@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(arm-none-eabi-nm -S --size-sort build/lxr02.elf)",
+      "Bash(make clean *)",
+      "Bash(make -j4)",
+      "Bash(arm-none-eabi-nm build/lxr02.elf)",
+      "Bash(awk '{print $3}')"
+    ]
+  }
+}

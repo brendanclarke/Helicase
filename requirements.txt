@@ -1,0 +1,21 @@
+# LXR-02 firmware — Python requirements
+#
+# Python is only used for the .img packaging tool (tools/build_lxrv2_img.py).
+# No third-party packages are required — only Python 3.6+ standard library.
+#
+# To verify your environment:
+#   python3 --version        # need 3.6+
+#   python3 -c "import struct, sys; print('OK')"
+#
+# Toolchain (not managed by pip — install separately):
+#   arm-none-eabi-gcc        https://developer.arm.com/downloads/-/gnu-rm
+#     macOS:   brew install --cask gcc-arm-embedded
+#     Ubuntu:  sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi
+#   make
+#     macOS:   xcode-select --install  (or brew install make)
+#     Ubuntu:  sudo apt install make
+#
+# Quick start:
+#   make          — builds ELF + BIN
+#   make img      — wraps BIN into LXRV2_lxr02.img for SD card flashing
+#   make clean    — removes build/
