@@ -1,7 +1,7 @@
 # LXR-02 Open-Source Firmware 
 ## A functional port of Sonic Potions LXR Software, version 0.37
 ### Introduction
-The LXR02 is a digital drum synthesizer produced in collaboration with Sonic Potions and Erica Synths. It is based on a 32-bit Cortex-M7 processor.
+The LXR02 is a digital drum synthesizer produced in collaboration with Sonic Potions and Erica Synths. It is based on a 32-bit Cortex-M7 processor. If you want to go straight to the firmware, it is './build/LXRV2_lxr02.img'. Put this in the root directory of the SD card and power on while pressing the encoder, as you would for any firmware update. You can switch between this and the Erica Synths firmware any time with this method. 
 
 This repository ports the original firmware written for the Sonic Potions LXR Drumsynth to the LXR02 hardware. Because the original LXR was based on a dual-processor design using an Atmega644 8-bit processor and a Cortex-M4, much of the underlying code has changed, and most of the hardware drivers are new:
 - All hardware read/writes happen on asynchronously draining queues, including LCD refreshes.
