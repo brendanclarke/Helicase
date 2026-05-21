@@ -882,7 +882,7 @@ static void processRelease(uint8_t buttonNr)
             frontPanel_sendData(SEQ_CC, SEQ_ERASE_ON_OFF, (uint8_t)bh_state.seqErasing);
         }
 
-        if (copyClear_Mode == MODE_CLEAR) {
+        if (copyClear_Mode == MODE_CLEAR && !btn_held[BUT_COPY]) {
             copyClear_armClearMenu(0);
             copyClear_Mode = MODE_NONE;
         }

@@ -32,6 +32,7 @@
 | 021 | 2026-05-16 | `lxr02-037_port-02.tar.gz` (local changes; no new tarball) | Audio jack-detect traced and integrated: OUT1L/OUT1R/OUT2L/OUT2R mapped to PD6/PD7/PB4/PB6, ISR-fed mixer jack-availability reads |
 | 022 | 2026-05-16 | `lxr02-037_port-02.tar.gz` (local changes; no new tarball) | Dither audit + 24-bit path upgrade: sample_mx_t widening at mixer/output stage, true 24-bit DMA pack, loudness regression fixed; dth global menu option planned but not yet wired |
 | 023 | 2026-05-17 | local working directory `lxr02-037_port/` | CPU refactor + DSP hot-path cleanup: foreground front-panel service, 5kHz LCD, slider LUT, filesystem idle poll limit, oscillator interp budget, oscillator-only ITCM, combined sample/loop load, encoder residue fix, memory audit |
+| 024 | 2026-05-21 | local working directory `lxr02-037_port/` | Copy/clear audit and fix: clear-mode encoder target select + execute, shift/copy release ownership, COPYCLEAR_AUDIT, README/MEMORY consolidation |
 
 ---
 
@@ -128,6 +129,10 @@ Full audit of dither in both LXR-master and our port: the only dither call (`cal
 ### 023 — CPU Refactor + DSP Hot-Path Cleanup (2026-05-17)
 Session 023 started with `AUDIT_REFACTOR.md`, then implemented the lowest-risk CPU wins and wrote `MEMORY_AUDIT.md`. Slider log taper now uses a 4096-entry LUT derived from `SLIDER_LOG_TAPER_DB`; idle filesystem polling is rate-limited; TIM6 was reduced to counters plus a 500Hz foreground service flag; TIM7 LCD drain is 5kHz/priority 7; main-loop DSP subblocks mask only low-priority service interrupts with BASEPRI; BufferTools uses packed saturating word helpers; mixer routing/slider/24-bit conversion work was fused; user-sample oscillator metadata is generation-cached; oscillator frequency setup is cached; oscillator interpolation is capped by a configurable active-target budget currently set to 2 and uses block renders; oscillator-only ITCM is enabled while filter/distortion ITCM remains disabled; global apply after load is amortized; `Load:[Samples ]` now runs sample install then loop append with one audio suspend/resume; modal load LCD transitions drain cleanly; and main encoder direction reversal clears sub-detent residue. `AUDIO_DMA_FRAMES` remains 96. A 128-frame experiment fails the current 4KB `.dma_nocache` MPU/linker window because the two audio DMA buffers alone consume 4096 bytes before the ADC DMA buffer.
 - **Find here**: `AUDIT_REFACTOR.md` implementation status, `MEMORY_AUDIT.md` section sizes, TIM6 foreground service, TIM7 5kHz LCD drain, BASEPRI DSP guard, slider LUT, filesystem idle poll limit, oscillator interpolation budget, oscillator-only ITCM, combined sample/loop loader, LCD modal drain, encoder residue fix, `.dma_nocache` 4KB limit and 128-frame explanation
+
+### 024 — Copy/Clear Fix + README/MEMORY Cleanup (2026-05-21)
+Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-master/front/LxrAvr/Menu/copyClearTools.c`, wrote `COPYCLEAR_AUDIT.md`, and found that the direct `seq_*` copy/clear calls were mostly correct while the active regression was in the menu/control path. `menu_parseEncoder()` now lets clear mode own encoder turns (target select) and encoder clicks (execute clear) before normal edit-mode toggling. `buttonHandler.c` no longer exits `MODE_CLEAR` on SHIFT release while COPY is still held, so clear mode stays armed until both combo buttons are released. README was trimmed so content after the `# MOVE EVERYTHING AFTER THIS TO MEMORY.md` marker lives in MEMORY; historical/non-enabled items were removed from README's confirmed hardware list and folded into MEMORY without duplicating the full moved block. `make -j4` passed after the copy/clear code changes.
+- **Find here**: `COPYCLEAR_AUDIT.md`, `menu_parseEncoder()` clear-mode ownership, SHIFT/COPY release ordering, README/MEMORY split, retained MEMORY details for known issues/critical reminders/toolchain
 
 ---
 
@@ -277,6 +282,9 @@ Session 023 started with `AUDIT_REFACTOR.md`, then implemented the lowest-risk C
 | Current ITCM test state is oscillator-only: `ENABLE_OSC_INITCM_CODE=1`, `ENABLE_EFFECT_INITCM_CODE=0`; filter/distortion ITCM tested worse on CPU monitor | 023 |
 | `Load:[Samples ]` now installs `/samples` then appends `/loops`; there is no separate visible SampLoop menu entry | 023 |
 | `AUDIO_DMA_FRAMES=96` remains the stable hardware DMA half; 128 needs an 8KB `.dma_nocache` MPU/linker redesign because the two audio DMA buffers alone fill 4KB | 023 |
+| Clear mode owns encoder turn and click before edit-mode toggling: turn selects clear target, click executes clear | 024 |
+| Clear mode should stay armed after SHIFT+COPY until both SHIFT and COPY are released; SHIFT release alone must not cancel if COPY is still held | 024 |
+| README now stops at front-matter/hardware/clock summary; MEMORY is the canonical verbose home for known issues, critical reminders, and moved historical details | 024 |
 
 ---
 

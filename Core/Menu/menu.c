@@ -1589,14 +1589,41 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
 
     if (button != lastEncoderButton) {
         btnClicked = button;
-        if (btnClicked)
-            editModeActive = (uint8_t)(1 - editModeActive);
         lastEncoderButton = button;
     } else if (inc == 0) {
         return; /* nothing changed */
     }
 
     screensaver_touch();
+
+    /* Clear mode owns both encoder turn and encoder click.
+    ** - Turn: select clear target.
+    ** - Click: execute selected clear operation.
+    ** While active, do NOT toggle regular menu edit mode. */
+    if (copyClear_isClearModeActive()) {
+        if (btnClicked) {
+            copyClear_executeClear();
+            return;
+        }
+
+        if (inc != 0) {
+            uint8_t target = copyClear_getClearTarget();
+            if (inc < 0) {
+                if (target != CLEAR_TRACK) {
+                    target--;
+                }
+            } else if (inc > 0) {
+                if (target != CLEAR_AUTOMATION2) {
+                    target++;
+                }
+            }
+            copyClear_setClearTarget(target);
+        }
+        return;
+    }
+
+    if (btnClicked)
+        editModeActive = (uint8_t)(1 - editModeActive);
 
     /* NOTE: original AVR did inc *= -1 here to correct encoder orientation.
     ** Our TIM1 input capture is wired for the same physical CW=positive sense
@@ -1605,9 +1632,7 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
         menu_handleLoadSaveMenu(inc, btnClicked);
     } else if (inc != 0) {
-        if (copyClear_isClearModeActive()) {
-            /* stub */
-        } else if (editModeActive) {
+        if (editModeActive) {
             menu_encoderChangeParameter(inc);
         } else {
             menu_moveToMenuItem(inc);

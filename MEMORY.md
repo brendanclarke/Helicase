@@ -163,7 +163,7 @@ Session 023 refactors CPU scheduling and DSP hot paths: TIM6 front-panel work is
 | Full details of a fix or decision? | `knowledge_files/log_archive/00x_SESSION_HANDOFF_LOG.md` |
 | Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
 | Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
-| Current known issues and reminders? | `README.md` |
+| Current known issues and reminders? | `MEMORY.md` |
 
 ---
 
@@ -175,6 +175,12 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 - `knowledge_files/LXR-master/` is read-only reference material only. Do not modify it.
 - Only session logs under `knowledge_files/log_archive/` are expected to change inside `knowledge_files/`.
 - **Original source reference**: `knowledge_files/LXR-master/` — AVR in `front/LxrAvr/`, STM32F4 in `mainboard/LxrStm32/src/`
+
+## General Process Reminders
+
+- Always verify the local working repository directory before writing code.
+- Blocking for 1ms anywhere in the main loop or any ISR at priority <= 4 is unacceptable.
+- Runtime SD/file work must remain asynchronous; boot-only synchronous polling is allowed before audio starts.
 
 ---
 
@@ -190,6 +196,10 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 - Application origin: **0x08008000** — VTOR must be set at startup
 - Stack top (SP): **0x20080000**
 - DTCM 128KB (not DMA-accessible) + SRAM1 368KB + SRAM2 16KB
+- I-Cache enabled (16KB, ICIALLU invalidate) — Session 13.
+- D-Cache enabled (16KB) with MPU (WT for SRAM, SO for DMA buffers) — Session 13.
+- DMA buffers live in the `.dma_nocache` linker section, marked Strongly-Ordered via MPU.
+- `audioOutBuffer` lives in DTCM (`INDTCMZ`) for single-cycle access.
 
 ### Flash Sector Layout (single-bank, confirmed via memtest)
 
@@ -273,6 +283,7 @@ if (audioCodec_queueFreeSlots() > 0) {
 **24-bit output path (Session 022)**: `audioOutBuffer`/`audioOutBuffer2` are `sample_mx_t` (int32_t, signed-24 value in container). `pack_half()` emits a true 24-bit payload in both halfwords of each I2S frame. Do NOT re-add `LSW = 0` zeroing. Do NOT add a `>> 8` shift in `sampleMix_toS24()` — int16 voice values enter the mixer already scaled as `int16 << 8` via `bufferTool_convertInt16ToSampleMix()`; adding `>>8` at pack time was the loudness regression fixed in session 022.
 
 **Zero startup underruns**: boot SD operations complete before `audioCodec_init()`.
+Runtime kit load from the menu may still create a small burst; boot-time SD work is complete before audio starts.
 
 ### Internal DAC — Must Never Be Enabled
 
@@ -368,18 +379,25 @@ Important caveat: long samples are not fully solved. `SampleInfo.size` is 32-bit
 
 ## Display / Menu
 
+- Full menu system is wired: voice pages, global/MIDI page, load/save page.
 - **LCD queue**: head/tail-only SPSC — do NOT reintroduce `lcd_q_count`
 - `sendDisplayBuffer` emits `lcd_setcursor` before every data byte
 - `buttonHandler_processEvents()`: `if` not `while` — intentional
 - **Knob repaint**: `menu_knobs_dirty` + `menu_serviceKnobRepaint()` is RV1-4 only
 - **endlessPots**: `atan2f(b, a)` — do NOT change argument order
 - Saturation in `menu_encoderChangeParameter` / `menu_handleLoadSaveMenu`: int16 sum + clamp
+- MODE/SELECT/VOICE button navigation and LED feedback are wired.
+- The cosmetic boot splash sequence is all LEDs → title → menu.
+- Canonical `.SND` save length is restored to 236 bytes; short kits load with zero-filled tails.
+- Display stability under rapid button mashing depends on the SPSC LCD ring behavior above.
+- Multi-knob RV1-RV4 repaint collapse is intentional and should remain scoped to that input path.
+- Global `cpu` is a read-only audio queue-free pressure widget, not a general MCU utilization meter.
 
 ---
 
 ## DSP / RNG Rules
 
-- **Compiler**: `-O2` required.
+- **Compiler**: global flags are `-O2 -flto`; DSP source files use the Makefile's more-specific `-Ofast` rule.
 - **FPU**: explicitly enabled in `sysclk_init()` via CPACR
 - **VLAs**: forbidden in DSP voice files. Use `static int16_t buf[OUTPUT_DMA_SIZE]`. Snare/Cymbal fixed Session 8, HiHat fixed Session 12.
 - **`GetRngValue()`**: returns `int16_t`. Explicit `(int16_t)` cast + `& 0x7FFF` mask at every call site.
@@ -407,8 +425,8 @@ initMidiUart(); usb_init();
 filesystem_initCardAndMountBlocking(); // card SPI mode + afatfs mount, pre-audio
 menu_init();           // calls memset on parameter_values — do NOT also memset in main()
 // Synchronous kit scan via filesystem_requestScanKits + polling
-// Synchronous kit load via preset_loadDrumset + polling + menu_pollPresetStatus
-// Synchronous globals load via preset_loadGlobals + polling + menu_pollPresetStatus
+// Synchronous boot kit load (P000.SND) via preset_loadDrumset + polling + menu_pollPresetStatus
+// Synchronous globals load (GLO.CFG) via preset_loadGlobals + polling + menu_pollPresetStatus
 audioCodec_init();     // single audio entry point — AFTER all SD boot ops
 sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 // main loop: filesystem_tick() + menu_pollPresetStatus() every iteration
@@ -447,7 +465,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ---
 
-## Known Issues (as of Session 023)
+## Known Issues / Technical Debt
 
 ### Resolved / Changed in Session 023
 - CPU scheduling refactor completed: TIM6 keeps only 1ms counters and a foreground service due flag; shift-register exchange, PB jack detect, encoder-button debounce, and endless-pot scanning run from `timebase_serviceFrontPanel()` at about 500Hz.
@@ -455,7 +473,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - Slider taper mapping now uses a 4096-entry boot LUT derived from `SLIDER_LOG_TAPER_DB`, removing repeated foreground `powf()` calls.
 - Oscillator interpolation is bounded by `OSC_WAVE_INTERP_MAX_ACTIVE=2` in the current test build and limited to audible oscillator waveform targets; user-sample interpolation remains enabled.
 - Oscillator-only ITCM is enabled. Filter/distortion ITCM annotations remain present but disabled through `ENABLE_EFFECT_INITCM_CODE=0` after hardware CPU monitor testing looked worse.
-- `Load:[Samples ]` now runs `/samples` installation then `/loops` append sequentially; the visible `SampLoop` menu entry was removed.
+- `Load:[Samples ]` now uses the sample/loop flow documented in Sample Flash Loading.
 - Main encoder direction reversals clear only sub-detent residue, avoiding the persistent two-click feel after fast direction changes.
 
 ### Resolved in Session 022
@@ -490,6 +508,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - ~~PD3 EXTI3 diagnostic in production~~ — **RESOLVED**. Real PC13/PD4/PD5 backend.
 - ~~EXTI4/EXTI9_5 pointing at Default_Handler~~ — **RESOLVED**. IRQ10/IRQ23 wired.
 - ~~seq_tick() in main loop~~ — **RESOLVED**. TIM3 4kHz ISR owns it.
+- ~~MIDI realtime bytes processed without timestamp~~ — **RESOLVED**. USART3 ISR timestamps every byte; realtime bytes route to the MidiRealtime ring.
 - ~~PAR_BPM=0 external sync toggle~~ — **RESOLVED**. PAR_EXT_SYNC global (SyncInpt).
 - ~~CC1 MORPH double-fire~~ — **RESOLVED**. CC1→MORPH in incoming channel path only.
 - ~~OUTPUT_DMA_SIZE=16 (2× EG/LFO rate)~~ — **RESOLVED**. Corrected to 32.
@@ -504,13 +523,18 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - ~~Load:[Samples] no-op~~ — **RESOLVED**. `/samples` full reinstall and `/loops` append-loop installer are wired through the Load page.
 - ~~Audio resume after modal sample writes failed~~ — **RESOLVED**. `audioCodec_suspend()`/`audioCodec_resume()` now fully stop/reset/restart DMA, I2S, and PLLI2S.
 
+### Resolved in Refactor Session
+- ~~audioTest.c, sineBufferTest.c, duplicate copy files~~ — **RESOLVED** by consolidation into `AudioCodecManager.c`.
+- ~~Scattered DMA ISRs~~ — **RESOLVED**. DMA1 Stream 4 and Stream 7 ISRs now live in `AudioCodecManager.c`.
+- ~~audioCodec_packHalf() public wrapper~~ — **RESOLVED**. Removed; ISRs call `pack_audio_half()` directly.
+
 ### Resolved in Session 15
 - ~~Sequencer step buttons unreliable / no sequenced voices~~ — **RESOLVED**. `BUTTON_TIMEOUT` corrected to 500ms and missing `seq_init()` added at boot.
 - ~~Sequencer tempo 4x slow~~ — **RESOLVED** for gross BPM in Session 15; Session 17 restored `systick_ticks` to the original 4kHz LXR mainboard tick while UI millisecond timing stays on `time_sysTick`.
 - ~~PATGEN/Euklid writes steps but LEDs do not update~~ — **RESOLVED**. Visible generated main-step LEDs refresh after steps/rotation changes.
 - ~~PATGEN/Euklid generated steps front-stacked~~ — **RESOLVED**. `__CLZ` shim now emits ARM `clz`; `__CLZ(0)` returns 32 as original Euklid expects.
 - ~~copyClearTools.c frontPanel calls commented out~~ — **RESOLVED**. Direct `seq_clear*` / `seq_copy*` calls wired.
-- Euclid and SOM parser backends are wired. Trigger backend remains stubbed.
+- Euclid and SOM parser backends are wired. Trigger backend was still stubbed at Session 15 and was later resolved in Session 019.
 
 ### Resolved in Session 14
 - ~~buttonHandler/menu/LED audit connectivity gaps~~ — **RESOLVED** for audit-defined paths. Connections documented in `BUTTONHANDLER_MENU_AUDIT_RESULTS.md` and `LED_AUDIT_SUMMARY.md`.
@@ -573,8 +597,10 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ## Toolchain
 
 ```
-arm-none-eabi-gcc -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard -O2
+arm-none-eabi-gcc -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard -O2 -flto
 ```
+
+DSP source files are compiled by the Makefile's more-specific `-Ofast` rule.
 
 Image format: `[8B "LXRV2IMG"][4B payload size LE][4B checksum LE][payload]`
 Boot: hold main encoder button while powering on.
