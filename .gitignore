@@ -1,0 +1,54 @@
+# Object files
+*.o
+*.d
+*.lst
+
+# Libraries
+*.lib
+*.a
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+.DS_store
+
+# Executables
+*.exe
+!FirmwareImageBuilder.exe
+*.out
+*.app
+
+# binaries
+*.hex
+*.elf
+*.bin
+*.lss
+
+!build/*.img
+
+# miscellaneous eclipse etc
+*.metadata
+*RemoteSystemsTempFiles
+*.settings
+*.bak
+*.svn
+*.map
+*.html
+*.rar
+*.zip
+
+# visual studio stuff
+*.pdb
+*.ncb
+*.suo
+*.ilk
+*.manifest
+*.obj
+*.pch
+*.idb
+*.user
+*.res
+*.dep
+*.htm
