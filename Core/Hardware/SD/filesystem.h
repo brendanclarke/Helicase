@@ -71,6 +71,21 @@ typedef enum {
     FS_OP_LOAD_NAME,
 } fs_op_kind_t;
 
+typedef enum {
+    FS_MOUNT_RESULT_UNKNOWN = 0,
+    FS_MOUNT_RESULT_READY,
+    FS_MOUNT_RESULT_NO_CARD,
+    FS_MOUNT_RESULT_CARD_INIT_FAILED,
+    FS_MOUNT_RESULT_UNSUPPORTED_CARD,
+    FS_MOUNT_RESULT_MOUNT_FAILED,
+} fs_mount_result_t;
+
+typedef enum {
+    FS_STALE_WARNING_NONE = 0,
+    FS_STALE_WARNING_GLO,
+    FS_STALE_WARNING_ALL,
+} fs_stale_warning_source_t;
+
 typedef void (*fs_completion_cb_t)(void);
 
 uint8_t     filesystem_initCardAndMountBlocking(void);
@@ -90,6 +105,13 @@ const char *filesystem_loadedName(void);
 uint8_t     filesystem_diagOp(void);
 uint8_t     filesystem_diagPhase(void);
 uint32_t    filesystem_diagBytesDone(void);
+fs_mount_result_t filesystem_lastMountResult(void);
+uint8_t           filesystem_bootDetectedUnsupportedCard(void);
+
+/* Session 025: stale globals are not fatal filesystem errors. The load path
+** applies a safe subset/default fallback, then latches this one-shot source so
+** menu.c can show "old settings" after the load UI is done. Reading clears it. */
+fs_stale_warning_source_t filesystem_takeStaleGlobalsWarning(void);
 
 #if FILESYSTEM_DIAGNOSTICS
 uint8_t filesystem_diagRawCmd0(void);

@@ -64,6 +64,11 @@ static uint8_t menu_globalApplyActive = 0;
 static uint8_t menu_globalApplyResetSave = 0;
 static uint8_t menu_globalApplyRepaintAll = 0;
 static uint16_t menu_globalApplyIndex = PAR_BEGINNING_OF_GLOBALS;
+static uint8_t menu_staleWarningActive = 0;
+static uint16_t menu_staleWarningStart = 0;
+static uint8_t menu_pendingAllStaleWarning = 0;
+
+#define MENU_STALE_WARNING_MS 2000u
 
 /* Globals can touch hardware/system settings rather than only DSP voice state.
 ** Before audio starts, applying all globals immediately is harmless. After
@@ -135,6 +140,29 @@ static uint8_t menu_tickGlobalApply(void)
         menu_finishGlobalApply();
 
     return 1u;
+}
+
+static void menu_showStaleSettingsWarning(fs_stale_warning_source_t src)
+{
+    const char *line2 = (src == FS_STALE_WARNING_ALL) ? "check&save .all" : "check&save .glo";
+
+    lcd_waitForIdle();
+    lcd_clear();
+    lcd_home();
+    lcd_string("old settings");
+    lcd_setcursor(0, 2);
+    lcd_string(line2);
+    lcd_waitForIdle();
+
+    if (audioCodec_renderCount == 0u) {
+        uint16_t t0 = time_sysTick;
+        while ((uint16_t)(time_sysTick - t0) < MENU_STALE_WARNING_MS) { /* boot-only hold */ }
+        return;
+    }
+
+    menu_storageBusy = 1u;
+    menu_staleWarningActive = 1u;
+    menu_staleWarningStart = time_sysTick;
 }
 
 static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
@@ -499,14 +527,13 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     /*PAR_SOM_FREQ*/          DTYPE_0B127,
     /*PAR_TRACK_ROTATION*/    DTYPE_1B16,
     /*PAR_BPM*/               DTYPE_0B255,
-    /*PAR_EXT_SYNC*/          DTYPE_MENU|(MENU_EXT_SYNC<<4),
     /*PAR_MIDI_CHAN_1*/        DTYPE_1B16,
     /*PAR_MIDI_CHAN_2*/        DTYPE_1B16,
     /*PAR_MIDI_CHAN_3*/        DTYPE_1B16,
     /*PAR_MIDI_CHAN_4*/        DTYPE_1B16,
     /*PAR_MIDI_CHAN_5*/        DTYPE_1B16,
     /*PAR_MIDI_CHAN_6*/        DTYPE_1B16,
-    /*PAR_FETCH*/             DTYPE_ON_OFF,
+    /*PAR_EXT_SYNC*/          DTYPE_MENU|(MENU_EXT_SYNC<<4),
     /*PAR_FOLLOW*/            DTYPE_ON_OFF,
     /*PAR_QUANTISATION*/      DTYPE_MENU|(MENU_SEQ_QUANT<<4),
     /*PAR_SCREENSAVER_ON_OFF*/DTYPE_ON_OFF,
@@ -1792,6 +1819,9 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 ** same iteration produce one repaint. */
 void menu_serviceKnobRepaint(void)
 {
+    if (menu_storageBusy)
+        return;
+
     if (menu_knobs_dirty) {
         menu_knobs_dirty = 0;
         // menu_repaintAll();
@@ -1818,6 +1848,9 @@ void menu_serviceRuntimeWidgets(void)
 {
     uint16_t now = time_sysTick;
     uint8_t sample;
+
+    if (menu_storageBusy)
+        return;
 
     if ((uint16_t)(now - menu_cpuUseLastRefresh) < MENU_CPU_USE_REFRESH_MS)
         return;
@@ -1865,6 +1898,25 @@ void menu_pollPresetStatus(void)
     if (menu_tickGlobalApply())
         return;
 
+    if (menu_pendingAllStaleWarning) {
+        /* ALL loads first finish kit/pattern/global application and allow the
+        ** "Loading pattern" UI to settle. Only then show the stale-globals
+        ** warning for the requested 2 seconds. */
+        menu_pendingAllStaleWarning = 0u;
+        menu_showStaleSettingsWarning(FS_STALE_WARNING_ALL);
+        return;
+    }
+
+    if (menu_staleWarningActive) {
+        if ((uint16_t)(time_sysTick - menu_staleWarningStart) >= MENU_STALE_WARNING_MS) {
+            menu_staleWarningActive = 0;
+            menu_storageBusy = 0;
+            menu_repaintAll();
+        } else {
+            return;
+        }
+    }
+
     if (preset_getStatus() != PRESET_UPDATE_READY) {
         if (!screensaver_isActive() &&
             menu_lcdRefreshPending && lcd_queueFree() >= 72u) {
@@ -1901,9 +1953,17 @@ void menu_pollPresetStatus(void)
     }
 
     case PRESET_OP_GLOBALS_LOAD:
+    {
+        fs_stale_warning_source_t stale_src = filesystem_takeStaleGlobalsWarning();
         menu_startGlobalApply((uint8_t)(menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE),
                               (uint8_t)(menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE));
+        /* For boot/load glo.cfg, show the warning immediately after starting
+        ** the deferred global apply. The warning is informational: filesystem.c
+        ** already loaded a safe subset/default fallback before we get here. */
+        if (stale_src == FS_STALE_WARNING_GLO)
+            menu_showStaleSettingsWarning(stale_src);
         break;
+    }
 
     case PRESET_OP_MORPH_LOAD:
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
@@ -1938,12 +1998,17 @@ void menu_pollPresetStatus(void)
         break;
 
     case PRESET_OP_ALL_LOAD:
+    {
+        fs_stale_warning_source_t stale_src = filesystem_takeStaleGlobalsWarning();
         menu_normalizeSoundModTargets(parameter_values);
         preset_sendDrumsetParameters();
         menu_startGlobalApply(1u, 1u);
         frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, 0);
         menu_storageBusy = 0;
+        if (stale_src == FS_STALE_WARNING_ALL)
+            menu_pendingAllStaleWarning = 1u;
         break;
+    }
 
     case PRESET_OP_PERFORMANCE_LOAD:
         menu_normalizeSoundModTargets(parameter_values);
@@ -2238,14 +2303,6 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
 
     case PAR_MORPH:
         preset_morph(value);
-        break;
-
-    case PAR_FETCH:
-        /* _SEQUENCER_ADD_SPIKE_: AVR toggled pot-fetch lock bits here.
-        ** This STM menu keeps lockPotentiometerFetch() as a no-op, but we keep the
-        ** control path explicit for future wiring. */
-        if (value)
-            lockPotentiometerFetch();
         break;
 
     case PAR_VOICE_DECIMATION1:

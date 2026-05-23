@@ -50,8 +50,8 @@
  * the file as needing review rather than silently miscompiling.
  *
  * Files known to need rework (do NOT just compile against this shim):
- *   - DSPAudio/mixer.c — reads GPIOC/GPIOA IDR for jack-detect
- *     (PA0/PA5/PC4/PC5 are slider/encoder ADC inputs on LXR-02)
+ *   - Hardware/timebase.c — samples LXR-02 jack-detect GPIO state and writes
+ *     retained mixer routing flags.
  *   - DSPAudio/random.c — already ported (Core/DSPAudio/random.c)
  *
  * Note: NOT placed at top of any include path that would cover the rest

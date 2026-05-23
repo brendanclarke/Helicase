@@ -39,8 +39,8 @@
  *
  * Confirmed hardware:
  *   PC13: CLK OUT, active high through DD1.
- *   PD4 : CLK IN, active low through VT1, idle high, EXTI4 falling edge.
- *   PD5 : RST IN, active low through VT2, idle high, EXTI5 both edges.
+ *   PD4 : CLK IN, GPIO input pull-up, EXTI4 rising edge.
+ *   PD5 : RST IN, GPIO input pull-up, EXTI5 rising edge.
  *
  * The EXTI handlers only clear pending flags, timestamp with TIM2, and enqueue
  * tiny events. Sequencer-facing work is drained from triggerJacks_tick() by the
@@ -67,7 +67,7 @@
 #define PC13_LOW()    (GPIOC_BSRR = (1UL << 29))
 
 /* -----------------------------------------------------------------------
-** GPIOD / PD4 CLK IN, PD5 RST IN
+** GPIOD / PD4 CLK IN, PD5 RST IN, PD6/PD7 OUT1 jack detect
 ** ----------------------------------------------------------------------- */
 #define GPIOD_BASE    0x40020C00UL
 #define GPIOD_MODER   (*((volatile uint32_t *)(GPIOD_BASE + 0x00UL)))
@@ -257,18 +257,12 @@ static void trigger_handleResetEvent(const TriggerEvent *event)
 		return;
 
 	seq_noteExtSyncActivity(SEQ_EXT_SYNC_PULSE, event->timestampUs);
-
-	/* Match the original LXR reset-input behavior for now: the active-low jack
-	** acts as a run/reset gate while external pulse sync is selected. A normal
-	** short reset pulse therefore stops/resets on the falling edge and starts
-	** again on the rising edge. */
-	seq_setRunning(event->value ? 0u : 1u);
-	if (!event->value)
-		trigger_havePulseTempo = 0;
+	trigger_havePulseTempo = 0;
+	seq_resetToPatternStart();
 }
 
 /* -----------------------------------------------------------------------
-** EXTI4_IRQHandler - CLK IN on PD4, active-low falling edge
+** EXTI4_IRQHandler - CLK IN on PD4, rising edge
 ** ----------------------------------------------------------------------- */
 void EXTI4_IRQHandler(void)
 {
@@ -282,27 +276,23 @@ void EXTI4_IRQHandler(void)
 }
 
 /* -----------------------------------------------------------------------
-** EXTI9_5_IRQHandler - RST IN on PD5, active-low both edges
+** EXTI9_5_IRQHandler - RST IN on PD5, rising edge
+**
+** Note: PD6/PD7 OUT1 detect is retained state, so it is polled by the
+** 500Hz front-panel service rather than handled as EXTI edges.
 ** ----------------------------------------------------------------------- */
 void EXTI9_5_IRQHandler(void)
 {
-	uint32_t idr = GPIOD_IDR;
-	uint32_t pending = EXTI_PR & (PD5_RST_MASK | PD6_OUT1L_MASK | PD7_OUT1R_MASK);
+	uint32_t pending = EXTI_PR & PD5_RST_MASK;
 
 	if (pending & PD5_RST_MASK) {
 		uint32_t timestampUs = timebase_tim2Now();
-		uint8_t activeLowAsserted = (uint8_t)((idr & PD5_RST_MASK) == 0u);
 		EXTI_PR = PD5_RST_MASK;
 		trigger_lastJackInputUs = timestampUs;
 		trigger_haveJackInput = 1;
-		trigger_pushEvent(TRIGGER_EVENT_RESET, activeLowAsserted, timestampUs);
+		trigger_pushEvent(TRIGGER_EVENT_RESET, 1u, timestampUs);
 	}
 
-	if (pending & (PD6_OUT1L_MASK | PD7_OUT1R_MASK)) {
-		mixer_setOutJackDetectPD((uint8_t)((idr & PD6_OUT1L_MASK) != 0u),
-				(uint8_t)((idr & PD7_OUT1R_MASK) != 0u));
-		EXTI_PR = pending & (PD6_OUT1L_MASK | PD7_OUT1R_MASK);
-	}
 }
 
 void triggerJacks_init(void)
@@ -322,26 +312,28 @@ void triggerJacks_init(void)
 	GPIOC_PUPDR  &= ~(3UL << 26);
 	trigger_setClkOut(0);
 
-	/* PD4/PD5/PD6/PD7: inputs, no internal pulls. The LXR-02 VT1/VT2 circuits idle
-	** high externally; adding pulls here would fight the hardware. */
+	/* PD4/PD5 are normally-low modular inputs. PD6/PD7 jack detect is a
+	** switched contact: no plug grounds the pin, plug inserted opens it.
+	** All four PD inputs need weak pull-ups so open states are retained high. */
 	GPIOD_MODER &= ~((3UL << 8) | (3UL << 10) | (3UL << 12) | (3UL << 14));
 	GPIOD_PUPDR &= ~((3UL << 8) | (3UL << 10) | (3UL << 12) | (3UL << 14));
+	GPIOD_PUPDR |=  ((1UL << 8) | (1UL << 10) | (1UL << 12) | (1UL << 14));
 
-	/* Route EXTI4..7 to port D. EXTICR2 covers lines 4..7. */
+	/* Route EXTI4/5 to port D. Keep EXTI6/7 disconnected because OUT1 jack
+	** detect is sampled as retained state in the 500Hz front-panel service. */
 	SYSCFG_EXTICR2 &= ~((0xFUL << 0) | (0xFUL << 4) | (0xFUL << 8) | (0xFUL << 12));
-	SYSCFG_EXTICR2 |=  ((0x3UL << 0) | (0x3UL << 4) | (0x3UL << 8) | (0x3UL << 12));
+	SYSCFG_EXTICR2 |=  ((0x3UL << 0) | (0x3UL << 4));
 
-	/* CLK IN: falling edge only. RST IN: both edges for active-low level
-	** changes. Clear stale pending bits before unmasking. */
+	/* CLK IN and RST IN both follow modular-clock convention: normally low,
+	** trigger on rising edge. PD6/PD7 EXTI stays disabled; jack-detect state is
+	** polled and retained with PB4/PB6. */
 	EXTI_IMR  &= ~(PD4_CLK_MASK | PD5_RST_MASK | PD6_OUT1L_MASK | PD7_OUT1R_MASK);
-	EXTI_RTSR &= ~PD4_CLK_MASK;
-	EXTI_FTSR |=  PD4_CLK_MASK;
-	EXTI_RTSR |=  PD5_RST_MASK;
-	EXTI_FTSR |=  PD5_RST_MASK;
-	EXTI_RTSR |=  (PD6_OUT1L_MASK | PD7_OUT1R_MASK);
-	EXTI_FTSR |=  (PD6_OUT1L_MASK | PD7_OUT1R_MASK);
+	EXTI_RTSR |=  (PD4_CLK_MASK | PD5_RST_MASK);
+	EXTI_FTSR &= ~(PD4_CLK_MASK | PD5_RST_MASK);
+	EXTI_RTSR &= ~(PD6_OUT1L_MASK | PD7_OUT1R_MASK);
+	EXTI_FTSR &= ~(PD6_OUT1L_MASK | PD7_OUT1R_MASK);
 	EXTI_PR    =  (PD4_CLK_MASK | PD5_RST_MASK | PD6_OUT1L_MASK | PD7_OUT1R_MASK);
-	EXTI_IMR  |=  (PD4_CLK_MASK | PD5_RST_MASK | PD6_OUT1L_MASK | PD7_OUT1R_MASK);
+	EXTI_IMR  |=  (PD4_CLK_MASK | PD5_RST_MASK);
 
 	/* Seed OUT1 detect state once at init so mixer reads are valid immediately. */
 	mixer_setOutJackDetectPD((uint8_t)((GPIOD_IDR & PD6_OUT1L_MASK) != 0u),
@@ -353,6 +345,7 @@ void triggerJacks_init(void)
 	NVIC_IPR(IRQ_EXTI4) = 3u << 4;
 	NVIC_IPR(IRQ_EXTI9_5) = 3u << 4;
 	NVIC_ISER0 |= (1UL << IRQ_EXTI4) | (1UL << IRQ_EXTI9_5);
+
 }
 
 void triggerJacks_toggleClkOut(void)

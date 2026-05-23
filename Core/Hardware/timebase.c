@@ -61,7 +61,6 @@
 
 #include "timebase.h"
 #include "lcd.h"
-#include "triggerJacks.h"
 #include "config.h"
 #include "dout.h"
 #include "din.h"
@@ -81,6 +80,7 @@
 #define TIM6_PSC     (*((volatile uint32_t *)(TIM6_BASE+0x28)))
 #define TIM6_ARR     (*((volatile uint32_t *)(TIM6_BASE+0x2C)))
 #define GPIOB_IDR    (*((volatile uint32_t *)0x40020410UL))
+#define GPIOD_IDR    (*((volatile uint32_t *)0x40020C10UL))
 
 /* -----------------------------------------------------------------------
 ** TIM2 free-running timestamp counter
@@ -141,6 +141,7 @@ void TIM6_DAC_IRQHandler(void)
 void timebase_serviceFrontPanel(void)
 {
     uint32_t gpiob_idr;
+    uint32_t gpiod_idr;
 
     if (frontpanel_service_due == 0u)
         return;
@@ -154,8 +155,12 @@ void timebase_serviceFrontPanel(void)
     dout_latch();
     din_dout_exchange();
 
-    /* PB4/PB6 output-jack detect inputs can tolerate the 500Hz service rate. */
+    /* Output-jack detect is retained state, not edge timing. Refresh both
+    ** banks here at the same 500Hz rate as the front-panel service. */
     gpiob_idr = GPIOB_IDR;
+    gpiod_idr = GPIOD_IDR;
+    mixer_setOutJackDetectPD((uint8_t)((gpiod_idr >> 6) & 1u),
+                             (uint8_t)((gpiod_idr >> 7) & 1u));
     mixer_setOutJackDetectPB((uint8_t)((gpiob_idr >> 4) & 1u),
                              (uint8_t)((gpiob_idr >> 6) & 1u));
 

@@ -6,10 +6,14 @@ The LXR02 is a digital drum synthesizer produced in collaboration with Sonic Pot
 This repository ports the original firmware written for the Sonic Potions LXR Drumsynth to the LXR02 hardware. Because the original LXR was based on a dual-processor design using an Atmega644 8-bit processor and a Cortex-M4, much of the underlying code has changed, and most of the hardware drivers are new:
 - All hardware read/writes happen on asynchronously draining queues, including LCD refreshes.
 - SD card read/writes use https://github.com/thenickdude/asyncfatfs. One of my favorite things about the port. Thanks to Nick for making some of that background magic happen. 
+- **USE A FAT32 FORMATTED CARD, MBR partition**. FAT16 also works, but MBR-FAT32 is the recommended cross-compatible format. FAT12 and exFAT are not supported; if one is detected at boot, the firmware shows `Unsupported card` / `use MBR-FAT32` and does not mount or load from it. On my mac this is just MBR partition, MS-DOS(FAT), but I'm including the terminal commands for future-proofing. If you are using an SD >32GB you may need to manually create a partition that is smaller, those options are included below, just remove/edit the <options> for your system and card. In your respective terminal, for disk <X>:
+    - Linux: sudo parted -s /dev/sd<X> mklabel msdos mkpart primary fat32 1MiB <32GiB> 100% && sudo mkfs.vfat -F 32 -n "LXR" /dev/sd<X>1
+    - Mac: 'diskutil partitionDisk disk3 MBR FAT32 "LXR" <R *if 32G or less, otherwise* 32G>'
+    - Win: "select disk <X>", "clean", "convert mbr", "create partition primary <size=32768>", "format fs=fat32 quick label=LXR", "assign" | diskpart
 - Memory mapping is updated for the M7, and there is 1.5MB available for sample storage in flash.
 - The mixbus and output buffers use the full 24-bit width of the DACs. 
 
-Other than that, the firware is designed to work exactly as on the Sonic Potions LXR, version 0.37, all files fully intercompatible, with the following additions/differences:
+Other than that, the firmware is designed to work as closely as possible to the Sonic Potions LXR, version 0.37. Kit/pattern/performance/all formats are kept compatible where the hardware allows; legacy 22-byte `glo.cfg`/ALL globals are accepted and migrated, while current globals use the LXR-02 23-byte span. Additions/differences:
 - The voice faders work. The log curve can be changed in config.h
 - The "STEP" mode button is labeled "LOAD" on the LXR02. Pressing "LOAD" gets you step mode, as per 0.37
 - The "< BAR >" buttons trigger the selected voice at 127/64 velocity and can be recorded. 
@@ -100,7 +104,9 @@ make && make img  → build/LXRV2_lxr02.img
 │       ├── 020_SESSION_HANDOFF_LOG.md
 │       ├── 021_SESSION_HANDOFF_LOG.md
 │       ├── 022_SESSION_HANDOFF_LOG.md
-│       └── 023_SESSION_HANDOFF_LOG.md
+│       ├── 023_SESSION_HANDOFF_LOG.md
+│       ├── 024_SESSION_HANDOFF_LOG.md
+│       └── 025_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h
@@ -110,7 +116,7 @@ make && make img  → build/LXRV2_lxr02.img
     │   ├── clocks.c/h               ← sysclk_init(), FPU enable via CPACR
     │   ├── timebase.c/h             ← SysTick 4kHz mainboard tick, TIM6 1kHz counters + 500Hz foreground service, TIM7 5kHz LCD drain
     │   ├── AudioCodecManager.c/h    ← consolidated audio: DMA ISRs, I2S/GPIO/DMA init, SPSC queue
-    │   ├── triggerJacks.c/h         ← CLK OUT/IN, RST IN, OUT1 detect EXTI9_5
+    │   ├── triggerJacks.c/h         ← CLK OUT/IN, RST IN; OUT jack detect is foreground-polled
     │   ├── memtest.c/h              ← flash sector probe (boot-time, MEMTEST_ENABLED gate)
     │   ├── frontPanel/
     │   │   ├── buttonHandler.c/h    ← ISR-safe event ring, main-loop processEvents()
@@ -146,7 +152,7 @@ make && make img  → build/LXRV2_lxr02.img
     │   ├── copyClearTools.c/h       ← copy/clear tools; direct seq_* calls wired Session 15
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
     ├── Preset/
-    │   ├── ParameterArray.h/c       ← supersedes Parameters.h; NUM_PARAMS=273
+    │   ├── ParameterArray.h/c       ← supersedes Parameters.h; NUM_PARAMS=275
     │   └── presetManager.c/h        ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── MIDI/
     │   ├── Uart.c/h                 ← USART3, 31250 baud, interrupt-driven dual FIFO (realtime + normal)
@@ -201,9 +207,9 @@ make && make img  → build/LXRV2_lxr02.img
 - USB MIDI (OTG_FS, PA11/PA12, enumerates as "Sonic Potions USB MIDI")
 - SD card SPI bit-bang (PC12/PD2/PC8/PD0), SDHC confirmed
 - CLK OUT jack (PC13)
-- CLK IN jack (PD4, active LOW via VT1, EXTI4)
-- RST IN jack (PD5, active LOW via VT2, EXTI5)
-- OUT1 L/R jack detect (PD6/PD7, no plug=LOW, plug inserted=HIGH, EXTI9_5 both edges)
+- CLK IN jack (PD4, GPIO input pull-up, EXTI4 rising edge low-to-high)
+- RST IN jack (PD5, GPIO input pull-up, EXTI5 rising edge low-to-high)
+- OUT1 L/R jack detect (PD6/PD7, input pull-up, no plug=LOW, plug inserted=HIGH, sampled by foreground service)
 - OUT2 L/R jack detect (PB4/PB6, no plug=LOW, plug inserted=HIGH, sampled by foreground service)
 - I-Cache enabled (16KB, ICIALLU invalidate)
 - D-Cache enabled (16KB) with MPU (WT for SRAM, SO for DMA buffers)

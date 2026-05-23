@@ -388,10 +388,13 @@ enum ParamEnums
 	//#########################################
 	//######## Global Parameters ##############
 	//#########################################
+	// Session 025: this raw globals span is saved directly to glo.cfg and
+	// the .all meta field. Keep the prefix order compatible with legacy
+	// 22-byte globals. Do not add physical controls (sliders/endless pots)
+	// here; they are hardware state, not saved parameter state.
 	PAR_BEGINNING_OF_GLOBALS, //a placeholder to mark the beginning of the global var space not present in morph and not needed in the seq
 	//global params
 	PAR_BPM = PAR_BEGINNING_OF_GLOBALS,
-	PAR_EXT_SYNC,
 
 	PAR_MIDI_CHAN_1,
 	PAR_MIDI_CHAN_2,
@@ -400,7 +403,7 @@ enum ParamEnums
 	PAR_MIDI_CHAN_5,
 	PAR_MIDI_CHAN_6,
 
-	PAR_FETCH,
+	PAR_EXT_SYNC,
 	PAR_FOLLOW,
 
 	PAR_QUANTISATION,
@@ -420,22 +423,6 @@ enum ParamEnums
 	    PAR_MIDI_CHAN_GLOBAL,
 	    PAR_OSC_WAVE_INTERP,
 
-		               
-
-    /* LXR-02 specific — slider/encoder params not saved to .snd files */
-
-    PAR_QUAD_ENC1,
-    PAR_QUAD_ENC2,
-    PAR_QUAD_ENC3,
-    PAR_QUAD_ENC4,
-
-	PAR_SLIDER_RV5,
-    PAR_SLIDER_RV6,
-    PAR_SLIDER_RV7,
-    PAR_SLIDER_RV8,
-    PAR_SLIDER_RV9,
-    PAR_SLIDER_RV10,
-	
 	NUM_PARAMS,   
 };
 

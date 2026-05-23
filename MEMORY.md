@@ -19,12 +19,14 @@ make && make img   →   build/LXRV2_lxr02.img
 
 **Current working source**: repository root, branch `LXR02Open-prime`.
 
-**Session 023 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/023_SESSION_HANDOFF_LOG.md` before related work.
+**Session 025 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/025_SESSION_HANDOFF_LOG.md` before related work.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
-Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 023 PB4/PB6 are sampled by the TIM6-scheduled foreground service while PD6/PD7 remain EXTI9_5 edge-driven.
+Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
 Session 023 refactors CPU scheduling and DSP hot paths: TIM6 front-panel work is foreground-serviced at 500Hz, TIM7 LCD drain is 5kHz/priority 7, idle filesystem polling is rate-limited, slider log taper uses a 4096-entry LUT, oscillator interpolation is capped by `OSC_WAVE_INTERP_MAX_ACTIVE=2` in the current test build, oscillator-only ITCM is enabled, sample+loop loading is one menu command, and the main encoder direction-change residue bug is mitigated.
+Session 024 fixes copy/clear ownership in the menu path and consolidates README/MEMORY.
+Session 025 fixes SD/global load compatibility and rear-jack behavior: FAT12/exFAT are rejected with `Unsupported card` / `use MBR-FAT32`; current globals span is 23 bytes, legacy 22-byte globals load silently with compatibility defaults, other globals lengths use safe fallback plus `check&save` warning; CLK IN is PD4 rising edge, RST IN is PD5 rising edge, and PD6/PD7 jack detect is retained-state foreground polling with pull-ups.
 
 ---
 
@@ -78,7 +80,9 @@ Session 023 refactors CPU scheduling and DSP hot paths: TIM6 front-panel work is
 │       ├── 020_SESSION_HANDOFF_LOG.md
 │       ├── 021_SESSION_HANDOFF_LOG.md
 │       ├── 022_SESSION_HANDOFF_LOG.md
-│       └── 023_SESSION_HANDOFF_LOG.md
+│       ├── 023_SESSION_HANDOFF_LOG.md
+│       ├── 024_SESSION_HANDOFF_LOG.md
+│       └── 025_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h
@@ -88,7 +92,7 @@ Session 023 refactors CPU scheduling and DSP hot paths: TIM6 front-panel work is
     │   ├── clocks.c/h               ← sysclk_init(), FPU enable via CPACR
     │   ├── timebase.c/h             ← SysTick 4kHz mainboard tick, TIM6 1kHz counters + 500Hz foreground service, TIM7 5kHz LCD drain
     │   ├── AudioCodecManager.c/h    ← consolidated audio: DMA ISRs, I2S/GPIO/DMA init, SPSC queue
-    │   ├── triggerJacks.c/h         ← CLK OUT/IN, RST IN, OUT1 detect EXTI9_5
+    │   ├── triggerJacks.c/h         ← CLK OUT/IN, RST IN; OUT jack detect is foreground-polled
     │   ├── memtest.c/h              ← flash sector probe (boot-time, MEMTEST_ENABLED gate)
     │   ├── frontPanel/
     │   │   ├── buttonHandler.c/h    ← ISR-safe event ring, main-loop processEvents()
@@ -124,7 +128,7 @@ Session 023 refactors CPU scheduling and DSP hot paths: TIM6 front-panel work is
     │   ├── copyClearTools.c/h       ← copy/clear tools; direct seq_* calls wired Session 15
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
     ├── Preset/
-    │   ├── ParameterArray.h/c       ← supersedes Parameters.h; NUM_PARAMS=273
+    │   ├── ParameterArray.h/c       ← supersedes Parameters.h; NUM_PARAMS=275
     │   └── presetManager.c/h        ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── MIDI/
     │   ├── Uart.c/h                 ← USART3, 31250 baud, interrupt-driven dual FIFO (realtime + normal)
@@ -229,20 +233,20 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 | USB MIDI | PA11 D-, PA12 D+ | OTG_FS, ADUM3160 isolator, VBUS sensing disabled |
 | MIDI DIN | PB10 TX, PB11 RX | USART3, 31250 baud |
 | CLK OUT | PC13 | |
-| CLK IN | PD4 | Active LOW via VT1, EXTI4 |
-| RST IN | PD5 | Active LOW via VT2, EXTI5 |
-| OUT1 L detect | PD6 | No plug=LOW, plug inserted=HIGH, EXTI9_5 both edges |
-| OUT1 R detect | PD7 | No plug=LOW, plug inserted=HIGH, EXTI9_5 both edges |
-| OUT2 L detect | PB4 | No plug=LOW, plug inserted=HIGH, sampled by TIM6-scheduled foreground service |
-| OUT2 R detect | PB6 | No plug=LOW, plug inserted=HIGH, sampled by TIM6-scheduled foreground service |
+| CLK IN | PD4 | GPIO input pull-up, EXTI4 rising edge on low-to-high transition |
+| RST IN | PD5 | GPIO input pull-up, EXTI5 rising edge on low-to-high transition |
+| OUT1 L detect | PD6 | GPIO input pull-up; no plug=LOW, plug inserted=HIGH, sampled by 500Hz foreground service |
+| OUT1 R detect | PD7 | GPIO input pull-up; no plug=LOW, plug inserted=HIGH, sampled by 500Hz foreground service |
+| OUT2 L detect | PB4 | No plug=LOW, plug inserted=HIGH, sampled by 500Hz foreground service |
+| OUT2 R detect | PB6 | No plug=LOW, plug inserted=HIGH, sampled by 500Hz foreground service |
 
-### IRQ Assignments (current — Session 023)
+### IRQ Assignments (current — Session 025)
 
 | IRQ | Priority | Handler | Function |
 |-----|----------|---------|----------|
-| IRQ10 | 3 | EXTI4_IRQHandler | CLK IN — PD4 falling edge, push to trigger event ring |
+| IRQ10 | 3 | EXTI4_IRQHandler | CLK IN — PD4 rising edge, push to trigger event ring |
 | IRQ15 | 4 | DMA1_Stream4_IRQHandler | I2S2/DAC2 — audio refill master |
-| IRQ23 | 3 | EXTI9_5_IRQHandler | RST IN (PD5) + OUT1 detect edges (PD6/PD7) |
+| IRQ23 | 3 | EXTI9_5_IRQHandler | RST IN — PD5 rising edge; PD6/PD7 masked and polled as jack state |
 | IRQ27 | 1 | TIM1_CC_IRQHandler | Main encoder A/B input capture |
 | IRQ29 | 2 | TIM3_IRQHandler | 4kHz sequencer timing owner: processRealtimeEvents → triggerJacks_tick → seq_tick |
 | IRQ39 | 5 | USART3_IRQHandler | MIDI DIN RX/TX; timestamps bytes with TIM2; realtime bytes → MidiRealtime ring |
@@ -252,7 +256,7 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 | IRQ67 | 5 | OTG_FS_IRQHandler | USB MIDI |
 
 TIM6 now schedules `timebase_serviceFrontPanel()` from the foreground loop.
-Shift-register exchange, PB4/PB6 jack detect, encoder-button debounce, and
+Shift-register exchange, PD6/PD7/PB4/PB6 jack detect, encoder-button debounce, and
 endless-pot angle processing no longer run in the TIM6 ISR.
 
 ---
@@ -299,6 +303,8 @@ The STM32F765 has an internal 12-bit DAC on PA4 (DAC1_OUT) and PA5 (DAC2_OUT). T
 
 **Implemented solution**: asyncfatfs (Betaflight/Cleanflight library), fronted by `filesystem.c/h`. Ground-up FAT16/FAT32 reimplementation with polling-based non-blocking I/O. Replaces ChaN FatFS entirely. Decision made in Session 11, implemented in Session 12, and reorganized behind the filesystem facade in Session 17.
 
+**Card format policy (Session 025)**: FAT16 and FAT32 are supported; MBR-FAT32 is recommended. FAT12 and exFAT are unsupported. Boot detection for unsupported layouts shows `Unsupported card` / `use MBR-FAT32` for 5 seconds and the filesystem is not mounted, so no boot load is attempted from that card.
+
 **Architecture:**
 ```
 presetManager.c / kitBrowser.c
@@ -319,6 +325,7 @@ presetManager.c / kitBrowser.c
 - Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
 - `kitBrowser.c/h` intentionally remains kit-only; pattern/performance/all use typed name loading and direct slot handling.
 - Boot path: synchronous polling loop before `audioCodec_init()` (audio not running, blocking OK).
+- Globals compatibility (Session 025): current `glo.cfg`/ALL globals span is 23 bytes (`NUM_PARAMS=275`, `PAR_BEGINNING_OF_GLOBALS=252`). Legacy 22-byte globals load silently, then force `PAR_EXT_SYNC=auto` and `PAR_OSC_WAVE_INTERP=1`. Any other globals length uses safe-prefix/default fallback, sanitizes `PAR_MIDI_CHAN_GLOBAL` to 1 if outside 1..16, and shows `old settings` / `check&save .glo` or `.all`.
 
 **SD_init() from `SPI/sd_routines.c` still needed** at boot to bring card to SPI mode (CMD0/CMD1/CMD8/ACMD41). Called before `afatfs_init()`. The rest of sd_routines.c (SD_readSingleBlock, busy-wait loops) is superseded.
 
@@ -451,7 +458,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - CC1 on the global MIDI channel controls MORPH (`value << 1`, 0..254). This is handled in the incoming channel-MIDI path, not in `midiParser_ccHandler()`. Do not add CC1 to the CC handler.
 - BAR1/BAR2 use `midiParser_playVoiceMidiNote(voice, vel)`. Do NOT revert to direct `voiceControl_noteOn/Off()`.
 - Default voice MIDI notes: Drum1=36 … Drum7=42. Overridden by CC2_MIDI_NOTE per-voice setting.
-- RST IN semantics: active-low run/reset gate. Low = stop+reset sequencer; release = start. Do not change this without documenting.
+- RST IN semantics: GPIO input with pull-up; low-to-high rising edge resets pattern position without toggling transport or sending MIDI stop/start.
 - MIDI realtime bytes (0xF8/FA/FB/FC) are routed to the MidiRealtime ring in the USART3 ISR and must NOT disturb the channel-message running-status parser state.
 
 ---

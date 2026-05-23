@@ -59,11 +59,11 @@ PB10 (MIDI TX/USART3) is also in the area of that via but connects via XP12, not
 | Pin | Front panel connection | MCU Pin | Status |
 |-----|----------------------|---------|--------|
 | 1 | GND | GND | |
-| 8 | RST IN gate (VT2 transistor) | **PD5** | ✓ EXTI5, active LOW |
-| 9 | OUT1 R jack detect | **PD7** | ✓ no plug=LOW, plug inserted=HIGH |
+| 8 | RST IN jack input | **PD5** | ✓ GPIO input pull-up, EXTI5 rising edge low-to-high |
+| 9 | OUT1 R jack detect | **PD7** | ✓ input pull-up; no plug=LOW, plug inserted=HIGH |
 | 10 | DD2 pin 2 (74HC165 CLK) | **PB3** | ✓ SPI1 SCK AF5 |
-| 13 | OUT1 L jack detect | **PD6** | ✓ no plug=LOW, plug inserted=HIGH |
-| 14 | CLK IN gate (VT1 transistor) | **PD4** | ✓ EXTI4, active LOW |
+| 13 | OUT1 L jack detect | **PD6** | ✓ input pull-up; no plug=LOW, plug inserted=HIGH |
+| 14 | CLK IN jack input | **PD4** | ✓ GPIO input pull-up, EXTI4 rising edge low-to-high |
 | others | ? | ? | |
 
 ---

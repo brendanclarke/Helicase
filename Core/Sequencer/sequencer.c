@@ -756,6 +756,21 @@ void seq_resetDeltaAndTick()
 
 }
 //------------------------------------------------------------------------------
+void seq_resetToPatternStart(void)
+{
+	/* External reset should reposition the sequence without toggling transport
+	** state or sending MIDI stop/start. The next clock pulse will play the
+	** pattern start according to each track's rotation. */
+	seq_lastShuffle = 0;
+	seq_barCounter = 0;
+	seq_masterStepCnt = 0;
+	seq_prescaleCounter = 0;
+	seq_delayedSyncStepFlag = 0;
+	seq_setStepIndexToStart();
+	seq_deltaT = 0;
+	seq_lastTick = systick_ticks;
+}
+//------------------------------------------------------------------------------
 /** call periodically to check if the next step has to be processed */
 void seq_tick()
 {

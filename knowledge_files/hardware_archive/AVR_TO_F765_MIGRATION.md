@@ -59,7 +59,7 @@ Everything runs on a single **STM32F765VIH6**. The AVR is gone. All former AVR r
 
 ### 8. Menu System / Parameter Management
 - **AVR**: Full menu.c, parameter_values[], presetManager.c, copyClearTools.c. Ran entirely on AVR, sent parameter updates to STM32 via frontPanel_sendData().
-- **F765**: Fully ported. Direct function calls replace serial protocol. parameter_values[] (NUM_PARAMS=273), full page table (16 pages × 8 sub-pages), all dtypes, value names, load/save page UI, encoder navigation, quad encoder parameter editing. frontPanel_sendData() stubbed until DSP connected. **Status: working**.
+- **F765**: Fully ported. Direct function calls replace serial protocol. parameter_values[] (NUM_PARAMS=275), full page table (16 pages × 8 sub-pages), all dtypes, value names, load/save page UI, encoder navigation, quad encoder parameter editing. frontPanel_sendData() stubbed until DSP connected. **Status: working**.
 
 ### 9. Preset Management
 - **AVR**: presetManager.c, SD card read/write via FatFS.
@@ -76,7 +76,7 @@ Everything runs on a single **STM32F765VIH6**. The AVR is gone. All former AVR r
 
 ### 12. Trigger/Clock Jacks
 - **Original LXR STM32F4**: TriggerOut.c — trigger outputs on GPIOD (PD8-PD14), CLK1 on PD15, CLK2/Reset on PA9/PA10. CLK IN on PC9, RST IN on PA8. EXTI9_5_IRQHandler with TIM2 for clock interval measurement.
-- **F765**: CLK OUT = PC13. CLK IN = PD4 (EXTI4). RST IN = PD5 (EXTI5). Both handled in EXTI9_5_IRQHandler. TIM2 needed for clock interval measurement (not yet initialised). **Status: GPIO confirmed, EXTI handler stub written, sequencer connections commented out**.
+- **F765**: CLK OUT = PC13. CLK IN = PD4 (EXTI4 rising edge). RST IN = PD5 (EXTI5 rising edge through EXTI9_5_IRQHandler). TIM2 is the free-running 1 MHz timestamp source for CLK/RST and MIDI realtime capture. **Status: hardware confirmed and wired into the sequencer timing owner.**
 - **Critical**: EXTI4/EXTI5 are armed by the bootloader. EXTI_IMR must be cleared at the top of main() before any init. This is done.
 - **Trigger outputs** (7 voice triggers + CLK1 + CLK2 + Reset): On original LXR these were GPIOD and GPIOA. On LXR-02 these jacks are NOT present — the LXR-02 only has CLK OUT, CLK IN, RST IN. The 7 voice trigger outputs and second clock output from the original expansion header do not have corresponding jacks on the LXR-02.
 
@@ -190,12 +190,12 @@ When sequencer step LED updates need to be a fifth source of "screen needs repai
 ## Key Unknowns / Risks
 
 1. ~~**SPI1 contention** (SD vs LED/button)~~ — **RESOLVED**. SD card is on bit-bang GPIO (PC12/PD2/PC8/PD0), not SPI1. No contention.
-2. **TIM2 for CLK IN interval measurement**: Not initialised. Original used TIM2 as a free-running counter reset on each CLK IN pulse to measure BPM. F765 TIM2 is available and must be set up in triggerJacks. Will also be used as the timestamp source for MIDI RX ISR.
+2. ~~**TIM2 for CLK IN interval measurement**~~ — **RESOLVED Session 019/025**. TIM2 is initialised as a 1 MHz free-running timestamp counter. CLK IN on PD4 and RST IN on PD5 each use rising-edge EXTI and timestamp events without resetting TIM2.
 3. ~~**Non-blocking LCD**~~ — **RESOLVED**. TIM7 async queue driver implemented. All lcd_* calls non-blocking post-init.
 4. ~~**Display buffer desync under rapid input**~~ — **RESOLVED Session 6**. SPSC ring (no shared count) + unconditional setcursor.
 5. **MidiParser RX**: USB MIDI RX and USART3 RX are plumbed but not connected to the sequencer/parameter system yet.
 6. **Slider-to-parameter mapping**: Sliders are new hardware. No original mapping exists. Must be designed.
-7. **GPIOD**: PD0=SD CS, PD1=SD DETECT, PD2=SD MOSI, PD4=CLK IN, PD5=RST IN — all confirmed. PD3, PD6, PD7 — unknown connections, do not configure unless traced.
+7. **GPIOD**: PD0=SD CS, PD1=SD DETECT, PD2=SD MOSI, PD4=CLK IN, PD5=RST IN, PD6=OUT1 L detect, PD7=OUT1 R detect — all confirmed. PD3 remains unknown; do not configure PD3 unless traced.
 8. **buttonHandler/ledHandler audit**: Not yet done. Button numbering reversed from original (BUT_MODE1=31 vs original BUT_MODE1=35). Action logic needs case-by-case audit.
 9. ~~**Preset save**: Load only.~~ — **RESOLVED**. Kit save (.SND) and globals save (.GLO) implemented and confirmed on hardware. Pattern/all/performance stubs in place.
 10. ~~**Sequencer, DSP audio, Sample ROM**: Not started.~~ — **PARTIALLY RESOLVED**. DSP voice files ported to Core/DSPAudio/. Sequencer ported to Core/Sequencer/ (main-loop polling). SampleRom has a safe no-op stub (real flash impl blocked on F765 flash_if.c hardening). AudioCodecManager consolidated and wired. **See architectural notes for the remaining ISR-timing work.**

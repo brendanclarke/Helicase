@@ -120,9 +120,8 @@ void mixer_setOutJackDetectPD(uint8_t pd6_high, uint8_t pd7_high)
 uint8_t mixer_checkOutJackAvailable(uint8_t dest)
 {
 	//read input pins
-	// for efficiency, these are split: The PB pins are read each TIM6 cycle
-	// alongside the shift-registers. The PD pin reads are hardware interrupt
-	// alongside the clk and rst inputs on EXTI. 
+	// for efficiency, the jack-detect pins are sampled by the 500Hz
+	// foreground front-panel service and retained here as state.
 	uint8_t l1_Available = mixer_out_l1_available;
 	uint8_t r1_Available = mixer_out_r1_available;
 	uint8_t l2_Available = mixer_out_l2_available;

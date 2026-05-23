@@ -116,32 +116,32 @@ ADC1: 14-channel circular scan via DMA2 Stream0 Ch0. 480-cycle sample time. 4MHz
 | Jack | Signal | MCU Pin | Logic | Notes |
 |------|--------|---------|-------|-------|
 | XS3 | CLK OUT | PC13 | Active HIGH | Via DD1 74AHCT125 level shifter pin 5(2A)→pin 6(2Y) |
-| XS1 | CLK IN | PD4 | Active LOW | Via VT1 transistor, inverted. Idle=HIGH, signal=LOW |
-| XS2 | RST IN | PD5 | Active LOW | Via VT2 transistor, inverted. Idle=HIGH, signal=LOW |
-| OUT1 L detect | Jack detect switch | PD6 | Active HIGH on insert | No plug=0V (GND), plug inserted=~3.2V |
-| OUT1 R detect | Jack detect switch | PD7 | Active HIGH on insert | No plug=0V (GND), plug inserted=~3.2V |
+| XS1 | CLK IN | PD4 | Rising edge | Low-to-high voltage transition at MCU pin; GPIO input with pull-up |
+| XS2 | RST IN | PD5 | Rising edge | Low-to-high voltage transition at MCU pin; GPIO input with pull-up |
+| OUT1 L detect | Jack detect switch | PD6 | Active HIGH on insert | GPIO input with pull-up. No plug grounds the pin; plug inserted opens the contact and reads HIGH. |
+| OUT1 R detect | Jack detect switch | PD7 | Active HIGH on insert | GPIO input with pull-up. No plug grounds the pin; plug inserted opens the contact and reads HIGH. |
 | OUT2 L detect | Jack detect switch | PB4 | Active HIGH on insert | No plug=0V (GND), plug inserted=~3.2V |
 | OUT2 R detect | Jack detect switch | PB6 | Active HIGH on insert | No plug=0V (GND), plug inserted=~3.2V |
 
 **Critical**: EXTI4 and EXTI5 are armed by the bootloader for CLK IN and RST IN. At application startup, `EXTI_IMR` must be written to 0x00000000 before any other init, otherwise any voltage change on those jacks fires an unhandled EXTI → Default_Handler → freeze. This is done at the top of main() before sysclk_init().
 
-On STM32F765, EXTI4 has its own IRQ10. CLK IN on PD4 is handled by `EXTI4_IRQHandler`; RST IN on PD5 is handled by `EXTI9_5_IRQHandler` through EXTI5. Session 021 also routes OUT1 detect inputs PD6/PD7 through EXTI9_5 (both edges) for change-driven updates.
+On STM32F765, EXTI4 has its own IRQ10. CLK IN on PD4 is handled by `EXTI4_IRQHandler`; RST IN on PD5 is handled by `EXTI9_5_IRQHandler` through EXTI5. CLK IN and RST IN are GPIO inputs with internal pull-ups and use rising-edge EXTI for low-to-high voltage transitions. PD6/PD7 EXTI is masked; OUT1 detect is GPIO input with internal pull-ups and retained state sampled by the same 500Hz foreground service that samples PB4/PB6.
 
 ## Clocks / Interrupts Summary
 | IRQ | Priority | Handler | Period | Function |
 |-----|----------|---------|--------|----------|
 | SysTick | 0 (highest) | SysTick_Handler | 1ms | lcd_ms_ticks for LCD blocking delays only |
 | TIM1_CC (IRQ27) | 1 | TIM1_CC_IRQHandler | event | Main encoder A/B input capture |
-| TIM6_DAC (IRQ54) | 1 | TIM6_DAC_IRQHandler | 1ms (1kHz) | LED/button SPI, OUT2 detect sample (PB4/PB6), systick |
+| TIM6_DAC (IRQ54) | 1 | TIM6_DAC_IRQHandler | 1ms (1kHz) | LED/button SPI, jack-detect service scheduling, systick |
 | TIM7 (IRQ55) | 2 | TIM7_IRQHandler | 100µs (10kHz) | LCD async queue drain |
 | EXTI4 (IRQ10) | 3 | EXTI4_IRQHandler | event | CLK IN (EXTI4/PD4) |
-| EXTI9_5 (IRQ23) | 3 | EXTI9_5_IRQHandler | event | RST IN (EXTI5/PD5) + OUT1 detect edges (PD6/PD7) |
+| EXTI9_5 (IRQ23) | 3 | EXTI9_5_IRQHandler | event | RST IN (EXTI5/PD5 rising edge); PD6/PD7 masked and polled as jack state |
 | OTG_FS (IRQ67) | 5 | OTG_FS_IRQHandler | event | USB MIDI |
 
 ## Package Notes
 - TFBGA100: PD0-PD7 are bonded (PD8-PD15 are NOT present)
 - GPIOD is fully functional but must have AHB1ENR bit 3 set before register access
 - PD0=SD CS, PD1=SD DETECT, PD2=SD MOSI — now confirmed, no longer unknown
-- PD4/PD5 idle HIGH because external VT1/VT2 circuit holds them there
-- Do NOT configure PD4/PD5 with pull-down — this fights the external circuit
-- PD6/PD7 are now confirmed as OUT1 L/R jack-detect inputs
+- PD4/PD5 MCU pads idle HIGH when open because internal pull-ups are enabled
+- Connected modular CLK/RST sources are expected to idle LOW and trigger on LOW-to-HIGH transitions
+- PD6/PD7 are confirmed as OUT1 L/R jack-detect inputs, use internal pull-ups to retain inserted=HIGH, and are sampled at 500Hz with PB4/PB6

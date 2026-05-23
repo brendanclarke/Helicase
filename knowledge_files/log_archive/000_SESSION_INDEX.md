@@ -29,10 +29,11 @@
 | 018 | 2026-05-12 | `lxr02-037_port-02.tar.gz` (local changes; no new tarball) | Sample flash loading, loop append loader, audio suspend/resume, filename display/sort |
 | 019 | 2026-05-14 | `lxr02-037_port-02.tar.gz` (local changes; no new tarball) | Full MIDI/clock/jack implementation: USART3 interrupt-driven RX/TX, TIM2 timestamp counter, MidiRealtime ring, TIM3 sequencer timing owner, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, OUTPUT_DMA_SIZE corrected to 32 |
 | 020 | 2026-05-14 | `lxr02-037_port-02.tar.gz` (local changes; no new tarball) | Slider audio path completion: direct mixer multiplier, always-on update, per-block interpolation, configurable log taper |
-| 021 | 2026-05-16 | `lxr02-037_port-02.tar.gz` (local changes; no new tarball) | Audio jack-detect traced and integrated: OUT1L/OUT1R/OUT2L/OUT2R mapped to PD6/PD7/PB4/PB6, ISR-fed mixer jack-availability reads |
+| 021 | 2026-05-16 | `lxr02-037_port-02.tar.gz` (local changes; no new tarball) | Audio jack-detect traced: OUT1L/OUT1R/OUT2L/OUT2R mapped to PD6/PD7/PB4/PB6; runtime model superseded in Session 025 |
 | 022 | 2026-05-16 | `lxr02-037_port-02.tar.gz` (local changes; no new tarball) | Dither audit + 24-bit path upgrade: sample_mx_t widening at mixer/output stage, true 24-bit DMA pack, loudness regression fixed; dth global menu option planned but not yet wired |
 | 023 | 2026-05-17 | local working directory `lxr02-037_port/` | CPU refactor + DSP hot-path cleanup: foreground front-panel service, 5kHz LCD, slider LUT, filesystem idle poll limit, oscillator interp budget, oscillator-only ITCM, combined sample/loop load, encoder residue fix, memory audit |
 | 024 | 2026-05-21 | local working directory `lxr02-037_port/` | Copy/clear audit and fix: clear-mode encoder target select + execute, shift/copy release ownership, COPYCLEAR_AUDIT, README/MEMORY consolidation |
+| 025 | 2026-05-23 | local working directory `lxr02-037_port/` | SD/FAT compatibility, stale globals/.all load policy, menu globals cleanup, CLK/RST correction, OUT jack-detect retained-state polling |
 
 ---
 
@@ -112,15 +113,15 @@ Session 18 implemented user sample loading from SD into flash. The linker now re
 
 ### 019 — MIDI, Clock, and Trigger-Jack Implementation (2026-05-14)
 Session 019 implemented all outstanding MIDI, clock, and jack phases from AUDIT-CLOCK-MIDI.md. USART3 RX/TX is now fully interrupt-driven with dual TX FIFOs (realtime priority + normal). TIM2 is initialised as a shared free-running 1 µs timestamp counter. A new `MidiRealtime.c/h` provides a 32-entry timestamped SPSC ring for MIDI_CLOCK/START/CONTINUE/STOP, pushed in the USART3 and USB ISRs. TIM3 (4 kHz, IRQ29, priority 2) is the new sequencer timing owner: it drains the realtime ring, drains jack events, and calls `seq_tick()` — removing all three from the main loop. Real trigger-jack backend replaces the PD3 diagnostic: PC13 CLK OUT, PD4 CLK IN (EXTI4), PD5 RST IN (EXTI9_5). Voice triggers from MIDI, BAR1/BAR2, and sequencer are deferred through a 32-entry pending ring and drained at the audio render boundary, eliminating the BAR1/BAR2 DSP race. New `PAR_EXT_SYNC` (SyncInpt) replaces the old BPM=0 external-sync toggle. AUTO mode priority: jack > DIN MIDI > USB MIDI > internal. CC1 on the global MIDI channel controls MORPH (`value << 1`). BAR1/BAR2 record through the full MIDI note path using assigned/default voice note numbers (Drum1=36..Drum7=42). `OUTPUT_DMA_SIZE` corrected to 32 (was 16). Build verified; full hardware bench testing is the next step.
-- **Find here**: TIM3 sequencer timing owner, TIM2 timestamp counter, MidiRealtime ring design, dual TX FIFO, voice trigger pending ring and audio-boundary drain, EXTI4/EXTI9_5 jack backend, PAR_EXT_SYNC AUTO priority logic, CC1→MORPH mapping and double-fire fix, BAR1/BAR2 MIDI path with assigned note lookup, OUTPUT_DMA_SIZE=32 correction, RST IN active-low gate semantics, startup vector table updates (IRQ10/23/29/39)
+- **Find here**: TIM3 sequencer timing owner, TIM2 timestamp counter, MidiRealtime ring design, dual TX FIFO, voice trigger pending ring and audio-boundary drain, EXTI4/EXTI9_5 jack backend, PAR_EXT_SYNC AUTO priority logic, CC1→MORPH mapping and double-fire fix, BAR1/BAR2 MIDI path with assigned note lookup, OUTPUT_DMA_SIZE=32 correction, startup vector table updates (IRQ10/23/29/39); see Session 025 for current RST IN semantics
 
 ### 020 — Slider Mixer Multiplier + Taper (2026-05-14)
 Session 020 completed the full slider audio-path audit and moved RV5–RV10 to a dedicated mixer-stage gain multiplier architecture. Sliders now update `slider_vol[]` continuously from ADC DMA with deadzone clamping and configurable log taper mapping, while base voice volume (`voice.vol`) remains fully owned by preset/morph/LFO/MIDI modulation. The mixer applies `slider_vol[i]` as a post-voice multiply for each voice block before routing, and slider zippering was reduced by per-block gain interpolation (`last_gain -> current_gain`). Build verified; hardware listening test reported substantial zipper reduction. The audit doc (`SLIDER_AUDIT.md`) was updated to reflect final implemented behavior and synced to `/Users/bc/Downloads/SLIDER_AUDIT.md`.
 - **Find here**: `adcPots.c` slider path rewrite, decoupling from `voice.vol` and parameter system, mixer-stage per-voice multiplier, per-block gain interpolation, configurable `SLIDER_LOG_TAPER_DB`, updated audit checklist and architecture notes
 
 ### 021 — Audio Jack Detect Trace + ISR Integration (2026-05-16)
-Session 021 completed rear audio jack-detect tracing and implementation. Confirmed mapping is OUT1L=PD6, OUT1R=PD7, OUT2L=PB4, OUT2R=PB6. Firmware integration uses a split strategy: PB4/PB6 are sampled in the existing TIM6 1kHz service ISR and cached into mixer state; PD6/PD7 are edge-driven through EXTI9_5 (shared with PD5 RST IN) and update mixer state on change. `mixer_checkOutJackAvailable()` now reads ISR-fed cached availability variables (`l1_Available/r1_Available/l2_Available/r2_Available`) instead of direct GPIO reads. Hardware docs were updated to include connector pin mapping and interrupt notes for debug continuity.
-- **Find here**: confirmed OUT jack-detect pin mapping, TIM6 piggyback sampling for PB4/PB6, EXTI9_5 both-edge handling for PD6/PD7, mixer cached jack-availability hook, EXTI line sharing constraints, hardware map and connector map updates
+Session 021 completed rear audio jack-detect tracing and confirmed the physical mapping: OUT1L=PD6, OUT1R=PD7, OUT2L=PB4, OUT2R=PB6. The original Session 021 runtime integration was later superseded by Session 025: all four jack-detect pins are now retained state sampled by the 500Hz foreground service, and PD6/PD7 EXTI is masked. `mixer_checkOutJackAvailable()` still consumes cached availability variables (`l1_Available/r1_Available/l2_Available/r2_Available`).
+- **Find here**: confirmed OUT jack-detect pin mapping, mixer cached jack-availability hook, hardware map and connector map updates; see Session 025 for current runtime behavior
 
 ### 022 — Dither Audit + 24-bit Path Widening (2026-05-16)
 Full audit of dither in both LXR-master and our port: the only dither call (`calcDrumVoiceSyncBlock()`) is guarded by `#ifdef USE_AMP_FILTER` which is never defined in either Makefile — dither is entirely inactive in both codebases. DMA was sending `[int16 MSW, 0x0000 LSW]`, wasting the lower 8 bits of the 24-bit I2S frame. Introduced `sample_mx_t` (signed 24-bit value in int32_t) in new `Core/DSPAudio/sample_mix.h`. Widened render buffers, mixer summing/routing, BufferTools helpers, and codec packer (`pack_half()`) to carry true 24-bit data. Voice sync-block and distortion interfaces were prototyped wide then rolled back to `int16_t` (deferred; pinned in DITHER_AUDIT.md). Conversion from int16 voices to widened domain happens in mixer immediately before pan/sum (`bufferTool_convertInt16ToSampleMix`). Loudness regression found and fixed: extra `>>8` in `sampleMix_toS24()` removed. Original `dth` global menu option (short `dth`, long `16bitDth`, DTYPE_ON_OFF, default off, second-last before CPU widget) fully designed in DITHER_AUDIT.md Steps 1–8 but not yet wired — infrastructure now in place. Build verified clean.
@@ -133,6 +134,10 @@ Session 023 started with `AUDIT_REFACTOR.md`, then implemented the lowest-risk C
 ### 024 — Copy/Clear Fix + README/MEMORY Cleanup (2026-05-21)
 Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-master/front/LxrAvr/Menu/copyClearTools.c`, wrote `COPYCLEAR_AUDIT.md`, and found that the direct `seq_*` copy/clear calls were mostly correct while the active regression was in the menu/control path. `menu_parseEncoder()` now lets clear mode own encoder turns (target select) and encoder clicks (execute clear) before normal edit-mode toggling. `buttonHandler.c` no longer exits `MODE_CLEAR` on SHIFT release while COPY is still held, so clear mode stays armed until both combo buttons are released. README was trimmed so content after the `# MOVE EVERYTHING AFTER THIS TO MEMORY.md` marker lives in MEMORY; historical/non-enabled items were removed from README's confirmed hardware list and folded into MEMORY without duplicating the full moved block. `make -j4` passed after the copy/clear code changes.
 - **Find here**: `COPYCLEAR_AUDIT.md`, `menu_parseEncoder()` clear-mode ownership, SHIFT/COPY release ordering, README/MEMORY split, retained MEMORY details for known issues/critical reminders/toolchain
+
+### 025 — SD/FAT, Globals Compatibility, CLK/RST + Jack Detect Cleanup (2026-05-23)
+Session 025 fixed unsupported-card boot handling, audited and patched `glo.cfg`/`.all` global load semantics, removed obsolete global-menu/settings entries, corrected CLK/RST assumptions from hardware diagnostics, and stabilized OUT jack detect as retained foreground state. FAT12/exFAT now show `Unsupported card` / `use MBR-FAT32` and do not mount. Global settings remain raw/unversioned: 22-byte legacy globals load silently with compatibility defaults, 23-byte current globals load normally, and other lengths use safe fallback plus `check&save` warnings. CLK IN is PD4 rising edge, RST IN is PD5 rising edge/reset-to-pattern-start, and PD6/PD7 jack detect uses pull-ups plus 500Hz foreground polling with PB4/PB6.
+- **Find here**: `FAT_AUDIT.md`, `SAVE_ALL_AUDIT.md`, `ST1_JACK_DET_AUDIT.md`, unsupported-card warning, 22/23/stale globals policy, `PAR_FETCH`/phantom-param removal, `menuPages.h` TEXT_EMPTY/PAR_NONE trap, PD4/PD5 rising-edge pull-up config, PD6/PD7 retained-state polling
 
 ---
 
@@ -162,7 +167,7 @@ Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-ma
 | audioCodec_init() — single hardware entry point | 009 |
 | DTCM not DMA-accessible | 007 |
 | Flash sectors 6-11 sample region, erase floor at sector 6 | 007 |
-| .SND/.GLO byte-compatible with original LXR | 007 |
+| .SND remains byte-compatible; `glo.cfg` current raw span is 23 bytes with explicit legacy-22 compatibility and stale fallback | 007, 025 |
 | plli2s_init HSERDY guard never entered — intentional | 009 |
 | AUDIO_DMA_FRAMES=96 gives the hardware render-slot budget 2.18ms; OUTPUT_DMA_SIZE=32 is the canonical DSP/control block (corrected in Session 019; was erroneously 16) | 010, 017, 019 |
 | DSP render must stay in main loop — ISR ceiling is fatal, no graceful degradation | 010 |
@@ -173,6 +178,7 @@ Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-ma
 | BAR1/BAR2 processPress() calls voiceControl_noteOn/Off() — latent DSP race | 010 |
 | encode_read4 moving to TIM6: cpsid/cpsie must become shadow copy — TIM1 preempts TIM6 | 010 |
 | asyncfatfs adopted — replaces ChaN FatFS entirely | 011 |
+| SD cards: FAT16/FAT32 supported; MBR-FAT32 recommended; FAT12/exFAT unsupported and boot warning is `Unsupported card` / `use MBR-FAT32` | 025 |
 | NB_FatFS rejected — C++, heap, no FAT16, no _FS_TINY | 011 |
 | FatFS fork for async rejected — 20+ functions, 28 yield points, high risk | 011 |
 | Original LXR: AVR owns SD for presets, STM32 only uses SD for sample upload (halts audio) | 011 |
@@ -223,6 +229,7 @@ Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-ma
 | Non-SD client code should include Core/Hardware/SD/filesystem.h only; asyncfatfs/SPI/raw SD details are private | 017 |
 | SD layout: Core/Hardware/SD/filesystem.c/h facade, kitBrowser kit-only, SPI/ for bit-bang transport, asyncfatfs/ for FAT/block shim | 017 |
 | Filesystem filetype registry owns .snd/.pat/.prf/.all/glo.cfg extensions and add-a-filetype documentation | 017 |
+| `glo.cfg`/ALL globals policy: no versioning; 22-byte legacy accepted with defaults, 23-byte current accepted, other lengths safe-prefix/default fallback + `check&save` warning | 025 |
 | Pattern/performance/all load/save use async streaming state machines; do not stage large files in RAM | 017 |
 | .prf/.all format: name[8], version=2, 64-byte meta, 512-byte kit block, pattern payload without second .pat name | 017 |
 | Pattern/performance/all loads show "Loading pattern", lock page changes while busy, then repaint load screen with cursor on file number | 017 |
@@ -231,6 +238,7 @@ Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-ma
 | Menu display repaints preflight lcd_queueFree() so cursor/data half-pairs cannot be partially dropped under LCD queue pressure | 017 |
 | CPU-use widget is a DWT CYCCNT event-based audio queue-free pressure meter, not generic MCU utilization | 017 |
 | Global menu page 4 now shows read-only cpu/CPU use time; Trigger Out2 PPQ and Trigger Gate Mode were removed from the displayed page | 017 |
+| `menuPages.h` globals rows are fragile: early `TEXT_EMPTY`/`PAR_NONE` can block later entries, so reordered globals need manual table verification | 025 |
 | PERF LEDs: solid SELECT LED is currently playing pattern; blinking SELECT LED is queued/viewed next pattern until ACK | 017 |
 | VOICE SELECT LED must be restored to menu_getSubPage() after switching voices | 017 |
 | Boot splash text is "Sonic Potions" / "LXR Drums V0.37"; screensaver uses explicit lcd_turnOff/lcd_turnOn and clears on exit | 017 |
@@ -250,13 +258,13 @@ Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-ma
 | TIM2 is a shared free-running 1 µs timestamp counter (PSC=107); do NOT reset on pulse; use unsigned delta subtraction | 019 |
 | MidiRealtime.c/h: 32-entry timestamped SPSC ring for MIDI_CLOCK/START/CONTINUE/STOP; push in USART3/USB ISR, pop in TIM3 | 019 |
 | Voice trigger ring: 32-entry VoiceTriggerEvent SPSC; all noteOn/Off enqueue; voiceControl_processPending() drained at audio boundary | 019 |
-| Jack event ring: 16-entry; push in EXTI4/EXTI9_5, pop in TIM3; CLK IN = PD4 EXTI4, RST IN = PD5 EXTI9_5 | 019 |
+| Jack event ring: 16-entry; push in EXTI4/EXTI9_5, pop in TIM3; CLK IN = PD4 EXTI4 rising edge, RST IN = PD5 EXTI5 rising edge | 019, 025 |
 | PAR_EXT_SYNC (SyncInpt): values off/usb/din/pls/aut; PAR_BPM minimum is now 1 — value 0 no longer means external sync | 019 |
 | AUTO sync priority: jack > DIN MIDI (500 ms hold) > USB MIDI > internal free-run | 019 |
 | CC1 on global MIDI channel → MORPH = value << 1 (0..127 maps to 0..254); handled in incoming channel-MIDI path, not in ccHandler | 019 |
 | BAR1/BAR2 call midiParser_playVoiceMidiNote(voice, vel); notes record through MIDI path; do NOT revert to direct voiceControl calls | 019 |
 | Default voice MIDI notes: Drum1=36 … Drum7=42; overridden by CC2_MIDI_NOTE per-voice | 019 |
-| RST IN semantics: active-low run/reset gate; low = stop+reset, release = start | 019 |
+| RST IN semantics: PD5 GPIO input pull-up, EXTI5 rising edge, resets to pattern start without toggling transport | 025 |
 | DIN TX FIFO is dual (realtime priority + normal); TXE interrupt driven; uart_sendMidiByte() is non-blocking | 019 |
 | EXTI4 = IRQ10 (CLK IN PD4); EXTI9_5 = IRQ23 (RST IN PD5); USART3 = IRQ39; TIM3 = IRQ29 — all now in startup vector table | 019 |
 | Do NOT call seq_tick(), midiParser_processRealtimeEvents(), or triggerJacks_tick() from main loop — TIM3 owns them | 019 |
@@ -265,8 +273,8 @@ Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-ma
 | Slider gain is always refreshed from ADC DMA in `adc_checkPots()` (no hysteresis gate in audio path) | 020 |
 | Slider zipper reduction path: per-block gain interpolation in mixer + optional log taper in `slider_raw_to_float()` | 020 |
 | `SLIDER_LOG_TAPER_DB` controls taper depth (0=linear; higher=more audio taper). Session 020 default: 60 dB | 020 |
-| OUT1L/OUT1R/OUT2L/OUT2R jack-detect mapping is PD6/PD7/PB4/PB6; no plug=LOW (GND), plug inserted=HIGH | 021 |
-| Jack-detect runtime split: PB4/PB6 sampled in TIM6 1kHz ISR; PD6/PD7 updated on EXTI9_5 both-edge interrupts; mixer consumes cached states | 021 |
+| OUT1L/OUT1R/OUT2L/OUT2R jack-detect mapping is PD6/PD7/PB4/PB6; no plug=LOW (GND), plug inserted=HIGH | 021, 025 |
+| All four jack-detect pins are retained state sampled by the 500Hz foreground service; PD6/PD7 use internal pull-ups and EXTI is masked | 025 |
 | USE_AMP_FILTER is never defined; dither call in calcDrumVoiceSyncBlock() is compiled out in both LXR-master and our port | 022 |
 | sample_mx_t = int32_t carrying a signed 24-bit value; int16 voice outputs enter mixer as int16<<8 via bufferTool_convertInt16ToSampleMix() | 022 |
 | sampleMix_toS24() must NOT right-shift before clamp — the <<8 scale is already in the value; do not re-add >>8 | 022 |

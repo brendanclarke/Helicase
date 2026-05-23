@@ -205,10 +205,18 @@ static void service_knob_repaint()
     }
 }
 
+static void boot_delayMs(uint16_t ms)
+{
+    uint16_t t0 = time_sysTick;
+    while ((uint16_t)(time_sysTick - t0) < ms) { /* boot-only hold */ }
+}
+
 int main(void)
 {
     #define EXTI_IMR (*((volatile uint32_t *)0x40013C00UL))
     #define EXTI_PR  (*((volatile uint32_t *)0x40013C14UL))
+    uint8_t show_unsupported_card_warning = 0;
+
     EXTI_PR  = 0xFFFFFFFFUL;
     EXTI_IMR = 0x00000000UL;
 
@@ -256,6 +264,7 @@ int main(void)
     ** ----------------------------------------------------------------- */
     {
         uint8_t sd_ok = filesystem_initCardAndMountBlocking();
+        show_unsupported_card_warning = filesystem_bootDetectedUnsupportedCard();
 
         /* Menu init — must be before preset load (memsets parameter_values) */
         menu_init();
@@ -293,6 +302,18 @@ int main(void)
     last_repaint_tick = 0;
 
 	menu_start();
+    if (show_unsupported_card_warning) {
+        /* Session 025: FAT12/exFAT or non-MBR layouts can look like "card
+        ** present" but are unsupported by LXR. Hold this modal warning long
+        ** enough to read before normal boot UI resumes. */
+        lcd_clear();
+        lcd_setcursor(0, 1);
+        lcd_string("Unsupported card");
+        lcd_setcursor(0, 2);
+        lcd_string("use MBR-FAT32");
+        lcd_waitForIdle();
+        boot_delayMs(5000u);
+    }
 	sequencerTimer_init();
 
 	for (;;) {
@@ -344,10 +365,6 @@ int main(void)
         // tick the SD read async
         filesystem_tick();
         audio_check_and_render();
-        // jack detect candidate trace (unmapped only: PB4, PB6, PD6, PD7)
-        // jack_detect_candidate_poll();
-        audio_check_and_render();
-        
     }
 }
 
@@ -409,34 +426,3 @@ int main(void)
         if (audioCodec_queueFreeSlots() > 0)
             audioCodec_renderSineBlock();
         */
-
-
-        //         static void jack_detect_candidate_poll(void)
-        // {
-        //     #define GPIOB_IDR (*((volatile uint32_t *)0x40020410UL))
-        //     #define GPIOD_IDR (*((volatile uint32_t *)0x40020C10UL))
-
-        //     static uint8_t initialized = 0u;
-        //     static uint8_t pb4_prev = 0u;
-        //     static uint8_t pb6_prev = 0u;
-        //     static uint8_t pd6_prev = 0u;
-        //     static uint8_t pd7_prev = 0u;
-        //     static int32_t change_count = 0;
-
-        //     uint8_t pb4 = (uint8_t)((GPIOB_IDR >> 4) & 1u);
-        //     uint8_t pb6 = (uint8_t)((GPIOB_IDR >> 6) & 1u);
-        //     uint8_t pd6 = (uint8_t)((GPIOD_IDR >> 6) & 1u);
-        //     uint8_t pd7 = (uint8_t)((GPIOD_IDR >> 7) & 1u);
-
-        //     if (!initialized) {
-        //         pb4_prev = pb4; pb6_prev = pb6;
-        //         pd6_prev = pd6; pd7_prev = pd7;
-        //         initialized = 1u;
-        //         return;
-        //     }
-
-        //     if (pb4 != pb4_prev) { pb4_prev = pb4; lcd_diagDisplayInt("PB", 4, "CNT", ++change_count); return; }
-        //     if (pb6 != pb6_prev) { pb6_prev = pb6; lcd_diagDisplayInt("PB", 6, "CNT", ++change_count); return; }
-        //     if (pd6 != pd6_prev) { pd6_prev = pd6; lcd_diagDisplayInt("PD", 6, "CNT", ++change_count); return; }
-        //     if (pd7 != pd7_prev) { pd7_prev = pd7; lcd_diagDisplayInt("PD", 7, "CNT", ++change_count); return; }
-        // }

@@ -72,6 +72,13 @@
 #include <string.h>
 #include <stdint.h>
 
+#define FS_SECTOR_SIZE_BYTES 512u
+#define FS_NUM_FATS_EXPECTED 2u
+#define MBR_PARTITION_TYPE_EXFAT 0x07u
+#define FS_CONTAINER_META_LEN 64u
+#define FS_CONTAINER_KIT_LEN 512u
+#define FS_CONTAINER_PAD_BYTE 0xffu
+
 /* -----------------------------------------------------------------------
 ** Operation types
 ** ----------------------------------------------------------------------- */
@@ -131,7 +138,7 @@ static fs_completion_cb_t completion_callback = NULL;
  * Kit save: 8 (name) + END_OF_SOUND_PARAMETERS bytes.
  * Globals save: NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS bytes.
  * Only one operation at a time, so one buffer suffices.
- * NUM_PARAMS=283, so worst case is currently 283 bytes. Use 320 for margin. */
+ * NUM_PARAMS=275, so worst case is currently 275 bytes. Use 320 for margin. */
 static uint8_t staging_buf[320];
 static uint16_t staging_len = 0;
 
@@ -144,8 +151,15 @@ static uint32_t op_stream_index = 0;
 static uint8_t op_item_offset = 0;
 static uint8_t op_loaded_active_pattern_running = 0;
 static uint8_t op_file_version = 0;
+static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
+static uint8_t fs_boot_detected_unsupported_card = 0;
+static fs_stale_warning_source_t fs_stale_warning_pending = FS_STALE_WARNING_NONE;
 
 #define FS_IDLE_POLL_MS 5u
+/* Session 025 keeps glo.cfg/.all raw and unversioned. The only explicitly
+** compatible historical globals payload is the original LXR/LXR-master
+** 22-byte span; the current span is derived from NUM_PARAMS below. */
+#define FS_GLOBALS_LEGACY_LEN_22  22u
 static uint16_t fs_last_idle_poll_tick = 0;
 
 extern uint8_t parameters2[END_OF_SOUND_PARAMETERS];
@@ -179,6 +193,215 @@ static const fs_file_desc_t *filesystem_desc(fs_file_type_t type)
             return &fs_file_descs[i];
     }
     return NULL;
+}
+
+static uint8_t filesystem_isPowerOfTwoU8(uint8_t value)
+{
+    return (uint8_t)(value && ((value & (uint8_t)(value - 1u)) == 0u));
+}
+
+static uint8_t filesystem_hasFatBootSignature(const uint8_t *sector)
+{
+    return (uint8_t)(sector[FS_SECTOR_SIZE_BYTES - 2u] == FAT_VOLUME_ID_SIGNATURE_1 &&
+                     sector[FS_SECTOR_SIZE_BYTES - 1u] == FAT_VOLUME_ID_SIGNATURE_2);
+}
+
+static uint8_t filesystem_isPlausibleFatVolume(const uint8_t *sector, uint32_t *num_clusters)
+{
+    const fatVolumeID_t *volume = (const fatVolumeID_t *)sector;
+    uint32_t totalSectors;
+    uint32_t fatSectors;
+    uint32_t rootDirectorySectors;
+    uint32_t usedSectors;
+    uint32_t dataSectors;
+
+    if (!filesystem_hasFatBootSignature(sector))
+        return 0;
+    if (volume->bytesPerSector != FS_SECTOR_SIZE_BYTES || volume->numFATs != FS_NUM_FATS_EXPECTED)
+        return 0;
+    if (volume->sectorsPerCluster < 1u || volume->sectorsPerCluster > 128u ||
+        !filesystem_isPowerOfTwoU8(volume->sectorsPerCluster))
+        return 0;
+
+    fatSectors = (volume->FATSize16 != 0u) ? volume->FATSize16 : volume->fatDescriptor.fat32.FATSize32;
+    if (fatSectors == 0u)
+        return 0;
+
+    totalSectors = (volume->totalSectors16 != 0u) ? volume->totalSectors16 : volume->totalSectors32;
+    if (totalSectors == 0u)
+        return 0;
+
+    rootDirectorySectors = ((uint32_t)volume->rootEntryCount * FAT_DIRECTORY_ENTRY_SIZE +
+                            (volume->bytesPerSector - 1u)) / volume->bytesPerSector;
+    usedSectors = (uint32_t)volume->reservedSectorCount + (volume->numFATs * fatSectors) + rootDirectorySectors;
+    if (totalSectors <= usedSectors)
+        return 0;
+
+    dataSectors = totalSectors - usedSectors;
+    *num_clusters = dataSectors / volume->sectorsPerCluster;
+    return 1;
+}
+
+static uint8_t filesystem_sectorLooksLikeExFat(const uint8_t *sector)
+{
+    static const char exfat_oem[8] = { 'E', 'X', 'F', 'A', 'T', ' ', ' ', ' ' };
+
+    if (!filesystem_hasFatBootSignature(sector))
+        return 0;
+    return (uint8_t)(memcmp(&sector[3], exfat_oem, sizeof(exfat_oem)) == 0);
+}
+
+static uint8_t filesystem_metaPaddingIsFF(const uint8_t *meta, uint16_t start)
+{
+    for (uint16_t i = start; i < FS_CONTAINER_META_LEN; i++) {
+        if (meta[i] != FS_CONTAINER_PAD_BYTE)
+            return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t filesystem_metaHasStoredGlobalsLen(const uint8_t *meta, uint16_t len)
+{
+    /* .all meta is always a 64-byte field. With no version byte, infer the
+    ** stored globals length from the first 0xff-padded byte after real data.
+    ** This lets us accept exactly legacy-22 or current-length globals while
+    ** rejecting random/stale layouts instead of applying bad values. */
+    if (len == 0u || len > FS_CONTAINER_META_LEN)
+        return 0u;
+    if (meta[len - 1u] == FS_CONTAINER_PAD_BYTE)
+        return 0u;
+    return filesystem_metaPaddingIsFF(meta, len);
+}
+
+static void filesystem_resetGlobalsToDefaults(void)
+{
+    /* Defaults first, then overlay only the bytes we trust. This prevents
+    ** shorter/stale files from leaving zero-filled or shifted parameters live. */
+    uint16_t globals_len = (uint16_t)(NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS);
+    memset(parameter_values + PAR_BEGINNING_OF_GLOBALS, 0, globals_len);
+    parameter_values[PAR_BPM] = 120u;
+    parameter_values[PAR_OSC_WAVE_INTERP] = 0u;
+}
+
+static void filesystem_sanitizeLoadedGlobals(void)
+{
+    uint8_t ch = parameter_values[PAR_MIDI_CHAN_GLOBAL];
+    if (ch == 0u || ch > 16u)
+        parameter_values[PAR_MIDI_CHAN_GLOBAL] = 1u;
+}
+
+static void filesystem_applyGlobalsPrefix(const uint8_t *src, uint16_t src_len)
+{
+    uint16_t globals_len = (uint16_t)(NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS);
+    uint16_t copy_len = (src_len < globals_len) ? src_len : globals_len;
+
+    filesystem_resetGlobalsToDefaults();
+    if (copy_len > 0u) {
+        memcpy(parameter_values + PAR_BEGINNING_OF_GLOBALS, src, copy_len);
+    }
+    filesystem_sanitizeLoadedGlobals();
+}
+
+static void filesystem_applyLegacy22Globals(const uint8_t *src, uint16_t src_len)
+{
+    /* Legacy 22-byte globals are treated as a supported compatibility case:
+    ** load all overlapping bytes silently, then force fields that moved or did
+    ** not exist in the old file to safe/current defaults. */
+    uint16_t copy_len = src_len;
+
+    if (copy_len > FS_GLOBALS_LEGACY_LEN_22)
+        copy_len = FS_GLOBALS_LEGACY_LEN_22;
+
+    filesystem_applyGlobalsPrefix(src, copy_len);
+    parameter_values[PAR_EXT_SYNC] = SEQ_EXT_SYNC_AUTO;
+    parameter_values[PAR_OSC_WAVE_INTERP] = 1u;
+}
+
+static uint16_t filesystem_staleGlobalsPrefixLimit(void)
+{
+    return (uint16_t)(PAR_PRESCALER_CLOCK_OUT1 - PAR_BEGINNING_OF_GLOBALS + 1u);
+}
+
+static uint16_t filesystem_staleMetaPrefixLen(const uint8_t *meta)
+{
+    uint16_t limit = filesystem_staleGlobalsPrefixLimit();
+    if (limit > FS_CONTAINER_META_LEN)
+        limit = FS_CONTAINER_META_LEN;
+
+    for (uint16_t i = 0u; i < limit; i++) {
+        if (meta[i] == FS_CONTAINER_PAD_BYTE)
+            return i;
+    }
+    return limit;
+}
+
+static void filesystem_applyStaleGlobalsFallback(const uint8_t *src, uint16_t src_len)
+{
+    /* Unknown globals lengths are stale, but still likely start with the old
+    ** global ordering. Preserve the known prefix through clock-out prescaler,
+    ** default everything else, and request the "check&save" warning. */
+    uint16_t copy_limit = filesystem_staleGlobalsPrefixLimit();
+    uint16_t copy_len = (src_len < copy_limit) ? src_len : copy_limit;
+
+    filesystem_resetGlobalsToDefaults();
+    if (copy_len > 0u) {
+        memcpy(parameter_values + PAR_BEGINNING_OF_GLOBALS, src, copy_len);
+    }
+
+    parameter_values[PAR_EXT_SYNC] = SEQ_EXT_SYNC_AUTO;
+    parameter_values[PAR_BAR_RESET_MODE] = 0u;
+    parameter_values[PAR_MIDI_CHAN_GLOBAL] = 1u;
+    parameter_values[PAR_OSC_WAVE_INTERP] = 1u;
+    filesystem_sanitizeLoadedGlobals();
+}
+
+static uint8_t filesystem_detectUnsupportedCardLayout(void)
+{
+    uint8_t sector0[FS_SECTOR_SIZE_BYTES];
+    uint32_t numClusters = 0;
+    uint32_t fatPartitionLba = 0;
+
+    if (SD_readSingleBlockCustomBuffer(0, sector0) != 0u)
+        return 0;
+
+    if (filesystem_sectorLooksLikeExFat(sector0))
+        return 1;
+
+    if (filesystem_hasFatBootSignature(sector0)) {
+        const mbrPartitionEntry_t *partition = (const mbrPartitionEntry_t *)(sector0 + 446);
+
+        for (uint8_t i = 0; i < 4u; i++) {
+            uint8_t type = partition[i].type;
+            if (type == MBR_PARTITION_TYPE_EXFAT)
+                return 1;
+
+            if (fatPartitionLba == 0u &&
+                partition[i].lbaBegin > 0u &&
+                (type == MBR_PARTITION_TYPE_FAT32 ||
+                 type == MBR_PARTITION_TYPE_FAT32_LBA ||
+                 type == MBR_PARTITION_TYPE_FAT16 ||
+                 type == MBR_PARTITION_TYPE_FAT16_LBA)) {
+                fatPartitionLba = partition[i].lbaBegin;
+            }
+        }
+    }
+
+    if (fatPartitionLba > 0u) {
+        uint8_t volumeSector[FS_SECTOR_SIZE_BYTES];
+        if (SD_readSingleBlockCustomBuffer(fatPartitionLba, volumeSector) == 0u &&
+            filesystem_isPlausibleFatVolume(volumeSector, &numClusters) &&
+            numClusters <= FAT12_MAX_CLUSTERS) {
+            return 1;
+        }
+        return 0;
+    }
+
+    if (filesystem_isPlausibleFatVolume(sector0, &numClusters) &&
+        numClusters <= FAT12_MAX_CLUSTERS) {
+        return 1;
+    }
+
+    return 0;
 }
 
 static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint8_t num)
@@ -236,9 +459,6 @@ static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
 #define FS_PATTERN_MAIN_SIZE      2u
 #define FS_PATTERN_SETTING_SIZE   2u
 #define FS_CONTAINER_VERSION      2u
-#define FS_CONTAINER_META_LEN     64u
-#define FS_CONTAINER_KIT_LEN      512u
-#define FS_CONTAINER_PAD_BYTE     0xffu
 
 static void filesystem_patternStepAddress(uint32_t step_index,
                                           uint8_t *pattern,
@@ -1158,6 +1378,8 @@ static void filesystem_loadContainer_tick(void)
         }
         op_file_ready = false;
         op_file = NULL;
+        if (is_all)
+            fs_stale_warning_pending = FS_STALE_WARNING_NONE;
         if (!afatfs_fopen(fname, "r", on_file_opened))
             return;
         op_phase = 1;
@@ -1217,39 +1439,70 @@ static void filesystem_loadContainer_tick(void)
 
     case 4: /* META */
     {
-        uint16_t meta_len = is_all ? (NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS)
-                                   : (op_file_version > 1u ? 2u : 1u);
         uint32_t n;
 
-        if (op_stream_index >= meta_len) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 5;
+        if (is_all) {
+            uint16_t globals_len = (uint16_t)(NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS);
+
+            /* Read the complete 64-byte .all meta field before deciding how
+            ** many globals it actually contains. This preserves the fixed file
+            ** offset regardless of whether globals are current, legacy, or
+            ** stale. Unknown layouts are safely defaulted and warned later. */
+            n = filesystem_readStreamChunk(staging_buf, FS_CONTAINER_META_LEN);
+            if (op_item_offset >= FS_CONTAINER_META_LEN) {
+                if (globals_len <= FS_CONTAINER_META_LEN &&
+                    filesystem_metaHasStoredGlobalsLen(staging_buf, globals_len)) {
+                    filesystem_applyGlobalsPrefix(staging_buf, globals_len);
+                } else if (filesystem_metaHasStoredGlobalsLen(staging_buf,
+                                                             FS_GLOBALS_LEGACY_LEN_22)) {
+                    /* Legacy 22-byte globals: keep values, force known-safe
+                    ** settings for fields that shifted/weren't present. */
+                    filesystem_applyLegacy22Globals(staging_buf, FS_GLOBALS_LEGACY_LEN_22);
+                } else {
+                    filesystem_applyStaleGlobalsFallback(staging_buf,
+                                                         filesystem_staleMetaPrefixLen(staging_buf));
+                    fs_stale_warning_pending = FS_STALE_WARNING_ALL;
+                }
+                op_item_offset = 0;
+                op_stream_index = 0;
+                op_phase = 6;
+            } else if (n == 0 && afatfs_feof(op_file)) {
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 13;
+            }
             return;
         }
 
-        n = filesystem_readStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            if (is_all) {
-                parameter_values[PAR_BEGINNING_OF_GLOBALS + op_stream_index] = staging_buf[0];
-            } else if (op_stream_index == 0u) {
-                parameter_values[PAR_BPM] = staging_buf[0];
-            } else {
-                parameter_values[PAR_BAR_RESET_MODE] = staging_buf[0];
+        {
+            uint16_t meta_len = (op_file_version > 1u ? 2u : 1u);
+
+            if (op_stream_index >= meta_len) {
+                op_stream_index = 0;
+                op_item_offset = 0;
+                op_phase = 5;
+                return;
             }
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+
+            n = filesystem_readStreamChunk(staging_buf, 1);
+            if (op_item_offset >= 1u) {
+                if (op_stream_index == 0u) {
+                    parameter_values[PAR_BPM] = staging_buf[0];
+                } else {
+                    parameter_values[PAR_BAR_RESET_MODE] = staging_buf[0];
+                }
+                op_item_offset = 0;
+                op_stream_index++;
+            } else if (n == 0 && afatfs_feof(op_file)) {
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 13;
+            }
         }
         return;
     }
 
     case 5: /* META PADDING */
     {
-        uint16_t meta_len = is_all ? (NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS)
-                                   : (op_file_version > 1u ? 2u : FS_CONTAINER_META_LEN);
+        uint16_t meta_len = (op_file_version > 1u ? 2u : FS_CONTAINER_META_LEN);
         uint16_t pad_len = FS_CONTAINER_META_LEN - meta_len;
         uint32_t n;
 
@@ -1459,6 +1712,7 @@ static void filesystem_loadGlobals_tick(void)
     case 0: /* OPEN */
         op_file_ready = false;
         op_file = NULL;
+        fs_stale_warning_pending = FS_STALE_WARNING_NONE;
         if (!afatfs_fopen("glo.cfg", "r", on_file_opened))
             return;
         op_phase = 1;
@@ -1473,17 +1727,43 @@ static void filesystem_loadGlobals_tick(void)
         }
         op_phase = 2;
         op_bytes_done = 0;
+        op_stream_index = 0;
         return;
 
-    case 2: /* READ - into parameter_values[PAR_BEGINNING_OF_GLOBALS..NUM_PARAMS-1] */
+    case 2: /* READ + validate length */
     {
-        uint16_t total = NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS;
-        uint32_t n = afatfs_fread(op_file,
-                                  parameter_values + PAR_BEGINNING_OF_GLOBALS + op_bytes_done,
-                                  total - op_bytes_done);
-        op_bytes_done += n;
-        if (op_bytes_done >= total
-            || (n == 0 && op_bytes_done > 0)) {
+        uint16_t globals_len = (uint16_t)(NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS);
+        uint32_t n = 0;
+
+        /* Read one byte past the current expected length so oversized glo.cfg
+        ** files are detected as stale instead of silently truncating. Exact
+        ** current length loads normally; exact legacy-22 loads silently with
+        ** compatibility overrides; every other length warns. */
+        if (op_stream_index <= globals_len) {
+            uint8_t byte = 0u;
+            n = afatfs_fread(op_file, &byte, 1u);
+            if (n > 0u) {
+                if (op_stream_index < sizeof(staging_buf))
+                    staging_buf[op_stream_index] = byte;
+                op_stream_index++;
+            }
+        }
+
+        if (op_stream_index > globals_len) {
+            filesystem_applyStaleGlobalsFallback(staging_buf, (uint16_t)op_stream_index);
+            fs_stale_warning_pending = FS_STALE_WARNING_GLO;
+            op_phase = 3;
+        } else if (n == 0u && afatfs_feof(op_file)) {
+            if (op_stream_index == globals_len) {
+                filesystem_applyGlobalsPrefix(staging_buf, globals_len);
+            } else if (op_stream_index == FS_GLOBALS_LEGACY_LEN_22) {
+                /* Legacy 22-byte globals: load silently with compatibility
+                ** overrides, no stale-warning screen. */
+                filesystem_applyLegacy22Globals(staging_buf, (uint16_t)op_stream_index);
+            } else {
+                filesystem_applyStaleGlobalsFallback(staging_buf, (uint16_t)op_stream_index);
+                fs_stale_warning_pending = FS_STALE_WARNING_GLO;
+            }
             op_phase = 3;
         }
         return;
@@ -2368,19 +2648,37 @@ void filesystem_initAfterCardReady(void)
 
 uint8_t filesystem_initCardAndMountBlocking(void)
 {
-    uint8_t sd_ok;
+    uint8_t sd_init_result;
 
+    fs_boot_detected_unsupported_card = 0;
+    fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
     spi_sd_set_slow();
-    sd_ok = (uint8_t)(SD_init() == 0);
-    if (!sd_ok)
+    sd_init_result = SD_init();
+    if (sd_init_result != 0u) {
+        fs_last_mount_result = (sd_init_result == 1u) ?
+            FS_MOUNT_RESULT_NO_CARD : FS_MOUNT_RESULT_CARD_INIT_FAILED;
         return 0;
+    }
 
     spi_sd_set_fast();
     filesystem_initAfterCardReady();
     while (afatfs_getFilesystemState() == AFATFS_FILESYSTEM_STATE_INITIALIZATION)
         filesystem_tick();
 
-    return (uint8_t)(afatfs_getFilesystemState() == AFATFS_FILESYSTEM_STATE_READY);
+    if (afatfs_getFilesystemState() == AFATFS_FILESYSTEM_STATE_READY) {
+        fs_last_mount_result = FS_MOUNT_RESULT_READY;
+        return 1;
+    }
+
+    if (afatfs_getFilesystemState() == AFATFS_FILESYSTEM_STATE_FATAL &&
+        filesystem_detectUnsupportedCardLayout()) {
+        fs_boot_detected_unsupported_card = 1;
+        fs_last_mount_result = FS_MOUNT_RESULT_UNSUPPORTED_CARD;
+    } else {
+        fs_last_mount_result = FS_MOUNT_RESULT_MOUNT_FAILED;
+    }
+
+    return 0;
 }
 
 void filesystem_tick(void)
@@ -2562,6 +2860,23 @@ uint8_t filesystem_diagPhase(void)
 uint32_t filesystem_diagBytesDone(void)
 {
     return op_bytes_done;
+}
+
+fs_mount_result_t filesystem_lastMountResult(void)
+{
+    return fs_last_mount_result;
+}
+
+uint8_t filesystem_bootDetectedUnsupportedCard(void)
+{
+    return fs_boot_detected_unsupported_card;
+}
+
+fs_stale_warning_source_t filesystem_takeStaleGlobalsWarning(void)
+{
+    fs_stale_warning_source_t result = fs_stale_warning_pending;
+    fs_stale_warning_pending = FS_STALE_WARNING_NONE;
+    return result;
 }
 
 #if FILESYSTEM_DIAGNOSTICS
