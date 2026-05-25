@@ -605,16 +605,22 @@ static void filesystem_loadKit_tick(void)
                                   (uint8_t *)preset_currentName + op_bytes_done,
                                   8 - op_bytes_done);
         op_bytes_done += n;
-        if (op_bytes_done >= 8
-            || (n == 0 && op_bytes_done > 0)) {
-            while (op_bytes_done < 8)
-                preset_currentName[op_bytes_done++] = ' ';
+        if (op_bytes_done >= 8) {
+            /* Full name read — sanitize and proceed to param read. */
             uint8_t i;
             for (i = 0; i < 8; i++)
                 if (preset_currentName[i] < 0x20 || preset_currentName[i] > 0x7E)
                     preset_currentName[i] = ' ';
             op_phase = 3;
             op_bytes_done = 0;
+        } else if (n == 0 && afatfs_feof(op_file)) {
+            /* EOF before 8 bytes — file is malformed; close and report error.
+            ** Do not proceed to param read: parameter_values[] must not be
+            ** clobbered with zeroes from an invalid file. */
+            preset_currentName[0] = '-';
+            memset(preset_currentName + 1, ' ', 7);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 4; /* jump straight to CLOSE */
         }
         return;
     }
@@ -1964,17 +1970,23 @@ static void filesystem_loadName_tick(void)
                                   (uint8_t *)loaded_name + op_bytes_done,
                                   8 - op_bytes_done);
         op_bytes_done += n;
-        if (op_bytes_done >= 8
-            || (n == 0 && op_bytes_done > 0)) {
-            while (op_bytes_done < 8)
-                loaded_name[op_bytes_done++] = ' ';
+        if (op_bytes_done >= 8) {
+            /* Full name read — sanitize and proceed. */
             loaded_name[8] = '\0';
             uint8_t i;
             for (i = 0; i < 8; i++)
                 if (loaded_name[i] < 0x20 || loaded_name[i] > 0x7E)
                     loaded_name[i] = ' ';
             op_phase = 3;
+        } else if (n == 0 && afatfs_feof(op_file)) {
+            /* EOF before 8 bytes (including zero-byte file) — malformed.
+            ** Show '-' so the display distinguishes this from an empty slot. */
+            loaded_name[0] = '-';
+            memset(loaded_name + 1, ' ', 7);
+            loaded_name[8] = '\0';
+            op_phase = 3;
         }
+        /* else: async buffer not ready yet — wait for more data next tick. */
         return;
     }
 
