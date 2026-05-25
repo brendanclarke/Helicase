@@ -2140,11 +2140,11 @@ void menu_switchPage(uint8_t pageNr)
         break;
 
     case LOAD_PAGE:
-        menu_resetSaveParameters();
         if (menu_activePage == LOAD_PAGE)
             menu_activePage = SAVE_PAGE;
         else
             menu_activePage = LOAD_PAGE;
+        menu_resetSaveParameters();
         menu_requestCurrentLoadSaveSelection(0);
         break;
 
