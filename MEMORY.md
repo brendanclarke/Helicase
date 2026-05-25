@@ -19,14 +19,15 @@ make && make img   →   build/LXRV2_lxr02.img
 
 **Current working source**: repository root, branch `LXR02Open-prime`.
 
-**Session 025 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/025_SESSION_HANDOFF_LOG.md` before related work.
+**Session 026 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/026_SESSION_HANDOFF_LOG.md` before related work.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
 Session 023 refactors CPU scheduling and DSP hot paths: TIM6 front-panel work is foreground-serviced at 500Hz, TIM7 LCD drain is 5kHz/priority 7, idle filesystem polling is rate-limited, slider log taper uses a 4096-entry LUT, oscillator interpolation is capped by `OSC_WAVE_INTERP_MAX_ACTIVE=2` in the current test build, oscillator-only ITCM is enabled, sample+loop loading is one menu command, and the main encoder direction-change residue bug is mitigated.
 Session 024 fixes copy/clear ownership in the menu path and consolidates README/MEMORY.
 Session 025 fixes SD/global load compatibility and rear-jack behavior: FAT12/exFAT are rejected with `Unsupported card` / `use MBR-FAT32`; current globals span is 23 bytes, legacy 22-byte globals load silently with compatibility defaults, other globals lengths use safe fallback plus `check&save` warning; CLK IN is PD4 rising edge, RST IN is PD5 rising edge, and PD6/PD7 jack detect is retained-state foreground polling with pull-ups.
+Session 026 diagnoses the load/save button display glitch (one-frame edit-mode flash caused by `menu_resetSaveParameters()` firing before `menu_activePage` is updated in `menu_switchPage()` — fix documented in `LOAD_SAVE_GLITCH_ASSESSMENT.md`, NOT YET APPLIED to `menu.c`); fixes `filesystem_loadName_tick()` and `filesystem_loadKit_tick()` phase-2 zero-byte/short-file hang using correct `afatfs_feof()` EOF idiom; malformed files now show `-` in the slot-name display. Note: `PAR_EXT_SYNC` occupies the LXR037 `PAR_FETCH` parameter slot — potential cross-system file interchange mismatch; TODO before any LXR037 file interchange.
 
 ---
 
@@ -82,7 +83,8 @@ Session 025 fixes SD/global load compatibility and rear-jack behavior: FAT12/exF
 │       ├── 022_SESSION_HANDOFF_LOG.md
 │       ├── 023_SESSION_HANDOFF_LOG.md
 │       ├── 024_SESSION_HANDOFF_LOG.md
-│       └── 025_SESSION_HANDOFF_LOG.md
+│       ├── 025_SESSION_HANDOFF_LOG.md
+│       └── 026_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h
@@ -560,6 +562,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 3. ~~BAR1/BAR2 race condition~~ — **RESOLVED in Session 019 Phase 7**. All voice triggers deferred through voiceControl pending ring; drained at audio boundary.
 4. **Long sample playback is not 32-bit clean yet** — `SampleInfo.size` is `uint32_t`, but `Oscillator.c` still derives the address index with the legacy `phase >> 17` path.
 5. **MIDI/clock/jack bring-up only** — All Session 019 features are build-verified only. Hardware bench testing required before claiming correctness.
+6. **Load/save button display glitch fix NOT YET APPLIED** — Fix is a two-line reorder in `menu_switchPage()` `case LOAD_PAGE:`: update `menu_activePage` BEFORE calling `menu_resetSaveParameters()`. Full details in `LOAD_SAVE_GLITCH_ASSESSMENT.md`. Do not restructure further.
 
 ### Medium Priority
 5. **ResonantFilter.c double literals** — lines 141, 167: `0.5*in` and `1.0 - f_lp2` cause software double emulation in SVF_calcBlockZDF hot loop. Change to `0.5f` and `1.0f`.
@@ -569,6 +572,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 9. ~~MidiParser RX not connected~~ — **RESOLVED in Session 019**. Full MIDI in/out including clock, sync, CC1→MORPH, and BAR1/BAR2 MIDI path implemented. Hardware validation pending.
 14. Final RV1-RV4 endless-pot noise fix needs long idle hardware soak, especially on global BPM page.
 15. Synced LFO tempo still needs audit/fix: current code path has used a hardcoded 130 BPM instead of `seq_getBpm()`.
+16. **PAR_EXT_SYNC / PAR_FETCH slot conflict with LXR037** — `PAR_EXT_SYNC` (MIDI auto-sync) occupies the parameter array slot where `PAR_FETCH` lived in LXR037. `.SND`, `.ALL`, `.PRF` files saved on LXR-02 and loaded on an LXR037 (or vice versa) may have that byte misinterpreted. No fix needed now; resolve before any cross-system file interchange.
 
 ### Lower Priority
 16. Sample loader naming/display/order needs hardware soak after Session 18 LFN changes. Sort is whole-filename lexicographic with ASCII case folded; display names preserve case.
@@ -598,6 +602,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - **frontPanel_sendData for CC_VELO_TARGET/CC_LFO_TARGET during kit load**: Routing through frontPanelParser → midiParser_ccHandler doesn't properly establish modulation targets in the merged single-MCU context. Use `preset_sendModTarget()` instead. Session 13.
 - **Morph skip cache**: can skip necessary DSP restores after returning to morph 0. Morph must send a complete final pass at the latest value. Session 16.
 - **Endless-pot double speed for all `DTYPE_0B255`**: made global BPM drift more visible. Only `PAR_MORPH` gets double angular speed. Session 16.
+- **Bare `n == 0` as asyncfatfs EOF test**: `afatfs_fread()` returns 0 while the SD buffer is still being populated — it is not an EOF signal. All EOF checks must use `n == 0 && afatfs_feof(op_file)`. Session 026.
 
 ---
 

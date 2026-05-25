@@ -10,6 +10,7 @@ This repository ports the original firmware written for the Sonic Potions LXR Dr
     - Linux: sudo parted -s /dev/sd<X> mklabel msdos mkpart primary fat32 1MiB <32GiB> 100% && sudo mkfs.vfat -F 32 -n "LXR" /dev/sd<X>1
     - Mac: 'diskutil partitionDisk disk3 MBR FAT32 "LXR" <R *if 32G or less, otherwise* 32G>'
     - Win: "select disk <X>", "clean", "convert mbr", "create partition primary <size=32768>", "format fs=fat32 quick label=LXR", "assign" | diskpart
+- **The original 0.37 kits and SD card files from here**: http://sonic-potions.com/public/SdCardImage.zip
 - Memory mapping is updated for the M7, and there is 1.5MB available for sample storage in flash.
 - The mixbus and output buffers use the full 24-bit width of the DACs. 
 
@@ -84,29 +85,7 @@ make && make img  → build/LXRV2_lxr02.img
 │       ├── 000_SESSION_INDEX.md    ← index of all sessions with keyword lookup
 │       ├── 001_SESSION_HANDOFF_LOG.md
 │       ├── 002_SESSION_HANDOFF_LOG.md
-│       ├── 003_SESSION_HANDOFF_LOG.md
-│       ├── 004_SESSION_HANDOFF_LOG.md
-│       ├── 005_SESSION_HANDOFF_LOG.md
-│       ├── 006_SESSION_HANDOFF_LOG.md
-│       ├── 007_SESSION_HANDOFF_LOG.md
-│       ├── 008_SESSION_HANDOFF_LOG.md
-│       ├── 009_SESSION_HANDOFF_LOG.md
-│       ├── 010_SESSION_HANDOFF_LOG.md
-│       ├── 011_SESSION_HANDOFF_LOG.md
-│       ├── 012_SESSION_HANDOFF_LOG.md
-│       ├── 013_SESSION_HANDOFF_LOG.md
-│       ├── 014_SESSION_HANDOFF_LOG.md
-│       ├── 015_SESSION_HANDOFF_LOG.md
-│       ├── 016_SESSION_HANDOFF_LOG.md
-│       ├── 017_SESSION_HANDOFF_LOG.md
-│       ├── 018_SESSION_HANDOFF_LOG.md
-│       ├── 019_SESSION_HANDOFF_LOG.md
-│       ├── 020_SESSION_HANDOFF_LOG.md
-│       ├── 021_SESSION_HANDOFF_LOG.md
-│       ├── 022_SESSION_HANDOFF_LOG.md
-│       ├── 023_SESSION_HANDOFF_LOG.md
-│       ├── 024_SESSION_HANDOFF_LOG.md
-│       └── 025_SESSION_HANDOFF_LOG.md
+│       ├... etc                     ← see 000_SESSION_INDEX.md for current list
 └── Core/
     ├── globals.h
     ├── datatypes.h

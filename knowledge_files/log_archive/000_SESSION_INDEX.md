@@ -34,6 +34,7 @@
 | 023 | 2026-05-17 | local working directory `lxr02-037_port/` | CPU refactor + DSP hot-path cleanup: foreground front-panel service, 5kHz LCD, slider LUT, filesystem idle poll limit, oscillator interp budget, oscillator-only ITCM, combined sample/loop load, encoder residue fix, memory audit |
 | 024 | 2026-05-21 | local working directory `lxr02-037_port/` | Copy/clear audit and fix: clear-mode encoder target select + execute, shift/copy release ownership, COPYCLEAR_AUDIT, README/MEMORY consolidation |
 | 025 | 2026-05-23 | local working directory `lxr02-037_port/` | SD/FAT compatibility, stale globals/.all load policy, menu globals cleanup, CLK/RST correction, OUT jack-detect retained-state polling |
+| 026 | 2026-05-25 | local working directory `lxr02-037_port/` | Load/save button glitch root-cause audit (fix pending menu.c); filesystem malformed-file name fallthrough fix (afatfs_feof pattern) |
 
 ---
 
@@ -138,6 +139,10 @@ Session 024 audited `Core/Menu/copyClearTools.c` against `knowledge_files/LXR-ma
 ### 025 — SD/FAT, Globals Compatibility, CLK/RST + Jack Detect Cleanup (2026-05-23)
 Session 025 fixed unsupported-card boot handling, audited and patched `glo.cfg`/`.all` global load semantics, removed obsolete global-menu/settings entries, corrected CLK/RST assumptions from hardware diagnostics, and stabilized OUT jack detect as retained foreground state. FAT12/exFAT now show `Unsupported card` / `use MBR-FAT32` and do not mount. Global settings remain raw/unversioned: 22-byte legacy globals load silently with compatibility defaults, 23-byte current globals load normally, and other lengths use safe fallback plus `check&save` warnings. CLK IN is PD4 rising edge, RST IN is PD5 rising edge/reset-to-pattern-start, and PD6/PD7 jack detect uses pull-ups plus 500Hz foreground polling with PB4/PB6.
 - **Find here**: `FAT_AUDIT.md`, `SAVE_ALL_AUDIT.md`, `ST1_JACK_DET_AUDIT.md`, unsupported-card warning, 22/23/stale globals policy, `PAR_FETCH`/phantom-param removal, `menuPages.h` TEXT_EMPTY/PAR_NONE trap, PD4/PD5 rising-edge pull-up config, PD6/PD7 retained-state polling
+
+### 026 — Load/Save Glitch Audit; Malformed File Name Fallthrough (2026-05-25)
+Load/save button display glitch diagnosed: `menu_resetSaveParameters()` is called before `menu_activePage` is updated in `menu_switchPage()` `case LOAD_PAGE:`, causing `menu_repaintAll()` to fire on the old voice/seq page with `editModeActive=1` — a one-frame edit-mode flash indistinguishable from an encoder click. Fix is a two-line reorder documented in `LOAD_SAVE_GLITCH_ASSESSMENT.md` but NOT yet applied to `menu.c`. `filesystem_loadName_tick()` and `filesystem_loadKit_tick()` phase-2 zero-byte hang fixed: bare `n==0` does not mean EOF in asyncfatfs (buffer not ready); correct idiom is `n==0 && afatfs_feof(op_file)`, matching all 20+ other read phases in `filesystem.c`. Malformed or zero-byte files now store `"-       "` in `loaded_name`/`preset_currentName` and advance to close cleanly. Kit loads on malformed files abort with `FS_STATUS_ERROR` before touching `parameter_values[]`. Minor TODO noted: `PAR_EXT_SYNC` occupies the slot where `PAR_FETCH` lived in LXR037; cross-system file interchange may cause a parameter offset mismatch at that location.
+- **Find here**: `LOAD_SAVE_GLITCH_ASSESSMENT.md`, `FILE_FALLTHROUGH_AUDIT.md`, menu_switchPage ordering fix, afatfs EOF idiom (`afatfs_feof` not bare `n==0`), filesystem_loadName_tick/-loadKit_tick phase-2 malformed-file fix, PAR_EXT_SYNC/PAR_FETCH slot conflict note
 
 ---
 
@@ -293,6 +298,10 @@ Session 025 fixed unsupported-card boot handling, audited and patched `glo.cfg`/
 | Clear mode owns encoder turn and click before edit-mode toggling: turn selects clear target, click executes clear | 024 |
 | Clear mode should stay armed after SHIFT+COPY until both SHIFT and COPY are released; SHIFT release alone must not cancel if COPY is still held | 024 |
 | README now stops at front-matter/hardware/clock summary; MEMORY is the canonical verbose home for known issues, critical reminders, and moved historical details | 024 |
+| Load/save button glitch: menu_resetSaveParameters() must be called AFTER menu_activePage is updated in menu_switchPage() case LOAD_PAGE — fix documented in LOAD_SAVE_GLITCH_ASSESSMENT.md, not yet applied to menu.c | 026 |
+| afatfs_fread() returning n==0 does NOT mean EOF — it means the SD buffer is not ready yet; always use n==0 && afatfs_feof(op_file) for EOF detection | 026 |
+| filesystem_loadName_tick() and filesystem_loadKit_tick() phase 2: malformed/zero-byte files now set name to "-       " and close cleanly; kit loads abort with FS_STATUS_ERROR before touching parameter_values[] | 026 |
+| PAR_EXT_SYNC (midi auto-sync) occupies the parameter slot where PAR_FETCH lived in LXR037 — potential cross-system file interchange mismatch at that offset; TODO before any LXR037 file interchange | 026 |
 
 ---
 
