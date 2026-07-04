@@ -35,6 +35,7 @@
 | 024 | 2026-05-21 | local working directory `lxr02-037_port/` | Copy/clear audit and fix: clear-mode encoder target select + execute, shift/copy release ownership, COPYCLEAR_AUDIT, README/MEMORY consolidation |
 | 025 | 2026-05-23 | local working directory `lxr02-037_port/` | SD/FAT compatibility, stale globals/.all load policy, menu globals cleanup, CLK/RST correction, OUT jack-detect retained-state polling |
 | 026 | 2026-05-25 | local working directory `lxr02-037_port/` | Load/save button glitch root-cause audit (fix pending menu.c); filesystem malformed-file name fallthrough fix (afatfs_feof pattern) |
+| 027 | 2026-07-04 | local working directory, branch `dev-burst-reduction` | Main-loop burst reduction: chunked kit/all/performance sound apply; AUDIO_DMA_FRAMES left at 96 |
 
 ---
 
@@ -144,6 +145,10 @@ Session 025 fixed unsupported-card boot handling, audited and patched `glo.cfg`/
 Load/save button display glitch diagnosed: `menu_resetSaveParameters()` is called before `menu_activePage` is updated in `menu_switchPage()` `case LOAD_PAGE:`, causing `menu_repaintAll()` to fire on the old voice/seq page with `editModeActive=1` — a one-frame edit-mode flash indistinguishable from an encoder click. Fix is a two-line reorder documented in `LOAD_SAVE_GLITCH_ASSESSMENT.md` but NOT yet applied to `menu.c`. `filesystem_loadName_tick()` and `filesystem_loadKit_tick()` phase-2 zero-byte hang fixed: bare `n==0` does not mean EOF in asyncfatfs (buffer not ready); correct idiom is `n==0 && afatfs_feof(op_file)`, matching all 20+ other read phases in `filesystem.c`. Malformed or zero-byte files now store `"-       "` in `loaded_name`/`preset_currentName` and advance to close cleanly. Kit loads on malformed files abort with `FS_STATUS_ERROR` before touching `parameter_values[]`. Minor TODO noted: `PAR_EXT_SYNC` occupies the slot where `PAR_FETCH` lived in LXR037; cross-system file interchange may cause a parameter offset mismatch at that location.
 - **Find here**: `LOAD_SAVE_GLITCH_ASSESSMENT.md`, `FILE_FALLTHROUGH_AUDIT.md`, menu_switchPage ordering fix, afatfs EOF idiom (`afatfs_feof` not bare `n==0`), filesystem_loadName_tick/-loadKit_tick phase-2 malformed-file fix, PAR_EXT_SYNC/PAR_FETCH slot conflict note
 
+### 027 — Main-Loop Burst Reduction (2026-07-04)
+Session 027 audited `BURST_REDUCTION.md` against live code, wrote `BURST_REDUCTION_AUDIT.md`, then implemented the low-risk part of the plan without changing `AUDIO_DMA_FRAMES`. The synchronous runtime sound-apply burst in `PRESET_OP_KIT_LOAD`, `PRESET_OP_ALL_LOAD`, and `PRESET_OP_PERFORMANCE_LOAD` is now chunked: `presetManager.c` factors the old six-voice modulation-destination apply into a one-voice helper plus `preset_startDrumsetApply()` / `preset_tickDrumsetApply()`, while `menu.c` owns operation-specific follow-up through `menu_startSoundApply()` / `menu_tickSoundApply()` / `menu_finishSoundApply()`. Boot-time behavior remains synchronous when `audioCodec_renderCount == 0`. `AUDIO_DMA_FRAMES` remains 96; 64-frame latency testing is explicitly deferred until this scheduling change is hardware-tested. `make clean`, `make`, and `make img` passed; user reported no obvious regression but no direct instrumentation/hardware proof of burst reduction.
+- **Find here**: `BURST_REDUCTION_AUDIT.md`, chunked drumset/sound apply, `preset_tickDrumsetApply()`, `menu_tickSoundApply()`, kit/all/performance load completion scheduling, `AUDIO_DMA_FRAMES=96` retained, 64-frame test deferred
+
 ---
 
 ## Key Cross-Session Facts (quick lookup)
@@ -175,6 +180,7 @@ Load/save button display glitch diagnosed: `menu_resetSaveParameters()` is calle
 | .SND remains byte-compatible; `glo.cfg` current raw span is 23 bytes with explicit legacy-22 compatibility and stale fallback | 007, 025 |
 | plli2s_init HSERDY guard never entered — intentional | 009 |
 | AUDIO_DMA_FRAMES=96 gives the hardware render-slot budget 2.18ms; OUTPUT_DMA_SIZE=32 is the canonical DSP/control block (corrected in Session 019; was erroneously 16) | 010, 017, 019 |
+| Runtime kit/all/performance load completion must use chunked sound apply (`menu_startSoundApply()` → `preset_tickDrumsetApply()`); keep boot-time pre-audio apply synchronous | 027 |
 | DSP render must stay in main loop — ISR ceiling is fatal, no graceful degradation | 010 |
 | SD blocking in main loop is root cause of post-kit-load underruns | 010 |
 | SD non-blocking FSM originally planned for TIM5 ISR priority 6 — TIM2 reserved for BPM/MIDI | 010 |
@@ -259,6 +265,7 @@ Load/save button display glitch diagnosed: `menu_resetSaveParameters()` is calle
 | LONG SAMPLE PLAYBACK NOT FINISHED: Oscillator.c still indexes with legacy phase >> 17 path | 018 |
 | Modal sample install must suspend audio and stop sequencer before flash writes, then resume audio | 018 |
 | AUDIO_DMA_FRAMES=96 gives the hardware render-slot budget 2.18ms; OUTPUT_DMA_SIZE=32 is the canonical DSP/control block (corrected from 16 in Session 019) | 010, 017, 019 |
+| Runtime kit/all/performance load completion must use chunked sound apply (`menu_startSoundApply()` → `preset_tickDrumsetApply()`); keep boot-time pre-audio apply synchronous | 027 |
 | TIM3 owns sequencer at 4 kHz (IRQ29, priority 2): processRealtimeEvents → triggerJacks_tick → seq_tick; do NOT add these back to main loop | 019 |
 | TIM2 is a shared free-running 1 µs timestamp counter (PSC=107); do NOT reset on pulse; use unsigned delta subtraction | 019 |
 | MidiRealtime.c/h: 32-entry timestamped SPSC ring for MIDI_CLOCK/START/CONTINUE/STOP; push in USART3/USB ISR, pop in TIM3 | 019 |

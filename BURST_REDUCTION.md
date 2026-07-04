@@ -191,7 +191,7 @@ either inherently bounded or had already been fixed in a prior session.
 ## Proposed changes
 
 ### 1. Reduce `AUDIO_DMA_FRAMES`
-
+ - User review: Do NOT do this until everything else is tested. 
 #### [MODIFY] `config.h`
 - Change `AUDIO_DMA_FRAMES` from 96 to **64** (1.45ms render deadline, a
   33% latency cut to 2.90ms with the existing fill-to-capacity queue

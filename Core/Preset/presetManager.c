@@ -70,6 +70,16 @@ static uint16_t morph_request_generation = 0;
 static uint16_t morph_pass_generation = 0;
 static uint16_t morph_index = 0;
 
+/* Runtime loaded-kit apply cursor.
+**
+** Kit/all/performance file completion used to send all six voices' velocity
+** and LFO modulation destinations in one foreground call. That was small but
+** bursty: every modNode_setDestination() mutates DSP graph state before the
+** main loop can return to audio_check_and_render(). The menu now starts this
+** cursor after audio is running and ticks one voice per foreground pass. */
+static uint8_t drumset_apply_active = 0;
+static uint8_t drumset_apply_voice = 0;
+
 preset_status_t preset_getStatus(void)
 {
     return pm_status;
@@ -209,32 +219,6 @@ void preset_init(void)
     pm_request_type = SAVE_TYPE_KIT;
 }
 
-/* -----------------------------------------------------------------------
-** preset_sendDrumsetParameters — send loaded parameters to DSP.
-** Called from menu when it sees UPDATE_READY for a kit load.
-** ----------------------------------------------------------------------- */
-// void preset_sendDrumsetParameters(void)
-// {
-//     uint8_t i;
-
-//     for (i = 0; i < 6; i++) {
-//         uint16_t value = modTargets[parameter_values[PAR_VEL_DEST_1 + i]].param;
-//         uint8_t upper = (uint8_t)(((value & 0x80u) >> 7) | ((i & 0x3fu) << 1));
-//         uint8_t lower = (uint8_t)(value & 0x7fu);
-//         frontPanel_sendData(CC_VELO_TARGET, upper, lower);
-
-//         if (parameter_values[PAR_VOICE_LFO1 + i] < 1 ||
-//             parameter_values[PAR_VOICE_LFO1 + i] > 6)
-//             parameter_values[PAR_VOICE_LFO1 + i] = 1;
-
-//         value = modTargets[parameter_values[PAR_TARGET_LFO1 + i]].param;
-//         upper = (uint8_t)(((value & 0x80u) >> 7) | ((i & 0x3fu) << 1));
-//         lower = (uint8_t)(value & 0x7fu);
-//         frontPanel_sendData(CC_LFO_TARGET, upper, lower);
-//     }
-
-//     preset_morph(parameter_values[PAR_MORPH]);
-// }
 static void preset_sendModTarget(uint8_t status, uint8_t upper, uint8_t lower)
 {
     switch(status)
@@ -262,69 +246,85 @@ static void preset_sendModTarget(uint8_t status, uint8_t upper, uint8_t lower)
                 break;
             }
         }   
-    }
+	}
 }
 
-void preset_sendDrumsetParameters()
+/* Apply one loaded kit voice's modulation routing.
+**
+** This helper is deliberately one voice wide so runtime kit/all/performance
+** load completion can spread DSP graph mutations across main-loop passes.
+** The synchronous wrapper below still calls all six voices before audio starts,
+** preserving boot behavior and legacy call sites. */
+static void preset_applyDrumsetVoice(uint8_t voice)
 {
-	uint8_t i;
-	//special case mod targets
-	for(i=0;i<6;i++)
-	{
-		//**VELO load drumkit. translate to param value before sending
-		// parameter_values[PAR_VEL_DEST_1+i] is an index into modTargets, we need to send
-		// a parameter number
-		uint8_t value = (uint8_t)(modTargets[parameter_values[PAR_VEL_DEST_1+i]].param);
-		uint8_t upper,lower;
-		upper = (uint8_t)(((value&0x80)>>7) | (((i)&0x3f)<<1));
-		lower = value&0x7f;
-		preset_sendModTarget(CC_VELO_TARGET,upper,lower);
+    uint8_t value;
+    uint8_t upper;
+    uint8_t lower;
 
-		// ensure target voice # is valid
-		if(parameter_values[PAR_VOICE_LFO1+i] < 1 || parameter_values[PAR_VOICE_LFO1+i] > 6 )
-			parameter_values[PAR_VOICE_LFO1+i]=1;
+    if (voice >= 6u)
+        return;
 
-		// **LFO par_target_lfo will be an index into modTargets, but we need a parameter number to send
-		value = (uint8_t)(modTargets[parameter_values[PAR_TARGET_LFO1+i]].param);
+    /* Loaded VELO destinations are stored as modTargets[] indices. The DSP
+    ** mod node needs the destination parameter number packed in the legacy
+    ** high/low protocol shape, so translate once at apply time. */
+    value = (uint8_t)(modTargets[parameter_values[PAR_VEL_DEST_1 + voice]].param);
+    upper = (uint8_t)(((value & 0x80u) >> 7) | ((voice & 0x3fu) << 1));
+    lower = (uint8_t)(value & 0x7fu);
+    preset_sendModTarget(CC_VELO_TARGET, upper, lower);
 
-		upper = (uint8_t)(((value&0x80)>>7) | (((i)&0x3f)<<1));
-		lower = value&0x7f;
-		// frontPanel_sendData(CC_LFO_TARGET,upper,lower);
-        preset_sendModTarget(CC_LFO_TARGET, upper, lower);
+    /* Old or malformed files can hold an invalid target-voice number. Clamp
+    ** before resolving the LFO destination so the later UI and mod-routing
+    ** paths agree on the repaired value. */
+    if (parameter_values[PAR_VOICE_LFO1 + voice] < 1u ||
+        parameter_values[PAR_VOICE_LFO1 + voice] > 6u) {
+        parameter_values[PAR_VOICE_LFO1 + voice] = 1u;
+    }
 
+    value = (uint8_t)(modTargets[parameter_values[PAR_TARGET_LFO1 + voice]].param);
+    upper = (uint8_t)(((value & 0x80u) >> 7) | ((voice & 0x3fu) << 1));
+    lower = (uint8_t)(value & 0x7fu);
+    preset_sendModTarget(CC_LFO_TARGET, upper, lower);
+}
 
+/* Synchronous loaded-kit apply.
+**
+** Safe before audio starts and retained for boot-time loads. Runtime load
+** completion should prefer preset_startDrumsetApply()/preset_tickDrumsetApply()
+** so the six mod-target updates do not run as one foreground burst. */
+void preset_sendDrumsetParameters(void)
+{
+    uint8_t voice;
 
-	// PAR_VEL_DEST_1,
-	// PAR_VEL_DEST_2,
-	// PAR_VEL_DEST_3,
-	// PAR_VEL_DEST_4,
-	// PAR_VEL_DEST_5,
-	// PAR_VEL_DEST_6,
+    for (voice = 0; voice < 6u; voice++)
+        preset_applyDrumsetVoice(voice);
 
-    // PAR_VOICE_LFO1,
-	// PAR_VOICE_LFO2,
-	// PAR_VOICE_LFO3,
-	// PAR_VOICE_LFO4,
-	// PAR_VOICE_LFO5,
-	// PAR_VOICE_LFO6,
+    /* Morph itself is already rate-limited by preset_morphTick(); this call
+    ** only records the requested value and arms a pass if needed. */
+    preset_morph(parameter_values[PAR_MORPH]);
+}
 
-	// PAR_TARGET_LFO1,
-	// PAR_TARGET_LFO2,
-	// PAR_TARGET_LFO3,
-	// PAR_TARGET_LFO4,
-	// PAR_TARGET_LFO5,
-	// PAR_TARGET_LFO6,
-    // LFO destinations aren't grabbed from parameters
-    // they must be assigned manually
-    
-	}
+void preset_startDrumsetApply(void)
+{
+    drumset_apply_active = 1u;
+    drumset_apply_voice = 0u;
+}
 
-	// --AS todo will this morph (and fuck up) our modulation targets?
-	// send parameters (possibly combined with morph parameters) to back
-	preset_morph(parameter_values[PAR_MORPH]);
+uint8_t preset_tickDrumsetApply(void)
+{
+    if (!drumset_apply_active)
+        return 0u;
 
+    if (drumset_apply_voice < 6u) {
+        preset_applyDrumsetVoice(drumset_apply_voice);
+        drumset_apply_voice++;
+        return 1u;
+    }
 
-
+    /* Final tick only arms morph; the actual morph parameter walk remains
+    ** bounded by preset_morphTick() elsewhere in the main loop. */
+    preset_morph(parameter_values[PAR_MORPH]);
+    drumset_apply_active = 0u;
+    return 0u;
 }
 /* -----------------------------------------------------------------------
 ** preset_loadDrumset — post async kit load request.

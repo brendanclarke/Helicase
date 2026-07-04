@@ -64,6 +64,23 @@ static uint8_t menu_globalApplyActive = 0;
 static uint8_t menu_globalApplyResetSave = 0;
 static uint8_t menu_globalApplyRepaintAll = 0;
 static uint16_t menu_globalApplyIndex = PAR_BEGINNING_OF_GLOBALS;
+
+/* Runtime sound-apply completion flags.
+**
+** Kit, ALL, and performance loads all need the same six-voice modulation
+** routing apply, but their follow-up work differs. These flags let the
+** chunked apply path finish with the exact same UI/sequencer/global side
+** effects that the old synchronous switch cases performed in one pass. */
+static uint8_t menu_soundApplyActive = 0;
+static uint8_t menu_soundApplyUpdateGap = 0;
+static uint8_t menu_soundApplyResetSave = 0;
+static uint8_t menu_soundApplyRepaintAll = 0;
+static uint8_t menu_soundApplyStartGlobals = 0;
+static uint8_t menu_soundApplyRequestPattern = 0;
+static uint8_t menu_soundApplyApplyPerformanceGlobals = 0;
+static uint8_t menu_soundApplyClearStorageBusy = 0;
+static uint8_t menu_soundApplyShowStaleWarning = 0;
+static fs_stale_warning_source_t menu_soundApplyStaleWarning = FS_STALE_WARNING_NONE;
 static uint8_t menu_staleWarningActive = 0;
 static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
@@ -163,6 +180,133 @@ static void menu_showStaleSettingsWarning(fs_stale_warning_source_t src)
     menu_storageBusy = 1u;
     menu_staleWarningActive = 1u;
     menu_staleWarningStart = time_sysTick;
+}
+
+/* Start loaded-sound apply.
+**
+** Before audio starts, keep the old synchronous behavior: boot loading can do
+** all post-load work immediately because no DMA deadline exists yet. After
+** audio has rendered at least once, only arm the chunked preset apply and let
+** menu_tickSoundApply() finish the operation over foreground passes. */
+static void menu_startSoundApply(uint8_t updateGap,
+                                 uint8_t resetSave,
+                                 uint8_t repaintAll,
+                                 uint8_t startGlobals,
+                                 uint8_t requestPattern,
+                                 uint8_t applyPerformanceGlobals,
+                                 uint8_t clearStorageBusy,
+                                 uint8_t showStaleWarning,
+                                 fs_stale_warning_source_t staleWarning)
+{
+    if (audioCodec_renderCount == 0u) {
+        preset_sendDrumsetParameters();
+        if (updateGap) {
+            menu_TargetVoiceGapIndex = getModTargetGapIndex(
+                parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
+        }
+        if (applyPerformanceGlobals) {
+            menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
+            menu_parseGlobalParam(PAR_BAR_RESET_MODE,
+                                  parameter_values[PAR_BAR_RESET_MODE]);
+        }
+        if (startGlobals)
+            menu_startGlobalApply(resetSave, repaintAll);
+        if (requestPattern)
+            frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, 0);
+        if (clearStorageBusy)
+            menu_storageBusy = 0u;
+        if (resetSave && !startGlobals)
+            menu_resetSaveParameters();
+        if (repaintAll && !startGlobals)
+            menu_repaintAll();
+        if (showStaleWarning)
+            menu_showStaleSettingsWarning(staleWarning);
+        return;
+    }
+
+    menu_soundApplyActive = 1u;
+    menu_soundApplyUpdateGap = updateGap;
+    menu_soundApplyResetSave = resetSave;
+    menu_soundApplyRepaintAll = repaintAll;
+    menu_soundApplyStartGlobals = startGlobals;
+    menu_soundApplyRequestPattern = requestPattern;
+    menu_soundApplyApplyPerformanceGlobals = applyPerformanceGlobals;
+    menu_soundApplyClearStorageBusy = clearStorageBusy;
+    menu_soundApplyShowStaleWarning = showStaleWarning;
+    menu_soundApplyStaleWarning = staleWarning;
+    preset_startDrumsetApply();
+}
+
+static void menu_finishSoundApply(void)
+{
+    menu_soundApplyActive = 0u;
+
+    if (menu_soundApplyUpdateGap) {
+        menu_TargetVoiceGapIndex = getModTargetGapIndex(
+            parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
+    }
+
+    if (menu_soundApplyApplyPerformanceGlobals) {
+        menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
+        menu_parseGlobalParam(PAR_BAR_RESET_MODE,
+                              parameter_values[PAR_BAR_RESET_MODE]);
+    }
+
+    if (menu_soundApplyStartGlobals)
+        menu_startGlobalApply(menu_soundApplyResetSave,
+                              menu_soundApplyRepaintAll);
+
+    if (menu_soundApplyRequestPattern)
+        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, 0);
+
+    if (menu_soundApplyClearStorageBusy)
+        menu_storageBusy = 0u;
+
+    /* When globals are started here, their existing finish path owns the
+    ** reset/repaint flags. Non-container operations still do those follow-ups
+    ** directly after the sound apply completes. */
+    if (!menu_soundApplyStartGlobals) {
+        if (menu_soundApplyResetSave)
+            menu_resetSaveParameters();
+        if (menu_soundApplyRepaintAll)
+            menu_repaintAll();
+    }
+
+    if (menu_soundApplyShowStaleWarning) {
+        if (menu_soundApplyStartGlobals &&
+            menu_soundApplyStaleWarning == FS_STALE_WARNING_ALL) {
+            menu_pendingAllStaleWarning = 1u;
+        } else {
+            menu_showStaleSettingsWarning(menu_soundApplyStaleWarning);
+        }
+    }
+
+    menu_soundApplyUpdateGap = 0u;
+    menu_soundApplyResetSave = 0u;
+    menu_soundApplyRepaintAll = 0u;
+    menu_soundApplyStartGlobals = 0u;
+    menu_soundApplyRequestPattern = 0u;
+    menu_soundApplyApplyPerformanceGlobals = 0u;
+    menu_soundApplyClearStorageBusy = 0u;
+    menu_soundApplyShowStaleWarning = 0u;
+    menu_soundApplyStaleWarning = FS_STALE_WARNING_NONE;
+}
+
+/* Tick one bounded unit of loaded-sound apply.
+**
+** Returning 1 tells menu_pollPresetStatus() to stop for this pass, giving the
+** main loop another audio_check_and_render() opportunity before any other
+** preset completion work is handled. */
+static uint8_t menu_tickSoundApply(void)
+{
+    if (!menu_soundApplyActive)
+        return 0u;
+
+    if (preset_tickDrumsetApply())
+        return 1u;
+
+    menu_finishSoundApply();
+    return 1u;
 }
 
 static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
@@ -1895,6 +2039,13 @@ void menu_pollPresetStatus(void)
     uint8_t retrySelectionAfterAck = 0;
     uint8_t retrySelectionLoadKit = 0;
 
+    /* Sound apply runs before globals because ALL/performance completion first
+    ** installs loaded modulation routing, then starts any global apply that
+    ** belongs to the container. Keep both paths one bounded unit per
+    ** foreground pass. */
+    if (menu_tickSoundApply())
+        return;
+
     if (menu_tickGlobalApply())
         return;
 
@@ -1941,14 +2092,9 @@ void menu_pollPresetStatus(void)
             break;
         }
 
-        /* Validate mod target indices after filesystem load completion */
         menu_normalizeSoundModTargets(parameter_values);
-        /* Send parameters to DSP */
-        preset_sendDrumsetParameters();
-        /* Update mod target gap index - was at the old call site */
-        menu_TargetVoiceGapIndex = getModTargetGapIndex(
-            parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
-        menu_repaintAll();
+        menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 0u, 0u,
+                             FS_STALE_WARNING_NONE);
         break;
     }
 
@@ -2001,24 +2147,16 @@ void menu_pollPresetStatus(void)
     {
         fs_stale_warning_source_t stale_src = filesystem_takeStaleGlobalsWarning();
         menu_normalizeSoundModTargets(parameter_values);
-        preset_sendDrumsetParameters();
-        menu_startGlobalApply(1u, 1u);
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, 0);
-        menu_storageBusy = 0;
-        if (stale_src == FS_STALE_WARNING_ALL)
-            menu_pendingAllStaleWarning = 1u;
+        menu_startSoundApply(0u, 1u, 1u, 1u, 1u, 0u, 1u,
+                             (uint8_t)(stale_src == FS_STALE_WARNING_ALL),
+                             stale_src);
         break;
     }
 
     case PRESET_OP_PERFORMANCE_LOAD:
         menu_normalizeSoundModTargets(parameter_values);
-        preset_sendDrumsetParameters();
-        menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
-        menu_parseGlobalParam(PAR_BAR_RESET_MODE, parameter_values[PAR_BAR_RESET_MODE]);
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, 0);
-        menu_storageBusy = 0;
-        menu_resetSaveParameters();
-        menu_repaintAll();
+        menu_startSoundApply(0u, 1u, 1u, 0u, 1u, 1u, 1u, 0u,
+                             FS_STALE_WARNING_NONE);
         break;
 
     case PRESET_OP_KIT_SAVE:

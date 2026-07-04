@@ -9,7 +9,7 @@ Update it whenever something is confirmed, fixed, or decided.
 ## Quick Start
 
 ```
-# Repository root is the working tree root (branch: LXR02Open-prime)
+# Repository root is the working tree root (branch: dev-burst-reduction)
 
 # Build
 make && make img   →   build/LXRV2_lxr02.img
@@ -17,10 +17,10 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: repository root, branch `LXR02Open-prime`.
+**Current working source**: repository root, branch `dev-burst-reduction`.
 
-**Session 026 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/026_SESSION_HANDOFF_LOG.md` before related work.
+**Session 027 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/027_SESSION_HANDOFF_LOG.md` before related work.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
@@ -28,6 +28,7 @@ Session 023 refactors CPU scheduling and DSP hot paths: TIM6 front-panel work is
 Session 024 fixes copy/clear ownership in the menu path and consolidates README/MEMORY.
 Session 025 fixes SD/global load compatibility and rear-jack behavior: FAT12/exFAT are rejected with `Unsupported card` / `use MBR-FAT32`; current globals span is 23 bytes, legacy 22-byte globals load silently with compatibility defaults, other globals lengths use safe fallback plus `check&save` warning; CLK IN is PD4 rising edge, RST IN is PD5 rising edge, and PD6/PD7 jack detect is retained-state foreground polling with pull-ups.
 Session 026 diagnoses the load/save button display glitch (one-frame edit-mode flash caused by `menu_resetSaveParameters()` firing before `menu_activePage` is updated in `menu_switchPage()` — fix documented in `LOAD_SAVE_GLITCH_ASSESSMENT.md`, NOT YET APPLIED to `menu.c`); fixes `filesystem_loadName_tick()` and `filesystem_loadKit_tick()` phase-2 zero-byte/short-file hang using correct `afatfs_feof()` EOF idiom; malformed files now show `-` in the slot-name display. Note: `PAR_EXT_SYNC` occupies the LXR037 `PAR_FETCH` parameter slot — potential cross-system file interchange mismatch; TODO before any LXR037 file interchange.
+Session 027 chunks runtime kit/all/performance sound-apply completion: after audio starts, `menu_startSoundApply()` / `menu_tickSoundApply()` drive `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` so one voice's velocity/LFO modulation routing is applied per foreground pass; boot-time pre-audio apply remains synchronous. `AUDIO_DMA_FRAMES` remains 96; 64-frame latency testing is deferred until the chunked path is hardware-tested.
 
 ---
 
@@ -84,7 +85,8 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
 │       ├── 023_SESSION_HANDOFF_LOG.md
 │       ├── 024_SESSION_HANDOFF_LOG.md
 │       ├── 025_SESSION_HANDOFF_LOG.md
-│       └── 026_SESSION_HANDOFF_LOG.md
+│       ├── 026_SESSION_HANDOFF_LOG.md
+│       └── 027_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h
@@ -289,7 +291,7 @@ if (audioCodec_queueFreeSlots() > 0) {
 **24-bit output path (Session 022)**: `audioOutBuffer`/`audioOutBuffer2` are `sample_mx_t` (int32_t, signed-24 value in container). `pack_half()` emits a true 24-bit payload in both halfwords of each I2S frame. Do NOT re-add `LSW = 0` zeroing. Do NOT add a `>> 8` shift in `sampleMix_toS24()` — int16 voice values enter the mixer already scaled as `int16 << 8` via `bufferTool_convertInt16ToSampleMix()`; adding `>>8` at pack time was the loudness regression fixed in session 022.
 
 **Zero startup underruns**: boot SD operations complete before `audioCodec_init()`.
-Runtime kit load from the menu may still create a small burst; boot-time SD work is complete before audio starts.
+Runtime kit/all/performance sound-apply completion is chunked after audio starts (Session 027): `menu_tickSoundApply()` drives `preset_tickDrumsetApply()` so only one voice's velocity/LFO modulation routing is applied per foreground pass. Boot-time pre-audio apply remains synchronous.
 
 ### Internal DAC — Must Never Be Enabled
 
@@ -401,6 +403,7 @@ Important caveat: long samples are not fully solved. `SampleInfo.size` is 32-bit
 - Display stability under rapid button mashing depends on the SPSC LCD ring behavior above.
 - Multi-knob RV1-RV4 repaint collapse is intentional and should remain scoped to that input path.
 - Global `cpu` is a read-only audio queue-free pressure widget, not a general MCU utilization meter.
+- Runtime kit/all/performance load completion should use `menu_startSoundApply()` / `preset_tickDrumsetApply()`; do not reintroduce direct `preset_sendDrumsetParameters()` calls in those post-audio completion paths.
 
 ---
 
@@ -475,6 +478,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ---
 
 ## Known Issues / Technical Debt
+
+### Resolved / Changed in Session 027
+- Runtime kit/all/performance load completion no longer applies all six sound modulation-routing voices in one foreground burst. After audio starts, `menu_startSoundApply()` arms the chunked apply and `menu_tickSoundApply()` lets `preset_tickDrumsetApply()` apply one voice per foreground pass before operation-specific UI/global/pattern follow-up runs. `AUDIO_DMA_FRAMES` remains 96; direct 64-frame latency testing is deferred until this path is hardware-tested.
 
 ### Resolved / Changed in Session 023
 - CPU scheduling refactor completed: TIM6 keeps only 1ms counters and a foreground service due flag; shift-register exchange, PB jack detect, encoder-button debounce, and endless-pot scanning run from `timebase_serviceFrontPanel()` at about 500Hz.

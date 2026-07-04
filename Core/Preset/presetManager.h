@@ -97,8 +97,17 @@ uint8_t preset_loadAll(uint8_t presetNr, uint8_t isAll);
 char*   preset_loadName(uint8_t presetNr, uint8_t what);
 void    preset_applyLoadedName(void);
 
-/* Send loaded parameters to DSP — called internally on kit load complete. */
+/* Send loaded parameters to DSP synchronously. Use this before audio starts;
+** runtime load completion should use the chunked apply API below so it cannot
+** monopolize one foreground pass. */
 void    preset_sendDrumsetParameters(void);
+
+/* Runtime chunked sound apply. preset_tickDrumsetApply() performs at most one
+** voice of modulation-routing work and returns non-zero while that pass did
+** foreground work. The menu owns operation-specific UI/global follow-up after
+** the tick function reports idle. */
+void    preset_startDrumsetApply(void);
+uint8_t preset_tickDrumsetApply(void);
 
 /* Morph — rate-limited front-panel CC parameter dump. */
 void    preset_morph(uint8_t morph);
