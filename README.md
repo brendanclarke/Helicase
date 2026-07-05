@@ -78,7 +78,7 @@ make && make img  → build/LXRV2_lxr02.img
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
-│   │   ├── FRONTPANEL_AUDIT.md     ← frontPanel_sendData() elimination audit
+│   │   ├── FRONTPANEL_AUDIT.md     ← legacy front-panel bridge elimination audit
 │   │   ├── SD_CARD_INVESTIGATION.md ← SD false-positive analysis (PA8, 74HC165)
 │   │   └── XP_CONNECTOR_MAPS.md   ← ribbon cable pin mappings
 │   └── log_archive/
@@ -128,7 +128,7 @@ make && make img  → build/LXRV2_lxr02.img
     │   ├── MenuText.h               ← all label strings
     │   ├── Cc2Text.c                ← modTargets[] 205 entries
     │   ├── CcNr2Text.h
-    │   ├── copyClearTools.c/h       ← copy/clear tools; direct seq_* calls wired Session 15
+    │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
     ├── Preset/
     │   ├── ParameterArray.h/c       ← supersedes Parameters.h; NUM_PARAMS=275
@@ -142,17 +142,19 @@ make && make img  → build/LXRV2_lxr02.img
     │   ├── MidiParser.c/h
     │   ├── MidiVoiceControl.c/h
     │   ├── SeqStep.h
-    │   ├── frontPanelParser.c/h     ← local dispatcher + sequencer/front-panel bridge
     │   └── valueShaper.h
+    ├── Scene/
+    │   └── Pattern/
+    │       ├── PatternData.c/h      ← pattern/track/step storage and edit API
+    │       ├── EuklidGenerator.c/h  ← pattern generator
+    │       ├── SomData.c/h          ← SOM data tables
+    │       └── SomGenerator.c/h     ← SOM pattern/performance generator
     ├── SampleRom/
     │   ├── SampleMemory.c/h         ← sample flash metadata/runtime cache, 120 entries, loop flags
     │   └── sampleFlash.c/h          ← guarded F765 sector 6-11 erase/program helpers
     ├── Sequencer/
     │   ├── sequencerTimer.c/h       ← TIM3 4kHz sequencer timing owner (IRQ29, priority 2) — Session 019
     │   ├── sequencer.c/h            ← original LXR sequencer source (driven by TIM3_IRQHandler)
-    │   ├── EuklidGenerator.c/h      ← original LXR euclid generator source
-    │   ├── SomData.c/h              ← original LXR SOM data tables
-    │   ├── SomGenerator.c/h         ← original LXR SOM generator source
     │   ├── clockSync.c/h
     ├── DSPAudio/
     │   ├── random.c/h               ← F765 RNG port (PLL48CLK, bare register)

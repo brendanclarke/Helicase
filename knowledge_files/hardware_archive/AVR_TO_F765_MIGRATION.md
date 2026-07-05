@@ -1,5 +1,11 @@
 # AVR → STM32F765 Migration Map
 
+**Session 028 update**: `Core/MIDI/frontPanelParser.c/h` has now been removed
+from the live tree. The old inter-processor protocol is not represented by a
+local dispatcher anymore; direct owner APIs are the current architecture. Pattern
+and generator state now begins under `Core/Scene/Pattern/` via `PatternData.c/h`,
+`EuklidGenerator.c/h`, and `SomGenerator.c/h`.
+
 ## Original LXR Architecture
 
 The original LXR had two processors communicating over UART at 500kbaud:
@@ -59,7 +65,7 @@ Everything runs on a single **STM32F765VIH6**. The AVR is gone. All former AVR r
 
 ### 8. Menu System / Parameter Management
 - **AVR**: Full menu.c, parameter_values[], presetManager.c, copyClearTools.c. Ran entirely on AVR, sent parameter updates to STM32 via frontPanel_sendData().
-- **F765**: Fully ported. Direct function calls replace serial protocol. parameter_values[] (NUM_PARAMS=275), full page table (16 pages × 8 sub-pages), all dtypes, value names, load/save page UI, encoder navigation, quad encoder parameter editing. frontPanel_sendData() stubbed until DSP connected. **Status: working**.
+- **F765**: Fully ported. Direct function calls replace serial protocol. parameter_values[] (NUM_PARAMS=275), full page table (16 pages × 8 sub-pages), all dtypes, value names, load/save page UI, encoder navigation, quad encoder parameter editing. Session 028 removed the remaining `frontPanel_sendData()`/parser bridge surface from live code. **Status: working**.
 
 ### 9. Preset Management
 - **AVR**: presetManager.c, SD card read/write via FatFS.
@@ -86,13 +92,24 @@ Everything runs on a single **STM32F765VIH6**. The AVR is gone. All former AVR r
 
 The entire frontPanelParser.h message protocol (LED_CC, SEQ_CC, VOICE_CC, SET_BPM, etc.) was the AVR↔STM32 communication layer. On LXR-02 this is replaced by **direct function calls**. Key implications:
 
-- `frontPanel_sendData(LED_CC, LED_CURRENT_STEP_NR, step)` → direct call to ledHandler
-- `frontPanel_sendData(SEQ_CC, SEQ_RUN_STOP, 1)` → direct call to sequencer
-- `frontPanel_parseData()` / `frontPanel_sendMidiMsg()` → eliminated
+- `frontPanel_sendData(LED_CC, LED_CURRENT_STEP_NR, step)` → Sequencer writes
+  `seq_ledState`, then foreground `led_processSeqLedState()` calls ledHandler.
+- `frontPanel_sendData(SEQ_CC, SEQ_RUN_STOP, 1)` → direct call to `seq_setRunning()`
+  plus buttonHandler UI state where needed.
+- Pattern/track/step/automation opcodes → direct calls to `pat_*` APIs in
+  `Core/Scene/Pattern/PatternData.c`.
+- Sound parameter opcodes → direct Preset calls such as
+  `preset_applySoundParameter()`.
+- MIDI configuration opcodes → direct MidiParser calls such as
+  `midiParser_setChannel()`, `midiParser_setRouting()`, and
+  `midiParser_setFilter()`.
+- `frontPanel_parseData()` / `frontPanel_sendMidiMsg()` → eliminated.
 - All the UART ISRs (USART0_RX_vect, USART0_UDRE_vect) → eliminated
 - The AVR's `uart_checkAndParse()` main loop call → eliminated
 
-When porting AVR source files, any call to `frontPanel_sendData()` or `frontPanel_sendMidiMsg()` must be replaced with the equivalent direct call into the STM32-side function it was invoking remotely.
+When porting AVR source files, any call to `frontPanel_sendData()` or
+`frontPanel_sendMidiMsg()` must be replaced with the equivalent owner API. Do
+not add a generic replacement bridge for the deleted parser.
 
 ---
 

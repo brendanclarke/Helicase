@@ -118,4 +118,74 @@ void led_setActive_step(uint8_t stepNr);
 void led_clearActive_step(void);
 void led_initPerformanceLeds(void);
 
+/* Deferred sequencer LED dirty bits.
+ *
+ * Why these flags exist:
+ * - seq_tick() is owned by the TIM3 timing path and can discover LED-worthy
+ *   events while advancing playback.
+ * - Directly repainting the 74HC595 LED chain and consulting menu/button state
+ *   from that timing path is too entangled and was formerly hidden behind the
+ *   removed front-panel parser.
+ * - The sequencer now writes a tiny data payload plus one of these bits; the
+ *   foreground main loop calls led_processSeqLedState() to perform the actual
+ *   LED/menu-aware rendering here in ledHandler.c.
+ *
+ * Meaning of each bit:
+ * - CHASE: chase/current-step LED should move to seq_ledState.chaseStep.
+ * - BEAT: START/STOP beat pulse LED should reflect seq_ledState.beatPulse.
+ * - REC_SUB: a live-recorded sub-step should update SELECT1..8 visibility.
+ * - REC_MAIN: a live-recorded sub-step's parent main step should update
+ *   STEP1..16 visibility.
+ *
+ * Risk:
+ * - These flags are shared between sequencer timing code and foreground LED
+ *   code. The payloads are byte-sized and existing code used the same coarse
+ *   dirty-byte exchange pattern, but future widening should audit races.
+ */
+#define SEQ_LED_DIRTY_CHASE    0x01
+#define SEQ_LED_DIRTY_BEAT     0x02
+#define SEQ_LED_DIRTY_REC_SUB  0x04
+#define SEQ_LED_DIRTY_REC_MAIN 0x08
+
+typedef struct {
+    /* Bitmask of SEQ_LED_DIRTY_* values. Written by sequencer.c, drained by
+     * led_processSeqLedState() in foreground. */
+    volatile uint8_t dirty;
+    /* Sub-step index 0..127 for the moving chase light. */
+    volatile uint8_t chaseStep;
+    /* 0/1 value for the temporary beat pulse on LED_START_STOP. */
+    volatile uint8_t beatPulse;
+    /* Sub-step index 0..127 that was just recorded and may need SELECT LED
+     * refresh if the current UI page is showing that sub-step bank. */
+    volatile uint8_t recordSubStep;
+    /* Sub-step index 0..127 whose parent main step may need STEP LED refresh. */
+    volatile uint8_t recordMainStep;
+} SeqLedState;
+
+extern SeqLedState seq_ledState;
+
+/*
+ * Sequencer LED helpers.
+ * Why: these replace the old protocol LED path with LED-owned rendering.
+ * Inputs are pattern/track/step display coordinates. Outputs are physical LED
+ * state updates. Risk: led_processSeqLedState() is foreground-only because it
+ * touches menu/button state and shift-register LED state.
+ */
+void led_updateCurrentStep(uint8_t step);
+void led_updateRecordedMainStep(uint8_t activeTrack,
+                                uint8_t shownPattern,
+                                uint8_t subStep);
+void led_updateRecordedSubStep(uint8_t activeTrack,
+                               uint8_t shownPattern,
+                               uint8_t step,
+                               uint8_t selectedStepBase,
+                               uint8_t shiftHeld,
+                               uint8_t selectMode);
+void led_updatePatternTrack(uint8_t track, uint8_t pattern,
+                            uint8_t selectedStepBase);
+void led_setBeatPulse(uint8_t on);
+void led_notifyPatternChanged(uint8_t playedPattern);
+void led_notifyTrackRotationReset(uint8_t rotation);
+void led_processSeqLedState(void);
+
 #endif

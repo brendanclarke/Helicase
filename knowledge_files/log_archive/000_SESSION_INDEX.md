@@ -36,6 +36,7 @@
 | 025 | 2026-05-23 | local working directory `lxr02-037_port/` | SD/FAT compatibility, stale globals/.all load policy, menu globals cleanup, CLK/RST correction, OUT jack-detect retained-state polling |
 | 026 | 2026-05-25 | local working directory `lxr02-037_port/` | Load/save button glitch root-cause audit (fix pending menu.c); filesystem malformed-file name fallthrough fix (afatfs_feof pattern) |
 | 027 | 2026-07-04 | local working directory, branch `dev-burst-reduction` | Main-loop burst reduction: chunked kit/all/performance sound apply; AUDIO_DMA_FRAMES left at 96 |
+| 028 | 2026-07-05 | local working directory, branch `dev-burst-reduction` | frontPanelParser removed: direct Menu/Button/LED/Preset/MIDI/Pattern/Sequencer APIs; PatternData + Scene/Pattern introduced |
 
 ---
 
@@ -149,6 +150,10 @@ Load/save button display glitch diagnosed: `menu_resetSaveParameters()` is calle
 Session 027 audited `BURST_REDUCTION.md` against live code, wrote `BURST_REDUCTION_AUDIT.md`, then implemented the low-risk part of the plan without changing `AUDIO_DMA_FRAMES`. The synchronous runtime sound-apply burst in `PRESET_OP_KIT_LOAD`, `PRESET_OP_ALL_LOAD`, and `PRESET_OP_PERFORMANCE_LOAD` is now chunked: `presetManager.c` factors the old six-voice modulation-destination apply into a one-voice helper plus `preset_startDrumsetApply()` / `preset_tickDrumsetApply()`, while `menu.c` owns operation-specific follow-up through `menu_startSoundApply()` / `menu_tickSoundApply()` / `menu_finishSoundApply()`. Boot-time behavior remains synchronous when `audioCodec_renderCount == 0`. `AUDIO_DMA_FRAMES` remains 96; 64-frame latency testing is explicitly deferred until this scheduling change is hardware-tested. `make clean`, `make`, and `make img` passed; user reported no obvious regression but no direct instrumentation/hardware proof of burst reduction.
 - **Find here**: `BURST_REDUCTION_AUDIT.md`, chunked drumset/sound apply, `preset_tickDrumsetApply()`, `menu_tickSoundApply()`, kit/all/performance load completion scheduling, `AUDIO_DMA_FRAMES=96` retained, 64-frame test deferred
 
+### 028 — frontPanelParser Removal and Scene/Pattern Split (2026-07-05)
+Session 028 removed the obsolete single-CPU front-panel parser bridge instead of replacing it with another mediation layer. `Core/MIDI/frontPanelParser.c/h` were deleted; front-panel opcodes were replaced by direct owner APIs in Menu, buttonHandler, ledHandler, Preset, MidiParser, Sequencer, copy/clear, filesystem, and new PatternData. Pattern-owned data moved under new `Core/Scene/Pattern/` with `PatternData.c/h`; Euklid and SOM files moved there too. LED reverse feedback is now a `SeqLedState` dirty-byte payload drained by `led_processSeqLedState()` in the foreground main loop. Pattern/track/step/automation edits now enter through `pat_*` APIs; sound parameter writes enter through Preset; MIDI config writes enter through MidiParser; transport/mute/roll remain Sequencer-owned. A second pass added detailed comments explaining every new direct-call boundary and risk. `make && make img` passed after the functional removal; the comments-only pass passed `make`. Parser/protocol greps were clean in live code, with remaining hits only in documentation/comments.
+- **Find here**: `REMOVE_FPP_AUDIT_2.md`, `MODULE_INTERCHANGE_SPEC.md`, `Core/Scene/Pattern/PatternData.c/h`, `led_processSeqLedState()`, direct `pat_*` APIs, deleted `Core/MIDI/frontPanelParser.c/h`
+
 ---
 
 ## Key Cross-Session Facts (quick lookup)
@@ -221,7 +226,9 @@ Session 027 audited `BURST_REDUCTION.md` against live code, wrote `BURST_REDUCTI
 | ResonantFilter.c double literals (0.5*, 1.0-) on lines 141/167 — software emulation in hot loop | 013 |
 | Kit save writes canonical 236 bytes (8-byte name + END_OF_SOUND_PARAMETERS sound bytes); short kit loads zero-fill missing sound bytes | 013, 017 |
 | Sequencer sources imported from original LXR: sequencer + EuklidGenerator + SomData + SomGenerator; sequencer_.c retained as legacy reference | 014 |
-| frontPanelParser.c now acts as active local dispatcher for button/menu/LED protocol traffic (not only stubs) | 014 |
+| frontPanelParser.c/h deleted; protocol opcodes replaced by direct owner APIs and `Core/Scene/Pattern/PatternData.c/h` | 028 |
+| `led_processSeqLedState()` drains Sequencer LED dirty flags in the foreground main loop; do not move it to TIM3 without auditing Menu/button/LED state access | 028 |
+| New Pattern API boundary: UI/copy/filesystem/generator code should call `pat_*`; remaining `seq_patternSet`/`seq_tmpPattern` names are compatibility macros only | 028 |
 | Button/menu and LED audit closures are documented in BUTTONHANDLER_MENU_AUDIT_RESULTS.md and LED_AUDIT_SUMMARY.md | 014 |
 | Reverse sequencer SEQ_CC feedback must use seq_notifyFront(), not frontPanel_sendData(), due direction-colliding command values | 015 |
 | SeqLedState drains sequencer LED events in main loop; do not move consumer to ISR without race audit | 015 |

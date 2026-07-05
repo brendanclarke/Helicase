@@ -35,7 +35,8 @@
 #include "menu.h"
 #include "CcNr2Text.h"
 #include "ParameterArray.h"
-#include "frontPanelParser.h"
+#include "MidiParser.h"
+#include "sequencer.h"
 #include "modulationNode.h"
 #include "DrumVoice.h"
 #include "CymbalVoice.h"
@@ -219,34 +220,113 @@ void preset_init(void)
     pm_request_type = SAVE_TYPE_KIT;
 }
 
-static void preset_sendModTarget(uint8_t status, uint8_t upper, uint8_t lower)
+void preset_applyVelocityModTarget(uint8_t voice, uint16_t targetParam)
 {
-    switch(status)
+    /*
+     * Applies a velocity modulation destination for one drum voice.
+     *
+     * Callers: Menu sound-parameter edits and loaded-kit apply. This replaces
+     * the old front-panel protocol packing for velocity destination opcodes.
+     *
+     * Why it lives in Preset: velocityModulators[] are sound/preset runtime
+     * objects, not Menu or Pattern state. Menu resolves user-facing target
+     * indices; Preset writes the actual modulation node destination.
+     *
+     * Inputs: voice is 0..5, targetParam is the resolved destination parameter
+     * id from modTargets[]. Output: the voice velocity modulator destination is
+     * updated. Invalid voices are ignored to preserve previous guard behavior.
+     *
+     * Risk: targetParam is narrowed to uint8_t by modNode_setDestination();
+     * this matches the existing sound engine API and legacy target encoding.
+     */
+    if (voice < 6u)
+        modNode_setDestination(&velocityModulators[voice], (uint8_t)targetParam);
+}
+
+void preset_applyLfoModTarget(uint8_t lfo, uint16_t targetParam)
+{
+    /*
+     * Applies an LFO modulation destination for one drum voice.
+     *
+     * Callers: Menu sound-parameter edits and loaded-kit apply. The removed
+     * parser used to forward high/low packed target bytes; the direct API takes
+     * the already resolved parameter id.
+     *
+     * Why it lives in Preset: voiceArray/snare/cymbal/hat LFO nodes are sound
+     * engine objects owned by Preset/voice state. Menu should not know those
+     * object addresses.
+     *
+     * Inputs: lfo selects voice/LFO 0..5, targetParam is the resolved mod target
+     * parameter id. Output: the chosen LFO modTarget destination is updated.
+     * Invalid lfo indices are ignored.
+     */
+    uint8_t value = (uint8_t)targetParam;
+    switch(lfo)
     {
-        case CC_VELO_TARGET:
-        {
-            uint8_t value = ((upper&0x01)<<7) | lower;
-            uint8_t velModNr = (upper&0xfe)>>1;
-			modNode_setDestination(&velocityModulators[velModNr], value);
-            break;
-        }
-        case CC_LFO_TARGET:
-        {
-            uint8_t value = ((upper&0x01)<<7) | lower;
-            uint8_t lfoNr = (upper&0xfe)>>1;
-            switch(lfoNr)
-            {
-            case 0:
-            case 1:
-            case 2:	modNode_setDestination(&voiceArray[lfoNr].lfo.modTarget, value);break;
-            case 3:	modNode_setDestination(&snareVoice.lfo.modTarget,value);		break;
-            case 4:	modNode_setDestination(&cymbalVoice.lfo.modTarget, value);		break;
-            case 5:	modNode_setDestination(&hatVoice.lfo.modTarget, value);			break;
-            default:
-                break;
-            }
-        }   
-	}
+    case 0:
+    case 1:
+    case 2:	modNode_setDestination(&voiceArray[lfo].lfo.modTarget, value);break;
+    case 3:	modNode_setDestination(&snareVoice.lfo.modTarget,value);		break;
+    case 4:	modNode_setDestination(&cymbalVoice.lfo.modTarget, value);		break;
+    case 5:	modNode_setDestination(&hatVoice.lfo.modTarget, value);			break;
+    default:
+        break;
+    }
+}
+
+void preset_applySoundParameter(uint16_t paramNr, uint8_t value,
+                                uint8_t recordAutomation)
+{
+    MidiMsg msg = {0};
+    uint8_t automationDest;
+
+    /*
+     * Applies one sound parameter directly to stored preset state and DSP.
+     *
+     * Callers: Menu edits, morph interpolation, reset-lock restore, and loaded
+     * kit/performance apply. This replaces SET_P1/SET_P2/front-panel parser
+     * packing for sound parameters.
+     *
+     * Why it lives in Preset: parameter_values[] and the sound-engine CC
+     * application path are Preset/sound state. Menu decides what the user
+     * changed; Preset applies that change and optionally records automation.
+     *
+     * Inputs:
+     *   - paramNr: canonical sound parameter id, before any MIDI_CC packing.
+     *   - value: 0..127 menu/DSP value.
+     *   - recordAutomation: non-zero records this edit into the active Pattern
+     *     via Sequencer automation capture.
+     *
+     * Outputs: parameter_values[paramNr] is updated, midiParser_ccHandler()
+     * applies the value to the DSP voice objects, and seq_recordAutomation()
+     * records the edit when requested.
+     *
+     * Risk: param 127 remains forbidden because the legacy CC encoding maps it
+     * to CC0 and then midiParser_ccHandler() underflows while recovering the
+     * parameter id. Keeping that guard preserves old behavior until the DSP CC
+     * path is replaced with a true typed sound-parameter API.
+     */
+    if (paramNr == 127u)
+        return;
+    if (paramNr >= END_OF_SOUND_PARAMETERS)
+        return;
+
+    parameter_values[paramNr] = value;
+
+    if (paramNr < 128u) {
+        msg.status = MIDI_CC;
+        msg.data1 = (uint8_t)((paramNr + 1u) & 0x7fu);
+        automationDest = msg.data1;
+    } else {
+        msg.status = MIDI_CC2;
+        msg.data1 = (uint8_t)(paramNr - 128u);
+        automationDest = (uint8_t)paramNr;
+    }
+    msg.data2 = value;
+    midiParser_ccHandler(msg, 1);
+
+    if (recordAutomation)
+        seq_recordAutomation(menu_getActiveVoice(), automationDest, value);
 }
 
 /* Apply one loaded kit voice's modulation routing.
@@ -254,7 +334,15 @@ static void preset_sendModTarget(uint8_t status, uint8_t upper, uint8_t lower)
 ** This helper is deliberately one voice wide so runtime kit/all/performance
 ** load completion can spread DSP graph mutations across main-loop passes.
 ** The synchronous wrapper below still calls all six voices before audio starts,
-** preserving boot behavior and legacy call sites. */
+** preserving boot behavior and legacy call sites.
+**
+** FrontPanelParser removal note: this function used to prepare high/low packed
+** protocol fragments for velocity/LFO target changes. Those locals remain only
+** to preserve the exact translation points while the direct Preset helpers are
+** introduced; the actual state change is now preset_applyVelocityModTarget()
+** and preset_applyLfoModTarget(). Once the sound engine has a fully typed
+** parameter API, the unused upper/lower compatibility calculations can be
+** removed in a separate cleanup. */
 static void preset_applyDrumsetVoice(uint8_t voice)
 {
     uint8_t value;
@@ -270,7 +358,9 @@ static void preset_applyDrumsetVoice(uint8_t voice)
     value = (uint8_t)(modTargets[parameter_values[PAR_VEL_DEST_1 + voice]].param);
     upper = (uint8_t)(((value & 0x80u) >> 7) | ((voice & 0x3fu) << 1));
     lower = (uint8_t)(value & 0x7fu);
-    preset_sendModTarget(CC_VELO_TARGET, upper, lower);
+    (void)upper;
+    (void)lower;
+    preset_applyVelocityModTarget(voice, value);
 
     /* Old or malformed files can hold an invalid target-voice number. Clamp
     ** before resolving the LFO destination so the later UI and mod-routing
@@ -283,7 +373,9 @@ static void preset_applyDrumsetVoice(uint8_t voice)
     value = (uint8_t)(modTargets[parameter_values[PAR_TARGET_LFO1 + voice]].param);
     upper = (uint8_t)(((value & 0x80u) >> 7) | ((voice & 0x3fu) << 1));
     lower = (uint8_t)(value & 0x7fu);
-    preset_sendModTarget(CC_LFO_TARGET, upper, lower);
+    (void)upper;
+    (void)lower;
+    preset_applyLfoModTarget(voice, value);
 }
 
 /* Synchronous loaded-kit apply.
@@ -502,10 +594,22 @@ static uint8_t preset_morphShouldSkip(uint16_t index)
 
 static void preset_morphSendParameter(uint16_t index, uint8_t value)
 {
-    if (index < 128u)
-        frontPanel_sendData(MIDI_CC, (uint8_t)index, value);
-    else
-        frontPanel_sendData(CC_2, (uint8_t)(index - 128u), value);
+    /*
+     * Sends one morph-interpolated sound parameter through Preset's direct
+     * sound apply helper.
+     *
+     * Callers: preset_morphTick() only. Morph is rate-limited there, so this
+     * helper intentionally does no pacing of its own.
+     *
+     * Inputs: index is the sound parameter id, value is the interpolated 0..127
+     * value between the current kit and morph kit. Output: the sound parameter
+     * is applied and automation is recorded, matching the old morph CC path.
+     *
+     * Risk: preset_morphShouldSkip() must filter unsupported indices before
+     * this call. In particular, parameter 127 must not reach the legacy CC
+     * application path.
+     */
+    preset_applySoundParameter(index, value, 1);
 }
 
 void preset_morph(uint8_t morph)
@@ -543,8 +647,8 @@ void preset_morphTick(void)
 
     index = morph_index++;
 
-    /* Skip index 127: frontPanel_sendData(MIDI_CC, 127, ...) encodes data1
-    ** as (127+1) & 0x7f = 0. midiParser_ccHandler then computes paramNr as
+    /* Skip index 127: legacy MIDI_CC packing encoded data1 as
+    ** (127+1) & 0x7f = 0. midiParser_ccHandler then computes paramNr as
     ** data1-1, underflowing to 65535. Mod-target slots are also intentionally
     ** not morphed, matching the original morph-save behavior. */
     if (preset_morphShouldSkip(index))

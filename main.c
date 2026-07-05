@@ -64,7 +64,6 @@
 #include "Uart.h"
 #include "MidiParser.h"
 #include "MidiVoiceControl.h"
-#include "frontPanelParser.h"
 #include "usb_manager.h"
 #include "filesystem.h"
 #include "SampleMemory.h"
@@ -320,8 +319,16 @@ int main(void)
 		// audio check and render each operation
 		// to see if there is one of 2 forward buffer slots free to calc
 		audio_check_and_render();
-		// TIM3 owns MIDI realtime, CLK/RST jack events, and seq_tick().
-		seq_ledState_process();
+		/*
+		 * TIM3 owns MIDI realtime, CLK/RST jack events, and seq_tick(), so it
+		 * can mark sequencer LED state dirty while playback advances.
+		 *
+		 * ledHandler owns physical LEDs and needs Menu/button context to know
+		 * which track/pattern/step is visible. Drain those dirty flags here in
+		 * the foreground main loop instead of doing LED/menu reads from the
+		 * sequencer timer path.
+		 */
+		led_processSeqLedState();
         audio_check_and_render();        
         // foreground front-panel hardware service, scheduled by TIM6 at 500Hz
         timebase_serviceFrontPanel();

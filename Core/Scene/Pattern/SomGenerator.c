@@ -146,21 +146,57 @@ void som_tick(uint8_t stepNr, uint8_t mutedTracks)
 //-----------------------------------------------
 void som_setX(uint8_t x)
 {
+	/*
+	 * Sets the SOM generator X coordinate from the menu value.
+	 *
+	 * Caller: menu_parseGlobalParam(PAR_POS_X). SOM is a Pattern generator, so
+	 * Menu calls it directly instead of routing through FrontPanelParser.
+	 *
+	 * Input: x is the 0..127 menu value. Output: somGenerator.x is normalized
+	 * approximately to -1..+1 for interpolation. Risk: this preserves the legacy
+	 * x/63.f mapping rather than changing generator feel during parser removal.
+	 */
 	somGenerator.x = (x/63.f)-1;
 }
 //-----------------------------------------------
 void som_setY(uint8_t y)
 {
+	/*
+	 * Sets the SOM generator Y coordinate from the menu value.
+	 *
+	 * Caller: menu_parseGlobalParam(PAR_POS_Y). Input/output/risk mirror
+	 * som_setX(), with the value feeding the Y interpolation axis.
+	 */
 	somGenerator.y = (y/63.f)-1;
 }
 //-----------------------------------------------
 void som_setFlux(float flux)
 {
+	/*
+	 * Sets SOM randomization amount.
+	 *
+	 * Caller: Menu converts PAR_FLUX from 0..127 to 0.0..1.0 before calling
+	 * this function. Output: som_tick() uses the new flux value when generating
+	 * probabilistic voice triggers.
+	 */
 	somGenerator.flux = flux;
 }
 //-----------------------------------------------
 void som_setFreq(uint8_t freq, uint8_t voice)
 {
+	/*
+	 * Sets the SOM trigger threshold/frequency for one voice.
+	 *
+	 * Caller: menu_parseGlobalParam(PAR_SOM_FREQ), using Menu's active voice.
+	 * This belongs here because SOM owns the per-voice generator thresholds.
+	 *
+	 * Inputs: freq is the 0..127 menu value, voice selects the SOM voice slot.
+	 * Output: somGenerator.frequency[voice] is updated in the legacy doubled
+	 * scale used by som_tick().
+	 *
+	 * Risk: no bounds check is added here in this comments-only pass; callers
+	 * must continue to pass valid voice indices as before.
+	 */
 
 	somGenerator.frequency[voice] = freq*2;
 

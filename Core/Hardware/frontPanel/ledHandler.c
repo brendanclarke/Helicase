@@ -42,6 +42,8 @@
 #include "timebase.h"
 #include "dout.h"
 #include "menu.h"
+#include "buttonHandler.h"
+#include "PatternData.h"
 #include <string.h>
 
 #define NUM_OF_PULSABLE_LEDS   8
@@ -61,6 +63,7 @@ static volatile uint8_t led_blinkLedNumber[NUM_OF_BLINKABLE_LEDS];
 static volatile uint8_t led_blinkingLeds;
 
 uint8_t led_originalLedState[NUM_OUTS / 8];  /* extern for ledHandler.c internal use */
+SeqLedState seq_ledState = {0};
 
 /* SR mapping: physical button index → SR chain bit */
 static const uint8_t btn_to_sr[NUM_OUTS] = {
@@ -398,4 +401,257 @@ void led_initPerformanceLeds(void)
     if ((playedPattern != viewedPattern) && (viewedPattern < 8u)) {
         led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + viewedPattern), 1);
     }
+}
+
+void led_updateCurrentStep(uint8_t step)
+{
+    /* Called by led_processSeqLedState() when sequencer.c marks
+     * SEQ_LED_DIRTY_CHASE. The sequencer only knows the playback sub-step; this
+     * LED owner decides whether that chase light should be visible on the
+     * current page and pattern. */
+    uint8_t shownPattern;
+    uint8_t playedPattern;
+
+    /* Defensive bound check because seq_ledState is cross-module state. A bad
+     * value should fail silently instead of indexing LED state incorrectly. */
+    if (!pat_stepValid(step))
+        return;
+
+    /* shownPattern is the pattern the UI is editing/viewing; playedPattern is
+     * the pattern the sequencer is actually playing. The chase LED is only
+     * meaningful when those match. */
+    shownPattern = menu_getViewedPattern();
+    playedPattern = menu_playedPattern;
+
+    if (shownPattern == playedPattern) {
+        /* Show chase on voice, performance, sequencer, and Euklid pages. Do not
+         * show it on global/load/save-style pages where STEP LEDs mean other
+         * UI choices. */
+        if ((menu_activePage < MENU_MIDI_PAGE) ||
+            (menu_activePage == PERFORMANCE_PAGE) ||
+            (menu_activePage == SEQ_PAGE) ||
+            (menu_activePage == EUKLID_PAGE)) {
+            led_setActive_step(step);
+        }
+    } else {
+        /* If follow mode is off and the user is viewing another pattern, clear
+         * the temporary chase LED so it does not imply the viewed pattern is
+         * currently playing this step. */
+        led_clearActive_step();
+    }
+}
+
+void led_updateRecordedMainStep(uint8_t activeTrack,
+                                uint8_t shownPattern,
+                                uint8_t subStep)
+{
+    /* Called after live recording or MIDI recording when the parent main step
+     * may have changed. This belongs in ledHandler because it is strictly a
+     * physical STEP1..16 presentation update; PatternData owns the pattern bit
+     * that we query below. */
+    uint8_t mainStep = (uint8_t)((subStep & 0x7fu) / 8u);
+    uint8_t on = 0;
+
+    /* Performance page STEP LEDs select patterns/rotation rather than edit
+     * track main-step state, so recording feedback must not overwrite them. */
+    if (menu_activePage == PERFORMANCE_PAGE)
+        return;
+    /* subStep is expected to be 0..127; the divide should therefore land in
+     * 0..15. Keep the guard because seq_ledState is shared state. */
+    if (mainStep >= 16u)
+        return;
+
+    /* Query the PatternData owner for the actual main-step bit. The LED helper
+     * does not cache or mutate pattern data. */
+    if (pat_trackValid(activeTrack) && pat_patternValid(shownPattern))
+        on = pat_isMainStepActive(activeTrack, mainStep, shownPattern);
+
+    /* STEP1 + mainStep is the physical 16-button row. */
+    led_setValue(on, (uint8_t)(LED_STEP1 + mainStep));
+}
+
+void led_updateRecordedSubStep(uint8_t activeTrack,
+                               uint8_t shownPattern,
+                               uint8_t step,
+                               uint8_t selectedStepBase,
+                               uint8_t shiftHeld,
+                               uint8_t selectMode)
+{
+    /* Called after live recording when the current SELECT1..8 sub-step bank may
+     * need a single LED refreshed. The caller supplies UI state explicitly so
+     * this helper can stay presentation-only and not invent pattern/menu state. */
+    uint8_t ledOffset;
+    uint8_t on = 0;
+
+    /* SELECT LEDs show sub-steps only while SHIFT is held or while the UI is in
+     * step-select mode. Otherwise those LEDs belong to sub-page/pattern UI. */
+    if (!shiftHeld && (selectMode != SELECT_MODE_STEP))
+        return;
+    /* Only update if the recorded sub-step is inside the currently displayed
+     * bank of eight sub-steps. selectedStepBase is 0,8,16...120. */
+    if ((step < selectedStepBase) || (step >= (uint8_t)(selectedStepBase + 8u)))
+        return;
+    if (!pat_stepValid(step))
+        return;
+
+    /* Ask PatternData whether the recorded sub-step is active. This preserves
+     * the old behavior where recording may turn the LED on, but erase/other
+     * pattern changes can turn it off. */
+    if (pat_trackValid(activeTrack) && pat_patternValid(shownPattern))
+        on = pat_isStepActive(activeTrack, step, shownPattern);
+
+    /* SELECT1..8 correspond to the visible sub-step window. */
+    ledOffset = (uint8_t)(step - selectedStepBase);
+    led_setValue(on, (uint8_t)(LED_PART_SELECT1 + ledOffset));
+}
+
+void led_updatePatternTrack(uint8_t track, uint8_t pattern,
+                            uint8_t selectedStepBase)
+{
+    /* Repaints all sequencer LEDs for one track/pattern.
+     *
+     * Called from menu/button code after view changes, copy/clear, pattern
+     * follow updates, and Euklid generation. This replaced LED_QUERY_SEQ_TRACK:
+     * the LED part lives here; the hidden menu parameter refresh is now an
+     * adjacent pat_applyTrackSettingsToMenu() call at each caller. */
+    uint8_t i;
+    uint8_t start;
+
+    /* Ignore invalid UI requests rather than lighting LEDs from bogus storage. */
+    if (!pat_trackValid(track) || !pat_patternValid(pattern))
+        return;
+
+    /* STEP1..16 show the main-step mask for the requested track/pattern. */
+    for (i = 0; i < 16u; i++) {
+        uint8_t on = pat_isMainStepActive(track, i, pattern);
+        led_setValue(on, (uint8_t)(LED_STEP1 + i));
+    }
+
+    /* SELECT1..8 show whichever eight sub-steps are currently selected in the
+     * step editor. buttonHandler_selectedStep is already a sub-step base. */
+    start = (uint8_t)((selectedStepBase / 8u) * 8u);
+    for (i = 0; i < 8u; i++) {
+        uint8_t stepNr = (uint8_t)(start + i);
+        uint8_t on = pat_isStepActive(track, stepNr, pattern);
+        led_setValue(on, (uint8_t)(LED_PART_SELECT1 + i));
+    }
+}
+
+void led_setBeatPulse(uint8_t on)
+{
+    /* The old reverse LED pulse opcode toggled the START/STOP LED on quarter
+     * beat boundaries. The sequencer now sets seq_ledState.beatPulse and this
+     * LED-owned helper applies it in the foreground. */
+    led_setValue((uint8_t)(on != 0u), LED_START_STOP);
+}
+
+void led_notifyPatternChanged(uint8_t playedPattern)
+{
+    /*
+     * Why: replaces reverse SEQ_CHANGE_PAT feedback without reintroducing a
+     * bridge. Input: newly playing pattern. Outputs: menu played-pattern state,
+     * optional follow-mode viewed pattern update, and visible LEDs. Risk:
+     * foreground LED/menu functions must not be called from a high-priority ISR.
+     */
+    uint8_t patNr = (uint8_t)(playedPattern & 0x07u);
+    menu_playedPattern = patNr;
+
+    if (parameter_values[PAR_FOLLOW]) {
+        menu_setShownPattern(patNr);
+        led_clearSequencerLeds();
+        led_updatePatternTrack(menu_getActiveVoice(), patNr, buttonHandler_selectedStep);
+        pat_applyTrackSettingsToMenu(patNr, menu_getActiveVoice());
+    }
+
+    if (buttonHandler_getMode() == SELECT_MODE_PERF) {
+        led_clearAllBlinkLeds();
+        led_initPerformanceLeds();
+    }
+}
+
+void led_notifyTrackRotationReset(uint8_t rotation)
+{
+    /* Called by seq_setRunning() when stop resets all transient track rotation
+     * values to zero through pat_setTrackRotation().
+     *
+     * Why this tiny function exists:
+     * - The visible menu value PAR_TRACK_ROTATION is UI presentation state.
+     * - The actual stored rotation mutation belongs in PatternData.
+     * - Sequencer.c should not reach directly into menu parameter arrays for a
+     *   UI refresh side effect after the parser removal.
+     *
+     * Input: rotation value to show, normally 0 after transport stop.
+     * Output: menu edit parameter reflects the reset rotation.
+     * Risk: this does not mutate pattern storage; callers must reset storage
+     * through pat_setTrackRotation() before notifying the UI value here. */
+    parameter_values[PAR_TRACK_ROTATION] = rotation;
+}
+
+void led_processSeqLedState(void)
+{
+    /* Foreground drain for deferred sequencer LED events.
+     *
+     * Who writes seq_ledState:
+     * - sequencer.c writes beatPulse/chaseStep/recordSubStep/recordMainStep and
+     *   ORs SEQ_LED_DIRTY_* bits while advancing playback or recording.
+     *
+     * Why this lives in ledHandler and not Sequencer:
+     * - Sequencer owns timing and playback indices.
+     * - ledHandler owns physical LED interpretation, page-specific LED meaning,
+     *   and calls into button/menu state needed to decide whether an LED should
+     *   be touched.
+     * - Keeping the drain here prevents a new generic bridge from replacing the
+     *   removed parser.
+     *
+     * Call timing:
+     * - main.c calls this in the foreground loop.
+     * - It should stay out of TIM3 because it reads menu/button state and writes
+     *   shift-register LED state.
+     */
+    uint8_t d = seq_ledState.dirty;
+    /* activeTrack is the UI-selected voice/track. Recording feedback should
+     * only repaint the track the user is currently editing. */
+    uint8_t activeTrack;
+    /* shownPattern is the UI-viewed pattern. It may differ from the currently
+     * playing pattern when follow is off. */
+    uint8_t shownPattern;
+
+    /* Nothing marked dirty means sequencer.c has not queued any LED work since
+     * the last foreground drain. */
+    if (!d)
+        return;
+    /* Clear the dirty byte before performing work. If sequencer.c queues more
+     * events while we are rendering, those bits can be set again for the next
+     * foreground pass rather than being lost at the end of this function. */
+    seq_ledState.dirty = 0;
+
+    /* Snapshot UI context once so all record-related LED updates in this drain
+     * use a consistent track/pattern. */
+    activeTrack = menu_getActiveVoice();
+    shownPattern = menu_getViewedPattern();
+
+    /* Beat pulse: set/clear START_STOP according to seq_ledState.beatPulse. */
+    if (d & SEQ_LED_DIRTY_BEAT)
+        led_setBeatPulse(seq_ledState.beatPulse);
+
+    /* Chase light: move the temporary current-step LED if the viewed pattern
+     * should show playback chase. */
+    if (d & SEQ_LED_DIRTY_CHASE)
+        led_updateCurrentStep(seq_ledState.chaseStep);
+
+    /* Recorded sub-step: update SELECT1..8 only if the recorded sub-step falls
+     * in the visible sub-step window and the UI mode makes SELECT LEDs mean
+     * sub-steps. */
+    if (d & SEQ_LED_DIRTY_REC_SUB)
+        led_updateRecordedSubStep(activeTrack, shownPattern,
+                                  seq_ledState.recordSubStep,
+                                  buttonHandler_selectedStep,
+                                  buttonHandler_getShift(),
+                                  buttonHandler_getMode());
+
+    /* Recorded main-step: update STEP1..16 for the parent main step of the
+     * recorded sub-step, unless performance mode owns those LEDs. */
+    if (d & SEQ_LED_DIRTY_REC_MAIN)
+        led_updateRecordedMainStep(activeTrack, shownPattern,
+                                   seq_ledState.recordMainStep);
 }

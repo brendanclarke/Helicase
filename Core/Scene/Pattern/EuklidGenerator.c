@@ -36,7 +36,7 @@
 
 
 #include "EuklidGenerator.h"
-#include "sequencer.h"
+#include "PatternData.h"
 
 static uint8_t euklid_length[NUM_TRACKS];
 static uint8_t euklid_steps[NUM_TRACKS];
@@ -173,7 +173,6 @@ void euklid_generate(uint8_t trackNr, uint8_t patternNr)
 	//let's calculate the new pattern
 	euklid_calcRecursive(length,steps,1,1,0); //always start with 1st iterations
 	//rotate resulting pattern
-	//euklid_rotatePattern(length, seq_getTrackRotation(trackNr));
 	euklid_rotatePattern(length, rotation);
 	//and store it in the active track
 	euklid_transferPattern(trackNr, patternNr);
@@ -192,12 +191,35 @@ uint8_t euklid_getSteps(uint8_t trackNr)
 //-----------------------------------------------------
 void euklid_setLength(uint8_t trackNr, uint8_t value)
 {
+	/*
+	 * Stores the Euclidean generator length for one Pattern track.
+	 *
+	 * Caller: menu_parseGlobalParam(PAR_EUKLID_LENGTH) via direct Menu call.
+	 * This no longer travels through FrontPanelParser because Euklid state is
+	 * Pattern generator state under Core/Scene/Pattern.
+	 *
+	 * Inputs: trackNr is the active voice/track, value is menu length. Output:
+	 * euklid_length[trackNr] is updated. Risk: this setter does not regenerate
+	 * the pattern by itself; Menu re-applies steps afterward to preserve the old
+	 * behavior where length changes constrain/regenerate the current pattern.
+	 */
 	if(value<=0)value=1;
 	euklid_length[trackNr] = value;
 }
 //-----------------------------------------------------
 void euklid_setSteps(uint8_t trackNr, uint8_t value, uint8_t patternNr)
 {
+	/*
+	 * Stores Euclidean step count and regenerates PatternData main steps.
+	 *
+	 * Caller: Menu direct edit path. Inputs: trackNr active voice, value desired
+	 * number of pulses, patternNr viewed/shown pattern to mutate. Output:
+	 * generator state updates and euklid_generate() writes the resulting mask to
+	 * PatternData via pat_setMainStepsRaw().
+	 *
+	 * Risk: value is clamped to 1..length to match legacy behavior. The caller
+	 * owns any LED repaint after generation.
+	 */
 	if(value<=0)value=1;
 
 	if(value>euklid_length[trackNr]) value= euklid_length[trackNr];
@@ -213,6 +235,17 @@ uint8_t euklid_getRotation(uint8_t trackNr)
 //-----------------------------------------------------
 void euklid_setRotation(uint8_t trackNr, uint8_t value, uint8_t patternNr)
 {
+	/*
+	 * Stores Euclidean rotation and regenerates PatternData main steps.
+	 *
+	 * Caller: Menu direct edit path. Inputs are active track, menu rotation, and
+	 * target pattern. Output is a regenerated main-step mask for that
+	 * pattern/track.
+	 *
+	 * Risk: invalid rotations keep the previous rotation value, preserving the
+	 * old generator behavior. This is generator rotation, not performance track
+	 * rotation handled by pat_setTrackRotation().
+	 */
 	if(value>euklid_length[trackNr]) value = euklid_rotation[trackNr];
 
 	euklid_rotation[trackNr] = value;
@@ -233,11 +266,32 @@ void euklid_rotatePattern(uint8_t length, uint8_t amount)
 void euklid_transferPattern(uint8_t trackNr, uint8_t patternNr)
 {
 	uint8_t len=euklid_length[trackNr];
-	seq_patternSet.seq_mainSteps[patternNr][trackNr] = euklid_patternBuffer;
+	/*
+	 * Transfers the generated Euclidean mask into PatternData.
+	 *
+	 * Why: Euklid generation produces pattern bits, so the write belongs to the
+	 * Pattern owner rather than the Sequencer scheduler or front-panel UI.
+	 *
+	 * Inputs: trackNr/patternNr select the PatternData destination; the generated
+	 * 16-bit main-step mask is held in euklid_patternBuffer.
+	 *
+	 * Outputs: pat_setMainStepsRaw() writes the main-step mask, and the generated
+	 * length is mirrored into the track length/rotation record so playback uses
+	 * the same generated length.
+	 *
+	 * Risk: length uses the legacy 0 == 16 encoding. Rotation in LengthRotate is
+	 * left untouched because this generator rotation is separate from live track
+	 * rotation/performance state.
+	 */
+	pat_setMainStepsRaw(patternNr, trackNr, euklid_patternBuffer);
 // **PATROT - pattern end is now stored differently
 
 	if(len == 16)
 		len=0;
-	seq_patternSet.seq_patternLengthRotate[patternNr][trackNr].length=len;
+	{
+		LengthRotate *lr = pat_lengthRotatePtr(patternNr, trackNr);
+		if (lr)
+			lr->length = len;
+	}
 
 }

@@ -68,6 +68,7 @@
 #include "SampleMemory.h"
 #include "kitBrowser.h"
 #include "sequencer.h"
+#include "PatternData.h"
 #include "timebase.h"
 #include <string.h>
 #include <stdint.h>
@@ -482,30 +483,69 @@ static void filesystem_patternTrackAddress(uint32_t index,
 
 static Step *filesystem_patternStepPtr(uint8_t pattern, uint8_t track, uint8_t step)
 {
+    /*
+     * Returns the PatternData Step record used by pattern save/load streaming.
+     *
+     * Why this exists: filesystem serializes pattern files one logical record at
+     * a time and should not know the internal array names. PatternData owns
+     * storage, so filesystem reaches it through pat_stepPtr().
+     *
+     * Running-load rule: if the loaded pattern is the currently playing
+     * seq_activePattern, writes go to PATTERNDATA_STAGING_PATTERN. Sequencer
+     * later commits that staging buffer at a safe pattern boundary.
+     *
+     * Inputs: pattern/track/step coordinates from the file stream. Output:
+     * mutable Step pointer or NULL when coordinates are invalid.
+     *
+     * Risk: save paths also use this helper. During an active-pattern load,
+     * reading that same pattern would read staging data by design, so callers
+     * must not overlap save/load operations.
+     */
     if (op_loaded_active_pattern_running && pattern == seq_activePattern)
-        return &seq_tmpPattern.seq_subStepPattern[track][step];
-    return &seq_patternSet.seq_subStepPattern[pattern][track][step];
+        return pat_stepPtr(PATTERNDATA_STAGING_PATTERN, track, step);
+    return pat_stepPtr(pattern, track, step);
 }
 
 static uint16_t *filesystem_patternMainPtr(uint8_t pattern, uint8_t track)
 {
+    /*
+     * Returns the PatternData main-step bitfield for pattern serialization.
+     *
+     * Main steps are Pattern-owned track data. The staging rule mirrors
+     * filesystem_patternStepPtr() so active-pattern loads do not modify the
+     * currently sounding pattern until Sequencer commits them.
+     */
     if (op_loaded_active_pattern_running && pattern == seq_activePattern)
-        return &seq_tmpPattern.seq_mainSteps[track];
-    return &seq_patternSet.seq_mainSteps[pattern][track];
+        return pat_mainStepsPtr(PATTERNDATA_STAGING_PATTERN, track);
+    return pat_mainStepsPtr(pattern, track);
 }
 
 static PatternSetting *filesystem_patternSettingPtr(uint8_t pattern)
 {
+    /*
+     * Returns PatternData's per-pattern settings record for serialization.
+     *
+     * Pattern settings include nextPattern/changeBar. They belong with Pattern
+     * data rather than Sequencer globals because they are saved with .pat files.
+     * Active-pattern loads use the staging pattern for boundary-safe commit.
+     */
     if (op_loaded_active_pattern_running && pattern == seq_activePattern)
-        return &seq_tmpPattern.seq_patternSettings;
-    return &seq_patternSet.seq_patternSettings[pattern];
+        return pat_patternSettingPtr(PATTERNDATA_STAGING_PATTERN);
+    return pat_patternSettingPtr(pattern);
 }
 
 static LengthRotate *filesystem_patternLengthPtr(uint8_t pattern, uint8_t track)
 {
+    /*
+     * Returns PatternData's per-pattern/per-track length/rotation record.
+     *
+     * Length/rotation moved under PatternData during FrontPanelParser removal.
+     * Filesystem streams those bytes directly from the owner instead of asking
+     * Sequencer/frontPanelParser for encoded values.
+     */
     if (op_loaded_active_pattern_running && pattern == seq_activePattern)
-        return &seq_tmpPattern.seq_patternLengthRotate[track];
-    return &seq_patternSet.seq_patternLengthRotate[pattern][track];
+        return pat_lengthRotatePtr(PATTERNDATA_STAGING_PATTERN, track);
+    return pat_lengthRotatePtr(pattern, track);
 }
 
 static void filesystem_packStep(const Step *step, uint8_t *buf)
@@ -749,7 +789,7 @@ static void filesystem_saveKit_tick(void)
 ** SAVE PATTERN state machine
 **
 ** The `.pat` payload mirrors the original AVR file format, but the data is
-** read directly from seq_patternSet instead of requesting it over the old
+** read through PatternData instead of requesting it over the old
 ** AVR/STM32 pseudo-sysex link. Each tick writes at most one logical record,
 ** so audio-time callers can keep pumping filesystem_tick().
 **
@@ -808,7 +848,11 @@ static void filesystem_savePattern_tick(void)
         }
 
         filesystem_patternStepAddress(op_stream_index, &pattern, &track, &step_nr);
-        step = &seq_patternSet.seq_subStepPattern[pattern][track][step_nr];
+        step = filesystem_patternStepPtr(pattern, track, step_nr);
+        if (!step) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         filesystem_packStep(step, staging_buf);
         filesystem_writeStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
         if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
@@ -831,7 +875,14 @@ static void filesystem_savePattern_tick(void)
         }
 
         filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        main_steps = seq_patternSet.seq_mainSteps[pattern][track];
+        {
+            uint16_t *mainPtr = filesystem_patternMainPtr(pattern, track);
+            if (!mainPtr) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            main_steps = *mainPtr;
+        }
         staging_buf[0] = (uint8_t)(main_steps & 0xffu);
         staging_buf[1] = (uint8_t)(main_steps >> 8);
         filesystem_writeStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
@@ -853,7 +904,11 @@ static void filesystem_savePattern_tick(void)
             return;
         }
 
-        setting = &seq_patternSet.seq_patternSettings[op_stream_index];
+        setting = filesystem_patternSettingPtr((uint8_t)op_stream_index);
+        if (!setting) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         staging_buf[0] = setting->nextPattern;
         staging_buf[1] = setting->changeBar;
         filesystem_writeStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
@@ -885,7 +940,14 @@ static void filesystem_savePattern_tick(void)
         }
 
         filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        staging_buf[0] = seq_patternSet.seq_patternLengthRotate[pattern][track].length;
+        {
+            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
+            if (!lr) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            staging_buf[0] = lr->length;
+        }
         filesystem_writeStreamChunk(staging_buf, 1);
         if (op_item_offset >= 1u) {
             op_item_offset = 0;
@@ -920,7 +982,7 @@ static void filesystem_savePattern_tick(void)
 ** default.
 **
 ** If the file contains the currently playing pattern while the sequencer is
-** running, that pattern is loaded into seq_tmpPattern. At completion,
+** running, that pattern is loaded into PatternData's temporary buffer. At completion,
 ** seq_newPatternAvailable plus seq_armActivePatternReload() arms the existing
 ** sequencer boundary-swap path without replacing a queued pattern change.
 **
@@ -1270,7 +1332,11 @@ static void filesystem_saveContainer_tick(void)
             return;
         }
         filesystem_patternStepAddress(op_stream_index, &pattern, &track, &step_nr);
-        step = &seq_patternSet.seq_subStepPattern[pattern][track][step_nr];
+        step = filesystem_patternStepPtr(pattern, track, step_nr);
+        if (!step) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         filesystem_packStep(step, staging_buf);
         filesystem_writeStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
         if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
@@ -1291,7 +1357,14 @@ static void filesystem_saveContainer_tick(void)
             return;
         }
         filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        main_steps = seq_patternSet.seq_mainSteps[pattern][track];
+        {
+            uint16_t *mainPtr = filesystem_patternMainPtr(pattern, track);
+            if (!mainPtr) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            main_steps = *mainPtr;
+        }
         staging_buf[0] = (uint8_t)(main_steps & 0xffu);
         staging_buf[1] = (uint8_t)(main_steps >> 8);
         filesystem_writeStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
@@ -1311,7 +1384,11 @@ static void filesystem_saveContainer_tick(void)
             op_phase = 11;
             return;
         }
-        setting = &seq_patternSet.seq_patternSettings[op_stream_index];
+        setting = filesystem_patternSettingPtr((uint8_t)op_stream_index);
+        if (!setting) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         staging_buf[0] = setting->nextPattern;
         staging_buf[1] = setting->changeBar;
         filesystem_writeStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
@@ -1341,7 +1418,14 @@ static void filesystem_saveContainer_tick(void)
             return;
         }
         filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        staging_buf[0] = seq_patternSet.seq_patternLengthRotate[pattern][track].length;
+        {
+            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
+            if (!lr) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            staging_buf[0] = lr->length;
+        }
         filesystem_writeStreamChunk(staging_buf, 1);
         if (op_item_offset >= 1u) {
             op_item_offset = 0;

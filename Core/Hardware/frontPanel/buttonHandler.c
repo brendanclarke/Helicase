@@ -16,8 +16,11 @@
 #include "screensaver.h"
 #include "ledHandler.h"
 #include "timebase.h"
-#include "frontPanelParser.h"
 #include "copyClearTools.h"
+#include "PatternData.h"
+#include "EuklidGenerator.h"
+#include "sequencer.h"
+#include "presetManager.h"
 #include <string.h>
 #include <stdint.h>
 #include "MidiParser.h"
@@ -88,9 +91,6 @@ uint8_t buttonHandler_resetLock = 0;
 
 static uint8_t buttonHandler_mutedVoices = 0;
 static int8_t buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
-
-#define ARM_AUTOMATION     0x40
-#define DISARM_AUTOMATION  0x00
 
 /* -----------------------------------------------------------------------
 ** Helpers
@@ -172,16 +172,50 @@ static int8_t btn_to_voice(uint8_t buttonNr)
 
 static void buttonHandler_updateSubSteps(void)
 {
-    /* _SEQUENCER_ADD_SPIKE_: The AVR queried sequencer-owned step LEDs over UART.
-    ** On STM we keep the same protocol call and route it through frontPanel_sendData()
-    ** so the sequencer endpoint can be wired centrally in frontPanelParser.c. */
+    /*
+     * Replaces the old LED_QUERY_SEQ_TRACK parser round-trip.
+     *
+     * Caller context: foreground button/menu mode changes only. This function
+     * is never called from the TIM6 button ISR, so it can touch Menu, Pattern,
+     * and LED state directly.
+     *
+     * Why it lives here: buttonHandler owns the selected-step cursor and knows
+     * when the visible track/pattern has changed. ledHandler owns the actual
+     * select/step LED writes, and PatternData owns pattern/track values. This
+     * helper is the UI glue that refreshes both views after a button action.
+     *
+     * Inputs: current active voice and viewed pattern are read from Menu, and
+     * the selected step is read from buttonHandler_selectedStep.
+     *
+     * Outputs: select LEDs are repainted from pattern data, and track-scoped
+     * menu parameters such as length/rotation/shuffle are loaded for display.
+     *
+     * Risk: this intentionally preserves the old hidden side effect where the
+     * LED query also refreshed menu parameter_values. If that side effect is
+     * removed later, every caller that expects fresh track params must be
+     * checked.
+     */
     led_clearSelectLeds();
     {
         uint8_t trackNr = menu_getActiveVoice();
         uint8_t patternNr = menu_getViewedPattern();
-        uint8_t value = (uint8_t)((trackNr << 4) | (patternNr & 0x7u));
-        frontPanel_sendData(LED_CC, LED_QUERY_SEQ_TRACK, value);
+        led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
+        pat_applyTrackSettingsToMenu(patternNr, trackNr);
     }
+}
+
+static void buttonHandler_applyEuklidParamsToMenu(uint8_t track)
+{
+    /*
+     * Why: entering PATGEN needs the current generator values in menu params,
+     * but there is no parser request path anymore. Input: track index. Output:
+     * PAR_EUKLID_* values updated for repaint. Risk: invalid tracks are ignored.
+     */
+    if (!pat_trackValid(track))
+        return;
+    parameter_values[PAR_EUKLID_LENGTH] = euklid_getLength(track);
+    parameter_values[PAR_EUKLID_STEPS] = euklid_getSteps(track);
+    parameter_values[PAR_EUKLID_ROTATION] = euklid_getRotation(track);
 }
 
 static void buttonHandler_enterSeqModeStepMode(void)
@@ -219,6 +253,28 @@ static void buttonHandler_leaveSeqMode(void)
 
 static void buttonHandler_armTimerActionStep(int8_t stepNr)
 {
+    /*
+     * Arms the long-press automation editor for one concrete sequencer step.
+     *
+     * Caller context: buttonHandler_tick() promotes a held step button into an
+     * armed automation step after BUTTON_TIMEOUT. The ISR only records button
+     * events; this foreground path is where PatternData can be called safely.
+     *
+     * Why it lives here: the long-press gesture and blink choice are UI state,
+     * but the armed automation destination must live in PatternData because it
+     * controls later pattern/track mutation performed by menu parameter edits.
+     *
+     * Inputs: stepNr is a 0..127 absolute sub-step index. Main steps are the
+     * multiples of 8 and blink STEP LEDs; sub-steps blink PART_SELECT LEDs.
+     *
+     * Outputs: buttonHandler_armedAutomationStep tracks the UI gesture,
+     * pat_armAutomationStep(step, activeVoice, 1) records the edit target and
+     * enables recording automation values for that track.
+     *
+     * Risk: recordAutomation is deliberately hard-coded to 1 to match the old
+     * ARM_AUTOMATION_STEP opcode behavior. If automation arming becomes
+     * per-pattern/per-track later, PatternData should absorb that policy.
+     */
     uint8_t isMainStep = (uint8_t)((stepNr % 8) == 0);
     buttonHandler_armedAutomationStep = stepNr;
 
@@ -230,13 +286,36 @@ static void buttonHandler_armTimerActionStep(int8_t stepNr)
         led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + selectButtonNr), 1);
     }
 
-    /* _SEQUENCER_ADD_SPIKE_: preserve AVR long-press automation arming message. */
-    frontPanel_sendData(ARM_AUTOMATION_STEP, (uint8_t)stepNr,
-                        (uint8_t)(menu_getActiveVoice() | ARM_AUTOMATION));
+    pat_armAutomationStep((uint8_t)stepNr, menu_getActiveVoice(), 1);
 }
 
 static void buttonHandler_disarmTimerActionStep(void)
 {
+    /*
+     * Clears any long-press automation editor state and restores reset-lock UI.
+     *
+     * Caller context: step button release, a completed timer action, or any
+     * path that must cancel the currently armed automation step.
+     *
+     * Why it lives here: buttonHandler owns the blink LEDs and the temporary
+     * reset-lock snapshot. PatternData owns the actual armed automation state,
+     * so disarming must update both places explicitly now that the parser has
+     * been removed.
+     *
+     * Inputs: buttonHandler_armedAutomationStep chooses which LED to stop
+     * blinking. buttonHandler_originalParameter/originalValue describe the
+     * value that must be restored when reset-lock was active.
+     *
+     * Outputs: no return value. The selected blink LED is stopped,
+     * pat_armAutomationStep(0, 0, 0) disables PatternData automation arming,
+     * and reset-lock restoration is applied either through Preset APIs or
+     * menu_parseGlobalParam depending on the parameter range.
+     *
+     * Risk: this keeps the historical parameter-range split. Sound parameters
+     * must go through Preset so DSP state changes with parameter_values; global
+     * menu parameters must go through menu_parseGlobalParam so their side
+     * effects remain intact.
+     */
     if (buttonHandler_armedAutomationStep != NO_STEP_SELECTED) {
         uint8_t isMainStep = (uint8_t)((buttonHandler_armedAutomationStep % 8) == 0);
 
@@ -253,18 +332,16 @@ static void buttonHandler_disarmTimerActionStep(void)
         }
 
         buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
-        /* _SEQUENCER_ADD_SPIKE_: keep AVR automation-disarm signal flow. */
-        frontPanel_sendData(ARM_AUTOMATION_STEP, 0, DISARM_AUTOMATION);
+        pat_armAutomationStep(0, 0, 0);
 
         if (buttonHandler_resetLock == 1) {
             buttonHandler_resetLock = 0;
             if (buttonHandler_originalParameter < 128) {
-                frontPanel_sendData(MIDI_CC, (uint8_t)buttonHandler_originalParameter,
-                                    buttonHandler_originalValue);
+                preset_applySoundParameter(buttonHandler_originalParameter,
+                                           buttonHandler_originalValue, 1);
             } else if (buttonHandler_originalParameter < END_OF_SOUND_PARAMETERS) {
-                frontPanel_sendData(CC_2,
-                                    (uint8_t)(buttonHandler_originalParameter - 128),
-                                    buttonHandler_originalValue);
+                preset_applySoundParameter(buttonHandler_originalParameter,
+                                           buttonHandler_originalValue, 1);
             } else {
                 menu_parseGlobalParam(buttonHandler_originalParameter,
                                       parameter_values[buttonHandler_originalParameter]);
@@ -275,7 +352,7 @@ static void buttonHandler_disarmTimerActionStep(void)
     }
 
     buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
-    frontPanel_sendData(ARM_AUTOMATION_STEP, 0, DISARM_AUTOMATION);
+    pat_armAutomationStep(0, 0, 0);
 }
 
 static uint8_t buttonHandler_TimerActionOccured(void)
@@ -307,6 +384,24 @@ void buttonHandler_tick(void)
 
 static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPressed)
 {
+    /*
+     * Selects a main step as the UI cursor without toggling pattern data.
+     *
+     * Caller context: STEP/VOICE mode button gestures that should inspect or
+     * edit a step. The old parser path fetched step values indirectly; this now
+     * calls PatternData directly.
+     *
+     * Inputs: ledNr is the STEP LED to blink, and seqButtonPressed is the
+     * 0..15 step-button index. The selected absolute sub-step is the main step
+     * at seqButtonPressed * 8.
+     *
+     * Outputs: selectedStepLed and PAR_ACTIVE_STEP are updated, the active
+     * STEP LED blinks, PatternData loads note/velocity/probability/automation
+     * values into menu parameter_values, and sub-step LEDs are refreshed.
+     *
+     * Risk: this is UI selection only. Any caller that wants to actually toggle
+     * a step must call pat_toggleMainStep() or pat_toggleStep() separately.
+     */
     led_setBlinkLed(selectedStepLed, 0);
     led_setValue(0, selectedStepLed);
 
@@ -316,8 +411,7 @@ static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPress
 
     led_setBlinkLed(ledNr, 1);
 
-    /* _SEQUENCER_ADD_SPIKE_: request active-step params from sequencer side. */
-    frontPanel_sendData(SEQ_CC, SEQ_REQUEST_STEP_PARAMS,
+    pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(),
                         (uint8_t)(seqButtonPressed * 8u));
     buttonHandler_updateSubSteps();
 }
@@ -333,9 +427,26 @@ static void buttonHandler_toggleStepParameterPage(void)
 
 static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
 {
+    /*
+     * Toggles one main sequencer step for the active voice/viewed pattern.
+     *
+     * Caller context: non-shift VOICE-mode release, or shift STEP-mode press.
+     * In the parser version this went through SET_MAIN_STEP-style opcodes; the
+     * button layer now asks PatternData to mutate the pattern directly.
+     *
+     * Inputs: ledNr is the visible STEP LED, seqButtonPressed is 0..15 and is
+     * expanded to the absolute main-step index by multiplying by 8.
+     *
+     * Outputs: active-step UI state is updated, PatternData loads that step's
+     * editable fields into the menu, PatternData toggles the main step bit, and
+     * the STEP LED is rewritten from pat_isMainStepActive().
+     *
+     * Risk: the function name is historical. It toggles rather than only
+     * removes. Keeping the name avoids unrelated call-site churn during the
+     * FrontPanelParser removal.
+     */
     uint8_t trackNr;
     uint8_t patternNr;
-    uint8_t value;
 
     led_setValue(0, ledNr);
     seqButtonPressed = (uint8_t)(seqButtonPressed * 8u);
@@ -344,20 +455,40 @@ static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
     parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
     selectedStepLed = ledNr;
 
-    /* _SEQUENCER_ADD_SPIKE_: AVR parity for main-step toggle + step-parameter refresh. */
-    frontPanel_sendData(SEQ_CC, SEQ_REQUEST_STEP_PARAMS, seqButtonPressed);
+    pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), seqButtonPressed);
 
     trackNr = menu_getActiveVoice();
     patternNr = menu_getViewedPattern();
-    value = (uint8_t)((trackNr << 4) | (patternNr & 0x7u));
-    frontPanel_sendData(MAIN_STEP_CC, value, (uint8_t)(seqButtonPressed / 8u));
+    pat_toggleMainStep(trackNr, (uint8_t)(seqButtonPressed / 8u), patternNr);
+    led_setValue(pat_isMainStepActive(trackNr, (uint8_t)(seqButtonPressed / 8u), patternNr),
+                 (uint8_t)(LED_STEP1 + (seqButtonPressed / 8u)));
 }
 
 static void buttonHandler_setTrackRotation(uint8_t seqButtonPressed)
 {
+    /*
+     * Sets the visible track-rotation edit value from performance mode.
+     *
+     * Caller context: shift + STEP button while in SELECT_MODE_PERF.
+     *
+     * Why this calls PatternData: rotation mutates per-pattern/per-track data,
+     * so it belongs behind the pat_ API. The LED blink is only feedback for the
+     * front-panel performance gesture and therefore stays in buttonHandler/
+     * ledHandler instead of PatternData.
+     *
+     * Inputs: seqButtonPressed is the desired rotation index from the STEP
+     * button row. Current pattern and active voice are read from Menu.
+     *
+     * Outputs: PAR_TRACK_ROTATION is updated for the menu display, PatternData
+     * applies the same mutation timing that seq_setTrackRotation() used before
+     * this removal pass, and the selected rotation LED blinks.
+     *
+     * Risk: the long-term scoping target says this policy will change when
+     * Pattern owns more sequencer state. This function intentionally preserves
+     * current behavior for now.
+     */
     parameter_values[PAR_TRACK_ROTATION] = seqButtonPressed;
-    /* _SEQUENCER_ADD_SPIKE_: track-rotation write forwarded to protocol endpoint. */
-    frontPanel_sendData(SEQ_CC, SEQ_TRACK_ROTATION, seqButtonPressed);
+    pat_setTrackRotation(menu_getViewedPattern(), menu_getActiveVoice(), seqButtonPressed);
     led_clearAllBlinkLeds();
     led_setBlinkLed((uint8_t)(LED_STEP1 + seqButtonPressed), 1);
 }
@@ -394,9 +525,7 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
             break;
         case SELECT_MODE_PERF:
             if (seqButtonPressed < 8u) {
-                /* _SEQUENCER_ADD_SPIKE_: manual roll on while held in perf mode. */
-                frontPanel_sendData(SEQ_CC, SEQ_ROLL_ON_OFF,
-                                    (uint8_t)((seqButtonPressed & 0x0fu) + 0x10u));
+                seq_setRoll(seqButtonPressed, 1);
                 led_setValue(1, ledNr);
             }
             break;
@@ -427,9 +556,7 @@ static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
 
     case SELECT_MODE_PERF:
         if (seqButtonPressed < 8u) {
-            /* _SEQUENCER_ADD_SPIKE_: manual roll off on release. */
-            frontPanel_sendData(SEQ_CC, SEQ_ROLL_ON_OFF,
-                                (uint8_t)(seqButtonPressed & 0x0fu));
+            seq_setRoll(seqButtonPressed, 0);
             led_setValue(0, ledNr);
         }
         break;
@@ -480,8 +607,15 @@ static void handleModeButtons(uint8_t mode)
         break;
 
     case SELECT_MODE_PAT_GEN:
-        /* _SEQUENCER_ADD_SPIKE_: request per-track euclid state before entering page. */
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_EUKLID_PARAMS, menu_getActiveVoice());
+        /*
+         * Entering the Euclidean generator page needs the active track's
+         * generator state visible in the menu immediately.
+         *
+         * Old behavior: the menu requested this through frontPanelParser.
+         * New behavior: buttonHandler reads EuklidGenerator directly because
+         * Euklid data now lives with Pattern under Core/Scene/Pattern.
+         */
+        buttonHandler_applyEuklidParamsToMenu(menu_getActiveVoice());
         menu_switchPage(EUKLID_PAGE);
         break;
 
@@ -501,19 +635,31 @@ static void handleSelectButton(uint8_t selectNr)
         case SELECT_MODE_STEP:
         case SELECT_MODE_VOICE:
         {
+            /*
+             * Shift + PART_SELECT toggles an individual sub-step.
+             *
+             * Inputs: buttonHandler_selectedStep identifies the selected main
+             * step, selectNr chooses one of its eight sub-steps, and Menu gives
+             * the active voice/viewed pattern.
+             *
+             * Outputs: the PART_SELECT LED is toggled for immediate feedback,
+             * PatternData flips the real step bit, PatternData reloads the
+             * editable step values into parameter_values, and the menu page is
+             * repainted if the step parameter page is visible.
+             *
+             * Risk: led_toggle() is optimistic UI feedback. The PatternData
+             * call is the source of truth; if validation is added later this
+             * should repaint from PatternData instead of blindly toggling.
+             */
             uint8_t stepNr = (uint8_t)(buttonHandler_selectedStep + selectNr);
             uint8_t ledNr = (uint8_t)(LED_PART_SELECT1 + selectNr);
             uint8_t trackNr;
             uint8_t patternNr;
-            uint8_t value;
-
-            /* _SEQUENCER_ADD_SPIKE_: restore shift+select sub-step toggle flow. */
             led_toggle(ledNr);
             trackNr = menu_getActiveVoice();
             patternNr = menu_getViewedPattern();
-            value = (uint8_t)((trackNr << 4) | (patternNr & 0x7u));
-            frontPanel_sendData(STEP_CC, value, stepNr);
-            frontPanel_sendData(SEQ_CC, SEQ_REQUEST_STEP_PARAMS, stepNr);
+            pat_toggleStep(trackNr, stepNr, patternNr);
+            pat_applyStepToMenu(patternNr, trackNr, stepNr);
             parameter_values[PAR_ACTIVE_STEP] = stepNr;
             buttonHandler_toggleStepParameterPage();
             break;
@@ -522,11 +668,24 @@ static void handleSelectButton(uint8_t selectNr)
         case SELECT_MODE_PAT_GEN:
         case SELECT_MODE_PERF:
         {
+            /*
+             * Shift + PART_SELECT changes which pattern is being viewed/edited.
+             *
+             * Caller context: PAT_GEN/PERF shift layer. This is a UI pattern
+             * view change, not necessarily an immediate playback pattern
+             * switch. menu_setShownPattern() resolves follow-mode behavior.
+             *
+             * Outputs: pattern select LEDs are refreshed, pattern/track values
+             * are loaded through PatternData, and Euklid params are read
+             * directly for the active track. This replaces several parser
+             * query opcodes that used to refresh the same state indirectly.
+             *
+             * Risk: Pattern settings, track settings, and Euklid settings are
+             * refreshed as separate direct calls. If these become one Pattern
+             * view-model later, this is one of the consolidation points.
+             */
             uint8_t trackNr;
             uint8_t patternNr;
-            uint8_t value;
-
-            /* _SEQUENCER_ADD_SPIKE_: restore shift+select pattern-view select + query. */
             menu_setShownPattern(selectNr);
             led_clearSelectLeds();
             led_clearAllBlinkLeds();
@@ -534,10 +693,10 @@ static void handleSelectButton(uint8_t selectNr)
 
             trackNr = menu_getActiveVoice();
             patternNr = menu_getViewedPattern();
-            value = (uint8_t)((trackNr << 4) | (patternNr & 0x7u));
-            frontPanel_sendData(LED_CC, LED_QUERY_SEQ_TRACK, value);
-            frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, patternNr);
-            frontPanel_sendData(SEQ_CC, SEQ_REQUEST_EUKLID_PARAMS, menu_getActiveVoice());
+            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
+            pat_applyPatternSettingsToMenu(patternNr);
+            pat_applyTrackSettingsToMenu(patternNr, trackNr);
+            buttonHandler_applyEuklidParamsToMenu(menu_getActiveVoice());
             break;
         }
 
@@ -550,11 +709,23 @@ static void handleSelectButton(uint8_t selectNr)
     switch (bh_state.selectButtonMode) {
     case SELECT_MODE_STEP:
     {
+        /*
+         * PART_SELECT in step mode moves the editable sub-step cursor.
+         *
+         * Inputs: selected main step plus selectNr produces the absolute
+         * sub-step. Current pattern/voice come from Menu.
+         *
+         * Outputs: PatternData copies that step's editable fields into menu
+         * parameter_values, PAR_ACTIVE_STEP records the cursor, and blink LEDs
+         * mark both the containing main step and the selected sub-step.
+         *
+         * Risk: this does not mutate the pattern. It only changes which step
+         * subsequent encoder/menu edits will target.
+         */
         uint8_t stepNr = (uint8_t)(buttonHandler_selectedStep + selectNr);
         uint8_t selectButtonNr;
 
-        /* _SEQUENCER_ADD_SPIKE_: restore non-shift sub-step selection requests. */
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_STEP_PARAMS, stepNr);
+        pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), stepNr);
         parameter_values[PAR_ACTIVE_STEP] = stepNr;
 
         led_clearAllBlinkLeds();
@@ -574,8 +745,16 @@ static void handleSelectButton(uint8_t selectNr)
 
     case SELECT_MODE_PERF:
         if (menu_getActivePage() == PERFORMANCE_PAGE) {
-            /* _SEQUENCER_ADD_SPIKE_: restore unshifted perf pattern-change trigger. */
-            frontPanel_sendData(SEQ_CC, SEQ_CHANGE_PAT, selectNr);
+            /*
+             * PART_SELECT on the performance page queues the next playback
+             * pattern directly in Sequencer.
+             *
+             * Old behavior: CC/protocol dispatch hid this as a front-panel
+             * command. New behavior: buttonHandler calls seq_setNextPattern()
+             * because this is transport/playback state, not PatternData edit
+             * state. The blink LED remains local UI feedback.
+             */
+            seq_setNextPattern(selectNr);
             led_clearAllBlinkLeds();
             led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + selectNr), 1);
         }
@@ -595,9 +774,20 @@ static void buttonHandler_partButtonPressed(uint8_t partNr)
 {
     if (copyClear_Mode >= MODE_COPY_PATTERN) {
         if (copyClear_srcSet()) {
+            /*
+             * Finish pattern copy.
+             *
+             * PatternData performs the actual pattern-to-pattern copy. After
+             * mutation, buttonHandler refreshes the visible LEDs and track
+             * menu parameters because the edited/viewed pattern may now show
+             * different step and track data.
+             *
+             * Risk: PatternData does not know which page is visible and should
+             * not reach into LEDs. Keeping repaint here avoids turning Pattern
+             * into another UI bridge.
+             */
             uint8_t trackNr;
             uint8_t patternNr;
-            uint8_t value;
 
             copyClear_setDst((int8_t)partNr, MODE_COPY_PATTERN);
             copyClear_copyPattern();
@@ -605,9 +795,8 @@ static void buttonHandler_partButtonPressed(uint8_t partNr)
 
             trackNr = menu_getActiveVoice();
             patternNr = menu_getViewedPattern();
-            value = (uint8_t)((trackNr << 4) | (patternNr & 0x7u));
-            /* _SEQUENCER_ADD_SPIKE_: keep sequence LED refresh request after copy. */
-            frontPanel_sendData(LED_CC, LED_QUERY_SEQ_TRACK, value);
+            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
+            pat_applyTrackSettingsToMenu(patternNr, trackNr);
         } else {
             copyClear_setSrc((int8_t)partNr, MODE_COPY_PATTERN);
             led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + partNr), 1);
@@ -639,9 +828,19 @@ static void handleVoiceButton(uint8_t voiceNr)
 {
     if (copyClear_Mode >= MODE_COPY_PATTERN) {
         if (copyClear_srcSet()) {
+            /*
+             * Finish track copy.
+             *
+             * PatternData copies between tracks inside the viewed pattern. The
+             * button layer then repaints the front-panel LEDs and reloads
+             * track-scoped menu parameters for the active voice.
+             *
+             * Risk: copy source/destination are stored as button indices and
+             * masked in copyClearTools. Validation still belongs in PatternData
+             * for the actual mutation.
+             */
             uint8_t trackNr;
             uint8_t patternNr;
-            uint8_t value;
 
             copyClear_setDst((int8_t)voiceNr, MODE_COPY_TRACK);
             copyClear_copyTrack();
@@ -649,9 +848,8 @@ static void handleVoiceButton(uint8_t voiceNr)
 
             trackNr = menu_getActiveVoice();
             patternNr = menu_getViewedPattern();
-            value = (uint8_t)((trackNr << 4) | (patternNr & 0x7u));
-            /* _SEQUENCER_ADD_SPIKE_: keep LED-query behavior after track copy. */
-            frontPanel_sendData(LED_CC, LED_QUERY_SEQ_TRACK, value);
+            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
+            pat_applyTrackSettingsToMenu(patternNr, trackNr);
         } else {
             copyClear_setSrc((int8_t)voiceNr, MODE_COPY_TRACK);
             led_setBlinkLed((uint8_t)(LED_VOICE1 + voiceNr), 1);
@@ -665,22 +863,33 @@ static void handleVoiceButton(uint8_t voiceNr)
             muteModeActive = (uint8_t)(1u - muteModeActive);
 
         if (muteModeActive) {
-            /* _SEQUENCER_ADD_SPIKE_: restore per-track mute/unmute dispatch. */
+            /*
+             * Per-track mute is Sequencer playback state, so buttonHandler now
+             * calls seq_setMute() directly after updating the local LED-facing
+             * mute bitset. The parser opcode carried no useful abstraction
+             * once the split front-panel processor architecture was removed.
+             */
             if (buttonHandler_mutedVoices & (1u << voiceNr)) {
                 buttonHandler_muteVoice(voiceNr, 0);
-                frontPanel_sendData(SEQ_CC, SEQ_UNMUTE_TRACK, voiceNr);
+                seq_setMute(voiceNr, 0);
             } else {
                 buttonHandler_muteVoice(voiceNr, 1);
-                frontPanel_sendData(SEQ_CC, SEQ_MUTE_TRACK, voiceNr);
+                seq_setMute(voiceNr, 1);
             }
             return;
         }
 
         if (bh_state.selectButtonMode == SELECT_MODE_PERF) {
+            /*
+             * PERF voice buttons clear mutes up to the selected voice and then
+             * repaint mute LEDs. The actual audible mute state belongs to
+             * Sequencer, while buttonHandler_mutedVoices is the front-panel
+             * shadow used to draw the current mute view.
+             */
             uint8_t i;
             for (i = 0; i <= voiceNr; i++) {
                 if (buttonHandler_mutedVoices & (1u << i)) {
-                    frontPanel_sendData(SEQ_CC, SEQ_UNMUTE_TRACK, i);
+                    seq_setMute(i, 0);
                     buttonHandler_mutedVoices &= (uint8_t)~(1u << i);
                 }
             }
@@ -694,10 +903,13 @@ static void handleVoiceButton(uint8_t voiceNr)
             led_setActiveSelectButton(menu_getSubPage());
         }
 
-        /* _SEQUENCER_ADD_SPIKE_: sequencer-facing active-track/euclid requests. */
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, voiceNr);
         menu_setActiveVoice(voiceNr);
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_EUKLID_PARAMS, voiceNr);
+        /*
+         * Active voice is UI/menu context, so Menu owns the selected value.
+         * Euklid params are then pulled directly from the Pattern generator
+         * module so the generator page is correct if the user switches there.
+         */
+        buttonHandler_applyEuklidParamsToMenu(voiceNr);
 
         if (bh_state.selectButtonMode == SELECT_MODE_STEP) {
             led_clearAllBlinkLeds();
@@ -741,28 +953,41 @@ static void processPress(uint8_t buttonNr)
         break;
 
     case BUT_START_STOP:
+        /*
+         * START/STOP is transport state. buttonHandler owns the physical LED
+         * and toggled UI bit; Sequencer owns whether playback actually runs.
+         * The old parser command is gone because this is now a direct same-CPU
+         * call with no serialization boundary.
+         */
         buttonHandler_setRunStopState((uint8_t)(1u - bh_state.seqRunning));
-        /* _SEQUENCER_ADD_SPIKE_: restore sequencer run/stop command. */
-        frontPanel_sendData(SEQ_CC, SEQ_RUN_STOP, (uint8_t)bh_state.seqRunning);
+        seq_setRunning((uint8_t)bh_state.seqRunning);
         break;
 
     case BUT_REC:
         if (buttonHandler_getShift()) {
             menu_switchPage(RECORDING_PAGE);
         } else {
-            /* _SEQUENCER_ADD_SPIKE_: restore recording toggle + sequencer update. */
+            /*
+             * Recording mode is Sequencer playback/edit state. The REC LED is
+             * local UI feedback, while seq_setRecordingMode() is the source of
+             * truth for how incoming notes and button gestures are recorded.
+             */
             bh_state.seqRecording = (uint8_t)((1u - bh_state.seqRecording) & 0x01u);
             led_setValue((uint8_t)bh_state.seqRecording, LED_REC);
-            frontPanel_sendData(SEQ_CC, SEQ_REC_ON_OFF, (uint8_t)bh_state.seqRecording);
+            seq_setRecordingMode((uint8_t)bh_state.seqRecording);
         }
         break;
 
     case BUT_COPY:
         if (buttonHandler_getShift()) {
-            /* _SEQUENCER_ADD_SPIKE_: restore realtime erase / clear-mode flow from AVR. */
             if (bh_state.seqRecording && bh_state.seqRunning) {
+                /*
+                 * SHIFT+COPY while recording/running enters erase mode. This
+                 * is direct Sequencer state because erase affects playback-time
+                 * recording behavior, not copy/clear PatternData utilities.
+                 */
                 bh_state.seqErasing = 1;
-                frontPanel_sendData(SEQ_CC, SEQ_ERASE_ON_OFF, (uint8_t)bh_state.seqErasing);
+                seq_setErasingMode((uint8_t)bh_state.seqErasing);
             } else {
                 if (copyClear_Mode == MODE_CLEAR) {
                     copyClear_executeClear();
@@ -806,7 +1031,6 @@ static void processPress(uint8_t buttonNr)
         {
             uint8_t trackNr;
             uint8_t patternNr;
-            uint8_t value;
 
             menu_switchPage(PATTERN_SETTINGS_PAGE);
             led_clearSelectLeds();
@@ -819,13 +1043,21 @@ static void processPress(uint8_t buttonNr)
             }
 
             if (bh_state.selectButtonMode == SELECT_MODE_PAT_GEN && parameter_values[PAR_FOLLOW]) {
+                /*
+                 * Follow mode means the viewed pattern should snap back to the
+                 * sequencer-followed pattern when entering the shift layer.
+                 *
+                 * After changing the shown pattern, the UI must explicitly
+                 * reload LEDs plus PatternData-backed pattern/track params.
+                 * This used to be hidden behind parser query opcodes.
+                 */
                 menu_setShownPattern(menu_shownPattern);
                 led_clearSequencerLeds();
                 trackNr = menu_getActiveVoice();
                 patternNr = menu_getViewedPattern();
-                value = (uint8_t)((trackNr << 4) | (patternNr & 0x7u));
-                frontPanel_sendData(LED_CC, LED_QUERY_SEQ_TRACK, value);
-                frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, frontParser_midiMsg.data2);
+                led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
+                pat_applyPatternSettingsToMenu(patternNr);
+                pat_applyTrackSettingsToMenu(patternNr, trackNr);
             }
 
             led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + menu_getViewedPattern()), 1);
@@ -869,7 +1101,7 @@ static void processRelease(uint8_t buttonNr)
         /* _SEQUENCER_ADD_SPIKE_: restore erase exit + copy-mode reset on release. */
         if (bh_state.seqErasing) {
             bh_state.seqErasing = 0;
-            frontPanel_sendData(SEQ_CC, SEQ_ERASE_ON_OFF, (uint8_t)bh_state.seqErasing);
+            seq_setErasingMode((uint8_t)bh_state.seqErasing);
         } else if (!buttonHandler_getShift()) {
             copyClear_reset();
         }
@@ -879,7 +1111,7 @@ static void processRelease(uint8_t buttonNr)
         /* _SEQUENCER_ADD_SPIKE_: restore shift-release unwind flow from AVR. */
         if (bh_state.seqErasing) {
             bh_state.seqErasing = 0;
-            frontPanel_sendData(SEQ_CC, SEQ_ERASE_ON_OFF, (uint8_t)bh_state.seqErasing);
+            seq_setErasingMode((uint8_t)bh_state.seqErasing);
         }
 
         if (copyClear_Mode == MODE_CLEAR && !btn_held[BUT_COPY]) {

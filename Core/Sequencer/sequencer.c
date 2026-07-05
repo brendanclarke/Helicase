@@ -45,7 +45,6 @@
 #include "MidiMessages.h"
 #include "MidiVoiceControl.h"
 #include "CymbalVoice.h"
-#include "frontPanelParser.h"
 #include "sequencer.h"
 #include <string.h>
 #include "usb_manager.h"
@@ -55,6 +54,8 @@
 #include "SomGenerator.h"
 #include "triggerJacks.h"
 #include "timebase.h"
+#include "ledHandler.h"
+#include "menu.h"
 
 
 #define SEQ_PRESCALER_MASK 	0x03
@@ -76,8 +77,6 @@ static uint32_t	seq_lastTick = 0;			/**< stores the time the last step change oc
 static float	seq_deltaT;					/**< time in [ms] until the next step
  	 	 	 	 	 	 	 	 	 	 	 1000ms = 1 sec
  	 	 	 	 	 	 	 	 	 	 	 1 min = 60 sec*/
-uint8_t seq_activeAutomTrack=0;
-
 uint8_t seq_delayedSyncStepFlag = 0;		//normally sync steps will only be advanced by external midi clocks in ext. sync mode
 											//if the shuffle needs a delayed sync step, it is indicated here.
 
@@ -90,9 +89,6 @@ uint8_t seq_lastMasterStep[NUM_TRACKS];		//keeps track of the last triggered mas
 float seq_shuffle = 0;
 
 static uint8_t seq_SomModeActive = 0;
-
-static int8_t seq_armedArmedAutomationStep = -1;
-static int8_t seq_armedArmedAutomationTrack = -1;
 
 static uint8_t seq_mutedTracks=0;			/**< indicate which tracks are muted */
 uint8_t seq_running = 0;					/**< 1 if running, 0 if stopped*/
@@ -144,10 +140,6 @@ const float seq_shuffleTable[16] =
 
 float seq_lastShuffle = 0;
 
-PatternSet seq_patternSet;
-
-TempPattern seq_tmpPattern;
-
 uint8_t seq_newPatternAvailable = 0; //indicate that a new pattern has loaded in the background and we should switch
 
 //for the automation tracks each track needs 2 modNodes
@@ -178,17 +170,36 @@ void seq_init()
 	memset(seq_lastMasterStep,0,NUM_TRACKS);
 
 
-	for(i=0;i<NUM_PATTERN;i++)
-	{
-		seq_patternSet.seq_patternSettings[i].changeBar 	= 0;	//default setting: zero repeats (play once then change)
-		seq_patternSet.seq_patternSettings[i].nextPattern 	= i;	//default setting: repeat same pattern
-		seq_clearPattern(i); // will clear all tracks in the pattern
-	}
+	/*
+	 * PatternData owns pattern storage after FrontPanelParser removal.
+	 *
+	 * Sequencer still initializes it because Sequencer startup is where the
+	 * playback scheduler, automation nodes, and pattern arrays become usable.
+	 * Later Scene/Pattern work can move this init call higher once Scene exists
+	 * as a full subsystem.
+	 */
+	pat_init();
 
 }
 //------------------------------------------------------------------------------
 static void seq_activateTmpPattern()
 {
+	/*
+	 * Commits an asynchronously loaded pattern into the active pattern slot.
+	 *
+	 * Caller: seq_nextStep() when filesystem has loaded into pat_tmpPattern and
+	 * the pattern boundary permits activation. PatternData owns both buffers,
+	 * but Sequencer currently owns the timing of when a loaded pattern becomes
+	 * audible.
+	 *
+	 * Inputs: seq_activePattern selects the destination pattern slot; the source
+	 * is pat_tmpPattern. Outputs: active pattern step, main-step, settings, and
+	 * length/rotation data are overwritten.
+	 *
+	 * Risk: this still uses seq_patternSet/seq_tmpPattern compatibility macros
+	 * from PatternData.h so the playback refactor can happen later without
+	 * reintroducing front-panel parser behavior.
+	 */
 	memcpy(&seq_patternSet.seq_subStepPattern[seq_activePattern],&seq_tmpPattern.seq_subStepPattern,sizeof(Step)*NUM_TRACKS*NUM_STEPS);
 	memcpy(&seq_patternSet.seq_mainSteps[seq_activePattern],&seq_tmpPattern.seq_mainSteps,sizeof(uint16_t)*NUM_TRACKS);
 	memcpy(&seq_patternSet.seq_patternSettings[seq_activePattern],&seq_tmpPattern.seq_patternSettings,sizeof(PatternSetting));
@@ -199,66 +210,30 @@ void seq_setShuffle(float shuffle)
 {
 	seq_shuffle = shuffle;
 }
-//------------------------------------------------------------------------------
-void seq_setTrackLength(uint8_t trackNr, uint8_t length)
+void seq_offsetTrackStepIndexForRotation(uint8_t trackNr, uint8_t oldRot,
+                                         uint8_t newRot, uint8_t len)
 {
-	//set new end marker
-	if(length == 16)
-		length=0;
-	// --AS **PATROT this was changed from setting length on seq_activePattern to shown (or edited) pattern
-	seq_patternSet.seq_patternLengthRotate[frontParser_shownPattern][trackNr].length=length;
+	int8_t offset;
+	int16_t si;
 
-}
-
-//------------------------------------------------------------------------------
-uint8_t seq_getTrackLength(uint8_t trackNr)
-{
-	// --AS **PATROT this was changed from getting seq_activePattern to shown (or edited) pattern
-	uint8_t r=seq_patternSet.seq_patternLengthRotate[frontParser_shownPattern][trackNr].length;
-	if(r==0)
-		return 16;
-	return r;
-}
-//------------------------------------------------------------------------------
-// **PATROT
-void seq_setTrackRotation(uint8_t trackNr, const uint8_t newRot)
-{
-	// frontParser_shownPattern contains the pattern that is shown (being edited) on the front at the time this is called
-	// seq_activePattern is the pattern that is now playing
-	LengthRotate *lr=&seq_patternSet.seq_patternLengthRotate[frontParser_shownPattern][trackNr];
-
-	if(newRot == lr->rotate)
+	/*
+	 * Why: PatternData owns the stored rotation value, but seq_stepIndex[] is
+	 * scheduler runtime state. Inputs are the old/new main-step rotations and
+	 * effective track length. Output is an adjusted sub-step index preserving
+	 * the pre-refactor live-rotation behavior. Risk: track/len must be bounded
+	 * by PatternData before this hook is called.
+	 */
+	if (trackNr >= NUM_TRACKS || len == 0)
 		return;
 
-	// if sequencer is running, move the current step position to compensate for the rotation
-	if(seq_running) {
-		int8_t len = lr->length;
-		if(len==0)
-			len=16;
-
-		// this is how many main steps we need to move in one direction, negative means
-		// move back positive is move forward
-		int8_t offset=(((int8_t)newRot) % len) - (((int8_t)lr->rotate) % len);
-
-        // if adding the offset to si would push it over the edge either way we need to wrap it
-		// offset will always be less than len
-        int16_t si = seq_stepIndex[trackNr] + (offset*8);
-        if(si < 0 )
-            si += (len*8);
-        else if(si >= (len*8))
-            si -= (len*8);
-        seq_stepIndex[trackNr]=(int8_t)si;
-	}
-
-	//set new rotation value
-	lr->rotate=newRot;
-
-}
-//------------------------------------------------------------------------------
-// **PATROT
-uint8_t seq_getTrackRotation(uint8_t trackNr)
-{
-	return seq_patternSet.seq_patternLengthRotate[frontParser_shownPattern][trackNr].rotate;
+	offset = (int8_t)(((int8_t)newRot % (int8_t)len) -
+	                  ((int8_t)oldRot % (int8_t)len));
+	si = seq_stepIndex[trackNr] + (offset * 8);
+	if (si < 0)
+		si += (len * 8);
+	else if (si >= (len * 8))
+		si -= (len * 8);
+	seq_stepIndex[trackNr] = (int8_t)si;
 }
 //------------------------------------------------------------------------------
 static void seq_calcDeltaT(uint16_t bpm)
@@ -461,8 +436,13 @@ static void seq_nextStep()
 			//reset pattern position to pattern rotate starting position for the active pattern --AS **PATROT
 			seq_setStepIndexToStart();
 
-			/* ORIG: uart_sendFrontpanelByte(FRONT_SEQ_CC/FRONT_SEQ_CHANGE_PAT/seq_activePattern) */
-			seq_notifyFront(FRONT_SEQ_CHANGE_PAT, seq_activePattern);
+			/*
+			 * Pattern changes are Sequencer timing events, but LED repaint is
+			 * front-panel ownership. led_notifyPatternChanged() is a direct
+			 * notification, not an opcode bridge: Sequencer tells ledHandler
+			 * the new active pattern so the visible pattern LEDs can follow.
+			 */
+			led_notifyPatternChanged(seq_activePattern);
 
 			// --AS send a pattern change message to midi/usb out
 			seq_sendProgChg(seq_activePattern);
@@ -478,13 +458,11 @@ static void seq_nextStep()
 	{
 		//&32 <=> %32
 		//a quarter beat occured (multiple of 32 steps in the 128 step pattern)
-		/* ORIG: uart_sendFrontpanelByte(FRONT_STEP_LED_STATUS_BYTE/FRONT_LED_PULSE_BEAT/1) */
 		seq_ledState.beatPulse = 1;
 		seq_ledState.dirty |= SEQ_LED_DIRTY_BEAT;
 	}
 	else if ((masterStepPos&31) == 1)
 	{
-		/* ORIG: uart_sendFrontpanelByte(FRONT_STEP_LED_STATUS_BYTE/FRONT_LED_PULSE_BEAT/0) */
 		seq_ledState.beatPulse = 0;
 		seq_ledState.dirty |= SEQ_LED_DIRTY_BEAT;
 	}
@@ -526,9 +504,17 @@ static void seq_nextStep()
 					// and this is the active track on the front, we erase the note value
 					// only do so if we are on a main step while erase is active. in this case, the main step and
 					// all it's substeps are erased.
-					if(seq_eraseActive && i==frontParser_activeTrack && seq_stepIndex[i]%8==0) {
+					if(seq_eraseActive && i==menu_getActiveVoice() && seq_stepIndex[i]%8==0) {
+						/*
+						 * Live erase targets the active front-panel voice only.
+						 *
+						 * Menu owns active voice selection; Sequencer owns the
+						 * playback-time erase condition; PatternData receives
+						 * the actual step mutation inside
+						 * seq_eraseStepAndSubSteps().
+						 */
 						// erase the main step and all substeps
-						seq_eraseStepAndSubSteps(frontParser_activeTrack,seq_stepIndex[i]/8);
+						seq_eraseStepAndSubSteps(menu_getActiveVoice(),seq_stepIndex[i]/8);
 					} else
 					// if sub-step is active
 					if(seq_intIsStepActive(i,seq_stepIndex[i],seq_activePattern))
@@ -576,8 +562,13 @@ static void seq_nextStep()
 
 	}
 
-	/* ORIG: uart_sendFrontpanelByte(FRONT_STEP_LED_STATUS_BYTE/FRONT_CURRENT_STEP_NUMBER_CC/step) */
-	seq_ledState.chaseStep = seq_stepIndex[frontParser_activeTrack];
+	/*
+	 * Chase LED state is produced by Sequencer timing and consumed later by
+	 * led_processSeqLedState() in the foreground loop. This avoids doing LED
+	 * work inside the playback step walk while preserving the old live chase
+	 * display for the active Menu voice.
+	 */
+	seq_ledState.chaseStep = seq_stepIndex[menu_getActiveVoice()];
 	seq_ledState.dirty |= SEQ_LED_DIRTY_CHASE;
 
 	// --AS check mtc, which might stop the sequencer if we haven't seen one in a while
@@ -645,17 +636,6 @@ void seq_noteExtSyncActivity(uint8_t source, uint32_t timestampUs)
 			return;
 		seq_autoSyncActiveSource = source;
 		seq_autoSyncLastUs = timestampUs;
-	}
-}
-//------------------------------------------------------------------------------
-void seq_armAutomationStep(uint8_t stepNr, uint8_t track,uint8_t isArmed)
-{
-	if(isArmed) {
-		seq_armedArmedAutomationStep 	= stepNr;
-		seq_armedArmedAutomationTrack 	= track;
-	} else {
-		seq_armedArmedAutomationStep 	= -1;
-		seq_armedArmedAutomationTrack 	= -1;
 	}
 }
 //------------------------------------------------------------------------------
@@ -824,47 +804,6 @@ void seq_setQuantisation(uint8_t value)
 {
 	seq_quantisation = value;
 }
-//------------------------------------------------------------------------------
-void seq_toggleStep(uint8_t voice, uint8_t stepNr, uint8_t patternNr)
-{
-	if((seq_patternSet.seq_subStepPattern[patternNr][voice][stepNr].volume&STEP_ACTIVE_MASK)==0)
-	{
-		seq_patternSet.seq_subStepPattern[patternNr][voice][stepNr].volume |= STEP_ACTIVE_MASK;
-	} else {
-		seq_patternSet.seq_subStepPattern[patternNr][voice][stepNr].volume &= ~STEP_ACTIVE_MASK;
-	}
-}
-//------------------------------------------------------------------------------
-void seq_toggleMainStep(uint8_t voice, uint8_t stepNr, uint8_t patternNr)
-{
-	seq_patternSet.seq_mainSteps[patternNr][voice] ^= (1<<stepNr);
-}
-//------------------------------------------------------------------------------
-static void seq_setMainStep(uint8_t patternNr, uint8_t voice, uint8_t stepNr, uint8_t onOff)
-{
-	if(onOff)
-	{
-		seq_patternSet.seq_mainSteps[patternNr][voice] |= (1<<stepNr);
-	}
-	else
-	{
-		seq_patternSet.seq_mainSteps[patternNr][voice] &= ~(1<<stepNr);
-	}
-}
-//------------------------------------------------------------------------------
-// --AS this appears unused
-//void seq_setStep(uint8_t voice, uint8_t stepNr, uint8_t onOff)
-//{
-//	if(onOff)
-//	{
-//		seq_patternSet.seq_subStepPattern[seq_activePattern][voice][stepNr].volume |= STEP_ACTIVE_MASK;
-//	}
-//	else
-//	{
-//		seq_patternSet.seq_subStepPattern[seq_activePattern][voice][stepNr].volume &= ~STEP_ACTIVE_MASK;
-//	}
-//}
-//------------------------------------------------------------------------------
 uint8_t seq_isRunning() {
 	return seq_running;
 }
@@ -878,12 +817,23 @@ void seq_setRunning(uint8_t isRunning)
 	{
 
 		// --AS reset all track rotations to 0. We are not saving rotated value. it's a performance tool.
+		/*
+		 * Stop resets performance track rotations for the active Pattern.
+		 *
+		 * Rotation storage now belongs to PatternData, so Sequencer calls
+		 * pat_setTrackRotation() for each track. The separate
+		 * led_notifyTrackRotationReset() call updates only the front-panel menu
+		 * display value; PatternData intentionally does not know about LEDs.
+		 *
+		 * Risk: this preserves current behavior where stop clears rotations
+		 * instead of saving them. The scoping notes expect rotation policy to be
+		 * revisited when Pattern owns more sequencer behavior.
+		 */
 		uint8_t i;
 		for(i=0;i<NUM_TRACKS;i++) {
-			seq_patternSet.seq_patternLengthRotate[seq_activePattern][i].rotate=0;
-			/* ORIG: uart_sendFrontpanelByte(FRONT_SEQ_CC/FRONT_SEQ_TRACK_ROTATION/rotation) */
-			seq_notifyFront(FRONT_SEQ_TRACK_ROTATION, seq_getTrackRotation(i));
+			pat_setTrackRotation(seq_activePattern, i, 0);
 		}
+		led_notifyTrackRotationReset(0);
 
 		//reset song position bar counter
 		seq_lastShuffle = 0;
@@ -916,23 +866,28 @@ void seq_setRunning(uint8_t isRunning)
 //------------------------------------------------------------------------------
 static uint8_t seq_intIsStepActive(uint8_t voice, uint8_t stepNr, uint8_t patternNr)
 {
-	return ((seq_patternSet.seq_subStepPattern[patternNr][voice][stepNr].volume & STEP_ACTIVE_MASK) > 0);
-}
-// --AS above will be inlined, below is for ext linkage
-uint8_t seq_isStepActive(uint8_t voice, uint8_t stepNr, uint8_t patternNr)
-{
-	return seq_intIsStepActive(voice,stepNr,patternNr);
+	/*
+	 * Playback read wrapper around PatternData.
+	 *
+	 * Sequencer still asks whether a step is active while walking playback
+	 * timing. PatternData owns the storage and validity checks. Keeping this
+	 * wrapper local limits churn until the later Pattern refactor can move more
+	 * playback-facing helpers behind Pattern APIs.
+	 */
+	return pat_isStepActive(voice, stepNr, patternNr);
 }
 
 //------------------------------------------------------------------------------
 static uint8_t seq_intIsMainStepActive(uint8_t voice, uint8_t mainStepNr, uint8_t pattern)
 {
-	return (seq_patternSet.seq_mainSteps[pattern][voice] & (1<<mainStepNr)) > 0;
-}
-// --AS above is inlined below for ext linkage
-uint8_t seq_isMainStepActive(uint8_t voice, uint8_t mainStepNr, uint8_t pattern)
-{
-	return seq_intIsMainStepActive(voice, mainStepNr, pattern);
+	/*
+	 * Playback read wrapper around PatternData main-step state.
+	 *
+	 * Inputs are Sequencer playback coordinates. Output is a boolean active
+	 * flag from PatternData. This replaces direct parser queries with direct
+	 * Pattern storage reads.
+	 */
+	return pat_isMainStepActive(voice, mainStepNr, pattern);
 }
 
 //------------------------------------------------------------------------------
@@ -964,82 +919,6 @@ uint8_t seq_isTrackMuted(uint8_t trackNr)
 	}
 	return 0;
 }
-//------------------------------------------------------------------------------
-// given a pattern and a track:
-// this sends the main step info (which main steps are on/off) in addition
-// to the length of the track
-void seq_sendMainStepInfoToFront(uint16_t stepNr)
-{
-	//the absolute number of patterns
-	const uint8_t currentPattern	= stepNr / 7;
-	const uint8_t currentTrack  	= stepNr - currentPattern*7;
-
-	uint16_t dataToSend = seq_patternSet.seq_mainSteps[currentPattern][currentTrack];
-
-	uart_sendFrontpanelSysExByte(  dataToSend	  & 0x7f); //1st 7 bit
-	uart_sendFrontpanelSysExByte( (dataToSend>>7) & 0x7f); //2nd 7 bit
-	uart_sendFrontpanelSysExByte( (dataToSend>>14)& 0x7f); //last 2 bit
-
-	// send the track length
-	uart_sendFrontpanelSysExByte( seq_patternSet.seq_patternLengthRotate[currentPattern][currentTrack].length);
-
-}
-//--------------------------------------------------------------------
-/** this one is more complicated than the 14 bit upper/lower nibble when transmitting the requested step number via SysEx.
- * because we have to transmit seven 8-bit values that make up the StepStruct we have to pack the data clever into the 7-bit
- * SysEx packets.
- *
- * first we send the lower 7-bit of all 7 values
- * then we transmit an additional 7-bit value containing all the MSBs from the previous seven values.
- *
- * 1st - (value1 & 0x7f)
- * 2nd - (value2 & 0x7f)
- * 3rd - (value3 & 0x7f)
- * 4th - (value4 & 0x7f)
- * 5th - (value5 & 0x7f)
- * 6th - (value6 & 0x7f)
- * 7th - (value7 & 0x7f)
- *
- * 8th - (0 MSB7 MSB6 MSB5 MSB4 MSB3 MSB2 MSB1)
- */
-void seq_sendStepInfoToFront(uint16_t stepNr)
-{
-
-	//decode the step number
-	//the step number is between 0 and NUMBER_STEPS*NUM_TRACKS*NUM_PATTERN = 128*7*8 = 7168 steps
-	// stepNr / 128 = absolute number of patterns (each track has 8 patterns * 7 tracks)
-	// numPatterns / 8 = the current track
-
-	//the absolute number of patterns
-	const uint8_t absPat 			= stepNr/128;
-	const uint8_t currentTrack 		= absPat / 8;
-	const uint8_t currentPattern 	= absPat - currentTrack*8;
-	const uint8_t currentStep		= stepNr - absPat*128;
-
-	//encode the data and send it back
-	Step *dataToSend = &seq_patternSet.seq_subStepPattern[currentPattern][currentTrack][currentStep];
-
-	uart_sendFrontpanelSysExByte(dataToSend->volume	& 0x7f);
-	uart_sendFrontpanelSysExByte(dataToSend->prob	& 0x7f);
-	uart_sendFrontpanelSysExByte(dataToSend->note	& 0x7f);
-
-	uart_sendFrontpanelSysExByte(dataToSend->param1Nr	& 0x7f);
-	uart_sendFrontpanelSysExByte(dataToSend->param1Val	& 0x7f);
-
-	uart_sendFrontpanelSysExByte(dataToSend->param2Nr	& 0x7f);
-	uart_sendFrontpanelSysExByte(dataToSend->param2Val	& 0x7f);
-
-	//now the MSBs from all 7 values
-	uart_sendFrontpanelSysExByte( 	(((dataToSend->volume 	& 0x80)>>7) |
-									((dataToSend->prob	 	& 0x80)>>6) |
-									((dataToSend->note	 	& 0x80)>>5) |
-									((dataToSend->param1Nr	& 0x80)>>4) |
-									((dataToSend->param1Val	& 0x80)>>3) |
-									((dataToSend->param2Nr	& 0x80)>>2) |
-									((dataToSend->param2Val	& 0x80)>>1))&0x7f
-									);
-}
-//-------------------------------------------------------------------------------
 void seq_setRoll(uint8_t voice, uint8_t onOff)
 {
 	if(voice >= 7) return;
@@ -1180,6 +1059,21 @@ static int8_t seq_quantize(int8_t step)
 //------------------------------------------------------------------------
 void seq_recordAutomation(uint8_t voice, uint8_t dest, uint8_t value)
 {
+	/*
+	 * Records automation from live parameter changes into PatternData.
+	 *
+	 * Callers: Preset sound-parameter apply and MidiParser global-channel CC
+	 * handling. Sequencer owns the recording gate and quantization because those
+	 * depend on current playback position; PatternData owns the step/lane write.
+	 *
+	 * Inputs: voice is the target track, dest is the automation parameter id or
+	 * legacy CC destination, value is the recorded value. Output: automation is
+	 * written to the active pattern when recording/step-active conditions pass.
+	 *
+	 * Risk: pat_recordArmedAutomation() is called even when seq_recordActive is
+	 * off so long-press armed automation can still capture a parameter edit,
+	 * matching the old ARM_AUTOMATION_STEP opcode behavior.
+	 */
 	if(seq_recordActive)
 	{
 		uint8_t quantizedStep = seq_quantize(seq_stepIndex[voice]);
@@ -1188,40 +1082,32 @@ void seq_recordAutomation(uint8_t voice, uint8_t dest, uint8_t value)
 		if( seq_intIsMainStepActive(voice,quantizedStep/8,seq_activePattern) &&
 				seq_intIsStepActive(voice,quantizedStep,seq_activePattern))
 		{
-			if(seq_activeAutomTrack == 0) {
-				seq_patternSet.seq_subStepPattern[seq_activePattern][voice][quantizedStep].param1Nr = dest;
-				seq_patternSet.seq_subStepPattern[seq_activePattern][voice][quantizedStep].param1Val = value;
-			} else {
-				seq_patternSet.seq_subStepPattern[seq_activePattern][voice][quantizedStep].param2Nr = dest;
-				seq_patternSet.seq_subStepPattern[seq_activePattern][voice][quantizedStep].param2Val = value;
-			}
+			pat_recordAutomation(seq_activePattern, voice, quantizedStep, dest, value);
 		}
 	}
 
-	if( (seq_armedArmedAutomationStep	!= -1) && (seq_armedArmedAutomationTrack != -1) )
-	{
-		//step button is held down
-		//-> set step automation parameters
-		if(seq_activeAutomTrack == 0) {
-			seq_patternSet.seq_subStepPattern[seq_activePattern]
-			                                  [seq_armedArmedAutomationTrack]
-			                                   [seq_armedArmedAutomationStep].param1Nr = dest;
-			seq_patternSet.seq_subStepPattern[seq_activePattern]
-			                                  [seq_armedArmedAutomationTrack]
-			                                   [seq_armedArmedAutomationStep].param1Val = value;
-		} else {
-			seq_patternSet.seq_subStepPattern[seq_activePattern]
-			                                  [seq_armedArmedAutomationTrack]
-			                                   [seq_armedArmedAutomationStep].param2Nr = dest;
-			seq_patternSet.seq_subStepPattern[seq_activePattern]
-			                                  [seq_armedArmedAutomationTrack]
-			                                   [seq_armedArmedAutomationStep].param2Val = value;
-		}
-	}
+	pat_recordArmedAutomation(seq_activePattern, dest, value);
 }
 //------------------------------------------------------------------------
 void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 {
+	/*
+	 * Records a played note into the active or next Pattern when recording.
+	 *
+	 * Callers: MIDI note input, roll performance, and internal recording paths.
+	 * Sequencer owns quantization and pattern-boundary timing; PatternData owns
+	 * main-step activation, while this function still writes Step fields through
+	 * compatibility arrays until the later PatternData refactor moves the rest
+	 * of step mutation behind pat_ APIs.
+	 *
+	 * Inputs: trackNr target track, vel recorded velocity, note recorded note.
+	 * Outputs: step note/volume/probability/active bit are updated, the
+	 * corresponding main step is activated, and visible record LEDs are marked
+	 * dirty if the edited track/pattern is currently shown by Menu.
+	 *
+	 * Risk: the direct Step writes are intentional temporary compatibility with
+	 * existing playback code. New UI code should prefer PatternData APIs.
+	 */
 	uint8_t targetPattern;
 	Step *stepPtr;
 	//only record notes when seq is running and recording
@@ -1259,14 +1145,20 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 		stepPtr->volume 	|= STEP_ACTIVE_MASK;
 
 		//activate corresponding main step
-		seq_setMainStep(targetPattern, trackNr, quantizedStep/8,1);
+		pat_setMainStep(targetPattern, trackNr, quantizedStep/8,1);
 
-		if( (frontParser_shownPattern == targetPattern) && ( frontParser_activeTrack == trackNr) )
+		if( (menu_getViewedPattern() == targetPattern) && ( menu_getActiveVoice() == trackNr) )
 		{
-			/* ORIG: uart_sendFrontpanelByte(FRONT_STEP_LED_STATUS_BYTE/FRONT_LED_SEQ_SUB_STEP/quantizedStep) */
+			/*
+			 * Recording LED updates are queued rather than drawn here.
+			 *
+			 * Sequencer knows the recorded step, but ledHandler owns the LED
+			 * hardware and buttonHandler owns selected-step/shift/mode UI
+			 * context. The dirty flags tell led_processSeqLedState() to repaint
+			 * only when the recorded track/pattern is visible.
+			 */
 			seq_ledState.recordSubStep = quantizedStep;
 			seq_ledState.dirty |= SEQ_LED_DIRTY_REC_SUB;
-			/* ORIG: uart_sendFrontpanelByte(FRONT_STEP_LED_STATUS_BYTE/FRONT_LED_SEQ_BUTTON/quantizedStep) */
 			seq_ledState.recordMainStep = quantizedStep;
 			seq_ledState.dirty |= SEQ_LED_DIRTY_REC_MAIN;
 		}
@@ -1278,9 +1170,25 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 // for the specified voice
 static void seq_eraseStepAndSubSteps(const uint8_t voice, const uint8_t mainStep)
 {
+	/*
+	 * Erases one main step and its eight sub-steps during live erase.
+	 *
+	 * Caller: seq_nextStep() when erase mode is active, playback reaches a main
+	 * step, and the playing track is the active Menu voice. PatternData owns the
+	 * main-step bit via pat_setMainStep(); this function still resets sub-step
+	 * Step structs directly through PatternData compatibility arrays until the
+	 * broader Pattern mutation refactor.
+	 *
+	 * Inputs: voice is the track to erase, mainStep is 0..15. Output: main step
+	 * disabled, all eight sub-steps reset, first sub-step re-enabled to preserve
+	 * the old invariant that each main-step cluster has an active first substep.
+	 *
+	 * Risk: direct Step writes must stay in sync with pat_resetStep() semantics.
+	 * Moving this fully into PatternData is a good later cleanup target.
+	 */
 	uint8_t i;
 	// turn off the main step
-	seq_setMainStep(seq_activePattern, voice, mainStep,0);
+	pat_setMainStep(seq_activePattern, voice, mainStep,0);
 
 	// turn off all substeps
 	for(i=(uint8_t)(mainStep*8);i<(uint8_t)((mainStep+1)*8);i++) {
@@ -1289,12 +1197,6 @@ static void seq_eraseStepAndSubSteps(const uint8_t voice, const uint8_t mainStep
 
 	// first substep needs to be made active
 	seq_patternSet.seq_subStepPattern[seq_activePattern][voice][(uint8_t)(mainStep*8)].volume |= STEP_ACTIVE_MASK;
-
-	//if( (frontParser_shownPattern == seq_activePattern) && ( frontParser_activeTrack == voice) )
-	//{
-		// --AS todo if the pattern is shown on the front, update the leds
-		// 		figure out. Right now it clears the LED's after shift is released... which is fine for now.
-	//}
 
 }
 
@@ -1321,117 +1223,6 @@ static void seq_resetNote(Step *step)
 	step->prob		= 127;
 	step->volume	= 100; // clears active bit as well
 }
-//------------------------------------------------------------------------------
-void seq_clearTrack(uint8_t trackNr, uint8_t pattern)
-{
-	int k;
-	for(k=0;k<128;k++)
-	{
-		seq_resetNote(&seq_patternSet.seq_subStepPattern[pattern][trackNr][k]);
-
-		//every 1st step in a substep pattern active
-		if( (k%8) == 0)
-			seq_patternSet.seq_subStepPattern[pattern][trackNr][k].volume |= STEP_ACTIVE_MASK ;
-	}
-
-	// all main steps off for this track
-	seq_patternSet.seq_mainSteps[pattern][trackNr] = 0;
-
-	//**PATROT all pattern rotations off and all patterns set to length 16
-	seq_patternSet.seq_patternLengthRotate[pattern][trackNr].value=0;
-
-}
-//------------------------------------------------------------------------------
-void seq_clearPattern(uint8_t pattern)
-{
-	int i;
-	for(i=0;i<NUM_TRACKS;i++)
-		seq_clearTrack(i, pattern);
-}
-
-//------------------------------------------------------------------------------
-void seq_clearAutomation(uint8_t trackNr, uint8_t pattern, uint8_t automTrack)
-{
-	int k;
-
-	if(automTrack==0)
-	{
-		for(k=0;k<128;k++)
-		{
-			seq_patternSet.seq_subStepPattern[pattern][trackNr][k].param1Nr 	= NO_AUTOMATION;
-			seq_patternSet.seq_subStepPattern[pattern][trackNr][k].param1Val 	= 0;
-		}
-	} else {
-		for(k=0;k<128;k++)
-		{
-			seq_patternSet.seq_subStepPattern[pattern][trackNr][k].param2Nr		= NO_AUTOMATION;
-			seq_patternSet.seq_subStepPattern[pattern][trackNr][k].param2Val	= 0;
-		}
-	}
-}
-//------------------------------------------------------------------------------
-void seq_copyTrack(uint8_t srcNr, uint8_t dstNr, uint8_t pattern)
-{
-	// --AS todo this fn and the next are very similar. Add a new fn that takes src, dest track and src, dest pat
-	// and then have these two fn's call it instead.
-	int k;
-	Step *src, *dst;
-	for(k=0;k<128;k++)
-	{
-		dst=&seq_patternSet.seq_subStepPattern[pattern][dstNr][k];
-		src=&seq_patternSet.seq_subStepPattern[pattern][srcNr][k];
-		dst->note		= src->note;
-		dst->param1Nr 	= src->param1Nr;
-		dst->param1Val 	= src->param1Val;
-		dst->param2Nr	= src->param2Nr;
-		dst->param2Val	= src->param2Val;
-		dst->prob		= src->prob;
-		dst->volume		= src->volume;
-	}
-
-	// copy which main steps are on/off
-	seq_patternSet.seq_mainSteps[pattern][dstNr] = seq_patternSet.seq_mainSteps[pattern][srcNr];
-
-	// --AS copy length and rotation offset from source track
-	seq_patternSet.seq_patternLengthRotate[pattern][dstNr].value =
-			seq_patternSet.seq_patternLengthRotate[pattern][srcNr].value;
-
-
-}
-//------------------------------------------------------------------------------
-void seq_copyPattern(uint8_t src, uint8_t dst)
-{
-	int k,j;
-	Step *psrc, *pdst;
-	for(j=0;j<NUM_TRACKS;j++)
-	{
-		for(k=0;k<128;k++)
-		{
-			pdst=&seq_patternSet.seq_subStepPattern[dst][j][k];
-			psrc=&seq_patternSet.seq_subStepPattern[src][j][k];
-			pdst->note			= psrc->note;
-			pdst->param1Nr 		= psrc->param1Nr;
-			pdst->param1Val 	= psrc->param1Val;
-			pdst->param2Nr		= psrc->param2Nr;
-			pdst->param2Val		= psrc->param2Val;
-			pdst->prob			= psrc->prob;
-			pdst->volume		= psrc->volume;
-		}
-
-		seq_patternSet.seq_mainSteps[dst][j] = seq_patternSet.seq_mainSteps[src][j];
-
-		// --AS copy length and rotation offset from source pattern for the track
-		seq_patternSet.seq_patternLengthRotate[dst][j].value =
-					seq_patternSet.seq_patternLengthRotate[src][j].value;
-
-	}
-}
-//------------------------------------------------------------------------------
-void seq_setActiveAutomationTrack(uint8_t trackNr)
-{
-	seq_activeAutomTrack = trackNr;
-}
-//------------------------------------------------------------------------------
 static uint8_t seq_isNextStepSyncStep()
 {
 	if(seq_delayedSyncStepFlag)

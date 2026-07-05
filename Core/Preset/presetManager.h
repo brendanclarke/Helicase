@@ -102,6 +102,18 @@ void    preset_applyLoadedName(void);
 ** monopolize one foreground pass. */
 void    preset_sendDrumsetParameters(void);
 
+/*
+ * Direct sound-apply helpers.
+ * Why: local UI/preset code should not pack fake front-panel protocol bytes to
+ * reach DSP parameter application. Inputs are real parameter IDs/targets.
+ * Outputs update DSP/menu parameter state and optionally record automation.
+ * Risk: parameter 127 is rejected because the old MIDI_CC packing underflowed.
+ */
+void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
+                                   uint8_t recordAutomation);
+void    preset_applyVelocityModTarget(uint8_t voice, uint16_t targetParam);
+void    preset_applyLfoModTarget(uint8_t lfo, uint16_t targetParam);
+
 /* Runtime chunked sound apply. preset_tickDrumsetApply() performs at most one
 ** voice of modulation-routing work and returns non-zero while that pass did
 ** foreground work. The menu owns operation-specific UI/global follow-up after

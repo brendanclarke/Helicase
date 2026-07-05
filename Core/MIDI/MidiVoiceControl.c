@@ -155,7 +155,6 @@ static void voiceControl_triggerNow(uint8_t voice, uint8_t note, uint8_t vel)
 	else
 		HiHat_trigger(vel,voice-5,note);
 
-	/* ORIG: uart_sendFrontpanelByte(NOTE_ON/voice/0) */
 	led_pulseLed((uint8_t)(LED_VOICE1 + voice));
 }
 

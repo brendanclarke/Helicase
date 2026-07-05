@@ -48,10 +48,10 @@
 #include "mixer.h"
 #include "valueShaper.h"
 #include "modulationNode.h"
-#include "frontPanelParser.h"
 #include "usb_manager.h"
 #include "presetManager.h"
 #include "menu.h"
+#include "buttonHandler.h"
 #include "MidiRealtime.h"
 #include "triggerJacks.h"
 #include "timebase.h"
@@ -212,12 +212,6 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 
 		case CC_BANK_CHANGE:
 			// bank change (coarse) selects kit (sound)
-			/*
-			 * already send in parseMidiMessage()
-			uart_sendFrontpanelByte(MIDI_CC);
-			uart_sendFrontpanelByte(CC_BANK_CHANGE);
-			uart_sendFrontpanelByte(msg.data2);
-			*/
 			break;
 
 		case NRPN_DATA_ENTRY_COARSE:
@@ -1111,6 +1105,18 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 			case CC2_MUTE_6:
 			case CC2_MUTE_7:
 			{
+				/*
+				 * Incoming MIDI CC2 mute messages affect Sequencer playback
+				 * state directly.
+				 *
+				 * This path is external MIDI, not front-panel UI, so it should
+				 * not call buttonHandler_muteVoice(); that helper is only the
+				 * local LED-facing shadow. Sequencer owns whether a track is
+				 * audibly muted.
+				 *
+				 * Inputs: CC2_MUTE_1..7 selects voice 0..6; data2==0 unmutes,
+				 * non-zero mutes. Output: Sequencer mute bit is updated.
+				 */
 				const uint8_t voiceNr = msg.data1 - CC2_MUTE_1;
 				if(msg.data2 == 0)
 				{
@@ -1154,8 +1160,14 @@ void midiParser_checkMtc()
 		// too much time has elapsed since our last message. mtc has gone away.
 		midiParser_mtcIsRunning=0;
 
-		/* ORIG: uart_sendFrontpanelByte(FRONT_SEQ_CC/FRONT_SEQ_RUN_STOP/0) */
-		seq_notifyFront(FRONT_SEQ_RUN_STOP, 0);
+		/*
+		 * MTC timeout must update both UI transport state and Sequencer state.
+		 *
+		 * The removed parser previously sent a front-panel start/stop command
+		 * back around the system. Now MidiParser calls buttonHandler only for
+		 * the START/STOP LED/UI bit, and calls Sequencer for real playback.
+		 */
+		buttonHandler_setRunStopState(0);
 		// stop the sequencer
 		seq_setRunning(0);
 	}
@@ -1232,11 +1244,22 @@ static void midiParser_handleNoteMessage(uint8_t channel, uint8_t note, uint8_t 
 				midiParser_noteOff(recordVoice, note, vel);
 		}
 	} else if (midi_MidiChannels[7] == channel) {
-		q = (int8_t)frontParser_activeTrack;
+		/*
+		 * Global-channel notes record/play the currently active UI voice.
+		 *
+		 * The active voice is Menu state. MidiParser reads it directly because
+		 * there is no parser mailbox translating "global note" into a selected
+		 * track anymore.
+		 *
+		 * Risk: this preserves the old behavior where changing the front-panel
+		 * active voice changes the recording target for global-channel notes.
+		 */
+		uint8_t activeVoice = menu_getActiveVoice();
+		q = (int8_t)activeVoice;
 		if (noteOn)
-			midiParser_noteOn(frontParser_activeTrack, note, vel, 1);
+			midiParser_noteOn(activeVoice, note, vel, 1);
 		else
-			midiParser_noteOff(frontParser_activeTrack, note, vel);
+			midiParser_noteOff(activeVoice, note, vel);
 	}
 
 	for (v = 0; v < 7; v++) {
@@ -1460,9 +1483,15 @@ void midiParser_parseMidiMessage(MidiMsg msg)
 			} else { // message 7 and we are not ignoring yet
 				if((msg.data1 & 0x01)==0) { // hour high nibble is 0
 					// well, we got all the way thru all 8 messages with 0, so the song has just begun
-					// tell the front that we've started running on our own
-					/* ORIG: uart_sendFrontpanelByte(FRONT_SEQ_CC/FRONT_SEQ_RUN_STOP/1) */
-					seq_notifyFront(FRONT_SEQ_RUN_STOP, 1);
+					/*
+					 * MTC can start playback without the physical START button.
+					 *
+					 * buttonHandler_setRunStopState() updates the front-panel
+					 * LED/UI bit, while seq_setRunning() starts the Sequencer.
+					 * Keeping both calls here replaces the old parser command
+					 * that bounced transport state through the front panel.
+					 */
+					buttonHandler_setRunStopState(1);
 					midiParser_mtcIgnore=1; // in case we happen to miss a 0 message. probably wouldn't happen, but...
 					midiParser_mtcIsRunning=1;
 					midiParser_lastMtcReceived=systick_ticks; // also might not be needed, but...
@@ -1489,14 +1518,28 @@ void midiParser_parseMidiMessage(MidiMsg msg)
 
 		} else if(msgonly==PROG_CHANGE) {
 			// --AS respond to prog change and change patterns. This responds only when global channel matches the PC message's channel.
+			/*
+			 * Program change on the global channel queues Sequencer's next
+			 * playback pattern. This is transport/performance state, not a
+			 * PatternData edit, so it remains a direct Sequencer call.
+			 */
 			if((midiParser_txRxFilter & 0x08) && (chanonly == midi_MidiChannels[7]))
 				seq_setNextPattern(msg.data1 & 0x07);
 
 		} else if(msgonly==MIDI_CC){
 			// respond to CC message. This responds only when global channel matches the cc message's channel
 			if((midiParser_txRxFilter & 0x04) && (chanonly == midi_MidiChannels[7])) {
-				//record automation if record is turned on
-				seq_recordAutomation(frontParser_activeTrack, msg.data1, msg.data2);
+				/*
+				 * Global-channel CC automation records to the currently active
+				 * UI voice. Menu owns that active voice; Sequencer owns the
+				 * recording gate and delegates actual Pattern writes onward.
+				 *
+				 * Risk: physical MIDI CCs and locally generated sound-parameter
+				 * applies share midiParser_ccHandler() below. The explicit
+				 * automation call here preserves the old global-channel MIDI
+				 * recording behavior.
+				 */
+				seq_recordAutomation(menu_getActiveVoice(), msg.data1, msg.data2);
 
 				//handle midi data
 				if (msg.data1 == CC_MOD_WHEEL) {
@@ -1509,11 +1552,9 @@ void midiParser_parseMidiMessage(MidiMsg msg)
 				} else {
 					midiParser_ccHandler(msg,1);
 				}
-				/* ORIG: uart_sendFrontpanelByte(msg.status/data1/data2) — forwarded
-				** received CC to AVR for display update. On LXR-02 single-chip,
-				** midiParser_ccHandler above already updates parameters locally.
-				** Routing through frontPanel_sendData would double-process:
-				** ccHandler called again + seq_recordAutomation called again. */
+				/* midiParser_ccHandler above already updates parameters locally.
+				** Re-processing the same CC locally would double-record
+				** automation and double-apply the parameter. */
 			}
 		} else {
 			// anything else
@@ -1658,6 +1699,16 @@ parseMsg:
 
 void midiParser_setRouting(uint8_t value)
 {
+	/*
+	 * Applies Menu's MIDI routing value to MidiParser's runtime route bits.
+	 *
+	 * Caller: menu_parseGlobalParam(PAR_MIDI_ROUTING). This replaces an opcode
+	 * that only forwarded the selected routing enum to MidiParser.
+	 *
+	 * Input: value is the menu routing enum documented above this function.
+	 * Output: midiParser_routing bitfield controls future USB/DIN forwarding.
+	 * Risk: value 0/default intentionally clears all routes.
+	 */
 	midiParser_routing.value=0;
 
 	switch(value) {
@@ -1686,8 +1737,42 @@ void midiParser_setRouting(uint8_t value)
 
 }
 
+void midiParser_setChannel(uint8_t voice, uint8_t channel)
+{
+	/*
+	 * Applies a Menu channel edit to MidiParser channel state.
+	 *
+	 * Caller: menu_parseGlobalParam(PAR_MIDI_CHAN_*). The front-panel parser
+	 * used to carry this write as an opcode; now Menu calls MidiParser directly
+	 * because MidiParser owns MIDI channel matching.
+	 *
+	 * Inputs: voice 0..6 selects a drum voice, voice 7 selects the global
+	 * channel, and channel is zero-based. Output: midi_MidiChannels[] updates.
+	 *
+	 * Risk: changing a per-voice channel sends note-off first so no voice keeps
+	 * sounding on a channel it no longer listens to. The global channel has no
+	 * voice to stop and must not call voiceControl_noteOff().
+	 */
+	if (voice >= 8u)
+		return;
+	if ((voice < 7u) && (midi_MidiChannels[voice] != channel))
+		voiceControl_noteOff(voice);
+	midi_MidiChannels[voice] = channel;
+}
+
 void midiParser_setFilter(uint8_t is_tx, uint8_t value)
 {
+	/*
+	 * Applies Menu's MIDI TX/RX filter nibble to MidiParser runtime filters.
+	 *
+	 * Caller: menu_parseGlobalParam(PAR_MIDI_FILT_TX/RX). MidiParser owns the
+	 * packed filter byte because it is read while parsing/routing MIDI.
+	 *
+	 * Inputs: is_tx selects high nibble when non-zero and low nibble when zero;
+	 * value is the 4-bit filter mask. Output: midiParser_txRxFilter is updated.
+	 * Risk: value is masked only on RX because TX shifts into the high nibble;
+	 * callers must provide the existing 0..15 menu value.
+	 */
 
 	if(is_tx) // set the high nibble to value
 		midiParser_txRxFilter = (value << 4) | (midiParser_txRxFilter & 0x0F);

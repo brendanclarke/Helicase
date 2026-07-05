@@ -28,6 +28,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/Preset \
           -ICore/MIDI \
           -ICore/DSPAudio \
+          -ICore/Scene/Pattern \
           -ICore/Sequencer \
           -ICore/SampleRom \
           -ICore/compat
@@ -84,15 +85,15 @@ SRCS = \
   Core/MIDI/FIFO.c \
   Core/MIDI/MidiRealtime.c \
   Core/MIDI/Uart.c \
-  Core/MIDI/frontPanelParser.c \
 	  Core/MIDI/MidiVoiceControl.c \
 	  Core/MIDI/MidiParser.c \
+  Core/Scene/Pattern/PatternData.c \
+  Core/Scene/Pattern/EuklidGenerator.c \
+  Core/Scene/Pattern/SomGenerator.c \
+  Core/Scene/Pattern/SomData.c \
 	  Core/Sequencer/sequencer.c \
 	  Core/Sequencer/sequencerTimer.c \
 	  Core/Sequencer/clockSync.c \
-  Core/Sequencer/EuklidGenerator.c \
-  Core/Sequencer/SomGenerator.c \
-  Core/Sequencer/SomData.c \
   Core/SampleRom/SampleMemory.c \
   Core/SampleRom/sampleFlash.c \
   Core/Src/startup_stm32f765xx.s
