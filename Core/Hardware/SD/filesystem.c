@@ -1123,8 +1123,11 @@ static void filesystem_loadPattern_tick(void)
     {
         uint32_t n = filesystem_readStreamChunk(staging_buf, 1);
         if (op_item_offset >= 1u) {
-            parameter_values[PAR_SHUFFLE] = staging_buf[0];
-            seq_setShuffle((float)staging_buf[0] / 127.0f);
+            /* Shuffle is PatternData-owned. The legacy pattern file stores one
+            ** shuffle byte for the full pattern set, so filesystem imports that
+            ** value through pat_setAllShuffle() instead of touching sequencer's
+            ** runtime coefficient directly. */
+            pat_setAllShuffle(staging_buf[0]);
             op_item_offset = 0;
             op_stream_index = 0;
             op_phase = 7;
@@ -1736,8 +1739,10 @@ static void filesystem_loadContainer_tick(void)
     {
         uint32_t n = filesystem_readStreamChunk(staging_buf, 1);
         if (op_item_offset >= 1u) {
-            parameter_values[PAR_SHUFFLE] = staging_buf[0];
-            seq_setShuffle((float)staging_buf[0] / 127.0f);
+            /* Container pattern payload uses the same one-byte legacy shuffle
+            ** block as .pat files. PatternData owns the stored value and bridges
+            ** to sequencer runtime playback internally. */
+            pat_setAllShuffle(staging_buf[0]);
             op_item_offset = 0;
             op_stream_index = 0;
             op_phase = 12;

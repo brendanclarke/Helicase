@@ -25,7 +25,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/Hardware/USB/App \
           -ICore/Hardware/USB/OTG_Driver/src \
           -ICore/Menu \
-          -ICore/Preset \
+          -ICore/Scene/Preset \
           -ICore/MIDI \
           -ICore/DSPAudio \
           -ICore/Scene/Pattern \
@@ -80,8 +80,8 @@ SRCS = \
   Core/Menu/Cc2Text.c \
   Core/Menu/copyClearTools.c \
   Core/Menu/screensaver.c \
-  Core/Preset/presetManager.c \
-  Core/Preset/ParameterArray.c \
+  Core/Scene/Preset/presetManager.c \
+  Core/Scene/Preset/ParameterArray.c \
   Core/MIDI/FIFO.c \
   Core/MIDI/MidiRealtime.c \
   Core/MIDI/Uart.c \

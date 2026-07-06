@@ -24,7 +24,6 @@ enum Seq_QuantisationEnum
 
 extern uint8_t seq_activePattern;
 extern uint8_t seq_newPatternAvailable;
-extern uint8_t seq_selectedStep;
 extern uint8_t seq_resetBarOnPatternChange;
 
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note);

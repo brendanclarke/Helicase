@@ -138,7 +138,7 @@ static void midiParser_setMorphFromModWheel(uint8_t value)
 uint8_t midiParser_getVoiceMidiNote(uint8_t voice)
 {
 	if (voice >= 7u)
-		return SEQ_DEFAULT_NOTE;
+		return PAT_DEFAULT_NOTE;
 
 	if (midi_NoteOverride[voice] != 0u)
 		return midi_NoteOverride[voice];

@@ -130,9 +130,6 @@ make && make img  → build/LXRV2_lxr02.img
     │   ├── CcNr2Text.h
     │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
-    ├── Preset/
-    │   ├── ParameterArray.h/c       ← supersedes Parameters.h; NUM_PARAMS=275
-    │   └── presetManager.c/h        ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── MIDI/
     │   ├── Uart.c/h                 ← USART3, 31250 baud, interrupt-driven dual FIFO (realtime + normal)
     │   ├── MidiRealtime.c/h         ← 32-entry timestamped SPSC ring for MIDI_CLOCK/START/CONTINUE/STOP
@@ -144,11 +141,14 @@ make && make img  → build/LXRV2_lxr02.img
     │   ├── SeqStep.h
     │   └── valueShaper.h
     ├── Scene/
-    │   └── Pattern/
-    │       ├── PatternData.c/h      ← pattern/track/step storage and edit API
-    │       ├── EuklidGenerator.c/h  ← pattern generator
-    │       ├── SomData.c/h          ← SOM data tables
-    │       └── SomGenerator.c/h     ← SOM pattern/performance generator
+    │   ├── Pattern/
+    │   │   ├── PatternData.c/h      ← pattern/track/step storage and edit API
+    │   │   ├── EuklidGenerator.c/h  ← pattern generator
+    │   │   ├── SomData.c/h          ← SOM data tables
+    │   │   └── SomGenerator.c/h     ← SOM pattern/performance generator
+    │   └── Preset/
+    │       ├── ParameterArray.h/c   ← supersedes Parameters.h; NUM_PARAMS=275
+    │       └── presetManager.c/h    ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── SampleRom/
     │   ├── SampleMemory.c/h         ← sample flash metadata/runtime cache, 120 entries, loop flags
     │   └── sampleFlash.c/h          ← guarded F765 sector 6-11 erase/program helpers

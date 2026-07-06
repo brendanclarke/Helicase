@@ -37,6 +37,7 @@
 | 026 | 2026-05-25 | local working directory `lxr02-037_port/` | Load/save button glitch root-cause audit (fix pending menu.c); filesystem malformed-file name fallthrough fix (afatfs_feof pattern) |
 | 027 | 2026-07-04 | local working directory, branch `dev-burst-reduction` | Main-loop burst reduction: chunked kit/all/performance sound apply; AUDIO_DMA_FRAMES left at 96 |
 | 028 | 2026-07-05 | local working directory, branch `dev-burst-reduction` | frontPanelParser removed: direct Menu/Button/LED/Preset/MIDI/Pattern/Sequencer APIs; PatternData + Scene/Pattern introduced |
+| 029 | 2026-07-06 | local working directory, branch `dev-burst-reduction` | Pattern storage ownership pass + Preset folder move: Sequencer raw pattern storage access removed, PatternData APIs expanded, `Core/Preset` moved to `Core/Scene/Preset`, staging/globals audits written |
 
 ---
 
@@ -154,6 +155,10 @@ Session 027 audited `BURST_REDUCTION.md` against live code, wrote `BURST_REDUCTI
 Session 028 removed the obsolete single-CPU front-panel parser bridge instead of replacing it with another mediation layer. `Core/MIDI/frontPanelParser.c/h` were deleted; front-panel opcodes were replaced by direct owner APIs in Menu, buttonHandler, ledHandler, Preset, MidiParser, Sequencer, copy/clear, filesystem, and new PatternData. Pattern-owned data moved under new `Core/Scene/Pattern/` with `PatternData.c/h`; Euklid and SOM files moved there too. LED reverse feedback is now a `SeqLedState` dirty-byte payload drained by `led_processSeqLedState()` in the foreground main loop. Pattern/track/step/automation edits now enter through `pat_*` APIs; sound parameter writes enter through Preset; MIDI config writes enter through MidiParser; transport/mute/roll remain Sequencer-owned. A second pass added detailed comments explaining every new direct-call boundary and risk. `make && make img` passed after the functional removal; the comments-only pass passed `make`. Parser/protocol greps were clean in live code, with remaining hits only in documentation/comments.
 - **Find here**: `REMOVE_FPP_AUDIT_2.md`, `MODULE_INTERCHANGE_SPEC.md`, `Core/Scene/Pattern/PatternData.c/h`, `led_processSeqLedState()`, direct `pat_*` APIs, deleted `Core/MIDI/frontPanelParser.c/h`
 
+### 029 — Pattern Storage Ownership + Preset Folder Move (2026-07-06)
+Session 029 completed `SCOPING_TARGETS.md` 1.3 and 1.4 as mechanical ownership/refactor work. Pattern storage fields/constants were renamed to `pat_*`/`PAT_*`; the transitional `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, and `SEQ_NEXT_RANDOM*` names were eliminated from live code. Sequencer still owns timing, transport, quantization, runtime step indices, MIDI output, and recording gates, but storage reads/writes now go through PatternData APIs such as `pat_readStep()`, `pat_getEffectiveTrackLength()`, `pat_recordNote()`, `pat_eraseMainStepSubSteps()`, `pat_commitStagedPattern()`, and `pat_setAllShuffle()`. Filesystem shuffle imports now go through PatternData. Oscillator, MIDI, SOM, and Sequencer default-note/random-pattern references now use `PAT_DEFAULT_NOTE` / `PAT_NEXT_RANDOM`. `Core/Preset/` was moved intact to `Core/Scene/Preset/`, the Makefile include/source paths were updated, `main.c` now includes `ParameterArray.h` directly, and Preset public names intentionally stayed `preset_*`/`parameterArray_*`. New audits documented staging buffers/continuation state and global-parameter duplication, with future direction: one active-pattern temporary buffer until 17th Scene/background-bank-load design, leave new filesystem buffers alone, and eventually replace raw globals with scene/bank/system settings structs. `make`, `make img`, stale-path greps, and `git diff --check` passed.
+- **Find here**: `029_SESSION_HANDOFF_LOG.md`, `Core/Scene/Pattern/PatternData.c/h`, `Core/Sequencer/sequencer.c`, `Core/Hardware/SD/filesystem.c`, `Core/Scene/Preset/`, `STAGING_AUDIT.md`, `GLOBALS_STAGING_AUDIT.md`
+
 ---
 
 ## Key Cross-Session Facts (quick lookup)
@@ -228,7 +233,10 @@ Session 028 removed the obsolete single-CPU front-panel parser bridge instead of
 | Sequencer sources imported from original LXR: sequencer + EuklidGenerator + SomData + SomGenerator; sequencer_.c retained as legacy reference | 014 |
 | frontPanelParser.c/h deleted; protocol opcodes replaced by direct owner APIs and `Core/Scene/Pattern/PatternData.c/h` | 028 |
 | `led_processSeqLedState()` drains Sequencer LED dirty flags in the foreground main loop; do not move it to TIM3 without auditing Menu/button/LED state access | 028 |
-| New Pattern API boundary: UI/copy/filesystem/generator code should call `pat_*`; remaining `seq_patternSet`/`seq_tmpPattern` names are compatibility macros only | 028 |
+| Pattern API boundary: UI/copy/filesystem/generator code should call `pat_*`; Sequencer no longer exposes `seq_patternSet`/`seq_tmpPattern`/`seq_selectedStep` compatibility names in live code | 028, 029 |
+| `Core/Preset` moved to `Core/Scene/Preset`; public names remain `preset_*`, `parameterArray_*`, `paramArray_*`, and `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign | 029 |
+| Active-pattern load staging buffer (`pat_tmpPattern`) stays for now and should come out with the 17th Scene/background-bank-load design; it should be the only necessary temporary pattern storage | 029 |
+| Future globals direction: replace raw duplicated globals with canonical settings structs split scene-level, bank-level, and system-level; exact membership TBD during Scene/file redesign | 029 |
 | Button/menu and LED audit closures are documented in BUTTONHANDLER_MENU_AUDIT_RESULTS.md and LED_AUDIT_SUMMARY.md | 014 |
 | Reverse sequencer SEQ_CC feedback must use seq_notifyFront(), not frontPanel_sendData(), due direction-colliding command values | 015 |
 | SeqLedState drains sequencer LED events in main loop; do not move consumer to ISR without race audit | 015 |

@@ -19,8 +19,8 @@ make && make img   →   build/LXRV2_lxr02.img
 
 **Current working source**: repository root, branch `dev-burst-reduction`.
 
-**Session 028 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/028_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, also read `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
+**Session 029 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/029_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal and Pattern/Preset ownership moves, also read `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
@@ -30,6 +30,7 @@ Session 025 fixes SD/global load compatibility and rear-jack behavior: FAT12/exF
 Session 026 diagnoses the load/save button display glitch (one-frame edit-mode flash caused by `menu_resetSaveParameters()` firing before `menu_activePage` is updated in `menu_switchPage()` — fix documented in `LOAD_SAVE_GLITCH_ASSESSMENT.md`, NOT YET APPLIED to `menu.c`); fixes `filesystem_loadName_tick()` and `filesystem_loadKit_tick()` phase-2 zero-byte/short-file hang using correct `afatfs_feof()` EOF idiom; malformed files now show `-` in the slot-name display. Note: `PAR_EXT_SYNC` occupies the LXR037 `PAR_FETCH` parameter slot — potential cross-system file interchange mismatch; TODO before any LXR037 file interchange.
 Session 027 chunks runtime kit/all/performance sound-apply completion: after audio starts, `menu_startSoundApply()` / `menu_tickSoundApply()` drive `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` so one voice's velocity/LFO modulation routing is applied per foreground pass; boot-time pre-audio apply remains synchronous. `AUDIO_DMA_FRAMES` remains 96; 64-frame latency testing is deferred until the chunked path is hardware-tested.
 Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former parser opcodes are direct owner calls: Pattern edits through `pat_*` in `Core/Scene/Pattern/PatternData.c`, LED feedback through `SeqLedState` plus foreground `led_processSeqLedState()`, sound parameters through Preset, MIDI config through MidiParser, and transport/playback through Sequencer. Euklid/SOM now live in `Core/Scene/Pattern/`.
+Session 029 completes the PatternData storage-ownership pass and Preset folder move. `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, and `SEQ_NEXT_RANDOM*` are gone from live code; Sequencer reads/writes pattern storage through `pat_*` helpers while keeping timing/transport/recording gates. `Core/Preset/` is now `Core/Scene/Preset/`; public names remain `preset_*`, `parameterArray_*`, and `paramArray_*`. `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign. Staging/global audits are in `STAGING_AUDIT.md` and `GLOBALS_STAGING_AUDIT.md`.
 
 ---
 
@@ -89,7 +90,8 @@ Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former pars
 │       ├── 025_SESSION_HANDOFF_LOG.md
 │       ├── 026_SESSION_HANDOFF_LOG.md
 │       ├── 027_SESSION_HANDOFF_LOG.md
-│       └── 028_SESSION_HANDOFF_LOG.md
+│       ├── 028_SESSION_HANDOFF_LOG.md
+│       └── 029_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h
@@ -134,9 +136,6 @@ Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former pars
     │   ├── CcNr2Text.h
     │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
-    ├── Preset/
-    │   ├── ParameterArray.h/c       ← supersedes Parameters.h; NUM_PARAMS=275
-    │   └── presetManager.c/h        ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── MIDI/
     │   ├── Uart.c/h                 ← USART3, 31250 baud, interrupt-driven dual FIFO (realtime + normal)
     │   ├── MidiRealtime.c/h         ← 32-entry timestamped SPSC ring for MIDI_CLOCK/START/CONTINUE/STOP
@@ -148,11 +147,14 @@ Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former pars
     │   ├── SeqStep.h
     │   └── valueShaper.h
     ├── Scene/
-    │   └── Pattern/
-    │       ├── PatternData.c/h      ← pattern/track/step storage and edit API
-    │       ├── EuklidGenerator.c/h  ← pattern generator
-    │       ├── SomData.c/h          ← SOM data tables
-    │       └── SomGenerator.c/h     ← SOM pattern/performance generator
+    │   ├── Pattern/
+    │   │   ├── PatternData.c/h      ← pattern/track/step storage and edit API
+    │   │   ├── EuklidGenerator.c/h  ← pattern generator
+    │   │   ├── SomData.c/h          ← SOM data tables
+    │   │   └── SomGenerator.c/h     ← SOM pattern/performance generator
+    │   └── Preset/
+    │       ├── ParameterArray.h/c   ← supersedes Parameters.h; NUM_PARAMS=275
+    │       └── presetManager.c/h    ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── SampleRom/
     │   ├── SampleMemory.c/h         ← sample flash metadata/runtime cache, 120 entries, loop flags
     │   └── sampleFlash.c/h          ← guarded F765 sector 6-11 erase/program helpers
@@ -316,7 +318,7 @@ The STM32F765 has an internal 12-bit DAC on PA4 (DAC1_OUT) and PA5 (DAC2_OUT). T
 
 **Architecture:**
 ```
-presetManager.c / kitBrowser.c
+Core/Scene/Preset/presetManager.c / kitBrowser.c
   → filesystem.c (typed operations: kit/morph/pattern/performance/all/globals)
     → asyncfatfs/asyncfatfs.c (afatfs_fopen/fread/fwrite/fclose/poll)
       → asyncfatfs/sdcard_lxr02.c (sector transfer FSM, 16 bytes/burst)
@@ -456,8 +458,11 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - `led_processSeqLedState()` drains sequencer LED events in the main loop. Do not move it to an ISR without auditing PatternData and LED RMW races.
 - `Core/MIDI/frontPanelParser.c/h` is deleted. Do not replace it with a generic bridge; call owner APIs directly.
 - New pattern/track/step/automation work should enter through `pat_*` APIs in `Core/Scene/Pattern/PatternData.c/h`.
-- `seq_patternSet` and `seq_tmpPattern` are compatibility macros for remaining playback/filesystem direct-layout users only. Shrink these references in later Pattern refactors.
+- Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or `seq_selectedStep` compatibility names in live code. Playback and recording must use PatternData helpers such as `pat_readStep()`, `pat_getEffectiveTrackLength()`, `pat_recordNote()`, and `pat_eraseMainStepSubSteps()`.
+- `pat_tmpPattern` is the remaining active-pattern load buffer. Leave it until the 17th Scene/background-bank-load design replaces it; it should be the only temporary pattern storage needed.
 - `seq_offsetTrackStepIndexForRotation()` is a narrow runtime hook used by PatternData; UI code should call `pat_setTrackRotation()`.
+- `Core/Scene/Preset/` owns Preset code location. Public names intentionally remain `preset_*`, `parameterArray_*`, and `paramArray_*`; do not rename only part of this API.
+- `parameter_values[]` and `parameters2[]` still live in Menu and are known future migration targets for the instrument/file redesign, not a cleanup to do casually.
 - `BUTTON_TIMEOUT` is milliseconds on this port (`500u`), not original AVR ticks (`38 * 13.107ms`).
 - `EuklidGenerator.c` matches original LXR. PATGEN distribution depends on `__CLZ(0) == 32`; do not replace the shim with `__builtin_clz()`.
 - `seq_tick()` is owned by `TIM3_IRQHandler`. **Do NOT add seq_tick() back to the main loop.**
@@ -488,13 +493,19 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Known Issues / Technical Debt
 
+### Resolved / Changed in Session 029
+- Pattern storage ownership moved further into `Core/Scene/Pattern/PatternData.c/h`. Live code no longer uses `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, or `SEQ_NEXT_RANDOM*`.
+- PatternData now owns staged pattern commit, playback-safe step reads, effective-length reads, live note record mutation, live erase mutation, and legacy file shuffle import through `pat_commitStagedPattern()`, `pat_readStep()`, `pat_getStepProbability()`, `pat_getStepNote()`, `pat_getStepVolume()`, `pat_getEffectiveTrackLength()`, `pat_recordNote()`, `pat_eraseMainStepSubSteps()`, and `pat_setAllShuffle()`.
+- Sequencer still owns timing, transport, quantization, runtime step indices, MIDI output, random next-pattern resolution, and recording/erase gates, but storage mutation/readbacks now go through `pat_*` helpers.
+- `Core/Preset/` moved to `Core/Scene/Preset/`. `Makefile` uses `-ICore/Scene/Preset` and sources `Core/Scene/Preset/presetManager.c` / `Core/Scene/Preset/ParameterArray.c`. `main.c` includes `ParameterArray.h` directly for `parameterArray_init()`.
+- Staging/global audits written: active-pattern load staging stays until the 17th Scene/background-bank-load design; new `filesystem.c` scratch/snapshot buffers and load/save menu polling are intentionally left alone; globals should eventually become canonical scene-level, bank-level, and system-level settings structs.
+
 ### Resolved / Changed in Session 028
 - `Core/MIDI/frontPanelParser.c/h` removed from live code. Former protocol opcodes are now direct owner calls documented in `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
 - New `Core/Scene/Pattern/PatternData.c/h` owns Pattern storage/edit APIs; Euklid and SOM moved from `Core/Sequencer/` to `Core/Scene/Pattern/`.
 - Sequencer LED feedback no longer uses parser callbacks. Sequencer writes `seq_ledState`; foreground `led_processSeqLedState()` performs LED/Menu/Button-aware rendering in ledHandler.
 - Sound parameter application is direct through Preset (`preset_applySoundParameter`, `preset_applyVelocityModTarget`, `preset_applyLfoModTarget`); MIDI channel/routing/filter config is direct through MidiParser setters.
 - Pattern file serialization reaches PatternData through pointer helpers and uses `PATTERNDATA_STAGING_PATTERN` for active-pattern load staging.
-- Remaining `seq_patternSet`/`seq_tmpPattern` use is transitional compatibility, not the target API.
 
 ### Resolved / Changed in Session 027
 - Runtime kit/all/performance load completion no longer applies all six sound modulation-routing voices in one foreground burst. After audio starts, `menu_startSoundApply()` arms the chunked apply and `menu_tickSoundApply()` lets `preset_tickDrumsetApply()` apply one voice per foreground pass before operation-specific UI/global/pattern follow-up runs. `AUDIO_DMA_FRAMES` remains 96; direct 64-frame latency testing is deferred until this path is hardware-tested.

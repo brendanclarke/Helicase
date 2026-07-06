@@ -1,0 +1,592 @@
+# Session 029 Handoff Log - Pattern Storage Ownership and Preset Folder Move
+
+DATE: 2026-07-06
+
+SESSION GOAL: Complete `SCOPING_TARGETS.md` 1.3 and 1.4 as mechanical
+ownership/refactor work. Move pattern storage/access out of Sequencer into
+PatternData with `pat_*` naming, then move `Core/Preset/` into `Core/Scene/`.
+Also audit staging/global duplication candidates and update permanent session
+knowledge.
+
+COMPLETED: Pattern storage fields/constants and the remaining Sequencer-owned
+pattern storage mutations were moved or renamed under PatternData. Sequencer now
+uses PatternData read/write helpers for pattern storage while retaining timing,
+transport, quantization, runtime step indices, MIDI output, and recording gates.
+`Core/Preset/` was moved intact to `Core/Scene/Preset/` with public names
+unchanged. Wrote staging/global audits and updated permanent knowledge files.
+
+VERIFIED ON HARDWARE: No. Build-only verification this session.
+
+CHANGES THIS SESSION:
+- `PATTERN_MOVE_AUDIT.md`: Created and maintained during the 1.3 pass. It
+  records the PatternData target functions, explicit non-targets, implementation
+  notes, special review items, and verification results.
+- `Core/Scene/Pattern/PatternData.c`: Expanded PatternData from the initial
+  Session 028 direct-call owner into the actual storage owner for former
+  Sequencer pattern storage access. Added staged-pattern commit, playback-safe
+  step readers, effective track length reader, all-pattern shuffle import,
+  note-record mutation, live-erase mutation, and renamed all storage fields to
+  `pat_*`.
+- `Core/Scene/Pattern/PatternData.h`: Updated public storage names, constants,
+  prototypes, and comments. Removed `seq_patternSet` / `seq_tmpPattern`
+  compatibility macros and added detailed contract comments for new helpers.
+- `Core/Sequencer/sequencer.c`: Removed direct bulk pattern storage commit and
+  raw step/main-step/length reads. Removed local storage wrappers and mutation
+  helpers that belonged in PatternData. Rewired playback, recording, live erase,
+  pattern change, external-clock positioning, and start-position reset through
+  `pat_*` helpers.
+- `Core/Sequencer/sequencer.h`: Removed `extern uint8_t seq_selectedStep;`.
+- `Core/Hardware/SD/filesystem.c`: Pattern and container shuffle loads now call
+  `pat_setAllShuffle()` instead of writing `parameter_values[PAR_SHUFFLE]` and
+  calling `seq_setShuffle()` directly.
+- `Core/DSPAudio/Oscillator.c`: Includes `PatternData.h` and uses
+  `PAT_DEFAULT_NOTE` as the neutral sequencer/pattern note reference.
+- `Core/MIDI/MidiParser.c`: Uses `PAT_DEFAULT_NOTE` for invalid voice MIDI note
+  fallback.
+- `Core/Scene/Pattern/SomGenerator.c`: Uses `PAT_DEFAULT_NOTE` for generated
+  SOM triggers.
+- `PRESET_FOLDER_MOVE_AUDIT.md`: Created and updated with the 1.4 Preset folder
+  move audit, implementation notes, include clients, function inventories, and
+  verification results.
+- `Core/Scene/Preset/ParameterArray.c/.h`: Moved from `Core/Preset/` with file
+  contents and public names unchanged.
+- `Core/Scene/Preset/presetManager.c/.h`: Moved from `Core/Preset/` with file
+  contents and public names unchanged.
+- `Core/Preset/`: Removed after the four files moved.
+- `Makefile`: Replaced `-ICore/Preset` with `-ICore/Scene/Preset`; replaced
+  source paths for `presetManager.c` and `ParameterArray.c`.
+- `main.c`: Added explicit `#include "ParameterArray.h"` because
+  `main.c` calls `parameterArray_init()` directly.
+- `STAGING_AUDIT.md`: Created staging/temporary-state audit. Captures decisions
+  to keep active-pattern staging until the 17th Scene/background-bank-load
+  design, leave new filesystem scratch/snapshot buffers alone, leave menu
+  sound-apply continuation flags for now, and defer `parameter_values[]` /
+  `parameters2[]` migration until the instrument file redesign.
+- `GLOBALS_STAGING_AUDIT.md`: Created global duplication audit. Lists all 23
+  current globals, their offsets, runtime mirrors, load/save paths, and the
+  preferred future direction: canonical settings structs split into scene-level,
+  bank-level, and system-level settings.
+- `SCOPING_TARGETS.md`: Updated design notes outside the mechanical code move,
+  including dynamic step-pool structural clarifications, automation hold/default
+  record-playback model notes, and Phase 6 memory/DTCM clarifications.
+- `knowledge_files/log_archive/000_SESSION_INDEX.md`: Added Session 029 row,
+  summary, and cross-session lookup facts.
+- `knowledge_files/MODULE_INTERCHANGE_SPEC.md`: Updated to Session 029
+  baseline. It now describes PatternData's expanded API, Sequencer's remaining
+  runtime ownership, Preset's new `Core/Scene/Preset` location, and
+  ParameterArray's current/future ownership boundary.
+- `MEMORY.md`: Updated session pointer, repository tree, Preset path, Pattern
+  reminders, and Session 029 known-resolved/changed notes.
+- `build/LXRV2_lxr02.img`: Regenerated by `make img`.
+
+KNOWN ISSUES INTRODUCED: None known from build verification. Hardware behavior
+was not tested. The Git worktree shows the Preset folder move as deleted
+`Core/Preset/*` plus untracked `Core/Scene/Preset/*` until staged, which is
+normal for an unstaged directory move.
+
+KNOWN ISSUES RESOLVED:
+- Live code no longer uses `seq_patternSet`, `seq_tmpPattern`,
+  `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, or `SEQ_NEXT_RANDOM*`.
+- Sequencer no longer indexes PatternData storage directly for the moved
+  playback/record/erase/shuffle/staging paths.
+- `Core/Preset/` no longer exists in live source/build paths.
+- `main.c` no longer relies on a transitive declaration for
+  `parameterArray_init()`.
+
+NEXT SESSION RECOMMENDED GOAL: Hardware smoke-test the Session 028/029
+ownership changes, especially pattern playback, live recording, live erase,
+active-pattern load while running, shuffle load/save, kit/all/performance load,
+morph, and boot preset/global load. After hardware confirmation, the next
+architectural target can be the 17th Scene/background-bank-load design or the
+instrument file redesign, not further incidental cleanup of the old staging
+state.
+
+BLOCKERS: Hardware testing is still needed. The active-pattern staging buffer,
+menu sound-apply continuation flags, and Menu-owned parameter arrays are
+deliberately retained until larger Scene/file/instrument redesign decisions are
+made.
+
+CRITICAL REMINDERS FOR NEXT SESSION:
+- Do not reintroduce `frontPanelParser` or a replacement bridge.
+- Pattern storage work should enter through `pat_*` APIs in
+  `Core/Scene/Pattern/PatternData.c/h`.
+- Sequencer still owns timing, transport, quantization, runtime step indices,
+  MIDI output, and recording/erase gates.
+- `pat_tmpPattern` is the only active-pattern load staging buffer to keep for
+  now; remove it only with the 17th Scene/background-bank-load design.
+- `Core/Scene/Preset/` is the Preset code location. Public names intentionally
+  remain `preset_*`, `parameterArray_*`, and `paramArray_*`.
+- `parameter_values[]` and `parameters2[]` still live in Menu. Move them only
+  during the instrument file redesign.
+- Preferred future globals direction is Option C from `GLOBALS_STAGING_AUDIT.md`:
+  canonical scene-level, bank-level, and system-level settings structs.
+
+## Detailed Notes
+
+### Pattern Move Scope And Decisions
+
+The 1.3 goal was a refactor/function move and rename, not a data-structure
+rewrite. The target was mostly comprehensive for pattern storage/access in
+`Core/Sequencer/sequencer.c`, with moved code landing in
+`Core/Scene/Pattern/PatternData.c` and using `pat_*` naming.
+
+Explicit decisions preserved from the audit:
+
+- Shuffle is Pattern-owned. PatternData stores the user/file-facing shuffle
+  value and bridges to Sequencer's current global audible coefficient.
+- `Core/Scene/Pattern/EuklidGenerator.c`, `SomData.c`, and `SomGenerator.c`
+  were not move targets. Their functions stayed in place and kept their names.
+  Only required call-site/constant updates were made.
+- Moved/changed code received expanded comments describing ownership, callers,
+  inputs/outputs, side effects, risks, and confederate modules.
+- Field renames were source-only; field order, field type, and binary layout
+  were not changed.
+
+### PatternData Storage And Constants
+
+Current PatternData-visible layout:
+
+- `NUM_TRACKS = 7`, `NUM_PATTERN = 8`, `NUM_STEPS = 128`.
+- `PAT_DEFAULT_NOTE = 63`.
+- `PAT_NEXT_RANDOM = 0x08`, `PAT_NEXT_RANDOM_PREV = 0x09`.
+- `Step`: 7-byte legacy step record: volume/active bit, probability, note, two
+  automation destinations and values.
+- `PatternSetting`: per-pattern `changeBar` and `nextPattern`.
+- `LengthRotate`: packed byte, 4-bit length and 4-bit rotation; length 0 means
+  16 main steps.
+- `PatternSet`: full pattern storage.
+- `TempPattern`: one-pattern active-load staging buffer.
+
+Renamed storage:
+
+- `seq_subStepPattern` -> `pat_subStepPattern`
+- `seq_mainSteps` -> `pat_mainSteps`
+- `seq_patternSettings` -> `pat_patternSettings`
+- `seq_patternLengthRotate` -> `pat_patternLengthRotate`
+- `seq_patternSet` -> `pat_patternSet`
+- `seq_tmpPattern` -> `pat_tmpPattern`
+
+Removed transitional names:
+
+- `seq_patternSet`
+- `seq_tmpPattern`
+- `seq_selectedStep`
+- `SEQ_DEFAULT_NOTE`
+- `SEQ_NEXT_RANDOM`
+- `SEQ_NEXT_RANDOM_PREV`
+
+### PatternData API Added Or Expanded
+
+New or substantially changed PatternData APIs:
+
+- `pat_commitStagedPattern(pattern)`
+  - Commits `pat_tmpPattern` into one live pattern slot. Filesystem fills the
+    staging buffer; Sequencer chooses the safe pattern-boundary commit time.
+- `pat_readStep(pattern, track, step, out)`
+  - Copies one `Step` snapshot for Sequencer playback inspection. This lets
+    automation parsing and MIDI echo velocity read step data without indexing
+    PatternData arrays directly.
+- `pat_getStepProbability(pattern, track, step)`
+  - Returns stored probability or 0 on invalid coordinates so invalid reads do
+    not trigger voices.
+- `pat_getStepNote(pattern, track, step)`
+  - Returns stored note or `PAT_DEFAULT_NOTE` on invalid coordinates.
+- `pat_getStepVolume(pattern, track, step)`
+  - Returns the stored lower 7-bit velocity or 0 on invalid coordinates.
+- `pat_getEffectiveTrackLength(pattern, track)`
+  - Returns a nonzero playback length. Converts stored length 0 to 16 so
+    Sequencer wrap/external-clock math cannot divide or wrap by zero.
+- `pat_setAllShuffle(value)`
+  - Imports the legacy one-byte `.pat`/container shuffle block into every
+    current pattern slot, refreshes `PAR_SHUFFLE`, and bridges to
+    `seq_setShuffle()`.
+- `pat_recordNote(pattern, track, step, velocity, note)`
+  - Performs the actual storage mutation for live note recording: suppresses the
+    first sub-step of a previously inactive main-step cluster when needed,
+    writes note/velocity/probability/active state, and sets the parent main-step
+    bit.
+- `pat_eraseMainStepSubSteps(pattern, track, mainStep)`
+  - Clears one main-step bit and resets its eight sub-steps, then reactivates
+    the first sub-step to preserve the original LXR invariant.
+
+Existing PatternData APIs that remain important:
+
+- Validation: `pat_trackValid()`, `pat_patternValid()`, `pat_stepValid()`.
+- Owner-level pointers: `pat_stepPtr()`, `pat_mainStepsPtr()`,
+  `pat_patternSettingPtr()`, `pat_lengthRotatePtr()`.
+- Step/main-step editing: `pat_setMainStep()`, `pat_setMainStepsRaw()`,
+  `pat_toggleStep()`, `pat_toggleMainStep()`.
+- Step fields: `pat_setStepNote()`, `pat_setStepVolume()`,
+  `pat_setStepProbability()`, `pat_setStepAutomationDestination()`,
+  `pat_setStepAutomationValue()`.
+- Pattern/track settings: `pat_setPatternChangeBar()`,
+  `pat_setPatternNext()`, `pat_getPatternChangeBar()`,
+  `pat_getPatternNext()`, `pat_setTrackLength()`, `pat_getTrackLength()`,
+  `pat_setTrackRotation()`, `pat_getTrackRotation()`, `pat_setShuffle()`,
+  `pat_getShuffle()`.
+- Copy/clear: `pat_clearTrack()`, `pat_clearPattern()`,
+  `pat_clearAutomation()`, `pat_copyTrack()`, `pat_copyPattern()`.
+- Automation/edit state: `pat_setSelectedStep()`,
+  `pat_setActiveAutomationTrack()`, `pat_getActiveAutomationTrack()`,
+  `pat_armAutomationStep()`, `pat_recordAutomation()`,
+  `pat_recordArmedAutomation()`.
+- Menu sync: `pat_applyStepToMenu()`, `pat_applyPatternSettingsToMenu()`,
+  `pat_applyTrackSettingsToMenu()`.
+
+### Sequencer Changes
+
+Sequencer remains runtime owner for:
+
+- TIM3 playback tick ownership and step walk timing.
+- Transport state.
+- Mute and roll state.
+- Quantization.
+- External sync and runtime step indices.
+- MIDI note output and program change behavior.
+- Random next-pattern resolution.
+- Recording/erase gates and target-pattern timing.
+
+Storage changes in `sequencer.c`:
+
+- Removed `seq_activateTmpPattern()`. Sequencer now calls
+  `pat_commitStagedPattern(seq_activePattern)` at the pattern boundary where a
+  staged load can become audible.
+- Removed `seq_intIsStepActive()` and `seq_intIsMainStepActive()` wrappers.
+  Playback calls `pat_isStepActive()` and `pat_isMainStepActive()` directly.
+- Removed `seq_eraseStepAndSubSteps()`. Live erase delegates storage mutation
+  to `pat_eraseMainStepSubSteps()`.
+- Removed `seq_resetNote()`. Step reset semantics live in PatternData's static
+  reset helper.
+- `seq_triggerVoice()` now obtains a `Step` snapshot through `pat_readStep()`
+  for automation parsing and MIDI echo velocity.
+- `seq_determineNextPattern()` now reads `changeBar` and `nextPattern` through
+  `pat_getPatternChangeBar()` and `pat_getPatternNext()`.
+- `seq_nextStep()` now uses `pat_getEffectiveTrackLength()`,
+  `pat_isMainStepActive()`, `pat_isStepActive()`,
+  `pat_getStepProbability()`, `pat_getStepVolume()`, and
+  `pat_getStepNote()`.
+- `seq_triggerNextMasterStep()` now uses `pat_getEffectiveTrackLength()`.
+- `seq_setRunning()` continues to reset transient rotations through
+  `pat_setTrackRotation()`.
+- `seq_recordAutomation()` checks active main/sub-step state through PatternData
+  and writes automation through `pat_recordAutomation()` /
+  `pat_recordArmedAutomation()`.
+- `seq_addNote()` keeps quantization and target-pattern choice, then calls
+  `pat_recordNote()`.
+- `seq_setStepIndexToStart()` reads rotation and length through
+  `pat_getTrackRotation()` and `pat_getEffectiveTrackLength()`.
+- Roll one-shot paths use `PAT_DEFAULT_NOTE`.
+- Random pattern comparison uses `PAT_NEXT_RANDOM`.
+
+### Filesystem Pattern Serialization
+
+`filesystem.c` remains the filesystem owner and is not a PatternData move
+target. It still uses PatternData pointer helpers for serialization:
+
+- `filesystem_patternStepPtr()`
+- `filesystem_patternMainPtr()`
+- `filesystem_patternSettingPtr()`
+- `filesystem_patternLengthPtr()`
+
+When loading the currently active pattern while Sequencer is running, these
+helpers choose `PATTERNDATA_STAGING_PATTERN` so the async stream writes into
+`pat_tmpPattern`.
+
+Session 029 fixed the shuffle ownership edge:
+
+- `.pat` load shuffle import calls `pat_setAllShuffle(staging_buf[0])`.
+- `.all` / `.prf` container pattern payload shuffle import calls
+  `pat_setAllShuffle(staging_buf[0])`.
+
+The file format is unchanged: legacy pattern/container payloads still carry one
+shuffle byte for the pattern set, not per-pattern shuffle values.
+
+### Other Pattern Call-Site Updates
+
+- `Oscillator.c` includes `PatternData.h` and uses `PAT_DEFAULT_NOTE` in
+  `osc_setBaseNote()` and `osc_recalcFreq()`. PatternData is only the neutral
+  note constant owner here; DSP state mutation remains oscillator-owned.
+- `MidiParser.c` uses `PAT_DEFAULT_NOTE` for invalid voice MIDI note fallback.
+- `SomGenerator.c` uses `PAT_DEFAULT_NOTE` for default generated voice triggers.
+- `EuklidGenerator.c`, `SomData.c`, and `SomGenerator.c` were left in
+  `Core/Scene/Pattern/` and not renamed, per the audit decision.
+
+### Preset Folder Move
+
+The 1.4 goal was a folder move, not a public API rename or data ownership
+rewrite. The destination is:
+
+- `Core/Scene/Preset/`
+
+Moved files:
+
+- `Core/Preset/ParameterArray.c` -> `Core/Scene/Preset/ParameterArray.c`
+- `Core/Preset/ParameterArray.h` -> `Core/Scene/Preset/ParameterArray.h`
+- `Core/Preset/presetManager.c` -> `Core/Scene/Preset/presetManager.c`
+- `Core/Preset/presetManager.h` -> `Core/Scene/Preset/presetManager.h`
+
+Line counts at move time:
+
+- `ParameterArray.c`: 681
+- `ParameterArray.h`: 448
+- `presetManager.c`: 666
+- `presetManager.h`: 129
+- Total: 1,924
+
+Build wiring:
+
+- `Makefile` include path changed from `-ICore/Preset` to
+  `-ICore/Scene/Preset`.
+- `Makefile` source paths changed to
+  `Core/Scene/Preset/presetManager.c` and
+  `Core/Scene/Preset/ParameterArray.c`.
+- Other includes remain bare names such as `#include "presetManager.h"` and
+  `#include "ParameterArray.h"`, resolved by the Makefile include path.
+- `main.c` now includes `ParameterArray.h` explicitly because it calls
+  `parameterArray_init()`.
+
+Public naming decision:
+
+- Keep `preset_*`.
+- Keep `parameterArray_*`.
+- Keep `paramArray_*`.
+- Keep `parameterArray`.
+- Keep `parameter_values[]`, `parameters2[]`, `parameter_dtypes[]`, and
+  `paramToModTarget[]` as current names.
+
+Rationale: this was a mechanical folder move. Renaming public APIs at the same
+time would touch Menu, MIDI, filesystem, main, DSP, and Pattern code without
+changing architecture. The later Scene/Preset redesign can decide whether any
+of these become `scene_*` names.
+
+### Preset Include Clients Preserved
+
+Direct `presetManager.h` clients:
+
+- `main.c`
+- `Core/MIDI/MidiParser.c`
+- `Core/Hardware/frontPanel/buttonHandler.c`
+- `Core/Menu/menu.c`
+- `Core/Hardware/SD/filesystem.c`
+- `Core/Scene/Preset/presetManager.c`
+
+Direct `ParameterArray.h` clients:
+
+- `main.c` after this session's explicit include
+- `Core/Menu/menu.h`
+- `Core/Menu/menu.c`
+- `Core/DSPAudio/DrumVoice.c`
+- `Core/DSPAudio/modulationNode.h`
+- `Core/Hardware/SD/filesystem.c`
+- `Core/Scene/Pattern/PatternData.c`
+- `Core/Scene/Preset/ParameterArray.c`
+- `Core/Scene/Preset/presetManager.c`
+
+### Preset Manager API Inventory
+
+`presetManager` owns async preset status and sound-parameter application:
+
+- `preset_currentName[8]`
+- Status fields: `pm_status`, `pm_completed_op`, `pm_request_slot`,
+  `pm_request_type`.
+- Morph cursor state: `morph_active`, `morph_target_value`,
+  `morph_pass_value`, `morph_request_generation`,
+  `morph_pass_generation`, `morph_index`.
+- Runtime loaded-kit apply cursor: `drumset_apply_active`,
+  `drumset_apply_voice`.
+
+Public functions:
+
+- `preset_init()`
+- `preset_getStatus()`
+- `preset_getCompletedOp()`
+- `preset_getRequestSlot()`
+- `preset_getRequestType()`
+- `preset_ackStatus()`
+- `preset_loadDrumset(presetNr, isMorph)`
+- `preset_saveDrumset(presetNr, isMorph)`
+- `preset_loadGlobals()`
+- `preset_saveGlobals()`
+- `preset_loadPattern(presetNr)`
+- `preset_savePattern(presetNr)`
+- `preset_saveAll(presetNr, isAll)`
+- `preset_loadAll(presetNr, isAll)`
+- `preset_loadName(presetNr, what)`
+- `preset_applyLoadedName()`
+- `preset_sendDrumsetParameters()`
+- `preset_applySoundParameter(paramNr, value, recordAutomation)`
+- `preset_applyVelocityModTarget(voice, targetParam)`
+- `preset_applyLfoModTarget(lfo, targetParam)`
+- `preset_startDrumsetApply()`
+- `preset_tickDrumsetApply()`
+- `preset_morph(morph)`
+- `preset_morphTick()`
+- `preset_getMorphValue(index, morph)`
+
+Important static helpers:
+
+- `preset_completeFilesystemOp(completed_op)`
+- `on_kit_load_complete()`
+- `on_morph_load_complete()`
+- `on_globals_load_complete()`
+- `on_pattern_load_complete()`
+- `on_all_load_complete()`
+- `on_performance_load_complete()`
+- `on_name_load_complete()`
+- `on_kit_save_complete()`
+- `on_morph_save_complete()`
+- `on_globals_save_complete()`
+- `on_pattern_save_complete()`
+- `on_all_save_complete()`
+- `on_performance_save_complete()`
+- `preset_fileTypeFromSaveType(what, hasName)`
+- `preset_applyDrumsetVoice(voice)`
+- `preset_interpolate(a, b, x)`
+- `preset_morphShouldSkip(index)`
+- `preset_morphSendParameter(index, value)`
+
+Primary confederates:
+
+- `filesystem.c`: async typed load/save/name operations.
+- `menu.c`: status polling and post-load follow-up.
+- `MidiParser.c`: legacy CC/CC2 sound application path.
+- `sequencer.c` / PatternData: automation recording.
+- `modulationNode.c/.h` and voice modules: velocity/LFO destination mutation.
+
+### ParameterArray Inventory
+
+`ParameterArray` is the numeric sound parameter id map plus runtime pointer map.
+It is now physically under `Core/Scene/Preset/`, but it does not yet own all
+parameter bytes.
+
+Exports:
+
+- Type tags: `TYPE_UINT8`, `TYPE_FLT`, `TYPE_SPECIAL_F`, `TYPE_UINT32`,
+  `TYPE_SPECIAL_P`, `TYPE_SPECIAL_FILTER_F`.
+- `extern uint8_t parameter_values[]`.
+- `enum ParamEnums`: canonical parameter ids, including sound params,
+  menu-only runtime params, pattern params, and the current global span ending
+  at `NUM_PARAMS`.
+- `ptrValue`.
+- `Parameter`.
+- `extern Parameter parameterArray[END_OF_SOUND_PARAMETERS]`.
+- `paramArray_setParameter(idx, newValue)`.
+- `parameterArray_init()`.
+
+Current ownership warning:
+
+- `parameter_values[]` is still defined in `menu.c`.
+- `parameters2[]` is still defined in `menu.c`.
+- `parameter_dtypes[]` is still defined in `menu.c`.
+- `paramToModTarget[]` is still defined in `Core/Menu/Cc2Text.c`.
+
+Future decision from `STAGING_AUDIT.md`: `parameter_values[]` and
+`parameters2[]` must eventually migrate fully into Preset/Scene as the canonical
+Preset Voice/Kit/Morph endpoint parameter source. Do that during the instrument
+file redesign, not as incidental cleanup.
+
+### Staging Audit Summary
+
+`STAGING_AUDIT.md` classified temporary/staging/deferral state across file
+loading, morph, menu continuation, and related runtime handoffs.
+
+Decisions:
+
+- Whole active-pattern load buffer: leave it. It should come out when the 17th
+  Scene/background-bank-load design exists. It should be the only temporary
+  pattern storage necessary.
+- Filesystem save snapshot buffer for kit/morph/globals: leave it.
+  `filesystem.c` is new code and was built for the current hardware and async
+  filesystem model.
+- Menu sound-apply continuation flags: leave for now, but the audit documents
+  file/load usage by operation so this can become an explicit state-progress
+  struct during filesystem/Scene restructuring.
+- Filesystem one-record scratch buffer: leave it.
+- Global-apply continuation state: interesting cleanup candidate, but larger
+  settings ownership work is required first.
+- Load/save selection deferral: leave it. New load/save menu polling code is
+  intentional.
+- Remaining new/purposeful staging should generally be left alone.
+- `parameter_values[]` and `parameters2[]` migration belongs with the
+  instrument file redesign.
+
+Current menu sound-apply continuation operation split:
+
+- Kit load uses sound apply to update LFO target gap and repaint.
+- Morph load bypasses sound apply and normalizes `parameters2[]`, arms morph,
+  and repaints.
+- Pattern load bypasses sound apply and refreshes pattern settings directly.
+- Globals load uses global apply chunking directly.
+- ALL load chains sound apply, global apply, pattern refresh, storage-busy
+  clearing, repaint/reset, and stale `.all` warning deferral.
+- Performance load chains sound apply, performance globals (`PAR_BPM` and
+  `PAR_BAR_RESET_MODE`), pattern refresh, storage-busy clear, reset, and repaint.
+
+Proposed future shape: replace parallel menu flags with a state-progress struct
+for known file families such as bank settings, scene, kit, morph, pattern,
+performance, all, globals, samples, and loops.
+
+### Globals Duplication Audit Summary
+
+Current global span:
+
+- `PAR_BEGINNING_OF_GLOBALS` starts the raw global byte span.
+- Current span is 23 bytes: `PAR_BPM` through `PAR_OSC_WAVE_INTERP`.
+- Current ids are 252..274 because `NUM_PARAMS` is 275.
+- `glo.cfg` stores exactly this span.
+- `.all` stores this span in the 64-byte container meta field, padded with
+  `0xff`.
+- `.prf` stores only `PAR_BPM` and `PAR_BAR_RESET_MODE`.
+
+Current globals and mirrors:
+
+- `PAR_BPM`: `parameter_values[]` -> `seq_tempo`, applied by `seq_setBpm()`.
+- `PAR_MIDI_CHAN_1..6`: `midi_MidiChannels[0..5]`, applied by
+  `midiParser_setChannel()`.
+- `PAR_EXT_SYNC`: `seq_isSyncExternal` / `seq_autoSyncActiveSource`, applied by
+  `seq_setExtSyncSource()`.
+- `PAR_FOLLOW`: read directly by UI/LED paths.
+- `PAR_QUANTISATION`: `seq_quantisation`, applied by `seq_setQuantisation()`.
+- `PAR_SCREENSAVER_ON_OFF`: read directly by `screensaver.c`.
+- `PAR_MIDI_MODE`: no runtime owner found; likely compatibility/legacy state.
+- `PAR_MIDI_CHAN_7`: `midi_MidiChannels[6]`.
+- `PAR_MIDI_ROUTING`: `midiParser_routing`.
+- `PAR_MIDI_FILT_TX/RX`: high/low nibbles of `midiParser_txRxFilter`.
+- `PAR_PRESCALER_CLOCK_IN`: `trigger_prescalerClockInput`.
+- `PAR_PRESCALER_CLOCK_OUT1`: `trigger_dividerClockOut1`.
+- `PAR_PRESCALER_CLOCK_OUT2`: compatibility no-op in setter today.
+- `PAR_TRIG_GATE_MODE`: `trigger_gateMode`.
+- `PAR_BAR_RESET_MODE`: `seq_resetBarOnPatternChange`.
+- `PAR_MIDI_CHAN_GLOBAL`: `midi_MidiChannels[7]`.
+- `PAR_OSC_WAVE_INTERP`: `modNode_waveInterpEnabled` plus oscillator generation
+  state.
+
+Important conclusion: the permanent duplicate is not filesystem `staging_buf`;
+that buffer is temporary. The permanent duplicate is `parameter_values[]` plus
+owner runtime state.
+
+Preferred future direction: Option C. Create canonical settings structs outside
+Menu, probably split into scene-level, bank-level, and system-level settings.
+Exact membership is TBD during the Scene/file redesign.
+
+### Verification
+
+Commands that passed during the session:
+
+```sh
+make
+make img
+git diff --check
+rg -n "Core/Preset|-ICore/Preset" Makefile Core main.c
+rg -n "seq_patternSet|seq_tmpPattern|seq_selectedStep|SEQ_DEFAULT_NOTE|SEQ_NEXT_RANDOM" Core Makefile main.c
+find Core -maxdepth 3 -type d -name Preset -print
+```
+
+Notes:
+
+- `make` passed with the existing nano syscall linker warnings for `_close`,
+  `_lseek`, `_read`, and `_write`, plus the usual LTO serial compilation note.
+- `make img` regenerated `build/LXRV2_lxr02.img`.
+- Stale old Preset path grep returned no matches in live source/build wiring.
+- Legacy pattern storage/name grep returned no matches in live code.
+- `find` reports only `Core/Scene/Preset`.

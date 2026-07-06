@@ -96,8 +96,6 @@ uint8_t seq_running = 0;					/**< 1 if running, 0 if stopped*/
 uint8_t seq_activePattern = 0;				/**< the currently playing pattern*/
 uint8_t seq_pendingPattern = 0;				/**< next pattern to play*/
 
-uint8_t seq_selectedStep = 0;
-
 uint8_t seq_recordActive = 0;				/**< set to 1 to activate the reording mode*/
 
 uint8_t seq_eraseActive=0;					/**RECORD will be 1 if live erasing the active voice  */
@@ -148,13 +146,8 @@ static AutomationNode seq_automationNodes[NUM_TRACKS][2];
 static void seq_sendMidi(MidiMsg msg);
 static void seq_sendRealtime(const uint8_t status);
 static void seq_sendProgChg(const uint8_t ptn);
-static void seq_eraseStepAndSubSteps(const uint8_t voice, const uint8_t mainStep);
-static void seq_activateTmpPattern();
 static void seq_nextStep();
 static uint8_t seq_isNextStepSyncStep();
-static uint8_t seq_intIsStepActive(uint8_t voice, uint8_t stepNr, uint8_t patternNr);
-static uint8_t seq_intIsMainStepActive(uint8_t voice, uint8_t mainStepNr, uint8_t pattern);
-static void seq_resetNote(Step *step);
 static void seq_setStepIndexToStart();
 //------------------------------------------------------------------------------
 void seq_init()
@@ -180,30 +173,6 @@ void seq_init()
 	 */
 	pat_init();
 
-}
-//------------------------------------------------------------------------------
-static void seq_activateTmpPattern()
-{
-	/*
-	 * Commits an asynchronously loaded pattern into the active pattern slot.
-	 *
-	 * Caller: seq_nextStep() when filesystem has loaded into pat_tmpPattern and
-	 * the pattern boundary permits activation. PatternData owns both buffers,
-	 * but Sequencer currently owns the timing of when a loaded pattern becomes
-	 * audible.
-	 *
-	 * Inputs: seq_activePattern selects the destination pattern slot; the source
-	 * is pat_tmpPattern. Outputs: active pattern step, main-step, settings, and
-	 * length/rotation data are overwritten.
-	 *
-	 * Risk: this still uses seq_patternSet/seq_tmpPattern compatibility macros
-	 * from PatternData.h so the playback refactor can happen later without
-	 * reintroducing front-panel parser behavior.
-	 */
-	memcpy(&seq_patternSet.seq_subStepPattern[seq_activePattern],&seq_tmpPattern.seq_subStepPattern,sizeof(Step)*NUM_TRACKS*NUM_STEPS);
-	memcpy(&seq_patternSet.seq_mainSteps[seq_activePattern],&seq_tmpPattern.seq_mainSteps,sizeof(uint16_t)*NUM_TRACKS);
-	memcpy(&seq_patternSet.seq_patternSettings[seq_activePattern],&seq_tmpPattern.seq_patternSettings,sizeof(PatternSetting));
-	memcpy(&seq_patternSet.seq_patternLengthRotate[seq_activePattern],&seq_tmpPattern.seq_patternLengthRotate,sizeof(LengthRotate)*NUM_TRACKS);
 }
 //------------------------------------------------------------------------------
 void seq_setShuffle(float shuffle)
@@ -319,10 +288,24 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 {
 	uint8_t midiChan; // which midi channel to send a note on
 	uint8_t midiNote; // which midi note to send
+	uint8_t midiVelocity;
+	Step stepData;
 
 	if(voiceNr > 6) return;
 
-	seq_parseAutomationNodes(voiceNr, &seq_patternSet.seq_subStepPattern[seq_activePattern][voiceNr][seq_stepIndex[voiceNr]]);
+	/*
+	 * PatternData owns the current Step; Sequencer only needs a playback-time
+	 * snapshot for automation-node parsing and the legacy MIDI echo velocity.
+	 * Trigger timing, choke behavior, DSP voice calls, and MIDI output remain
+	 * sequencer runtime work.
+	 */
+	if (pat_readStep(seq_activePattern, voiceNr, (uint8_t)seq_stepIndex[voiceNr],
+	                 &stepData)) {
+		seq_parseAutomationNodes(voiceNr, &stepData);
+		midiVelocity = (uint8_t)(stepData.volume & STEP_VOLUME_MASK);
+	} else {
+		midiVelocity = vol;
+	}
 
 	//turn the trigger off before sending the next one
 	if(voiceNr>=5)
@@ -350,15 +333,23 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 		midiNote = midi_NoteOverride[voiceNr];
 
 	//send the new note to midi/usb out
-	seq_sendMidiNoteOn(midiChan, midiNote,
-			seq_patternSet.seq_subStepPattern[seq_activePattern][voiceNr][seq_stepIndex[voiceNr]].volume&STEP_VOLUME_MASK);
+	seq_sendMidiNoteOn(midiChan, midiNote, midiVelocity);
 }
 //------------------------------------------------------------------------------
 static uint8_t seq_determineNextPattern()
 {
-	const PatternSetting * const p=&seq_patternSet.seq_patternSettings[seq_activePattern];
-	if(seq_barCounter % (p->changeBar+1) == 0)
-		return p->nextPattern;
+	/*
+	 * Resolve the next automatic pattern target for the active pattern.
+	 *
+	 * PatternData owns the saved change-bar and next-pattern settings; Sequencer
+	 * owns bar counting, random-target resolution, and the runtime pending-pattern
+	 * state. Input is implicit seq_activePattern/seq_barCounter. Output is the
+	 * pattern enum to keep or queue. Caller/confederate: seq_nextStep() invokes
+	 * this at the master-track boundary before handling PAT_NEXT_RANDOM values.
+	 */
+	const uint8_t changeBar = pat_getPatternChangeBar(seq_activePattern);
+	if(seq_barCounter % (changeBar + 1u) == 0)
+		return pat_getPatternNext(seq_activePattern);
 	else
 		return seq_activePattern;
 }
@@ -375,15 +366,9 @@ static void seq_nextStep()
 	// track 0 determines the master step position
 	uint8_t masterStepPos;
 	uint8_t seqlen;
-	//if( (((seq_stepIndex[0]+1) &0x7f) == 0) ||
-	//    (((seq_patternSet.seq_subStepPattern[seq_activePattern][0][seq_stepIndex[0]+1]).note & PATTERN_END_MASK)>=PATTERN_END_MASK) )
-
-	seqlen=seq_patternSet.seq_patternLengthRotate[seq_activePattern][0].length;
-	if(!seqlen)
-		seqlen=16;
+	seqlen = pat_getEffectiveTrackLength(seq_activePattern, 0);
 
 	if( (((seq_stepIndex[0]+1) & 0x7f) == 0) || ((seq_stepIndex[0]+1) / 8 == seqlen))
-			//(((seq_patternSet.seq_subStepPattern[seq_activePattern][0][seq_stepIndex[0]+1]).note & PATTERN_END)) )
 	{
 		masterStepPos = 0;
 		//a bar has passed
@@ -401,9 +386,9 @@ static void seq_nextStep()
 		{
 			//check pattern settings if we have to auto change patterns
 			seq_pendingPattern = seq_determineNextPattern();
-			if(seq_pendingPattern >= SEQ_NEXT_RANDOM)
+			if(seq_pendingPattern >= PAT_NEXT_RANDOM)
 			{
-				uint8_t limit = seq_pendingPattern - SEQ_NEXT_RANDOM +2;
+				uint8_t limit = seq_pendingPattern - PAT_NEXT_RANDOM +2;
 				uint8_t rnd = GetRngValue() % limit;
 				seq_pendingPattern = rnd;
 			}
@@ -428,7 +413,11 @@ static void seq_nextStep()
 			if(seq_newPatternAvailable)
 			{
 				seq_newPatternAvailable = 0;
-				seq_activateTmpPattern();
+				/*
+				 * Sequencer owns the safe pattern boundary where a staged load
+				 * becomes audible; PatternData owns the storage commit.
+				 */
+				pat_commitStagedPattern(seq_activePattern);
 			}
 
 			seq_activePattern = seq_pendingPattern;
@@ -478,9 +467,7 @@ static void seq_nextStep()
 		//check if track end is reached
 
 		// --AS **PATROT we now use this for length
-		seqlen=seq_patternSet.seq_patternLengthRotate[seq_activePattern][i].length;
-		if(!seqlen)
-			seqlen=16;
+		seqlen = pat_getEffectiveTrackLength(seq_activePattern, (uint8_t)i);
 
 		if((seq_stepIndex[i] / 8) == seqlen || (seq_stepIndex[i] & 0x7f) == 0)
 		{
@@ -498,7 +485,7 @@ static void seq_nextStep()
 			if(!(seq_mutedTracks & (1<<i) ) )
 			{
 				//if main step (associated with current substep) is active
-				if(seq_intIsMainStepActive(i,seq_stepIndex[i]/8,seq_activePattern)) {
+				if(pat_isMainStepActive((uint8_t)i, (uint8_t)(seq_stepIndex[i]/8), seq_activePattern)) {
 
 					// --AS **RECORD if we are in erase mode (shift clear while record and playing)
 					// and this is the active track on the front, we erase the note value
@@ -509,15 +496,16 @@ static void seq_nextStep()
 						 * Live erase targets the active front-panel voice only.
 						 *
 						 * Menu owns active voice selection; Sequencer owns the
-						 * playback-time erase condition; PatternData receives
-						 * the actual step mutation inside
-						 * seq_eraseStepAndSubSteps().
+						 * playback-time erase condition; PatternData owns the
+						 * actual step mutation.
 						 */
 						// erase the main step and all substeps
-						seq_eraseStepAndSubSteps(menu_getActiveVoice(),seq_stepIndex[i]/8);
+						pat_eraseMainStepSubSteps(seq_activePattern,
+						                          menu_getActiveVoice(),
+						                          (uint8_t)(seq_stepIndex[i]/8));
 					} else
 					// if sub-step is active
-					if(seq_intIsStepActive(i,seq_stepIndex[i],seq_activePattern))
+					if(pat_isStepActive((uint8_t)i, (uint8_t)seq_stepIndex[i], seq_activePattern))
 					{
 						//PROBABILITY
 						//every 8th step a new random value is generated
@@ -529,10 +517,10 @@ static void seq_nextStep()
 							seq_rndValue[i] = GetRngValue()&0x7f;
 						}
 
-						if( (seq_rndValue[i]) <= seq_patternSet.seq_subStepPattern[seq_activePattern][i][seq_stepIndex[i]].prob )
+						if( (seq_rndValue[i]) <= pat_getStepProbability(seq_activePattern, (uint8_t)i, (uint8_t)seq_stepIndex[i]) )
 						{
-							const uint8_t vol = seq_patternSet.seq_subStepPattern[seq_activePattern][i][seq_stepIndex[i]].volume&STEP_VOLUME_MASK;
-							const uint8_t note = seq_patternSet.seq_subStepPattern[seq_activePattern][i][seq_stepIndex[i]].note;
+							const uint8_t vol = pat_getStepVolume(seq_activePattern, (uint8_t)i, (uint8_t)seq_stepIndex[i]);
+							const uint8_t note = pat_getStepNote(seq_activePattern, (uint8_t)i, (uint8_t)seq_stepIndex[i]);
 							seq_triggerVoice(i,vol,note);
 						}
 					} // if sub step is active
@@ -551,10 +539,10 @@ static void seq_nextStep()
 					{
 						const uint8_t vol = ROLL_VOLUME;
 
-						const uint8_t note = seq_patternSet.seq_subStepPattern[seq_activePattern][i][seq_stepIndex[i]].note;
+						const uint8_t note = pat_getStepNote(seq_activePattern, (uint8_t)i, (uint8_t)seq_stepIndex[i]);
 						seq_triggerVoice(i,vol,note);
 
-						seq_addNote(i,vol, note); // --AS todo should this be note or should it be SEQ_DEFAULT_NOTE (before my change it would have been SEQ_DEFAULT_NOTE)
+						seq_addNote(i,vol, note); // --AS todo should this be note or should it be PAT_DEFAULT_NOTE (before my change it would have been PAT_DEFAULT_NOTE)
 					}
 				}
 			}
@@ -657,11 +645,21 @@ void seq_setDeltaT(float delta)
  */
 void seq_triggerNextMasterStep(uint8_t stepSize)
 {
+	/*
+	 * Position all track step indices for the next external master-clock tick.
+	 *
+	 * Sequencer owns external-clock phase state (`seq_stepIndex[]` and
+	 * `seq_lastMasterStep[]`), while PatternData owns the per-track effective
+	 * pattern length read here through pat_getEffectiveTrackLength(). Input:
+	 * stepSize is the external sync stride in sub-steps. Output: runtime indices
+	 * are positioned so the next seq_nextStep() call lands on the intended master
+	 * step and seq_deltaT is forced due. Callers/clients: trigger jack and MIDI
+	 * sync paths. Risk: length must be nonzero; PatternData returns 16 on invalid
+	 * coordinates to avoid divide/wrap faults during sync.
+	 */
 	uint8_t i, sn, len;
 	for(i=0;i<NUM_TRACKS;i++) {
-		len = seq_patternSet.seq_patternLengthRotate[seq_activePattern][i].length;
-		if(!len) // length of 0 means length of 16 (since we are using 4 bits)
-			len=16;
+		len = pat_getEffectiveTrackLength(seq_activePattern, i);
 		len *= 8; // need length in steps
 
 		if(seq_lastMasterStep[i] == 0) // need to set it so next step will inc it to 0
@@ -864,33 +862,6 @@ void seq_setRunning(uint8_t isRunning)
 
 }
 //------------------------------------------------------------------------------
-static uint8_t seq_intIsStepActive(uint8_t voice, uint8_t stepNr, uint8_t patternNr)
-{
-	/*
-	 * Playback read wrapper around PatternData.
-	 *
-	 * Sequencer still asks whether a step is active while walking playback
-	 * timing. PatternData owns the storage and validity checks. Keeping this
-	 * wrapper local limits churn until the later Pattern refactor can move more
-	 * playback-facing helpers behind Pattern APIs.
-	 */
-	return pat_isStepActive(voice, stepNr, patternNr);
-}
-
-//------------------------------------------------------------------------------
-static uint8_t seq_intIsMainStepActive(uint8_t voice, uint8_t mainStepNr, uint8_t pattern)
-{
-	/*
-	 * Playback read wrapper around PatternData main-step state.
-	 *
-	 * Inputs are Sequencer playback coordinates. Output is a boolean active
-	 * flag from PatternData. This replaces direct parser queries with direct
-	 * Pattern storage reads.
-	 */
-	return pat_isMainStepActive(voice, mainStepNr, pattern);
-}
-
-//------------------------------------------------------------------------------
 void seq_setMute(uint8_t trackNr, uint8_t isMuted)
 {
 	if(trackNr==7)
@@ -927,9 +898,9 @@ void seq_setRoll(uint8_t voice, uint8_t onOff)
 		seq_rollState |= (1<<voice);
 		if(seq_rollRate == 0xff) {
 			//trigger one shot
-			seq_triggerVoice(voice,ROLL_VOLUME,SEQ_DEFAULT_NOTE);
+			seq_triggerVoice(voice,ROLL_VOLUME,PAT_DEFAULT_NOTE);
 			//record roll notes
-			seq_addNote(voice,ROLL_VOLUME,SEQ_DEFAULT_NOTE);
+			seq_addNote(voice,ROLL_VOLUME,PAT_DEFAULT_NOTE);
 		}
 	} else {
 		seq_rollState &= ~(1<<voice);
@@ -1079,8 +1050,8 @@ void seq_recordAutomation(uint8_t voice, uint8_t dest, uint8_t value)
 		uint8_t quantizedStep = seq_quantize(seq_stepIndex[voice]);
 
 		//only record to active steps
-		if( seq_intIsMainStepActive(voice,quantizedStep/8,seq_activePattern) &&
-				seq_intIsStepActive(voice,quantizedStep,seq_activePattern))
+		if( pat_isMainStepActive(voice, (uint8_t)(quantizedStep/8), seq_activePattern) &&
+				pat_isStepActive(voice, (uint8_t)quantizedStep, seq_activePattern))
 		{
 			pat_recordAutomation(seq_activePattern, voice, quantizedStep, dest, value);
 		}
@@ -1096,20 +1067,18 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 	 *
 	 * Callers: MIDI note input, roll performance, and internal recording paths.
 	 * Sequencer owns quantization and pattern-boundary timing; PatternData owns
-	 * main-step activation, while this function still writes Step fields through
-	 * compatibility arrays until the later PatternData refactor moves the rest
-	 * of step mutation behind pat_ APIs.
+	 * the actual Step and main-step mutation through pat_recordNote().
 	 *
 	 * Inputs: trackNr target track, vel recorded velocity, note recorded note.
-	 * Outputs: step note/volume/probability/active bit are updated, the
-	 * corresponding main step is activated, and visible record LEDs are marked
-	 * dirty if the edited track/pattern is currently shown by Menu.
+	 * Outputs: when recording is active, PatternData updates note/velocity,
+	 * probability, active bit, and parent main-step state; visible record LEDs
+	 * are marked dirty if the edited track/pattern is currently shown by Menu.
 	 *
-	 * Risk: the direct Step writes are intentional temporary compatibility with
-	 * existing playback code. New UI code should prefer PatternData APIs.
+	 * Risk: quantization can push a late note to step 0 of the next pattern, so
+	 * Sequencer must keep the target-pattern decision here even though PatternData
+	 * owns the write.
 	 */
 	uint8_t targetPattern;
-	Step *stepPtr;
 	//only record notes when seq is running and recording
 	if(seq_running && seq_recordActive)
 	{
@@ -1127,25 +1096,7 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 		} else
 			targetPattern=seq_activePattern;
 
-		//special care must be taken when recording midi notes!
-		//since per default the 1st substep of a mainstep cluster is always active
-		//we will get double notes when a substep other than ss1 is recorded
-		if(!seq_intIsMainStepActive(trackNr, quantizedStep/8, targetPattern))
-		{
-			//if the mainstep is not active, we clear the 1st substep
-			//to prevent double notes while recording
-			seq_patternSet.seq_subStepPattern[targetPattern][trackNr][(quantizedStep/8)*8].volume 	&= ~STEP_ACTIVE_MASK;
-		}
-
-		//set the current step in the requested track active
-		stepPtr=&seq_patternSet.seq_subStepPattern[targetPattern][trackNr][quantizedStep];
-		stepPtr->note 		= note;				// note (--AS was SEQ_DEFAULT_NOTE)
-		stepPtr->volume		= vel;				// new velocity
-		stepPtr->prob		= 127;				// 100% probability
-		stepPtr->volume 	|= STEP_ACTIVE_MASK;
-
-		//activate corresponding main step
-		pat_setMainStep(targetPattern, trackNr, quantizedStep/8,1);
+		pat_recordNote(targetPattern, trackNr, (uint8_t)quantizedStep, vel, note);
 
 		if( (menu_getViewedPattern() == targetPattern) && ( menu_getActiveVoice() == trackNr) )
 		{
@@ -1166,41 +1117,6 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 }
 
 //------------------------------------------------------------------------
-// --AS **RECORD erase a main step and all it's sub steps on the active pattern
-// for the specified voice
-static void seq_eraseStepAndSubSteps(const uint8_t voice, const uint8_t mainStep)
-{
-	/*
-	 * Erases one main step and its eight sub-steps during live erase.
-	 *
-	 * Caller: seq_nextStep() when erase mode is active, playback reaches a main
-	 * step, and the playing track is the active Menu voice. PatternData owns the
-	 * main-step bit via pat_setMainStep(); this function still resets sub-step
-	 * Step structs directly through PatternData compatibility arrays until the
-	 * broader Pattern mutation refactor.
-	 *
-	 * Inputs: voice is the track to erase, mainStep is 0..15. Output: main step
-	 * disabled, all eight sub-steps reset, first sub-step re-enabled to preserve
-	 * the old invariant that each main-step cluster has an active first substep.
-	 *
-	 * Risk: direct Step writes must stay in sync with pat_resetStep() semantics.
-	 * Moving this fully into PatternData is a good later cleanup target.
-	 */
-	uint8_t i;
-	// turn off the main step
-	pat_setMainStep(seq_activePattern, voice, mainStep,0);
-
-	// turn off all substeps
-	for(i=(uint8_t)(mainStep*8);i<(uint8_t)((mainStep+1)*8);i++) {
-		seq_resetNote(&seq_patternSet.seq_subStepPattern[seq_activePattern][voice][i]);
-	}
-
-	// first substep needs to be made active
-	seq_patternSet.seq_subStepPattern[seq_activePattern][voice][(uint8_t)(mainStep*8)].volume |= STEP_ACTIVE_MASK;
-
-}
-
-//------------------------------------------------------------------------
 void seq_setRecordingMode(uint8_t active)
 {
 	seq_recordActive = active;
@@ -1211,18 +1127,6 @@ void seq_setErasingMode(uint8_t active)
 	seq_eraseActive = active;
 }
 
-//------------------------------------------------------------------------------
-// --AS reset a step to it's default state
-static void seq_resetNote(Step *step)
-{
-	step->note 		= SEQ_DEFAULT_NOTE;
-	step->param1Nr 	= NO_AUTOMATION;
-	step->param1Val = 0;
-	step->param2Nr	= NO_AUTOMATION;
-	step->param2Val	= 0;
-	step->prob		= 127;
-	step->volume	= 100; // clears active bit as well
-}
 static uint8_t seq_isNextStepSyncStep()
 {
 	if(seq_delayedSyncStepFlag)
@@ -1326,13 +1230,24 @@ static void seq_sendProgChg(const uint8_t ptn)
  */
 static void seq_setStepIndexToStart()
 {
+	/*
+	 * Reset runtime track counters to each track's PatternData rotation.
+	 *
+	 * PatternData owns stored rotation and effective length; Sequencer owns
+	 * `seq_stepIndex[]` and `seq_lastMasterStep[]`, which are scheduler runtime
+	 * state. Input is implicit seq_activePattern. Output: every track starts one
+	 * sub-step before its rotated start so the next seq_nextStep() increment lands
+	 * on the correct position. Callers: transport start/stop, pattern changes, and
+	 * external reset. Risk: preserves the legacy "rot > len" adjustment exactly
+	 * for shortened tracks while treating encoded/default length as 16.
+	 */
 	uint8_t len, rot, i;
 	for(i=0;i<NUM_TRACKS;i++) {
 		// adjust rot in case the pattern length is less than the rotated amount
 		// len is 0-15 where a value of 0 means 16
-		rot=seq_patternSet.seq_patternLengthRotate[seq_activePattern][i].rotate;
-		len=seq_patternSet.seq_patternLengthRotate[seq_activePattern][i].length;
-		if(len && (rot > len))
+		rot = pat_getTrackRotation(seq_activePattern, i);
+		len = pat_getEffectiveTrackLength(seq_activePattern, i);
+		if((len != 16u) && (rot > len))
 			rot = rot % len;
 
 		// this is for external clock sync via trigger expansion kit (the ext tick will adjust this -1)

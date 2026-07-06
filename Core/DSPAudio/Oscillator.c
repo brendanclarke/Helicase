@@ -52,6 +52,7 @@
 #include "Samples.h"
 #include "MidiParser.h"
 #include "MidiNoteNumbers.h"
+#include "PatternData.h"
 #include "modulationNode.h"
 #include <math.h>
 // TODO DSP_PORT
@@ -965,13 +966,19 @@ static void osc_calcUserSampleFreqValue(OscInfo* osc, const float currentFreq)
 		osc->freqCacheValid = 1u;
  }
  //-----------------------------------------------------------
- void osc_setBaseNote(OscInfo* osc, uint8_t baseNote)
- {
+void osc_setBaseNote(OscInfo* osc, uint8_t baseNote)
+{
 
 	 //get fine tune
 	 const float cent = midiParser_calcDetune(osc->midiFreq&0xff);
-	 //calc coarse tune
-	 int16_t note =  (osc->midiFreq>>8) + (baseNote-SEQ_DEFAULT_NOTE);
+	 /*
+	  * PatternData owns the default sequencer note value after the 1.3 pattern
+	  * move. Oscillator uses PAT_DEFAULT_NOTE only as the neutral pitch reference:
+	  * input is the caller-supplied base note plus oscillator coarse/fine tuning,
+	  * output is osc->freq and osc->baseNote. Common callers are voice parameter
+	  * apply paths; PatternData itself is not involved in DSP state mutation here.
+	  */
+	 int16_t note =  (osc->midiFreq>>8) + (baseNote-PAT_DEFAULT_NOTE);
 	 if(note>127)note=127;
 	 if(note<0)note=0;
 
@@ -980,12 +987,17 @@ static void osc_calcUserSampleFreqValue(OscInfo* osc, const float currentFreq)
  };
 
  //-----------------------------------------------------------
- void osc_recalcFreq(OscInfo* osc)
- {
+void osc_recalcFreq(OscInfo* osc)
+{
 	 //get fine tune
 	 const float cent = midiParser_calcDetune(osc->midiFreq&0xff);
-	 //calc coarse tune
-	 int16_t note =  (osc->midiFreq>>8) + (osc->baseNote-SEQ_DEFAULT_NOTE);
+	 /*
+	  * Recompute frequency from the stored base note using PatternData's neutral
+	  * default-note constant. Input/output mirror osc_setBaseNote(), but this path
+	  * uses osc->baseNote already stored in the oscillator. This keeps the renamed
+	  * PAT_DEFAULT_NOTE dependency explicit after the sequencer storage move.
+	  */
+	 int16_t note =  (osc->midiFreq>>8) + (osc->baseNote-PAT_DEFAULT_NOTE);
 
 	 if(note>127)note=127;
  	 if(note<0)note=0;

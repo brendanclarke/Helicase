@@ -1,8 +1,9 @@
 # Module Interchange Spec
 
-Session 028 baseline. This spec records the live module API boundaries after
-`frontPanelParser.c/h` removal. The goal is to make the direct-call ownership
-clear so future work does not recreate a generic bridge.
+Session 029 baseline. This spec records the live module API boundaries after
+`frontPanelParser.c/h` removal, the PatternData storage-ownership pass, and the
+`Core/Preset` -> `Core/Scene/Preset` folder move. The goal is to make the
+direct-call ownership clear so future work does not recreate a generic bridge.
 
 ## Rules
 
@@ -13,7 +14,12 @@ clear so future work does not recreate a generic bridge.
 - Sound parameter application goes through Preset.
 - MIDI runtime configuration goes through MidiParser.
 - Filesystem may serialize Pattern data through PatternData pointer accessors.
-- `seq_patternSet` and `seq_tmpPattern` are compatibility macros only.
+- Sequencer may read pattern data through narrow PatternData playback helpers;
+  it must not index PatternData storage arrays directly.
+- `pat_tmpPattern` is the only active-pattern load staging buffer and is
+  retained until the 17th Scene/background-bank-load design replaces it.
+- Preset code lives under `Core/Scene/Preset/`, but public API names remain
+  `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
 
 ## Core/Scene/Pattern/PatternData
 
@@ -28,12 +34,16 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 |---|---|---|
 | `pat_init(void)` | Initialize all pattern storage and shuffle API backing. | `seq_init()` |
 | `pat_trackValid(track)` / `pat_patternValid(pattern)` / `pat_stepValid(step)` | Bounds checks before direct access. | PatternData internals, ledHandler, filesystem, buttonHandler |
-| `pat_stepPtr(pattern, track, step)` | Bounded pointer to `Step`; supports `PATTERNDATA_STAGING_PATTERN`. | filesystem, Sequencer compatibility code |
+| `pat_stepPtr(pattern, track, step)` | Bounded pointer to `Step`; supports `PATTERNDATA_STAGING_PATTERN`. | filesystem, PatternData owner-level code |
 | `pat_mainStepsPtr(pattern, track)` | Bounded pointer to main-step mask. | filesystem, PatternData, Euklid |
 | `pat_patternSettingPtr(pattern)` | Bounded pointer to per-pattern settings. | filesystem, Sequencer pattern-change logic |
 | `pat_lengthRotatePtr(pattern, track)` | Bounded pointer to track length/rotation byte. | filesystem, Euklid, PatternData |
 | `pat_isStepActive(track, step, pattern)` | Read sub-step active bit. | ledHandler, Sequencer playback wrappers |
 | `pat_isMainStepActive(track, mainStep, pattern)` | Read main-step active bit. | ledHandler, Sequencer playback wrappers, buttonHandler |
+| `pat_readStep(pattern, track, step, out)` | Copy one `Step` snapshot for playback-side inspection. | Sequencer automation parsing and MIDI echo velocity |
+| `pat_getStepProbability(pattern, track, step)` | Read one step probability with safe invalid default. | Sequencer playback |
+| `pat_getStepNote(pattern, track, step)` | Read one step note with `PAT_DEFAULT_NOTE` fallback. | Sequencer playback, rolls, MIDI note echo |
+| `pat_getStepVolume(pattern, track, step)` | Read lower 7-bit velocity. | Sequencer playback and MIDI note echo |
 | `pat_setMainStep(pattern, track, mainStep, onOff)` | Set one main-step bit. | Sequencer recording/erase, PatternData operations |
 | `pat_setMainStepsRaw(pattern, track, bits)` | Replace whole 16-bit main-step mask. | EuklidGenerator, file load paths |
 | `pat_toggleStep(track, step, pattern)` | Toggle one sub-step active bit. | buttonHandler shift-select |
@@ -48,18 +58,22 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_getPatternChangeBar(pattern)` / `pat_getPatternNext(pattern)` | Read pattern settings. | Future callers; currently mostly direct pointer reads |
 | `pat_setTrackLength(pattern, track, length)` | Set track length with 0==16 storage encoding. | `menu_parseGlobalParam(PAR_TRACK_LENGTH)` |
 | `pat_getTrackLength(pattern, track)` | Read length in UI form. | `pat_applyTrackSettingsToMenu()` |
+| `pat_getEffectiveTrackLength(pattern, track)` | Read nonzero playback length, converting stored 0 to 16. | Sequencer step walk, external clock, start-position reset |
 | `pat_setTrackRotation(pattern, track, rotation)` | Set track rotation and invoke Sequencer runtime compensation if needed. | buttonHandler perf rotation, Sequencer stop reset |
 | `pat_getTrackRotation(pattern, track)` | Read track rotation. | `pat_applyTrackSettingsToMenu()` |
 | `pat_setShuffle(pattern, value)` | Pattern-facing shuffle API; still forwards global coefficient to Sequencer. | `menu_parseGlobalParam(PAR_SHUFFLE)` |
+| `pat_setAllShuffle(value)` | Import legacy one-byte pattern/container shuffle into all pattern slots and bridge to playback. | filesystem `.pat`/`.all`/`.prf` load paths |
 | `pat_getShuffle(pattern)` | Read stored UI-facing shuffle value. | `pat_applyTrackSettingsToMenu()` |
 | `pat_clearTrack(pattern, track)` | Reset one track. | copyClearTools, `pat_clearPattern()` |
 | `pat_clearPattern(pattern)` | Reset all tracks in one pattern. | copyClearTools, `pat_init()` |
 | `pat_clearAutomation(pattern, track, automTrack)` | Clear automation lane 0/1 for a track. | copyClearTools |
 | `pat_copyTrack(pattern, srcTrack, dstTrack)` | Copy one track inside a pattern. | copyClearTools |
 | `pat_copyPattern(srcPattern, dstPattern)` | Copy whole pattern slot. | copyClearTools |
-| `pat_setSelectedStep(step)` | Keep active step mirror in `seq_selectedStep` and `PAR_ACTIVE_STEP`. | PatternData menu-apply and automation destination edit |
+| `pat_setSelectedStep(step)` | Keep active step mirror in `PAR_ACTIVE_STEP`; `seq_selectedStep` no longer exists. | PatternData menu-apply and automation destination edit |
 | `pat_setActiveAutomationTrack(track)` / `pat_getActiveAutomationTrack(void)` | Select automation lane. | Menu; future UI clients |
 | `pat_armAutomationStep(step, track, armed)` | Arm/disarm held-step automation recording target. | buttonHandler long-press path |
+| `pat_recordNote(pattern, track, step, velocity, note)` | Record quantized note/velocity/probability/active state and parent main step. | `seq_addNote()` |
+| `pat_eraseMainStepSubSteps(pattern, track, mainStep)` | Erase one main-step cluster and restore first-sub-step invariant. | Sequencer live erase |
 | `pat_recordAutomation(pattern, track, step, dest, value)` | Write automation into a concrete quantized step. | Sequencer |
 | `pat_recordArmedAutomation(pattern, dest, value)` | Write automation into held/armed step if present. | Sequencer |
 | `pat_applyStepToMenu(pattern, track, step)` | Copy step editable fields into `parameter_values`. | buttonHandler, Menu active-step edits |
@@ -223,16 +237,17 @@ Affiliate modules: PatternData, ledHandler, Menu, MidiParser, MidiVoiceControl,
 triggerJacks, clockSync, SOM, USB/UART MIDI.
 
 Purpose: owns playback timing, transport, mute, roll, quantization, external
-sync state, MIDI note output, and current playback pattern. It still reads some
-PatternData storage through compatibility macros pending the next Pattern
-refactor.
+sync state, MIDI note output, current playback pattern, runtime step indices,
+and recording gates. Pattern storage reads/writes go through PatternData APIs;
+Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
+`seq_selectedStep` compatibility names.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
 | `seq_init()` | Initialize automation nodes, runtime indices, PatternData. | `main.c` boot |
 | `seq_tick()` | Advance playback when due. | TIM3 owner |
 | `seq_triggerVoice(voiceNr, vol, note)` | Trigger one voice from Sequencer/SOM. | Sequencer, SOM |
-| `seq_setShuffle(shuffle)` | Set current playback shuffle coefficient. | PatternData shuffle API |
+| `seq_setShuffle(shuffle)` | Set current playback shuffle coefficient. | PatternData shuffle bridge only |
 | `seq_resetDeltaAndTick()` / `seq_resetToPatternStart()` / `seq_setDeltaT(delta)` | Clock/reset timing control. | trigger/MIDI sync paths |
 | `seq_triggerNextMasterStep(stepSize)` | External clock master-step scheduling. | trigger/MIDI sync paths |
 | `seq_setBpm(bpm)` / `seq_getBpm()` | Tempo. | Menu/global apply |
@@ -250,11 +265,13 @@ refactor.
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
 | `seq_offsetTrackStepIndexForRotation(trackNr, oldRot, newRot, len)` | Narrow runtime hook for live rotation compensation. | PatternData only |
 
-## Core/Preset/presetManager
+## Core/Scene/Preset/presetManager
 
 Affiliate modules: filesystem, Menu, MidiParser, Sequencer, DSP voice/mod nodes.
 
-Purpose: owns preset load/save status and sound-parameter application.
+Purpose: owns preset load/save status and sound-parameter application. The
+folder now lives under `Core/Scene/Preset/`; public function prefixes remain
+`preset_*` for the mechanical move.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
@@ -271,6 +288,27 @@ Purpose: owns preset load/save status and sound-parameter application.
 | `preset_applyLfoModTarget(lfo, targetParam)` | Direct LFO mod destination update. | Menu, preset load apply |
 | `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Chunked runtime sound/mod-target apply. | Menu |
 | `preset_morph(morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited morph interpolation/application. | Menu, main loop |
+
+## Core/Scene/Preset/ParameterArray
+
+Affiliate modules: Menu, Preset manager, MidiParser, modulationNode, DSP voice
+modules, mixer, filesystem, PatternData.
+
+Purpose: owns the canonical numeric parameter id map and the runtime pointer map
+from sound parameter ids to DSP engine fields. It does not yet own
+`parameter_values[]` or `parameters2[]`; those arrays remain in Menu until the
+later instrument/file redesign makes Preset/Scene the canonical endpoint
+parameter owner.
+
+| API / Data | Use | Usual callers / clients |
+|---|---|---|
+| `enum ParamEnums` / `PAR_*` / `END_OF_SOUND_PARAMETERS` / `NUM_PARAMS` | Canonical parameter id space for sound, menu, pattern, and globals. | Menu, filesystem, Preset, MidiParser, PatternData |
+| `TYPE_UINT8`, `TYPE_FLT`, `TYPE_SPECIAL_F`, `TYPE_UINT32`, `TYPE_SPECIAL_P`, `TYPE_SPECIAL_FILTER_F` | Type tags for runtime parameter pointer entries. | ParameterArray, modulationNode |
+| `ptrValue` | Float/integer value carrier for typed writes. | modulationNode, ParameterArray |
+| `Parameter` / `parameterArray[]` | Map sound parameter id to target DSP field and value type. | ParameterArray, modulationNode |
+| `paramArray_setParameter(idx, newValue)` | Write one typed value into the mapped DSP field when the id/pointer are valid. | modulationNode restore/apply paths |
+| `parameterArray_init()` | Fill the sound-parameter pointer/type map. | `main.c` boot |
+| `extern parameter_values[]` | Current permanent parameter byte store declaration. | Defined in Menu today; future Preset/Scene migration |
 
 ## Core/MIDI/MidiParser
 

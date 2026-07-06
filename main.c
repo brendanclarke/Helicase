@@ -70,6 +70,7 @@
 
 #include "menu.h"
 #include "screensaver.h"
+#include "ParameterArray.h"
 #include "presetManager.h"
 
 #include "memtest.h"
