@@ -21,7 +21,11 @@ Every phase ends with **Open Engineering Questions** (things that need a decisio
 
 ## Phase 1 — Foundation Refactors
 
-**Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Sequencer/Pattern/`, `Core/Preset/` → `Core/Scene/`
+**Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Scene/Pattern/`, `Core/Preset/` → `Core/Scene/Preset/`
+
+**Current status:** completed across Sessions 027-029. Burst reduction,
+frontPanelParser removal, PatternData ownership, and the Preset folder move are
+landed. This section remains as historical rationale for the order of work.
 
 These are the four refactor/reorg tasks you already flagged before any of the new feature work. None of them change behavior; they change where code lives and how it's called, so that every phase after this one is being built on the layout you actually want rather than being built once and then dragged through a rename later. Do these first, in this order, each as its own compileable/testable commit.
 
@@ -36,9 +40,16 @@ One correction to flag: the intermediate draft of this document (and the "RED TE
 This is a bigger job than the earlier draft made it look. The real numbers:
 
 - `frontPanelParser.c` is 816 lines with **70 `case` labels** across three internal `switch(command)` blocks (opcode dispatch for standard front-panel messages, an LFO-target sub-switch, and a sysex path) plus the `frontPanel_sendData()` encoder itself.
-- `frontPanel_sendData()` is called **105 times** across the codebase: 55 in `Core/Menu/menu.c`, 35 in `Core/Hardware/frontPanel/buttonHandler.c`, 6 in `Core/Preset/presetManager.c` (soon `Core/Scene/`), plus a handful internal to the parser file itself.
+- At the time this phase was scoped, `frontPanel_sendData()` was called **105
+  times** across the codebase. Session 028 removed that bridge and replaced it
+  with direct owner calls.
 
-So this isn't "remove a file and add a few direct calls" — it's 105 call sites, each of which currently packs its payload into `(status, data1, data2)` MIDI-CC-shaped bytes, sends it through `frontPanel_sendData()`, and relies on the parser's `switch` to unpack and route it to the real target function (sequencer, DSP voice, LED handler, modulation node, etc.). The real target functions already exist and are already correct — the opcode encode/decode round-trip is the only thing being removed. Practically, this means:
+This was not "remove a file and add a few direct calls" — it was 105 call sites,
+each of which packed its payload into `(status, data1, data2)` MIDI-CC-shaped
+bytes, sent it through `frontPanel_sendData()`, and relied on the parser's
+`switch` to unpack and route it to the real target function (sequencer, DSP
+voice, LED handler, modulation node, etc.). Session 028 completed this
+mechanical bridge removal. The original practical checklist was:
 
 1. For each of the 70 opcodes, find the `case` body in `frontPanelParser.c` and the function(s) it ultimately calls.
 2. At each of the 105 call sites, replace the `frontPanel_sendData(OPCODE, data1, data2)` call with a direct call to that same target function, passing the already-known values instead of re-encoding them into a byte pair and decoding them back out.
@@ -54,11 +65,14 @@ Since Phase 4 is about to replace this entire pattern data model (8 fixed patter
 
 Recommendation: move first, rewrite second, as two separate commits. Move everything pattern-storage-and-servicing-related (the structs above, the `Step`/`PatternSet` types, load/save helpers, step-advance logic, euklid/patgen generators) into `Core/Sequencer/Pattern/`, rename the moved functions with the `pat_*` prefix, and get it compiling and behaving identically to before. Then do the Phase 4 rewrite inside that new location. Two reasons: first, a pure rename-and-move is easy to verify byte-for-byte (same behavior, different file/name), so if something breaks you know it's the move, not new logic; second, `seq_tick()` and the timer wiring stay in `sequencer.c` (they're timing/scheduling, not pattern storage), so the move needs a clean line between "what moves to `Pattern/`" and "what stays in `sequencer.c` as the scheduler that calls into `Pattern/`" — deciding that boundary is easier without simultaneously redesigning the data the boundary is passing around.
 
-### 1.4 Move `Core/Preset/` into `Core/Scene/`
+### 1.4 Move `Core/Preset/` into `Core/Scene/Preset/`
 
-`Core/Preset/` is currently `presetManager.c/.h` (562/108 lines) and `ParameterArray.c/.h` (681/448 lines) — 1,799 lines total, ~90 functions between them (kit load/save, morph, globals, drumset send, everything currently gated through `frontPanel_sendData` per 1.2 above). Same logic as 1.3: move and rename first (`Core/Scene/`, functions can stay `preset_*` for now or move to `scene_*` — your call, but pick one and do it in this pass rather than mixing prefixes), verify unchanged behavior, then build the Phase 3 BANK/SCENE/KIT hierarchy inside the new location rather than fighting the move and the redesign at the same time.
+Completed in Session 029. `presetManager.c/.h` and `ParameterArray.c/.h` now
+live under `Core/Scene/Preset/`; public function prefixes intentionally remain
+`preset_*`, `parameterArray_*`, and `paramArray_*`.
 
-Note the include-path knock-on: `presetManager.c`/`ParameterArray.c` are referenced by `-ICore/Preset` in the `Makefile`, and by `#include "presetManager.h"` / `#include "ParameterArray.h"` from `frontPanelParser.c`, `menu.c`, `lfo.c`, and others — all of those includes and the Makefile's `-I` flag need updating in the same commit as the move, or the build breaks immediately (which is a fine sanity check that the move was mechanical and complete).
+The include-path knock-on was handled in the same session: `Makefile` uses
+`-ICore/Scene/Preset` and source paths under `Core/Scene/Preset/`.
 
 **Suggested complementary step:** since 1.2, 1.3, and 1.4 all touch `frontPanelParser.c`'s call sites in overlapping files (`presetManager.c` and `sequencer.c` both `#include "frontPanelParser.h"`), doing 1.2 *before* 1.3/1.4 means the direct-wiring pass only has to happen once, against the pre-move file layout, rather than being redone against new paths. The order above (1.1 → 1.2 → 1.3 → 1.4) reflects that.
 
@@ -72,32 +86,68 @@ Note the include-path knock-on: `presetManager.c`/`ParameterArray.c` are referen
 
 **Location:** `Core/Scene/` (post-move), `Core/Hardware/SD/filesystem.c`, `Core/Hardware/SD/asyncfatfs/`
 
-This phase builds the BANK/SCENE/KIT/PAT/FX library structure from `putting it together` inside the `Scene/` directory Phase 1 just created, and lands the debounced autosave system. It comes before the sequencer rewrite (Phase 3) because the sequencer rewrite's whole memory design (dynamic pool split 16-ways-plus-one across scenes) only makes sense once "scene" is a real, addressable unit that the file layer understands — right now the SD layer has no concept of a scene at all.
+This phase builds the current SD card hierarchy documented in `FILESYSTEM_SPEC.md` — `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, plus root `settings.cfg` — and lands the debounced autosave system. It comes before the sequencer rewrite (Phase 3) because the sequencer rewrite's whole memory design (dynamic pool split 16-ways-plus-one across scenes) only makes sense once "scene" is a real, addressable unit that the file layer understands — right now the SD layer has no concept of a scene at all.
 
 ### 2.1 Current SD layer, for grounding
 
-`filesystem.c` is entirely flat: `filesystem_makeFilename()` builds an 8.3 name like `p000.snd` (`p` + 3-digit slot number + extension) directly into a buffer — there is no directory component anywhere in the current path-building code, and file *type* is an enum (`fs_file_type_t`: `FS_FILE_KIT`, `FS_FILE_PATTERN`, `FS_FILE_MORPH`, `FS_FILE_PERFORMANCE`, `FS_FILE_ALL`, `FS_FILE_GLOBALS`, `FS_FILE_SAMPLES`) rather than a path. So the `BANK/001 <name>/SCENE 01 <name>/KIT/drum1.drm` hierarchy from `putting it together` is a genuinely new capability, not an extension of something that half-exists.
+`filesystem.c` began as an entirely flat file loader: `filesystem_makeFilename()` builds an 8.3 name like `p000.snd` (`p` + 3-digit slot number + extension) directly into a buffer, and file *type* is an enum (`fs_file_type_t`: `FS_FILE_KIT`, `FS_FILE_PATTERN`, `FS_FILE_MORPH`, `FS_FILE_PERFORMANCE`, `FS_FILE_ALL`, `FS_FILE_GLOBALS`, `FS_FILE_SAMPLES`) rather than a path. The new directory hierarchy (`Bank/001 Bank/001 Scene/Kit_<kit>/...`, root `Kit/001 Kit Name/...`, root library pools, and `settings.cfg`) is therefore a genuinely new capability, not an extension of something that half-existed.
 
 The good news: the underlying `asyncfatfs` library (the Betaflight-derived async FAT driver already in `Core/Hardware/SD/asyncfatfs/`) already exports `afatfs_mkdir()` and `afatfs_chdir()` — they're just never called from `filesystem.c` today. So this is "teach the existing facade to walk directories," not "write a new filesystem layer."
 
-### 2.2 BANK / SCENE / KIT / PAT / FX hierarchy
+### 2.2 SD card hierarchy
 
-Implement the directory structure and file types exactly as specced in `putting it together`:
+Implement the directory structure and file types exactly as specced in `FILESYSTEM_SPEC.md`:
 
 ```
-SD:/
-├── BANK/001 <name>/settings.cfg, SCENE 01 <name>/{KIT/*.drm|.snr|.cym|.hat, pattern.pat, effects.fx}, … SCENE 16 <name>/
-├── KIT/001 <name>/{drum1.drm, drum2.drm, drum3.drm, snare.snr, cymbal.cym, hi-hat.hat}, …
-├── PAT/<name>.pat, …
-├── FX/<name>.fx, …
-├── SCENE/<name>.scn, …
-├── SAMPLES/<name>.wav, …
-└── WAVETABLES/001 <name>/<name>.wav, …
+settings.cfg
+Bank/
+  001 <bank name>/
+    bankset.bcg
+    001 <scene name>/
+      sceneset.scg
+      Kit <kit name>/
+        kitset.kcg
+        <instrument 1>.<type>
+        ...
+        <instrument 6>.<type>
+      pattern.pat
+      effect.fx
+    ...
+    016 <scene name>/
+Scene/
+  001 <scene name>/
+    sceneset.scg
+    Kit <kit name>/
+      kitset.kcg
+      <instrument files>
+    pattern.pat
+    effect.fx
+Kit/
+  001 <kit name>/
+    kitset.kcg
+    <six instrument files>
+Pattern/
+  <pattern name>.pat
+Sample/
+  <sample name>.wav
+Wavetable/
+  001 <wavetable name>/
+    <wavetable sample>.wav
+Effect/
+  <effect name>.fx
+Instrument/
+  <instrument name>.<type>
 ```
 
-`fs_file_type_t` needs new members for `.snr`/`.cym`/`.hat`/`.drm` (currently there's no per-instrument-part file type — everything voice-related goes through the monolithic kit), `.fx`, `.scn`, and the directory-scoped variants of `.pat`/`.kit` (root `PAT/`/`KIT/` vs. inside a `BANK/xxx/SCENE xx/`). `filesystem_makeFilename()` becomes path-building rather than name-building, and every call site that currently only handles a flat slot number needs a bank/scene context to resolve into a path.
+The only root-level file recognized by the new firmware should be `settings.cfg`, replacing `GLO.CFG`/`glo.cfg`. It stores system-level settings and a reference to the last loaded bank; boot should load that bank. The recognized root directories are exactly `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, and `Instrument`.
 
-Root-level `KIT/`, `PAT/`, `FX/`, and `SCENE/` act as shared libraries per the spec — any file there can load into any scene slot in any bank, and any scene's parts can be exported back out to them. This is a straightforward extension of the existing "load this slot" flow once paths exist, just with more possible source/destination roots.
+`Bank`, `Scene`, `Kit`, and `Wavetable` use numbered folders named `001 <name>`, `002 <name>`, etc. A single underscore after the three-digit slot ID may be accepted for compatibility with older generated folders, but the preferred convention is a space separator and spaces inside the display name are valid. Numbers do not need to be contiguous; browsers should scan slot numbers sequentially and show missing slots as empty (for example `003: Empty`) instead of collapsing gaps. `Bank` scene folders are limited to slots `001` through `016`.
+
+`bankset.bcg`, `sceneset.scg`, and `kitset.kcg` are guard/version/config files. They identify the folder type, prevent accidentally loading a scene/kit/etc. as the wrong container, and carry the metadata needed at that level. `kitset.kcg` also records which instrument file occupies each of the six voice slots.
+
+`fs_file_type_t` needs new members for `.drm`, `.snr`, `.cym`, `.hat`, `.fx`, `.bcg`, `.scg`, `.kcg`, `settings.cfg`, and the directory-scoped variants of `.pat`/`.wav`/instrument files where source and destination matter (`Pattern/` pool vs. scene `pattern.pat`, `Sample/` vs. `Wavetable/<slot>/`, root `Instrument/` vs. kit-contained instruments). `filesystem_makeFilename()` becomes path-building rather than name-building, and every call site that currently only handles a flat slot number needs bank/scene/kit context to resolve into a path.
+
+Root-level `Scene`, `Kit`, `Pattern`, `Effect`, and `Instrument` act as shared libraries per the spec: scenes can be loaded into banks, kits into scenes, patterns/effects into scenes, and instruments into kit voice slots. `Sample` and `Wavetable` are loaded during sample-load/flash-write operations rather than per-scene auto-save. A user may copy scene folders between banks, copy `pattern.pat`/`effect.fx` out to the root pools (or back in if renamed correctly), and copy instrument files out of kit folders into `Instrument/`; kit membership itself should remain controlled by `kitset.kcg`.
 
 ### 2.3 The 17th scene (background bank loading)
 
@@ -107,7 +157,7 @@ This also directly answers what "load a kit by MIDI bank change" becomes in the 
 
 ### 2.4 Debounced auto-save to dot-files
 
-Per your answer: this applies specifically to the files that live inside a loaded bank — the per-instrument part files (`.snr`, `.cym`, `.drm`, etc.), the `.fx` file, the 16 `.pat` files, and the `.cfg` file. Anything else (root-library `KIT/`/`PAT/`/`FX/`/`SCENE/` files, `.wav` samples/wavetables) is explicit load/save only, not auto-saved.
+Per your answer: this applies specifically to the files that live inside a loaded bank — the per-instrument files (`.drm`, `.snr`, `.cym`, `.hat`, etc.), scene `effect.fx`, scene `pattern.pat`, `sceneset.scg`, kit `kitset.kcg`, and bank `bankset.bcg` as needed. Root-library files and folders (`Scene`, `Kit`, `Pattern`, `Effect`, `Instrument`, `Sample`, `Wavetable`) are explicit load/save/copy/import only, not auto-saved.
 
 Mechanism, exactly as you specified: a parameter edit marks its owning file as stale and (re)starts a 5-second idle timer. Any further edit to a parameter in that same file resets the 5-second timer. If edits keep coming in continuously past 30 seconds without a 5-second gap, force a write anyway rather than letting the timer be reset indefinitely. Each of these files is backed by a `.<name>.<ext>` shadow copy holding the last state committed by an explicit menu **SAVE** — the debounced writes go to the live `.<name>.<ext>` working file, not the dot-shadow, and a new **RELOAD** menu page (alongside LOAD/SAVE) restores the working file from the dot-shadow.
 
@@ -121,7 +171,7 @@ Per your `putting it together` note and follow-up answer: this reverts the *curr
 
 - **SRAM budget for 17 scenes:** each scene now holds a full kit (6 instrument parts' worth of parameters), a pattern (up to 16,382 bytes — Phase 3's finalized dynamic event pool ceiling), and FX settings. The total SRAM cost of "17 scenes resident simultaneously" needs to be tallied once kit and FX sizes are also known — unlike the pattern pool's earlier draft, this ceiling is now fixed by the event pool's 14-bit address width, not just an SRAM-availability guess, so there's no "shrink it if it doesn't fit" lever on the pattern side anymore; any shortfall has to come out of the kit or FX budget instead, or out of dropping below 17 fully-resident scenes.
 - **Rename/replace primitive in `asyncfatfs`:** needs confirming before 2.4's `.tmp`-then-rename safety mechanism can be built as specified.
-- **Directory-walk cost on `afatfs_chdir`:** the async FAT driver services filesystem ops incrementally across ticks already (per the "flash is fast enough, it already works for samples" answer), but nested directories (`BANK/001/SCENE 01/KIT/`) mean more directory-entry lookups per file open than the current flat scheme. Probably fine given samples already stream from flash successfully, but worth a quick timing check once real directory traversal is in.
+- **Directory-walk cost on `afatfs_chdir`:** the async FAT driver services filesystem ops incrementally across ticks already (per the "flash is fast enough, it already works for samples" answer), but nested directories (`Bank/001 Bank/001 Scene/Kit_<kit>/`) mean more directory-entry lookups per file open than the current flat scheme. Probably fine given samples already stream from flash successfully, but worth a quick timing check once real directory traversal is in.
 
 ### Suggested Complementary Features
 
@@ -294,7 +344,17 @@ Since scenes now carry their own kit/morph-target pair (Phase 2), per-voice and 
 
 ### 4.4 Morph engine implementation
 
-The current LXR-02 morph engine (`Core/Preset/presetManager.c`, soon `Core/Scene/`) is a single global morph: `preset_morph()` sets a target and bumps a generation counter; `preset_morphTick()`, called once per main loop, advances a `morph_index` cursor across `END_OF_SOUND_PARAMETERS` and sends **exactly one** interpolated parameter per call via `frontPanel_sendData()` (soon a direct call, per Phase 1.2), skipping a short list of indices that shouldn't be morphed (index 127's encoding collision, velocity-destination slots, voice-LFO slots, LFO-target slots). This one-parameter-per-tick design is exactly what you described, and it's the mechanism Phase 4 needs to extend to per-voice + LFO-overlay morphing without breaking its real-time-safety property (bounded work per tick, no burst).
+The current LXR-02 morph engine (`Core/Scene/Preset/presetManager.c`) is a
+single global morph: `preset_morph()` sets a target and bumps a generation
+counter; `preset_morphTick()`, called once per main loop, advances a
+`morph_index` cursor across `END_OF_SOUND_PARAMETERS` and applies **exactly
+one** interpolated parameter per call through Preset's direct sound-parameter
+path, skipping a short list of indices that shouldn't be morphed (index 127's
+encoding collision, velocity-destination slots, voice-LFO slots, LFO-target
+slots). This one-parameter-per-tick design is exactly what you described, and
+it's the mechanism Phase 4 needs to extend to per-voice + LFO-overlay morphing
+without breaking its real-time-safety property (bounded work per tick, no
+burst).
 
 There's real prior art for this specific extension: `LXR/mainboard/LxrStm32/src/Preset/MorphEngine.c` in the original LXR-1 codebase already implements per-voice morph amounts plus an LFO-to-morph overlay, as a "background morph worker" (`preset_serviceMorphInterpolation()`) that does "exactly one interpolation unit... per call" — its own doc comment uses almost exactly your phrasing. Its approach: a `preset_morphScanParam` cursor walks parameters (like LXR-02's `morph_index` today), and a `preset_morphDrainPhase` counter interleaves an LFO-overlay check for each of up to 6 source voices *at every parameter*, before advancing to the next parameter — so its actual drain order is "param 1: base value, then check voices 1–6 for an LFO-morph overlay targeting this param; param 2: same; …" rather than "finish all params for every voice, then do LFO overlays at the end."
 
@@ -374,7 +434,7 @@ That division range was originally expressed in **sub-step** terms (64 sub-steps
 
 ### 5.5 Load/save UI rework
 
-The original `putting it together` draft proposed a specific knob remapping for the load/save menus (knob 1 = type, knob 2 = number/cursor, knobs 3/4 = character entry with capitals/numbers/lowercase split across them). Per your note, this is superseded — "we have bigger file changes in mind" — because the whole load/save menu needs rebuilding around the new file-type set from Phase 2 (BANK/SCENE/KIT/PAT/FX/instrument-parts) rather than the old kit/pattern/morph/performance/all/globals/samples set. The specific knob assignment idea is worth keeping as a starting point for that rebuild, but the menu structure itself (what "type" even means, what "auto-load" means per type) needs designing fresh against the Phase 2 file model rather than patched onto the current one.
+The original `putting it together` draft proposed a specific knob remapping for the load/save menus (knob 1 = type, knob 2 = number/cursor, knobs 3/4 = character entry with capitals/numbers/lowercase split across them). Per your note, this is superseded — "we have bigger file changes in mind" — because the whole load/save menu needs rebuilding around the current Phase 2 file model: banks, scenes, kits, patterns, samples, wavetables, effects, instruments, and root `settings.cfg`. The specific knob assignment idea is worth keeping as a starting point for that rebuild, but the menu structure itself (what "type" even means, what "auto-load" means per type) needs designing fresh against the Phase 2 file model rather than patched onto the current flat slot menu.
 
 ### 5.6 External MIDI sequencing tracks
 
@@ -448,7 +508,7 @@ Grounding from actual granular-synthesis practice, since this is new DSP territo
 
 ### 6.4 New oscillators
 
-- **Wavetable.** Reads `.wav` files of any length from `WAVETABLES/` (confirmed by your answer — not a fixed single-cycle format, no Serum-style multi-frame container). Morphable (interpolating between two selected waves) but not modulatable directly; scanning through a wavetable set happens via LFO or envelope targeting the wavetable-position parameter, same as any other modulatable parameter.
+- **Wavetable.** Reads `.wav` files of any length from numbered folders under root `Wavetable/` (confirmed by your answer — not a fixed single-cycle format, no Serum-style multi-frame container). Morphable (interpolating between two selected waves) but not modulatable directly; scanning through a wavetable set happens via LFO or envelope targeting the wavetable-position parameter, same as any other modulatable parameter.
 - **PWM.** You flagged this as "probably wavetables, but suggest another method if you have one" — a direct suggestion: implementing PWM as a genuine variable-duty-cycle square calculation (compare the oscillator's phase accumulator against a duty-cycle threshold instead of the fixed 50% used by `REC`) is cheaper than storing a set of wavetable frames at different duty cycles, and only needs one new parameter (duty cycle) rather than wavetable memory. The tradeoff is the same aliasing consideration as any hard-edged digital waveform on this platform (no oversampling budget), so it inherits the same character as the existing `SAW`/`REC` waveforms rather than being cleaner than them — which is likely fine, since they're presumably an accepted part of the current sound already.
 - **Buffer oscillator.** Reads directly from the L or R DTCM buffer described in 6.7, using the same scanning parameters as the granular oscillator/instrument (position, loop size, retrigger, rate/sync, retrigger randomization). This is effectively "granular, but reading from the BBD buffer instead of sample flash" and can likely share most of its scanning-parameter code with 6.2's granular instrument rather than being a wholly separate implementation.
 - **Swarm / hypersaw.** A detune-and-phase-spread oscillator stack (multiple copies of a base waveform, each slightly detuned and phase-offset) — standard "supersaw" technique, computationally is just N oscillator instances summed, so its cost scales linearly with however many stacked voices are budgeted per instance.

@@ -9,7 +9,7 @@ This is documentation only. No code changes are proposed for this pass.
 
 ## Current Global Span
 
-Defined in `Core/Preset/ParameterArray.h`:
+Defined in `Core/Scene/Preset/ParameterArray.h`:
 
 - `PAR_BEGINNING_OF_GLOBALS` starts the raw global byte span.
 - Current span is 23 bytes: `PAR_BPM` through `PAR_OSC_WAVE_INTERP`.
@@ -312,7 +312,7 @@ Near term:
 
 Future Scene/file redesign:
 
-- Move `parameter_values[]` and `parameters2[]` into `/Core/Preset/`.
+- Move `parameter_values[]` and `parameters2[]` into `Core/Scene/Preset/`.
 - Remove Menu as permanent owner of full parameter arrays.
 - Treat globals/settings as scene-level, bank-level, and system-level storage
   objects, not as a tail slice of the kit/menu parameter array.

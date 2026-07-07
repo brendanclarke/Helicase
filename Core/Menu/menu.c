@@ -917,6 +917,25 @@ static uint8_t menu_isLoadSaveSelectionCurrent(void)
                      preset_getRequestSlot() == menu_currentPresetNr[what]);
 }
 
+/* Request the filesystem action that corresponds to the current Load/Save page
+ * selection.
+ *
+ * Why this exists: the Load/Save UI has two different browsing behaviors. Most
+ * types only need an async name read while the encoder moves. Kit and morph kit
+ * loading on the Load page historically loaded immediately when the slot
+ * changed, and that behavior is preserved.
+ *
+ * Input: loadKitOnLoadPage is nonzero when an encoder movement on LOAD_PAGE
+ * should initiate preset_loadDrumset() instead of just preset_loadName().
+ * Outputs: starts a presetManager/filesystem request or sets
+ * menu_deferSelectionRequest so menu_pollPresetStatus() can retry after the
+ * single filesystem operation slot becomes free.
+ *
+ * Affiliates/clients: menu_handleLoadSaveMenu() calls this after type/slot
+ * changes. preset_loadDrumset(slot, morph=0) is the path that initiates a
+ * Phase 2 Kit/ directory load; preset_loadDrumset(slot, morph=1) still uses the
+ * legacy morph .SND load path. preset_loadName() is the name-only client.
+ */
 static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
 {
     uint8_t what = menu_saveOptions.what;
@@ -1271,6 +1290,19 @@ void menu_repaint(void)
 /* -----------------------------------------------------------------------
 ** menu_repaintLoadSavePage — close port of original
 ** ----------------------------------------------------------------------- */
+/* Paint the two-line Load/Save page into editDisplayBuffer.
+ *
+ * Why this needed a Phase 2 change: the Load page now displays Kit/ directory
+ * slots using filesystem_kitSlotName() from the scan cache, not the currently
+ * loaded preset_currentName or a legacy .SND name header. The visible kit
+ * number is one-based to match folders like 001 Name, while
+ * menu_currentPresetNr[] remains zero-based for presetManager/filesystem calls.
+ *
+ * Inputs: menu_activePage, menu_saveOptions, menu_currentPresetNr[],
+ * preset_currentName, editModeActive. Outputs: editDisplayBuffer plus optional
+ * cursor intent for name editing. Clients: menu_repaint() whenever LOAD_PAGE or
+ * SAVE_PAGE needs a redraw.
+ */
 static void menu_repaintLoadSavePage(void)
 {
     /* Clear both rows so any indicator (>, [, ]) that moved from its
@@ -1308,7 +1340,15 @@ static void menu_repaintLoadSavePage(void)
 
     /* Bottom row */
     if (menu_saveOptions.what < SAVE_TYPE_GLO) {
-        numtostrpu(&editDisplayBuffer[1][1], menu_currentPresetNr[menu_saveOptions.what], ' ');
+        uint8_t displayPreset = menu_currentPresetNr[menu_saveOptions.what];
+        const char *displayName = preset_currentName;
+
+        if (menu_activePage == LOAD_PAGE && menu_saveOptions.what == SAVE_TYPE_KIT) {
+            displayPreset = (uint8_t)(displayPreset + 1u);
+            displayName = filesystem_kitSlotName(menu_currentPresetNr[SAVE_TYPE_KIT]);
+        }
+
+        numtostrpu(&editDisplayBuffer[1][1], displayPreset, ' ');
         if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
             if (editModeActive) {
                 editDisplayBuffer[1][0] = '[';
@@ -1317,7 +1357,7 @@ static void menu_repaintLoadSavePage(void)
                 editDisplayBuffer[1][0] = ARROW_SIGN;
             }
         }
-        memcpy(&editDisplayBuffer[1][5], preset_currentName, 8);
+        memcpy(&editDisplayBuffer[1][5], displayName, 8);
     }
 
     if (menu_activePage == SAVE_PAGE) {
@@ -1686,7 +1726,20 @@ checkvalid:
 }
 
 /* -----------------------------------------------------------------------
-** menu_handleLoadSaveMenu — exact port of original
+** menu_handleLoadSaveMenu
+**
+** Handles encoder and OK-button input while the active page is Load or Save.
+**
+** Inputs: inc is the signed encoder delta; btnClicked is nonzero for the OK
+** button edge. Outputs: updates menu_saveOptions/menu_currentPresetNr, starts
+** preset save/load requests, edits preset_currentName on the Save page, and
+** requests display/name refreshes through menu_requestCurrentLoadSaveSelection.
+**
+** Phase 2 kit-load affiliate: when the Load page is editing a kit slot, encoder
+** movement calls menu_requestCurrentLoadSaveSelection(1), which calls
+** preset_loadDrumset(slot, 0). That eventually starts filesystem's directory
+** kit loader for Kit/NNN Name. The Save page still follows the existing save
+** paths until the new save functions are implemented.
 ** ----------------------------------------------------------------------- */
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
@@ -1753,10 +1806,13 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             break;
         case SAVE_STATE_EDIT_PRESET_NR: {
             /* Saturating add - original `kit > 0` and `kit <= 125` checks
-            ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. */
+            ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. Kits use
+            ** 0..127 internally so they can display/open 001..128 folders;
+            ** the older numbered file pools remain capped at 0..125 here. */
+            int16_t maxPreset = (menu_saveOptions.what == SAVE_TYPE_KIT) ? 127 : 125;
             int16_t newPreset = (int16_t)menu_currentPresetNr[menu_saveOptions.what] + (int16_t)inc;
             if (newPreset < 0)        newPreset = 0;
-            else if (newPreset > 125) newPreset = 125;
+            else if (newPreset > maxPreset) newPreset = maxPreset;
             menu_currentPresetNr[menu_saveOptions.what] = (uint8_t)newPreset;
             if (inc != 0) {
                 if (menu_activePage == LOAD_PAGE) {

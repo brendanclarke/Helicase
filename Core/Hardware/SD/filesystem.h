@@ -101,7 +101,33 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb);
 uint8_t filesystem_installSamplesBlocking(void);
 uint8_t filesystem_installLoopsBlocking(void);
 
+/* Return the most recent eight-character name produced by a load-name request.
+ *
+ * Input: none. Output: pointer to filesystem-owned storage that remains valid
+ * until the next filesystem_requestLoadName() or filesystem_start() operation
+ * reuses it. Clients: presetManager.c and kitBrowser.c display name browsing.
+ */
 const char *filesystem_loadedName(void);
+
+/* Query the Phase 2 Kit/ scan cache for a numbered kit folder.
+ *
+ * Input: zero_based_slot is the internal slot index used by preset/menu code;
+ * SD folder names are one-based 001 Name through 128 Name, with underscore
+ * accepted as a compatibility separator. Output: nonzero when
+ * filesystem_requestScanKits() has found a matching Kit/NNN Name directory.
+ * Clients: menu.c and any future load/save UI that must show explicit Empty
+ * slots without trying to open a missing directory.
+ */
+uint8_t     filesystem_kitSlotExists(uint8_t zero_based_slot);
+
+/* Return the eight-character display name from the Phase 2 Kit/ scan cache.
+ *
+ * Input: zero_based_slot as above. Output: filesystem-owned eight printable
+ * characters plus NUL for existing kits, or the literal "Empty   " for missing
+ * slots. Client: menu_repaintLoadSavePage() displays kit names directly from
+ * the directory cache instead of reading legacy .SND headers.
+ */
+const char *filesystem_kitSlotName(uint8_t zero_based_slot);
 uint8_t     filesystem_diagOp(void);
 uint8_t     filesystem_diagPhase(void);
 uint32_t    filesystem_diagBytesDone(void);

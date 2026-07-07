@@ -19,8 +19,8 @@ make && make img   →   build/LXRV2_lxr02.img
 
 **Current working source**: repository root, branch `dev-burst-reduction`.
 
-**Session 029 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/029_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal and Pattern/Preset ownership moves, also read `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
+**Session 030 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/030_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, and Phase 2 directory-kit loading, also read `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
@@ -31,6 +31,7 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
 Session 027 chunks runtime kit/all/performance sound-apply completion: after audio starts, `menu_startSoundApply()` / `menu_tickSoundApply()` drive `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` so one voice's velocity/LFO modulation routing is applied per foreground pass; boot-time pre-audio apply remains synchronous. `AUDIO_DMA_FRAMES` remains 96; 64-frame latency testing is deferred until the chunked path is hardware-tested.
 Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former parser opcodes are direct owner calls: Pattern edits through `pat_*` in `Core/Scene/Pattern/PatternData.c`, LED feedback through `SeqLedState` plus foreground `led_processSeqLedState()`, sound parameters through Preset, MIDI config through MidiParser, and transport/playback through Sequencer. Euklid/SOM now live in `Core/Scene/Pattern/`.
 Session 029 completes the PatternData storage-ownership pass and Preset folder move. `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, and `SEQ_NEXT_RANDOM*` are gone from live code; Sequencer reads/writes pattern storage through `pat_*` helpers while keeping timing/transport/recording gates. `Core/Preset/` is now `Core/Scene/Preset/`; public names remain `preset_*`, `parameterArray_*`, and `paramArray_*`. `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign. Staging/global audits are in `STAGING_AUDIT.md` and `GLOBALS_STAGING_AUDIT.md`.
+Session 030 begins Phase 2 filesystem work. `FILESYSTEM_SPEC.md` is the current root layout spec; `Core/Hardware/SD/storageTypes.c/h` owns kit text schemas/parameter maps with `storage_` prefixes; normal root kit load scans `Kit/NNN Name/`, loads `kitset.kcg` plus six instrument files, and keeps morph load on legacy `.SND`. Numbered folder convention is preferred `NNN Name`, compatibility `NNN_Name`, with a FAT short-alias fallback for scan aliases like `001SLA~1`. `SD_CARD/Kit/` is generated from legacy kits using the space convention.
 
 ---
 
@@ -91,7 +92,8 @@ Session 029 completes the PatternData storage-ownership pass and Preset folder m
 │       ├── 026_SESSION_HANDOFF_LOG.md
 │       ├── 027_SESSION_HANDOFF_LOG.md
 │       ├── 028_SESSION_HANDOFF_LOG.md
-│       └── 029_SESSION_HANDOFF_LOG.md
+│       ├── 029_SESSION_HANDOFF_LOG.md
+│       └── 030_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h
@@ -114,7 +116,8 @@ Session 029 completes the PatternData storage-ownership pass and Preset folder m
     │   │       ├── encoder.c/h      ← SW42, TIM1 IC, Dannegger, accel + rebound suppression
     │   │       └── endlessPots.c/h  ← RV1-4, atan2 delta tracking
     │   ├── SD/
-    │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations
+    │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations; normal kit load now scans/loads root Kit/ directories
+    │   │   ├── storageTypes.c/h     ← Phase 2 kit text schema, numbered-folder parser, instrument parameter maps
     │   │   ├── kitBrowser.c/h       ← kit-only 128-slot gap-tolerant browser
     │   │   ├── SPI/
     │   │   │   ├── spi_sd.c/h       ← bit-bang SPI: PC12/PD2/PC8/PD0
@@ -196,6 +199,10 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 - Always verify the local working repository directory before writing code.
 - Blocking for 1ms anywhere in the main loop or any ISR at priority <= 4 is unacceptable.
 - Runtime SD/file work must remain asynchronous; boot-only synchronous polling is allowed before audio starts.
+- New code should be commented at detailed contract level: why the function,
+  variable, or storage type exists; what it does; inputs/outputs; and
+  clients/accessors/affiliates. Do this proactively, not as a cleanup after the
+  user asks again.
 
 ---
 
@@ -308,7 +315,7 @@ The STM32F765 has an internal 12-bit DAC on PA4 (DAC1_OUT) and PA5 (DAC2_OUT). T
 
 ---
 
-## SD Card Architecture (implemented Sessions 12 and 17)
+## SD Card Architecture (implemented Sessions 12, 17, and Phase 2 start in 030)
 
 **SD operations must never block the main loop or any ISR at priority ≤ 4.**
 
@@ -333,6 +340,19 @@ Core/Scene/Preset/presetManager.c / kitBrowser.c
 - `sdcard_lxr02.c` implements `sdcard_readBlock`/`sdcard_writeBlock`/`sdcard_poll` on top of `SPI/spi_sd.c`. Each `sdcard_poll()` call clocks a burst of 16 SPI bytes (~9µs). A 512-byte sector completes in 32 polls.
 - `filesystem.c` serializes operations — one SD operation at a time. Request functions return immediately; completion is signalled via callback/status.
 - `filesystem.c` owns the filetype registry and add-a-filetype checklist. Non-SD clients include `filesystem.h` only.
+- Phase 2 root filesystem spec lives in `FILESYSTEM_SPEC.md`. Recognized root
+  directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`,
+  `Effect`, and `Instrument`; future system settings live in root
+  `settings.cfg`.
+- `storageTypes.c/h` owns Phase 2 text storage schemas and parameter maps. Keep
+  it free of `asyncfatfs` calls and keep function names prefixed `storage_`.
+- Normal kit load now scans root `Kit/` directories named `NNN Name` or
+  compatibility `NNN_Name`, then loads `kitset.kcg` plus six instrument files.
+  Morph-kit load remains legacy `.SND` until per-instrument morph persistence is
+  designed.
+- Kit scan keeps both display names and FAT short open aliases. If a card only
+  exposes a short alias such as `001SLA~1`, scan falls back to the leading
+  three-digit slot so the kit remains loadable.
 - Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
 - `kitBrowser.c/h` intentionally remains kit-only; pattern/performance/all use typed name loading and direct slot handling.
 - Boot path: synchronous polling loop before `audioCodec_init()` (audio not running, blocking OK).
@@ -444,7 +464,7 @@ initMidiUart(); usb_init();
 filesystem_initCardAndMountBlocking(); // card SPI mode + afatfs mount, pre-audio
 menu_init();           // calls memset on parameter_values — do NOT also memset in main()
 // Synchronous kit scan via filesystem_requestScanKits + polling
-// Synchronous boot kit load (P000.SND) via preset_loadDrumset + polling + menu_pollPresetStatus
+// Synchronous boot normal kit load (root Kit/001 ... directory) via preset_loadDrumset + polling + menu_pollPresetStatus
 // Synchronous globals load (GLO.CFG) via preset_loadGlobals + polling + menu_pollPresetStatus
 audioCodec_init();     // single audio entry point — AFTER all SD boot ops
 sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
@@ -463,6 +483,11 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - `seq_offsetTrackStepIndexForRotation()` is a narrow runtime hook used by PatternData; UI code should call `pat_setTrackRotation()`.
 - `Core/Scene/Preset/` owns Preset code location. Public names intentionally remain `preset_*`, `parameterArray_*`, and `paramArray_*`; do not rename only part of this API.
 - `parameter_values[]` and `parameters2[]` still live in Menu and are known future migration targets for the instrument/file redesign, not a cleanup to do casually.
+- Normal kit load is directory-based through root `Kit/`; morph-kit load is
+  still legacy `.SND`. Do not collapse those paths until instrument morph
+  save/load is designed.
+- MIDI notes/channels do not belong in `kitset.kcg` or instrument files. They
+  belong in future scene settings.
 - `BUTTON_TIMEOUT` is milliseconds on this port (`500u`), not original AVR ticks (`38 * 13.107ms`).
 - `EuklidGenerator.c` matches original LXR. PATGEN distribution depends on `__CLZ(0) == 32`; do not replace the shim with `__builtin_clz()`.
 - `seq_tick()` is owned by `TIM3_IRQHandler`. **Do NOT add seq_tick() back to the main loop.**
@@ -492,6 +517,30 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ---
 
 ## Known Issues / Technical Debt
+
+### Resolved / Changed in Session 030
+- Phase 2 root filesystem spec created in `FILESYSTEM_SPEC.md`. Root layout is
+  `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`,
+  `Instrument`, plus future root `settings.cfg`.
+- `SD_CARD/Kit/` generated from legacy `Pxxx.SND` files. Folders use preferred
+  `NNN Name` convention, for example `004 Moch to`; `_` remains accepted for
+  compatibility.
+- New `Core/Hardware/SD/storageTypes.c/h` owns Phase 2 kit text schemas,
+  numbered-folder parsing, kitset/instrument validation, and instrument
+  parameter maps. All functions in this layer use the `storage_` prefix and
+  must remain independent of `asyncfatfs`.
+- Normal kit load now reads root `Kit/` directories: scan cache ->
+  `kitset.kcg` -> six instrument files. `FS_FILE_MORPH` / MorphKit load still
+  uses legacy `.SND`.
+- `asyncfatfs` now sets opened handle type from the FAT directory entry so
+  opened directories can be entered/scanned reliably.
+- Kit scan has a FAT short-alias fallback for space-named folders when LFN
+  reconstruction is unavailable.
+- MIDI note/channel settings were intentionally removed from `kitset.kcg`; they
+  are future scene settings. Directory kit loads leave `PAR_MIDI_NOTE1..7`
+  unchanged for now.
+- Final hardware status: menu/init directory kit load worked after discovery
+  fixes; final short-alias fallback still needs hardware smoke-test.
 
 ### Resolved / Changed in Session 029
 - Pattern storage ownership moved further into `Core/Scene/Pattern/PatternData.c/h`. Live code no longer uses `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, or `SEQ_NEXT_RANDOM*`.

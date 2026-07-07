@@ -63,6 +63,7 @@ SRCS = \
   Core/Hardware/SD/asyncfatfs/fat_standard.c \
   Core/Hardware/SD/asyncfatfs/sdcard_lxr02.c \
   Core/Hardware/SD/filesystem.c \
+  Core/Hardware/SD/storageTypes.c \
   Core/Hardware/SD/kitBrowser.c \
   Core/Hardware/USB/OTG_Driver/src/usb_core.c \
   Core/Hardware/USB/OTG_Driver/src/usb_dcd.c \

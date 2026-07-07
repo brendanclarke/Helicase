@@ -1,9 +1,10 @@
 # Module Interchange Spec
 
-Session 029 baseline. This spec records the live module API boundaries after
+Session 030 baseline. This spec records the live module API boundaries after
 `frontPanelParser.c/h` removal, the PatternData storage-ownership pass, and the
-`Core/Preset` -> `Core/Scene/Preset` folder move. The goal is to make the
-direct-call ownership clear so future work does not recreate a generic bridge.
+`Core/Preset` -> `Core/Scene/Preset` folder move, plus the first Phase 2
+directory-kit filesystem boundary. The goal is to make the direct-call
+ownership clear so future work does not recreate a generic bridge.
 
 ## Rules
 
@@ -14,12 +15,16 @@ direct-call ownership clear so future work does not recreate a generic bridge.
 - Sound parameter application goes through Preset.
 - MIDI runtime configuration goes through MidiParser.
 - Filesystem may serialize Pattern data through PatternData pointer accessors.
+- Filesystem owns async SD/FAT access; storage text schemas and parameter maps
+  live in `storageTypes.c/h`.
 - Sequencer may read pattern data through narrow PatternData playback helpers;
   it must not index PatternData storage arrays directly.
 - `pat_tmpPattern` is the only active-pattern load staging buffer and is
   retained until the 17th Scene/background-bank-load design replaces it.
 - Preset code lives under `Core/Scene/Preset/`, but public API names remain
   `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
+- Normal root Kit loads are directory-based; morph kit loads remain legacy
+  `.SND` until instrument morph save/load is designed.
 
 ## Core/Scene/Pattern/PatternData
 
@@ -387,24 +392,40 @@ render boundary. Session 028 removed obsolete front-panel dependency.
 
 ## Core/Hardware/SD/filesystem
 
-Affiliate modules: Preset, Menu, kitBrowser, PatternData, SampleMemory.
+Affiliate modules: Preset, Menu, kitBrowser, PatternData, SampleMemory,
+storageTypes.
 
 Purpose: public typed async filesystem facade. It serializes pattern data
-through PatternData accessors after Session 028.
+through PatternData accessors after Session 028. After Session 030, normal kit
+load also scans and opens root `Kit/NNN Name/` directories, while leaving
+storage text parsing to `storageTypes.c/h`.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
 | `filesystem_initCardAndMountBlocking()` / `filesystem_initAfterCardReady()` | Boot card init/mount. | `main.c` |
 | `filesystem_tick()` | Pump asyncfatfs work. | main loop |
 | `filesystem_status()` / `filesystem_ack()` | Operation status protocol. | Preset/Menu |
-| `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. | Preset |
-| `filesystem_requestLoadName(type, slot, cb)` | Async 8-byte name load. | Preset/Menu |
-| `filesystem_requestScanKits(cb)` | Kit slot scan. | kitBrowser/Menu |
+| `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is now `Kit/NNN Name/kitset.kcg` plus instruments; for `FS_FILE_MORPH`, load remains legacy `.SND`. Saves remain legacy for now. | Preset |
+| `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
+| `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the new cache and legacy `kitBrowser` map. | main startup, kitBrowser/Menu |
 | `filesystem_installSamplesBlocking()` / `filesystem_installLoopsBlocking()` | Blocking sample/loop install under audio suspend. | Menu |
 | `filesystem_loadedName()` | Read loaded name buffer. | Preset |
+| `filesystem_kitSlotExists(zero_based_slot)` | Query the Phase 2 Kit scan cache for a numbered folder. | Menu/future browsers |
+| `filesystem_kitSlotName(zero_based_slot)` | Return cached eight-character Kit display name or `Empty   `. | Menu Load page |
 | `filesystem_diagOp()` / `filesystem_diagPhase()` / `filesystem_diagBytesDone()` | Diagnostics. | diagnostics/future UI |
 | `filesystem_lastMountResult()` / `filesystem_bootDetectedUnsupportedCard()` | Boot/card status. | main/Menu |
 | `filesystem_takeStaleGlobalsWarning()` | One-shot stale globals warning source. | Menu |
+
+Important private Phase 2 kit helpers:
+
+- `filesystem_scanKits_tick()` enters root `Kit/`, reconstructs LFN display
+  names when available, records FAT short aliases for opening, and populates
+  `kb_map[]`/`kb_numKits` for legacy `kitBrowser` compatibility.
+- `filesystem_loadKitDirectory_tick()` opens the selected kit folder, parses
+  `kitset.kcg`, loads six listed instrument files, and writes into
+  `parameter_values[]` / `parameters2[]`.
+- Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
+  fallback for FAT aliases like `001SLA~1`.
 
 Private but important pattern serialization helpers:
 
@@ -415,6 +436,41 @@ Private but important pattern serialization helpers:
 
 These select normal PatternData storage or `PATTERNDATA_STAGING_PATTERN` when
 loading the currently active pattern.
+
+## Core/Hardware/SD/storageTypes
+
+Affiliate modules: filesystem, ParameterArray, generated `SD_CARD/Kit` data,
+`tools/convert_legacy_kits.py`.
+
+Purpose: pure Phase 2 storage-format layer. It owns text schema parsing,
+validation, numbered folder parsing, filename/type checks, display-name
+normalization, and instrument-key-to-`ParameterArray` maps. It must not call
+`asyncfatfs`; filesystem owns I/O and passes complete text lines/names into this
+layer. All functions in this layer use the `storage_` prefix.
+
+| API / Data | Use | Usual callers / clients |
+|---|---|---|
+| `storage_status_t` | Parser/validator result codes. | filesystem |
+| `storage_instrument_type_t` | Format-level type enum for `.drm`, `.snr`, `.cym`, `.hat`. | kitset/instrument parser |
+| `storage_kitset_t` | Incremental parse state for `kitset.kcg`. | filesystem directory kit loader |
+| `storage_instrument_state_t` | Incremental parse state for one instrument file. | filesystem directory kit loader |
+| `storage_kitsetInit()` / `storage_kitsetParseLine()` / `storage_kitsetFinalize()` | Validate `kitset.kcg`, collect instrument filenames/types, and write kit-level parameters such as audio outputs. | `filesystem_loadKitDirectory_tick()` |
+| `storage_instrumentStateInit()` / `storage_instrumentParseLine()` / `storage_instrumentFinalize()` | Validate one instrument file and write mapped `[params]`/`[morph]` values. | `filesystem_loadKitDirectory_tick()` |
+| `storage_instrumentCopyMainToMorphFallback()` | Copy mapped main values into morph buffer when an instrument has no `[morph]` section. | `filesystem_loadKitDirectory_tick()` |
+| `storage_instrumentTypeFromText()` / `storage_instrumentFilenameMatchesType()` | Convert/validate type strings and extensions. | kitset/instrument validation |
+| `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into zero-based slot plus eight-character display name. | Kit scan |
+| `storage_copyDisplayName()` / `storage_copyFilename()` | Fixed-width display-name normalization and short filename copying. | filesystem/parser code |
+
+Current ownership decisions:
+
+- `kitset.kcg` owns kit membership, instrument filenames, instrument types,
+  `audio_out`, `voice_decimation_all`, and kit metadata.
+- Instrument files own per-voice sound parameters, including volume and pan.
+- MIDI note/channel values do not belong in kitset or instrument files; they
+  belong in future scene settings.
+- Instrument morph data is optional during this load pass. Missing morph data is
+  treated as "copy main parameters into morph" until save-format work defines
+  explicit per-instrument morph persistence.
 
 ## main.c
 

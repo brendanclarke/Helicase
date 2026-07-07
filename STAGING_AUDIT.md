@@ -30,7 +30,7 @@ audio deadline, or needs boundary-safe sequencer behavior.
 - The remaining items are generally new or purposeful and should be left alone
   unless their owning subsystem is redesigned.
 - `parameter_values[]` and `parameters2[]` must eventually migrate fully into
-  `/Core/Preset/`, which should become the only canonical source of Preset
+  `Core/Scene/Preset/`, which should become the only canonical source of Preset
   Voice/Kit/Morph endpoint parameters. The Menu should not permanently own full
   parameter arrays. This belongs with the instrument file redesign, not this
   cleanup.
@@ -304,9 +304,10 @@ SCOPING_TARGETS file families this needs to cover:
 
 - Current flat files: kit, morph kit, pattern, performance, all, globals,
   samples.
-- Phase 2 hierarchy: bank `settings.cfg`, 16 scene directories, per-instrument
-  files (`.drm`, `.snr`, `.cym`, `.hat`), `pattern.pat`, `effects.fx`, root
-  library `KIT/`, `PAT/`, `FX/`, `SCENE/`, `SAMPLES/`, and `WAVETABLES/`.
+- Phase 2 hierarchy: root `settings.cfg`, bank directories, scene directories,
+  per-instrument files (`.drm`, `.snr`, `.cym`, `.hat`), `pattern.pat`,
+  `effect.fx`, and root library pools `Kit/`, `Pattern/`, `Effect/`, `Scene/`,
+  `Sample/`, `Wavetable/`, and `Instrument/`.
 
 Risk:
 
@@ -358,7 +359,7 @@ Recommendation if filesystem is later redesigned:
 
 ### `presetManager` Async Status State
 
-- File: `Core/Preset/presetManager.c`
+- File: `Core/Scene/Preset/presetManager.c`
 - Symbols/functions:
   - `pm_status`
   - `pm_completed_op`
@@ -549,12 +550,57 @@ Cleanup angle:
 
 ## Probably Keep / Not Vestigial
 
+### Directory Kit Scan And Parser Scratch
+
+- Files:
+  - `Core/Hardware/SD/filesystem.c`
+  - `Core/Hardware/SD/storageTypes.c`
+- Symbols/functions:
+  - `kit_slot_present[]`
+  - `kit_slot_name[][]`
+  - `kit_slot_open_name[][]`
+  - `op_kit_root_dir`
+  - `op_kit_slot_dir`
+  - `op_finder`
+  - `op_lfn_name[]`
+  - `op_line_buf[]`
+  - `op_kitset`
+  - `op_instrument_state`
+  - `filesystem_scanKits_tick()`
+  - `filesystem_loadKitDirectory_tick()`
+  - `storage_kitsetParseLine()`
+  - `storage_instrumentParseLine()`
+
+What it does:
+
+- Caches root `Kit/` numbered-folder presence, display names, and FAT short
+  aliases for opening.
+- Holds async directory-scan and text-line parse state while loading
+  `kitset.kcg` and six instrument files.
+- Compatibility-populates `kb_map[]` / `kb_numKits` until kitBrowser/menu are
+  fully rebuilt around the Phase 2 filesystem model.
+
+Decision:
+
+- Keep. This is purposeful Phase 2 filesystem state, not vestigial staging.
+- Revisit only when the full bank/scene browser replaces the current root-kit
+  compatibility path.
+
+Why it is probably not vestigial:
+
+- The firmware is single-operation async; directory and parser state must
+  survive across `filesystem_tick()` calls.
+- FAT long names are display-oriented while `asyncfatfs` opens short names in
+  the current directory, so display/open names must both be retained.
+- Space-named folders can fall back to short aliases if LFN reconstruction is
+  unavailable on a card.
+
 ### `parameters2[]` Morph Kit Buffer
 
 - File: `Core/Menu/menu.c`
 - Users:
   - `Core/Hardware/SD/filesystem.c`
-  - `Core/Preset/presetManager.c`
+  - `Core/Scene/Preset/presetManager.c`
 - Symbol: `uint8_t parameters2[END_OF_SOUND_PARAMETERS]`
 
 What it does:
@@ -565,7 +611,7 @@ What it does:
 
 Decision:
 
-- Leave for now, but it must eventually migrate fully into `/Core/Preset/`
+- Leave for now, but it must eventually migrate fully into `Core/Scene/Preset/`
   alongside `parameter_values[]`.
 - Menu should not permanently own the full kit/morph endpoint arrays.
 - The right time is the instrument file redesign, when Preset becomes canonical
@@ -583,7 +629,7 @@ Possible cleanup:
 
 ### Morph Pass Scheduler State
 
-- File: `Core/Preset/presetManager.c`
+- File: `Core/Scene/Preset/presetManager.c`
 - Symbols/functions:
   - `morph_active`
   - `morph_target_value`
@@ -613,11 +659,14 @@ Possible cleanup:
 ### Direct Kit/Morph Load Into `parameter_values[]` / `parameters2[]`
 
 - File: `Core/Hardware/SD/filesystem.c`
-- Function: `filesystem_loadKit_tick()`
+- Functions:
+  - `filesystem_loadKitDirectory_tick()`
+  - `filesystem_loadKit_tick()`
 
 What it does:
 
-- Reads a kit directly into `parameter_values[]` or a morph kit directly into
+- Reads a normal directory kit into `parameter_values[]` and morph fallback data
+  into `parameters2[]`, or reads a legacy morph kit directly into
   `parameters2[]`.
 - Post-load sound application happens later through the preset/menu completion
   path.
