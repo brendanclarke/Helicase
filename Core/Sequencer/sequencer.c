@@ -68,8 +68,7 @@ uint8_t seq_masterStepCnt=0;				/** keeps track of the played steps between 0 an
 uint8_t seq_rollRate = 0x08;				//start with roll rate = 1/16
 uint8_t seq_rollState = 0;					/**< each bit represents a voice. if bit is set, roll is active*/
 
-static int8_t 	seq_stepIndex[NUM_TRACKS];	/**< we have 16 steps consisting of 8 sub steps = 128 steps.
-											     each track has its own counter to allow different pattern lengths */
+static int16_t seq_stepIndex[NUM_TRACKS]; /**< bridge step counter, -1 before start and 0..127 while running. Each track has its own counter for independent track lengths. */
 
 static uint16_t seq_tempo = 120;			/**< seq speed in bpm*/
 
@@ -159,7 +158,7 @@ void seq_init()
 		autoNode_init(&seq_automationNodes[i][1]);
 	}
 
-	memset(seq_stepIndex,0,NUM_TRACKS);
+	memset(seq_stepIndex,0,sizeof(seq_stepIndex));
 	memset(seq_lastMasterStep,0,NUM_TRACKS);
 
 
@@ -182,34 +181,33 @@ void seq_setShuffle(float shuffle)
 void seq_offsetTrackStepIndexForRotation(uint8_t trackNr, uint8_t oldRot,
                                          uint8_t newRot, uint8_t len)
 {
-	int8_t offset;
+	int16_t offset;
 	int16_t si;
 
 	/*
 	 * Why: PatternData owns the stored rotation value, but seq_stepIndex[] is
-	 * scheduler runtime state. Inputs are the old/new main-step rotations and
-	 * effective track length. Output is an adjusted sub-step index preserving
-	 * the pre-refactor live-rotation behavior. Risk: track/len must be bounded
+	 * scheduler runtime state. Inputs are the old/new step rotations and
+	 * effective track length. Output is an adjusted step index preserving
+	 * live-rotation behavior. Risk: track/len must be bounded
 	 * by PatternData before this hook is called.
 	 */
 	if (trackNr >= NUM_TRACKS || len == 0)
 		return;
 
-	offset = (int8_t)(((int8_t)newRot % (int8_t)len) -
-	                  ((int8_t)oldRot % (int8_t)len));
-	si = seq_stepIndex[trackNr] + (offset * 8);
+	offset = (int16_t)((newRot % len) - (oldRot % len));
+	si = seq_stepIndex[trackNr] + offset;
 	if (si < 0)
-		si += (len * 8);
-	else if (si >= (len * 8))
-		si -= (len * 8);
-	seq_stepIndex[trackNr] = (int8_t)si;
+		si += len;
+	else if (si >= len)
+		si -= len;
+	seq_stepIndex[trackNr] = si;
 }
 //------------------------------------------------------------------------------
 static void seq_calcDeltaT(uint16_t bpm)
 {
 	//--- calc deltaT ----
-	// f�r 4/4tel takt -> 1 beat = 4 main steps = 4*8 = 32 sub steps
-	// 120 bpm 4/4tel = 120 * 1 beat / 60sec = 120 * 32 in 60 sec;
+	// For 4/4 timing, one beat is 32 internal PPQ ticks in this sequencer clock.
+	// 120 bpm 4/4 = 120 beats / 60 sec; seq_deltaT is divided by SEQ_INTERNAL_PPQ below.
 	seq_deltaT 	= (1000*60)/bpm; 	//bei 12 = 500ms = time for one beat
 	seq_deltaT /= SEQ_INTERNAL_PPQ; //we run the internal clock at 96ppq -> seq clock 32 ppq == prescaler 3, midi clock 24 ppq == prescale 4
 	seq_deltaT *= SYSTICK_TICKS_PER_MS; //systick_ticks is the canonical 0.25ms LXR tick
@@ -368,7 +366,7 @@ static void seq_nextStep()
 	uint8_t seqlen;
 	seqlen = pat_getEffectiveTrackLength(seq_activePattern, 0);
 
-	if( (((seq_stepIndex[0]+1) & 0x7f) == 0) || ((seq_stepIndex[0]+1) / 8 == seqlen))
+	if (((seq_stepIndex[0] + 1) >= seqlen) || ((seq_stepIndex[0] + 1) >= NUM_STEPS))
 	{
 		masterStepPos = 0;
 		//a bar has passed
@@ -376,7 +374,7 @@ static void seq_nextStep()
 	}
 	else
 	{
-		masterStepPos = seq_stepIndex[0]+1;
+		masterStepPos = (uint8_t)(seq_stepIndex[0] + 1);
 	}
 
 	//-------- check if the master track has ended and check if a pattern switch is necessary --------
@@ -469,7 +467,7 @@ static void seq_nextStep()
 		// --AS **PATROT we now use this for length
 		seqlen = pat_getEffectiveTrackLength(seq_activePattern, (uint8_t)i);
 
-		if((seq_stepIndex[i] / 8) == seqlen || (seq_stepIndex[i] & 0x7f) == 0)
+		if ((seq_stepIndex[i] >= seqlen) || (seq_stepIndex[i] >= NUM_STEPS))
 		{
 			//if end is reached reset track to step 0
 			seq_stepIndex[i] = 0;
@@ -484,14 +482,13 @@ static void seq_nextStep()
 			//if track is not muted
 			if(!(seq_mutedTracks & (1<<i) ) )
 			{
-				//if main step (associated with current substep) is active
-				if(pat_isMainStepActive((uint8_t)i, (uint8_t)(seq_stepIndex[i]/8), seq_activePattern)) {
+				// If the current bridge step is active, this track can trigger.
+				if (pat_isStepActive((uint8_t)i, (uint8_t)seq_stepIndex[i], seq_activePattern)) {
 
 					// --AS **RECORD if we are in erase mode (shift clear while record and playing)
 					// and this is the active track on the front, we erase the note value
-					// only do so if we are on a main step while erase is active. in this case, the main step and
-					// all it's substeps are erased.
-					if(seq_eraseActive && i==menu_getActiveVoice() && seq_stepIndex[i]%8==0) {
+					// Bridge erase removes only the current step while erase is active.
+					if(seq_eraseActive && i==menu_getActiveVoice()) {
 						/*
 						 * Live erase targets the active front-panel voice only.
 						 *
@@ -499,32 +496,20 @@ static void seq_nextStep()
 						 * playback-time erase condition; PatternData owns the
 						 * actual step mutation.
 						 */
-						// erase the main step and all substeps
-						pat_eraseMainStepSubSteps(seq_activePattern,
-						                          menu_getActiveVoice(),
-						                          (uint8_t)(seq_stepIndex[i]/8));
-					} else
-					// if sub-step is active
-					if(pat_isStepActive((uint8_t)i, (uint8_t)seq_stepIndex[i], seq_activePattern))
-					{
-						//PROBABILITY
-						//every 8th step a new random value is generated
-						//thus every sub step block has only one random value to compare against
-						//allows randomisation of rolls by chance
-
-						if((seq_stepIndex[i] & 0x07) == 0x00) //every 8th step
-						{
-							seq_rndValue[i] = GetRngValue()&0x7f;
-						}
-
-						if( (seq_rndValue[i]) <= pat_getStepProbability(seq_activePattern, (uint8_t)i, (uint8_t)seq_stepIndex[i]) )
+						// Erase the current bridge step.
+						pat_eraseStep(seq_activePattern,
+						              menu_getActiveVoice(),
+						              (uint8_t)seq_stepIndex[i]);
+					} else {
+						seq_rndValue[i] = GetRngValue() & 0x7f;
+						if ((seq_rndValue[i]) <= pat_getStepProbability(seq_activePattern, (uint8_t)i, (uint8_t)seq_stepIndex[i]))
 						{
 							const uint8_t vol = pat_getStepVolume(seq_activePattern, (uint8_t)i, (uint8_t)seq_stepIndex[i]);
 							const uint8_t note = pat_getStepNote(seq_activePattern, (uint8_t)i, (uint8_t)seq_stepIndex[i]);
 							seq_triggerVoice(i,vol,note);
 						}
-					} // if sub step is active
-				} // if main step is active
+					}
+				} // if step is active
 			} // if this track is not muted
 		}
 
@@ -651,16 +636,17 @@ void seq_triggerNextMasterStep(uint8_t stepSize)
 	 * Sequencer owns external-clock phase state (`seq_stepIndex[]` and
 	 * `seq_lastMasterStep[]`), while PatternData owns the per-track effective
 	 * pattern length read here through pat_getEffectiveTrackLength(). Input:
-	 * stepSize is the external sync stride in sub-steps. Output: runtime indices
-	 * are positioned so the next seq_nextStep() call lands on the intended master
-	 * step and seq_deltaT is forced due. Callers/clients: trigger jack and MIDI
-	 * sync paths. Risk: length must be nonzero; PatternData returns 16 on invalid
-	 * coordinates to avoid divide/wrap faults during sync.
+	 * stepSize is the external sync stride in bridge steps. Output: runtime
+	 * indices are positioned so the next seq_nextStep() call lands on the intended
+	 * master step and seq_deltaT is forced due. Callers/clients: trigger jack and
+	 * MIDI sync paths. Risk: length must be nonzero; PatternData returns 128 on
+	 * invalid coordinates to avoid divide/wrap faults during sync.
 	 */
 	uint8_t i, sn, len;
 	for(i=0;i<NUM_TRACKS;i++) {
 		len = pat_getEffectiveTrackLength(seq_activePattern, i);
-		len *= 8; // need length in steps
+		if(seq_lastMasterStep[i] >= len)
+			seq_lastMasterStep[i] = 0;
 
 		if(seq_lastMasterStep[i] == 0) // need to set it so next step will inc it to 0
 			sn=len-1; // set to last step before wrap around, effectively 0
@@ -989,7 +975,7 @@ void seq_setRollRate(uint8_t rate)
 //------------------------------------------------------------------------
 /** quantize a step to the seq_quantisation value*/
 #define QUANT(x) (NUM_STEPS/x)
-static int8_t seq_quantize(int8_t step)
+static uint8_t seq_quantize(uint8_t step)
 {
 	uint8_t quantisationMultiplier=1;
 	switch(seq_quantisation)
@@ -1018,7 +1004,7 @@ static int8_t seq_quantize(int8_t step)
 
 	//now calc the quantisation
 	float frac = step/(float)quantisationMultiplier;
-	int8_t itg = (int8_t)frac;
+	uint8_t itg = (uint8_t)frac;
 	frac = frac - itg;
 
 	if(frac>=0.5f)
@@ -1050,8 +1036,7 @@ void seq_recordAutomation(uint8_t voice, uint8_t dest, uint8_t value)
 		uint8_t quantizedStep = seq_quantize(seq_stepIndex[voice]);
 
 		//only record to active steps
-		if( pat_isMainStepActive(voice, (uint8_t)(quantizedStep/8), seq_activePattern) &&
-				pat_isStepActive(voice, (uint8_t)quantizedStep, seq_activePattern))
+		if (pat_isStepActive(voice, quantizedStep, seq_activePattern))
 		{
 			pat_recordAutomation(seq_activePattern, voice, quantizedStep, dest, value);
 		}
@@ -1067,11 +1052,11 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 	 *
 	 * Callers: MIDI note input, roll performance, and internal recording paths.
 	 * Sequencer owns quantization and pattern-boundary timing; PatternData owns
-	 * the actual Step and main-step mutation through pat_recordNote().
+	 * the actual Step mutation through pat_recordNote().
 	 *
 	 * Inputs: trackNr target track, vel recorded velocity, note recorded note.
 	 * Outputs: when recording is active, PatternData updates note/velocity,
-	 * probability, active bit, and parent main-step state; visible record LEDs
+	 * probability and active bit; visible record LEDs
 	 * are marked dirty if the edited track/pattern is currently shown by Menu.
 	 *
 	 * Risk: quantization can push a late note to step 0 of the next pattern, so
@@ -1082,7 +1067,7 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 	//only record notes when seq is running and recording
 	if(seq_running && seq_recordActive)
 	{
-		const int8_t quantizedStep = seq_quantize(seq_stepIndex[trackNr]);
+		const uint8_t quantizedStep = seq_quantize((uint8_t)seq_stepIndex[trackNr]);
 
 
 		// --AS **RECORD fix for recording across patterns
@@ -1223,10 +1208,10 @@ static void seq_sendProgChg(const uint8_t ptn)
 }
 
 /* **PATROT set the step starting index to the position where the pattern rotation would have it start.
- *  A pattern rotation of 0 means start at the beginning of the pattern. max value is 15.
- *  Each value represents a main step interval (which contains 8 substeps)
+ *  A pattern rotation of 0 means start at the beginning of the track. During the
+ *  bridge, rotation is a step offset in the effective 1..128 step length.
  *
- *  This is called when the sequencer starts/stops running, also when a pattern change takes place
+ *  This is called when the sequencer starts/stops running, also when a pattern change takes place.
  */
 static void seq_setStepIndexToStart()
 {
@@ -1236,10 +1221,9 @@ static void seq_setStepIndexToStart()
 	 * PatternData owns stored rotation and effective length; Sequencer owns
 	 * `seq_stepIndex[]` and `seq_lastMasterStep[]`, which are scheduler runtime
 	 * state. Input is implicit seq_activePattern. Output: every track starts one
-	 * sub-step before its rotated start so the next seq_nextStep() increment lands
+	 * step before its rotated start so the next seq_nextStep() increment lands
 	 * on the correct position. Callers: transport start/stop, pattern changes, and
-	 * external reset. Risk: preserves the legacy "rot > len" adjustment exactly
-	 * for shortened tracks while treating encoded/default length as 16.
+	 * external reset. Risk: length and rotation must stay normalized by PatternData.
 	 */
 	uint8_t len, rot, i;
 	for(i=0;i<NUM_TRACKS;i++) {
@@ -1251,10 +1235,10 @@ static void seq_setStepIndexToStart()
 			rot = rot % len;
 
 		// this is for external clock sync via trigger expansion kit (the ext tick will adjust this -1)
-		seq_lastMasterStep[i] = (8 * rot);
+		seq_lastMasterStep[i] = rot;
 
 		// -1 here because we increment it first thing when we start
-		seq_stepIndex[i] = ( 8 * rot) - 1;
+		seq_stepIndex[i] = (int16_t)rot - 1;
 
 	}
 

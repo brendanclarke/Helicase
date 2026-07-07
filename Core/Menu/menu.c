@@ -709,9 +709,9 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     /*PAR_STEP_VOLUME*/       DTYPE_0B127,
     /*PAR_STEP_PROB*/         DTYPE_0B127,
     /*PAR_STEP_NOTE*/         DTYPE_NOTE_NAME,
-    /*PAR_EUKLID_LENGTH*/     DTYPE_1B16,
-    /*PAR_EUKLID_STEPS*/      DTYPE_1B16,
-    /*PAR_EUKLID_ROTATION*/   DTYPE_0B15,
+    /*PAR_EUKLID_LENGTH*/     DTYPE_1B128,
+    /*PAR_EUKLID_STEPS*/      DTYPE_1B128,
+    /*PAR_EUKLID_ROTATION*/   DTYPE_0B127,
     /*PAR_AUTOM_TRACK*/       DTYPE_0b1,
     /*PAR_P1_DEST*/           DTYPE_AUTOM_TARGET,
     /*PAR_P2_DEST*/           DTYPE_AUTOM_TARGET,
@@ -720,7 +720,7 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     /*PAR_SHUFFLE*/           DTYPE_0B127,
     /*PAR_PATTERN_BEAT*/      DTYPE_0B127,
     /*PAR_PATTERN_NEXT*/      DTYPE_MENU|(MENU_NEXT_PATTERN<<4),
-    /*PAR_TRACK_LENGTH*/      DTYPE_1B16,
+    /*PAR_TRACK_LENGTH*/      DTYPE_1B128,
     /*PAR_POS_X*/             DTYPE_0B127,
     /*PAR_POS_Y*/             DTYPE_0B127,
     /*PAR_FLUX*/              DTYPE_0B127,
@@ -851,6 +851,7 @@ static uint8_t menuIndex = 0;
 uint8_t menu_numSamples = 0;
 uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 uint8_t menu_shownPattern = 0;
+uint8_t menu_currentBar = 0;
 uint8_t menu_muteModeActive = 0;
 
 char currentDisplayBuffer[2][16];
@@ -1485,6 +1486,7 @@ static void menu_repaintGeneric(void)
             case DTYPE_0B127:
             case DTYPE_0B255:
             case DTYPE_1B16:
+            case DTYPE_1B128:
             case DTYPE_0B15:
             case DTYPE_VOICE_LFO:
                 numtostrpu(&editDisplayBuffer[1][13], curParmVal, ' ');
@@ -1647,6 +1649,10 @@ static void menu_encoderChangeParameter(int8_t inc)
     case DTYPE_1B16:
         if (*paramValue < 1) *paramValue = 1;
         else if (*paramValue > 16) *paramValue = 16;
+        break;
+    case DTYPE_1B128:
+        if (*paramValue < 1) *paramValue = 1;
+        else if (*paramValue > 128) *paramValue = 128;
         break;
     case DTYPE_0B15:
         if (*paramValue > 15) *paramValue = 15;
@@ -2060,6 +2066,7 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
         break; }
     case DTYPE_0B255: break;
     case DTYPE_1B16: if (*pv<1)*pv=1; else if(*pv>16)*pv=16; break;
+    case DTYPE_1B128: if (*pv<1)*pv=1; else if(*pv>128)*pv=128; break;
     case DTYPE_0B15: if (*pv>15)*pv=15; break;
     case DTYPE_MIX_FM: case DTYPE_ON_OFF: case DTYPE_0b1: if(*pv>1)*pv=1; break;
     case DTYPE_MENU: { uint8_t n=getMaxEntriesForMenu((uint8_t)(parameter_dtypes[parNr]>>4)); if(*pv>=n)*pv=(uint8_t)(n-1); break; }
@@ -2409,7 +2416,7 @@ void menu_switchPage(uint8_t pageNr)
              * Entering a voice page also changes the active Pattern track view.
              *
              * Menu owns active voice/page state, ledHandler owns the physical
-             * step/sub-step LEDs, and PatternData owns track edit parameters.
+             * step/bar LEDs, and PatternData owns track edit parameters.
              * The old parser query has been replaced by those direct calls.
              *
              * Inputs: active voice from Menu and shown pattern from Menu.
@@ -2863,10 +2870,11 @@ void    menu_setShownPattern(uint8_t p)
      * target what the user is looking at.
      *
      * Input: p is the viewed pattern index supplied by button/menu navigation.
-     * Output: menu_shownPattern is updated. Risk: this setter does not repaint
+     * Output: during the single-pattern bridge, menu_shownPattern is pinned to 0. Risk: this setter does not repaint
      * LEDs or reload PatternData params; callers must do that explicitly.
      */
-    menu_shownPattern = p;
+    menu_shownPattern = 0;
+    (void)p;
 }
 uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 

@@ -514,10 +514,11 @@ static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
  *   shuffle byte
  *   track length bytes[pattern-major track-major], optional for old files
  */
-#define FS_PATTERN_STEP_COUNT     ((uint32_t)NUM_TRACKS * NUM_PATTERN * NUM_STEPS)
-#define FS_PATTERN_MAIN_COUNT     ((uint32_t)NUM_PATTERN * NUM_TRACKS)
-#define FS_PATTERN_SETTINGS_COUNT ((uint32_t)NUM_PATTERN)
-#define FS_PATTERN_LENGTH_COUNT   ((uint32_t)NUM_PATTERN * NUM_TRACKS)
+#define FS_PATTERN_FILE_PATTERN_COUNT 8u
+#define FS_PATTERN_STEP_COUNT     ((uint32_t)NUM_TRACKS * FS_PATTERN_FILE_PATTERN_COUNT * NUM_STEPS)
+#define FS_PATTERN_MAIN_COUNT     ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT * NUM_TRACKS)
+#define FS_PATTERN_SETTINGS_COUNT ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT)
+#define FS_PATTERN_LENGTH_COUNT   ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT * NUM_TRACKS)
 #define FS_PATTERN_STEP_SIZE      7u
 #define FS_PATTERN_MAIN_SIZE      2u
 #define FS_PATTERN_SETTING_SIZE   2u
@@ -530,8 +531,8 @@ static void filesystem_patternStepAddress(uint32_t step_index,
 {
     uint32_t abs_pat = step_index / NUM_STEPS;
 
-    *track = (uint8_t)(abs_pat / NUM_PATTERN);
-    *pattern = (uint8_t)(abs_pat - ((uint32_t)*track * NUM_PATTERN));
+    *track = (uint8_t)(abs_pat / FS_PATTERN_FILE_PATTERN_COUNT);
+    *pattern = (uint8_t)(abs_pat - ((uint32_t)*track * FS_PATTERN_FILE_PATTERN_COUNT));
     *step = (uint8_t)(step_index - (abs_pat * NUM_STEPS));
 }
 
@@ -543,6 +544,17 @@ static void filesystem_patternTrackAddress(uint32_t index,
     *track = (uint8_t)(index - ((uint32_t)*pattern * NUM_TRACKS));
 }
 
+
+/* Legacy pattern-file discard/blank records for bridge slots 1..7.
+ *
+ * The Phase 2 bridge has one live pattern (slot 0) but still streams the old
+ * eight-slot file layout. Save paths read these zeroed records for slots 1..7;
+ * load paths write into them so old files can be consumed without creating live
+ * pattern slots that Phase 3 will delete. */
+static Step filesystem_discardStep;
+static uint16_t filesystem_discardMainSteps;
+static PatternSetting filesystem_discardPatternSetting;
+static LengthRotate filesystem_discardLengthRotate = { NUM_STEPS, 0 };
 static Step *filesystem_patternStepPtr(uint8_t pattern, uint8_t track, uint8_t step)
 {
     /*
@@ -563,6 +575,8 @@ static Step *filesystem_patternStepPtr(uint8_t pattern, uint8_t track, uint8_t s
      * reading that same pattern would read staging data by design, so callers
      * must not overlap save/load operations.
      */
+    if (pattern != 0u)
+        return &filesystem_discardStep;
     if (op_loaded_active_pattern_running && pattern == seq_activePattern)
         return pat_stepPtr(PATTERNDATA_STAGING_PATTERN, track, step);
     return pat_stepPtr(pattern, track, step);
@@ -577,6 +591,8 @@ static uint16_t *filesystem_patternMainPtr(uint8_t pattern, uint8_t track)
      * filesystem_patternStepPtr() so active-pattern loads do not modify the
      * currently sounding pattern until Sequencer commits them.
      */
+    if (pattern != 0u)
+        return &filesystem_discardMainSteps;
     if (op_loaded_active_pattern_running && pattern == seq_activePattern)
         return pat_mainStepsPtr(PATTERNDATA_STAGING_PATTERN, track);
     return pat_mainStepsPtr(pattern, track);
@@ -591,6 +607,8 @@ static PatternSetting *filesystem_patternSettingPtr(uint8_t pattern)
      * data rather than Sequencer globals because they are saved with .pat files.
      * Active-pattern loads use the staging pattern for boundary-safe commit.
      */
+    if (pattern != 0u)
+        return &filesystem_discardPatternSetting;
     if (op_loaded_active_pattern_running && pattern == seq_activePattern)
         return pat_patternSettingPtr(PATTERNDATA_STAGING_PATTERN);
     return pat_patternSettingPtr(pattern);
@@ -605,6 +623,8 @@ static LengthRotate *filesystem_patternLengthPtr(uint8_t pattern, uint8_t track)
      * Filesystem streams those bytes directly from the owner instead of asking
      * Sequencer/frontPanelParser for encoded values.
      */
+    if (pattern != 0u)
+        return &filesystem_discardLengthRotate;
     if (op_loaded_active_pattern_running && pattern == seq_activePattern)
         return pat_lengthRotatePtr(PATTERNDATA_STAGING_PATTERN, track);
     return pat_lengthRotatePtr(pattern, track);

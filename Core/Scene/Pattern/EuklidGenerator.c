@@ -155,29 +155,13 @@ void euklid_calcRecursive(uint8_t length, uint8_t steps, uint8_t iteration, uint
 //-----------------------------------------------------
 void euklid_generate(uint8_t trackNr, uint8_t patternNr)
 {
-	uint8_t length,steps,rotation;
-	length = euklid_length[trackNr];
-	steps = euklid_steps[trackNr];
-	rotation = euklid_rotation[trackNr];
-
-	//todo ist das hier n�tig? zero steps sollte doch gehen...
-	if(steps==0)steps++;
-
-	//reset the global values
-	euklid_nextCnt1 = 0;
-	euklid_originalLength = length;
-
-	//clear the buffer
-	euklid_patternBuffer = 0;
-
-	//let's calculate the new pattern
-	euklid_calcRecursive(length,steps,1,1,0); //always start with 1st iterations
-	//rotate resulting pattern
-	euklid_rotatePattern(length, rotation);
-	//and store it in the active track
+	/* Generate directly into PatternData for the 128-step bridge.
+	 *
+	 * The legacy recursive code still exists below as historical code, but its
+	 * uint16_t buffer cannot represent an 8-bar pattern. The bridge transfer path
+	 * reads euklid_length/steps/rotation and writes Step active bits directly. */
 	euklid_transferPattern(trackNr, patternNr);
-}
-//-----------------------------------------------------
+}//-----------------------------------------------------
 uint8_t euklid_getLength(uint8_t trackNr)
 {
 	return euklid_length[trackNr];
@@ -203,23 +187,26 @@ void euklid_setLength(uint8_t trackNr, uint8_t value)
 	 * the pattern by itself; Menu re-applies steps afterward to preserve the old
 	 * behavior where length changes constrain/regenerate the current pattern.
 	 */
-	if(value<=0)value=1;
+	if(!pat_trackValid(trackNr)) return;
+	if(value == 0)value=1;
+	if(value > NUM_STEPS)value = NUM_STEPS;
 	euklid_length[trackNr] = value;
 }
 //-----------------------------------------------------
 void euklid_setSteps(uint8_t trackNr, uint8_t value, uint8_t patternNr)
 {
 	/*
-	 * Stores Euclidean step count and regenerates PatternData main steps.
+	 * Stores Euclidean pulse count and regenerates bridge step active bits.
 	 *
 	 * Caller: Menu direct edit path. Inputs: trackNr active voice, value desired
 	 * number of pulses, patternNr viewed/shown pattern to mutate. Output:
-	 * generator state updates and euklid_generate() writes the resulting mask to
-	 * PatternData via pat_setMainStepsRaw().
+	 * generator state updates and euklid_generate() writes active bits into
+	 * PatternData Step[0..127] storage.
 	 *
 	 * Risk: value is clamped to 1..length to match legacy behavior. The caller
 	 * owns any LED repaint after generation.
 	 */
+	if(!pat_trackValid(trackNr)) return;
 	if(value<=0)value=1;
 
 	if(value>euklid_length[trackNr]) value= euklid_length[trackNr];
@@ -236,17 +223,19 @@ uint8_t euklid_getRotation(uint8_t trackNr)
 void euklid_setRotation(uint8_t trackNr, uint8_t value, uint8_t patternNr)
 {
 	/*
-	 * Stores Euclidean rotation and regenerates PatternData main steps.
+	 * Stores Euclidean rotation and regenerates bridge step active bits.
 	 *
 	 * Caller: Menu direct edit path. Inputs are active track, menu rotation, and
-	 * target pattern. Output is a regenerated main-step mask for that
+	 * target pattern. Output is regenerated Step[0..127] active state for that
 	 * pattern/track.
 	 *
 	 * Risk: invalid rotations keep the previous rotation value, preserving the
 	 * old generator behavior. This is generator rotation, not performance track
 	 * rotation handled by pat_setTrackRotation().
 	 */
-	if(value>euklid_length[trackNr]) value = euklid_rotation[trackNr];
+	if(!pat_trackValid(trackNr)) return;
+
+	if(euklid_length[trackNr] != 0) value = (uint8_t)(value % euklid_length[trackNr]);
 
 	euklid_rotation[trackNr] = value;
 	euklid_generate(trackNr, patternNr);
@@ -265,33 +254,53 @@ void euklid_rotatePattern(uint8_t length, uint8_t amount)
 //-----------------------------------------------------
 void euklid_transferPattern(uint8_t trackNr, uint8_t patternNr)
 {
-	uint8_t len=euklid_length[trackNr];
-	/*
-	 * Transfers the generated Euclidean mask into PatternData.
+	/* Transfer generated Euclidean rhythm into the 128-step bridge pattern.
 	 *
-	 * Why: Euklid generation produces pattern bits, so the write belongs to the
-	 * Pattern owner rather than the Sequencer scheduler or front-panel UI.
-	 *
-	 * Inputs: trackNr/patternNr select the PatternData destination; the generated
-	 * 16-bit main-step mask is held in euklid_patternBuffer.
-	 *
-	 * Outputs: pat_setMainStepsRaw() writes the main-step mask, and the generated
-	 * length is mirrored into the track length/rotation record so playback uses
-	 * the same generated length.
-	 *
-	 * Risk: length uses the legacy 0 == 16 encoding. Rotation in LengthRotate is
-	 * left untouched because this generator rotation is separate from live track
-	 * rotation/performance state.
-	 */
-	pat_setMainStepsRaw(patternNr, trackNr, euklid_patternBuffer);
-// **PATROT - pattern end is now stored differently
+	 * The old generator wrote a 16-bit main-step mask. During this bridge the
+	 * active bit in Step[0..127] is the sequencer source of truth, so this writes
+	 * those existing Step records directly through PatternData pointers. Notes,
+	 * probability, velocity, and automation values are preserved; only the active
+	 * bit is changed. */
+	uint8_t len;
+	uint8_t steps;
+	uint8_t rotation;
+	uint8_t i;
+	uint16_t bucket = 0;
 
-	if(len == 16)
-		len=0;
-	{
-		LengthRotate *lr = pat_lengthRotatePtr(patternNr, trackNr);
-		if (lr)
-			lr->length = len;
+	if (!pat_trackValid(trackNr) || !pat_patternValid(patternNr))
+		return;
+
+	len = euklid_length[trackNr];
+	steps = euklid_steps[trackNr];
+	if (len == 0u)
+		len = 1u;
+	if (len > NUM_STEPS)
+		len = NUM_STEPS;
+	if (steps == 0u)
+		steps = 1u;
+	if (steps > len)
+		steps = len;
+	rotation = (uint8_t)(euklid_rotation[trackNr] % len);
+
+	for (i = 0; i < NUM_STEPS; i++) {
+		Step *step = pat_stepPtr(patternNr, trackNr, i);
+		if (!step)
+			continue;
+		step->volume &= (uint8_t)~STEP_ACTIVE_MASK;
 	}
 
+	for (i = 0; i < len; i++) {
+		uint8_t dst;
+		bucket = (uint16_t)(bucket + steps);
+		if (bucket >= len) {
+			Step *step;
+			bucket = (uint16_t)(bucket - len);
+			dst = (uint8_t)((i + rotation) % len);
+			step = pat_stepPtr(patternNr, trackNr, dst);
+			if (step)
+				step->volume |= STEP_ACTIVE_MASK;
+		}
+	}
+
+	pat_setTrackLength(patternNr, trackNr, len);
 }

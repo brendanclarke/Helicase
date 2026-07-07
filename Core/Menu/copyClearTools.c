@@ -188,6 +188,26 @@ void copyClear_copyPattern()
 	buttonHandler_copySrc = buttonHandler_copyDst = SRC_DST_NONE;
 };
 //-----------------------------------------------------------------------------
+void copyClear_copyBar()
+{
+	/* Copy one 16-step bar on the active track.
+	 *
+	 * COPY+SELECT stores source/destination SELECT indices here while
+	 * PatternData owns the actual Step copy and track-length extension. Inputs:
+	 * buttonHandler_copySrc/Dst are zero-based bars 0..7 from SELECT1..8; Menu
+	 * supplies the current pattern/track. Output: destination bar is overwritten,
+	 * length may extend, and copy gesture state is cleared for button release. */
+	uint8_t src = (uint8_t)(buttonHandler_copySrc & 0x07);
+	uint8_t dst = (uint8_t)(buttonHandler_copyDst & 0x07);
+	uint8_t pattern = menu_getViewedPattern();
+	uint8_t track = menu_getActiveVoice();
+
+	if(copyClear_Mode != MODE_COPY_PATTERN)
+		return;
+	pat_copyBar(pattern, track, src, dst);
+	buttonHandler_copySrc = buttonHandler_copyDst = SRC_DST_NONE;
+}
+//-----------------------------------------------------------------------------
 uint8_t copyClear_isClearModeActive() 
 {
 	return (copyClear_Mode == MODE_CLEAR);

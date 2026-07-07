@@ -18,8 +18,10 @@
   * 1 hiHat
   * track 7 is the open hh... it triggers the highhat voice but with longer decay. it chokes the closed hihat*/
 #define NUM_TRACKS 7
-#define NUM_PATTERN 8
+#define NUM_PATTERN 1
 #define NUM_STEPS 128
+#define NUM_BARS 8u
+#define NUM_STEPS_PER_BAR 16u
 
 #define PAT_DEFAULT_NOTE 63
 
@@ -50,12 +52,9 @@ typedef struct PatternSettingsStruct
 	uint8_t  	nextPattern;	// [0:9] (0-7) are the 8 patterns, (8) is random previous, (9) is random all
 }PatternSetting;
 
-typedef union {
-	uint8_t value;
-	struct {
-		unsigned length:4;	// length (0 = default 16 steps)
-		unsigned rotate:4;	// 0 means not rotated, 15 is max
-	};
+typedef struct {
+	uint8_t length;	// real track length in steps, 1..128
+	uint8_t rotate;	// step rotation, 0 means not rotated
 } LengthRotate;
 
 typedef struct PatternSetStruct
@@ -174,11 +173,11 @@ void pat_setTrackLength(uint8_t pattern, uint8_t track, uint8_t length);
 uint8_t pat_getTrackLength(uint8_t pattern, uint8_t track);
 /*
  * Effective track length reader.
- * Why: stored length uses 0 as the legacy "16 main steps" sentinel, but
- * sequencer runtime code needs a nonzero length for wrap and external-clock
- * math. Inputs are pattern/track coordinates. Output is 1..16, with invalid
- * coordinates falling back to 16. Callers/clients: sequencer step walk,
- * external-clock master-step alignment, and start-position reset.
+ * Why: stored length may still receive 0 from older files, but sequencer
+ * runtime code needs a nonzero length for wrap and external-clock math. Inputs
+ * are pattern/track coordinates. Output is 1..128, with invalid coordinates
+ * falling back to 128. Callers/clients: sequencer step walk, external-clock
+ * master-step alignment, and start-position reset.
  */
 uint8_t pat_getEffectiveTrackLength(uint8_t pattern, uint8_t track);
 void pat_setTrackRotation(uint8_t pattern, uint8_t track, uint8_t rotation);
@@ -203,21 +202,23 @@ void pat_clearPattern(uint8_t pattern);
 void pat_clearAutomation(uint8_t pattern, uint8_t track, uint8_t automTrack);
 /*
  * Recording and live-erase mutation helpers.
- * Why: sequencer.c owns recording/erase timing and quantization, but the Step
+ * Why: sequencer.c owns recording/erase timing and quantization, but Step
  * writes belong in PatternData. Inputs identify the destination pattern/track
- * and sub-step/main-step plus note/velocity where needed. Outputs mutate Step
- * defaults, active bits, probability, note, velocity, and main-step masks.
- * Callers/clients: seq_addNote() and sequencer live erase. Confederates:
- * pat_setMainStep(), pat_resetStep(), LED dirty-state handling in sequencer.
- * Risk: these preserve the legacy invariant that each main-step cluster has an
- * active first sub-step unless a later recorded sub-step suppresses it to avoid
- * double triggering.
+ * and bridge step plus note/velocity where needed. Outputs mutate Step
+ * defaults, active bits, probability, note, velocity, and compatibility
+ * main-step masks. Callers/clients: seq_addNote() and sequencer live erase.
+ * Confederates: pat_setMainStep() for bridge mask mirroring, pat_resetStep(),
+ * and LED dirty-state handling in sequencer.
+ * Risk: all 128 Step records are live sequencer steps; old main-step helpers
+ * exist only for compatibility until Scene storage replaces them.
  */
 void pat_recordNote(uint8_t pattern, uint8_t track, uint8_t step,
                     uint8_t velocity, uint8_t note);
 void pat_eraseMainStepSubSteps(uint8_t pattern, uint8_t track, uint8_t mainStep);
+void pat_eraseStep(uint8_t pattern, uint8_t track, uint8_t step);
 void pat_copyTrack(uint8_t pattern, uint8_t srcTrack, uint8_t dstTrack);
 void pat_copyPattern(uint8_t srcPattern, uint8_t dstPattern);
+void pat_copyBar(uint8_t pattern, uint8_t track, uint8_t srcBar, uint8_t dstBar);
 
 void pat_setSelectedStep(uint8_t step);
 void pat_setActiveAutomationTrack(uint8_t track);

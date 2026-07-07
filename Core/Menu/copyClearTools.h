@@ -37,6 +37,7 @@ void copyClear_clearCurrentTrack();
 void copyClear_clearCurrentPattern();
 void copyClear_copyTrack();
 void copyClear_copyPattern();
+void copyClear_copyBar();
 uint8_t copyClear_getClearTarget();
 uint8_t copyClear_isClearModeActive();
 void copyClear_setClearTarget(uint8_t mode);

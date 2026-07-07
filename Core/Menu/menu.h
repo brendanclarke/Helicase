@@ -32,6 +32,7 @@ extern uint8_t menu_activePage;
 extern uint8_t menu_activeVoice;
 extern uint8_t menu_playedPattern;
 extern uint8_t menu_shownPattern;
+extern uint8_t menu_currentBar;
 extern uint8_t menu_muteModeActive;
 
 #define NUM_PRESET_LOCATIONS 5
@@ -184,6 +185,7 @@ enum Datatypes {
     DTYPE_0b1,
     DTYPE_NOTE_NAME,
     DTYPE_0B15,
+    DTYPE_1B128,
 };
 
 typedef struct PageStruct {

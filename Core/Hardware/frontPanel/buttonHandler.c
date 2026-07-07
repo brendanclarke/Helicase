@@ -170,6 +170,38 @@ static int8_t btn_to_voice(uint8_t buttonNr)
     }
 }
 
+
+static uint8_t buttonHandler_barStartStep(void)
+{
+    /* Current bridge view helper.
+     *
+     * Menu owns menu_currentBar as the visible 16-step bar. buttonHandler uses
+     * this to turn a STEP-row button index into the real PatternData step
+     * 0..127 without repeating bar math at each call site. */
+    return (uint8_t)(menu_currentBar * NUM_STEPS_PER_BAR);
+}
+
+static uint8_t buttonHandler_visibleStep(uint8_t seqButtonPressed)
+{
+    return (uint8_t)(buttonHandler_barStartStep() + seqButtonPressed);
+}
+
+static void buttonHandler_selectBar(uint8_t bar)
+{
+    /* Change or re-acknowledge the visible 16-step bar.
+     *
+     * Inputs: bar is SELECT/BAR-derived 0..7. Output: menu_currentBar updates,
+     * STEP/SELECT LEDs repaint from PatternData, and the selected-bar SELECT LED
+     * runs the 500 ms flash requested for bar navigation feedback. */
+    if (bar >= NUM_BARS)
+        return;
+    menu_currentBar = bar;
+    buttonHandler_selectedStep = buttonHandler_barStartStep();
+    parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
+    led_updatePatternTrack(menu_getActiveVoice(), menu_getViewedPattern(), buttonHandler_selectedStep);
+    pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice());
+    led_flashLed((uint8_t)(LED_PART_SELECT1 + bar));
+}
 static void buttonHandler_updateSubSteps(void)
 {
     /*
@@ -264,8 +296,9 @@ static void buttonHandler_armTimerActionStep(int8_t stepNr)
      * but the armed automation destination must live in PatternData because it
      * controls later pattern/track mutation performed by menu parameter edits.
      *
-     * Inputs: stepNr is a 0..127 absolute sub-step index. Main steps are the
-     * multiples of 8 and blink STEP LEDs; sub-steps blink PART_SELECT LEDs.
+     * Inputs: stepNr is a 0..127 absolute bridge step index. The visible bar is
+     * already folded into that value, so the blink target is STEP1..16 at
+     * stepNr % NUM_STEPS_PER_BAR.
      *
      * Outputs: buttonHandler_armedAutomationStep tracks the UI gesture,
      * pat_armAutomationStep(step, activeVoice, 1) records the edit target and
@@ -275,16 +308,8 @@ static void buttonHandler_armTimerActionStep(int8_t stepNr)
      * ARM_AUTOMATION_STEP opcode behavior. If automation arming becomes
      * per-pattern/per-track later, PatternData should absorb that policy.
      */
-    uint8_t isMainStep = (uint8_t)((stepNr % 8) == 0);
     buttonHandler_armedAutomationStep = stepNr;
-
-    if (isMainStep) {
-        uint8_t mainStepNr = (uint8_t)(stepNr / 8);
-        led_setBlinkLed((uint8_t)(LED_STEP1 + mainStepNr), 1);
-    } else {
-        uint8_t selectButtonNr = (uint8_t)(stepNr % 8);
-        led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + selectButtonNr), 1);
-    }
+    led_setBlinkLed((uint8_t)(LED_STEP1 + ((uint8_t)stepNr % NUM_STEPS_PER_BAR)), 1);
 
     pat_armAutomationStep((uint8_t)stepNr, menu_getActiveVoice(), 1);
 }
@@ -302,9 +327,9 @@ static void buttonHandler_disarmTimerActionStep(void)
      * so disarming must update both places explicitly now that the parser has
      * been removed.
      *
-     * Inputs: buttonHandler_armedAutomationStep chooses which LED to stop
-     * blinking. buttonHandler_originalParameter/originalValue describe the
-     * value that must be restored when reset-lock was active.
+     * Inputs: buttonHandler_armedAutomationStep chooses which visible STEP LED
+     * to stop blinking. buttonHandler_originalParameter/originalValue describe
+     * the value that must be restored when reset-lock was active.
      *
      * Outputs: no return value. The selected blink LED is stopped,
      * pat_armAutomationStep(0, 0, 0) disables PatternData automation arming,
@@ -317,15 +342,7 @@ static void buttonHandler_disarmTimerActionStep(void)
      * effects remain intact.
      */
     if (buttonHandler_armedAutomationStep != NO_STEP_SELECTED) {
-        uint8_t isMainStep = (uint8_t)((buttonHandler_armedAutomationStep % 8) == 0);
-
-        if (isMainStep) {
-            uint8_t mainStepNr = (uint8_t)(buttonHandler_armedAutomationStep / 8);
-            led_setBlinkLed((uint8_t)(LED_STEP1 + mainStepNr), 0);
-        } else {
-            uint8_t selectButtonNr = (uint8_t)(buttonHandler_armedAutomationStep % 8);
-            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + selectButtonNr), 0);
-        }
+        led_setBlinkLed((uint8_t)(LED_STEP1 + ((uint8_t)buttonHandler_armedAutomationStep % NUM_STEPS_PER_BAR)), 0);
 
         if (buttonHandler_resetLock == 1) {
             parameter_values[buttonHandler_originalParameter] = buttonHandler_originalValue;
@@ -385,34 +402,35 @@ void buttonHandler_tick(void)
 static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPressed)
 {
     /*
-     * Selects a main step as the UI cursor without toggling pattern data.
+     * Selects one visible bridge step as the UI cursor without toggling pattern
+     * data.
      *
      * Caller context: STEP/VOICE mode button gestures that should inspect or
      * edit a step. The old parser path fetched step values indirectly; this now
      * calls PatternData directly.
      *
      * Inputs: ledNr is the STEP LED to blink, and seqButtonPressed is the
-     * 0..15 step-button index. The selected absolute sub-step is the main step
-     * at seqButtonPressed * 8.
+     * 0..15 step-button index inside menu_currentBar. The selected absolute
+     * step is menu_currentBar * 16 + seqButtonPressed.
      *
      * Outputs: selectedStepLed and PAR_ACTIVE_STEP are updated, the active
      * STEP LED blinks, PatternData loads note/velocity/probability/automation
-     * values into menu parameter_values, and sub-step LEDs are refreshed.
+     * values into menu parameter_values, and the visible bar LEDs are refreshed.
      *
      * Risk: this is UI selection only. Any caller that wants to actually toggle
-     * a step must call pat_toggleMainStep() or pat_toggleStep() separately.
+     * a step must call pat_toggleStep() separately.
      */
     led_setBlinkLed(selectedStepLed, 0);
     led_setValue(0, selectedStepLed);
 
-    buttonHandler_selectedStep = (uint8_t)(seqButtonPressed * 8u);
+    buttonHandler_selectedStep = buttonHandler_visibleStep(seqButtonPressed);
     selectedStepLed = ledNr;
     parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
 
     led_setBlinkLed(ledNr, 1);
 
     pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(),
-                        (uint8_t)(seqButtonPressed * 8u));
+                        buttonHandler_visibleStep(seqButtonPressed));
     buttonHandler_updateSubSteps();
 }
 
@@ -428,18 +446,18 @@ static void buttonHandler_toggleStepParameterPage(void)
 static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
 {
     /*
-     * Toggles one main sequencer step for the active voice/viewed pattern.
+     * Toggles one bridge sequencer step for the active voice/viewed pattern.
      *
      * Caller context: non-shift VOICE-mode release, or shift STEP-mode press.
-     * In the parser version this went through SET_MAIN_STEP-style opcodes; the
-     * button layer now asks PatternData to mutate the pattern directly.
+     * In the parser version this went through step opcodes; the button layer
+     * now asks PatternData to mutate the pattern directly.
      *
      * Inputs: ledNr is the visible STEP LED, seqButtonPressed is 0..15 and is
-     * expanded to the absolute main-step index by multiplying by 8.
+     * expanded to the absolute step index for menu_currentBar.
      *
      * Outputs: active-step UI state is updated, PatternData loads that step's
-     * editable fields into the menu, PatternData toggles the main step bit, and
-     * the STEP LED is rewritten from pat_isMainStepActive().
+     * editable fields into the menu, PatternData toggles the step active bit,
+     * and the STEP LED is rewritten from pat_isStepActive().
      *
      * Risk: the function name is historical. It toggles rather than only
      * removes. Keeping the name avoids unrelated call-site churn during the
@@ -449,7 +467,7 @@ static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
     uint8_t patternNr;
 
     led_setValue(0, ledNr);
-    seqButtonPressed = (uint8_t)(seqButtonPressed * 8u);
+    seqButtonPressed = buttonHandler_visibleStep(seqButtonPressed);
 
     buttonHandler_selectedStep = seqButtonPressed;
     parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
@@ -459,9 +477,9 @@ static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
 
     trackNr = menu_getActiveVoice();
     patternNr = menu_getViewedPattern();
-    pat_toggleMainStep(trackNr, (uint8_t)(seqButtonPressed / 8u), patternNr);
-    led_setValue(pat_isMainStepActive(trackNr, (uint8_t)(seqButtonPressed / 8u), patternNr),
-                 (uint8_t)(LED_STEP1 + (seqButtonPressed / 8u)));
+    pat_toggleStep(trackNr, seqButtonPressed, patternNr);
+    led_setValue(pat_isStepActive(trackNr, seqButtonPressed, patternNr),
+                 ledNr);
 }
 
 static void buttonHandler_setTrackRotation(uint8_t seqButtonPressed)
@@ -515,12 +533,11 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
     } else {
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
-            buttonHandler_setTimeraction((uint8_t)(seqButtonPressed * 8u));
+            buttonHandler_setTimeraction(buttonHandler_visibleStep(seqButtonPressed));
             break;
         case SELECT_MODE_STEP:
             led_clearAllBlinkLeds();
             buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
-            led_setBlinkLed(LED_PART_SELECT1, 1);
             buttonHandler_toggleStepParameterPage();
             break;
         case SELECT_MODE_PERF:
@@ -634,71 +651,15 @@ static void handleSelectButton(uint8_t selectNr)
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_STEP:
         case SELECT_MODE_VOICE:
-        {
-            /*
-             * Shift + PART_SELECT toggles an individual sub-step.
-             *
-             * Inputs: buttonHandler_selectedStep identifies the selected main
-             * step, selectNr chooses one of its eight sub-steps, and Menu gives
-             * the active voice/viewed pattern.
-             *
-             * Outputs: the PART_SELECT LED is toggled for immediate feedback,
-             * PatternData flips the real step bit, PatternData reloads the
-             * editable step values into parameter_values, and the menu page is
-             * repainted if the step parameter page is visible.
-             *
-             * Risk: led_toggle() is optimistic UI feedback. The PatternData
-             * call is the source of truth; if validation is added later this
-             * should repaint from PatternData instead of blindly toggling.
-             */
-            uint8_t stepNr = (uint8_t)(buttonHandler_selectedStep + selectNr);
-            uint8_t ledNr = (uint8_t)(LED_PART_SELECT1 + selectNr);
-            uint8_t trackNr;
-            uint8_t patternNr;
-            led_toggle(ledNr);
-            trackNr = menu_getActiveVoice();
-            patternNr = menu_getViewedPattern();
-            pat_toggleStep(trackNr, stepNr, patternNr);
-            pat_applyStepToMenu(patternNr, trackNr, stepNr);
-            parameter_values[PAR_ACTIVE_STEP] = stepNr;
-            buttonHandler_toggleStepParameterPage();
+            buttonHandler_selectBar(selectNr);
             break;
-        }
 
         case SELECT_MODE_PAT_GEN:
-        case SELECT_MODE_PERF:
-        {
-            /*
-             * Shift + PART_SELECT changes which pattern is being viewed/edited.
-             *
-             * Caller context: PAT_GEN/PERF shift layer. This is a UI pattern
-             * view change, not necessarily an immediate playback pattern
-             * switch. menu_setShownPattern() resolves follow-mode behavior.
-             *
-             * Outputs: pattern select LEDs are refreshed, pattern/track values
-             * are loaded through PatternData, and Euklid params are read
-             * directly for the active track. This replaces several parser
-             * query opcodes that used to refresh the same state indirectly.
-             *
-             * Risk: Pattern settings, track settings, and Euklid settings are
-             * refreshed as separate direct calls. If these become one Pattern
-             * view-model later, this is one of the consolidation points.
-             */
-            uint8_t trackNr;
-            uint8_t patternNr;
-            menu_setShownPattern(selectNr);
-            led_clearSelectLeds();
-            led_clearAllBlinkLeds();
-            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + selectNr), 1);
-
-            trackNr = menu_getActiveVoice();
-            patternNr = menu_getViewedPattern();
-            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-            pat_applyPatternSettingsToMenu(patternNr);
-            pat_applyTrackSettingsToMenu(patternNr, trackNr);
-            buttonHandler_applyEuklidParamsToMenu(menu_getActiveVoice());
+            buttonHandler_selectBar(selectNr);
             break;
-        }
+
+        case SELECT_MODE_PERF:
+            break;
 
         default:
             break;
@@ -708,33 +669,8 @@ static void handleSelectButton(uint8_t selectNr)
 
     switch (bh_state.selectButtonMode) {
     case SELECT_MODE_STEP:
-    {
-        /*
-         * PART_SELECT in step mode moves the editable sub-step cursor.
-         *
-         * Inputs: selected main step plus selectNr produces the absolute
-         * sub-step. Current pattern/voice come from Menu.
-         *
-         * Outputs: PatternData copies that step's editable fields into menu
-         * parameter_values, PAR_ACTIVE_STEP records the cursor, and blink LEDs
-         * mark both the containing main step and the selected sub-step.
-         *
-         * Risk: this does not mutate the pattern. It only changes which step
-         * subsequent encoder/menu edits will target.
-         */
-        uint8_t stepNr = (uint8_t)(buttonHandler_selectedStep + selectNr);
-        uint8_t selectButtonNr;
-
-        pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), stepNr);
-        parameter_values[PAR_ACTIVE_STEP] = stepNr;
-
-        led_clearAllBlinkLeds();
-        led_setBlinkLed((uint8_t)(LED_STEP1 + (stepNr / 8u)), 1);
-        selectButtonNr = (uint8_t)(stepNr % 8u);
-        led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + selectButtonNr), 1);
-        buttonHandler_toggleStepParameterPage();
+        buttonHandler_selectBar(selectNr);
         break;
-    }
 
     case SELECT_MODE_VOICE:
         menu_switchSubPage(selectNr);
@@ -743,21 +679,11 @@ static void handleSelectButton(uint8_t selectNr)
         menu_repaintAll();
         break;
 
+    case SELECT_MODE_PAT_GEN:
+        buttonHandler_selectBar(selectNr);
+        break;
+
     case SELECT_MODE_PERF:
-        if (menu_getActivePage() == PERFORMANCE_PAGE) {
-            /*
-             * PART_SELECT on the performance page queues the next playback
-             * pattern directly in Sequencer.
-             *
-             * Old behavior: CC/protocol dispatch hid this as a front-panel
-             * command. New behavior: buttonHandler calls seq_setNextPattern()
-             * because this is transport/playback state, not PatternData edit
-             * state. The blink LED remains local UI feedback.
-             */
-            seq_setNextPattern(selectNr);
-            led_clearAllBlinkLeds();
-            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + selectNr), 1);
-        }
         break;
 
     case SELECT_MODE_LOAD_SAVE:
@@ -774,23 +700,11 @@ static void buttonHandler_partButtonPressed(uint8_t partNr)
 {
     if (copyClear_Mode >= MODE_COPY_PATTERN) {
         if (copyClear_srcSet()) {
-            /*
-             * Finish pattern copy.
-             *
-             * PatternData performs the actual pattern-to-pattern copy. After
-             * mutation, buttonHandler refreshes the visible LEDs and track
-             * menu parameters because the edited/viewed pattern may now show
-             * different step and track data.
-             *
-             * Risk: PatternData does not know which page is visible and should
-             * not reach into LEDs. Keeping repaint here avoids turning Pattern
-             * into another UI bridge.
-             */
             uint8_t trackNr;
             uint8_t patternNr;
 
             copyClear_setDst((int8_t)partNr, MODE_COPY_PATTERN);
-            copyClear_copyPattern();
+            copyClear_copyBar();
             led_clearAllBlinkLeds();
 
             trackNr = menu_getActiveVoice();
@@ -802,11 +716,7 @@ static void buttonHandler_partButtonPressed(uint8_t partNr)
             led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + partNr), 1);
         }
     } else {
-        if (bh_state.selectButtonMode == SELECT_MODE_VOICE && buttonHandler_getShift()) {
-            buttonHandler_setTimeraction((uint8_t)(buttonHandler_selectedStep + partNr));
-        } else {
-            handleSelectButton(partNr);
-        }
+        handleSelectButton(partNr);
     }
 }
 
@@ -820,8 +730,6 @@ static void buttonHandler_partButtonReleased(uint8_t partNr)
         return;
 
     buttonHandler_buttonTimerStepNr = NO_STEP_SELECTED;
-    if (buttonHandler_getShift() && bh_state.selectButtonMode == SELECT_MODE_VOICE)
-        handleSelectButton(partNr);
 }
 
 static void handleVoiceButton(uint8_t voiceNr)
@@ -1005,18 +913,20 @@ static void processPress(uint8_t buttonNr)
         break;
 
     case BUT_BAR1:
-    {
-        uint8_t selectedVoice = menu_getActiveVoice();
-        midiParser_playVoiceMidiNote(selectedVoice, 127);
+        led_setValue(1, LED_BAR1);
+        if (menu_currentBar > 0u)
+            buttonHandler_selectBar((uint8_t)(menu_currentBar - 1u));
+        else
+            led_flashLed(LED_PART_SELECT1);
         break;
-    }
 
     case BUT_BAR2:
-    {
-        uint8_t selectedVoice = menu_getActiveVoice();
-        midiParser_playVoiceMidiNote(selectedVoice, 64);
+        led_setValue(1, LED_BAR2);
+        if (menu_currentBar < (NUM_BARS - 1u))
+            buttonHandler_selectBar((uint8_t)(menu_currentBar + 1u));
+        else
+            led_flashLed((uint8_t)(LED_PART_SELECT1 + (NUM_BARS - 1u)));
         break;
-    }
 
     case BUT_SHIFT:
         /* _SEQUENCER_ADD_SPIKE_: restore SHIFT-press mode behavior parity with AVR. */
@@ -1097,6 +1007,14 @@ static void processRelease(uint8_t buttonNr)
     }
 
     switch (buttonNr) {
+    case BUT_BAR1:
+        led_setValue(0, LED_BAR1);
+        break;
+
+    case BUT_BAR2:
+        led_setValue(0, LED_BAR2);
+        break;
+
     case BUT_COPY:
         /* _SEQUENCER_ADD_SPIKE_: restore erase exit + copy-mode reset on release. */
         if (bh_state.seqErasing) {

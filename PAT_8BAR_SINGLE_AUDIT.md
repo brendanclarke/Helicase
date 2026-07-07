@@ -366,3 +366,26 @@ Proceed with a bridge, not a cleanup. Keep the current storage and UI seams
 recognizable, make pattern slot 0 the single Scene pattern, redirect playback
 and editing to direct 0..127 step access, and confine old-format conversion to
 clearly marked `_temp` helpers.
+
+## Implementation Notes From This Pass
+
+- `NUM_PATTERN` is now one live pattern slot. Filesystem pattern streaming keeps the legacy eight-slot file shape with slot 0 mapped to PatternData and slots 1-7 routed to discard/blank bridge records.
+- `LengthRotate` now stores byte-sized `length` and `rotate`; track length is treated as real 1..128 steps. Zero loaded from old files resolves to the 128-step default through PatternData readers/setters.
+- Sequencer playback now advances against 1..128 step lengths and reads `Step.volume & STEP_ACTIVE_MASK` directly for each track step instead of treating `pat_mainSteps` as the active playback gate.
+- STEP1..16 now displays `menu_currentBar * 16 + 0..15`; SELECT1..8 indicates the viewed bar. `led_flashLed()` provides the 500 ms on/off/on/off/on bar acknowledgement.
+- `SHIFT+SELECT` in VOICE mode and SELECT in STEP/PAT_GEN mode select the visible bar. Plain VOICE SELECT still selects voice subpages. PERF SELECT no longer queues old pattern slots.
+- BAR1/BAR2 no longer trigger voices. They move the visible bar without wrapping, flash the boundary bar again at the ends, and light their own LEDs while pressed.
+- COPY+SELECT now performs copy-bar/paste-bar on the current track. Paste extends the track length to include the destination bar.
+- Euklid generation bypasses the legacy 16-bit transfer buffer for the bridge and writes generated rhythm directly to 128 `Step` active bits while preserving existing note/probability/automation fields.
+
+### Follow-Up Build/Test Watchpoints
+
+- This pass was not built here because the make toolchain is unavailable by request. Build should pay close attention to any stale comments/prototypes around the retained legacy `pat_mainSteps` helpers and any assumptions in filesystem container save/load paths.
+- `pat_mainSteps` remains as legacy/file compatibility storage for this bridge, but playback and visible step editing now use the 128 `Step` active bits as the source of truth.
+### Continuation Notes After Interruption
+
+- `led_flashLed()` now restarts an existing flash slot for the same LED, so repeated BAR1/BAR2 boundary presses or repeated SHIFT+SELECT acknowledgements produce a fresh 500 ms flash instead of being ignored while the previous flash is active.
+- Long-press automation arming now blinks the visible STEP1..16 LED for `step % 16`; it no longer routes non-boundary steps to SELECT LEDs, because SELECT1..8 is the bar indicator row during this bridge.
+- `led_updateRecordedSubStep()` is now a documented compatibility no-op. SELECT-row record feedback is intentionally suppressed until the old REC_SUB dirty bit can be deleted with the Scene UI work.
+- Euklid length/steps/rotation setters now guard invalid track indices before touching generator arrays. Generation still writes only Step active bits and clamps length/steps/rotation to the active 1..128 bridge range.
+- Static checks run here: literal newline-artifact scan and `git diff --check`. `git diff --check` reported only Git LF-to-CRLF normalization warnings, not whitespace errors. No firmware build or `make` command was run.

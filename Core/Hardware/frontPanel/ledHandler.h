@@ -118,6 +118,7 @@ void led_clearAll(void);
  */
 void led_tickHandler(void);
 void led_pulseLed(uint8_t ledNr);
+void led_flashLed(uint8_t ledNr);
 void led_setBlinkLed(uint8_t ledNr, uint8_t onOff);
 void led_clearAllBlinkLeds(void);
 
@@ -160,9 +161,10 @@ void led_initPerformanceLeds(void);
  * Meaning of each bit:
  * - CHASE: chase/current-step LED should move to seq_ledState.chaseStep.
  * - BEAT: START/STOP beat pulse LED should reflect seq_ledState.beatPulse.
- * - REC_SUB: a live-recorded sub-step should update SELECT1..8 visibility.
- * - REC_MAIN: a live-recorded sub-step's parent main step should update
- *   STEP1..16 visibility.
+ * - REC_SUB: compatibility dirty bit; SELECT1..8 now identify bars, so the
+ *   exported handler is a documented no-op during the bridge.
+ * - REC_MAIN: a live-recorded bridge step should update STEP1..16 visibility
+ *   when that step is inside the viewed bar.
  *
  * Risk:
  * - These flags are shared between sequencer timing code and foreground LED
@@ -183,9 +185,9 @@ typedef struct {
     /* 0/1 value for the temporary beat pulse on LED_START_STOP. */
     volatile uint8_t beatPulse;
     /* Sub-step index 0..127 that was just recorded and may need SELECT LED
-     * refresh if the current UI page is showing that sub-step bank. */
+     * refresh if the current UI page is showing that bridge step. */
     volatile uint8_t recordSubStep;
-    /* Sub-step index 0..127 whose parent main step may need STEP LED refresh. */
+    /* Bridge step index 0..127 whose STEP-row LED may need refresh. */
     volatile uint8_t recordMainStep;
 } SeqLedState;
 
@@ -209,11 +211,11 @@ extern SeqLedState seq_ledState;
  */
 /* Move/clear chase feedback for playback step `step` after page/pattern checks. */
 void led_updateCurrentStep(uint8_t step);
-/* Refresh STEP-row record feedback for one recorded step/main-step. */
+/* Refresh STEP-row record feedback for one recorded bridge step. */
 void led_updateRecordedMainStep(uint8_t activeTrack,
                                 uint8_t shownPattern,
                                 uint8_t subStep);
-/* Refresh SELECT-row record feedback for one visible old sub-step window. */
+/* Compatibility no-op for old SELECT-row record feedback. */
 void led_updateRecordedSubStep(uint8_t activeTrack,
                                uint8_t shownPattern,
                                uint8_t step,
