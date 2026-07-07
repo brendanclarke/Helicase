@@ -90,6 +90,16 @@ enum LedAliasNumbers {
     LED_SEQ13 = LED_STEP13, LED_SEQ14 = LED_STEP14, LED_SEQ15 = LED_STEP15, LED_SEQ16 = LED_STEP16
 };
 
+/*
+ * Low-level LED API.
+ *
+ * These functions accept logical LED IDs from LedNumbers/LedAliasNumbers, not
+ * raw 74HC595 positions. `val` inputs are boolean. The normal setters update
+ * remembered/base LED state; the `Temp` variants alter only the current
+ * physical output so later reset/pulse/blink cleanup can restore the previous
+ * base state. Common clients: buttonHandler, menu page transitions, sequencer
+ * foreground LED drain, and copy/clear UI.
+ */
 void led_init(void);
 void led_setValue(uint8_t val, uint8_t ledNr);
 void led_setValueTemp(uint8_t val, uint8_t ledNr);
@@ -97,12 +107,29 @@ void led_reset(uint8_t ledNr);
 void led_toggle(uint8_t ledNr);
 void led_toggleTemp(uint8_t ledNr);
 void led_clearAll(void);
+/*
+ * Time-based LED effect API.
+ *
+ * led_tickHandler() services pulse and blink slot tables and must be called
+ * regularly from the front-panel service path. led_pulseLed() is a short
+ * one-shot inversion that returns to original state automatically.
+ * led_setBlinkLed() starts/stops persistent blinking until explicitly cleared.
+ * led_clearAllBlinkLeds() cancels every blink slot and restores base state.
+ */
 void led_tickHandler(void);
 void led_pulseLed(uint8_t ledNr);
 void led_setBlinkLed(uint8_t ledNr, uint8_t onOff);
 void led_clearAllBlinkLeds(void);
 
 /* High-level voice/mode LED control — matches original API */
+/*
+ * High-level voice/mode/page LED API.
+ *
+ * These helpers encode row-level UI meaning on top of the low-level LED
+ * primitives. Inputs are zero-based row indices or bit patterns as described
+ * beside each function. They write remembered/base LED state unless otherwise
+ * noted by the implementation.
+ */
 void led_setActivePage(uint8_t pageNr);            /* light one page/select LED */
 void led_setActiveVoice(uint8_t voiceNr);           /* light one voice LED */
 void led_setActiveVoiceLeds(uint8_t pattern);       /* light pattern of voice LEDs */
@@ -162,6 +189,15 @@ typedef struct {
     volatile uint8_t recordMainStep;
 } SeqLedState;
 
+/*
+ * Exported deferred sequencer LED state.
+ *
+ * Writers: sequencer.c updates the volatile payload fields and ORs dirty bits
+ * while advancing playback or recording. Reader/owner: led_processSeqLedState()
+ * drains dirty bits in foreground and performs the physical LED rendering.
+ * External clients should treat this as a narrow timing-to-UI handoff, not a
+ * general LED API.
+ */
 extern SeqLedState seq_ledState;
 
 /*
@@ -171,21 +207,29 @@ extern SeqLedState seq_ledState;
  * state updates. Risk: led_processSeqLedState() is foreground-only because it
  * touches menu/button state and shift-register LED state.
  */
+/* Move/clear chase feedback for playback step `step` after page/pattern checks. */
 void led_updateCurrentStep(uint8_t step);
+/* Refresh STEP-row record feedback for one recorded step/main-step. */
 void led_updateRecordedMainStep(uint8_t activeTrack,
                                 uint8_t shownPattern,
                                 uint8_t subStep);
+/* Refresh SELECT-row record feedback for one visible old sub-step window. */
 void led_updateRecordedSubStep(uint8_t activeTrack,
                                uint8_t shownPattern,
                                uint8_t step,
                                uint8_t selectedStepBase,
                                uint8_t shiftHeld,
                                uint8_t selectMode);
+/* Repaint STEP and SELECT rows from PatternData for one track/pattern view. */
 void led_updatePatternTrack(uint8_t track, uint8_t pattern,
                             uint8_t selectedStepBase);
+/* Apply START/STOP beat pulse state supplied by Sequencer. */
 void led_setBeatPulse(uint8_t on);
+/* Update Menu/LED pattern-follow state after Sequencer changes pattern. */
 void led_notifyPatternChanged(uint8_t playedPattern);
+/* Mirror a Sequencer rotation reset into the visible menu parameter. */
 void led_notifyTrackRotationReset(uint8_t rotation);
+/* Foreground drain for seq_ledState dirty payloads. */
 void led_processSeqLedState(void);
 
 #endif
