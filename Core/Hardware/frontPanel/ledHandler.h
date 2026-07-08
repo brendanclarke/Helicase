@@ -118,6 +118,16 @@ void led_clearAll(void);
  */
 void led_tickHandler(void);
 void led_pulseLed(uint8_t ledNr);
+typedef enum {
+    LED_FLASH_GROUP_SELECT = 0,
+    LED_FLASH_GROUP_SEQ,
+    LED_FLASH_GROUP_MODE,
+    LED_FLASH_GROUP_VOICE,
+    LED_FLASH_GROUP_BAR,
+    LED_FLASH_GROUP_FUNCTION,
+    LED_FLASH_GROUP_COUNT
+} LedFlashGroup;
+void led_flashGroup(LedFlashGroup group, uint16_t mask);
 void led_flashLed(uint8_t ledNr);
 void led_setBlinkLed(uint8_t ledNr, uint8_t onOff);
 void led_clearAllBlinkLeds(void);
@@ -225,6 +235,9 @@ void led_updateRecordedSubStep(uint8_t activeTrack,
 /* Repaint STEP and SELECT rows from PatternData for one track/pattern view. */
 void led_updatePatternTrack(uint8_t track, uint8_t pattern,
                             uint8_t selectedStepBase);
+void led_updatePatternTrackView(uint8_t track, uint8_t pattern,
+                                uint8_t selectedStepBase,
+                                uint8_t updateSelectRow);
 /* Apply START/STOP beat pulse state supplied by Sequencer. */
 void led_setBeatPulse(uint8_t on);
 /* Update Menu/LED pattern-follow state after Sequencer changes pattern. */

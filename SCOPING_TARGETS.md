@@ -304,6 +304,26 @@ On the Patgen/Euclidean page (`SHIFT+PERF`), pressing `SHIFT+PERF` twice reverts
 
 A borrowed idea worth folding in here since it's sequencer-scale-adjacent: a pattern-level scale selector with `12a`/`12b` modes that skip specific steps of a 16-step grid on a fixed schedule (`12a` skips steps 2, 6, 10, 14; `12b` skips 3, 7, 11, 15) to convert a 16-step binary grid into a 12-step ternary (triplet) feel and back, without needing a genuinely different step count. This is a cheap way to get triplet feel without touching the 128-step/8-bar architecture — worth doing as a scale/display mode on top of Phase 3 rather than a structural change.
 
+### 3.11 Final LED state consolidation pass
+
+As the last Phase 3 subphase before Phase 4, consolidate the front-panel LED
+state rules without changing the public LED API. The current UI work has several
+temporary layers that can overlap: base lit/unlit state, persistent blink,
+group flash, one-shot pulse, and sequencer chase/highlight. The intended
+priority and restore fallback order is:
+
+`base lit/unlit < blink < flash < pulse`
+
+The consolidation should make that order explicit inside `ledHandler`: base
+writes update the remembered mode-owned state, blink/flash/pulse render as
+overlays, and expiry/cancel of any layer re-renders the next-highest active
+layer rather than blindly restoring to base. A pulsed LED that was blinking
+should fall back to its blinking render state; a flashed LED whose base changed
+during the flash should fall back to the latest base; unrelated LED groups
+should not be disturbed. Include BAR1/SW43 and sequencer chase in the same
+render rules, either by placing chase explicitly in the priority stack or by
+folding it into an existing temporary layer.
+
 ### Open Engineering Questions
 
 - **Manual roll triggering:** you flagged needing "a smart way of triggering manual rolls" now that rolls are decoupled from pattern length — this needs a concrete UI proposal (which button/hold-gesture initiates a manual roll, and at what rate) before Phase 5's UI work can wire it up.

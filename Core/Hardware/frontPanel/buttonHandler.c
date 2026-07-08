@@ -192,15 +192,20 @@ static void buttonHandler_selectBar(uint8_t bar)
      *
      * Inputs: bar is SELECT/BAR-derived 0..7. Output: menu_currentBar updates,
      * STEP/SELECT LEDs repaint from PatternData, and the selected-bar SELECT LED
-     * runs the 500 ms flash requested for bar navigation feedback. */
+     * runs the current ledHandler flash timing for bar navigation feedback. */
+    uint8_t selectRowShowsBar;
     if (bar >= NUM_BARS)
         return;
     menu_currentBar = bar;
     buttonHandler_selectedStep = buttonHandler_barStartStep();
     parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
-    led_updatePatternTrack(menu_getActiveVoice(), menu_getViewedPattern(), buttonHandler_selectedStep);
+    selectRowShowsBar = (uint8_t)(bh_state.selectButtonMode != SELECT_MODE_VOICE);
+    led_updatePatternTrackView(menu_getActiveVoice(), menu_getViewedPattern(),
+                               buttonHandler_selectedStep, selectRowShowsBar);
     pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice());
-    led_flashLed((uint8_t)(LED_PART_SELECT1 + bar));
+    if (!selectRowShowsBar)
+        led_setActiveSelectButton(menu_getSubPage());
+    led_flashGroup(LED_FLASH_GROUP_SELECT, (uint16_t)(1u << bar));
 }
 static void buttonHandler_updateSubSteps(void)
 {
@@ -434,11 +439,21 @@ static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPress
     buttonHandler_updateSubSteps();
 }
 
-static void buttonHandler_toggleStepParameterPage(void)
+static void buttonHandler_showStepParameterPage(void)
 {
+    /*
+     * STEP mode starts on a track front page and moves to the per-step editor
+     * only after the user selects a concrete STEP1..16 button.
+     *
+     * Inputs are implicit current Menu state. Output: SEQ_PAGE subpage 1 is
+     * shown when STEP mode owns the SELECT/STEP UI. This keeps the front page
+     * visible on mode entry or track change, then leaves it hidden until STEP
+     * mode is re-entered or another voice changes the active track.
+     */
     if (bh_state.selectButtonMode == SELECT_MODE_STEP &&
         menu_activePage == SEQ_PAGE) {
-        menu_switchSubPage(menu_getSubPage());
+        if (menu_getSubPage() != 1u)
+            menu_switchSubPage(1u);
         menu_repaintAll();
     }
 }
@@ -522,7 +537,7 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
             break;
         case SELECT_MODE_STEP:
             buttonHandler_setRemoveStep(ledNr, seqButtonPressed);
-            buttonHandler_toggleStepParameterPage();
+            buttonHandler_showStepParameterPage();
             break;
         case SELECT_MODE_PERF:
             buttonHandler_setTrackRotation(seqButtonPressed);
@@ -538,7 +553,7 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
         case SELECT_MODE_STEP:
             led_clearAllBlinkLeds();
             buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
-            buttonHandler_toggleStepParameterPage();
+            buttonHandler_showStepParameterPage();
             break;
         case SELECT_MODE_PERF:
             if (seqButtonPressed < 8u) {
@@ -684,6 +699,21 @@ static void handleSelectButton(uint8_t selectNr)
         break;
 
     case SELECT_MODE_PERF:
+        /*
+         * Single-pattern bridge re-align gesture.
+         *
+         * PERF SELECT1 is the only active pattern button while NUM_PATTERN is
+         * one. Pressing it again does not queue a pattern; it asks Sequencer to
+         * re-derive every track counter from the master step clock, track
+         * length, rotation, and scale. Other SELECT buttons stay inactive until
+         * the later Scene/pattern-selection trigger design replaces this.
+         */
+        if (selectNr == 0u &&
+            seq_activePattern == 0u &&
+            menu_getViewedPattern() == 0u) {
+            seq_realignActivePatternToMasterClock();
+            led_flashGroup(LED_FLASH_GROUP_SELECT, 0x0001u);
+        }
         break;
 
     case SELECT_MODE_LOAD_SAVE:
@@ -722,6 +752,8 @@ static void buttonHandler_partButtonPressed(uint8_t partNr)
 
 static void buttonHandler_partButtonReleased(uint8_t partNr)
 {
+    (void)partNr;
+
     if (copyClear_Mode >= MODE_COPY_PATTERN) {
         return;
     }
@@ -819,9 +851,12 @@ static void handleVoiceButton(uint8_t voiceNr)
          */
         buttonHandler_applyEuklidParamsToMenu(voiceNr);
 
-        if (bh_state.selectButtonMode == SELECT_MODE_STEP) {
+        if (bh_state.selectButtonMode == SELECT_MODE_STEP ||
+            menu_activePage == SEQ_PAGE) {
             led_clearAllBlinkLeds();
             buttonHandler_enterSeqModeStepMode();
+        } else if (menu_activePage == EUKLID_PAGE) {
+            menu_repaintAll();
         }
     }
 }
@@ -917,7 +952,7 @@ static void processPress(uint8_t buttonNr)
         if (menu_currentBar > 0u)
             buttonHandler_selectBar((uint8_t)(menu_currentBar - 1u));
         else
-            led_flashLed(LED_PART_SELECT1);
+            led_flashGroup(LED_FLASH_GROUP_SELECT, 0x0001u);
         break;
 
     case BUT_BAR2:
@@ -925,7 +960,8 @@ static void processPress(uint8_t buttonNr)
         if (menu_currentBar < (NUM_BARS - 1u))
             buttonHandler_selectBar((uint8_t)(menu_currentBar + 1u));
         else
-            led_flashLed((uint8_t)(LED_PART_SELECT1 + (NUM_BARS - 1u)));
+            led_flashGroup(LED_FLASH_GROUP_SELECT,
+                           (uint16_t)(1u << (NUM_BARS - 1u)));
         break;
 
     case BUT_SHIFT:

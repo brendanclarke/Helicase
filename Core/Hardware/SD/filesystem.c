@@ -513,6 +513,8 @@ static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
  *   pattern settings[pattern], nextPattern then changeBar
  *   shuffle byte
  *   track length bytes[pattern-major track-major], optional for old files
+ *   track settings extension[pattern-major track-major], optional:
+ *     rotate, scale, midiChannel, midiNote
  */
 #define FS_PATTERN_FILE_PATTERN_COUNT 8u
 #define FS_PATTERN_STEP_COUNT     ((uint32_t)NUM_TRACKS * FS_PATTERN_FILE_PATTERN_COUNT * NUM_STEPS)
@@ -522,6 +524,7 @@ static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
 #define FS_PATTERN_STEP_SIZE      7u
 #define FS_PATTERN_MAIN_SIZE      2u
 #define FS_PATTERN_SETTING_SIZE   2u
+#define FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE 4u
 #define FS_CONTAINER_VERSION      2u
 
 static void filesystem_patternStepAddress(uint32_t step_index,
@@ -554,7 +557,45 @@ static void filesystem_patternTrackAddress(uint32_t index,
 static Step filesystem_discardStep;
 static uint16_t filesystem_discardMainSteps;
 static PatternSetting filesystem_discardPatternSetting;
-static LengthRotate filesystem_discardLengthRotate = { NUM_STEPS, 0 };
+static LengthRotate filesystem_discardLengthRotate = { NUM_STEPS, 0, TRACK_SCALE_OFF, 1u, 0u };
+
+static uint8_t filesystem_defaultTrackMidiChannel(uint8_t track)
+{
+    /*
+     * Pattern files can omit the track-settings extension. In that case the
+     * loader supplies a valid PatternData-owned channel in menu form so old
+     * files cannot leave zero in a 1..16 channel field.
+     */
+    return (uint8_t)((track < 15u) ? (track + 1u) : 1u);
+}
+
+static void filesystem_defaultTrackSettings(LengthRotate *lr, uint8_t track)
+{
+    /*
+     * Default all fields that were not present in the legacy one-byte length
+     * stream. The following optional extension may overwrite rotate, scale,
+     * midiChannel, and midiNote for new pattern/container saves.
+     */
+    if (!lr)
+        return;
+    lr->rotate = 0u;
+    lr->scale = TRACK_SCALE_OFF;
+    if (track < NUM_TRACKS) {
+        uint16_t chanParam = (track == 6u)
+            ? PAR_MIDI_CHAN_7
+            : (uint16_t)(PAR_MIDI_CHAN_1 + track);
+        uint8_t channel = parameter_values[chanParam];
+        lr->midiChannel = (channel >= 1u && channel <= 16u)
+            ? channel
+            : filesystem_defaultTrackMidiChannel(track);
+        lr->midiNote = (parameter_values[PAR_MIDI_NOTE1 + track] <= 127u)
+            ? parameter_values[PAR_MIDI_NOTE1 + track]
+            : 0u;
+    } else {
+        lr->midiChannel = filesystem_defaultTrackMidiChannel(track);
+        lr->midiNote = 0u;
+    }
+}
 static Step *filesystem_patternStepPtr(uint8_t pattern, uint8_t track, uint8_t step)
 {
     /*
@@ -1195,7 +1236,7 @@ static void filesystem_loadKitDirectory_tick(void)
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
+            op_phase = 13;
             return;
         }
         if (line_ready) {
@@ -1215,7 +1256,7 @@ static void filesystem_loadKitDirectory_tick(void)
             } else {
                 op_close_status = FS_STATUS_DONE;
             }
-            op_phase = 14;
+            op_phase = 13;
         }
         return;
 
@@ -1575,7 +1616,8 @@ static void filesystem_savePattern_tick(void)
         uint8_t pattern, track;
 
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_close_status = FS_STATUS_DONE;
+            op_stream_index = 0;
+            op_item_offset = 0;
             op_phase = 8;
             return;
         }
@@ -1597,13 +1639,48 @@ static void filesystem_savePattern_tick(void)
         return;
     }
 
-    case 8: /* CLOSE */
+    case 8: /* TRACK SETTINGS EXTENSION */
+    {
+        uint8_t pattern, track;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 9;
+            return;
+        }
+
+        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+        {
+            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
+            if (!lr) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            /*
+             * New pattern saves append the fields that make the STEP front page
+             * PatternData-owned. Length remains in the legacy block above so old
+             * files and old tooling still see the expected byte stream prefix.
+             */
+            staging_buf[0] = lr->rotate;
+            staging_buf[1] = lr->scale;
+            staging_buf[2] = lr->midiChannel;
+            staging_buf[3] = lr->midiNote;
+        }
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            op_item_offset = 0;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 9: /* CLOSE */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 9;
+            op_phase = 10;
         return;
 
-    case 9: /* WAIT_CLOSE */
+    case 10: /* WAIT_CLOSE */
         if (!op_close_done) return;
         filesystem_finish(op_close_status);
         return;
@@ -1619,8 +1696,8 @@ static void filesystem_savePattern_tick(void)
 **
 ** Required sections (name, steps, main steps, settings, shuffle) fail on EOF.
 ** The final length block is optional for old `.pat` files; missing lengths
-** are set to 0, which the sequencer interprets as the original 16-step
-** default.
+** are set to 0, which PatternData normalizes to the 128-step default. New
+** files may append a track-settings extension after the legacy length block.
 **
 ** If the file contains the currently playing pattern while the sequencer is
 ** running, that pattern is loaded into PatternData's temporary buffer. At completion,
@@ -1628,7 +1705,8 @@ static void filesystem_savePattern_tick(void)
 ** sequencer boundary-swap path without replacing a queued pattern change.
 **
 ** Phases: 0=open, 1=wait_open, 2=name, 3=steps, 4=main steps,
-**         5=settings, 6=shuffle, 7=lengths, 8=close, 9=wait_close
+**         5=settings, 6=shuffle, 7=lengths, 8=settings extension,
+**         9=close, 10=wait_close
 ** ----------------------------------------------------------------------- */
 static void filesystem_loadPattern_tick(void)
 {
@@ -1675,7 +1753,7 @@ static void filesystem_loadPattern_tick(void)
             op_phase = 3;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 8;
+            op_phase = 9;
         }
         return;
     }
@@ -1702,7 +1780,7 @@ static void filesystem_loadPattern_tick(void)
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 8;
+            op_phase = 9;
         }
         return;
     }
@@ -1729,7 +1807,7 @@ static void filesystem_loadPattern_tick(void)
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 8;
+            op_phase = 9;
         }
         return;
     }
@@ -1755,7 +1833,7 @@ static void filesystem_loadPattern_tick(void)
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 8;
+            op_phase = 9;
         }
         return;
     }
@@ -1786,11 +1864,8 @@ static void filesystem_loadPattern_tick(void)
         uint32_t n;
 
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            if (op_loaded_active_pattern_running) {
-                seq_newPatternAvailable = 1;
-                seq_armActivePatternReload();
-            }
-            op_close_status = FS_STATUS_DONE;
+            op_stream_index = 0;
+            op_item_offset = 0;
             op_phase = 8;
             return;
         }
@@ -1800,20 +1875,67 @@ static void filesystem_loadPattern_tick(void)
             filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
             length_rotate = filesystem_patternLengthPtr(pattern, track);
             length_rotate->length = (op_item_offset >= 1u) ? staging_buf[0] : 0;
-            length_rotate->rotate = 0;
+            filesystem_defaultTrackSettings(length_rotate, track);
             op_item_offset = 0;
             op_stream_index++;
         }
         return;
     }
 
-    case 8: /* CLOSE */
+    case 8: /* TRACK SETTINGS EXTENSION */
+    {
+        uint8_t pattern, track;
+        LengthRotate *length_rotate;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            if (op_loaded_active_pattern_running) {
+                seq_newPatternAvailable = 1;
+                seq_armActivePatternReload();
+            }
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 9;
+            return;
+        }
+
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+            length_rotate = filesystem_patternLengthPtr(pattern, track);
+            /*
+             * Optional extension for new pattern saves. Legacy files hit EOF
+             * before this block and keep the defaults assigned while reading
+             * the length block above.
+             */
+            length_rotate->rotate = staging_buf[0];
+            length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
+                ? staging_buf[1]
+                : TRACK_SCALE_OFF;
+            length_rotate->midiChannel =
+                (staging_buf[2] >= 1u && staging_buf[2] <= 16u)
+                    ? staging_buf[2]
+                    : filesystem_defaultTrackMidiChannel(track);
+            length_rotate->midiNote = (staging_buf[3] <= 127u) ? staging_buf[3] : 0u;
+            op_item_offset = 0;
+            op_stream_index++;
+        } else if (n == 0 && afatfs_feof(op_file)) {
+            if (op_loaded_active_pattern_running) {
+                seq_newPatternAvailable = 1;
+                seq_armActivePatternReload();
+            }
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 9;
+        }
+        return;
+    }
+
+    case 9: /* CLOSE */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 9;
+            op_phase = 10;
         return;
 
-    case 9: /* WAIT_CLOSE */
+    case 10: /* WAIT_CLOSE */
         if (!op_close_done) return;
         filesystem_finish(op_close_status);
         return;
@@ -2057,7 +2179,8 @@ static void filesystem_saveContainer_tick(void)
     {
         uint8_t pattern, track;
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_close_status = FS_STATUS_DONE;
+            op_stream_index = 0;
+            op_item_offset = 0;
             op_phase = 13;
             return;
         }
@@ -2078,13 +2201,46 @@ static void filesystem_saveContainer_tick(void)
         return;
     }
 
-    case 13: /* CLOSE */
+    case 13: /* PATTERN SETTINGS EXTENSION */
+    {
+        uint8_t pattern, track;
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 14;
+            return;
+        }
+        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+        {
+            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
+            if (!lr) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            /*
+             * Container pattern payload mirrors standalone .pat: keep the
+             * legacy length byte block, then append PatternData-owned track
+             * settings for new firmware.
+             */
+            staging_buf[0] = lr->rotate;
+            staging_buf[1] = lr->scale;
+            staging_buf[2] = lr->midiChannel;
+            staging_buf[3] = lr->midiNote;
+        }
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            op_item_offset = 0;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 14: /* CLOSE */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 14;
+            op_phase = 15;
         return;
 
-    case 14: /* WAIT_CLOSE */
+    case 15: /* WAIT_CLOSE */
         if (!op_close_done) return;
         filesystem_finish(op_close_status);
         return;
@@ -2146,7 +2302,7 @@ static void filesystem_loadContainer_tick(void)
             op_phase = 3;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
     }
@@ -2160,13 +2316,13 @@ static void filesystem_loadContainer_tick(void)
             op_stream_index = 0;
             if (op_file_version > FS_CONTAINER_VERSION) {
                 op_close_status = FS_STATUS_ERROR;
-                op_phase = 13;
+                op_phase = 14;
             } else {
                 op_phase = 4;
             }
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
     }
@@ -2202,7 +2358,7 @@ static void filesystem_loadContainer_tick(void)
                 op_phase = 6;
             } else if (n == 0 && afatfs_feof(op_file)) {
                 op_close_status = FS_STATUS_ERROR;
-                op_phase = 13;
+                op_phase = 14;
             }
             return;
         }
@@ -2228,7 +2384,7 @@ static void filesystem_loadContainer_tick(void)
                 op_stream_index++;
             } else if (n == 0 && afatfs_feof(op_file)) {
                 op_close_status = FS_STATUS_ERROR;
-                op_phase = 13;
+                op_phase = 14;
             }
         }
         return;
@@ -2253,7 +2409,7 @@ static void filesystem_loadContainer_tick(void)
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
     }
@@ -2297,7 +2453,7 @@ static void filesystem_loadContainer_tick(void)
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
     }
@@ -2322,7 +2478,7 @@ static void filesystem_loadContainer_tick(void)
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
     }
@@ -2347,7 +2503,7 @@ static void filesystem_loadContainer_tick(void)
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
     }
@@ -2371,7 +2527,7 @@ static void filesystem_loadContainer_tick(void)
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
     }
@@ -2389,7 +2545,7 @@ static void filesystem_loadContainer_tick(void)
             op_phase = 12;
         } else if (n == 0 && afatfs_feof(op_file)) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
     }
@@ -2400,11 +2556,8 @@ static void filesystem_loadContainer_tick(void)
         LengthRotate *length_rotate;
         uint32_t n;
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            if (op_loaded_active_pattern_running) {
-                seq_newPatternAvailable = 1;
-                seq_armActivePatternReload();
-            }
-            op_close_status = FS_STATUS_DONE;
+            op_stream_index = 0;
+            op_item_offset = 0;
             op_phase = 13;
             return;
         }
@@ -2413,20 +2566,62 @@ static void filesystem_loadContainer_tick(void)
             filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
             length_rotate = filesystem_patternLengthPtr(pattern, track);
             length_rotate->length = (op_item_offset >= 1u) ? staging_buf[0] : 0;
-            length_rotate->rotate = 0;
+            filesystem_defaultTrackSettings(length_rotate, track);
             op_item_offset = 0;
             op_stream_index++;
         }
         return;
     }
 
-    case 13: /* CLOSE */
+    case 13: /* PATTERN SETTINGS EXTENSION */
+    {
+        uint8_t pattern, track;
+        LengthRotate *length_rotate;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            if (op_loaded_active_pattern_running) {
+                seq_newPatternAvailable = 1;
+                seq_armActivePatternReload();
+            }
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 14;
+            return;
+        }
+
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+            length_rotate = filesystem_patternLengthPtr(pattern, track);
+            length_rotate->rotate = staging_buf[0];
+            length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
+                ? staging_buf[1]
+                : TRACK_SCALE_OFF;
+            length_rotate->midiChannel =
+                (staging_buf[2] >= 1u && staging_buf[2] <= 16u)
+                    ? staging_buf[2]
+                    : filesystem_defaultTrackMidiChannel(track);
+            length_rotate->midiNote = (staging_buf[3] <= 127u) ? staging_buf[3] : 0u;
+            op_item_offset = 0;
+            op_stream_index++;
+        } else if (n == 0 && afatfs_feof(op_file)) {
+            if (op_loaded_active_pattern_running) {
+                seq_newPatternAvailable = 1;
+                seq_armActivePatternReload();
+            }
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 14;
+        }
+        return;
+    }
+
+    case 14: /* CLOSE */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 14;
+            op_phase = 15;
         return;
 
-    case 14: /* WAIT_CLOSE */
+    case 15: /* WAIT_CLOSE */
         if (!op_close_done) return;
         filesystem_finish(op_close_status);
         return;

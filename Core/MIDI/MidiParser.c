@@ -137,13 +137,36 @@ static void midiParser_setMorphFromModWheel(uint8_t value)
 
 uint8_t midiParser_getVoiceMidiNote(uint8_t voice)
 {
+	uint8_t note;
+
 	if (voice >= 7u)
 		return PAT_DEFAULT_NOTE;
+
+	/*
+	 * PatternData owns the track MIDI note shown on the STEP track-settings
+	 * page. The legacy midi_NoteOverride[] array remains for older kit/global
+	 * flows, but live input should match the active pattern track setting so a
+	 * loaded pattern behaves without requiring a UI edit to mirror values.
+	 */
+	note = pat_getTrackMidiNote(seq_activePattern, voice);
+	if (note != 0u)
+		return note;
 
 	if (midi_NoteOverride[voice] != 0u)
 		return midi_NoteOverride[voice];
 
 	return (uint8_t)(MIDI_DEFAULT_VOICE_NOTE_BASE + voice);
+}
+
+static uint8_t midiParser_getVoiceMidiChannel(uint8_t voice)
+{
+	/*
+	 * Return a zero-based MIDI channel for the active pattern track. PatternData
+	 * stores menu/display form 1..16; invalid storage is clamped by its getter.
+	 */
+	if (voice >= 7u)
+		return midi_MidiChannels[7];
+	return (uint8_t)(pat_getTrackMidiChannel(seq_activePattern, voice) - 1u);
 }
 
 static uint8_t midiParser_voiceMatchesNote(uint8_t voice, uint8_t note)
@@ -1235,7 +1258,7 @@ static void midiParser_handleNoteMessage(uint8_t channel, uint8_t note, uint8_t 
 	const uint8_t noteOn = (msgonly == NOTE_ON && vel);
 
 	if (recordVoice < 7u) {
-		if (midi_MidiChannels[recordVoice] == channel &&
+		if (midiParser_getVoiceMidiChannel(recordVoice) == channel &&
 				midiParser_voiceMatchesNote(recordVoice, note)) {
 			q = (int8_t)recordVoice;
 			if (noteOn)
@@ -1266,7 +1289,7 @@ static void midiParser_handleNoteMessage(uint8_t channel, uint8_t note, uint8_t 
 		if (v == q)
 			continue;
 
-		if (midi_MidiChannels[v] != channel)
+		if (midiParser_getVoiceMidiChannel((uint8_t)v) != channel)
 			continue;
 
 		if (!midiParser_voiceMatchesNote((uint8_t)v, note))

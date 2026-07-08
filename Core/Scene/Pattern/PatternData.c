@@ -60,6 +60,36 @@ static uint8_t pat_activeAutomationTrack = 0;
  * can make shuffle per-pattern or per-track-pattern without changing callers. */
 static uint8_t pat_shuffleValue[NUM_PATTERN];
 
+static uint8_t pat_defaultTrackMidiChannel(uint8_t track)
+{
+	/*
+	 * Default new PatternData-owned track MIDI channel in menu/display form.
+	 *
+	 * The old kit/global MIDI channel parameters remain for compatibility, but
+	 * the STEP track-settings page now loads from PatternData. A 1..7 default
+	 * keeps freshly cleared patterns valid before any globals or pattern file
+	 * have been loaded.
+	 */
+	return (uint8_t)((track < 15u) ? (track + 1u) : 1u);
+}
+
+/*
+ * Track-scale menu values as exact rational timing ratios.
+ *
+ * Why this table lives in PatternData: track scale is Pattern-owned per-track
+ * metadata, while Sequencer only needs a normalized numerator/denominator when
+ * it schedules playback. Inputs are TRACK_SCALE_* menu/storage values. Output
+ * is a small ratio where 1/1 means the corrected default 4-steps-per-beat grid,
+ * 5/2 is x25, and 2/5 is /25. Risk: MenuText.h must keep the display order in
+ * sync with this table because the menu value is the table index.
+ */
+static const TrackScaleRatio pat_trackScaleRatios[TRACK_SCALE_COUNT] = {
+	{1u, 8u}, {1u, 7u}, {1u, 6u}, {1u, 5u}, {1u, 4u}, {1u, 3u},
+	{2u, 5u}, {1u, 2u}, {3u, 5u}, {3u, 4u}, {1u, 1u},
+	{4u, 3u}, {5u, 3u}, {2u, 1u}, {5u, 2u}, {3u, 1u},
+	{4u, 1u}, {5u, 1u}, {6u, 1u}, {7u, 1u}, {8u, 1u},
+};
+
 static void pat_resetStep(Step *step)
 {
 	/* Reset one bridge step to the default inactive edit state used by clear-pattern
@@ -172,7 +202,14 @@ PatternSetting *pat_patternSettingPtr(uint8_t pattern)
 
 LengthRotate *pat_lengthRotatePtr(uint8_t pattern, uint8_t track)
 {
-	/* Length/rotation is per pattern+track. During the Phase 2 bridge length is a real step count, 1..128; zero is only accepted from old files and normalized by the setter. */
+	/* Per-track Pattern settings live here during the bridge.
+	 *
+	 * LengthRotate keeps its historical name for now, but the record now owns
+	 * the STEP front-page track settings: length, rotation, scale, MIDI channel,
+	 * and MIDI note. The legacy pattern length stream may still supply only the
+	 * length byte; loaders must default the newer fields before reading the
+	 * optional settings extension block.
+	 */
 	if (!pat_trackValid(track))
 		return 0;
 	if (pattern == PATTERNDATA_STAGING_PATTERN)
@@ -543,6 +580,108 @@ uint8_t pat_getTrackRotation(uint8_t pattern, uint8_t track)
 	return lr ? lr->rotate : 0;
 }
 
+void pat_setTrackScale(uint8_t pattern, uint8_t track, uint8_t scale)
+{
+	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
+
+	/*
+	 * Stores the per-track timing scale selected from the Pattern STEP front
+	 * page.
+	 *
+	 * Inputs: pattern/track select the PatternData owner and scale is a
+	 * TRACK_SCALE_* menu index. Outputs: storage is clamped to a known scale and
+	 * PAR_TRACK_SCALE mirrors it for the current UI. The sequencer reads this
+	 * through pat_getTrackScaleRatio() when scheduling. If the edited pattern is
+	 * currently running, Sequencer is asked to realign immediately so a mid-run
+	 * change from a slow divide to a fast multiply cannot dump a long backlog of
+	 * "missed" scaled steps into one tick.
+	 */
+	if (!lr)
+		return;
+	if (scale >= TRACK_SCALE_COUNT)
+		scale = TRACK_SCALE_OFF;
+	lr->scale = scale;
+	parameter_values[PAR_TRACK_SCALE] = scale;
+	if (pattern == seq_activePattern && seq_isRunning())
+		seq_realignActivePatternToMasterClock();
+}
+
+void pat_setTrackMidiChannel(uint8_t pattern, uint8_t track, uint8_t channel)
+{
+	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
+
+	/*
+	 * Store the Pattern-owned MIDI channel shown on the STEP track-settings
+	 * page. The menu value is 1..16; zero or out-of-range values are normalized
+	 * so old/partial files cannot leave the MIDI parser with an underflowing
+	 * channel.
+	 */
+	if (!lr)
+		return;
+	if (channel < 1u)
+		channel = 1u;
+	else if (channel > 16u)
+		channel = 16u;
+	lr->midiChannel = channel;
+	parameter_values[PAR_TRACK_MIDI_CHAN] = channel;
+}
+
+uint8_t pat_getTrackMidiChannel(uint8_t pattern, uint8_t track)
+{
+	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
+	if (!lr || lr->midiChannel < 1u || lr->midiChannel > 16u)
+		return pat_defaultTrackMidiChannel(track);
+	return lr->midiChannel;
+}
+
+void pat_setTrackMidiNote(uint8_t pattern, uint8_t track, uint8_t note)
+{
+	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
+
+	/*
+	 * Store the Pattern-owned MIDI note override shown on the STEP front page.
+	 * A value of 0 keeps the existing "any/default" behavior; nonzero values
+	 * are concrete MIDI notes.
+	 */
+	if (!lr)
+		return;
+	if (note > 127u)
+		note = 127u;
+	lr->midiNote = note;
+	parameter_values[PAR_TRACK_MIDI_NOTE] = note;
+}
+
+uint8_t pat_getTrackMidiNote(uint8_t pattern, uint8_t track)
+{
+	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
+	(void)track;
+	if (!lr || lr->midiNote > 127u)
+		return 0u;
+	return lr->midiNote;
+}
+
+uint8_t pat_getTrackScale(uint8_t pattern, uint8_t track)
+{
+	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
+	if (!lr || lr->scale >= TRACK_SCALE_COUNT)
+		return TRACK_SCALE_OFF;
+	return lr->scale;
+}
+
+TrackScaleRatio pat_getTrackScaleRatio(uint8_t pattern, uint8_t track)
+{
+	uint8_t scale = pat_getTrackScale(pattern, track);
+
+	/*
+	 * Converts PatternData track scale to the exact rational ratio consumed by
+	 * Sequencer timing. Invalid storage falls back to 1/1 so corrupt or legacy
+	 * data cannot create a zero denominator in the timing path.
+	 */
+	if (scale >= TRACK_SCALE_COUNT)
+		scale = TRACK_SCALE_OFF;
+	return pat_trackScaleRatios[scale];
+}
+
 void pat_setShuffle(uint8_t pattern, uint8_t value)
 {
 	/* Menu edit path for PAR_SHUFFLE.
@@ -615,6 +754,10 @@ void pat_clearTrack(uint8_t pattern, uint8_t track)
 	pat_patternSet.pat_mainSteps[pattern][track] = 0;
 	pat_patternSet.pat_patternLengthRotate[pattern][track].length = NUM_STEPS;
 	pat_patternSet.pat_patternLengthRotate[pattern][track].rotate = 0;
+	pat_patternSet.pat_patternLengthRotate[pattern][track].scale = TRACK_SCALE_OFF;
+	pat_patternSet.pat_patternLengthRotate[pattern][track].midiChannel =
+		pat_defaultTrackMidiChannel(track);
+	pat_patternSet.pat_patternLengthRotate[pattern][track].midiNote = 0u;
 }
 
 void pat_clearPattern(uint8_t pattern)
@@ -952,5 +1095,14 @@ void pat_applyTrackSettingsToMenu(uint8_t pattern, uint8_t track)
 		return;
 	parameter_values[PAR_TRACK_LENGTH] = pat_getTrackLength(pattern, track);
 	parameter_values[PAR_TRACK_ROTATION] = pat_getTrackRotation(pattern, track);
+	parameter_values[PAR_TRACK_SCALE] = pat_getTrackScale(pattern, track);
+	/*
+	 * STEP front-page aliases mirror PatternData-owned track settings. Legacy
+	 * PAR_MIDI_* parameters may still be updated as a compatibility output when
+	 * these aliases are edited, but they are no longer the storage owner for
+	 * this page.
+	 */
+	parameter_values[PAR_TRACK_MIDI_CHAN] = pat_getTrackMidiChannel(pattern, track);
+	parameter_values[PAR_TRACK_MIDI_NOTE] = pat_getTrackMidiNote(pattern, track);
 	parameter_values[PAR_SHUFFLE] = pat_getShuffle(pattern);
 }

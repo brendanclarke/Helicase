@@ -31,6 +31,34 @@
 #define PAT_NEXT_RANDOM 		0x08
 #define PAT_NEXT_RANDOM_PREV 	0x09
 
+#define TRACK_SCALE_DIV8   0u
+#define TRACK_SCALE_DIV7   1u
+#define TRACK_SCALE_DIV6   2u
+#define TRACK_SCALE_DIV5   3u
+#define TRACK_SCALE_DIV4   4u
+#define TRACK_SCALE_DIV3   5u
+#define TRACK_SCALE_DIV25  6u
+#define TRACK_SCALE_DIV2   7u
+#define TRACK_SCALE_DIV_D6 8u
+#define TRACK_SCALE_DIV_D3 9u
+#define TRACK_SCALE_OFF    10u
+#define TRACK_SCALE_MUL_D3 11u
+#define TRACK_SCALE_MUL_D6 12u
+#define TRACK_SCALE_MUL2   13u
+#define TRACK_SCALE_MUL25  14u
+#define TRACK_SCALE_MUL3   15u
+#define TRACK_SCALE_MUL4   16u
+#define TRACK_SCALE_MUL5   17u
+#define TRACK_SCALE_MUL6   18u
+#define TRACK_SCALE_MUL7   19u
+#define TRACK_SCALE_MUL8   20u
+#define TRACK_SCALE_COUNT  21u
+
+typedef struct {
+	uint8_t num;
+	uint8_t den;
+} TrackScaleRatio;
+
 typedef struct StepStruct
 {
 	uint8_t 	volume;		// 0-127 volume -> 0x7f => lower 7 bit, upper bit => active
@@ -55,6 +83,9 @@ typedef struct PatternSettingsStruct
 typedef struct {
 	uint8_t length;	// real track length in steps, 1..128
 	uint8_t rotate;	// step rotation, 0 means not rotated
+	uint8_t scale;	// track timing scale, TRACK_SCALE_* value
+	uint8_t midiChannel; // track MIDI channel in menu form, 1..16
+	uint8_t midiNote; // track MIDI note override; 0 means any/default
 } LengthRotate;
 
 typedef struct PatternSetStruct
@@ -182,6 +213,13 @@ uint8_t pat_getTrackLength(uint8_t pattern, uint8_t track);
 uint8_t pat_getEffectiveTrackLength(uint8_t pattern, uint8_t track);
 void pat_setTrackRotation(uint8_t pattern, uint8_t track, uint8_t rotation);
 uint8_t pat_getTrackRotation(uint8_t pattern, uint8_t track);
+void pat_setTrackScale(uint8_t pattern, uint8_t track, uint8_t scale);
+uint8_t pat_getTrackScale(uint8_t pattern, uint8_t track);
+TrackScaleRatio pat_getTrackScaleRatio(uint8_t pattern, uint8_t track);
+void pat_setTrackMidiChannel(uint8_t pattern, uint8_t track, uint8_t channel);
+uint8_t pat_getTrackMidiChannel(uint8_t pattern, uint8_t track);
+void pat_setTrackMidiNote(uint8_t pattern, uint8_t track, uint8_t note);
+uint8_t pat_getTrackMidiNote(uint8_t pattern, uint8_t track);
 void pat_setShuffle(uint8_t pattern, uint8_t value);
 /*
  * Pattern-file shuffle import helper.

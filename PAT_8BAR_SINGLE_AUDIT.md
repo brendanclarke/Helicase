@@ -250,19 +250,21 @@ Specific updates:
   for the bridge if removing them causes churn, but comments should mark them
   obsolete. Removing them is fine if the compile fallout is small.
 - `led_initPerformanceLeds()` should light only SELECT1.
-- Add `led_flashLed()` for the 0.5-second bar SELECT flash:
+- Historical bridge note: this pass originally sketched a 500/100 flash helper,
+  but the live implementation now keeps the project-local 400 ms duration and
+  80 ms cycle in the existing `ledHandler` flash code. Do not add a separate
+  flash layer for this behavior.
 
 ```c
-#define LED_FLASH_DURATION_TIME_MS 500
-#define LED_FLASH_CYCLE_TIME_MS    100
+#define LED_FLASH_DURATION_TIME_MS 400
+#define LED_FLASH_CYCLE_TIME_MS     80
 void led_flashLed(uint8_t ledNr);
 ```
 
-  The flash sequence is exactly:
-  on for 100 ms, off for 100 ms, on for 100 ms, off for 100 ms, on for 100 ms,
-  then return to the original LED state. This is separate from `led_pulseLed()`,
-  which remains the existing short temporary inversion, and from the persistent
-  blink slots.
+  The flash sequence follows the existing handler timing and restores whatever
+  the LED group's current logical state is when the flash ends. This is separate
+  from `led_pulseLed()`, which remains the existing short temporary inversion,
+  and from the persistent blink slots.
 - Bar changes from SHIFT+SELECT or BAR1/BAR2 should call `led_flashLed()` on
   the corresponding SELECT LED.
 - BAR1/BAR2 LEDs should light on press and return on release through the
@@ -372,7 +374,7 @@ clearly marked `_temp` helpers.
 - `NUM_PATTERN` is now one live pattern slot. Filesystem pattern streaming keeps the legacy eight-slot file shape with slot 0 mapped to PatternData and slots 1-7 routed to discard/blank bridge records.
 - `LengthRotate` now stores byte-sized `length` and `rotate`; track length is treated as real 1..128 steps. Zero loaded from old files resolves to the 128-step default through PatternData readers/setters.
 - Sequencer playback now advances against 1..128 step lengths and reads `Step.volume & STEP_ACTIVE_MASK` directly for each track step instead of treating `pat_mainSteps` as the active playback gate.
-- STEP1..16 now displays `menu_currentBar * 16 + 0..15`; SELECT1..8 indicates the viewed bar. `led_flashLed()` provides the 500 ms on/off/on/off/on bar acknowledgement.
+- STEP1..16 now displays `menu_currentBar * 16 + 0..15`; SELECT1..8 indicates the viewed bar. `led_flashLed()` provides the existing 400/80 bar acknowledgement timing.
 - `SHIFT+SELECT` in VOICE mode and SELECT in STEP/PAT_GEN mode select the visible bar. Plain VOICE SELECT still selects voice subpages. PERF SELECT no longer queues old pattern slots.
 - BAR1/BAR2 no longer trigger voices. They move the visible bar without wrapping, flash the boundary bar again at the ends, and light their own LEDs while pressed.
 - COPY+SELECT now performs copy-bar/paste-bar on the current track. Paste extends the track length to include the destination bar.
@@ -384,8 +386,650 @@ clearly marked `_temp` helpers.
 - `pat_mainSteps` remains as legacy/file compatibility storage for this bridge, but playback and visible step editing now use the 128 `Step` active bits as the source of truth.
 ### Continuation Notes After Interruption
 
-- `led_flashLed()` now restarts an existing flash slot for the same LED, so repeated BAR1/BAR2 boundary presses or repeated SHIFT+SELECT acknowledgements produce a fresh 500 ms flash instead of being ignored while the previous flash is active.
+- `led_flashLed()` now restarts an existing flash slot for the same LED, so repeated BAR1/BAR2 boundary presses or repeated SHIFT+SELECT acknowledgements produce a fresh flash at the existing 400/80 timing instead of being ignored while the previous flash is active.
 - Long-press automation arming now blinks the visible STEP1..16 LED for `step % 16`; it no longer routes non-boundary steps to SELECT LEDs, because SELECT1..8 is the bar indicator row during this bridge.
 - `led_updateRecordedSubStep()` is now a documented compatibility no-op. SELECT-row record feedback is intentionally suppressed until the old REC_SUB dirty bit can be deleted with the Scene UI work.
 - Euklid length/steps/rotation setters now guard invalid track indices before touching generator arrays. Generation still writes only Step active bits and clamps length/steps/rotation to the active 1..128 bridge range.
 - Static checks run here: literal newline-artifact scan and `git diff --check`. `git diff --check` reported only Git LF-to-CRLF normalization warnings, not whitespace errors. No firmware build or `make` command was run.
+
+## Fine-Tuning Plan: Clock, Flash Overlay, STEP Front Page, Track Scale, Re-Align
+
+This section is the implementation plan for the post-bridge tuning pass. It
+builds on the completed one-pattern/8-bar bridge and should still avoid turning
+this into the full Phase 3 pattern rewrite.
+
+### 1. Slow The Default Sequencer Step Rate To 1/8 Current Speed
+
+Historical starting point: before this pass, internal timing advanced a
+sequencer step every 3 internal PPQ ticks, which yielded 32 sequencer steps per
+quarter note. The requested default is 4 sequencer steps per beat, so the
+default step edge now occurs every 24 internal PPQ ticks instead.
+
+Implementation direction:
+
+- Replace the magic prescaler masks with named constants:
+  - `SEQ_INTERNAL_PPQ = 96`
+  - `SEQ_DEFAULT_STEPS_PER_BEAT = 4`
+  - `SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP = 24`
+  - `MIDI_CLOCKS_PER_QUARTER = 24`
+- Stop using the old 12-count prescaler cycle for step scheduling. It is too
+  small for a 24-tick default step interval.
+- Keep MIDI clock output at 24 PPQ. The musical step clock should slow down;
+  the MIDI realtime clock should not slow down with it.
+- Keep shuffle tied to the default step grid for now. After this change, the
+  old comments around "32 steps per beat" and quarter-beat pulse positions must
+  be rewritten because they will be false.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * The internal timing ISR still runs a 96 PPQ phase clock, but the visible
+ * pattern grid now advances at 4 steps per beat by default. That means one
+ * default sequencer step is 24 internal PPQ ticks. MIDI clock output remains
+ * 24 PPQ and is generated from the internal phase clock independently of the
+ * pattern step scheduler, so slowing the pattern grid does not slow external
+ * MIDI clock.
+ */
+```
+
+### 2. Make LED Flash A Group-Aware Overlay
+
+The current `led_flashLed(uint8_t ledNr)` is a useful start, but it stores only
+the flashed LED IDs. It relies on `led_reset()` at expiry, which restores the
+current remembered/base state. That part is good. The missing behavior is group
+ownership: a new SELECT flash does not cancel the previous SELECT flash, so fast
+BAR presses can leave multiple SELECT LEDs in flash phases.
+
+New API shape:
+
+```c
+typedef enum {
+    LED_FLASH_GROUP_SELECT,
+    LED_FLASH_GROUP_SEQ,
+    LED_FLASH_GROUP_MODE,
+    LED_FLASH_GROUP_VOICE,
+    LED_FLASH_GROUP_BAR,
+    LED_FLASH_GROUP_FUNCTION,
+    LED_FLASH_GROUP_COUNT
+} LedFlashGroup;
+
+void led_flashGroup(LedFlashGroup group, uint16_t mask);
+```
+
+Group bit meanings:
+
+- SELECT: bits 0..7 map to `LED_PART_SELECT1..8`.
+- SEQ: bits 0..15 map to `LED_STEP1..16`.
+- MODE: bits 0..3 map to `LED_MODE1..4`.
+- VOICE: bits 0..6 map to `LED_VOICE1..7`.
+- BAR: bits 0..1 map to `LED_BAR1`, `LED_BAR2`.
+- FUNCTION: bits 0..3 map to `LED_SHIFT`, `LED_START_STOP`, `LED_REC`,
+  `LED_COPY` in the user-requested order SHIFT, PLAY, REC, COPY. Note that the
+  code names PLAY as `LED_START_STOP`.
+
+Implementation direction:
+
+- Replace the generic flash slot pool with one flash record per group:
+  - `activeMask`
+  - `phase`
+  - `nextTime`
+  - `endTime`
+- `led_flashGroup(group, mask)` first cancels that group's existing flash:
+  - restore every currently flashed LED in the old mask with `led_reset()`
+  - clear the old active mask
+- Then it starts the new mask:
+  - ignore bits beyond the group's LED count
+  - set `activeMask` to the cleaned mask
+  - force the masked LEDs on with `led_setValueTemp(1, led)`
+  - schedule the flash using the current local timing constants,
+    `LED_FLASH_DURATION_TIME_MS = 400` and `LED_FLASH_CYCLE_TIME_MS = 80`
+- During a flash, base LED writes must continue to update
+  `led_originalLedState[]` / `led_sw43OriginalState`. The flash overlay should
+  only touch the physical output with `led_setValueTemp()`. On expiry/cancel it
+  calls `led_reset()`, which restores whatever base state exists at that moment.
+  This exactly covers "base changed from on to off/off to on while flashing."
+- Keep a compatibility wrapper if useful:
+
+```c
+void led_flashLed(uint8_t ledNr)
+```
+
+  but make it route through the correct group+bit when the LED belongs to a
+  known group. Prefer updating call sites directly to `led_flashGroup()` where
+  the group is obvious.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * Flash is an overlay, not LED state. led_setValue() may change the remembered
+ * base state while a flash is active; the flash group only forces temporary
+ * physical output phases. When the flash is cancelled or expires, led_reset()
+ * restores the LED to the current base state, not to a snapshot taken when the
+ * flash began. Starting a new flash for a group cancels that group's previous
+ * mask first so, for example, only one SELECT-row acknowledgement can flash at
+ * a time.
+ */
+```
+
+Call-site changes:
+
+- BAR1/BAR2 boundary and bar-change feedback should use
+  `led_flashGroup(LED_FLASH_GROUP_SELECT, 1u << bar)`.
+- Any future acknowledgement on STEP, MODE, VOICE, BAR, or function LEDs should
+  use the same group function instead of allocating ad hoc slots.
+- The VOICE-mode SELECT subpage bug should disappear because
+  `led_setActiveSelectButton(menu_getSubPage())` can update the SELECT base
+  state while the SELECT flash is active, and flash expiry restores that base.
+
+### 3. Add A STEP Mode Front Page
+
+The existing `SEQ_PAGE` first subpage is the per-step editor. Add a new STEP
+front page modeled on the quiet, always-available PERF page:
+
+- It appears when entering STEP mode.
+- It appears when the selected track/voice changes while in STEP mode.
+- It remains visible until a step is selected.
+- After a step is selected, the page does not automatically return until the
+  STEP mode button is pressed again or a VOICE button changes the selected
+  track.
+
+Suggested page layout:
+
+```c
+/* SEQ_PAGE subpage 0: STEP front page */
+{TEXT_PAT_LENGTH, TEXT_MIDI_CHANNEL, TEXT_NOTE, TEXT_TRACK_SCALE,
+ TEXT_EMPTY,      TEXT_EMPTY,        TEXT_EMPTY,TEXT_EMPTY,
+ PAR_TRACK_LENGTH, PAR_MIDI_CHAN_X,  PAR_MIDI_NOTE_X, PAR_TRACK_SCALE,
+ PAR_NONE,         PAR_NONE,         PAR_NONE,        PAR_NONE}
+
+/* SEQ_PAGE subpage 1: existing per-step editor */
+{TEXT_STEP_VELOCITY, TEXT_NOTE, TEXT_PROBABILITY, ...}
+```
+
+Because `PAR_MIDI_CHAN_X` and `PAR_MIDI_NOTE_X` are voice-specific parameters,
+the page table cannot name a single fixed parameter for all tracks without help.
+The least invasive bridge approach is to add display/edit indirection for
+track-scoped aliases, or to refresh the four front-page parameter cells when
+the active voice changes. Implementation should choose the smaller code change
+after checking menu table constraints.
+
+Remove these from the VOICE mix subpage:
+
+- `PAR_TRACK_LENGTH`
+- `PAR_MIDI_CHAN_1..7`
+- `PAR_MIDI_NOTE1..7`
+
+Replace those VOICE mix slots with `PAR_NONE`/`TEXT_EMPTY` unless there are
+obvious voice-level parameters already waiting for the slots.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * STEP mode has two UI states: a track front page and the per-step editor.
+ * Entering STEP mode or changing the active track shows the front page so the
+ * user sees track-level length, MIDI channel, MIDI note, and scale before
+ * selecting a step. Selecting a STEP1..16 button moves to the step editor and
+ * keeps it there until STEP mode is re-entered or a VOICE button changes the
+ * active track. This is UI presentation state only; PatternData remains the
+ * owner of track length/scale and step data.
+ */
+```
+
+### 4. Add Track Scale / Track Scaling
+
+Add a new Pattern-owned, per-track parameter:
+
+- Semantic name: track scale / track scaling.
+- UI category: `Pattern`.
+- Long name: `Scale`.
+- Short name: `sca`.
+- Parameter name: `PAR_TRACK_SCALE`.
+- DType: menu.
+- Default: `off`.
+- Center value: `off`.
+
+Menu values, in display order, should be centered around `off`:
+
+```c
+/8, /7, /6, /5, /4, /3, /25, /2, /.6, /.3, off, x.3, x.6, x2, x25, x3, x4, x5, x6, x7, x8
+```
+
+This order is my interpretation of "off is the center value": decrementing from
+`off` visits `/.3`, `/.6`, `/2`, `/25`, `/3`, ... `/8`, while incrementing
+visits `x.3`, `x.6`, `x2`, `x25`, ... `x8`.
+
+Intended ratios:
+
+- `off`: 1/1, default speed, 4 track steps per beat.
+- `x.3`: 4/3 default speed.
+- `x.6`: 5/3 default speed.
+- `x2`: 2/1.
+- `x25`: 5/2.
+- `x3`..`x8`: 3/1 through 8/1.
+- `/.3`: 3/4 default speed.
+- `/.6`: 3/5 default speed.
+- `/25`: 2/5 default speed.
+- `/2`..`/8`: 1/2 through 1/8.
+
+Storage direction:
+
+- Add `scale` to `LengthRotate`, or introduce a separate per-track PatternData
+  array if keeping `LengthRotate` as length/rotation-only is cleaner.
+- Initialize scale to `TRACK_SCALE_OFF`.
+- Copy scale in track copy and pattern/staging commit paths.
+- Reset scale to off in `pat_clearTrack()`.
+- Add `pat_setTrackScale()`, `pat_getTrackScale()`, and a
+  `pat_getTrackScaleRatio()` helper that returns a small rational pair
+  `{num, den}`.
+- Refresh `PAR_TRACK_SCALE` in `pat_applyTrackSettingsToMenu()`.
+- Do not change the legacy `.pat/.prf/.all` binary stream shape in this pass
+  unless explicitly decided. Loading old files should leave scale at `off`.
+  Saving old-format files cannot preserve scale without a deliberate versioned
+  extension.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * Track scale is PatternData-owned per-track timing metadata. It does not
+ * change the stored step grid; it changes how many stored steps a track advances
+ * for each default master step. The default/off value is a 1:1 ratio against
+ * the corrected 4-steps-per-beat master grid. File compatibility note: the
+ * legacy pattern stream has no scale byte, so old-format loads initialize this
+ * field to off and old-format saves do not preserve it until the Scene pattern
+ * format replaces the bridge serializer.
+ */
+```
+
+### 5. Add A 16-Bit Master Step Clock And Per-Track Scaled Advancement
+
+Introduce a 16-bit `seq_masterStepClock` that resets:
+
+- when the sequencer is started,
+- when `seq_resetToPatternStart()` runs,
+- when changing/committing pattern.
+
+This clock advances once per corrected default step. It may overflow naturally.
+Each track then advances from that default grid according to its scale ratio and
+track length.
+
+Recommended runtime state:
+
+```c
+static uint16_t seq_masterStepClock;
+static uint16_t seq_trackScalePhase[NUM_TRACKS];
+```
+
+Default-tick algorithm:
+
+- On each default master step:
+  - increment `seq_masterStepClock`
+  - for each track:
+    - add scale numerator to that track's phase
+    - while phase >= denominator:
+      - phase -= denominator
+      - advance that track one step, wrapping by its effective length
+      - trigger/erase/roll using the stepped position
+- For `off`, ratio 1/1, this advances once per default master step.
+- For fast scales, e.g. `x2`, the track still plays every traversed step. This
+  is a timing multiplier/divider, not a skip/land-only transform. Multiple step
+  advances that fall within one default master interval must each be scheduled
+  at the finest tick spacing available to the sequencer instead of collapsing
+  into one audible instant.
+- For slow scales, some default ticks do not advance that track.
+
+This keeps fractional values exact without floats and uses only tiny per-track
+state. The implementation should calculate per-track step timing from the
+available tick interval and re-calculate each track's 128-step-loop offset
+against the master step clock so fractional ratios do not accumulate drift over
+long playback.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * seq_masterStepClock is the transport's corrected default-step counter: one
+ * tick means one 4-steps-per-beat grid position, independent of individual
+ * track scaling. Each track owns a small rational phase accumulator. A scale of
+ * 1/1 advances one stored step per master tick; faster scales may advance more
+ * than once inside one master interval, and those traversed steps are scheduled
+ * at the finest available sequencer tick positions rather than skipped.
+ * Slower scales may wait across several master ticks. Loop-offset correction is
+ * re-derived against the master clock at each 128-step master loop so fractional
+ * scale ratios do not drift. The 16-bit master clock is allowed to overflow
+ * because realign only needs modulo arithmetic against track length.
+ */
+```
+
+### 6. Pattern Re-Align
+
+Because this bridge has one live pattern, the only pattern SELECT that can
+realign is SELECT1 while the selected/playing pattern is 0.
+
+Implementation direction:
+
+- Add `seq_realignActivePatternToMasterClock()` to Sequencer.
+- It should recompute each track's `seq_stepIndex[]` and
+  `seq_trackScalePhase[]` from:
+  - `seq_masterStepClock`
+  - track length
+  - track scale ratio
+  - track rotation
+- It must not clear pattern data or reset transport.
+- It should be safe while running and should also be harmless while stopped.
+- In PERF mode only, pressing SELECT1 again should call this helper when
+  `seq_activePattern == 0` and `menu_getViewedPattern() == 0`. SELECT2..8 stay
+  inactive placeholders during this bridge. Do not add the same gesture to other
+  modes yet; pattern-selection triggering will be redesigned later.
+
+Suggested math:
+
+- Compute total scaled advances from the fine scheduler tick count, with the
+  master step clock retained as the coarse default-grid reference:
+  - `advances = (seq_elapsedPpqTicks * num) / (24 * den) + 1`
+  - `phase = (seq_elapsedPpqTicks * num) % (24 * den)`
+- Position track to `(rotation + advances) % length`.
+- The implemented scaled scheduler tracks per-track event counts directly.
+  Realign sets the currently sounding/selected step from that count, so the
+  legacy single global pre-increment helper no longer drives scaled playback.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * Pattern realign derives runtime track positions from the master step clock
+ * instead of from where the per-track counters happened to drift. This is a
+ * performance action: it does not alter PatternData length/rotation/scale, it
+ * only rewrites Sequencer runtime counters and scale phases. The calculation is
+ * ratio-based so fractional scales realign to the same position they would have
+ * reached if playback had run from master clock zero without interruption.
+ */
+```
+
+### Verification Checklist For This Pass
+
+- Build succeeds with no new warnings.
+- At 120 BPM, default/off track scale advances 4 steps per beat, not 32.
+- MIDI clock output remains 24 PPQ when internal sync is active.
+- External sync still advances at the corrected default grid.
+- SELECT-row flash no longer leaves multiple SELECT LEDs flashing after fast
+  BAR1/BAR2 presses.
+- While a SELECT LED is flashing, changing VOICE subpage updates the base LED;
+  flash expiry restores the new subpage LED, not the old one.
+- A new flash for any group cancels only that group's previous flash.
+- STEP mode entry shows the track front page.
+- Changing active voice/track while in STEP mode shows the track front page.
+- Selecting a step hides the front page and shows the step editor until STEP is
+  re-entered or track changes.
+- VOICE mix subpage no longer shows track length/channel/note.
+- Track scale defaults to `off` after init, clear, and legacy file load.
+- Track scale edit changes playback rate for the active track without changing
+  stored step data.
+- Fast track scales visit and trigger every traversed step at sequencer tick
+  timing; they do not skip intermediate steps or collapse them into a single
+  landed-step trigger.
+- Long-running fractional scales do not drift across repeated 128-step master
+  loops because offsets are re-derived against the master step clock.
+- PERF SELECT1 realigns all tracks to the master step clock; SELECT2..8 remain
+  inactive in the one-pattern bridge.
+
+### Decisions Confirmed Before Implementation
+
+- Scale menu order is:
+  `/8 /7 /6 /5 /4 /3 /25 /2 /.6 /.3 off x.3 x.6 x2 x25 x3 x4 x5 x6 x7 x8`.
+- Keep the current 400 ms / 80 ms flash timing and modify the existing flash
+  slot machinery in place. Do not add a second flash layer beside it.
+- Track scaling is a timing multiplier/divider. Tracks always play every
+  traversed step; fast scales must schedule intermediate steps at the finest
+  timing resolution available rather than skipping them.
+- Track-scale offset should be re-calculated against the master step clock for
+  each 128-step master loop so fractional ratios do not drift.
+- Track scale is runtime-only for legacy `.pat/.prf/.all` saves in this bridge.
+  Persisted storage waits for the later Instrument/Kit/Scene save design.
+- Pattern Re-Align is triggered only from PERF mode SELECT1 for now.
+
+### Implementation Notes From Fine-Tuning Pass
+
+- `led_flashLed()` remains as a compatibility wrapper, but the existing flash
+  slot machinery now treats each slot as one group: SELECT, SEQ, MODE, VOICE,
+  BAR, or FUNCTION. Starting a flash for a group restores that group's previous
+  mask first, then starts the new mask with the existing 400 ms / 80 ms timing.
+- `LengthRotate` now includes runtime-only `scale`. Legacy pattern/container
+  file readers explicitly set scale to `TRACK_SCALE_OFF` when loading old
+  length bytes, and legacy save paths still write only the existing length byte.
+- `PAR_TRACK_SCALE`, `PAR_TRACK_MIDI_CHAN`, and `PAR_TRACK_MIDI_NOTE` were added
+  before globals so they are menu/runtime parameters rather than saved globals.
+  `PAR_TRACK_SCALE` uses the normal `DTYPE_MENU` path with menu table id 0; the
+  existing dtype encoding stores the id in the high nibble, and id 0 was unused.
+  `PAR_TRACK_MIDI_*` are aliases for the active track's real MIDI channel/note.
+- `SEQ_PAGE` subpage 0 is now the STEP front page: track length, current-track
+  MIDI channel, current-track MIDI note, and track scale. The old per-step edit
+  page moved to SEQ subpage 1 and is shown only after a STEP button selects a
+  concrete step.
+- The sequencer scheduler now advances from a 96 PPQ internal tick counter. A
+  default/off track emits one step every 24 PPQ ticks, so the corrected default
+  is 4 steps per beat. Track scale ratios convert elapsed PPQ ticks to due step
+  events and emit every unplayed event in order.
+- MIDI external sync now advances four 96-PPQ scheduler ticks per MIDI clock.
+  Trigger-jack sync still uses the legacy native 32 PPQ prescaler value, mapped
+  to scheduler ticks by multiplying by 3.
+- PERF SELECT1 calls `seq_realignActivePatternToMasterClock()` in the
+  one-pattern bridge and flashes SELECT1 through the group flash path.
+
+## Follow-Up Plan: STEP Track Settings Ownership And SELECT Flash Persistence
+
+This follow-up corrects two issues found after the fine-tuning pass:
+
+- The STEP front page is conceptually a track settings page, not an Euklid
+  generator page or a transient collection of aliases.
+- VOICE subpage SELECT LEDs still do not persist through BAR-change flash in
+  VOICE mode because bar repaint code rewrites the SELECT-row base state before
+  the flash expires.
+
+### Investigation Findings
+
+- `SEQ_PAGE` subpage 0 already displays the intended track settings surface:
+  track length, track MIDI channel, track note, and track scale.
+- Track length and track scale currently live in `LengthRotate`, but scale is
+  still runtime-only in the filesystem path.
+- `PAR_TRACK_MIDI_CHAN` and `PAR_TRACK_MIDI_NOTE` are menu-only aliases today.
+  They mirror `PAR_MIDI_CHAN_1..7` and `PAR_MIDI_NOTE1..7`, so they are not
+  owned by PatternData and are not serialized as per-pattern track settings.
+- Euklid generator settings still have their own page and storage arrays. That
+  page should stay generator-specific; it should not be the owner for ordinary
+  per-track pattern settings.
+- The SELECT flash restore path uses temporary LED writes and `led_reset()`,
+  which correctly restores the current base state. The failure is earlier:
+  `buttonHandler_selectBar()` calls `led_updatePatternTrack()`, and
+  `led_updatePatternTrack()` always calls `led_setActiveSelectButton(menu_currentBar)`.
+  In VOICE mode that changes the SELECT-row base state from voice subpage to
+  bar indicator, so flash expiry restores the wrong semantic owner.
+
+### Menu/Display Plan
+
+- Rename the STEP front page in comments and local helper names as the track
+  settings front page. It remains `SEQ_PAGE` subpage 0 for now, because STEP mode
+  is the user-facing entry point.
+- Keep Euklid generator length/steps/rotation on `EUKLID_PAGE`, but stop treating
+  that page or its helper as the source of truth for the STEP track settings
+  page. Plain VOICE button presses in STEP/track-settings context should call the
+  track-settings refresh path, not only `buttonHandler_applyEuklidParamsToMenu()`.
+- When the active voice changes while the displayed page is `SEQ_PAGE`, show
+  subpage 0 again and repaint from PatternData. This should be tied to the
+  displayed page/context as well as `SELECT_MODE_STEP`, so the page refresh is
+  consistent even if a later gesture reuses the track-settings page outside the
+  strict STEP mode enum.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * Track settings page refresh is based on the visible page/context, not only on
+ * the select-button mode enum. The page presents PatternData-owned track
+ * settings, so a VOICE-row track change must reload PatternData, repaint the
+ * STEP front page, and leave the per-step editor hidden until the user selects
+ * a concrete STEP button again.
+ */
+```
+
+### PatternData Ownership Plan
+
+- Replace the narrow `LengthRotate` concept with a broader per-track pattern
+  settings record, or extend it in place and rename it in a later cleanup. The
+  minimum fields for this pass are:
+  - `length`
+  - `rotate`
+  - `scale`
+  - `midiChannel`
+  - `midiNote`
+- Add PatternData setters/getters for track MIDI channel and track MIDI note:
+  `pat_setTrackMidiChannel()`, `pat_getTrackMidiChannel()`,
+  `pat_setTrackMidiNote()`, and `pat_getTrackMidiNote()`.
+- Update `pat_applyTrackSettingsToMenu()` so `PAR_TRACK_MIDI_CHAN` and
+  `PAR_TRACK_MIDI_NOTE` mirror PatternData-owned values, not the legacy preset
+  MIDI parameter array.
+- Update `menu_parseGlobalParam(PAR_TRACK_MIDI_CHAN)` and
+  `menu_parseGlobalParam(PAR_TRACK_MIDI_NOTE)` so edits write PatternData. If the
+  existing MIDI input/playback code still requires the legacy `PAR_MIDI_*`
+  values, mirror the active track's PatternData value into those parameters as a
+  compatibility output, not as the owner.
+- Decide whether track MIDI channel/note should also replace the old kit-level
+  `PAR_MIDI_CHAN_1..7` and `PAR_MIDI_NOTE1..7` semantics globally in this pass.
+  If not, keep the old params for legacy MIDI behavior and document the temporary
+  mirror.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * PatternData owns per-track pattern settings shown on the STEP front page.
+ * The menu parameters are view/edit aliases only: they load from the active
+ * pattern/track before display, and edits write back through PatternData
+ * setters. Legacy PAR_MIDI_* mirrors may still be updated for compatibility,
+ * but they are not the source of truth for this page.
+ */
+```
+
+### Pattern Storage Protocol Plan
+
+- Extend the pattern storage protocol for the per-track settings record instead
+  of continuing to save only the legacy length byte.
+- Preserve old loads:
+  - Old one-byte track-length records load `length` and default `rotate = 0`,
+    `scale = off`, `midiChannel = legacy/default`, and `midiNote = legacy/default`.
+  - Missing or zero length still resolves through the existing 128-step default.
+- For new saves, write a versioned per-track settings payload. Candidate byte
+  order:
+  - length
+  - rotate
+  - scale
+  - midiChannel
+  - midiNote
+- Bump the relevant pattern/container version only if the existing loader cannot
+  distinguish old one-byte length records from new multi-byte settings records.
+  Otherwise keep a backward-compatible record-size branch.
+- Update staged/temp pattern copy and pattern commit paths so the whole track
+  settings record copies together.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * Pattern track settings are versioned beyond the legacy one-byte length stream.
+ * Old files provide only length, so the loader supplies defaults for the newer
+ * fields. New saves write the complete per-track settings record so STEP front
+ * page values round-trip with PatternData instead of leaking through kit/global
+ * parameter storage.
+ */
+```
+
+### General Flash Overlay Plan
+
+- Treat flash as a general overlay/compositor behavior for any supported LED
+  group. It is not intrinsic to bar selection; bar selection is just one caller
+  that asks the SELECT group to flash a mask.
+- The steady/base LED state remains owned by the current UI mode:
+  - VOICE mode: SELECT LEDs show the voice subpage.
+  - STEP/track-settings context: SELECT LEDs show the current bar.
+  - PERF mode: SELECT LEDs show performance/pattern status.
+  - Other groups keep their own existing mode-specific meanings.
+- `led_flashGroup(group, mask)` should overlay the requested mask on top of that
+  base state. While a flash is active, ordinary LED state changes in the same
+  group must update the remembered/base state without tearing down or visibly
+  replacing the flash overlay. When the flash ends, the group renders whatever
+  base state is current at that moment.
+- A new flash request for a group cancels only that group's previous overlay,
+  restores/renders the current base state for the previous mask, then starts the
+  new overlay mask. Flashes in other groups continue independently.
+- Do not solve this by adding a second flash layer. Modify the existing
+  ledHandler flash machinery so base-state writes and temporary flash rendering
+  compose correctly in one place.
+- Separate pattern STEP-row repaint from SELECT-row ownership. Bar-selection
+  callers may request a SELECT flash overlay, but they must not force the SELECT
+  row's base state to bar indication unless the current UI context actually owns
+  SELECT as bar indication.
+
+Code-comment requirement for this change:
+
+```c
+/*
+ * Flash is an overlay on top of the current UI-owned LED base state. Base LED
+ * writes continue to update the remembered state while a flash is active, but
+ * the rendered output remains controlled by the active flash mask until that
+ * group's overlay expires or is replaced. Expiry renders the latest base state,
+ * not a snapshot from flash start. Callers such as bar selection request flash
+ * feedback; they do not become owners of the SELECT row's persistent meaning.
+ */
+```
+
+### Verification Checklist
+
+- In STEP mode, pressing any VOICE button shows the track settings front page
+  for that track and repaints immediately.
+- The track settings page values come from PatternData for length, MIDI channel,
+  MIDI note, and scale.
+- Editing each track setting updates PatternData and survives pattern
+  save/load through the new storage protocol.
+- Loading old patterns still restores track length and defaults the newer fields
+  safely.
+- In VOICE mode, changing bars requests a SELECT flash overlay but preserves
+  SELECT-row base ownership as the current voice subpage.
+- If the VOICE subpage changes during a flash, flash expiry restores the new
+  subpage LED.
+- In STEP mode, changing bars still leaves the selected bar LED as the SELECT
+  row's persistent state.
+- Flashing MODE, VOICE, BAR, SEQ, SELECT, or FUNCTION groups overlays only that
+  group and does not disturb unrelated groups or persistent mode state.
+
+### Implementation Notes From Track Settings Follow-Up
+
+- `SCOPING_TARGETS.md` now includes Phase 3.11 as the final Phase 3 LED-state
+  consolidation pass before Phase 4. That pass is intentionally not implemented
+  here.
+- `LengthRotate` keeps its historical name for this bridge, but now owns the
+  full STEP front-page track settings record: length, rotation, scale, MIDI
+  channel, and MIDI note.
+- PatternData now provides track MIDI channel/note setters and getters.
+  `PAR_TRACK_MIDI_CHAN` and `PAR_TRACK_MIDI_NOTE` load from PatternData and edit
+  PatternData first; the old `PAR_MIDI_*` arrays are only mirrored for current
+  compatibility with existing MIDI/parser paths.
+- Sequencer MIDI output and MIDI input note/channel matching now read the active
+  pattern track's MIDI channel/note from PatternData, so loaded pattern settings
+  behave without requiring a UI edit to refresh the old globals.
+- Pattern file/container storage keeps the legacy one-byte track-length block
+  exactly where it was, then appends an optional four-byte per-track settings
+  extension: rotation, scale, MIDI channel, MIDI note. Old files stop after the
+  length block and load with defaults for the newer fields. When old files omit
+  MIDI channel/note, the loader seeds those fields from the currently loaded
+  legacy MIDI parameters when they are valid, preserving old kit/pattern behavior.
+- `led_updatePatternTrackView()` separates STEP-row repaint from SELECT-row
+  ownership. Existing `led_updatePatternTrack()` keeps the old behavior for
+  callers that want SELECT as the bar row; VOICE-mode bar changes use the new
+  helper without taking SELECT-row ownership, then request a normal SELECT flash
+  overlay.
+- Plain VOICE button changes while `SEQ_PAGE` is displayed now re-enter the
+  STEP/track-settings front page and repaint from PatternData, even if a future
+  gesture arrives at that page through a route other than strict STEP mode.

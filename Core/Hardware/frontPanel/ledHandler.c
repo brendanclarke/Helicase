@@ -66,9 +66,9 @@
 #define LED_PULSE_TIME_MS      50
 #define NUM_OF_BLINKABLE_LEDS  8
 #define LED_BLINK_TIME_MS      250
-#define NUM_OF_FLASHABLE_LEDS  4
-#define LED_FLASH_DURATION_TIME_MS 500
-#define LED_FLASH_CYCLE_TIME_MS    100
+#define NUM_OF_FLASHABLE_LEDS  LED_FLASH_GROUP_COUNT
+#define LED_FLASH_DURATION_TIME_MS 400
+#define LED_FLASH_CYCLE_TIME_MS    80
 
 /*
  * One-shot pulse slots.
@@ -85,15 +85,17 @@ static volatile uint8_t  led_pulseLedNumber[NUM_OF_PULSABLE_LEDS];
 static volatile uint8_t  led_pulsingLeds;
 /* Short patterned flash slots.
  *
- * led_flashLed() is used for bar-selection acknowledgement where a plain 50 ms
- * pulse is too subtle. Each slot forces the LED through on/off/on/off/on over
- * 500 ms, then restores the remembered/base state. This effect is deliberately
- * separate from blink slots so bar feedback does not consume persistent blink
- * state used by copy, mode, and selected-step UI.
+ * These are group slots, not arbitrary per-LED allocations. A new flash request
+ * for SELECT, SEQ, MODE, VOICE, BAR, or the four function LEDs first cancels
+ * that same group's previous mask and restores those LEDs to their current base
+ * state. The new mask then runs through the existing 400 ms / 80 ms temporary
+ * output pattern. led_setValue() may still change base LED state while the
+ * flash is active; expiry uses led_reset(), so it restores the state that is
+ * current at expiry rather than a snapshot taken when the flash began.
  */
 static volatile uint16_t led_flashEndTime[NUM_OF_FLASHABLE_LEDS];
 static volatile uint16_t led_flashNextTime[NUM_OF_FLASHABLE_LEDS];
-static volatile uint8_t  led_flashLedNumber[NUM_OF_FLASHABLE_LEDS];
+static volatile uint16_t led_flashMask[NUM_OF_FLASHABLE_LEDS];
 static volatile uint8_t  led_flashPhase[NUM_OF_FLASHABLE_LEDS];
 static volatile uint8_t  led_flashingLeds;
 
@@ -438,6 +440,159 @@ void led_pulseLed(uint8_t ledNr)
     }
 }
 
+static uint8_t led_flashGroupLedCount(LedFlashGroup group)
+{
+    /*
+     * Returns how many low bits are meaningful for one flash group. Keeping
+     * this local to ledHandler preserves the public 16-bit mask API while
+     * preventing callers from knowing row sizes or the BAR/function aliases.
+     */
+    switch (group) {
+    case LED_FLASH_GROUP_SELECT:   return 8u;
+    case LED_FLASH_GROUP_SEQ:      return 16u;
+    case LED_FLASH_GROUP_MODE:     return 4u;
+    case LED_FLASH_GROUP_VOICE:    return 7u;
+    case LED_FLASH_GROUP_BAR:      return 2u;
+    case LED_FLASH_GROUP_FUNCTION: return 4u;
+    default:                       return 0u;
+    }
+}
+
+static uint8_t led_flashGroupLed(LedFlashGroup group, uint8_t bit)
+{
+    /*
+     * Maps a group bit to the existing logical LED ID. The function group uses
+     * the requested order SHIFT, PLAY, REC, COPY; PLAY is the existing
+     * START_STOP logical LED. Invalid bits return 0xFF and are ignored.
+     */
+    switch (group) {
+    case LED_FLASH_GROUP_SELECT:
+        return (bit < 8u) ? (uint8_t)(LED_PART_SELECT1 + bit) : 0xFFu;
+    case LED_FLASH_GROUP_SEQ:
+        return (bit < 16u) ? (uint8_t)(LED_STEP1 + bit) : 0xFFu;
+    case LED_FLASH_GROUP_MODE:
+        return (bit < 4u) ? (uint8_t)(LED_MODE1 + bit) : 0xFFu;
+    case LED_FLASH_GROUP_VOICE:
+        return (bit < 7u) ? (uint8_t)(LED_VOICE1 + bit) : 0xFFu;
+    case LED_FLASH_GROUP_BAR:
+        if (bit == 0u) return LED_BAR1;
+        if (bit == 1u) return LED_BAR2;
+        return 0xFFu;
+    case LED_FLASH_GROUP_FUNCTION:
+        if (bit == 0u) return LED_SHIFT;
+        if (bit == 1u) return LED_START_STOP;
+        if (bit == 2u) return LED_REC;
+        if (bit == 3u) return LED_COPY;
+        return 0xFFu;
+    default:
+        return 0xFFu;
+    }
+}
+
+static uint16_t led_cleanFlashMask(LedFlashGroup group, uint16_t mask)
+{
+    uint8_t count = led_flashGroupLedCount(group);
+    if (count == 0u)
+        return 0u;
+    if (count >= 16u)
+        return mask;
+    return (uint16_t)(mask & (uint16_t)((1u << count) - 1u));
+}
+
+static void led_applyFlashMask(LedFlashGroup group, uint16_t mask, uint8_t value)
+{
+    uint8_t bit;
+    uint8_t count = led_flashGroupLedCount(group);
+    for (bit = 0; bit < count; bit++) {
+        if (mask & (uint16_t)(1u << bit)) {
+            uint8_t ledNr = led_flashGroupLed(group, bit);
+            if (ledNr != 0xFFu)
+                led_setValueTemp(value, ledNr);
+        }
+    }
+}
+
+static void led_restoreFlashMask(LedFlashGroup group, uint16_t mask)
+{
+    uint8_t bit;
+    uint8_t count = led_flashGroupLedCount(group);
+    for (bit = 0; bit < count; bit++) {
+        if (mask & (uint16_t)(1u << bit)) {
+            uint8_t ledNr = led_flashGroupLed(group, bit);
+            if (ledNr != 0xFFu)
+                led_reset(ledNr);
+        }
+    }
+}
+
+void led_flashGroup(LedFlashGroup group, uint16_t mask)
+{
+    uint8_t slot = (uint8_t)group;
+
+    /*
+     * Start or replace the active flash for one LED group.
+     *
+     * Inputs: group selects a known LED row/set and mask selects which LEDs in
+     * that group should flash. Bits beyond the group width are ignored. Output:
+     * any previous flash for this group is cancelled and restored, then the new
+     * mask is forced into the existing temporary flash pattern. This modifies
+     * the existing flash slot state in place; no parallel flash layer exists.
+     */
+    if (slot >= NUM_OF_FLASHABLE_LEDS)
+        return;
+
+    if (led_flashingLeds & (uint8_t)(1u << slot)) {
+        led_restoreFlashMask(group, led_flashMask[slot]);
+        led_flashingLeds &= (uint8_t)~(uint8_t)(1u << slot);
+        led_flashMask[slot] = 0u;
+    }
+
+    mask = led_cleanFlashMask(group, mask);
+    if (mask == 0u)
+        return;
+
+    led_flashMask[slot] = mask;
+    led_flashPhase[slot] = 0u;
+    led_flashingLeds |= (uint8_t)(1u << slot);
+    led_flashNextTime[slot] = (uint16_t)(time_sysTick + LED_FLASH_CYCLE_TIME_MS);
+    led_flashEndTime[slot] = (uint16_t)(time_sysTick + LED_FLASH_DURATION_TIME_MS);
+    led_applyFlashMask(group, mask, 1u);
+}
+
+void led_flashLed(uint8_t ledNr)
+{
+    /*
+     * Compatibility wrapper for older call sites that flash one logical LED.
+     * The wrapper translates that LED into the group-mask API so single-LED
+     * callers still get group cancellation semantics, especially on SELECT.
+     */
+    if (ledNr >= LED_PART_SELECT1 && ledNr <= LED_PART_SELECT8) {
+        led_flashGroup(LED_FLASH_GROUP_SELECT,
+                       (uint16_t)(1u << (ledNr - LED_PART_SELECT1)));
+    } else if (ledNr >= LED_STEP1 && ledNr <= LED_STEP16) {
+        led_flashGroup(LED_FLASH_GROUP_SEQ,
+                       (uint16_t)(1u << (ledNr - LED_STEP1)));
+    } else if (ledNr <= LED_MODE4) {
+        led_flashGroup(LED_FLASH_GROUP_MODE,
+                       (uint16_t)(1u << (ledNr - LED_MODE1)));
+    } else if (ledNr >= LED_VOICE1 && ledNr <= LED_VOICE7) {
+        led_flashGroup(LED_FLASH_GROUP_VOICE,
+                       (uint16_t)(1u << (ledNr - LED_VOICE1)));
+    } else if (ledNr == LED_BAR1) {
+        led_flashGroup(LED_FLASH_GROUP_BAR, 0x0001u);
+    } else if (ledNr == LED_BAR2) {
+        led_flashGroup(LED_FLASH_GROUP_BAR, 0x0002u);
+    } else if (ledNr == LED_SHIFT) {
+        led_flashGroup(LED_FLASH_GROUP_FUNCTION, 0x0001u);
+    } else if (ledNr == LED_START_STOP) {
+        led_flashGroup(LED_FLASH_GROUP_FUNCTION, 0x0002u);
+    } else if (ledNr == LED_REC) {
+        led_flashGroup(LED_FLASH_GROUP_FUNCTION, 0x0004u);
+    } else if (ledNr == LED_COPY) {
+        led_flashGroup(LED_FLASH_GROUP_FUNCTION, 0x0008u);
+    }
+}
+
 /*
  * Add or remove one LED from the persistent blink set.
  *
@@ -451,45 +606,6 @@ void led_pulseLed(uint8_t ledNr)
  * pattern indications. This function does not own blink timing; led_tickHandler()
  * performs the periodic toggles.
  */
-
-/*
- * Start a 500 ms bar-selection flash.
- *
- * Input: ledNr is a logical LED ID, usually LED_PART_SELECT1..8. Output: if a
- * flash slot is available, the LED is forced through on/off/on/off/on in 100 ms
- * slices, then restored to its remembered/base state by led_tickHandler(). The
- * base state is never changed, so this can acknowledge BAR1/BAR2 and
- * SHIFT+SELECT without stealing the current SELECT-row meaning.
- */
-void led_flashLed(uint8_t ledNr)
-{
-    uint8_t physLed = led_toPhysicalNumber(ledNr);
-    int i;
-
-    if ((physLed >= NUM_OUTS) && (physLed != LED_BAR1)) return;
-
-    for (i = 0; i < NUM_OF_FLASHABLE_LEDS; i++) {
-        if ((led_flashingLeds & (1 << i)) && (led_flashLedNumber[i] == ledNr)) {
-            led_flashPhase[i] = 0;
-            led_flashNextTime[i] = (uint16_t)(time_sysTick + LED_FLASH_CYCLE_TIME_MS);
-            led_flashEndTime[i] = (uint16_t)(time_sysTick + LED_FLASH_DURATION_TIME_MS);
-            led_setValueTemp(1, ledNr);
-            return;
-        }
-    }
-
-    for (i = 0; i < NUM_OF_FLASHABLE_LEDS; i++) {
-        if (!(led_flashingLeds & (1 << i))) {
-            led_flashLedNumber[i] = ledNr;
-            led_flashPhase[i] = 0;
-            led_flashingLeds |= (uint8_t)(1 << i);
-            led_flashNextTime[i] = (uint16_t)(time_sysTick + LED_FLASH_CYCLE_TIME_MS);
-            led_flashEndTime[i] = (uint16_t)(time_sysTick + LED_FLASH_DURATION_TIME_MS);
-            led_setValueTemp(1, ledNr);
-            break;
-        }
-    }
-}
 void led_setBlinkLed(uint8_t ledNr, uint8_t onOff)
 {
     uint8_t physLed = led_toPhysicalNumber(ledNr);
@@ -560,12 +676,13 @@ void led_tickHandler(void)
         if (led_flashingLeds & (1<<i)) {
             if (time_sysTick > led_flashEndTime[i]) {
                 led_flashingLeds &= (uint8_t)~(1<<i);
-                led_reset(led_flashLedNumber[i]);
+                led_restoreFlashMask((LedFlashGroup)i, led_flashMask[i]);
+                led_flashMask[i] = 0u;
             } else if (time_sysTick > led_flashNextTime[i]) {
                 led_flashPhase[i]++;
                 led_flashNextTime[i] = (uint16_t)(led_flashNextTime[i] + LED_FLASH_CYCLE_TIME_MS);
-                led_setValueTemp((uint8_t)((led_flashPhase[i] & 1u) == 0u),
-                                 led_flashLedNumber[i]);
+                led_applyFlashMask((LedFlashGroup)i, led_flashMask[i],
+                                   (uint8_t)((led_flashPhase[i] & 1u) == 0u));
             }
         }
     }
@@ -964,15 +1081,22 @@ void led_updateRecordedSubStep(uint8_t activeTrack,
  * Callers that also need menu parameter_values refreshed must call
  * pat_applyTrackSettingsToMenu() separately.
  */
-void led_updatePatternTrack(uint8_t track, uint8_t pattern,
-                            uint8_t selectedStepBase)
+void led_updatePatternTrackView(uint8_t track, uint8_t pattern,
+                                uint8_t selectedStepBase,
+                                uint8_t updateSelectRow)
 {
-    /* Repaints all sequencer LEDs for one track/pattern.
+    /* Repaints the visible pattern STEP row for one track/pattern.
      *
      * Called from menu/button code after view changes, copy/clear, pattern
      * follow updates, and Euklid generation. This replaced LED_QUERY_SEQ_TRACK:
      * the LED part lives here; the hidden menu parameter refresh is now an
-     * adjacent pat_applyTrackSettingsToMenu() call at each caller. */
+     * adjacent pat_applyTrackSettingsToMenu() call at each caller.
+     *
+     * updateSelectRow controls SELECT-row ownership. STEP-style views own
+     * SELECT as a bar indicator and pass nonzero. VOICE views own SELECT as a
+     * subpage indicator and pass zero, allowing flash to overlay the SELECT row
+     * without changing the subpage base state.
+     */
     uint8_t i;
     uint8_t start;
 
@@ -986,8 +1110,15 @@ void led_updatePatternTrack(uint8_t track, uint8_t pattern,
         led_setValue(on, (uint8_t)(LED_STEP1 + i));
     }
 
-    led_setActiveSelectButton(menu_currentBar);
+    if (updateSelectRow)
+        led_setActiveSelectButton(menu_currentBar);
     (void)selectedStepBase;
+}
+
+void led_updatePatternTrack(uint8_t track, uint8_t pattern,
+                            uint8_t selectedStepBase)
+{
+    led_updatePatternTrackView(track, pattern, selectedStepBase, 1u);
 }
 
 /*

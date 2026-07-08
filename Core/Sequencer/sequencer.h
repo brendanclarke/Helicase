@@ -32,6 +32,7 @@ void seq_init(void);
 void seq_tick(void);
 void seq_resetDeltaAndTick(void);
 void seq_resetToPatternStart(void);
+void seq_realignActivePatternToMasterClock(void);
 void seq_setDeltaT(float delta);
 void seq_triggerNextMasterStep(uint8_t stepSize);
 void seq_setBpm(uint16_t bpm);

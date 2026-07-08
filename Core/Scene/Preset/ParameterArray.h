@@ -64,8 +64,6 @@
 // --AS **PATROT this list needs to correspond exactly with the sound parameters in the AVR side because
 // modulation targets are sent across and they have to match in this list
 
-extern uint8_t parameter_values[];
-
 enum ParamEnums
 {
 
@@ -384,6 +382,9 @@ enum ParamEnums
     PAR_FLUX,
     PAR_SOM_FREQ,
     PAR_TRACK_ROTATION,
+    PAR_TRACK_SCALE,
+    PAR_TRACK_MIDI_CHAN,
+    PAR_TRACK_MIDI_NOTE,
 
 	//#########################################
 	//######## Global Parameters ##############
@@ -442,6 +443,7 @@ typedef struct ParameterStruct
 } Parameter;
 
 extern Parameter parameterArray[END_OF_SOUND_PARAMETERS];
+extern uint8_t parameter_values[NUM_PARAMS];
 void paramArray_setParameter(uint16_t idx, ptrValue newValue);
 void parameterArray_init();
 

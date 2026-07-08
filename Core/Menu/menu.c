@@ -726,6 +726,9 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     /*PAR_FLUX*/              DTYPE_0B127,
     /*PAR_SOM_FREQ*/          DTYPE_0B127,
     /*PAR_TRACK_ROTATION*/    DTYPE_1B16,
+    /*PAR_TRACK_SCALE*/       DTYPE_MENU|(MENU_TRACK_SCALE<<4),
+    /*PAR_TRACK_MIDI_CHAN*/   DTYPE_1B16,
+    /*PAR_TRACK_MIDI_NOTE*/   DTYPE_NOTE_NAME,
     /*PAR_BPM*/               DTYPE_0B255,
     /*PAR_MIDI_CHAN_1*/        DTYPE_1B16,
     /*PAR_MIDI_CHAN_2*/        DTYPE_1B16,
@@ -841,6 +844,7 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_CHANNEL,CAT_MIDI,LONG_MIDI_CHANNEL},
     {SHORT_CPU_USE,CAT_GLOBAL,LONG_CPU_USE_TIME},
     {SHORT_OSC_INTERP,CAT_GLOBAL,LONG_OSC_INTERP},
+    {SHORT_SCALE,CAT_PATTERN,LONG_SCALE},
 };
 
 /* -----------------------------------------------------------------------
@@ -1048,6 +1052,7 @@ static uint8_t getMaxEntriesForMenu(uint8_t menuId)
     case MENU_MIDI_FILTERING:return (uint8_t)midiFilterNames[0][0];
     case MENU_PPQ:           return (uint8_t)ppqNames[0][0];
     case MENU_EXT_SYNC:      return (uint8_t)extSyncNames[0][0];
+    case MENU_TRACK_SCALE:    return (uint8_t)trackScaleNames[0][0];
     default: return 0;
     }
 }
@@ -1093,6 +1098,7 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     case MENU_MIDI_FILTERING: p = midiFilterNames[curParmVal+1];    break;
     case MENU_PPQ:            p = ppqNames[curParmVal+1];           break;
     case MENU_EXT_SYNC:       p = extSyncNames[curParmVal+1];       break;
+    case MENU_TRACK_SCALE:    p = trackScaleNames[curParmVal+1];    break;
     default: break;
     }
     buf[0]=p[0]; buf[1]=p[1]?p[1]:' '; buf[2]=p[2]?p[2]:' ';
@@ -1474,7 +1480,8 @@ static void menu_repaintGeneric(void)
                 numtostrps(&editDisplayBuffer[1][13], (int8_t)(curParmVal - 63));
                 break;
             case DTYPE_NOTE_NAME:
-                if (parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7 && curParmVal==0)
+                if (((parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7) ||
+                     parNr == PAR_TRACK_MIDI_NOTE) && curParmVal==0)
                     memcpy(&editDisplayBuffer[1][13], menuText_any, 3);
                 else
                     setNoteName(curParmVal, &editDisplayBuffer[1][13]);
@@ -1536,7 +1543,8 @@ static void menu_repaintGeneric(void)
                     numtostrps(valueAsText, (int8_t)(curParmVal - 63));
                     break;
                 case DTYPE_NOTE_NAME:
-                    if (parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7 && curParmVal==0)
+                    if (((parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7) ||
+                         parNr == PAR_TRACK_MIDI_NOTE) && curParmVal==0)
                         memcpy(valueAsText, menuText_any, 3);
                     else
                         setNoteName(curParmVal, valueAsText);
@@ -2542,6 +2550,55 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         pat_setTrackLength(menu_getViewedPattern(), menu_getActiveVoice(), value);
         break;
 
+    case PAR_TRACK_SCALE:
+        /*
+         * Track scale is Pattern-owned runtime timing metadata. Menu supplies
+         * the active track/viewed pattern because the STEP front page edits the
+         * track currently in front of the user; PatternData stores the menu
+         * index and Sequencer reads the exact ratio during playback scheduling.
+         */
+        pat_setTrackScale(menu_getViewedPattern(), menu_getActiveVoice(), value);
+        break;
+
+    case PAR_TRACK_MIDI_CHAN:
+    {
+        /*
+         * Pattern-owned current-track MIDI channel for the STEP front page.
+         *
+         * PatternData is the storage owner for the track-settings page. The
+         * legacy PAR_MIDI_CHAN_* parameter and MidiParser channel are mirrored
+         * as a compatibility output so existing note routing keeps following
+         * the currently edited track setting until Phase 4/Scene routing fully
+         * replaces the old global MIDI channel ownership.
+         */
+        uint8_t track = menu_getActiveVoice();
+        uint16_t realParam = (track == 6u)
+            ? PAR_MIDI_CHAN_7
+            : (uint16_t)(PAR_MIDI_CHAN_1 + track);
+        pat_setTrackMidiChannel(menu_getViewedPattern(), track, value);
+        parameter_values[realParam] = value;
+        menu_parseGlobalParam(realParam, value);
+        break;
+    }
+
+    case PAR_TRACK_MIDI_NOTE:
+    {
+        /*
+         * Pattern-owned current-track MIDI note for the STEP front page.
+         *
+         * PatternData stores the value shown on the track settings page. The
+         * legacy per-voice note override is mirrored through Preset so existing
+         * MIDI playback/input code still sees the edited note while the broader
+         * Scene/Instrument ownership is pending.
+         */
+        uint8_t track = menu_getActiveVoice();
+        uint16_t realParam = (uint16_t)(PAR_MIDI_NOTE1 + track);
+        pat_setTrackMidiNote(menu_getViewedPattern(), track, value);
+        parameter_values[realParam] = value;
+        preset_applySoundParameter(realParam, value, 1);
+        break;
+    }
+
     case PAR_SHUFFLE:
         /*
          * Shuffle should become a Pattern value even though its backing storage
@@ -2893,6 +2950,7 @@ void menu_init(void)
     parameter_values[PAR_EUKLID_STEPS]  = 16;
     parameter_values[PAR_ROLL]          = 8;
     parameter_values[PAR_BPM]           = 120;
+    parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_OFF;
     parameter_values[PAR_OSC_WAVE_INTERP] = 0;
     /*
      * Wave interpolation is a sound-engine global that is applied immediately
