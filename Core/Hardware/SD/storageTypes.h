@@ -106,8 +106,9 @@ typedef struct {
  * and are checked against the instrument header so a renamed file cannot be
  * loaded into the wrong voice class by accident. current_section tracks top
  * metadata, [params], and [morph]. seen_param_count proves at least one primary
- * parameter landed. seen_morph_data tells filesystem.c whether it must copy the
- * main values into parameters2[] as the Phase 2 fallback.
+ * parameter landed. seen_morph_count tells filesystem.c whether an explicit
+ * morph endpoint was loaded or whether it must copy the main values into
+ * parameters2[] as the Phase 2 fallback.
  *
  * Inputs arrive through storage_instrumentParseLine(). Outputs are validation
  * flags plus writes into parameter_values[] and parameters2[]. Clients are the
@@ -122,7 +123,7 @@ typedef struct {
     uint8_t seen_type;
     uint8_t seen_slot;
     uint8_t seen_param_count;
-    uint8_t seen_morph_data;
+    uint8_t seen_morph_count;
 } storage_instrument_state_t;
 
 /* Initialize kitset parse state before the first line of kitset.kcg.
@@ -189,7 +190,7 @@ storage_status_t storage_instrumentFinalize(const storage_instrument_state_t *st
  * Inputs: format type, one-based slot, already-loaded main parameter buffer,
  * and morph destination buffer. Output: each mapped main parameter for that
  * instrument is copied into the corresponding morph parameter index. Client:
- * filesystem_loadKitDirectory_tick() calls this when seen_morph_data is false.
+ * filesystem_loadKitDirectory_tick() calls this when seen_morph_count is zero.
  */
 void storage_instrumentCopyMainToMorphFallback(storage_instrument_type_t type,
                                                uint8_t slot,

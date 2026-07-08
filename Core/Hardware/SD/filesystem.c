@@ -1344,7 +1344,7 @@ static void filesystem_loadKitDirectory_tick(void)
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
             } else {
-                if (!op_instrument_state.seen_morph_data) {
+                if (op_instrument_state.seen_morph_count == 0u) {
                     storage_instrumentCopyMainToMorphFallback(
                         op_kitset.instrument_type[op_instrument_slot],
                         (uint8_t)(op_instrument_slot + 1u),

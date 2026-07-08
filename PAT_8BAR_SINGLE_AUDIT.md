@@ -1142,3 +1142,369 @@ Verification from this cleanup:
   owning kit metadata, kit names, or `PAR_VOICE_DECIMATION_ALL`.
 - Firmware build was not run here because `make` is not installed in this
   environment.
+
+## Instrument Morph Endpoint And Padding Notes
+
+Follow-up work updated the generated instrument files and loader behavior:
+
+- `tools/convert_legacy_kits.py` now emits both `[params]` and `[morph]` for
+  every generated `.drm`, `.snr`, `.cym`, and `.hat` file. Legacy `.SND` files
+  do not contain a separate morph endpoint, so the converter writes the same
+  parameter values to both sections.
+- Each endpoint is padded to 64 byte-valued key/value rows with ignored
+  `_padNN=0` entries. Current instrument maps use 34 or 35 named parameters,
+  leaving room for later fields while old readers can ignore unknown pad keys.
+- The instrument reader already routed `[params]` into `parameter_values[]` and
+  `[morph]` into `parameters2[]`; this pass made the bookkeeping explicit by
+  replacing `seen_morph_data` with `seen_morph_count`.
+- Validation checked all 198 mirrored instrument files: every file has exactly
+  64 `[params]` rows and 64 `[morph]` rows.
+
+Important data finding from `SD_CARD/P000.SND`:
+
+- The first readback used the wrong legacy addressing model. Ordinary
+  instrument parameters in the `.SND` payload are addressed as
+  `ParamEnums - 1`, because the persisted blob starts at the first real sound
+  parameter rather than at `PAR_NONE`.
+- `audio_out` is the exception. It lives in the CC2 stream, so the converter
+  now reads it from `128 + CC2_AUDIO_OUTn` instead of using the ordinary
+  instrument parameter offset. This keeps the Slak kit routing at zero instead
+  of incorrectly reading the later `114` byte as slot 3 output.
+- After regenerating `SD_CARD/Kit`, Slak drum 3 reads back as
+  `velo_attack=12`, `velo_decay=0`, `vol_slope=7`, `volume=77`, `pan=63`,
+  `drive=17`. Slak cymbal reads back as `velo_attack=30`, `velo_decay=0`,
+  `vol_slope=4`, `volume=127`, `pan=63`, `drive=30`.
+- Validation checked all 198 mirrored instrument files again: every file has
+  exactly 64 `[params]` rows and 64 `[morph]` rows. The regenerated kitsets
+  still omit `kit_name`, `voice_decimation_all`, and trailing metadata.
+- Follow-up converter audit: CC2 is not just `audio_out`; the CC2 boundary is
+  `PAR_FILTER_DRIVE_1`. `tools/convert_legacy_kits.py` now derives that split
+  from `ParameterArray.h`: parameters before `PAR_FILTER_DRIVE_1` read from
+  `ParamEnums - 1`, while parameters at or after it read from
+  `128 + CC2_*`. Validation covered all emitted instrument parameters and the
+  six kitset `audio_out` fields: 93 generated references land in CC2, with no
+  missing `CC2_*` counterpart.
+- Firmware build was not run here because `make` is not installed in this
+  environment.
+
+## Session Addendum: Kit Directory Loader And Converter Work
+
+This session migrated beyond the original single-pattern audit into the Phase 2
+Kit/ directory loader and legacy kit conversion path. Keep this addendum as the
+end-of-document handoff for the code and SD-card data changes piled on during
+that work.
+
+### Boot-Lock Fix In Directory Kit Loading
+
+Changed code:
+
+- `Core/Hardware/SD/filesystem.c`
+
+Why:
+
+- Boot was able to hang while `main.c` synchronously waited for
+  `preset_loadDrumset(0, 0)` to finish. The directory-kit load state machine
+  reached `case 13`, the `READ kitset.kcg` phase, but terminal outcomes could
+  set `op_phase` back to 13. A valid EOF, a finalize failure, or a read error
+  could therefore loop on the same phase instead of closing the file and
+  reporting completion or failure.
+
+What changed:
+
+- Terminal kitset-read outcomes in phase 13 now advance to phase 14.
+- `op_close_status` still carries the final result:
+  - read error: `FS_STATUS_ERROR`
+  - finalize error: `FS_STATUS_ERROR`
+  - finalize success: `FS_STATUS_DONE`
+- Phase 14 closes `kitset.kcg`; the existing close/completion path then lets
+  the preset load operation leave `PRESET_LOAD_IN_PROGRESS`.
+
+Inputs:
+
+- Streaming text lines from `Kit/NNN Name/kitset.kcg`, read by
+  `filesystem_readTextLine()`.
+- Parser results from `storage_kitsetParseLine()` and
+  `storage_kitsetFinalize()`.
+
+Outputs:
+
+- `op_close_status`, `op_phase`, and the global filesystem operation status.
+- On success, parsed kitset state that drives the six instrument-file loads.
+- On failure, an invalid preset name marker plus a completed filesystem
+  operation instead of an infinite boot wait.
+
+Accessors and clients:
+
+- External clients still enter through `preset_loadDrumset()` and the
+  filesystem request/tick API. No new public accessor was added.
+- Boot client: `main.c`, through preset-manager polling.
+- Runtime clients: menu/load flows that use the same preset-manager path.
+
+Confederate functions:
+
+- `filesystem_loadKitDirectory_tick()`
+- `filesystem_readTextLine()`
+- `storage_kitsetParseLine()`
+- `storage_kitsetFinalize()`
+- async close callback `on_file_closed()`
+
+### Reduced `kitset.kcg` Schema
+
+Changed code and data:
+
+- `Core/Hardware/SD/storageTypes.h`
+- `Core/Hardware/SD/storageTypes.c`
+- `Core/Hardware/SD/filesystem.c`
+- `tools/convert_legacy_kits.py`
+- `SD_CARD/Kit/*/kitset.kcg`
+- Root Markdown docs were swept for stale claims about removed kitset fields.
+
+Why:
+
+- `kitset.kcg` had been carrying data that should not belong to the kitset
+  manifest. The kit name is defined by the folder name, global voice
+  decimation is not kit data, and conversion metadata is not runtime data.
+- Storing unnecessary fields made the format easier to corrupt and harder to
+  reason about during boot.
+
+What changed:
+
+- `kitset.kcg` now contains only:
+  - `format=helicase.kitset`
+  - `version=1`
+  - six `[slotN]` sections
+  - each slot has `type`, `file`, and `audio_out`
+- The parser no longer consumes or requires `kit_name`.
+- The parser no longer consumes or requires `voice_decimation_all`.
+- The converter no longer emits kitset metadata such as `source_name`,
+  `source_file`, `legacy_slot`, or trailing legacy hex.
+- `filesystem_loadKitDirectory_tick()` takes the kit display name from the
+  scanned folder cache and initializes `PAR_VOICE_DECIMATION_ALL` to 127.
+
+Inputs:
+
+- Numbered folder names such as `001 Slak`, parsed by
+  `storage_parseNumberedFolder()` and recorded by the kit scan.
+- `kitset.kcg` slot sections with instrument type, filename, and `audio_out`.
+
+Outputs:
+
+- `storage_kitset_t.instrument_type[]`
+- `storage_kitset_t.instrument_file[][]`
+- `parameter_values[PAR_AUDIO_OUT1..PAR_AUDIO_OUT6]`
+- `parameter_values[PAR_VOICE_DECIMATION_ALL] = 127`
+- Preset display/current kit name copied from the folder-derived slot name.
+
+Accessors and clients:
+
+- Runtime clients should use the existing filesystem kit-slot accessors:
+  `filesystem_kitSlotExists()` and `filesystem_kitSlotName()`.
+- Loader client: `filesystem_loadKitDirectory_tick()`.
+- Browser compatibility client: the scan still populates the legacy
+  `kitBrowser` map through `filesystem_recordKitDirectory()`.
+- Generated-data client: `tools/convert_legacy_kits.py` writes the on-card
+  files consumed by these parsers.
+
+Confederate functions:
+
+- `storage_kitsetInit()`
+- `storage_kitsetParseLine()`
+- `storage_kitsetFinalize()`
+- `storage_instrumentFilenameMatchesType()`
+- `storage_instrumentTypeFromText()`
+- `filesystem_recordKitDirectory()`
+- `storage_parseNumberedFolder()`
+
+### Instrument File Morph Endpoint And 64-Byte Padding
+
+Changed code and data:
+
+- `Core/Hardware/SD/storageTypes.h`
+- `Core/Hardware/SD/storageTypes.c`
+- `Core/Hardware/SD/filesystem.c`
+- `tools/convert_legacy_kits.py`
+- `SD_CARD/Kit/*/*.drm`
+- `SD_CARD/Kit/*/*.snr`
+- `SD_CARD/Kit/*/*.cym`
+- `SD_CARD/Kit/*/*.hat`
+
+Why:
+
+- Future Scene work needs both the normal endpoint and the morph endpoint to be
+  represented in generated instrument files.
+- Legacy `.SND` files do not contain a distinct morph endpoint, so the safest
+  conversion is to seed morph with the same values as the normal endpoint.
+- Padding each endpoint to 64 byte-valued entries leaves room to add parameters
+  later without immediately breaking older readers that ignore unknown keys.
+
+What changed:
+
+- Converted instruments now write:
+  - header metadata: `format`, `version`, `type`, `slot`, plus conversion
+    source fields in the instrument file only
+  - `[params]` endpoint
+  - `_padNN=0` rows through 64 entries
+  - `[morph]` endpoint
+  - `_padNN=0` rows through 64 entries
+- `storage_instrument_state_t` now tracks `seen_morph_count` instead of the
+  older boolean-style `seen_morph_data` name.
+- The reader writes `[params]` values into `parameter_values[]`.
+- The reader writes `[morph]` values into `parameters2[]`.
+- If an instrument file has no explicit morph values, the loader calls the
+  fallback copier to seed morph from the already-loaded main endpoint.
+
+Inputs:
+
+- Instrument text lines from `.drm`, `.snr`, `.cym`, and `.hat` files.
+- Expected instrument type and one-based slot from the validated kitset.
+- Generated field maps in `tools/convert_legacy_kits.py`.
+
+Outputs:
+
+- Main endpoint parameter writes to `parameter_values[]`.
+- Morph endpoint parameter writes to `parameters2[]`.
+- Validation flags in `storage_instrument_state_t`, including
+  `seen_param_count` and `seen_morph_count`.
+
+Accessors and clients:
+
+- There is no new public accessor. The output buffers are the existing synth
+  parameter arrays:
+  - `parameter_values[]` for the active endpoint
+  - `parameters2[]` for the morph endpoint
+- Runtime client: `filesystem_loadKitDirectory_tick()`.
+- Parser client: `storage_instrumentParseLine()`.
+- Future save client: the eventual directory-kit save path should emit the same
+  `[params]` and `[morph]` sections.
+
+Confederate functions:
+
+- `storage_instrumentStateInit()`
+- `storage_instrumentParseLine()`
+- `storage_instrumentFinalize()`
+- `storage_instrumentCopyMainToMorphFallback()`
+- `storage_paramsForInstrument()`
+- `storage_findParamMap()`
+
+### Legacy `.SND` Parameter Landing In The Converter
+
+Changed code and data:
+
+- `tools/convert_legacy_kits.py`
+- Regenerated `SD_CARD/Kit`
+
+Why:
+
+- The first conversion pass landed several Slak drum 3 and cymbal values at
+  zero because the converter used the wrong legacy byte addressing model.
+- The legacy payload after the eight-byte name is not simply indexed by all
+  current runtime enum values. Main endpoint parameters land at
+  `ParamEnums - 1`, while CC2 parameters live in the separate CC2 block.
+- `audio_out` exposed the issue first, but it is not special by itself. The
+  real split is at `PAR_FILTER_DRIVE_1`, the first parameter after the
+  `END OF MIDI DATASIZE` boundary in `ParameterArray.h`.
+
+What changed:
+
+- `parse_param_values()` reads `enum ParamEnums` from `ParameterArray.h` and
+  returns the enum table plus `END_OF_SOUND_PARAMETERS`.
+- `parse_cc2_values()` reads the CC2 enum names from `MidiMessages.h`. For now,
+  only the CC2 enum is used from that file; the main MIDI enum in
+  `MidiMessages.h` has drifted and is not used as the split authority.
+- `cc2_name_for_param()` derives the split from `ParameterArray.h`:
+  - if `param_indexes[name] < PAR_FILTER_DRIVE_1`, read from the main endpoint
+    blob at `ParamEnums - 1`
+  - otherwise read from `128 + CC2_*`
+- `param_value()` centralizes this address calculation for both instrument
+  endpoint emission and kitset `audio_out` emission.
+- `append_endpoint()` emits one named endpoint plus zero padding to 64 rows.
+- `write_instrument()` emits both `[params]` and `[morph]` from the same legacy
+  values.
+- `write_kitset()` emits only the reduced manifest and reads
+  `PAR_AUDIO_OUT1..PAR_AUDIO_OUT6` through the same CC2-aware `param_value()`.
+
+Inputs:
+
+- Legacy `SD_CARD/P000.SND` through `SD_CARD/P032.SND`.
+- `Core/Scene/Preset/ParameterArray.h` for current `PAR_*` enum positions and
+  the `PAR_FILTER_DRIVE_1` boundary.
+- `Core/MIDI/MidiMessages.h` for the CC2 enum names and ordering.
+- Converter field maps for drum, snare, cymbal, and hat instruments.
+
+Outputs:
+
+- `SD_CARD/Kit/NNN Name/kitset.kcg`
+- `SD_CARD/Kit/NNN Name/*.drm`
+- `SD_CARD/Kit/NNN Name/*.snr`
+- `SD_CARD/Kit/NNN Name/*.cym`
+- `SD_CARD/Kit/NNN Name/*.hat`
+
+Accessors and clients:
+
+- Script functions:
+  - `parse_param_values()`
+  - `parse_cc2_values()`
+  - `param_value()`
+  - `append_endpoint()`
+  - `write_instrument()`
+  - `write_kitset()`
+  - `main()`
+- Runtime clients are indirect: the generated files are consumed by
+  `storage_kitsetParseLine()` and `storage_instrumentParseLine()` through
+  `filesystem_loadKitDirectory_tick()`.
+
+Confederate functions and tables:
+
+- `DRUM_PARAM_TEMPLATE`
+- `SNARE_PARAMS`
+- `CYMBAL_PARAMS`
+- `HAT_PARAMS`
+- `DRUM_FIELDS`
+- `SNARE_FIELDS`
+- `CYMBAL_FIELDS`
+- `HAT_FIELDS`
+- `storageTypes.c` parameter maps, which must stay semantically aligned with
+  the converter field names.
+
+Validation performed:
+
+- Clean-replaced `SD_CARD/Kit` by removing the directory and rerunning
+  `python3 tools/convert_legacy_kits.py`.
+- Regenerated output has 33 kit directories and 198 instrument files.
+- Every generated instrument file has exactly 64 `[params]` rows and 64
+  `[morph]` rows.
+- Every generated kitset omits removed keys: `kit_name`,
+  `voice_decimation_all`, `[metadata]`, `source_name`, `source_file`, and
+  `legacy_slot`.
+- Converter audit found 93 generated parameter references in the CC2 half and
+  no missing `CC2_*` counterpart.
+- Slak canary after corrected landing:
+  - drum 3: `velo_attack=12`, `velo_decay=0`, `vol_slope=7`, `volume=77`,
+    `pan=63`, `drive=17`
+  - cymbal: `velo_attack=30`, `velo_decay=0`, `vol_slope=4`, `volume=127`,
+    `pan=63`, `drive=30`
+  - `kitset.kcg` `audio_out` fields are all zero for Slak and are read from
+    the CC2 block.
+
+### Documentation And Test State
+
+Changed documentation:
+
+- `PAT_8BAR_SINGLE_AUDIT.md` now contains the boot-lock notes, kitset cleanup
+  notes, morph endpoint notes, converter landing notes, and this consolidated
+  session addendum.
+- Root-level Markdown was swept earlier in the session to remove claims that
+  `kitset.kcg` stores the kit name, global voice decimation, or legacy
+  conversion metadata.
+
+Known limitations:
+
+- Firmware build was not run because `make` is not installed in this
+  environment.
+- The generated `tools/__pycache__` directory may remain from Python validation;
+  it is intentionally not part of the firmware or SD-card data path and was
+  left alone after the user said it can stay.
+- `Core/MIDI/MidiMessages.h` appears drifted in its main MIDI enum around the
+  MIDI-size boundary, but this session explicitly deferred that cleanup. The
+  converter uses `ParameterArray.h` as the authority for the
+  `PAR_FILTER_DRIVE_1` split and uses only the CC2 enum from `MidiMessages.h`.

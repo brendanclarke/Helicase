@@ -693,7 +693,7 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
             if (storage_streq(key, map[i].key)) {
                 if (state->current_section == STORAGE_SECTION_MORPH) {
                     morph_values[map[i].param] = parsed;
-                    state->seen_morph_data = 1u;
+                    state->seen_morph_count++;
                 } else {
                     target_values[map[i].param] = parsed;
                     state->seen_param_count++;
@@ -709,7 +709,7 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
 /* See storageTypes.h for the public contract.
  *
  * A missing [morph] section is not an error. filesystem.c checks
- * seen_morph_data after this succeeds and calls
+ * seen_morph_count after this succeeds and calls
  * storage_instrumentCopyMainToMorphFallback() when needed.
  */
 storage_status_t storage_instrumentFinalize(const storage_instrument_state_t *state)

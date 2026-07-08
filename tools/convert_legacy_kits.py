@@ -10,6 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SD_ROOT = ROOT / "SD_CARD"
 PARAM_HEADER = ROOT / "Core" / "Scene" / "Preset" / "ParameterArray.h"
+MIDI_MESSAGES_HEADER = ROOT / "Core" / "MIDI" / "MidiMessages.h"
+INSTRUMENT_ENDPOINT_SIZE = 64
+CC2_PAYLOAD_BASE = 128
 
 
 DRUM_FIELDS = [
@@ -137,6 +140,28 @@ def parse_param_values() -> tuple[dict[str, int], int]:
     return values, values["END_OF_SOUND_PARAMETERS"]
 
 
+def parse_cc2_values() -> dict[str, int]:
+    text = MIDI_MESSAGES_HEADER.read_text(encoding="utf-8")
+    body = text.split("//for all parameters above 127", 1)[1].split("};", 1)[0]
+    values: dict[str, int] = {}
+    current = -1
+
+    for raw in body.splitlines():
+        line = raw.split("//", 1)[0].strip().rstrip(",").strip()
+        if not line or not line.startswith("CC2_"):
+            continue
+        if "=" in line:
+            name, expr = [part.strip() for part in line.split("=", 1)]
+            value = values[expr] if expr in values else int(expr, 0)
+            values[name] = value
+            current = value
+        else:
+            current += 1
+            values[line] = current
+
+    return values
+
+
 def sanitize_display_name(raw: bytes, fallback: str) -> str:
     chars = []
     for byte in raw:
@@ -161,9 +186,41 @@ def filename_prefix(name: str, fallback: str) -> str:
     return (cleaned[:6] or fallback.lower())[:6]
 
 
-def param_value(params: bytes, param_indexes: dict[str, int], name: str) -> int:
-    idx = param_indexes[name]
+def cc2_name_for_param(name: str, param_indexes: dict[str, int]) -> str | None:
+    if param_indexes[name] < param_indexes["PAR_FILTER_DRIVE_1"]:
+        return None
+    return f"CC2_{name.removeprefix('PAR_')}"
+
+
+def param_value(
+    params: bytes,
+    param_indexes: dict[str, int],
+    cc2_indexes: dict[str, int],
+    name: str,
+) -> int:
+    cc2_name = cc2_name_for_param(name, param_indexes)
+    if cc2_name is not None:
+        idx = CC2_PAYLOAD_BASE + cc2_indexes[cc2_name]
+    else:
+        idx = param_indexes[name] - 1
     return params[idx] if idx < len(params) else 0
+
+
+def append_endpoint(
+    lines: list[str],
+    section: str,
+    fields: list[str],
+    param_names: list[str],
+    params: bytes,
+    param_indexes: dict[str, int],
+    cc2_indexes: dict[str, int],
+) -> None:
+    lines.append(section)
+    for field, param_name in zip(fields, param_names):
+        lines.append(f"{field}={param_value(params, param_indexes, cc2_indexes, param_name)}")
+    for pad_index in range(len(fields), INSTRUMENT_ENDPOINT_SIZE):
+        lines.append(f"_pad{pad_index:02d}=0")
+    lines.append("")
 
 
 def write_instrument(
@@ -177,6 +234,7 @@ def write_instrument(
     param_names: list[str],
     params: bytes,
     param_indexes: dict[str, int],
+    cc2_indexes: dict[str, int],
 ) -> None:
     lines = [
         "format=helicase.instrument",
@@ -187,16 +245,17 @@ def write_instrument(
         f"source_name={source_name}",
         f"source_file={source_file}",
         "",
-        "[params]",
     ]
-    for field, param_name in zip(fields, param_names):
-        lines.append(f"{field}={param_value(params, param_indexes, param_name)}")
-    lines.append("")
+    append_endpoint(lines, "[params]", fields, param_names, params, param_indexes, cc2_indexes)
+    append_endpoint(lines, "[morph]", fields, param_names, params, param_indexes, cc2_indexes)
     path.write_text("\n".join(lines), encoding="ascii")
 
 
 def write_kitset(
     path: Path,
+    params: bytes,
+    param_indexes: dict[str, int],
+    cc2_indexes: dict[str, int],
     files: list[tuple[str, str]],
 ) -> None:
     lines = [
@@ -210,7 +269,7 @@ def write_kitset(
             f"[slot{slot}]",
             f"type={instrument_type}",
             f"file={filename}",
-            f"audio_out={param_value(params, param_indexes, f'PAR_AUDIO_OUT{slot}')}",
+            f"audio_out={param_value(params, param_indexes, cc2_indexes, f'PAR_AUDIO_OUT{slot}')}",
         ])
         lines.append("")
 
@@ -219,6 +278,7 @@ def write_kitset(
 
 def main() -> None:
     param_indexes, sound_param_count = parse_param_values()
+    cc2_indexes = parse_cc2_values()
     kit_root = SD_ROOT / "Kit"
     kit_root.mkdir(exist_ok=True)
 
@@ -271,10 +331,14 @@ def main() -> None:
                 param_names,
                 params,
                 param_indexes,
+                cc2_indexes,
             )
 
         write_kitset(
             kit_dir / "kitset.kcg",
+            params,
+            param_indexes,
+            cc2_indexes,
             files,
         )
 
