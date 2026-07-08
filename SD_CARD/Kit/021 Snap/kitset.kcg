@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=Snap
-source_name=Snap
-source_file=P020.SND
-legacy_slot=20
-voice_decimation_all=127
 
 [slot1]
 type=drm

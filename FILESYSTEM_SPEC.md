@@ -148,8 +148,9 @@ kitset.kcg
 <instrument 6>.<type>
 ```
 
-`kitset.kcg` stores kit-level metadata/configuration. It also records which instrument
-files occupy the six voice slots.
+`kitset.kcg` is only the kit folder guard/version file plus the six-slot
+instrument manifest. The kit name comes from the `Kit/NNN Name` folder, and
+performance or scene controls are not stored in this file.
 
 The six instrument files are named by the kit/instrument, for example:
 

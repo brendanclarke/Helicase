@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=KitWool
-source_name=KitWool
-source_file=P015.SND
-legacy_slot=15
-voice_decimation_all=114
 
 [slot1]
 type=drm

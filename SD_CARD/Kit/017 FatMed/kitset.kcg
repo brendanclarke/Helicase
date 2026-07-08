@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=FatMed
-source_name=FatMed
-source_file=P016.SND
-legacy_slot=16
-voice_decimation_all=127
 
 [slot1]
 type=drm

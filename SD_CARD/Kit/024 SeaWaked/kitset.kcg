@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=SeaWaked
-source_name=SeaWaked
-source_file=P023.SND
-legacy_slot=23
-voice_decimation_all=127
 
 [slot1]
 type=drm

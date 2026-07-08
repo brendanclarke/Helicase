@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=SoyEared
-source_name=SoyEared
-source_file=P012.SND
-legacy_slot=12
-voice_decimation_all=127
 
 [slot1]
 type=drm

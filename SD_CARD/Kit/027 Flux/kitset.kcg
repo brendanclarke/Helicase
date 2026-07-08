@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=Flux
-source_name=Flux
-source_file=P026.SND
-legacy_slot=26
-voice_decimation_all=127
 
 [slot1]
 type=drm

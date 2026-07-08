@@ -31,7 +31,7 @@ this pass.
 - Instrument files own sound parameters for their voice, including `volume` and
   `pan`.
 - `kitset.kcg` owns kit slot membership, instrument filenames, instrument types,
-  `audio_out`, and kit-level metadata.
+  and `audio_out`. The kit name is owned by the `Kit/NNN Name` folder.
 - MIDI note and MIDI channel settings do not belong in `kitset.kcg`; they should
   live in scene settings later.
 - Users should not be expected to hand-author a valid kit folder. `kitset.kcg`
@@ -161,11 +161,6 @@ Example `kitset.kcg`:
 ```text
 format=helicase.kitset
 version=1
-kit_name=Slak
-source_name=Slak
-source_file=P000.SND
-legacy_slot=0
-voice_decimation_all=127
 
 [slot1]
 type=drm
@@ -181,9 +176,6 @@ format=helicase.instrument
 version=1
 type=drm
 slot=1
-kit_name=Slak
-source_name=Slak
-source_file=P000.SND
 
 [params]
 osc_wave=0
@@ -204,12 +196,14 @@ than ad hoc substring matching across the whole file.
 
 `kitset.kcg` should load:
 
-- display name into `preset_currentName`, padded/truncated to 8 chars
-- `voice_decimation_all` into `PAR_VOICE_DECIMATION_ALL`
 - for each slot 1..6:
   - `type` must match the expected extension or the loader fails
   - `file` is the instrument filename to open
   - `audio_out` maps to `PAR_AUDIO_OUT1`..`PAR_AUDIO_OUT6`
+
+The loader should take the display name from the scanned `Kit/NNN Name` folder
+and initialize `PAR_VOICE_DECIMATION_ALL` to 127 until that performance control
+is owned by scene data.
 
 `kitset.kcg` should not load:
 
@@ -601,14 +595,13 @@ For `FS_FILE_KIT`, name load should no longer open a file payload. Options:
 
 1. Use the scan cache's folder display name (`001_Slak` -> `Slak`) and complete
    immediately.
-2. Open `kitset.kcg` and parse `kit_name`.
+2. Return `Empty` until the kit scan cache is available.
 
 Recommended first implementation: use scan cache. It avoids extra directory
 walking while the user scrolls and keeps `filesystem_requestLoadName()` cheap.
 Full validation still happens during actual load.
 
-If scan cache is unavailable, fall back to opening `Kit/NNN_*/kitset.kcg` and
-parsing `kit_name`, or return `Empty`.
+If scan cache is unavailable, return `Empty`.
 
 ### Step 5 - Add Directory Kit Loader State Machine
 
@@ -908,7 +901,6 @@ Host-side sanity checks:
   Result: no mismatches across all generated kits for the parameters owned by
   the new kit/instrument format.
 - Parameters loaded from `kitset.kcg`:
-  - `PAR_VOICE_DECIMATION_ALL`
   - `PAR_AUDIO_OUT1` through `PAR_AUDIO_OUT6`
 - Parameters loaded from instrument files:
   - all per-voice oscillator/filter/envelope/LFO/velocity/transient/volume/pan

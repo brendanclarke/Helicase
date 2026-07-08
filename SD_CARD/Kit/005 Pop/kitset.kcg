@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=Pop
-source_name=Pop
-source_file=P004.SND
-legacy_slot=4
-voice_decimation_all=127
 
 [slot1]
 type=drm

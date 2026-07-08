@@ -441,16 +441,16 @@ void storage_kitsetInit(storage_kitset_t *kit)
     memset(kit, 0, sizeof(*kit));
     for (uint8_t i = 0u; i < STORAGE_KIT_SLOT_COUNT; i++)
         kit->instrument_type[i] = STORAGE_INSTRUMENT_UNKNOWN;
-    storage_copyDisplayName(kit->display_name, "");
 }
 
 /* See storageTypes.h for the public contract.
  *
  * The parser is intentionally incremental because filesystem.c reads from SD in
- * small chunks. Top-level fields validate the file guard/version/name and write
- * global kit parameters. [slot1]..[slot6] sections collect instrument type,
- * filename, and audio_out for each voice. MIDI data is ignored here by design;
- * it will be owned by scene settings.
+ * small chunks. Top-level fields validate only the file guard/version.
+ * [slot1]..[slot6] sections collect instrument type, filename, and audio_out
+ * for each voice. The kit display name is owned by the folder name, and
+ * performance controls such as voice_decimation_all are not stored in
+ * kitset.kcg.
  */
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                                          const char *line,
@@ -491,15 +491,6 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
             if (parsed != 1u)
                 return STORAGE_STATUS_UNSUPPORTED_VERSION;
             kit->seen_version = 1u;
-        } else if (storage_streq(key, "kit_name")) {
-            storage_copyDisplayName(kit->display_name, value);
-            kit->seen_kit_name = 1u;
-        } else if (storage_streq(key, "voice_decimation_all")) {
-            st = storage_parseU8(value, &parsed);
-            if (st != STORAGE_STATUS_OK)
-                return st;
-            target_values[PAR_VOICE_DECIMATION_ALL] = parsed;
-            kit->seen_voice_decimation = 1u;
         }
         return STORAGE_STATUS_OK;
     }
@@ -537,8 +528,7 @@ storage_status_t storage_kitsetFinalize(const storage_kitset_t *kit)
 {
     const uint8_t all_slots = (uint8_t)((1u << STORAGE_KIT_SLOT_COUNT) - 1u);
 
-    if (!kit->seen_format || !kit->seen_version || !kit->seen_kit_name ||
-        !kit->seen_voice_decimation) {
+    if (!kit->seen_format || !kit->seen_version) {
         return STORAGE_STATUS_MISSING_REQUIRED;
     }
     if (kit->seen_type_mask != all_slots ||

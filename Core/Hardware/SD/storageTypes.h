@@ -78,25 +78,23 @@ typedef enum {
 /* Incremental parse state for kitset.kcg.
  *
  * The kitset file is the guard that proves a Kit/NNN Name directory is a kit
- * and lists the six instrument files to load. display_name is the eight-char
- * LCD/preset name. instrument_file/type are filled per slot. current_slot is
- * changed by [slotN] section headers. seen_* masks record required fields so
- * storage_kitsetFinalize() can reject partial or hand-edited files.
+ * and lists the six instrument files to load. The kit display name is owned by
+ * the numbered folder name, not by kitset.kcg. instrument_file/type are filled
+ * per slot. current_slot is changed by [slotN] section headers. seen_* masks
+ * record required fields so storage_kitsetFinalize() can reject partial or
+ * hand-edited files.
  *
  * Inputs arrive through storage_kitsetParseLine(). Outputs are this struct and
- * writes to kit-level parameter slots such as PAR_AUDIO_OUTn and
- * PAR_VOICE_DECIMATION_ALL. Clients/accessors are filesystem_loadKitDirectory_
- * tick() in filesystem.c and the generated kitset.kcg files.
+ * writes to kit slot routing parameters such as PAR_AUDIO_OUTn. Clients are
+ * filesystem_loadKitDirectory_tick() in filesystem.c and the generated
+ * kitset.kcg files.
  */
 typedef struct {
-    char display_name[STORAGE_KIT_DISPLAY_NAME_LEN];
     char instrument_file[STORAGE_KIT_SLOT_COUNT][STORAGE_KIT_FILENAME_MAX];
     storage_instrument_type_t instrument_type[STORAGE_KIT_SLOT_COUNT];
     uint8_t current_slot;
     uint8_t seen_format;
     uint8_t seen_version;
-    uint8_t seen_kit_name;
-    uint8_t seen_voice_decimation;
     uint8_t seen_type_mask;
     uint8_t seen_file_mask;
     uint8_t seen_audio_out_mask;
@@ -130,8 +128,8 @@ typedef struct {
 /* Initialize kitset parse state before the first line of kitset.kcg.
  *
  * Input/output: kit points to caller-owned storage_kitset_t scratch. The
- * function clears all fields, marks instrument slots as UNKNOWN, and pads the
- * display name with spaces. Client: filesystem_loadKitDirectory_tick().
+ * function clears all fields and marks instrument slots as UNKNOWN. Client:
+ * filesystem_loadKitDirectory_tick().
  */
 void storage_kitsetInit(storage_kitset_t *kit);
 
@@ -139,9 +137,9 @@ void storage_kitsetInit(storage_kitset_t *kit);
  *
  * Inputs: kit is the state initialized by storage_kitsetInit(); line is one
  * NUL-terminated line with CR/LF already removed; target_values is the active
- * ParameterArray buffer. Outputs: updated kit state and kit-level parameters
- * such as audio output and voice-decimation-all. Unknown keys are ignored for
- * forward compatibility; malformed required keys return an error status.
+ * ParameterArray buffer. Outputs: updated kit state and slot routing parameters
+ * such as audio output. Unknown keys are ignored for forward compatibility;
+ * malformed required keys return an error status.
  */
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                                          const char *line,
@@ -150,8 +148,8 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
 /* Validate that all required kitset.kcg fields were present and coherent.
  *
  * Input: kit parse state after EOF. Output: OK or an error status. This checks
- * the file guard/version/name, all six type/file/audio_out fields, and that
- * listed filenames have extensions matching their declared instrument type.
+ * the file guard/version, all six type/file/audio_out fields, and that listed
+ * filenames have extensions matching their declared instrument type.
  */
 storage_status_t storage_kitsetFinalize(const storage_kitset_t *kit);
 

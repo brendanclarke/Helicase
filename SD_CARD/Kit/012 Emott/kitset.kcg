@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=Emott
-source_name=Emott
-source_file=P011.SND
-legacy_slot=11
-voice_decimation_all=127
 
 [slot1]
 type=drm

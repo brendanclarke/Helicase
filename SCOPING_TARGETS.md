@@ -143,7 +143,7 @@ The only root-level file recognized by the new firmware should be `settings.cfg`
 
 `Bank`, `Scene`, `Kit`, and `Wavetable` use numbered folders named `001 <name>`, `002 <name>`, etc. A single underscore after the three-digit slot ID may be accepted for compatibility with older generated folders, but the preferred convention is a space separator and spaces inside the display name are valid. Numbers do not need to be contiguous; browsers should scan slot numbers sequentially and show missing slots as empty (for example `003: Empty`) instead of collapsing gaps. `Bank` scene folders are limited to slots `001` through `016`.
 
-`bankset.bcg`, `sceneset.scg`, and `kitset.kcg` are guard/version/config files. They identify the folder type, prevent accidentally loading a scene/kit/etc. as the wrong container, and carry the metadata needed at that level. `kitset.kcg` also records which instrument file occupies each of the six voice slots.
+`bankset.bcg` and `sceneset.scg` are guard/version/config files. `kitset.kcg` is slimmer: it identifies the folder type and records which instrument file occupies each of the six voice slots. The kit name comes from the `Kit/NNN Name` folder.
 
 `fs_file_type_t` needs new members for `.drm`, `.snr`, `.cym`, `.hat`, `.fx`, `.bcg`, `.scg`, `.kcg`, `settings.cfg`, and the directory-scoped variants of `.pat`/`.wav`/instrument files where source and destination matter (`Pattern/` pool vs. scene `pattern.pat`, `Sample/` vs. `Wavetable/<slot>/`, root `Instrument/` vs. kit-contained instruments). `filesystem_makeFilename()` becomes path-building rather than name-building, and every call site that currently only handles a flat slot number needs bank/scene/kit context to resolve into a path.
 

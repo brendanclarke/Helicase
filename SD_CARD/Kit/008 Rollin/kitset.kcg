@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=Rollin'
-source_name=Rollin'
-source_file=P007.SND
-legacy_slot=7
-voice_decimation_all=127
 
 [slot1]
 type=drm

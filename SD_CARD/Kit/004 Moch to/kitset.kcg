@@ -1,10 +1,5 @@
 format=helicase.kitset
 version=1
-kit_name=Moch to
-source_name=Moch to
-source_file=P003.SND
-legacy_slot=3
-voice_decimation_all=127
 
 [slot1]
 type=drm

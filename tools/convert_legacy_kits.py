@@ -197,26 +197,12 @@ def write_instrument(
 
 def write_kitset(
     path: Path,
-    kit_name: str,
-    source_name: str,
-    source_file: str,
-    legacy_slot: int,
-    params: bytes,
-    trailing: bytes,
-    param_indexes: dict[str, int],
     files: list[tuple[str, str]],
 ) -> None:
     lines = [
         "format=helicase.kitset",
         "version=1",
-        f"kit_name={kit_name}",
-        f"source_name={source_name}",
-        f"source_file={source_file}",
-        f"legacy_slot={legacy_slot}",
-        f"voice_decimation_all={param_value(params, param_indexes, 'PAR_VOICE_DECIMATION_ALL')}",
     ]
-    if trailing:
-        lines.append(f"legacy_trailing_hex={trailing.hex()}")
     lines.append("")
 
     for slot, (instrument_type, filename) in enumerate(files, start=1):
@@ -289,13 +275,6 @@ def main() -> None:
 
         write_kitset(
             kit_dir / "kitset.kcg",
-            source_name,
-            source_name,
-            snd_path.name,
-            legacy_slot,
-            params,
-            trailing,
-            param_indexes,
             files,
         )
 

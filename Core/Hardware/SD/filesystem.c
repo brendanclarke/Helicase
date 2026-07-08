@@ -855,7 +855,7 @@ static void filesystem_dirLfnAppendEntry(const fatDirectoryEntry_t *entry)
  * slot prefix but no space/underscore separator, so the normal visible-name
  * parser must reject it. This fallback keeps the slot loadable by deriving the
  * slot from the first three digits and using the alias tail as a best-effort
- * display name until the kitset.kcg load supplies the real kit name.
+ * display name. Kit names are owned by the numbered folder, not kitset.kcg.
  *
  * Inputs: open_name is the 8.3 alias used by afatfs_fopen(). Outputs: the scan
  * cache and kitBrowser compatibility map are populated if the alias starts with
@@ -1099,13 +1099,13 @@ static void filesystem_loadKit_tick(void)
 ** Why this exists: Phase 2 replaces root-level Pxxx.SND kit loads with
 ** Kit/NNN Name/kitset.kcg plus six instrument files. The loader validates the
 ** selected scan-cache slot, enters Kit/, enters the selected kit folder by its
-** cached FAT short name, parses kitset.kcg, then opens each listed instrument
-** file in order.
+** cached FAT short name, copies the display name from the folder scan, parses
+** kitset.kcg, then opens each listed instrument file in order.
 **
 ** Inputs: op_slot is the zero-based internal kit number; kit_slot_present and
 ** kit_slot_open_name must have been populated by filesystem_requestScanKits();
 ** storageTypes owns the text schema and ParameterArray maps. Outputs:
-** parameter_values[] receives kit-level and instrument [params] data,
+** parameter_values[] receives slot routing and instrument [params] data,
 ** parameters2[] receives [morph] data or the main-to-morph fallback, and
 ** preset_currentName receives the kit display name, "Empty   ", or "-       ".
 **
@@ -1127,6 +1127,8 @@ static void filesystem_loadKitDirectory_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        memcpy(preset_currentName, kit_slot_name[op_slot], 8);
+        parameter_values[PAR_VOICE_DECIMATION_ALL] = 127u;
         if (!afatfs_chdir(NULL))
             return;
         op_phase = 1;
@@ -1236,7 +1238,7 @@ static void filesystem_loadKitDirectory_tick(void)
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 13;
+            op_phase = 14;
             return;
         }
         if (line_ready) {
@@ -1256,7 +1258,7 @@ static void filesystem_loadKitDirectory_tick(void)
             } else {
                 op_close_status = FS_STATUS_DONE;
             }
-            op_phase = 13;
+            op_phase = 14;
         }
         return;
 
@@ -1279,7 +1281,7 @@ static void filesystem_loadKitDirectory_tick(void)
 
     case 16: /* PREPARE NEXT INSTRUMENT */
         if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
-            memcpy(preset_currentName, op_kitset.display_name, 8);
+            memcpy(preset_currentName, kit_slot_name[op_slot], 8);
             op_close_status = FS_STATUS_DONE;
             op_phase = 28;
             return;

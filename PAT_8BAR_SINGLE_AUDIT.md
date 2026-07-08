@@ -1033,3 +1033,112 @@ Code-comment requirement for this change:
 - Plain VOICE button changes while `SEQ_PAGE` is displayed now re-enter the
   STEP/track-settings front page and repaint from PatternData, even if a future
   gesture arrives at that page through a route other than strict STEP mode.
+
+## Additional Boot-Hang Bugfix Plan: Kitset EOF Phase
+
+This note continues the interrupted boot-hang investigation from the task DB.
+The current boot path in `main.c` does not load `.pat` files. With an SD card
+present, the blocking startup sequence is:
+
+1. `filesystem_requestScanKits()` while polling `filesystem_tick()`.
+2. `preset_loadDrumset(0, 0)` while polling `filesystem_tick()`.
+3. `preset_loadGlobals()` while polling `filesystem_tick()`.
+
+The most concrete hang candidate is in the normal kit load state machine in
+`Core/Hardware/SD/filesystem.c`, case 13, `READ kitset.kcg`.
+
+Current behavior:
+
+- If `filesystem_readTextLine()` returns an error, the code marks the kit
+  invalid but sets `op_phase = 13`, so it retries the same read phase instead
+  of closing the file and finishing the operation.
+- If EOF is reached and `storage_kitsetFinalize()` succeeds or fails, the code
+  sets `op_phase = 13` again. That means a valid `kitset.kcg` can finish parsing
+  but never advance to the close/final status path, leaving
+  `preset_loadDrumset(0, 0)` stuck in `PRESET_LOAD_IN_PROGRESS` during boot.
+- The parse-line invalid-format path already advances to phase 14, so the EOF
+  path is now the higher-priority bug.
+
+Bugfix direction:
+
+- In case 13, every terminal kitset-read outcome should transition to phase 14
+  so `kitset.kcg` is closed and the existing phase 15/28 completion path runs.
+- Preserve the existing `op_close_status` values:
+  - read error: `FS_STATUS_ERROR`
+  - finalize failure: `FS_STATUS_ERROR`
+  - finalize success: `FS_STATUS_DONE`
+- Do not treat this as a pattern-storage migration issue. Pattern load is a
+  user/menu operation after boot; the startup hang must be isolated to kit scan,
+  kit load, or globals load unless another boot caller is added later.
+
+Suggested implementation shape:
+
+```c
+if (st != STORAGE_STATUS_OK) {
+    filesystem_setPresetNameInvalid();
+    op_close_status = FS_STATUS_ERROR;
+    op_phase = 14;
+    return;
+}
+...
+if (eof) {
+    st = storage_kitsetFinalize(&op_kitset);
+    if (st != STORAGE_STATUS_OK) {
+        filesystem_setPresetNameInvalid();
+        op_close_status = FS_STATUS_ERROR;
+    } else {
+        op_close_status = FS_STATUS_DONE;
+    }
+    op_phase = 14;
+}
+```
+
+Verification plan for the bugfix:
+
+- Boot with the current SD card. If the hang was in kit 0 load, startup should
+  pass the loading screen.
+- Boot with a deliberately malformed `Kit/001 .../kitset.kcg`. The loader
+  should close the file, mark the kit invalid or fail the load, and return from
+  the boot polling loop instead of spinning.
+- Boot with no `Kit/` directory. The kit scan/load path should fail cleanly and
+  not block globals/menu startup.
+- Boot with no SD card. The `if (sd_ok)` block should still be skipped, proving
+  the issue is in boot SD operations rather than hardware init.
+- If boot still hangs, add a temporary LED/LCD marker before and after each of
+  the three boot polling loops above to identify whether the remaining block is
+  kit scan, kit load, or globals load.
+
+## Kitset Schema Cleanup Notes
+
+Per the follow-up decision, `kitset.kcg` is now only a kit-folder guard plus the
+six voice-slot manifest. The kit display name is owned by the `Kit/NNN Name`
+folder, not by a `kit_name` line. `voice_decimation_all` is not kit data; the
+directory-kit loader initializes `PAR_VOICE_DECIMATION_ALL` to 127 for now.
+Legacy conversion metadata such as `source_name`, `source_file`, and
+`legacy_slot` is not emitted into `kitset.kcg`.
+
+Work in progress:
+
+- `storage_kitsetParseLine()` no longer consumes `kit_name` or
+  `voice_decimation_all`.
+- `storage_kitsetFinalize()` no longer requires `kit_name` or
+  `voice_decimation_all`.
+- `filesystem_loadKitDirectory_tick()` copies the loaded kit name from the
+  scanned folder cache and defaults `PAR_VOICE_DECIMATION_ALL` to 127.
+- The boot-lock fix changes terminal kitset read outcomes to advance from phase
+  13 to phase 14 so `kitset.kcg` closes and the load operation can finish.
+- `tools/convert_legacy_kits.py` no longer emits the removed `.kcg` fields.
+
+Verification from this cleanup:
+
+- All 33 mirrored `SD_CARD/Kit/*/kitset.kcg` files were rewritten to the reduced
+  schema: `format`, `version`, then six `[slotN]` sections with `type`, `file`,
+  and `audio_out`.
+- A schema sweep found no remaining `kit_name`, `source_name`, `source_file`,
+  `legacy_slot`, `legacy_trailing_hex`, or `voice_decimation_all` keys in
+  mirrored `kitset.kcg` files.
+- A parser-equivalent validation passed for all 33 mirrored kitsets.
+- Root-level Markdown docs were swept so they no longer describe `kitset.kcg` as
+  owning kit metadata, kit names, or `PAR_VOICE_DECIMATION_ALL`.
+- Firmware build was not run here because `make` is not installed in this
+  environment.
