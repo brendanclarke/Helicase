@@ -110,11 +110,13 @@ void sync_tickTimestamp(uint32_t timestampUs)
 
 	if(seq_isRunning())
 	{
-		//now handle sequencer transport (4 steps every 3 clocks)
-		if(sync_clockCnt == 1 || sync_clockCnt >= 4) {
-			sync_clockCnt = 1;
-			seq_resetDeltaAndTick();
-		}
+		/*
+		 * MIDI clock is 24 PPQ. The sequencer scheduler is 96 PPQ, so every
+		 * incoming MIDI clock advances four internal scheduler ticks. The old
+		 * 4-steps-every-3-clocks bridge belonged to the previous 32-steps-per-
+		 * beat grid and would make the corrected default rate eight times fast.
+		 */
+		seq_resetDeltaAndTick();
 	}
 }
 //---------------------------------------------------------

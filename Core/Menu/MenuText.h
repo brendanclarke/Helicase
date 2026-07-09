@@ -19,6 +19,10 @@
 #ifndef MENUTEXT_H_
 #define MENUTEXT_H_
 
+/* DTYPE_MENU stores its menu table id in the high nibble of one byte. Id 0 is
+** valid and is reserved here for track scale so the new 21-entry scale menu can
+** use the normal menu dtype path without widening the packed dtype table. */
+#define MENU_TRACK_SCALE    0
 #define MENU_FILTER         1
 #define MENU_WAVEFORM       2
 #define MENU_AUDIO_OUT      3
@@ -100,6 +104,11 @@ static const char midiFilterNames[][16] = {
     {"off"},{"N"},{"R"},{"RN"},{"C"},{"CN"},{"CR"},{"CRN"},
     {"P"},{"PN"},{"PR"},{"PRN"},{"PC"},{"PCN"},{"PCR"},{"all"},
 };
+static const char trackScaleNames[][4] = {
+    {21},
+    {"/8"},{"/7"},{"/6"},{"/5"},{"/4"},{"/3"},{"/25"},{"/2"},{"/.6"},{"/.3"},
+    {"off"},{"x.3"},{"x.6"},{"x2"},{"x25"},{"x3"},{"x4"},{"x5"},{"x6"},{"x7"},{"x8"},
+};
 
 static const char shortNames[][4] = {
     {""}, {"coa"},{"fin"},{"atk"},{"dec"},{"eg2"},{"mod"},{"amt"},
@@ -112,6 +121,7 @@ static const char shortNames[][4] = {
     {"fch"},{"flw"},{"qnt"},{"trk"},{"val"},{"shu"},{"ssv"},
     {"x"},{"y"},{"flx"},{"mid"},{"mrt"},{"txf"},{"rxf"},
     {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},
+    {"sca"},
 };
 
 static const char catNames[][16] = {
@@ -138,7 +148,7 @@ static const char longNames[][16] = {
     {"Freqcy 1"},{"Freqcy 2"},{"Gain 1"},{"Gain 2"},
     {"Routing"},{"TxFilter"},{"RxFilter"},
     {"In PPQ"},{"Out1 PPQ"},{"Out2 PPQ"},{"Gate Mode"},{"PCReset"},
-    {"CPU use time"},{"OscIntrp"},
+    {"CPU use time"},{"OscIntrp"},{"Scale"},
 };
 
 #endif /* MENUTEXT_H_ */

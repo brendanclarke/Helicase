@@ -1,5 +1,10 @@
 # frontPanelParser Audit — AVR vs F765 Port Status
 
+**Session 028 status**: this audit is historical. `Core/MIDI/frontPanelParser.c/h`
+has now been deleted from the live firmware. Current code should not recreate a
+parser or bridge; use the direct owner APIs documented in
+`knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
+
 **Scope**: `frontPanelParser.c` (556 lines), `frontPanelParser.h` (167 lines),
 and every call site that touches `frontPanel_sendData()` / `frontPanel_parseData()`
 across the AVR front code: `menu.c`, `buttonHandler.c`, `copyClearTools.c`.

@@ -4,7 +4,7 @@
  *
  * Changes from original:
  *   - PROGMEM / pgm_read_* stripped — direct array access
- *   - frontPanel_sendData() → local single-chip protocol shim
+ *   - local controls call owning modules directly; no front-panel protocol shim
  *   - parameters2[] morph buffer declared here
  *   - screensaver_touch() → stub
  *   - copyClear_isClearModeActive() → always returns 0
@@ -42,10 +42,14 @@
 #include "AudioCodecManager.h"
 #include "timebase.h"
 #include "presetManager.h"
-#include "frontPanelParser.h"
 #include "filesystem.h"
 #include "SampleMemory.h"
 #include "sequencer.h"
+#include "PatternData.h"
+#include "EuklidGenerator.h"
+#include "SomGenerator.h"
+#include "triggerJacks.h"
+#include "MidiParser.h"
 #include "modulationNode.h"
 #include <string.h>
 #include <stdint.h>
@@ -64,6 +68,23 @@ static uint8_t menu_globalApplyActive = 0;
 static uint8_t menu_globalApplyResetSave = 0;
 static uint8_t menu_globalApplyRepaintAll = 0;
 static uint16_t menu_globalApplyIndex = PAR_BEGINNING_OF_GLOBALS;
+
+/* Runtime sound-apply completion flags.
+**
+** Kit, ALL, and performance loads all need the same six-voice modulation
+** routing apply, but their follow-up work differs. These flags let the
+** chunked apply path finish with the exact same UI/sequencer/global side
+** effects that the old synchronous switch cases performed in one pass. */
+static uint8_t menu_soundApplyActive = 0;
+static uint8_t menu_soundApplyUpdateGap = 0;
+static uint8_t menu_soundApplyResetSave = 0;
+static uint8_t menu_soundApplyRepaintAll = 0;
+static uint8_t menu_soundApplyStartGlobals = 0;
+static uint8_t menu_soundApplyRequestPattern = 0;
+static uint8_t menu_soundApplyApplyPerformanceGlobals = 0;
+static uint8_t menu_soundApplyClearStorageBusy = 0;
+static uint8_t menu_soundApplyShowStaleWarning = 0;
+static fs_stale_warning_source_t menu_soundApplyStaleWarning = FS_STALE_WARNING_NONE;
 static uint8_t menu_staleWarningActive = 0;
 static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
@@ -165,14 +186,171 @@ static void menu_showStaleSettingsWarning(fs_stale_warning_source_t src)
     menu_staleWarningStart = time_sysTick;
 }
 
+/* Start loaded-sound apply.
+**
+** Before audio starts, keep the old synchronous behavior: boot loading can do
+** all post-load work immediately because no DMA deadline exists yet. After
+** audio has rendered at least once, only arm the chunked preset apply and let
+** menu_tickSoundApply() finish the operation over foreground passes. */
+static void menu_startSoundApply(uint8_t updateGap,
+                                 uint8_t resetSave,
+                                 uint8_t repaintAll,
+                                 uint8_t startGlobals,
+                                 uint8_t requestPattern,
+                                 uint8_t applyPerformanceGlobals,
+                                 uint8_t clearStorageBusy,
+                                 uint8_t showStaleWarning,
+                                 fs_stale_warning_source_t staleWarning)
+{
+    if (audioCodec_renderCount == 0u) {
+        preset_sendDrumsetParameters();
+        if (updateGap) {
+            menu_TargetVoiceGapIndex = getModTargetGapIndex(
+                parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
+        }
+        if (applyPerformanceGlobals) {
+            menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
+            menu_parseGlobalParam(PAR_BAR_RESET_MODE,
+                                  parameter_values[PAR_BAR_RESET_MODE]);
+        }
+        if (startGlobals)
+            menu_startGlobalApply(resetSave, repaintAll);
+        if (requestPattern)
+            /*
+             * Loaded kit/all data can change pattern-level edit parameters.
+             *
+             * Old behavior: Menu asked frontPanelParser to send pattern values
+             * back through the opcode path. New behavior: PatternData owns
+             * pattern settings and copies the viewed pattern's values directly
+             * into menu parameter_values before any repaint.
+             *
+             * Input: current viewed pattern from Menu. Output: pattern settings
+             * such as change bar/next pattern are refreshed for display.
+             *
+             * Risk: this is the boot/no-audio synchronous path. The foreground
+             * chunked path below has the same call in menu_finishSoundApply().
+             */
+            pat_applyPatternSettingsToMenu(menu_getViewedPattern());
+        if (clearStorageBusy)
+            menu_storageBusy = 0u;
+        if (resetSave && !startGlobals)
+            menu_resetSaveParameters();
+        if (repaintAll && !startGlobals)
+            menu_repaintAll();
+        if (showStaleWarning)
+            menu_showStaleSettingsWarning(staleWarning);
+        return;
+    }
+
+    menu_soundApplyActive = 1u;
+    menu_soundApplyUpdateGap = updateGap;
+    menu_soundApplyResetSave = resetSave;
+    menu_soundApplyRepaintAll = repaintAll;
+    menu_soundApplyStartGlobals = startGlobals;
+    menu_soundApplyRequestPattern = requestPattern;
+    menu_soundApplyApplyPerformanceGlobals = applyPerformanceGlobals;
+    menu_soundApplyClearStorageBusy = clearStorageBusy;
+    menu_soundApplyShowStaleWarning = showStaleWarning;
+    menu_soundApplyStaleWarning = staleWarning;
+    preset_startDrumsetApply();
+}
+
+static void menu_finishSoundApply(void)
+{
+    menu_soundApplyActive = 0u;
+
+    if (menu_soundApplyUpdateGap) {
+        menu_TargetVoiceGapIndex = getModTargetGapIndex(
+            parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
+    }
+
+    if (menu_soundApplyApplyPerformanceGlobals) {
+        menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
+        menu_parseGlobalParam(PAR_BAR_RESET_MODE,
+                              parameter_values[PAR_BAR_RESET_MODE]);
+    }
+
+    if (menu_soundApplyStartGlobals)
+        menu_startGlobalApply(menu_soundApplyResetSave,
+                              menu_soundApplyRepaintAll);
+
+    if (menu_soundApplyRequestPattern)
+        /*
+         * Completes the foreground/chunked equivalent of the boot-time pattern
+         * refresh above. PatternData is called only after preset drumset apply
+         * has finished so parameter_values does not mix old sound state with
+         * newly loaded pattern settings.
+         */
+        pat_applyPatternSettingsToMenu(menu_getViewedPattern());
+
+    if (menu_soundApplyClearStorageBusy)
+        menu_storageBusy = 0u;
+
+    /* When globals are started here, their existing finish path owns the
+    ** reset/repaint flags. Non-container operations still do those follow-ups
+    ** directly after the sound apply completes. */
+    if (!menu_soundApplyStartGlobals) {
+        if (menu_soundApplyResetSave)
+            menu_resetSaveParameters();
+        if (menu_soundApplyRepaintAll)
+            menu_repaintAll();
+    }
+
+    if (menu_soundApplyShowStaleWarning) {
+        if (menu_soundApplyStartGlobals &&
+            menu_soundApplyStaleWarning == FS_STALE_WARNING_ALL) {
+            menu_pendingAllStaleWarning = 1u;
+        } else {
+            menu_showStaleSettingsWarning(menu_soundApplyStaleWarning);
+        }
+    }
+
+    menu_soundApplyUpdateGap = 0u;
+    menu_soundApplyResetSave = 0u;
+    menu_soundApplyRepaintAll = 0u;
+    menu_soundApplyStartGlobals = 0u;
+    menu_soundApplyRequestPattern = 0u;
+    menu_soundApplyApplyPerformanceGlobals = 0u;
+    menu_soundApplyClearStorageBusy = 0u;
+    menu_soundApplyShowStaleWarning = 0u;
+    menu_soundApplyStaleWarning = FS_STALE_WARNING_NONE;
+}
+
+/* Tick one bounded unit of loaded-sound apply.
+**
+** Returning 1 tells menu_pollPresetStatus() to stop for this pass, giving the
+** main loop another audio_check_and_render() opportunity before any other
+** preset completion work is handled. */
+static uint8_t menu_tickSoundApply(void)
+{
+    if (!menu_soundApplyActive)
+        return 0u;
+
+    if (preset_tickDrumsetApply())
+        return 1u;
+
+    menu_finishSoundApply();
+    return 1u;
+}
+
 static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
 {
     if (paramNr >= PAR_VEL_DEST_1 && paramNr <= PAR_VEL_DEST_6) {
+        /*
+         * Velocity modulation destinations are Preset voice routing state.
+         *
+         * The old front-panel opcode path only converted a menu parameter into
+         * the same per-voice target write. Menu now resolves the mod target
+         * table and calls Preset directly.
+         *
+         * Inputs: paramNr selects voice 0..5, value indexes modTargets[].
+         * Output: Preset updates that voice's velocity modulation target.
+         * Risk: value must already be a valid menu/modTargets index, matching
+         * the historical menu contract.
+         */
         uint8_t voiceNr = (uint8_t)(paramNr - PAR_VEL_DEST_1);
         uint16_t target = modTargets[value].param;
-        uint8_t upper = (uint8_t)(((target & 0x80u) >> 7) | ((voiceNr & 0x3fu) << 1));
-        uint8_t lower = (uint8_t)(target & 0x7fu);
-        frontPanel_sendData(CC_VELO_TARGET, upper, lower);
+        preset_applyVelocityModTarget(voiceNr, target);
         return;
     }
 
@@ -186,21 +364,136 @@ static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
     }
 
     if (paramNr >= PAR_TARGET_LFO1 && paramNr <= PAR_TARGET_LFO6) {
+        /*
+         * LFO modulation destinations are Preset modulation routing state.
+         *
+         * Menu keeps the target-gap helper because it is display/menu mapping
+         * logic. Preset receives the resolved parameter id and applies it to
+         * the sound engine directly, replacing the parser CC bridge.
+         *
+         * Inputs: paramNr selects LFO voice index, value indexes modTargets[].
+         * Output: Preset updates the LFO modulation target and Menu updates the
+         * cached target-gap index used by the voice LFO selector.
+         */
         uint8_t lfoNr = (uint8_t)(paramNr - PAR_TARGET_LFO1);
         uint16_t target = modTargets[value].param;
-        uint8_t upper = (uint8_t)(((target & 0x80u) >> 7) | ((lfoNr & 0x3fu) << 1));
-        uint8_t lower = (uint8_t)(target & 0x7fu);
         menu_TargetVoiceGapIndex = getModTargetGapIndex(value);
-        frontPanel_sendData(CC_LFO_TARGET, upper, lower);
+        preset_applyLfoModTarget(lfoNr, target);
         return;
     }
 
+    /*
+     * Sound parameter writes now go straight to Preset.
+     *
+     * The front-panel parser previously split SET_P1/SET_P2-style opcodes by
+     * parameter range. With one CPU, Menu can call the Preset API directly for
+     * all sound parameters and leave true global parameters to
+     * menu_parseGlobalParam().
+     *
+     * Input: paramNr/value are already the canonical menu parameter pair.
+     * Output: Preset updates parameter_values/DSP state when requested by its
+     * API. Risk: callers must keep using menu_parseGlobalParam for globals so
+     * sequencer, MIDI, trigger, Pattern, and SOM side effects still occur.
+     */
     if (paramNr < 128)
-        frontPanel_sendData(MIDI_CC, (uint8_t)paramNr, value);
+        preset_applySoundParameter(paramNr, value, 1);
     else if (paramNr < END_OF_SOUND_PARAMETERS)
-        frontPanel_sendData(CC_2, (uint8_t)(paramNr - 128), value);
+        preset_applySoundParameter(paramNr, value, 1);
     else
         menu_parseGlobalParam(paramNr, value);
+}
+
+uint8_t menu_paramUsesMorphView(uint16_t paramNr)
+{
+    /*
+     * Decide whether one menu parameter should read/write the morph endpoint.
+     *
+     * Why: SHIFT+VOICE mode is an overlay on ordinary voice pages, not a copy
+     * of the page table. This guard keeps the alternate buffer restricted to
+     * sound parameters that are actually being displayed on VOICE1..VOICE7.
+     *
+     * Inputs: paramNr is the canonical ParameterArray id from menuPages.
+     * Output: nonzero means display/edit uses parameters2[] instead of
+     * parameter_values[]. Clients: repaint and edit helpers below. Risk:
+     * parameter 127 is still excluded because the active sound apply path cannot
+     * encode it safely, and non-voice pages must never redirect to morph data.
+     */
+    if (!voiceModeShowMorph)
+        return 0u;
+    if (menu_activePage > VOICE7_PAGE)
+        return 0u;
+    if (paramNr == PAR_NONE || paramNr == 127u)
+        return 0u;
+    return (uint8_t)(paramNr < END_OF_SOUND_PARAMETERS);
+}
+
+uint8_t menu_getParameterDisplayValue(uint16_t paramNr)
+{
+    /*
+     * Read one visible menu value from the active UI buffer.
+     *
+     * Inputs: canonical parameter id. Output: the value currently meant for
+     * display: morph endpoint when menu_paramUsesMorphView() is true, otherwise
+     * the normal parameter_values[] value. Clients are display formatting and
+     * dtype clamp code that needs linked parameter values. Invalid ids read as
+     * zero so a malformed page cell cannot index outside Menu-owned storage.
+     */
+    if (menu_paramUsesMorphView(paramNr))
+        return parameters2[paramNr];
+    if (paramNr < NUM_PARAMS)
+        return parameter_values[paramNr];
+    return 0u;
+}
+
+uint8_t *menu_getParameterEditPtr(uint16_t paramNr)
+{
+    /*
+     * Return the mutable menu buffer slot for one editable parameter.
+     *
+     * Inputs: canonical parameter id. Output: pointer into parameters2[] for
+     * morph voice mode, pointer into parameter_values[] otherwise, or NULL for
+     * invalid ids. Clients: encoder and endless-pot edit paths. Confederates:
+     * commits still go through menu_sendEditedParameter() so the write target
+     * and side effects stay paired.
+     */
+    if (menu_paramUsesMorphView(paramNr))
+        return &parameters2[paramNr];
+    if (paramNr < NUM_PARAMS)
+        return &parameter_values[paramNr];
+    return 0;
+}
+
+static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value)
+{
+    /*
+     * Commit one edited parameter to the correct owner.
+     *
+     * Why: active-kit edits and morph-endpoint edits share the same voice-page
+     * UI but have different side effects. Active edits must update DSP and may
+     * record automation through Preset. Morph edits must update parameters2[]
+     * only, then refresh the current morph interpolation without overwriting
+     * parameter_values[].
+     *
+     * Inputs: paramNr/value after dtype clamping. Outputs: either normal active
+     * sound/global application or morph endpoint storage plus a morph refresh.
+     * Clients: menu_encoderChangeParameter() and menu_parseKnobDelta(). Risk:
+     * calling preset_applySoundParameter() for morph edits would collapse the
+     * active kit and morph endpoint into the same value, destroying morph range.
+     */
+    if (menu_paramUsesMorphView(paramNr)) {
+        if (paramNr >= PAR_VOICE_LFO1 && paramNr <= PAR_VOICE_LFO6) {
+            uint8_t lfoNr = (uint8_t)(paramNr - PAR_VOICE_LFO1);
+            uint8_t newTargVal = getModTargetIdxFromGapIdx((uint8_t)(value - 1u),
+                                                           menu_TargetVoiceGapIndex);
+            parameters2[PAR_TARGET_LFO1 + lfoNr] = newTargVal;
+        } else if (paramNr >= PAR_TARGET_LFO1 && paramNr <= PAR_TARGET_LFO6) {
+            menu_TargetVoiceGapIndex = getModTargetGapIndex(value);
+        }
+        preset_morph(parameter_values[PAR_MORPH]);
+        return;
+    }
+
+    menu_sendSoundParameter(paramNr, value);
 }
 
 static void menu_setStorageMessage(const char *message, const char *detail)
@@ -270,6 +563,18 @@ static void menu_loadSamplesModal(void)
 ** ----------------------------------------------------------------------- */
 uint8_t parameter_values[NUM_PARAMS];
 uint8_t parameters2[END_OF_SOUND_PARAMETERS];
+/*
+ * Voice-page morph endpoint overlay flag.
+ *
+ * Why: SHIFT+VOICE uses the existing VOICE page tables and edit mechanics but
+ * must resolve sound parameter values against parameters2[] instead of the
+ * active-kit parameter_values[]. Input/client: buttonHandler sets this through
+ * menu_setVoiceModeShowMorph(). Output: repaint, encoder, and endless-pot edit
+ * helpers choose the correct Menu-owned buffer. Risk: this is intentionally a
+ * view/edit overlay only; non-voice pages and non-sound parameters must stay on
+ * parameter_values[].
+ */
+uint8_t voiceModeShowMorph = 0;
 
 /* -----------------------------------------------------------------------
 ** Dtype table — exact port of original, PROGMEM removed
@@ -509,9 +814,9 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     /*PAR_STEP_VOLUME*/       DTYPE_0B127,
     /*PAR_STEP_PROB*/         DTYPE_0B127,
     /*PAR_STEP_NOTE*/         DTYPE_NOTE_NAME,
-    /*PAR_EUKLID_LENGTH*/     DTYPE_1B16,
-    /*PAR_EUKLID_STEPS*/      DTYPE_1B16,
-    /*PAR_EUKLID_ROTATION*/   DTYPE_0B15,
+    /*PAR_EUKLID_LENGTH*/     DTYPE_1B128,
+    /*PAR_EUKLID_STEPS*/      DTYPE_1B128,
+    /*PAR_EUKLID_ROTATION*/   DTYPE_0B127,
     /*PAR_AUTOM_TRACK*/       DTYPE_0b1,
     /*PAR_P1_DEST*/           DTYPE_AUTOM_TARGET,
     /*PAR_P2_DEST*/           DTYPE_AUTOM_TARGET,
@@ -520,12 +825,15 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     /*PAR_SHUFFLE*/           DTYPE_0B127,
     /*PAR_PATTERN_BEAT*/      DTYPE_0B127,
     /*PAR_PATTERN_NEXT*/      DTYPE_MENU|(MENU_NEXT_PATTERN<<4),
-    /*PAR_TRACK_LENGTH*/      DTYPE_1B16,
+    /*PAR_TRACK_LENGTH*/      DTYPE_1B128,
     /*PAR_POS_X*/             DTYPE_0B127,
     /*PAR_POS_Y*/             DTYPE_0B127,
     /*PAR_FLUX*/              DTYPE_0B127,
     /*PAR_SOM_FREQ*/          DTYPE_0B127,
     /*PAR_TRACK_ROTATION*/    DTYPE_1B16,
+    /*PAR_TRACK_SCALE*/       DTYPE_MENU|(MENU_TRACK_SCALE<<4),
+    /*PAR_TRACK_MIDI_CHAN*/   DTYPE_1B16,
+    /*PAR_TRACK_MIDI_NOTE*/   DTYPE_NOTE_NAME,
     /*PAR_BPM*/               DTYPE_0B255,
     /*PAR_MIDI_CHAN_1*/        DTYPE_1B16,
     /*PAR_MIDI_CHAN_2*/        DTYPE_1B16,
@@ -641,6 +949,7 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_CHANNEL,CAT_MIDI,LONG_MIDI_CHANNEL},
     {SHORT_CPU_USE,CAT_GLOBAL,LONG_CPU_USE_TIME},
     {SHORT_OSC_INTERP,CAT_GLOBAL,LONG_OSC_INTERP},
+    {SHORT_SCALE,CAT_PATTERN,LONG_SCALE},
 };
 
 /* -----------------------------------------------------------------------
@@ -651,6 +960,7 @@ static uint8_t menuIndex = 0;
 uint8_t menu_numSamples = 0;
 uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 uint8_t menu_shownPattern = 0;
+uint8_t menu_currentBar = 0;
 uint8_t menu_muteModeActive = 0;
 
 char currentDisplayBuffer[2][16];
@@ -717,6 +1027,25 @@ static uint8_t menu_isLoadSaveSelectionCurrent(void)
                      preset_getRequestSlot() == menu_currentPresetNr[what]);
 }
 
+/* Request the filesystem action that corresponds to the current Load/Save page
+ * selection.
+ *
+ * Why this exists: the Load/Save UI has two different browsing behaviors. Most
+ * types only need an async name read while the encoder moves. Kit and morph kit
+ * loading on the Load page historically loaded immediately when the slot
+ * changed, and that behavior is preserved.
+ *
+ * Input: loadKitOnLoadPage is nonzero when an encoder movement on LOAD_PAGE
+ * should initiate preset_loadDrumset() instead of just preset_loadName().
+ * Outputs: starts a presetManager/filesystem request or sets
+ * menu_deferSelectionRequest so menu_pollPresetStatus() can retry after the
+ * single filesystem operation slot becomes free.
+ *
+ * Affiliates/clients: menu_handleLoadSaveMenu() calls this after type/slot
+ * changes. preset_loadDrumset(slot, morph=0) is the path that initiates a
+ * Phase 2 Kit/ directory load; preset_loadDrumset(slot, morph=1) still uses the
+ * legacy morph .SND load path. preset_loadName() is the name-only client.
+ */
 static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
 {
     uint8_t what = menu_saveOptions.what;
@@ -828,6 +1157,7 @@ static uint8_t getMaxEntriesForMenu(uint8_t menuId)
     case MENU_MIDI_FILTERING:return (uint8_t)midiFilterNames[0][0];
     case MENU_PPQ:           return (uint8_t)ppqNames[0][0];
     case MENU_EXT_SYNC:      return (uint8_t)extSyncNames[0][0];
+    case MENU_TRACK_SCALE:    return (uint8_t)trackScaleNames[0][0];
     default: return 0;
     }
 }
@@ -873,6 +1203,7 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     case MENU_MIDI_FILTERING: p = midiFilterNames[curParmVal+1];    break;
     case MENU_PPQ:            p = ppqNames[curParmVal+1];           break;
     case MENU_EXT_SYNC:       p = extSyncNames[curParmVal+1];       break;
+    case MENU_TRACK_SCALE:    p = trackScaleNames[curParmVal+1];    break;
     default: break;
     }
     buf[0]=p[0]; buf[1]=p[1]?p[1]:' '; buf[2]=p[2]?p[2]:' ';
@@ -1071,6 +1402,19 @@ void menu_repaint(void)
 /* -----------------------------------------------------------------------
 ** menu_repaintLoadSavePage — close port of original
 ** ----------------------------------------------------------------------- */
+/* Paint the two-line Load/Save page into editDisplayBuffer.
+ *
+ * Why this needed a Phase 2 change: the Load page now displays Kit/ directory
+ * slots using filesystem_kitSlotName() from the scan cache, not the currently
+ * loaded preset_currentName or a legacy .SND name header. The visible kit
+ * number is one-based to match folders like 001 Name, while
+ * menu_currentPresetNr[] remains zero-based for presetManager/filesystem calls.
+ *
+ * Inputs: menu_activePage, menu_saveOptions, menu_currentPresetNr[],
+ * preset_currentName, editModeActive. Outputs: editDisplayBuffer plus optional
+ * cursor intent for name editing. Clients: menu_repaint() whenever LOAD_PAGE or
+ * SAVE_PAGE needs a redraw.
+ */
 static void menu_repaintLoadSavePage(void)
 {
     /* Clear both rows so any indicator (>, [, ]) that moved from its
@@ -1108,7 +1452,15 @@ static void menu_repaintLoadSavePage(void)
 
     /* Bottom row */
     if (menu_saveOptions.what < SAVE_TYPE_GLO) {
-        numtostrpu(&editDisplayBuffer[1][1], menu_currentPresetNr[menu_saveOptions.what], ' ');
+        uint8_t displayPreset = menu_currentPresetNr[menu_saveOptions.what];
+        const char *displayName = preset_currentName;
+
+        if (menu_activePage == LOAD_PAGE && menu_saveOptions.what == SAVE_TYPE_KIT) {
+            displayPreset = (uint8_t)(displayPreset + 1u);
+            displayName = filesystem_kitSlotName(menu_currentPresetNr[SAVE_TYPE_KIT]);
+        }
+
+        numtostrpu(&editDisplayBuffer[1][1], displayPreset, ' ');
         if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
             if (editModeActive) {
                 editDisplayBuffer[1][0] = '[';
@@ -1117,7 +1469,7 @@ static void menu_repaintLoadSavePage(void)
                 editDisplayBuffer[1][0] = ARROW_SIGN;
             }
         }
-        memcpy(&editDisplayBuffer[1][5], preset_currentName, 8);
+        memcpy(&editDisplayBuffer[1][5], displayName, 8);
     }
 
     if (menu_activePage == SAVE_PAGE) {
@@ -1178,7 +1530,7 @@ static void menu_repaintGeneric(void)
             return;
         }
 
-        curParmVal = parameter_values[parNr];
+        curParmVal = menu_getParameterDisplayValue(parNr);
 
         memset(&editDisplayBuffer[0][0], ' ', 16);
         memset(&editDisplayBuffer[1][0], ' ', 16);
@@ -1233,7 +1585,8 @@ static void menu_repaintGeneric(void)
                 numtostrps(&editDisplayBuffer[1][13], (int8_t)(curParmVal - 63));
                 break;
             case DTYPE_NOTE_NAME:
-                if (parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7 && curParmVal==0)
+                if (((parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7) ||
+                     parNr == PAR_TRACK_MIDI_NOTE) && curParmVal==0)
                     memcpy(&editDisplayBuffer[1][13], menuText_any, 3);
                 else
                     setNoteName(curParmVal, &editDisplayBuffer[1][13]);
@@ -1245,6 +1598,7 @@ static void menu_repaintGeneric(void)
             case DTYPE_0B127:
             case DTYPE_0B255:
             case DTYPE_1B16:
+            case DTYPE_1B128:
             case DTYPE_0B15:
             case DTYPE_VOICE_LFO:
                 numtostrpu(&editDisplayBuffer[1][13], curParmVal, ' ');
@@ -1281,7 +1635,7 @@ static void menu_repaintGeneric(void)
             } else if (parNr == PAR_RUNTIME_CPU_USE) {
                 menu_formatCpuUsePercent3(valueAsText);
             } else {
-                curParmVal = parameter_values[parNr];
+                curParmVal = menu_getParameterDisplayValue(parNr);
                 switch (parameter_dtypes[parNr] & 0x0F) {
                 case DTYPE_TARGET_SELECTION_VELO:
                 case DTYPE_TARGET_SELECTION_LFO:
@@ -1294,7 +1648,8 @@ static void menu_repaintGeneric(void)
                     numtostrps(valueAsText, (int8_t)(curParmVal - 63));
                     break;
                 case DTYPE_NOTE_NAME:
-                    if (parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7 && curParmVal==0)
+                    if (((parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7) ||
+                         parNr == PAR_TRACK_MIDI_NOTE) && curParmVal==0)
                         memcpy(valueAsText, menuText_any, 3);
                     else
                         setNoteName(curParmVal, valueAsText);
@@ -1341,7 +1696,10 @@ static void menu_encoderChangeParameter(int8_t inc)
     if (paramNr == PAR_RUNTIME_CPU_USE || paramNr >= NUM_PARAMS)
         return;
 
-    uint8_t *paramValue = &parameter_values[paramNr];
+    uint8_t *paramValue = menu_getParameterEditPtr(paramNr);
+
+    if (!paramValue)
+        return;
 
     /* Apply inc with proper saturation. The original AVR code only checked
     ** for the boundary value (255 for CW, >= -inc for CCW), which worked when
@@ -1375,9 +1733,13 @@ static void menu_encoderChangeParameter(int8_t inc)
         /* _SEQUENCER_ADD_SPIKE_: linked TARGET_LFO update/sending is handled in
         ** menu_sendSoundParameter(), matching the AVR combined behavior. */
         break; }
-    case DTYPE_TARGET_SELECTION_LFO: 
+    case DTYPE_TARGET_SELECTION_LFO:
     {
-        uint8_t voiceNr =  (uint8_t)(parameter_values[PAR_VOICE_LFO1+(paramNr - PAR_TARGET_LFO1)]-1);
+        uint8_t linkedVoice = menu_getParameterDisplayValue((uint16_t)(PAR_VOICE_LFO1+(paramNr - PAR_TARGET_LFO1)));
+        uint8_t voiceNr;
+        if (linkedVoice < 1u || linkedVoice > 6u)
+            linkedVoice = 1u;
+        voiceNr = (uint8_t)(linkedVoice - 1u);
         if(*paramValue < (modTargetVoiceOffsets[voiceNr].start)) {
             if(inc < 0) // going down, allow 0
                 *paramValue=0;
@@ -1408,6 +1770,10 @@ static void menu_encoderChangeParameter(int8_t inc)
         if (*paramValue < 1) *paramValue = 1;
         else if (*paramValue > 16) *paramValue = 16;
         break;
+    case DTYPE_1B128:
+        if (*paramValue < 1) *paramValue = 1;
+        else if (*paramValue > 128) *paramValue = 128;
+        break;
     case DTYPE_0B15:
         if (*paramValue > 15) *paramValue = 15;
         break;
@@ -1427,7 +1793,7 @@ static void menu_encoderChangeParameter(int8_t inc)
         break;
     }
 
-    menu_sendSoundParameter(paramNr, *paramValue);
+    menu_sendEditedParameter(paramNr, *paramValue);
 }
 
 /* -----------------------------------------------------------------------
@@ -1486,7 +1852,20 @@ checkvalid:
 }
 
 /* -----------------------------------------------------------------------
-** menu_handleLoadSaveMenu — exact port of original
+** menu_handleLoadSaveMenu
+**
+** Handles encoder and OK-button input while the active page is Load or Save.
+**
+** Inputs: inc is the signed encoder delta; btnClicked is nonzero for the OK
+** button edge. Outputs: updates menu_saveOptions/menu_currentPresetNr, starts
+** preset save/load requests, edits preset_currentName on the Save page, and
+** requests display/name refreshes through menu_requestCurrentLoadSaveSelection.
+**
+** Phase 2 kit-load affiliate: when the Load page is editing a kit slot, encoder
+** movement calls menu_requestCurrentLoadSaveSelection(1), which calls
+** preset_loadDrumset(slot, 0). That eventually starts filesystem's directory
+** kit loader for Kit/NNN Name. The Save page still follows the existing save
+** paths until the new save functions are implemented.
 ** ----------------------------------------------------------------------- */
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
@@ -1553,10 +1932,13 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             break;
         case SAVE_STATE_EDIT_PRESET_NR: {
             /* Saturating add - original `kit > 0` and `kit <= 125` checks
-            ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. */
+            ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. Kits use
+            ** 0..127 internally so they can display/open 001..128 folders;
+            ** the older numbered file pools remain capped at 0..125 here. */
+            int16_t maxPreset = (menu_saveOptions.what == SAVE_TYPE_KIT) ? 127 : 125;
             int16_t newPreset = (int16_t)menu_currentPresetNr[menu_saveOptions.what] + (int16_t)inc;
             if (newPreset < 0)        newPreset = 0;
-            else if (newPreset > 125) newPreset = 125;
+            else if (newPreset > maxPreset) newPreset = maxPreset;
             menu_currentPresetNr[menu_saveOptions.what] = (uint8_t)newPreset;
             if (inc != 0) {
                 if (menu_activePage == LOAD_PAGE) {
@@ -1772,8 +2154,10 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 
     if (parNr == PAR_NONE || parNr >= NUM_PARAMS) return;
 
-    uint8_t *pv = &parameter_values[parNr];
+    uint8_t *pv = menu_getParameterEditPtr(parNr);
     int16_t inc = delta;
+
+    if (!pv) return;
 
     int16_t next = (int16_t)(*pv) + inc;
     if (next < 0) next = 0;
@@ -1795,7 +2179,11 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
         else if (*pv > 6) *pv = 6;
         break;
     case DTYPE_TARGET_SELECTION_LFO: {
-        uint8_t voiceNr = (uint8_t)(parameter_values[PAR_VOICE_LFO1 + (parNr - PAR_TARGET_LFO1)] - 1);
+        uint8_t linkedVoice = menu_getParameterDisplayValue((uint16_t)(PAR_VOICE_LFO1 + (parNr - PAR_TARGET_LFO1)));
+        uint8_t voiceNr;
+        if (linkedVoice < 1u || linkedVoice > 6u)
+            linkedVoice = 1u;
+        voiceNr = (uint8_t)(linkedVoice - 1u);
         if (*pv < modTargetVoiceOffsets[voiceNr].start) {
             *pv = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
         } else if (*pv > modTargetVoiceOffsets[voiceNr].end) {
@@ -1804,13 +2192,14 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
         break; }
     case DTYPE_0B255: break;
     case DTYPE_1B16: if (*pv<1)*pv=1; else if(*pv>16)*pv=16; break;
+    case DTYPE_1B128: if (*pv<1)*pv=1; else if(*pv>128)*pv=128; break;
     case DTYPE_0B15: if (*pv>15)*pv=15; break;
     case DTYPE_MIX_FM: case DTYPE_ON_OFF: case DTYPE_0b1: if(*pv>1)*pv=1; break;
     case DTYPE_MENU: { uint8_t n=getMaxEntriesForMenu((uint8_t)(parameter_dtypes[parNr]>>4)); if(*pv>=n)*pv=(uint8_t)(n-1); break; }
     default: case DTYPE_0B127: if(*pv>127)*pv=127; break;
     }
 
-    menu_sendSoundParameter(parNr, *pv);
+    menu_sendEditedParameter(parNr, *pv);
     menu_knobs_dirty = 1;
 }
 
@@ -1895,6 +2284,13 @@ void menu_pollPresetStatus(void)
     uint8_t retrySelectionAfterAck = 0;
     uint8_t retrySelectionLoadKit = 0;
 
+    /* Sound apply runs before globals because ALL/performance completion first
+    ** installs loaded modulation routing, then starts any global apply that
+    ** belongs to the container. Keep both paths one bounded unit per
+    ** foreground pass. */
+    if (menu_tickSoundApply())
+        return;
+
     if (menu_tickGlobalApply())
         return;
 
@@ -1941,14 +2337,9 @@ void menu_pollPresetStatus(void)
             break;
         }
 
-        /* Validate mod target indices after filesystem load completion */
         menu_normalizeSoundModTargets(parameter_values);
-        /* Send parameters to DSP */
-        preset_sendDrumsetParameters();
-        /* Update mod target gap index - was at the old call site */
-        menu_TargetVoiceGapIndex = getModTargetGapIndex(
-            parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
-        menu_repaintAll();
+        menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 0u, 0u,
+                             FS_STALE_WARNING_NONE);
         break;
     }
 
@@ -1991,7 +2382,7 @@ void menu_pollPresetStatus(void)
         break;
 
     case PRESET_OP_PATTERN_LOAD:
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, 0);
+        pat_applyPatternSettingsToMenu(menu_getViewedPattern());
         menu_storageBusy = 0;
         menu_resetSaveParameters();
         menu_repaintAll();
@@ -2001,24 +2392,16 @@ void menu_pollPresetStatus(void)
     {
         fs_stale_warning_source_t stale_src = filesystem_takeStaleGlobalsWarning();
         menu_normalizeSoundModTargets(parameter_values);
-        preset_sendDrumsetParameters();
-        menu_startGlobalApply(1u, 1u);
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, 0);
-        menu_storageBusy = 0;
-        if (stale_src == FS_STALE_WARNING_ALL)
-            menu_pendingAllStaleWarning = 1u;
+        menu_startSoundApply(0u, 1u, 1u, 1u, 1u, 0u, 1u,
+                             (uint8_t)(stale_src == FS_STALE_WARNING_ALL),
+                             stale_src);
         break;
     }
 
     case PRESET_OP_PERFORMANCE_LOAD:
         menu_normalizeSoundModTargets(parameter_values);
-        preset_sendDrumsetParameters();
-        menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
-        menu_parseGlobalParam(PAR_BAR_RESET_MODE, parameter_values[PAR_BAR_RESET_MODE]);
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_PATTERN_PARAMS, 0);
-        menu_storageBusy = 0;
-        menu_resetSaveParameters();
-        menu_repaintAll();
+        menu_startSoundApply(0u, 1u, 1u, 0u, 1u, 1u, 1u, 0u,
+                             FS_STALE_WARNING_NONE);
         break;
 
     case PRESET_OP_KIT_SAVE:
@@ -2115,6 +2498,7 @@ void menu_switchPage(uint8_t pageNr)
     switch (pageNr) {
     case MENU_MIDI_PAGE: {
         uint8_t toggle = (menu_activePage == MENU_MIDI_PAGE);
+        menu_setVoiceModeShowMorph(0u);
         menu_activePage = MENU_MIDI_PAGE;
         editModeActive = 0;
         lockPotentiometerFetch();
@@ -2134,12 +2518,26 @@ void menu_switchPage(uint8_t pageNr)
     case PERFORMANCE_PAGE:
     case PATTERN_SETTINGS_PAGE:
     case SEQ_PAGE:
+        menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;
         editModeActive = 0;
         lockPotentiometerFetch();
+        if (pageNr == SEQ_PAGE) {
+            /*
+             * STEP mode's front page is a track-settings view.
+             *
+             * menu_switchPage() repaints before returning, so the PatternData
+             * values must be copied into parameter_values here, not only in the
+             * button-layer LED refresh that runs after the page switch. If this
+             * sync happens after repaint, the LCD appears one voice-button
+             * press behind even though menu_activeVoice is already correct.
+             */
+            pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice());
+        }
         break;
 
     case LOAD_PAGE:
+        menu_setVoiceModeShowMorph(0u);
         if (menu_activePage == LOAD_PAGE)
             menu_activePage = SAVE_PAGE;
         else
@@ -2149,18 +2547,29 @@ void menu_switchPage(uint8_t pageNr)
         break;
 
     default: /* voice pages */
+        if (pageNr > VOICE7_PAGE)
+            menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;
         if (pageNr < 7)
             menu_setActiveVoice(pageNr);
         editModeActive = 0;
         lockPotentiometerFetch();
         {
-            /* _SEQUENCER_ADD_SPIKE_: AVR parity - query sequencer-owned step LEDs
-            ** for currently selected track/pattern whenever we enter voice pages. */
+            /*
+             * Entering a voice page also changes the active Pattern track view.
+             *
+             * Menu owns active voice/page state, ledHandler owns the physical
+             * step/bar LEDs, and PatternData owns track edit parameters.
+             * The old parser query has been replaced by those direct calls.
+             *
+             * Inputs: active voice from Menu and shown pattern from Menu.
+             * Output: visible sequencer LEDs and track-scoped parameter_values
+             * match the newly selected voice.
+             */
             uint8_t trackNr = menu_getActiveVoice();
             uint8_t patternNr = menu_shownPattern;
-            uint8_t value = (uint8_t)((trackNr << 4) | (patternNr & 0x7u));
-            frontPanel_sendData(LED_CC, LED_QUERY_SEQ_TRACK, value);
+            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
+            pat_applyTrackSettingsToMenu(patternNr, trackNr);
         }
         break;
     }
@@ -2218,86 +2627,206 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
     case PAR_MIDI_CHAN_6:
     case PAR_MIDI_CHAN_GLOBAL:
     {
+        /*
+         * MIDI channel parameters are MIDI parser configuration.
+         *
+         * The menu value is stored as 1..16 for display; MidiParser stores
+         * zero-based channels. Voice 7 is the historical global channel slot.
+         * This direct call replaces a parser opcode that only forwarded the
+         * same channel assignment.
+         */
         uint8_t voice;
         uint8_t channel = (uint8_t)(value - 1u);
         if (paramNr == PAR_MIDI_CHAN_GLOBAL)
             voice = 7u;
         else
             voice = (uint8_t)(paramNr - PAR_MIDI_CHAN_1);
-        /* _SEQUENCER_ADD_SPIKE_: route legacy midi-channel sequencer command through
-        ** local frontPanel protocol endpoint. */
-        frontPanel_sendData(SEQ_CC, SEQ_MIDI_CHAN, (uint8_t)((voice << 4) | channel));
+        midiParser_setChannel(voice, channel);
         break;
     }
 
     case PAR_POS_X:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, menu_getActiveVoice());
-        frontPanel_sendData(SEQ_CC, SEQ_POSX, value);
+        /*
+         * SOM parameters now call the SOM generator directly. These are
+         * generator controls under Core/Scene/Pattern, not sequencer transport
+         * messages. Inputs are menu-scaled 0..127 values.
+         */
+        som_setX(value);
         break;
 
     case PAR_POS_Y:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, menu_getActiveVoice());
-        frontPanel_sendData(SEQ_CC, SEQ_POSY, value);
+        som_setY(value);
         break;
 
     case PAR_FLUX:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, menu_getActiveVoice());
-        frontPanel_sendData(SEQ_CC, SEQ_FLUX, value);
+        /*
+         * Flux is stored by SOM as 0.0..1.0, while the menu exposes 0..127.
+         * Menu performs that UI-scale conversion at the direct call site.
+         */
+        som_setFlux((float)value / 127.0f);
         break;
 
     case PAR_SOM_FREQ:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, menu_getActiveVoice());
-        frontPanel_sendData(SEQ_CC, SEQ_SOM_FREQ, value);
+        /*
+         * SOM frequency is per active voice/track, so Menu supplies the active
+         * voice and SOM owns the generator state mutation.
+         */
+        som_setFreq(value, menu_getActiveVoice());
         break;
 
     case PAR_TRACK_LENGTH:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, menu_getActiveVoice());
-        frontPanel_sendData(SEQ_CC, SEQ_TRACK_LENGTH, value);
+        /*
+         * Track length is per-pattern/per-track data.
+         *
+         * PatternData owns the mutation; Menu supplies the viewed pattern and
+         * active voice because this edit targets what the user is looking at,
+         * not necessarily the currently playing pattern.
+         */
+        pat_setTrackLength(menu_getViewedPattern(), menu_getActiveVoice(), value);
         break;
 
+    case PAR_TRACK_SCALE:
+        /*
+         * Track scale is Pattern-owned runtime timing metadata. Menu supplies
+         * the active track/viewed pattern because the STEP front page edits the
+         * track currently in front of the user; PatternData stores the menu
+         * index and Sequencer reads the exact ratio during playback scheduling.
+         */
+        pat_setTrackScale(menu_getViewedPattern(), menu_getActiveVoice(), value);
+        break;
+
+    case PAR_TRACK_MIDI_CHAN:
+    {
+        /*
+         * Pattern-owned current-track MIDI channel for the STEP front page.
+         *
+         * PatternData is the storage owner for the track-settings page. The
+         * legacy PAR_MIDI_CHAN_* parameter and MidiParser channel are mirrored
+         * as a compatibility output so existing note routing keeps following
+         * the currently edited track setting until Phase 4/Scene routing fully
+         * replaces the old global MIDI channel ownership.
+         */
+        uint8_t track = menu_getActiveVoice();
+        uint16_t realParam = (track == 6u)
+            ? PAR_MIDI_CHAN_7
+            : (uint16_t)(PAR_MIDI_CHAN_1 + track);
+        pat_setTrackMidiChannel(menu_getViewedPattern(), track, value);
+        parameter_values[realParam] = value;
+        menu_parseGlobalParam(realParam, value);
+        break;
+    }
+
+    case PAR_TRACK_MIDI_NOTE:
+    {
+        /*
+         * Pattern-owned current-track MIDI note for the STEP front page.
+         *
+         * PatternData stores the value shown on the track settings page. The
+         * legacy per-voice note override is mirrored through Preset so existing
+         * MIDI playback/input code still sees the edited note while the broader
+         * Scene/Instrument ownership is pending.
+         */
+        uint8_t track = menu_getActiveVoice();
+        uint16_t realParam = (uint16_t)(PAR_MIDI_NOTE1 + track);
+        pat_setTrackMidiNote(menu_getViewedPattern(), track, value);
+        parameter_values[realParam] = value;
+        preset_applySoundParameter(realParam, value, 1);
+        break;
+    }
+
     case PAR_SHUFFLE:
-        frontPanel_sendData(SEQ_CC, SEQ_SHUFFLE, value);
+        /*
+         * Shuffle is a per-track Pattern timing setting.
+         *
+         * Menu supplies the viewed pattern and active track because the STEP
+         * front-page second half edits the track currently in front of the
+         * user. PatternData stores the value and Sequencer queries it per track
+         * when scheduling due events. This replaces the old global
+         * seq_shuffle bridge.
+         */
+        pat_setTrackShuffle(menu_getViewedPattern(), menu_getActiveVoice(), value);
         break;
 
     case PAR_AUTOM_TRACK:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_AUTOM_TRACK, value);
+        /*
+         * Active automation lane is Pattern edit context. Menu writes through
+         * PatternData so automation recording/editing state is centralized
+         * outside the front-panel parser.
+         */
+        pat_setActiveAutomationTrack(value);
         break;
 
     case PAR_P1_DEST:
     case PAR_P2_DEST:
     {
+        /*
+         * Automation destination edits mutate the selected Pattern step.
+         *
+         * Inputs: PAR_ACTIVE_STEP is the currently selected absolute step,
+         * active voice/viewed pattern come from Menu, and P1/P2 chooses
+         * automation lane 0/1. The menu value indexes modTargets[] and the
+         * Pattern stores the resolved parameter id.
+         *
+         * Output: PatternData updates the step automation destination.
+         * Risk: pat_setSelectedStep() preserves the old side effect where the
+         * active step was also pushed through the opcode path before the lane
+         * destination changed.
+         */
         uint16_t tmp = modTargets[value].param;
-        frontPanel_sendData(SEQ_CC, SEQ_SELECT_ACTIVE_STEP, parameter_values[PAR_ACTIVE_STEP]);
-        /* _SEQUENCER_ADD_SPIKE_: keep AVR packed hi/lo destination protocol. */
-        frontPanel_sendData((uint8_t)(paramNr == PAR_P1_DEST ? SET_P1_DEST : SET_P2_DEST),
-                            (uint8_t)(tmp >> 7), (uint8_t)(tmp & 0x7Fu));
+        pat_setSelectedStep(parameter_values[PAR_ACTIVE_STEP]);
+        pat_setStepAutomationDestination(menu_getViewedPattern(), menu_getActiveVoice(),
+                                         parameter_values[PAR_ACTIVE_STEP],
+                                         (uint8_t)(paramNr == PAR_P1_DEST ? 0u : 1u),
+                                         tmp);
         break;
     }
 
     case PAR_P1_VAL:
-        frontPanel_sendData(SET_P1_VAL, parameter_values[PAR_ACTIVE_STEP], value);
+        /*
+         * Automation lane value for selected step, lane 0. PatternData owns the
+         * step mutation; Menu only supplies current edit coordinates.
+         */
+        pat_setStepAutomationValue(menu_getViewedPattern(), menu_getActiveVoice(),
+                                   parameter_values[PAR_ACTIVE_STEP], 0u, value);
         break;
 
     case PAR_P2_VAL:
-        frontPanel_sendData(SET_P2_VAL, parameter_values[PAR_ACTIVE_STEP], value);
+        /*
+         * Automation lane value for selected step, lane 1. Kept separate from
+         * P1 for readability because the menu parameters are distinct.
+         */
+        pat_setStepAutomationValue(menu_getViewedPattern(), menu_getActiveVoice(),
+                                   parameter_values[PAR_ACTIVE_STEP], 1u, value);
         break;
 
     case PAR_QUANTISATION:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_QUANT, value);
+        /*
+         * Quantisation affects recording/playback timing, so it remains a
+         * Sequencer setting and is called directly here.
+         */
+        seq_setQuantisation(value);
         break;
 
     case PAR_SCREENSAVER_ON_OFF:
         break;
 
     case PAR_BPM:
+        /*
+         * BPM is Sequencer transport timing. Menu clamps zero to one before
+         * calling Sequencer because the sequencer cannot run at 0 BPM.
+         */
         if (value == 0u) {
             value = 1u;
             parameter_values[PAR_BPM] = 1u;
         }
-        frontPanel_sendData(SET_BPM, (uint8_t)(value & 0x7Fu), (uint8_t)((value >> 7) & 0x7Fu));
+        seq_setBpm(value);
         break;
 
     case PAR_EXT_SYNC:
+        /*
+         * External sync source changes Sequencer clocking behavior. The menu
+         * value is already the runtime enum value expected by Sequencer.
+         */
         seq_setExtSyncSource(value);
         break;
 
@@ -2312,105 +2841,193 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
     case PAR_VOICE_DECIMATION5:
     case PAR_VOICE_DECIMATION6:
     case PAR_VOICE_DECIMATION_ALL:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK,
-                            (uint8_t)(paramNr - PAR_VOICE_DECIMATION1));
-        frontPanel_sendData(VOICE_CC, VOICE_DECIMATION, value);
+        /*
+         * Voice decimation is a sound parameter even though it appears in the
+         * global/performance area. Preset owns sound-engine application, so the
+         * menu dispatches it directly there.
+         */
+        preset_applySoundParameter((uint16_t)(PAR_VOICE_DECIMATION1 +
+                                  (paramNr - PAR_VOICE_DECIMATION1)),
+                                  value, 1);
         break;
 
     case PAR_ROLL:
-        frontPanel_sendData(SEQ_CC, SEQ_ROLL_RATE, value);
+        /*
+         * Roll rate controls Sequencer performance behavior. It is not Pattern
+         * storage, so it remains a direct Sequencer call.
+         */
+        seq_setRollRate(value);
         break;
 
     case PAR_EUKLID_LENGTH:
     {
-        uint8_t length = (uint8_t)(value - 1u);
+        /*
+         * Euclidean generator length is generator state under Pattern.
+         *
+         * Length changes can constrain the effective number of steps, so this
+         * preserves the old behavior by re-applying the current steps value
+         * after length changes, then repainting the visible pattern track.
+         *
+         * Risk: LED repaint reads PatternData generated by Euklid. If Euklid
+         * later stops writing directly to pattern steps, this repaint target
+         * must follow that new interface.
+         */
+        uint8_t length = value;
         uint8_t pattern = menu_shownPattern;
-        uint8_t msg = (uint8_t)((pattern & 0x7u) | (length << 3));
         uint8_t steps;
 
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, menu_getActiveVoice());
-        frontPanel_sendData(SEQ_CC, SEQ_EUKLID_LENGTH, msg);
+        euklid_setLength(menu_getActiveVoice(), length);
 
-        steps = (uint8_t)(parameter_values[PAR_EUKLID_STEPS] - 1u);
-        msg = (uint8_t)((pattern & 0x7u) | (steps << 3));
-        frontPanel_sendData(SEQ_CC, SEQ_EUKLID_STEPS, msg);
+        steps = parameter_values[PAR_EUKLID_STEPS];
+        euklid_setSteps(menu_getActiveVoice(), steps, pattern);
+        led_updatePatternTrack(menu_getActiveVoice(), pattern, buttonHandler_selectedStep);
         break;
     }
 
     case PAR_EUKLID_STEPS:
     {
-        uint8_t steps = (uint8_t)(value - 1u);
+        /*
+         * Euclidean steps regenerate the active voice in the shown pattern.
+         * Menu supplies active voice/shown pattern, EuklidGenerator mutates the
+         * pattern, and ledHandler repaints the currently selected track view.
+         */
+        uint8_t steps = value;
         uint8_t pattern = menu_shownPattern;
-        uint8_t msg = (uint8_t)((pattern & 0x7u) | (steps << 3));
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, menu_getActiveVoice());
-        frontPanel_sendData(SEQ_CC, SEQ_EUKLID_STEPS, msg);
+        euklid_setSteps(menu_getActiveVoice(), steps, pattern);
+        led_updatePatternTrack(menu_getActiveVoice(), pattern, buttonHandler_selectedStep);
         break;
     }
 
     case PAR_EUKLID_ROTATION:
     {
+        /*
+         * Euclidean rotation regenerates the active voice in the shown pattern.
+         * This belongs in EuklidGenerator because it is generator logic, with
+         * the LED repaint kept here as UI feedback.
+         */
         uint8_t rotation = value;
         uint8_t pattern = menu_shownPattern;
-        uint8_t msg = (uint8_t)((pattern & 0x7u) | (rotation << 3));
-        frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, menu_getActiveVoice());
-        frontPanel_sendData(SEQ_CC, SEQ_EUKLID_ROTATION, msg);
+        euklid_setRotation(menu_getActiveVoice(), rotation, pattern);
+        led_updatePatternTrack(menu_getActiveVoice(), pattern, buttonHandler_selectedStep);
         break;
     }
 
     case PAR_PATTERN_BEAT:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_PAT_BEAT, value);
+        /*
+         * Pattern change bar is pattern-level data. PatternData owns the value;
+         * Menu supplies the viewed pattern because this is an edit operation.
+         */
+        pat_setPatternChangeBar(menu_getViewedPattern(), value);
         break;
 
     case PAR_PATTERN_NEXT:
-        frontPanel_sendData(SEQ_CC, SEQ_SET_PAT_NEXT, value);
+        /*
+         * Next-pattern setting is pattern-level data for the viewed pattern,
+         * not an immediate Sequencer pattern switch.
+         */
+        pat_setPatternNext(menu_getViewedPattern(), value);
         break;
 
     case PAR_ACTIVE_STEP:
-        frontPanel_sendData(SEQ_CC, SEQ_REQUEST_STEP_PARAMS, value);
+        /*
+         * Active step changes reload step edit fields from PatternData.
+         *
+         * This does not mutate the step; it copies note/velocity/probability
+         * and automation lane data for the selected step into menu parameters.
+         */
+        pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), value);
         break;
 
     case PAR_STEP_PROB:
-        frontPanel_sendData(SEQ_CC, SEQ_PROB, value);
+        /*
+         * Step probability mutates the selected Pattern step for the active
+         * voice/viewed pattern.
+         */
+        pat_setStepProbability(menu_getViewedPattern(), menu_getActiveVoice(),
+                               parameter_values[PAR_ACTIVE_STEP], value);
         break;
 
     case PAR_STEP_NOTE:
-        frontPanel_sendData(SEQ_CC, SEQ_NOTE, value);
+        /*
+         * Step note mutates the selected Pattern step. PatternData validates
+         * pattern/track/step coordinates and owns the stored note value.
+         */
+        pat_setStepNote(menu_getViewedPattern(), menu_getActiveVoice(),
+                        parameter_values[PAR_ACTIVE_STEP], value);
         break;
 
     case PAR_STEP_VOLUME:
-        frontPanel_sendData(SEQ_CC, SEQ_VOLUME, value);
+        /*
+         * Step volume/velocity mutates the selected Pattern step. This direct
+         * call replaces the old sequencer-step opcode.
+         */
+        pat_setStepVolume(menu_getViewedPattern(), menu_getActiveVoice(),
+                          parameter_values[PAR_ACTIVE_STEP], value);
         break;
 
     case PAR_MIDI_ROUTING:
-        frontPanel_sendData(SEQ_CC, SEQ_MIDI_ROUTING, value);
+        /*
+         * MIDI routing/filter parameters are MidiParser configuration. Menu is
+         * the UI source of the new value; MidiParser owns runtime behavior.
+         */
+        midiParser_setRouting(value);
         break;
 
     case PAR_MIDI_FILT_TX:
-        frontPanel_sendData(SEQ_CC, SEQ_MIDI_FILT_TX, value);
+        /*
+         * MIDI transmit filter is MidiParser runtime configuration. Direction
+         * 1 is TX by historical API convention.
+         */
+        midiParser_setFilter(1u, value);
         break;
 
     case PAR_MIDI_FILT_RX:
-        frontPanel_sendData(SEQ_CC, SEQ_MIDI_FILT_RX, value);
+        /*
+         * MIDI receive filter is MidiParser runtime configuration. Direction
+         * 0 is RX by historical API convention.
+         */
+        midiParser_setFilter(0u, value);
         break;
 
     case PAR_PRESCALER_CLOCK_IN:
-        frontPanel_sendData(SEQ_CC, SEQ_TRIGGER_IN_PPQ, value);
+        /*
+         * Trigger-jack prescalers are hardware trigger configuration, so Menu
+         * writes them directly to the trigger-jack owner instead of routing a
+         * parser command through the removed bridge.
+         */
+        triggerJacks_setClockInputPpq(value);
         break;
 
     case PAR_PRESCALER_CLOCK_OUT1:
-        frontPanel_sendData(SEQ_CC, SEQ_TRIGGER_OUT1_PPQ, value);
+        /*
+         * Clock output 1 prescaler belongs to triggerJacks hardware state.
+         */
+        triggerJacks_setClockOut1Ppq(value);
         break;
 
     case PAR_PRESCALER_CLOCK_OUT2:
-        frontPanel_sendData(SEQ_CC, SEQ_TRIGGER_OUT2_PPQ, value);
+        /*
+         * Clock output 2 prescaler belongs to triggerJacks hardware state.
+         */
+        triggerJacks_setClockOut2Ppq(value);
         break;
 
     case PAR_TRIG_GATE_MODE:
-        frontPanel_sendData(SEQ_CC, SEQ_TRIGGER_GATE_MODE, value);
+        /*
+         * Gate mode belongs to the trigger output driver. Menu passes through
+         * the selected value directly because no front-panel protocol boundary
+         * remains.
+         */
+        trigger_setGatemode(value);
         break;
 
     case PAR_BAR_RESET_MODE:
-        frontPanel_sendData(SEQ_CC, SEQ_BAR_RESET_MODE, value);
+        /*
+         * Bar-reset mode is still Sequencer-owned global state and was only
+         * ever proxied by parser opcodes. Direct assignment preserves existing
+         * storage while making the ownership explicit.
+         */
+        seq_resetBarOnPatternChange = value;
         break;
 
     case PAR_OSC_WAVE_INTERP:
@@ -2438,11 +3055,66 @@ void    menu_setActiveVoice(uint8_t v) { menu_activeVoice = v; }
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
 uint8_t menu_getSubPage(void)      { return (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT); }
 void    menu_setNumSamples(uint8_t n) { menu_numSamples = n; }
+void menu_setVoiceModeShowMorph(uint8_t onOff)
+{
+    /*
+     * Set the voice-page morph endpoint overlay.
+     *
+     * Why: buttonHandler owns the SHIFT+VOICE gesture, but Menu owns the
+     * parameter buffer used by repaint/edit code. Input onOff is boolean.
+     * Output: voiceModeShowMorph is updated and the next repaint/edit resolves
+     * voice-page sound parameters against the matching buffer. Confederates:
+     * buttonHandler also owns the MODE1 blink feedback for this flag.
+     */
+    voiceModeShowMorph = (uint8_t)(onOff != 0u);
+    menu_endlessPotMappingChanged();
+}
+
+void menu_showStepTrackSettingsFirstHalf(void)
+{
+    /*
+     * Show the first half of STEP's track-settings front page.
+     *
+     * Why: selecting a different track in STEP mode should land on the primary
+     * settings row (length, scale, MIDI channel, note), while re-pressing the
+     * same track can toggle to the second half. Inputs: current Menu state.
+     * Output: menuIndex selects SEQ_PAGE subpage 0 parameter 0 and endless-pot
+     * snapshots update for the visible columns.
+     */
+    menuIndex = 0u;
+    menu_endlessPotMappingChanged();
+}
+
+void menu_toggleStepTrackSettingsHalf(void)
+{
+    /*
+     * Toggle STEP's track-settings front page between first and second halves.
+     *
+     * Why: repeated VOICE presses in STEP mode should act like a compact page
+     * toggle without entering the per-step editor. Inputs: current menuIndex.
+     * Output: activeParameter moves between 0 and 4 on SEQ_PAGE subpage 0, and
+     * endless-pot mappings are refreshed for the newly visible half.
+     */
+    uint8_t activeParameter = menuIndex & MASK_PARAMETER;
+    menuIndex = (activeParameter < 4u) ? 4u : 0u;
+    menu_endlessPotMappingChanged();
+}
 void    menu_setShownPattern(uint8_t p)
 {
-    menu_shownPattern = p;
-    /* _SEQUENCER_ADD_SPIKE_: AVR parity - shown pattern updates are sequencer-visible. */
-    frontPanel_sendData(SEQ_CC, SEQ_SET_SHOWN_PATTERN, menu_shownPattern);
+    /*
+     * Stores the pattern slot currently being viewed/edited by the UI.
+     *
+     * This is intentionally Menu state, not Sequencer next-pattern state:
+     * pattern view can differ from playback during performance/follow modes.
+     * PatternData callers use menu_getViewedPattern() when an edit should
+     * target what the user is looking at.
+     *
+     * Input: p is the viewed pattern index supplied by button/menu navigation.
+     * Output: during the single-pattern bridge, menu_shownPattern is pinned to 0. Risk: this setter does not repaint
+     * LEDs or reload PatternData params; callers must do that explicitly.
+     */
+    menu_shownPattern = 0;
+    (void)p;
 }
 uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 
@@ -2461,15 +3133,20 @@ void menu_init(void)
     parameter_values[PAR_EUKLID_STEPS]  = 16;
     parameter_values[PAR_ROLL]          = 8;
     parameter_values[PAR_BPM]           = 120;
+    parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_OFF;
     parameter_values[PAR_OSC_WAVE_INTERP] = 0;
+    /*
+     * Wave interpolation is a sound-engine global that is applied immediately
+     * at boot because there is no parser/global-apply pass between zeroed menu
+     * defaults and the oscillator runtime state.
+     */
     modNode_setWaveInterpEnabled(0);
 
     /* Switch to voice 1, light MODE1 and voice 1 LEDs */
     // led_setMode2(SELECT_MODE_VOICE);  /* MODE1 lit */
     // menu_switchPage(VOICE1_PAGE);
-    /* _SEQUENCER_ADD_SPIKE_: restore AVR init notifications for sequencer state. */
-    frontPanel_sendData(SEQ_CC, SEQ_SET_SHOWN_PATTERN, 0);
-    frontPanel_sendData(SEQ_CC, SEQ_SET_ACTIVE_TRACK, 0);
+    menu_shownPattern = 0;
+    menu_activeVoice = 0;
     // lcd_clear();
     // led_setActiveVoice(0);
 

@@ -21,7 +21,11 @@ Every phase ends with **Open Engineering Questions** (things that need a decisio
 
 ## Phase 1 — Foundation Refactors
 
-**Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Sequencer/Pattern/`, `Core/Preset/` → `Core/Scene/`
+**Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Scene/Pattern/`, `Core/Preset/` → `Core/Scene/Preset/`
+
+**Current status:** completed across Sessions 027-029. Burst reduction,
+frontPanelParser removal, PatternData ownership, and the Preset folder move are
+landed. This section remains as historical rationale for the order of work.
 
 These are the four refactor/reorg tasks you already flagged before any of the new feature work. None of them change behavior; they change where code lives and how it's called, so that every phase after this one is being built on the layout you actually want rather than being built once and then dragged through a rename later. Do these first, in this order, each as its own compileable/testable commit.
 
@@ -36,9 +40,16 @@ One correction to flag: the intermediate draft of this document (and the "RED TE
 This is a bigger job than the earlier draft made it look. The real numbers:
 
 - `frontPanelParser.c` is 816 lines with **70 `case` labels** across three internal `switch(command)` blocks (opcode dispatch for standard front-panel messages, an LFO-target sub-switch, and a sysex path) plus the `frontPanel_sendData()` encoder itself.
-- `frontPanel_sendData()` is called **105 times** across the codebase: 55 in `Core/Menu/menu.c`, 35 in `Core/Hardware/frontPanel/buttonHandler.c`, 6 in `Core/Preset/presetManager.c` (soon `Core/Scene/`), plus a handful internal to the parser file itself.
+- At the time this phase was scoped, `frontPanel_sendData()` was called **105
+  times** across the codebase. Session 028 removed that bridge and replaced it
+  with direct owner calls.
 
-So this isn't "remove a file and add a few direct calls" — it's 105 call sites, each of which currently packs its payload into `(status, data1, data2)` MIDI-CC-shaped bytes, sends it through `frontPanel_sendData()`, and relies on the parser's `switch` to unpack and route it to the real target function (sequencer, DSP voice, LED handler, modulation node, etc.). The real target functions already exist and are already correct — the opcode encode/decode round-trip is the only thing being removed. Practically, this means:
+This was not "remove a file and add a few direct calls" — it was 105 call sites,
+each of which packed its payload into `(status, data1, data2)` MIDI-CC-shaped
+bytes, sent it through `frontPanel_sendData()`, and relied on the parser's
+`switch` to unpack and route it to the real target function (sequencer, DSP
+voice, LED handler, modulation node, etc.). Session 028 completed this
+mechanical bridge removal. The original practical checklist was:
 
 1. For each of the 70 opcodes, find the `case` body in `frontPanelParser.c` and the function(s) it ultimately calls.
 2. At each of the 105 call sites, replace the `frontPanel_sendData(OPCODE, data1, data2)` call with a direct call to that same target function, passing the already-known values instead of re-encoding them into a byte pair and decoding them back out.
@@ -54,11 +65,14 @@ Since Phase 4 is about to replace this entire pattern data model (8 fixed patter
 
 Recommendation: move first, rewrite second, as two separate commits. Move everything pattern-storage-and-servicing-related (the structs above, the `Step`/`PatternSet` types, load/save helpers, step-advance logic, euklid/patgen generators) into `Core/Sequencer/Pattern/`, rename the moved functions with the `pat_*` prefix, and get it compiling and behaving identically to before. Then do the Phase 4 rewrite inside that new location. Two reasons: first, a pure rename-and-move is easy to verify byte-for-byte (same behavior, different file/name), so if something breaks you know it's the move, not new logic; second, `seq_tick()` and the timer wiring stay in `sequencer.c` (they're timing/scheduling, not pattern storage), so the move needs a clean line between "what moves to `Pattern/`" and "what stays in `sequencer.c` as the scheduler that calls into `Pattern/`" — deciding that boundary is easier without simultaneously redesigning the data the boundary is passing around.
 
-### 1.4 Move `Core/Preset/` into `Core/Scene/`
+### 1.4 Move `Core/Preset/` into `Core/Scene/Preset/`
 
-`Core/Preset/` is currently `presetManager.c/.h` (562/108 lines) and `ParameterArray.c/.h` (681/448 lines) — 1,799 lines total, ~90 functions between them (kit load/save, morph, globals, drumset send, everything currently gated through `frontPanel_sendData` per 1.2 above). Same logic as 1.3: move and rename first (`Core/Scene/`, functions can stay `preset_*` for now or move to `scene_*` — your call, but pick one and do it in this pass rather than mixing prefixes), verify unchanged behavior, then build the Phase 3 BANK/SCENE/KIT hierarchy inside the new location rather than fighting the move and the redesign at the same time.
+Completed in Session 029. `presetManager.c/.h` and `ParameterArray.c/.h` now
+live under `Core/Scene/Preset/`; public function prefixes intentionally remain
+`preset_*`, `parameterArray_*`, and `paramArray_*`.
 
-Note the include-path knock-on: `presetManager.c`/`ParameterArray.c` are referenced by `-ICore/Preset` in the `Makefile`, and by `#include "presetManager.h"` / `#include "ParameterArray.h"` from `frontPanelParser.c`, `menu.c`, `lfo.c`, and others — all of those includes and the Makefile's `-I` flag need updating in the same commit as the move, or the build breaks immediately (which is a fine sanity check that the move was mechanical and complete).
+The include-path knock-on was handled in the same session: `Makefile` uses
+`-ICore/Scene/Preset` and source paths under `Core/Scene/Preset/`.
 
 **Suggested complementary step:** since 1.2, 1.3, and 1.4 all touch `frontPanelParser.c`'s call sites in overlapping files (`presetManager.c` and `sequencer.c` both `#include "frontPanelParser.h"`), doing 1.2 *before* 1.3/1.4 means the direct-wiring pass only has to happen once, against the pre-move file layout, rather than being redone against new paths. The order above (1.1 → 1.2 → 1.3 → 1.4) reflects that.
 
@@ -72,32 +86,76 @@ Note the include-path knock-on: `presetManager.c`/`ParameterArray.c` are referen
 
 **Location:** `Core/Scene/` (post-move), `Core/Hardware/SD/filesystem.c`, `Core/Hardware/SD/asyncfatfs/`
 
-This phase builds the BANK/SCENE/KIT/PAT/FX library structure from `putting it together` inside the `Scene/` directory Phase 1 just created, and lands the debounced autosave system. It comes before the sequencer rewrite (Phase 3) because the sequencer rewrite's whole memory design (dynamic pool split 16-ways-plus-one across scenes) only makes sense once "scene" is a real, addressable unit that the file layer understands — right now the SD layer has no concept of a scene at all.
+This phase builds the current SD card hierarchy documented in `FILESYSTEM_SPEC.md` — `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, plus root `settings.cfg` — and lands the debounced autosave system. It comes before the sequencer rewrite (Phase 3) because the sequencer rewrite's whole memory design (dynamic pool split 16-ways-plus-one across scenes) only makes sense once "scene" is a real, addressable unit that the file layer understands — right now the SD layer has no concept of a scene at all.
+
+**Current bridge status after Session 031:** root `Kit/NNN Name/` loading and
+the one-live-pattern/8-bar bridge are intentionally provisional. Pattern and
+container save/load currently serialize a Phase 2 bridge shape, but final
+interchange compatibility is not promised yet: the old single global shuffle
+byte is ignored/omitted, and external Python converters are expected to handle
+any migration once the final Scene/Pattern storage shape and save operations are
+defined.
 
 ### 2.1 Current SD layer, for grounding
 
-`filesystem.c` is entirely flat: `filesystem_makeFilename()` builds an 8.3 name like `p000.snd` (`p` + 3-digit slot number + extension) directly into a buffer — there is no directory component anywhere in the current path-building code, and file *type* is an enum (`fs_file_type_t`: `FS_FILE_KIT`, `FS_FILE_PATTERN`, `FS_FILE_MORPH`, `FS_FILE_PERFORMANCE`, `FS_FILE_ALL`, `FS_FILE_GLOBALS`, `FS_FILE_SAMPLES`) rather than a path. So the `BANK/001 <name>/SCENE 01 <name>/KIT/drum1.drm` hierarchy from `putting it together` is a genuinely new capability, not an extension of something that half-exists.
+`filesystem.c` began as an entirely flat file loader: `filesystem_makeFilename()` builds an 8.3 name like `p000.snd` (`p` + 3-digit slot number + extension) directly into a buffer, and file *type* is an enum (`fs_file_type_t`: `FS_FILE_KIT`, `FS_FILE_PATTERN`, `FS_FILE_MORPH`, `FS_FILE_PERFORMANCE`, `FS_FILE_ALL`, `FS_FILE_GLOBALS`, `FS_FILE_SAMPLES`) rather than a path. The new directory hierarchy (`Bank/001 Bank/001 Scene/Kit_<kit>/...`, root `Kit/001 Kit Name/...`, root library pools, and `settings.cfg`) is therefore a genuinely new capability, not an extension of something that half-existed.
 
 The good news: the underlying `asyncfatfs` library (the Betaflight-derived async FAT driver already in `Core/Hardware/SD/asyncfatfs/`) already exports `afatfs_mkdir()` and `afatfs_chdir()` — they're just never called from `filesystem.c` today. So this is "teach the existing facade to walk directories," not "write a new filesystem layer."
 
-### 2.2 BANK / SCENE / KIT / PAT / FX hierarchy
+### 2.2 SD card hierarchy
 
-Implement the directory structure and file types exactly as specced in `putting it together`:
+Implement the directory structure and file types exactly as specced in `FILESYSTEM_SPEC.md`:
 
 ```
-SD:/
-├── BANK/001 <name>/settings.cfg, SCENE 01 <name>/{KIT/*.drm|.snr|.cym|.hat, pattern.pat, effects.fx}, … SCENE 16 <name>/
-├── KIT/001 <name>/{drum1.drm, drum2.drm, drum3.drm, snare.snr, cymbal.cym, hi-hat.hat}, …
-├── PAT/<name>.pat, …
-├── FX/<name>.fx, …
-├── SCENE/<name>.scn, …
-├── SAMPLES/<name>.wav, …
-└── WAVETABLES/001 <name>/<name>.wav, …
+settings.cfg
+Bank/
+  001 <bank name>/
+    bankset.bcg
+    001 <scene name>/
+      sceneset.scg
+      Kit <kit name>/
+        kitset.kcg
+        <instrument 1>.<type>
+        ...
+        <instrument 6>.<type>
+      pattern.pat
+      effect.fx
+    ...
+    016 <scene name>/
+Scene/
+  001 <scene name>/
+    sceneset.scg
+    Kit <kit name>/
+      kitset.kcg
+      <instrument files>
+    pattern.pat
+    effect.fx
+Kit/
+  001 <kit name>/
+    kitset.kcg
+    <six instrument files>
+Pattern/
+  <pattern name>.pat
+Sample/
+  <sample name>.wav
+Wavetable/
+  001 <wavetable name>/
+    <wavetable sample>.wav
+Effect/
+  <effect name>.fx
+Instrument/
+  <instrument name>.<type>
 ```
 
-`fs_file_type_t` needs new members for `.snr`/`.cym`/`.hat`/`.drm` (currently there's no per-instrument-part file type — everything voice-related goes through the monolithic kit), `.fx`, `.scn`, and the directory-scoped variants of `.pat`/`.kit` (root `PAT/`/`KIT/` vs. inside a `BANK/xxx/SCENE xx/`). `filesystem_makeFilename()` becomes path-building rather than name-building, and every call site that currently only handles a flat slot number needs a bank/scene context to resolve into a path.
+The only root-level file recognized by the new firmware should be `settings.cfg`, replacing `GLO.CFG`/`glo.cfg`. It stores system-level settings and a reference to the last loaded bank; boot should load that bank. The recognized root directories are exactly `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, and `Instrument`.
 
-Root-level `KIT/`, `PAT/`, `FX/`, and `SCENE/` act as shared libraries per the spec — any file there can load into any scene slot in any bank, and any scene's parts can be exported back out to them. This is a straightforward extension of the existing "load this slot" flow once paths exist, just with more possible source/destination roots.
+`Bank`, `Scene`, `Kit`, and `Wavetable` use numbered folders named `001 <name>`, `002 <name>`, etc. A single underscore after the three-digit slot ID may be accepted for compatibility with older generated folders, but the preferred convention is a space separator and spaces inside the display name are valid. Numbers do not need to be contiguous; browsers should scan slot numbers sequentially and show missing slots as empty (for example `003: Empty`) instead of collapsing gaps. `Bank` scene folders are limited to slots `001` through `016`.
+
+`bankset.bcg` and `sceneset.scg` are guard/version/config files. `kitset.kcg` is slimmer: it identifies the folder type and records which instrument file occupies each of the six voice slots. The kit name comes from the `Kit/NNN Name` folder.
+
+`fs_file_type_t` needs new members for `.drm`, `.snr`, `.cym`, `.hat`, `.fx`, `.bcg`, `.scg`, `.kcg`, `settings.cfg`, and the directory-scoped variants of `.pat`/`.wav`/instrument files where source and destination matter (`Pattern/` pool vs. scene `pattern.pat`, `Sample/` vs. `Wavetable/<slot>/`, root `Instrument/` vs. kit-contained instruments). `filesystem_makeFilename()` becomes path-building rather than name-building, and every call site that currently only handles a flat slot number needs bank/scene/kit context to resolve into a path.
+
+Root-level `Scene`, `Kit`, `Pattern`, `Effect`, and `Instrument` act as shared libraries per the spec: scenes can be loaded into banks, kits into scenes, patterns/effects into scenes, and instruments into kit voice slots. `Sample` and `Wavetable` are loaded during sample-load/flash-write operations rather than per-scene auto-save. A user may copy scene folders between banks, copy `pattern.pat`/`effect.fx` out to the root pools (or back in if renamed correctly), and copy instrument files out of kit folders into `Instrument/`; kit membership itself should remain controlled by `kitset.kcg`.
 
 ### 2.3 The 17th scene (background bank loading)
 
@@ -107,7 +165,7 @@ This also directly answers what "load a kit by MIDI bank change" becomes in the 
 
 ### 2.4 Debounced auto-save to dot-files
 
-Per your answer: this applies specifically to the files that live inside a loaded bank — the per-instrument part files (`.snr`, `.cym`, `.drm`, etc.), the `.fx` file, the 16 `.pat` files, and the `.cfg` file. Anything else (root-library `KIT/`/`PAT/`/`FX/`/`SCENE/` files, `.wav` samples/wavetables) is explicit load/save only, not auto-saved.
+Per your answer: this applies specifically to the files that live inside a loaded bank — the per-instrument files (`.drm`, `.snr`, `.cym`, `.hat`, etc.), scene `effect.fx`, scene `pattern.pat`, `sceneset.scg`, kit `kitset.kcg`, and bank `bankset.bcg` as needed. Root-library files and folders (`Scene`, `Kit`, `Pattern`, `Effect`, `Instrument`, `Sample`, `Wavetable`) are explicit load/save/copy/import only, not auto-saved.
 
 Mechanism, exactly as you specified: a parameter edit marks its owning file as stale and (re)starts a 5-second idle timer. Any further edit to a parameter in that same file resets the 5-second timer. If edits keep coming in continuously past 30 seconds without a 5-second gap, force a write anyway rather than letting the timer be reset indefinitely. Each of these files is backed by a `.<name>.<ext>` shadow copy holding the last state committed by an explicit menu **SAVE** — the debounced writes go to the live `.<name>.<ext>` working file, not the dot-shadow, and a new **RELOAD** menu page (alongside LOAD/SAVE) restores the working file from the dot-shadow.
 
@@ -121,7 +179,7 @@ Per your `putting it together` note and follow-up answer: this reverts the *curr
 
 - **SRAM budget for 17 scenes:** each scene now holds a full kit (6 instrument parts' worth of parameters), a pattern (up to 16,382 bytes — Phase 3's finalized dynamic event pool ceiling), and FX settings. The total SRAM cost of "17 scenes resident simultaneously" needs to be tallied once kit and FX sizes are also known — unlike the pattern pool's earlier draft, this ceiling is now fixed by the event pool's 14-bit address width, not just an SRAM-availability guess, so there's no "shrink it if it doesn't fit" lever on the pattern side anymore; any shortfall has to come out of the kit or FX budget instead, or out of dropping below 17 fully-resident scenes.
 - **Rename/replace primitive in `asyncfatfs`:** needs confirming before 2.4's `.tmp`-then-rename safety mechanism can be built as specified.
-- **Directory-walk cost on `afatfs_chdir`:** the async FAT driver services filesystem ops incrementally across ticks already (per the "flash is fast enough, it already works for samples" answer), but nested directories (`BANK/001/SCENE 01/KIT/`) mean more directory-entry lookups per file open than the current flat scheme. Probably fine given samples already stream from flash successfully, but worth a quick timing check once real directory traversal is in.
+- **Directory-walk cost on `afatfs_chdir`:** the async FAT driver services filesystem ops incrementally across ticks already (per the "flash is fast enough, it already works for samples" answer), but nested directories (`Bank/001 Bank/001 Scene/Kit_<kit>/`) mean more directory-entry lookups per file open than the current flat scheme. Probably fine given samples already stream from flash successfully, but worth a quick timing check once real directory traversal is in.
 
 ### Suggested Complementary Features
 
@@ -140,23 +198,28 @@ This is the biggest single architectural change in the whole roadmap: replacing 
 
 ### 3.2 The dynamic event pool
 
-**Address array.** Every scene has 7 tracks × 128 steps = 896 possible steps, each represented by a fixed `896 × 2 bytes = 1,792 bytes` per-scene array — same total size as the first pass at this design, but now split as **2 flag bits + a 14-bit address** rather than a plain 16-bit pointer. The two flags — "has automation" and "has special (non-default) step data" — live here, in the static array, not inside the block itself. That's the key move: it's what makes room, inside the block header, for a step-ID (needed for O(1) defragmentation, below) without growing the block.
+**Address array.** Every scene has 7 tracks × 128 steps = 896 possible steps, each represented by a fixed `896 × 2 bytes = 1,792 bytes` per-scene array. Each 16-bit entry is **MSB (bit 15): on/off, next bit (bit 14): has specials, trailing bits 13–0: a 14-bit offset address** — three independent pieces of state, not a single pointer with reserved values doing double duty:
 
-**Two reserved address values need zero pool storage**, and only ever occur when both flags are clear (a real block is never allocated for a step that's actually blank or default):
-- `0x0000` — **blank.** Step is off. No trigger, no automation, no lookup.
-- `0x3FFF` — **default.** Step is on, plays at the track's default note, 100 velocity, 100% probability. No lookup, no dynamic allocation.
+- **MSB, bit 15 — on/off.** A set bit means the step is **on**: its `SEQ` LED is lit and the note at that step triggers. A clear bit means the step is off: its `SEQ` LED is not lit and its note does not trigger. This trigger state is independent of the offset address and has-specials fields: an off step can still apply automation and retain special values.
+- **Next bit, bit 14 — has specials at address.** A set bit means the dynamic block at this step's offset address carries a special-flags byte (note/velocity/timing/roll/probability overrides, or the automation-hold flag). A clear bit means the step uses every default value for those fields. This bit remains meaningful when the on/off MSB is clear: assigned special values remain stored and are not cleared or discarded when the step is turned off or back on.
+- **Trailing bits 13–0 — offset address**, with exactly **one** reserved value: `0x3FFF` (all 14 bits set) means **no lookup at all** — there is no dynamic block for this step, full stop. Combined with the on/off MSB, that one reserved address covers both of the old "free" cases:
+  - `0x3FFF` + on/off MSB clear → step is off, nothing stored (the old "blank").
+  - `0x3FFF` + on/off MSB set → step is on, plays the track's default note/velocity/timing/probability (the old "default").
+  - Any other address (`0x0000`–`0x3FFE`, 16,383 real values) → look up a dynamic block regardless of the on/off MSB. If the MSB is clear, the step's note does not trigger but every automation entry in that block is still applied. If bit 14 is also set, its special values remain assigned and persist across later on/off toggles. This lets a parameter change land on a beat without also firing a trigger there, and lets turning a programmed step off remain a reversible performance edit rather than deleting its settings.
 
-The allocator simply never hands either offset out to a real block — a fixed exclusion rule, not an ongoing risk.
+  One combination the encoder must never produce: bit 14 set (claims a special-flags byte exists) together with address `0x3FFF` (claims there's nothing to look up) — these are contradictory, and should be an assertion/invariant check rather than a case the decoder has to handle.
 
-**Any other address is a real 14-bit byte offset into the pool**, addressing up to `2¹⁴ − 2 = 16,382` usable bytes. Since the flags live in the static array, nothing in the block itself needs to restate them:
+**Only one address is reserved now, not two** (the earlier pass at this design spent two addresses — `0x0000` and `0x3FFF` — because on/off and "has data" weren't yet separated). That makes the usable pool `2¹⁴ − 1 = 16,383` bytes, a one-byte difference from before that doesn't move any of the capacity figures below in practice.
 
-- **Block header (always present, 2 bytes):** 10-bit step-ID — a back-reference to which of the 896 steps owns this block, needing 10 bits since `2⁹ = 512 < 896 ≤ 1,024 = 2¹⁰` — plus 6 bits whose meaning depends on the static array's flags for this step:
-  - **Automation flag set, special flag clear:** the 6 bits are an automation count, encoded as `count − 1` so all 64 codes are useful (raw `0` = 1 automation, raw `63` = 64 automations) — a block only exists because it has *something* in it, so there's no reason to ever waste a code on "zero automations."
-  - **Special flag set, automation flag clear:** the 6 bits are the special-field flags themselves — one bit per override (note, velocity, microtiming, roll mode, rand1; one bit reserved for future use). Each set bit contributes one override byte, in flag order, immediately after the 2-byte header.
-  - **Both flags set:** the 6 bits are still the automation count as above, but a **third header byte** is added, holding the same special-field flags plus 2 further bits — one is **`automation hold`** (defined here only as a flag that exists; what it *means* during playback is sequencer-level logic for Phase 3's playback design, not a storage-format question), the other reserved. Override bytes follow the third header byte, then the automation entries.
-- **Automation entries** are 2 bytes each, unchanged: 9-bit target parameter ID (up to 512 addressable parameters — see 3.4), 7-bit value.
+**The dynamic block itself**, at any real address:
 
-**Worst case, using your own numbers:** a step using every currently-defined special field (5, plus 1 reserved and unused) and 4 automations costs `3 header bytes + 5 override bytes + 4×2 automation bytes = 16 bytes`. If every one of the 896 steps hit that simultaneously, the whole scene costs `896 × 16 = 14,336 bytes` — comfortably inside the 16,382-byte pool, with 2,046 bytes of headroom left over even in that extreme case. In the more realistic "every step has at least one automation, nothing else" case, the pool holds **7,295 total automation entries**. That's about 7% fewer than the 7,872 the earlier 18KB-pool version could claim — but that comparison wasn't apples-to-apples: the 18KB version never actually budgeted bytes for the step-ID that 3.3's defragmentation depends on. A version of the 18KB pool corrected to include one (which needs a 3rd header byte, since a 1-byte header can't fit a 10-bit ID) tops out at 6,976 — this design beats even that, from a smaller nominal pool, because moving the flags out to the static array buys back exactly the room the step-ID needs without a 3rd byte in the common case.
+- **First 2 bytes (always present):** 10-bit step-ID — a back-reference to which of the 896 steps owns this block, needed for O(1) defragmentation (3.3), sized for `2⁹ = 512 < 896 ≤ 1,024 = 2¹⁰` — plus a **6-bit automation count, 0–63, always meaningful**. Zero is a legitimate count now (not reserved or avoided): a step can have custom special values and zero automation, which is exactly the case a fixed `count − 1` encoding would have made awkward. The ceiling drops from the earlier design's 64 to 63 as the direct cost of making zero usable — a fair trade for not needing a special case.
+- **If bit 14 (has-special) was set in the static entry**, byte 3 is **always** the special-flags byte, in a fixed position — not conditionally placed depending on the automation count. The rule that matters at this scoping level, and the only one this document needs to commit to: **each set bit in the special-flags byte means one more value byte follows**, immediately after it, in flag order — except for any flag later designated a pure binary condition (`automation hold` is the one named so far), which needs no value byte since the flag bit alone *is* the information. Exactly which fields exist, how many of the 8 bits get used now versus reserved for later, and their order — note, velocity, timing, roll, probability were the working example earlier in this process — is implementation-phase detail, not a scoping decision; what's fixed here is only the structural rule (flag byte → N value bytes → automation entries).
+- **Automation entries follow**, 2 bytes each, unchanged: 9-bit target parameter ID (up to 512 addressable parameters — see 3.4), 7-bit value. The count from the header says how many.
+
+`automation hold` stays defined at the storage layer only as "a flag that exists"; see 3.3a for how it relates to the default playback/record behavior that's now settled for ordinary (non-held) automation.
+
+**Worst case, for illustration only** (using the 5-value-flag working example, not a commitment to that exact field list): a step using all 5 example special fields and 4 automations costs `2 header bytes + 1 special-flags byte + 5 override bytes + 4×2 automation bytes = 16 bytes`. If every one of the 896 steps hit that simultaneously, the whole scene costs `896 × 16 = 14,336 bytes` — comfortably inside the 16,383-byte pool, with 2,047 bytes of headroom left over even in that extreme case. In the more realistic "every step has at least one automation, nothing else" case, the pool holds **7,295 total automation entries**, independent of exactly how many special fields end up defined, since that case never touches the special-flags byte at all.
 
 ### 3.3 Background defragmentation & real-time-safe live recording
 
@@ -177,13 +240,49 @@ That split drives the design: a fast, allocation-free path for the common case, 
 
 **Global defragmenter — separate, lower priority.** Micro-relocations leave small holes scattered through the pool over a long editing session, the same way any allocator does. The pool-wide defragmenter (find the most fragmented region, consolidate it) is what turns scattered holes back into large contiguous free runs. It's periodic housekeeping, not on any real-time path — the reserved-slack mechanism above is what actually guarantees live recording never stalls, independent of whether the global sweep has run recently.
 
-**Free-space tracking.** A 1-bit-per-chunk occupancy bitmap over 4-byte chunks, covering the full `2¹⁴` nominal address space rather than just the 16,382 usable bytes — chunking the full nominal range is what gives a clean `2¹⁴ ÷ 4 = 4,096` chunks `= 4,096 bits = 512 bytes`, with the 2 reserved addresses simply always marked occupied. Both micro-relocation and the global defragmenter use this to find a new home for a block: a linear scan is cheap on this core (worst case ~128 32-bit word tests across 4,096 bits, faster still with a count-trailing-zeros instruction to skip whole free/full words at once). The bitmap doesn't need to track *whose* block occupies a chunk — that's what the block's own step-ID header is for: "whose block is this" is answered by reading the 10-bit ID, not by anything in the bitmap.
+**Free-space tracking.** A 1-bit-per-chunk occupancy bitmap over 4-byte chunks, covering the full `2¹⁴` nominal address space rather than just the 16,383 usable bytes — chunking the full nominal range is what gives a clean `2¹⁴ ÷ 4 = 4,096` chunks `= 4,096 bits = 512 bytes`, with the single reserved address (`0x3FFF`) and the 3 unusable trailing bytes (`16,384` isn't a multiple of 4, so the top partial chunk is permanently unusable — too small to hold even a minimal 2-byte header plus anything, so the allocator should just never hand it out) both marked permanently occupied. Both micro-relocation and the global defragmenter use this to find a new home for a block: a linear scan is cheap on this core (worst case ~128 32-bit word tests across 4,096 bits, faster still with a count-trailing-zeros instruction to skip whole free/full words at once). The bitmap doesn't need to track *whose* block occupies a chunk — that's what the block's own step-ID header is for: "whose block is this" is answered by reading the 10-bit ID, not by anything in the bitmap.
+
+**The write protocol — creating and clearing steps, not just relocating them.** The same write-new/swap-pointer/free-old discipline that governs defrag governs every mutation of a step's static entry, with no exceptions:
+
+- **Creating or growing a step's data:** the step-writer (menu edit or live-record) sends the stack servicer a request — the content to store, and how much room it needs (one or two 4-byte chunks, typically). The servicer allocates space, writes the full content into place, and *only then* reports the real address back. The step-writer does not touch the static array (offset address, on/off bit, has-specials bit) until it has that confirmed address — there is no intermediate state where the static entry points at a block that isn't fully written yet.
+- **Clearing a step's stored data:** the step-writer atomically writes `0x3FFF` (preserving the current on/off MSB and clearing has-specials) to the static entry first, so the sequencer immediately stops looking up the old dynamic block, and *separately* notifies the servicer that the old address is now free, to be added back to the bitmap whenever convenient. This operation is distinct from turning a step off: an ordinary on/off toggle changes only bit 15 and must preserve the real offset address, automation, has-specials bit, and special values. Nothing reads a freed block again once its static entry no longer points at it, so there is no urgency to that second step.
+- **The invalid combinations flagged in 3.2** (has-specials set together with the reserved address, in either on/off state) should never be producible by construction if the offset address, on/off bit, and has-specials bit are always updated **together, as a single atomic 16-bit write** — never as separate partial updates to the same entry. That single discipline is also what rules out both of the "nasty" half-updated states worth naming explicitly: a special-flags byte being claimed by the static entry while the pool still holds old, differently-shaped content underneath it (avoided because the static entry only ever flips *after* the new pool content is fully in place), and a reader misinterpreting pool bytes because it checked the wrong bit or checked out of order (avoided by the reader always consulting bit 14 before deciding how to interpret byte 2 onward, never inferring shape from content).
+
+This protocol is sound as described, and worth stating as three explicit invariants for whoever implements it, since they're the kind of thing that's easy to violate accidentally later without them being written down:
+
+1. **Single-owner access to the pool.** The stack servicer must be the only code path that ever mutates pool bytes or bitmap state — including its own background defrag and micro-relocation work — so that "the servicer processes requests in order" is actually true and not just usually true. If anything else ever pokes the pool directly (e.g., a future "fast path" optimization that bypasses the servicer for some case), the ordering guarantees above stop holding.
+2. **Stale-request resolution.** The protocol has a real window — between "step-writer sends a request" and "servicer reports back" — during which the true state is in flight. If the user edits the same step again before the first request completes (a quick toggle, a second CC), a late-arriving response for the *first* request could otherwise get applied after a *newer* edit has already superseded it. A per-step generation counter, incremented on every edit and checked before applying a servicer response, is the standard fix — worth specifying now so it's not discovered as a bug later.
+3. **Bitmap visibility timing.** A chunk the servicer has reserved but not yet finished writing into shouldn't look "just free space" to the global defragmenter's bitmap scan, but it also shouldn't look like a normal, relocatable, already-linked block (its step-ID back-reference may not be valid yet). The clean rule: the bitmap only marks a chunk occupied *as part of* the same operation that makes it real (fully written, step-ID set, ready to be pointed at) — never before. Anything the defragmenter finds occupied should always have a valid step-ID it can look up in the static array; if it doesn't, that's a bug, not a case to handle gracefully.
 
 **Cross-scene safety, per your note:** mutating step data on a track is disabled if that track's *scene* isn't the one currently playing — so only one scene's pool is ever under concurrent read (playback) + write (edit, live-record, micro-relocation, defrag) pressure at a time.
 
 **Atomicity:** unchanged — the static array entry is a 2-byte, 2-byte-aligned field, so the pointer swap that makes a relocated or newly-written block live is a single aligned `STRH` on Cortex-M7, atomic with respect to interrupts and DMA without additional locking.
 
 **Save format:** because the pool stays defragmented — both by the periodic global sweep and continuously by the micro-relocation slack top-ups — it writes to the `.pat` file close to as-is.
+
+### 3.3a Automation hold and the default record/playback model
+
+This is now settled as the default playback behavior for ordinary automation, not just an open question:
+
+**Playback:** when a step automates a parameter, that value holds through subsequent steps — unchanged — until the next step that is either **active** (triggers) or **carries any automation of its own** (for any parameter, not necessarily the same one). At that next such step, the parameter resets to its default value, *unless* that same step also automates the parameter again, in which case it takes on the new automated value instead of resetting.
+
+**Recording:** the record process has to actively maintain this behavior, not just log raw CC changes as they arrive. Per your spec: while record is active, a parameter change (a "diff") is watched until the user stops recording, changes the selected track/voice, or another voice's CC automation arrives. At the end of each step:
+- If the watched parameter diffed during that step, write (or overwrite) the step's automation entry with the parameter's **final** value at step-end — not every intermediate value, just one write per step regardless of how many CC messages arrived during it.
+- If the step isn't active and nothing diffed during it, the writer does nothing — no automation entry gets created.
+- If the step **is** active, or already carries other automation, the writer stamps the currently-held value onto it **even if nothing diffed during that step**. This is the part that makes the playback rule above actually work as intended: without re-stamping, a value set several steps back would get silently reset to default the next time an unrelated active/automated step passed, even though the user never told it to change. The re-stamping is what keeps a live-recorded hold matching what the user actually heard while recording it.
+
+The direct consequence for 3.3's slack/defrag design: live-record's write frequency isn't just "the first time a new parameter touches a given step" — during an active recording pass with a held parameter, potentially **every subsequent active or automated step** gets a fresh stamp, at the sequencer's step rate, until recording stops. That's still comfortably slow relative to a 216MHz core (tens to low-hundreds of milliseconds between steps at musical tempos), so the conclusion in 3.3 doesn't change — the background maintainer still has ample headroom — but it's worth being explicit that this, not occasional first-touches, is the real sizing driver for how often slack gets consumed during a busy recording pass.
+
+**One reconciliation this raises, worth flagging rather than resolving here:** 3.2's `automation hold` flag was introduced as a separate, explicit per-entry marker, before this default hold-and-reset behavior existed as a concept. Now that ordinary automation already holds by default until the next active/automated step, it's not yet clear what `automation hold` adds on top of that — whether it means "persist even *through* the next active/automated step, don't reset there either," or something else entirely. Not something to resolve in this document (per your note below), but worth flagging so the two aren't built as quietly-overlapping, half-redundant mechanisms.
+
+### 3.3b Risks and cross-feature tradeoffs
+
+Per your framing of what this document is actually for — catching features that would otherwise step on each other's toes during implementation, not designing every feature in full — here's what 3.3a's hold/record model touches that's worth having on record now, without resolving any of it:
+
+- **Storage cost vs. playback simplicity, as an explicit tradeoff, not an accident.** The re-stamping behavior means a value held steady across a long run of active steps costs one automation entry *per active step it crosses*, not one entry for the whole run. Against 3.2's capacity figures (7,295 total automation entries in the realistic case), a single sustained knob-hold recorded across, say, 20 active steps in a busy pattern consumes 20 of those entries, not 1. The alternative — store only the moment of change plus a hold marker, and have playback search backward for "the last time this parameter was set" — would be far cheaper on pool space but adds real search cost and complexity to the per-tick playback read path. Nobody needs to pick between these now, but whoever implements 3.3a should know this fork exists rather than discovering it mid-implementation.
+- **Interaction with per-track step scale and rolls (3.7, 3.8).** "The next active or automated step" is a step-grid concept; a scaled track (where one step might represent a whole bar) or an active roll (many rapid hits inside what's nominally one step) both change what "the next step" means in real time. Whether a roll's individual hits count as separate "active" events for hold-reset purposes, or the whole roll cell counts as one, isn't addressed by either feature's description alone and needs a decision when both are actually implemented together.
+- **Interaction with per-voice morph and its LFO overlay (4.3, 4.4).** Per-voice morph is recordable the same way any parameter is (via step automation), but it can *also* change continuously from an internally-generated LFO overlay that's explicitly meant to be invisible and non-recorded. The record-watcher described above needs to distinguish "an external CC/knob diff" from "the morph value moved because its own LFO overlay is running" — otherwise background LFO wiggle could get recorded as a dense pile of step automations. This should be a straightforward guard (watch the CC/knob input stream, not the resulting parameter value), but it's a real seam between two features built somewhat separately, worth a specific check when both exist.
+- **Interaction with copy operations (3.5).** Because a step's automated value is only meaningful in the context of "whatever was held going into it," copying a *portion* of a pattern (rather than the whole thing) can sound different once pasted somewhere else, if the copied region didn't happen to start right after a reset point. This is a real, if minor, consequence of the hold-based model that a naive "each step is fully self-contained" mental model wouldn't have — worth a note in the eventual copy-operation implementation rather than a surprise bug report.
 
 ### 3.4 Parameter ID space (shared with the FX sequencer)
 
@@ -195,11 +294,18 @@ Per your note, the full set: copy scene, copy instrument (single voice part), co
 
 ### 3.6 Automation always runs; trigger is a separate bit
 
-Automation on a step plays back regardless of whether that step has a trigger — this is a change from the old velocity-0-as-automation-only-step model. Only steps with an actual trigger light their LED. Pressing a step button in step mode still toggles the trigger/LED, but does **not** touch that step's note, velocity, automation, or any other stored data — trigger-on/off and "what data lives on this step" are fully decoupled. Additionally: holding `SHIFT+COPY/CLEAR` while the menu is up, then pressing sequence and `SELECT` buttons, clears just a step or just a bar of all automation/settings (distinct from toggling a trigger off).
+Automation on a step plays back regardless of whether that step has a trigger — this is a change from the old velocity-0-as-automation-only-step model, and 3.2's final storage format makes it a literal, direct consequence of the design rather than a special case to handle: the on/off MSB and the automation offset address are independent fields in the static entry, so a step's trigger state and its automation content were never coupled to begin with. Only steps with bit 15 set light their `SEQ` LED and trigger their note. Pressing a step button in step mode toggles that on/off bit alone — it does **not** touch the step's offset address, automation, has-specials bit, note, velocity, timing, roll, probability, or any other stored data. Automation therefore continues to apply while the step is off, and special assignments persist so they are restored unchanged when the step is turned back on. Additionally: holding `SHIFT+COPY/CLEAR` while the menu is up, then pressing sequence and `SELECT` buttons, clears just a step or just a bar of all automation/settings (distinct from clearing the on/off bit).
 
 ### 3.7 Per-track step timing scale
 
 Per-track length (up to 128 steps) and per-track scale, accessible from the second page under the transient-voicing ("click") sub-page. Since there are no sub-steps in this paradigm, scale is expressed relative to the base step (1 step = 1/16th note): scaling a track up to ×16 means 1 step on that track = 1 bar, in `/2` increments down to `/16` (1 step = 1/128th note). Dot and triplet subdivisions are flagged by you as open — see below.
+
+Session 031 landed a bridge version of this concept before the dynamic-pool
+rewrite: STEP front-page track settings now expose length, scale, MIDI channel,
+MIDI note, and per-track shuffle, and Sequencer derives scaled/shuffled timing
+from an absolute 96-PPQ master clock. This bridge uses the existing `Step`
+storage and should be treated as behavior/spec discovery for the final Phase 3
+implementation, not as the final storage model.
 
 ### 3.8 Roll overhaul
 
@@ -213,12 +319,31 @@ On the Patgen/Euclidean page (`SHIFT+PERF`), pressing `SHIFT+PERF` twice reverts
 
 A borrowed idea worth folding in here since it's sequencer-scale-adjacent: a pattern-level scale selector with `12a`/`12b` modes that skip specific steps of a 16-step grid on a fixed schedule (`12a` skips steps 2, 6, 10, 14; `12b` skips 3, 7, 11, 15) to convert a 16-step binary grid into a 12-step ternary (triplet) feel and back, without needing a genuinely different step count. This is a cheap way to get triplet feel without touching the 128-step/8-bar architecture — worth doing as a scale/display mode on top of Phase 3 rather than a structural change.
 
+### 3.11 Final LED state consolidation pass
+
+As the last Phase 3 subphase before Phase 4, consolidate the front-panel LED
+state rules without changing the public LED API. The current UI work has several
+temporary layers that can overlap: base lit/unlit state, persistent blink,
+group flash, one-shot pulse, and sequencer chase/highlight. The intended
+priority and restore fallback order is:
+
+`base lit/unlit < blink < flash < pulse`
+
+The consolidation should make that order explicit inside `ledHandler`: base
+writes update the remembered mode-owned state, blink/flash/pulse render as
+overlays, and expiry/cancel of any layer re-renders the next-highest active
+layer rather than blindly restoring to base. A pulsed LED that was blinking
+should fall back to its blinking render state; a flashed LED whose base changed
+during the flash should fall back to the latest base; unrelated LED groups
+should not be disturbed. Include BAR1/SW43 and sequencer chase in the same
+render rules, either by placing chase explicitly in the priority stack or by
+folding it into an existing temporary layer.
+
 ### Open Engineering Questions
 
 - **Manual roll triggering:** you flagged needing "a smart way of triggering manual rolls" now that rolls are decoupled from pattern length — this needs a concrete UI proposal (which button/hold-gesture initiates a manual roll, and at what rate) before Phase 5's UI work can wire it up.
 - **Dot/triplet subdivisions for per-track scale:** flagged as "maybe" in the source doc — worth a decision before 3.7 is implemented, since it affects the scale-value encoding (a plain `/2..×16` power-of-two range doesn't accommodate dotted/triplet values without extra encoding bits).
-- **Live-record write semantics — confirm before 3.3 is built.** 3.3's whole slack-reservation design rests on an assumption: that live-recording a continuously-moving parameter onto a single step *updates one existing automation entry's value in place* (cheap, no growth) rather than appending a new entry on every incoming value change (which would consume slack constantly rather than only on the first touch of a new parameter). This needs confirming — is an automation entry keyed uniquely per `(step, parameter)`, with live record overwriting the value byte of the existing entry once one exists for that pair? If instead every value change during a live pass is meant to append a fresh entry, the slack-reservation sizing in 3.3 needs to be revisited from scratch, since the "one-time cost per step" framing wouldn't hold.
-- **`automation hold` playback semantics:** the flag exists in the storage format (3.2) but what it does during playback — does a held value persist until the next automation for that parameter anywhere later in the pattern, and does that next automation become the new held value or a one-shot override — is undecided and belongs with `seq_tick()`'s playback logic.
+- **`automation hold` vs. the 3.3a default hold-and-reset behavior:** as flagged in 3.3a, it's not yet clear what the dedicated `hold` flag adds on top of the now-default "holds until next active/automated step" behavior for ordinary automation. Left open deliberately (per your note that this can wait for the implementation session), but worth resolving before both are built as potentially-overlapping mechanisms.
 
 ### Suggested Complementary Features
 
@@ -254,7 +379,17 @@ Since scenes now carry their own kit/morph-target pair (Phase 2), per-voice and 
 
 ### 4.4 Morph engine implementation
 
-The current LXR-02 morph engine (`Core/Preset/presetManager.c`, soon `Core/Scene/`) is a single global morph: `preset_morph()` sets a target and bumps a generation counter; `preset_morphTick()`, called once per main loop, advances a `morph_index` cursor across `END_OF_SOUND_PARAMETERS` and sends **exactly one** interpolated parameter per call via `frontPanel_sendData()` (soon a direct call, per Phase 1.2), skipping a short list of indices that shouldn't be morphed (index 127's encoding collision, velocity-destination slots, voice-LFO slots, LFO-target slots). This one-parameter-per-tick design is exactly what you described, and it's the mechanism Phase 4 needs to extend to per-voice + LFO-overlay morphing without breaking its real-time-safety property (bounded work per tick, no burst).
+The current LXR-02 morph engine (`Core/Scene/Preset/presetManager.c`) is a
+single global morph: `preset_morph()` sets a target and bumps a generation
+counter; `preset_morphTick()`, called once per main loop, advances a
+`morph_index` cursor across `END_OF_SOUND_PARAMETERS` and applies **exactly
+one** interpolated parameter per call through Preset's direct sound-parameter
+path, skipping a short list of indices that shouldn't be morphed (index 127's
+encoding collision, velocity-destination slots, voice-LFO slots, LFO-target
+slots). This one-parameter-per-tick design is exactly what you described, and
+it's the mechanism Phase 4 needs to extend to per-voice + LFO-overlay morphing
+without breaking its real-time-safety property (bounded work per tick, no
+burst).
 
 There's real prior art for this specific extension: `LXR/mainboard/LxrStm32/src/Preset/MorphEngine.c` in the original LXR-1 codebase already implements per-voice morph amounts plus an LFO-to-morph overlay, as a "background morph worker" (`preset_serviceMorphInterpolation()`) that does "exactly one interpolation unit... per call" — its own doc comment uses almost exactly your phrasing. Its approach: a `preset_morphScanParam` cursor walks parameters (like LXR-02's `morph_index` today), and a `preset_morphDrainPhase` counter interleaves an LFO-overlay check for each of up to 6 source voices *at every parameter*, before advancing to the next parameter — so its actual drain order is "param 1: base value, then check voices 1–6 for an LFO-morph overlay targeting this param; param 2: same; …" rather than "finish all params for every voice, then do LFO overlays at the end."
 
@@ -334,7 +469,7 @@ That division range was originally expressed in **sub-step** terms (64 sub-steps
 
 ### 5.5 Load/save UI rework
 
-The original `putting it together` draft proposed a specific knob remapping for the load/save menus (knob 1 = type, knob 2 = number/cursor, knobs 3/4 = character entry with capitals/numbers/lowercase split across them). Per your note, this is superseded — "we have bigger file changes in mind" — because the whole load/save menu needs rebuilding around the new file-type set from Phase 2 (BANK/SCENE/KIT/PAT/FX/instrument-parts) rather than the old kit/pattern/morph/performance/all/globals/samples set. The specific knob assignment idea is worth keeping as a starting point for that rebuild, but the menu structure itself (what "type" even means, what "auto-load" means per type) needs designing fresh against the Phase 2 file model rather than patched onto the current one.
+The original `putting it together` draft proposed a specific knob remapping for the load/save menus (knob 1 = type, knob 2 = number/cursor, knobs 3/4 = character entry with capitals/numbers/lowercase split across them). Per your note, this is superseded — "we have bigger file changes in mind" — because the whole load/save menu needs rebuilding around the current Phase 2 file model: banks, scenes, kits, patterns, samples, wavetables, effects, instruments, and root `settings.cfg`. The specific knob assignment idea is worth keeping as a starting point for that rebuild, but the menu structure itself (what "type" even means, what "auto-load" means per type) needs designing fresh against the Phase 2 file model rather than patched onto the current flat slot menu.
 
 ### 5.6 External MIDI sequencing tracks
 
@@ -363,28 +498,52 @@ Currently: `DRUM`, `SNARE`, `CYMBAL`, `HIHAT` instrument types, freely swappable
 
 - **Basic** — drum, snare (and similar low-DSP-cost voices).
 - **Advanced** — cymbal, hi-hat, and other voices that need meaningfully more DSP per sample.
-- **Advanced-buffer** — granular, convolution, and anything else that needs a dedicated hot data buffer: a **1/4-second, 8-bit, mono buffer in ITCM** per voice instance of this tier, used to loop lower-resolution grains/impulse data in the background without taxing the main per-sample DSP budget.
+- **Advanced-buffer** — granular, drone, Karplus-Strong, convolution chamber. Per your clarification: **only one instrument in a given kit will ever use this tier**, and that one instrument gets a dedicated **0.25-second, 16-bit, mono buffer in DTCM** (not ITCM — see below). This is a separate, distinct buffer from the FX-stack's BBD delay (6.7, 8-bit stereo, 1.0+ seconds) — the two are unrelated allocations with fixed, static sizes decided once during implementation, not dynamically resized. (A future idea worth remembering but explicitly out of scope now: an instrument that reads the BBD delay's own buffer directly, as an oscillator — a different feature from anything in this phase, not something to design around today.)
 
-This tiering is a real architectural decision (voice types declare which tier they need, and the tier determines what resources — filter complexity budget, ITCM buffer allocation — get reserved for that voice slot), not just a naming convention, so it's worth deciding the tier-to-resource mapping explicitly before the first advanced-buffer voice (granular, 6.2) gets built against it.
+**ITCM is off the table for this buffer, per your call**, and that's the right decision independent of the reasoning that follows: ITCM is only 16KB total and already holds the oscillator hot-path code (`calcSineBlock`, `calcFmBlock`, and the rest of the dozen or so `INITCM`-tagged functions in `Oscillator.c`) — keeping it reserved for code, as you said, avoids a real resource conflict rather than trying to measure exactly how tight a squeeze it'd be.
 
-**A genuine open question, not glossed over:** ITCM is 16KB total on this part, and it currently holds the oscillator hot-path *code* — `calcSineBlock`, `calcFmSineBlock`, `calcFmBlock`, `calcNextOscSampleFmBlock`, `calcNoiseBlock`, `calcNextOscSampleBlock`, `calcWavetableOscBlock`, `calcSampleOscFmBlock`, `calcUserSampleOscFmBlock`, `calcUserSampleOscBlock`, `calcSampleOscBlock`, `osc_setFreq` — about a dozen functions tagged `INITCM` (`config.h`'s `ENABLE_OSC_INITCM_CODE` switch). A 1/4-second 8-bit mono buffer at ~44.1kHz is roughly 11KB. Putting an 11KB **data** buffer in the same 16KB region that's currently reserved for oscillator **code** is a real resource conflict, not free headroom — the earlier draft asserted this "fits perfectly," which isn't something the code supports as written. This needs an actual measurement (how much of the 16KB the current `INITCM`-tagged functions occupy, via `arm-none-eabi-size`/the linker `.map` file after a real build) before committing to ITCM as the buffer's home, and a fallback plan (DTCM instead, accepting the non-DMA-accessible constraint that's already true either way since ITCM isn't DMA-accessible either; or reducing which oscillator functions stay `INITCM`-tagged to make room) if it doesn't fit.
+**Freeing DTCM headroom by moving read-only tables to flash.** You asked specifically about `transientData` and `sine_table` — both are real, and I checked their exact sizes and current placement rather than estimating:
+
+- `sine_table` (`Core/DSPAudio/wavetable.c:43`) is `const int16_t[TABLESIZE+1]` with `TABLESIZE = 4096`, so **4,097 × 2 bytes = 8,194 bytes**.
+- `transientData` (`Core/DSPAudio/transientTables.c:62`) is `const int8_t[NUM_TRANSIENTS][TRANSIENT_SAMPLE_LENGTH]` with `NUM_TRANSIENTS = 12` and `TRANSIENT_SAMPLE_LENGTH = 2205`, so **12 × 2,205 = 26,460 bytes**.
+- Together: **34,654 bytes (~33.85KB)** — right at the top of your own 26–34KB estimate.
+
+Both are currently DTCM-resident via the `INCCM`/`INCCMZ` macros — which, per `config.h`'s own comment, are aliases for `INDTCM`/`INDTCMZ` (a carryover naming convention from the original LXR's CCM-RAM). This is worth flagging on its own: my Phase 6.7 draft below had claimed DTCM was almost entirely free (~3.2KB used) based on grepping only the literal `INDTCM`/`INDTCMZ` token — that missed everything tagged via the `INCCM`/`INCCMZ` alias, which turns out to include not just these two tables but every drum/snare/cymbal/hi-hat voice struct, the six `ModulationNode` velocity modulators, and the mixer's per-voice state arrays. That's corrected below.
+
+Both tables are also good, low-risk candidates for moving to flash specifically because samples already stream from the same internal flash region (`0x08080000+`, per `MEMORY.md`) successfully today — confirming that this part's internal flash, with its ART accelerator prefetch/cache, is fast enough for real-time audio access, at least for the sequential-access pattern sample playback uses:
+
+- **`transientData`** is read sequentially, start to finish, once per transient hit (`transientGenerator.c`'s `phase`-indexed access) — the same access shape as sample playback, which is already proven to work from this exact flash region. High confidence this moves cleanly.
+- **`sine_table`** is read at true audio rate, per-sample, inside the oscillator block-calc functions (`Oscillator.c`), with a phase-accumulator index that's usually local/incrementing but can jump further per sample at high pitch — a somewhat less favorable pattern than `transientData`'s sequential one, and more like the pattern actual *code* execution from flash already relies on (which also works today, on the same ART cache). **Decision: leave it in DTCM.** `transientData` alone frees enough headroom (6.7) without taking on `sine_table`'s less-proven access pattern; if more DTCM room is ever needed later, moving `sine_table` is still there as a lever, with the polyphony stress test below as the thing to check before flipping it.
+- Implementation is likely as simple as removing the `INCCM`/`INCCMZ` tag from `transientData`'s declaration — with no section attribute, `const` data falls through to the linker's default `.rodata` placement in app flash, the same place all the rest of the firmware's constant data and code already lives. No new linker section should be needed, but worth confirming the default `.rodata` target is genuinely the app-flash region (`0x08008000–0x0807FFFF`) and not anywhere near the runtime-erasable sample sectors (6–11), so a future sample write/erase can never touch it.
+- Two smaller `INCCM`-tagged `const` tables exist too (`squareRootLut`, 128 floats = 512 bytes; `transientVolumeTable`, 69 floats = 276 bytes) and are candidates for the same move if a little more headroom is ever wanted, on the same reasoning as `transientData` — not needed for the current target, so not part of the current plan.
+
+**What's actually in DTCM, confirmed by a real build.** The project compiles cleanly with `arm-none-eabi-gcc` (13.2.1) as checked out — `make` succeeds with no errors, only pre-existing minor warnings unrelated to this analysis. The linker's own `.map` file gives the real, no-guessing numbers:
+
+- **`.itcm`** (the `INITCM`-tagged oscillator code from earlier): **3,776 bytes** used of 16,384 total — 12,608 bytes free. Confirms your instinct to keep ITCM code-only was the right call independent of this measurement, and also confirms there was never much pressure there to begin with.
+- **`.dtcm`** (`INDTCM`/`INCCM` — const data loaded from flash at startup): **35,168 bytes**. This is `sine_table` + `transientData` + the two smaller tables (`squareRootLut`, `transientVolumeTable`) + one small static float — matches the source-level tally closely.
+- **`.dtcmz`** (`INDTCMZ`/`INCCMZ` — zero-initialized, runtime-mutable state): **6,092 bytes**. This is the six voice structs, the six `ModulationNode`s, the mixer's per-voice arrays, and the audio/oscillator interpolation buffers — all genuinely small; the six voice structs turned out to be compact (a few hundred bytes each), not the large unknown I'd flagged as needing measurement.
+- **Total DTCM in use today: 41,260 bytes (40.3KB) of 131,072 (128KB) — 89,812 bytes (87.7KB) free before moving anything.**
+
+This resolves the open question from the previous pass at this document: the real total was measurable, and it's good news — DTCM was never close to full, just not fully accounted for by source grepping alone.
 
 ### 6.2 Granular instrument
 
-Built as a complete instrument (advanced-buffer tier), not an oscillator variant — this was your explicit correction to the initial framing. Reads directly from the 1.5MB sample flash region (the same one that already backs regular sample playback, so the flash-read-speed question is answered by "it already works for samples as-is," per your answer). Pitch parameters, per your spec: assign a scale/interval, fine detune, and a "distance" value that moves up/down that scale/interval — rather than free continuous pitch, grain pitch is quantized to a chosen scale and stepped through it. A feedback path with a short delay/decay is also wanted; per your round-2 answer, this is meant to use the same BBD-style buffer described in 6.7 to "stack" the grain sound, giving density without needing true overlapping-grain polyphony.
+Built as a complete instrument (advanced-buffer tier), not an oscillator variant — this was your explicit correction to the initial framing. Reads directly from the internal sample flash region (the same one that already backs regular sample playback, so the flash-read-speed question is answered by "it already works for samples as-is," per your answer). Pitch parameters, per your spec: assign a scale/interval, fine detune, and a "distance" value that moves up/down that scale/interval — rather than free continuous pitch, grain pitch is quantized to a chosen scale and stepped through it.
+
+A feedback path with a short delay/decay is also wanted, using the dedicated 0.25-second buffer from 6.1 — confirmed as its own separate allocation, not routed through the 6.7 FX-stack's BBD delay. Since only one advanced-buffer-tier instrument exists per kit, this buffer is exclusively the active granular (or drone/Karplus/convolution) instrument's own resource.
 
 Grounding from actual granular-synthesis practice, since this is new DSP territory for the project: the standard approach windows each grain with an amplitude envelope to avoid clicks at non-zero-crossing boundaries, and the shape of that window is itself a real timbral control, not just anti-click housekeeping — an equal-power/Hann-style crossfade gives the smoothest, most "fused" texture, while sharper (near-rectangular) windows give a more clicky/metallic character and are cheaper to compute. Grain parameters worth having beyond pitch (standard across granular implementations): grain length, density (grains per second / overlap amount), and position jitter (randomizing the read-start point slightly for a less mechanical texture) — these map naturally onto the existing per-parameter automation/morph infrastructure once they exist as real parameters.
 
 ### 6.3 New voices
 
 - **West Coast.** Sine/triangle oscillator core, wavefolder (depth + symmetry), FM ratio/index, and an LPG-style decay envelope in place of a standard ADSR. Two pieces of this reuse existing code directly: the sine/triangle core is already `SINE`/`TRI` in `Oscillator.h`, and 2-operator FM already exists (`calcFmSineBlock`/`calcFmBlock` in `Oscillator.c`) — the FM ratio/index parameters are largely exposing controls on code that's already there, not writing new FM synthesis from scratch. The wavefolder and LPG are genuinely new. For the wavefolder: the cheapest embedded-appropriate approach is a triangle-style fold (mirror the signal back down once it crosses a threshold, piecewise-linear, computationally trivial), which is the same family of technique used in Serge/Buchla-style analog wavefolders being modeled in current DSP research — worth noting that any digital wavefolder aliases hard at high fold depth on high-pitched material, and this platform has no spare CPU budget for oversampling the wavefolder stage, so fold depth may need a soft ceiling (or an explicit "this gets aliasy at extreme settings" acceptance, which is arguably in keeping with an intentionally lo-fi/8-bit-adjacent voice anyway). For the LPG: real Buchla-style LPGs are a combined VCA+lowpass filter driven by one control signal with a distinctly *asymmetric* response — fast to open, slow/lazy to close — which is what gives the characteristic percussive "ring." The computationally cheap way to get that same asymmetric behavior digitally is a one-pole smoother on the strike/decay envelope with two different time constants depending on whether the envelope is rising or falling, driving both the VCA gain and the filter cutoff from that single smoothed value simultaneously (rather than two independent envelopes) — this is a well-documented digital model of the real Buchla 292 circuit and is cheap enough to run per-voice on this part.
-- **Drone.** Interacting sub-oscillators, slow chaotic LFOs, internal bit-crush, a BBD-style short delay/feedback loop (again the 6.7 buffer), integrated ring modulation, bit inversion, and some extra pre-wired or limited-selection internal LFOs (i.e., not the full general-purpose LFO routing the main voices get — a smaller, purpose-built set). No transient/envelope in the normal sense — it's meant to sit and drone once triggered.
+- **Drone.** Interacting sub-oscillators, slow chaotic LFOs, internal bit-crush, a short delay/feedback loop (the same dedicated 6.1 buffer as granular — only one advanced-buffer-tier instrument exists per kit, so whichever one is in use owns it exclusively), integrated ring modulation, bit inversion, and some extra pre-wired or limited-selection internal LFOs (i.e., not the full general-purpose LFO routing the main voices get — a smaller, purpose-built set). No transient/envelope in the normal sense — it's meant to sit and drone once triggered.
 - **Karplus-Strong.** This is worth calling out as the *cheapest* of the new voices to implement well: the algorithm is a short noise burst fed into a delay line of length `N = Fs / f0` (sample rate over target fundamental), read back through a simple one-pole averaging filter (`y[n] = (y[n-N] + y[n-N-1]) / 2`, or a loss-factor-weighted version for controllable decay time), fed back into the delay line. A single delay line plus a one-pole filter per voice is far cheaper than any of the other new voice types, and the classic extension for better pitch accuracy at higher notes (an allpass filter correcting the fractional part of the delay length that a purely integer-sample delay line can't represent) is a small, well-documented addition if pitch accuracy on higher-pitched plucks turns out to matter.
 - **Convolution chamber.** A pitch-enveloped transient or user sample run through a simulated resonant chamber (spring reverb, cabinet, etc.) via convolution. This is real convolution reverb, which is the most CPU-expensive item in this entire phase — a true convolution against an arbitrary-length impulse response scales with IR length, and even a short IR (a few hundred samples) is meaningfully more expensive per sample than anything else in this document. This needs an explicit CPU budget decision (how long an IR is affordable per voice, whether it's one shared chamber IR set or per-kit-selectable, whether a cheaper structured/algorithmic reverb approximation is an acceptable substitute for true convolution) before committing to "convolution" as the literal implementation rather than as the description of the desired *sound*.
 
 ### 6.4 New oscillators
 
-- **Wavetable.** Reads `.wav` files of any length from `WAVETABLES/` (confirmed by your answer — not a fixed single-cycle format, no Serum-style multi-frame container). Morphable (interpolating between two selected waves) but not modulatable directly; scanning through a wavetable set happens via LFO or envelope targeting the wavetable-position parameter, same as any other modulatable parameter.
+- **Wavetable.** Reads `.wav` files of any length from numbered folders under root `Wavetable/` (confirmed by your answer — not a fixed single-cycle format, no Serum-style multi-frame container). Morphable (interpolating between two selected waves) but not modulatable directly; scanning through a wavetable set happens via LFO or envelope targeting the wavetable-position parameter, same as any other modulatable parameter.
 - **PWM.** You flagged this as "probably wavetables, but suggest another method if you have one" — a direct suggestion: implementing PWM as a genuine variable-duty-cycle square calculation (compare the oscillator's phase accumulator against a duty-cycle threshold instead of the fixed 50% used by `REC`) is cheaper than storing a set of wavetable frames at different duty cycles, and only needs one new parameter (duty cycle) rather than wavetable memory. The tradeoff is the same aliasing consideration as any hard-edged digital waveform on this platform (no oversampling budget), so it inherits the same character as the existing `SAW`/`REC` waveforms rather than being cleaner than them — which is likely fine, since they're presumably an accepted part of the current sound already.
 - **Buffer oscillator.** Reads directly from the L or R DTCM buffer described in 6.7, using the same scanning parameters as the granular oscillator/instrument (position, loop size, retrigger, rate/sync, retrigger randomization). This is effectively "granular, but reading from the BBD buffer instead of sample flash" and can likely share most of its scanning-parameter code with 6.2's granular instrument rather than being a wholly separate implementation.
 - **Swarm / hypersaw.** A detune-and-phase-spread oscillator stack (multiple copies of a base waveform, each slightly detuned and phase-offset) — standard "supersaw" technique, computationally is just N oscillator instances summed, so its cost scales linearly with however many stacked voices are budgeted per instance.
@@ -413,15 +572,20 @@ Run modes, per `putting it together`: **Off** (pressing the FX sequencer's `SEQ`
 
 The first real FX stack, meant to double as a proof of concept for the FX bus itself. Three stages: bit-crush (bit-off/invert per bit — a literal bitmask/bit-toggle effect on the sample word, not a bit-depth-reduction crusher), a wavefolder (same technique as 6.3's West Coast wavefolder, available here as an insert effect), and an 8-bit stereo BBD-style delay, followed by a selectable multimode filter at 16-bit resolution — reusing the same filter DSP the voices already use (`Core/DSPAudio/ResonantFilter.c` already has the state-variable filter core — `SVF_recalcFreq`, plus `fastTanh`/`tanhXdX`/`softClipTwo` saturation helpers — tagged `INITCM_EFFECT`, currently disabled by default via `ENABLE_EFFECT_INITCM_CODE 0` in `config.h`; this filter stage is a real, existing, tested building block, not new DSP).
 
-**Memory, checked against the real linker script rather than assumed:** DTCM is 128KB total. Right now only about 3.2KB of it is explicitly claimed via the `INDTCM`/`INDTCMZ` tags — `audioOutBuffer`/`audioOutBuffer2` in `AudioCodecManager.c` (2 × 2 × `AUDIO_DMA_FRAMES` × 4 bytes each ≈ 1.5KB each) and two small oscillator interpolation buffers in `Oscillator.c`. Your own math for the delay buffer — 8-bit halves the size of a 16-bit buffer, so a slightly-under-1-second stereo delay at 44.1kHz fits comfortably under 128KB even with the interpolation/filter state alongside it — checks out arithmetically and there does appear to be real headroom (unlike the ITCM situation in 6.1, DTCM genuinely looks mostly free right now). That said, "checks out arithmetically against a rough tally of currently-tagged buffers" is different from "confirmed by the linker" — worth a real `.map`-file check once other Phase 6 features (which may also want DTCM for hot state) are further along, so the delay buffer's exact size gets finalized against actual remaining headroom rather than the budget being assumed fixed this early.
+**Memory — now confirmed by a real build, not estimated.** DTCM is 128KB (131,072 bytes) total; a real `make` shows 41,260 bytes already in use (35,168 in `.dtcm`, 6,092 in `.dtcmz` — see 6.1), leaving **89,812 bytes (87.7KB) free today**, before moving anything.
+
+Target sizes: the BBD delay at a full 1 second, stereo, 8-bit is `44,108 × 2 = 88,216 bytes (86.15KB)`; the 6.1 advanced-buffer-tier buffer at 0.25 seconds, mono, 16-bit is `44,108 × 0.25 × 2 = 22,054 bytes (21.54KB)`. Combined target: **110,270 bytes (107.7KB)**.
+
+**That doesn't fit in the 87.7KB free today — it's short by about 20KB.** This is exactly what the 6.1 flash-relocation plan is for: moving `transientData` and `sine_table` out of DTCM frees `26,460 + 8,194 = 34,654 bytes (33.85KB)`, bringing free DTCM to `89,812 + 34,654 = 124,466 bytes (121.6KB)` — **enough for both buffers at their full target sizes, with about 13.9KB left over.** If the two smaller tables (`squareRootLut`, `transientVolumeTable`) move too, that margin grows to roughly 15.2KB.
+
+So the concrete answer: **the flash move isn't optional headroom, it's the difference between the two buffers fitting at their stated sizes or not.** Given the decision to move `transientData` only and leave `sine_table` where it is (6.1 — `sine_table`'s audio-rate access pattern is the riskier one, `transientData`'s sequential pattern is the safe, already-proven one), the real number is: `89,812 + 26,460 = 116,272 bytes (113.55KB)` free against a `110,270-byte (107.69KB)` target — **it fits, with 5,858 bytes (5.86KB) to spare.** That's a real margin, not a rounding error, but it's tighter than moving both tables would give (13.9KB), so it's worth keeping in mind if any other Phase 6 feature also wants a DTCM allocation later.
 
 **A design choice worth surfacing rather than deciding silently:** real BBD hardware pairs its delay line with companding (compress going in, expand coming out) and pre/post low-pass filtering specifically to keep an 8-ish-bit-equivalent signal path usably clean — raw *linear* 8-bit PCM, with no companding, is considerably noisier and more aliased than that. Given this is explicitly framed as an "8-bit tech demo," the gritty raw-linear character might be exactly the point rather than a flaw — worth deciding whether this stack ships as intentionally lo-fi (raw 8-bit, cheapest to implement, matches the "tech demo" framing) or as a more faithful-sounding BBD emulation (adds a compander stage, more DSP cost, cleaner result) — possibly as a toggle, since the compander is a small addition on top of a working raw-8-bit delay rather than a different architecture.
 
 ### Open Engineering Questions
 
-- **ITCM headroom for the granular buffer (6.1/6.2)** — needs an actual `.map`-file measurement of current `INITCM`-tagged code size before committing an 11KB data buffer to the same 16KB region; DTCM is the fallback if it doesn't fit, at the cost of no longer being able to double-buffer with the audio-thread DMA-facing buffers that must stay in plain SRAM1.
+- **`sine_table`-in-flash, if revisited later** — not part of the current plan (6.1: leaving it in DTCM, moving `transientData` only), but if DTCM pressure from some other future feature ever makes it worth reconsidering, the thing to test first is several simultaneous sine-based voices at widely different, high pitches — the access pattern most likely to pressure the ART cache, unlike `transientData`'s already-proven sequential one.
 - **Convolution chamber CPU budget (6.3)** — needs a decision on maximum affordable IR length before "convolution" is locked in as the literal technique rather than a cheaper structured-reverb approximation of the same target sound.
-- **DTCM final tally for the BBD buffer (6.7)** — the arithmetic checks out today, but should be re-verified against a real build once other Phase 6 features that also want DTCM (LPG envelope state, Karplus-Strong per-voice delay lines, etc.) are sized.
 - **FX stack file format** — 64 arbitrary parameters per stack, remembered in kit and morph endpoints, with a stack-type tag: this needs the same kind of parameter-ID-space decision Phase 3.4 made for step automation (is FX-stack-parameter-64 the same "9-bit ID" space, or a separate per-stack-type namespace?) before the file format can be finalized.
 
 ### Suggested Complementary Features

@@ -9,7 +9,7 @@ Update it whenever something is confirmed, fixed, or decided.
 ## Quick Start
 
 ```
-# Repository root is the working tree root (branch: LXR02Open-prime)
+# Repository root is the working tree root (branch: dev-burst-reduction)
 
 # Build
 make && make img   →   build/LXRV2_lxr02.img
@@ -17,10 +17,10 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: repository root, branch `LXR02Open-prime`.
+**Current working source**: repository root, branch `dev-burst-reduction`.
 
-**Session 026 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/026_SESSION_HANDOFF_LOG.md` before related work.
+**Session 031 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/031_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, Phase 2 directory-kit loading, and the current bridge STEP/track-settings model, also read `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
@@ -28,6 +28,11 @@ Session 023 refactors CPU scheduling and DSP hot paths: TIM6 front-panel work is
 Session 024 fixes copy/clear ownership in the menu path and consolidates README/MEMORY.
 Session 025 fixes SD/global load compatibility and rear-jack behavior: FAT12/exFAT are rejected with `Unsupported card` / `use MBR-FAT32`; current globals span is 23 bytes, legacy 22-byte globals load silently with compatibility defaults, other globals lengths use safe fallback plus `check&save` warning; CLK IN is PD4 rising edge, RST IN is PD5 rising edge, and PD6/PD7 jack detect is retained-state foreground polling with pull-ups.
 Session 026 diagnoses the load/save button display glitch (one-frame edit-mode flash caused by `menu_resetSaveParameters()` firing before `menu_activePage` is updated in `menu_switchPage()` — fix documented in `LOAD_SAVE_GLITCH_ASSESSMENT.md`, NOT YET APPLIED to `menu.c`); fixes `filesystem_loadName_tick()` and `filesystem_loadKit_tick()` phase-2 zero-byte/short-file hang using correct `afatfs_feof()` EOF idiom; malformed files now show `-` in the slot-name display. Note: `PAR_EXT_SYNC` occupies the LXR037 `PAR_FETCH` parameter slot — potential cross-system file interchange mismatch; TODO before any LXR037 file interchange.
+Session 027 chunks runtime kit/all/performance sound-apply completion: after audio starts, `menu_startSoundApply()` / `menu_tickSoundApply()` drive `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` so one voice's velocity/LFO modulation routing is applied per foreground pass; boot-time pre-audio apply remains synchronous. `AUDIO_DMA_FRAMES` remains 96; 64-frame latency testing is deferred until the chunked path is hardware-tested.
+Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former parser opcodes are direct owner calls: Pattern edits through `pat_*` in `Core/Scene/Pattern/PatternData.c`, LED feedback through `SeqLedState` plus foreground `led_processSeqLedState()`, sound parameters through Preset, MIDI config through MidiParser, and transport/playback through Sequencer. Euklid/SOM now live in `Core/Scene/Pattern/`.
+Session 029 completes the PatternData storage-ownership pass and Preset folder move. `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, and `SEQ_NEXT_RANDOM*` are gone from live code; Sequencer reads/writes pattern storage through `pat_*` helpers while keeping timing/transport/recording gates. `Core/Preset/` is now `Core/Scene/Preset/`; public names remain `preset_*`, `parameterArray_*`, and `paramArray_*`. `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign. Staging/global audits are in `STAGING_AUDIT.md` and `GLOBALS_STAGING_AUDIT.md`.
+Session 030 begins Phase 2 filesystem work. `FILESYSTEM_SPEC.md` is the current root layout spec; `Core/Hardware/SD/storageTypes.c/h` owns kit text schemas/parameter maps with `storage_` prefixes; normal root kit load scans `Kit/NNN Name/`, loads `kitset.kcg` plus six instrument files, and keeps morph load on legacy `.SND`. Numbered folder convention is preferred `NNN Name`, compatibility `NNN_Name`, with a FAT short-alias fallback for scan aliases like `001SLA~1`. `SD_CARD/Kit/` is generated from legacy kits using the space convention.
+Session 031 completes the one-live-pattern/8-bar bridge pass and follow-ups. Live `NUM_PATTERN` is 1 while pattern files still stream the old 8-slot bridge layout; STEP front page now owns per-track length, scale, MIDI channel, MIDI note, and per-track shuffle; empty boot tracks default to 16 steps. Sequencer timing runs at corrected default speed with a 96-PPQ master step clock, per-track scale ratios, per-track shuffle, and pattern realign. LED flash is a group overlay and `led_setBlinkLed()` is idempotent. `SHIFT+VOICE` enters morph endpoint edit mode using `parameters2[]` and a blinking VOICE mode LED; stopped selected-voice re-press previews the voice. Pattern/container storage no longer imports or exports the old single shuffle byte; only per-track shuffle extension data is used, and final storage conversion remains a Phase 2 external-converter concern.
 
 ---
 
@@ -47,6 +52,7 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
 ├── build/                           ← generated, not in VCS
 ├── knowledge_files/
 │   ├── SESSION_HANDOFF_TEMPLATE.md ← template for writing new session handoff logs
+│   ├── MODULE_INTERCHANGE_SPEC.md  ← Session 028 direct-call API boundary map
 │   ├── ENHANCED_FEATURES.md        ← future enhancement notes
 │   ├── MEMORY_AUDIT.md             ← memory region audit notes
 │   ├── DSP_AUDIT.md                ← DSP pipeline audit and hot-path notes
@@ -54,7 +60,7 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
-│   │   ├── FRONTPANEL_AUDIT.md     ← frontPanel_sendData() elimination audit
+│   │   ├── FRONTPANEL_AUDIT.md     ← legacy front-panel bridge elimination audit
 │   │   ├── SD_CARD_INVESTIGATION.md ← SD false-positive analysis (PA8, 74HC165)
 │   │   └── XP_CONNECTOR_MAPS.md   ← ribbon cable pin mappings
 │   └── log_archive/
@@ -84,7 +90,12 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
 │       ├── 023_SESSION_HANDOFF_LOG.md
 │       ├── 024_SESSION_HANDOFF_LOG.md
 │       ├── 025_SESSION_HANDOFF_LOG.md
-│       └── 026_SESSION_HANDOFF_LOG.md
+│       ├── 026_SESSION_HANDOFF_LOG.md
+│       ├── 027_SESSION_HANDOFF_LOG.md
+│       ├── 028_SESSION_HANDOFF_LOG.md
+│       ├── 029_SESSION_HANDOFF_LOG.md
+│       ├── 030_SESSION_HANDOFF_LOG.md
+│       └── 031_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h
@@ -107,7 +118,8 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
     │   │       ├── encoder.c/h      ← SW42, TIM1 IC, Dannegger, accel + rebound suppression
     │   │       └── endlessPots.c/h  ← RV1-4, atan2 delta tracking
     │   ├── SD/
-    │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations
+    │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations; normal kit load now scans/loads root Kit/ directories
+    │   │   ├── storageTypes.c/h     ← Phase 2 kit text schema, numbered-folder parser, instrument parameter maps
     │   │   ├── kitBrowser.c/h       ← kit-only 128-slot gap-tolerant browser
     │   │   ├── SPI/
     │   │   │   ├── spi_sd.c/h       ← bit-bang SPI: PC12/PD2/PC8/PD0
@@ -127,11 +139,8 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
     │   ├── MenuText.h               ← all label strings
     │   ├── Cc2Text.c                ← modTargets[] 205 entries
     │   ├── CcNr2Text.h
-    │   ├── copyClearTools.c/h       ← copy/clear tools; direct seq_* calls wired Session 15
+    │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
-    ├── Preset/
-    │   ├── ParameterArray.h/c       ← supersedes Parameters.h; NUM_PARAMS=275
-    │   └── presetManager.c/h        ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── MIDI/
     │   ├── Uart.c/h                 ← USART3, 31250 baud, interrupt-driven dual FIFO (realtime + normal)
     │   ├── MidiRealtime.c/h         ← 32-entry timestamped SPSC ring for MIDI_CLOCK/START/CONTINUE/STOP
@@ -141,17 +150,22 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
     │   ├── MidiParser.c/h
     │   ├── MidiVoiceControl.c/h
     │   ├── SeqStep.h
-    │   ├── frontPanelParser.c/h     ← local dispatcher + sequencer/front-panel bridge
     │   └── valueShaper.h
+    ├── Scene/
+    │   ├── Pattern/
+    │   │   ├── PatternData.c/h      ← pattern/track/step storage and edit API
+    │   │   ├── EuklidGenerator.c/h  ← pattern generator
+    │   │   ├── SomData.c/h          ← SOM data tables
+    │   │   └── SomGenerator.c/h     ← SOM pattern/performance generator
+    │   └── Preset/
+    │       ├── ParameterArray.h/c   ← supersedes Parameters.h; NUM_PARAMS=275
+    │       └── presetManager.c/h    ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── SampleRom/
     │   ├── SampleMemory.c/h         ← sample flash metadata/runtime cache, 120 entries, loop flags
     │   └── sampleFlash.c/h          ← guarded F765 sector 6-11 erase/program helpers
     ├── Sequencer/
     │   ├── sequencerTimer.c/h       ← TIM3 4kHz sequencer timing owner (IRQ29, priority 2) — Session 019
     │   ├── sequencer.c/h            ← original LXR sequencer source (driven by TIM3_IRQHandler)
-    │   ├── EuklidGenerator.c/h      ← original LXR euclid generator source
-    │   ├── SomData.c/h              ← original LXR SOM data tables
-    │   ├── SomGenerator.c/h         ← original LXR SOM generator source
     │   ├── clockSync.c/h
     ├── DSPAudio/
     │   ├── random.c/h               ← F765 RNG port (PLL48CLK, bare register)
@@ -179,7 +193,7 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 
 - This folder is the repository/codebase.
 - `knowledge_files/LXR-master/` is read-only reference material only. Do not modify it.
-- Only session logs under `knowledge_files/log_archive/` are expected to change inside `knowledge_files/`.
+- Knowledge docs should be updated when architecture changes; session logs live under `knowledge_files/log_archive/`, and current direct-call API boundaries live in `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
 - **Original source reference**: `knowledge_files/LXR-master/` — AVR in `front/LxrAvr/`, STM32F4 in `mainboard/LxrStm32/src/`
 
 ## General Process Reminders
@@ -187,6 +201,10 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 - Always verify the local working repository directory before writing code.
 - Blocking for 1ms anywhere in the main loop or any ISR at priority <= 4 is unacceptable.
 - Runtime SD/file work must remain asynchronous; boot-only synchronous polling is allowed before audio starts.
+- New code should be commented at detailed contract level: why the function,
+  variable, or storage type exists; what it does; inputs/outputs; and
+  clients/accessors/affiliates. Do this proactively, not as a cleanup after the
+  user asks again.
 
 ---
 
@@ -289,7 +307,7 @@ if (audioCodec_queueFreeSlots() > 0) {
 **24-bit output path (Session 022)**: `audioOutBuffer`/`audioOutBuffer2` are `sample_mx_t` (int32_t, signed-24 value in container). `pack_half()` emits a true 24-bit payload in both halfwords of each I2S frame. Do NOT re-add `LSW = 0` zeroing. Do NOT add a `>> 8` shift in `sampleMix_toS24()` — int16 voice values enter the mixer already scaled as `int16 << 8` via `bufferTool_convertInt16ToSampleMix()`; adding `>>8` at pack time was the loudness regression fixed in session 022.
 
 **Zero startup underruns**: boot SD operations complete before `audioCodec_init()`.
-Runtime kit load from the menu may still create a small burst; boot-time SD work is complete before audio starts.
+Runtime kit/all/performance sound-apply completion is chunked after audio starts (Session 027): `menu_tickSoundApply()` drives `preset_tickDrumsetApply()` so only one voice's velocity/LFO modulation routing is applied per foreground pass. Boot-time pre-audio apply remains synchronous.
 
 ### Internal DAC — Must Never Be Enabled
 
@@ -299,7 +317,7 @@ The STM32F765 has an internal 12-bit DAC on PA4 (DAC1_OUT) and PA5 (DAC2_OUT). T
 
 ---
 
-## SD Card Architecture (implemented Sessions 12 and 17)
+## SD Card Architecture (implemented Sessions 12, 17, and Phase 2 start in 030)
 
 **SD operations must never block the main loop or any ISR at priority ≤ 4.**
 
@@ -309,7 +327,7 @@ The STM32F765 has an internal 12-bit DAC on PA4 (DAC1_OUT) and PA5 (DAC2_OUT). T
 
 **Architecture:**
 ```
-presetManager.c / kitBrowser.c
+Core/Scene/Preset/presetManager.c / kitBrowser.c
   → filesystem.c (typed operations: kit/morph/pattern/performance/all/globals)
     → asyncfatfs/asyncfatfs.c (afatfs_fopen/fread/fwrite/fclose/poll)
       → asyncfatfs/sdcard_lxr02.c (sector transfer FSM, 16 bytes/burst)
@@ -324,6 +342,19 @@ presetManager.c / kitBrowser.c
 - `sdcard_lxr02.c` implements `sdcard_readBlock`/`sdcard_writeBlock`/`sdcard_poll` on top of `SPI/spi_sd.c`. Each `sdcard_poll()` call clocks a burst of 16 SPI bytes (~9µs). A 512-byte sector completes in 32 polls.
 - `filesystem.c` serializes operations — one SD operation at a time. Request functions return immediately; completion is signalled via callback/status.
 - `filesystem.c` owns the filetype registry and add-a-filetype checklist. Non-SD clients include `filesystem.h` only.
+- Phase 2 root filesystem spec lives in `FILESYSTEM_SPEC.md`. Recognized root
+  directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`,
+  `Effect`, and `Instrument`; future system settings live in root
+  `settings.cfg`.
+- `storageTypes.c/h` owns Phase 2 text storage schemas and parameter maps. Keep
+  it free of `asyncfatfs` calls and keep function names prefixed `storage_`.
+- Normal kit load now scans root `Kit/` directories named `NNN Name` or
+  compatibility `NNN_Name`, then loads `kitset.kcg` plus six instrument files.
+  Morph-kit load remains legacy `.SND` until per-instrument morph persistence is
+  designed.
+- Kit scan keeps both display names and FAT short open aliases. If a card only
+  exposes a short alias such as `001SLA~1`, scan falls back to the leading
+  three-digit slot so the kit remains loadable.
 - Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
 - `kitBrowser.c/h` intentionally remains kit-only; pattern/performance/all use typed name loading and direct slot handling.
 - Boot path: synchronous polling loop before `audioCodec_init()` (audio not running, blocking OK).
@@ -401,6 +432,7 @@ Important caveat: long samples are not fully solved. `SampleInfo.size` is 32-bit
 - Display stability under rapid button mashing depends on the SPSC LCD ring behavior above.
 - Multi-knob RV1-RV4 repaint collapse is intentional and should remain scoped to that input path.
 - Global `cpu` is a read-only audio queue-free pressure widget, not a general MCU utilization meter.
+- Runtime kit/all/performance load completion should use `menu_startSoundApply()` / `preset_tickDrumsetApply()`; do not reintroduce direct `preset_sendDrumsetParameters()` calls in those post-audio completion paths.
 
 ---
 
@@ -434,18 +466,30 @@ initMidiUart(); usb_init();
 filesystem_initCardAndMountBlocking(); // card SPI mode + afatfs mount, pre-audio
 menu_init();           // calls memset on parameter_values — do NOT also memset in main()
 // Synchronous kit scan via filesystem_requestScanKits + polling
-// Synchronous boot kit load (P000.SND) via preset_loadDrumset + polling + menu_pollPresetStatus
+// Synchronous boot normal kit load (root Kit/001 ... directory) via preset_loadDrumset + polling + menu_pollPresetStatus
 // Synchronous globals load (GLO.CFG) via preset_loadGlobals + polling + menu_pollPresetStatus
 audioCodec_init();     // single audio entry point — AFTER all SD boot ops
 sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 // main loop: filesystem_tick() + menu_pollPresetStatus() every iteration
 // main loop: midi_service() for DIN/USB drain + flush
-// main loop: seq_ledState_process() (NOT seq_tick — TIM3 owns that)
+// main loop: led_processSeqLedState() (NOT seq_tick — TIM3 owns that)
 ```
 
 ### Sequencer / PATGEN Reminders
-- Reverse sequencer `SEQ_CC` feedback must use `seq_notifyFront()`, not `frontPanel_sendData()`, because original two-chip command values collide by direction.
-- `seq_ledState_process()` drains sequencer LED events in the main loop. Do not move it to an ISR without auditing `seq_patternSet` and LED RMW races.
+- Sequencer-to-LED feedback uses `seq_ledState` in `ledHandler.c`; do not reintroduce the removed front-panel parser bridge.
+- `led_processSeqLedState()` drains sequencer LED events in the main loop. Do not move it to an ISR without auditing PatternData and LED RMW races.
+- `Core/MIDI/frontPanelParser.c/h` is deleted. Do not replace it with a generic bridge; call owner APIs directly.
+- New pattern/track/step/automation work should enter through `pat_*` APIs in `Core/Scene/Pattern/PatternData.c/h`.
+- Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or `seq_selectedStep` compatibility names in live code. Playback and recording must use PatternData helpers such as `pat_readStep()`, `pat_getEffectiveTrackLength()`, `pat_recordNote()`, and `pat_eraseMainStepSubSteps()`.
+- `pat_tmpPattern` is the remaining active-pattern load buffer. Leave it until the 17th Scene/background-bank-load design replaces it; it should be the only temporary pattern storage needed.
+- `seq_offsetTrackStepIndexForRotation()` is a narrow runtime hook used by PatternData; UI code should call `pat_setTrackRotation()`.
+- `Core/Scene/Preset/` owns Preset code location. Public names intentionally remain `preset_*`, `parameterArray_*`, and `paramArray_*`; do not rename only part of this API.
+- `parameter_values[]` and `parameters2[]` still live in Menu and are known future migration targets for the instrument/file redesign, not a cleanup to do casually.
+- Normal kit load is directory-based through root `Kit/`; morph-kit load is
+  still legacy `.SND`. Do not collapse those paths until instrument morph
+  save/load is designed.
+- MIDI notes/channels do not belong in `kitset.kcg` or instrument files. They
+  belong in future scene settings.
 - `BUTTON_TIMEOUT` is milliseconds on this port (`500u`), not original AVR ticks (`38 * 13.107ms`).
 - `EuklidGenerator.c` matches original LXR. PATGEN distribution depends on `__CLZ(0) == 32`; do not replace the shim with `__builtin_clz()`.
 - `seq_tick()` is owned by `TIM3_IRQHandler`. **Do NOT add seq_tick() back to the main loop.**
@@ -466,7 +510,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ---
 
 ### Morph / Endless-Pot Reminders
-- `preset_morph()` is an original-LXR-style front-panel CC dump. It is rate-limited by `preset_morphTick()`, but still uses `frontPanel_sendData()` and can record automation when sequencer record is armed.
+- `preset_morph()` is rate-limited by `preset_morphTick()` and applies sound parameters through `preset_applySoundParameter()`, recording automation when sequencer record is armed.
 - Do not add a morph skip cache. The request/pass generation scheduler must send a full final pass at the latest morph value.
 - Morph skips index 127 and mod-target ranges. MorphKit load now writes `parameters2[]`; MorphKit save writes interpolated values except mod-target ranges.
 - RV1-RV4 are analog endless pots, not the digital Gray-code encoder. The driver uses raw A/B snapshot baselines, `ENDLESS_POT_DEADZONE = 20`, `ENDLESS_POT_TIMEOUT_MS = 5000`, and `ENDLESS_POT_DELTA_TIMEOUT_MS = 20`.
@@ -475,6 +519,47 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ---
 
 ## Known Issues / Technical Debt
+
+### Resolved / Changed in Session 030
+- Phase 2 root filesystem spec created in `FILESYSTEM_SPEC.md`. Root layout is
+  `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`,
+  `Instrument`, plus future root `settings.cfg`.
+- `SD_CARD/Kit/` generated from legacy `Pxxx.SND` files. Folders use preferred
+  `NNN Name` convention, for example `004 Moch to`; `_` remains accepted for
+  compatibility.
+- New `Core/Hardware/SD/storageTypes.c/h` owns Phase 2 kit text schemas,
+  numbered-folder parsing, kitset/instrument validation, and instrument
+  parameter maps. All functions in this layer use the `storage_` prefix and
+  must remain independent of `asyncfatfs`.
+- Normal kit load now reads root `Kit/` directories: scan cache ->
+  `kitset.kcg` -> six instrument files. `FS_FILE_MORPH` / MorphKit load still
+  uses legacy `.SND`.
+- `asyncfatfs` now sets opened handle type from the FAT directory entry so
+  opened directories can be entered/scanned reliably.
+- Kit scan has a FAT short-alias fallback for space-named folders when LFN
+  reconstruction is unavailable.
+- MIDI note/channel settings were intentionally removed from `kitset.kcg`; they
+  are future scene settings. Directory kit loads leave `PAR_MIDI_NOTE1..7`
+  unchanged for now.
+- Final hardware status: menu/init directory kit load worked after discovery
+  fixes; final short-alias fallback still needs hardware smoke-test.
+
+### Resolved / Changed in Session 029
+- Pattern storage ownership moved further into `Core/Scene/Pattern/PatternData.c/h`. Live code no longer uses `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, or `SEQ_NEXT_RANDOM*`.
+- PatternData now owns staged pattern commit, playback-safe step reads, effective-length reads, live note record mutation, live erase mutation, and legacy file shuffle import through `pat_commitStagedPattern()`, `pat_readStep()`, `pat_getStepProbability()`, `pat_getStepNote()`, `pat_getStepVolume()`, `pat_getEffectiveTrackLength()`, `pat_recordNote()`, `pat_eraseMainStepSubSteps()`, and `pat_setAllShuffle()`.
+- Sequencer still owns timing, transport, quantization, runtime step indices, MIDI output, random next-pattern resolution, and recording/erase gates, but storage mutation/readbacks now go through `pat_*` helpers.
+- `Core/Preset/` moved to `Core/Scene/Preset/`. `Makefile` uses `-ICore/Scene/Preset` and sources `Core/Scene/Preset/presetManager.c` / `Core/Scene/Preset/ParameterArray.c`. `main.c` includes `ParameterArray.h` directly for `parameterArray_init()`.
+- Staging/global audits written: active-pattern load staging stays until the 17th Scene/background-bank-load design; new `filesystem.c` scratch/snapshot buffers and load/save menu polling are intentionally left alone; globals should eventually become canonical scene-level, bank-level, and system-level settings structs.
+
+### Resolved / Changed in Session 028
+- `Core/MIDI/frontPanelParser.c/h` removed from live code. Former protocol opcodes are now direct owner calls documented in `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
+- New `Core/Scene/Pattern/PatternData.c/h` owns Pattern storage/edit APIs; Euklid and SOM moved from `Core/Sequencer/` to `Core/Scene/Pattern/`.
+- Sequencer LED feedback no longer uses parser callbacks. Sequencer writes `seq_ledState`; foreground `led_processSeqLedState()` performs LED/Menu/Button-aware rendering in ledHandler.
+- Sound parameter application is direct through Preset (`preset_applySoundParameter`, `preset_applyVelocityModTarget`, `preset_applyLfoModTarget`); MIDI channel/routing/filter config is direct through MidiParser setters.
+- Pattern file serialization reaches PatternData through pointer helpers and uses `PATTERNDATA_STAGING_PATTERN` for active-pattern load staging.
+
+### Resolved / Changed in Session 027
+- Runtime kit/all/performance load completion no longer applies all six sound modulation-routing voices in one foreground burst. After audio starts, `menu_startSoundApply()` arms the chunked apply and `menu_tickSoundApply()` lets `preset_tickDrumsetApply()` apply one voice per foreground pass before operation-specific UI/global/pattern follow-up runs. `AUDIO_DMA_FRAMES` remains 96; direct 64-frame latency testing is deferred until this path is hardware-tested.
 
 ### Resolved / Changed in Session 023
 - CPU scheduling refactor completed: TIM6 keeps only 1ms counters and a foreground service due flag; shift-register exchange, PB jack detect, encoder-button debounce, and endless-pot scanning run from `timebase_serviceFrontPanel()` at about 500Hz.
@@ -549,7 +634,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - ~~buttonHandler/menu/LED audit connectivity gaps~~ — **RESOLVED** for audit-defined paths. Connections documented in `BUTTONHANDLER_MENU_AUDIT_RESULTS.md` and `LED_AUDIT_SUMMARY.md`.
 
 ### Resolved in Session 13
-- ~~PAR_VOICE_LFO1-6 not reaching modulation targets during kit load~~ — **RESOLVED**. `preset_sendModTarget()` calls `modNode_setDestination()` directly, bypassing frontPanel_sendData roundabout.
+- ~~PAR_VOICE_LFO1-6 not reaching modulation targets during kit load~~ — **RESOLVED**. Preset modulation-target helpers call `modNode_setDestination()` directly.
 
 ### Resolved in Session 12
 - ~~SD card operations block the main loop~~ — **RESOLVED** by asyncfatfs.
@@ -595,11 +680,11 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - **SD chunking at FatFS-call granularity in main loop**: f_open is still one blocking call, insufficient. Session 10.
 - **Forking ChaN FatFS for async conversion**: 20+ functions need state machine conversion, 28 yield points, 6 levels of call nesting — unacceptable risk and complexity. Session 11.
 - **NB_FatFS library**: C++ with heap allocation (new/delete), lambdas, global voidPtr for context, no _FS_TINY support, no FAT16, 9500 lines, designed for hardware DMA callbacks. Session 11.
-- **preset_morph() sending index 127**: `frontPanel_sendData(MIDI_CC, 127, val)` → `(127+1) & 0x7f = 0` → `paramNr = 0 - 1 = 65535` → wild write to `midiParser_originalCcValues[65536]`. Memory corruption. Must skip index 127. Session 12.
+- **preset_morph() sending index 127 through the old MIDI_CC packing**: `(127+1) & 0x7f = 0` → `paramNr = 0 - 1 = 65535` → wild write to `midiParser_originalCcValues[65536]`. Memory corruption. Must skip index 127. Session 12.
 - **VLAs in HiHat_calcSyncBlock**: `int16_t mod1[size], mod2[size]` — silent stack corruption with -O2. Must use static arrays. Session 12.
 - **SD_sendCommand() from sdcard_lxr02.c**: Deasserts CS after R1 response — breaks data transfer. Must use send_cmd_keep_cs() instead. Session 12.
 - **Two back-to-back filesystem requests**: storage FSM is single-operation. Must wait for completion or ack. Session 12/17.
-- **frontPanel_sendData for CC_VELO_TARGET/CC_LFO_TARGET during kit load**: Routing through frontPanelParser → midiParser_ccHandler doesn't properly establish modulation targets in the merged single-MCU context. Use `preset_sendModTarget()` instead. Session 13.
+- **Old CC_VELO_TARGET/CC_LFO_TARGET bridge during kit load**: routing modulation-target changes through the removed parser path did not properly establish modulation targets in the merged single-MCU context. Use Preset modulation-target helpers instead. Session 13.
 - **Morph skip cache**: can skip necessary DSP restores after returning to morph 0. Morph must send a complete final pass at the latest value. Session 16.
 - **Endless-pot double speed for all `DTYPE_0B255`**: made global BPM drift more visible. Only `PAR_MORPH` gets double angular speed. Session 16.
 - **Bare `n == 0` as asyncfatfs EOF test**: `afatfs_fread()` returns 0 while the SD buffer is still being populated — it is not an EOF signal. All EOF checks must use `n == 0 && afatfs_feof(op_file)`. Session 026.

@@ -2514,7 +2514,19 @@ bool afatfs_ftruncate(afatfsFilePtr_t file, afatfsFileCallback_t callback)
 }
 
 /**
- * Load details from the given FAT directory entry into the file.
+ * Load details from the given FAT directory entry into the file object.
+ *
+ * Inputs: file is the asyncfatfs handle being opened; entry is the FAT
+ * directory entry found by afatfs_createFileContinue() or directory traversal.
+ * Outputs: cluster, logical/physical size, attributes, and file->type are
+ * populated from the entry. file->type must be set here because later clients
+ * such as afatfs_chdir(), directory scans, and the Phase 2 Kit/ loader need to
+ * know whether an opened handle represents a directory or a normal file. Before
+ * this assignment, opened directories kept the caller-initialized normal-file
+ * type and could not reliably be used as directories.
+ *
+ * Affiliates/clients: afatfs_createFileContinue() calls this after a matching
+ * entry is found; afatfs_chdir() and filesystem.c depend on the resulting type.
  */
 static void afatfs_fileLoadDirectoryEntry(afatfsFile_t *file, fatDirectoryEntry_t *entry)
 {
@@ -2522,6 +2534,9 @@ static void afatfs_fileLoadDirectoryEntry(afatfsFile_t *file, fatDirectoryEntry_
     file->logicalSize = entry->fileSize;
     file->physicalSize = roundUpTo(entry->fileSize, afatfs_clusterSize());
     file->attrib = entry->attrib;
+    file->type = (entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY)
+        ? AFATFS_FILE_TYPE_DIRECTORY
+        : AFATFS_FILE_TYPE_NORMAL;
 }
 
 static void afatfs_createFileContinue(afatfsFile_t *file)

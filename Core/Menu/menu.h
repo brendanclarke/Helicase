@@ -32,7 +32,24 @@ extern uint8_t menu_activePage;
 extern uint8_t menu_activeVoice;
 extern uint8_t menu_playedPattern;
 extern uint8_t menu_shownPattern;
+extern uint8_t menu_currentBar;
 extern uint8_t menu_muteModeActive;
+/*
+ * Voice-page morph endpoint display/edit flag.
+ *
+ * Why: SHIFT+VOICE reuses the normal voice pages while pointing their values at
+ * the morph endpoint buffer instead of the active kit buffer. Menu owns this
+ * flag because Menu owns display value selection and edit destinations; Preset
+ * owns applying active sound parameters to DSP.
+ *
+ * Inputs/accessors: buttonHandler sets this through menu_setVoiceModeShowMorph().
+ * Outputs/effects: menu repaint and edit helpers choose parameters2[] for
+ * voice-page sound parameters while nonzero. Confederates: parameters2[] is the
+ * morph-kit endpoint buffer, parameter_values[] is the active-kit buffer, and
+ * Preset's morph interpolation reads both. Risk: global, pattern, STEP, load,
+ * save, and performance parameters must never be redirected to parameters2[].
+ */
+extern uint8_t voiceModeShowMorph;
 
 #define NUM_PRESET_LOCATIONS 5
 extern uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
@@ -88,6 +105,7 @@ enum NamesEnum {
     TEXT_TRIGGER_GATE_MODE, TEXT_BAR_RESET_MODE, TEXT_MIDI_CHAN_GLOBAL,
     TEXT_CPU_USE,
     TEXT_OSC_INTERP,
+    TEXT_TRACK_SCALE,
     NUM_NAMES
 };
 
@@ -120,6 +138,7 @@ enum longNamesEnum {
     LONG_TRIGGER_GATE_MODE, LONG_BAR_RESET_MODE,
     LONG_CPU_USE_TIME,
     LONG_OSC_INTERP,
+    LONG_SCALE,
 };
 
 enum shortNamesEnum {
@@ -140,7 +159,7 @@ enum shortNamesEnum {
     SHORT_X, SHORT_Y, SHORT_FLUX, SHORT_MIDI, SHORT_MIDI_ROUTING,
     SHORT_MIDI_FILT_TX, SHORT_MIDI_FILT_RX,
     SHORT_TRIGGER_IN, SHORT_TRIGGER_OUT1, SHORT_TRIGGER_OUT2,
-    SHORT_BAR_RESET_MODE, SHORT_CPU_USE, SHORT_OSC_INTERP
+    SHORT_BAR_RESET_MODE, SHORT_CPU_USE, SHORT_OSC_INTERP, SHORT_SCALE
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu
@@ -184,6 +203,7 @@ enum Datatypes {
     DTYPE_0b1,
     DTYPE_NOTE_NAME,
     DTYPE_0B15,
+    DTYPE_1B128,
 };
 
 typedef struct PageStruct {
@@ -228,8 +248,38 @@ void menu_start(void);
 void menu_parseEncoder(int8_t inc, uint8_t button);
 void menu_switchPage(uint8_t pageNr);
 void menu_switchSubPage(uint8_t subPageNr);
+/*
+ * Morph voice view setter.
+ *
+ * Why: buttonHandler owns the SHIFT+VOICE gesture, but Menu owns whether voice
+ * pages display/edit the active kit or morph endpoint buffer. Input onOff is a
+ * boolean. Output: voiceModeShowMorph is updated and subsequent Menu repaint,
+ * encoder, and endless-pot code uses the matching parameter buffer.
+ */
+void menu_setVoiceModeShowMorph(uint8_t onOff);
+/*
+ * STEP front-page half navigation.
+ *
+ * Why: repeated VOICE presses in STEP mode should toggle between track settings
+ * halves without buttonHandler editing menuIndex directly. Output: the visible
+ * SEQ_PAGE subpage-0 half is selected and endless-pot mappings are refreshed.
+ */
+void menu_toggleStepTrackSettingsHalf(void);
+void menu_showStepTrackSettingsFirstHalf(void);
 void menu_resetActiveParameter(void);
 uint8_t menu_getSubPage(void);
+/*
+ * Parameter buffer resolution for voice morph mode.
+ *
+ * Inputs are canonical ParameterArray ids from menuPages. Outputs either the
+ * currently visible value or a mutable edit pointer for that id. Clients:
+ * repaint, encoder, and endless-pot edit code. Risk: callers must still route
+ * commits through Menu/Preset helpers so active-kit edits and morph-endpoint
+ * edits get the correct side effects.
+ */
+uint8_t menu_paramUsesMorphView(uint16_t paramNr);
+uint8_t menu_getParameterDisplayValue(uint16_t paramNr);
+uint8_t *menu_getParameterEditPtr(uint16_t paramNr);
 void menu_parseKnobDelta(uint8_t knobNr, int8_t delta);
 void menu_notifyExternalParamChanged(uint16_t paramNr);
 void menu_serviceKnobRepaint(void);  /* call from main loop after RV1-4 read loop */

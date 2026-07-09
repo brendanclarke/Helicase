@@ -67,6 +67,7 @@ void midiDebugSend(uint8_t b1, uint8_t b2);
 // 5 - M2A - midi in to usb out and midi out
 
 void midiParser_setRouting(uint8_t value);
+void midiParser_setChannel(uint8_t voice, uint8_t channel);
 
 // it's either tx or rx. value is a bitmap value from 0 to 15 where (lsb first):
 // bit 1 - Note on/off
