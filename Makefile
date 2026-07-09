@@ -28,6 +28,12 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/Scene/Preset \
           -ICore/MIDI \
           -ICore/DSPAudio \
+          -ICore/DSP/Instruments \
+          -ICore/DSP/Instruments/Drum \
+          -ICore/DSP/Instruments/Snare \
+          -ICore/DSP/Instruments/Cymbal \
+          -ICore/DSP/Instruments/HiHat \
+          -ICore/Scene \
           -ICore/Scene/Pattern \
           -ICore/Sequencer \
           -ICore/SampleRom \
@@ -83,6 +89,12 @@ SRCS = \
   Core/Menu/screensaver.c \
   Core/Scene/Preset/presetManager.c \
   Core/Scene/Preset/ParameterArray.c \
+  Core/Scene/SceneData.c \
+  Core/DSP/Instruments/InstrumentManager.c \
+  Core/DSP/Instruments/Drum/DrumParameters.c \
+  Core/DSP/Instruments/Snare/SnareParameters.c \
+  Core/DSP/Instruments/Cymbal/CymbalParameters.c \
+  Core/DSP/Instruments/HiHat/HiHatParameters.c \
   Core/MIDI/FIFO.c \
   Core/MIDI/MidiRealtime.c \
   Core/MIDI/Uart.c \
@@ -103,12 +115,12 @@ DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/automationNode.c \
   Core/DSPAudio/BufferTools.c \
-  Core/DSPAudio/CymbalVoice.c \
+  Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
   Core/DSPAudio/distortion.c \
   Core/DSPAudio/dither.c \
-  Core/DSPAudio/DrumVoice.c \
-  Core/DSPAudio/HiHat.c \
+  Core/DSP/Instruments/Drum/DrumVoice.c \
+  Core/DSP/Instruments/HiHat/HiHat.c \
   Core/DSPAudio/lfo.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
@@ -118,7 +130,7 @@ DSP_SRCS = \
   Core/DSPAudio/Samples.c \
   Core/DSPAudio/SlopeEg2.c \
   Core/DSPAudio/snapEg.c \
-  Core/DSPAudio/Snare.c \
+  Core/DSP/Instruments/Snare/Snare.c \
   Core/DSPAudio/squareRootLut.c \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/transientTables.c \
@@ -142,6 +154,21 @@ $(BUILD)/$(TARGET).elf: $(OBJS)
 
 # DSP sources compiled with -Ofast (more specific rule wins over the generic one below)
 $(BUILD)/Core/DSPAudio/%.o: Core/DSPAudio/%.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# Moved instrument render sources retain the DSP fast-math policy. Descriptor
+# and registry control files remain in SRCS and use ordinary -O2 semantics.
+$(BUILD)/Core/DSP/Instruments/Drum/DrumVoice.o: Core/DSP/Instruments/Drum/DrumVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Snare/Snare.o: Core/DSP/Instruments/Snare/Snare.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Cymbal/CymbalVoice.o: Core/DSP/Instruments/Cymbal/CymbalVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

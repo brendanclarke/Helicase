@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SD_ROOT = ROOT / "SD_CARD"
 PARAMETER_ARRAY_H = ROOT / "Core" / "Scene" / "Preset" / "ParameterArray.h"
+PARAM_RENAME_TXT = ROOT / "param_rename.txt"
 
 # Voice slots and extensions are fixed by storageTypes.c. The short filename
 # prefix is six characters so prefix+d1/s1/c1/h1 still fits FAT 8.3 names.
@@ -34,6 +35,15 @@ INSTRUMENT_FILES = [
     ("cym", "c1", 5),
     ("hat", "h1", 6),
 ]
+
+INSTRUMENT_RENAME_SECTIONS = {
+    1: "DRUM",
+    2: "DRUM",
+    3: "DRUM",
+    4: "SNARE",
+    5: "CYMBAL",
+    6: "HIHAT",
+}
 
 # This is the Python-side copy of storageTypes.c's key-to-ParameterArray maps.
 # Keeping the PAR_* names instead of numeric offsets lets the converter check
@@ -296,6 +306,83 @@ def parse_param_enum() -> dict[str, int]:
     return values
 
 
+def parse_param_renames() -> dict[str, dict[str, str]]:
+    """Return per-instrument legacy-key to file-key renames."""
+    sections: dict[str, dict[str, str]] = {}
+    current: str | None = None
+
+    for line_nr, raw_line in enumerate(PARAM_RENAME_TXT.read_text(encoding="ascii").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            current = line
+            if current in sections:
+                raise RuntimeError(f"duplicate rename section {current!r} at {PARAM_RENAME_TXT}:{line_nr}")
+            sections[current] = {}
+            continue
+        if current is None:
+            raise RuntimeError(f"rename outside a section at {PARAM_RENAME_TXT}:{line_nr}")
+        if line.count("=") != 1:
+            raise RuntimeError(f"bad rename line at {PARAM_RENAME_TXT}:{line_nr}: {line!r}")
+        old_key, new_key = [part.strip() for part in line.split("=", 1)]
+        if not old_key or not new_key:
+            raise RuntimeError(f"empty rename key at {PARAM_RENAME_TXT}:{line_nr}")
+        if old_key in sections[current]:
+            raise RuntimeError(f"duplicate rename key {old_key!r} in {current} at {PARAM_RENAME_TXT}:{line_nr}")
+        sections[current][old_key] = new_key
+
+    return sections
+
+
+def validate_param_renames(param_renames: dict[str, dict[str, str]]) -> None:
+    """Prove every instrument key has one unambiguous output name."""
+    expected_sections = set(INSTRUMENT_RENAME_SECTIONS.values())
+    unexpected_sections = sorted(set(param_renames) - expected_sections)
+    if unexpected_sections:
+        raise RuntimeError(
+            f"unexpected rename sections in {PARAM_RENAME_TXT}: "
+            f"{', '.join(unexpected_sections)}"
+        )
+
+    for section in sorted(expected_sections):
+        renames = param_renames.get(section)
+        if renames is None:
+            raise RuntimeError(f"missing {section} section in {PARAM_RENAME_TXT}")
+
+        slots = [
+            slot
+            for slot, rename_section in INSTRUMENT_RENAME_SECTIONS.items()
+            if rename_section == section
+        ]
+        expected_keys = {
+            key
+            for slot in slots
+            for key, _ in INSTRUMENT_PARAMS[slot]
+        }
+        missing = sorted(expected_keys - set(renames))
+        unexpected = sorted(set(renames) - expected_keys)
+        if missing:
+            raise RuntimeError(
+                f"{section} rename section is missing keys: {', '.join(missing)}"
+            )
+        if unexpected:
+            raise RuntimeError(
+                f"{section} rename section has unknown keys: "
+                f"{', '.join(unexpected)}"
+            )
+
+        destination_keys = list(renames.values())
+        duplicates = sorted({
+            key for key in destination_keys if destination_keys.count(key) > 1
+        })
+        if duplicates:
+            raise RuntimeError(
+                f"{section} rename section has duplicate output keys: "
+                f"{', '.join(duplicates)}"
+            )
+
+
 def sanitize_display_name(raw: bytes, fallback: str) -> str:
     chars = []
     for byte in raw:
@@ -332,31 +419,34 @@ def payload_value(payload: bytes, param_values: dict[str, int], param_name: str)
 def instrument_values(
     payload: bytes,
     param_values: dict[str, int],
+    param_renames: dict[str, dict[str, str]],
     slot: int,
 ) -> list[tuple[str, int]]:
     values = []
+    section = INSTRUMENT_RENAME_SECTIONS[slot]
+    renames = param_renames.get(section)
+    if renames is None:
+        raise RuntimeError(f"missing {section} section in {PARAM_RENAME_TXT}")
+
+    expected_keys = {key for key, _ in INSTRUMENT_PARAMS[slot]}
+    missing = sorted(expected_keys - set(renames))
+    if missing:
+        raise RuntimeError(f"{section} rename section is missing keys: {', '.join(missing)}")
+
     for key, param_name in INSTRUMENT_PARAMS[slot]:
-        values.append((key, payload_value(payload, param_values, param_name)))
+        values.append((renames[key], payload_value(payload, param_values, param_name)))
     return values
 
 
 def write_instrument(
     path: Path,
     instrument_type: str,
-    kit_name: str,
-    source_name: str,
-    source_file: str,
-    slot: int,
     values: list[tuple[str, int]],
 ) -> None:
     lines = [
         "format=helicase.instrument",
         "version=1",
         f"type={instrument_type}",
-        f"slot={slot}",
-        f"kit_name={kit_name}",
-        f"source_name={source_name}",
-        f"source_file={source_file}",
         "",
         "[params]",
     ]
@@ -393,19 +483,24 @@ def write_kitset(
     path.write_text("\n".join(lines), encoding="ascii")
 
 
-def convert_one(snd_path: Path, kit_root: Path, param_values: dict[str, int]) -> None:
+def convert_one(
+    snd_path: Path,
+    kit_root: Path,
+    param_values: dict[str, int],
+    param_renames: dict[str, dict[str, str]],
+) -> None:
     legacy_slot = int(snd_path.stem[1:])
     data = snd_path.read_bytes()
     if len(data) < 8:
         raise ValueError(f"{snd_path} is too short for an eight-byte kit name")
 
     payload = data[8:]
-    source_name = sanitize_display_name(data[:8], f"Kit{legacy_slot:03d}")
-    dir_name = f"{legacy_slot + 1:03d} {path_safe_name(source_name, f'Kit{legacy_slot:03d}')}"
+    kit_display_name = sanitize_display_name(data[:8], f"Kit{legacy_slot:03d}")
+    dir_name = f"{legacy_slot + 1:03d} {path_safe_name(kit_display_name, f'Kit{legacy_slot:03d}')}"
     kit_dir = kit_root / dir_name
     kit_dir.mkdir(parents=True, exist_ok=True)
 
-    prefix = filename_prefix(source_name, f"kit{legacy_slot:03d}")
+    prefix = filename_prefix(kit_display_name, f"kit{legacy_slot:03d}")
     files = [
         (instrument_type, f"{prefix}{suffix}.{instrument_type}", slot)
         for instrument_type, suffix, slot in INSTRUMENT_FILES
@@ -415,11 +510,7 @@ def convert_one(snd_path: Path, kit_root: Path, param_values: dict[str, int]) ->
         write_instrument(
             kit_dir / filename,
             instrument_type,
-            source_name,
-            source_name,
-            snd_path.name,
-            slot,
-            instrument_values(payload, param_values, slot),
+            instrument_values(payload, param_values, param_renames, slot),
         )
 
     write_kitset(kit_dir / "kitset.kcg", files, payload, param_values)
@@ -427,6 +518,8 @@ def convert_one(snd_path: Path, kit_root: Path, param_values: dict[str, int]) ->
 
 def main() -> None:
     param_values = parse_param_enum()
+    param_renames = parse_param_renames()
+    validate_param_renames(param_renames)
     kit_root = SD_ROOT / "Kit"
 
     # The generated directory is a mirror of the legacy Pxxx.SND files, so stale
@@ -440,7 +533,7 @@ def main() -> None:
         raise RuntimeError(f"no legacy Pxxx.SND files found in {SD_ROOT}")
 
     for snd_path in snd_files:
-        convert_one(snd_path, kit_root, param_values)
+        convert_one(snd_path, kit_root, param_values, param_renames)
 
     print(f"converted {len(snd_files)} legacy kits into {kit_root}")
 

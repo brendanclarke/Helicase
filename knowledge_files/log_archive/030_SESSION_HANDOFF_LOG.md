@@ -44,9 +44,10 @@ CHANGES THIS SESSION:
   convention.
 - `SD_CARD/Kit/`: Generated the converted kit library. The tree now uses space
   folder names such as `001 Slak`, `004 Moch to`, etc. Each folder contains
-  `kitset.kcg` plus six instrument files. `kitset.kcg` contains kit metadata,
-  voice membership, instrument filenames, instrument types, audio outputs, and
-  `voice_decimation_all`; MIDI note/channel settings are intentionally absent.
+  `kitset.kcg` plus six instrument files. The reduced `kitset.kcg` schema is a
+  kit-folder guard plus six voice-slot manifest sections with instrument type,
+  filename, and audio output; MIDI note/channel settings are intentionally
+  absent.
 - `Core/Hardware/SD/storageTypes.h`: Added the public storage-format boundary
   for Phase 2 kit loading. It declares storage constants, status codes,
   instrument type enum, kitset parse state, instrument parse state, parser
@@ -216,15 +217,10 @@ kitset.kcg
 <six instrument files>
 ```
 
-`kitset.kcg` currently records:
+`kitset.kcg` records:
 
 - `format=helicase.kitset`
 - `version=1`
-- `kit_name`
-- `source_name`
-- `source_file`
-- `legacy_slot`
-- `voice_decimation_all`
 - six `[slotN]` sections with `type`, `file`, and `audio_out`
 
 MIDI note and MIDI channel settings are deliberately absent. The decision during
@@ -237,9 +233,6 @@ Instrument files contain:
 - `format=helicase.instrument`
 - `version=1`
 - `type`
-- `slot`
-- `kit_name`
-- source metadata
 - `[params]` field/value lines
 
 The initial generated instrument types are `.drm`, `.snr`, `.cym`, and `.hat`.

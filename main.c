@@ -72,6 +72,7 @@
 #include "screensaver.h"
 #include "ParameterArray.h"
 #include "presetManager.h"
+#include "SceneData.h"
 
 #include "memtest.h"
 #include <stdint.h>
@@ -240,6 +241,11 @@ int main(void)
     triggerJacks_init();
     sampleMemory_init();
     dsp_init();
+    /*
+     * SceneData now owns every stored Pattern/Kit/parameter image. Initialize
+     * it before Sequencer/Menu/filesystem clients obtain Scene-indexed views.
+     */
+    scene_initAll();
     seq_init();
     euklid_init();
     som_init();

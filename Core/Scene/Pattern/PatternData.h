@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include "globals.h"
+#include "InstrumentManager.h"
 
  /**<
   * we have 6 voices
@@ -18,7 +19,6 @@
   * 1 hiHat
   * track 7 is the open hh... it triggers the highhat voice but with longer decay. it chokes the closed hihat*/
 #define NUM_TRACKS 7
-#define NUM_PATTERN 1
 #define NUM_STEPS 128
 #define NUM_BARS 8u
 #define NUM_STEPS_PER_BAR 16u
@@ -67,10 +67,10 @@ typedef struct StepStruct
 	uint8_t		note;		//midi note value 0-127 -> 0x7f, --AS todo upper bit is now free for other usages
 
 	//parameter automation
-	uint8_t 	param1Nr;
+	instrument_param_id_t param1Nr;
 	uint8_t 	param1Val;
 
-	uint8_t 	param2Nr;
+	instrument_param_id_t param2Nr;
 	uint8_t 	param2Val;
 
 }Step;
@@ -95,35 +95,23 @@ typedef struct {
 	uint8_t length;	// real track length in steps, 1..128
 	uint8_t rotate;	// step rotation, 0 means not rotated
 	uint8_t scale;	// track timing scale, TRACK_SCALE_* value
-	uint8_t midiChannel; // track MIDI channel in menu form, 1..16
-	uint8_t midiNote; // track MIDI note override; 0 means any/default
 	uint8_t shuffle; // per-track shuffle amount, 0..127
 } LengthRotate;
 
 typedef struct PatternSetStruct
 {
-	Step pat_subStepPattern[NUM_PATTERN][NUM_TRACKS][NUM_STEPS];
-	uint16_t pat_mainSteps[NUM_PATTERN][NUM_TRACKS];
-	PatternSetting pat_patternSettings[NUM_PATTERN];
-	LengthRotate pat_patternLengthRotate[NUM_PATTERN][NUM_TRACKS];
-}PatternSet;
-
-typedef struct TempPatternStruct
-{
 	Step pat_subStepPattern[NUM_TRACKS][NUM_STEPS];
 	uint16_t pat_mainSteps[NUM_TRACKS];
 	PatternSetting pat_patternSettings;
-	LengthRotate pat_patternLengthRotate[NUM_TRACKS]; // only used for length
-}TempPattern;
-
-extern PatternSet pat_patternSet;
-extern TempPattern pat_tmpPattern;
+	LengthRotate pat_patternLengthRotate[NUM_TRACKS];
+}PatternSet;
 
 /*
  * PatternData storage API contract:
  * Why: sequencer.c no longer owns pattern arrays, but playback, filesystem, UI,
  * and generator code still need narrow access to the legacy 8-pattern layout.
- * Inputs/outputs for the functions below use current pattern/track/step indices
+ * The first coordinate used by the functions below is now a Scene index, even
+ * where its C type remains uint8_t. Inputs/outputs use Scene/track/step indices
  * and either return bounded values, live owner-level pointers, or mutate stored
  * PatternData records. Callers/clients include sequencer playback and recording,
  * filesystem serialization, button/menu edit paths, ledHandler display refresh,
@@ -139,21 +127,19 @@ extern TempPattern pat_tmpPattern;
  * Risk: callers that ignore a 0 return must not dereference pat_*Ptr results.
  */
 uint8_t pat_trackValid(uint8_t track);
-uint8_t pat_patternValid(uint8_t pattern);
+uint8_t pat_patternValid(uint8_t scene_index);
 uint8_t pat_stepValid(uint8_t step);
 
 /*
  * Pointer accessors.
  * Why: playback/filesystem need bounded access to the existing binary layout.
- * Inputs: pattern/track/step indices; PATTERNDATA_STAGING_PATTERN selects the
- * temporary load buffer for filesystem staging. Output: pointer or 0 on invalid.
+ * Inputs: Scene/track/step indices. Output: pointer or 0 on invalid.
  * Risk: returned pointers are live mutable storage; use only in owner-level code.
  */
-#define PATTERNDATA_STAGING_PATTERN 0xFFu
-Step *pat_stepPtr(uint8_t pattern, uint8_t track, uint8_t step);
-uint16_t *pat_mainStepsPtr(uint8_t pattern, uint8_t track);
-PatternSetting *pat_patternSettingPtr(uint8_t pattern);
-LengthRotate *pat_lengthRotatePtr(uint8_t pattern, uint8_t track);
+Step *pat_stepPtr(uint8_t scene_index, uint8_t track, uint8_t step);
+uint16_t *pat_mainStepsPtr(uint8_t scene_index, uint8_t track);
+PatternSetting *pat_patternSettingPtr(uint8_t scene_index);
+LengthRotate *pat_lengthRotatePtr(uint8_t scene_index, uint8_t track);
 
 /*
  * Pattern lifecycle and edit API.
@@ -164,17 +150,7 @@ LengthRotate *pat_lengthRotatePtr(uint8_t pattern, uint8_t track);
  * menu-apply helpers from ISR context.
  */
 void pat_init(void);
-/*
- * Staged-load commit.
- * Why: filesystem loads the currently playing pattern into pat_tmpPattern while
- * sequencer playback keeps reading the active slot; sequencer owns the boundary
- * timing, but PatternData owns the actual storage copy. Input: destination
- * pattern slot. Output: active slot is overwritten from the staging buffer.
- * Callers/clients: sequencer.c pattern-boundary swap after filesystem load.
- * Risk: file-format-visible storage is copied field-for-field; this must remain
- * layout-compatible with .pat/.all/performance serializers.
- */
-void pat_commitStagedPattern(uint8_t pattern);
+void pat_initScene(uint8_t scene_index);
 
 uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t pattern);
 uint8_t pat_isMainStepActive(uint8_t track, uint8_t mainStep, uint8_t pattern);
@@ -228,10 +204,6 @@ uint8_t pat_getTrackRotation(uint8_t pattern, uint8_t track);
 void pat_setTrackScale(uint8_t pattern, uint8_t track, uint8_t scale);
 uint8_t pat_getTrackScale(uint8_t pattern, uint8_t track);
 TrackScaleRatio pat_getTrackScaleRatio(uint8_t pattern, uint8_t track);
-void pat_setTrackMidiChannel(uint8_t pattern, uint8_t track, uint8_t channel);
-uint8_t pat_getTrackMidiChannel(uint8_t pattern, uint8_t track);
-void pat_setTrackMidiNote(uint8_t pattern, uint8_t track, uint8_t note);
-uint8_t pat_getTrackMidiNote(uint8_t pattern, uint8_t track);
 /*
  * Per-track shuffle accessors.
  *
@@ -271,8 +243,9 @@ void pat_setActiveAutomationTrack(uint8_t track);
 uint8_t pat_getActiveAutomationTrack(void);
 void pat_armAutomationStep(uint8_t step, uint8_t track, uint8_t armed);
 void pat_recordAutomation(uint8_t pattern, uint8_t track, uint8_t step,
-                          uint8_t dest, uint8_t value);
-void pat_recordArmedAutomation(uint8_t pattern, uint8_t dest, uint8_t value);
+                          instrument_param_id_t dest, uint8_t value);
+void pat_recordArmedAutomation(uint8_t pattern, instrument_param_id_t dest,
+                               uint8_t value);
 
 void pat_applyStepToMenu(uint8_t pattern, uint8_t track, uint8_t step);
 void pat_applyPatternSettingsToMenu(uint8_t pattern);

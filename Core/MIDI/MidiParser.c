@@ -53,6 +53,7 @@
 #include "menu.h"
 #include "buttonHandler.h"
 #include "MidiRealtime.h"
+#include "SceneData.h"
 #include "triggerJacks.h"
 #include "timebase.h"
 #include <stdbool.h>
@@ -148,12 +149,9 @@ uint8_t midiParser_getVoiceMidiNote(uint8_t voice)
 	 * flows, but live input should match the active pattern track setting so a
 	 * loaded pattern behaves without requiring a UI edit to mirror values.
 	 */
-	note = pat_getTrackMidiNote(seq_activePattern, voice);
+	note = scene_getTrackMidiNote(scene_getActiveIndex(), voice);
 	if (note != 0u)
 		return note;
-
-	if (midi_NoteOverride[voice] != 0u)
-		return midi_NoteOverride[voice];
 
 	return (uint8_t)(MIDI_DEFAULT_VOICE_NOTE_BASE + voice);
 }
@@ -166,7 +164,7 @@ static uint8_t midiParser_getVoiceMidiChannel(uint8_t voice)
 	 */
 	if (voice >= 7u)
 		return midi_MidiChannels[7];
-	return (uint8_t)(pat_getTrackMidiChannel(seq_activePattern, voice) - 1u);
+	return (uint8_t)(scene_getTrackMidiChannel(scene_getActiveIndex(), voice) - 1u);
 }
 
 static uint8_t midiParser_voiceMatchesNote(uint8_t voice, uint8_t note)

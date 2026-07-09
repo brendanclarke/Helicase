@@ -62,6 +62,7 @@
 #include "filesystem.h"
 #include "asyncfatfs.h"
 #include "storageTypes.h"
+#include "SceneData.h"
 #include "sd_routines.h"
 #include "spi_sd.h"
 #include "presetManager.h"
@@ -522,15 +523,15 @@ static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
  * written; external Python converters will own migration once the final storage
  * shape settles.
  */
-#define FS_PATTERN_FILE_PATTERN_COUNT 8u
+#define FS_PATTERN_FILE_PATTERN_COUNT 1u
 #define FS_PATTERN_STEP_COUNT     ((uint32_t)NUM_TRACKS * FS_PATTERN_FILE_PATTERN_COUNT * NUM_STEPS)
 #define FS_PATTERN_MAIN_COUNT     ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT * NUM_TRACKS)
 #define FS_PATTERN_SETTINGS_COUNT ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT)
 #define FS_PATTERN_LENGTH_COUNT   ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT * NUM_TRACKS)
-#define FS_PATTERN_STEP_SIZE      7u
+#define FS_PATTERN_STEP_SIZE      9u
 #define FS_PATTERN_MAIN_SIZE      2u
 #define FS_PATTERN_SETTING_SIZE   2u
-#define FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE 4u
+#define FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE 2u
 #define FS_PATTERN_TRACK_SHUFFLE_SIZE 1u
 /*
  * Container version stays at 2 while Phase 2 storage is still provisional.
@@ -571,7 +572,9 @@ static void filesystem_patternTrackAddress(uint32_t index,
 static Step filesystem_discardStep;
 static uint16_t filesystem_discardMainSteps;
 static PatternSetting filesystem_discardPatternSetting;
-static LengthRotate filesystem_discardLengthRotate = { NUM_STEPS, 0, TRACK_SCALE_OFF, 1u, 0u, 0u };
+static LengthRotate filesystem_discardLengthRotate = {
+    NUM_STEPS, 0u, TRACK_SCALE_OFF, 0u
+};
 
 static uint8_t filesystem_defaultTrackMidiChannel(uint8_t track)
 {
@@ -597,21 +600,7 @@ static void filesystem_defaultTrackSettings(LengthRotate *lr, uint8_t track)
     lr->rotate = 0u;
     lr->scale = TRACK_SCALE_OFF;
     lr->shuffle = 0u;
-    if (track < NUM_TRACKS) {
-        uint16_t chanParam = (track == 6u)
-            ? PAR_MIDI_CHAN_7
-            : (uint16_t)(PAR_MIDI_CHAN_1 + track);
-        uint8_t channel = parameter_values[chanParam];
-        lr->midiChannel = (channel >= 1u && channel <= 16u)
-            ? channel
-            : filesystem_defaultTrackMidiChannel(track);
-        lr->midiNote = (parameter_values[PAR_MIDI_NOTE1 + track] <= 127u)
-            ? parameter_values[PAR_MIDI_NOTE1 + track]
-            : 0u;
-    } else {
-        lr->midiChannel = filesystem_defaultTrackMidiChannel(track);
-        lr->midiNote = 0u;
-    }
+    (void)track;
 }
 static Step *filesystem_patternStepPtr(uint8_t pattern, uint8_t track, uint8_t step)
 {
@@ -635,9 +624,7 @@ static Step *filesystem_patternStepPtr(uint8_t pattern, uint8_t track, uint8_t s
      */
     if (pattern != 0u)
         return &filesystem_discardStep;
-    if (op_loaded_active_pattern_running && pattern == seq_activePattern)
-        return pat_stepPtr(PATTERNDATA_STAGING_PATTERN, track, step);
-    return pat_stepPtr(pattern, track, step);
+    return pat_stepPtr(scene_getActiveIndex(), track, step);
 }
 
 static uint16_t *filesystem_patternMainPtr(uint8_t pattern, uint8_t track)
@@ -651,9 +638,7 @@ static uint16_t *filesystem_patternMainPtr(uint8_t pattern, uint8_t track)
      */
     if (pattern != 0u)
         return &filesystem_discardMainSteps;
-    if (op_loaded_active_pattern_running && pattern == seq_activePattern)
-        return pat_mainStepsPtr(PATTERNDATA_STAGING_PATTERN, track);
-    return pat_mainStepsPtr(pattern, track);
+    return pat_mainStepsPtr(scene_getActiveIndex(), track);
 }
 
 static PatternSetting *filesystem_patternSettingPtr(uint8_t pattern)
@@ -667,9 +652,7 @@ static PatternSetting *filesystem_patternSettingPtr(uint8_t pattern)
      */
     if (pattern != 0u)
         return &filesystem_discardPatternSetting;
-    if (op_loaded_active_pattern_running && pattern == seq_activePattern)
-        return pat_patternSettingPtr(PATTERNDATA_STAGING_PATTERN);
-    return pat_patternSettingPtr(pattern);
+    return pat_patternSettingPtr(scene_getActiveIndex());
 }
 
 static LengthRotate *filesystem_patternLengthPtr(uint8_t pattern, uint8_t track)
@@ -683,9 +666,7 @@ static LengthRotate *filesystem_patternLengthPtr(uint8_t pattern, uint8_t track)
      */
     if (pattern != 0u)
         return &filesystem_discardLengthRotate;
-    if (op_loaded_active_pattern_running && pattern == seq_activePattern)
-        return pat_lengthRotatePtr(PATTERNDATA_STAGING_PATTERN, track);
-    return pat_lengthRotatePtr(pattern, track);
+    return pat_lengthRotatePtr(scene_getActiveIndex(), track);
 }
 
 static void filesystem_packStep(const Step *step, uint8_t *buf)
@@ -693,10 +674,12 @@ static void filesystem_packStep(const Step *step, uint8_t *buf)
     buf[0] = step->volume;
     buf[1] = step->prob;
     buf[2] = step->note;
-    buf[3] = step->param1Nr;
-    buf[4] = step->param1Val;
-    buf[5] = step->param2Nr;
-    buf[6] = step->param2Val;
+    buf[3] = (uint8_t)(step->param1Nr & 0xffu);
+    buf[4] = (uint8_t)(step->param1Nr >> 8);
+    buf[5] = step->param1Val;
+    buf[6] = (uint8_t)(step->param2Nr & 0xffu);
+    buf[7] = (uint8_t)(step->param2Nr >> 8);
+    buf[8] = step->param2Val;
 }
 
 static void filesystem_unpackStep(Step *step, const uint8_t *buf)
@@ -704,10 +687,12 @@ static void filesystem_unpackStep(Step *step, const uint8_t *buf)
     step->volume = buf[0];
     step->prob = buf[1];
     step->note = buf[2];
-    step->param1Nr = buf[3];
-    step->param1Val = buf[4];
-    step->param2Nr = buf[5];
-    step->param2Val = buf[6];
+    step->param1Nr = (instrument_param_id_t)buf[3] |
+                     ((instrument_param_id_t)buf[4] << 8);
+    step->param1Val = buf[5];
+    step->param2Nr = (instrument_param_id_t)buf[6] |
+                     ((instrument_param_id_t)buf[7] << 8);
+    step->param2Val = buf[8];
 }
 
 static uint32_t filesystem_writeStreamChunk(const uint8_t *buf, uint8_t len)
@@ -1270,7 +1255,9 @@ static void filesystem_loadKitDirectory_tick(void)
             return;
         }
         if (line_ready) {
-            st = storage_kitsetParseLine(&op_kitset, op_line_buf, parameter_values);
+            st = storage_kitsetParseLine(
+                &op_kitset, op_line_buf,
+                &scene_get(scene_getActiveIndex())->kit);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
@@ -1321,6 +1308,9 @@ static void filesystem_loadKitDirectory_tick(void)
         storage_instrumentStateInit(&op_instrument_state,
                                     op_kitset.instrument_type[op_instrument_slot],
                                     (uint8_t)(op_instrument_slot + 1u));
+        instrumentManager_resetSlot(
+            scene_instrumentSlot(scene_getActiveIndex(), op_instrument_slot),
+            op_kitset.instrument_type[op_instrument_slot]);
         op_line_len = 0u;
         op_phase = 17;
         return;
@@ -1361,8 +1351,9 @@ static void filesystem_loadKitDirectory_tick(void)
         if (line_ready) {
             st = storage_instrumentParseLine(&op_instrument_state,
                                              op_line_buf,
-                                             parameter_values,
-                                             parameters2);
+                                             scene_instrumentSlot(
+                                                 scene_getActiveIndex(),
+                                                 op_instrument_slot));
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
@@ -1380,8 +1371,8 @@ static void filesystem_loadKitDirectory_tick(void)
                     storage_instrumentCopyMainToMorphFallback(
                         op_kitset.instrument_type[op_instrument_slot],
                         (uint8_t)(op_instrument_slot + 1u),
-                        parameter_values,
-                        parameters2);
+                        scene_instrumentSlot(scene_getActiveIndex(),
+                                             op_instrument_slot));
                 }
                 op_close_status = FS_STATUS_DONE;
             }
@@ -1693,8 +1684,6 @@ static void filesystem_savePattern_tick(void)
              */
             staging_buf[0] = lr->rotate;
             staging_buf[1] = lr->scale;
-            staging_buf[2] = lr->midiChannel;
-            staging_buf[3] = lr->midiNote;
         }
         filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
         if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
@@ -1805,7 +1794,17 @@ static void filesystem_loadPattern_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        op_loaded_active_pattern_running = (uint8_t)seq_isRunning();
+        /*
+         * TempPattern no longer exists. A one-Scene build cannot replace the
+         * playing Pattern safely, so running loads fail explicitly instead of
+         * writing through a hidden staging shape.
+         */
+        if (seq_isRunning()) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 9;
+            return;
+        }
+        op_loaded_active_pattern_running = 0u;
         op_phase = 2;
         op_stream_index = 0;
         op_item_offset = 0;
@@ -1963,18 +1962,9 @@ static void filesystem_loadPattern_tick(void)
             length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
                 ? staging_buf[1]
                 : TRACK_SCALE_OFF;
-            length_rotate->midiChannel =
-                (staging_buf[2] >= 1u && staging_buf[2] <= 16u)
-                    ? staging_buf[2]
-                    : filesystem_defaultTrackMidiChannel(track);
-            length_rotate->midiNote = (staging_buf[3] <= 127u) ? staging_buf[3] : 0u;
             op_item_offset = 0;
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
-            if (op_loaded_active_pattern_running) {
-                seq_newPatternAvailable = 1;
-                seq_armActivePatternReload();
-            }
             op_item_offset = 0;
             op_close_status = FS_STATUS_DONE;
             op_phase = 9;
@@ -1989,10 +1979,6 @@ static void filesystem_loadPattern_tick(void)
         uint32_t n;
 
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            if (op_loaded_active_pattern_running) {
-                seq_newPatternAvailable = 1;
-                seq_armActivePatternReload();
-            }
             op_close_status = FS_STATUS_DONE;
             op_phase = 9;
             return;
@@ -2015,10 +2001,6 @@ static void filesystem_loadPattern_tick(void)
             op_item_offset = 0;
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
-            if (op_loaded_active_pattern_running) {
-                seq_newPatternAvailable = 1;
-                seq_armActivePatternReload();
-            }
             op_close_status = FS_STATUS_DONE;
             op_phase = 9;
         }
@@ -2317,8 +2299,6 @@ static void filesystem_saveContainer_tick(void)
              */
             staging_buf[0] = lr->rotate;
             staging_buf[1] = lr->scale;
-            staging_buf[2] = lr->midiChannel;
-            staging_buf[3] = lr->midiNote;
         }
         filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
         if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
@@ -2412,7 +2392,12 @@ static void filesystem_loadContainer_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        op_loaded_active_pattern_running = (uint8_t)seq_isRunning();
+        if (seq_isRunning()) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 14;
+            return;
+        }
+        op_loaded_active_pattern_running = 0u;
         op_phase = 2;
         op_stream_index = 0;
         op_item_offset = 0;
@@ -2713,18 +2698,9 @@ static void filesystem_loadContainer_tick(void)
             length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
                 ? staging_buf[1]
                 : TRACK_SCALE_OFF;
-            length_rotate->midiChannel =
-                (staging_buf[2] >= 1u && staging_buf[2] <= 16u)
-                    ? staging_buf[2]
-                    : filesystem_defaultTrackMidiChannel(track);
-            length_rotate->midiNote = (staging_buf[3] <= 127u) ? staging_buf[3] : 0u;
             op_item_offset = 0;
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
-            if (op_loaded_active_pattern_running) {
-                seq_newPatternAvailable = 1;
-                seq_armActivePatternReload();
-            }
             op_item_offset = 0;
             op_close_status = FS_STATUS_DONE;
             op_phase = 14;
@@ -2739,10 +2715,6 @@ static void filesystem_loadContainer_tick(void)
         uint32_t n;
 
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            if (op_loaded_active_pattern_running) {
-                seq_newPatternAvailable = 1;
-                seq_armActivePatternReload();
-            }
             op_close_status = FS_STATUS_DONE;
             op_phase = 14;
             return;
@@ -2762,10 +2734,6 @@ static void filesystem_loadContainer_tick(void)
             op_item_offset = 0;
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
-            if (op_loaded_active_pattern_running) {
-                seq_newPatternAvailable = 1;
-                seq_armActivePatternReload();
-            }
             op_close_status = FS_STATUS_DONE;
             op_phase = 14;
         }

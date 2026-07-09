@@ -175,7 +175,6 @@ Example instrument:
 format=helicase.instrument
 version=1
 type=drm
-slot=1
 
 [params]
 osc_wave=0

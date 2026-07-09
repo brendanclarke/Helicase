@@ -11,18 +11,20 @@
  *
  * Inputs are complete, NUL-terminated text lines and names supplied by
  * filesystem.c. Outputs are storage_status_t validation results, sanitized
- * fixed-width names, kit/instrument parse state, and writes into the existing
- * parameter_values[]/parameters2[] arrays. Clients must call the Init(),
- * ParseLine(), and Finalize() functions in that order.
+ * fixed-width names, kit/instrument parse state, and writes into a caller-owned
+ * Scene kit record. Clients must call the Init(), ParseLine(), and Finalize()
+ * functions in that order.
  *
  * Affiliates: Core/Hardware/SD/filesystem.c is the runtime client; the
  * generated SD_CARD/Kit tree and tools/convert_legacy_kits.py must stay in
- * sync with this schema and the parameter maps in storageTypes.c.
+ * sync with this schema and the canonical descriptors in InstrumentManager.
  */
 #ifndef STORAGETYPES_H_
 #define STORAGETYPES_H_
 
 #include <stdint.h>
+#include "InstrumentManager.h"
+#include "SceneData.h"
 
 /* Public storage constants for the Phase 2 kit directory loader.
  *
@@ -64,16 +66,15 @@ typedef enum {
  *
  * These values are intentionally format-level types, not voice numbers. The
  * parser combines a type with the slot number supplied by kitset.kcg to select
- * the correct ParameterArray enum map. UNKNOWN is used during initialization
- * and for rejecting unsupported future extensions.
+ * the correct descriptor table. UNKNOWN is used during initialization and for
+ * rejecting unsupported future extensions.
  */
-typedef enum {
-    STORAGE_INSTRUMENT_DRM = 0,
-    STORAGE_INSTRUMENT_SNR,
-    STORAGE_INSTRUMENT_CYM,
-    STORAGE_INSTRUMENT_HAT,
-    STORAGE_INSTRUMENT_UNKNOWN,
-} storage_instrument_type_t;
+typedef instrument_type_t storage_instrument_type_t;
+#define STORAGE_INSTRUMENT_DRM     INSTRUMENT_TYPE_DRM
+#define STORAGE_INSTRUMENT_SNR     INSTRUMENT_TYPE_SNR
+#define STORAGE_INSTRUMENT_CYM     INSTRUMENT_TYPE_CYM
+#define STORAGE_INSTRUMENT_HAT     INSTRUMENT_TYPE_HAT
+#define STORAGE_INSTRUMENT_UNKNOWN INSTRUMENT_TYPE_UNKNOWN
 
 /* Incremental parse state for kitset.kcg.
  *
@@ -85,7 +86,7 @@ typedef enum {
  * hand-edited files.
  *
  * Inputs arrive through storage_kitsetParseLine(). Outputs are this struct and
- * writes to kit slot routing parameters such as PAR_AUDIO_OUTn. Clients are
+ * writes to scene->kit.settings.audio_out[]. Clients are
  * filesystem_loadKitDirectory_tick() in filesystem.c and the generated
  * kitset.kcg files.
  */
@@ -102,16 +103,16 @@ typedef struct {
 
 /* Incremental parse state for one instrument file.
  *
- * expected_type and expected_slot come from the already-validated kitset entry
- * and are checked against the instrument header so a renamed file cannot be
- * loaded into the wrong voice class by accident. current_section tracks top
- * metadata, [params], and [morph]. seen_param_count proves at least one primary
- * parameter landed. seen_morph_count tells filesystem.c whether an explicit
- * morph endpoint was loaded or whether it must copy the main values into
- * parameters2[] as the Phase 2 fallback.
+ * expected_type and expected_slot come from the already-validated kitset entry.
+ * The type is checked against the instrument header, while the slot selects the
+ * instrument record for the file named by kitset.kcg. current_section tracks
+ * top metadata, [params], and [morph]. seen_param_count proves at least one
+ * primary parameter landed. seen_morph_count tells filesystem.c whether an
+ * explicit morph endpoint was loaded or whether it must copy the main image
+ * into the morph image as the Phase 2 fallback.
  *
  * Inputs arrive through storage_instrumentParseLine(). Outputs are validation
- * flags plus writes into parameter_values[] and parameters2[]. Clients are the
+ * flags plus writes into kit_instrument_slot_t. Clients are the
  * directory kit loader and future save code that will emit the same sections.
  */
 typedef struct {
@@ -121,7 +122,6 @@ typedef struct {
     uint8_t seen_format;
     uint8_t seen_version;
     uint8_t seen_type;
-    uint8_t seen_slot;
     uint8_t seen_param_count;
     uint8_t seen_morph_count;
 } storage_instrument_state_t;
@@ -137,14 +137,14 @@ void storage_kitsetInit(storage_kitset_t *kit);
 /* Parse one complete line from kitset.kcg.
  *
  * Inputs: kit is the state initialized by storage_kitsetInit(); line is one
- * NUL-terminated line with CR/LF already removed; target_values is the active
- * ParameterArray buffer. Outputs: updated kit state and slot routing parameters
- * such as audio output. Unknown keys are ignored for forward compatibility;
+ * NUL-terminated line with CR/LF already removed; target_kit is the Scene kit
+ * being assembled. Outputs: updated parse state and audio routing settings.
+ * Unknown keys are ignored for forward compatibility;
  * malformed required keys return an error status.
  */
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                                          const char *line,
-                                         uint8_t *target_values);
+                                         kit_t *target_kit);
 
 /* Validate that all required kitset.kcg fields were present and coherent.
  *
@@ -166,36 +166,33 @@ void storage_instrumentStateInit(storage_instrument_state_t *state,
 
 /* Parse one complete line from an instrument file.
  *
- * Inputs: state, a NUL-terminated line, target_values for [params], and
- * morph_values for [morph]. Outputs: parameter writes to the correct
- * ParameterArray enum indices for the expected type/slot, plus validation flags
- * in state. Unknown parameter keys are ignored so future saves can add fields
- * older firmware does not understand.
+ * Inputs: state, a NUL-terminated line, and the destination kit instrument
+ * slot. Outputs: descriptor-routed writes to the correct main image, morph
+ * image, or supplemental field, plus validation flags in state. Unknown keys
+ * are ignored so future saves can add fields older firmware does not understand.
  */
 storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                                              const char *line,
-                                             uint8_t *target_values,
-                                             uint8_t *morph_values);
+                                             kit_instrument_slot_t *slot);
 
 /* Validate required instrument metadata after EOF.
  *
  * Input: state after all lines were parsed. Output: OK only if the file guard,
- * version, type, slot, and at least one [params] value were seen. Morph data is
+ * version, type, and at least one [params] value were seen. Morph data is
  * optional during this load pass because old converted kits do not carry it.
  */
 storage_status_t storage_instrumentFinalize(const storage_instrument_state_t *state);
 
 /* Phase 2 morph fallback for instrument files without a [morph] section.
  *
- * Inputs: format type, one-based slot, already-loaded main parameter buffer,
- * and morph destination buffer. Output: each mapped main parameter for that
- * instrument is copied into the corresponding morph parameter index. Client:
+ * Inputs: format type, one-based slot, and the already-loaded instrument
+ * record. Output: every descriptor-owned main image value is copied to the
+ * corresponding morph image value. Client:
  * filesystem_loadKitDirectory_tick() calls this when seen_morph_count is zero.
  */
 void storage_instrumentCopyMainToMorphFallback(storage_instrument_type_t type,
                                                uint8_t slot,
-                                               const uint8_t *main_values,
-                                               uint8_t *morph_values);
+                                               kit_instrument_slot_t *instrument);
 
 /* Convert a kitset/instrument type token such as "drm" into the enum above.
  *

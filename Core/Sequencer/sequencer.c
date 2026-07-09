@@ -56,6 +56,7 @@
 #include "timebase.h"
 #include "ledHandler.h"
 #include "menu.h"
+#include "SceneData.h"
 
 
 #define SEQ_INTERNAL_PPQ	96u
@@ -306,16 +307,14 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 	//Trigger internal synth voice
 	voiceControl_noteOn(voiceNr, note, vol);
 
-	midiChan = (uint8_t)(pat_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
+	midiChan = (uint8_t)(scene_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
 
 	/*
 	 * MIDI output note/channel are PatternData-owned track settings now. A note
 	 * value of 0 preserves the old "use the triggered note" behavior; nonzero
 	 * values override the outgoing MIDI note for this pattern track.
 	 */
-	midiNote = pat_getTrackMidiNote(seq_activePattern, voiceNr);
-	if(midiNote == 0 && midi_NoteOverride[voiceNr] != 0u)
-		midiNote = midi_NoteOverride[voiceNr];
+	midiNote = scene_getTrackMidiNote(seq_activePattern, voiceNr);
 	if(midiNote == 0)
 		midiNote = note;
 
@@ -344,9 +343,7 @@ void seq_previewVoice(uint8_t voiceNr)
 	if (voiceNr > 6u || seq_running)
 		return;
 
-	note = pat_getTrackMidiNote(seq_activePattern, voiceNr);
-	if (note == 0u && midi_NoteOverride[voiceNr] != 0u)
-		note = midi_NoteOverride[voiceNr];
+	note = scene_getTrackMidiNote(seq_activePattern, voiceNr);
 	if (note == 0u)
 		note = PAT_DEFAULT_NOTE;
 
@@ -360,7 +357,7 @@ void seq_previewVoice(uint8_t voiceNr)
 	voiceControl_noteOff(voiceNr);
 	voiceControl_noteOn(voiceNr, note, ROLL_VOLUME);
 
-	midiChan = (uint8_t)(pat_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
+	midiChan = (uint8_t)(scene_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
 	seq_sendMidiNoteOn(midiChan, note, ROLL_VOLUME);
 }
 //------------------------------------------------------------------------------
@@ -566,10 +563,7 @@ static uint8_t seq_handleMasterBoundary(void)
 			if (seq_resetBarOnPatternChange)
 				seq_barCounter = 0u;
 			seq_loadPendigFlag = 0u;
-			if (seq_newPatternAvailable) {
-				seq_newPatternAvailable = 0u;
-				pat_commitStagedPattern(seq_activePattern);
-			}
+			seq_newPatternAvailable = 0u;
 			seq_activePattern = seq_pendingPattern;
 			seq_setStepIndexToStart();
 			seq_resetScaledScheduler();

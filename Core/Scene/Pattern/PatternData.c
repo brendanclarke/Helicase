@@ -5,40 +5,13 @@
  */
 
 #include "PatternData.h"
+#include "SceneData.h"
 #include "MidiMessages.h"
 #include "ParameterArray.h"
 #include "menu.h"
 #include "modulationNode.h"
 #include "sequencer.h"
 #include <string.h>
-
-/* Primary pattern storage.
- *
- * Why it exists here:
- * - This session removes the old local protocol/parser layer.
- * - Pattern/track/step data is Scene/Pattern state, not sequencer transport
- *   state and not front-panel UI state.
- *
- * Who uses it:
- * - PatternData APIs below mutate/query it.
- * - sequencer.c still reads it during playback as a deliberate transition
- *   point until the later Pattern playback refactor.
- * - filesystem.c streams it through PatternData pointer accessors.
- *
- * Risk:
- * - The structure layout is file-format-visible. Do not reorder fields without
- *   auditing `.pat`, `.all`, and performance serializers.
- */
-PatternSet pat_patternSet;
-
-/* Temporary pattern load buffer.
- *
- * When a file load targets the pattern that is currently playing, filesystem.c
- * writes into this buffer first. sequencer.c then swaps it into pat_patternSet
- * at a pattern boundary. This preserves the old safe-load behavior while
- * moving the storage owner into PatternData.
- */
-TempPattern pat_tmpPattern;
 
 /* Held-step automation edit target.
  *
@@ -52,19 +25,6 @@ static int8_t pat_armedAutomationTrack = -1;
 /* Which automation lane receives edits/recording: 0 = param1, nonzero = param2.
  * This used to be set via a sequencer opcode; now menu.c writes it directly. */
 static uint8_t pat_activeAutomationTrack = 0;
-
-static uint8_t pat_defaultTrackMidiChannel(uint8_t track)
-{
-	/*
-	 * Default new PatternData-owned track MIDI channel in menu/display form.
-	 *
-	 * The old kit/global MIDI channel parameters remain for compatibility, but
-	 * the STEP track-settings page now loads from PatternData. A 1..7 default
-	 * keeps freshly cleared patterns valid before any globals or pattern file
-	 * have been loaded.
-	 */
-	return (uint8_t)((track < 15u) ? (track + 1u) : 1u);
-}
 
 /*
  * Track-scale menu values as exact rational timing ratios.
@@ -91,49 +51,12 @@ static void pat_resetStep(Step *step)
 	if (!step)
 		return;
 	step->note 		= PAT_DEFAULT_NOTE;
-	step->param1Nr 	= NO_AUTOMATION;
+	step->param1Nr 	= INSTRUMENT_PARAM_INVALID;
 	step->param1Val = 0;
-	step->param2Nr	= NO_AUTOMATION;
+	step->param2Nr	= INSTRUMENT_PARAM_INVALID;
 	step->param2Val	= 0;
 	step->prob		= 127;
 	step->volume	= 100;
-}
-
-void pat_commitStagedPattern(uint8_t pattern)
-{
-	/*
-	 * Commits the temporary filesystem load buffer into one live pattern slot.
-	 *
-	 * Why this moved here: filesystem owns async file streaming and sequencer owns
-	 * the safe pattern-boundary timing, but the copy itself is PatternData storage
-	 * mutation. Keeping the four field copies here removes the last bulk PatternSet
-	 * write from sequencer.c and keeps the legacy binary layout local to the owner.
-	 *
-	 * Input: pattern is the destination pattern slot, usually seq_activePattern
-	 * supplied by sequencer.c after filesystem has filled pat_tmpPattern. Output:
-	 * destination steps, compatibility masks, pattern settings, and length/rotation
-	 * bytes are overwritten from pat_tmpPattern.
-	 *
-	 * Callers/clients/confederates: sequencer.c calls this from its
-	 * pattern-boundary swap path after filesystem sets seq_newPatternAvailable and
-	 * arms seq_armActivePatternReload(). filesystem.c writes the staging buffer
-	 * through pat_*Ptr accessors. Risk: this is file-format-visible storage; do not
-	 * change field order or sizes here as part of a move-only refactor.
-	 */
-	if (!pat_patternValid(pattern))
-		return;
-	memcpy(&pat_patternSet.pat_subStepPattern[pattern],
-	       &pat_tmpPattern.pat_subStepPattern,
-	       sizeof(Step) * NUM_TRACKS * NUM_STEPS);
-	memcpy(&pat_patternSet.pat_mainSteps[pattern],
-	       &pat_tmpPattern.pat_mainSteps,
-	       sizeof(uint16_t) * NUM_TRACKS);
-	memcpy(&pat_patternSet.pat_patternSettings[pattern],
-	       &pat_tmpPattern.pat_patternSettings,
-	       sizeof(PatternSetting));
-	memcpy(&pat_patternSet.pat_patternLengthRotate[pattern],
-	       &pat_tmpPattern.pat_patternLengthRotate,
-	       sizeof(LengthRotate) * NUM_TRACKS);
 }
 
 uint8_t pat_trackValid(uint8_t track)
@@ -141,9 +64,9 @@ uint8_t pat_trackValid(uint8_t track)
 	return (uint8_t)(track < NUM_TRACKS);
 }
 
-uint8_t pat_patternValid(uint8_t pattern)
+uint8_t pat_patternValid(uint8_t scene_index)
 {
-	return (uint8_t)(pattern == 0u);
+	return scene_indexValid(scene_index);
 }
 
 uint8_t pat_stepValid(uint8_t step)
@@ -151,50 +74,38 @@ uint8_t pat_stepValid(uint8_t step)
 	return (uint8_t)(step < NUM_STEPS);
 }
 
-Step *pat_stepPtr(uint8_t pattern, uint8_t track, uint8_t step)
+Step *pat_stepPtr(uint8_t scene_index, uint8_t track, uint8_t step)
 {
-	/* Central bounded access to a Step.
-	 *
-	 * pattern == PATTERNDATA_STAGING_PATTERN intentionally redirects to
-	 * pat_tmpPattern for filesystem staging. All other patterns must be
-	 * 0..NUM_PATTERN-1. Returning 0 forces callers to handle invalid indices
-	 * without guessing the storage layout. */
+	scene_t *scene;
+	/* Central bounded access to one Scene-owned Step. */
 	if (!pat_trackValid(track) || !pat_stepValid(step))
 		return 0;
-	if (pattern == PATTERNDATA_STAGING_PATTERN)
-		return &pat_tmpPattern.pat_subStepPattern[track][step];
-	if (!pat_patternValid(pattern))
+	scene = scene_get(scene_index);
+	if (!scene)
 		return 0;
-	return &pat_patternSet.pat_subStepPattern[pattern][track][step];
+	return &scene->pattern.pat_subStepPattern[track][step];
 }
 
-uint16_t *pat_mainStepsPtr(uint8_t pattern, uint8_t track)
+uint16_t *pat_mainStepsPtr(uint8_t scene_index, uint8_t track)
 {
-	/* Same staging-aware pointer policy as pat_stepPtr(), but for the 16-bit
-	 * compatibility main-step mask used only by legacy file/menu plumbing. */
+	scene_t *scene;
 	if (!pat_trackValid(track))
 		return 0;
-	if (pattern == PATTERNDATA_STAGING_PATTERN)
-		return &pat_tmpPattern.pat_mainSteps[track];
-	if (!pat_patternValid(pattern))
+	scene = scene_get(scene_index);
+	if (!scene)
 		return 0;
-	return &pat_patternSet.pat_mainSteps[pattern][track];
+	return &scene->pattern.pat_mainSteps[track];
 }
 
-PatternSetting *pat_patternSettingPtr(uint8_t pattern)
+PatternSetting *pat_patternSettingPtr(uint8_t scene_index)
 {
-	/* Pattern settings are per-pattern, except the temporary filesystem staging
-	 * buffer has a single PatternSetting because it only stages one pattern at
-	 * a time. */
-	if (pattern == PATTERNDATA_STAGING_PATTERN)
-		return &pat_tmpPattern.pat_patternSettings;
-	if (!pat_patternValid(pattern))
-		return 0;
-	return &pat_patternSet.pat_patternSettings[pattern];
+	scene_t *scene = scene_get(scene_index);
+	return scene ? &scene->pattern.pat_patternSettings : 0;
 }
 
-LengthRotate *pat_lengthRotatePtr(uint8_t pattern, uint8_t track)
+LengthRotate *pat_lengthRotatePtr(uint8_t scene_index, uint8_t track)
 {
+	scene_t *scene;
 	/* Per-track Pattern settings live here during the bridge.
 	 *
 	 * LengthRotate keeps its historical name for now, but the record now owns
@@ -205,25 +116,25 @@ LengthRotate *pat_lengthRotatePtr(uint8_t pattern, uint8_t track)
 	 */
 	if (!pat_trackValid(track))
 		return 0;
-	if (pattern == PATTERNDATA_STAGING_PATTERN)
-		return &pat_tmpPattern.pat_patternLengthRotate[track];
-	if (!pat_patternValid(pattern))
+	scene = scene_get(scene_index);
+	if (!scene)
 		return 0;
-	return &pat_patternSet.pat_patternLengthRotate[pattern][track];
+	return &scene->pattern.pat_patternLengthRotate[track];
 }
 
 void pat_init(void)
 {
-	uint8_t i;
+	pat_initScene(scene_getActiveIndex());
+}
 
-	for (i = 0; i < NUM_PATTERN; i++) {
-		/* Default pattern-change behavior: play once, then stay on itself. */
-		pat_patternSet.pat_patternSettings[i].changeBar = 0;
-		pat_patternSet.pat_patternSettings[i].nextPattern = i;
-		/* pat_clearPattern() initializes steps, compatibility mask, and
-		 * length/rotation for every track in this pattern. */
-		pat_clearPattern(i);
-	}
+void pat_initScene(uint8_t scene_index)
+{
+	PatternSetting *settings = pat_patternSettingPtr(scene_index);
+	if (!settings)
+		return;
+	settings->changeBar = 0u;
+	settings->nextPattern = scene_index;
+	pat_clearPattern(scene_index);
 }
 
 uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t pattern)
@@ -595,60 +506,6 @@ void pat_setTrackScale(uint8_t pattern, uint8_t track, uint8_t scale)
 		seq_realignActivePatternToMasterClock();
 }
 
-void pat_setTrackMidiChannel(uint8_t pattern, uint8_t track, uint8_t channel)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-
-	/*
-	 * Store the Pattern-owned MIDI channel shown on the STEP track-settings
-	 * page. The menu value is 1..16; zero or out-of-range values are normalized
-	 * so old/partial files cannot leave the MIDI parser with an underflowing
-	 * channel.
-	 */
-	if (!lr)
-		return;
-	if (channel < 1u)
-		channel = 1u;
-	else if (channel > 16u)
-		channel = 16u;
-	lr->midiChannel = channel;
-	parameter_values[PAR_TRACK_MIDI_CHAN] = channel;
-}
-
-uint8_t pat_getTrackMidiChannel(uint8_t pattern, uint8_t track)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	if (!lr || lr->midiChannel < 1u || lr->midiChannel > 16u)
-		return pat_defaultTrackMidiChannel(track);
-	return lr->midiChannel;
-}
-
-void pat_setTrackMidiNote(uint8_t pattern, uint8_t track, uint8_t note)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-
-	/*
-	 * Store the Pattern-owned MIDI note override shown on the STEP front page.
-	 * A value of 0 keeps the existing "any/default" behavior; nonzero values
-	 * are concrete MIDI notes.
-	 */
-	if (!lr)
-		return;
-	if (note > 127u)
-		note = 127u;
-	lr->midiNote = note;
-	parameter_values[PAR_TRACK_MIDI_NOTE] = note;
-}
-
-uint8_t pat_getTrackMidiNote(uint8_t pattern, uint8_t track)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	(void)track;
-	if (!lr || lr->midiNote > 127u)
-		return 0u;
-	return lr->midiNote;
-}
-
 uint8_t pat_getTrackScale(uint8_t pattern, uint8_t track)
 {
 	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
@@ -723,18 +580,17 @@ void pat_clearTrack(uint8_t pattern, uint8_t track)
 	 * still expands defensively to the full 128-step bridge length.
 	 */
 	uint8_t k;
+	LengthRotate *settings;
 	if (!pat_patternValid(pattern) || !pat_trackValid(track))
 		return;
 	for (k = 0; k < NUM_STEPS; k++)
-		pat_resetStep(&pat_patternSet.pat_subStepPattern[pattern][track][k]);
-	pat_patternSet.pat_mainSteps[pattern][track] = 0;
-	pat_patternSet.pat_patternLengthRotate[pattern][track].length = PAT_DEFAULT_TRACK_LENGTH;
-	pat_patternSet.pat_patternLengthRotate[pattern][track].rotate = 0;
-	pat_patternSet.pat_patternLengthRotate[pattern][track].scale = TRACK_SCALE_OFF;
-	pat_patternSet.pat_patternLengthRotate[pattern][track].midiChannel =
-		pat_defaultTrackMidiChannel(track);
-	pat_patternSet.pat_patternLengthRotate[pattern][track].midiNote = 0u;
-	pat_patternSet.pat_patternLengthRotate[pattern][track].shuffle = 0u;
+		pat_resetStep(pat_stepPtr(pattern, track, k));
+	*pat_mainStepsPtr(pattern, track) = 0u;
+	settings = pat_lengthRotatePtr(pattern, track);
+	settings->length = PAT_DEFAULT_TRACK_LENGTH;
+	settings->rotate = 0u;
+	settings->scale = TRACK_SCALE_OFF;
+	settings->shuffle = 0u;
 }
 
 void pat_clearPattern(uint8_t pattern)
@@ -756,12 +612,13 @@ void pat_clearAutomation(uint8_t pattern, uint8_t track, uint8_t automTrack)
 	if (!pat_patternValid(pattern) || !pat_trackValid(track))
 		return;
 	for (k = 0; k < NUM_STEPS; k++) {
+		Step *step = pat_stepPtr(pattern, track, k);
 		if (automTrack == 0) {
-			pat_patternSet.pat_subStepPattern[pattern][track][k].param1Nr = NO_AUTOMATION;
-			pat_patternSet.pat_subStepPattern[pattern][track][k].param1Val = 0;
+			step->param1Nr = INSTRUMENT_PARAM_INVALID;
+			step->param1Val = 0;
 		} else {
-			pat_patternSet.pat_subStepPattern[pattern][track][k].param2Nr = NO_AUTOMATION;
-			pat_patternSet.pat_subStepPattern[pattern][track][k].param2Val = 0;
+			step->param2Nr = INSTRUMENT_PARAM_INVALID;
+			step->param2Val = 0;
 		}
 	}
 }
@@ -791,7 +648,7 @@ void pat_recordNote(uint8_t pattern, uint8_t track, uint8_t step,
 	if (!pat_patternValid(pattern) || !pat_trackValid(track) || !pat_stepValid(step))
 		return;
 	mainStep = (uint8_t)(step & 0x0fu);
-	stepPtr = &pat_patternSet.pat_subStepPattern[pattern][track][step];
+	stepPtr = pat_stepPtr(pattern, track, step);
 	stepPtr->note = note;
 	stepPtr->volume = (uint8_t)(velocity & STEP_VOLUME_MASK);
 	stepPtr->prob = 127;
@@ -824,9 +681,8 @@ void pat_eraseMainStepSubSteps(uint8_t pattern, uint8_t track, uint8_t mainStep)
 	pat_setMainStep(pattern, track, mainStep, 0);
 	firstStep = (uint8_t)(mainStep * 8u);
 	for (i = firstStep; i < (uint8_t)(firstStep + 8u); i++)
-		pat_resetStep(&pat_patternSet.pat_subStepPattern[pattern][track][i]);
-	pat_patternSet.pat_subStepPattern[pattern][track][firstStep].volume |=
-		STEP_ACTIVE_MASK;
+		pat_resetStep(pat_stepPtr(pattern, track, i));
+	pat_stepPtr(pattern, track, firstStep)->volume |= STEP_ACTIVE_MASK;
 }
 
 
@@ -850,32 +706,25 @@ void pat_copyTrack(uint8_t pattern, uint8_t srcTrack, uint8_t dstTrack)
 	 * settings. */
 	if (!pat_patternValid(pattern) || !pat_trackValid(srcTrack) || !pat_trackValid(dstTrack))
 		return;
-	memcpy(&pat_patternSet.pat_subStepPattern[pattern][dstTrack],
-	       &pat_patternSet.pat_subStepPattern[pattern][srcTrack],
+	memcpy(pat_stepPtr(pattern, dstTrack, 0u),
+	       pat_stepPtr(pattern, srcTrack, 0u),
 	       sizeof(Step) * NUM_STEPS);
-	pat_patternSet.pat_mainSteps[pattern][dstTrack] =
-		pat_patternSet.pat_mainSteps[pattern][srcTrack];
-	pat_patternSet.pat_patternLengthRotate[pattern][dstTrack] =
-		pat_patternSet.pat_patternLengthRotate[pattern][srcTrack];
+	*pat_mainStepsPtr(pattern, dstTrack) = *pat_mainStepsPtr(pattern, srcTrack);
+	*pat_lengthRotatePtr(pattern, dstTrack) =
+		*pat_lengthRotatePtr(pattern, srcTrack);
 }
 
 void pat_copyPattern(uint8_t srcPattern, uint8_t dstPattern)
 {
-	/* Copy a full pattern. This includes all track data and pattern-level
-	 * settings, preserving the old copy-pattern behavior from sequencer.c. */
-	if (!pat_patternValid(srcPattern) || !pat_patternValid(dstPattern))
-		return;
-	memcpy(&pat_patternSet.pat_subStepPattern[dstPattern],
-	       &pat_patternSet.pat_subStepPattern[srcPattern],
-	       sizeof(Step) * NUM_TRACKS * NUM_STEPS);
-	memcpy(&pat_patternSet.pat_mainSteps[dstPattern],
-	       &pat_patternSet.pat_mainSteps[srcPattern],
-	       sizeof(uint16_t) * NUM_TRACKS);
-	memcpy(&pat_patternSet.pat_patternLengthRotate[dstPattern],
-	       &pat_patternSet.pat_patternLengthRotate[srcPattern],
-	       sizeof(LengthRotate) * NUM_TRACKS);
-	pat_patternSet.pat_patternSettings[dstPattern] =
-		pat_patternSet.pat_patternSettings[srcPattern];
+	/*
+	 * Whole-pattern copy now means copying between complete Scene owners.
+	 * This compatibility wrapper copies only PatternSet; Scene/Bank copy paths
+	 * should copy the containing scene_t when kit/settings must travel too.
+	 */
+	scene_t *src = scene_get(srcPattern);
+	scene_t *dst = scene_get(dstPattern);
+	if (src && dst)
+		dst->pattern = src->pattern;
 }
 
 
@@ -897,8 +746,8 @@ void pat_copyBar(uint8_t pattern, uint8_t track, uint8_t srcBar, uint8_t dstBar)
 
 	srcStep = (uint8_t)(srcBar * NUM_STEPS_PER_BAR);
 	dstStep = (uint8_t)(dstBar * NUM_STEPS_PER_BAR);
-	memcpy(&pat_patternSet.pat_subStepPattern[pattern][track][dstStep],
-	       &pat_patternSet.pat_subStepPattern[pattern][track][srcStep],
+	memcpy(pat_stepPtr(pattern, track, dstStep),
+	       pat_stepPtr(pattern, track, srcStep),
 	       sizeof(Step) * NUM_STEPS_PER_BAR);
 
 	neededLength = (uint8_t)((dstBar + 1u) * NUM_STEPS_PER_BAR);
@@ -951,7 +800,7 @@ void pat_armAutomationStep(uint8_t step, uint8_t track, uint8_t armed)
 }
 
 void pat_recordAutomation(uint8_t pattern, uint8_t track, uint8_t step,
-                          uint8_t dest, uint8_t value)
+                          instrument_param_id_t dest, uint8_t value)
 {
 	/*
 	 * Writes one automation value into a quantized Pattern step.
@@ -972,15 +821,18 @@ void pat_recordAutomation(uint8_t pattern, uint8_t track, uint8_t step,
 	if (!pat_patternValid(pattern) || !pat_trackValid(track) || !pat_stepValid(step))
 		return;
 	if (pat_activeAutomationTrack == 0) {
-		pat_patternSet.pat_subStepPattern[pattern][track][step].param1Nr = dest;
-		pat_patternSet.pat_subStepPattern[pattern][track][step].param1Val = value;
+		Step *target = pat_stepPtr(pattern, track, step);
+		target->param1Nr = dest;
+		target->param1Val = value;
 	} else {
-		pat_patternSet.pat_subStepPattern[pattern][track][step].param2Nr = dest;
-		pat_patternSet.pat_subStepPattern[pattern][track][step].param2Val = value;
+		Step *target = pat_stepPtr(pattern, track, step);
+		target->param2Nr = dest;
+		target->param2Val = value;
 	}
 }
 
-void pat_recordArmedAutomation(uint8_t pattern, uint8_t dest, uint8_t value)
+void pat_recordArmedAutomation(uint8_t pattern, instrument_param_id_t dest,
+                               uint8_t value)
 {
 	/*
 	 * Writes automation to the long-press armed step, if one exists.
@@ -1009,7 +861,7 @@ void pat_applyStepToMenu(uint8_t pattern, uint8_t track, uint8_t step)
 	 * converted from stored param-number encoding back to modTargets[] indices.
 	 * This function mutates menu edit state but does not change pattern data. */
 	Step *s = pat_stepPtr(pattern, track, step);
-	uint8_t dest;
+	instrument_param_id_t dest;
 	if (!s)
 		return;
 	parameter_values[PAR_STEP_VOLUME] = (uint8_t)(s->volume & STEP_VOLUME_MASK);
@@ -1079,7 +931,9 @@ void pat_applyTrackSettingsToMenu(uint8_t pattern, uint8_t track)
 	 * these aliases are edited, but they are no longer the storage owner for
 	 * this page.
 	 */
-	parameter_values[PAR_TRACK_MIDI_CHAN] = pat_getTrackMidiChannel(pattern, track);
-	parameter_values[PAR_TRACK_MIDI_NOTE] = pat_getTrackMidiNote(pattern, track);
+	parameter_values[PAR_TRACK_MIDI_CHAN] =
+		scene_getTrackMidiChannel(pattern, track);
+	parameter_values[PAR_TRACK_MIDI_NOTE] =
+		scene_getTrackMidiNote(pattern, track);
 	parameter_values[PAR_SHUFFLE] = pat_getTrackShuffle(pattern, track);
 }

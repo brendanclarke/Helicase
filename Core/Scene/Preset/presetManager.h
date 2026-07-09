@@ -30,6 +30,7 @@
 #ifndef PRESETMANAGER_H_
 #define PRESETMANAGER_H_
 #include <stdint.h>
+#include "SceneData.h"
 
 /* -----------------------------------------------------------------------
 ** Async operation status
@@ -59,6 +60,18 @@ typedef enum {
 } preset_op_type_t;
 
 extern char preset_currentName[8];
+
+/*
+ * Selects one of the two persisted endpoint images.
+ *
+ * The interpolation image is intentionally absent: only presetMorphEngine may
+ * write that runtime cache. Clients are Menu edits, external MIDI translation,
+ * storage/load follow-up, and tests.
+ */
+typedef enum {
+    INSTRUMENT_IMAGE_MAIN = 0,
+    INSTRUMENT_IMAGE_MORPH
+} instrument_image_select_t;
 
 void    preset_init(void);
 
@@ -113,6 +126,19 @@ void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
                                    uint8_t recordAutomation);
 void    preset_applyVelocityModTarget(uint8_t voice, uint16_t targetParam);
 void    preset_applyLfoModTarget(uint8_t lfo, uint16_t targetParam);
+
+uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
+                                      uint8_t local_param,
+                                      instrument_image_select_t image,
+                                      uint8_t value,
+                                      uint8_t record_automation);
+uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
+                                        uint8_t local_param, uint16_t value);
+uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
+                                           instrument_param_id_t id,
+                                           uint8_t value);
+uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
+void preset_applySceneSettings(uint8_t scene_index);
 
 /* Runtime chunked sound apply. preset_tickDrumsetApply() performs at most one
 ** voice of modulation-routing work and returns non-zero while that pass did

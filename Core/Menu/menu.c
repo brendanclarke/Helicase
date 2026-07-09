@@ -46,6 +46,7 @@
 #include "SampleMemory.h"
 #include "sequencer.h"
 #include "PatternData.h"
+#include "SceneData.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
 #include "triggerJacks.h"
@@ -2710,7 +2711,7 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         uint16_t realParam = (track == 6u)
             ? PAR_MIDI_CHAN_7
             : (uint16_t)(PAR_MIDI_CHAN_1 + track);
-        pat_setTrackMidiChannel(menu_getViewedPattern(), track, value);
+        scene_setTrackMidiChannel(menu_getViewedPattern(), track, value);
         parameter_values[realParam] = value;
         menu_parseGlobalParam(realParam, value);
         break;
@@ -2728,7 +2729,7 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
          */
         uint8_t track = menu_getActiveVoice();
         uint16_t realParam = (uint16_t)(PAR_MIDI_NOTE1 + track);
-        pat_setTrackMidiNote(menu_getViewedPattern(), track, value);
+        scene_setTrackMidiNote(menu_getViewedPattern(), track, value);
         parameter_values[realParam] = value;
         preset_applySoundParameter(realParam, value, 1);
         break;
