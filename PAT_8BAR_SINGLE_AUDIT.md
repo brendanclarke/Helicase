@@ -1508,3 +1508,160 @@ Known limitations:
   MIDI-size boundary, but this session explicitly deferred that cleanup. The
   converter uses `ParameterArray.h` as the authority for the
   `PAR_FILTER_DRIVE_1` split and uses only the CC2 enum from `MidiMessages.h`.
+
+### Follow-Up: Legacy Kit Converter Parameter Assignment Removed
+
+Changed code:
+
+- `tools/convert_legacy_kits.py`
+
+Why:
+
+- The inferred legacy `.SND` byte-to-parameter mapping is still wrong against
+  known original-hardware values. Keeping any inferred mapping in the converter
+  risks regenerating misleading Kit folders.
+
+What changed:
+
+- Deleted all current parameter assignment logic from the converter:
+  - no `ParameterArray.h` enum parsing
+  - no `MidiMessages.h` / CC2 parsing
+  - no `PAR_*` mapping templates
+  - no generated `[params]` or `[morph]` endpoint values
+  - no `audio_out` assignment from legacy bytes
+- The converter now creates only the Kit folder skeleton, `kitset.kcg` slot
+  type/file entries, and instrument metadata headers. It is intentionally
+  waiting for an explicit authoritative parameter list before emitting values.
+
+Validation:
+
+- `python3 -m py_compile tools/convert_legacy_kits.py`
+- Search confirmed no remaining `PAR_`, `CC2`, `[params]`, `[morph]`, or
+  `audio_out` assignment logic in the converter script.
+
+### Follow-Up: Legacy Kit Converter Rebuilt From Slak Canary
+
+Changed code/data:
+
+- `tools/convert_legacy_kits.py`
+- `SD_CARD/Kit/`
+
+Why:
+
+- The Slak canary proved that `P000.SND` is not packed by a separate inferred
+  endpoint order. It is an eight-byte display name followed by payload bytes
+  indexed directly by the current `ParameterArray.h` `PAR_*` enum value.
+- Comments in the MIDI headers are not authoritative for this conversion. The
+  converter now strips C comments and parses only the actual `ParamEnums`
+  sequence.
+- `audio_out` belongs in `kitset.kcg`, not in the instrument files. The Slak
+  values confirmed the audio routing table: `0` is stereo1, `1` is stereo2,
+  and `2` begins the single-output sequence at L1.
+
+What changed:
+
+- Reintroduced parameter assignment, but only through the verified direct
+  payload indexing rule:
+  - `file_offset = 8 + PAR_* enum value`
+  - `PAR_COARSE1` maps to payload index `8`
+  - `PAR_FILTER_DRIVE_1` maps to payload index `128`
+  - `PAR_FILTER_TYPE_1` maps to payload index `191`
+  - `PAR_AUDIO_OUT1` maps to payload index `215`
+- Removed the old CC/CC2 split inference from the converter. The only authority
+  is the parsed `ParameterArray.h` enum value for each emitted storage key.
+- Kept the generated schema aligned with `storageTypes.c`:
+  - `kitset.kcg` emits `type`, `file`, and `audio_out` for each slot.
+  - instrument files emit only voice-owned `[params]` keys.
+  - `[morph]` is initialized from the same legacy values as `[params]`.
+- `SD_CARD/Kit/` is now clean-replaced each time the converter runs so stale
+  folders and host metadata cannot survive regeneration.
+
+Code comments added:
+
+- Converter module docstring documents the verified legacy layout and the split
+  between kitset-owned routing and instrument-owned voice parameters.
+- `INSTRUMENT_FILES` documents the FAT 8.3 filename constraint.
+- `INSTRUMENT_PARAMS` documents that the converter is the Python-side affiliate
+  of the `storageTypes.c` storage maps and intentionally stores `PAR_*` names
+  instead of numeric offsets.
+- `strip_c_comments()` documents why stale comments are ignored.
+- `parse_param_enum()` documents that `ParameterArray.h` provides the enum
+  values.
+- `payload_value()` documents the checked read from a legacy payload byte.
+- `main()` documents why the generated `Kit/` tree is removed before writing.
+
+Validation:
+
+- `python3 -m py_compile tools/convert_legacy_kits.py`
+- `python3 tools/convert_legacy_kits.py`
+- Regenerated `31` kit folders from the current `SD_CARD/P*.SND` set.
+- Confirmed no `.DS_Store` survived under `SD_CARD/Kit`.
+- Slak spot checks against `SD_CARD/P000.SND`:
+  - `PAR_COARSE1=31`
+  - `PAR_FINE1=126`
+  - `PAR_VOL1=127`
+  - `PAR_VOL6=127`
+  - `PAR_FILTER_DRIVE_1=30`
+  - `PAR_FILTER_TYPE_1=5`
+  - `PAR_AUDIO_OUT1=2`
+  - `PAR_AUDIO_OUT6=1`
+- `SD_CARD/Kit/001 Slak/kitset.kcg` now routes slot 1 to `audio_out=2`, slots
+  2-5 to `audio_out=0`, and slot 6 to `audio_out=1`.
+
+Notes:
+
+- The current source set contains `P035.SND` but no `P030.SND` through
+  `P034.SND`, so generated folders jump from `030 Ent` to `036 1ShtSnr`. The
+  converter preserves source slot numbers rather than compacting user-visible
+  kit numbers.
+
+### Follow-Up: STEP Track Settings Page Immediate Refresh
+
+Changed code:
+
+- `Core/Menu/menu.c`
+- `Core/Menu/menuPages.h`
+- `Core/Scene/Pattern/PatternData.c`
+- `Core/Scene/Pattern/PatternData.h`
+
+Why:
+
+- The STEP front page could look one track behind after pressing a VOICE button
+  because `menu_switchPage(SEQ_PAGE)` repainted before the button-layer
+  `buttonHandler_updateSubSteps()` call refreshed `PAR_TRACK_LENGTH`,
+  `PAR_TRACK_SCALE`, `PAR_TRACK_MIDI_CHAN`, and `PAR_TRACK_MIDI_NOTE` from
+  PatternData.
+- The displayed parameter order needed to match the intended track-settings
+  mental model: length, scale, MIDI channel, MIDI note.
+- A freshly initialized empty pattern should boot as a compact 16-step loop per
+  track, while legacy/corrupt loaded zero lengths should still fall back to the
+  full 128-step bridge length.
+
+What changed:
+
+- `menu_switchPage(SEQ_PAGE)` now calls
+  `pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice())`
+  before the page repaint at the end of `menu_switchPage()`. This makes any
+  STEP-page entry path display the current active track settings on the first
+  VOICE/track press.
+- `SEQ_PAGE` subpage 0 now lists:
+  - `PAR_TRACK_LENGTH`
+  - `PAR_TRACK_SCALE`
+  - `PAR_TRACK_MIDI_CHAN`
+  - `PAR_TRACK_MIDI_NOTE`
+- Added `PAT_DEFAULT_TRACK_LENGTH` as `NUM_STEPS_PER_BAR`.
+- `pat_clearTrack()` now initializes cleared/boot-empty track length to
+  `PAT_DEFAULT_TRACK_LENGTH` instead of `NUM_STEPS`.
+
+Code comments added:
+
+- `menu_switchPage(SEQ_PAGE)` documents why PatternData settings must be copied
+  before `menu_repaintAll()` runs.
+- `pat_clearTrack()` documents the distinction between the 16-step boot empty
+  default and the existing 128-step defensive fallback for loaded zero lengths.
+
+Validation:
+
+- `make`
+- `make img`
+- `make img` wrote `build/LXRV2_lxr02.img (277000b) OK`.

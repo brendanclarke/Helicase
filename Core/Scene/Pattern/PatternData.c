@@ -53,13 +53,6 @@ static int8_t pat_armedAutomationTrack = -1;
  * This used to be set via a sequencer opcode; now menu.c writes it directly. */
 static uint8_t pat_activeAutomationTrack = 0;
 
-/* Temporary per-pattern shuffle API backing.
- *
- * The value is still forwarded to seq_setShuffle() because playback consumes a
- * global shuffle coefficient today. The API is Pattern-owned now so later work
- * can make shuffle per-pattern or per-track-pattern without changing callers. */
-static uint8_t pat_shuffleValue[NUM_PATTERN];
-
 static uint8_t pat_defaultTrackMidiChannel(uint8_t track)
 {
 	/*
@@ -222,10 +215,6 @@ LengthRotate *pat_lengthRotatePtr(uint8_t pattern, uint8_t track)
 void pat_init(void)
 {
 	uint8_t i;
-
-	/* Shuffle has a PatternData-facing API now. Initialize all pattern slots to
-	 * zero even though playback still reads the global sequencer coefficient. */
-	memset(pat_shuffleValue, 0, sizeof(pat_shuffleValue));
 
 	for (i = 0; i < NUM_PATTERN; i++) {
 		/* Default pattern-change behavior: play once, then stay on itself. */
@@ -682,58 +671,38 @@ TrackScaleRatio pat_getTrackScaleRatio(uint8_t pattern, uint8_t track)
 	return pat_trackScaleRatios[scale];
 }
 
-void pat_setShuffle(uint8_t pattern, uint8_t value)
+void pat_setTrackShuffle(uint8_t pattern, uint8_t track, uint8_t shuffle)
 {
-	/* Menu edit path for PAR_SHUFFLE.
-	 *
-	 * The pattern argument is kept even while playback is global because the
-	 * stored/user-facing owner is PatternData. Callers should not call
-	 * seq_setShuffle() directly for user-facing shuffle edits anymore. */
-	if (pat_patternValid(pattern))
-		pat_shuffleValue[pattern] = value;
+	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
+
 	/*
-	 * Why: shuffle is Pattern-owned, but playback still consumes seq_shuffle.
-	 * Inputs: viewed pattern/value 0..127. Outputs: PatternData's remembered
-	 * value and current sequencer shuffle coefficient. Risk: until playback is
-	 * Scene-aware this remains a global audible setting.
+	 * Store one track's shuffle amount.
+	 *
+	 * Why: shuffle affects playback timing and must follow the Pattern track,
+	 * not Sequencer's transport globals. Menu edits the viewed pattern/track;
+	 * Sequencer queries this value when computing that track's due events.
+	 *
+	 * Inputs: pattern/track identify the PatternData owner, shuffle is the
+	 * 0..127 menu amount. Outputs: PatternData storage and PAR_SHUFFLE's visible
+	 * mirror update. Confederates: filesystem writes this from the optional
+	 * per-track shuffle extension. Risk: this must not forward to a
+	 * transport-global shuffle path; playback reads per-track values directly so
+	 * tracks can differ.
 	 */
-	seq_setShuffle((float)value / 127.0f);
+	if (!lr)
+		return;
+	if (shuffle > 127u)
+		shuffle = 127u;
+	lr->shuffle = shuffle;
+	parameter_values[PAR_SHUFFLE] = shuffle;
 }
 
-void pat_setAllShuffle(uint8_t value)
+uint8_t pat_getTrackShuffle(uint8_t pattern, uint8_t track)
 {
-	/*
-	 * Imports the legacy one-byte pattern-set shuffle value into PatternData.
-	 *
-	 * Why: filesystem pattern and container files currently serialize one shuffle
-	 * byte, not one value per pattern slot. Shuffle ownership is PatternData, so
-	 * file loads should no longer call seq_setShuffle() directly; they call this
-	 * helper to update Pattern-owned backing and let PatternData bridge the current
-	 * audible runtime coefficient.
-	 *
-	 * Input: value is the loaded 0..127 shuffle byte. Outputs: all current pattern
-	 * slots receive the value, PAR_SHUFFLE mirrors it for menu display, and the
-	 * same PatternData-to-sequencer runtime bridge used by pat_setShuffle()
-	 * refreshes playback timing.
-	 *
-	 * Callers/clients/confederates: filesystem_loadPattern_tick() and
-	 * filesystem_loadContainer_tick() call this after reading the shuffle block.
-	 * pat_applyTrackSettingsToMenu() later exposes the per-pattern backing to UI.
-	 * Risk: this deliberately preserves the existing single-byte file format; do
-	 * not interpret it as a Phase 3 per-pattern shuffle serialization design.
-	 */
-	uint8_t pattern;
-	for (pattern = 0; pattern < NUM_PATTERN; pattern++)
-		pat_shuffleValue[pattern] = value;
-	parameter_values[PAR_SHUFFLE] = value;
-	seq_setShuffle((float)value / 127.0f);
-}
-
-uint8_t pat_getShuffle(uint8_t pattern)
-{
-	if (!pat_patternValid(pattern))
-		return 0;
-	return pat_shuffleValue[pattern];
+	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
+	if (!lr || lr->shuffle > 127u)
+		return 0u;
+	return lr->shuffle;
 }
 
 void pat_clearTrack(uint8_t pattern, uint8_t track)
@@ -744,7 +713,14 @@ void pat_clearTrack(uint8_t pattern, uint8_t track)
 	 * - every bridge step resets to default note, velocity, probability, and no automation
 	 * - every step is inactive
 	 * - the legacy main-step mask is cleared for file/UI compatibility
-	 * - length/rotation reset to 128 steps/no rotation
+	 * - length/rotation reset to the boot empty-pattern length/no rotation
+	 * - scale, MIDI defaults, note override, and per-track shuffle reset to
+	 *   their safe empty-pattern defaults
+	 *
+	 * PAT_DEFAULT_TRACK_LENGTH intentionally differs from the legacy/corrupt
+	 * file fallback in pat_getTrackLength(): freshly initialized empty patterns
+	 * should start as a compact 16-step loop, while zero loaded from older files
+	 * still expands defensively to the full 128-step bridge length.
 	 */
 	uint8_t k;
 	if (!pat_patternValid(pattern) || !pat_trackValid(track))
@@ -752,12 +728,13 @@ void pat_clearTrack(uint8_t pattern, uint8_t track)
 	for (k = 0; k < NUM_STEPS; k++)
 		pat_resetStep(&pat_patternSet.pat_subStepPattern[pattern][track][k]);
 	pat_patternSet.pat_mainSteps[pattern][track] = 0;
-	pat_patternSet.pat_patternLengthRotate[pattern][track].length = NUM_STEPS;
+	pat_patternSet.pat_patternLengthRotate[pattern][track].length = PAT_DEFAULT_TRACK_LENGTH;
 	pat_patternSet.pat_patternLengthRotate[pattern][track].rotate = 0;
 	pat_patternSet.pat_patternLengthRotate[pattern][track].scale = TRACK_SCALE_OFF;
 	pat_patternSet.pat_patternLengthRotate[pattern][track].midiChannel =
 		pat_defaultTrackMidiChannel(track);
 	pat_patternSet.pat_patternLengthRotate[pattern][track].midiNote = 0u;
+	pat_patternSet.pat_patternLengthRotate[pattern][track].shuffle = 0u;
 }
 
 void pat_clearPattern(uint8_t pattern)
@@ -1104,5 +1081,5 @@ void pat_applyTrackSettingsToMenu(uint8_t pattern, uint8_t track)
 	 */
 	parameter_values[PAR_TRACK_MIDI_CHAN] = pat_getTrackMidiChannel(pattern, track);
 	parameter_values[PAR_TRACK_MIDI_NOTE] = pat_getTrackMidiNote(pattern, track);
-	parameter_values[PAR_SHUFFLE] = pat_getShuffle(pattern);
+	parameter_values[PAR_SHUFFLE] = pat_getTrackShuffle(pattern, track);
 }

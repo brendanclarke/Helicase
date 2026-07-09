@@ -76,7 +76,6 @@ static volatile struct {
     unsigned seqErasing       :1; /* _SEQUENCER_ADD_SPIKE_: keep erase state while COPY is held */
 } bh_state;
 
-static uint8_t lastActivePage = 0;
 static uint8_t lastActiveSubPage = 0;
 uint8_t buttonHandler_selectedStep = 0;
 static uint8_t selectedStepLed = LED_STEP1;
@@ -91,6 +90,7 @@ uint8_t buttonHandler_resetLock = 0;
 
 static uint8_t buttonHandler_mutedVoices = 0;
 static int8_t buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
+static uint8_t buttonHandler_morphVoiceModeActive = 0;
 
 /* -----------------------------------------------------------------------
 ** Helpers
@@ -98,6 +98,29 @@ static int8_t buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
 uint8_t buttonHandler_getMode(void)  { return bh_state.selectButtonMode; }
 uint8_t buttonHandler_getShift(void) { return (uint8_t)(btn_held[BUT_SHIFT]); }
 int8_t buttonHandler_getArmedAutomationStep(void) { return buttonHandler_armedAutomationStep; }
+
+static void buttonHandler_setMorphVoiceMode(uint8_t onOff)
+{
+    /*
+     * Enter or leave the VOICE-mode morph endpoint overlay.
+     *
+     * Why: SHIFT+MODE_VOICE should behave like ordinary VOICE mode while Menu
+     * displays/edits the morph endpoint buffer. buttonHandler owns the mode
+     * gesture and MODE LED feedback; Menu owns the parameter buffer flag.
+     *
+     * Input onOff is boolean. Outputs: local morph overlay state, Menu's
+     * voiceModeShowMorph flag, and the MODE1 blink state are updated together.
+     * Confederates: menu_setVoiceModeShowMorph() changes value resolution, and
+     * led_setBlinkLed() provides persistent feedback without adding a new LED
+     * mode. Risk: this is not a distinct selectButtonMode; SELECT_MODE_VOICE
+     * branches must continue to handle subpages and voice selection normally.
+     */
+    buttonHandler_morphVoiceModeActive = (uint8_t)(onOff != 0u);
+    menu_setVoiceModeShowMorph(buttonHandler_morphVoiceModeActive);
+    led_setBlinkLed(LED_MODE1, buttonHandler_morphVoiceModeActive);
+    if (buttonHandler_morphVoiceModeActive)
+        led_setValue(1u, LED_MODE1);
+}
 
 void buttonHandler_setRunStopState(uint8_t running)
 {
@@ -257,7 +280,7 @@ static void buttonHandler_applyEuklidParamsToMenu(uint8_t track)
 
 static void buttonHandler_enterSeqModeStepMode(void)
 {
-    menu_switchSubPage(0);
+    menu_showStepTrackSettingsFirstHalf();
     menu_switchPage(SEQ_PAGE);
     buttonHandler_updateSubSteps();
     led_setBlinkLed(selectedStepLed, 1);
@@ -267,25 +290,6 @@ static void buttonHandler_leaveSeqModeStepMode(void)
 {
     led_setBlinkLed(selectedStepLed, 0);
     led_setValue(0, selectedStepLed);
-}
-
-static void buttonHandler_enterSeqMode(void)
-{
-    lastActivePage = menu_activePage;
-    lastActiveSubPage = menu_getSubPage();
-    menu_switchSubPage(0);
-    menu_switchPage(SEQ_PAGE);
-    buttonHandler_updateSubSteps();
-    led_setBlinkLed(selectedStepLed, 1);
-}
-
-static void buttonHandler_leaveSeqMode(void)
-{
-    led_setBlinkLed(selectedStepLed, 0);
-    led_setValue(0, selectedStepLed);
-    led_clearSelectLeds();
-    menu_switchPage(lastActivePage);
-    menu_switchSubPage(lastActiveSubPage);
 }
 
 static void buttonHandler_armTimerActionStep(int8_t stepNr)
@@ -600,6 +604,32 @@ static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
 
 static void handleModeButtons(uint8_t mode)
 {
+    if (buttonHandler_getShift() && mode == SELECT_MODE_VOICE) {
+        /*
+         * SHIFT+VOICE is now persistent morph voice mode.
+         *
+         * Why: the shifted VOICE mode gesture is reserved for viewing/editing
+         * morph endpoint parameters on the normal voice pages. It must bypass
+         * the old shifted-mode arithmetic, otherwise MODE1+SHIFT lands on a
+         * generator/alternate mode instead of staying in VOICE semantics.
+         *
+         * Inputs: physical MODE1 press while SHIFT is held. Outputs:
+         * SELECT_MODE_VOICE remains active, Menu shows the active voice page
+         * from parameters2[], and MODE1 blinks until morph mode is left.
+         */
+        bh_state.selectButtonMode = SELECT_MODE_VOICE;
+        led_clearAllBlinkLeds();
+        led_setMode2(SELECT_MODE_VOICE);
+        buttonHandler_setMorphVoiceMode(1u);
+        menu_switchPage(menu_getActiveVoice());
+        led_setActiveSelectButton(menu_getSubPage());
+        menu_resetActiveParameter();
+        menu_repaintAll();
+        return;
+    }
+
+    buttonHandler_setMorphVoiceMode(0u);
+
     if (buttonHandler_getShift())
         bh_state.selectButtonMode = (uint8_t)((mode + 4u) & 0x07u);
     else
@@ -766,6 +796,9 @@ static void buttonHandler_partButtonReleased(uint8_t partNr)
 
 static void handleVoiceButton(uint8_t voiceNr)
 {
+    uint8_t wasSelectedVoice;
+    uint8_t shouldPreviewVoice;
+
     if (copyClear_Mode >= MODE_COPY_PATTERN) {
         if (copyClear_srcSet()) {
             /*
@@ -796,6 +829,19 @@ static void handleVoiceButton(uint8_t voiceNr)
         }
         return;
     }
+
+    /*
+     * Stopped-transport voice preview gate.
+     *
+     * Why: selecting a different VOICE changes UI context, but re-pressing the
+     * already selected VOICE is an audition gesture when playback is stopped.
+     * Inputs are the pressed voice, Menu's current active voice, and Sequencer
+     * running state. Output is a boolean consumed after non-copy/non-mute voice
+     * actions finish. Confederates: seq_previewVoice() owns the actual synth
+     * and MIDI trigger path; copy/mute branches return before using this flag.
+     */
+    wasSelectedVoice = (uint8_t)(voiceNr == menu_getActiveVoice());
+    shouldPreviewVoice = (uint8_t)(wasSelectedVoice && !seq_isRunning());
 
     {
         uint8_t muteModeActive = buttonHandler_getShift();
@@ -834,16 +880,18 @@ static void handleVoiceButton(uint8_t voiceNr)
                 }
             }
             buttonHandler_showMuteLEDs();
+            if (shouldPreviewVoice)
+                seq_previewVoice(voiceNr);
             return;
         }
 
+        menu_setActiveVoice(voiceNr);
         led_setActiveVoice(voiceNr);
         if (bh_state.selectButtonMode == SELECT_MODE_VOICE) {
             menu_switchPage(voiceNr);
             led_setActiveSelectButton(menu_getSubPage());
         }
 
-        menu_setActiveVoice(voiceNr);
         /*
          * Active voice is UI/menu context, so Menu owns the selected value.
          * Euklid params are then pulled directly from the Pattern generator
@@ -854,10 +902,29 @@ static void handleVoiceButton(uint8_t voiceNr)
         if (bh_state.selectButtonMode == SELECT_MODE_STEP ||
             menu_activePage == SEQ_PAGE) {
             led_clearAllBlinkLeds();
-            buttonHandler_enterSeqModeStepMode();
+            /*
+             * STEP-mode VOICE presses own the track-settings front-page half.
+             *
+             * Why: selecting a new track should show the primary settings
+             * half, while re-pressing the already selected track toggles to
+             * the second half where per-track shuffle lives. Menu owns
+             * menuIndex, so buttonHandler uses Menu helpers instead of editing
+             * index bits directly. Output: the active track settings are
+             * refreshed and the selected step LED resumes blinking.
+             */
+            if (wasSelectedVoice)
+                menu_toggleStepTrackSettingsHalf();
+            else
+                menu_showStepTrackSettingsFirstHalf();
+            menu_switchPage(SEQ_PAGE);
+            buttonHandler_updateSubSteps();
+            led_setBlinkLed(selectedStepLed, 1);
         } else if (menu_activePage == EUKLID_PAGE) {
             menu_repaintAll();
         }
+
+        if (shouldPreviewVoice)
+            seq_previewVoice(voiceNr);
     }
 }
 
@@ -969,8 +1036,17 @@ static void processPress(uint8_t buttonNr)
         led_setValue(1, LED_SHIFT);
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
-            buttonHandler_enterSeqMode();
-            break;
+            /*
+             * Holding SHIFT in VOICE mode no longer enters a temporary STEP
+             * overlay.
+             *
+             * Why: SHIFT+MODE_VOICE is now the persistent morph voice mode
+             * gesture. A plain SHIFT press must not steal the UI away from
+             * voice pages, because morph endpoint editing uses the same pages,
+             * SELECT subpages, encoder, and endless pots as normal voice mode.
+             * Output: only the physical SHIFT LED changes for this gesture.
+             */
+            return;
 
         case SELECT_MODE_PERF:
         case SELECT_MODE_PAT_GEN:
@@ -1077,7 +1153,16 @@ static void processRelease(uint8_t buttonNr)
 
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
-            buttonHandler_leaveSeqMode();
+            /*
+             * VOICE-mode SHIFT release pairs with the no-op SHIFT press above.
+             *
+             * Output: restore the selected voice LEDs only. Do not call
+             * buttonHandler_leaveSeqMode(), because SHIFT no longer entered
+             * the STEP overlay in VOICE mode.
+             */
+            led_setActiveVoice(menu_getActiveVoice());
+            if (buttonHandler_morphVoiceModeActive)
+                led_setBlinkLed(LED_MODE1, 1u);
             break;
 
         case SELECT_MODE_PERF:

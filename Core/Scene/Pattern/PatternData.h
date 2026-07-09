@@ -22,6 +22,7 @@
 #define NUM_STEPS 128
 #define NUM_BARS 8u
 #define NUM_STEPS_PER_BAR 16u
+#define PAT_DEFAULT_TRACK_LENGTH NUM_STEPS_PER_BAR
 
 #define PAT_DEFAULT_NOTE 63
 
@@ -81,11 +82,22 @@ typedef struct PatternSettingsStruct
 }PatternSetting;
 
 typedef struct {
+	/*
+	 * Per-track Pattern settings shown by the STEP front page.
+	 *
+	 * Why: the bridge keeps one PatternData-owned record for track-level
+	 * Pattern settings even though the historical type name only mentions
+	 * length/rotation. Inputs/outputs are owned through pat_* accessors below.
+	 * Clients include Menu for editing/display, Sequencer for timing/playback,
+	 * and filesystem for pattern/all/performance serialization. Risk: this type
+	 * is file-format-visible; append fields only with matching loader defaults.
+	 */
 	uint8_t length;	// real track length in steps, 1..128
 	uint8_t rotate;	// step rotation, 0 means not rotated
 	uint8_t scale;	// track timing scale, TRACK_SCALE_* value
 	uint8_t midiChannel; // track MIDI channel in menu form, 1..16
 	uint8_t midiNote; // track MIDI note override; 0 means any/default
+	uint8_t shuffle; // per-track shuffle amount, 0..127
 } LengthRotate;
 
 typedef struct PatternSetStruct
@@ -220,21 +232,17 @@ void pat_setTrackMidiChannel(uint8_t pattern, uint8_t track, uint8_t channel);
 uint8_t pat_getTrackMidiChannel(uint8_t pattern, uint8_t track);
 void pat_setTrackMidiNote(uint8_t pattern, uint8_t track, uint8_t note);
 uint8_t pat_getTrackMidiNote(uint8_t pattern, uint8_t track);
-void pat_setShuffle(uint8_t pattern, uint8_t value);
 /*
- * Pattern-file shuffle import helper.
- * Why: the legacy .pat/.all payload stores one shuffle byte for the whole
- * pattern set, while PatternData now owns shuffle as pattern state. Input:
- * loaded 0..127 shuffle value. Outputs: every current pattern slot receives
- * that value, PAR_SHUFFLE is refreshed for the UI, and the same
- * PatternData-to-sequencer runtime bridge used by pat_setShuffle() refreshes
- * playback timing. Caller/client: filesystem pattern/container load paths.
- * Risk: this preserves the old single-byte file behavior and is not a
- * per-pattern file-format expansion.
+ * Per-track shuffle accessors.
+ *
+ * Why: shuffle is now Pattern timing data per track, not a global sequencer
+ * coefficient. Inputs are pattern/track coordinates and a 0..127 menu value.
+ * Outputs update/read PatternData storage; setters also mirror PAR_SHUFFLE for
+ * the currently visible menu value. Clients: Menu edits, filesystem legacy
+ * import/extension load, and Sequencer due-event timing.
  */
-void pat_setAllShuffle(uint8_t value);
-uint8_t pat_getShuffle(uint8_t pattern);
-
+void pat_setTrackShuffle(uint8_t pattern, uint8_t track, uint8_t shuffle);
+uint8_t pat_getTrackShuffle(uint8_t pattern, uint8_t track);
 void pat_clearTrack(uint8_t pattern, uint8_t track);
 void pat_clearPattern(uint8_t pattern);
 void pat_clearAutomation(uint8_t pattern, uint8_t track, uint8_t automTrack);

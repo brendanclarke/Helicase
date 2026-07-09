@@ -511,10 +511,16 @@ static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
  *   Step[track-major pattern-major step-major], each Step as 7 bytes
  *   main steps[pattern-major track-major], little-endian uint16_t
  *   pattern settings[pattern], nextPattern then changeBar
- *   shuffle byte
  *   track length bytes[pattern-major track-major], optional for old files
- *   track settings extension[pattern-major track-major], optional:
+ *   track settings extension[pattern-major track-major], optional append-only:
  *     rotate, scale, midiChannel, midiNote
+ *   track shuffle extension[pattern-major track-major], optional append-only:
+ *     shuffle
+ *
+ * Phase 2 storage is intentionally not back-compatible with every intermediate
+ * bridge experiment. The old single shuffle byte is ignored and no longer
+ * written; external Python converters will own migration once the final storage
+ * shape settles.
  */
 #define FS_PATTERN_FILE_PATTERN_COUNT 8u
 #define FS_PATTERN_STEP_COUNT     ((uint32_t)NUM_TRACKS * FS_PATTERN_FILE_PATTERN_COUNT * NUM_STEPS)
@@ -525,6 +531,14 @@ static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
 #define FS_PATTERN_MAIN_SIZE      2u
 #define FS_PATTERN_SETTING_SIZE   2u
 #define FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE 4u
+#define FS_PATTERN_TRACK_SHUFFLE_SIZE 1u
+/*
+ * Container version stays at 2 while Phase 2 storage is still provisional.
+ * Inputs/clients: saveContainer writes the current bridge payload and optional
+ * per-track extensions; loadContainer treats EOF before optional extensions as
+ * a valid partial bridge file. Output: runtime code ignores the removed legacy
+ * single shuffle byte instead of preserving transitional compatibility.
+ */
 #define FS_CONTAINER_VERSION      2u
 
 static void filesystem_patternStepAddress(uint32_t step_index,
@@ -557,7 +571,7 @@ static void filesystem_patternTrackAddress(uint32_t index,
 static Step filesystem_discardStep;
 static uint16_t filesystem_discardMainSteps;
 static PatternSetting filesystem_discardPatternSetting;
-static LengthRotate filesystem_discardLengthRotate = { NUM_STEPS, 0, TRACK_SCALE_OFF, 1u, 0u };
+static LengthRotate filesystem_discardLengthRotate = { NUM_STEPS, 0, TRACK_SCALE_OFF, 1u, 0u, 0u };
 
 static uint8_t filesystem_defaultTrackMidiChannel(uint8_t track)
 {
@@ -573,13 +587,16 @@ static void filesystem_defaultTrackSettings(LengthRotate *lr, uint8_t track)
 {
     /*
      * Default all fields that were not present in the legacy one-byte length
-     * stream. The following optional extension may overwrite rotate, scale,
-     * midiChannel, and midiNote for new pattern/container saves.
+     * stream. The following optional extensions may overwrite rotate, scale,
+     * midiChannel, midiNote, and shuffle for new pattern/container saves.
+     * Legacy single-shuffle storage is intentionally ignored in Phase 2, so a
+     * missing per-track shuffle extension means shuffle defaults to off.
      */
     if (!lr)
         return;
     lr->rotate = 0u;
     lr->scale = TRACK_SCALE_OFF;
+    lr->shuffle = 0u;
     if (track < NUM_TRACKS) {
         uint16_t chanParam = (track == 6u)
             ? PAR_MIDI_CHAN_7
@@ -1199,8 +1216,14 @@ static void filesystem_loadKitDirectory_tick(void)
 
     case 9: /* CLOSE selected kit directory handle */
         op_close_done = false;
-        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed)) {
+            /*
+             * Case 9 only starts the async close. Case 10 must wait for
+             * on_file_closed() to set op_close_done; staying in case 9 repeats
+             * the close request forever and stalls the boot kit load loop.
+             */
             op_phase = 10;
+        }
         return;
 
     case 10: /* WAIT CLOSE selected kit directory */
@@ -1238,6 +1261,11 @@ static void filesystem_loadKitDirectory_tick(void)
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
+            /*
+             * A read error can occur after kitset.kcg is open. Route through
+             * case 14 so afatfs_fclose() is actually requested; case 15 only
+             * waits for a close callback and would hang if entered directly.
+             */
             op_phase = 14;
             return;
         }
@@ -1246,6 +1274,10 @@ static void filesystem_loadKitDirectory_tick(void)
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
+                /*
+                 * Malformed kitset data still owns an open file handle. Close
+                 * first, then let the wait-close phase surface FS_STATUS_ERROR.
+                 */
                 op_phase = 14;
             }
             return;
@@ -1478,7 +1510,8 @@ static void filesystem_saveKit_tick(void)
 ** so audio-time callers can keep pumping filesystem_tick().
 **
 ** Phases: 0=open, 1=wait_open, 2=name, 3=steps, 4=main steps,
-**         5=settings, 6=shuffle, 7=lengths, 8=close, 9=wait_close
+**         5=settings, 6=lengths, 7=track settings extension,
+**         8=track shuffle extension, 9=close, 10=wait_close
 ** ----------------------------------------------------------------------- */
 static void filesystem_savePattern_tick(void)
 {
@@ -1603,24 +1636,14 @@ static void filesystem_savePattern_tick(void)
         return;
     }
 
-    case 6: /* SHUFFLE */
-        staging_buf[0] = parameter_values[PAR_SHUFFLE];
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index = 0;
-            op_phase = 7;
-        }
-        return;
-
-    case 7: /* TRACK LENGTHS */
+    case 6: /* TRACK LENGTHS */
     {
         uint8_t pattern, track;
 
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
             op_stream_index = 0;
             op_item_offset = 0;
-            op_phase = 8;
+            op_phase = 7;
             return;
         }
 
@@ -1641,7 +1664,47 @@ static void filesystem_savePattern_tick(void)
         return;
     }
 
-    case 8: /* TRACK SETTINGS EXTENSION */
+    case 7: /* TRACK SETTINGS EXTENSION */
+    {
+        uint8_t pattern, track;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_stream_index = 0;
+            op_item_offset = 0;
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 8;
+            return;
+        }
+
+        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+        {
+            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
+            if (!lr) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            /*
+             * New pattern saves append the fields that make the STEP front page
+             * PatternData-owned. Length remains in the legacy block above so old
+             * files and old tooling still see the expected byte stream prefix.
+             * Shuffle deliberately does not widen this record; it has its own
+             * following extension so files saved by the earlier four-byte
+             * extension build remain unambiguous.
+             */
+            staging_buf[0] = lr->rotate;
+            staging_buf[1] = lr->scale;
+            staging_buf[2] = lr->midiChannel;
+            staging_buf[3] = lr->midiNote;
+        }
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            op_item_offset = 0;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 8: /* TRACK SHUFFLE EXTENSION */
     {
         uint8_t pattern, track;
 
@@ -1659,17 +1722,17 @@ static void filesystem_savePattern_tick(void)
                 return;
             }
             /*
-             * New pattern saves append the fields that make the STEP front page
-             * PatternData-owned. Length remains in the legacy block above so old
-             * files and old tooling still see the expected byte stream prefix.
+             * Per-track shuffle is persisted in a standalone append-only
+             * extension. Input is the PatternData LengthRotate owner for the
+             * current file coordinate; output is one 0..127 shuffle byte.
+             * Clients are newer pattern/container loaders. Older firmware stops
+             * before this block because all earlier bytes keep their original
+             * size and order.
              */
-            staging_buf[0] = lr->rotate;
-            staging_buf[1] = lr->scale;
-            staging_buf[2] = lr->midiChannel;
-            staging_buf[3] = lr->midiNote;
+            staging_buf[0] = lr->shuffle;
         }
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
             op_item_offset = 0;
             op_stream_index++;
         }
@@ -1678,8 +1741,14 @@ static void filesystem_savePattern_tick(void)
 
     case 9: /* CLOSE */
         op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
+        if (afatfs_fclose(op_file, on_file_closed)) {
+            /*
+             * Pattern save follows the same close/request then wait/finish
+             * contract. Advancing to case 10 lets the callback complete the
+             * operation; re-entering case 9 would hang after the file payload.
+             */
             op_phase = 10;
+        }
         return;
 
     case 10: /* WAIT_CLOSE */
@@ -1699,7 +1768,8 @@ static void filesystem_savePattern_tick(void)
 ** Required sections (name, steps, main steps, settings, shuffle) fail on EOF.
 ** The final length block is optional for old `.pat` files; missing lengths
 ** are set to 0, which PatternData normalizes to the 128-step default. New
-** files may append a track-settings extension after the legacy length block.
+** files may append track-settings and track-shuffle extensions after the
+** legacy length block.
 **
 ** If the file contains the currently playing pattern while the sequencer is
 ** running, that pattern is loaded into PatternData's temporary buffer. At completion,
@@ -1707,8 +1777,8 @@ static void filesystem_savePattern_tick(void)
 ** sequencer boundary-swap path without replacing a queued pattern change.
 **
 ** Phases: 0=open, 1=wait_open, 2=name, 3=steps, 4=main steps,
-**         5=settings, 6=shuffle, 7=lengths, 8=settings extension,
-**         9=close, 10=wait_close
+**         5=settings, 6=lengths, 7=settings extension,
+**         8=shuffle extension, 9=close, 10=wait_close
 ** ----------------------------------------------------------------------- */
 static void filesystem_loadPattern_tick(void)
 {
@@ -1840,26 +1910,7 @@ static void filesystem_loadPattern_tick(void)
         return;
     }
 
-    case 6: /* SHUFFLE */
-    {
-        uint32_t n = filesystem_readStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            /* Shuffle is PatternData-owned. The legacy pattern file stores one
-            ** shuffle byte for the full pattern set, so filesystem imports that
-            ** value through pat_setAllShuffle() instead of touching sequencer's
-            ** runtime coefficient directly. */
-            pat_setAllShuffle(staging_buf[0]);
-            op_item_offset = 0;
-            op_stream_index = 0;
-            op_phase = 7;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 8;
-        }
-        return;
-    }
-
-    case 7: /* TRACK LENGTHS */
+    case 6: /* TRACK LENGTHS */
     {
         uint8_t pattern, track;
         LengthRotate *length_rotate;
@@ -1868,7 +1919,7 @@ static void filesystem_loadPattern_tick(void)
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
             op_stream_index = 0;
             op_item_offset = 0;
-            op_phase = 8;
+            op_phase = 7;
             return;
         }
 
@@ -1884,7 +1935,54 @@ static void filesystem_loadPattern_tick(void)
         return;
     }
 
-    case 8: /* TRACK SETTINGS EXTENSION */
+    case 7: /* TRACK SETTINGS EXTENSION */
+    {
+        uint8_t pattern, track;
+        LengthRotate *length_rotate;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_stream_index = 0;
+            op_item_offset = 0;
+            op_phase = 8;
+            return;
+        }
+
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+            length_rotate = filesystem_patternLengthPtr(pattern, track);
+            /*
+             * Optional four-byte track-settings extension for new pattern
+             * saves. Legacy files hit EOF before this block and keep the
+             * defaults assigned while reading the length block above. Per-track
+             * shuffle is intentionally a following extension so the four-byte
+             * record size remains compatible with earlier Phase 2 saves.
+             */
+            length_rotate->rotate = staging_buf[0];
+            length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
+                ? staging_buf[1]
+                : TRACK_SCALE_OFF;
+            length_rotate->midiChannel =
+                (staging_buf[2] >= 1u && staging_buf[2] <= 16u)
+                    ? staging_buf[2]
+                    : filesystem_defaultTrackMidiChannel(track);
+            length_rotate->midiNote = (staging_buf[3] <= 127u) ? staging_buf[3] : 0u;
+            op_item_offset = 0;
+            op_stream_index++;
+        } else if (n == 0 && afatfs_feof(op_file)) {
+            if (op_loaded_active_pattern_running) {
+                seq_newPatternAvailable = 1;
+                seq_armActivePatternReload();
+            }
+            op_item_offset = 0;
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 9;
+        }
+        return;
+    }
+
+    case 8: /* TRACK SHUFFLE EXTENSION */
     {
         uint8_t pattern, track;
         LengthRotate *length_rotate;
@@ -1900,24 +1998,20 @@ static void filesystem_loadPattern_tick(void)
             return;
         }
 
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
             filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
             length_rotate = filesystem_patternLengthPtr(pattern, track);
             /*
-             * Optional extension for new pattern saves. Legacy files hit EOF
-             * before this block and keep the defaults assigned while reading
-             * the length block above.
+             * Optional per-track shuffle extension. Input is one stored 0..127
+             * byte for the current PatternData track; output updates
+             * LengthRotate.shuffle. If EOF arrives before this block exists,
+             * shuffle remains at the default-off value assigned with the track
+             * length/settings defaults.
+             * Clients: PatternData accessors and the per-track sequencer timing
+             * scheduler.
              */
-            length_rotate->rotate = staging_buf[0];
-            length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
-                ? staging_buf[1]
-                : TRACK_SCALE_OFF;
-            length_rotate->midiChannel =
-                (staging_buf[2] >= 1u && staging_buf[2] <= 16u)
-                    ? staging_buf[2]
-                    : filesystem_defaultTrackMidiChannel(track);
-            length_rotate->midiNote = (staging_buf[3] <= 127u) ? staging_buf[3] : 0u;
+            length_rotate->shuffle = (staging_buf[0] <= 127u) ? staging_buf[0] : 0u;
             op_item_offset = 0;
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {
@@ -1958,6 +2052,10 @@ static void filesystem_loadPattern_tick(void)
 ** PERFORMANCE meta area stores BPM and bar-reset mode, then 0xff padding.
 ** Kit area stores active kit bytes without a name, then 0xff padding.
 ** Pattern payload is the same as `.pat` after its 8-byte name header.
+**
+** Pattern payload phases: 8=steps, 9=main steps, 10=settings,
+** 11=lengths, 12=track settings extension, 13=track shuffle extension,
+** 14=close, 15=wait_close.
 ** ----------------------------------------------------------------------- */
 static void filesystem_saveContainer_tick(void)
 {
@@ -2167,23 +2265,13 @@ static void filesystem_saveContainer_tick(void)
         return;
     }
 
-    case 11: /* SHUFFLE */
-        staging_buf[0] = parameter_values[PAR_SHUFFLE];
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index = 0;
-            op_phase = 12;
-        }
-        return;
-
-    case 12: /* PATTERN LENGTHS */
+    case 11: /* PATTERN LENGTHS */
     {
         uint8_t pattern, track;
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
             op_stream_index = 0;
             op_item_offset = 0;
-            op_phase = 13;
+            op_phase = 12;
             return;
         }
         filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
@@ -2203,7 +2291,44 @@ static void filesystem_saveContainer_tick(void)
         return;
     }
 
-    case 13: /* PATTERN SETTINGS EXTENSION */
+    case 12: /* PATTERN SETTINGS EXTENSION */
+    {
+        uint8_t pattern, track;
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_stream_index = 0;
+            op_item_offset = 0;
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 13;
+            return;
+        }
+        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+        {
+            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
+            if (!lr) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            /*
+             * Container pattern payload mirrors standalone .pat: write the
+             * current track length block, then append PatternData-owned track
+             * settings for new firmware. Shuffle is not packed into this
+             * four-byte record; it has a separate extension immediately after
+             * this block.
+             */
+            staging_buf[0] = lr->rotate;
+            staging_buf[1] = lr->scale;
+            staging_buf[2] = lr->midiChannel;
+            staging_buf[3] = lr->midiNote;
+        }
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            op_item_offset = 0;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 13: /* TRACK SHUFFLE EXTENSION */
     {
         uint8_t pattern, track;
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
@@ -2219,17 +2344,14 @@ static void filesystem_saveContainer_tick(void)
                 return;
             }
             /*
-             * Container pattern payload mirrors standalone .pat: keep the
-             * legacy length byte block, then append PatternData-owned track
-             * settings for new firmware.
+             * Append per-track shuffle after the track-settings
+             * extension. Input is PatternData's stored 0..127 timing amount;
+             * output is one byte consumed by newer container/pattern loaders.
              */
-            staging_buf[0] = lr->rotate;
-            staging_buf[1] = lr->scale;
-            staging_buf[2] = lr->midiChannel;
-            staging_buf[3] = lr->midiNote;
+            staging_buf[0] = lr->shuffle;
         }
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
             op_item_offset = 0;
             op_stream_index++;
         }
@@ -2255,6 +2377,11 @@ static void filesystem_saveContainer_tick(void)
 
 /* -----------------------------------------------------------------------
 ** LOAD ALL / PERFORMANCE state machine
+**
+** Pattern payload phases mirror saveContainer(): 8=steps, 9=main steps,
+** 10=settings, 11=lengths, 12=track settings extension,
+** 13=optional track shuffle extension, 14=close, 15=wait_close. Required
+** sections close with error on EOF; optional extensions close with done.
 ** ----------------------------------------------------------------------- */
 static void filesystem_loadContainer_tick(void)
 {
@@ -2534,25 +2661,7 @@ static void filesystem_loadContainer_tick(void)
         return;
     }
 
-    case 11: /* SHUFFLE */
-    {
-        uint32_t n = filesystem_readStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            /* Container pattern payload uses the same one-byte legacy shuffle
-            ** block as .pat files. PatternData owns the stored value and bridges
-            ** to sequencer runtime playback internally. */
-            pat_setAllShuffle(staging_buf[0]);
-            op_item_offset = 0;
-            op_stream_index = 0;
-            op_phase = 12;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 12: /* PATTERN LENGTHS */
+    case 11: /* PATTERN LENGTHS */
     {
         uint8_t pattern, track;
         LengthRotate *length_rotate;
@@ -2560,7 +2669,7 @@ static void filesystem_loadContainer_tick(void)
         if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
             op_stream_index = 0;
             op_item_offset = 0;
-            op_phase = 13;
+            op_phase = 12;
             return;
         }
         n = filesystem_readStreamChunk(staging_buf, 1);
@@ -2575,7 +2684,55 @@ static void filesystem_loadContainer_tick(void)
         return;
     }
 
-    case 13: /* PATTERN SETTINGS EXTENSION */
+    case 12: /* PATTERN SETTINGS EXTENSION */
+    {
+        uint8_t pattern, track;
+        LengthRotate *length_rotate;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_stream_index = 0;
+            op_item_offset = 0;
+            op_phase = 13;
+            return;
+        }
+
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+            length_rotate = filesystem_patternLengthPtr(pattern, track);
+            /*
+             * Optional four-byte track-settings extension inside .all/.prf
+             * containers. Inputs are the append-only bytes after the current
+             * length block; outputs update PatternData's track settings record.
+             * Shuffle is intentionally not read here because it belongs to the
+             * following one-byte-per-track extension, keeping this record
+             * compatible with earlier four-byte saves.
+             */
+            length_rotate->rotate = staging_buf[0];
+            length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
+                ? staging_buf[1]
+                : TRACK_SCALE_OFF;
+            length_rotate->midiChannel =
+                (staging_buf[2] >= 1u && staging_buf[2] <= 16u)
+                    ? staging_buf[2]
+                    : filesystem_defaultTrackMidiChannel(track);
+            length_rotate->midiNote = (staging_buf[3] <= 127u) ? staging_buf[3] : 0u;
+            op_item_offset = 0;
+            op_stream_index++;
+        } else if (n == 0 && afatfs_feof(op_file)) {
+            if (op_loaded_active_pattern_running) {
+                seq_newPatternAvailable = 1;
+                seq_armActivePatternReload();
+            }
+            op_item_offset = 0;
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 14;
+        }
+        return;
+    }
+
+    case 13: /* TRACK SHUFFLE EXTENSION */
     {
         uint8_t pattern, track;
         LengthRotate *length_rotate;
@@ -2591,19 +2748,17 @@ static void filesystem_loadContainer_tick(void)
             return;
         }
 
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
             filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
             length_rotate = filesystem_patternLengthPtr(pattern, track);
-            length_rotate->rotate = staging_buf[0];
-            length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
-                ? staging_buf[1]
-                : TRACK_SCALE_OFF;
-            length_rotate->midiChannel =
-                (staging_buf[2] >= 1u && staging_buf[2] <= 16u)
-                    ? staging_buf[2]
-                    : filesystem_defaultTrackMidiChannel(track);
-            length_rotate->midiNote = (staging_buf[3] <= 127u) ? staging_buf[3] : 0u;
+            /*
+             * Optional per-track shuffle extension for container payloads.
+             * Input is one stored 0..127 byte for the current PatternData
+             * track; output updates LengthRotate.shuffle. If a provisional file
+             * ends before this block, shuffle remains at the default-off value.
+             */
+            length_rotate->shuffle = (staging_buf[0] <= 127u) ? staging_buf[0] : 0u;
             op_item_offset = 0;
             op_stream_index++;
         } else if (n == 0 && afatfs_feof(op_file)) {

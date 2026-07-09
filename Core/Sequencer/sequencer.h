@@ -27,7 +27,16 @@ extern uint8_t seq_newPatternAvailable;
 extern uint8_t seq_resetBarOnPatternChange;
 
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note);
-void seq_setShuffle(float shuffle);
+/*
+ * Stopped-transport voice preview.
+ *
+ * Why: front-panel VOICE re-press audition should use Sequencer's existing
+ * voice/MIDI/trigger ownership without advancing pattern state. Input voiceNr
+ * is the UI track/voice index. Output is one synth/MIDI preview trigger when
+ * valid. Clients: buttonHandler voice button path. Risk: this must not mutate
+ * seq_stepIndex[], recording state, automation lanes, or PatternData steps.
+ */
+void seq_previewVoice(uint8_t voiceNr);
 void seq_init(void);
 void seq_tick(void);
 void seq_resetDeltaAndTick(void);

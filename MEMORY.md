@@ -19,8 +19,8 @@ make && make img   →   build/LXRV2_lxr02.img
 
 **Current working source**: repository root, branch `dev-burst-reduction`.
 
-**Session 030 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/030_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, and Phase 2 directory-kit loading, also read `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
+**Session 031 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/031_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, Phase 2 directory-kit loading, and the current bridge STEP/track-settings model, also read `knowledge_files/MODULE_INTERCHANGE_SPEC.md`.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
@@ -32,6 +32,7 @@ Session 027 chunks runtime kit/all/performance sound-apply completion: after aud
 Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former parser opcodes are direct owner calls: Pattern edits through `pat_*` in `Core/Scene/Pattern/PatternData.c`, LED feedback through `SeqLedState` plus foreground `led_processSeqLedState()`, sound parameters through Preset, MIDI config through MidiParser, and transport/playback through Sequencer. Euklid/SOM now live in `Core/Scene/Pattern/`.
 Session 029 completes the PatternData storage-ownership pass and Preset folder move. `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, and `SEQ_NEXT_RANDOM*` are gone from live code; Sequencer reads/writes pattern storage through `pat_*` helpers while keeping timing/transport/recording gates. `Core/Preset/` is now `Core/Scene/Preset/`; public names remain `preset_*`, `parameterArray_*`, and `paramArray_*`. `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign. Staging/global audits are in `STAGING_AUDIT.md` and `GLOBALS_STAGING_AUDIT.md`.
 Session 030 begins Phase 2 filesystem work. `FILESYSTEM_SPEC.md` is the current root layout spec; `Core/Hardware/SD/storageTypes.c/h` owns kit text schemas/parameter maps with `storage_` prefixes; normal root kit load scans `Kit/NNN Name/`, loads `kitset.kcg` plus six instrument files, and keeps morph load on legacy `.SND`. Numbered folder convention is preferred `NNN Name`, compatibility `NNN_Name`, with a FAT short-alias fallback for scan aliases like `001SLA~1`. `SD_CARD/Kit/` is generated from legacy kits using the space convention.
+Session 031 completes the one-live-pattern/8-bar bridge pass and follow-ups. Live `NUM_PATTERN` is 1 while pattern files still stream the old 8-slot bridge layout; STEP front page now owns per-track length, scale, MIDI channel, MIDI note, and per-track shuffle; empty boot tracks default to 16 steps. Sequencer timing runs at corrected default speed with a 96-PPQ master step clock, per-track scale ratios, per-track shuffle, and pattern realign. LED flash is a group overlay and `led_setBlinkLed()` is idempotent. `SHIFT+VOICE` enters morph endpoint edit mode using `parameters2[]` and a blinking VOICE mode LED; stopped selected-voice re-press previews the voice. Pattern/container storage no longer imports or exports the old single shuffle byte; only per-track shuffle extension data is used, and final storage conversion remains a Phase 2 external-converter concern.
 
 ---
 
@@ -93,7 +94,8 @@ Session 030 begins Phase 2 filesystem work. `FILESYSTEM_SPEC.md` is the current 
 │       ├── 027_SESSION_HANDOFF_LOG.md
 │       ├── 028_SESSION_HANDOFF_LOG.md
 │       ├── 029_SESSION_HANDOFF_LOG.md
-│       └── 030_SESSION_HANDOFF_LOG.md
+│       ├── 030_SESSION_HANDOFF_LOG.md
+│       └── 031_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h

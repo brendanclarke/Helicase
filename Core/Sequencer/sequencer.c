@@ -92,8 +92,6 @@ static uint32_t seq_autoSyncLastUs = 0;
 uint8_t seq_lastMasterStep[NUM_TRACKS];		//keeps track of the last triggered master sync step of each track
 
 
-float seq_shuffle = 0;
-
 static uint8_t seq_SomModeActive = 0;
 
 static uint8_t seq_mutedTracks=0;			/**< indicate which tracks are muted */
@@ -142,8 +140,6 @@ const float seq_shuffleTable[16] =
 		0.234375f,
 };
 
-float seq_lastShuffle = 0;
-
 uint8_t seq_newPatternAvailable = 0; //indicate that a new pattern has loaded in the background and we should switch
 
 //for the automation tracks each track needs 2 modNodes
@@ -180,11 +176,6 @@ void seq_init()
 	pat_init();
 
 }
-//------------------------------------------------------------------------------
-void seq_setShuffle(float shuffle)
-{
-	seq_shuffle = shuffle;
-}
 void seq_offsetTrackStepIndexForRotation(uint8_t trackNr, uint8_t oldRot,
                                          uint8_t newRot, uint8_t len)
 {
@@ -219,22 +210,9 @@ static void seq_calcDeltaT(uint16_t bpm)
 	seq_deltaT /= (float)SEQ_INTERNAL_PPQ;
 	seq_deltaT *= SYSTICK_TICKS_PER_MS; //systick_ticks is the canonical 0.25ms LXR tick
 
-	//--- calc shuffle ---
-	if(seq_shuffle != 0)
-	{
-		//every 2nd and 4th 16th note in a beat is shifted full
-		//=> step 8 and step 24
-		//every 2nd 16th note in half a beat
-		//every beat has 32 steps => half = 16
-		uint8_t stepInHalfBeat = (uint8_t)(seq_elapsedPpqTicks & 0x0fu);
-		const float shuffleFactor = seq_shuffleTable[stepInHalfBeat] * seq_shuffle;
-		const float originalDeltaT = seq_deltaT;
-
-		seq_deltaT += shuffleFactor * originalDeltaT * 16.f;
-		seq_deltaT -= seq_lastShuffle * originalDeltaT * 16.f;
-
-		seq_lastShuffle = shuffleFactor;
-	}
+	/* Per-track shuffle is applied by seq_trackEventDueTick(). The transport
+	 * PPQ tick duration stays uniform so one track's shuffle cannot perturb the
+	 * scheduler clock used by every other track. */
 }
 //------------------------------------------------------------------------------
 void seq_setBpm(uint16_t bpm)
@@ -344,6 +322,47 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 	//send the new note to midi/usb out
 	seq_sendMidiNoteOn(midiChan, midiNote, midiVelocity);
 }
+void seq_previewVoice(uint8_t voiceNr)
+{
+	uint8_t midiChan;
+	uint8_t note;
+
+	/*
+	 * Trigger one voice without advancing or reading sequencer step state.
+	 *
+	 * Why: buttonHandler uses this for stopped-transport VOICE re-press
+	 * preview. seq_triggerVoice() intentionally reads the current step for
+	 * playback automation and MIDI velocity; preview must skip that so audition
+	 * cannot depend on seq_stepIndex[] or write automation side effects.
+	 *
+	 * Input voiceNr is the 0-based UI track/voice. Outputs: trigger jack, synth
+	 * voice, and MIDI note-on follow the same channel/note ownership as normal
+	 * playback. Confederates: PatternData supplies the optional track MIDI note
+	 * override, MidiVoiceControl owns note-on/off, and triggerJacks owns trigger
+	 * pulse state. Invalid voices and running transport are ignored.
+	 */
+	if (voiceNr > 6u || seq_running)
+		return;
+
+	note = pat_getTrackMidiNote(seq_activePattern, voiceNr);
+	if (note == 0u && midi_NoteOverride[voiceNr] != 0u)
+		note = midi_NoteOverride[voiceNr];
+	if (note == 0u)
+		note = PAT_DEFAULT_NOTE;
+
+	if (voiceNr >= 5u) {
+		trigger_triggerVoice(5, TRIGGER_OFF);
+		trigger_triggerVoice(6, TRIGGER_OFF);
+	} else {
+		trigger_triggerVoice(voiceNr, TRIGGER_OFF);
+	}
+
+	voiceControl_noteOff(voiceNr);
+	voiceControl_noteOn(voiceNr, note, ROLL_VOLUME);
+
+	midiChan = (uint8_t)(pat_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
+	seq_sendMidiNoteOn(midiChan, note, ROLL_VOLUME);
+}
 //------------------------------------------------------------------------------
 static uint8_t seq_determineNextPattern()
 {
@@ -384,24 +403,87 @@ static void seq_resetScaledScheduler(void)
 	memset(seq_trackEventCount, 0, sizeof(seq_trackEventCount));
 }
 
-static uint32_t seq_dueTrackEvents(uint8_t track)
+static uint32_t seq_trackEventBaseTick(uint8_t track, uint32_t eventIndex)
 {
 	TrackScaleRatio ratio = pat_getTrackScaleRatio(seq_activePattern, track);
 	uint32_t threshold;
-	uint32_t due;
 
 	/*
-	 * Convert elapsed 96-PPQ ticks to the number of step events that should
-	 * have occurred for this track's scale. Event zero is the immediate pattern
-	 * start at elapsed tick 0, so the mathematical due count is +1. This visits
-	 * every traversed step: x8 produces one due event every 3 PPQ ticks, /8 one
-	 * due event every 192 PPQ ticks, and fractional values are rounded by the
-	 * integer floor at the finest available sequencer tick.
+	 * Convert one per-track event number to its unshuffled absolute PPQ tick.
+	 *
+	 * Why: scale and shuffle both need an absolute, restartable timing origin.
+	 * Inputs are a track and event index since pattern start; event 0 is the
+	 * immediate start event at tick 0. Output is the 96-PPQ tick where that
+	 * event would occur before shuffle. Confederates: PatternData supplies the
+	 * exact scale ratio. Risk: callers use this in scheduler timing, so keep it
+	 * bounded and avoid stateful drift corrections here.
 	 */
 	if (ratio.num == 0u || ratio.den == 0u)
 		ratio.num = ratio.den = 1u;
+	if (eventIndex == 0u)
+		return 0u;
 	threshold = (uint32_t)SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP * (uint32_t)ratio.den;
-	due = ((seq_elapsedPpqTicks * (uint32_t)ratio.num) / threshold) + 1u;
+	return (uint32_t)(((eventIndex * threshold) + (uint32_t)ratio.num - 1u) /
+	                  (uint32_t)ratio.num);
+}
+
+static uint32_t seq_trackEventShuffleOffset(uint8_t track, uint32_t eventIndex)
+{
+	uint8_t shuffle = pat_getTrackShuffle(seq_activePattern, track);
+	uint32_t baseTick;
+	uint8_t phase;
+	float amount;
+
+	/*
+	 * Calculate one event's absolute per-track shuffle offset in PPQ ticks.
+	 *
+	 * Why: old shuffle altered the global tick delta, which made every track
+	 * share one groove amount. Per-track shuffle must be derived from each
+	 * track's own event timing so different tracks can swing independently.
+	 *
+	 * Inputs: track and event index. Output: a non-negative delay in 96-PPQ
+	 * ticks, scaled from the existing 16-entry shuffle curve. Clients:
+	 * seq_trackEventDueTick() only. Risk: event 0 must remain unshifted so
+	 * transport start and pattern realign still have a stable downbeat.
+	 */
+	if (shuffle == 0u || eventIndex == 0u)
+		return 0u;
+	baseTick = seq_trackEventBaseTick(track, eventIndex);
+	phase = (uint8_t)(baseTick & 0x0fu);
+	amount = seq_shuffleTable[phase] * ((float)shuffle / 127.0f) * 16.0f;
+	return (uint32_t)(amount + 0.5f);
+}
+
+static uint32_t seq_trackEventDueTick(uint8_t track, uint32_t eventIndex)
+{
+	/*
+	 * Return the absolute PPQ tick at which one track event is due.
+	 *
+	 * Why: deriving due time from event count, scale, and shuffle prevents
+	 * fractional scale and per-track shuffle from accumulating drift over
+	 * repeated 128-step loops. Inputs are a track and event count since pattern
+	 * start. Output is an absolute 96-PPQ tick threshold. Confederates:
+	 * seq_dueTrackEvents() compares this threshold to seq_elapsedPpqTicks.
+	 */
+	return seq_trackEventBaseTick(track, eventIndex) +
+	       seq_trackEventShuffleOffset(track, eventIndex);
+}
+
+static uint32_t seq_dueTrackEvents(uint8_t track)
+{
+	uint32_t due = seq_trackEventCount[track];
+
+	/*
+	 * Count unprocessed events whose absolute due tick has arrived.
+	 *
+	 * Input: track index. Output: number of events that should have occurred for
+	 * this track by seq_elapsedPpqTicks. Caller seq_processSchedulerTick() then
+	 * advances until seq_trackEventCount reaches this number. This loop is
+	 * bounded by actual backlog; under normal internal clocking it visits at
+	 * most one event for slow/default tracks and a small burst for fast scales.
+	 */
+	while (seq_trackEventDueTick(track, due) <= seq_elapsedPpqTicks)
+		due++;
 	return due;
 }
 
@@ -698,7 +780,6 @@ void seq_resetToPatternStart(void)
 	/* External reset should reposition the sequence without toggling transport
 	** state or sending MIDI stop/start. The next clock pulse will play the
 	** pattern start according to each track's rotation. */
-	seq_lastShuffle = 0;
 	seq_barCounter = 0;
 	seq_delayedSyncStepFlag = 0;
 	seq_setStepIndexToStart();
@@ -772,7 +853,6 @@ void seq_setRunning(uint8_t isRunning)
 		led_notifyTrackRotationReset(0);
 
 		//reset song position bar counter
-		seq_lastShuffle = 0;
 		seq_barCounter = 0;
 		seq_resetScaledScheduler();
 		//so the next seq_tick call will trigger the next step immediately

@@ -88,6 +88,14 @@ The include-path knock-on was handled in the same session: `Makefile` uses
 
 This phase builds the current SD card hierarchy documented in `FILESYSTEM_SPEC.md` — `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, plus root `settings.cfg` — and lands the debounced autosave system. It comes before the sequencer rewrite (Phase 3) because the sequencer rewrite's whole memory design (dynamic pool split 16-ways-plus-one across scenes) only makes sense once "scene" is a real, addressable unit that the file layer understands — right now the SD layer has no concept of a scene at all.
 
+**Current bridge status after Session 031:** root `Kit/NNN Name/` loading and
+the one-live-pattern/8-bar bridge are intentionally provisional. Pattern and
+container save/load currently serialize a Phase 2 bridge shape, but final
+interchange compatibility is not promised yet: the old single global shuffle
+byte is ignored/omitted, and external Python converters are expected to handle
+any migration once the final Scene/Pattern storage shape and save operations are
+defined.
+
 ### 2.1 Current SD layer, for grounding
 
 `filesystem.c` began as an entirely flat file loader: `filesystem_makeFilename()` builds an 8.3 name like `p000.snd` (`p` + 3-digit slot number + extension) directly into a buffer, and file *type* is an enum (`fs_file_type_t`: `FS_FILE_KIT`, `FS_FILE_PATTERN`, `FS_FILE_MORPH`, `FS_FILE_PERFORMANCE`, `FS_FILE_ALL`, `FS_FILE_GLOBALS`, `FS_FILE_SAMPLES`) rather than a path. The new directory hierarchy (`Bank/001 Bank/001 Scene/Kit_<kit>/...`, root `Kit/001 Kit Name/...`, root library pools, and `settings.cfg`) is therefore a genuinely new capability, not an extension of something that half-existed.
@@ -291,6 +299,13 @@ Automation on a step plays back regardless of whether that step has a trigger �
 ### 3.7 Per-track step timing scale
 
 Per-track length (up to 128 steps) and per-track scale, accessible from the second page under the transient-voicing ("click") sub-page. Since there are no sub-steps in this paradigm, scale is expressed relative to the base step (1 step = 1/16th note): scaling a track up to ×16 means 1 step on that track = 1 bar, in `/2` increments down to `/16` (1 step = 1/128th note). Dot and triplet subdivisions are flagged by you as open — see below.
+
+Session 031 landed a bridge version of this concept before the dynamic-pool
+rewrite: STEP front-page track settings now expose length, scale, MIDI channel,
+MIDI note, and per-track shuffle, and Sequencer derives scaled/shuffled timing
+from an absolute 96-PPQ master clock. This bridge uses the existing `Step`
+storage and should be treated as behavior/spec discovery for the final Phase 3
+implementation, not as the final storage model.
 
 ### 3.8 Roll overhaul
 

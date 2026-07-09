@@ -1,10 +1,13 @@
 # Module Interchange Spec
 
-Session 030 baseline. This spec records the live module API boundaries after
-`frontPanelParser.c/h` removal, the PatternData storage-ownership pass, and the
-`Core/Preset` -> `Core/Scene/Preset` folder move, plus the first Phase 2
-directory-kit filesystem boundary. The goal is to make the direct-call
-ownership clear so future work does not recreate a generic bridge.
+Session 030 baseline, updated in Session 031 for the one-pattern bridge, STEP
+track-settings front page, morph VOICE mode, per-track shuffle, and LED blink
+idempotence. This spec records the live module API boundaries after
+`frontPanelParser.c/h` removal, the PatternData storage-ownership pass, the
+`Core/Preset` -> `Core/Scene/Preset` folder move, the first Phase 2
+directory-kit filesystem boundary, and the current bridge pattern behavior. The
+goal is to make the direct-call ownership clear so future work does not recreate
+a generic bridge.
 
 ## Rules
 
@@ -25,6 +28,10 @@ ownership clear so future work does not recreate a generic bridge.
   `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
 - Normal root Kit loads are directory-based; morph kit loads remain legacy
   `.SND` until instrument morph save/load is designed.
+- Pattern/container storage is still a Phase 2 bridge shape. It does not
+  preserve the old single/global shuffle byte; per-track shuffle is the only
+  live shuffle storage, and final migration/backfill is expected to happen in
+  external Python converters once storage settles.
 
 ## Core/Scene/Pattern/PatternData
 
@@ -37,12 +44,12 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
-| `pat_init(void)` | Initialize all pattern storage and shuffle API backing. | `seq_init()` |
+| `pat_init(void)` | Initialize all PatternData storage. | `seq_init()` |
 | `pat_trackValid(track)` / `pat_patternValid(pattern)` / `pat_stepValid(step)` | Bounds checks before direct access. | PatternData internals, ledHandler, filesystem, buttonHandler |
 | `pat_stepPtr(pattern, track, step)` | Bounded pointer to `Step`; supports `PATTERNDATA_STAGING_PATTERN`. | filesystem, PatternData owner-level code |
 | `pat_mainStepsPtr(pattern, track)` | Bounded pointer to main-step mask. | filesystem, PatternData, Euklid |
 | `pat_patternSettingPtr(pattern)` | Bounded pointer to per-pattern settings. | filesystem, Sequencer pattern-change logic |
-| `pat_lengthRotatePtr(pattern, track)` | Bounded pointer to track length/rotation byte. | filesystem, Euklid, PatternData |
+| `pat_lengthRotatePtr(pattern, track)` | Bounded pointer to the per-track settings record (`LengthRotate`: length, rotation, scale, MIDI channel/note, shuffle). | filesystem, Euklid, PatternData |
 | `pat_isStepActive(track, step, pattern)` | Read sub-step active bit. | ledHandler, Sequencer playback wrappers |
 | `pat_isMainStepActive(track, mainStep, pattern)` | Read main-step active bit. | ledHandler, Sequencer playback wrappers, buttonHandler |
 | `pat_readStep(pattern, track, step, out)` | Copy one `Step` snapshot for playback-side inspection. | Sequencer automation parsing and MIDI echo velocity |
@@ -66,9 +73,10 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_getEffectiveTrackLength(pattern, track)` | Read nonzero playback length, converting stored 0 to 16. | Sequencer step walk, external clock, start-position reset |
 | `pat_setTrackRotation(pattern, track, rotation)` | Set track rotation and invoke Sequencer runtime compensation if needed. | buttonHandler perf rotation, Sequencer stop reset |
 | `pat_getTrackRotation(pattern, track)` | Read track rotation. | `pat_applyTrackSettingsToMenu()` |
-| `pat_setShuffle(pattern, value)` | Pattern-facing shuffle API; still forwards global coefficient to Sequencer. | `menu_parseGlobalParam(PAR_SHUFFLE)` |
-| `pat_setAllShuffle(value)` | Import legacy one-byte pattern/container shuffle into all pattern slots and bridge to playback. | filesystem `.pat`/`.all`/`.prf` load paths |
-| `pat_getShuffle(pattern)` | Read stored UI-facing shuffle value. | `pat_applyTrackSettingsToMenu()` |
+| `pat_setTrackScale(pattern, track, scale)` / `pat_getTrackScale(pattern, track)` / `pat_getTrackScaleRatio(pattern, track)` | Store/read per-track timing scale and convert it to exact numerator/denominator timing for Sequencer. | `menu_parseGlobalParam(PAR_TRACK_SCALE)`, Sequencer scheduler |
+| `pat_setTrackMidiChannel(pattern, track, channel)` / `pat_getTrackMidiChannel(pattern, track)` | Store/read per-track MIDI output channel in menu form (`1..16`). | `menu_parseGlobalParam(PAR_TRACK_MIDI_CHAN)`, Sequencer MIDI output/input matching |
+| `pat_setTrackMidiNote(pattern, track, note)` / `pat_getTrackMidiNote(pattern, track)` | Store/read per-track MIDI note override (`0` means fallback/default). | `menu_parseGlobalParam(PAR_TRACK_MIDI_NOTE)`, Sequencer trigger/preview/MIDI output |
+| `pat_setTrackShuffle(pattern, track, shuffle)` / `pat_getTrackShuffle(pattern, track)` | Store/read per-track shuffle amount (`0..127`); no legacy all-track shuffle import/export remains. | `menu_parseGlobalParam(PAR_SHUFFLE)`, filesystem per-track shuffle extension, Sequencer scheduler |
 | `pat_clearTrack(pattern, track)` | Reset one track. | copyClearTools, `pat_clearPattern()` |
 | `pat_clearPattern(pattern)` | Reset all tracks in one pattern. | copyClearTools, `pat_init()` |
 | `pat_clearAutomation(pattern, track, automTrack)` | Clear automation lane 0/1 for a track. | copyClearTools |
@@ -132,7 +140,7 @@ Sequencer LED feedback via `SeqLedState`.
 | `led_clearAll()` | Clear all LED state. | UI flows |
 | `led_tickHandler()` | Blink/pulse maintenance. | foreground/timer service |
 | `led_pulseLed(ledNr)` | Pulse one LED. | voice trigger indication paths |
-| `led_setBlinkLed(ledNr, onOff)` / `led_clearAllBlinkLeds()` | Blink management. | buttonHandler, Menu |
+| `led_setBlinkLed(ledNr, onOff)` / `led_clearAllBlinkLeds()` | Blink management; starting blink for an already-blinking LED is idempotent so duplicate slots cannot cancel visually. | buttonHandler, Menu |
 | `led_setActivePage(pageNr)` | Light one page/select LED. | buttonHandler load/save |
 | `led_setActiveVoice(voiceNr)` / `led_setActiveVoiceLeds(pattern)` | Voice LED display. | buttonHandler, Menu |
 | `led_setActiveSelectButton(butNr)` | SELECT LED display. | buttonHandler, Menu |
@@ -202,6 +210,9 @@ encoder and endless-pot edit dispatch, and post-load operation follow-up.
 | `menu_serviceRuntimeWidgets()` | Runtime UI widgets such as CPU. | main loop |
 | `menu_switchPage(pageNr)` / `menu_switchSubPage(subPageNr)` | Page navigation and direct Pattern/LED refresh. | buttonHandler/Menu |
 | `menu_resetActiveParameter()` | Keep active parameter valid for page. | buttonHandler/Menu |
+| `menu_setVoiceModeShowMorph(onOff)` | Toggle VOICE-page morph endpoint overlay; repaint/edit helpers resolve sound parameters through `parameters2[]` when set. | buttonHandler `SHIFT+VOICE` mode |
+| `menu_paramUsesMorphView(paramNr)` / `menu_getParameterDisplayValue(paramNr)` / `menu_getParameterEditPtr(paramNr)` | Resolve display/edit buffer for normal vs. morph VOICE pages. | Menu repaint, encoder edits, endless-pot edits |
+| `menu_showStepTrackSettingsFirstHalf()` / `menu_toggleStepTrackSettingsHalf()` | Select STEP front-page first half or toggle to the second half where per-track shuffle lives. | buttonHandler STEP-mode voice/track buttons |
 | `menu_resetSaveParameters()` | Reset load/save UI state. | load/save page |
 | `menu_setNumSamples(num)` | Sample count display state. | sample/filesystem paths |
 | `menu_getActivePage()` / `menu_getSubPage()` | Read visible page/subpage. | buttonHandler, ledHandler |
@@ -252,8 +263,10 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_init()` | Initialize automation nodes, runtime indices, PatternData. | `main.c` boot |
 | `seq_tick()` | Advance playback when due. | TIM3 owner |
 | `seq_triggerVoice(voiceNr, vol, note)` | Trigger one voice from Sequencer/SOM. | Sequencer, SOM |
-| `seq_setShuffle(shuffle)` | Set current playback shuffle coefficient. | PatternData shuffle bridge only |
+| `seq_previewVoice(voiceNr)` | Trigger the selected voice while transport is stopped without reading or advancing step state. | buttonHandler selected-voice re-press |
+| Internal scaled scheduler helpers | Compute due events from absolute 96-PPQ tick time, per-track scale, and per-track shuffle. | Sequencer only; reads PatternData track settings |
 | `seq_resetDeltaAndTick()` / `seq_resetToPatternStart()` / `seq_setDeltaT(delta)` | Clock/reset timing control. | trigger/MIDI sync paths |
+| `seq_realignActivePatternToMasterClock()` | Recalculate per-track runtime positions from the master step clock, length, and scale. | buttonHandler/PERF pattern realign gesture |
 | `seq_triggerNextMasterStep(stepSize)` | External clock master-step scheduling. | trigger/MIDI sync paths |
 | `seq_setBpm(bpm)` / `seq_getBpm()` | Tempo. | Menu/global apply |
 | `seq_sync()` | External MIDI clock tick. | MidiParser |

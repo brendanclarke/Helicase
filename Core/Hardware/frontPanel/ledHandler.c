@@ -613,6 +613,21 @@ void led_setBlinkLed(uint8_t ledNr, uint8_t onOff)
 
     int i;
     if (onOff) {
+        /*
+         * Treat "start blinking" as idempotent for a logical LED.
+         *
+         * Why: mode overlays may reassert their blink state after a SHIFT
+         * release or repaint. Without this guard, the same LED can occupy two
+         * blink slots and be toggled twice per blink tick, which looks like it
+         * stopped blinking. Input is the public logical LED id; output is no
+         * change when that LED is already in the blink set. Clients include
+         * buttonHandler's SHIFT+VOICE, SHIFT+PERF/PATGEN, and global-menu mode
+         * feedback.
+         */
+        for (i=0;i<NUM_OF_BLINKABLE_LEDS;i++) {
+            if ((led_blinkingLeds & (1<<i)) && led_blinkLedNumber[i]==ledNr)
+                return;
+        }
         for (i=0;i<NUM_OF_BLINKABLE_LEDS;i++) {
             if (!(led_blinkingLeds & (1<<i))) {
                 led_blinkLedNumber[i] = ledNr; led_blinkingLeds |= (uint8_t)(1<<i);

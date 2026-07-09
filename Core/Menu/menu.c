@@ -403,6 +403,99 @@ static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
         menu_parseGlobalParam(paramNr, value);
 }
 
+uint8_t menu_paramUsesMorphView(uint16_t paramNr)
+{
+    /*
+     * Decide whether one menu parameter should read/write the morph endpoint.
+     *
+     * Why: SHIFT+VOICE mode is an overlay on ordinary voice pages, not a copy
+     * of the page table. This guard keeps the alternate buffer restricted to
+     * sound parameters that are actually being displayed on VOICE1..VOICE7.
+     *
+     * Inputs: paramNr is the canonical ParameterArray id from menuPages.
+     * Output: nonzero means display/edit uses parameters2[] instead of
+     * parameter_values[]. Clients: repaint and edit helpers below. Risk:
+     * parameter 127 is still excluded because the active sound apply path cannot
+     * encode it safely, and non-voice pages must never redirect to morph data.
+     */
+    if (!voiceModeShowMorph)
+        return 0u;
+    if (menu_activePage > VOICE7_PAGE)
+        return 0u;
+    if (paramNr == PAR_NONE || paramNr == 127u)
+        return 0u;
+    return (uint8_t)(paramNr < END_OF_SOUND_PARAMETERS);
+}
+
+uint8_t menu_getParameterDisplayValue(uint16_t paramNr)
+{
+    /*
+     * Read one visible menu value from the active UI buffer.
+     *
+     * Inputs: canonical parameter id. Output: the value currently meant for
+     * display: morph endpoint when menu_paramUsesMorphView() is true, otherwise
+     * the normal parameter_values[] value. Clients are display formatting and
+     * dtype clamp code that needs linked parameter values. Invalid ids read as
+     * zero so a malformed page cell cannot index outside Menu-owned storage.
+     */
+    if (menu_paramUsesMorphView(paramNr))
+        return parameters2[paramNr];
+    if (paramNr < NUM_PARAMS)
+        return parameter_values[paramNr];
+    return 0u;
+}
+
+uint8_t *menu_getParameterEditPtr(uint16_t paramNr)
+{
+    /*
+     * Return the mutable menu buffer slot for one editable parameter.
+     *
+     * Inputs: canonical parameter id. Output: pointer into parameters2[] for
+     * morph voice mode, pointer into parameter_values[] otherwise, or NULL for
+     * invalid ids. Clients: encoder and endless-pot edit paths. Confederates:
+     * commits still go through menu_sendEditedParameter() so the write target
+     * and side effects stay paired.
+     */
+    if (menu_paramUsesMorphView(paramNr))
+        return &parameters2[paramNr];
+    if (paramNr < NUM_PARAMS)
+        return &parameter_values[paramNr];
+    return 0;
+}
+
+static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value)
+{
+    /*
+     * Commit one edited parameter to the correct owner.
+     *
+     * Why: active-kit edits and morph-endpoint edits share the same voice-page
+     * UI but have different side effects. Active edits must update DSP and may
+     * record automation through Preset. Morph edits must update parameters2[]
+     * only, then refresh the current morph interpolation without overwriting
+     * parameter_values[].
+     *
+     * Inputs: paramNr/value after dtype clamping. Outputs: either normal active
+     * sound/global application or morph endpoint storage plus a morph refresh.
+     * Clients: menu_encoderChangeParameter() and menu_parseKnobDelta(). Risk:
+     * calling preset_applySoundParameter() for morph edits would collapse the
+     * active kit and morph endpoint into the same value, destroying morph range.
+     */
+    if (menu_paramUsesMorphView(paramNr)) {
+        if (paramNr >= PAR_VOICE_LFO1 && paramNr <= PAR_VOICE_LFO6) {
+            uint8_t lfoNr = (uint8_t)(paramNr - PAR_VOICE_LFO1);
+            uint8_t newTargVal = getModTargetIdxFromGapIdx((uint8_t)(value - 1u),
+                                                           menu_TargetVoiceGapIndex);
+            parameters2[PAR_TARGET_LFO1 + lfoNr] = newTargVal;
+        } else if (paramNr >= PAR_TARGET_LFO1 && paramNr <= PAR_TARGET_LFO6) {
+            menu_TargetVoiceGapIndex = getModTargetGapIndex(value);
+        }
+        preset_morph(parameter_values[PAR_MORPH]);
+        return;
+    }
+
+    menu_sendSoundParameter(paramNr, value);
+}
+
 static void menu_setStorageMessage(const char *message, const char *detail)
 {
     /* Modal sample/loop installs suspend audio before flash writes. The OLED
@@ -470,6 +563,18 @@ static void menu_loadSamplesModal(void)
 ** ----------------------------------------------------------------------- */
 uint8_t parameter_values[NUM_PARAMS];
 uint8_t parameters2[END_OF_SOUND_PARAMETERS];
+/*
+ * Voice-page morph endpoint overlay flag.
+ *
+ * Why: SHIFT+VOICE uses the existing VOICE page tables and edit mechanics but
+ * must resolve sound parameter values against parameters2[] instead of the
+ * active-kit parameter_values[]. Input/client: buttonHandler sets this through
+ * menu_setVoiceModeShowMorph(). Output: repaint, encoder, and endless-pot edit
+ * helpers choose the correct Menu-owned buffer. Risk: this is intentionally a
+ * view/edit overlay only; non-voice pages and non-sound parameters must stay on
+ * parameter_values[].
+ */
+uint8_t voiceModeShowMorph = 0;
 
 /* -----------------------------------------------------------------------
 ** Dtype table — exact port of original, PROGMEM removed
@@ -1425,7 +1530,7 @@ static void menu_repaintGeneric(void)
             return;
         }
 
-        curParmVal = parameter_values[parNr];
+        curParmVal = menu_getParameterDisplayValue(parNr);
 
         memset(&editDisplayBuffer[0][0], ' ', 16);
         memset(&editDisplayBuffer[1][0], ' ', 16);
@@ -1530,7 +1635,7 @@ static void menu_repaintGeneric(void)
             } else if (parNr == PAR_RUNTIME_CPU_USE) {
                 menu_formatCpuUsePercent3(valueAsText);
             } else {
-                curParmVal = parameter_values[parNr];
+                curParmVal = menu_getParameterDisplayValue(parNr);
                 switch (parameter_dtypes[parNr] & 0x0F) {
                 case DTYPE_TARGET_SELECTION_VELO:
                 case DTYPE_TARGET_SELECTION_LFO:
@@ -1591,7 +1696,10 @@ static void menu_encoderChangeParameter(int8_t inc)
     if (paramNr == PAR_RUNTIME_CPU_USE || paramNr >= NUM_PARAMS)
         return;
 
-    uint8_t *paramValue = &parameter_values[paramNr];
+    uint8_t *paramValue = menu_getParameterEditPtr(paramNr);
+
+    if (!paramValue)
+        return;
 
     /* Apply inc with proper saturation. The original AVR code only checked
     ** for the boundary value (255 for CW, >= -inc for CCW), which worked when
@@ -1625,9 +1733,13 @@ static void menu_encoderChangeParameter(int8_t inc)
         /* _SEQUENCER_ADD_SPIKE_: linked TARGET_LFO update/sending is handled in
         ** menu_sendSoundParameter(), matching the AVR combined behavior. */
         break; }
-    case DTYPE_TARGET_SELECTION_LFO: 
+    case DTYPE_TARGET_SELECTION_LFO:
     {
-        uint8_t voiceNr =  (uint8_t)(parameter_values[PAR_VOICE_LFO1+(paramNr - PAR_TARGET_LFO1)]-1);
+        uint8_t linkedVoice = menu_getParameterDisplayValue((uint16_t)(PAR_VOICE_LFO1+(paramNr - PAR_TARGET_LFO1)));
+        uint8_t voiceNr;
+        if (linkedVoice < 1u || linkedVoice > 6u)
+            linkedVoice = 1u;
+        voiceNr = (uint8_t)(linkedVoice - 1u);
         if(*paramValue < (modTargetVoiceOffsets[voiceNr].start)) {
             if(inc < 0) // going down, allow 0
                 *paramValue=0;
@@ -1681,7 +1793,7 @@ static void menu_encoderChangeParameter(int8_t inc)
         break;
     }
 
-    menu_sendSoundParameter(paramNr, *paramValue);
+    menu_sendEditedParameter(paramNr, *paramValue);
 }
 
 /* -----------------------------------------------------------------------
@@ -2042,8 +2154,10 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 
     if (parNr == PAR_NONE || parNr >= NUM_PARAMS) return;
 
-    uint8_t *pv = &parameter_values[parNr];
+    uint8_t *pv = menu_getParameterEditPtr(parNr);
     int16_t inc = delta;
+
+    if (!pv) return;
 
     int16_t next = (int16_t)(*pv) + inc;
     if (next < 0) next = 0;
@@ -2065,7 +2179,11 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
         else if (*pv > 6) *pv = 6;
         break;
     case DTYPE_TARGET_SELECTION_LFO: {
-        uint8_t voiceNr = (uint8_t)(parameter_values[PAR_VOICE_LFO1 + (parNr - PAR_TARGET_LFO1)] - 1);
+        uint8_t linkedVoice = menu_getParameterDisplayValue((uint16_t)(PAR_VOICE_LFO1 + (parNr - PAR_TARGET_LFO1)));
+        uint8_t voiceNr;
+        if (linkedVoice < 1u || linkedVoice > 6u)
+            linkedVoice = 1u;
+        voiceNr = (uint8_t)(linkedVoice - 1u);
         if (*pv < modTargetVoiceOffsets[voiceNr].start) {
             *pv = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
         } else if (*pv > modTargetVoiceOffsets[voiceNr].end) {
@@ -2081,7 +2199,7 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     default: case DTYPE_0B127: if(*pv>127)*pv=127; break;
     }
 
-    menu_sendSoundParameter(parNr, *pv);
+    menu_sendEditedParameter(parNr, *pv);
     menu_knobs_dirty = 1;
 }
 
@@ -2380,6 +2498,7 @@ void menu_switchPage(uint8_t pageNr)
     switch (pageNr) {
     case MENU_MIDI_PAGE: {
         uint8_t toggle = (menu_activePage == MENU_MIDI_PAGE);
+        menu_setVoiceModeShowMorph(0u);
         menu_activePage = MENU_MIDI_PAGE;
         editModeActive = 0;
         lockPotentiometerFetch();
@@ -2399,12 +2518,26 @@ void menu_switchPage(uint8_t pageNr)
     case PERFORMANCE_PAGE:
     case PATTERN_SETTINGS_PAGE:
     case SEQ_PAGE:
+        menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;
         editModeActive = 0;
         lockPotentiometerFetch();
+        if (pageNr == SEQ_PAGE) {
+            /*
+             * STEP mode's front page is a track-settings view.
+             *
+             * menu_switchPage() repaints before returning, so the PatternData
+             * values must be copied into parameter_values here, not only in the
+             * button-layer LED refresh that runs after the page switch. If this
+             * sync happens after repaint, the LCD appears one voice-button
+             * press behind even though menu_activeVoice is already correct.
+             */
+            pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice());
+        }
         break;
 
     case LOAD_PAGE:
+        menu_setVoiceModeShowMorph(0u);
         if (menu_activePage == LOAD_PAGE)
             menu_activePage = SAVE_PAGE;
         else
@@ -2414,6 +2547,8 @@ void menu_switchPage(uint8_t pageNr)
         break;
 
     default: /* voice pages */
+        if (pageNr > VOICE7_PAGE)
+            menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;
         if (pageNr < 7)
             menu_setActiveVoice(pageNr);
@@ -2601,11 +2736,15 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
 
     case PAR_SHUFFLE:
         /*
-         * Shuffle should become a Pattern value even though its backing storage
-         * may still be sequencer-adjacent during this migration. The pat_ API
-         * is the intentional future-facing boundary for this edit.
+         * Shuffle is a per-track Pattern timing setting.
+         *
+         * Menu supplies the viewed pattern and active track because the STEP
+         * front-page second half edits the track currently in front of the
+         * user. PatternData stores the value and Sequencer queries it per track
+         * when scheduling due events. This replaces the old global
+         * seq_shuffle bridge.
          */
-        pat_setShuffle(menu_getViewedPattern(), value);
+        pat_setTrackShuffle(menu_getViewedPattern(), menu_getActiveVoice(), value);
         break;
 
     case PAR_AUTOM_TRACK:
@@ -2916,6 +3055,50 @@ void    menu_setActiveVoice(uint8_t v) { menu_activeVoice = v; }
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
 uint8_t menu_getSubPage(void)      { return (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT); }
 void    menu_setNumSamples(uint8_t n) { menu_numSamples = n; }
+void menu_setVoiceModeShowMorph(uint8_t onOff)
+{
+    /*
+     * Set the voice-page morph endpoint overlay.
+     *
+     * Why: buttonHandler owns the SHIFT+VOICE gesture, but Menu owns the
+     * parameter buffer used by repaint/edit code. Input onOff is boolean.
+     * Output: voiceModeShowMorph is updated and the next repaint/edit resolves
+     * voice-page sound parameters against the matching buffer. Confederates:
+     * buttonHandler also owns the MODE1 blink feedback for this flag.
+     */
+    voiceModeShowMorph = (uint8_t)(onOff != 0u);
+    menu_endlessPotMappingChanged();
+}
+
+void menu_showStepTrackSettingsFirstHalf(void)
+{
+    /*
+     * Show the first half of STEP's track-settings front page.
+     *
+     * Why: selecting a different track in STEP mode should land on the primary
+     * settings row (length, scale, MIDI channel, note), while re-pressing the
+     * same track can toggle to the second half. Inputs: current Menu state.
+     * Output: menuIndex selects SEQ_PAGE subpage 0 parameter 0 and endless-pot
+     * snapshots update for the visible columns.
+     */
+    menuIndex = 0u;
+    menu_endlessPotMappingChanged();
+}
+
+void menu_toggleStepTrackSettingsHalf(void)
+{
+    /*
+     * Toggle STEP's track-settings front page between first and second halves.
+     *
+     * Why: repeated VOICE presses in STEP mode should act like a compact page
+     * toggle without entering the per-step editor. Inputs: current menuIndex.
+     * Output: activeParameter moves between 0 and 4 on SEQ_PAGE subpage 0, and
+     * endless-pot mappings are refreshed for the newly visible half.
+     */
+    uint8_t activeParameter = menuIndex & MASK_PARAMETER;
+    menuIndex = (activeParameter < 4u) ? 4u : 0u;
+    menu_endlessPotMappingChanged();
+}
 void    menu_setShownPattern(uint8_t p)
 {
     /*
