@@ -30,6 +30,14 @@
 #define STORAGE_SECTION_PARAMS  1u
 #define STORAGE_SECTION_MORPH   2u
 
+/*
+ * Longest current descriptor key is "amp_envelope_decay_closed" at 25 bytes.
+ * Keep parser scratch wider than the descriptor namespace so storage lookup
+ * fails only for genuinely unknown keys, not because a valid key was truncated
+ * before instrumentManager_descriptorIndexByKey() sees it.
+ */
+#define STORAGE_INSTRUMENT_KEY_MAX 32u
+
 /* Exact string comparison helper.
  *
  * Inputs: two NUL-terminated strings. Output: nonzero only for byte-for-byte
@@ -387,7 +395,7 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                                              const char *line,
                                              kit_instrument_slot_t *slot)
 {
-    char key[24];
+    char key[STORAGE_INSTRUMENT_KEY_MAX];
     const char *value;
     storage_status_t st;
     uint8_t parsed;

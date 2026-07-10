@@ -66,12 +66,21 @@ typedef struct {
     instrument_runtime_binding_t runtime;
 } ParamDescriptor;
 
+#define INSTRUMENT_MENU_EMPTY 0xffu
+#define INSTRUMENT_MENU_SKIP  0xfeu
+
+typedef struct {
+    uint8_t descriptor_index[8];
+} instrument_menu_page_t;
+
 typedef struct {
     instrument_type_t type;
     const char *type_text;
     const char *extension;
     const ParamDescriptor *descriptors;
     uint8_t descriptor_count;
+    const instrument_menu_page_t *menu_pages;
+    uint8_t menu_page_count;
 } instrument_registry_entry_t;
 
 instrument_param_id_t instrumentParam_make(uint8_t slot, uint8_t descriptor_index);
@@ -93,6 +102,11 @@ const ParamDescriptor *instrumentManager_descriptorIndexByKey(
 const ParamDescriptor *instrumentManager_menuDescriptor(instrument_type_t type,
                                                          uint8_t page,
                                                          uint8_t position);
+const ParamDescriptor *instrumentManager_menuDescriptorIndex(
+    instrument_type_t type, uint8_t page, uint8_t position, uint8_t *index_out);
+const ParamDescriptor *instrumentManager_voicePageDescriptorIndex(
+    instrument_type_t type, uint8_t voice_page, uint8_t page, uint8_t position,
+    uint8_t *index_out);
 struct kit_instrument_slot;
 void instrumentManager_resetSlot(struct kit_instrument_slot *slot,
                                  instrument_type_t type);

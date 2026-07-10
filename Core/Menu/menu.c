@@ -717,6 +717,377 @@ static void menu_endlessPotMappingChanged(void);
 static uint8_t menu_cpuUseWidgetVisible(void);
 static void menu_formatCpuUsePercent3(char *buf);
 static void menu_formatCpuUsePercent4(char *buf);
+static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value);
+static void setNoteName(uint8_t num, char *buf);
+
+typedef enum {
+    MENU_CELL_EMPTY = 0,
+    MENU_CELL_STATIC,
+    MENU_CELL_INSTRUMENT
+} menu_cell_kind_t;
+
+typedef struct {
+    menu_cell_kind_t kind;
+    uint8_t text_id;
+    uint16_t static_param;
+    uint8_t slot;
+    uint8_t descriptor_index;
+    const ParamDescriptor *descriptor;
+} menu_cell_t;
+
+static uint8_t menu_isVoicePage(uint8_t page);
+static uint8_t menu_voicePageToSlot(uint8_t page);
+static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position);
+static uint8_t menu_cellDtype(const menu_cell_t *cell);
+static uint16_t menu_cellDisplayValue(const menu_cell_t *cell);
+static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value);
+static uint8_t menu_cellIsEmpty(const menu_cell_t *cell);
+static void menu_copyInstrumentText(char *dst, const char *src, uint8_t width);
+static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText);
+static void menu_displayInstrumentTargetFull(uint16_t target);
+static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText);
+static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value);
+
+static uint8_t menu_isVoicePage(uint8_t page)
+{
+    return (uint8_t)(page <= VOICE7_PAGE);
+}
+
+static uint8_t menu_voicePageToSlot(uint8_t page)
+{
+    if (page >= VOICE7_PAGE)
+        return 5u;
+    return page;
+}
+
+static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
+{
+    menu_cell_t cell;
+    const Page *page;
+
+    memset(&cell, 0, sizeof(cell));
+    cell.kind = MENU_CELL_EMPTY;
+    cell.static_param = PAR_NONE;
+    cell.text_id = TEXT_EMPTY;
+    cell.descriptor_index = INSTRUMENT_MENU_EMPTY;
+
+    /*
+     * Resolve one visible menu cell without assuming one global parameter ID
+     * namespace.
+     *
+     * Static pages still come from menuPages[][] and parameter_values[]. Voice
+     * pages now come from the active Scene slot's instrument descriptors: the
+     * descriptor supplies text/dtype and descriptor_index supplies the storage
+     * cell in SceneData. This keeps old global/Pattern pages stable while
+     * removing the false overlap between flat PAR_* ids and instrument ids.
+     */
+    if (subPage >= NUM_SUB_PAGES || position >= 8u)
+        return cell;
+
+    if (menu_isVoicePage(menu_activePage)) {
+        const kit_instrument_slot_t *slot;
+        uint8_t slot_index = menu_voicePageToSlot(menu_activePage);
+
+        slot = scene_instrumentSlotConst(scene_getActiveIndex(), slot_index);
+        if (!slot)
+            return cell;
+
+        cell.descriptor =
+            instrumentManager_voicePageDescriptorIndex(slot->type,
+                                                       menu_activePage,
+                                                       subPage,
+                                                       position,
+                                                       &cell.descriptor_index);
+        if (!cell.descriptor &&
+            cell.descriptor_index == INSTRUMENT_MENU_SKIP) {
+            cell.kind = MENU_CELL_STATIC;
+            cell.text_id = TEXT_SKIP;
+            cell.static_param = PAR_NONE;
+            return cell;
+        }
+        if (!cell.descriptor)
+            return cell;
+
+        cell.kind = MENU_CELL_INSTRUMENT;
+        cell.slot = slot_index;
+        return cell;
+    }
+
+    page = &menuPages[menu_activePage][subPage];
+    cell.text_id = (&page->top1)[position];
+    cell.static_param = (&page->bot1)[position];
+    if (cell.text_id == TEXT_EMPTY || cell.static_param == PAR_NONE)
+        return cell;
+
+    cell.kind = MENU_CELL_STATIC;
+    return cell;
+}
+
+static uint8_t menu_cellIsEmpty(const menu_cell_t *cell)
+{
+    return (uint8_t)(!cell || cell->kind == MENU_CELL_EMPTY);
+}
+
+static uint8_t menu_cellDtype(const menu_cell_t *cell)
+{
+    if (!cell)
+        return DTYPE_0B127;
+    if (cell->kind == MENU_CELL_INSTRUMENT)
+        return cell->descriptor ? cell->descriptor->dtype : DTYPE_0B127;
+    if (cell->kind == MENU_CELL_STATIC && cell->static_param < NUM_PARAMS)
+        return parameter_dtypes[cell->static_param];
+    return DTYPE_0B127;
+}
+
+static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
+{
+    if (!cell)
+        return 0u;
+    if (cell->kind == MENU_CELL_INSTRUMENT) {
+        const kit_instrument_slot_t *slot =
+            scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
+        if (!slot || cell->descriptor_index >= INSTRUMENT_PARAM_COUNT)
+            return 0u;
+        return voiceModeShowMorph
+            ? slot->parameter_images.morph_instrument_parameters[cell->descriptor_index]
+            : slot->parameter_images.instrument_parameters[cell->descriptor_index];
+    }
+    if (cell->kind == MENU_CELL_STATIC)
+        return menu_getParameterDisplayValue(cell->static_param);
+    return 0u;
+}
+
+static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
+{
+    if (!cell)
+        return 0u;
+    if (cell->kind == MENU_CELL_INSTRUMENT) {
+        uint8_t scene_index = scene_getActiveIndex();
+        if (!cell->descriptor)
+            return 0u;
+        if (cell->descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) {
+            return preset_setInstrumentParameter(
+                scene_index, cell->slot, cell->descriptor_index,
+                voiceModeShowMorph ? INSTRUMENT_IMAGE_MORPH
+                                   : INSTRUMENT_IMAGE_MAIN,
+                (uint8_t)value,
+                (uint8_t)(!voiceModeShowMorph));
+        }
+        if (voiceModeShowMorph)
+            return 0u;
+        return preset_setSupplementalParameter(
+            scene_index, cell->slot, cell->descriptor_index, value);
+    }
+    if (cell->kind == MENU_CELL_STATIC) {
+        uint8_t *paramValue = menu_getParameterEditPtr(cell->static_param);
+        if (!paramValue)
+            return 0u;
+        *paramValue = (uint8_t)value;
+        menu_sendEditedParameter(cell->static_param, *paramValue);
+        return 1u;
+    }
+    return 0u;
+}
+
+static void menu_copyInstrumentText(char *dst, const char *src, uint8_t width)
+{
+    uint8_t i;
+    for (i = 0u; i < width; i++)
+        dst[i] = (src && src[i]) ? src[i] : ' ';
+}
+
+static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
+{
+    uint8_t slot;
+    uint8_t local;
+    const kit_instrument_slot_t *instrument;
+    const ParamDescriptor *descriptor;
+
+    /*
+     * Compact descriptor-target renderer.
+     *
+     * Descriptor target values are canonical slot*64+descriptor IDs, not
+     * indices into the old modTargets[] table. The compact display therefore
+     * derives its text from the active Scene's slot type at paint time. Storage
+     * remains just the canonical target id in the parameter cell.
+     */
+    if (target == INSTRUMENT_PARAM_INVALID ||
+        !instrumentParam_isVoiceParameter(target)) {
+        memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
+
+    slot = instrumentParam_slot(target);
+    local = instrumentParam_local(target);
+    instrument = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    descriptor = instrument
+        ? instrumentManager_descriptor(instrument->type, local)
+        : 0;
+    if (!descriptor) {
+        memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
+
+    valueAsText[0] = (char)('1' + slot);
+    valueAsText[1] = descriptor->short_name && descriptor->short_name[0]
+        ? descriptor->short_name[0] : ' ';
+    valueAsText[2] = descriptor->short_name && descriptor->short_name[1]
+        ? descriptor->short_name[1] : ' ';
+}
+
+static void menu_displayInstrumentTargetFull(uint16_t target)
+{
+    uint8_t slot;
+    uint8_t local;
+    const kit_instrument_slot_t *instrument;
+    const ParamDescriptor *descriptor;
+
+    if (target == INSTRUMENT_PARAM_INVALID ||
+        !instrumentParam_isVoiceParameter(target)) {
+        memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+        return;
+    }
+
+    slot = instrumentParam_slot(target);
+    local = instrumentParam_local(target);
+    instrument = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    descriptor = instrument
+        ? instrumentManager_descriptor(instrument->type, local)
+        : 0;
+    if (!descriptor) {
+        memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+        return;
+    }
+
+    memcpy(&editDisplayBuffer[1][0], "Voice", 5);
+    numtostru(&editDisplayBuffer[1][5], (uint8_t)(slot + 1u));
+    menu_copyInstrumentText(&editDisplayBuffer[1][8], descriptor->long_name, 8u);
+}
+
+static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
+{
+    uint16_t raw = menu_cellDisplayValue(cell);
+    uint8_t dtype = (uint8_t)(menu_cellDtype(cell) & 0x0f);
+    uint8_t value = (raw > 255u) ? 255u : (uint8_t)raw;
+
+    /*
+     * Format one cell value for the compact four-column view. Instrument cells
+     * share the same dtype vocabulary as static cells, but target cells may
+     * store 16-bit canonical descriptor IDs. Those IDs display as off when the
+     * invalid sentinel is stored; a later target-picker patch can replace the
+     * numeric fallback with descriptor-name rendering.
+     */
+    if (raw == INSTRUMENT_PARAM_INVALID &&
+        (dtype == DTYPE_TARGET_SELECTION_VELO ||
+         dtype == DTYPE_TARGET_SELECTION_LFO ||
+         dtype == DTYPE_AUTOM_TARGET)) {
+        memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
+
+    switch (dtype) {
+    case DTYPE_TARGET_SELECTION_VELO:
+    case DTYPE_TARGET_SELECTION_LFO:
+        if (cell->kind == MENU_CELL_INSTRUMENT)
+            menu_formatInstrumentTargetShort(raw, valueAsText);
+        else
+            menu_displayModTargetShort(value, valueAsText, 0);
+        break;
+    case DTYPE_AUTOM_TARGET:
+        menu_displayModTargetShort(value, valueAsText, 1);
+        break;
+    case DTYPE_PM63:
+        numtostrps(valueAsText, (int8_t)(value - 63));
+        break;
+    case DTYPE_NOTE_NAME:
+        if (cell->kind == MENU_CELL_STATIC &&
+            cell->static_param == PAR_TRACK_MIDI_NOTE && value == 0u) {
+            memcpy(valueAsText, menuText_any, 3);
+        } else {
+            setNoteName(value, valueAsText);
+        }
+        break;
+    case DTYPE_MIX_FM:
+        if (value == 1u) memcpy(valueAsText, menuText_mix, 3);
+        else            memcpy(valueAsText, menuText_fm, 3);
+        break;
+    case DTYPE_ON_OFF:
+        if (value == 1u) memcpy(valueAsText, menuText_on, 3);
+        else            memcpy(valueAsText, menuText_off, 3);
+        break;
+    case DTYPE_MENU:
+        getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
+                                value, valueAsText);
+        break;
+    case DTYPE_0b1:
+        numtostrpu(valueAsText, (uint8_t)(value + 1u), ' ');
+        break;
+    default:
+    case DTYPE_0B127:
+    case DTYPE_0B255:
+    case DTYPE_1B16:
+    case DTYPE_0B15:
+    case DTYPE_VOICE_LFO:
+        numtostrpu(valueAsText, value, ' ');
+        break;
+    }
+}
+
+static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
+{
+    uint8_t dtype;
+    if (!cell || !value)
+        return;
+
+    dtype = (uint8_t)(menu_cellDtype(cell) & 0x0f);
+    switch (dtype) {
+    case DTYPE_AUTOM_TARGET: {
+        uint8_t nmt = getNumModTargets();
+        if (*value >= nmt)
+            *value = (nmt > 0u) ? (uint16_t)(nmt - 1u) : 0u;
+        break; }
+    case DTYPE_TARGET_SELECTION_VELO:
+    case DTYPE_TARGET_SELECTION_LFO:
+        if (*value == INSTRUMENT_PARAM_INVALID)
+            break;
+        if (*value >= INSTRUMENT_VOICE_ID_COUNT)
+            *value = INSTRUMENT_PARAM_INVALID;
+        break;
+    case DTYPE_0B255:
+        if (*value > 255u) *value = 255u;
+        break;
+    case DTYPE_1B16:
+        if (*value < 1u) *value = 1u;
+        else if (*value > 16u) *value = 16u;
+        break;
+    case DTYPE_1B128:
+        if (*value < 1u) *value = 1u;
+        else if (*value > 128u) *value = 128u;
+        break;
+    case DTYPE_0B15:
+        if (*value > 15u) *value = 15u;
+        break;
+    case DTYPE_MIX_FM:
+    case DTYPE_ON_OFF:
+    case DTYPE_0b1:
+        if (*value > 1u) *value = 1u;
+        break;
+    case DTYPE_MENU: {
+        uint8_t n = getMaxEntriesForMenu((uint8_t)(menu_cellDtype(cell) >> 4));
+        if (n == 0u)
+            *value = 0u;
+        else if (*value >= n)
+            *value = (uint16_t)(n - 1u);
+        break; }
+    default:
+    case DTYPE_0B127:
+    case DTYPE_PM63:
+    case DTYPE_NOTE_NAME:
+    case DTYPE_VOICE_LFO:
+        if (*value > 127u) *value = 127u;
+        break;
+    }
+}
 
 
 static uint8_t menu_nameIsEmptySlot(void)
@@ -968,7 +1339,8 @@ static void menu_displayCpuUseEdit(void)
 ** ----------------------------------------------------------------------- */
 static uint8_t has2ndPage(uint8_t menuPage)
 {
-    return (menuPages[menu_activePage][menuPage].top5 != TEXT_EMPTY) ? 1 : 0;
+    menu_cell_t cell = menu_resolveCell(menuPage, 4u);
+    return (uint8_t)(!menu_cellIsEmpty(&cell));
 }
 
 static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
@@ -1226,81 +1598,100 @@ static void menu_repaintGeneric(void)
 {
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
-    const Page *ap = &menuPages[menu_activePage][activePage];
-    uint8_t curParmVal;
     char valueAsText[3];
 
     if (editModeActive) {
-        uint8_t parName  = (&ap->top1)[activeParameter];
-        uint16_t parNr   = (&ap->bot1)[activeParameter];
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        uint16_t curParmVal;
+        uint8_t dtype;
 
-        if (parNr == PAR_RUNTIME_CPU_USE) {
+        if (menu_cellIsEmpty(&cell))
+            return;
+        if (cell.kind == MENU_CELL_STATIC &&
+            cell.static_param == PAR_RUNTIME_CPU_USE) {
             menu_displayCpuUseEdit();
             return;
         }
 
-        curParmVal = menu_getParameterDisplayValue(parNr);
+        curParmVal = menu_cellDisplayValue(&cell);
+        dtype = (uint8_t)(menu_cellDtype(&cell) & 0x0f);
 
         memset(&editDisplayBuffer[0][0], ' ', 16);
         memset(&editDisplayBuffer[1][0], ' ', 16);
 
-        if ((parameter_dtypes[parNr] & 0x0F) == DTYPE_AUTOM_TARGET) {
+        if (cell.kind == MENU_CELL_STATIC && dtype == DTYPE_AUTOM_TARGET) {
+            uint8_t value = (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
             memcpy(&editDisplayBuffer[0][0], "AutDst", 6);
-            numtostru(&editDisplayBuffer[0][7], (uint8_t)(parNr - PAR_P1_DEST + 1));
-            if (modTargets[curParmVal].param == PAR_NONE) {
+            numtostru(&editDisplayBuffer[0][7],
+                      (uint8_t)(cell.static_param - PAR_P1_DEST + 1u));
+            if (modTargets[value].param == PAR_NONE) {
                 memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
             } else {
                 memcpy(&editDisplayBuffer[0][9], "Voice", 5);
-                numtostru(&editDisplayBuffer[0][15], voiceFromModTargValue(curParmVal));
-                menu_displayModTargetFull(curParmVal);
+                numtostru(&editDisplayBuffer[0][15], voiceFromModTargValue(value));
+                menu_displayModTargetFull(value);
             }
         } else {
-            /* Top row: category (0-7) + long name (8-15) */
-            const char *cat = catNames[valueNames[parName].category];
-            const char *lng = longNames[valueNames[parName].longName];
-            uint8_t ci;
-            for (ci=0; ci<8 && cat[ci]; ci++) editDisplayBuffer[0][ci] = cat[ci];
-            for (ci=0; ci<8 && lng[ci]; ci++) editDisplayBuffer[0][8+ci] = lng[ci];
+            uint8_t value = (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
 
-            /* Bottom row: value at col 13 */
-            switch (parameter_dtypes[parNr] & 0x0F) {
+            if (cell.kind == MENU_CELL_INSTRUMENT) {
+                menu_copyInstrumentText(&editDisplayBuffer[0][0],
+                                        cell.descriptor->category, 8u);
+                menu_copyInstrumentText(&editDisplayBuffer[0][8],
+                                        cell.descriptor->long_name, 8u);
+            } else {
+                const char *cat = catNames[valueNames[cell.text_id].category];
+                const char *lng = longNames[valueNames[cell.text_id].longName];
+                uint8_t ci;
+                for (ci = 0u; ci < 8u && cat[ci]; ci++)
+                    editDisplayBuffer[0][ci] = cat[ci];
+                for (ci = 0u; ci < 8u && lng[ci]; ci++)
+                    editDisplayBuffer[0][8u + ci] = lng[ci];
+            }
+
+            switch (dtype) {
             case DTYPE_TARGET_SELECTION_VELO:
             case DTYPE_TARGET_SELECTION_LFO:
-                menu_displayModTargetFull(curParmVal);
+                if (cell.kind == MENU_CELL_INSTRUMENT)
+                    menu_displayInstrumentTargetFull(curParmVal);
+                else if (curParmVal == INSTRUMENT_PARAM_INVALID)
+                    memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+                else
+                    menu_displayModTargetFull(value);
                 break;
             case DTYPE_MIX_FM:
-                if (curParmVal==1) memcpy(&editDisplayBuffer[1][13], menuText_mix, 3);
+                if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_mix, 3);
                 else               memcpy(&editDisplayBuffer[1][13], menuText_fm, 3);
                 break;
             case DTYPE_ON_OFF:
-                if (curParmVal==1) memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
+                if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
                 else               memcpy(&editDisplayBuffer[1][13], menuText_off, 3);
                 break;
             case DTYPE_MENU: {
-                uint8_t menuId = (uint8_t)(parameter_dtypes[parNr] >> 4);
-                if (menuId == MENU_WAVEFORM &&
-                    curParmVal >= (uint8_t)waveformNames[0][0]) {
+                uint8_t menuId = (uint8_t)(menu_cellDtype(&cell) >> 4);
+                if (menuId == MENU_WAVEFORM && value >= (uint8_t)waveformNames[0][0]) {
                     char sampleName[SAMPLE_DISPLAY_NAME_LEN + 1u];
                     uint8_t sampleIndex =
-                        (uint8_t)(curParmVal - (uint8_t)waveformNames[0][0]);
+                        (uint8_t)(value - (uint8_t)waveformNames[0][0]);
 
                     sampleMemory_getDisplayName(sampleIndex, sampleName);
                     memcpy(&editDisplayBuffer[1][0], sampleName,
                            SAMPLE_DISPLAY_NAME_LEN);
                 }
-                getMenuItemNameForValue(menuId, curParmVal, &editDisplayBuffer[1][13]);
+                getMenuItemNameForValue(menuId, value, &editDisplayBuffer[1][13]);
                 break; }
             case DTYPE_PM63:
-                numtostrps(&editDisplayBuffer[1][13], (int8_t)(curParmVal - 63));
+                numtostrps(&editDisplayBuffer[1][13], (int8_t)(value - 63));
                 break;
             case DTYPE_NOTE_NAME:
-                if (parNr == PAR_TRACK_MIDI_NOTE && curParmVal==0)
+                if (cell.kind == MENU_CELL_STATIC &&
+                    cell.static_param == PAR_TRACK_MIDI_NOTE && value==0)
                     memcpy(&editDisplayBuffer[1][13], menuText_any, 3);
                 else
-                    setNoteName(curParmVal, &editDisplayBuffer[1][13]);
+                    setNoteName(value, &editDisplayBuffer[1][13]);
                 break;
             case DTYPE_0b1:
-                numtostrpu(&editDisplayBuffer[1][13], (uint8_t)(curParmVal+1), ' ');
+                numtostrpu(&editDisplayBuffer[1][13], (uint8_t)(value+1), ' ');
                 break;
             default:
             case DTYPE_0B127:
@@ -1309,82 +1700,44 @@ static void menu_repaintGeneric(void)
             case DTYPE_1B128:
             case DTYPE_0B15:
             case DTYPE_VOICE_LFO:
-                numtostrpu(&editDisplayBuffer[1][13], curParmVal, ' ');
+                numtostrpu(&editDisplayBuffer[1][13], value, ' ');
                 break;
             }
         }
     } else {
-        /* Normal mode: 4 columns of 3-char short names + values */
         const uint8_t is2ndPage = (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
-        /* Top row: 4 short names at cols 0,4,8,12 */
-        memcpy(&editDisplayBuffer[0][0],
-            shortNames[valueNames[(&ap->top1)[0+is2ndPage]].shortName], 3);
-        memcpy(&editDisplayBuffer[0][4],
-            shortNames[valueNames[(&ap->top1)[1+is2ndPage]].shortName], 3);
-        memcpy(&editDisplayBuffer[0][8],
-            shortNames[valueNames[(&ap->top1)[2+is2ndPage]].shortName], 3);
-        memcpy(&editDisplayBuffer[0][12],
-            shortNames[valueNames[(&ap->top1)[3+is2ndPage]].shortName], 3);
+        for (i = 0u; i < 4u; i++) {
+            menu_cell_t cell = menu_resolveCell(activePage,
+                                                (uint8_t)(i + is2ndPage));
+            if (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP) {
+                memcpy(&editDisplayBuffer[0][4u * i], menuText_blank, 3);
+            } else if (cell.kind == MENU_CELL_INSTRUMENT) {
+                menu_copyInstrumentText(&editDisplayBuffer[0][4u * i],
+                                        cell.descriptor->short_name, 3u);
+            } else if (cell.kind == MENU_CELL_STATIC) {
+                memcpy(&editDisplayBuffer[0][4u * i],
+                       shortNames[valueNames[cell.text_id].shortName], 3);
+            } else {
+                memcpy(&editDisplayBuffer[0][4u * i], menuText_blank, 3);
+            }
+        }
 
-        /* Uppercase the active parameter's short name */
         upr_three(&editDisplayBuffer[0][(activeParameter % 4) * 4]);
-
-        /* Scroll sign at col 15 */
         editDisplayBuffer[0][15] = (char)checkScrollSign(activePage, activeParameter);
 
-        /* Bottom row: 4 values at cols 0,4,8,12 */
-        for (i=0; i<4; i++) {
-            const uint16_t parNr = (&ap->bot1)[i + is2ndPage];
-
-            if (parNr == PAR_NONE) {
+        for (i = 0u; i < 4u; i++) {
+            menu_cell_t cell = menu_resolveCell(activePage,
+                                                (uint8_t)(i + is2ndPage));
+            if (menu_cellIsEmpty(&cell) ||
+                (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP)) {
                 memcpy(valueAsText, menuText_blank, 3);
-            } else if (parNr == PAR_RUNTIME_CPU_USE) {
+            } else if (cell.kind == MENU_CELL_STATIC &&
+                       cell.static_param == PAR_RUNTIME_CPU_USE) {
                 menu_formatCpuUsePercent3(valueAsText);
             } else {
-                curParmVal = menu_getParameterDisplayValue(parNr);
-                switch (parameter_dtypes[parNr] & 0x0F) {
-                case DTYPE_TARGET_SELECTION_VELO:
-                case DTYPE_TARGET_SELECTION_LFO:
-                    menu_displayModTargetShort(curParmVal, valueAsText, 0);
-                    break;
-                case DTYPE_AUTOM_TARGET:
-                    menu_displayModTargetShort(curParmVal, valueAsText, 1);
-                    break;
-                case DTYPE_PM63:
-                    numtostrps(valueAsText, (int8_t)(curParmVal - 63));
-                    break;
-                case DTYPE_NOTE_NAME:
-                    if (parNr == PAR_TRACK_MIDI_NOTE && curParmVal==0)
-                        memcpy(valueAsText, menuText_any, 3);
-                    else
-                        setNoteName(curParmVal, valueAsText);
-                    break;
-                case DTYPE_MIX_FM:
-                    if (curParmVal==1) memcpy(valueAsText, menuText_mix, 3);
-                    else               memcpy(valueAsText, menuText_fm, 3);
-                    break;
-                case DTYPE_ON_OFF:
-                    if (curParmVal==1) memcpy(valueAsText, menuText_on, 3);
-                    else               memcpy(valueAsText, menuText_off, 3);
-                    break;
-                case DTYPE_MENU: {
-                    uint8_t menuId = (uint8_t)(parameter_dtypes[parNr] >> 4);
-                    getMenuItemNameForValue(menuId, curParmVal, valueAsText);
-                    break; }
-                case DTYPE_0b1:
-                    numtostrpu(valueAsText, (uint8_t)(curParmVal+1), ' ');
-                    break;
-                default:
-                case DTYPE_0B127:
-                case DTYPE_0B255:
-                case DTYPE_1B16:
-                case DTYPE_0B15:
-                case DTYPE_VOICE_LFO:
-                    numtostrpu(valueAsText, curParmVal, ' ');
-                    break;
-                }
+                menu_formatCellValue3(&cell, valueAsText);
             }
             memcpy(&editDisplayBuffer[1][4*i], valueAsText, 3);
         }
@@ -1398,65 +1751,47 @@ static void menu_encoderChangeParameter(int8_t inc)
 {
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
-    uint16_t paramNr = (&menuPages[menu_activePage][activePage].bot1)[activeParameter];
+    menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+    uint16_t value;
 
-    if (paramNr == PAR_RUNTIME_CPU_USE || paramNr >= NUM_PARAMS)
+    if (menu_cellIsEmpty(&cell))
+        return;
+    if (cell.kind == MENU_CELL_STATIC &&
+        cell.static_param == PAR_RUNTIME_CPU_USE)
         return;
 
-    uint8_t *paramValue = menu_getParameterEditPtr(paramNr);
+    value = menu_cellDisplayValue(&cell);
 
-    if (!paramValue)
-        return;
-
-    /* Apply inc with proper saturation. The original AVR code only checked
-    ** for the boundary value (255 for CW, >= -inc for CCW), which worked when
-    ** |inc|=1 always. With encoder acceleration, |inc| can be up to 4 (or
-    ** larger if you ever raise ACCEL_MAX_MULT), and the boundary checks must
-    ** work for the full range. The dtype-specific clamps further down would
-    ** catch overflow into the high range, but a uint8_t wrap from e.g. 250+10
-    ** lands at 4, which the clamps don't see as out-of-range. */
-    if (inc > 0) {
-        int16_t sum = (int16_t)*paramValue + (int16_t)inc;
-        *paramValue = (sum > 255) ? 255 : (uint8_t)sum;
+    /*
+     * Apply encoder acceleration in a value-local domain before committing to
+     * the owner. Static cells eventually write parameter_values[]; instrument
+     * cells write SceneData through Preset so active/morph endpoints and DSP
+     * side effects stay paired.
+     */
+    if ((menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_VELO ||
+        (menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_LFO) {
+        if (value == INSTRUMENT_PARAM_INVALID && inc > 0)
+            value = 0u;
+        else if (value == INSTRUMENT_PARAM_INVALID)
+            return;
+        else if (inc > 0)
+            value = (value < 65535u - (uint16_t)inc)
+                ? (uint16_t)(value + (uint16_t)inc) : 65535u;
+        else if (inc < 0) {
+            uint16_t step = (uint16_t)(-inc);
+            value = (value > step) ? (uint16_t)(value - step)
+                                   : INSTRUMENT_PARAM_INVALID;
+        }
+    } else if (inc > 0) {
+        uint32_t sum = (uint32_t)value + (uint32_t)inc;
+        value = (sum > 65535u) ? 65535u : (uint16_t)sum;
     } else if (inc < 0) {
-        int16_t sum = (int16_t)*paramValue + (int16_t)inc;
-        *paramValue = (sum < 0) ? 0 : (uint8_t)sum;
+        uint16_t step = (uint16_t)(-inc);
+        value = (value > step) ? (uint16_t)(value - step) : 0u;
     }
 
-    switch (parameter_dtypes[paramNr] & 0x0F) {
-    case DTYPE_AUTOM_TARGET: {
-        uint8_t nmt = getNumModTargets();
-        if (*paramValue >= nmt) *paramValue = (uint8_t)(nmt - 1);
-        break; }
-    case DTYPE_0B255: break;
-    case DTYPE_1B16:
-        if (*paramValue < 1) *paramValue = 1;
-        else if (*paramValue > 16) *paramValue = 16;
-        break;
-    case DTYPE_1B128:
-        if (*paramValue < 1) *paramValue = 1;
-        else if (*paramValue > 128) *paramValue = 128;
-        break;
-    case DTYPE_0B15:
-        if (*paramValue > 15) *paramValue = 15;
-        break;
-    case DTYPE_MIX_FM:
-    case DTYPE_ON_OFF:
-    case DTYPE_0b1:
-        if (*paramValue > 1) *paramValue = 1;
-        break;
-    case DTYPE_MENU: {
-        uint8_t menuId = (uint8_t)(parameter_dtypes[paramNr] >> 4);
-        uint8_t numEntries = getMaxEntriesForMenu(menuId);
-        if (*paramValue >= numEntries) *paramValue = (uint8_t)(numEntries - 1);
-        break; }
-    default:
-    case DTYPE_0B127:
-        if (*paramValue > 127) *paramValue = 127;
-        break;
-    }
-
-    menu_sendEditedParameter(paramNr, *paramValue);
+    menu_clampCellValue(&cell, &value);
+    (void)menu_cellCommitValue(&cell, value);
 }
 
 /* -----------------------------------------------------------------------
@@ -1467,7 +1802,6 @@ static void menu_moveToMenuItem(int8_t inc)
     int8_t activeParameter = (int8_t)(menuIndex & MASK_PARAMETER);
     int8_t activePage      = (int8_t)(menuIndex >> PAGE_SHIFT);
     uint8_t needLock = 0;
-    uint8_t param;
     uint8_t allowedSkips = 3;
 
     inc = (int8_t)(inc > 0 ? 1 : -1);
@@ -1503,12 +1837,15 @@ checkvalid:
         }
     }
 
-    param = (&menuPages[menu_activePage][(uint8_t)activePage].top1)[(uint8_t)activeParameter];
-    if (param == TEXT_SKIP) {
+    {
+        menu_cell_t cell =
+            menu_resolveCell((uint8_t)activePage, (uint8_t)activeParameter);
+        if (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP) {
         if (allowedSkips--) goto checkvalid;
         else return;
+        }
+        if (menu_cellIsEmpty(&cell)) return;
     }
-    if (param == TEXT_EMPTY) return;
 
     menuIndex = (uint8_t)((activePage << PAGE_SHIFT) | activeParameter);
     (void)needLock; /* lockPotentiometerFetch stubbed */
@@ -1756,14 +2093,18 @@ static uint8_t menu_paramVisible(uint16_t paramNr)
         return 0;
 
     if (editModeActive) {
-        return (uint8_t)((&menuPages[menu_activePage][activePage].bot1)
-                         [activeParameter] == paramNr);
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                         cell.static_param == paramNr);
     } else {
         const uint8_t is2ndPage = (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
         for (i = 0; i < 4; i++) {
-            if ((&menuPages[menu_activePage][activePage].bot1)[i + is2ndPage] == paramNr)
+            menu_cell_t cell =
+                menu_resolveCell(activePage, (uint8_t)(i + is2ndPage));
+            if (cell.kind == MENU_CELL_STATIC &&
+                cell.static_param == paramNr)
                 return 1;
         }
     }
@@ -1790,8 +2131,10 @@ static void menu_updateEndlessPotScales(void)
     for (uint8_t knobNr = 0; knobNr < ENDLESS_POT_COUNT; knobNr++) {
         uint8_t useDouble = 0;
         if (menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) {
-            uint16_t parNr = (&menuPages[menu_activePage][activePage].bot1)[knobNr + is2ndPage];
-            useDouble = (uint8_t)(parNr == PAR_MORPH);
+            menu_cell_t cell =
+                menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
+            useDouble = (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                                  cell.static_param == PAR_MORPH);
         }
         endlessPots_setDouble(knobNr, useDouble);
     }
@@ -1813,33 +2156,38 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     const uint8_t is2ndPage       = (uint8_t)((activeParameter > 3) ? 4 : 0);
-    const uint16_t parNr          = (&menuPages[menu_activePage][activePage].bot1)[knobNr + is2ndPage];
+    menu_cell_t cell =
+        menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
+    uint16_t value;
+    int32_t next;
 
-    if (parNr == PAR_NONE || parNr >= NUM_PARAMS) return;
+    if (menu_cellIsEmpty(&cell)) return;
+    if (cell.kind == MENU_CELL_STATIC &&
+        cell.static_param == PAR_RUNTIME_CPU_USE) return;
 
-    uint8_t *pv = menu_getParameterEditPtr(parNr);
-    int16_t inc = delta;
-
-    if (!pv) return;
-
-    int16_t next = (int16_t)(*pv) + inc;
-    if (next < 0) next = 0;
-    else if (next > 255) next = 255;
-    *pv = (uint8_t)next;
-
-    /* clamp by dtype */
-    switch (parameter_dtypes[parNr] & 0x0F) {
-    case DTYPE_0B255: break;
-    case DTYPE_1B16: if (*pv<1)*pv=1; else if(*pv>16)*pv=16; break;
-    case DTYPE_1B128: if (*pv<1)*pv=1; else if(*pv>128)*pv=128; break;
-    case DTYPE_0B15: if (*pv>15)*pv=15; break;
-    case DTYPE_MIX_FM: case DTYPE_ON_OFF: case DTYPE_0b1: if(*pv>1)*pv=1; break;
-    case DTYPE_MENU: { uint8_t n=getMaxEntriesForMenu((uint8_t)(parameter_dtypes[parNr]>>4)); if(*pv>=n)*pv=(uint8_t)(n-1); break; }
-    default: case DTYPE_0B127: if(*pv>127)*pv=127; break;
+    value = menu_cellDisplayValue(&cell);
+    if ((menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_VELO ||
+        (menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_LFO) {
+        if (value == INSTRUMENT_PARAM_INVALID && delta > 0)
+            value = 0u;
+        else if (value == INSTRUMENT_PARAM_INVALID)
+            return;
+        else {
+            next = (int32_t)value + (int32_t)delta;
+            if (next < 0) value = INSTRUMENT_PARAM_INVALID;
+            else if (next > 65535) value = 65535u;
+            else value = (uint16_t)next;
+        }
+    } else {
+        next = (int32_t)value + (int32_t)delta;
+        if (next < 0) next = 0;
+        else if (next > 65535) next = 65535;
+        value = (uint16_t)next;
     }
 
-    menu_sendEditedParameter(parNr, *pv);
-    menu_knobs_dirty = 1;
+    menu_clampCellValue(&cell, &value);
+    if (menu_cellCommitValue(&cell, value))
+        menu_knobs_dirty = 1;
 }
 
 /* Consume the knobs-dirty flag and repaint if set. Call once per main
@@ -1866,8 +2214,9 @@ static uint8_t menu_cpuUseWidgetVisible(void)
     if (menu_activePage != MENU_MIDI_PAGE)
         return 0;
     if (editModeActive) {
-        uint16_t parNr = (&menuPages[menu_activePage][activePage].bot1)[activeParameter];
-        return (uint8_t)(parNr == PAR_RUNTIME_CPU_USE);
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                         cell.static_param == PAR_RUNTIME_CPU_USE);
     }
     return (uint8_t)(activePage == 1u && activeParameter >= 4u);
 }
@@ -2104,8 +2453,10 @@ void menu_switchSubPage(uint8_t subPageNr)
             }
         } else {
             if (menu_activePage == MENU_MIDI_PAGE) {
+                menu_cell_t nextCell =
+                    menu_resolveCell((uint8_t)(activePage + 1u), 0u);
                 if (activePage < NUM_SUB_PAGES-1 &&
-                    menuPages[menu_activePage][activePage+1].top1 != TEXT_EMPTY)
+                    !menu_cellIsEmpty(&nextCell))
                     activePage++;
                 else
                     activePage = 0;
