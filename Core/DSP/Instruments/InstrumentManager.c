@@ -4,13 +4,20 @@
 #include "CymbalParameters.h"
 #include "HiHatParameters.h"
 #include "SceneData.h"
+#include "DrumVoice.h"
+#include "Snare.h"
+#include "CymbalVoice.h"
+#include "HiHat.h"
+#include "mixer.h"
 #include <string.h>
 
 /*
- * Registry entries contain immutable identity/metadata only.
+ * Registry entries contain the instrument-owned meaning of generic slot
+ * storage.
  *
- * Mutable endpoints and routing live in SceneData; DSP application lives in
- * Preset. This boundary keeps file/Menu lookup reusable for inactive Scenes.
+ * ParameterArray/SceneData allocate the amount of per-slot storage. These
+ * descriptors define what each storage cell means for a drum/snare/cymbal/hat
+ * slot and how the value reaches that instrument's runtime instance.
  */
 static const instrument_registry_entry_t instrument_registry[] = {
     { INSTRUMENT_TYPE_DRM, "drm", ".drm",
@@ -28,12 +35,13 @@ static char instrumentManager_lower(char c)
     return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
 }
 
-instrument_param_id_t instrumentParam_make(uint8_t slot, uint8_t local_param)
+instrument_param_id_t instrumentParam_make(uint8_t slot, uint8_t descriptor_index)
 {
-    if (slot >= INSTRUMENT_SLOT_COUNT || local_param >= INSTRUMENT_PARAM_COUNT)
+    if (slot >= INSTRUMENT_SLOT_COUNT ||
+        descriptor_index >= INSTRUMENT_PARAM_COUNT)
         return INSTRUMENT_PARAM_INVALID;
     return (instrument_param_id_t)((uint16_t)slot * INSTRUMENT_PARAM_COUNT +
-                                   local_param);
+                                   descriptor_index);
 }
 
 uint8_t instrumentParam_isVoiceParameter(instrument_param_id_t id)
@@ -108,18 +116,15 @@ uint8_t instrumentManager_filenameMatchesType(const char *filename,
 }
 
 const ParamDescriptor *instrumentManager_descriptor(instrument_type_t type,
-                                                     uint8_t local_param)
+                                                     uint8_t descriptor_index)
 {
     const instrument_registry_entry_t *entry =
         instrumentManager_registryEntry(type);
-    uint8_t i;
     if (!entry)
         return 0;
-    for (i = 0u; i < entry->descriptor_count; i++) {
-        if (entry->descriptors[i].local_param == local_param)
-            return &entry->descriptors[i];
-    }
-    return 0;
+    if (descriptor_index >= entry->descriptor_count)
+        return 0;
+    return &entry->descriptors[descriptor_index];
 }
 
 const ParamDescriptor *instrumentManager_descriptorByKey(instrument_type_t type,
@@ -137,21 +142,33 @@ const ParamDescriptor *instrumentManager_descriptorByKey(instrument_type_t type,
     return 0;
 }
 
-const ParamDescriptor *instrumentManager_menuDescriptor(instrument_type_t type,
-                                                         uint8_t page,
-                                                         uint8_t position)
+const ParamDescriptor *instrumentManager_descriptorIndexByKey(
+    instrument_type_t type, const char *file_key, uint8_t *index_out)
 {
     const instrument_registry_entry_t *entry =
         instrumentManager_registryEntry(type);
     uint8_t i;
-    if (!entry)
+    if (index_out)
+        *index_out = 0xffu;
+    if (!entry || !file_key)
         return 0;
     for (i = 0u; i < entry->descriptor_count; i++) {
-        if (entry->descriptors[i].menu_page == page &&
-            entry->descriptors[i].menu_position == position) {
+        if (strcmp(entry->descriptors[i].file_key, file_key) == 0) {
+            if (index_out)
+                *index_out = i;
             return &entry->descriptors[i];
         }
     }
+    return 0;
+}
+
+const ParamDescriptor *instrumentManager_menuDescriptor(instrument_type_t type,
+                                                         uint8_t page,
+                                                         uint8_t position)
+{
+    (void)type;
+    (void)page;
+    (void)position;
     return 0;
 }
 
@@ -166,27 +183,17 @@ void instrumentManager_resetSlot(struct kit_instrument_slot *raw_slot,
         return;
 
     /*
-     * Reset all three images together so a shorter replacement instrument
-     * cannot expose stale values from the old type. Supplementals use explicit
-     * off sentinels because zero is a valid canonical target.
+     * Reset all generic storage images together so a shorter replacement
+     * instrument cannot expose stale values from the old type.
      */
     memset(slot, 0, sizeof(*slot));
     slot->type = entry ? type : INSTRUMENT_TYPE_UNKNOWN;
-    slot->supplemental.velocity_target_param = INSTRUMENT_PARAM_INVALID;
-    slot->supplemental.lfo_target_param = INSTRUMENT_PARAM_INVALID;
     if (!entry)
         return;
     for (i = 0u; i < entry->descriptor_count; i++) {
-        const ParamDescriptor *descriptor = &entry->descriptors[i];
-        uint8_t local = descriptor->local_param;
-        if (descriptor->value_owner != INSTRUMENT_VALUE_PARAMETER_IMAGE)
-            continue;
-        slot->parameter_images.instrument_parameters[local] =
-            descriptor->default_value;
-        slot->parameter_images.morph_instrument_parameters[local] =
-            descriptor->default_value;
-        slot->parameter_images.morph_interpolation[local] =
-            descriptor->default_value;
+        slot->parameter_images.instrument_parameters[i] = 0u;
+        slot->parameter_images.morph_instrument_parameters[i] = 0u;
+        slot->parameter_images.morph_interpolation[i] = 0u;
     }
 }
 
@@ -206,10 +213,87 @@ uint8_t instrumentManager_targetValid(uint8_t scene_index,
     descriptor = instrumentManager_descriptor(slot->type,
                                                instrumentParam_local(id));
     if (!descriptor ||
-        descriptor->value_owner != INSTRUMENT_VALUE_PARAMETER_IMAGE) {
+        !(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
         return 0u;
     }
     return (use == INSTRUMENT_TARGET_MODULATION)
-        ? (uint8_t)descriptor->is_modulatable
-        : (uint8_t)descriptor->is_step_automatable;
+        ? (uint8_t)((descriptor->flags & INSTRUMENT_PARAM_FLAG_MODULATABLE) != 0u)
+        : (uint8_t)((descriptor->flags & INSTRUMENT_PARAM_FLAG_AUTOMATABLE) != 0u);
+}
+
+void *instrumentManager_runtimeInstance(uint8_t slot)
+{
+    switch (slot) {
+    case 0u:
+    case 1u:
+    case 2u:
+        return &voiceArray[slot];
+    case 3u:
+        return &snareVoice;
+    case 4u:
+        return &cymbalVoice;
+    case 5u:
+        return &hatVoice;
+    default:
+        return 0;
+    }
+}
+
+static void instrumentManager_writeParameter(Parameter parameter, uint16_t value)
+{
+    ptrValue shaped;
+
+    if (!parameter.ptr)
+        return;
+
+    shaped.itg = value;
+    shaped.flt = (float)value / 127.0f;
+
+    switch (parameter.type) {
+    case TYPE_UINT8:
+        *((uint8_t *)parameter.ptr) = (uint8_t)value;
+        break;
+    case TYPE_UINT32:
+        *((uint32_t *)parameter.ptr) = (uint32_t)value;
+        break;
+    case TYPE_FLT:
+    case TYPE_SPECIAL_F:
+    case TYPE_SPECIAL_P:
+    case TYPE_SPECIAL_FILTER_F:
+        *((float *)parameter.ptr) = shaped.flt;
+        break;
+    default:
+        break;
+    }
+}
+
+uint8_t instrumentManager_writeRuntime(uint8_t slot,
+                                       const ParamDescriptor *descriptor,
+                                       uint16_t value)
+{
+    void *instance;
+    Parameter parameter;
+
+    if (!descriptor)
+        return 0u;
+
+    switch (descriptor->runtime.kind) {
+    case INSTRUMENT_BIND_INSTANCE_OFFSET:
+        instance = instrumentManager_runtimeInstance(slot);
+        if (!instance)
+            return 0u;
+        parameter.ptr = (void *)((uint8_t *)instance + descriptor->runtime.offset);
+        parameter.type = descriptor->runtime.parameter_type;
+        instrumentManager_writeParameter(parameter, value);
+        return 1u;
+
+    case INSTRUMENT_BIND_SLOT_DECIMATION:
+        if (slot >= INSTRUMENT_SLOT_COUNT)
+            return 0u;
+        mixer_decimation_rate[slot] = (float)value / 127.0f;
+        return 1u;
+
+    default:
+        return 0u;
+    }
 }

@@ -7,7 +7,7 @@
 typedef struct {
     uint8_t scene_index;
     uint8_t slot;
-    uint8_t local_param;
+    uint8_t descriptor_index;
     uint8_t requested_amount;
     uint8_t pass_amount;
     uint16_t requested_generation;
@@ -39,7 +39,7 @@ static uint8_t presetMorph_interpolate(uint8_t a, uint8_t b, uint8_t position)
 static void presetMorph_beginPass(void)
 {
     morph_worker.slot = 0u;
-    morph_worker.local_param = 0u;
+    morph_worker.descriptor_index = 0u;
     morph_worker.pass_amount = morph_worker.requested_amount;
     morph_worker.pass_generation = morph_worker.requested_generation;
     morph_worker.active = 1u;
@@ -49,7 +49,7 @@ void presetMorph_init(void)
 {
     morph_worker.scene_index = 0u;
     morph_worker.slot = 0u;
-    morph_worker.local_param = 0u;
+    morph_worker.descriptor_index = 0u;
     morph_worker.requested_amount = 0u;
     morph_worker.pass_amount = 0u;
     morph_worker.requested_generation = 0u;
@@ -94,20 +94,20 @@ uint8_t presetMorph_tick(void)
         kit_instrument_slot_t *instrument =
             &scene->kit.instruments[morph_worker.slot];
 
-        while (morph_worker.local_param < INSTRUMENT_PARAM_COUNT) {
-            uint8_t local = morph_worker.local_param++;
+        while (morph_worker.descriptor_index < INSTRUMENT_PARAM_COUNT) {
+            uint8_t local = morph_worker.descriptor_index++;
             const ParamDescriptor *descriptor =
                 instrumentManager_descriptor(instrument->type, local);
-            uint8_t value;
+            uint16_t value;
             instrument_param_id_t id;
 
             if (!descriptor ||
-                descriptor->value_owner != INSTRUMENT_VALUE_PARAMETER_IMAGE) {
+                !(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
                 continue;
             }
             value = presetMorph_interpolate(
-                instrument->parameter_images.instrument_parameters[local],
-                instrument->parameter_images.morph_instrument_parameters[local],
+                (uint8_t)instrument->parameter_images.instrument_parameters[local],
+                (uint8_t)instrument->parameter_images.morph_instrument_parameters[local],
                 morph_worker.pass_amount);
             instrument->parameter_images.morph_interpolation[local] = value;
             id = instrumentParam_make(morph_worker.slot, local);
@@ -117,7 +117,7 @@ uint8_t presetMorph_tick(void)
             return 1u;
         }
         morph_worker.slot++;
-        morph_worker.local_param = 0u;
+        morph_worker.descriptor_index = 0u;
     }
 
     if (morph_worker.pass_generation != morph_worker.requested_generation) {

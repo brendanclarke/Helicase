@@ -67,6 +67,7 @@
 #include "spi_sd.h"
 #include "presetManager.h"
 #include "ParameterArray.h"
+#include "menu.h"
 #include "SampleMemory.h"
 #include "kitBrowser.h"
 #include "sequencer.h"
@@ -143,8 +144,8 @@ static fs_completion_cb_t completion_callback = NULL;
  * Kit save: 8 (name) + END_OF_SOUND_PARAMETERS bytes.
  * Globals save: NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS bytes.
  * Only one operation at a time, so one buffer suffices.
- * NUM_PARAMS=275, so worst case is currently 275 bytes. Use 320 for margin. */
-static uint8_t staging_buf[320];
+ * NUM_PARAMS is kept wide for descriptor-id compatibility; use 512 for margin. */
+static uint8_t staging_buf[512];
 static uint16_t staging_len = 0;
 
 /* Name buffer for load_name operation.
@@ -497,12 +498,7 @@ static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint8_t num)
 
 static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
 {
-    if (index >= PAR_VEL_DEST_1 && index <= PAR_VEL_DEST_6)
-        return 1;
-    if (index >= PAR_VOICE_LFO1 && index <= PAR_VOICE_LFO6)
-        return 1;
-    if (index >= PAR_TARGET_LFO1 && index <= PAR_TARGET_LFO6)
-        return 1;
+    (void)index;
     return 0;
 }
 
@@ -1130,7 +1126,6 @@ static void filesystem_loadKitDirectory_tick(void)
             return;
         }
         memcpy(preset_currentName, kit_slot_name[op_slot], 8);
-        parameter_values[PAR_VOICE_DECIMATION_ALL] = 127u;
         if (!afatfs_chdir(NULL))
             return;
         op_phase = 1;

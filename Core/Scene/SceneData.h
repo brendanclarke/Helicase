@@ -17,22 +17,14 @@
 #define SCENE_COUNT 1u
 
 typedef struct {
-    uint8_t instrument_parameters[INSTRUMENT_PARAM_COUNT];
-    uint8_t morph_instrument_parameters[INSTRUMENT_PARAM_COUNT];
-    uint8_t morph_interpolation[INSTRUMENT_PARAM_COUNT];
+    uint16_t instrument_parameters[INSTRUMENT_PARAM_COUNT];
+    uint16_t morph_instrument_parameters[INSTRUMENT_PARAM_COUNT];
+    uint16_t morph_interpolation[INSTRUMENT_PARAM_COUNT];
 } instrument_parameter_images_t;
-
-typedef struct {
-    instrument_param_id_t velocity_target_param;
-    uint8_t velocity_amount;
-    uint8_t lfo_target_voice;
-    instrument_param_id_t lfo_target_param;
-} instrument_supplemental_t;
 
 typedef struct kit_instrument_slot {
     instrument_type_t type;
     instrument_parameter_images_t parameter_images;
-    instrument_supplemental_t supplemental;
 } kit_instrument_slot_t;
 
 typedef struct {

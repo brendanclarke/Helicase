@@ -72,16 +72,8 @@ static INCCMZ uint8_t modNode_waveInterpActiveCount = 0u;
 
 static OscInfo* modNode_getWaveTargetOsc(uint16_t param)
 {
-	switch (param) {
-	case PAR_OSC_WAVE_DRUM1: return &voiceArray[0].osc;
-	case PAR_OSC_WAVE_DRUM2: return &voiceArray[1].osc;
-	case PAR_OSC_WAVE_DRUM3: return &voiceArray[2].osc;
-	case PAR_OSC_WAVE_SNARE: return &snareVoice.osc;
-	case PAR_WAVE1_CYM: return &cymbalVoice.osc;
-	case PAR_WAVE1_HH: return &hatVoice.osc;
-	default:
-		return 0;
-	}
+	(void)param;
+	return 0;
 }
 
 static uint8_t modNode_getMaxWaveformIndex(void)

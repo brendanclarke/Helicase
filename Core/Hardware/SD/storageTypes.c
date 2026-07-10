@@ -433,33 +433,32 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
     }
 
     {
+        uint8_t index;
         const ParamDescriptor *descriptor =
-            instrumentManager_descriptorByKey(state->expected_type, key);
-        uint8_t local;
+            instrumentManager_descriptorIndexByKey(state->expected_type, key,
+                                                   &index);
         if (!descriptor)
             return STORAGE_STATUS_OK;
         if (!slot || slot->type != state->expected_type)
             return STORAGE_STATUS_BAD_TYPE;
-        local = descriptor->local_param;
 
         /*
-         * Descriptor ownership directs the key into an endpoint image or a
-         * non-morphed supplemental field. Supplemental duplicates in [morph]
-         * are ignored so converted legacy files remain readable without
-         * accidentally creating a second routing endpoint.
+         * Descriptor index is the storage cell for this instrument type.
+         * ParameterArray only allocates the generic slot storage; the instrument
+         * descriptor defines what the cell means and how runtime application
+         * should interpret it. Non-morphable runtime bindings are ignored in
+         * [morph] so routing/target values keep a single endpoint.
          */
-        if (descriptor->value_owner == INSTRUMENT_VALUE_VELOCITY_TARGET ||
-            descriptor->value_owner == INSTRUMENT_VALUE_LFO_TARGET_PARAM) {
-            uint16_t target;
-            if (state->current_section != STORAGE_SECTION_PARAMS)
-                return STORAGE_STATUS_OK;
-            st = storage_parseU16(value, &target);
+        if (descriptor->runtime.kind == INSTRUMENT_BIND_VELOCITY_TARGET ||
+            descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_PARAM) {
+            uint16_t parsed16;
+            st = storage_parseU16(value, &parsed16);
             if (st != STORAGE_STATUS_OK)
                 return st;
-            if (descriptor->value_owner == INSTRUMENT_VALUE_VELOCITY_TARGET)
-                slot->supplemental.velocity_target_param = target;
-            else
-                slot->supplemental.lfo_target_param = target;
+            if (state->current_section == STORAGE_SECTION_MORPH) {
+                return STORAGE_STATUS_OK;
+            }
+            slot->parameter_images.instrument_parameters[index] = parsed16;
             state->seen_param_count++;
             return STORAGE_STATUS_OK;
         }
@@ -468,39 +467,30 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
         if (st != STORAGE_STATUS_OK)
             return st;
 
-        if (descriptor->value_owner == INSTRUMENT_VALUE_PARAMETER_IMAGE) {
-            if (state->current_section == STORAGE_SECTION_MORPH) {
-                slot->parameter_images.morph_instrument_parameters[local] = parsed;
-                state->seen_morph_count++;
-            } else {
-                slot->parameter_images.instrument_parameters[local] = parsed;
-                state->seen_param_count++;
-            }
-        } else if (state->current_section == STORAGE_SECTION_PARAMS) {
-            switch (descriptor->value_owner) {
-            case INSTRUMENT_VALUE_VELOCITY_AMOUNT:
-                slot->supplemental.velocity_amount = parsed;
-                break;
-            case INSTRUMENT_VALUE_LFO_TARGET_VOICE:
+        if (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE) {
                 /*
                  * Legacy converted kits can contain zero here because the old
-                 * flat PAR_VOICE_LFO byte was repaired only during apply.
-                 * SceneData now owns the stored supplemental field, so clamp it
+                 * flat LFO target voice byte was repaired only during apply.
+                 * SceneData now owns the generic storage cell, so clamp it
                  * while parsing. Clients are filesystem_loadKitDirectory_tick()
-                 * and Preset's later supplemental apply; affiliates are
-                 * parameter_values[PAR_VOICE_LFO*] and the LFO target resolver.
+                 * and Preset's later instrument-runtime apply.
                  */
                 if (parsed < 1u)
                     parsed = 1u;
                 else if (parsed > STORAGE_KIT_SLOT_COUNT)
                     parsed = STORAGE_KIT_SLOT_COUNT;
-                slot->supplemental.lfo_target_voice = parsed;
-                break;
-            default:
-                break;
-            }
-            state->seen_param_count++;
         }
+
+        if (state->current_section == STORAGE_SECTION_MORPH) {
+            if (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) {
+                slot->parameter_images.morph_instrument_parameters[index] = parsed;
+                state->seen_morph_count++;
+            }
+            return STORAGE_STATUS_OK;
+        }
+
+        slot->parameter_images.instrument_parameters[index] = parsed;
+        state->seen_param_count++;
     }
 
     return STORAGE_STATUS_OK;
@@ -524,9 +514,9 @@ storage_status_t storage_instrumentFinalize(const storage_instrument_state_t *st
 
 /* See storageTypes.h for the public contract.
  *
- * The fallback copies only descriptors owned by the parameter images.
- * Supplemental fields are not morph endpoints, and Scene MIDI settings live
- * outside the kit, so neither class is touched here.
+     * The fallback copies only descriptors flagged as morphable. Routing/target
+     * cells are single-endpoint runtime values and Scene MIDI settings live
+     * outside the kit, so neither class is touched here.
  */
 void storage_instrumentCopyMainToMorphFallback(storage_instrument_type_t type,
                                                uint8_t slot,
@@ -540,10 +530,9 @@ void storage_instrumentCopyMainToMorphFallback(storage_instrument_type_t type,
         return;
     for (i = 0u; i < entry->descriptor_count; i++) {
         const ParamDescriptor *descriptor = &entry->descriptors[i];
-        uint8_t local = descriptor->local_param;
-        if (descriptor->value_owner == INSTRUMENT_VALUE_PARAMETER_IMAGE) {
-            instrument->parameter_images.morph_instrument_parameters[local] =
-                instrument->parameter_images.instrument_parameters[local];
+        if (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) {
+            instrument->parameter_images.morph_instrument_parameters[i] =
+                instrument->parameter_images.instrument_parameters[i];
         }
     }
 }

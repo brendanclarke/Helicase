@@ -49,57 +49,63 @@ INSTRUMENT_PARAM_COUNT = 64
 INSTRUMENT_PARAM_INVALID = 0xFFFF
 CANONICAL_TARGET_KEYS = {"velo_mod_dest", "lfo_target_param"}
 
-# Stable local IDs copied from InstrumentManager.h.
-#
-# Why this table exists: the text converter runs outside the firmware and must
-# emit the same canonical slot*64+local IDs that storageTypes.c now parses for
-# supplemental target fields. Ordinary byte parameters are still copied from the
-# legacy payload, but velocity/LFO target parameters need this explicit local-ID
-# lookup to stop writing old modTargets[] indices into uint16_t Scene fields.
-LOCAL_ID_BY_FILE_KEY = {
-    "osc1_wave": 0,
-    "osc1_pitch_coarse": 1,
-    "osc1_pitch_fine": 2,
-    "osc2_wave": 3,
-    "osc2_pitch_coarse": 4,
-    "osc2_mod_amount": 5,
-    "osc3_wave": 6,
-    "noise_freq": 6,
-    "osc3_pitch_coarse": 7,
-    "osc1_noise_mix": 7,
-    "osc3_mod_amount": 8,
-    "osc2_mod_type": 9,
-    "filter_freq": 12,
-    "filter_reso": 13,
-    "filter_drive": 14,
-    "filter_type": 15,
-    "amp_envelope_attack": 16,
-    "amp_envelope_decay": 17,
-    "amp_envelope_decay_closed": 17,
-    "amp_envelope_decay_open": 18,
-    "amp_envelope_slope": 19,
-    "amp_attack_repeat": 20,
-    "pitch_envelope_decay": 21,
-    "pitch_envelope_amount": 22,
-    "pitch_envelope_slope": 23,
-    "instrument_vol": 24,
-    "instrument_pan": 25,
-    "instrument_drive": 26,
-    "instrument_decimation": 27,
-    "lfo_rate": 32,
-    "lfo_amount": 33,
-    "lfo_wave": 34,
-    "lfo_retrigger_voice": 35,
-    "lfo_sync": 36,
-    "lfo_offset": 37,
-    "velo_vol_on_off": 40,
-    "velo_mod_amount": 41,
-    "velo_mod_dest": 42,
-    "lfo_target_voice": 43,
-    "lfo_target_param": 44,
-    "transient_vol": 48,
-    "transient_wave": 49,
-    "transient_freq": 50,
+# Descriptor order is the generic storage index for each instrument type.
+# ParameterArray only allocates slot storage; the firmware's instrument files
+# define what each index means. This Python copy exists only so legacy
+# modTargets[] bytes can be converted into slot*64+descriptor_index references.
+DESCRIPTOR_KEYS = {
+    "DRUM": [
+        "osc1_wave", "osc1_pitch_coarse", "osc1_pitch_fine",
+        "osc2_wave", "osc2_pitch_coarse", "osc2_mod_amount",
+        "osc2_mod_type", "filter_freq", "filter_reso", "filter_drive",
+        "filter_type", "amp_envelope_attack", "amp_envelope_decay",
+        "amp_envelope_slope", "pitch_envelope_decay",
+        "pitch_envelope_amount", "pitch_envelope_slope", "instrument_vol",
+        "instrument_pan", "instrument_drive", "instrument_decimation",
+        "lfo_rate", "lfo_amount", "lfo_wave", "lfo_retrigger_voice",
+        "lfo_sync", "lfo_offset", "velo_vol_on_off", "velo_mod_amount",
+        "velo_mod_dest", "lfo_target_voice", "lfo_target_param",
+        "transient_wave", "transient_vol", "transient_freq",
+    ],
+    "SNARE": [
+        "osc1_wave", "osc1_pitch_coarse", "osc1_pitch_fine",
+        "noise_freq", "osc1_noise_mix", "filter_freq", "filter_reso",
+        "filter_drive", "filter_type", "amp_envelope_attack",
+        "amp_envelope_decay", "amp_envelope_slope", "amp_attack_repeat",
+        "pitch_envelope_decay", "pitch_envelope_amount",
+        "pitch_envelope_slope", "instrument_vol", "instrument_pan",
+        "instrument_drive", "instrument_decimation", "lfo_rate",
+        "lfo_amount", "lfo_wave", "lfo_retrigger_voice", "lfo_sync",
+        "lfo_offset", "velo_vol_on_off", "velo_mod_amount",
+        "velo_mod_dest", "lfo_target_voice", "lfo_target_param",
+        "transient_wave", "transient_vol", "transient_freq",
+    ],
+    "CYMBAL": [
+        "osc1_wave", "osc1_pitch_coarse", "osc1_pitch_fine",
+        "osc2_wave", "osc2_pitch_coarse", "osc2_mod_amount",
+        "osc3_wave", "osc3_pitch_coarse", "osc3_mod_amount",
+        "filter_freq", "filter_reso", "filter_drive", "filter_type",
+        "amp_envelope_attack", "amp_envelope_decay",
+        "amp_envelope_slope", "amp_attack_repeat", "instrument_vol",
+        "instrument_pan", "instrument_drive", "instrument_decimation",
+        "lfo_rate", "lfo_amount", "lfo_wave", "lfo_retrigger_voice",
+        "lfo_sync", "lfo_offset", "velo_vol_on_off", "velo_mod_amount",
+        "velo_mod_dest", "lfo_target_voice", "lfo_target_param",
+        "transient_wave", "transient_vol", "transient_freq",
+    ],
+    "HIHAT": [
+        "osc1_wave", "osc1_pitch_coarse", "osc1_pitch_fine",
+        "osc2_wave", "osc2_pitch_coarse", "osc2_mod_amount",
+        "osc3_wave", "osc3_pitch_coarse", "osc3_mod_amount",
+        "filter_freq", "filter_reso", "filter_drive", "filter_type",
+        "amp_envelope_attack", "amp_envelope_decay_closed",
+        "amp_envelope_decay_open", "amp_envelope_slope", "instrument_vol",
+        "instrument_pan", "instrument_drive", "instrument_decimation",
+        "lfo_rate", "lfo_amount", "lfo_wave", "lfo_retrigger_voice",
+        "lfo_sync", "lfo_offset", "velo_vol_on_off", "velo_mod_amount",
+        "velo_mod_dest", "lfo_target_voice", "lfo_target_param",
+        "transient_wave", "transient_vol", "transient_freq",
+    ],
 }
 
 # Legacy modTargets[] order copied from Core/Menu/Cc2Text.c.
@@ -656,25 +662,28 @@ def validate_param_renames(param_renames: dict[str, dict[str, str]]) -> None:
 def build_canonical_param_ids(
     param_renames: dict[str, dict[str, str]],
 ) -> dict[str, int]:
-    """Map legacy PAR_* names to canonical slot*64+local instrument IDs.
+    """Map legacy PAR_* names to canonical slot*64+descriptor-index IDs.
 
     The input side is the legacy ParameterArray symbol used by Pxxx.SND files;
-    the output side is the firmware's new instrument_param_id_t value. Clients:
-    legacy_target_to_canonical(), which converts old modTargets[] index bytes
-    for supplemental target fields only.
+    the output side is the firmware's current instrument_param_id_t value.
+    Clients: legacy_target_to_canonical(), which converts old modTargets[]
+    index bytes for target fields only.
     """
     canonical_by_param: dict[str, int] = {}
 
     for slot, param_rows in INSTRUMENT_PARAMS.items():
         section = INSTRUMENT_RENAME_SECTIONS[slot]
         renames = param_renames[section]
+        descriptor_index = {
+            key: index for index, key in enumerate(DESCRIPTOR_KEYS[section])
+        }
         for old_key, param_name in param_rows:
             file_key = renames[old_key]
-            local = LOCAL_ID_BY_FILE_KEY.get(file_key)
-            if local is None:
+            index = descriptor_index.get(file_key)
+            if index is None:
                 continue
             canonical_by_param[param_name] = (
-                (slot - 1) * INSTRUMENT_PARAM_COUNT + local
+                (slot - 1) * INSTRUMENT_PARAM_COUNT + index
             )
 
     return canonical_by_param

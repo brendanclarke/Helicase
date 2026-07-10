@@ -133,8 +133,9 @@ void    preset_applyLfoModTarget(uint8_t lfo, uint16_t targetParam);
  * Why these functions exist: root Kit directories now parse into
  * scene_t.kit.instruments rather than the old flat parameter_values[] buffer.
  * Preset is the boundary that knows how to turn that Scene-owned data into the
- * current DSP/Menu affiliates without leaking legacy PAR_* IDs into SceneData,
- * storageTypes, or InstrumentManager.
+ * current DSP runtime bindings without leaking legacy PAR_* IDs into SceneData,
+ * storageTypes, or InstrumentManager. The per-slot storage cell is the
+ * descriptor array index for that instrument type.
  *
  * Accessors/clients:
  * - storageTypes/filesystem populate Scene slots directly during load.
@@ -146,12 +147,12 @@ void    preset_applyLfoModTarget(uint8_t lfo, uint16_t targetParam);
  *   touching SceneData arrays directly.
  */
 uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
-                                      uint8_t local_param,
+                                      uint8_t descriptor_index,
                                       instrument_image_select_t image,
                                       uint8_t value,
                                       uint8_t record_automation);
 uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
-                                        uint8_t local_param, uint16_t value);
+                                        uint8_t descriptor_index, uint16_t value);
 uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
                                            uint8_t value);
@@ -159,7 +160,7 @@ uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
 void preset_applySceneSettings(uint8_t scene_index);
 
 /* Runtime chunked sound apply. preset_tickDrumsetApply() applies one Scene kit
-** slot's audio routing/supplemental affiliates per pass, then advances the
+** slot's audio routing and non-morph runtime cells per pass, then advances the
 ** presetMorphEngine parameter image dump until idle. The menu owns
 ** operation-specific UI/global follow-up after the tick function reports idle. */
 void    preset_startDrumsetApply(void);

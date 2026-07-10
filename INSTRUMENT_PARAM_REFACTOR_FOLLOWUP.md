@@ -263,3 +263,127 @@ Remaining caveat:
 - Kit save and ALL/performance serializers still use legacy flat arrays. This
   pass fixes root directory Kit load/application. Descriptor-driven directory
   Kit save and full container migration remain separate Phase 2 work.
+
+### 2026-07-10 - Instrument-owned runtime descriptor cutover
+
+Goal: rip out the false instrument-parameter identity layer and move sound
+parameter meaning out of `Core/Scene/Preset/ParameterArray.c` into the
+instrument files that actually own the DSP structs.
+
+Changed `Core/DSP/Instruments/InstrumentManager.h/.c`:
+
+- Removed the shared `INST_PARAM_*` semantic enum and the invented instrument
+  dtype/source scaffolding. The generic storage cell is now the descriptor array
+  index for the active instrument type.
+- Added `instrument_runtime_binding_t`, where an instrument descriptor can bind
+  a storage cell to an offset from that slot's runtime instrument instance.
+- Added runtime slot instance lookup and direct descriptor runtime writes. Slot
+  instance lookup is the only current place that knows slot 0..2 are drum
+  instances, slot 3 is snare, slot 4 is cymbal, and slot 5 is hi-hat.
+
+Changed `Core/DSP/Instruments/*/*Parameters.c`:
+
+- Rebuilt drum/snare/cymbal/hi-hat descriptor rows as the actual source of
+  truth: file key, literal short/long/category text, existing Menu dtype byte,
+  flags, and runtime binding.
+- Parameter meaning is now local to the instrument file. Example: a hi-hat
+  `osc2_pitch_coarse` row binds to `offsetof(HiHatVoice, modOsc.modNodeValue)`,
+  not a Preset-owned `PAR_*` value.
+
+Changed `Core/Scene/SceneData.h`:
+
+- Removed the separate supplemental struct. Instrument slot storage is generic
+  `uint16_t` cell arrays for main, morph, and interpolation images. Wider cells
+  allow target IDs such as `65535` without another side channel.
+
+Changed `Core/Scene/Preset/ParameterArray.c`:
+
+- Deleted the instrument DSP pointer table from Preset. `ParameterArray.c` now
+  only preserves the legacy flat array shell for old non-instrument callers.
+
+Changed `Core/Scene/Preset/presetManager.c` and `presetMorphEngine.c`:
+
+- Deleted the private canonical-to-legacy `PAR_*` adapter added in the previous
+  pass.
+- Runtime kit apply now resolves `slot + descriptor_index` through
+  `InstrumentManager` and writes the instrument-owned runtime binding directly.
+- Morph walks descriptor indices and skips rows not flagged morphable.
+
+Changed `Core/Hardware/SD/storageTypes.c/.h`:
+
+- Instrument file parsing now looks up a file key to a descriptor index and
+  writes that generic cell. It no longer routes keys through ownership enums or
+  supplemental fields.
+
+Changed `tools/convert_legacy_kits.py` and regenerated `SD_CARD/Kit/`:
+
+- Replaced the deleted fake local-ID table with descriptor-order key lists for
+  each instrument type.
+- Converted legacy modulation target indices to `slot * 64 + descriptor_index`
+  IDs.
+
+Intentional breakage / follow-up:
+
+- Runtime value shaping is now intentionally crude for many float bindings
+  (`value / 127.0f`). The old MIDI path applied special curves for pitch,
+  filter frequency, pan, envelopes, and modulation graph targets. Those should
+  come back as instrument-owned binding kinds or shapers, not as Preset-owned
+  `PAR_*` indirection.
+- Instrument Menu rendering still uses the old static `menuPages.h` /
+  `parameter_dtypes[]` path. The descriptors now contain enough text/dtype
+  metadata to move voice pages next.
+- Legacy ALL/performance save/load and old MIDI/modulation paths still know
+  about `PAR_*`. This pass deliberately stops root Kit instrument files from
+  depending on that layer.
+
+Validation:
+
+- `make -B` succeeds after the cutover.
+- `python3 tools/convert_legacy_kits.py` regenerated 31 root Kit folders.
+- A schema/range validation pass found 31 kits, 186 instrument files, and 0
+  errors.
+
+### 2026-07-10 - Removed flat sound ids from ParameterArray
+
+Changed `Core/Scene/Preset/ParameterArray.h`:
+
+- `enum ParamEnums` no longer contains voice/instrument sound ids such as
+  `PAR_COARSE1`, `PAR_FILTER_FREQ_1`, `PAR_VOICE_DECIMATION1`, or
+  `PAR_MIDI_NOTE1`.
+- The enum now keeps only non-sound menu/performance/pattern/global ids plus
+  the `END_OF_SOUND_PARAMETERS` sentinel.
+- `NUM_PARAMS` remains explicitly sized to 384. That is compatibility capacity,
+  not a sound parameter list: remaining MIDI/automation paths can still carry
+  descriptor-style ids above the small menu range, and shrinking the backing
+  `parameter_values[]` buffer produced compiler overflow warnings.
+- Increased `filesystem.c`'s existing staging buffer to 512 bytes because the
+  widened compatibility capacity makes the globals span larger than the old
+  320-byte assumption.
+
+Changed `Core/Menu/menu.c` and `Core/Menu/menuPages.h`:
+
+- Replaced the giant positional sound dtype table with designated dtype entries
+  for the surviving non-sound ids.
+- Blank-disabled the old static voice pages. They no longer reference deleted
+  flat sound ids; instrument pages need to be rebuilt from `ParamDescriptor`
+  rows.
+- Removed branches for deleted voice decimation, velocity target, LFO target,
+  and per-voice MIDI note parameters.
+
+Changed `Core/Menu/Cc2Text.c`:
+
+- Collapsed the old modulation target table to the placeholder entry. That
+  table was another hardcoded copy of the deleted sound parameter list.
+
+Changed `Core/Scene/Preset/presetManager.c` and `Core/DSPAudio/modulationNode.c`:
+
+- Removed compatibility writes to deleted `PAR_AUDIO_OUT*` and
+  `PAR_VOICE_DECIMATION*` mirrors. Mixer routing still applies directly from
+  Scene kit settings.
+- Made the legacy waveform-target lookup inert because it depended on deleted
+  waveform `PAR_*` ids. Descriptor-owned modulation targets need a fresh
+  implementation.
+
+Validation:
+
+- `make -B` succeeds after this cut.

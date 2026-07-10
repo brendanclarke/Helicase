@@ -106,15 +106,7 @@ static void menu_beginStorageMessage(const char *message)
 
 static void menu_normalizeSoundModTargets(uint8_t *values)
 {
-    uint8_t nmt = getNumModTargets();
-    uint8_t i;
-
-    for (i = 0; i < 6; i++) {
-        if (values[PAR_VEL_DEST_1 + i] >= nmt)
-            values[PAR_VEL_DEST_1 + i] = 0;
-        if (values[PAR_TARGET_LFO1 + i] >= nmt)
-            values[PAR_TARGET_LFO1 + i] = 0;
-    }
+    (void)values;
 }
 
 static void menu_finishGlobalApply(void)
@@ -206,8 +198,7 @@ static void menu_startSoundApply(uint8_t updateGap,
     if (audioCodec_renderCount == 0u) {
         preset_sendDrumsetParameters();
         if (updateGap) {
-            menu_TargetVoiceGapIndex = getModTargetGapIndex(
-                parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
+            menu_TargetVoiceGapIndex = 0u;
         }
         if (applyPerformanceGlobals) {
             menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
@@ -261,8 +252,7 @@ static void menu_finishSoundApply(void)
     menu_soundApplyActive = 0u;
 
     if (menu_soundApplyUpdateGap) {
-        menu_TargetVoiceGapIndex = getModTargetGapIndex(
-            parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
+        menu_TargetVoiceGapIndex = 0u;
     }
 
     if (menu_soundApplyApplyPerformanceGlobals) {
@@ -336,53 +326,6 @@ static uint8_t menu_tickSoundApply(void)
 
 static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
 {
-    if (paramNr >= PAR_VEL_DEST_1 && paramNr <= PAR_VEL_DEST_6) {
-        /*
-         * Velocity modulation destinations are Preset voice routing state.
-         *
-         * The old front-panel opcode path only converted a menu parameter into
-         * the same per-voice target write. Menu now resolves the mod target
-         * table and calls Preset directly.
-         *
-         * Inputs: paramNr selects voice 0..5, value indexes modTargets[].
-         * Output: Preset updates that voice's velocity modulation target.
-         * Risk: value must already be a valid menu/modTargets index, matching
-         * the historical menu contract.
-         */
-        uint8_t voiceNr = (uint8_t)(paramNr - PAR_VEL_DEST_1);
-        uint16_t target = modTargets[value].param;
-        preset_applyVelocityModTarget(voiceNr, target);
-        return;
-    }
-
-    if (paramNr >= PAR_VOICE_LFO1 && paramNr <= PAR_VOICE_LFO6) {
-        uint8_t lfoNr = (uint8_t)(paramNr - PAR_VOICE_LFO1);
-        uint8_t newTargVal = getModTargetIdxFromGapIdx((uint8_t)(value - 1u),
-                                                       menu_TargetVoiceGapIndex);
-        parameter_values[PAR_TARGET_LFO1 + lfoNr] = newTargVal;
-        value = newTargVal;
-        paramNr = (uint16_t)(PAR_TARGET_LFO1 + lfoNr);
-    }
-
-    if (paramNr >= PAR_TARGET_LFO1 && paramNr <= PAR_TARGET_LFO6) {
-        /*
-         * LFO modulation destinations are Preset modulation routing state.
-         *
-         * Menu keeps the target-gap helper because it is display/menu mapping
-         * logic. Preset receives the resolved parameter id and applies it to
-         * the sound engine directly, replacing the parser CC bridge.
-         *
-         * Inputs: paramNr selects LFO voice index, value indexes modTargets[].
-         * Output: Preset updates the LFO modulation target and Menu updates the
-         * cached target-gap index used by the voice LFO selector.
-         */
-        uint8_t lfoNr = (uint8_t)(paramNr - PAR_TARGET_LFO1);
-        uint16_t target = modTargets[value].param;
-        menu_TargetVoiceGapIndex = getModTargetGapIndex(value);
-        preset_applyLfoModTarget(lfoNr, target);
-        return;
-    }
-
     /*
      * Sound parameter writes now go straight to Preset.
      *
@@ -482,14 +425,6 @@ static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value)
      * active kit and morph endpoint into the same value, destroying morph range.
      */
     if (menu_paramUsesMorphView(paramNr)) {
-        if (paramNr >= PAR_VOICE_LFO1 && paramNr <= PAR_VOICE_LFO6) {
-            uint8_t lfoNr = (uint8_t)(paramNr - PAR_VOICE_LFO1);
-            uint8_t newTargVal = getModTargetIdxFromGapIdx((uint8_t)(value - 1u),
-                                                           menu_TargetVoiceGapIndex);
-            parameters2[PAR_TARGET_LFO1 + lfoNr] = newTargVal;
-        } else if (paramNr >= PAR_TARGET_LFO1 && paramNr <= PAR_TARGET_LFO6) {
-            menu_TargetVoiceGapIndex = getModTargetGapIndex(value);
-        }
         preset_morph(parameter_values[PAR_MORPH]);
         return;
     }
@@ -578,286 +513,59 @@ uint8_t parameters2[END_OF_SOUND_PARAMETERS];
 uint8_t voiceModeShowMorph = 0;
 
 /* -----------------------------------------------------------------------
-** Dtype table — exact port of original, PROGMEM removed
+** Dtype table
 ** ----------------------------------------------------------------------- */
 const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
-    /*PAR_NONE*/              DTYPE_0B127,
-    /*PAR_OSC_WAVE_DRUM1*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_OSC_WAVE_DRUM2*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_OSC_WAVE_DRUM3*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_OSC_WAVE_SNARE*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*NRPN_DATA_ENTRY_COARSE*/DTYPE_0B127,
-    /*PAR_WAVE1_CYM*/         DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE1_HH*/          DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_COARSE1*/           DTYPE_0B127,
-    /*PAR_FINE1*/             DTYPE_PM63,
-    /*PAR_COARSE2*/           DTYPE_0B127,
-    /*PAR_FINE2*/             DTYPE_PM63,
-    /*PAR_COARSE3*/           DTYPE_0B127,
-    /*PAR_FINE3*/             DTYPE_PM63,
-    /*PAR_COARSE4*/           DTYPE_0B127,
-    /*PAR_FINE4*/             DTYPE_PM63,
-    /*PAR_COARSE5*/           DTYPE_0B127,
-    /*PAR_FINE5*/             DTYPE_PM63,
-    /*PAR_COARSE6*/           DTYPE_0B127,
-    /*PAR_FINE6*/             DTYPE_PM63,
-    /*PAR_MOD_WAVE_DRUM1*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_MOD_WAVE_DRUM2*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_MOD_WAVE_DRUM3*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE2_CYM*/         DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE3_CYM*/         DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE2_HH*/          DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE3_HH*/          DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_NOISE_FREQ1*/       DTYPE_0B127,
-    /*PAR_MIX1*/              DTYPE_0B127,
-    /*PAR_MOD_OSC_F1_CYM*/   DTYPE_0B127,
-    /*PAR_MOD_OSC_F2_CYM*/   DTYPE_0B127,
-    /*PAR_MOD_OSC_GAIN1_CYM*/DTYPE_0B127,
-    /*PAR_MOD_OSC_GAIN2_CYM*/DTYPE_0B127,
-    /*PAR_MOD_OSC_F1*/        DTYPE_0B127,
-    /*PAR_MOD_OSC_F2*/        DTYPE_0B127,
-    /*PAR_MOD_OSC_GAIN1*/     DTYPE_0B127,
-    /*PAR_MOD_OSC_GAIN2*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_1*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_2*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_3*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_4*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_5*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_6*/     DTYPE_0B127,
-    /*PAR_RESO_1*/            DTYPE_0B127,
-    /*PAR_RESO_2*/            DTYPE_0B127,
-    /*PAR_RESO_3*/            DTYPE_0B127,
-    /*PAR_RESO_4*/            DTYPE_0B127,
-    /*PAR_RESO_5*/            DTYPE_0B127,
-    /*PAR_RESO_6*/            DTYPE_0B127,
-    /*PAR_VELOA1*/            DTYPE_0B127,
-    /*PAR_VELOD1*/            DTYPE_0B127,
-    /*PAR_VELOA2*/            DTYPE_0B127,
-    /*PAR_VELOD2*/            DTYPE_0B127,
-    /*PAR_VELOA3*/            DTYPE_0B127,
-    /*PAR_VELOD3*/            DTYPE_0B127,
-    /*PAR_VELOA4*/            DTYPE_0B127,
-    /*PAR_VELOD4*/            DTYPE_0B127,
-    /*PAR_VELOA5*/            DTYPE_0B127,
-    /*PAR_VELOD5*/            DTYPE_0B127,
-    /*PAR_VELOA6*/            DTYPE_0B127,
-    /*PAR_VELOD6_CLOSED*/     DTYPE_0B127,
-    /*PAR_VELOD6_OPEN*/       DTYPE_0B127,
-    /*PAR_VOL_SLOPE1*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE2*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE3*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE4*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE5*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE6*/        DTYPE_0B127,
-    /*PAR_REPEAT4*/           DTYPE_0B127,
-    /*PAR_REPEAT5*/           DTYPE_0B127,
-    /*PAR_MOD_EG1*/           DTYPE_0B127,
-    /*PAR_MOD_EG2*/           DTYPE_0B127,
-    /*PAR_MOD_EG3*/           DTYPE_0B127,
-    /*PAR_MOD_EG4*/           DTYPE_0B127,
-    /*PAR_MODAMNT1*/          DTYPE_0B127,
-    /*PAR_MODAMNT2*/          DTYPE_0B127,
-    /*PAR_MODAMNT3*/          DTYPE_0B127,
-    /*PAR_MODAMNT4*/          DTYPE_0B127,
-    /*PAR_PITCH_SLOPE1*/      DTYPE_0B127,
-    /*PAR_PITCH_SLOPE2*/      DTYPE_0B127,
-    /*PAR_PITCH_SLOPE3*/      DTYPE_0B127,
-    /*PAR_PITCH_SLOPE4*/      DTYPE_0B127,
-    /*PAR_FMAMNT1*/           DTYPE_0B127,
-    /*PAR_FM_FREQ1*/          DTYPE_0B127,
-    /*PAR_FMAMNT2*/           DTYPE_0B127,
-    /*PAR_FM_FREQ2*/          DTYPE_0B127,
-    /*PAR_FMAMNT3*/           DTYPE_0B127,
-    /*PAR_FM_FREQ3*/          DTYPE_0B127,
-    /*PAR_VOL1*/              DTYPE_0B127,
-    /*PAR_VOL2*/              DTYPE_0B127,
-    /*PAR_VOL3*/              DTYPE_0B127,
-    /*PAR_VOL4*/              DTYPE_0B127,
-    /*PAR_VOL5*/              DTYPE_0B127,
-    /*PAR_VOL6*/              DTYPE_0B127,
-    /*PAR_PAN1*/              DTYPE_PM63,
-    /*PAR_PAN2*/              DTYPE_PM63,
-    /*PAR_PAN3*/              DTYPE_PM63,
-    /*NRPN_FINE*/             DTYPE_0B127,
-    /*NRPN_COARSE*/           DTYPE_0B127,
-    /*PAR_PAN4*/              DTYPE_PM63,
-    /*PAR_PAN5*/              DTYPE_PM63,
-    /*PAR_PAN6*/              DTYPE_PM63,
-    /*PAR_DRIVE1*/            DTYPE_0B127,
-    /*PAR_DRIVE2*/            DTYPE_0B127,
-    /*PAR_DRIVE3*/            DTYPE_0B127,
-    /*PAR_SNARE_DISTORTION*/  DTYPE_0B127,
-    /*PAR_CYMBAL_DISTORTION*/ DTYPE_0B127,
-    /*PAR_HAT_DISTORTION*/    DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION1*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION2*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION3*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION4*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION5*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION6*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION_ALL*/DTYPE_0B127,
-    /*PAR_FREQ_LFO1*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO2*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO3*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO4*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO5*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO6*/         DTYPE_0B127,
-    /*PAR_AMOUNT_LFO1*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO2*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO3*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO4*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO5*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO6*/       DTYPE_0B127,
-    /*PAR_BANK_CHANGE*/       DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_1*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_2*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_3*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_4*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_5*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_6*/    DTYPE_0B127,
-    /*PAR_MIX_MOD_1*/         DTYPE_MIX_FM,
-    /*PAR_MIX_MOD_2*/         DTYPE_MIX_FM,
-    /*PAR_MIX_MOD_3*/         DTYPE_MIX_FM,
-    /*PAR_VOLUME_MOD_ON_OFF1*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF2*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF3*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF4*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF5*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF6*/DTYPE_ON_OFF,
-    /*PAR_VELO_MOD_AMT_1*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_2*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_3*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_4*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_5*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_6*/    DTYPE_0B127,
-    /*PAR_VEL_DEST_1*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_2*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_3*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_4*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_5*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_6*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_WAVE_LFO1*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO2*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO3*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO4*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO5*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO6*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_VOICE_LFO1*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO2*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO3*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO4*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO5*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO6*/        DTYPE_VOICE_LFO,
-    /*PAR_TARGET_LFO1*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO2*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO3*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO4*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO5*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO6*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_RETRIGGER_LFO1*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO2*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO3*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO4*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO5*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO6*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_SYNC_LFO1*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO2*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO3*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO4*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO5*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO6*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_OFFSET_LFO1*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO2*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO3*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO4*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO5*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO6*/       DTYPE_0B127,
-    /*PAR_FILTER_TYPE_1*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_2*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_3*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_4*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_5*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_6*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_TRANS1_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS2_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS3_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS4_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS5_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS6_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS1_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS2_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS3_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS4_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS5_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS6_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS1_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS2_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS3_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS4_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS5_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS6_FREQ*/       DTYPE_0B127,
-    /*PAR_AUDIO_OUT1*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT2*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT3*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT4*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT5*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT6*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_MIDI_NOTE1*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE2*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE3*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE4*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE5*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE6*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE7*/        DTYPE_NOTE_NAME,
-    /*PAR_ROLL*/              DTYPE_MENU|(MENU_ROLL_RATES<<4),
-    /*PAR_MORPH*/             DTYPE_0B255,
-    /*PAR_ACTIVE_STEP*/       DTYPE_0B127,
-    /*PAR_STEP_VOLUME*/       DTYPE_0B127,
-    /*PAR_STEP_PROB*/         DTYPE_0B127,
-    /*PAR_STEP_NOTE*/         DTYPE_NOTE_NAME,
-    /*PAR_EUKLID_LENGTH*/     DTYPE_1B128,
-    /*PAR_EUKLID_STEPS*/      DTYPE_1B128,
-    /*PAR_EUKLID_ROTATION*/   DTYPE_0B127,
-    /*PAR_AUTOM_TRACK*/       DTYPE_0b1,
-    /*PAR_P1_DEST*/           DTYPE_AUTOM_TARGET,
-    /*PAR_P2_DEST*/           DTYPE_AUTOM_TARGET,
-    /*PAR_P1_VAL*/            DTYPE_0B127,
-    /*PAR_P2_VAL*/            DTYPE_0B127,
-    /*PAR_SHUFFLE*/           DTYPE_0B127,
-    /*PAR_PATTERN_BEAT*/      DTYPE_0B127,
-    /*PAR_PATTERN_NEXT*/      DTYPE_MENU|(MENU_NEXT_PATTERN<<4),
-    /*PAR_TRACK_LENGTH*/      DTYPE_1B128,
-    /*PAR_POS_X*/             DTYPE_0B127,
-    /*PAR_POS_Y*/             DTYPE_0B127,
-    /*PAR_FLUX*/              DTYPE_0B127,
-    /*PAR_SOM_FREQ*/          DTYPE_0B127,
-    /*PAR_TRACK_ROTATION*/    DTYPE_1B16,
-    /*PAR_TRACK_SCALE*/       DTYPE_MENU|(MENU_TRACK_SCALE<<4),
-    /*PAR_TRACK_MIDI_CHAN*/   DTYPE_1B16,
-    /*PAR_TRACK_MIDI_NOTE*/   DTYPE_NOTE_NAME,
-    /*PAR_BPM*/               DTYPE_0B255,
-    /*PAR_MIDI_CHAN_1*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_2*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_3*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_4*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_5*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_6*/        DTYPE_1B16,
-    /*PAR_EXT_SYNC*/          DTYPE_MENU|(MENU_EXT_SYNC<<4),
-    /*PAR_FOLLOW*/            DTYPE_ON_OFF,
-    /*PAR_QUANTISATION*/      DTYPE_MENU|(MENU_SEQ_QUANT<<4),
-    /*PAR_SCREENSAVER_ON_OFF*/DTYPE_ON_OFF,
-    /*PAR_MIDI_MODE*/         DTYPE_MENU|(MENU_MIDI<<4),
-    /*PAR_MIDI_CHAN_7*/        DTYPE_1B16,
-    /*PAR_MIDI_ROUTING*/      DTYPE_MENU|(MENU_MIDI_ROUTING<<4),
-    /*PAR_MIDI_FILT_TX*/      DTYPE_MENU|(MENU_MIDI_FILTERING<<4),
-    /*PAR_MIDI_FILT_RX*/      DTYPE_MENU|(MENU_MIDI_FILTERING<<4),
-    /*PAR_PRESCALER_CLOCK_IN*/ DTYPE_MENU|(MENU_PPQ<<4),
-    /*PAR_PRESCALER_CLOCK_OUT1*/DTYPE_MENU|(MENU_PPQ<<4),
-    /*PAR_PRESCALER_CLOCK_OUT2*/DTYPE_MENU|(MENU_PPQ<<4),
-    /*PAR_TRIG_GATE_MODE*/    DTYPE_ON_OFF,
-    /*PAR_BAR_RESET_MODE*/    DTYPE_ON_OFF,
-    /*PAR_MIDI_CHAN_GLOBAL*/   DTYPE_1B16,
-    /*PAR_OSC_WAVE_INTERP*/   DTYPE_ON_OFF,
+    [PAR_NONE] = DTYPE_0B127,
+    [PAR_ROLL] = DTYPE_MENU|(MENU_ROLL_RATES<<4),
+    [PAR_MORPH] = DTYPE_0B255,
+    [PAR_ACTIVE_STEP] = DTYPE_0B127,
+    [PAR_STEP_VOLUME] = DTYPE_0B127,
+    [PAR_STEP_PROB] = DTYPE_0B127,
+    [PAR_STEP_NOTE] = DTYPE_NOTE_NAME,
+    [PAR_EUKLID_LENGTH] = DTYPE_1B128,
+    [PAR_EUKLID_STEPS] = DTYPE_1B128,
+    [PAR_EUKLID_ROTATION] = DTYPE_0B127,
+    [PAR_AUTOM_TRACK] = DTYPE_0b1,
+    [PAR_P1_DEST] = DTYPE_AUTOM_TARGET,
+    [PAR_P2_DEST] = DTYPE_AUTOM_TARGET,
+    [PAR_P1_VAL] = DTYPE_0B127,
+    [PAR_P2_VAL] = DTYPE_0B127,
+    [PAR_SHUFFLE] = DTYPE_0B127,
+    [PAR_PATTERN_BEAT] = DTYPE_0B127,
+    [PAR_PATTERN_NEXT] = DTYPE_MENU|(MENU_NEXT_PATTERN<<4),
+    [PAR_TRACK_LENGTH] = DTYPE_1B128,
+    [PAR_POS_X] = DTYPE_0B127,
+    [PAR_POS_Y] = DTYPE_0B127,
+    [PAR_FLUX] = DTYPE_0B127,
+    [PAR_SOM_FREQ] = DTYPE_0B127,
+    [PAR_TRACK_ROTATION] = DTYPE_1B16,
+    [PAR_TRACK_SCALE] = DTYPE_MENU|(MENU_TRACK_SCALE<<4),
+    [PAR_TRACK_MIDI_CHAN] = DTYPE_1B16,
+    [PAR_TRACK_MIDI_NOTE] = DTYPE_NOTE_NAME,
+    [PAR_BPM] = DTYPE_0B255,
+    [PAR_MIDI_CHAN_1] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_2] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_3] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_4] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_5] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_6] = DTYPE_1B16,
+    [PAR_EXT_SYNC] = DTYPE_MENU|(MENU_EXT_SYNC<<4),
+    [PAR_FOLLOW] = DTYPE_ON_OFF,
+    [PAR_QUANTISATION] = DTYPE_MENU|(MENU_SEQ_QUANT<<4),
+    [PAR_SCREENSAVER_ON_OFF] = DTYPE_ON_OFF,
+    [PAR_MIDI_MODE] = DTYPE_MENU|(MENU_MIDI<<4),
+    [PAR_MIDI_CHAN_7] = DTYPE_1B16,
+    [PAR_MIDI_ROUTING] = DTYPE_MENU|(MENU_MIDI_ROUTING<<4),
+    [PAR_MIDI_FILT_TX] = DTYPE_MENU|(MENU_MIDI_FILTERING<<4),
+    [PAR_MIDI_FILT_RX] = DTYPE_MENU|(MENU_MIDI_FILTERING<<4),
+    [PAR_PRESCALER_CLOCK_IN] = DTYPE_MENU|(MENU_PPQ<<4),
+    [PAR_PRESCALER_CLOCK_OUT1] = DTYPE_MENU|(MENU_PPQ<<4),
+    [PAR_PRESCALER_CLOCK_OUT2] = DTYPE_MENU|(MENU_PPQ<<4),
+    [PAR_TRIG_GATE_MODE] = DTYPE_ON_OFF,
+    [PAR_BAR_RESET_MODE] = DTYPE_ON_OFF,
+    [PAR_MIDI_CHAN_GLOBAL] = DTYPE_1B16,
+    [PAR_OSC_WAVE_INTERP] = DTYPE_ON_OFF,
 };
 
 /* -----------------------------------------------------------------------
@@ -1586,8 +1294,7 @@ static void menu_repaintGeneric(void)
                 numtostrps(&editDisplayBuffer[1][13], (int8_t)(curParmVal - 63));
                 break;
             case DTYPE_NOTE_NAME:
-                if (((parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7) ||
-                     parNr == PAR_TRACK_MIDI_NOTE) && curParmVal==0)
+                if (parNr == PAR_TRACK_MIDI_NOTE && curParmVal==0)
                     memcpy(&editDisplayBuffer[1][13], menuText_any, 3);
                 else
                     setNoteName(curParmVal, &editDisplayBuffer[1][13]);
@@ -1649,8 +1356,7 @@ static void menu_repaintGeneric(void)
                     numtostrps(valueAsText, (int8_t)(curParmVal - 63));
                     break;
                 case DTYPE_NOTE_NAME:
-                    if (((parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7) ||
-                         parNr == PAR_TRACK_MIDI_NOTE) && curParmVal==0)
+                    if (parNr == PAR_TRACK_MIDI_NOTE && curParmVal==0)
                         memcpy(valueAsText, menuText_any, 3);
                     else
                         setNoteName(curParmVal, valueAsText);
@@ -1718,50 +1424,6 @@ static void menu_encoderChangeParameter(int8_t inc)
     }
 
     switch (parameter_dtypes[paramNr] & 0x0F) {
-    case DTYPE_TARGET_SELECTION_VELO: {
-        uint8_t voiceNr = (uint8_t)(paramNr - PAR_VEL_DEST_1);
-        if (*paramValue < modTargetVoiceOffsets[voiceNr].start) {
-            *paramValue = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
-        } else if (*paramValue > modTargetVoiceOffsets[voiceNr].end) {
-            *paramValue = modTargetVoiceOffsets[voiceNr].end;
-        }
-        /* _SEQUENCER_ADD_SPIKE_: target message send is centralized below via
-        ** menu_sendSoundParameter(paramNr, *paramValue). */
-        break; }
-    case DTYPE_VOICE_LFO: {
-        if (*paramValue < 1) *paramValue = 1;
-        else if (*paramValue > 6) *paramValue = 6;
-        /* _SEQUENCER_ADD_SPIKE_: linked TARGET_LFO update/sending is handled in
-        ** menu_sendSoundParameter(), matching the AVR combined behavior. */
-        break; }
-    case DTYPE_TARGET_SELECTION_LFO:
-    {
-        uint8_t linkedVoice = menu_getParameterDisplayValue((uint16_t)(PAR_VOICE_LFO1+(paramNr - PAR_TARGET_LFO1)));
-        uint8_t voiceNr;
-        if (linkedVoice < 1u || linkedVoice > 6u)
-            linkedVoice = 1u;
-        voiceNr = (uint8_t)(linkedVoice - 1u);
-        if(*paramValue < (modTargetVoiceOffsets[voiceNr].start)) {
-            if(inc < 0) // going down, allow 0
-                *paramValue=0;
-            else // going up fix to start
-                *paramValue = (modTargetVoiceOffsets[voiceNr].start);
-        } else if (*paramValue > (modTargetVoiceOffsets[voiceNr].end)) {
-            *paramValue = (modTargetVoiceOffsets[voiceNr].end);
-        }
-        menu_TargetVoiceGapIndex = getModTargetGapIndex(*paramValue);
-        break;
-    }
-        // {
-        // uint8_t voiceNr = (uint8_t)(parameter_values[PAR_VOICE_LFO1 + (paramNr - PAR_TARGET_LFO1)] - 1);
-        // if (*paramValue < modTargetVoiceOffsets[voiceNr].start) {
-        //     *paramValue = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
-        // } else if (*paramValue > modTargetVoiceOffsets[voiceNr].end) {
-        //     *paramValue = modTargetVoiceOffsets[voiceNr].end;
-        // }
-        // menu_TargetVoiceGapIndex = getModTargetGapIndex(*paramValue);
-        // break; 
-        // }
     case DTYPE_AUTOM_TARGET: {
         uint8_t nmt = getNumModTargets();
         if (*paramValue >= nmt) *paramValue = (uint8_t)(nmt - 1);
@@ -2167,30 +1829,6 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 
     /* clamp by dtype */
     switch (parameter_dtypes[parNr] & 0x0F) {
-    case DTYPE_TARGET_SELECTION_VELO: {
-        uint8_t voiceNr = (uint8_t)(parNr - PAR_VEL_DEST_1);
-        if (*pv < modTargetVoiceOffsets[voiceNr].start) {
-            *pv = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
-        } else if (*pv > modTargetVoiceOffsets[voiceNr].end) {
-            *pv = modTargetVoiceOffsets[voiceNr].end;
-        }
-        break; }
-    case DTYPE_VOICE_LFO:
-        if (*pv < 1) *pv = 1;
-        else if (*pv > 6) *pv = 6;
-        break;
-    case DTYPE_TARGET_SELECTION_LFO: {
-        uint8_t linkedVoice = menu_getParameterDisplayValue((uint16_t)(PAR_VOICE_LFO1 + (parNr - PAR_TARGET_LFO1)));
-        uint8_t voiceNr;
-        if (linkedVoice < 1u || linkedVoice > 6u)
-            linkedVoice = 1u;
-        voiceNr = (uint8_t)(linkedVoice - 1u);
-        if (*pv < modTargetVoiceOffsets[voiceNr].start) {
-            *pv = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
-        } else if (*pv > modTargetVoiceOffsets[voiceNr].end) {
-            *pv = modTargetVoiceOffsets[voiceNr].end;
-        }
-        break; }
     case DTYPE_0B255: break;
     case DTYPE_1B16: if (*pv<1)*pv=1; else if(*pv>16)*pv=16; break;
     case DTYPE_1B128: if (*pv<1)*pv=1; else if(*pv>128)*pv=128; break;
@@ -2343,8 +1981,8 @@ void menu_pollPresetStatus(void)
          *
          * Why this differs from ALL/performance below: root Kit folders parse
          * instrument files into scene_t.kit, not parameter_values[]. Preset's
-         * chunked apply cursor mirrors Scene supplementals and image values
-         * into the legacy Menu/DSP affiliates as it works. Running the old
+         * chunked apply cursor applies descriptor-indexed runtime cells and
+         * image values as it works. Running the old
          * parameter_values[] normalizer here would inspect stale flat data
          * before the real loaded Scene data has been applied.
          */
@@ -2735,12 +2373,9 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
          * legacy per-voice note override is mirrored through Preset so existing
          * MIDI playback/input code still sees the edited note while the broader
          * Scene/Instrument ownership is pending.
-         */
+        */
         uint8_t track = menu_getActiveVoice();
-        uint16_t realParam = (uint16_t)(PAR_MIDI_NOTE1 + track);
         scene_setTrackMidiNote(menu_getViewedPattern(), track, value);
-        parameter_values[realParam] = value;
-        preset_applySoundParameter(realParam, value, 1);
         break;
     }
 
@@ -2842,23 +2477,6 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
 
     case PAR_MORPH:
         preset_morph(value);
-        break;
-
-    case PAR_VOICE_DECIMATION1:
-    case PAR_VOICE_DECIMATION2:
-    case PAR_VOICE_DECIMATION3:
-    case PAR_VOICE_DECIMATION4:
-    case PAR_VOICE_DECIMATION5:
-    case PAR_VOICE_DECIMATION6:
-    case PAR_VOICE_DECIMATION_ALL:
-        /*
-         * Voice decimation is a sound parameter even though it appears in the
-         * global/performance area. Preset owns sound-engine application, so the
-         * menu dispatches it directly there.
-         */
-        preset_applySoundParameter((uint16_t)(PAR_VOICE_DECIMATION1 +
-                                  (paramNr - PAR_VOICE_DECIMATION1)),
-                                  value, 1);
         break;
 
     case PAR_ROLL:
