@@ -2338,7 +2338,16 @@ void menu_pollPresetStatus(void)
             break;
         }
 
-        menu_normalizeSoundModTargets(parameter_values);
+        /*
+         * Directory Kit load completion is Scene-owned now.
+         *
+         * Why this differs from ALL/performance below: root Kit folders parse
+         * instrument files into scene_t.kit, not parameter_values[]. Preset's
+         * chunked apply cursor mirrors Scene supplementals and image values
+         * into the legacy Menu/DSP affiliates as it works. Running the old
+         * parameter_values[] normalizer here would inspect stale flat data
+         * before the real loaded Scene data has been applied.
+         */
         menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 0u, 0u,
                              FS_STALE_WARNING_NONE);
         break;

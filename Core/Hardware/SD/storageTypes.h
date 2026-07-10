@@ -168,8 +168,12 @@ void storage_instrumentStateInit(storage_instrument_state_t *state,
  *
  * Inputs: state, a NUL-terminated line, and the destination kit instrument
  * slot. Outputs: descriptor-routed writes to the correct main image, morph
- * image, or supplemental field, plus validation flags in state. Unknown keys
- * are ignored so future saves can add fields older firmware does not understand.
+ * image, or supplemental field, plus validation flags in state. LFO target
+ * voice is clamped into the valid 1..6 Scene-domain range while parsing
+ * because legacy converted files can carry the old zero placeholder. Unknown
+ * keys are ignored so future saves can add fields older firmware does not
+ * understand. Clients are filesystem_loadKitDirectory_tick() and Preset's
+ * later Scene-to-runtime apply bridge.
  */
 storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                                              const char *line,

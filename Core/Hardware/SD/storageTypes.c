@@ -482,6 +482,18 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                 slot->supplemental.velocity_amount = parsed;
                 break;
             case INSTRUMENT_VALUE_LFO_TARGET_VOICE:
+                /*
+                 * Legacy converted kits can contain zero here because the old
+                 * flat PAR_VOICE_LFO byte was repaired only during apply.
+                 * SceneData now owns the stored supplemental field, so clamp it
+                 * while parsing. Clients are filesystem_loadKitDirectory_tick()
+                 * and Preset's later supplemental apply; affiliates are
+                 * parameter_values[PAR_VOICE_LFO*] and the LFO target resolver.
+                 */
+                if (parsed < 1u)
+                    parsed = 1u;
+                else if (parsed > STORAGE_KIT_SLOT_COUNT)
+                    parsed = STORAGE_KIT_SLOT_COUNT;
                 slot->supplemental.lfo_target_voice = parsed;
                 break;
             default:

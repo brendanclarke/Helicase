@@ -88,6 +88,7 @@ SRCS = \
   Core/Menu/copyClearTools.c \
   Core/Menu/screensaver.c \
   Core/Scene/Preset/presetManager.c \
+  Core/Scene/Preset/presetMorphEngine.c \
   Core/Scene/Preset/ParameterArray.c \
   Core/Scene/SceneData.c \
   Core/DSP/Instruments/InstrumentManager.c \

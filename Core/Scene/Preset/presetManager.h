@@ -127,6 +127,24 @@ void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
 void    preset_applyVelocityModTarget(uint8_t voice, uint16_t targetParam);
 void    preset_applyLfoModTarget(uint8_t lfo, uint16_t targetParam);
 
+/*
+ * Scene-owned instrument mutation/apply API.
+ *
+ * Why these functions exist: root Kit directories now parse into
+ * scene_t.kit.instruments rather than the old flat parameter_values[] buffer.
+ * Preset is the boundary that knows how to turn that Scene-owned data into the
+ * current DSP/Menu affiliates without leaking legacy PAR_* IDs into SceneData,
+ * storageTypes, or InstrumentManager.
+ *
+ * Accessors/clients:
+ * - storageTypes/filesystem populate Scene slots directly during load.
+ * - menu.c load completion calls preset_startDrumsetApply(), which uses these
+ *   functions in bounded foreground chunks.
+ * - presetMorphEngine calls preset_applyInstrumentRuntimeValue() after it
+ *   rebuilds morph_interpolation[].
+ * - future Menu/MIDI descriptor editors should call the setters instead of
+ *   touching SceneData arrays directly.
+ */
 uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
                                       uint8_t local_param,
                                       instrument_image_select_t image,
@@ -140,10 +158,10 @@ uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
 uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
 void preset_applySceneSettings(uint8_t scene_index);
 
-/* Runtime chunked sound apply. preset_tickDrumsetApply() performs at most one
-** voice of modulation-routing work and returns non-zero while that pass did
-** foreground work. The menu owns operation-specific UI/global follow-up after
-** the tick function reports idle. */
+/* Runtime chunked sound apply. preset_tickDrumsetApply() applies one Scene kit
+** slot's audio routing/supplemental affiliates per pass, then advances the
+** presetMorphEngine parameter image dump until idle. The menu owns
+** operation-specific UI/global follow-up after the tick function reports idle. */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
 

@@ -43,6 +43,8 @@
 #include "HiHat.h"
 #include "Snare.h"
 #include "filesystem.h"
+#include "presetMorphEngine.h"
+#include "mixer.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -56,30 +58,27 @@ static volatile preset_op_type_t pm_completed_op = PRESET_OP_NONE;
 static volatile uint8_t          pm_request_slot = 0;
 static volatile uint8_t          pm_request_type = SAVE_TYPE_KIT;
 
-/* -----------------------------------------------------------------------
-** Morph state
-**
-** preset_morph() captures the latest requested value. preset_morphTick()
-** applies one sound-parameter slot per call. Each active pass uses a snapshot
-** morph value. Request/pass generations guarantee that the newest requested
-** morph value gets one complete non-cached pass before the job goes idle.
-** ----------------------------------------------------------------------- */
-static uint8_t  morph_active = 0;
-static uint8_t  morph_target_value = 0;
-static uint8_t  morph_pass_value = 0;
-static uint16_t morph_request_generation = 0;
-static uint16_t morph_pass_generation = 0;
-static uint16_t morph_index = 0;
-
 /* Runtime loaded-kit apply cursor.
-**
-** Kit/all/performance file completion used to send all six voices' velocity
-** and LFO modulation destinations in one foreground call. That was small but
-** bursty: every modNode_setDestination() mutates DSP graph state before the
-** main loop can return to audio_check_and_render(). The menu now starts this
-** cursor after audio is running and ticks one voice per foreground pass. */
+ *
+ * Why this changed: directory Kit files now parse into Scene-owned
+ * kit_instrument_slot_t images, while the legacy implementation only applied
+ * modulation routing from parameter_values[]. The cursor therefore owns the
+ * bounded post-load bridge from Scene state to current DSP affiliates.
+ *
+ * Inputs: preset_startDrumsetApply() selects the active Scene and arms the
+ * cursor. preset_tickDrumsetApply() advances at most one audio route,
+ * supplemental routing bundle, or Morph/image application per foreground pass.
+ *
+ * Outputs: mixer_audioRouting[], velocity/LFO modulation nodes, the
+ * parameter_values[] compatibility mirror, and the live DSP parameter structs
+ * are updated through existing Preset/MIDI apply APIs. Clients are menu.c load
+ * completion and boot-time synchronous apply. Affiliates are SceneData,
+ * InstrumentManager descriptors, presetMorphEngine, Cc2Text target maps, and
+ * the legacy ParameterArray/MidiParser backend.
+ */
 static uint8_t drumset_apply_active = 0;
 static uint8_t drumset_apply_voice = 0;
+static uint8_t preset_morph_initialized = 0;
 
 preset_status_t preset_getStatus(void)
 {
@@ -209,8 +208,228 @@ static fs_file_type_t preset_fileTypeFromSaveType(uint8_t what, uint8_t *hasName
     }
 }
 
+/* Ensure the Scene Morph worker exists before any compatibility wrapper uses it.
+ *
+ * Why this helper exists: preset_init() is present but the current boot path
+ * does not call it. Lazy initialization keeps the new Morph worker valid for
+ * boot kit load, menu Morph edits, MIDI Morph edits, and tests without making
+ * this bug fix depend on a separate main.c initialization reorder.
+ *
+ * Inputs: none. Output: presetMorph_init() has run exactly once. Clients are
+ * preset_init(), preset_morph(), and preset_startDrumsetApply().
+ */
+static void preset_ensureMorphInitialized(void)
+{
+    if (preset_morph_initialized)
+        return;
+    presetMorph_init();
+    preset_morph_initialized = 1u;
+}
+
+/* Translate a canonical instrument local ID back to the current legacy DSP ID.
+ *
+ * Why this adapter exists: SceneData/InstrumentManager now own stable
+ * slot-local IDs, but the live DSP write path still runs through
+ * preset_applySoundParameter(), midiParser_ccHandler(), and ParameterArray's
+ * legacy PAR_* bindings. Keeping this translation private to Preset prevents
+ * SceneData, storageTypes, and descriptors from growing DSP pointers or legacy
+ * storage knowledge while the backend migration is still in progress.
+ *
+ * Inputs: runtime instrument type, zero-based slot, and local parameter ID.
+ * Output: legacy PAR_* value below END_OF_SOUND_PARAMETERS, or
+ * END_OF_SOUND_PARAMETERS as an invalid sentinel. Clients are
+ * preset_applyInstrumentRuntimeValue(), supplemental target mirroring, and
+ * converter validation by source inspection.
+ */
+static uint16_t preset_legacyParamForLocal(instrument_type_t type,
+                                           uint8_t slot,
+                                           uint8_t local)
+{
+    switch (type) {
+    case INSTRUMENT_TYPE_DRM:
+        if (slot > 2u)
+            return END_OF_SOUND_PARAMETERS;
+        switch (local) {
+        case INST_PARAM_OSC1_WAVE:            return (uint16_t)(PAR_OSC_WAVE_DRUM1 + slot);
+        case INST_PARAM_OSC1_PITCH_COARSE:    return (uint16_t)(PAR_COARSE1 + (slot * 2u));
+        case INST_PARAM_OSC1_PITCH_FINE:      return (uint16_t)(PAR_FINE1 + (slot * 2u));
+        case INST_PARAM_OSC2_WAVE:            return (uint16_t)(PAR_MOD_WAVE_DRUM1 + slot);
+        case INST_PARAM_OSC2_PITCH_COARSE:    return (uint16_t)(PAR_FM_FREQ1 + (slot * 2u));
+        case INST_PARAM_OSC2_MOD_AMOUNT:      return (uint16_t)(PAR_FMAMNT1 + (slot * 2u));
+        case INST_PARAM_OSC2_MOD_TYPE:        return (uint16_t)(PAR_MIX_MOD_1 + slot);
+        case INST_PARAM_FILTER_FREQ:          return (uint16_t)(PAR_FILTER_FREQ_1 + slot);
+        case INST_PARAM_FILTER_RESO:          return (uint16_t)(PAR_RESO_1 + slot);
+        case INST_PARAM_FILTER_DRIVE:         return (uint16_t)(PAR_FILTER_DRIVE_1 + slot);
+        case INST_PARAM_FILTER_TYPE:          return (uint16_t)(PAR_FILTER_TYPE_1 + slot);
+        case INST_PARAM_AMP_ENV_ATTACK:       return (uint16_t)(PAR_VELOA1 + (slot * 2u));
+        case INST_PARAM_AMP_ENV_DECAY:        return (uint16_t)(PAR_VELOD1 + (slot * 2u));
+        case INST_PARAM_AMP_ENV_SLOPE:        return (uint16_t)(PAR_VOL_SLOPE1 + slot);
+        case INST_PARAM_PITCH_ENV_DECAY:      return (uint16_t)(PAR_MOD_EG1 + slot);
+        case INST_PARAM_PITCH_ENV_AMOUNT:     return (uint16_t)(PAR_MODAMNT1 + slot);
+        case INST_PARAM_PITCH_ENV_SLOPE:      return (uint16_t)(PAR_PITCH_SLOPE1 + slot);
+        case INST_PARAM_INSTRUMENT_VOL:       return (uint16_t)(PAR_VOL1 + slot);
+        case INST_PARAM_INSTRUMENT_PAN:       return (uint16_t)(PAR_PAN1 + slot);
+        case INST_PARAM_INSTRUMENT_DRIVE:     return (uint16_t)(PAR_DRIVE1 + slot);
+        case INST_PARAM_INSTRUMENT_DECIMATION:return (uint16_t)(PAR_VOICE_DECIMATION1 + slot);
+        case INST_PARAM_LFO_RATE:             return (uint16_t)(PAR_FREQ_LFO1 + slot);
+        case INST_PARAM_LFO_AMOUNT:           return (uint16_t)(PAR_AMOUNT_LFO1 + slot);
+        case INST_PARAM_LFO_WAVE:             return (uint16_t)(PAR_WAVE_LFO1 + slot);
+        case INST_PARAM_LFO_RETRIGGER:        return (uint16_t)(PAR_RETRIGGER_LFO1 + slot);
+        case INST_PARAM_LFO_SYNC:             return (uint16_t)(PAR_SYNC_LFO1 + slot);
+        case INST_PARAM_LFO_OFFSET:           return (uint16_t)(PAR_OFFSET_LFO1 + slot);
+        case INST_PARAM_VELO_VOL_ON_OFF:      return (uint16_t)(PAR_VOLUME_MOD_ON_OFF1 + slot);
+        case INST_PARAM_TRANSIENT_VOL:        return (uint16_t)(PAR_TRANS1_VOL + slot);
+        case INST_PARAM_TRANSIENT_WAVE:       return (uint16_t)(PAR_TRANS1_WAVE + slot);
+        case INST_PARAM_TRANSIENT_FREQ:       return (uint16_t)(PAR_TRANS1_FREQ + slot);
+        default:                              return END_OF_SOUND_PARAMETERS;
+        }
+
+    case INSTRUMENT_TYPE_SNR:
+        if (slot != 3u)
+            return END_OF_SOUND_PARAMETERS;
+        switch (local) {
+        case INST_PARAM_OSC1_WAVE:            return PAR_OSC_WAVE_SNARE;
+        case INST_PARAM_OSC1_PITCH_COARSE:    return PAR_COARSE4;
+        case INST_PARAM_OSC1_PITCH_FINE:      return PAR_FINE4;
+        case INST_PARAM_OSC3_WAVE_OR_NOISE_FREQ:  return PAR_NOISE_FREQ1;
+        case INST_PARAM_OSC3_PITCH_OR_NOISE_MIX:  return PAR_MIX1;
+        case INST_PARAM_FILTER_FREQ:          return PAR_FILTER_FREQ_4;
+        case INST_PARAM_FILTER_RESO:          return PAR_RESO_4;
+        case INST_PARAM_FILTER_DRIVE:         return PAR_FILTER_DRIVE_4;
+        case INST_PARAM_FILTER_TYPE:          return PAR_FILTER_TYPE_4;
+        case INST_PARAM_AMP_ENV_ATTACK:       return PAR_VELOA4;
+        case INST_PARAM_AMP_ENV_DECAY:        return PAR_VELOD4;
+        case INST_PARAM_AMP_ENV_SLOPE:        return PAR_VOL_SLOPE4;
+        case INST_PARAM_AMP_ATTACK_REPEAT:    return PAR_REPEAT4;
+        case INST_PARAM_PITCH_ENV_DECAY:      return PAR_MOD_EG4;
+        case INST_PARAM_PITCH_ENV_AMOUNT:     return PAR_MODAMNT4;
+        case INST_PARAM_PITCH_ENV_SLOPE:      return PAR_PITCH_SLOPE4;
+        case INST_PARAM_INSTRUMENT_VOL:       return PAR_VOL4;
+        case INST_PARAM_INSTRUMENT_PAN:       return PAR_PAN4;
+        case INST_PARAM_INSTRUMENT_DRIVE:     return PAR_SNARE_DISTORTION;
+        case INST_PARAM_INSTRUMENT_DECIMATION:return PAR_VOICE_DECIMATION4;
+        case INST_PARAM_LFO_RATE:             return PAR_FREQ_LFO4;
+        case INST_PARAM_LFO_AMOUNT:           return PAR_AMOUNT_LFO4;
+        case INST_PARAM_LFO_WAVE:             return PAR_WAVE_LFO4;
+        case INST_PARAM_LFO_RETRIGGER:        return PAR_RETRIGGER_LFO4;
+        case INST_PARAM_LFO_SYNC:             return PAR_SYNC_LFO4;
+        case INST_PARAM_LFO_OFFSET:           return PAR_OFFSET_LFO4;
+        case INST_PARAM_VELO_VOL_ON_OFF:      return PAR_VOLUME_MOD_ON_OFF4;
+        case INST_PARAM_TRANSIENT_VOL:        return PAR_TRANS4_VOL;
+        case INST_PARAM_TRANSIENT_WAVE:       return PAR_TRANS4_WAVE;
+        case INST_PARAM_TRANSIENT_FREQ:       return PAR_TRANS4_FREQ;
+        default:                              return END_OF_SOUND_PARAMETERS;
+        }
+
+    case INSTRUMENT_TYPE_CYM:
+        if (slot != 4u)
+            return END_OF_SOUND_PARAMETERS;
+        switch (local) {
+        case INST_PARAM_OSC1_WAVE:            return PAR_WAVE1_CYM;
+        case INST_PARAM_OSC1_PITCH_COARSE:    return PAR_COARSE5;
+        case INST_PARAM_OSC1_PITCH_FINE:      return PAR_FINE5;
+        case INST_PARAM_OSC2_WAVE:            return PAR_WAVE2_CYM;
+        case INST_PARAM_OSC2_PITCH_COARSE:    return PAR_MOD_OSC_F1_CYM;
+        case INST_PARAM_OSC2_MOD_AMOUNT:      return PAR_MOD_OSC_GAIN1_CYM;
+        case INST_PARAM_OSC3_WAVE_OR_NOISE_FREQ: return PAR_WAVE3_CYM;
+        case INST_PARAM_OSC3_PITCH_OR_NOISE_MIX: return PAR_MOD_OSC_F2_CYM;
+        case INST_PARAM_OSC3_MOD_AMOUNT:      return PAR_MOD_OSC_GAIN2_CYM;
+        case INST_PARAM_FILTER_FREQ:          return PAR_FILTER_FREQ_5;
+        case INST_PARAM_FILTER_RESO:          return PAR_RESO_5;
+        case INST_PARAM_FILTER_DRIVE:         return PAR_FILTER_DRIVE_5;
+        case INST_PARAM_FILTER_TYPE:          return PAR_FILTER_TYPE_5;
+        case INST_PARAM_AMP_ENV_ATTACK:       return PAR_VELOA5;
+        case INST_PARAM_AMP_ENV_DECAY:        return PAR_VELOD5;
+        case INST_PARAM_AMP_ENV_SLOPE:        return PAR_VOL_SLOPE5;
+        case INST_PARAM_AMP_ATTACK_REPEAT:    return PAR_REPEAT5;
+        case INST_PARAM_INSTRUMENT_VOL:       return PAR_VOL5;
+        case INST_PARAM_INSTRUMENT_PAN:       return PAR_PAN5;
+        case INST_PARAM_INSTRUMENT_DRIVE:     return PAR_CYMBAL_DISTORTION;
+        case INST_PARAM_INSTRUMENT_DECIMATION:return PAR_VOICE_DECIMATION5;
+        case INST_PARAM_LFO_RATE:             return PAR_FREQ_LFO5;
+        case INST_PARAM_LFO_AMOUNT:           return PAR_AMOUNT_LFO5;
+        case INST_PARAM_LFO_WAVE:             return PAR_WAVE_LFO5;
+        case INST_PARAM_LFO_RETRIGGER:        return PAR_RETRIGGER_LFO5;
+        case INST_PARAM_LFO_SYNC:             return PAR_SYNC_LFO5;
+        case INST_PARAM_LFO_OFFSET:           return PAR_OFFSET_LFO5;
+        case INST_PARAM_VELO_VOL_ON_OFF:      return PAR_VOLUME_MOD_ON_OFF5;
+        case INST_PARAM_TRANSIENT_VOL:        return PAR_TRANS5_VOL;
+        case INST_PARAM_TRANSIENT_WAVE:       return PAR_TRANS5_WAVE;
+        case INST_PARAM_TRANSIENT_FREQ:       return PAR_TRANS5_FREQ;
+        default:                              return END_OF_SOUND_PARAMETERS;
+        }
+
+    case INSTRUMENT_TYPE_HAT:
+        if (slot != 5u)
+            return END_OF_SOUND_PARAMETERS;
+        switch (local) {
+        case INST_PARAM_OSC1_WAVE:            return PAR_WAVE1_HH;
+        case INST_PARAM_OSC1_PITCH_COARSE:    return PAR_COARSE6;
+        case INST_PARAM_OSC1_PITCH_FINE:      return PAR_FINE6;
+        case INST_PARAM_OSC2_WAVE:            return PAR_WAVE2_HH;
+        case INST_PARAM_OSC2_PITCH_COARSE:    return PAR_MOD_OSC_F1;
+        case INST_PARAM_OSC2_MOD_AMOUNT:      return PAR_MOD_OSC_GAIN1;
+        case INST_PARAM_OSC3_WAVE_OR_NOISE_FREQ: return PAR_WAVE3_HH;
+        case INST_PARAM_OSC3_PITCH_OR_NOISE_MIX: return PAR_MOD_OSC_F2;
+        case INST_PARAM_OSC3_MOD_AMOUNT:      return PAR_MOD_OSC_GAIN2;
+        case INST_PARAM_FILTER_FREQ:          return PAR_FILTER_FREQ_6;
+        case INST_PARAM_FILTER_RESO:          return PAR_RESO_6;
+        case INST_PARAM_FILTER_DRIVE:         return PAR_FILTER_DRIVE_6;
+        case INST_PARAM_FILTER_TYPE:          return PAR_FILTER_TYPE_6;
+        case INST_PARAM_AMP_ENV_ATTACK:       return PAR_VELOA6;
+        case INST_PARAM_AMP_ENV_DECAY:        return PAR_VELOD6_CLOSED;
+        case INST_PARAM_AMP_ENV_DECAY_OPEN:   return PAR_VELOD6_OPEN;
+        case INST_PARAM_AMP_ENV_SLOPE:        return PAR_VOL_SLOPE6;
+        case INST_PARAM_INSTRUMENT_VOL:       return PAR_VOL6;
+        case INST_PARAM_INSTRUMENT_PAN:       return PAR_PAN6;
+        case INST_PARAM_INSTRUMENT_DRIVE:     return PAR_HAT_DISTORTION;
+        case INST_PARAM_INSTRUMENT_DECIMATION:return PAR_VOICE_DECIMATION6;
+        case INST_PARAM_LFO_RATE:             return PAR_FREQ_LFO6;
+        case INST_PARAM_LFO_AMOUNT:           return PAR_AMOUNT_LFO6;
+        case INST_PARAM_LFO_WAVE:             return PAR_WAVE_LFO6;
+        case INST_PARAM_LFO_RETRIGGER:        return PAR_RETRIGGER_LFO6;
+        case INST_PARAM_LFO_SYNC:             return PAR_SYNC_LFO6;
+        case INST_PARAM_LFO_OFFSET:           return PAR_OFFSET_LFO6;
+        case INST_PARAM_VELO_VOL_ON_OFF:      return PAR_VOLUME_MOD_ON_OFF6;
+        case INST_PARAM_TRANSIENT_VOL:        return PAR_TRANS6_VOL;
+        case INST_PARAM_TRANSIENT_WAVE:       return PAR_TRANS6_WAVE;
+        case INST_PARAM_TRANSIENT_FREQ:       return PAR_TRANS6_FREQ;
+        default:                              return END_OF_SOUND_PARAMETERS;
+        }
+
+    default:
+        return END_OF_SOUND_PARAMETERS;
+    }
+}
+
+static uint16_t preset_legacyParamForInstrumentId(uint8_t scene_index,
+                                                  instrument_param_id_t id)
+{
+    uint8_t slot;
+    const kit_instrument_slot_t *instrument;
+
+    if (!instrumentParam_isVoiceParameter(id))
+        return END_OF_SOUND_PARAMETERS;
+    slot = instrumentParam_slot(id);
+    instrument = scene_instrumentSlotConst(scene_index, slot);
+    if (!instrument)
+        return END_OF_SOUND_PARAMETERS;
+    return preset_legacyParamForLocal(instrument->type, slot,
+                                      instrumentParam_local(id));
+}
+
+static uint8_t preset_modTargetIndexForCanonical(uint8_t scene_index,
+                                                 instrument_param_id_t id)
+{
+    uint16_t legacy = preset_legacyParamForInstrumentId(scene_index, id);
+    if (legacy >= END_OF_SOUND_PARAMETERS)
+        return 0u;
+    return paramToModTarget[legacy];
+}
+
 /* -----------------------------------------------------------------------
-** preset_init — no-op.  Filesystem mount handled by asyncfatfs.
+** preset_init — reset Preset async state and initialize Scene-owned morph
+** application helpers. Filesystem mount is still handled by asyncfatfs.
 ** ----------------------------------------------------------------------- */
 void preset_init(void)
 {
@@ -218,6 +437,7 @@ void preset_init(void)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_KIT;
+    preset_ensureMorphInitialized();
 }
 
 void preset_applyVelocityModTarget(uint8_t voice, uint16_t targetParam)
@@ -329,53 +549,256 @@ void preset_applySoundParameter(uint16_t paramNr, uint8_t value,
         seq_recordAutomation(menu_getActiveVoice(), automationDest, value);
 }
 
-/* Apply one loaded kit voice's modulation routing.
-**
-** This helper is deliberately one voice wide so runtime kit/all/performance
-** load completion can spread DSP graph mutations across main-loop passes.
-** The synchronous wrapper below still calls all six voices before audio starts,
-** preserving boot behavior and legacy call sites.
-**
-** FrontPanelParser removal note: this function used to prepare high/low packed
-** protocol fragments for velocity/LFO target changes. Those locals remain only
-** to preserve the exact translation points while the direct Preset helpers are
-** introduced; the actual state change is now preset_applyVelocityModTarget()
-** and preset_applyLfoModTarget(). Once the sound engine has a fully typed
-** parameter API, the unused upper/lower compatibility calculations can be
-** removed in a separate cleanup. */
-static void preset_applyDrumsetVoice(uint8_t voice)
+static uint8_t preset_applyInstrumentRuntimeValueInternal(uint8_t scene_index,
+                                                          instrument_param_id_t id,
+                                                          uint8_t value,
+                                                          uint8_t recordAutomation)
 {
-    uint8_t value;
-    uint8_t upper;
-    uint8_t lower;
+    uint16_t legacy_param = preset_legacyParamForInstrumentId(scene_index, id);
+    if (legacy_param >= END_OF_SOUND_PARAMETERS)
+        return 0u;
+    if (scene_index != scene_getActiveIndex())
+        return 1u;
 
-    if (voice >= 6u)
-        return;
+    /*
+     * Scene-owned images are the source of truth, but current DSP code still
+     * uses the legacy Preset/MIDI parameter backend. This single adapter keeps
+     * parameter_values[] coherent for Menu display and applies the byte to the
+     * existing voice structs. Clients are presetMorphEngine, loaded-kit apply,
+     * and typed Menu/external-control setters.
+     */
+    preset_applySoundParameter(legacy_param, value, recordAutomation);
+    return 1u;
+}
 
-    /* Loaded VELO destinations are stored as modTargets[] indices. The DSP
-    ** mod node needs the destination parameter number packed in the legacy
-    ** high/low protocol shape, so translate once at apply time. */
-    value = (uint8_t)(modTargets[parameter_values[PAR_VEL_DEST_1 + voice]].param);
-    upper = (uint8_t)(((value & 0x80u) >> 7) | ((voice & 0x3fu) << 1));
-    lower = (uint8_t)(value & 0x7fu);
-    (void)upper;
-    (void)lower;
-    preset_applyVelocityModTarget(voice, value);
+uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
+                                           instrument_param_id_t id,
+                                           uint8_t value)
+{
+    /*
+     * Public runtime apply for one canonical instrument parameter.
+     *
+     * Inputs: Scene index, canonical slot-local instrument ID, and byte value.
+     * Output: active Scene values are mirrored into the legacy DSP backend;
+     * inactive Scene calls validate but do not mutate live DSP state. Accessors
+     * and affiliates: SceneData supplies slot/type lookup, InstrumentManager
+     * supplies canonical ID helpers, and preset_applySoundParameter() remains
+     * the temporary ParameterArray/MidiParser adapter.
+     */
+    return preset_applyInstrumentRuntimeValueInternal(scene_index, id, value, 0u);
+}
 
-    /* Old or malformed files can hold an invalid target-voice number. Clamp
-    ** before resolving the LFO destination so the later UI and mod-routing
-    ** paths agree on the repaired value. */
-    if (parameter_values[PAR_VOICE_LFO1 + voice] < 1u ||
-        parameter_values[PAR_VOICE_LFO1 + voice] > 6u) {
-        parameter_values[PAR_VOICE_LFO1 + voice] = 1u;
+uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
+                                      uint8_t local_param,
+                                      instrument_image_select_t image,
+                                      uint8_t value,
+                                      uint8_t record_automation)
+{
+    kit_instrument_slot_t *instrument = scene_instrumentSlot(scene_index, slot);
+    const ParamDescriptor *descriptor;
+    if (!instrument)
+        return 0u;
+
+    descriptor = instrumentManager_descriptor(instrument->type, local_param);
+    if (!descriptor ||
+        descriptor->value_owner != INSTRUMENT_VALUE_PARAMETER_IMAGE) {
+        return 0u;
+    }
+    if (value < descriptor->min_value)
+        value = descriptor->min_value;
+    if (value > descriptor->max_value)
+        value = descriptor->max_value;
+
+    /*
+     * Typed endpoint setter.
+     *
+     * Why this exists: Menu, MIDI translation, tests, and future instrument
+     * import should not write the Scene arrays directly. The setter enforces
+     * descriptor ownership/range, chooses the persisted endpoint, and schedules
+     * Morph interpolation so the runtime image and DSP backend follow the
+     * Scene state. Affiliate code: presetMorphEngine owns
+     * morph_interpolation[], while preset_applyInstrumentRuntimeValueInternal()
+     * owns the temporary legacy DSP mirror.
+     */
+    if (image == INSTRUMENT_IMAGE_MORPH) {
+        instrument->parameter_images.morph_instrument_parameters[local_param] = value;
+    } else {
+        instrument->parameter_images.instrument_parameters[local_param] = value;
     }
 
-    value = (uint8_t)(modTargets[parameter_values[PAR_TARGET_LFO1 + voice]].param);
-    upper = (uint8_t)(((value & 0x80u) >> 7) | ((voice & 0x3fu) << 1));
-    lower = (uint8_t)(value & 0x7fu);
-    (void)upper;
-    (void)lower;
-    preset_applyLfoModTarget(voice, value);
+    if (scene_index == scene_getActiveIndex()) {
+        scene_t *scene = scene_get(scene_index);
+        preset_ensureMorphInitialized();
+        if (record_automation && image == INSTRUMENT_IMAGE_MAIN &&
+            scene && scene->settings.morph_amount == 0u) {
+            (void)preset_applyInstrumentRuntimeValueInternal(
+                scene_index,
+                instrumentParam_make(slot, local_param),
+                value,
+                1u);
+        }
+        presetMorph_request(scene_index,
+                            scene ? scene->settings.morph_amount : 0u);
+    }
+    return 1u;
+}
+
+uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
+                                        uint8_t local_param, uint16_t value)
+{
+    kit_instrument_slot_t *instrument = scene_instrumentSlot(scene_index, slot);
+    const ParamDescriptor *descriptor;
+    if (!instrument)
+        return 0u;
+
+    descriptor = instrumentManager_descriptor(instrument->type, local_param);
+    if (!descriptor)
+        return 0u;
+
+    /*
+     * Supplemental setter for non-morphed instrument routing values.
+     *
+     * These fields live beside the three parameter images because they are not
+     * Morph endpoints. The function stores canonical Scene state first, then
+     * mirrors active-Scene values into the legacy UI/DSP affiliates that still
+     * expect PAR_VEL_DEST/PAR_VOICE_LFO/PAR_TARGET_LFO byte slots.
+     */
+    switch (descriptor->value_owner) {
+    case INSTRUMENT_VALUE_VELOCITY_AMOUNT:
+        if (value > 127u)
+            value = 127u;
+        instrument->supplemental.velocity_amount = (uint8_t)value;
+        if (scene_index == scene_getActiveIndex())
+            preset_applySoundParameter((uint16_t)(PAR_VELO_MOD_AMT_1 + slot),
+                                       (uint8_t)value, 0u);
+        return 1u;
+
+    case INSTRUMENT_VALUE_VELOCITY_TARGET:
+        instrument->supplemental.velocity_target_param = value;
+        if (scene_index == scene_getActiveIndex()) {
+            uint16_t legacy_target =
+                preset_legacyParamForInstrumentId(scene_index, value);
+            uint8_t target_index =
+                preset_modTargetIndexForCanonical(scene_index, value);
+            parameter_values[PAR_VEL_DEST_1 + slot] = target_index;
+            if (legacy_target < END_OF_SOUND_PARAMETERS)
+                preset_applyVelocityModTarget(slot, legacy_target);
+        }
+        return 1u;
+
+    case INSTRUMENT_VALUE_LFO_TARGET_VOICE:
+        if (value < 1u)
+            value = 1u;
+        if (value > INSTRUMENT_SLOT_COUNT)
+            value = INSTRUMENT_SLOT_COUNT;
+        instrument->supplemental.lfo_target_voice = (uint8_t)value;
+        if (scene_index == scene_getActiveIndex())
+            parameter_values[PAR_VOICE_LFO1 + slot] = (uint8_t)value;
+        return 1u;
+
+    case INSTRUMENT_VALUE_LFO_TARGET_PARAM:
+        instrument->supplemental.lfo_target_param = value;
+        if (scene_index == scene_getActiveIndex()) {
+            uint16_t legacy_target =
+                preset_legacyParamForInstrumentId(scene_index, value);
+            uint8_t target_index =
+                preset_modTargetIndexForCanonical(scene_index, value);
+            parameter_values[PAR_TARGET_LFO1 + slot] = target_index;
+            if (legacy_target < END_OF_SOUND_PARAMETERS)
+                preset_applyLfoModTarget(slot, legacy_target);
+        }
+        return 1u;
+
+    default:
+        return 0u;
+    }
+}
+
+uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+    uint8_t route;
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+
+    /*
+     * Apply one Scene-owned kit routing byte.
+     *
+     * Input is a Scene/slot pair; output is the active mixer routing and
+     * parameter_values[] compatibility byte. The mixer array remains the DSP
+     * affiliate until routing is absorbed into a typed Scene apply backend.
+     * Clients are the bounded loaded-kit apply cursor and future kit-setting
+     * UI edits.
+     */
+    route = scene->kit.settings.audio_out[slot];
+    if (route > MIXER_ROUTING_DAC2_R)
+        route = MIXER_ROUTING_DAC1_STEREO;
+    if (scene_index == scene_getActiveIndex()) {
+        mixer_audioRouting[slot] = route;
+        parameter_values[PAR_AUDIO_OUT1 + slot] = route;
+    }
+    return 1u;
+}
+
+void preset_applySceneSettings(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+    if (!scene || scene_index != scene_getActiveIndex())
+        return;
+
+    /*
+     * Apply Scene-wide settings that still have legacy mirrors.
+     *
+     * Morph amount and global voice decimation are Scene settings, while the
+     * live Menu/DSP affiliates still read parameter_values[PAR_MORPH] and
+     * PAR_VOICE_DECIMATION_ALL. This function keeps those mirrors coherent
+     * after a Scene/Kit load without giving SceneData knowledge of Menu IDs.
+     */
+    parameter_values[PAR_MORPH] = scene->settings.morph_amount;
+    parameter_values[PAR_VOICE_DECIMATION_ALL] =
+        scene->settings.voice_decimation_all;
+    preset_applySoundParameter(PAR_VOICE_DECIMATION_ALL,
+                               scene->settings.voice_decimation_all,
+                               0u);
+    preset_morph(scene->settings.morph_amount);
+}
+
+/* Apply one loaded Scene kit slot's non-image affiliates.
+ *
+ * Why this helper changed: the directory Kit loader now stores audio routing
+ * and supplemental routing in SceneData, while image bytes are handled by the
+ * Morph worker. A one-slot helper keeps post-load foreground work bounded and
+ * gives all clients one place where Scene supplementals are mirrored into
+ * current Menu/DSP affiliates.
+ *
+ * Inputs: active Scene index and zero-based slot. Outputs: mixer route,
+ * velocity amount/destination, LFO target voice, and LFO target parameter are
+ * applied through typed Preset setters. Clients are synchronous boot apply and
+ * preset_tickDrumsetApply(). Affiliates are mixer_audioRouting, modulation
+ * nodes, parameter_values[], and SceneData.
+ */
+static void preset_applyDrumsetVoice(uint8_t voice)
+{
+    uint8_t scene_index = scene_getActiveIndex();
+    const kit_instrument_slot_t *instrument =
+        scene_instrumentSlotConst(scene_index, voice);
+
+    if (!instrument || voice >= INSTRUMENT_SLOT_COUNT)
+        return;
+
+    (void)preset_applyKitAudioRouting(scene_index, voice);
+    (void)preset_setSupplementalParameter(
+        scene_index, voice, INST_PARAM_VELO_MOD_AMOUNT,
+        instrument->supplemental.velocity_amount);
+    (void)preset_setSupplementalParameter(
+        scene_index, voice, INST_PARAM_VELO_MOD_DEST,
+        instrument->supplemental.velocity_target_param);
+    (void)preset_setSupplementalParameter(
+        scene_index, voice, INST_PARAM_LFO_TARGET_VOICE,
+        instrument->supplemental.lfo_target_voice);
+    (void)preset_setSupplementalParameter(
+        scene_index, voice, INST_PARAM_LFO_TARGET_PARAM,
+        instrument->supplemental.lfo_target_param);
 }
 
 /* Synchronous loaded-kit apply.
@@ -387,16 +810,23 @@ void preset_sendDrumsetParameters(void)
 {
     uint8_t voice;
 
+    preset_applySceneSettings(scene_getActiveIndex());
     for (voice = 0; voice < 6u; voice++)
         preset_applyDrumsetVoice(voice);
 
-    /* Morph itself is already rate-limited by preset_morphTick(); this call
-    ** only records the requested value and arms a pass if needed. */
-    preset_morph(parameter_values[PAR_MORPH]);
+    while (presetMorph_tick()) {
+        /* Boot-time synchronous path: audio has not started, so drain the
+         * Scene Morph worker immediately after applying routing. Runtime load
+         * completion uses preset_tickDrumsetApply() to perform the same work
+         * one foreground pass at a time. */
+    }
 }
 
 void preset_startDrumsetApply(void)
 {
+    preset_ensureMorphInitialized();
+    preset_applySceneSettings(scene_getActiveIndex());
+    presetMorph_rebuildScene(scene_getActiveIndex());
     drumset_apply_active = 1u;
     drumset_apply_voice = 0u;
 }
@@ -406,15 +836,15 @@ uint8_t preset_tickDrumsetApply(void)
     if (!drumset_apply_active)
         return 0u;
 
-    if (drumset_apply_voice < 6u) {
+    if (drumset_apply_voice < INSTRUMENT_SLOT_COUNT) {
         preset_applyDrumsetVoice(drumset_apply_voice);
         drumset_apply_voice++;
         return 1u;
     }
 
-    /* Final tick only arms morph; the actual morph parameter walk remains
-    ** bounded by preset_morphTick() elsewhere in the main loop. */
-    preset_morph(parameter_values[PAR_MORPH]);
+    if (presetMorph_tick())
+        return 1u;
+
     drumset_apply_active = 0u;
     return 0u;
 }
@@ -579,83 +1009,33 @@ static uint8_t preset_interpolate(uint8_t a, uint8_t b, uint8_t x)
     return (uint8_t)((fixedPointValue & 0xff) < 0x7f ? result : result + 1);
 }
 
-static uint8_t preset_morphShouldSkip(uint16_t index)
-{
-    if (index == 127u)
-        return 1;
-    if (index >= PAR_VEL_DEST_1 && index <= PAR_VEL_DEST_6)
-        return 1;
-    if (index >= PAR_VOICE_LFO1 && index <= PAR_VOICE_LFO6)
-        return 1;
-    if (index >= PAR_TARGET_LFO1 && index <= PAR_TARGET_LFO6)
-        return 1;
-    return 0;
-}
-
-static void preset_morphSendParameter(uint16_t index, uint8_t value)
-{
-    /*
-     * Sends one morph-interpolated sound parameter through Preset's direct
-     * sound apply helper.
-     *
-     * Callers: preset_morphTick() only. Morph is rate-limited there, so this
-     * helper intentionally does no pacing of its own.
-     *
-     * Inputs: index is the sound parameter id, value is the interpolated 0..127
-     * value between the current kit and morph kit. Output: the sound parameter
-     * is applied and automation is recorded, matching the old morph CC path.
-     *
-     * Risk: preset_morphShouldSkip() must filter unsupported indices before
-     * this call. In particular, parameter 127 must not reach the legacy CC
-     * application path.
-     */
-    preset_applySoundParameter(index, value, 1);
-}
-
 void preset_morph(uint8_t morph)
 {
-    if (morph_target_value != morph || !morph_active)
-        morph_request_generation++;
-
-    morph_target_value = morph;
-    if (!morph_active) {
-        morph_active = 1;
-        morph_pass_value = morph;
-        morph_pass_generation = morph_request_generation;
-        morph_index = 0;
-    }
+    /*
+     * Compatibility wrapper for existing Menu/MIDI Morph callers.
+     *
+     * The old implementation walked flat parameter_values[]/parameters2[].
+     * Directory Kits now store two Scene-owned endpoint images, so Morph
+     * requests are forwarded to presetMorphEngine. That worker rebuilds
+     * morph_interpolation[] and applies active-Scene image values through
+     * preset_applyInstrumentRuntimeValue().
+     */
+    preset_ensureMorphInitialized();
+    parameter_values[PAR_MORPH] = morph;
+    presetMorph_request(scene_getActiveIndex(), morph);
 }
 
 void preset_morphTick(void)
 {
-    uint16_t index;
-    uint8_t value;
-
-    if (!morph_active)
-        return;
-
-    if (morph_index >= END_OF_SOUND_PARAMETERS) {
-        if (morph_pass_generation != morph_request_generation) {
-            morph_pass_value = morph_target_value;
-            morph_pass_generation = morph_request_generation;
-            morph_index = 0;
-        } else {
-            morph_active = 0;
-        }
-        return;
-    }
-
-    index = morph_index++;
-
-    /* Skip index 127: legacy MIDI_CC packing encoded data1 as
-    ** (127+1) & 0x7f = 0. midiParser_ccHandler then computes paramNr as
-    ** data1-1, underflowing to 65535. Mod-target slots are also intentionally
-    ** not morphed, matching the original morph-save behavior. */
-    if (preset_morphShouldSkip(index))
-        return;
-
-    value = preset_getMorphValue(index, morph_pass_value);
-    preset_morphSendParameter(index, value);
+    /*
+     * Compatibility tick called from main.c.
+     *
+     * Output is intentionally ignored by the caller; the worker itself limits
+     * work to one descriptor-backed image value per call. Loaded-kit apply also
+     * ticks the same worker while a load completion is active, so both boot and
+     * runtime loads share one Morph path.
+     */
+    (void)presetMorph_tick();
 }
 
 uint8_t preset_getMorphValue(uint16_t index, uint8_t morph)

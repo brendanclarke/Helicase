@@ -45,6 +45,277 @@ INSTRUMENT_RENAME_SECTIONS = {
     6: "HIHAT",
 }
 
+INSTRUMENT_PARAM_COUNT = 64
+INSTRUMENT_PARAM_INVALID = 0xFFFF
+CANONICAL_TARGET_KEYS = {"velo_mod_dest", "lfo_target_param"}
+
+# Stable local IDs copied from InstrumentManager.h.
+#
+# Why this table exists: the text converter runs outside the firmware and must
+# emit the same canonical slot*64+local IDs that storageTypes.c now parses for
+# supplemental target fields. Ordinary byte parameters are still copied from the
+# legacy payload, but velocity/LFO target parameters need this explicit local-ID
+# lookup to stop writing old modTargets[] indices into uint16_t Scene fields.
+LOCAL_ID_BY_FILE_KEY = {
+    "osc1_wave": 0,
+    "osc1_pitch_coarse": 1,
+    "osc1_pitch_fine": 2,
+    "osc2_wave": 3,
+    "osc2_pitch_coarse": 4,
+    "osc2_mod_amount": 5,
+    "osc3_wave": 6,
+    "noise_freq": 6,
+    "osc3_pitch_coarse": 7,
+    "osc1_noise_mix": 7,
+    "osc3_mod_amount": 8,
+    "osc2_mod_type": 9,
+    "filter_freq": 12,
+    "filter_reso": 13,
+    "filter_drive": 14,
+    "filter_type": 15,
+    "amp_envelope_attack": 16,
+    "amp_envelope_decay": 17,
+    "amp_envelope_decay_closed": 17,
+    "amp_envelope_decay_open": 18,
+    "amp_envelope_slope": 19,
+    "amp_attack_repeat": 20,
+    "pitch_envelope_decay": 21,
+    "pitch_envelope_amount": 22,
+    "pitch_envelope_slope": 23,
+    "instrument_vol": 24,
+    "instrument_pan": 25,
+    "instrument_drive": 26,
+    "instrument_decimation": 27,
+    "lfo_rate": 32,
+    "lfo_amount": 33,
+    "lfo_wave": 34,
+    "lfo_retrigger_voice": 35,
+    "lfo_sync": 36,
+    "lfo_offset": 37,
+    "velo_vol_on_off": 40,
+    "velo_mod_amount": 41,
+    "velo_mod_dest": 42,
+    "lfo_target_voice": 43,
+    "lfo_target_param": 44,
+    "transient_vol": 48,
+    "transient_wave": 49,
+    "transient_freq": 50,
+}
+
+# Legacy modTargets[] order copied from Core/Menu/Cc2Text.c.
+#
+# Do not parse Cc2Text.c at conversion time: the converter output must be
+# deterministic and reviewable even while firmware UI tables are being deleted.
+# This list is an explicit compatibility fixture for translating old target
+# indices into canonical instrument IDs.
+LEGACY_MOD_TARGET_PARAMS = [
+    "PAR_NONE",
+    "PAR_VOICE_DECIMATION_ALL",
+    "PAR_COARSE1",
+    "PAR_FINE1",
+    "PAR_OSC_WAVE_DRUM1",
+    "PAR_VELOA1",
+    "PAR_VELOD1",
+    "PAR_VOL_SLOPE1",
+    "PAR_MOD_EG1",
+    "PAR_PITCH_SLOPE1",
+    "PAR_MODAMNT1",
+    "PAR_VEL_DEST_1",
+    "PAR_VELO_MOD_AMT_1",
+    "PAR_VOLUME_MOD_ON_OFF1",
+    "PAR_FMAMNT1",
+    "PAR_FM_FREQ1",
+    "PAR_MOD_WAVE_DRUM1",
+    "PAR_MIX_MOD_1",
+    "PAR_TRANS1_WAVE",
+    "PAR_TRANS1_VOL",
+    "PAR_TRANS1_FREQ",
+    "PAR_FILTER_FREQ_1",
+    "PAR_RESO_1",
+    "PAR_FILTER_TYPE_1",
+    "PAR_FILTER_DRIVE_1",
+    "PAR_FREQ_LFO1",
+    "PAR_SYNC_LFO1",
+    "PAR_AMOUNT_LFO1",
+    "PAR_WAVE_LFO1",
+    "PAR_RETRIGGER_LFO1",
+    "PAR_OFFSET_LFO1",
+    "PAR_VOL1",
+    "PAR_PAN1",
+    "PAR_VOICE_DECIMATION1",
+    "PAR_DRIVE1",
+    "PAR_MIDI_NOTE1",
+    "PAR_COARSE2",
+    "PAR_FINE2",
+    "PAR_OSC_WAVE_DRUM2",
+    "PAR_VELOA2",
+    "PAR_VELOD2",
+    "PAR_VOL_SLOPE2",
+    "PAR_MOD_EG2",
+    "PAR_PITCH_SLOPE2",
+    "PAR_MODAMNT2",
+    "PAR_VEL_DEST_2",
+    "PAR_VELO_MOD_AMT_2",
+    "PAR_VOLUME_MOD_ON_OFF2",
+    "PAR_FMAMNT2",
+    "PAR_FM_FREQ2",
+    "PAR_MOD_WAVE_DRUM2",
+    "PAR_MIX_MOD_2",
+    "PAR_TRANS2_WAVE",
+    "PAR_TRANS2_VOL",
+    "PAR_TRANS2_FREQ",
+    "PAR_FILTER_FREQ_2",
+    "PAR_RESO_2",
+    "PAR_FILTER_TYPE_2",
+    "PAR_FILTER_DRIVE_2",
+    "PAR_FREQ_LFO2",
+    "PAR_SYNC_LFO2",
+    "PAR_AMOUNT_LFO2",
+    "PAR_WAVE_LFO2",
+    "PAR_RETRIGGER_LFO2",
+    "PAR_OFFSET_LFO2",
+    "PAR_VOL2",
+    "PAR_PAN2",
+    "PAR_VOICE_DECIMATION2",
+    "PAR_DRIVE2",
+    "PAR_MIDI_NOTE2",
+    "PAR_COARSE3",
+    "PAR_FINE3",
+    "PAR_OSC_WAVE_DRUM3",
+    "PAR_VELOA3",
+    "PAR_VELOD3",
+    "PAR_VOL_SLOPE3",
+    "PAR_MOD_EG3",
+    "PAR_PITCH_SLOPE3",
+    "PAR_MODAMNT3",
+    "PAR_VEL_DEST_3",
+    "PAR_VELO_MOD_AMT_3",
+    "PAR_VOLUME_MOD_ON_OFF3",
+    "PAR_FMAMNT3",
+    "PAR_FM_FREQ3",
+    "PAR_MOD_WAVE_DRUM3",
+    "PAR_MIX_MOD_3",
+    "PAR_TRANS3_WAVE",
+    "PAR_TRANS3_VOL",
+    "PAR_TRANS3_FREQ",
+    "PAR_FILTER_FREQ_3",
+    "PAR_RESO_3",
+    "PAR_FILTER_TYPE_3",
+    "PAR_FILTER_DRIVE_3",
+    "PAR_FREQ_LFO3",
+    "PAR_SYNC_LFO3",
+    "PAR_AMOUNT_LFO3",
+    "PAR_WAVE_LFO3",
+    "PAR_RETRIGGER_LFO3",
+    "PAR_OFFSET_LFO3",
+    "PAR_VOL3",
+    "PAR_PAN3",
+    "PAR_VOICE_DECIMATION3",
+    "PAR_DRIVE3",
+    "PAR_MIDI_NOTE3",
+    "PAR_COARSE4",
+    "PAR_FINE4",
+    "PAR_NOISE_FREQ1",
+    "PAR_MIX1",
+    "PAR_OSC_WAVE_SNARE",
+    "PAR_VELOA4",
+    "PAR_VELOD4",
+    "PAR_REPEAT4",
+    "PAR_VOL_SLOPE4",
+    "PAR_MOD_EG4",
+    "PAR_PITCH_SLOPE4",
+    "PAR_MODAMNT4",
+    "PAR_VEL_DEST_4",
+    "PAR_VELO_MOD_AMT_4",
+    "PAR_VOLUME_MOD_ON_OFF4",
+    "PAR_TRANS4_WAVE",
+    "PAR_TRANS4_VOL",
+    "PAR_TRANS4_FREQ",
+    "PAR_FILTER_FREQ_4",
+    "PAR_RESO_4",
+    "PAR_FILTER_TYPE_4",
+    "PAR_FILTER_DRIVE_4",
+    "PAR_FREQ_LFO4",
+    "PAR_SYNC_LFO4",
+    "PAR_AMOUNT_LFO4",
+    "PAR_WAVE_LFO4",
+    "PAR_RETRIGGER_LFO4",
+    "PAR_OFFSET_LFO4",
+    "PAR_VOL4",
+    "PAR_PAN4",
+    "PAR_VOICE_DECIMATION4",
+    "PAR_SNARE_DISTORTION",
+    "PAR_MIDI_NOTE4",
+    "PAR_COARSE5",
+    "PAR_FINE5",
+    "PAR_WAVE1_CYM",
+    "PAR_VELOA5",
+    "PAR_VELOD5",
+    "PAR_REPEAT5",
+    "PAR_VOL_SLOPE5",
+    "PAR_VEL_DEST_5",
+    "PAR_VELO_MOD_AMT_5",
+    "PAR_VOLUME_MOD_ON_OFF5",
+    "PAR_MOD_OSC_F1_CYM",
+    "PAR_MOD_OSC_F2_CYM",
+    "PAR_MOD_OSC_GAIN1_CYM",
+    "PAR_MOD_OSC_GAIN2_CYM",
+    "PAR_WAVE2_CYM",
+    "PAR_WAVE3_CYM",
+    "PAR_TRANS5_WAVE",
+    "PAR_TRANS5_VOL",
+    "PAR_TRANS5_FREQ",
+    "PAR_FILTER_FREQ_5",
+    "PAR_RESO_5",
+    "PAR_FILTER_TYPE_5",
+    "PAR_FILTER_DRIVE_5",
+    "PAR_FREQ_LFO5",
+    "PAR_SYNC_LFO5",
+    "PAR_AMOUNT_LFO5",
+    "PAR_WAVE_LFO5",
+    "PAR_RETRIGGER_LFO5",
+    "PAR_OFFSET_LFO5",
+    "PAR_VOL5",
+    "PAR_PAN5",
+    "PAR_VOICE_DECIMATION5",
+    "PAR_CYMBAL_DISTORTION",
+    "PAR_MIDI_NOTE5",
+    "PAR_COARSE6",
+    "PAR_FINE6",
+    "PAR_WAVE1_HH",
+    "PAR_VELOA6",
+    "PAR_VELOD6_CLOSED",
+    "PAR_VELOD6_OPEN",
+    "PAR_VOL_SLOPE6",
+    "PAR_VEL_DEST_6",
+    "PAR_VELO_MOD_AMT_6",
+    "PAR_VOLUME_MOD_ON_OFF6",
+    "PAR_MOD_OSC_F1",
+    "PAR_MOD_OSC_F2",
+    "PAR_MOD_OSC_GAIN1",
+    "PAR_MOD_OSC_GAIN2",
+    "PAR_WAVE2_HH",
+    "PAR_WAVE3_HH",
+    "PAR_TRANS6_WAVE",
+    "PAR_TRANS6_VOL",
+    "PAR_TRANS6_FREQ",
+    "PAR_FILTER_FREQ_6",
+    "PAR_RESO_6",
+    "PAR_FILTER_TYPE_6",
+    "PAR_FILTER_DRIVE_6",
+    "PAR_FREQ_LFO6",
+    "PAR_SYNC_LFO6",
+    "PAR_AMOUNT_LFO6",
+    "PAR_WAVE_LFO6",
+    "PAR_RETRIGGER_LFO6",
+    "PAR_OFFSET_LFO6",
+    "PAR_VOL6",
+    "PAR_PAN6",
+    "PAR_VOICE_DECIMATION6",
+    "PAR_HAT_DISTORTION",
+    "PAR_MIDI_NOTE6",
+]
+
 # This is the Python-side copy of storageTypes.c's key-to-ParameterArray maps.
 # Keeping the PAR_* names instead of numeric offsets lets the converter check
 # the live enum values before reading bytes from legacy .SND files.
@@ -382,6 +653,51 @@ def validate_param_renames(param_renames: dict[str, dict[str, str]]) -> None:
                 f"{', '.join(duplicates)}"
             )
 
+def build_canonical_param_ids(
+    param_renames: dict[str, dict[str, str]],
+) -> dict[str, int]:
+    """Map legacy PAR_* names to canonical slot*64+local instrument IDs.
+
+    The input side is the legacy ParameterArray symbol used by Pxxx.SND files;
+    the output side is the firmware's new instrument_param_id_t value. Clients:
+    legacy_target_to_canonical(), which converts old modTargets[] index bytes
+    for supplemental target fields only.
+    """
+    canonical_by_param: dict[str, int] = {}
+
+    for slot, param_rows in INSTRUMENT_PARAMS.items():
+        section = INSTRUMENT_RENAME_SECTIONS[slot]
+        renames = param_renames[section]
+        for old_key, param_name in param_rows:
+            file_key = renames[old_key]
+            local = LOCAL_ID_BY_FILE_KEY.get(file_key)
+            if local is None:
+                continue
+            canonical_by_param[param_name] = (
+                (slot - 1) * INSTRUMENT_PARAM_COUNT + local
+            )
+
+    return canonical_by_param
+
+
+def legacy_target_to_canonical(
+    target_index: int,
+    canonical_by_param: dict[str, int],
+) -> int:
+    """Translate one legacy modTargets[] index to a canonical instrument ID.
+
+    Invalid, global, MIDI-note, and otherwise non-instrument targets become the
+    firmware's INSTRUMENT_PARAM_INVALID sentinel. storageTypes.c accepts this
+    uint16_t value and Preset maps it back to "no target" for the current
+    compatibility UI/DSP path.
+    """
+    if target_index < 0 or target_index >= len(LEGACY_MOD_TARGET_PARAMS):
+        return INSTRUMENT_PARAM_INVALID
+    return canonical_by_param.get(
+        LEGACY_MOD_TARGET_PARAMS[target_index],
+        INSTRUMENT_PARAM_INVALID,
+    )
+
 
 def sanitize_display_name(raw: bytes, fallback: str) -> str:
     chars = []
@@ -420,6 +736,7 @@ def instrument_values(
     payload: bytes,
     param_values: dict[str, int],
     param_renames: dict[str, dict[str, str]],
+    canonical_by_param: dict[str, int],
     slot: int,
 ) -> list[tuple[str, int]]:
     values = []
@@ -434,7 +751,11 @@ def instrument_values(
         raise RuntimeError(f"{section} rename section is missing keys: {', '.join(missing)}")
 
     for key, param_name in INSTRUMENT_PARAMS[slot]:
-        values.append((renames[key], payload_value(payload, param_values, param_name)))
+        file_key = renames[key]
+        value = payload_value(payload, param_values, param_name)
+        if file_key in CANONICAL_TARGET_KEYS:
+            value = legacy_target_to_canonical(value, canonical_by_param)
+        values.append((file_key, value))
     return values
 
 
@@ -488,6 +809,7 @@ def convert_one(
     kit_root: Path,
     param_values: dict[str, int],
     param_renames: dict[str, dict[str, str]],
+    canonical_by_param: dict[str, int],
 ) -> None:
     legacy_slot = int(snd_path.stem[1:])
     data = snd_path.read_bytes()
@@ -510,7 +832,13 @@ def convert_one(
         write_instrument(
             kit_dir / filename,
             instrument_type,
-            instrument_values(payload, param_values, param_renames, slot),
+            instrument_values(
+                payload,
+                param_values,
+                param_renames,
+                canonical_by_param,
+                slot,
+            ),
         )
 
     write_kitset(kit_dir / "kitset.kcg", files, payload, param_values)
@@ -520,6 +848,7 @@ def main() -> None:
     param_values = parse_param_enum()
     param_renames = parse_param_renames()
     validate_param_renames(param_renames)
+    canonical_by_param = build_canonical_param_ids(param_renames)
     kit_root = SD_ROOT / "Kit"
 
     # The generated directory is a mirror of the legacy Pxxx.SND files, so stale
@@ -533,7 +862,13 @@ def main() -> None:
         raise RuntimeError(f"no legacy Pxxx.SND files found in {SD_ROOT}")
 
     for snd_path in snd_files:
-        convert_one(snd_path, kit_root, param_values, param_renames)
+        convert_one(
+            snd_path,
+            kit_root,
+            param_values,
+            param_renames,
+            canonical_by_param,
+        )
 
     print(f"converted {len(snd_files)} legacy kits into {kit_root}")
 
