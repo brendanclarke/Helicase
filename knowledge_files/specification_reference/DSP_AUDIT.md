@@ -1,5 +1,15 @@
 # LXR-02 DSP Performance Audit
 
+Session 032 note: this audit was moved into `specification_reference/` as a
+historical DSP/performance snapshot. The CPU scheduling advice remains useful,
+but the instrument ownership model changed after this was written:
+descriptor-backed instrument parameters now live under `Core/DSP/Instruments/`,
+are stored in Scene kit images, and are applied to DSP runtime state through
+Preset/InstrumentManager. Session 032 repaired the directory-kit path enough
+for booted kits to produce sound again, but hardware testing reports descriptor
+Morph is broken and LFO/automation assignments do not yet affect the DSP. Read
+`INSTRUMENT_FILE_SPEC.md` before changing instrument parameter propagation.
+
 Audited: 2026-05-08. Firmware: LXR-02 Open Firmware (branch: LXR02Open-prime).
 Problem statement: DSP render does not always complete within the 2.18ms
 budget (96 samples at 44108Hz), causing audible underruns.

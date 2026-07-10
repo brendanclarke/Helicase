@@ -1,5 +1,13 @@
 # MEMORY_AUDIT.md
 
+Session 032 note: this audit was moved into `specification_reference/` as a
+historical memory snapshot. The section sizes and largest-symbol list are from
+Session 023 and predate the SceneData/instrument-descriptor refactor. Treat old
+names such as `seq_patternSet`, `seq_tmpPattern`, and `parameterArray` as
+historical anchors, not current ownership names. Re-run the size/nm commands
+before making new SRAM/flash decisions; for current instrument storage and menu
+ownership, read `INSTRUMENT_FILE_SPEC.md`.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.  
