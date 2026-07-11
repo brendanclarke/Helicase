@@ -1,9 +1,10 @@
 # Instrument and Kit File Specification
 
-Session 032 reference. This replaces the root-level planning/audit notes for
-Phase 2 kit directories and the instrument-parameter refactor. It records the
-current on-card file shapes, firmware ownership model, menu descriptor model,
-runtime apply path, and known gaps after Session 032 hardware testing.
+Session 032 reference. This document has been folded into
+`knowledge_files/specification_reference/FILESYSTEM_SPEC.md`, which is now the
+authoritative source for current filesystem, kit/instrument file, Scene
+storage, menu descriptor, runtime apply, and future save/load decisions. Keep
+this file only as a Session 032 source reference until it is deleted later.
 
 ## Status
 

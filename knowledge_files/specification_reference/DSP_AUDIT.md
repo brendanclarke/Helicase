@@ -8,7 +8,8 @@ are stored in Scene kit images, and are applied to DSP runtime state through
 Preset/InstrumentManager. Session 032 repaired the directory-kit path enough
 for booted kits to produce sound again, but hardware testing reports descriptor
 Morph is broken and LFO/automation assignments do not yet affect the DSP. Read
-`INSTRUMENT_FILE_SPEC.md` before changing instrument parameter propagation.
+`knowledge_files/specification_reference/FILESYSTEM_SPEC.md` before changing
+instrument file, Scene storage, or instrument parameter propagation.
 
 Audited: 2026-05-08. Firmware: LXR-02 Open Firmware (branch: LXR02Open-prime).
 Problem statement: DSP render does not always complete within the 2.18ms

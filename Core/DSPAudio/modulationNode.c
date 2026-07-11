@@ -101,46 +101,209 @@ uint32_t modNode_getWaveInterpGeneration(void)
 	return modNode_waveInterpGeneration;
 }
 
- //-----------------------------------------------------------------------
+static const Parameter *modNode_currentParameter(const ModulationNode* vm)
+{
+	/*
+	 * Resolve the currently active target for one modulation node.
+	 *
+	 * Inputs: vm may be a legacy ParameterArray-backed node or a new
+	 * descriptor-backed direct node. Output: the live Parameter pointer/type
+	 * pair to read/write, or NULL when the node is off or malformed. This helper
+	 * keeps every caller from repeating the namespace split: legacy destinations
+	 * index parameterArray[], while descriptor destinations store an already
+	 * resolved runtime pointer supplied by InstrumentManager.
+	 */
+	if (!vm) {
+		return 0;
+	}
+	if (vm->destinationMode == MOD_NODE_DEST_DIRECT_PARAMETER) {
+		return vm->directParameter.ptr ? &vm->directParameter : 0;
+	}
+	if (vm->destination >= END_OF_SOUND_PARAMETERS) {
+		return 0;
+	}
+	return parameterArray[vm->destination].ptr ? &parameterArray[vm->destination] : 0;
+}
+
+static void modNode_writeParameterValue(const Parameter *p, ptrValue value)
+{
+	/*
+	 * Write a typed modulation restore value through an already resolved target.
+	 *
+	 * Inputs: p is either a legacy parameterArray[] entry or a descriptor
+	 * directParameter; value is the stored original value. Output: the target is
+	 * restored in-place. This helper exists because descriptor targets cannot be
+	 * restored through paramArray_setParameter(), but they must still obey the
+	 * same scalar type tags that the legacy modulation node already used.
+	 */
+	if (!p || !p->ptr) {
+		return;
+	}
+	switch(p->type)
+	{
+		case TYPE_UINT8:
+			*((uint8_t*)p->ptr) = (uint8_t)value.itg;
+			break;
+
+		case TYPE_UINT32:
+			*((uint32_t*)p->ptr) = value.itg;
+			break;
+
+		case TYPE_SPECIAL_F:
+		case TYPE_SPECIAL_P:
+		case TYPE_SPECIAL_FILTER_F:
+		case TYPE_FLT:
+			*((float*)p->ptr) = value.flt;
+			break;
+
+		default:
+			break;
+	}
+}
+
+static uint8_t modNode_captureOriginalValue(ModulationNode* vm)
+{
+	const Parameter *p = modNode_currentParameter(vm);
+
+	/*
+	 * Capture the baseline that modNode_resetTargets() restores before the next
+	 * audio block's modulation overlay.
+	 *
+	 * Inputs: vm already has its target mode and pointer/id installed. Output:
+	 * vm->originalValue is refreshed and the function returns nonzero when a
+	 * live target exists. TYPE_SPECIAL_F intentionally keeps the legacy baseline
+	 * of 1.0f; oscillator pitch and LFO-rate rows use modNodeValue as a
+	 * multiplier overlay rather than as the stored edit value.
+	 */
+	if (!p) {
+		return 0u;
+	}
+	switch(p->type)
+	{
+		case TYPE_UINT8:
+			vm->originalValue.itg = *((uint8_t*)p->ptr);
+			break;
+
+		case TYPE_SPECIAL_F:
+			vm->originalValue.flt = 1.f;
+			break;
+
+		case TYPE_SPECIAL_P:
+		case TYPE_SPECIAL_FILTER_F:
+		case TYPE_FLT:
+			vm->originalValue.flt = *((float*)p->ptr);
+			break;
+
+		case TYPE_UINT32:
+			vm->originalValue.itg = *((uint32_t*)p->ptr);
+			break;
+
+		default:
+			break;
+	}
+	return 1u;
+}
+
+static void modNode_restoreTarget(ModulationNode* vm)
+{
+	const Parameter *p;
+
+	/*
+	 * Restore one node's current target before clearing or applying modulation.
+	 *
+	 * Inputs: vm can point at either target namespace. Output: legacy nodes are
+	 * restored through paramArray_setParameter() to preserve the old API, while
+	 * descriptor-backed nodes write directly through their cached Parameter.
+	 * modNode_resetTargets() and retargeting both use this so block-level
+	 * overlays do not permanently replace the user's stored/base value.
+	 */
+	if (!vm) {
+		return;
+	}
+	if (vm->destinationMode == MOD_NODE_DEST_LEGACY_PARAM_ARRAY) {
+		paramArray_setParameter(vm->destination, vm->originalValue);
+		return;
+	}
+	p = modNode_currentParameter(vm);
+	modNode_writeParameterValue(p, vm->originalValue);
+}
+
+static void modNode_resetIdentity(ModulationNode* vm)
+{
+	/*
+	 * Forget target identity without changing amount or lastVal.
+	 *
+	 * Inputs: vm is a source modulation node whose previous target has already
+	 * been restored. Output: both target namespaces are cleared. This is private
+	 * so public callers go through modNode_clearDestination(), which performs
+	 * the restore first.
+	 */
+	if (!vm) {
+		return;
+	}
+	vm->destination = 0u;
+	vm->type = 0u;
+	vm->originalValue.itg = 0u;
+	vm->originalValue.flt = 0.f;
+	vm->destinationMode = MOD_NODE_DEST_LEGACY_PARAM_ARRAY;
+	vm->directParameter.ptr = 0;
+	vm->directParameter.type = 0u;
+	vm->waveInterpTarget = 0;
+}
+
+//-----------------------------------------------------------------------
 void modNode_init(ModulationNode* vm)
 {
-	vm->lastVal = 0;
+	/*
+	 * Initialize a modulation node in the off state.
+	 *
+	 * Inputs: vm is owned by a voice LFO or velocity modulator. Output:
+	 * amount/lastVal are reset and both destination namespaces are empty. This
+	 * does not call modNode_setDestination(0), because that function is the
+	 * legacy ParameterArray API and should not be the generic "off" primitive
+	 * for descriptor-backed nodes.
+	 */
+	if (!vm) {
+		return;
+	}
+	modNode_resetIdentity(vm);
+	vm->lastVal = 0.f;
 	vm->amount = 0.f;
-	modNode_setDestination(vm,0);
 }
 //-----------------------------------------------------------------------
 static void modNode_setOriginalValueChanged(ModulationNode* vm, uint16_t idx)
 {
-	// --AS TODO this code is repeated (approximately. not exactly) inside modNode_setDestination. can we combine?
-
-
-	if(vm->destination == idx) { //parameter is active in this modulator
-		const Parameter *p=&parameterArray[idx];
-
-			//update orig value
-			switch(p->type)
-			{
-				case TYPE_UINT8:
-					vm->originalValue.itg = *((uint8_t*)p->ptr);
-					break;
-
-				case TYPE_SPECIAL_F:
-					break;
-
-				case TYPE_SPECIAL_P:
-				case TYPE_SPECIAL_FILTER_F:
-				case TYPE_FLT:
-					vm->originalValue.flt = *((float*)p->ptr);
-					break;
-
-				case TYPE_UINT32:
-					vm->originalValue.itg = *((uint32_t*)p->ptr);
-					break;
-
-				default:
-					break;
-			}
-		}
+	/*
+	 * Refresh legacy target baselines after a ParameterArray-backed edit.
+	 *
+	 * Inputs: vm is one node and idx is a legacy ParameterArray id. Output:
+	 * vm->originalValue is refreshed only when this legacy node targets idx.
+	 * Descriptor-backed targets are handled by modNode_directOriginalValueChanged()
+	 * because their destination ids live in a different namespace.
+	 */
+	if(vm &&
+	   vm->destinationMode == MOD_NODE_DEST_LEGACY_PARAM_ARRAY &&
+	   vm->destination == idx) {
+		(void)modNode_captureOriginalValue(vm);
+	}
+}
+//-----------------------------------------------------------------------
+static void modNode_setDirectOriginalValueChanged(ModulationNode* vm, uint16_t destination)
+{
+	/*
+	 * Refresh descriptor target baselines after an InstrumentManager edit.
+	 *
+	 * Inputs: vm is one node and destination is a canonical descriptor target
+	 * id. Output: active direct nodes with the same id recapture the current
+	 * runtime base value. This is the descriptor equivalent of
+	 * modNode_setOriginalValueChanged(), kept separate so legacy ids and
+	 * descriptor ids cannot be accidentally compared.
+	 */
+	if(vm &&
+	   vm->destinationMode == MOD_NODE_DEST_DIRECT_PARAMETER &&
+	   vm->destination == destination) {
+		(void)modNode_captureOriginalValue(vm);
+	}
 }
 //-----------------------------------------------------------------------
 // This is called when a user changes a parameter value on the front. It saves
@@ -162,6 +325,33 @@ void modNode_originalValueChanged(uint16_t idx)
 	modNode_setOriginalValueChanged(&hatVoice.lfo.modTarget,idx);
 }
 //-----------------------------------------------------------------------
+void modNode_directOriginalValueChanged(uint16_t destination)
+{
+	uint8_t i;
+
+	/*
+	 * Public descriptor-target original-value refresh.
+	 *
+	 * Inputs: destination is a canonical descriptor id supplied by
+	 * InstrumentManager after it writes an ordinary instrument runtime value.
+	 * Output: every velocity/LFO node using direct descriptor mode for that id
+	 * updates its restore baseline. This is intentionally parallel to the
+	 * legacy modNode_originalValueChanged() API rather than overloading it with
+	 * a second id namespace.
+	 */
+	for(i=0;i<6;i++)
+	{
+		modNode_setDirectOriginalValueChanged(&velocityModulators[i],destination);
+	}
+
+	modNode_setDirectOriginalValueChanged(&voiceArray[0].lfo.modTarget,destination);
+	modNode_setDirectOriginalValueChanged(&voiceArray[1].lfo.modTarget,destination);
+	modNode_setDirectOriginalValueChanged(&voiceArray[2].lfo.modTarget,destination);
+	modNode_setDirectOriginalValueChanged(&snareVoice.lfo.modTarget,destination);
+	modNode_setDirectOriginalValueChanged(&cymbalVoice.lfo.modTarget,destination);
+	modNode_setDirectOriginalValueChanged(&hatVoice.lfo.modTarget,destination);
+}
+//-----------------------------------------------------------------------
 void modNode_resetTargets()
 {
 	modNode_waveInterpGeneration++;
@@ -173,15 +363,15 @@ void modNode_resetTargets()
 	uint8_t i;
 	for(i=0;i<6;i++)
 	{
-		paramArray_setParameter(velocityModulators[i].destination,velocityModulators[i].originalValue);
+		modNode_restoreTarget(&velocityModulators[i]);
 	}
 
-	paramArray_setParameter(voiceArray[0].lfo.modTarget.destination,voiceArray[0].lfo.modTarget.originalValue);
-	paramArray_setParameter(voiceArray[1].lfo.modTarget.destination,voiceArray[1].lfo.modTarget.originalValue);
-	paramArray_setParameter(voiceArray[2].lfo.modTarget.destination,voiceArray[2].lfo.modTarget.originalValue);
-	paramArray_setParameter(snareVoice.lfo.modTarget.destination,snareVoice.lfo.modTarget.originalValue);
-	paramArray_setParameter(cymbalVoice.lfo.modTarget.destination,cymbalVoice.lfo.modTarget.originalValue);
-	paramArray_setParameter(hatVoice.lfo.modTarget.destination,hatVoice.lfo.modTarget.originalValue);
+	modNode_restoreTarget(&voiceArray[0].lfo.modTarget);
+	modNode_restoreTarget(&voiceArray[1].lfo.modTarget);
+	modNode_restoreTarget(&voiceArray[2].lfo.modTarget);
+	modNode_restoreTarget(&snareVoice.lfo.modTarget);
+	modNode_restoreTarget(&cymbalVoice.lfo.modTarget);
+	modNode_restoreTarget(&hatVoice.lfo.modTarget);
 
 
 }
@@ -195,61 +385,97 @@ void modNode_reassignVeloMod()
 	}
 }
 //-----------------------------------------------------------------------
+void modNode_clearDestination(ModulationNode* vm)
+{
+	/*
+	 * Clear one node after restoring any active target.
+	 *
+	 * Inputs: vm is the source node. Output: target state is restored and both
+	 * target namespaces are cleared, while amount/lastVal are preserved so a
+	 * later retarget can keep the user's modulation depth. InstrumentManager
+	 * uses this for descriptor off values; legacy callers should still use
+	 * modNode_setDestination() when they truly have a ParameterArray id.
+	 */
+	if (!vm) {
+		return;
+	}
+	modNode_restoreTarget(vm);
+	modNode_resetIdentity(vm);
+}
+//-----------------------------------------------------------------------
 // set a modulation destination to one of the sound parameters.
 // This is called when the mod target changes or is initialized.
 // The target's actual value needs to be preserved because it will be modulated.
 void modNode_setDestination(ModulationNode* vm, uint16_t dest)
 {
-	//TODO check if this interrupts other modulations too much
-	//is needed to really get the original value
-	modNode_resetTargets();
-
-	//restore old value to original --AS TODO isn't this already being done above for all nodes?
-	paramArray_setParameter(vm->destination,vm->originalValue);
-
-	//update dest param
-	vm->destination = dest;
-
-	const Parameter *p = &parameterArray[vm->destination];
-
-	//--AS **PATROT we want to avoid reading from invalid memory
-	if(!p->ptr)
+	/*
+	 * Legacy ParameterArray destination installer.
+	 *
+	 * Inputs: dest is an old flat sound-parameter id. Output: vm targets the
+	 * corresponding parameterArray[] entry, or is cleared when the id is off,
+	 * out of range, or has no live pointer. Descriptor-backed ids must never be
+	 * routed here; InstrumentManager installs those through
+	 * modNode_setDirectDestination() after resolving a live runtime pointer.
+	 */
+	if (!vm) {
 		return;
-
-	//get new original parameter value
-	switch(p->type)
-	{
-		case TYPE_UINT8:
-			vm->originalValue.itg = *((uint8_t*)p->ptr);
-			break;
-		case TYPE_SPECIAL_F: // --AS TODO whats up with this???
-			vm->originalValue.flt = 1;//*((float*)parameterArray[vm->destination].ptr);
-			break;
-
-		case TYPE_SPECIAL_FILTER_F:
-		case TYPE_FLT:
-			vm->originalValue.flt = *((float*)p->ptr);
-			break;
-
-		case TYPE_UINT32:
-			vm->originalValue.itg = *((uint32_t*)p->ptr);
-			break;
-
-		case TYPE_SPECIAL_P:
-		default:
-			break;
 	}
+	modNode_resetTargets();
+	modNode_clearDestination(vm);
+	if (dest >= END_OF_SOUND_PARAMETERS || !parameterArray[dest].ptr) {
+		return;
+	}
+
+	vm->destinationMode = MOD_NODE_DEST_LEGACY_PARAM_ARRAY;
+	vm->destination = dest;
+	vm->type = parameterArray[dest].type;
+	(void)modNode_captureOriginalValue(vm);
+}
+//-----------------------------------------------------------------------
+uint8_t modNode_setDirectDestination(ModulationNode* vm,
+									 uint16_t destination,
+									 Parameter parameter,
+									 void *waveInterpTarget)
+{
+	/*
+	 * Descriptor runtime destination installer.
+	 *
+	 * Inputs: destination is a canonical descriptor id for identity matching,
+	 * parameter is the live runtime pointer/type resolved by InstrumentManager,
+	 * and waveInterpTarget is an optional OscInfo* for waveform interpolation.
+	 * Output: nonzero on success; the old target is restored, the direct target
+	 * is cached, and originalValue captures the current modulation baseline.
+	 * This API exists so descriptor targets do not masquerade as legacy
+	 * parameterArray[] ids.
+	 */
+	if (!vm || !parameter.ptr) {
+		return 0u;
+	}
+	modNode_resetTargets();
+	modNode_clearDestination(vm);
+	vm->destinationMode = MOD_NODE_DEST_DIRECT_PARAMETER;
+	vm->destination = destination;
+	vm->type = parameter.type;
+	vm->directParameter = parameter;
+	vm->waveInterpTarget = waveInterpTarget;
+	if (!modNode_captureOriginalValue(vm)) {
+		modNode_resetIdentity(vm);
+		return 0u;
+	}
+	return 1u;
 }
 //-----------------------------------------------------------------------
 // This is called to actually modulate the value for a modulation node
 void modNode_updateValue(ModulationNode* vm, float val)
 {
-	Parameter const *p = &parameterArray[vm->destination];
+	Parameter const *p = modNode_currentParameter(vm);
 
-	vm->lastVal = val;
+	if (vm) {
+		vm->lastVal = val;
+	}
 
 	// --AS **PATROT avoid setting this if it's not set to something good
-	if(!p->ptr)
+	if(!p || !p->ptr)
 		return;
 
 	switch(p->type)
@@ -265,7 +491,9 @@ void modNode_updateValue(ModulationNode* vm, float val)
 		}
 
 		if (modNode_waveInterpEnabled) {
-			OscInfo *osc = modNode_getWaveTargetOsc(vm->destination);
+			OscInfo *osc = (vm->destinationMode == MOD_NODE_DEST_DIRECT_PARAMETER)
+				? (OscInfo *)vm->waveInterpTarget
+				: modNode_getWaveTargetOsc(vm->destination);
 			if (osc && modNode_waveInterpActiveCount < OSC_WAVE_INTERP_MAX_ACTIVE) {
 				const uint8_t maxWave = modNode_getMaxWaveformIndex();
 					if (modulated > maxWave) {

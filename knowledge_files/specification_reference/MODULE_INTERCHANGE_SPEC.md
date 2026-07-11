@@ -29,8 +29,9 @@ a generic bridge.
   `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
 - Normal root Kit loads are directory-based; morph kit loads remain legacy
   `.SND` until instrument morph save/load is designed.
-- Instrument file shape, descriptor tables, Scene storage, menu layout, and DSP
-  propagation are specified in `specification_reference/INSTRUMENT_FILE_SPEC.md`.
+- Filesystem shape, instrument file shape, descriptor tables, Scene storage,
+  menu layout, and DSP propagation are specified in
+  `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
 - Instrument voice parameter values are Scene-owned descriptor images. Dynamic
   VOICE menu cells resolve through the active slot's instrument descriptor
   layout, not through static `menuPages.h` cells or `parameter_values[]`.
@@ -445,7 +446,7 @@ descriptor-key validation to `storageTypes.c/h`.
 | `filesystem_initCardAndMountBlocking()` / `filesystem_initAfterCardReady()` | Boot card init/mount. | `main.c` |
 | `filesystem_tick()` | Pump asyncfatfs work. | main loop |
 | `filesystem_status()` / `filesystem_ack()` | Operation status protocol. | Preset/Menu |
-| `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is now `Kit/NNN Name/kitset.kcg` plus instruments; for `FS_FILE_MORPH`, load remains legacy `.SND`. Saves remain legacy for now. | Preset |
+| `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is now `Kit/NNN Name/kitset.kcg` plus instruments; for `FS_FILE_MORPH`, load remains legacy `.SND`. New-format saves are not implemented; saves remain legacy for now. | Preset |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
 | `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the new cache and legacy `kitBrowser` map. | main startup, kitBrowser/Menu |
 | `filesystem_installSamplesBlocking()` / `filesystem_installLoopsBlocking()` | Blocking sample/loop install under audio suspend. | Menu |
@@ -504,14 +505,18 @@ layer. All functions in this layer use the `storage_` prefix.
 
 Current ownership decisions:
 
-- `kitset.kcg` owns kit membership, instrument filenames, instrument types,
-  `audio_out`, `voice_decimation_all`, and kit metadata.
-- Instrument files own per-voice sound parameters, including volume and pan.
-- MIDI note/channel values do not belong in kitset or instrument files; they
-  belong in future scene settings.
-- Instrument morph data is optional during this load pass. Missing morph data is
-  treated as "copy main parameters into morph" until save-format work defines
-  explicit per-instrument morph persistence.
+- `kitset.kcg` owns only format/version validation plus per-slot kit
+  membership, instrument filenames, instrument types, and `audio_out`.
+- The kit name comes only from the kit folder name. It is not stored in
+  `kitset.kcg`.
+- Instrument files own per-voice descriptor values, including volume, pan, and
+  optional `[morph]` endpoint values.
+- MIDI note/channel values and `voice_decimation_all` do not belong in
+  `kitset.kcg` or instrument files; they belong in Scene settings.
+- Missing instrument `[morph]` data is treated as "copy main parameters into
+  morph" for morphable descriptors.
+- New-format save operations have not been implemented yet; final Kit save must
+  write the same folder shape the loader accepts.
 
 ## main.c
 

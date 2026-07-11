@@ -710,7 +710,7 @@ static uint8_t menu_nameIsEmptySlot(void);
 static uint8_t menu_isLoadSaveSelectionCurrent(void);
 static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage);
 static void menu_displayModTargetFull(uint8_t curParmVal);
-static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText, char inclVoice);
+static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText);
 static uint8_t getMaxEntriesForMenu(uint8_t menuId);
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf);
 static void menu_endlessPotMappingChanged(void);
@@ -735,6 +735,17 @@ typedef struct {
     const ParamDescriptor *descriptor;
 } menu_cell_t;
 
+typedef struct {
+    uint8_t scene_index;
+    uint8_t source_slot;
+    uint8_t target_voice_index;
+    uint8_t target_param_index;
+    uint16_t raw_target_voice;
+    uint8_t target_voice;
+    uint8_t target_slot;
+    uint16_t target_param;
+} menu_lfo_target_context_t;
+
 static uint8_t menu_isVoicePage(uint8_t page);
 static uint8_t menu_voicePageToSlot(uint8_t page);
 static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position);
@@ -742,7 +753,20 @@ static uint8_t menu_cellDtype(const menu_cell_t *cell);
 static uint16_t menu_cellDisplayValue(const menu_cell_t *cell);
 static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value);
 static uint8_t menu_cellIsEmpty(const menu_cell_t *cell);
-static void menu_copyInstrumentText(char *dst, const char *src, uint8_t width);
+static uint8_t menu_cellIsLfoTargetVoice(const menu_cell_t *cell);
+static uint8_t menu_cellIsLfoTargetParam(const menu_cell_t *cell);
+static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
+                                     menu_lfo_target_context_t *ctx);
+static uint16_t menu_lfoTargetNormalizeParam(
+    const menu_lfo_target_context_t *ctx, uint16_t value);
+static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
+    const menu_cell_t *cell, const menu_lfo_target_context_t *ctx,
+    uint16_t raw_voice);
+static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta);
+static uint8_t menu_lfoTargetEditParam(const menu_cell_t *cell, int16_t delta);
+static uint16_t menu_lfoTargetDisplayValue(const menu_cell_t *cell,
+                                           uint16_t raw);
+static void menu_copyPaddedField(char *dst, const char *src, uint8_t width);
 static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText);
 static void menu_displayInstrumentTargetFull(uint16_t target);
 static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText);
@@ -828,6 +852,22 @@ static uint8_t menu_cellIsEmpty(const menu_cell_t *cell)
     return (uint8_t)(!cell || cell->kind == MENU_CELL_EMPTY);
 }
 
+static uint8_t menu_cellIsLfoTargetVoice(const menu_cell_t *cell)
+{
+    return (uint8_t)(cell && cell->kind == MENU_CELL_INSTRUMENT &&
+                     cell->descriptor &&
+                     cell->descriptor->runtime.kind ==
+                         INSTRUMENT_BIND_LFO_TARGET_VOICE);
+}
+
+static uint8_t menu_cellIsLfoTargetParam(const menu_cell_t *cell)
+{
+    return (uint8_t)(cell && cell->kind == MENU_CELL_INSTRUMENT &&
+                     cell->descriptor &&
+                     cell->descriptor->runtime.kind ==
+                         INSTRUMENT_BIND_LFO_TARGET_PARAM);
+}
+
 static uint8_t menu_cellDtype(const menu_cell_t *cell)
 {
     if (!cell)
@@ -889,11 +929,299 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
     return 0u;
 }
 
-static void menu_copyInstrumentText(char *dst, const char *src, uint8_t width)
+static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
+                                     menu_lfo_target_context_t *ctx)
 {
-    uint8_t i;
-    for (i = 0u; i < width; i++)
-        dst[i] = (src && src[i]) ? src[i] : ' ';
+    const kit_instrument_slot_t *source;
+    uint8_t voice_index;
+    uint8_t param_index;
+    uint16_t raw_voice;
+
+    /*
+     * Resolve the two-cell LFO target editing context for one source slot.
+     *
+     * Inputs: a resolved instrument menu cell, either lfo_target_voice or
+     * lfo_target_param, and an output context. Outputs: source slot, sibling
+     * descriptor indices, raw/clamped target voice, target slot, and current
+     * stored target parameter. The function returns 0 when the cell is not an
+     * LFO target cell or the current source instrument type does not expose
+     * both target bindings.
+     *
+     * Why this cannot be folded into the encoder/knob handlers: those handlers
+     * should describe input mechanics, not know how an instrument registry maps
+     * sibling storage cells. The same context is needed by display, encoder,
+     * endless knobs, and later load normalization, so keeping one resolver
+     * prevents each caller from making descriptor-index assumptions.
+     *
+     * Common accessors/affiliates: scene_instrumentSlotConst() reads the
+     * current source slot type and generic SceneData storage;
+     * instrumentManager_descriptorIndexForBinding() finds sibling descriptor
+     * cells by binding kind; InstrumentManager target helpers validate the
+     * selected target slot's current instrument descriptor flags.
+     */
+    if (!ctx || (!menu_cellIsLfoTargetVoice(cell) &&
+                 !menu_cellIsLfoTargetParam(cell)))
+        return 0u;
+
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->scene_index = scene_getActiveIndex();
+    ctx->source_slot = cell->slot;
+    source = scene_instrumentSlotConst(ctx->scene_index, ctx->source_slot);
+    if (!source)
+        return 0u;
+
+    if (!instrumentManager_descriptorIndexForBinding(
+            source->type, INSTRUMENT_BIND_LFO_TARGET_VOICE, &voice_index) ||
+        !instrumentManager_descriptorIndexForBinding(
+            source->type, INSTRUMENT_BIND_LFO_TARGET_PARAM, &param_index)) {
+        return 0u;
+    }
+
+    raw_voice = source->parameter_images.instrument_parameters[voice_index];
+    ctx->target_voice_index = voice_index;
+    ctx->target_param_index = param_index;
+    ctx->raw_target_voice = raw_voice;
+    if (raw_voice < 1u)
+        ctx->target_voice = 1u;
+    else if (raw_voice > INSTRUMENT_SLOT_COUNT)
+        ctx->target_voice = INSTRUMENT_SLOT_COUNT;
+    else
+        ctx->target_voice = (uint8_t)raw_voice;
+    ctx->target_slot = (uint8_t)(ctx->target_voice - 1u);
+    ctx->target_param = source->parameter_images.instrument_parameters[param_index];
+    return 1u;
+}
+
+static uint16_t menu_lfoTargetNormalizeParam(
+    const menu_lfo_target_context_t *ctx, uint16_t value)
+{
+    uint8_t local;
+    instrument_param_id_t candidate;
+
+    /*
+     * Normalize an LFO target parameter against the selected target voice.
+     *
+     * Inputs: an already resolved LFO target context and a stored/edited target
+     * parameter value. Output: INSTRUMENT_PARAM_INVALID for off/stale/invalid
+     * values, or a canonical target ID rebuilt for ctx->target_slot and proven
+     * modulatable through InstrumentManager.
+     *
+     * Why this is separate from the edit functions: voice edits, parameter
+     * edits, display, and load normalization all need the same invariant:
+     * lfo_target_param is either off or belongs to the selected target voice
+     * and is modulatable for that voice slot's current instrument type.
+     *
+     * Common clients/affiliates: menu_lfoTargetEditVoice() preserves the local
+     * descriptor across voice changes through this helper; display treats stale
+     * values as off; InstrumentManager supplies canonical ID packing and
+     * descriptor-flag validation.
+     */
+    if (!ctx || value == INSTRUMENT_PARAM_INVALID ||
+        !instrumentParam_isVoiceParameter(value)) {
+        return INSTRUMENT_PARAM_INVALID;
+    }
+
+    local = instrumentParam_local(value);
+    candidate = instrumentParam_make(ctx->target_slot, local);
+    if (candidate == INSTRUMENT_PARAM_INVALID)
+        return INSTRUMENT_PARAM_INVALID;
+    return instrumentManager_targetValid(ctx->scene_index, candidate,
+                                         INSTRUMENT_TARGET_MODULATION)
+        ? candidate : INSTRUMENT_PARAM_INVALID;
+}
+
+static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
+    const menu_cell_t *cell, const menu_lfo_target_context_t *ctx,
+    uint16_t raw_voice)
+{
+    uint8_t voice;
+    uint16_t reconciled;
+    uint8_t ok;
+
+    /*
+     * Commit a target voice and reconcile the sibling target parameter.
+     *
+     * Inputs: the edited lfo_target_voice cell, its context before the voice
+     * change, and the requested raw voice value. Outputs: the clamped voice is
+     * stored in the source slot; lfo_target_param is rewritten to the same
+     * local descriptor on the new target voice only when that descriptor is
+     * modulatable there, otherwise it is reset to off. Return value is nonzero
+     * when the voice commit succeeded.
+     *
+     * Why this cannot be folded into menu_cellCommitValue(): generic cell
+     * commit deliberately knows only one descriptor cell at a time. LFO target
+     * voice is a paired control: changing it must preserve or invalidate its
+     * sibling target parameter. Keeping pair reconciliation here lets the
+     * generic SceneData setter stay single-cell and reusable.
+     *
+     * Common accessors/affiliates: preset_setSupplementalParameter() writes
+     * source slot storage and performs current runtime validation;
+     * menu_lfoTargetNormalizeParam() applies target-slot descriptor rules;
+     * InstrumentManager owns all target capability checks.
+     */
+    if (!cell || !ctx)
+        return 0u;
+    if (raw_voice < 1u)
+        voice = 1u;
+    else if (raw_voice > INSTRUMENT_SLOT_COUNT)
+        voice = INSTRUMENT_SLOT_COUNT;
+    else
+        voice = (uint8_t)raw_voice;
+
+    ok = preset_setSupplementalParameter(ctx->scene_index, ctx->source_slot,
+                                         ctx->target_voice_index, voice);
+    {
+        menu_lfo_target_context_t next = *ctx;
+        next.raw_target_voice = voice;
+        next.target_voice = voice;
+        next.target_slot = (uint8_t)(voice - 1u);
+        reconciled = menu_lfoTargetNormalizeParam(&next, ctx->target_param);
+        (void)preset_setSupplementalParameter(ctx->scene_index,
+                                              ctx->source_slot,
+                                              ctx->target_param_index,
+                                              reconciled);
+    }
+    return ok;
+}
+
+static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta)
+{
+    menu_lfo_target_context_t ctx;
+    int16_t next;
+
+    /*
+     * Apply encoder/knob movement to lfo_target_voice.
+     *
+     * Inputs: the resolved voice target cell and signed movement delta from
+     * either the main encoder or an endless pot. Outputs: the target voice is
+     * clamped to 1..INSTRUMENT_SLOT_COUNT and the sibling target parameter is
+     * reconciled against the new selected voice.
+     *
+     * Why this is a separate edit helper: encoder and knob paths previously
+     * edited the field as a generic 0..127 value. Both controls must share the
+     * same clamp/reconcile rule, and that rule depends on sibling descriptor
+     * storage rather than only the edited cell.
+     *
+     * Common clients/affiliates: menu_encoderChangeParameter(),
+     * menu_parseKnobDelta(), preset_setSupplementalParameter(), and
+     * InstrumentManager's registry-driven target validation.
+     */
+    if (!menu_lfoTargetContext(cell, &ctx))
+        return 0u;
+    next = (int16_t)ctx.target_voice + delta;
+    if (next < 1)
+        next = 1;
+    else if (next > (int16_t)INSTRUMENT_SLOT_COUNT)
+        next = (int16_t)INSTRUMENT_SLOT_COUNT;
+    return menu_lfoTargetCommitVoiceAndReconcile(cell, &ctx, (uint16_t)next);
+}
+
+static uint8_t menu_lfoTargetEditParam(const menu_cell_t *cell, int16_t delta)
+{
+    menu_lfo_target_context_t ctx;
+    uint16_t value;
+    uint8_t steps;
+    int8_t dir;
+
+    /*
+     * Apply encoder/knob movement to lfo_target_param.
+     *
+     * Inputs: the resolved target-parameter cell and signed movement delta.
+     * Outputs: the source slot stores only off or a canonical target ID on the
+     * selected target voice whose descriptor is modulatable for that voice
+     * slot's current instrument type. Non-modulatable descriptors are skipped,
+     * so the picker exposes exactly one off position.
+     *
+     * Why this cannot be part of menu_encoderChangeParameter(): the same
+     * filtered traversal is required for endless knobs and future normalization
+     * work. It also depends on sibling lfo_target_voice storage and target
+     * slot registry state, neither of which belongs in the generic numeric
+     * edit path.
+     *
+     * Common clients/affiliates: both physical edit paths, SceneData's generic
+     * per-slot storage, instrumentManager_stepTargetForSlot(), and the future
+     * descriptor-aware DSP modulation adapter.
+     */
+    if (!menu_lfoTargetContext(cell, &ctx))
+        return 0u;
+
+    if (ctx.raw_target_voice != ctx.target_voice) {
+        (void)preset_setSupplementalParameter(ctx.scene_index, ctx.source_slot,
+                                              ctx.target_voice_index,
+                                              ctx.target_voice);
+    }
+
+    value = menu_lfoTargetNormalizeParam(&ctx, ctx.target_param);
+    if (delta == 0) {
+        return preset_setSupplementalParameter(ctx.scene_index, ctx.source_slot,
+                                               ctx.target_param_index, value);
+    }
+
+    dir = (delta > 0) ? 1 : -1;
+    steps = (uint8_t)((delta > 0) ? delta : -delta);
+    while (steps--) {
+        uint16_t next = instrumentManager_stepTargetForSlot(
+            ctx.scene_index, ctx.target_slot, value, dir,
+            INSTRUMENT_TARGET_MODULATION);
+        if (next == value)
+            break;
+        value = next;
+        if (value == INSTRUMENT_PARAM_INVALID && dir < 0)
+            break;
+    }
+
+    return preset_setSupplementalParameter(ctx.scene_index, ctx.source_slot,
+                                           ctx.target_param_index, value);
+}
+
+static uint16_t menu_lfoTargetDisplayValue(const menu_cell_t *cell,
+                                           uint16_t raw)
+{
+    menu_lfo_target_context_t ctx;
+
+    /*
+     * Return the display-safe value for lfo_target_param.
+     *
+     * Inputs: a resolved menu cell and the raw stored target value. Output: off
+     * or a canonical target ID that belongs to the currently selected target
+     * voice and is modulatable. This function does not mutate SceneData.
+     *
+     * Why display normalization is separate from edit normalization: a stale
+     * loaded value or instrument-type swap should not draw a target from the
+     * wrong voice while the user is merely browsing. Edits will commit the
+     * normalized value, but repaint can safely render stale data as off first.
+     *
+     * Common clients/affiliates: compact four-column rendering,
+     * single-parameter target display, menu_lfoTargetNormalizeParam(), and
+     * InstrumentManager descriptor validity.
+     */
+    if (!menu_cellIsLfoTargetParam(cell) ||
+        !menu_lfoTargetContext(cell, &ctx)) {
+        return raw;
+    }
+    return menu_lfoTargetNormalizeParam(&ctx, raw);
+}
+
+static void menu_copyPaddedField(char *dst, const char *src, uint8_t width)
+{
+    uint8_t i = 0u;
+
+    /*
+     * Menu labels are fixed-width LCD fields, but descriptor text is normal C
+     * string data. Copy at most the field width, stop at the first terminator,
+     * and pad the rest. This keeps short labels such as "FM" or "LFO" from
+     * leaking adjacent string-literal bytes into the display.
+     */
+    if (src) {
+        while (i < width && src[i]) {
+            dst[i] = src[i];
+            i++;
+        }
+    }
+    while (i < width) {
+        dst[i] = ' ';
+        i++;
+    }
 }
 
 static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
@@ -910,6 +1238,13 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
      * indices into the old modTargets[] table. The compact display therefore
      * derives its text from the active Scene's slot type at paint time. Storage
      * remains just the canonical target id in the parameter cell.
+     *
+     * Output is only the target descriptor's own three-character short name.
+     * Earlier code prefixed the voice number (for example "1wa" or "1co"),
+     * but LFO target voice is already shown as its own adjacent parameter and
+     * the old step-automation voice-prefixed display is being retired. Keeping
+     * this renderer descriptor-only prevents redundant voice text from leaking
+     * into any current or future descriptor-target browser.
      */
     if (target == INSTRUMENT_PARAM_INVALID ||
         !instrumentParam_isVoiceParameter(target)) {
@@ -928,11 +1263,7 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
         return;
     }
 
-    valueAsText[0] = (char)('1' + slot);
-    valueAsText[1] = descriptor->short_name && descriptor->short_name[0]
-        ? descriptor->short_name[0] : ' ';
-    valueAsText[2] = descriptor->short_name && descriptor->short_name[1]
-        ? descriptor->short_name[1] : ' ';
+    menu_copyPaddedField(valueAsText, descriptor->short_name, 3u);
 }
 
 static void menu_displayInstrumentTargetFull(uint16_t target)
@@ -959,15 +1290,30 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
         return;
     }
 
-    memcpy(&editDisplayBuffer[1][0], "Voice", 5);
-    numtostru(&editDisplayBuffer[1][5], (uint8_t)(slot + 1u));
-    menu_copyInstrumentText(&editDisplayBuffer[1][8], descriptor->long_name, 8u);
+    /*
+     * Full descriptor-target renderer.
+     *
+     * Inputs: a canonical target ID. Output: row 2 shows the target
+     * descriptor's category in columns 0-7 and long name in columns 8-15. The
+     * selected target voice is intentionally not repeated here: for LFO target
+     * editing, voice is already a separate menu parameter, and repeating
+     * "VoiceN" hides the category information the user needs to identify the
+     * target. This function stays separate from the compact renderer because
+     * the LCD field widths and user-facing purpose are different.
+     *
+     * Affiliates: SceneData supplies the active target slot type,
+     * InstrumentManager resolves the descriptor for the canonical target, and
+     * menu_copyPaddedField() keeps short category/long-name strings bounded to
+     * their fixed LCD fields.
+     */
+    menu_copyPaddedField(&editDisplayBuffer[1][0], descriptor->category, 8u);
+    menu_copyPaddedField(&editDisplayBuffer[1][8], descriptor->long_name, 8u);
 }
 
 static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
 {
-    uint16_t raw = menu_cellDisplayValue(cell);
     uint8_t dtype = (uint8_t)(menu_cellDtype(cell) & 0x0f);
+    uint16_t raw = menu_cellDisplayValue(cell);
     uint8_t value = (raw > 255u) ? 255u : (uint8_t)raw;
 
     /*
@@ -977,6 +1323,18 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
      * invalid sentinel is stored; a later target-picker patch can replace the
      * numeric fallback with descriptor-name rendering.
      */
+    if (dtype == DTYPE_TARGET_SELECTION_LFO && cell &&
+        cell->kind == MENU_CELL_INSTRUMENT) {
+        raw = menu_lfoTargetDisplayValue(cell, raw);
+        value = (raw > 255u) ? 255u : (uint8_t)raw;
+    } else if (dtype == DTYPE_VOICE_LFO && menu_cellIsLfoTargetVoice(cell)) {
+        if (raw < 1u)
+            raw = 1u;
+        else if (raw > INSTRUMENT_SLOT_COUNT)
+            raw = INSTRUMENT_SLOT_COUNT;
+        value = (uint8_t)raw;
+    }
+
     if (raw == INSTRUMENT_PARAM_INVALID &&
         (dtype == DTYPE_TARGET_SELECTION_VELO ||
          dtype == DTYPE_TARGET_SELECTION_LFO ||
@@ -991,10 +1349,16 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         if (cell->kind == MENU_CELL_INSTRUMENT)
             menu_formatInstrumentTargetShort(raw, valueAsText);
         else
-            menu_displayModTargetShort(value, valueAsText, 0);
+            menu_displayModTargetShort(value, valueAsText);
         break;
     case DTYPE_AUTOM_TARGET:
-        menu_displayModTargetShort(value, valueAsText, 1);
+        /*
+         * Do not revive the legacy voice-prefixed compact target text
+         * ("1wa", "1co", ...). Step-automation targeting is scheduled for a
+         * Phase 4 display rewrite, and current target browsers should show the
+         * plain target short name only.
+         */
+        menu_displayModTargetShort(value, valueAsText);
         break;
     case DTYPE_PM63:
         numtostrps(valueAsText, (int8_t)(value - 63));
@@ -1086,6 +1450,12 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     case DTYPE_VOICE_LFO:
         if (*value > 127u) *value = 127u;
         break;
+    }
+    if (menu_cellIsLfoTargetVoice(cell)) {
+        if (*value < 1u)
+            *value = 1u;
+        else if (*value > INSTRUMENT_SLOT_COUNT)
+            *value = INSTRUMENT_SLOT_COUNT;
     }
 }
 
@@ -1306,18 +1676,23 @@ static void menu_displayModTargetFull(uint8_t curParmVal)
     for (i=0;i<8&&lng[i];i++) editDisplayBuffer[1][8+i]=lng[i];
 }
 
-static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText, char inclVoice)
+static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText)
 {
     if (modTargets[curParmVal].param == PAR_NONE) {
         memcpy(valueAsText, menuText_off, 3);
     } else {
-        uint8_t off = 0;
-        if (inclVoice)
-            valueAsText[off++] = (char)(voiceFromModTargValue(curParmVal) + '0');
         const uint8_t name = modTargets[curParmVal].nameIdx;
         const char *sn = shortNames[valueNames[name].shortName];
         uint8_t k;
-        for (k=off; k<3; k++) valueAsText[k] = sn[k-off] ? sn[k-off] : ' ';
+        /*
+         * Legacy compact automation target text used to optionally replace the
+         * first short-name column with a voice number, producing labels such as
+         * "1wa" or "1co". That style is not used by the new descriptor target
+         * selectors and should not be reintroduced while the Phase 4 automation
+         * display rewrite is pending. This helper now always renders the plain
+         * target short name only.
+         */
+        for (k=0; k<3; k++) valueAsText[k] = sn[k] ? sn[k] : ' ';
     }
 }
 
@@ -1615,6 +1990,16 @@ static void menu_repaintGeneric(void)
 
         curParmVal = menu_cellDisplayValue(&cell);
         dtype = (uint8_t)(menu_cellDtype(&cell) & 0x0f);
+        if (dtype == DTYPE_TARGET_SELECTION_LFO &&
+            cell.kind == MENU_CELL_INSTRUMENT) {
+            curParmVal = menu_lfoTargetDisplayValue(&cell, curParmVal);
+        } else if (dtype == DTYPE_VOICE_LFO &&
+                   menu_cellIsLfoTargetVoice(&cell)) {
+            if (curParmVal < 1u)
+                curParmVal = 1u;
+            else if (curParmVal > INSTRUMENT_SLOT_COUNT)
+                curParmVal = INSTRUMENT_SLOT_COUNT;
+        }
 
         memset(&editDisplayBuffer[0][0], ' ', 16);
         memset(&editDisplayBuffer[1][0], ' ', 16);
@@ -1635,10 +2020,10 @@ static void menu_repaintGeneric(void)
             uint8_t value = (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
 
             if (cell.kind == MENU_CELL_INSTRUMENT) {
-                menu_copyInstrumentText(&editDisplayBuffer[0][0],
-                                        cell.descriptor->category, 8u);
-                menu_copyInstrumentText(&editDisplayBuffer[0][8],
-                                        cell.descriptor->long_name, 8u);
+                menu_copyPaddedField(&editDisplayBuffer[0][0],
+                                     cell.descriptor->category, 8u);
+                menu_copyPaddedField(&editDisplayBuffer[0][8],
+                                     cell.descriptor->long_name, 8u);
             } else {
                 const char *cat = catNames[valueNames[cell.text_id].category];
                 const char *lng = longNames[valueNames[cell.text_id].longName];
@@ -1714,8 +2099,8 @@ static void menu_repaintGeneric(void)
             if (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP) {
                 memcpy(&editDisplayBuffer[0][4u * i], menuText_blank, 3);
             } else if (cell.kind == MENU_CELL_INSTRUMENT) {
-                menu_copyInstrumentText(&editDisplayBuffer[0][4u * i],
-                                        cell.descriptor->short_name, 3u);
+                menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
+                                     cell.descriptor->short_name, 3u);
             } else if (cell.kind == MENU_CELL_STATIC) {
                 memcpy(&editDisplayBuffer[0][4u * i],
                        shortNames[valueNames[cell.text_id].shortName], 3);
@@ -1761,6 +2146,15 @@ static void menu_encoderChangeParameter(int8_t inc)
         return;
 
     value = menu_cellDisplayValue(&cell);
+
+    if (menu_cellIsLfoTargetVoice(&cell)) {
+        (void)menu_lfoTargetEditVoice(&cell, inc);
+        return;
+    }
+    if (menu_cellIsLfoTargetParam(&cell)) {
+        (void)menu_lfoTargetEditParam(&cell, inc);
+        return;
+    }
 
     /*
      * Apply encoder acceleration in a value-local domain before committing to
@@ -2166,6 +2560,17 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
         cell.static_param == PAR_RUNTIME_CPU_USE) return;
 
     value = menu_cellDisplayValue(&cell);
+    if (menu_cellIsLfoTargetVoice(&cell)) {
+        if (menu_lfoTargetEditVoice(&cell, delta))
+            menu_knobs_dirty = 1;
+        return;
+    }
+    if (menu_cellIsLfoTargetParam(&cell)) {
+        if (menu_lfoTargetEditParam(&cell, delta))
+            menu_knobs_dirty = 1;
+        return;
+    }
+
     if ((menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_VELO ||
         (menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_LFO) {
         if (value == INSTRUMENT_PARAM_INVALID && delta > 0)

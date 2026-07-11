@@ -238,60 +238,6 @@ void preset_init(void)
     preset_ensureMorphInitialized();
 }
 
-void preset_applyVelocityModTarget(uint8_t voice, uint16_t targetParam)
-{
-    /*
-     * Applies a velocity modulation destination for one drum voice.
-     *
-     * Callers: Menu sound-parameter edits and loaded-kit apply. This replaces
-     * the old front-panel protocol packing for velocity destination opcodes.
-     *
-     * Why it lives in Preset: velocityModulators[] are sound/preset runtime
-     * objects, not Menu or Pattern state. Menu resolves user-facing target
-     * indices; Preset writes the actual modulation node destination.
-     *
-     * Inputs: voice is 0..5, targetParam is the resolved destination parameter
-     * id from modTargets[]. Output: the voice velocity modulator destination is
-     * updated. Invalid voices are ignored to preserve previous guard behavior.
-     *
-     * Risk: targetParam is narrowed to uint8_t by modNode_setDestination();
-     * this matches the existing sound engine API and legacy target encoding.
-     */
-    if (voice < 6u)
-        modNode_setDestination(&velocityModulators[voice], (uint8_t)targetParam);
-}
-
-void preset_applyLfoModTarget(uint8_t lfo, uint16_t targetParam)
-{
-    /*
-     * Applies an LFO modulation destination for one drum voice.
-     *
-     * Callers: Menu sound-parameter edits and loaded-kit apply. The removed
-     * parser used to forward high/low packed target bytes; the direct API takes
-     * the already resolved parameter id.
-     *
-     * Why it lives in Preset: voiceArray/snare/cymbal/hat LFO nodes are sound
-     * engine objects owned by Preset/voice state. Menu should not know those
-     * object addresses.
-     *
-     * Inputs: lfo selects voice/LFO 0..5, targetParam is the resolved mod target
-     * parameter id. Output: the chosen LFO modTarget destination is updated.
-     * Invalid lfo indices are ignored.
-     */
-    uint8_t value = (uint8_t)targetParam;
-    switch(lfo)
-    {
-    case 0:
-    case 1:
-    case 2:	modNode_setDestination(&voiceArray[lfo].lfo.modTarget, value);break;
-    case 3:	modNode_setDestination(&snareVoice.lfo.modTarget,value);		break;
-    case 4:	modNode_setDestination(&cymbalVoice.lfo.modTarget, value);		break;
-    case 5:	modNode_setDestination(&hatVoice.lfo.modTarget, value);			break;
-    default:
-        break;
-    }
-}
-
 void preset_applySoundParameter(uint16_t paramNr, uint8_t value,
                                 uint8_t recordAutomation)
 {

@@ -118,14 +118,12 @@ void    preset_sendDrumsetParameters(void);
 /*
  * Direct sound-apply helpers.
  * Why: local UI/preset code should not pack fake front-panel protocol bytes to
- * reach DSP parameter application. Inputs are real parameter IDs/targets.
+ * reach DSP parameter application. Inputs are real legacy sound parameter IDs.
  * Outputs update DSP/menu parameter state and optionally record automation.
  * Risk: parameter 127 is rejected because the old MIDI_CC packing underflowed.
  */
 void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
                                    uint8_t recordAutomation);
-void    preset_applyVelocityModTarget(uint8_t voice, uint16_t targetParam);
-void    preset_applyLfoModTarget(uint8_t lfo, uint16_t targetParam);
 
 /*
  * Scene-owned instrument mutation/apply API.

@@ -36,15 +36,15 @@
  * so the cell participates in morphing, modulation target selection, and step
  * automation.
  */
-#define ROW(key_, short_, long_, cat_, dtype_, member_, type_) \
+#define ROW(key_, cat_, long_, short_, dtype_, member_, type_) \
     { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, BIND(member_, type_) }
 
 /*
  * ROW_MENU is a ROW variant for parameters whose dtype encodes a named menu
  * table, such as waveform, filter type, or LFO sync rate.
  */
-#define ROW_MENU(key_, short_, long_, cat_, menu_, member_, type_) \
-    ROW(key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), member_, type_)
+#define ROW_MENU(key_, cat_, long_, short_, menu_, member_, type_) \
+    ROW(key_, cat_, long_, short_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), member_, type_)
 
 /*
  * ROW_NOBIND is for descriptor-owned cells that do not write a SnareVoice
@@ -52,7 +52,7 @@
  * modulation target selectors, so they intentionally start with flags=0 rather
  * than FLAGS_IMAGE.
  */
-#define ROW_NOBIND(key_, short_, long_, cat_, dtype_, bind_kind_) \
+#define ROW_NOBIND(key_, cat_, long_, short_, dtype_, bind_kind_) \
     { key_, short_, long_, cat_, dtype_, 0u, { bind_kind_, 0u, 0u } }
 
 /*
@@ -60,7 +60,7 @@
  * SnareVoice member. The value still morphs, can be a modulation/automation
  * target, and is applied through the supplied binding kind.
  */
-#define ROW_NOBIND_IMAGE(key_, short_, long_, cat_, dtype_, bind_kind_) \
+#define ROW_NOBIND_IMAGE(key_, cat_, long_, short_, dtype_, bind_kind_) \
     { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, { bind_kind_, 0u, 0u } }
 
 /*
@@ -111,45 +111,45 @@ typedef enum {
 /*
  * Snare parameter descriptors.
  *
- * Each row defines the SD-card key, three-character menu label, long edit label,
- * category label, display dtype, capability flags, and runtime binding for one
+ * Each row defines the SD-card key, category label, long edit label,
+ * three-character menu label, display dtype, capability flags, and runtime binding for one
  * descriptor-indexed storage cell.
  */
 const ParamDescriptor snare_param_descriptors[] = {
-    ROW_MENU("osc1_wave", "wav", "Waveform", "Oscilltr", MENU_WAVEFORM, osc.waveform, TYPE_UINT8),
-    ROW("osc1_pitch_coarse", "coa", "Coarse", "Oscilltr", DTYPE_0B127, osc.modNodeValue, TYPE_SPECIAL_F),
-    ROW("osc1_pitch_fine", "fin", "Fine", "Oscilltr", DTYPE_PM63, osc.modNodeValue, TYPE_SPECIAL_F),
-    ROW("noise_freq", "noi", "Frequncy", "Noise", DTYPE_0B127, noiseOsc.modNodeValue, TYPE_SPECIAL_F),
-    ROW("osc1_noise_mix", "mix", "Mix", "Nois/Osc", DTYPE_0B127, mix, TYPE_FLT),
-    ROW("filter_freq", "frq", "Frequncy", "Filter", DTYPE_0B127, filter.f, TYPE_FLT),
-    ROW("filter_reso", "res", "Resnance", "Filter", DTYPE_0B127, filter.q, TYPE_FLT),
-    ROW("filter_drive", "drv", "Overdriv", "Filter", DTYPE_0B127, filter.drive, TYPE_FLT),
-    ROW_MENU("filter_type", "typ", "Type", "Filter", MENU_FILTER, filterType, TYPE_UINT8),
-    ROW("amp_envelope_attack", "atk", "Attack", "Veloc EG", DTYPE_0B127, oscVolEg.attack, TYPE_FLT),
-    ROW("amp_envelope_decay", "dec", "Decay", "Veloc EG", DTYPE_0B127, oscVolEg.decay, TYPE_FLT),
-    ROW("amp_envelope_slope", "slp", "Slope", "Veloc EG", DTYPE_0B127, oscVolEg.slope, TYPE_FLT),
-    ROW("amp_attack_repeat", "rpt", "RepeatCt", "Veloc EG", DTYPE_0B127, oscVolEg.repeat, TYPE_UINT8),
-    ROW("pitch_envelope_decay", "dec", "Decay", "PitchMod", DTYPE_0B127, oscPitchEg.decay, TYPE_FLT),
-    ROW("pitch_envelope_amount", "amt", "Amount", "PitchMod", DTYPE_0B127, egPitchModAmount, TYPE_FLT),
-    ROW("pitch_envelope_slope", "slp", "Slope", "PitchMod", DTYPE_0B127, oscPitchEg.slope, TYPE_FLT),
-    ROW("instrument_vol", "vol", "Volume", "Voice", DTYPE_0B127, vol, TYPE_FLT),
-    ROW("instrument_pan", "pan", "Panning", "Voice", DTYPE_PM63, pan, TYPE_UINT8),
-    ROW("instrument_drive", "drv", "Overdriv", "Voice", DTYPE_0B127, distortion.shape, TYPE_FLT),
-    ROW_NOBIND_IMAGE("instrument_decimation", "srt", "SampleRt", "Voice", DTYPE_0B127, INSTRUMENT_BIND_SLOT_DECIMATION),
-    ROW("lfo_rate", "frq", "Frequncy", "LFO", DTYPE_0B127, lfo.modNodeValue, TYPE_SPECIAL_F),
-    ROW("lfo_amount", "amt", "Amount", "LFO", DTYPE_0B127, lfo.modTarget.amount, TYPE_FLT),
-    ROW_MENU("lfo_wave", "wav", "Waveform", "LFO", MENU_LFO_WAVES, lfo.waveform, TYPE_UINT8),
-    ROW_MENU("lfo_retrigger_voice", "rtg", "Retriggr", "LFO", MENU_RETRIGGER, lfo.retrigger, TYPE_UINT8),
-    ROW_MENU("lfo_sync", "snc", "ClockSnc", "LFO", MENU_SYNC_RATES, lfo.sync, TYPE_UINT8),
-    ROW("lfo_offset", "ofs", "Offset", "LFO", DTYPE_0B127, lfo.phaseOffset, TYPE_UINT32),
-    ROW("velo_vol_on_off", "vel", "Vol mod", "Velocity", DTYPE_ON_OFF, volumeMod, TYPE_UINT8),
-    ROW_NOBIND_IMAGE("velo_mod_amount", "amt", "Amount", "Velocity", DTYPE_0B127, INSTRUMENT_BIND_VELOCITY_AMOUNT),
-    ROW_NOBIND("velo_mod_dest", "dst", "DstParam", "Velocity", DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
-    ROW_NOBIND("lfo_target_voice", "voi", "DstVoice", "LFO", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
-    ROW_NOBIND("lfo_target_param", "dst", "DstParam", "LFO", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
-    ROW_MENU("transient_wave", "wav", "Waveform", "Transnt", MENU_TRANS, transGen.waveform, TYPE_UINT8),
-    ROW("transient_vol", "vol", "Volume", "Transnt", DTYPE_0B127, transGen.volume, TYPE_FLT),
-    ROW("transient_freq", "frq", "Frequncy", "Transnt", DTYPE_0B127, transGen.pitch, TYPE_FLT),
+    ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, osc.waveform, TYPE_UINT8),
+    ROW("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, osc.modNodeValue, TYPE_SPECIAL_F),
+    ROW("osc1_pitch_fine", "Oscilltr", "Fine", "fin", DTYPE_PM63, osc.modNodeValue, TYPE_SPECIAL_F),
+    ROW("noise_freq", "Noise", "Frequncy", "noi", DTYPE_0B127, noiseOsc.modNodeValue, TYPE_SPECIAL_F),
+    ROW("osc1_noise_mix", "Nois/Osc", "Mix", "mix", DTYPE_0B127, mix, TYPE_FLT),
+    ROW("filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127, filter.f, TYPE_FLT),
+    ROW("filter_reso", "Filter", "Resnance", "res", DTYPE_0B127, filter.q, TYPE_FLT),
+    ROW("filter_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, filter.drive, TYPE_FLT),
+    ROW_MENU("filter_type", "Filter", "Type", "typ", MENU_FILTER, filterType, TYPE_UINT8),
+    ROW("amp_envelope_attack", "Veloc EG", "Attack", "atk", DTYPE_0B127, oscVolEg.attack, TYPE_FLT),
+    ROW("amp_envelope_decay", "Veloc EG", "Decay", "dec", DTYPE_0B127, oscVolEg.decay, TYPE_FLT),
+    ROW("amp_envelope_slope", "Veloc EG", "Slope", "slp", DTYPE_0B127, oscVolEg.slope, TYPE_FLT),
+    ROW("amp_attack_repeat", "Veloc EG", "RepeatCt", "rpt", DTYPE_0B127, oscVolEg.repeat, TYPE_UINT8),
+    ROW("pitch_envelope_decay", "PitchMod", "Decay", "dec", DTYPE_0B127, oscPitchEg.decay, TYPE_FLT),
+    ROW("pitch_envelope_amount", "PitchMod", "Amount", "amt", DTYPE_0B127, egPitchModAmount, TYPE_FLT),
+    ROW("pitch_envelope_slope", "PitchMod", "Slope", "slp", DTYPE_0B127, oscPitchEg.slope, TYPE_FLT),
+    ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, vol, TYPE_FLT),
+    ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, pan, TYPE_UINT8),
+    ROW("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, distortion.shape, TYPE_FLT),
+    ROW_NOBIND_IMAGE("instrument_decimation", "Voice", "SampleRt", "srt", DTYPE_0B127, INSTRUMENT_BIND_SLOT_DECIMATION),
+    ROW("lfo_rate", "LFO", "Frequncy", "frq", DTYPE_0B127, lfo.modNodeValue, TYPE_SPECIAL_F),
+    ROW("lfo_amount", "LFO", "Amount", "amt", DTYPE_0B127, lfo.modTarget.amount, TYPE_FLT),
+    ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, lfo.waveform, TYPE_UINT8),
+    ROW_MENU("lfo_retrigger_voice", "LFO", "Retriggr", "rtg", MENU_RETRIGGER, lfo.retrigger, TYPE_UINT8),
+    ROW_MENU("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, lfo.sync, TYPE_UINT8),
+    ROW("lfo_offset", "LFO", "Offset", "ofs", DTYPE_0B127, lfo.phaseOffset, TYPE_UINT32),
+    ROW("velo_vol_on_off", "Velocity", "Vol mod", "vel", DTYPE_ON_OFF, volumeMod, TYPE_UINT8),
+    ROW_NOBIND_IMAGE("velo_mod_amount", "Velocity", "Amount", "amt", DTYPE_0B127, INSTRUMENT_BIND_VELOCITY_AMOUNT),
+    ROW_NOBIND("velo_mod_dest", "Velocity", "DstParam", "dst", DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
+    ROW_NOBIND("lfo_target_voice", "LFO", "DstVoice", "voi", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
+    ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "dst", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
+    ROW_MENU("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, transGen.waveform, TYPE_UINT8),
+    ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, transGen.volume, TYPE_FLT),
+    ROW("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, transGen.pitch, TYPE_FLT),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */

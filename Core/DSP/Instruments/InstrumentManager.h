@@ -107,12 +107,78 @@ const ParamDescriptor *instrumentManager_menuDescriptorIndex(
 const ParamDescriptor *instrumentManager_voicePageDescriptorIndex(
     instrument_type_t type, uint8_t voice_page, uint8_t page, uint8_t position,
     uint8_t *index_out);
+/*
+ * Find an instrument descriptor by runtime binding kind.
+ *
+ * Inputs: an instrument type, the binding kind to search for, and an optional
+ * output pointer for the descriptor index. Output: the matching descriptor, or
+ * NULL when the type is unknown or the binding is not exposed by that
+ * instrument. The index output is written only on success.
+ *
+ * Why this exists outside Menu: Menu needs to relate sibling descriptor-backed
+ * cells such as lfo_target_voice and lfo_target_param, but those cells are
+ * owned by each instrument registry entry and can move as instrument
+ * definitions evolve. Keeping the scan here preserves InstrumentManager as the
+ * source of descriptor structure while avoiding hardcoded menu lists.
+ *
+ * Common clients: Menu's coupled LFO target picker, storage/load
+ * normalization, and future dynamic instrument-slot replacement. Affiliate
+ * data: instrument_registry_entry_t::descriptors and ParamDescriptor::runtime.
+ */
+const ParamDescriptor *instrumentManager_descriptorIndexForBinding(
+    instrument_type_t type, instrument_binding_kind_t kind, uint8_t *index_out);
 struct kit_instrument_slot;
 void instrumentManager_resetSlot(struct kit_instrument_slot *slot,
                                  instrument_type_t type);
 uint8_t instrumentManager_targetValid(uint8_t scene_index,
                                       instrument_param_id_t id,
                                       instrument_target_use_t use);
+/*
+ * Validate one local descriptor index on a specific target slot.
+ *
+ * Inputs: Scene index, zero-based target slot, local descriptor index, and the
+ * requested target use. Output: nonzero only when that target slot currently
+ * contains an instrument whose descriptor exists and carries the required
+ * target flag. This is a convenience wrapper around canonical target IDs.
+ *
+ * Why this is separate from instrumentManager_targetValid(): the LFO target
+ * picker navigates a local descriptor list for one selected voice slot. It
+ * should not duplicate canonical ID packing rules or validity checks inside
+ * Menu. Existing instrumentManager_targetValid() remains the canonical-ID
+ * validator for storage/runtime paths; this helper is the local-index adapter
+ * for UI enumeration.
+ *
+ * Common clients: Menu target pickers, load-time pair normalization, and future
+ * automation/modulation browsers. Affiliates: instrumentParam_make(),
+ * SceneData's active kit slots, and descriptor capability flags.
+ */
+uint8_t instrumentManager_targetLocalValid(uint8_t scene_index,
+                                           uint8_t target_slot,
+                                           uint8_t local,
+                                           instrument_target_use_t use);
+/*
+ * Step through valid targets for one target slot.
+ *
+ * Inputs: Scene index, zero-based target slot, the current canonical target or
+ * INSTRUMENT_PARAM_INVALID for off, signed direction, and target use. Output:
+ * the next canonical target in descriptor order, or INSTRUMENT_PARAM_INVALID
+ * for the single off position. Positive direction moves from off to the first
+ * valid descriptor and then forward; negative direction moves backward and
+ * returns off before the first valid descriptor. Non-modulatable descriptors
+ * are skipped rather than surfaced as repeated off entries.
+ *
+ * Why this cannot live inside menu_encoderChangeParameter(): encoder, endless
+ * knobs, file normalization, and future UI browsers all need the same
+ * registry-driven traversal. The traversal belongs beside descriptor validity
+ * so callers do not know or cache per-instrument target lists.
+ *
+ * Common clients: Menu's LFO target parameter editor and future target-picker
+ * UIs. Affiliates: SceneData slot type lookup, instrument registry descriptor
+ * order, instrumentManager_targetValid(), and INSTRUMENT_PARAM_INVALID.
+ */
+instrument_param_id_t instrumentManager_stepTargetForSlot(
+    uint8_t scene_index, uint8_t target_slot, instrument_param_id_t current,
+    int8_t direction, instrument_target_use_t use);
 void *instrumentManager_runtimeInstance(uint8_t slot);
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,

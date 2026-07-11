@@ -41,14 +41,41 @@
 #include "stm32f4xx.h"
 #include "ParameterArray.h"
 
+/*
+ * Modulation destination namespace.
+ *
+ * Why: legacy modulation targets are indexes into parameterArray[], while new
+ * instrument targets are canonical descriptor ids resolved to direct runtime
+ * pointers by InstrumentManager. The enum lets every ModulationNode remember
+ * which interpretation its destination field uses so descriptor ids are never
+ * accidentally read as legacy array indexes.
+ */
+typedef enum {
+	MOD_NODE_DEST_LEGACY_PARAM_ARRAY = 0,
+	MOD_NODE_DEST_DIRECT_PARAMETER
+} mod_node_destination_mode_t;
+
+/*
+ * Runtime modulation source state.
+ *
+ * Accessors/clients: voice LFOs own one ModulationNode as Lfo::modTarget, and
+ * velocityModulators[] owns six velocity nodes. Inputs arrive through
+ * modNode_setDestination() for legacy ParameterArray ids or
+ * modNode_setDirectDestination() for descriptor-resolved targets. Outputs are
+ * block-local parameter overlays applied by modNode_updateValue() and restored
+ * by modNode_resetTargets().
+ */
 typedef struct ModulatorStruct
 {
 
-	uint16_t	destination;	/**< dest param nr */
+	uint16_t	destination;	/**< legacy ParameterArray id or descriptor target id */
 	uint8_t		type;			/**< pointer type */
 	ptrValue	originalValue;	/**< stores the original value of the parameter*/
 	float		amount;			/**< modulation amount*/
 	float 		lastVal;
+	uint8_t		destinationMode;	/**< mod_node_destination_mode_t value */
+	Parameter	directParameter;	/**< descriptor-resolved runtime target */
+	void		*waveInterpTarget;	/**< optional OscInfo* for waveform blend */
 
 } ModulationNode;
 
@@ -62,7 +89,45 @@ void modNode_reassignVeloMod();
 /** if multiple nodes address the same target we need to update the other modNodes if one of them changes the destionation*/
 //void modNode_originalValueModulated(uint16_t idx, ModulationNode* modSource);
 void modNode_originalValueChanged(uint16_t idx);
+/*
+ * Clear one modulation destination regardless of its namespace.
+ *
+ * Inputs: vm is the source modulation node to clear. Output: any active target
+ * is restored to vm->originalValue, then the node forgets its target pointer
+ * and identity while preserving amount/lastVal. This exists separately from
+ * modNode_setDestination(..., 0) because legacy ParameterArray id 0 and the new
+ * descriptor-target off state are different concepts. Clients are
+ * InstrumentManager's descriptor target off cases, modNode_init(), and the
+ * future velocity/LFO target migration work.
+ */
+void modNode_clearDestination(ModulationNode* vm);
 void modNode_setDestination(ModulationNode* vm, uint16_t dest);
+/*
+ * Install a descriptor-resolved runtime target directly into one mod node.
+ *
+ * Inputs: vm is the source node, destination is the canonical descriptor target
+ * id used only for identity/refresh matching, parameter is the live runtime
+ * pointer/type resolved by InstrumentManager, and waveInterpTarget is an
+ * optional OscInfo* carried as void* for oscillator waveform interpolation.
+ * Output: nonzero when the pointer is valid and the direct destination was
+ * installed. This cannot be folded into modNode_setDestination(), whose input
+ * remains a legacy ParameterArray index; overloading that API would recreate
+ * the descriptor-id/legacy-id confusion that broke LFO target apply.
+ */
+uint8_t modNode_setDirectDestination(ModulationNode* vm,
+									 uint16_t destination,
+									 Parameter parameter,
+									 void *waveInterpTarget);
+/*
+ * Refresh originalValue for descriptor-backed targets after a base-value edit.
+ *
+ * Inputs: destination is a canonical descriptor target id that InstrumentManager
+ * just applied through the ordinary runtime edit/load/morph path. Output: any
+ * active direct modulation node pointing at that id captures the current base
+ * value again. This is separate from modNode_originalValueChanged(), which
+ * still receives legacy ParameterArray ids.
+ */
+void modNode_directOriginalValueChanged(uint16_t destination);
 void modNode_updateValue(ModulationNode* vm, float val);
 void modNode_setWaveInterpEnabled(uint8_t enabled);
 uint8_t modNode_getWaveInterpEnabled(void);

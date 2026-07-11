@@ -20,7 +20,7 @@ make && make img   →   build/LXRV2_lxr02.img
 **Current working source**: repository root, branch `dev-burst-reduction`.
 
 **Session 032 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/032_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, Phase 2 directory-kit loading, the current bridge STEP/track-settings model, and descriptor-backed instrument storage, also read `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` and `knowledge_files/specification_reference/INSTRUMENT_FILE_SPEC.md`.
+`knowledge_files/log_archive/032_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, Phase 2 directory-kit loading, the current bridge STEP/track-settings model, descriptor-backed instrument storage, and the future filesystem shape, also read `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` and `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
@@ -31,9 +31,9 @@ Session 026 diagnoses the load/save button display glitch (one-frame edit-mode f
 Session 027 chunks runtime kit/all/performance sound-apply completion: after audio starts, `menu_startSoundApply()` / `menu_tickSoundApply()` drive `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` so one voice's velocity/LFO modulation routing is applied per foreground pass; boot-time pre-audio apply remains synchronous. `AUDIO_DMA_FRAMES` remains 96; 64-frame latency testing is deferred until the chunked path is hardware-tested.
 Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former parser opcodes are direct owner calls: Pattern edits through `pat_*` in `Core/Scene/Pattern/PatternData.c`, LED feedback through `SeqLedState` plus foreground `led_processSeqLedState()`, sound parameters through Preset, MIDI config through MidiParser, and transport/playback through Sequencer. Euklid/SOM now live in `Core/Scene/Pattern/`.
 Session 029 completes the PatternData storage-ownership pass and Preset folder move. `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, and `SEQ_NEXT_RANDOM*` are gone from live code; Sequencer reads/writes pattern storage through `pat_*` helpers while keeping timing/transport/recording gates. `Core/Preset/` is now `Core/Scene/Preset/`; public names remain `preset_*`, `parameterArray_*`, and `paramArray_*`. `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign. Staging/global audits are in `STAGING_AUDIT.md` and `GLOBALS_STAGING_AUDIT.md`.
-Session 030 begins Phase 2 filesystem work. `FILESYSTEM_SPEC.md` is the current root layout spec; `Core/Hardware/SD/storageTypes.c/h` owns kit text schemas/parameter maps with `storage_` prefixes; normal root kit load scans `Kit/NNN Name/`, loads `kitset.kcg` plus six instrument files, and keeps morph load on legacy `.SND`. Numbered folder convention is preferred `NNN Name`, compatibility `NNN_Name`, with a FAT short-alias fallback for scan aliases like `001SLA~1`. `SD_CARD/Kit/` is generated from legacy kits using the space convention.
+Session 030 begins Phase 2 filesystem work. `FILESYSTEM_SPEC.md` began as the root layout spec and now forwards to `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`; `Core/Hardware/SD/storageTypes.c/h` owns kit text schemas/parameter maps with `storage_` prefixes; normal root kit load scans `Kit/NNN Name/`, loads `kitset.kcg` plus six instrument files, and keeps morph load on legacy `.SND`. Numbered folder convention is preferred `NNN Name`, compatibility `NNN_Name`, with a FAT short-alias fallback for scan aliases like `001SLA~1`. `SD_CARD/Kit/` is generated from legacy kits using the space convention.
 Session 031 completes the one-live-pattern/8-bar bridge pass and follow-ups. Live `NUM_PATTERN` is 1 while pattern files still stream the old 8-slot bridge layout; STEP front page now owns per-track length, scale, MIDI channel, MIDI note, and per-track shuffle; empty boot tracks default to 16 steps. Sequencer timing runs at corrected default speed with a 96-PPQ master step clock, per-track scale ratios, per-track shuffle, and pattern realign. LED flash is a group overlay and `led_setBlinkLed()` is idempotent. `SHIFT+VOICE` enters morph endpoint edit mode using `parameters2[]` and a blinking VOICE mode LED; stopped selected-voice re-press previews the voice. Pattern/container storage no longer imports or exports the old single shuffle byte; only per-track shuffle extension data is used, and final storage conversion remains a Phase 2 external-converter concern.
-Session 032 follows through on the instrument parameter refactor. VOICE pages are now populated from descriptor-owned layouts in `Core/DSP/Instruments/*/*Parameters.c` and menu edits write Scene descriptor images instead of static `menuPages.h`/`parameter_values[]` cells. Directory kit loading writes descriptor-indexed Scene storage, and Preset/InstrumentManager applies descriptor values back into the DSP runtime; the 001 Slak kit boots and audio mostly works after a parser key-buffer fix for `amp_envelope_decay_closed/open`. `instrument_decimation` and `velo_mod_amount` are `ROW_NOBIND_IMAGE` parameters: morphable/modulatable/automatable image values with special runtime handling instead of direct member-offset binds. Known gaps: descriptor Morph is broken on hardware, and LFO/velocity modulation plus step automation assignments do not yet work for descriptor-backed targets. Root planning/audit docs for this work were consolidated into `knowledge_files/specification_reference/INSTRUMENT_FILE_SPEC.md` and `knowledge_files/log_archive/032_SESSION_HANDOFF_LOG.md`.
+Session 032 follows through on the instrument parameter refactor. VOICE pages are now populated from descriptor-owned layouts in `Core/DSP/Instruments/*/*Parameters.c` and menu edits write Scene descriptor images instead of static `menuPages.h`/`parameter_values[]` cells. Directory kit loading writes descriptor-indexed Scene storage, and Preset/InstrumentManager applies descriptor values back into the DSP runtime; the 001 Slak kit boots and audio mostly works after a parser key-buffer fix for `amp_envelope_decay_closed/open`. `instrument_decimation` and `velo_mod_amount` are `ROW_NOBIND_IMAGE` parameters: morphable/modulatable/automatable image values with special runtime handling instead of direct member-offset binds. Known gaps: descriptor Morph is broken on hardware, and LFO/velocity modulation plus step automation assignments do not yet work for descriptor-backed targets. Current filesystem/instrument-file authority is now `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`; `INSTRUMENT_FILE_SPEC.md` is preserved only as a Session 032 source reference until it is deleted later.
 
 ---
 
@@ -57,7 +57,8 @@ Session 032 follows through on the instrument parameter refactor. VOICE pages ar
 │   ├── OSC_INTERP_AUDIT.md         ← oscillator interpolation audit
 │   ├── specification_reference/
 │   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API boundary map, updated through Session 032
-│   │   ├── INSTRUMENT_FILE_SPEC.md    ← instrument/kit file, Scene storage, menu, and DSP propagation spec
+│   │   ├── FILESYSTEM_SPEC.md         ← authoritative filesystem, kit/instrument file, Scene storage, and save/load target spec
+│   │   ├── INSTRUMENT_FILE_SPEC.md    ← superseded Session 032 source reference; contents folded into FILESYSTEM_SPEC.md
 │   │   ├── MEMORY_AUDIT.md            ← historical Session 023 memory region audit notes
 │   │   └── DSP_AUDIT.md               ← historical DSP pipeline audit and hot-path notes
 │   ├── hardware_archive/
@@ -192,7 +193,7 @@ Session 032 follows through on the instrument parameter refactor. VOICE pages ar
 |----------|------|
 | Which session introduced a fix? | `knowledge_files/log_archive/000_SESSION_INDEX.md` |
 | Full details of a fix or decision? | `knowledge_files/log_archive/00x_SESSION_HANDOFF_LOG.md` |
-| Current instrument/kit file, Scene storage, menu, and DSP propagation spec? | `knowledge_files/specification_reference/INSTRUMENT_FILE_SPEC.md` |
+| Current filesystem, instrument/kit file, Scene storage, menu, and DSP propagation spec? | `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` |
 | Current module/API ownership boundaries? | `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` |
 | Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
 | Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
@@ -206,7 +207,7 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 
 - This folder is the repository/codebase.
 - `knowledge_files/LXR-master/` is read-only reference material only. Do not modify it.
-- Knowledge docs should be updated when architecture changes; session logs live under `knowledge_files/log_archive/`, current direct-call API boundaries live in `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md`, and descriptor instrument/kit storage rules live in `knowledge_files/specification_reference/INSTRUMENT_FILE_SPEC.md`.
+- Knowledge docs should be updated when architecture changes; session logs live under `knowledge_files/log_archive/`, current direct-call API boundaries live in `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md`, and filesystem plus descriptor instrument/kit storage rules live in `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
 - **Original source reference**: `knowledge_files/LXR-master/` — AVR in `front/LxrAvr/`, STM32F4 in `mainboard/LxrStm32/src/`
 
 ## General Process Reminders
@@ -355,16 +356,20 @@ Core/Scene/Preset/presetManager.c / kitBrowser.c
 - `sdcard_lxr02.c` implements `sdcard_readBlock`/`sdcard_writeBlock`/`sdcard_poll` on top of `SPI/spi_sd.c`. Each `sdcard_poll()` call clocks a burst of 16 SPI bytes (~9µs). A 512-byte sector completes in 32 polls.
 - `filesystem.c` serializes operations — one SD operation at a time. Request functions return immediately; completion is signalled via callback/status.
 - `filesystem.c` owns the filetype registry and add-a-filetype checklist. Non-SD clients include `filesystem.h` only.
-- Phase 2 root filesystem spec lives in `FILESYSTEM_SPEC.md`. Recognized root
-  directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`,
-  `Effect`, and `Instrument`; future system settings live in root
-  `settings.cfg`.
+- Authoritative filesystem and instrument-file spec lives in
+  `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`; the root
+  `FILESYSTEM_SPEC.md` is only a compatibility pointer.
+  Target root directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`,
+  `Wavetable`, `Effect`, and `Instrument`; future system settings live in root
+  `settings.cfg`. Current implemented directory work is root `Kit/` load only;
+  globals still use legacy `glo.cfg`.
 - `storageTypes.c/h` owns Phase 2 text storage schemas and parameter maps. Keep
   it free of `asyncfatfs` calls and keep function names prefixed `storage_`.
 - Normal kit load now scans root `Kit/` directories named `NNN Name` or
   compatibility `NNN_Name`, then loads `kitset.kcg` plus six instrument files.
-  Morph-kit load remains legacy `.SND` until per-instrument morph persistence is
-  designed.
+  New-format Kit save is not implemented yet; current save paths remain legacy.
+  Morph-kit load/save remains legacy `.SND` until per-instrument morph
+  persistence is designed.
 - Kit scan keeps both display names and FAT short open aliases. If a card only
   exposes a short alias such as `001SLA~1`, scan falls back to the leading
   three-digit slot so the kit remains loadable.
@@ -514,7 +519,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - TIM2 is a shared free-running 1 µs counter. Do NOT reset it on each pulse. Use unsigned subtraction for deltas.
 - TIM5 is free and reserved for future `afatfs_poll()` ISR migration. Do NOT use it for anything else.
 - PAR_EXT_SYNC values in order: `off` / `usb` / `din` / `pls` / `aut`. PAR_BPM minimum is 1; value 0 no longer means external sync.
-- CC1 on the global MIDI channel controls MORPH (`value << 1`, 0..254). This is handled in the incoming channel-MIDI path, not in `midiParser_ccHandler()`. Do not add CC1 to the CC handler.
+- CC1 on the global MIDI channel controls MORPH as a 7-bit input to a 0..255 parameter: values 0..126 map to `value * 2`, and 127 maps to 255 so the endpoint is reachable. This is handled in the incoming channel-MIDI path, not in `midiParser_ccHandler()`. Do not add CC1 to the CC handler.
 - BAR1/BAR2 use `midiParser_playVoiceMidiNote(voice, vel)`. Do NOT revert to direct `voiceControl_noteOn/Off()`.
 - Default voice MIDI notes: Drum1=36 … Drum7=42. Overridden by CC2_MIDI_NOTE per-voice setting.
 - RST IN semantics: GPIO input with pull-up; low-to-high rising edge resets pattern position without toggling transport or sending MIDI stop/start.
@@ -523,9 +528,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ---
 
 ### Morph / Endless-Pot Reminders
-- `preset_morph()` is rate-limited by `preset_morphTick()` and applies sound parameters through `preset_applySoundParameter()`, recording automation when sequencer record is armed.
+- `preset_morph()` is rate-limited by `preset_morphTick()`. Legacy flat morph used `preset_applySoundParameter()`; descriptor Morph now forwards into Scene-owned instrument images through `presetMorphEngine`, but Session 032 hardware testing reports descriptor Morph is broken and must be debugged before extending it.
 - Do not add a morph skip cache. The request/pass generation scheduler must send a full final pass at the latest morph value.
-- Morph skips index 127 and mod-target ranges. MorphKit load now writes `parameters2[]`; MorphKit save writes interpolated values except mod-target ranges.
+- Legacy MorphKit load/save still uses `parameters2[]` and flat `.SND` behavior. Do not treat it as the final descriptor instrument morph persistence path.
 - RV1-RV4 are analog endless pots, not the digital Gray-code encoder. The driver uses raw A/B snapshot baselines, `ENDLESS_POT_DEADZONE = 20`, `ENDLESS_POT_TIMEOUT_MS = 5000`, and `ENDLESS_POT_DELTA_TIMEOUT_MS = 20`.
 - Only `PAR_MORPH` gets endless-pot double angular speed. Do not apply this to all `DTYPE_0B255`; BPM drift exposed that as too broad.
 
@@ -534,9 +539,12 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ## Known Issues / Technical Debt
 
 ### Resolved / Changed in Session 030
-- Phase 2 root filesystem spec created in `FILESYSTEM_SPEC.md`. Root layout is
-  `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`,
-  `Instrument`, plus future root `settings.cfg`.
+- Phase 2 root filesystem spec began in `FILESYSTEM_SPEC.md`; after the
+  Session 032 documentation consolidation, the authoritative filesystem and
+  instrument-file spec is `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
+  Target root layout is `Bank`, `Scene`, `Kit`,
+  `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, plus future root
+  `settings.cfg`. Current implemented directory load work is root `Kit/` only.
 - `SD_CARD/Kit/` generated from legacy `Pxxx.SND` files. Folders use preferred
   `NNN Name` convention, for example `004 Moch to`; `_` remains accepted for
   compatibility.
@@ -547,8 +555,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   this layer use the `storage_` prefix and must remain independent of
   `asyncfatfs`.
 - Normal kit load now reads root `Kit/` directories: scan cache ->
-  `kitset.kcg` -> six instrument files. `FS_FILE_MORPH` / MorphKit load still
-  uses legacy `.SND`.
+  `kitset.kcg` -> six instrument files. New-format saves have not been worked
+  on yet; `FS_FILE_KIT` save and `FS_FILE_MORPH` / MorphKit load/save still use
+  legacy `.SND`.
 - `asyncfatfs` now sets opened handle type from the FAT directory entry so
   opened directories can be entered/scanned reliably.
 - Kit scan has a FAT short-alias fallback for space-named folders when LFN
