@@ -1,13 +1,14 @@
 # LXR-02 DSP Performance Audit
 
-Session 032 note: this audit was moved into `specification_reference/` as a
+Session 033 note: this audit was moved into `specification_reference/` as a
 historical DSP/performance snapshot. The CPU scheduling advice remains useful,
 but the instrument ownership model changed after this was written:
 descriptor-backed instrument parameters now live under `Core/DSP/Instruments/`,
 are stored in Scene kit images, and are applied to DSP runtime state through
-Preset/InstrumentManager. Session 032 repaired the directory-kit path enough
-for booted kits to produce sound again, but hardware testing reports descriptor
-Morph is broken and LFO/automation assignments do not yet affect the DSP. Read
+Preset/InstrumentManager. Sessions 032-033 repaired the directory-kit path,
+descriptor runtime application, descriptor Morph, per-voice Morph, and
+descriptor/Scene LFO and velocity modulation targets. Step automation remains
+the major descriptor-target runtime path that is still legacy/incomplete. Read
 `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` before changing
 instrument file, Scene storage, or instrument parameter propagation.
 

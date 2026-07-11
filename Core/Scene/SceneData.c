@@ -6,21 +6,51 @@ static uint8_t scene_active_index;
 
 uint8_t scene_indexValid(uint8_t scene_index)
 {
+    /*
+     * Validate a resident Scene index.
+     *
+     * Input: candidate index. Output: nonzero when the index addresses the
+     * current scenes[] allocation. Keeping this helper even while SCENE_COUNT
+     * is one lets future Bank work expand the allocation without rewriting
+     * callers that currently only need bounds safety.
+     */
     return (uint8_t)(scene_index < SCENE_COUNT);
 }
 
 scene_t *scene_get(uint8_t scene_index)
 {
+    /*
+     * Borrow mutable Scene storage.
+     *
+     * Input: resident Scene index. Output: pointer to scenes[index] or NULL for
+     * invalid input. Affiliates are Preset, filesystem load/apply, PatternData,
+     * and future Scene/Bank file code; all use this central bounds check rather
+     * than indexing the global array directly.
+     */
     return scene_indexValid(scene_index) ? &scenes[scene_index] : 0;
 }
 
 const scene_t *scene_getConst(uint8_t scene_index)
 {
+    /*
+     * Borrow read-only Scene storage.
+     *
+     * Input: resident Scene index. Output: const pointer or NULL. Menu,
+     * InstrumentManager, and runtime apply code use this when they need current
+     * Scene metadata without taking ownership of retained data writes.
+     */
     return scene_indexValid(scene_index) ? &scenes[scene_index] : 0;
 }
 
 uint8_t scene_getActiveIndex(void)
 {
+    /*
+     * Return the active Scene index.
+     *
+     * Inputs: none. Output: current active resident Scene index. This remains
+     * an accessor rather than a public global so Phase 3/4 Bank work can change
+     * scene selection/apply policy behind one boundary.
+     */
     return scene_active_index;
 }
 
@@ -42,6 +72,14 @@ uint8_t scene_selectActive(uint8_t scene_index)
 kit_instrument_slot_t *scene_instrumentSlot(uint8_t scene_index, uint8_t slot)
 {
     scene_t *scene = scene_get(scene_index);
+    /*
+     * Borrow one mutable Kit instrument slot.
+     *
+     * Inputs: Scene index and zero-based slot. Output: pointer to the slot or
+     * NULL for invalid Scene/slot. Filesystem Kit load, Preset setters, and
+     * future instrument-swap operations use this as the safe write boundary for
+     * swappable instrument storage.
+     */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return 0;
     return &scene->kit.instruments[slot];
@@ -51,6 +89,13 @@ const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
                                                        uint8_t slot)
 {
     const scene_t *scene = scene_getConst(scene_index);
+    /*
+     * Borrow one read-only Kit instrument slot.
+     *
+     * Inputs: Scene index and zero-based slot. Output: const pointer or NULL.
+     * Menu and InstrumentManager use this to resolve current slot type and
+     * descriptor images without mutating Scene data.
+     */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return 0;
     return &scene->kit.instruments[slot];
@@ -60,6 +105,13 @@ void scene_setTrackMidiChannel(uint8_t scene_index, uint8_t track,
                                uint8_t channel)
 {
     scene_t *scene = scene_get(scene_index);
+    /*
+     * Store a track MIDI channel in Scene settings.
+     *
+     * Inputs: Scene index, track index, and requested channel. Output: valid
+     * coordinates store a clamped 1..16 value. This remains a Scene setting so
+     * Kit/instrument changes do not rewrite MIDI assignment.
+     */
     if (!scene || track >= NUM_TRACKS)
         return;
     if (channel < 1u)
@@ -73,6 +125,14 @@ uint8_t scene_getTrackMidiChannel(uint8_t scene_index, uint8_t track)
 {
     const scene_t *scene = scene_getConst(scene_index);
     uint8_t channel;
+    /*
+     * Read a track MIDI channel from Scene settings.
+     *
+     * Inputs: Scene index and track index. Output: valid stored 1..16 channel,
+     * track+1 fallback for unset/stale values, or 1 for invalid coordinates.
+     * The fallback preserves current bridge defaults until MIDI off/channel
+     * policy is redesigned in Phase 5.
+     */
     if (!scene || track >= NUM_TRACKS)
         return 1u;
     channel = scene->settings.midi_channel[track];
@@ -84,6 +144,13 @@ uint8_t scene_getTrackMidiChannel(uint8_t scene_index, uint8_t track)
 void scene_setTrackMidiNote(uint8_t scene_index, uint8_t track, uint8_t note)
 {
     scene_t *scene = scene_get(scene_index);
+    /*
+     * Store a track MIDI note in Scene settings.
+     *
+     * Inputs: Scene index, track index, and note value. Output: valid
+     * coordinates store a 0..127 note, clamping out-of-range input to 127. This
+     * setting is track/Scene data, not instrument-file data.
+     */
     if (!scene || track >= NUM_TRACKS)
         return;
     scene->settings.midi_note[track] = (note <= 127u) ? note : 127u;
@@ -92,6 +159,13 @@ void scene_setTrackMidiNote(uint8_t scene_index, uint8_t track, uint8_t note)
 uint8_t scene_getTrackMidiNote(uint8_t scene_index, uint8_t track)
 {
     const scene_t *scene = scene_getConst(scene_index);
+    /*
+     * Read a track MIDI note from Scene settings.
+     *
+     * Inputs: Scene index and track index. Output: stored 0..127 note or 0 for
+     * invalid/stale data. Menu and MIDI callers use this to keep the current
+     * Scene storage policy centralized.
+     */
     if (!scene || track >= NUM_TRACKS)
         return 0u;
     return (scene->settings.midi_note[track] <= 127u)

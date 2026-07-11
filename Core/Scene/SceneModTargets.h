@@ -43,11 +43,49 @@ typedef struct {
  * lists from spreading into Menu or DSP code.
  */
 uint8_t sceneModTarget_isSceneTarget(uint16_t id);
+/*
+ * Return the immutable descriptor for one Scene target ID.
+ *
+ * Input: a stored target ID from Menu, Scene storage, or an installed
+ * modulation destination. Output: descriptor metadata for valid Scene targets,
+ * or NULL for off/voice/stale IDs. Common clients are Menu display and
+ * InstrumentManager apply code.
+ */
 const scene_mod_target_descriptor_t *sceneModTarget_descriptor(uint16_t id);
+/*
+ * Validate one Scene target for a requested use.
+ *
+ * Inputs: stored target ID and a SCENE_MOD_TARGET_USE_* flag. Output: nonzero
+ * only when the ID is in the Scene namespace and the descriptor opts into that
+ * modulation use. This keeps velocity/LFO picker filtering out of Menu.
+ */
 uint8_t sceneModTarget_valid(uint16_t id, scene_mod_target_use_t use);
+/*
+ * Walk the Scene target list in display order.
+ *
+ * Inputs: current Scene target or off/stale value, signed direction, and use
+ * flag. Output: next valid Scene target or INSTRUMENT_PARAM_INVALID for off.
+ * The walk does not wrap; callers combine this with voice-local descriptor
+ * traversal for mixed target lists.
+ */
 uint16_t sceneModTarget_step(uint16_t current, int8_t direction,
                              scene_mod_target_use_t use);
+/*
+ * Format the three-character Scene target short label.
+ *
+ * Inputs: stored Scene target ID and a 3-byte output field. Output: padded
+ * target short name, or the shared `off` text when invalid. Menu uses this for
+ * compact target cells.
+ */
 void sceneModTarget_formatShort(uint16_t id, char out[3]);
+/*
+ * Format the full Scene target edit label.
+ *
+ * Inputs: stored Scene target ID and two 8-byte output fields. Output: padded
+ * category and long-name fields, or `off` in the category field when invalid.
+ * This mirrors descriptor full-label rendering without exposing the table to
+ * Menu.
+ */
 void sceneModTarget_formatFull(uint16_t id, char out_category[8],
                                char out_long[8]);
 

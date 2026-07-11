@@ -68,6 +68,15 @@ static void sceneModTarget_copyPadded(char *dst, const char *src, uint8_t width)
 
 uint8_t sceneModTarget_isSceneTarget(uint16_t id)
 {
+    /*
+     * Classify one stored target ID.
+     *
+     * Input: any target value from menu/Scene storage. Output: nonzero only
+     * for IDs inside the Scene target namespace. This tiny predicate is kept
+     * public because Menu and InstrumentManager both need to branch between
+     * voice descriptor IDs and Scene target IDs without duplicating the base
+     * range math.
+     */
     return (uint8_t)(id >= SCENE_MOD_TARGET_BASE &&
                      id < (uint16_t)(SCENE_MOD_TARGET_BASE +
                                       SCENE_MOD_TARGET_COUNT));

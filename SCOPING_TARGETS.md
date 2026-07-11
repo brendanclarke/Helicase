@@ -5,13 +5,15 @@
 ## How this document is organized
 
 The work is grouped into six phases, ordered around the trajectory the code is
-actually following after Session 032. Phase 1 is complete foundation cleanup.
+actually following after Session 033. Phase 1 is complete foundation cleanup.
 Phase 2 has landed the first real filesystem/Scene bridge: root Kit directory
 loading into descriptor-backed instrument images. Phase 3 now finishes that
 partially-built foundation before the sequencer storage rewrite: instrument
 parameter load/runtime coverage, descriptor modulation and automation, Morph,
 menu/load-save work, Scene and Bank structures, and new-format load/save
-operations. Phase 4 is the dynamic stack Pattern implementation that used to be
+operations. Session 033 landed the main runtime/Morph portions of that work;
+the next Phase 3 emphasis is file work and the remaining automation path. Phase
+4 is the dynamic stack Pattern implementation that used to be
 scoped as Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup,
 copy/clear helpers, and menu controls. Phase 6 is DSP expansion.
 
@@ -126,8 +128,9 @@ Explicitly not completed in Phase 2:
 - Effect load/save.
 - Root `settings.cfg`; globals still use legacy `glo.cfg`.
 - Final new-format Morph load/save.
-- Descriptor-aware runtime modulation and automation.
-- Hardware-working descriptor Morph.
+- Descriptor-aware runtime modulation, automation, and hardware-working
+  descriptor Morph. Session 033 completed descriptor modulation and Morph; step
+  automation remains Phase 3 work.
 
 ### 2.1 Current Bridge Shape
 
@@ -182,8 +185,13 @@ dynamic Pattern rewrite begins.
 
 Finish descriptor-backed instrument load/apply coverage:
 
-- Verify every loaded descriptor key has a correct runtime binding or explicit
-  special writer.
+- Status after Session 033: the main descriptor runtime path is live for the
+  current Drum/Snare/Cymbal/HiHat rows, including the LFO expansion,
+  voice-local decimation, velocity amount, per-voice Morph, and Scene
+  modulation targets.
+- Continue verifying every loaded descriptor key has a correct runtime binding
+  or explicit special writer as instruments become swappable and new file work
+  starts.
 - Keep `ROW_NOBIND_IMAGE` parameters as morphable/modulatable/automatable image
   values with explicit runtime handling.
 - Keep target selector rows as `ROW_NOBIND` supplemental values.
@@ -195,7 +203,9 @@ Finish descriptor-backed instrument load/apply coverage:
 
 Replace the remaining legacy target runtime path for descriptor-backed targets:
 
-- Make `ModulationNode` descriptor-aware for velocity and LFO destinations.
+- Status after Session 033: velocity and LFO destinations are
+  descriptor-aware for direct descriptor targets, supplemental voice-local
+  decimation, per-voice Morph Scene targets, and Scene Decimation.
 - Make `AutomationNode` descriptor-aware instead of emitting legacy MIDI CC/CC2
   into `midiParser_ccHandler()`.
 - Stop narrowing step automation destinations to `uint8_t`; preserve canonical
@@ -207,8 +217,9 @@ Replace the remaining legacy target runtime path for descriptor-backed targets:
 
 ### 3.3 Morph and Per-Voice Morph
 
-Make Morph work against Scene-owned descriptor images, then extend it to
-per-voice Morph.
+Status after Session 033: Morph works against Scene-owned descriptor images and
+has been extended to per-voice Morph. This section remains the contract for
+future file save/load, MIDI cleanup, and automation follow-through.
 
 Current and future Morph values are 0..255 user-facing parameters. Menu storage
 and file storage should preserve 0..255. MIDI CC and step automation remain
@@ -219,15 +230,14 @@ and file storage should preserve 0..255. MIDI CC and step automation remain
 
 Work items:
 
-- Debug the current descriptor Morph worker on hardware using one audible
-  field such as volume or filter frequency.
-- Verify main endpoint writes, morph endpoint writes, `scene->settings`
-  storage, `morph_interpolation[]`, and `instrumentManager_writeRuntime()`.
+- Keep main endpoint writes, morph endpoint writes, `scene->settings`
+  storage, `morph_interpolation[]`, and `instrumentManager_writeRuntime()` in
+  sync as file save/load work lands.
 - Preserve the one-parameter-per-foreground-pass worker model.
-- Add per-voice morph amounts saved with Scene state.
+- Add per-voice morph amounts to Scene file save/load.
 - Receiving a global morph message overwrites all per-voice morph values.
-- Velocity modulation and step automation can set per-voice morph and update
-  the visible value.
+- Velocity modulation can set per-voice morph and update the visible value.
+  Step automation must do the same once descriptor automation lands.
 - LFO-to-voice-morph is a background overlay and does not update the visible
   PERF-menu morph value.
 
@@ -238,7 +248,7 @@ Complete the menu path required for descriptor-backed instruments:
 - Keep VOICE pages descriptor-generated.
 - Keep `SHIFT+VOICE` morph endpoint edit/view behavior for descriptor cells.
 - Ensure static non-voice pages still resolve through `menuPages.h`.
-- Add visible/editable per-voice morph controls in PERF.
+- Visible/editable per-voice Morph controls in PERF are implemented.
 - Rebuild load/save/reload menus around the typed filesystem hierarchy instead
   of the old flat slot list.
 - Keep scene-level MIDI note/channel and `voice_decimation_all` out of
@@ -263,12 +273,20 @@ sequencer storage changes:
 Implement load/save operations for the settled file types in
 `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`:
 
+- First next-session cleanup: minor restructuring around how voice 6 is stored
+  for tracks 6+7 and choke.
+- Verify instruments can be swapped freely in kit slots without hardcoded
+  parameter assumptions.
 - Kit save writes `kitset.kcg` plus six instrument files in the same shape the
   current loader accepts.
 - Instrument pool load/save copies a descriptor-keyed instrument file into or
   out of a kit voice slot.
+- Morphed-instrument load/save must preserve `[params]` and `[morph]` endpoint
+  images and the current descriptor-key vocabulary.
 - Scene load/save writes `sceneset.scg`, `Kit <kit name>/`, `pattern.pat`, and
   `effect.fx`.
+- Add an FX slot shim so Scene folders can validate/store `effect.fx` before
+  Phase 6 implements full effects.
 - Bank load/save writes `bankset.bcg` plus up to 16 Scene folders.
 - Pattern load/save stays bridge-only until Phase 4 replaces the Pattern file
   format.
@@ -295,9 +313,9 @@ Implement the future autosave behavior after explicit load/save paths exist:
 - **SRAM budget for 17 scenes:** each resident scene carries settings, kit
   descriptor images, Pattern storage, and future FX state. Re-measure once the
   Scene and Bank structs are real.
-- **Per-voice Morph storage count:** decide whether the hihat open/closed menu
-  views share one morph amount with the hihat slot or expose separate controls
-  while still writing one underlying hihat instrument slot.
+- **Voice 6/choke storage:** next file-work pass should clarify the storage
+  model for voice 6 as used by tracks 6+7 and choke/open-hat behavior before
+  save/load schemas are hardened.
 - **Effect placeholders:** decide how strict `effect.fx` validation should be
   before Phase 6 has real FX stacks.
 

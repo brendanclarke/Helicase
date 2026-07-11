@@ -1,9 +1,10 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative filesystem and instrument-file reference for the
-Helicase/LXR-02 firmware after Session 032. It folds in the Session 032
+Helicase/LXR-02 firmware after Session 033. It folds in the Session 032
 instrument/kit file decisions that were previously captured in
-`INSTRUMENT_FILE_SPEC.md`.
+`INSTRUMENT_FILE_SPEC.md`, plus the Session 033 runtime decisions for LFO,
+velocity modulation, Morph, per-voice Morph, and Scene modulation targets.
 
 Use this document to distinguish three things:
 
@@ -12,8 +13,8 @@ Use this document to distinguish three things:
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
 - Not implemented yet: new-format saves, Scene loads/saves, Bank loads/saves,
-  Effect loads/saves, root `settings.cfg`, and final new-format Morph save/load
-  behavior.
+  Effect loads/saves, root `settings.cfg`, final new-format Morph save/load
+  behavior, and descriptor-backed step automation playback.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -21,7 +22,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented after Session 032:
+Implemented after Session 033:
 
 - Normal kit loading scans root `Kit/` for numbered folders.
 - Preferred kit folder names are `NNN Name`, for example `001 Slak`.
@@ -38,6 +39,19 @@ Implemented after Session 032:
   `Core/DSP/Instruments/*/*Parameters.c`.
 - Preset/InstrumentManager applies descriptor image values back into the DSP
   runtime after load and menu edits.
+- Descriptor-backed Morph works from Scene-owned main/morph endpoint images.
+- PERF Morph has been split into one Scene global setter plus six per-voice
+  Morph amounts. The global Morph control bulk-sets the six per-voice values.
+- LFO and velocity modulation can target active-slot descriptor parameters
+  without hardcoded per-instrument parameter lists.
+- LFO and velocity modulation can target the shared Scene modulation namespace:
+  per-voice Morph targets `1vm..6vm` and Scene Decimation `srt`.
+- Per-instrument `instrument_decimation` is a voice-local descriptor target and
+  is morphable, modulatable, and marked automatable for the future automation
+  pass.
+- LFOs now expose two target selector pairs with shared oscillator settings and
+  shared polarity.
+- VOICE sub-pages can expose up to 16 descriptor cells as four-cell screens.
 
 Current bridges and limitations:
 
@@ -52,10 +66,14 @@ Current bridges and limitations:
   settled future replacement but is not wired yet.
 - Scene, Bank, Effect, Instrument-pool, Wavetable-pool, and new Pattern-pool
   load/save operations are not implemented yet.
-- Descriptor Morph is known broken on hardware after Session 032.
-- Descriptor-backed LFO/velocity modulation target assignment and step
-  automation target assignment are stored/displayed but not yet applied through
-  descriptor-aware runtime modulation/automation nodes.
+- Descriptor-backed LFO and velocity modulation runtime paths are in place for
+  direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
+  Decimation. The remaining target-runtime gap is step automation.
+- `AutomationNode` and the current step automation storage/playback path still
+  use legacy/narrow target IDs and must be rebuilt for descriptor and Scene
+  modulation targets.
+- New Scene modulation target IDs are runtime/menu IDs, not a completed file
+  save/load schema for Scene folders.
 
 ## Root Layout
 
@@ -204,13 +222,15 @@ Current `scene_t` ownership:
 Current `scene_settings_t` fields:
 
 - `morph_amount`
+- `voice_morph_amount[INSTRUMENT_SLOT_COUNT]`
 - `voice_decimation_all`
 - `midi_channel[NUM_TRACKS]`
 - `midi_note[NUM_TRACKS]`
 
 Future Scene file work should move scene-level metadata and settings into
-`sceneset.scg`, including MIDI note/channel and `voice_decimation_all`. These
-do not belong in `kitset.kcg` or instrument files.
+`sceneset.scg`, including MIDI note/channel, global/per-voice Morph values,
+and `voice_decimation_all`. These do not belong in `kitset.kcg` or instrument
+files.
 
 ## Kit
 
@@ -387,9 +407,12 @@ Section rules:
   for descriptors flagged morphable.
 - Unknown keys are skipped for forward compatibility.
 - Known keys must parse as `uint8_t`, except descriptor target cells
-  `velo_mod_dest` and `lfo_target_param`, which parse as `uint16_t`.
-- `lfo_target_voice` is clamped during parse into `1..6`; converted legacy kits
-  may contain zero.
+  `velo_mod_dest`, `lfo_target_param`, and `lfo_target_param_2`, which parse as
+  `uint16_t`.
+- `lfo_target_voice` and `lfo_target_voice_2` are menu/runtime destination
+  selectors. Voices `1..6` select voice slots and the special display value
+  `scn` selects the Scene modulation target namespace. Converted legacy kits
+  may contain zero and should be normalized by the loader/runtime before use.
 
 Instrument file metadata deliberately does not include:
 
@@ -417,10 +440,10 @@ The physical SD-card key vocabulary lives in each instrument descriptor table:
 
 Current descriptor counts:
 
-- Drum: 35 descriptors.
-- Snare: 34 descriptors.
-- Cymbal: 35 descriptors.
-- HiHat: 35 descriptors.
+- Drum: 39 descriptors.
+- Snare: 38 descriptors.
+- Cymbal: 39 descriptors.
+- HiHat: 39 descriptors.
 
 Descriptor key lookup is type-local. The same key may exist in multiple
 instrument types but resolves against the loaded slot type.
@@ -440,8 +463,10 @@ Current keys by family:
   `pitch_envelope_slope`.
 - Voice: `instrument_vol`, `instrument_pan`, `instrument_drive`,
   `instrument_decimation`.
-- LFO: `lfo_rate`, `lfo_amount`, `lfo_wave`, `lfo_retrigger_voice`,
-  `lfo_sync`, `lfo_offset`, `lfo_target_voice`, `lfo_target_param`.
+- LFO: `lfo_rate`, `lfo_amount`, `lfo_amount_2`, `lfo_wave`,
+  `lfo_polarity`, `lfo_retrigger_voice`, `lfo_sync`, `lfo_offset`,
+  `lfo_target_voice`, `lfo_target_param`, `lfo_target_voice_2`,
+  `lfo_target_param_2`.
 - Velocity: `velo_vol_on_off`, `velo_mod_amount`, `velo_mod_dest`.
 - Transient: `transient_wave`, `transient_vol`, `transient_freq`.
 
@@ -483,7 +508,9 @@ values. Target selectors remain `ROW_NOBIND`.
 
 `ROW_NOBIND_IMAGE` is used for image parameters that are
 morphable/modulatable/automatable but do not write through an instrument-struct
-offset:
+offset. `ROW_SLOT_DECIMATION` is an explicit wrapper around this pattern so the
+voice-local `instrument_decimation` row advertises its morph/mod/automation
+contract at the descriptor site without creating a second flagging system:
 
 - `instrument_decimation`
 - `velo_mod_amount`
@@ -520,7 +547,10 @@ Current bounds:
 - `INSTRUMENT_SLOT_COUNT`: 6.
 - `INSTRUMENT_PARAM_COUNT`: 64.
 - Voice parameter IDs: `0..383`.
-- Higher IDs remain reserved for later FX/general parameter address space.
+- Scene modulation IDs start at `INSTRUMENT_VOICE_ID_COUNT` (`384`) and
+  currently occupy `384..390` for `1vm..6vm` plus Scene Decimation `srt`.
+- Remaining higher IDs remain reserved for later FX/general parameter address
+  space.
 
 `morph_interpolation[]` is runtime-derived state and is not serialized.
 
@@ -630,39 +660,100 @@ storage should preserve that 0..255 range. MIDI CC and step automation are
 - Input `0..126` maps to `value * 2`.
 - Input `127` maps to `255`, so the endpoint is reachable.
 
-Current descriptor Morph state:
+Current descriptor Morph state after Session 033:
 
 - Instrument files can carry `[morph]` endpoint values.
 - Missing `[morph]` copies main endpoint values into morph endpoint values.
 - Scene instrument slots store main endpoint, morph endpoint, and derived
   interpolation images.
-- Hardware testing after Session 032 reports descriptor Morph is not working.
+- The Morph worker runs against Scene-owned descriptor images and applies one
+  descriptor per foreground pass.
+- The worker uses the active slot's current instrument type and descriptor
+  table, so instrument swapping remains dynamic and the Morph engine does not
+  own hardcoded parameter lists.
+- Per-voice Morph amounts live in `scene_settings_t.voice_morph_amount[6]`.
+- PERF shows two four-cell screens: `mrp 1vm 2vm 3vm` and `4vm 5vm 6vm srt`.
+- Setting global `mrp` bulk-sets all six per-voice Morph values.
+- Setting `srt` controls Scene/global decimation and defaults to `127` when
+  Scene state has no explicit value yet.
+- Per-voice Morph is the actual Morph-engine control. Global Morph is only a
+  convenience set operation.
 
-Target selection uses canonical descriptor IDs, not legacy `modTargets[]`
-indices. Target display helpers enumerate active Scene descriptors and filter
-by descriptor flags.
+Target selection uses canonical descriptor IDs and Scene modulation target IDs,
+not legacy `modTargets[]` indices. Target display helpers enumerate active
+Scene descriptors and filter by descriptor flags.
 
 Current working target state:
 
 - Off targets use `INSTRUMENT_PARAM_INVALID` (`65535`).
-- Target menu display can show descriptor-based targets.
+- Target menu display can show descriptor-based and Scene modulation targets.
 - Target cells can store descriptor IDs in Scene storage.
 - `instrumentManager_targetValid()` validates by descriptor flags.
+- The velocity target picker shows exactly one `off`, then modulatable
+  descriptors for the source voice's current instrument, then Scene modulation
+  targets. It does not show parameters from other voice slots.
+- The LFO target picker shows voice destinations `1..6` plus `scn`. For a
+  voice destination, the parameter picker shows only modulatable descriptors
+  for that voice's current instrument. For `scn`, it shows Scene modulation
+  targets.
+- The parameter picker skips non-modulatable descriptor rows. It does not show
+  repeated `off` placeholders for skipped rows.
+- If the selected target voice changes and the previous target parameter is not
+  valid for the new destination, the parameter resets to `off`.
+
+Current LFO shape:
+
+- Each voice owns one LFO oscillator/configuration.
+- That LFO has two target selector pairs and two amounts:
+  `lfo_target_voice/lfo_target_param/lfo_amount` and
+  `lfo_target_voice_2/lfo_target_param_2/lfo_amount_2`.
+- `lfo_polarity` is shared by both target pairs and displays only `neg`, `pos`,
+  and `bi`.
+- Negative polarity applies downward from the base/default value, matching the
+  previous behavior.
+- Positive polarity applies upward from the base/default value.
+- Bipolar polarity applies equally around the base/default value where the
+  destination range allows it.
+- LFO VOICE menu short pages are:
+  `frq snc wav ofs`, `rtg pol am1 am2`, and `vo1 ds1 vo2 ds2`.
+
+Current velocity modulation behavior:
+
+- Direct descriptor targets write through the descriptor-aware runtime path.
+- Voice-local `instrument_decimation` is a descriptor target using the special
+  `INSTRUMENT_BIND_SLOT_DECIMATION` binding.
+- Scene per-voice Morph targets are retained set operations on
+  `voice_morph_amount[slot]`, scaled by velocity and amount, and update the
+  PERF menu value.
+- Scene Decimation is a retained set operation on `voice_decimation_all` and
+  updates the PERF menu value.
+
+Current LFO modulation behavior:
+
+- Direct descriptor targets write through the descriptor-aware runtime path.
+- Voice-local `instrument_decimation` uses the special supplemental binding.
+- Per-voice Morph LFO modulation is a hidden secondary layer centered around
+  the retained per-voice Morph base value. It does not move the PERF menu value.
+- Multiple LFO sources targeting the same voice Morph sum their signed deltas
+  around the retained base value, then clamp to `0..255`.
+- The Morph worker adds one extra foreground pass for each voice whose Morph is
+  currently LFO-modulated. It still interpolates one descriptor per pass rather
+  than trying to recalculate a whole voice immediately.
+- Scene Decimation LFO modulation is runtime-only; it does not move the retained
+  `voice_decimation_all` menu value.
 
 Current target limitations:
 
-- `ModulationNode` still uses legacy `parameterArray[]` destination pointers.
-- Non-off descriptor LFO/velocity destinations are validated/stored but not
-  fully applied to DSP runtime targets.
 - `AutomationNode` still plays back by emitting legacy MIDI CC/CC2 through
   `midiParser_ccHandler()`.
 - `preset_applyInstrumentRuntimeValueInternal()` currently ignores its
   `recordAutomation` argument.
 - `seq_recordAutomation()` still accepts/narrows destination as `uint8_t`.
 
-Therefore, descriptor target assignment, LFO/velocity modulation, and step
-automation require descriptor-aware `ModulationNode` and `AutomationNode`
-follow-up work.
+Therefore, the remaining descriptor target follow-up is step automation:
+`AutomationNode`, step target storage, automation recording, and automation
+display must preserve descriptor/Scene target IDs and apply through the same
+descriptor-aware runtime routes.
 
 ## Pattern
 
@@ -877,4 +968,3 @@ Instrument/
   909kik.drm
   snap.snr
 ```
-

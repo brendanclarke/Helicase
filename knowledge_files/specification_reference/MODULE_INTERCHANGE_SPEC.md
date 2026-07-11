@@ -1,9 +1,11 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 032 for the one-pattern bridge,
+Session 030 baseline, updated through Session 033 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
-dynamic VOICE menu pages. This spec records the live module API boundaries
+dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
+descriptor Morph, per-voice Morph, and Scene modulation targets. This spec
+records the live module API boundaries
 after `frontPanelParser.c/h` removal, the PatternData storage-ownership pass,
 the `Core/Preset` -> `Core/Scene/Preset` folder move, the first Phase 2
 directory-kit filesystem boundary, and the current bridge pattern behavior. The
@@ -39,12 +41,19 @@ a generic bridge.
   for non-instrument sound parameters. It is not the canonical store for new
   descriptor-backed instrument parameters.
 - `ParameterArray` remains the legacy runtime pointer map used by older flat
-  parameter paths, `ModulationNode`, and `AutomationNode`. It is no longer the
-  canonical map for instrument file keys.
-- Descriptor-backed velocity/LFO target storage and menu display exist, but the
-  descriptor-aware runtime modulation/automation path is not complete after
-  Session 032. Hardware testing reports Morph broken and LFO/automation target
-  assignments not taking effect.
+  parameter paths and by `AutomationNode`. It is no longer the canonical map
+  for instrument file keys.
+- Descriptor-backed velocity/LFO target storage, menu display, and runtime
+  application are live after Session 033 for direct descriptor targets,
+  voice-local decimation, per-voice Morph, and Scene Decimation. Step
+  automation remains the unfinished descriptor/Scene target path.
+- Descriptor Morph is live after Session 033. The Morph engine walks
+  Scene-owned descriptor images and the active slot's descriptor table instead
+  of hardcoded parameter lists.
+- Scene-level sound modulation targets live in
+  `Core/Scene/SceneModTargets.c/h`. The first target set is `1vm..6vm` plus
+  Scene Decimation `srt`; future FX parameters join that namespace instead of
+  being inserted into per-instrument descriptor tables.
 - Pattern/container storage is still a Phase 2 bridge shape. It does not
   preserve the old single/global shuffle byte; per-track shuffle is the only
   live shuffle storage, and final migration/backfill is expected to happen in
@@ -245,8 +254,9 @@ Shared state used by clients:
 - Active Scene instrument images for descriptor-backed VOICE cells.
 - `menu_activePage`, `menu_activeVoice`, `menu_playedPattern`,
   `menu_shownPattern`, `menu_muteModeActive`
-- `modTargets[]`, `paramToModTarget[]` for legacy/static target naming. New
-  instrument target cells display descriptor labels through InstrumentManager.
+- `modTargets[]`, `paramToModTarget[]` for legacy/static target naming.
+  Descriptor and Scene target cells display labels through InstrumentManager
+  and SceneModTargets, with no hardcoded per-instrument target lists in Menu.
 
 ## Core/Menu/copyClearTools
 
@@ -329,10 +339,12 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_applyInstrumentRuntimeValue(scene, id, value)` | Apply one descriptor-backed instrument value to the DSP runtime through InstrumentManager. | Menu, morph/runtime apply |
 | `preset_applyKitAudioRouting(scene, slot)` | Apply one Scene kit slot's audio route to mixer routing. | Kit load/apply paths |
 | `preset_applySceneSettings(scene)` | Apply Scene settings/global runtime values. | Boot/load paths |
+| `preset_applyVoiceDecimationAllRuntime(value)` | Apply a transient Scene Decimation value for LFO modulation without changing the retained PERF `srt` setting. | InstrumentManager LFO Scene target path |
 | `preset_applyVelocityModTarget(voice, targetParam)` | Direct velocity mod destination update. | Menu, preset load apply |
 | `preset_applyLfoModTarget(lfo, targetParam)` | Direct LFO mod destination update. | Menu, preset load apply |
 | `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Chunked runtime Scene kit audio-routing, descriptor runtime apply, and legacy mod-target apply. | Menu |
-| `preset_morph(morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Intended rate-limited morph interpolation/application. After Session 032 hardware testing, descriptor Morph is known broken and needs follow-up. | Menu, main loop |
+| `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values; per-voice Morph is the engine input. | Menu, MIDI, velocity modulation, main loop |
+| `presetMorph_setVoiceLfoModulation(source_slot, target_slot, amount, polarity, lfo_value)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay that is summed around retained per-voice Morph base values. | InstrumentManager/LFO dispatch |
 
 ## Core/Scene/Preset/ParameterArray
 
@@ -343,8 +355,9 @@ Purpose: owns the legacy numeric parameter id map and runtime pointer map from
 flat sound parameter ids to DSP engine fields. After Session 032, instrument
 file keys and dynamic VOICE pages are descriptor-backed through
 InstrumentManager/SceneData instead of this table. `ParameterArray` remains
-important for older static sound parameters and for `ModulationNode` /
-`AutomationNode` paths until those are migrated to descriptor IDs.
+important for older static sound parameters and for the legacy AutomationNode
+path. Session 033 added descriptor-aware LFO/velocity adapters; AutomationNode
+still needs the same descriptor/Scene target migration.
 
 | API / Data | Use | Usual callers / clients |
 |---|---|---|
@@ -355,6 +368,33 @@ important for older static sound parameters and for `ModulationNode` /
 | `paramArray_setParameter(idx, newValue)` | Write one typed value into the mapped DSP field when the id/pointer are valid. | modulationNode restore/apply paths |
 | `parameterArray_init()` | Fill the sound-parameter pointer/type map. | `main.c` boot |
 | `extern parameter_values[]` | Legacy/static parameter byte store declaration. Descriptor-backed instrument values live in Scene storage. | Defined in Menu today |
+
+## Core/Scene/SceneModTargets
+
+Affiliate modules: Menu, InstrumentManager, Preset/Morph, future FX modules.
+
+Purpose: owns the canonical ID/name/range list for Scene-level sound
+parameters that are modulation targets but are not parameters of a swappable
+instrument in a voice slot. This keeps per-instrument descriptor tables dynamic:
+voice-local targets come from the currently installed instrument descriptor
+table, while non-voice sound targets come from this Scene namespace.
+
+Current target order:
+
+- `1vm`, `2vm`, `3vm`, `4vm`, `5vm`, `6vm`
+- Scene Decimation `srt`
+
+Scene Decimation deliberately appears after the six Morph targets so the
+velocity target list does not place it directly beside a voice-local
+`instrument_decimation` row, which also uses short label `srt`.
+
+| API | Use | Usual callers / clients |
+|---|---|---|
+| `sceneModTarget_count()` | Number of Scene target descriptors. | Menu/InstrumentManager list traversal |
+| `sceneModTarget_idAt(index)` | Convert list index to canonical Scene target ID. | Menu stepping/display |
+| `sceneModTarget_valid(id, use_mask)` | Validate a target for velocity and/or LFO use. | Menu, InstrumentManager |
+| `sceneModTarget_get(id)` | Read descriptor metadata: kind, voice slot, range, labels, flags. | Menu, InstrumentManager |
+| `sceneModTarget_first(use_mask)` / `sceneModTarget_step(current, dir, use_mask)` | Non-looping target-list traversal with skipped invalid entries. | Menu target pickers |
 
 ## Core/MIDI/MidiParser
 

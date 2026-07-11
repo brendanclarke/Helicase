@@ -1,10 +1,12 @@
 # Instrument and Kit File Specification
 
-Session 032 reference. This document has been folded into
+Session 032 reference, superseded after Session 033. This document has been folded into
 `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`, which is now the
 authoritative source for current filesystem, kit/instrument file, Scene
 storage, menu descriptor, runtime apply, and future save/load decisions. Keep
 this file only as a Session 032 source reference until it is deleted later.
+Do not use the status bullets below as current runtime truth; Session 033 fixed
+descriptor Morph plus descriptor/Scene LFO and velocity modulation targets.
 
 ## Status
 
@@ -15,9 +17,10 @@ this file only as a Session 032 source reference until it is deleted later.
   in `Core/DSP/Instruments/*/*Parameters.c`.
 - The sequencer triggers voices and audio is produced after the Session 032
   runtime shaper/binding repair.
-- Hardware testing after Session 032 reports that Morph does not work.
-- LFO/velocity modulation target assignments and step automation assignments do
-  not yet work reliably for descriptor IDs. They remain follow-up work.
+- Historical Session 032 gap, fixed in Session 033: Morph did not work yet.
+- Historical Session 032 gap, partly fixed in Session 033: LFO/velocity
+  modulation target assignments did not yet work for descriptor IDs. Step
+  automation remains follow-up work.
 
 ## SD Card Shape
 
@@ -406,33 +409,35 @@ Current working state:
 - Target cells can store descriptor IDs in Scene storage.
 - `instrumentManager_targetValid()` validates by descriptor flags.
 
-Current limitations:
+Historical Session 032 limitations, superseded by Session 033 where noted:
 
-- `ModulationNode` still uses legacy `parameterArray[]` destination pointers.
-- Non-off descriptor LFO/velocity destinations are validated/stored but not
-  fully applied to DSP runtime targets.
+- Session 033 added descriptor/Scene LFO and velocity target adapters beside
+  legacy `parameterArray[]` destination pointers.
+- Session 033 fixed non-off descriptor LFO/velocity destinations so they are
+  applied to DSP runtime targets.
 - `AutomationNode` still plays back by emitting legacy MIDI CC/CC2 through
   `midiParser_ccHandler()`.
 - `preset_applyInstrumentRuntimeValueInternal()` currently ignores its
   `recordAutomation` argument.
 - `seq_recordAutomation()` still accepts/narrows destination as `uint8_t`.
 
-Therefore, descriptor target assignment, LFO/velocity modulation, and step
-automation require a descriptor-aware `ModulationNode` and `AutomationNode`
-follow-up. Session 032 hardware testing confirms these are not working.
+Therefore, the remaining current follow-up after Session 033 is descriptor-aware
+step automation: `AutomationNode`, recording, target storage, and target display
+must preserve descriptor/Scene IDs.
 
 ## Known Session 032 Gaps
 
-1. Morph is currently broken on hardware despite the intended Scene
-   main/morph/interpolation path. Next session should instrument:
+1. Resolved in Session 033: Morph was broken on hardware despite the intended
+   Scene main/morph/interpolation path. The debugging checklist was:
    - menu main/morph image writes
    - `scene->settings.morph_amount`
    - `presetMorph_request()` / `presetMorph_tick()`
    - `morph_interpolation[]`
    - `instrumentManager_writeRuntime()` calls
    - one audible runtime field such as volume or filter frequency
-2. LFO/velocity target assignment is descriptor-aware at storage/display level
-   but not at runtime modulation level.
+2. Resolved in Session 033: LFO/velocity target assignment was
+   descriptor-aware at storage/display level but not at runtime modulation
+   level.
 3. Step automation is descriptor-aware at PatternData storage width level, but
    record/playback still uses legacy CC-oriented automation nodes.
 4. `make` was unavailable in the Session 032 shell, so final compile validation
