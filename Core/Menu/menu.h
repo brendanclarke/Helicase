@@ -190,7 +190,16 @@ enum loadSaveEnum {
 enum Datatypes {
     DTYPE_0B255 = 0,
     DTYPE_0B127,
-    DTYPE_PM100,
+    /*
+     * Dedicated three-state LFO polarity dtype.
+     *
+     * Why this is not DTYPE_MENU: DTYPE_MENU packs the menu-table id into the
+     * high nibble of the same byte, leaving only ids 0..15. Adding polarity as
+     * menu id 16 wrapped back to id 0 and displayed the track-scale table. This
+     * dtype keeps the stored value as the DSP enum 0..2 and gives Menu an
+     * explicit clamp/display branch.
+     */
+    DTYPE_LFO_POLARITY,
     DTYPE_MENU,
     DTYPE_PM63,
     DTYPE_1B16,

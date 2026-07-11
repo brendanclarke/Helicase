@@ -55,6 +55,11 @@
 #include <string.h>
 #include <stdint.h>
 
+#define MENU_COMPACT_SCREEN_CELLS 4u
+#define MENU_STATIC_SUBPAGE_CELLS 8u
+#define MENU_VOICE_SUBPAGE_SCREENS \
+    (INSTRUMENT_MENU_PAGE_CELLS / MENU_COMPACT_SCREEN_CELLS)
+
 /* ---- stubs for original calls we haven't ported yet ---- */
 // static inline void screensaver_touch(void){}
 // static inline uint8_t copyClear_isClearModeActive(void){return 0;}
@@ -665,6 +670,18 @@ static const Name valueNames[NUM_NAMES] = {
 ** State — exact match to original
 ** ----------------------------------------------------------------------- */
 static uint8_t menuIndex = 0;
+/*
+ * Current four-parameter screen for each voice SELECT sub-page.
+ *
+ * Static menu pages still use menuIndex parameter bits 0..3 and 4..7 as the
+ * old two-screen model. Voice pages can now expose up to sixteen instrument
+ * descriptor cells per SELECT button, so the selected screen lives outside
+ * menuIndex and is remembered per sub-page. It intentionally survives voice
+ * page and mode changes; pressing a SELECT button while already in VOICE mode
+ * is the only normal action that resets a different sub-page to screen 0 or
+ * advances the same sub-page to the next screen.
+ */
+static uint8_t menu_voiceSubPageScreen[NUM_SUB_PAGES];
 
 uint8_t menu_numSamples = 0;
 uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
@@ -699,6 +716,12 @@ static volatile struct {
 ** Forward declarations (static)
 ** ----------------------------------------------------------------------- */
 static uint8_t has2ndPage(uint8_t menuPage);
+static uint8_t menu_voiceAbsolutePositionSelectable(uint8_t subPage,
+                                                    uint8_t position);
+static uint8_t menu_voiceSubPageScreenExists(uint8_t subPage, uint8_t screen);
+static uint8_t menu_voiceFirstSelectableColumn(uint8_t subPage,
+                                               uint8_t screen);
+static uint8_t menu_voiceVisiblePosition(uint8_t subPage, uint8_t position);
 static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter);
 static void menu_repaintLoadSavePage(void);
 static void menu_repaintGeneric(void);
@@ -713,6 +736,7 @@ static void menu_displayModTargetFull(uint8_t curParmVal);
 static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText);
 static uint8_t getMaxEntriesForMenu(uint8_t menuId);
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf);
+static void menu_getLfoPolarityName(uint8_t value, char *buf);
 static void menu_endlessPotMappingChanged(void);
 static uint8_t menu_cpuUseWidgetVisible(void);
 static void menu_formatCpuUsePercent3(char *buf);
@@ -738,6 +762,9 @@ typedef struct {
 typedef struct {
     uint8_t scene_index;
     uint8_t source_slot;
+    uint8_t target_pair;
+    instrument_binding_kind_t target_voice_kind;
+    instrument_binding_kind_t target_param_kind;
     uint8_t target_voice_index;
     uint8_t target_param_index;
     uint16_t raw_target_voice;
@@ -748,11 +775,18 @@ typedef struct {
 
 static uint8_t menu_isVoicePage(uint8_t page);
 static uint8_t menu_voicePageToSlot(uint8_t page);
+static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position);
 static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position);
 static uint8_t menu_cellDtype(const menu_cell_t *cell);
 static uint16_t menu_cellDisplayValue(const menu_cell_t *cell);
 static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value);
 static uint8_t menu_cellIsEmpty(const menu_cell_t *cell);
+static uint8_t menu_lfoTargetPairForKind(instrument_binding_kind_t kind,
+                                         uint8_t *pair_out,
+                                         uint8_t *is_voice_out,
+                                         uint8_t *is_param_out,
+                                         instrument_binding_kind_t *voice_kind_out,
+                                         instrument_binding_kind_t *param_kind_out);
 static uint8_t menu_cellIsLfoTargetVoice(const menu_cell_t *cell);
 static uint8_t menu_cellIsLfoTargetParam(const menu_cell_t *cell);
 static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
@@ -784,7 +818,7 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
     return page;
 }
 
-static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
+static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
 {
     menu_cell_t cell;
     const Page *page;
@@ -796,7 +830,7 @@ static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
     cell.descriptor_index = INSTRUMENT_MENU_EMPTY;
 
     /*
-     * Resolve one visible menu cell without assuming one global parameter ID
+     * Resolve one absolute menu cell without assuming one global parameter ID
      * namespace.
      *
      * Static pages still come from menuPages[][] and parameter_values[]. Voice
@@ -804,13 +838,18 @@ static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
      * descriptor supplies text/dtype and descriptor_index supplies the storage
      * cell in SceneData. This keeps old global/Pattern pages stable while
      * removing the false overlap between flat PAR_* ids and instrument ids.
+     * Voice callers may pass absolute positions 0..15; static callers remain
+     * limited to the old 0..7 Page structure.
      */
-    if (subPage >= NUM_SUB_PAGES || position >= 8u)
+    if (subPage >= NUM_SUB_PAGES)
         return cell;
 
     if (menu_isVoicePage(menu_activePage)) {
         const kit_instrument_slot_t *slot;
         uint8_t slot_index = menu_voicePageToSlot(menu_activePage);
+
+        if (position >= INSTRUMENT_MENU_PAGE_CELLS)
+            return cell;
 
         slot = scene_instrumentSlotConst(scene_getActiveIndex(), slot_index);
         if (!slot)
@@ -837,6 +876,8 @@ static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
         return cell;
     }
 
+    if (position >= MENU_STATIC_SUBPAGE_CELLS)
+        return cell;
     page = &menuPages[menu_activePage][subPage];
     cell.text_id = (&page->top1)[position];
     cell.static_param = (&page->bot1)[position];
@@ -847,25 +888,132 @@ static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
     return cell;
 }
 
+static uint8_t menu_voiceVisiblePosition(uint8_t subPage, uint8_t position)
+{
+    uint8_t screen;
+
+    /*
+     * Map one visible four-column voice position to an absolute 16-cell row.
+     *
+     * Inputs: subPage is the SELECT sub-page and position is the current
+     * compact-column index. Output: absolute descriptor-cell position for the
+     * current remembered voice screen. This cannot be folded into
+     * menu_resolveCellAbsolute() because existence tests and SELECT toggling
+     * must inspect future screens without applying the current screen offset.
+     */
+    if (subPage >= NUM_SUB_PAGES)
+        return position;
+    screen = menu_voiceSubPageScreen[subPage];
+    if (screen >= MENU_VOICE_SUBPAGE_SCREENS ||
+        !menu_voiceSubPageScreenExists(subPage, screen)) {
+        screen = 0u;
+        menu_voiceSubPageScreen[subPage] = 0u;
+    }
+    return (uint8_t)(screen * MENU_COMPACT_SCREEN_CELLS +
+                     (position % MENU_COMPACT_SCREEN_CELLS));
+}
+
+static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
+{
+    if (menu_isVoicePage(menu_activePage)) {
+        return menu_resolveCellAbsolute(
+            subPage, menu_voiceVisiblePosition(subPage, position));
+    }
+    return menu_resolveCellAbsolute(subPage, position);
+}
+
 static uint8_t menu_cellIsEmpty(const menu_cell_t *cell)
 {
     return (uint8_t)(!cell || cell->kind == MENU_CELL_EMPTY);
 }
 
+static uint8_t menu_lfoTargetPairForKind(instrument_binding_kind_t kind,
+                                         uint8_t *pair_out,
+                                         uint8_t *is_voice_out,
+                                         uint8_t *is_param_out,
+                                         instrument_binding_kind_t *voice_kind_out,
+                                         instrument_binding_kind_t *param_kind_out)
+{
+    uint8_t pair = 0xffu;
+    uint8_t is_voice = 0u;
+    uint8_t is_param = 0u;
+    instrument_binding_kind_t voice_kind = INSTRUMENT_BIND_NONE;
+    instrument_binding_kind_t param_kind = INSTRUMENT_BIND_NONE;
+
+    /*
+     * Resolve one LFO target binding into its selector pair.
+     *
+     * Inputs: a descriptor runtime binding kind from the currently edited
+     * menu cell. Outputs: target-pair index, whether the edited cell is the
+     * voice or parameter side, and the sibling binding kinds for that same
+     * pair. This helper exists because pair behavior is shared while storage
+     * cells are not: pair 1 must use lfo_target_voice/lfo_target_param, and
+     * pair 2 must use lfo_target_voice_2/lfo_target_param_2. Keeping the map
+     * here prevents display, encoder, endless-pot, and reconcile paths from
+     * duplicating four enum checks or assuming descriptor indices.
+     */
+    switch (kind) {
+    case INSTRUMENT_BIND_LFO_TARGET_VOICE:
+        pair = 0u;
+        is_voice = 1u;
+        voice_kind = INSTRUMENT_BIND_LFO_TARGET_VOICE;
+        param_kind = INSTRUMENT_BIND_LFO_TARGET_PARAM;
+        break;
+    case INSTRUMENT_BIND_LFO_TARGET_PARAM:
+        pair = 0u;
+        is_param = 1u;
+        voice_kind = INSTRUMENT_BIND_LFO_TARGET_VOICE;
+        param_kind = INSTRUMENT_BIND_LFO_TARGET_PARAM;
+        break;
+    case INSTRUMENT_BIND_LFO_TARGET_VOICE_2:
+        pair = 1u;
+        is_voice = 1u;
+        voice_kind = INSTRUMENT_BIND_LFO_TARGET_VOICE_2;
+        param_kind = INSTRUMENT_BIND_LFO_TARGET_PARAM_2;
+        break;
+    case INSTRUMENT_BIND_LFO_TARGET_PARAM_2:
+        pair = 1u;
+        is_param = 1u;
+        voice_kind = INSTRUMENT_BIND_LFO_TARGET_VOICE_2;
+        param_kind = INSTRUMENT_BIND_LFO_TARGET_PARAM_2;
+        break;
+    default:
+        break;
+    }
+
+    if (pair == 0xffu)
+        return 0u;
+    if (pair_out)
+        *pair_out = pair;
+    if (is_voice_out)
+        *is_voice_out = is_voice;
+    if (is_param_out)
+        *is_param_out = is_param;
+    if (voice_kind_out)
+        *voice_kind_out = voice_kind;
+    if (param_kind_out)
+        *param_kind_out = param_kind;
+    return 1u;
+}
+
 static uint8_t menu_cellIsLfoTargetVoice(const menu_cell_t *cell)
 {
-    return (uint8_t)(cell && cell->kind == MENU_CELL_INSTRUMENT &&
-                     cell->descriptor &&
-                     cell->descriptor->runtime.kind ==
-                         INSTRUMENT_BIND_LFO_TARGET_VOICE);
+    uint8_t is_voice = 0u;
+    if (!cell || cell->kind != MENU_CELL_INSTRUMENT || !cell->descriptor)
+        return 0u;
+    (void)menu_lfoTargetPairForKind(cell->descriptor->runtime.kind, 0,
+                                    &is_voice, 0, 0, 0);
+    return is_voice;
 }
 
 static uint8_t menu_cellIsLfoTargetParam(const menu_cell_t *cell)
 {
-    return (uint8_t)(cell && cell->kind == MENU_CELL_INSTRUMENT &&
-                     cell->descriptor &&
-                     cell->descriptor->runtime.kind ==
-                         INSTRUMENT_BIND_LFO_TARGET_PARAM);
+    uint8_t is_param = 0u;
+    if (!cell || cell->kind != MENU_CELL_INSTRUMENT || !cell->descriptor)
+        return 0u;
+    (void)menu_lfoTargetPairForKind(cell->descriptor->runtime.kind, 0, 0,
+                                    &is_param, 0, 0);
+    return is_param;
 }
 
 static uint8_t menu_cellDtype(const menu_cell_t *cell)
@@ -936,16 +1084,19 @@ static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
     uint8_t voice_index;
     uint8_t param_index;
     uint16_t raw_voice;
+    uint8_t pair;
+    instrument_binding_kind_t voice_kind;
+    instrument_binding_kind_t param_kind;
 
     /*
-     * Resolve the two-cell LFO target editing context for one source slot.
+     * Resolve the two-cell LFO target editing context for one source slot/pair.
      *
      * Inputs: a resolved instrument menu cell, either lfo_target_voice or
-     * lfo_target_param, and an output context. Outputs: source slot, sibling
-     * descriptor indices, raw/clamped target voice, target slot, and current
-     * stored target parameter. The function returns 0 when the cell is not an
-     * LFO target cell or the current source instrument type does not expose
-     * both target bindings.
+     * lfo_target_param for pair 1 or pair 2, and an output context. Outputs:
+     * source slot, pair id, sibling descriptor indices, raw/clamped target
+     * voice, target slot, and current stored target parameter. The function
+     * returns 0 when the cell is not an LFO target cell or the current source
+     * instrument type does not expose both target bindings for that pair.
      *
      * Why this cannot be folded into the encoder/knob handlers: those handlers
      * should describe input mechanics, not know how an instrument registry maps
@@ -959,21 +1110,26 @@ static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
      * cells by binding kind; InstrumentManager target helpers validate the
      * selected target slot's current instrument descriptor flags.
      */
-    if (!ctx || (!menu_cellIsLfoTargetVoice(cell) &&
-                 !menu_cellIsLfoTargetParam(cell)))
+    if (!ctx || !cell || cell->kind != MENU_CELL_INSTRUMENT ||
+        !cell->descriptor ||
+        !menu_lfoTargetPairForKind(cell->descriptor->runtime.kind, &pair, 0, 0,
+                                   &voice_kind, &param_kind))
         return 0u;
 
     memset(ctx, 0, sizeof(*ctx));
     ctx->scene_index = scene_getActiveIndex();
     ctx->source_slot = cell->slot;
+    ctx->target_pair = pair;
+    ctx->target_voice_kind = voice_kind;
+    ctx->target_param_kind = param_kind;
     source = scene_instrumentSlotConst(ctx->scene_index, ctx->source_slot);
     if (!source)
         return 0u;
 
     if (!instrumentManager_descriptorIndexForBinding(
-            source->type, INSTRUMENT_BIND_LFO_TARGET_VOICE, &voice_index) ||
+            source->type, voice_kind, &voice_index) ||
         !instrumentManager_descriptorIndexForBinding(
-            source->type, INSTRUMENT_BIND_LFO_TARGET_PARAM, &param_index)) {
+            source->type, param_kind, &param_index)) {
         return 0u;
     }
 
@@ -1379,6 +1535,9 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         if (value == 1u) memcpy(valueAsText, menuText_on, 3);
         else            memcpy(valueAsText, menuText_off, 3);
         break;
+    case DTYPE_LFO_POLARITY:
+        menu_getLfoPolarityName(value, valueAsText);
+        break;
     case DTYPE_MENU:
         getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
                                 value, valueAsText);
@@ -1436,6 +1595,13 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     case DTYPE_0b1:
         if (*value > 1u) *value = 1u;
         break;
+    case DTYPE_LFO_POLARITY: {
+        uint8_t n = (uint8_t)lfoPolarityNames[0][0];
+        if (n == 0u)
+            *value = 0u;
+        else if (*value >= n)
+            *value = (uint16_t)(n - 1u);
+        break; }
     case DTYPE_MENU: {
         uint8_t n = getMaxEntriesForMenu((uint8_t)(menu_cellDtype(cell) >> 4));
         if (n == 0u)
@@ -1659,6 +1825,34 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     buf[0]=p[0]; buf[1]=p[1]?p[1]:' '; buf[2]=p[2]?p[2]:' ';
 }
 
+static void menu_getLfoPolarityName(uint8_t value, char *buf)
+{
+    const char *p;
+    uint8_t count = (uint8_t)lfoPolarityNames[0][0];
+
+    /*
+     * Format the dedicated LFO polarity dtype.
+     *
+     * Inputs: raw stored polarity value, expected to match mod_node_polarity_t
+     * values 0..2. Output: a three-character LCD field. This cannot use the
+     * packed DTYPE_MENU helper because that helper has only four high-nibble
+     * bits for table ids; the previous id 16 wrapped to id 0 and displayed the
+     * track-scale table. Keeping this helper local lets compact view,
+     * single-parameter edit view, and clamp logic share the same table without
+     * inventing a bogus menu-table id.
+     */
+    if (count == 0u) {
+        memcpy(buf, menuText_dash, 3);
+        return;
+    }
+    if (value >= count)
+        value = (uint8_t)(count - 1u);
+    p = lfoPolarityNames[value + 1u];
+    buf[0] = p[0];
+    buf[1] = p[1] ? p[1] : ' ';
+    buf[2] = p[2] ? p[2] : ' ';
+}
+
 /* -----------------------------------------------------------------------
 ** Mod target display helpers
 ** ----------------------------------------------------------------------- */
@@ -1714,13 +1908,122 @@ static void menu_displayCpuUseEdit(void)
 ** ----------------------------------------------------------------------- */
 static uint8_t has2ndPage(uint8_t menuPage)
 {
-    menu_cell_t cell = menu_resolveCell(menuPage, 4u);
+    menu_cell_t cell = menu_resolveCellAbsolute(menuPage, 4u);
     return (uint8_t)(!menu_cellIsEmpty(&cell));
+}
+
+static uint8_t menu_voiceAbsolutePositionSelectable(uint8_t subPage,
+                                                    uint8_t position)
+{
+    menu_cell_t cell;
+
+    /*
+     * Decide whether one absolute voice sub-page cell can receive focus.
+     *
+     * Inputs: SELECT sub-page and absolute instrument cell 0..15. Output:
+     * nonzero for a real parameter cell, zero for INSTRUMENT_MENU_EMPTY or
+     * INSTRUMENT_MENU_SKIP. This exists separately from menu_resolveCell()
+     * because encoder movement must scan the full 16-cell row without applying
+     * the current four-cell screen offset. Clients: voice screen existence,
+     * SELECT screen entry, and encoder navigation across sparse future layouts.
+     */
+    if (position >= INSTRUMENT_MENU_PAGE_CELLS)
+        return 0u;
+    cell = menu_resolveCellAbsolute(subPage, position);
+    if (menu_cellIsEmpty(&cell))
+        return 0u;
+    if (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP)
+        return 0u;
+    return 1u;
+}
+
+static uint8_t menu_voiceSubPageScreenExists(uint8_t subPage, uint8_t screen)
+{
+    uint8_t i;
+    uint8_t start;
+
+    /*
+     * Test whether one four-cell voice screen exists.
+     *
+     * Inputs: subPage is the SELECT button page and screen is 0..3. Output:
+     * nonzero when any cell on that screen is selectable. Earlier code treated
+     * the first cell as a screen sentinel, but sparse future layouts need to
+     * allow screens such as "        pa4 pa5    ". The reader now uses the
+     * same ordinary INSTRUMENT_MENU_EMPTY cells that the layout rows use, so no
+     * additional empty-count flagging system is required.
+     */
+    if (subPage >= NUM_SUB_PAGES || screen >= MENU_VOICE_SUBPAGE_SCREENS)
+        return 0u;
+    start = (uint8_t)(screen * MENU_COMPACT_SCREEN_CELLS);
+    for (i = 0u; i < MENU_COMPACT_SCREEN_CELLS; i++) {
+        if (menu_voiceAbsolutePositionSelectable(subPage,
+                                                 (uint8_t)(start + i)))
+            return 1u;
+    }
+    return 0u;
+}
+
+static uint8_t menu_voiceFirstSelectableColumn(uint8_t subPage,
+                                               uint8_t screen)
+{
+    uint8_t i;
+    uint8_t start;
+
+    /*
+     * Find the initial focus column for one visible voice screen.
+     *
+     * Inputs: SELECT sub-page and four-cell screen. Output: the first
+     * selectable visible column, or zero when the screen is empty. SELECT uses
+     * this after changing screens so sparse screens do not land the highlight
+     * on a blank cell while the actual parameter sits later in the row.
+     */
+    if (subPage >= NUM_SUB_PAGES || screen >= MENU_VOICE_SUBPAGE_SCREENS)
+        return 0u;
+    start = (uint8_t)(screen * MENU_COMPACT_SCREEN_CELLS);
+    for (i = 0u; i < MENU_COMPACT_SCREEN_CELLS; i++) {
+        if (menu_voiceAbsolutePositionSelectable(subPage,
+                                                 (uint8_t)(start + i)))
+            return i;
+    }
+    return 0u;
 }
 
 static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
 {
     const uint8_t is2ndPage = (uint8_t)(activeParameter > 3);
+
+    if (menu_isVoicePage(menu_activePage)) {
+        uint8_t screen;
+        uint8_t hasNext;
+
+        /*
+         * Voice pages use up to four screens behind one SELECT sub-page.
+         *
+         * Screen 0 shows '>' when another screen exists, preserving the old
+         * first-screen affordance. Later screens show '*' when there is still
+         * another screen ahead or '<' when the next SELECT press will loop back
+         * to the first screen. Single-screen sub-pages show no marker.
+         *
+         * menuIndex stores the sub-page in a shared bitfield used by voice,
+         * MIDI, STEP, and other modes. During mode transitions that bitfield
+         * can briefly contain a value outside the voice SELECT range; normalize
+         * before indexing the voice-screen memory so stale mode state cannot
+         * read or write past menu_voiceSubPageScreen[].
+         */
+        if (activePage >= NUM_SUB_PAGES)
+            activePage = 0u;
+        screen = menu_voiceSubPageScreen[activePage];
+        if (screen >= MENU_VOICE_SUBPAGE_SCREENS ||
+            !menu_voiceSubPageScreenExists(activePage, screen)) {
+            screen = 0u;
+            menu_voiceSubPageScreen[activePage] = 0u;
+        }
+        hasNext = menu_voiceSubPageScreenExists(activePage,
+                                                (uint8_t)(screen + 1u));
+        if (screen == 0u)
+            return hasNext ? '>' : 0u;
+        return hasNext ? '*' : '<';
+    }
 
     if (menu_activePage == MENU_MIDI_PAGE) {
         if (is2ndPage) {
@@ -2052,6 +2355,9 @@ static void menu_repaintGeneric(void)
                 if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
                 else               memcpy(&editDisplayBuffer[1][13], menuText_off, 3);
                 break;
+            case DTYPE_LFO_POLARITY:
+                menu_getLfoPolarityName(value, &editDisplayBuffer[1][13]);
+                break;
             case DTYPE_MENU: {
                 uint8_t menuId = (uint8_t)(menu_cellDtype(&cell) >> 4);
                 if (menuId == MENU_WAVEFORM && value >= (uint8_t)waveformNames[0][0]) {
@@ -2090,7 +2396,8 @@ static void menu_repaintGeneric(void)
             }
         }
     } else {
-        const uint8_t is2ndPage = (uint8_t)((activeParameter > 3) ? 4 : 0);
+        const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+            ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
         for (i = 0u; i < 4u; i++) {
@@ -2199,6 +2506,58 @@ static void menu_moveToMenuItem(int8_t inc)
     uint8_t allowedSkips = 3;
 
     inc = (int8_t)(inc > 0 ? 1 : -1);
+
+    if (menu_isVoicePage(menu_activePage)) {
+        /*
+         * Voice pages navigate real parameters across the full 16-cell row.
+         *
+         * Inputs: encoder movement in compact-view navigation. Output:
+         * activeParameter remains a visible column 0..3, but the remembered
+         * sub-page screen changes when the next selectable descriptor lives on
+         * another four-cell screen. Empty cells and INSTRUMENT_MENU_SKIP cells
+         * are skipped. Unlike SELECT cycling, encoder navigation does not loop:
+         * decrementing stops at the first selectable cell on screen 0, and
+         * incrementing stops at the final selectable cell on the final populated
+         * screen. This cannot be folded into menu_resolveCell() because that
+         * resolver maps the current visible column; navigation must inspect
+         * future absolute cells before deciding which screen is current.
+         */
+        uint8_t subPage = (uint8_t)activePage;
+        uint8_t screen;
+        int16_t candidate;
+
+        if (subPage >= NUM_SUB_PAGES)
+            subPage = 0u;
+        screen = menu_voiceSubPageScreen[subPage];
+        if (screen >= MENU_VOICE_SUBPAGE_SCREENS ||
+            !menu_voiceSubPageScreenExists(subPage, screen)) {
+            screen = 0u;
+            menu_voiceSubPageScreen[subPage] = 0u;
+        }
+        if (activeParameter < 0 ||
+            activeParameter >= (int8_t)MENU_COMPACT_SCREEN_CELLS) {
+            activeParameter =
+                (int8_t)menu_voiceFirstSelectableColumn(subPage, screen);
+        }
+
+        candidate = (int16_t)(screen * MENU_COMPACT_SCREEN_CELLS +
+                              (uint8_t)activeParameter + inc);
+        while (candidate >= 0 &&
+               candidate < (int16_t)INSTRUMENT_MENU_PAGE_CELLS) {
+            if (menu_voiceAbsolutePositionSelectable(subPage,
+                                                     (uint8_t)candidate)) {
+                screen = (uint8_t)(candidate / MENU_COMPACT_SCREEN_CELLS);
+                activeParameter =
+                    (int8_t)(candidate % MENU_COMPACT_SCREEN_CELLS);
+                menu_voiceSubPageScreen[subPage] = screen;
+                menuIndex = (uint8_t)((subPage << PAGE_SHIFT) |
+                                      (uint8_t)activeParameter);
+                return;
+            }
+            candidate = (int16_t)(candidate + inc);
+        }
+        return;
+    }
 
 checkvalid:
     activeParameter = (int8_t)(activeParameter + inc);
@@ -2491,7 +2850,8 @@ static uint8_t menu_paramVisible(uint16_t paramNr)
         return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
                          cell.static_param == paramNr);
     } else {
-        const uint8_t is2ndPage = (uint8_t)((activeParameter > 3) ? 4 : 0);
+        const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+            ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
         for (i = 0; i < 4; i++) {
@@ -2520,7 +2880,8 @@ static void menu_updateEndlessPotScales(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
-    uint8_t is2ndPage = (uint8_t)((activeParameter > 3) ? 4 : 0);
+    uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+        ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
 
     for (uint8_t knobNr = 0; knobNr < ENDLESS_POT_COUNT; knobNr++) {
         uint8_t useDouble = 0;
@@ -2549,7 +2910,8 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
-    const uint8_t is2ndPage       = (uint8_t)((activeParameter > 3) ? 4 : 0);
+    const uint8_t is2ndPage       = menu_isVoicePage(menu_activePage)
+        ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
     menu_cell_t cell =
         menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
     uint16_t value;
@@ -2847,6 +3209,48 @@ void menu_switchSubPage(uint8_t subPageNr)
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
 
+    if (menu_isVoicePage(menu_activePage)) {
+        /*
+         * Voice SELECT buttons choose a sub-page and cycle its four-parameter screens.
+         *
+         * Inputs: subPageNr is the pressed SELECT button in VOICE mode. Output:
+         * pressing a different SELECT button switches to that sub-page and
+         * resets its screen to the first four parameters; pressing the same
+         * SELECT button advances to the next four-parameter screen that
+         * contains any selectable parameter, or loops back to the first when
+         * no later screen contains one. The screen memory is per sub-page and
+         * is not cleared by voice/mode changes.
+         */
+        if (subPageNr >= NUM_SUB_PAGES)
+            subPageNr = 0u;
+        if (activePage >= NUM_SUB_PAGES)
+            activePage = subPageNr;
+        if (subPageNr == activePage) {
+            uint8_t screen = menu_voiceSubPageScreen[activePage];
+            if (screen >= MENU_VOICE_SUBPAGE_SCREENS ||
+                !menu_voiceSubPageScreenExists(activePage, screen)) {
+                screen = 0u;
+            }
+            if (menu_voiceSubPageScreenExists(activePage,
+                                              (uint8_t)(screen + 1u)))
+                screen++;
+            else
+                screen = 0u;
+            menu_voiceSubPageScreen[activePage] = screen;
+            activeParameter =
+                menu_voiceFirstSelectableColumn(activePage, screen);
+        } else {
+            activePage = subPageNr;
+            menu_voiceSubPageScreen[activePage] = 0u;
+            activeParameter =
+                menu_voiceFirstSelectableColumn(activePage, 0u);
+        }
+
+        menuIndex = (uint8_t)((activePage << PAGE_SHIFT) | activeParameter);
+        menu_endlessPotMappingChanged();
+        return;
+    }
+
     if (subPageNr == activePage) {
         /* toggle between 1st and 2nd half of this sub-page */
         if (activeParameter < 4) {
@@ -2886,6 +3290,28 @@ void menu_switchSubPage(uint8_t subPageNr)
 void menu_resetActiveParameter(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    if (menu_isVoicePage(menu_activePage)) {
+        /*
+         * Repair a remembered voice screen after instrument/page changes.
+         *
+         * Inputs: current SELECT sub-page and its remembered screen. Output:
+         * when an instrument swap leaves that screen empty, fall back to the
+         * first screen, which every voice sub-page is expected to define.
+         * The sub-page guard covers cross-mode entry where menuIndex may still
+         * hold a non-voice sub-page value; repairing it here keeps later
+         * display and knob paths on the first valid voice screen.
+         */
+        if (activePage >= NUM_SUB_PAGES)
+            activePage = 0u;
+        if (!menu_voiceSubPageScreenExists(activePage,
+                                           menu_voiceSubPageScreen[activePage]))
+            menu_voiceSubPageScreen[activePage] = 0u;
+        menuIndex = (uint8_t)(
+            (activePage << PAGE_SHIFT) |
+            menu_voiceFirstSelectableColumn(activePage,
+                                            menu_voiceSubPageScreen[activePage]));
+        return;
+    }
     if (!has2ndPage(activePage))
         menuIndex &= (uint8_t)(~MASK_PARAMETER);
 }

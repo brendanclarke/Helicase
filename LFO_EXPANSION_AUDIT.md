@@ -481,7 +481,7 @@ Required descriptor changes in all four instruments:
   - `*_PARAM_LFO_TARGET_PARAM_2`
 - Change existing `lfo_amount` short name from `amt` to `am1`.
 - Add:
-  - `ROW_MENU("lfo_polarity", "LFO", "Polarity", "pol", MENU_LFO_POLARITY, lfo.polarity, TYPE_UINT8)`
+  - `ROW("lfo_polarity", "LFO", "Polarity", "pol", DTYPE_LFO_POLARITY, lfo.polarity, TYPE_UINT8)`
   - `ROW("lfo_amount_2", "LFO", "Amount 2", "am2", DTYPE_0B127, lfo.modTarget2.amount, TYPE_FLT)`
   - `ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2)`
   - `ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2)`
@@ -491,13 +491,15 @@ Required descriptor changes in all four instruments:
 
 Required menu layout changes:
 
-- Replace the current single LFO page with three pages:
+- Keep the LFO controls on one 16-cell voice sub-page row, displayed by Menu as
+  three populated four-cell screens:
   - `frq snc wav ofs`
   - `rtg pol am1 am2`
   - `vo1 ds1 vo2 ds2`
 - For hihat, update both `hihat_menu_pages` and `hihat_open_menu_pages`.
-- Because every instrument adds two extra pages, each `*_menu_page_count` should
-  grow by two through the existing `sizeof()` count calculation.
+- Do not add extra LFO sub-pages or grow `*_menu_page_count`; the voice
+  sub-page framework owns the four-cell screen selection inside the existing
+  row.
 
 Why:
 
@@ -524,20 +526,19 @@ Comment text needed:
 
 - Near the LFO rows: explain that target pair 1 and pair 2 share one LFO
   oscillator and polarity but own independent amount/destination nodes.
-- Near the split LFO pages: explain that the three pages are a layout decision,
-  not a change in storage hierarchy.
+- Near the wide LFO row: explain that the four-cell screens are a Menu display
+  decision, not a change in storage hierarchy.
 
 CPU impact:
 
 - No audio cost from descriptor/page rows themselves.
-- Slightly larger descriptor tables and two more menu pages per instrument.
+- Slightly larger descriptor tables and wider 16-cell menu rows.
 
 ### 8. `Core/Menu/MenuText.h` And `Core/Menu/menu.c`
 
 Required `MenuText.h` changes:
 
-- Add `MENU_LFO_POLARITY`.
-- Add table:
+- Add `lfoPolarityNames` table:
   - count `3`,
   - `neg`,
   - `pos`,
@@ -545,8 +546,10 @@ Required `MenuText.h` changes:
 
 Required `menu.c` table changes:
 
-- Add `MENU_LFO_POLARITY` to `getMaxEntriesForMenu()`.
-- Add `MENU_LFO_POLARITY` to `getMenuItemNameForValue()`.
+- Do not add a `MENU_LFO_POLARITY` packed table id. `DTYPE_MENU` ids are stored
+  in four high-nibble bits and therefore only support `0..15`.
+- Add a dedicated `DTYPE_LFO_POLARITY` display/clamp path that reads
+  `lfoPolarityNames` directly.
 
 Required target-pair generalization in `menu.c`:
 
@@ -790,3 +793,173 @@ that are already installed against the changed descriptor id.
 2. Decide whether `lfo_polarity` should be morphable as an image row. Keeping it
    as `ROW_MENU` is consistent with current LFO wave/sync/retrigger behavior,
    but mode interpolation will step through integer polarity states.
+
+## Implementation Notes - 2026-07-11
+
+Code edits made:
+
+- Added `mod_node_polarity_t` and `mod_node_range_t` in
+  `Core/DSPAudio/modulationNode.h`.
+- Added cached range storage to `ModulationNode` and a new
+  `modNode_updateValuePolarity()` API.
+- Kept `modNode_updateValue()` as the legacy negative wrapper for velocity and
+  older callers.
+- Made direct descriptor targets install and refresh with a cached min/max
+  range so modulation amount is range-relative rather than value-relative.
+- Added `modTarget2` and shared `polarity` to `Lfo`.
+- Updated `lfo_dispatchNextValue()` to send the same raw oscillator value to
+  both destination nodes with shared polarity.
+- Updated `modNode_resetTargets()`, legacy original-value refresh, and direct
+  original-value/range refresh to include all six `modTarget2` nodes.
+- Added second LFO target binding kinds in `InstrumentManager.h`.
+- Updated InstrumentManager target resolution to build a direct modulation
+  range and reject unsafe modulation targets without a range contract.
+- Excluded `TYPE_UINT32` and generic `DTYPE_MENU` rows from modulation targets;
+  oscillator/noise waveform rows remain allowed because they have explicit
+  waveform ranges and the existing interpolation affiliation.
+- Added default selector values in `instrumentManager_resetSlot()`:
+  target voices default to `1`, target params and velocity target default to
+  `INSTRUMENT_PARAM_INVALID`.
+- Added compile-time descriptor/page count macros in each instrument parameter
+  header and static assertions in each parameter `.c` file.
+- Expanded drum, snare, cymbal, and hihat descriptors with:
+  - `lfo_polarity`
+  - `lfo_amount_2`
+  - `lfo_target_voice_2`
+  - `lfo_target_param_2`
+- Changed LFO short names to the requested page text:
+  - `am1`, `am2`, `vo1`, `ds1`, `vo2`, `ds2`
+- Expanded the instrument voice sub-page layout contract from 8 descriptor
+  cells to 16 descriptor cells. Menu now displays instrument-owned voice
+  sub-pages as up to four four-parameter screens behind the same SELECT button.
+- Folded each instrument's LFO controls into one wide LFO sub-page instead of
+  adding extra sub-pages:
+  - screen 1: `frq snc wav ofs`
+  - screen 2: `rtg pol am1 am2`
+  - screen 3: `vo1 ds1 vo2 ds2`
+- Restored the old Mix/Voice sub-page as the row after the LFO row, so
+  `vol/pan/srt/drv` remains accessible.
+- Updated drum, snare, cymbal, closed hihat, and open hihat layouts to the
+  16-cell row contract.
+- Added per-SELECT-sub-page voice screen memory in `menu.c`. This state is
+  separate from `menuIndex`: `menuIndex` still stores the selected sub-page and
+  visible column, while `menu_voiceSubPageScreen[]` stores which four-cell
+  instrument screen is currently visible for each SELECT button.
+- Updated voice-page SELECT behavior:
+  - pressing a different SELECT button enters that sub-page at screen 1
+  - pressing the same SELECT button advances to the next screen
+  - when the next screen's first cell is `INSTRUMENT_MENU_EMPTY`, SELECT loops
+    back to screen 1
+  - the remembered screen survives voice and mode changes
+  - if an instrument swap leaves the remembered screen unavailable, Menu falls
+    back to screen 1
+- Updated scroll-marker behavior for voice pages:
+  - screen 1 shows `>` only when another screen exists
+  - middle screens show `*` when another screen exists
+  - final non-first screens show `<`
+  - single-screen voice sub-pages show no marker
+- Kept static pages on the old 8-cell/two-half behavior. The wider 16-cell
+  contract applies only to instrument-owned voice sub-pages.
+- Updated compact repaint, edit selection, endless-pot mapping, knob edits, and
+  voice-page navigation to resolve the remembered four-cell voice screen before
+  looking up instrument descriptors.
+- Added `DTYPE_LFO_POLARITY` and display names `neg`, `pos`, `bi`.
+- Generalized Menu's LFO target context resolver so pair 1 and pair 2 share
+  clamp/reconcile/target-stepping behavior without sharing storage cells.
+- Updated `storageTypes.c` so `lfo_target_param_2` parses as a 16-bit canonical
+  descriptor target and `lfo_target_voice_2` clamps to `1..6`.
+
+Implementation decisions landed:
+
+- `TYPE_SPECIAL_F` uses range `0.0f..2.0f` with neutral/base captured as `1.0f`.
+- Negative polarity keeps the current phase convention: high LFO value is
+  closer to base, low value moves downward.
+- Positive polarity moves upward from base.
+- Bipolar polarity uses half the cached range width in each direction.
+- Range refresh lives under `InstrumentManager_writeRuntime()` through
+  `instrumentManager_noteRuntimeValueChanged()`, so menu edits, Kit load, morph,
+  automation, and future MIDI all refresh active direct modulation nodes through
+  the same path.
+
+Verification:
+
+- `make -B` completed successfully after the `Lfo` struct-size change.
+- `make` completed successfully after the final static-assert additions.
+- `make` completed successfully after replacing the incorrect extra-LFO-subpage
+  layout with the 16-cell voice sub-page framework. A compiler warning about
+  stale voice sub-page indexing was fixed by normalizing `menuIndex` sub-page
+  bits before indexing `menu_voiceSubPageScreen[]`.
+- Remaining warnings are pre-existing/toolchain warnings about nano libc syscall
+  stubs and LTO serial compilation; no new compile errors were reported.
+
+Follow-up watch points:
+
+- Hardware test the new target list now that generic `DTYPE_MENU` rows are
+  excluded. Expected result: target selection skips LFO waveform/sync/retrigger,
+  filter type, transient wave, etc.; oscillator/noise waveform rows should still
+  be available where the instrument exposes a real `OscInfo`.
+- Hardware test polarity on small base values to confirm range-relative amount
+  feels stable.
+- Decide later whether `lfo_polarity` should stay morphable or become a
+  supplemental non-morphable selector.
+
+## Implementation Notes - Voice Sub-Page Navigation Fix - 2026-07-11
+
+Code edits made:
+
+- Replaced the numbered `INSTRUMENT_MENU_EMPTY_4`,
+  `INSTRUMENT_MENU_EMPTY_8`, and `INSTRUMENT_MENU_EMPTY_12` helper macros with
+  explicit `INSTRUMENT_MENU_EMPTY` cells in every instrument menu row.
+- Left `INSTRUMENT_MENU_EMPTY` as the only blank-cell sentinel in
+  `instrument_menu_page_t`. The row reader now inspects the actual 16 cells
+  instead of depending on helper macros that implied a second empty-count
+  system.
+- Added `menu_voiceAbsolutePositionSelectable()` in `menu.c`.
+  - Input: one SELECT sub-page and one absolute 0..15 voice-cell position.
+  - Output: nonzero when that cell is a real focusable parameter.
+  - It skips both `INSTRUMENT_MENU_EMPTY` and `INSTRUMENT_MENU_SKIP`.
+  - It exists separately from `menu_resolveCell()` because navigation has to
+    inspect future absolute cells before deciding which four-cell screen is
+    current.
+- Changed `menu_voiceSubPageScreenExists()` from "first cell decides" to "any
+  selectable cell on the four-cell screen decides". This supports sparse future
+  screens such as `        pa4 pa5    `.
+- Added `menu_voiceFirstSelectableColumn()` so SELECT and mode/voice repair do
+  not focus an empty leading column on sparse screens.
+- Reworked the VOICE-mode branch of `menu_moveToMenuItem()`:
+  - encoder increment scans forward through absolute cells until it finds the
+    next selectable parameter or reaches cell 15
+  - encoder decrement scans backward until it finds the previous selectable
+    parameter or reaches cell 0
+  - crossing a four-cell boundary updates `menu_voiceSubPageScreen[]`
+  - navigation stops at the true first/last populated cell and does not loop
+  - empty cells and `INSTRUMENT_MENU_SKIP` are skipped, including across screen
+    boundaries
+- Updated SELECT handling so repeated SELECT advances to the next screen that
+  contains any selectable parameter and loops to screen 1 only when no later
+  screen contains one.
+- Updated voice-page reset repair so remembered screens survive voice/mode
+  changes while the active column lands on the first selectable parameter on
+  that remembered screen.
+
+Polarity display fix:
+
+- Removed the invalid `MENU_LFO_POLARITY` table id. `DTYPE_MENU` stores table
+  ids in the high nibble of one byte, so id 16 wrapped to id 0 and displayed
+  the track-scale table (`/8`, `/7`, `/6`) even though the stored DSP value was
+  correct.
+- Replaced the unused `DTYPE_PM100` enum slot with `DTYPE_LFO_POLARITY`.
+- Changed instrument `lfo_polarity` descriptors from `ROW_MENU(...,
+  MENU_LFO_POLARITY, ...)` to `ROW(..., DTYPE_LFO_POLARITY, ...)`.
+- Added `menu_getLfoPolarityName()` plus compact-view, single-parameter-view,
+  and clamp branches for `DTYPE_LFO_POLARITY`.
+- Updated `InstrumentManager` modulation-target eligibility so
+  `DTYPE_LFO_POLARITY` remains a selector/control and is not offered as a
+  continuous modulation destination.
+
+Verification:
+
+- `make` completed successfully after the navigation, explicit-row, and
+  polarity dtype fixes.
+- Remaining warnings are the existing nano libc syscall stub warnings and LTO
+  serial compilation note.

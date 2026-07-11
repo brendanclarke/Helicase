@@ -458,8 +458,20 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
          * [morph] so routing/target values keep a single endpoint.
          */
         if (descriptor->runtime.kind == INSTRUMENT_BIND_VELOCITY_TARGET ||
-            descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_PARAM) {
+            descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_PARAM ||
+            descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_PARAM_2) {
             uint16_t parsed16;
+            /*
+             * Canonical descriptor targets are 16-bit values.
+             *
+             * Inputs: velocity target, LFO destination 1, and LFO destination 2
+             * file keys store either INSTRUMENT_PARAM_INVALID for off or a
+             * packed slot/local descriptor id. Output: only the main endpoint
+             * stores the parsed selector; [morph] ignores these supplemental
+             * routing cells. This must not use the normal u8 parser because
+             * valid target ids can exceed 255, and zero is a valid target id
+             * rather than an off sentinel.
+             */
             st = storage_parseU16(value, &parsed16);
             if (st != STORAGE_STATUS_OK)
                 return st;
@@ -475,13 +487,15 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
         if (st != STORAGE_STATUS_OK)
             return st;
 
-        if (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE) {
+        if (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE ||
+            descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE_2) {
                 /*
                  * Legacy converted kits can contain zero here because the old
                  * flat LFO target voice byte was repaired only during apply.
-                 * SceneData now owns the generic storage cell, so clamp it
-                 * while parsing. Clients are filesystem_loadKitDirectory_tick()
-                 * and Preset's later instrument-runtime apply.
+                 * SceneData now owns the generic storage cell, so clamp both
+                 * LFO target voice selector pairs while parsing. Clients are
+                 * filesystem_loadKitDirectory_tick() and Preset's later
+                 * instrument-runtime apply.
                  */
                 if (parsed < 1u)
                     parsed = 1u;

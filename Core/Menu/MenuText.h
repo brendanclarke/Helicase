@@ -38,7 +38,6 @@
 #define MENU_MIDI_FILTERING 13
 #define MENU_PPQ            14
 #define MENU_EXT_SYNC       15
-
 static const char menuText_ok[]    = "ok ";
 static const char menuText_off[]   = "off";
 static const char menuText_on[]    = "on ";
@@ -73,6 +72,14 @@ static const char retriggerNames[][4] = {
 };
 static const char lfoWaveNames[][4] = {
     {8}, {"sin"},{"tri"},{"sup"},{"sdn"},{"sqr"},{"rnd"},{"xup"},{"xdn"},
+};
+/* Three-character display names for the shared LFO polarity selector.
+** Clients: descriptor ROW("lfo_polarity", ..., DTYPE_LFO_POLARITY), compact
+** value formatting, and single-parameter edit formatting. Outputs: "neg",
+** "pos", and "bi " while the stored numeric value remains aligned with
+** mod_node_polarity_t: 0 negative, 1 positive, 2 bipolar. */
+static const char lfoPolarityNames[][4] = {
+    {3}, {"neg"},{"pos"},{"bi"},
 };
 static const char rollRateNames[][4] = {
     {14},

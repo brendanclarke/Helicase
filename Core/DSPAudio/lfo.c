@@ -56,8 +56,10 @@ void lfo_init(Lfo *lfo)
 	lfo->sync			= 0;
 	lfo->freq			= 1;
 	lfo->modNodeValue	= 1;
+	lfo->polarity		= MOD_NODE_POLARITY_NEGATIVE;
 
 	modNode_init(&lfo->modTarget);
+	modNode_init(&lfo->modTarget2);
 }
 //-------------------------------------------------------------
 float lfo_calc(Lfo *lfo)
@@ -131,7 +133,18 @@ float lfo_calc(Lfo *lfo)
 void lfo_dispatchNextValue(Lfo* lfo)
 {
 	float val = lfo_calc(lfo);
-	modNode_updateValue(&lfo->modTarget,val);
+	/*
+	 * Fan one raw oscillator value out to both destination nodes.
+	 *
+	 * Inputs: lfo_calc() returns the shared 0..1 waveform for this block, and
+	 * lfo->polarity stores the shared negative/positive/bipolar mode. Outputs:
+	 * each ModulationNode applies its own amount, target pointer, restore
+	 * baseline, and cached range. The shaping is intentionally not in lfo_calc()
+	 * because only the destination node knows whether the target is float,
+	 * byte, waveform-interpolated, or a TYPE_SPECIAL_F multiplier.
+	 */
+	modNode_updateValuePolarity(&lfo->modTarget,val,lfo->polarity);
+	modNode_updateValuePolarity(&lfo->modTarget2,val,lfo->polarity);
 }
 //-------------------------------------------------------------
 uint32_t lfo_calcPhaseInc(float freq, uint8_t sync)

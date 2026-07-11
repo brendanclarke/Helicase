@@ -43,7 +43,18 @@ typedef enum {
     INSTRUMENT_BIND_VELOCITY_AMOUNT,
     INSTRUMENT_BIND_VELOCITY_TARGET,
     INSTRUMENT_BIND_LFO_TARGET_VOICE,
-    INSTRUMENT_BIND_LFO_TARGET_PARAM
+    INSTRUMENT_BIND_LFO_TARGET_PARAM,
+    /*
+     * Second LFO target pair bindings.
+     *
+     * Voice and parameter selectors are supplemental descriptor cells whose
+     * local indices can move as instrument definitions evolve. Pair 2 needs
+     * its own binding identities so Menu, storage, and InstrumentManager can
+     * find the matching sibling cells without hardcoded descriptor positions
+     * and without sharing pair 1's SceneData storage.
+     */
+    INSTRUMENT_BIND_LFO_TARGET_VOICE_2,
+    INSTRUMENT_BIND_LFO_TARGET_PARAM_2
 } instrument_binding_kind_t;
 
 typedef struct {
@@ -68,9 +79,19 @@ typedef struct {
 
 #define INSTRUMENT_MENU_EMPTY 0xffu
 #define INSTRUMENT_MENU_SKIP  0xfeu
+#define INSTRUMENT_MENU_PAGE_CELLS 16u
 
 typedef struct {
-    uint8_t descriptor_index[8];
+    /*
+     * Instrument-owned voice sub-page cells.
+     *
+     * Static pages still use the old Page top/bottom arrays with eight cells.
+     * Instrument pages are wider so one SELECT sub-page can expose up to four
+     * four-parameter screens. Menu owns the current screen index and resolves
+     * absolute positions here; descriptor arrays remain the storage/file-key
+     * source of truth.
+     */
+    uint8_t descriptor_index[INSTRUMENT_MENU_PAGE_CELLS];
 } instrument_menu_page_t;
 
 typedef struct {

@@ -56,14 +56,47 @@ typedef enum {
 } mod_node_destination_mode_t;
 
 /*
+ * Polarity values shared by LFO dispatch and ModulationNode target shaping.
+ *
+ * Inputs: Lfo::polarity stores one of these byte values through descriptor
+ * menu writes. Output: modNode_updateValuePolarity() maps the raw 0..1 LFO
+ * value into a range-relative destination delta. These constants live here
+ * instead of lfo.h so ModulationNode does not include the LFO type and create
+ * a circular ownership dependency.
+ */
+typedef enum {
+	MOD_NODE_POLARITY_NEGATIVE = 0,
+	MOD_NODE_POLARITY_POSITIVE,
+	MOD_NODE_POLARITY_BIPOLAR
+} mod_node_polarity_t;
+
+/*
+ * Cached descriptor-target modulation range.
+ *
+ * Inputs: InstrumentManager builds this from the target descriptor, scalar
+ * type, and runtime affiliation when installing or refreshing a direct target.
+ * Outputs: ModulationNode uses min/max to scale amount by usable range instead
+ * of by the current value. This keeps small base values from collapsing LFO
+ * depth and avoids descriptor/range lookup inside the audio block hot path.
+ */
+typedef struct {
+	float min;
+	float max;
+	uint8_t valid;
+} mod_node_range_t;
+
+/*
  * Runtime modulation source state.
  *
  * Accessors/clients: voice LFOs own one ModulationNode as Lfo::modTarget, and
  * velocityModulators[] owns six velocity nodes. Inputs arrive through
  * modNode_setDestination() for legacy ParameterArray ids or
- * modNode_setDirectDestination() for descriptor-resolved targets. Outputs are
- * block-local parameter overlays applied by modNode_updateValue() and restored
- * by modNode_resetTargets().
+ * modNode_setDirectDestination() for descriptor-resolved targets. Direct
+ * targets also cache a min/max contract supplied by InstrumentManager so
+ * range-relative LFO polarity does not need to know descriptor tables in the
+ * DSP update function. Outputs are block-local parameter overlays applied by
+ * modNode_updateValue()/modNode_updateValuePolarity() and restored by
+ * modNode_resetTargets().
  */
 typedef struct ModulatorStruct
 {
@@ -76,6 +109,7 @@ typedef struct ModulatorStruct
 	uint8_t		destinationMode;	/**< mod_node_destination_mode_t value */
 	Parameter	directParameter;	/**< descriptor-resolved runtime target */
 	void		*waveInterpTarget;	/**< optional OscInfo* for waveform blend */
+	mod_node_range_t range;		/**< cached direct-target min/max contract */
 
 } ModulationNode;
 
@@ -117,19 +151,46 @@ void modNode_setDestination(ModulationNode* vm, uint16_t dest);
 uint8_t modNode_setDirectDestination(ModulationNode* vm,
 									 uint16_t destination,
 									 Parameter parameter,
-									 void *waveInterpTarget);
+									 void *waveInterpTarget,
+									 mod_node_range_t range);
 /*
- * Refresh originalValue for descriptor-backed targets after a base-value edit.
+ * Refresh originalValue and range for descriptor-backed targets after a base-value edit.
  *
  * Inputs: destination is a canonical descriptor target id that InstrumentManager
- * just applied through the ordinary runtime edit/load/morph path. Output: any
- * active direct modulation node pointing at that id captures the current base
- * value again. This is separate from modNode_originalValueChanged(), which
- * still receives legacy ParameterArray ids.
+ * just applied through the ordinary runtime edit/load/morph path, and range is
+ * the current descriptor min/max contract for that same live target. Output:
+ * any active direct modulation node pointing at that id captures the current
+ * base value and range again. This is separate from
+ * modNode_originalValueChanged(), which still receives legacy ParameterArray ids.
  */
-void modNode_directOriginalValueChanged(uint16_t destination);
+void modNode_directOriginalValueChanged(uint16_t destination,
+										mod_node_range_t range);
 void modNode_updateValue(ModulationNode* vm, float val);
+/*
+ * Apply one modulation sample with an explicit polarity.
+ *
+ * Inputs: vm is a legacy or descriptor-backed modulation node, val is the raw
+ * modulation source value in 0..1, and polarity is mod_node_polarity_t. Output:
+ * descriptor-backed nodes with valid cached ranges receive stable range-scaled
+ * modulation; legacy nodes fall back to the historical negative/value-relative
+ * formula used by velocity modulation. This cannot be folded into
+ * modNode_updateValue() because LFOs need positive and bipolar polarity while
+ * existing velocity callers still use the legacy negative API.
+ */
+void modNode_updateValuePolarity(ModulationNode* vm, float val,
+								 uint8_t polarity);
 void modNode_setWaveInterpEnabled(uint8_t enabled);
 uint8_t modNode_getWaveInterpEnabled(void);
 uint32_t modNode_getWaveInterpGeneration(void);
+/*
+ * Return the current maximum waveform index for oscillator waveform modulation.
+ *
+ * Inputs: none; the value follows SampleMemory's current sample count. Output:
+ * the highest waveform id that a modulated oscillator waveform field may hold.
+ * InstrumentManager uses this while building a direct-target range, and
+ * ModulationNode uses it again for the interpolation write path. Keeping one
+ * accessor prevents Menu or InstrumentManager from duplicating sample/waveform
+ * packing rules.
+ */
+uint8_t modNode_getMaxWaveformIndex(void);
 #endif /* VELOCITYMODULATION_H_ */
