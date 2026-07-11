@@ -1,10 +1,10 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative filesystem and instrument-file reference for the
-Helicase/LXR-02 firmware after Session 033. It folds in the Session 032
-instrument/kit file decisions that were previously captured in
-`INSTRUMENT_FILE_SPEC.md`, plus the Session 033 runtime decisions for LFO,
-velocity modulation, Morph, per-voice Morph, and Scene modulation targets.
+Helicase/LXR-02 firmware after Session 033. It includes the full Session 032
+instrument/kit file specification formerly kept in `INSTRUMENT_FILE_SPEC.md`,
+plus the Session 033 runtime decisions for LFO, velocity modulation, Morph,
+per-voice Morph, and Scene modulation targets.
 
 Use this document to distinguish three things:
 
@@ -30,6 +30,9 @@ Implemented after Session 033:
   `NNN_Name`, are accepted.
 - FAT short-alias fallback accepts aliases beginning with a valid three-digit
   slot prefix, such as `001SLA~1`.
+- The Kit scan cache stores both the eight-character display name and the FAT
+  open name. Long filenames are display/UI data; asyncfatfs opens the cached
+  short alias in the current directory.
 - The kit display name is the folder name after the three-digit slot prefix.
 - `kitset.kcg` is parsed as the six-slot kit manifest.
 - Six descriptor-keyed instrument text files are loaded from the kit folder.
@@ -258,6 +261,21 @@ kitset.kcg
 <instrument 4>.<type>
 <instrument 5>.<type>
 <instrument 6>.<type>
+```
+
+Concrete current test-card example:
+
+```text
+SD_CARD/
+  Kit/
+    001 Slak/
+      kitset.kcg
+      slakd1.drm
+      slakd2.drm
+      slakd3.drm
+      slaks1.snr
+      slakc1.cym
+      slakh1.hat
 ```
 
 `kitset.kcg` is the kit folder guard/version file plus the six-slot instrument
@@ -886,6 +904,28 @@ Settled future behavior:
 
 The current legacy save paths are implementation leftovers and should not be
 used as the new-format specification.
+
+## Verification Anchors
+
+Use these as smoke tests when changing filesystem, descriptor storage, or
+instrument runtime propagation:
+
+- Build with `make` and package with `make img` when an image is needed.
+- Boot with `SD_CARD/Kit/001 Slak`.
+- Confirm the Kit scan shows the folder-derived kit name.
+- Confirm `kitset.kcg` slot type/file/audio routing is honored.
+- Confirm long descriptor keys such as `amp_envelope_decay_closed/open` parse.
+- Confirm VOICE pages populate from active instrument descriptors.
+- Confirm Slak file values are visible on VOICE pages.
+- Confirm loaded voices produce audio.
+- Confirm editing `instrument_vol`, filter frequency, envelope decay, and
+  waveform changes sound immediately.
+- Confirm Morph reaches both endpoints for a simple audible descriptor.
+- Confirm LFO and velocity targets show one `off`, skip non-modulatable
+  descriptors, and apply to direct descriptor, voice-local decimation, and
+  Scene targets.
+- Treat step automation as pending until the descriptor-aware AutomationNode
+  pass is complete.
 
 ## Debounced Autosave and Reload Target
 

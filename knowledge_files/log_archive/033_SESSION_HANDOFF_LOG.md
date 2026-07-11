@@ -296,7 +296,6 @@ Files:
 - `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`
 - `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md`
 - `knowledge_files/specification_reference/DSP_AUDIT.md`
-- `knowledge_files/specification_reference/INSTRUMENT_FILE_SPEC.md`
 - `SCOPING_TARGETS.md`
 - `MEMORY.md`
 - `knowledge_files/log_archive/000_SESSION_INDEX.md`
@@ -319,8 +318,9 @@ Changes:
 - `MODULE_INTERCHANGE_SPEC.md` now treats SceneModTargets as an owner module
   and updates the stale Session 032 “Morph/modulation broken” statements.
 - `DSP_AUDIT.md` is marked historical with a Session 033 note.
-- `INSTRUMENT_FILE_SPEC.md` is marked superseded but preserved as a Session 032
-  reference, per instruction not to delete it.
+- `INSTRUMENT_FILE_SPEC.md` was subsequently folded completely into
+  `FILESYSTEM_SPEC.md` and deleted, leaving one authoritative file/storage
+  reference.
 - `SCOPING_TARGETS.md` now puts the project effectively in Phase 3 file work:
   automation, Kit/Instrument save, morphed-instrument save/load, Scene, FX shim,
   Bank, and root settings.
@@ -371,8 +371,8 @@ Start Phase 3 file work:
 - `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` is the
   filesystem authority.
 - Root `FILESYSTEM_SPEC.md` was intentionally deleted.
-- `INSTRUMENT_FILE_SPEC.md` is superseded and preserved only as Session 032
-  reference material.
+- `INSTRUMENT_FILE_SPEC.md` has been deleted after being folded into
+  `FILESYSTEM_SPEC.md`.
 - Do not hardcode instrument parameter lists. Voice slots are swappable.
 - Scene targets are only non-voice sound targets. Voice-local descriptor
   targets stay in the current instrument descriptor tables.
