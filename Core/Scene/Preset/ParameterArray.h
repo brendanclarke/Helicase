@@ -139,6 +139,24 @@ enum ParamEnums
 	PAR_MIDI_CHAN_GLOBAL,
 	PAR_OSC_WAVE_INTERP,
 
+	/*
+	 * Scene-level PERF controls added after existing globals to avoid
+	 * renumbering established Pattern/MIDI/global ids.
+	 *
+	 * PAR_MORPH remains the overall bulk-set control near the legacy PERF ids.
+	 * These six voice Morph ids are contiguous so Preset/Menu can map
+	 * PAR_VOICE1_MORPH + slot without hardcoding per-instrument parameter
+	 * lists. PAR_VOICE_DECIMATION_ALL is the Scene-retained global decimation
+	 * value shown as PERF "srt".
+	 */
+	PAR_VOICE1_MORPH,
+	PAR_VOICE2_MORPH,
+	PAR_VOICE3_MORPH,
+	PAR_VOICE4_MORPH,
+	PAR_VOICE5_MORPH,
+	PAR_VOICE6_MORPH,
+	PAR_VOICE_DECIMATION_ALL,
+
 	NUM_PARAMS = 384,
 };
 

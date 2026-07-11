@@ -332,21 +332,24 @@ static uint8_t menu_tickSoundApply(void)
 static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
 {
     /*
-     * Sound parameter writes now go straight to Preset.
+     * Route flat menu parameters by ownership, not by MIDI CC packing range.
      *
-     * The front-panel parser previously split SET_P1/SET_P2-style opcodes by
-     * parameter range. With one CPU, Menu can call the Preset API directly for
-     * all sound parameters and leave true global parameters to
-     * menu_parseGlobalParam().
+     * Instrument sound parameters no longer live in ParameterArray's flat
+     * namespace; descriptor-backed voice edits use preset_setInstrumentParameter().
+     * The remaining flat ids include PERF Morph/Roll, Pattern, generator, MIDI,
+     * trigger, and globals. Many of those ids are numerically below 128, so the
+     * old "param < 128 means sound CC" test bypassed menu_parseGlobalParam()
+     * and lost owner-specific side effects such as preset_morph().
      *
-     * Input: paramNr/value are already the canonical menu parameter pair.
-     * Output: Preset updates parameter_values/DSP state when requested by its
-     * API. Risk: callers must keep using menu_parseGlobalParam for globals so
-     * sequencer, MIDI, trigger, Pattern, and SOM side effects still occur.
+     * Inputs: canonical flat ParameterArray id and clamped byte value. Outputs:
+     * only true legacy sound ids use preset_applySoundParameter(); all non-sound
+     * flat ids run their typed owner path in menu_parseGlobalParam(). This stays
+     * as a separate helper because menu_sendEditedParameter() also owns the
+     * morph-endpoint edit overlay; collapsing both decisions would make it too
+     * easy for future clients to route descriptor endpoint edits through the
+     * active runtime parameter path.
      */
-    if (paramNr < 128)
-        preset_applySoundParameter(paramNr, value, 1);
-    else if (paramNr < END_OF_SOUND_PARAMETERS)
+    if (paramNr < END_OF_SOUND_PARAMETERS)
         preset_applySoundParameter(paramNr, value, 1);
     else
         menu_parseGlobalParam(paramNr, value);
@@ -430,7 +433,15 @@ static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value)
      * active kit and morph endpoint into the same value, destroying morph range.
      */
     if (menu_paramUsesMorphView(paramNr)) {
-        preset_morph(parameter_values[PAR_MORPH]);
+        /*
+         * Refresh descriptor Morph from retained per-voice amounts.
+         *
+         * After per-voice Morph, preset_morph() is the overall bulk-set
+         * operation and would overwrite all six voice amounts. Morph endpoint
+         * edits only need a runtime rebuild, so use Preset's non-mutating
+         * rebuild boundary here.
+         */
+        preset_rebuildMorph();
         return;
     }
 
@@ -524,6 +535,13 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     [PAR_NONE] = DTYPE_0B127,
     [PAR_ROLL] = DTYPE_MENU|(MENU_ROLL_RATES<<4),
     [PAR_MORPH] = DTYPE_0B255,
+    [PAR_VOICE1_MORPH] = DTYPE_0B255,
+    [PAR_VOICE2_MORPH] = DTYPE_0B255,
+    [PAR_VOICE3_MORPH] = DTYPE_0B255,
+    [PAR_VOICE4_MORPH] = DTYPE_0B255,
+    [PAR_VOICE5_MORPH] = DTYPE_0B255,
+    [PAR_VOICE6_MORPH] = DTYPE_0B255,
+    [PAR_VOICE_DECIMATION_ALL] = DTYPE_0B127,
     [PAR_ACTIVE_STEP] = DTYPE_0B127,
     [PAR_STEP_VOLUME] = DTYPE_0B127,
     [PAR_STEP_PROB] = DTYPE_0B127,
@@ -664,6 +682,12 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_CPU_USE,CAT_GLOBAL,LONG_CPU_USE_TIME},
     {SHORT_OSC_INTERP,CAT_GLOBAL,LONG_OSC_INTERP},
     {SHORT_SCALE,CAT_PATTERN,LONG_SCALE},
+    {SHORT_VOICE1_MORPH,CAT_VOICE,LONG_VOICE1_MORPH},
+    {SHORT_VOICE2_MORPH,CAT_VOICE,LONG_VOICE2_MORPH},
+    {SHORT_VOICE3_MORPH,CAT_VOICE,LONG_VOICE3_MORPH},
+    {SHORT_VOICE4_MORPH,CAT_VOICE,LONG_VOICE4_MORPH},
+    {SHORT_VOICE5_MORPH,CAT_VOICE,LONG_VOICE5_MORPH},
+    {SHORT_VOICE6_MORPH,CAT_VOICE,LONG_VOICE6_MORPH},
 };
 
 /* -----------------------------------------------------------------------
@@ -730,6 +754,7 @@ static void menu_moveToMenuItem(int8_t inc);
 static void menu_encoderChangeParameter(int8_t inc);
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked);
 static uint8_t menu_nameIsEmptySlot(void);
+static uint8_t menu_paramIsMorphAmount(uint16_t paramNr);
 static uint8_t menu_isLoadSaveSelectionCurrent(void);
 static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage);
 static void menu_displayModTargetFull(uint8_t curParmVal);
@@ -2876,6 +2901,23 @@ void menu_notifyExternalParamChanged(uint16_t paramNr)
         menu_knobs_dirty = 1;
 }
 
+static uint8_t menu_paramIsMorphAmount(uint16_t paramNr)
+{
+    /*
+     * Identify flat Scene Morph amount controls.
+     *
+     * Inputs: canonical ParameterArray id. Output: nonzero for the overall
+     * Morph bulk-set control and the six per-slot Morph controls. Clients use
+     * this to keep encoder/endless-pot behavior consistent across Morph
+     * controls without teaching Menu about instrument descriptors or slot
+     * parameter lists.
+     */
+    if (paramNr == PAR_MORPH)
+        return 1u;
+    return (uint8_t)(paramNr >= PAR_VOICE1_MORPH &&
+                     paramNr <= PAR_VOICE6_MORPH);
+}
+
 static void menu_updateEndlessPotScales(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
@@ -2889,7 +2931,7 @@ static void menu_updateEndlessPotScales(void)
             menu_cell_t cell =
                 menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
             useDouble = (uint8_t)(cell.kind == MENU_CELL_STATIC &&
-                                  cell.static_param == PAR_MORPH);
+                                  menu_paramIsMorphAmount(cell.static_param));
         }
         endlessPots_setDouble(knobNr, useDouble);
     }
@@ -3128,7 +3170,12 @@ void menu_pollPresetStatus(void)
             break;
         }
         menu_normalizeSoundModTargets(parameters2);
-        preset_morph(parameter_values[PAR_MORPH]);
+        /*
+         * Legacy morph-file load refreshes endpoint data. It must not call the
+         * overall Morph bulk-set path because that would collapse distinct
+         * per-voice Morph amounts. Rebuild from retained Scene values instead.
+         */
+        preset_rebuildMorph();
         menu_repaintAll();
         break;
 
@@ -3661,6 +3708,36 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         preset_morph(value);
         break;
 
+    case PAR_VOICE1_MORPH:
+    case PAR_VOICE2_MORPH:
+    case PAR_VOICE3_MORPH:
+    case PAR_VOICE4_MORPH:
+    case PAR_VOICE5_MORPH:
+    case PAR_VOICE6_MORPH:
+        /*
+         * Per-voice Morph is Scene-level performance state.
+         *
+         * Inputs: flat PERF parameter id and 0..255 value. Output: Preset
+         * updates only the selected slot's retained Morph amount and queues
+         * only that slot in the descriptor-driven Morph worker. This belongs
+         * here, not in descriptor VOICE pages, because the PERF cells are
+         * static Scene controls rather than instrument parameter descriptors.
+         */
+        preset_morphVoice((uint8_t)(paramNr - PAR_VOICE1_MORPH), value);
+        break;
+
+    case PAR_VOICE_DECIMATION_ALL:
+        /*
+         * Scene global decimation is retained with other Scene settings.
+         *
+         * Inputs: PERF "srt" value 0..127. Output: Preset stores the setting
+         * and applies mixer_decimation_rate[6] using the same taper as the
+         * legacy VOICE_DECIMATION_ALL MIDI CC. Keeping the write behind Preset
+         * gives future sceneset.scg load/save one owner boundary.
+         */
+        preset_setVoiceDecimationAll(scene_getActiveIndex(), value);
+        break;
+
     case PAR_ROLL:
         /*
          * Roll rate controls Sequencer performance behavior. It is not Pattern
@@ -3945,6 +4022,17 @@ void menu_init(void)
     parameter_values[PAR_BPM]           = 120;
     parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_OFF;
     parameter_values[PAR_OSC_WAVE_INTERP] = 0;
+    /*
+     * Scene global sample-rate/decimation must default to full rate.
+     *
+     * SceneData also initializes voice_decimation_all to 127, but Menu's flat
+     * parameter mirror is memset to zero above and can be used by early global
+     * apply paths before a Scene settings apply has mirrored the retained
+     * value. A zero here shapes mixer_decimation_rate[6] to 0, so the decimator
+     * never refreshes voice samples and the unit presents as silent. Keep the
+     * mirror's undefined/startup value aligned with the Scene default.
+     */
+    parameter_values[PAR_VOICE_DECIMATION_ALL] = 127u;
     /*
      * Wave interpolation is a sound-engine global that is applied immediately
      * at boot because there is no parser/global-apply pass between zeroed menu

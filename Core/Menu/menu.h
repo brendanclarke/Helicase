@@ -106,6 +106,15 @@ enum NamesEnum {
     TEXT_CPU_USE,
     TEXT_OSC_INTERP,
     TEXT_TRACK_SCALE,
+    /*
+     * Static PERF labels for Scene-retained per-voice Morph amounts.
+     *
+     * These are menu text ids, not ParamDescriptors, because PERF edits flat
+     * Scene controls. The corresponding parameter ids are contiguous
+     * PAR_VOICE1_MORPH..PAR_VOICE6_MORPH.
+     */
+    TEXT_VOICE1_MORPH, TEXT_VOICE2_MORPH, TEXT_VOICE3_MORPH,
+    TEXT_VOICE4_MORPH, TEXT_VOICE5_MORPH, TEXT_VOICE6_MORPH,
     NUM_NAMES
 };
 
@@ -139,6 +148,9 @@ enum longNamesEnum {
     LONG_CPU_USE_TIME,
     LONG_OSC_INTERP,
     LONG_SCALE,
+    /* Long names used in single-parameter PERF edit view for 1vm..6vm. */
+    LONG_VOICE1_MORPH, LONG_VOICE2_MORPH, LONG_VOICE3_MORPH,
+    LONG_VOICE4_MORPH, LONG_VOICE5_MORPH, LONG_VOICE6_MORPH,
 };
 
 enum shortNamesEnum {
@@ -159,7 +171,10 @@ enum shortNamesEnum {
     SHORT_X, SHORT_Y, SHORT_FLUX, SHORT_MIDI, SHORT_MIDI_ROUTING,
     SHORT_MIDI_FILT_TX, SHORT_MIDI_FILT_RX,
     SHORT_TRIGGER_IN, SHORT_TRIGGER_OUT1, SHORT_TRIGGER_OUT2,
-    SHORT_BAR_RESET_MODE, SHORT_CPU_USE, SHORT_OSC_INTERP, SHORT_SCALE
+    SHORT_BAR_RESET_MODE, SHORT_CPU_USE, SHORT_OSC_INTERP, SHORT_SCALE,
+    /* Compact PERF labels for per-voice Morph columns. */
+    SHORT_VOICE1_MORPH, SHORT_VOICE2_MORPH, SHORT_VOICE3_MORPH,
+    SHORT_VOICE4_MORPH, SHORT_VOICE5_MORPH, SHORT_VOICE6_MORPH
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu

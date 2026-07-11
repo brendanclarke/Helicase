@@ -53,10 +53,13 @@ const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
  * Why: shuffle is now PatternData-owned timing data, so PERF should not expose
  * a global-looking value that edits whichever track happens to be active.
  * Clients: menu_repaintGeneric() and edit navigation consume this static table.
- * Output: PERF keeps roll/morph/sample-rate controls only for this pass.
+ * Output: PERF exposes overall Scene Morph, six per-voice Morph amounts, and
+ * Scene global decimation. Roll is intentionally absent from PERF; later
+ * performance/recording work will re-home roll behavior with the new pattern
+ * stack instead of keeping it beside Morph.
  */
 /* PERFORMANCE_PAGE */ {
-  {TEXT_ROLL_SPEED,TEXT_X_FADE,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_ROLL,PAR_MORPH,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
+  {TEXT_X_FADE,TEXT_VOICE1_MORPH,TEXT_VOICE2_MORPH,TEXT_VOICE3_MORPH,TEXT_VOICE4_MORPH,TEXT_VOICE5_MORPH,TEXT_VOICE6_MORPH,TEXT_SAMPLE_RATE, PAR_MORPH,PAR_VOICE1_MORPH,PAR_VOICE2_MORPH,PAR_VOICE3_MORPH,PAR_VOICE4_MORPH,PAR_VOICE5_MORPH,PAR_VOICE6_MORPH,PAR_VOICE_DECIMATION_ALL},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},

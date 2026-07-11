@@ -153,7 +153,7 @@ uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
                                         uint8_t descriptor_index, uint16_t value);
 uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
-                                           uint8_t value);
+                                           uint16_t value);
 uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
 void preset_applySceneSettings(uint8_t scene_index);
 
@@ -164,8 +164,20 @@ void preset_applySceneSettings(uint8_t scene_index);
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
 
-/* Morph — rate-limited front-panel CC parameter dump. */
+/*
+ * Scene Morph and Scene performance settings.
+ *
+ * preset_morph() is now the overall Morph bulk-set operation: it writes the
+ * Scene global mirror and all six per-slot Morph amounts. preset_morphVoice()
+ * changes one slot only. preset_rebuildMorph() requeues the descriptor-driven
+ * worker from retained Scene values without changing any Morph amounts, which
+ * is required after endpoint loads/edits. preset_setVoiceDecimationAll()
+ * retains and applies the Scene-wide decimation multiplier used by PERF "srt".
+ */
 void    preset_morph(uint8_t morph);
+void    preset_morphVoice(uint8_t slot, uint8_t morph);
+void    preset_rebuildMorph(void);
+void    preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
 void    preset_morphTick(void);
 uint8_t preset_getMorphValue(uint16_t index, uint8_t morph);
 

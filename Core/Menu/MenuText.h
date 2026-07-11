@@ -127,8 +127,9 @@ static const char shortNames[][4] = {
     {"bpm"},{"ch"},{"out"},{"srt"},{"nxt"},{"mod"},{"vel"},
     {"fch"},{"flw"},{"qnt"},{"trk"},{"val"},{"shu"},{"ssv"},
     {"x"},{"y"},{"flx"},{"mid"},{"mrt"},{"txf"},{"rxf"},
-    {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},
-    {"sca"},
+    {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},{"sca"},
+    /* PERF per-voice Morph compact labels: voice number + "vm". */
+    {"1vm"},{"2vm"},{"3vm"},{"4vm"},{"5vm"},{"6vm"},
 };
 
 static const char catNames[][16] = {
@@ -156,6 +157,8 @@ static const char longNames[][16] = {
     {"Routing"},{"TxFilter"},{"RxFilter"},
     {"In PPQ"},{"Out1 PPQ"},{"Out2 PPQ"},{"Gate Mode"},{"PCReset"},
     {"CPU use time"},{"OscIntrp"},{"Scale"},
+    /* Single-parameter long names for PERF per-voice Morph controls. */
+    {"1 Morph"},{"2 Morph"},{"3 Morph"},{"4 Morph"},{"5 Morph"},{"6 Morph"},
 };
 
 #endif /* MENUTEXT_H_ */

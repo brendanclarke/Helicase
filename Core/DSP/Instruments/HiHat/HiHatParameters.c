@@ -64,6 +64,24 @@
     { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, { bind_kind_, 0u, 0u } }
 
 /*
+ * Slot decimation is intentionally an image parameter, not a Scene target.
+ *
+ * Inputs: the normal descriptor text fields. Output: a descriptor whose flags
+ * mark per-instrument decimation as morphable, modulatable, and automatable
+ * even though its runtime binding is supplemental. InstrumentManager already
+ * applies this binding through mixer_decimation_rate[slot]; the modulation and
+ * automation target resolvers need follow-up adapter work so this descriptor
+ * can be selected like other voice-local sound parameters without pretending
+ * it is a direct HiHatVoice member.
+ *
+ * This small wrapper exists so instrument_decimation rows advertise their
+ * intended contract directly at the row site. ROW_NOBIND_IMAGE remains the
+ * generic supplemental-image helper for any future non-instance parameter.
+ */
+#define ROW_SLOT_DECIMATION(key_, cat_, long_, short_, dtype_) \
+    ROW_NOBIND_IMAGE(key_, cat_, long_, short_, dtype_, INSTRUMENT_BIND_SLOT_DECIMATION)
+
+/*
  * Hi-hat-local descriptor indices.
  *
  * These enum values must stay in the same order as hihat_param_descriptors[].
@@ -146,7 +164,7 @@ const ParamDescriptor hihat_param_descriptors[] = {
     ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, vol, TYPE_FLT),
     ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, pan, TYPE_UINT8),
     ROW("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, distortion.shape, TYPE_FLT),
-    ROW_NOBIND_IMAGE("instrument_decimation", "Voice", "SampleRt", "srt", DTYPE_0B127, INSTRUMENT_BIND_SLOT_DECIMATION),
+    ROW_SLOT_DECIMATION("instrument_decimation", "Voice", "SampleRt", "srt", DTYPE_0B127),
     /*
      * LFO runtime rows.
      *
@@ -239,5 +257,6 @@ _Static_assert(HIHAT_MENU_PAGE_COUNT ==
 #undef BIND
 #undef ROW
 #undef ROW_MENU
+#undef ROW_SLOT_DECIMATION
 #undef ROW_NOBIND
 #undef ROW_NOBIND_IMAGE

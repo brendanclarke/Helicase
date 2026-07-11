@@ -99,6 +99,62 @@ uint8_t scene_getTrackMidiNote(uint8_t scene_index, uint8_t track)
         : 0u;
 }
 
+void scene_setVoiceMorphAmount(uint8_t scene_index, uint8_t slot,
+                               uint8_t amount)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Store one Scene-retained per-slot Morph amount.
+     *
+     * Inputs: resident Scene index, zero-based instrument slot, and 0..255
+     * amount. Output: only the selected slot's setting is updated. Clients are
+     * Preset's PERF/MIDI Morph setters and future sceneset.scg load. This
+     * cannot be folded into those callers because SceneData owns validity and
+     * indexing for the retained Scene record.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    scene->settings.voice_morph_amount[slot] = amount;
+}
+
+uint8_t scene_getVoiceMorphAmount(uint8_t scene_index, uint8_t slot)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /*
+     * Read one Scene-retained per-slot Morph amount.
+     *
+     * Inputs: resident Scene index and zero-based instrument slot. Output:
+     * stored 0..255 amount, or 0 for invalid coordinates so a bad caller cannot
+     * index outside the Scene settings. Clients are Preset endpoint refresh and
+     * the Morph worker's pass snapshot.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    return scene->settings.voice_morph_amount[slot];
+}
+
+void scene_setAllVoiceMorphAmounts(uint8_t scene_index, uint8_t amount)
+{
+    scene_t *scene = scene_get(scene_index);
+    uint8_t slot;
+
+    /*
+     * Bulk-store the six per-slot Morph amounts for overall PERF Morph.
+     *
+     * Inputs: resident Scene index and 0..255 amount. Output: every instrument
+     * slot's Morph setting is updated while instrument endpoint images remain
+     * untouched. This exists separately from the single-slot setter because the
+     * global Morph control is semantically a six-slot set operation, not a
+     * second Morph engine or a derived average.
+     */
+    if (!scene)
+        return;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        scene->settings.voice_morph_amount[slot] = amount;
+}
+
 void scene_initAll(void)
 {
     uint8_t scene_index;

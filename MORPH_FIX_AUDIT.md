@@ -427,3 +427,82 @@ Medium confidence that `SHIFT+VOICE` endpoint storage is already basically
 correct. The audit found it writes descriptor-indexed morph images and requests
 a rebuild, which matches the intended flexible instrument-slot design. It
 should be retested after the PERF routing and 0..255 worker fixes.
+
+## Implementation Notes - 2026-07-11
+
+Implemented the core fixes described above.
+
+### Static Menu Routing
+
+Changed `Core/Menu/menu.c::menu_sendSoundParameter()` so flat menu parameters
+are routed by `END_OF_SOUND_PARAMETERS`, not by the old `paramNr < 128` MIDI CC
+packing test.
+
+Effect:
+
+- PERF Morph now reaches `menu_parseGlobalParam(PAR_MORPH)`.
+- That path calls `preset_morph(value)`.
+- `preset_morph()` updates `parameter_values[PAR_MORPH]` and requests the
+  descriptor-driven Scene morph worker.
+- Other flat non-instrument ids below 128, such as PERF Roll, also now reach
+  their typed owner switch instead of the legacy sound-parameter fake-MIDI path.
+
+The adjacent code comment explains why this helper remains separate from
+`menu_sendEditedParameter()`: the caller also owns the morph-endpoint edit
+overlay, and keeping the ownership decisions separate reduces the chance that a
+future descriptor endpoint edit is routed through active runtime parameter
+apply.
+
+### Morph Worker 0..255 Range
+
+Changed `Core/Scene/Preset/presetMorphEngine.c` so the worker preserves the full
+0..255 Morph amount:
+
+- Removed the old `morph_amount > 127` clamp.
+- Replaced the old byte-domain 0..127 interpolation helper with a 0..255
+  exact-endpoint helper.
+- Kept the descriptor scan flexible:
+  `instrumentManager_descriptor(instrument->type, local)` plus
+  `INSTRUMENT_PARAM_FLAG_MORPHABLE`.
+- Stopped casting Scene endpoint images to `uint8_t` before interpolation.
+
+The new interpolation contract is:
+
+- amount `0` returns the main endpoint exactly.
+- amount `255` returns the morph endpoint exactly.
+- intermediate values use rounded `/255` interpolation.
+- descending endpoint ranges land exactly at the morph endpoint instead of
+  stopping one value above it.
+
+### Runtime Apply Width
+
+Changed `preset_applyInstrumentRuntimeValue()` in
+`Core/Scene/Preset/presetManager.c/.h` from a byte value to `uint16_t`.
+
+Reason:
+
+- Scene descriptor image arrays are already `uint16_t`.
+- `InstrumentManager_writeRuntime()` already accepts `uint16_t`.
+- The morph worker should not reintroduce a byte-domain assumption at the
+  Preset boundary, especially before TYPE_SPECIAL_F and future descriptor range
+  contracts are reworked.
+
+Current callers are still descriptor-driven and bounded by the instrument
+registry; no hardcoded morph parameter list was added.
+
+### MIDI CC1 Endpoint Mapping
+
+Changed `Core/MIDI/MidiParser.c::midiParser_setMorphFromModWheel()` so incoming
+CC1 maps 7-bit MIDI to 8-bit Morph as:
+
+- `0..126 -> value * 2`
+- `127 -> 255`
+
+This lets external controllers reach the exact morph endpoint while keeping the
+special case limited to the incoming MIDI path.
+
+### Scene Setting Documentation
+
+Added adjacent comment text to `Core/Scene/SceneData.h::morph_amount` to mark it
+as the Scene-level global 0..255 Morph amount used by PERF, MIDI CC1, and
+descriptor endpoint rebuilds.

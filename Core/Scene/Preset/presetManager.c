@@ -45,6 +45,7 @@
 #include "filesystem.h"
 #include "presetMorphEngine.h"
 #include "mixer.h"
+#include "valueShaper.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -225,6 +226,45 @@ static void preset_ensureMorphInitialized(void)
     preset_morph_initialized = 1u;
 }
 
+static void preset_syncSceneMorphMirrors(const scene_t *scene)
+{
+    uint8_t slot;
+
+    /*
+     * Mirror retained Scene Morph settings into the flat Menu buffer.
+     *
+     * Inputs: Scene settings record. Outputs: parameter_values[] entries used
+     * by PERF `mrp` and `1vm..6vm` are updated for display/edit baselines.
+     * This helper is intentionally Preset-local because Preset is the boundary
+     * between SceneData's retained settings and legacy flat menu mirrors; Menu,
+     * MIDI, and future Scene-file load should not each duplicate the mirror
+     * rules.
+     */
+    if (!scene)
+        return;
+    parameter_values[PAR_MORPH] = scene->settings.morph_amount;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        parameter_values[PAR_VOICE1_MORPH + slot] =
+            scene->settings.voice_morph_amount[slot];
+}
+
+static void preset_applyVoiceDecimationAllRuntime(uint8_t value)
+{
+    /*
+     * Apply the Scene-wide decimation multiplier to the mixer runtime.
+     *
+     * Inputs: retained PERF `srt` value in the existing 0..127 menu domain.
+     * Output: mixer_decimation_rate[6] receives the same tapered value used by
+     * the legacy VOICE_DECIMATION_ALL MIDI CC path. This stays separate from
+     * preset_setVoiceDecimationAll() so Scene apply can mirror already-retained
+     * settings without pretending the user edited the parameter again.
+     */
+    if (value > 127u)
+        value = 127u;
+    mixer_decimation_rate[INSTRUMENT_SLOT_COUNT] =
+        valueShaperI2F(value, -0.7f);
+}
+
 /* -----------------------------------------------------------------------
 ** preset_init — reset Preset async state and initialize Scene-owned morph
 ** application helpers. Filesystem mount is still handled by asyncfatfs.
@@ -329,17 +369,24 @@ static uint8_t preset_applyInstrumentRuntimeValueInternal(uint8_t scene_index,
 
 uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
-                                           uint8_t value)
+                                           uint16_t value)
 {
     /*
      * Public runtime apply for one canonical instrument parameter.
      *
-     * Inputs: Scene index, slot/descriptor-index instrument ID, and byte value.
-     * Output: active Scene values are written through instrument-owned runtime
-     * bindings;
-     * inactive Scene calls validate but do not mutate live DSP state. Accessors
-     * and affiliates: SceneData supplies slot/type lookup, InstrumentManager
-     * supplies descriptor lookup and runtime instance binding.
+     * Inputs: Scene index, slot/descriptor-index instrument ID, and descriptor
+     * image value. Output: active Scene values are written through
+     * instrument-owned runtime bindings; inactive Scene calls validate but do
+     * not mutate live DSP state. Accessors and affiliates: SceneData supplies
+     * slot/type lookup, InstrumentManager supplies descriptor lookup and runtime
+     * instance binding, and presetMorphEngine calls this after building
+     * morph_interpolation[].
+     *
+     * The public value is uint16_t because Scene descriptor images and
+     * InstrumentManager_writeRuntime() are already uint16_t. Keeping this
+     * boundary wide prevents Morph from baking in today's byte-domain menu
+     * values and avoids a lossy cast before TYPE_SPECIAL_F-style descriptors can
+     * re-establish their own min/max contracts.
      */
     return preset_applyInstrumentRuntimeValueInternal(scene_index, id, value, 0u);
 }
@@ -382,15 +429,25 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
         scene_t *scene = scene_get(scene_index);
         preset_ensureMorphInitialized();
         if (record_automation && image == INSTRUMENT_IMAGE_MAIN &&
-            scene && scene->settings.morph_amount == 0u) {
+            scene && scene_getVoiceMorphAmount(scene_index, slot) == 0u) {
             (void)preset_applyInstrumentRuntimeValueInternal(
                 scene_index,
                 instrumentParam_make(slot, descriptor_index),
                 value,
                 1u);
         }
-        presetMorph_request(scene_index,
-                            scene ? scene->settings.morph_amount : 0u);
+        /*
+         * Endpoint edits are slot-local under per-voice Morph.
+         *
+         * Inputs: the edited slot/descriptor endpoint and the retained
+         * per-slot Morph amount in SceneData. Output: only that slot is queued
+         * for interpolation; other voices keep their current Morph positions.
+         * This preserves dynamic instrument membership because the worker will
+         * still ask InstrumentManager which descriptors are morphable for the
+         * slot's current type.
+         */
+        if (scene)
+            presetMorph_requestVoice(scene_index, slot);
     }
     return 1u;
 }
@@ -452,11 +509,19 @@ void preset_applySceneSettings(uint8_t scene_index)
     /*
      * Apply Scene-wide settings that still have legacy mirrors.
      *
-     * Morph amount is still a Menu-visible Scene setting. Instrument/runtime
-     * settings no longer mirror through flat sound parameter ids.
+     * Inputs: active Scene index. Outputs: flat PERF mirrors are synchronized
+     * from retained Scene settings, global decimation is applied, and the Morph
+     * worker is queued from per-voice Morph amounts. This must not call
+     * preset_morph(), because preset_morph() is now the user-facing bulk-set
+     * operation and would overwrite distinct per-voice Morph values loaded from
+     * future sceneset.scg data.
      */
-    parameter_values[PAR_MORPH] = scene->settings.morph_amount;
-    preset_morph(scene->settings.morph_amount);
+    preset_ensureMorphInitialized();
+    preset_syncSceneMorphMirrors(scene);
+    parameter_values[PAR_VOICE_DECIMATION_ALL] =
+        scene->settings.voice_decimation_all;
+    preset_applyVoiceDecimationAllRuntime(scene->settings.voice_decimation_all);
+    presetMorph_rebuildScene(scene_index);
 }
 
 /* Apply one loaded Scene kit slot's non-image affiliates.
@@ -520,7 +585,6 @@ void preset_startDrumsetApply(void)
 {
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
-    presetMorph_rebuildScene(scene_getActiveIndex());
     drumset_apply_active = 1u;
     drumset_apply_voice = 0u;
 }
@@ -706,17 +770,89 @@ static uint8_t preset_interpolate(uint8_t a, uint8_t b, uint8_t x)
 void preset_morph(uint8_t morph)
 {
     /*
-     * Compatibility wrapper for existing Menu/MIDI Morph callers.
+     * Set overall Scene Morph by writing all per-voice Morph amounts.
      *
-     * The old implementation walked flat parameter_values[]/parameters2[].
-     * Directory Kits now store two Scene-owned endpoint images, so Morph
-     * requests are forwarded to presetMorphEngine. That worker rebuilds
-     * morph_interpolation[] and applies active-Scene image values through
-     * preset_applyInstrumentRuntimeValue().
+     * Inputs: user-facing 0..255 Morph amount from PERF, global MIDI CC1, or
+     * Scene-load fallback. Outputs: the Scene global mirror and all six
+     * per-slot Morph amounts are retained, flat PERF menu mirrors are updated,
+     * and the Morph worker is queued for every instrument slot. Runtime Morph
+     * is still per voice; this function is only the bulk-set operation that
+     * gives the user one overall control.
      */
+    scene_t *scene;
+    uint8_t scene_index = scene_getActiveIndex();
+
     preset_ensureMorphInitialized();
-    parameter_values[PAR_MORPH] = morph;
-    presetMorph_request(scene_getActiveIndex(), morph);
+    scene = scene_get(scene_index);
+    if (!scene)
+        return;
+    scene->settings.morph_amount = morph;
+    scene_setAllVoiceMorphAmounts(scene_index, morph);
+    preset_syncSceneMorphMirrors(scene);
+    presetMorph_requestAll(scene_index);
+}
+
+void preset_morphVoice(uint8_t slot, uint8_t morph)
+{
+    /*
+     * Set one Scene voice's Morph amount.
+     *
+     * Inputs: zero-based instrument slot and 0..255 Morph amount. Output: only
+     * that slot's Scene Morph amount and PERF mirror are updated, and only that
+     * slot is queued for descriptor Morph interpolation. This function exists
+     * separately from preset_morph() because global Morph is a bulk-set
+     * operation while MIDI CC1 on a voice channel and PERF 1vm..6vm edits must
+     * preserve the other five slot amounts.
+     */
+    uint8_t scene_index = scene_getActiveIndex();
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    preset_ensureMorphInitialized();
+    scene_setVoiceMorphAmount(scene_index, slot, morph);
+    parameter_values[PAR_VOICE1_MORPH + slot] = morph;
+    presetMorph_requestVoice(scene_index, slot);
+}
+
+void preset_rebuildMorph(void)
+{
+    /*
+     * Requeue Morph from retained Scene values without changing them.
+     *
+     * Inputs: none; the active Scene supplies all six per-slot Morph amounts.
+     * Output: the descriptor-driven Morph worker rebuilds the runtime
+     * interpolation image. Clients are endpoint-load/edit refresh paths that
+     * must not call preset_morph(), because that would overwrite distinct
+     * per-voice Morph amounts with the global bulk-set amount.
+     */
+    uint8_t scene_index = scene_getActiveIndex();
+
+    preset_ensureMorphInitialized();
+    presetMorph_rebuildScene(scene_index);
+}
+
+void preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Retain and apply Scene global decimation.
+     *
+     * Inputs: Scene index and PERF `srt` value in the 0..127 menu domain.
+     * Outputs: scene_settings_t::voice_decimation_all is retained,
+     * parameter_values[] is mirrored for the PERF page, and the active Scene's
+     * mixer global decimation multiplier is updated. This function is separate
+     * from the MIDI CC handler so future sceneset.scg load/save has one owner
+     * for the retained setting and runtime side effect.
+     */
+    if (!scene)
+        return;
+    if (value > 127u)
+        value = 127u;
+    scene->settings.voice_decimation_all = value;
+    parameter_values[PAR_VOICE_DECIMATION_ALL] = value;
+    if (scene_index == scene_getActiveIndex())
+        preset_applyVoiceDecimationAllRuntime(value);
 }
 
 void preset_morphTick(void)
