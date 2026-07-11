@@ -45,6 +45,7 @@
 #include "Snare.h"
 #include "sequencer.h"
 #include "valueShaper.h"
+#include "InstrumentManager.h"
 //-------------------------------------------------------------
 void lfo_init(Lfo *lfo)
 {
@@ -130,21 +131,31 @@ float lfo_calc(Lfo *lfo)
 	return 0;
 }
 //-------------------------------------------------------------
-void lfo_dispatchNextValue(Lfo* lfo)
+void lfo_dispatchNextValue(Lfo* lfo, uint8_t source_slot)
 {
 	float val = lfo_calc(lfo);
 	/*
 	 * Fan one raw oscillator value out to both destination nodes.
 	 *
 	 * Inputs: lfo_calc() returns the shared 0..1 waveform for this block, and
-	 * lfo->polarity stores the shared negative/positive/bipolar mode. Outputs:
-	 * each ModulationNode applies its own amount, target pointer, restore
-	 * baseline, and cached range. The shaping is intentionally not in lfo_calc()
-	 * because only the destination node knows whether the target is float,
-	 * byte, waveform-interpolated, or a TYPE_SPECIAL_F multiplier.
+	 * lfo->polarity stores the shared negative/positive/bipolar mode. The
+	 * source slot tells InstrumentManager which installed supplemental/Scene
+	 * target adapters belong to this LFO. Outputs: each ModulationNode applies
+	 * its own direct target, then InstrumentManager applies any non-pointer
+	 * target for pair 1 or pair 2.
+	 *
+	 * This stays separate from lfo_calc() because only destination owners know
+	 * whether the target is a direct pointer, slot decimation, Scene Decimation,
+	 * or the hidden per-voice Morph layer.
 	 */
 	modNode_updateValuePolarity(&lfo->modTarget,val,lfo->polarity);
 	modNode_updateValuePolarity(&lfo->modTarget2,val,lfo->polarity);
+	instrumentManager_updateLfoSceneTarget(source_slot, 0u, val,
+										   lfo->polarity,
+										   lfo->modTarget.amount);
+	instrumentManager_updateLfoSceneTarget(source_slot, 1u, val,
+										   lfo->polarity,
+										   lfo->modTarget2.amount);
 }
 //-------------------------------------------------------------
 uint32_t lfo_calcPhaseInc(float freq, uint8_t sync)

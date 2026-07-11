@@ -179,6 +179,25 @@ void modNode_updateValue(ModulationNode* vm, float val);
  */
 void modNode_updateValuePolarity(ModulationNode* vm, float val,
 								 uint8_t polarity);
+/*
+ * Shape a normalized modulation source against an explicit integer range.
+ *
+ * Inputs: retained base value, target min/max, normalized source,
+ * normalized amount, and MOD_NODE_POLARITY_* selector. Output: a clamped
+ * integer target value. This is the range-only form of the descriptor
+ * modulation math used by ModulationNode, provided for supplemental and Scene
+ * targets that have a real range but no direct runtime Parameter pointer.
+ *
+ * This helper must be separate from modNode_rangeValue() because Scene targets
+ * and slot-decimation targets are not ModulationNode destinations and should
+ * not construct fake nodes or fake Parameters just to reuse polarity math.
+ */
+uint16_t modNode_shapeRangeU16(uint16_t base,
+							   uint16_t min_value,
+							   uint16_t max_value,
+							   float source_0_1,
+							   float amount_0_1,
+							   uint8_t polarity);
 void modNode_setWaveInterpEnabled(uint8_t enabled);
 uint8_t modNode_getWaveInterpEnabled(void);
 uint32_t modNode_getWaveInterpGeneration(void);

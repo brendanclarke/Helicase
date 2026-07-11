@@ -39,6 +39,7 @@
 #include "Snare.h"
 #include "squareRootLut.h"
 #include "modulationNode.h"
+#include "InstrumentManager.h"
 // #include "TriggerOut.h"
 
 
@@ -97,6 +98,16 @@ void Snare_trigger(const uint8_t vel, const uint8_t note)
 	lfo_retrigger(3);
 	//update velocity modulation
 	modNode_updateValue(&velocityModulators[3],vel/127.f);
+	/*
+	 * Apply velocity targets that are not direct ModulationNode pointers.
+	 *
+	 * Inputs: source voice slot and normalized trigger velocity. Output:
+	 * InstrumentManager no-ops for ordinary direct descriptor targets, but
+	 * applies voice-local slot decimation or retained Scene targets when those
+	 * are installed. This call stays beside modNode_updateValue() so trigger
+	 * clients do not need to know which backend the current target uses.
+	 */
+	instrumentManager_applyVelocityModulationTarget(3u, vel/127.f);
 
 	float offset = 1;
 	if(snareVoice.transGen.waveform==1) //offset mode

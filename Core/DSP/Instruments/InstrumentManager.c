@@ -4,6 +4,9 @@
 #include "CymbalParameters.h"
 #include "HiHatParameters.h"
 #include "SceneData.h"
+#include "SceneModTargets.h"
+#include "presetManager.h"
+#include "presetMorphEngine.h"
 #include "DrumVoice.h"
 #include "Snare.h"
 #include "CymbalVoice.h"
@@ -58,6 +61,31 @@ typedef struct {
     void *waveInterpTarget;
     mod_node_range_t range;
 } instrument_runtime_target_t;
+
+typedef enum {
+    INSTALLED_MOD_TARGET_NONE = 0,
+    INSTALLED_MOD_TARGET_SLOT_DECIMATION,
+    INSTALLED_MOD_TARGET_SCENE_TARGET
+} installed_mod_target_kind_t;
+
+typedef struct {
+    installed_mod_target_kind_t kind;
+    uint16_t target_id;
+} installed_mod_target_t;
+
+/*
+ * Supplemental modulation targets are installed beside, not inside,
+ * ModulationNode.
+ *
+ * Direct descriptor targets resolve to a live Parameter pointer and can be
+ * restored every audio block by ModulationNode. Slot decimation and Scene
+ * targets are sound targets with supplemental owners, so they need
+ * owner-specific setters instead of fake pointers. InstrumentManager owns this
+ * routing table because it already translates menu/Scene target IDs into
+ * runtime modulation backends.
+ */
+static installed_mod_target_t velocity_installed_targets[INSTRUMENT_SLOT_COUNT];
+static installed_mod_target_t lfo_installed_targets[INSTRUMENT_SLOT_COUNT][2u];
 
 static uint8_t instrumentManager_resolveModulationTarget(
     uint8_t scene_index,
@@ -447,6 +475,23 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
     }
 }
 
+static uint8_t instrumentManager_descriptorIsSlotDecimationTarget(
+    const ParamDescriptor *descriptor)
+{
+    /*
+     * Identify the voice-local supplemental decimation target.
+     *
+     * Input: descriptor metadata for the target slot's current instrument.
+     * Output: nonzero only for the descriptor-owned per-instrument sample-rate
+     * parameter. This helper keeps the supplemental binding rule out of Menu
+     * and prevents Scene Decimation from being confused with the voice-local
+     * instrument_decimation row that happens to share the same short label.
+     */
+    return (uint8_t)(descriptor &&
+                     descriptor->runtime.kind == INSTRUMENT_BIND_SLOT_DECIMATION &&
+                     (descriptor->dtype & 0x0fu) == DTYPE_0B127);
+}
+
 uint8_t instrumentManager_targetValid(uint8_t scene_index,
                                       instrument_param_id_t id,
                                       instrument_target_use_t use)
@@ -468,17 +513,19 @@ uint8_t instrumentManager_targetValid(uint8_t scene_index,
     }
     if (use == INSTRUMENT_TARGET_MODULATION) {
         /*
-         * Modulation targets must be direct runtime fields for the descriptor
-         * overlay backend. Descriptor rows such as slot decimation are stored
-         * as image cells and may still be automatable later, but they do not
-         * expose a stable per-instance pointer that ModulationNode can restore
-         * every audio block. Keeping this rule in the shared validator makes
-         * Menu target stepping and DSP target installation agree without a
-         * hardcoded exclusion list.
+         * Modulation targets are either direct runtime fields for the
+         * ModulationNode pointer backend or explicit supplemental descriptor
+         * targets with their own adapter. Slot decimation is the first
+         * supplemental voice target: it is descriptor-owned and image-backed,
+         * but applies through mixer_decimation_rate[slot] rather than a
+         * voice-struct member pointer. Keeping both cases in the shared
+         * validator makes Menu target stepping and DSP target installation
+         * agree without a hardcoded parameter list.
          */
         return (uint8_t)(((descriptor->flags & INSTRUMENT_PARAM_FLAG_MODULATABLE) != 0u) &&
-                         descriptor->runtime.kind == INSTRUMENT_BIND_INSTANCE_OFFSET &&
-                         instrumentManager_descriptorSupportsModulationRange(descriptor));
+                         ((descriptor->runtime.kind == INSTRUMENT_BIND_INSTANCE_OFFSET &&
+                           instrumentManager_descriptorSupportsModulationRange(descriptor)) ||
+                          instrumentManager_descriptorIsSlotDecimationTarget(descriptor)));
     }
     return (uint8_t)((descriptor->flags & INSTRUMENT_PARAM_FLAG_AUTOMATABLE) != 0u);
 }
@@ -588,6 +635,111 @@ instrument_param_id_t instrumentManager_stepTargetForSlot(
             }
             i--;
         }
+    }
+    return INSTRUMENT_PARAM_INVALID;
+}
+
+static uint16_t instrumentManager_lastTargetForSlot(uint8_t scene_index,
+                                                    uint8_t target_slot,
+                                                    instrument_target_use_t use)
+{
+    uint16_t current = INSTRUMENT_PARAM_INVALID;
+
+    /*
+     * Find the last valid descriptor target for one slot by using the public
+     * descriptor stepper.
+     *
+     * Inputs: Scene index, target slot, and target use. Output: the final
+     * valid canonical descriptor target or off when the slot has none. This
+     * helper exists only for mixed-list boundary navigation: moving backward
+     * from the first Scene velocity target should land on the last voice-local
+     * descriptor target without duplicating descriptor scans here.
+     */
+    while (1) {
+        uint16_t next = instrumentManager_stepTargetForSlot(
+            scene_index, target_slot, current, 1, use);
+        if (next == current)
+            return current;
+        current = next;
+    }
+}
+
+uint8_t instrumentManager_targetValidForVelocitySource(
+    uint8_t scene_index, uint8_t source_slot, uint16_t target_id)
+{
+    /*
+     * Validate a mixed velocity target for one source voice.
+     *
+     * Inputs: Scene index, zero-based source slot, and stored target ID.
+     * Output: nonzero for off, a modulatable descriptor on the same source
+     * slot, or a Scene modulation target. This keeps velocity from browsing
+     * every kit voice while still appending Scene targets after the voice-local
+     * descriptor list.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (target_id == INSTRUMENT_PARAM_INVALID)
+        return 1u;
+    if (sceneModTarget_valid(target_id, SCENE_MOD_TARGET_USE_VELOCITY))
+        return 1u;
+    return (uint8_t)(instrumentParam_isVoiceParameter(target_id) &&
+                     instrumentParam_slot(target_id) == source_slot &&
+                     instrumentManager_targetValid(scene_index, target_id,
+                                                   INSTRUMENT_TARGET_MODULATION));
+}
+
+uint16_t instrumentManager_stepVelocityTargetForSource(
+    uint8_t scene_index, uint8_t source_slot, uint16_t current,
+    int8_t direction)
+{
+    uint16_t normalized = current;
+
+    /*
+     * Walk the velocity target list for one source voice.
+     *
+     * Inputs: Scene index, source slot, current target or off, and signed
+     * direction. Output: one off entry, then this source slot's current
+     * instrument descriptor targets, then Scene mod targets. The descriptor
+     * portion delegates to instrumentManager_stepTargetForSlot(), so
+     * instrument swaps change the list without a hardcoded target table.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT || direction == 0)
+        return current;
+    if (!instrumentManager_targetValidForVelocitySource(scene_index,
+                                                        source_slot,
+                                                        normalized)) {
+        normalized = INSTRUMENT_PARAM_INVALID;
+    }
+
+    if (direction > 0) {
+        if (normalized == INSTRUMENT_PARAM_INVALID ||
+            instrumentParam_isVoiceParameter(normalized)) {
+            uint16_t next = instrumentManager_stepTargetForSlot(
+                scene_index, source_slot, normalized, 1,
+                INSTRUMENT_TARGET_MODULATION);
+            if (next != normalized)
+                return next;
+            return sceneModTarget_step(INSTRUMENT_PARAM_INVALID, 1,
+                                       SCENE_MOD_TARGET_USE_VELOCITY);
+        }
+        if (sceneModTarget_valid(normalized, SCENE_MOD_TARGET_USE_VELOCITY))
+            return sceneModTarget_step(normalized, 1,
+                                       SCENE_MOD_TARGET_USE_VELOCITY);
+        return INSTRUMENT_PARAM_INVALID;
+    }
+
+    if (sceneModTarget_valid(normalized, SCENE_MOD_TARGET_USE_VELOCITY)) {
+        uint16_t next = sceneModTarget_step(normalized, -1,
+                                           SCENE_MOD_TARGET_USE_VELOCITY);
+        if (next != INSTRUMENT_PARAM_INVALID)
+            return next;
+        return instrumentManager_lastTargetForSlot(
+            scene_index, source_slot, INSTRUMENT_TARGET_MODULATION);
+    }
+    if (instrumentParam_isVoiceParameter(normalized)) {
+        return instrumentManager_stepTargetForSlot(
+            scene_index, source_slot, normalized, -1,
+            INSTRUMENT_TARGET_MODULATION);
     }
     return INSTRUMENT_PARAM_INVALID;
 }
@@ -1002,6 +1154,245 @@ static uint8_t instrumentManager_resolveModulationTarget(
     return (uint8_t)(target_out->parameter.ptr != 0);
 }
 
+static uint8_t instrumentManager_isSlotDecimationTarget(
+    uint8_t scene_index, uint16_t id)
+{
+    const kit_instrument_slot_t *slot;
+    const ParamDescriptor *descriptor;
+
+    /*
+     * Validate a canonical descriptor ID as voice-local slot decimation.
+     *
+     * Inputs: Scene index and stored target ID. Output: nonzero only when the
+     * selected slot's current instrument owns an instrument_decimation
+     * descriptor that is valid for modulation. This keeps per-instrument `srt`
+     * in descriptor space and avoids putting it in SceneModTargets.
+     */
+    if (!instrumentParam_isVoiceParameter(id) ||
+        !instrumentManager_targetValid(scene_index, id,
+                                       INSTRUMENT_TARGET_MODULATION)) {
+        return 0u;
+    }
+    slot = scene_instrumentSlotConst(scene_index, instrumentParam_slot(id));
+    if (!slot)
+        return 0u;
+    descriptor = instrumentManager_descriptor(slot->type,
+                                              instrumentParam_local(id));
+    return instrumentManager_descriptorIsSlotDecimationTarget(descriptor);
+}
+
+static uint8_t instrumentManager_applySlotDecimationTarget(uint16_t id,
+                                                           uint16_t value)
+{
+    const kit_instrument_slot_t *slot_state;
+    const ParamDescriptor *descriptor;
+    uint8_t slot;
+
+    /*
+     * Apply one voice-local slot-decimation modulation value.
+     *
+     * Inputs: canonical descriptor target ID and 0..127 value. Output:
+     * InstrumentManager's existing supplemental runtime writer updates
+     * mixer_decimation_rate[target_slot]. This helper keeps velocity and LFO
+     * supplemental modulation paths from duplicating descriptor decode and
+     * binding rules.
+     */
+    if (!instrumentParam_isVoiceParameter(id))
+        return 0u;
+    slot = instrumentParam_slot(id);
+    slot_state = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    if (!slot_state)
+        return 0u;
+    descriptor = instrumentManager_descriptor(slot_state->type,
+                                              instrumentParam_local(id));
+    if (!instrumentManager_descriptorIsSlotDecimationTarget(descriptor))
+        return 0u;
+    if (value > 127u)
+        value = 127u;
+    return instrumentManager_writeRuntime(slot, descriptor, value);
+}
+
+static uint8_t instrumentManager_slotDecimationBase(uint16_t id)
+{
+    const scene_t *scene;
+    uint8_t slot;
+    uint8_t local;
+
+    /*
+     * Read the current base value for LFO slot-decimation modulation.
+     *
+     * Inputs: canonical instrument_decimation target ID. Output: the active
+     * Scene's current Morph interpolation image for that descriptor, clamped to
+     * 0..127. LFO modulation should be centered on the current voice-local base
+     * value, not on a hardcoded full-rate value.
+     */
+    if (!instrumentParam_isVoiceParameter(id))
+        return 127u;
+    scene = scene_getConst(scene_getActiveIndex());
+    slot = instrumentParam_slot(id);
+    local = instrumentParam_local(id);
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT ||
+        local >= INSTRUMENT_PARAM_COUNT) {
+        return 127u;
+    }
+    {
+        uint16_t value =
+            scene->kit.instruments[slot].parameter_images.morph_interpolation[local];
+        return (uint8_t)((value > 127u) ? 127u : value);
+    }
+}
+
+static uint8_t instrumentManager_applyVelocitySceneTarget(
+    uint16_t target_id, float velocity_0_1, float amount)
+{
+    const scene_mod_target_descriptor_t *descriptor =
+        sceneModTarget_descriptor(target_id);
+    uint16_t value;
+
+    /*
+     * Apply one velocity-triggered Scene modulation target.
+     *
+     * Inputs: Scene target ID, normalized trigger velocity, and normalized
+     * velocity amount. Output: retained Scene settings are changed through
+     * their owners. Per-voice Morph uses preset_morphVoice(), so the PERF
+     * value updates exactly like a menu edit; Scene Decimation uses its
+     * retained setter for the same reason.
+     */
+    if (!descriptor)
+        return 0u;
+    if (velocity_0_1 < 0.f)
+        velocity_0_1 = 0.f;
+    else if (velocity_0_1 > 1.f)
+        velocity_0_1 = 1.f;
+    if (amount < 0.f)
+        amount = 0.f;
+    else if (amount > 1.f)
+        amount = 1.f;
+    value = (uint16_t)((float)descriptor->max_value * velocity_0_1 * amount +
+                       0.5f);
+    switch (descriptor->kind) {
+    case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+        preset_morphVoice(descriptor->voice_slot, (uint8_t)value);
+        return 1u;
+    case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
+        preset_setVoiceDecimationAll(scene_getActiveIndex(), (uint8_t)value);
+        return 1u;
+    default:
+        return 0u;
+    }
+}
+
+static uint8_t instrumentManager_updateLfoSceneDestination(
+    uint16_t target_id, uint8_t source_slot, uint8_t target_pair,
+    float lfo_value_0_1, uint8_t polarity, float amount)
+{
+    const scene_t *scene = scene_getConst(scene_getActiveIndex());
+    const scene_mod_target_descriptor_t *descriptor =
+        sceneModTarget_descriptor(target_id);
+    uint16_t base;
+    uint16_t shaped;
+
+    /*
+     * Apply one LFO sample to a Scene modulation target.
+     *
+     * Inputs: Scene target ID, source LFO identity, normalized LFO value,
+     * polarity, and normalized amount. Output: voice Morph targets write the
+     * hidden Morph-worker layer, while Scene Decimation uses a runtime-only
+     * mixer apply so the retained PERF value does not move every LFO block.
+     */
+    if (!descriptor || !scene)
+        return 0u;
+    switch (descriptor->kind) {
+    case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+        base = scene->settings.voice_morph_amount[descriptor->voice_slot];
+        shaped = modNode_shapeRangeU16(base, descriptor->min_value,
+                                       descriptor->max_value,
+                                       lfo_value_0_1, amount, polarity);
+        presetMorph_setVoiceLfoModulation(scene_getActiveIndex(),
+                                          descriptor->voice_slot,
+                                          source_slot, target_pair,
+                                          1u, (uint8_t)shaped);
+        return 1u;
+    case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
+        base = scene->settings.voice_decimation_all;
+        shaped = modNode_shapeRangeU16(base, descriptor->min_value,
+                                       descriptor->max_value,
+                                       lfo_value_0_1, amount, polarity);
+        preset_applyVoiceDecimationAllRuntime((uint8_t)shaped);
+        return 1u;
+    default:
+        return 0u;
+    }
+}
+
+static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
+                                                           uint8_t target_pair)
+{
+    installed_mod_target_t *installed;
+    const scene_t *scene;
+
+    /*
+     * Restore the base value for one installed supplemental LFO target.
+     *
+     * Inputs: source slot and LFO pair whose target is about to be cleared or
+     * replaced. Output: slot decimation and Scene Decimation return to their
+     * current retained/runtime base, and hidden Morph contributions from that
+     * source/pair are cleared. Direct ModulationNode targets already restore
+     * themselves through modNode_clearDestination(), so this helper handles
+     * only the adapter backends owned by InstrumentManager.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
+        return;
+    installed = &lfo_installed_targets[source_slot][target_pair];
+    scene = scene_getConst(scene_getActiveIndex());
+    switch (installed->kind) {
+    case INSTALLED_MOD_TARGET_SLOT_DECIMATION:
+        (void)instrumentManager_applySlotDecimationTarget(
+            installed->target_id,
+            instrumentManager_slotDecimationBase(installed->target_id));
+        break;
+    case INSTALLED_MOD_TARGET_SCENE_TARGET: {
+        const scene_mod_target_descriptor_t *descriptor =
+            sceneModTarget_descriptor(installed->target_id);
+        if (descriptor &&
+            descriptor->kind == SCENE_MOD_TARGET_KIND_DECIMATION_ALL &&
+            scene) {
+            preset_applyVoiceDecimationAllRuntime(
+                scene->settings.voice_decimation_all);
+        }
+        break; }
+    default:
+        break;
+    }
+    presetMorph_clearLfoSource(source_slot, target_pair);
+    installed->kind = INSTALLED_MOD_TARGET_NONE;
+    installed->target_id = INSTRUMENT_PARAM_INVALID;
+}
+
+static void instrumentManager_restoreVelocitySupplementalTarget(uint8_t source_slot)
+{
+    installed_mod_target_t *installed;
+
+    /*
+     * Restore one velocity supplemental target before target replacement.
+     *
+     * Inputs: source voice slot whose velocity destination is changing. Output:
+     * voice-local slot decimation returns to the current Morph/base image.
+     * Scene velocity targets intentionally do not restore because their
+     * behavior is a retained set operation, exactly like editing PERF values.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    installed = &velocity_installed_targets[source_slot];
+    if (installed->kind == INSTALLED_MOD_TARGET_SLOT_DECIMATION) {
+        (void)instrumentManager_applySlotDecimationTarget(
+            installed->target_id,
+            instrumentManager_slotDecimationBase(installed->target_id));
+    }
+    installed->kind = INSTALLED_MOD_TARGET_NONE;
+    installed->target_id = INSTRUMENT_PARAM_INVALID;
+}
+
 static uint8_t instrumentManager_installLfoModulationTarget(
     uint8_t source_slot, uint8_t target_index, instrument_param_id_t target_id)
 {
@@ -1023,8 +1414,24 @@ static uint8_t instrumentManager_installLfoModulationTarget(
      */
     if (!node)
         return 0u;
+    instrumentManager_restoreLfoSupplementalTarget(source_slot, target_index);
     if (target_id == INSTRUMENT_PARAM_INVALID) {
         modNode_clearDestination(node);
+        return 1u;
+    }
+    if (instrumentManager_isSlotDecimationTarget(scene_getActiveIndex(),
+                                                 target_id)) {
+        modNode_clearDestination(node);
+        lfo_installed_targets[source_slot][target_index].kind =
+            INSTALLED_MOD_TARGET_SLOT_DECIMATION;
+        lfo_installed_targets[source_slot][target_index].target_id = target_id;
+        return 1u;
+    }
+    if (sceneModTarget_valid(target_id, SCENE_MOD_TARGET_USE_LFO)) {
+        modNode_clearDestination(node);
+        lfo_installed_targets[source_slot][target_index].kind =
+            INSTALLED_MOD_TARGET_SCENE_TARGET;
+        lfo_installed_targets[source_slot][target_index].target_id = target_id;
         return 1u;
     }
     if (!instrumentManager_resolveModulationTarget(scene_getActiveIndex(),
@@ -1053,8 +1460,24 @@ static uint8_t instrumentManager_installVelocityModulationTarget(
      */
     if (source_slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
+    instrumentManager_restoreVelocitySupplementalTarget(source_slot);
     if (target_id == INSTRUMENT_PARAM_INVALID) {
         modNode_clearDestination(&velocityModulators[source_slot]);
+        return 1u;
+    }
+    if (instrumentManager_isSlotDecimationTarget(scene_getActiveIndex(),
+                                                 target_id)) {
+        modNode_clearDestination(&velocityModulators[source_slot]);
+        velocity_installed_targets[source_slot].kind =
+            INSTALLED_MOD_TARGET_SLOT_DECIMATION;
+        velocity_installed_targets[source_slot].target_id = target_id;
+        return 1u;
+    }
+    if (sceneModTarget_valid(target_id, SCENE_MOD_TARGET_USE_VELOCITY)) {
+        modNode_clearDestination(&velocityModulators[source_slot]);
+        velocity_installed_targets[source_slot].kind =
+            INSTALLED_MOD_TARGET_SCENE_TARGET;
+        velocity_installed_targets[source_slot].target_id = target_id;
         return 1u;
     }
     if (!instrumentManager_resolveModulationTarget(scene_getActiveIndex(),
@@ -1065,6 +1488,83 @@ static uint8_t instrumentManager_installVelocityModulationTarget(
     return modNode_setDirectDestination(&velocityModulators[source_slot],
                                         target.id, target.parameter,
                                         target.waveInterpTarget, target.range);
+}
+
+void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot,
+                                                     float velocity_0_1)
+{
+    const installed_mod_target_t *installed;
+    float amount;
+    uint16_t value;
+
+    /*
+     * Apply a velocity-triggered supplemental or Scene modulation target.
+     *
+     * Inputs: source slot and normalized trigger velocity. Output: no-op for
+     * direct descriptor targets, because modNode_updateValue() has already
+     * handled them. Slot decimation writes the voice-local supplemental runtime
+     * binding; Scene targets call retained Scene setters where required.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    installed = &velocity_installed_targets[source_slot];
+    amount = velocityModulators[source_slot].amount;
+    switch (installed->kind) {
+    case INSTALLED_MOD_TARGET_SLOT_DECIMATION:
+        if (velocity_0_1 < 0.f)
+            velocity_0_1 = 0.f;
+        else if (velocity_0_1 > 1.f)
+            velocity_0_1 = 1.f;
+        value = (uint16_t)(127.f * velocity_0_1 * amount + 0.5f);
+        (void)instrumentManager_applySlotDecimationTarget(installed->target_id,
+                                                          value);
+        break;
+    case INSTALLED_MOD_TARGET_SCENE_TARGET:
+        (void)instrumentManager_applyVelocitySceneTarget(installed->target_id,
+                                                         velocity_0_1, amount);
+        break;
+    default:
+        break;
+    }
+}
+
+void instrumentManager_updateLfoSceneTarget(uint8_t source_slot,
+                                            uint8_t target_pair,
+                                            float lfo_value_0_1,
+                                            uint8_t polarity,
+                                            float amount)
+{
+    const installed_mod_target_t *installed;
+    uint16_t shaped;
+    uint8_t base;
+
+    /*
+     * Apply one LFO sample to an installed supplemental or Scene target.
+     *
+     * Inputs: source slot, target pair, normalized LFO value, shared polarity,
+     * and normalized pair amount. Output: direct ModulationNode targets remain
+     * handled in lfo_dispatchNextValue(); this function handles only
+     * slot-decimation and Scene adapters.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
+        return;
+    installed = &lfo_installed_targets[source_slot][target_pair];
+    switch (installed->kind) {
+    case INSTALLED_MOD_TARGET_SLOT_DECIMATION:
+        base = instrumentManager_slotDecimationBase(installed->target_id);
+        shaped = modNode_shapeRangeU16(base, 0u, 127u, lfo_value_0_1,
+                                       amount, polarity);
+        (void)instrumentManager_applySlotDecimationTarget(installed->target_id,
+                                                          shaped);
+        break;
+    case INSTALLED_MOD_TARGET_SCENE_TARGET:
+        (void)instrumentManager_updateLfoSceneDestination(
+            installed->target_id, source_slot, target_pair,
+            lfo_value_0_1, polarity, amount);
+        break;
+    default:
+        break;
+    }
 }
 
 static uint8_t instrumentManager_writeSpecialRuntime(
@@ -1279,7 +1779,8 @@ uint8_t instrumentManager_writeRuntime(uint8_t slot,
          * pair 2 share this validation but keep separate binding identities so
          * Menu/storage can find the correct sibling descriptor cells.
          */
-        return (uint8_t)(value >= 1u && value <= INSTRUMENT_SLOT_COUNT);
+        return (uint8_t)(value >= 1u &&
+                         value <= (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u));
 
     case INSTRUMENT_BIND_LFO_TARGET_PARAM:
     case INSTRUMENT_BIND_LFO_TARGET_PARAM_2:

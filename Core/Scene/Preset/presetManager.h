@@ -178,6 +178,16 @@ void    preset_morph(uint8_t morph);
 void    preset_morphVoice(uint8_t slot, uint8_t morph);
 void    preset_rebuildMorph(void);
 void    preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
+/*
+ * Apply Scene-wide decimation to runtime without changing retained Scene/Menu
+ * state.
+ *
+ * Inputs: value in the 0..127 PERF `srt` domain. Output:
+ * mixer_decimation_rate[6] receives the shaped multiplier. LFO modulation uses
+ * this runtime-only path so Scene Decimation can be a Scene mod target without
+ * causing the displayed PERF setting to move every LFO block.
+ */
+void    preset_applyVoiceDecimationAllRuntime(uint8_t value);
 void    preset_morphTick(void);
 uint8_t preset_getMorphValue(uint16_t index, uint8_t morph);
 

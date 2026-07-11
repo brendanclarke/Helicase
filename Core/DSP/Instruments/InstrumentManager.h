@@ -178,6 +178,17 @@ uint8_t instrumentManager_targetLocalValid(uint8_t scene_index,
                                            uint8_t local,
                                            instrument_target_use_t use);
 /*
+ * Validate one target for a velocity source voice.
+ *
+ * Inputs: Scene index, zero-based source slot, and a stored target ID. Output:
+ * nonzero only for off, a modulatable descriptor on the source slot, or a
+ * Scene mod target. This mixed validator exists because velocity target
+ * browsing appends Scene targets after the source voice's descriptor list,
+ * while LFO voice-target browsing still uses a selected target voice.
+ */
+uint8_t instrumentManager_targetValidForVelocitySource(
+    uint8_t scene_index, uint8_t source_slot, uint16_t target_id);
+/*
  * Step through valid targets for one target slot.
  *
  * Inputs: Scene index, zero-based target slot, the current canonical target or
@@ -200,6 +211,53 @@ uint8_t instrumentManager_targetLocalValid(uint8_t scene_index,
 instrument_param_id_t instrumentManager_stepTargetForSlot(
     uint8_t scene_index, uint8_t target_slot, instrument_param_id_t current,
     int8_t direction, instrument_target_use_t use);
+/*
+ * Walk the velocity target list for one source voice.
+ *
+ * Inputs: Scene index, zero-based source slot, current stored target ID or
+ * INSTRUMENT_PARAM_INVALID, and signed direction. Output: the next legal
+ * target in the velocity picker. The picker order is one off entry, the source
+ * slot's current instrument descriptors that are valid modulation targets,
+ * then Scene mod targets.
+ *
+ * This must stay separate from the generic descriptor stepper because velocity
+ * has a mixed namespace: voice-local descriptor IDs plus Scene target IDs.
+ * Menu callers need one stable traversal for encoder and knob edits, and load
+ * normalization needs the same validity rule without knowing descriptor or
+ * Scene-target internals.
+ */
+uint16_t instrumentManager_stepVelocityTargetForSource(
+    uint8_t scene_index, uint8_t source_slot, uint16_t current,
+    int8_t direction);
+/*
+ * Apply a velocity-triggered supplemental or Scene modulation target.
+ *
+ * Inputs: source_slot is the voice that was triggered, and velocity_0_1 is the
+ * normalized trigger velocity already used by velocityModulators[source_slot].
+ * Output: direct descriptor targets are ignored because ModulationNode already
+ * handled them; installed slot-decimation and Scene targets are converted into
+ * owner-specific runtime or retained set operations.
+ *
+ * This function must stay separate from modNode_updateValue() because velocity
+ * Scene targets intentionally update retained PERF/Menu base values, while
+ * slot decimation writes through InstrumentManager's supplemental binding and
+ * direct descriptor targets are transient pointer writes.
+ */
+void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot,
+                                                     float velocity_0_1);
+/*
+ * Apply one LFO sample to an installed supplemental or Scene target.
+ *
+ * Inputs: source slot, target pair, normalized LFO value, shared polarity, and
+ * that pair's amount. Output: direct ModulationNode targets have already been
+ * updated by lfo_dispatchNextValue(); this function handles only installed
+ * slot-decimation and Scene targets without forcing them into fake pointers.
+ */
+void instrumentManager_updateLfoSceneTarget(uint8_t source_slot,
+                                            uint8_t target_pair,
+                                            float lfo_value_0_1,
+                                            uint8_t polarity,
+                                            float amount);
 void *instrumentManager_runtimeInstance(uint8_t slot);
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,

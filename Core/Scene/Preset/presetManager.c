@@ -248,7 +248,7 @@ static void preset_syncSceneMorphMirrors(const scene_t *scene)
             scene->settings.voice_morph_amount[slot];
 }
 
-static void preset_applyVoiceDecimationAllRuntime(uint8_t value)
+void preset_applyVoiceDecimationAllRuntime(uint8_t value)
 {
     /*
      * Apply the Scene-wide decimation multiplier to the mixer runtime.

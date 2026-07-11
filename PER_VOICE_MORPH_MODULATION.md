@@ -2,8 +2,8 @@
 
 Date: 2026-07-11
 
-Status: specification and implementation audit only. No code changes have been
-made for this feature in this pass.
+Status: implementation pass completed on 2026-07-11. Build passes with the
+existing libc nano syscall warnings.
 
 ## Goal
 
@@ -254,8 +254,8 @@ Suggested API:
 typedef uint16_t scene_mod_target_id_t;
 
 typedef enum {
-    SCENE_MOD_TARGET_KIND_DECIMATION_ALL = 0,
-    SCENE_MOD_TARGET_KIND_VOICE_MORPH,
+    SCENE_MOD_TARGET_KIND_VOICE_MORPH = 0,
+    SCENE_MOD_TARGET_KIND_DECIMATION_ALL,
     SCENE_MOD_TARGET_KIND_EFFECT_PARAMETER
 } scene_mod_target_kind_t;
 
@@ -403,7 +403,6 @@ Suggested installed target state:
 ```c
 typedef enum {
     INSTALLED_MOD_TARGET_NONE = 0,
-    INSTALLED_MOD_TARGET_DIRECT_PARAMETER,
     INSTALLED_MOD_TARGET_SLOT_DECIMATION,
     INSTALLED_MOD_TARGET_SCENE_TARGET
 } installed_mod_target_kind_t;
@@ -836,3 +835,77 @@ that two direct `ModulationNode`s may have when aimed at the same raw parameter.
 
 Decide this before implementation if exact parity with existing direct
 modulation conflicts is more important than predictable layering.
+
+## Implementation Notes - 2026-07-11
+
+Code changes completed:
+
+- Added `Core/Scene/SceneModTargets.h/.c`.
+- Added `SceneModTargets.c` to `Makefile`.
+- Scene target metadata now defines `1vm` through `6vm`, then Scene `srt`.
+- Per-instrument `instrument_decimation` rows in all four instrument parameter
+  files now use explicit `ROW_SLOT_DECIMATION(...)` wrappers. These still carry
+  the image flag contract: morphable, modulatable, automatable.
+- Added `modNode_shapeRangeU16()` so supplemental and Scene targets can use the
+  same range-relative `neg` / `pos` / `bi` polarity math as descriptor-backed
+  direct LFO targets.
+- Added velocity target browsing helpers in `InstrumentManager`: one source
+  voice's descriptor targets, then Scene targets, with one `off`.
+- Added Menu support for velocity target normalization/editing/display through
+  the mixed velocity list.
+- Extended LFO DstVoice to include the `scn` value after voice 6.
+- Extended LFO DstParam normalization/editing/display so `scn` browses the
+  Scene target list and voice numbers browse the selected voice descriptor
+  list.
+- Added supplemental target install/apply state in `InstrumentManager` for
+  voice-local slot decimation and Scene targets, beside the existing direct
+  `ModulationNode` backend.
+- Velocity trigger paths now call
+  `instrumentManager_applyVelocityModulationTarget()` after the existing direct
+  `modNode_updateValue()` call. The new call is a no-op for direct targets and
+  handles slot decimation plus Scene targets.
+- `lfo_dispatchNextValue()` now receives the source slot from `mixer.c`.
+  Direct `ModulationNode` target updates still run first; InstrumentManager then
+  updates installed slot-decimation or Scene adapters for pair 1 and pair 2.
+- Added a hidden LFO Morph layer to `presetMorphEngine`. LFO Morph modulation
+  stores source/pair contributions outside SceneData, does not update PERF
+  menu values, and spends one extra worker tick resolving the effective Morph
+  amount for each active LFO-modulated voice.
+- Exposed `preset_applyVoiceDecimationAllRuntime()` so LFO Scene Decimation can
+  apply to the mixer without mutating retained Scene/PERF state.
+
+Important implementation detail:
+
+- Velocity modulation of Scene Morph and Scene Decimation is a retained set
+  operation. It calls `preset_morphVoice()` or
+  `preset_setVoiceDecimationAll()`, so the menu follows the value.
+- LFO modulation of voice Morph is a hidden secondary layer. It calls
+  `presetMorph_setVoiceLfoModulation()` and does not update the menu.
+- LFO modulation of Scene Decimation uses the runtime-only decimation apply
+  function and does not update the retained/menu `srt` value.
+- Multiple LFO Morph contributions are implemented as summed signed deltas
+  around the current retained base Morph amount, clamped to 0..255.
+- Clearing or replacing an LFO supplemental target restores slot decimation or
+  Scene Decimation to its current base value and clears any hidden Morph
+  contribution from that source/pair. Direct targets already restore through
+  `ModulationNode`.
+
+Verification:
+
+- `make` passes.
+- Build output still shows the existing libc nano syscall warnings for
+  `_close`, `_lseek`, `_read`, and `_write`.
+
+Hardware/menu checks still needed:
+
+- Confirm `velo_mod_dest` order is `off`, source voice modulatable descriptors
+  including voice-local `srt`, then `1vm..6vm`, then Scene `srt`.
+- Confirm LFO DstVoice displays `1..6, scn`.
+- Confirm LFO DstParam with `scn` displays one `off`, then `1vm..6vm`, then
+  Scene `srt`.
+- Confirm velocity to `1vm..6vm` updates PERF per-voice Morph values.
+- Confirm LFO to `1vm..6vm` changes Morph sound without moving PERF values.
+- Confirm velocity/LFO to voice-local `srt` changes per-instrument decimation,
+  not Scene Decimation.
+- Confirm velocity to Scene `srt` updates PERF `srt`, while LFO to Scene `srt`
+  affects the runtime decimation layer without moving the displayed value.

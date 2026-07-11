@@ -51,6 +51,7 @@
 #include "HiHat.h"
 #include "squareRootLut.h"
 #include "modulationNode.h"
+#include "InstrumentManager.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -116,6 +117,16 @@ void HiHat_trigger( uint8_t vel, uint8_t isOpen, const uint8_t note)
 
 	//update velocity modulation
 	modNode_updateValue(&velocityModulators[5],vel/127.f);
+	/*
+	 * Apply velocity targets that are not direct ModulationNode pointers.
+	 *
+	 * Inputs: source voice slot and normalized trigger velocity. Output:
+	 * InstrumentManager no-ops for ordinary direct descriptor targets, but
+	 * applies voice-local slot decimation or retained Scene targets when those
+	 * are installed. This call stays beside modNode_updateValue() so trigger
+	 * clients do not need to know which backend the current target uses.
+	 */
+	instrumentManager_applyVelocityModulationTarget(5u, vel/127.f);
 
 	float offset = 1;
 	if(hatVoice.transGen.waveform==1) //offset mode

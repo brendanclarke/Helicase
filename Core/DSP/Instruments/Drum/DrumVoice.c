@@ -44,6 +44,7 @@
 #include <stdbool.h>
 #include "ParameterArray.h"
 #include "modulationNode.h"
+#include "InstrumentManager.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -126,6 +127,16 @@ void Drum_trigger(const uint8_t voiceNr, const uint8_t vol, const uint8_t note)
 
 	//update velocity modulation
 	modNode_updateValue(&velocityModulators[voiceNr],vol/127.f);
+	/*
+	 * Apply velocity targets that are not direct ModulationNode pointers.
+	 *
+	 * Inputs: source voice slot and normalized trigger velocity. Output:
+	 * InstrumentManager no-ops for ordinary direct descriptor targets, but
+	 * applies voice-local slot decimation or retained Scene targets when those
+	 * are installed. This call stays beside modNode_updateValue() so trigger
+	 * clients do not need to know which backend the current target uses.
+	 */
+	instrumentManager_applyVelocityModulationTarget(voiceNr, vol/127.f);
 
 	//only reset phase if envelope is closed
 #ifdef USE_AMP_FILTER

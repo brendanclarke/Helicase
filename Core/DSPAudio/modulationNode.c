@@ -603,6 +603,75 @@ static uint8_t modNode_rangeValue(ModulationNode* vm,
 	return 1u;
 }
 
+uint16_t modNode_shapeRangeU16(uint16_t base,
+							   uint16_t min_value,
+							   uint16_t max_value,
+							   float source_0_1,
+							   float amount_0_1,
+							   uint8_t polarity)
+{
+	float width;
+	float delta;
+	float shaped;
+
+	/*
+	 * Shape an explicit integer range with the same polarity contract as
+	 * descriptor-backed ModulationNode targets.
+	 *
+	 * Inputs: base is the retained/current value, min/max define the legal
+	 * target range, source_0_1 is the normalized LFO/velocity source, amount is
+	 * normalized 0..1, and polarity is a mod_node_polarity_t value. Output is a
+	 * clamped integer suitable for owner-specific setters such as
+	 * instrumentManager_writeRuntime() or presetMorphEngine.
+	 *
+	 * This function cannot use ModulationNode internals because supplemental
+	 * targets such as slot decimation and Scene Morph do not have direct
+	 * Parameter pointers. Keeping one exported range helper prevents those
+	 * adapters from copying slightly different negative/positive/bipolar math.
+	 */
+	if (max_value < min_value) {
+		uint16_t t = min_value;
+		min_value = max_value;
+		max_value = t;
+	}
+	if (source_0_1 < 0.f) {
+		source_0_1 = 0.f;
+	} else if (source_0_1 > 1.f) {
+		source_0_1 = 1.f;
+	}
+	if (amount_0_1 < 0.f) {
+		amount_0_1 = 0.f;
+	} else if (amount_0_1 > 1.f) {
+		amount_0_1 = 1.f;
+	}
+	if (base < min_value)
+		base = min_value;
+	else if (base > max_value)
+		base = max_value;
+
+	width = (float)max_value - (float)min_value;
+	switch (polarity)
+	{
+		case MOD_NODE_POLARITY_POSITIVE:
+			delta = amount_0_1 * source_0_1 * width;
+			break;
+
+		case MOD_NODE_POLARITY_BIPOLAR:
+			delta = amount_0_1 * ((source_0_1 * 2.f) - 1.f) * (width * 0.5f);
+			break;
+
+		default:
+			delta = -amount_0_1 * (1.f - source_0_1) * width;
+			break;
+	}
+	shaped = modNode_clampFloat((float)base + delta,
+								(float)min_value,
+								(float)max_value);
+	if (shaped <= 0.f)
+		return 0u;
+	return (uint16_t)(shaped + 0.5f);
+}
+
 static float modNode_legacyNegativeValue(ModulationNode* vm,
 										 const Parameter *p,
 										 float val)

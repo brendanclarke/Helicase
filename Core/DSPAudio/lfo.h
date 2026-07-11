@@ -97,7 +97,20 @@ typedef struct LfoStruct
 } Lfo;
 //-------------------------------------------------------------
 void lfo_init(Lfo *lfo);
-void lfo_dispatchNextValue(Lfo* lfo);
+/*
+ * Dispatch one LFO block with explicit source-slot identity.
+ *
+ * Inputs: lfo is the oscillator/modulation state for one voice, and source_slot
+ * identifies which instrument slot owns it. Output: the shared waveform updates
+ * both direct ModulationNode targets and any installed Scene/supplemental
+ * target adapters for the same LFO pair slots.
+ *
+ * The source slot cannot be inferred reliably by Scene target code from the
+ * Lfo pointer without hardcoding voice object addresses. Passing it from
+ * mixer.c keeps LFO math generic while allowing InstrumentManager to route
+ * Scene modulation by the same source slot used when the target was installed.
+ */
+void lfo_dispatchNextValue(Lfo* lfo, uint8_t source_slot);
 void lfo_setFreq(Lfo *lfo, float f);
 void lfo_setSync(Lfo* lfo, uint8_t sync);
 void lfo_recalcSync();

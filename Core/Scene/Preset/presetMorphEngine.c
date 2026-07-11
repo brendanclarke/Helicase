@@ -11,10 +11,18 @@ typedef struct {
     uint8_t requested_mask;
     uint8_t pass_mask;
     uint8_t pass_amount[INSTRUMENT_SLOT_COUNT];
+    uint8_t pass_lfo_resolved_mask;
     uint8_t active;
 } preset_morph_worker_t;
 
+typedef struct {
+    uint8_t active;
+    uint8_t amount;
+} preset_morph_lfo_contribution_t;
+
 static preset_morph_worker_t morph_worker;
+static preset_morph_lfo_contribution_t morph_lfo_contributions
+    [INSTRUMENT_SLOT_COUNT][INSTRUMENT_SLOT_COUNT][2u];
 
 #define PRESET_MORPH_ALL_SLOTS_MASK \
     ((uint8_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u))
@@ -75,6 +83,71 @@ static uint8_t presetMorph_firstQueuedSlot(uint8_t mask)
     return INSTRUMENT_SLOT_COUNT;
 }
 
+static uint8_t presetMorph_voiceHasLfoLayer(uint8_t slot)
+{
+    uint8_t source;
+    uint8_t pair;
+
+    /*
+     * Test whether one voice has any active hidden LFO Morph contributions.
+     *
+     * Input: target voice slot. Output: nonzero if any source slot/pair is
+     * currently driving that voice's secondary Morph layer. This small scan is
+     * separate from the resolver because request/begin-pass code only needs a
+     * yes/no answer, while the resolver must also sum shaped contributions.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+        for (pair = 0u; pair < 2u; pair++) {
+            if (morph_lfo_contributions[slot][source][pair].active)
+                return 1u;
+        }
+    }
+    return 0u;
+}
+
+static uint8_t presetMorph_resolveLfoAmount(const scene_t *scene, uint8_t slot)
+{
+    uint8_t source;
+    uint8_t pair;
+    int32_t base;
+    int32_t effective;
+
+    /*
+     * Resolve the effective Morph amount for one LFO-modulated voice.
+     *
+     * Inputs: current Scene and target voice slot. Output: retained base Morph
+     * plus all active source/pair deltas, clamped to 0..255. Each contribution
+     * stores an already-shaped absolute Morph amount; the resolver converts it
+     * to a delta from the current retained base so menu/velocity/MIDI base
+     * changes remain the center of the hidden LFO layer.
+     *
+     * This cannot be folded into every descriptor interpolation because that
+     * would recalculate the same LFO/base combination for every morphable
+     * parameter in the voice. It also cannot run in LFO dispatch because
+     * dispatch must not walk descriptor tables or update all morphed
+     * parameters immediately.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    base = scene->settings.voice_morph_amount[slot];
+    effective = base;
+    for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+        for (pair = 0u; pair < 2u; pair++) {
+            const preset_morph_lfo_contribution_t *contribution =
+                &morph_lfo_contributions[slot][source][pair];
+            if (contribution->active)
+                effective += (int32_t)contribution->amount - base;
+        }
+    }
+    if (effective < 0)
+        effective = 0;
+    else if (effective > 255)
+        effective = 255;
+    return (uint8_t)effective;
+}
+
 static void presetMorph_snapshotPassAmounts(const scene_t *scene)
 {
     uint8_t slot;
@@ -116,6 +189,7 @@ static void presetMorph_beginPass(void)
 
     morph_worker.pass_mask = morph_worker.requested_mask;
     morph_worker.requested_mask = 0u;
+    morph_worker.pass_lfo_resolved_mask = 0u;
     presetMorph_snapshotPassAmounts(scene);
     morph_worker.slot = presetMorph_firstQueuedSlot(morph_worker.pass_mask);
     morph_worker.descriptor_index = 0u;
@@ -129,8 +203,17 @@ void presetMorph_init(void)
     morph_worker.descriptor_index = 0u;
     morph_worker.requested_mask = 0u;
     morph_worker.pass_mask = 0u;
+    morph_worker.pass_lfo_resolved_mask = 0u;
     for (uint8_t slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
         morph_worker.pass_amount[slot] = 0u;
+    for (uint8_t target = 0u; target < INSTRUMENT_SLOT_COUNT; target++) {
+        for (uint8_t source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+            for (uint8_t pair = 0u; pair < 2u; pair++) {
+                morph_lfo_contributions[target][source][pair].active = 0u;
+                morph_lfo_contributions[target][source][pair].amount = 0u;
+            }
+        }
+    }
     morph_worker.active = 0u;
 }
 
@@ -207,6 +290,27 @@ uint8_t presetMorph_tick(void)
             continue;
         }
 
+        if (morph_worker.descriptor_index == 0u &&
+            !(morph_worker.pass_lfo_resolved_mask &
+              PRESET_MORPH_SLOT_MASK(morph_worker.slot)) &&
+            presetMorph_voiceHasLfoLayer(morph_worker.slot)) {
+            /*
+             * Resolve one active LFO Morph amount as its own worker item.
+             *
+             * Inputs: the current pass slot and stored LFO contribution table.
+             * Output: pass_amount[slot] receives the effective base-plus-LFO
+             * Morph amount that later descriptor interpolation will use. The
+             * function returns after this voice-level resolve so an
+             * LFO-modulated Morph voice adds one bounded work item, while
+             * actual descriptor interpolation remains one parameter per tick.
+             */
+            morph_worker.pass_amount[morph_worker.slot] =
+                presetMorph_resolveLfoAmount(scene, morph_worker.slot);
+            morph_worker.pass_lfo_resolved_mask |=
+                PRESET_MORPH_SLOT_MASK(morph_worker.slot);
+            return 1u;
+        }
+
         while (morph_worker.descriptor_index < INSTRUMENT_PARAM_COUNT) {
             uint8_t local = morph_worker.descriptor_index++;
             const ParamDescriptor *descriptor =
@@ -254,4 +358,58 @@ void presetMorph_rebuildScene(uint8_t scene_index)
      * Kit load apply, and non-mutating endpoint refresh paths.
      */
     presetMorph_requestAll(scene_index);
+}
+
+void presetMorph_setVoiceLfoModulation(uint8_t scene_index,
+                                       uint8_t target_slot,
+                                       uint8_t source_slot,
+                                       uint8_t target_pair,
+                                       uint8_t active,
+                                       uint8_t amount)
+{
+    /*
+     * Store one hidden LFO Morph contribution and queue its target voice.
+     *
+     * Inputs: Scene index, target voice slot, source LFO slot, target pair,
+     * active flag, and shaped 0..255 amount. Output: the contribution table is
+     * updated and the target voice is queued for bounded Morph apply. This does
+     * not touch SceneData or PERF mirrors, preserving the difference between
+     * retained base Morph and the invisible LFO layer.
+     */
+    if (!scene_getConst(scene_index) ||
+        target_slot >= INSTRUMENT_SLOT_COUNT ||
+        source_slot >= INSTRUMENT_SLOT_COUNT ||
+        target_pair > 1u) {
+        return;
+    }
+    morph_lfo_contributions[target_slot][source_slot][target_pair].active =
+        active ? 1u : 0u;
+    morph_lfo_contributions[target_slot][source_slot][target_pair].amount =
+        amount;
+    presetMorph_requestVoice(scene_index, target_slot);
+}
+
+void presetMorph_clearLfoSource(uint8_t source_slot, uint8_t target_pair)
+{
+    uint8_t target;
+    uint8_t scene_index = scene_getActiveIndex();
+
+    /*
+     * Remove one source LFO pair from every hidden Morph target.
+     *
+     * Inputs: source slot and pair whose modulation destination was cleared or
+     * changed. Output: each affected target voice is queued so the worker
+     * recomputes from remaining contributions or from the retained base. This
+     * helper exists because install/clear code should not have to remember
+     * which voice the old Scene target pointed at.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
+        return;
+    for (target = 0u; target < INSTRUMENT_SLOT_COUNT; target++) {
+        if (morph_lfo_contributions[target][source_slot][target_pair].active) {
+            morph_lfo_contributions[target][source_slot][target_pair].active = 0u;
+            morph_lfo_contributions[target][source_slot][target_pair].amount = 0u;
+            presetMorph_requestVoice(scene_index, target);
+        }
+    }
 }

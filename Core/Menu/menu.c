@@ -47,6 +47,7 @@
 #include "sequencer.h"
 #include "PatternData.h"
 #include "SceneData.h"
+#include "SceneModTargets.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
 #include "triggerJacks.h"
@@ -794,6 +795,7 @@ typedef struct {
     uint8_t target_param_index;
     uint16_t raw_target_voice;
     uint8_t target_voice;
+    uint8_t target_is_scene;
     uint8_t target_slot;
     uint16_t target_param;
 } menu_lfo_target_context_t;
@@ -814,6 +816,7 @@ static uint8_t menu_lfoTargetPairForKind(instrument_binding_kind_t kind,
                                          instrument_binding_kind_t *param_kind_out);
 static uint8_t menu_cellIsLfoTargetVoice(const menu_cell_t *cell);
 static uint8_t menu_cellIsLfoTargetParam(const menu_cell_t *cell);
+static uint8_t menu_cellIsVelocityTargetParam(const menu_cell_t *cell);
 static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
                                      menu_lfo_target_context_t *ctx);
 static uint16_t menu_lfoTargetNormalizeParam(
@@ -825,6 +828,12 @@ static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta);
 static uint8_t menu_lfoTargetEditParam(const menu_cell_t *cell, int16_t delta);
 static uint16_t menu_lfoTargetDisplayValue(const menu_cell_t *cell,
                                            uint16_t raw);
+static uint16_t menu_velocityTargetNormalize(const menu_cell_t *cell,
+                                             uint16_t raw);
+static uint8_t menu_velocityTargetEditParam(const menu_cell_t *cell,
+                                            int16_t delta);
+static uint16_t menu_velocityTargetDisplayValue(const menu_cell_t *cell,
+                                                uint16_t raw);
 static void menu_copyPaddedField(char *dst, const char *src, uint8_t width);
 static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText);
 static void menu_displayInstrumentTargetFull(uint16_t target);
@@ -1041,6 +1050,23 @@ static uint8_t menu_cellIsLfoTargetParam(const menu_cell_t *cell)
     return is_param;
 }
 
+static uint8_t menu_cellIsVelocityTargetParam(const menu_cell_t *cell)
+{
+    /*
+     * Identify the descriptor cell that stores one voice's velocity target.
+     *
+     * Input: resolved menu cell. Output: nonzero only for an instrument-owned
+     * velo_mod_dest binding. This cannot be inferred from dtype alone because
+     * LFO target params share the target-selection dtype but use a paired
+     * DstVoice context, while velocity uses the source slot as its context.
+     */
+    return (uint8_t)(cell &&
+                     cell->kind == MENU_CELL_INSTRUMENT &&
+                     cell->descriptor &&
+                     cell->descriptor->runtime.kind ==
+                        INSTRUMENT_BIND_VELOCITY_TARGET);
+}
+
 static uint8_t menu_cellDtype(const menu_cell_t *cell)
 {
     if (!cell)
@@ -1164,11 +1190,15 @@ static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
     ctx->raw_target_voice = raw_voice;
     if (raw_voice < 1u)
         ctx->target_voice = 1u;
-    else if (raw_voice > INSTRUMENT_SLOT_COUNT)
-        ctx->target_voice = INSTRUMENT_SLOT_COUNT;
+    else if (raw_voice > (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u))
+        ctx->target_voice = (uint8_t)(INSTRUMENT_SLOT_COUNT + 1u);
     else
         ctx->target_voice = (uint8_t)raw_voice;
-    ctx->target_slot = (uint8_t)(ctx->target_voice - 1u);
+    ctx->target_is_scene =
+        (uint8_t)(ctx->target_voice == (uint8_t)(INSTRUMENT_SLOT_COUNT + 1u));
+    ctx->target_slot = ctx->target_is_scene
+        ? 0xffu
+        : (uint8_t)(ctx->target_voice - 1u);
     ctx->target_param = source->parameter_images.instrument_parameters[param_index];
     return 1u;
 }
@@ -1184,23 +1214,32 @@ static uint16_t menu_lfoTargetNormalizeParam(
      *
      * Inputs: an already resolved LFO target context and a stored/edited target
      * parameter value. Output: INSTRUMENT_PARAM_INVALID for off/stale/invalid
-     * values, or a canonical target ID rebuilt for ctx->target_slot and proven
-     * modulatable through InstrumentManager.
+     * values, a Scene target ID when DstVoice is `scn`, or a canonical target
+     * ID rebuilt for ctx->target_slot and proven modulatable through
+     * InstrumentManager.
      *
      * Why this is separate from the edit functions: voice edits, parameter
      * edits, display, and load normalization all need the same invariant:
-     * lfo_target_param is either off or belongs to the selected target voice
-     * and is modulatable for that voice slot's current instrument type.
+     * lfo_target_param is either off, belongs to the selected target voice and
+     * is modulatable for that voice slot's current instrument type, or belongs
+     * to the Scene mod target namespace when DstVoice is `scn`.
      *
      * Common clients/affiliates: menu_lfoTargetEditVoice() preserves the local
      * descriptor across voice changes through this helper; display treats stale
      * values as off; InstrumentManager supplies canonical ID packing and
      * descriptor-flag validation.
      */
-    if (!ctx || value == INSTRUMENT_PARAM_INVALID ||
-        !instrumentParam_isVoiceParameter(value)) {
+    if (!ctx || value == INSTRUMENT_PARAM_INVALID) {
         return INSTRUMENT_PARAM_INVALID;
     }
+
+    if (ctx->target_is_scene) {
+        return sceneModTarget_valid(value, SCENE_MOD_TARGET_USE_LFO)
+            ? value : INSTRUMENT_PARAM_INVALID;
+    }
+
+    if (!instrumentParam_isVoiceParameter(value))
+        return INSTRUMENT_PARAM_INVALID;
 
     local = instrumentParam_local(value);
     candidate = instrumentParam_make(ctx->target_slot, local);
@@ -1244,8 +1283,8 @@ static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
         return 0u;
     if (raw_voice < 1u)
         voice = 1u;
-    else if (raw_voice > INSTRUMENT_SLOT_COUNT)
-        voice = INSTRUMENT_SLOT_COUNT;
+    else if (raw_voice > (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u))
+        voice = (uint8_t)(INSTRUMENT_SLOT_COUNT + 1u);
     else
         voice = (uint8_t)raw_voice;
 
@@ -1255,7 +1294,11 @@ static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
         menu_lfo_target_context_t next = *ctx;
         next.raw_target_voice = voice;
         next.target_voice = voice;
-        next.target_slot = (uint8_t)(voice - 1u);
+        next.target_is_scene =
+            (uint8_t)(voice == (uint8_t)(INSTRUMENT_SLOT_COUNT + 1u));
+        next.target_slot = next.target_is_scene
+            ? 0xffu
+            : (uint8_t)(voice - 1u);
         reconciled = menu_lfoTargetNormalizeParam(&next, ctx->target_param);
         (void)preset_setSupplementalParameter(ctx->scene_index,
                                               ctx->source_slot,
@@ -1275,8 +1318,9 @@ static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta)
      *
      * Inputs: the resolved voice target cell and signed movement delta from
      * either the main encoder or an endless pot. Outputs: the target voice is
-     * clamped to 1..INSTRUMENT_SLOT_COUNT and the sibling target parameter is
-     * reconciled against the new selected voice.
+     * clamped to 1..INSTRUMENT_SLOT_COUNT+1, where the final value is displayed
+     * as `scn`, and the sibling target parameter is reconciled against the new
+     * selected namespace.
      *
      * Why this is a separate edit helper: encoder and knob paths previously
      * edited the field as a generic 0..127 value. Both controls must share the
@@ -1292,8 +1336,8 @@ static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta)
     next = (int16_t)ctx.target_voice + delta;
     if (next < 1)
         next = 1;
-    else if (next > (int16_t)INSTRUMENT_SLOT_COUNT)
-        next = (int16_t)INSTRUMENT_SLOT_COUNT;
+    else if (next > (int16_t)(INSTRUMENT_SLOT_COUNT + 1u))
+        next = (int16_t)(INSTRUMENT_SLOT_COUNT + 1u);
     return menu_lfoTargetCommitVoiceAndReconcile(cell, &ctx, (uint16_t)next);
 }
 
@@ -1341,9 +1385,11 @@ static uint8_t menu_lfoTargetEditParam(const menu_cell_t *cell, int16_t delta)
     dir = (delta > 0) ? 1 : -1;
     steps = (uint8_t)((delta > 0) ? delta : -delta);
     while (steps--) {
-        uint16_t next = instrumentManager_stepTargetForSlot(
-            ctx.scene_index, ctx.target_slot, value, dir,
-            INSTRUMENT_TARGET_MODULATION);
+        uint16_t next = ctx.target_is_scene
+            ? sceneModTarget_step(value, dir, SCENE_MOD_TARGET_USE_LFO)
+            : instrumentManager_stepTargetForSlot(
+                ctx.scene_index, ctx.target_slot, value, dir,
+                INSTRUMENT_TARGET_MODULATION);
         if (next == value)
             break;
         value = next;
@@ -1381,6 +1427,79 @@ static uint16_t menu_lfoTargetDisplayValue(const menu_cell_t *cell,
         return raw;
     }
     return menu_lfoTargetNormalizeParam(&ctx, raw);
+}
+
+static uint16_t menu_velocityTargetNormalize(const menu_cell_t *cell,
+                                             uint16_t raw)
+{
+    /*
+     * Normalize a velocity destination against its source voice.
+     *
+     * Inputs: resolved velo_mod_dest cell and raw stored target. Output: off,
+     * a modulatable descriptor target on the same source slot, or a Scene mod
+     * target. This is separate from LFO normalization because velocity has no
+     * DstVoice cell: the source slot is always the voice whose velocity target
+     * cell is being edited.
+     */
+    if (!menu_cellIsVelocityTargetParam(cell))
+        return raw;
+    return instrumentManager_targetValidForVelocitySource(
+        scene_getActiveIndex(), cell->slot, raw)
+        ? raw : INSTRUMENT_PARAM_INVALID;
+}
+
+static uint8_t menu_velocityTargetEditParam(const menu_cell_t *cell,
+                                            int16_t delta)
+{
+    uint16_t value;
+    uint8_t steps;
+    int8_t dir;
+
+    /*
+     * Edit one velocity destination cell through the mixed target list.
+     *
+     * Inputs: resolved velo_mod_dest cell and signed encoder/knob delta.
+     * Output: source slot storage receives exactly one of: off, a modulatable
+     * descriptor target on the same source slot, or a Scene mod target.
+     * Non-modulatable descriptors are skipped and there is only one off entry.
+     *
+     * This cannot use the generic DTYPE_TARGET_SELECTION path because velocity
+     * targets are not numeric ranges and are not the old modTargets[] table.
+     * The traversal depends on the source slot's current instrument type and
+     * the shared SceneModTargets list, so it must call the descriptor/Scene
+     * target browsers instead of incrementing raw stored IDs.
+     */
+    if (!menu_cellIsVelocityTargetParam(cell))
+        return 0u;
+    value = menu_velocityTargetNormalize(cell, menu_cellDisplayValue(cell));
+    if (delta == 0) {
+        return menu_cellCommitValue(cell, value);
+    }
+    dir = (delta > 0) ? 1 : -1;
+    steps = (uint8_t)((delta > 0) ? delta : -delta);
+    while (steps--) {
+        uint16_t next = instrumentManager_stepVelocityTargetForSource(
+            scene_getActiveIndex(), cell->slot, value, dir);
+        if (next == value)
+            break;
+        value = next;
+        if (value == INSTRUMENT_PARAM_INVALID && dir < 0)
+            break;
+    }
+    return menu_cellCommitValue(cell, value);
+}
+
+static uint16_t menu_velocityTargetDisplayValue(const menu_cell_t *cell,
+                                                uint16_t raw)
+{
+    /*
+     * Return the display-safe velocity target value.
+     *
+     * Inputs: resolved menu cell and raw stored target. Output: stale values
+     * render as off without mutating SceneData. Edits commit the same
+     * normalization through menu_velocityTargetEditParam().
+     */
+    return menu_velocityTargetNormalize(cell, raw);
 }
 
 static void menu_copyPaddedField(char *dst, const char *src, uint8_t width)
@@ -1428,8 +1547,14 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
      * into any current or future descriptor-target browser.
      */
     if (target == INSTRUMENT_PARAM_INVALID ||
-        !instrumentParam_isVoiceParameter(target)) {
+        (!instrumentParam_isVoiceParameter(target) &&
+         !sceneModTarget_isSceneTarget(target))) {
         memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
+
+    if (sceneModTarget_isSceneTarget(target)) {
+        sceneModTarget_formatShort(target, valueAsText);
         return;
     }
 
@@ -1455,8 +1580,15 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
     const ParamDescriptor *descriptor;
 
     if (target == INSTRUMENT_PARAM_INVALID ||
-        !instrumentParam_isVoiceParameter(target)) {
+        (!instrumentParam_isVoiceParameter(target) &&
+         !sceneModTarget_isSceneTarget(target))) {
         memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+        return;
+    }
+
+    if (sceneModTarget_isSceneTarget(target)) {
+        sceneModTarget_formatFull(target, &editDisplayBuffer[1][0],
+                                  &editDisplayBuffer[1][8]);
         return;
     }
 
@@ -1508,11 +1640,15 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         cell->kind == MENU_CELL_INSTRUMENT) {
         raw = menu_lfoTargetDisplayValue(cell, raw);
         value = (raw > 255u) ? 255u : (uint8_t)raw;
+    } else if (dtype == DTYPE_TARGET_SELECTION_VELO && cell &&
+               cell->kind == MENU_CELL_INSTRUMENT) {
+        raw = menu_velocityTargetDisplayValue(cell, raw);
+        value = (raw > 255u) ? 255u : (uint8_t)raw;
     } else if (dtype == DTYPE_VOICE_LFO && menu_cellIsLfoTargetVoice(cell)) {
         if (raw < 1u)
             raw = 1u;
-        else if (raw > INSTRUMENT_SLOT_COUNT)
-            raw = INSTRUMENT_SLOT_COUNT;
+        else if (raw > (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u))
+            raw = (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u);
         value = (uint8_t)raw;
     }
 
@@ -1576,7 +1712,12 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     case DTYPE_1B16:
     case DTYPE_0B15:
     case DTYPE_VOICE_LFO:
-        numtostrpu(valueAsText, value, ' ');
+        if (menu_cellIsLfoTargetVoice(cell) &&
+            value == (uint8_t)(INSTRUMENT_SLOT_COUNT + 1u)) {
+            memcpy(valueAsText, "scn", 3);
+        } else {
+            numtostrpu(valueAsText, value, ' ');
+        }
         break;
     }
 }
@@ -1598,7 +1739,8 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     case DTYPE_TARGET_SELECTION_LFO:
         if (*value == INSTRUMENT_PARAM_INVALID)
             break;
-        if (*value >= INSTRUMENT_VOICE_ID_COUNT)
+        if (*value >= INSTRUMENT_VOICE_ID_COUNT &&
+            !sceneModTarget_isSceneTarget(*value))
             *value = INSTRUMENT_PARAM_INVALID;
         break;
     case DTYPE_0B255:
@@ -1645,8 +1787,8 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     if (menu_cellIsLfoTargetVoice(cell)) {
         if (*value < 1u)
             *value = 1u;
-        else if (*value > INSTRUMENT_SLOT_COUNT)
-            *value = INSTRUMENT_SLOT_COUNT;
+        else if (*value > (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u))
+            *value = (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u);
     }
 }
 
@@ -2321,12 +2463,15 @@ static void menu_repaintGeneric(void)
         if (dtype == DTYPE_TARGET_SELECTION_LFO &&
             cell.kind == MENU_CELL_INSTRUMENT) {
             curParmVal = menu_lfoTargetDisplayValue(&cell, curParmVal);
+        } else if (dtype == DTYPE_TARGET_SELECTION_VELO &&
+                   cell.kind == MENU_CELL_INSTRUMENT) {
+            curParmVal = menu_velocityTargetDisplayValue(&cell, curParmVal);
         } else if (dtype == DTYPE_VOICE_LFO &&
                    menu_cellIsLfoTargetVoice(&cell)) {
             if (curParmVal < 1u)
                 curParmVal = 1u;
-            else if (curParmVal > INSTRUMENT_SLOT_COUNT)
-                curParmVal = INSTRUMENT_SLOT_COUNT;
+            else if (curParmVal > (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u))
+                curParmVal = (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u);
         }
 
         memset(&editDisplayBuffer[0][0], ' ', 16);
@@ -2416,7 +2561,12 @@ static void menu_repaintGeneric(void)
             case DTYPE_1B128:
             case DTYPE_0B15:
             case DTYPE_VOICE_LFO:
-                numtostrpu(&editDisplayBuffer[1][13], value, ' ');
+                if (menu_cellIsLfoTargetVoice(&cell) &&
+                    value == (uint8_t)(INSTRUMENT_SLOT_COUNT + 1u)) {
+                    memcpy(&editDisplayBuffer[1][13], "scn", 3);
+                } else {
+                    numtostrpu(&editDisplayBuffer[1][13], value, ' ');
+                }
                 break;
             }
         }
@@ -2485,6 +2635,10 @@ static void menu_encoderChangeParameter(int8_t inc)
     }
     if (menu_cellIsLfoTargetParam(&cell)) {
         (void)menu_lfoTargetEditParam(&cell, inc);
+        return;
+    }
+    if (menu_cellIsVelocityTargetParam(&cell)) {
+        (void)menu_velocityTargetEditParam(&cell, inc);
         return;
     }
 
@@ -2971,6 +3125,11 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     }
     if (menu_cellIsLfoTargetParam(&cell)) {
         if (menu_lfoTargetEditParam(&cell, delta))
+            menu_knobs_dirty = 1;
+        return;
+    }
+    if (menu_cellIsVelocityTargetParam(&cell)) {
+        if (menu_velocityTargetEditParam(&cell, delta))
             menu_knobs_dirty = 1;
         return;
     }

@@ -91,6 +91,7 @@ SRCS = \
   Core/Scene/Preset/presetMorphEngine.c \
   Core/Scene/Preset/ParameterArray.c \
   Core/Scene/SceneData.c \
+  Core/Scene/SceneModTargets.c \
   Core/DSP/Instruments/InstrumentManager.c \
   Core/DSP/Instruments/Drum/DrumParameters.c \
   Core/DSP/Instruments/Snare/SnareParameters.c \

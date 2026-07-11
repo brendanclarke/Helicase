@@ -494,12 +494,12 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	modNode_reassignVeloMod();
 
 	//calc and dispatch LFO
-	lfo_dispatchNextValue(&voiceArray[0].lfo);
-	lfo_dispatchNextValue(&voiceArray[1].lfo);
-	lfo_dispatchNextValue(&voiceArray[2].lfo);
-	lfo_dispatchNextValue(&snareVoice.lfo);
-	lfo_dispatchNextValue(&cymbalVoice.lfo);
-	lfo_dispatchNextValue(&hatVoice.lfo);
+	lfo_dispatchNextValue(&voiceArray[0].lfo, 0u);
+	lfo_dispatchNextValue(&voiceArray[1].lfo, 1u);
+	lfo_dispatchNextValue(&voiceArray[2].lfo, 2u);
+	lfo_dispatchNextValue(&snareVoice.lfo, 3u);
+	lfo_dispatchNextValue(&cymbalVoice.lfo, 4u);
+	lfo_dispatchNextValue(&hatVoice.lfo, 5u);
 
 	//update filter frequencies
 	SVF_recalcFreq(&voiceArray[0].filter);
