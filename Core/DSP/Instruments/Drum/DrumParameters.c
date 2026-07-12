@@ -12,6 +12,16 @@
  * file key, menu text, dtype, morph/mod flags, and runtime offset from the
  * slot's DrumVoice instance.
  */
+/*
+ * Load-menu type metadata for Drum instruments.
+ *
+ * Inputs/outputs: InstrumentManager imports this immutable label and flag
+ * byte into the central registry. Clients read it through registry accessors
+ * instead of hardcoding "Drum" or Basic policy in Menu/filesystem code.
+ * Affiliates are the Instrument Load browser and assignment-limit checks.
+ */
+const char drum_instrument_display_label[] = "Drum";
+const uint8_t drum_instrument_type_flags = DRUM_INSTRUMENT_TYPE_FLAGS;
 
 /*
  * FLAGS_IMAGE marks a normal sound parameter image cell: the value is stored

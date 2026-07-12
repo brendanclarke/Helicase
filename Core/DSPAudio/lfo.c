@@ -249,50 +249,28 @@ void lfo_setSync(Lfo* lfo, uint8_t sync)
 //-------------------------------------------------------------
 void lfo_recalcSync()
 {
-	Lfo* lfo = &voiceArray[0].lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &voiceArray[1].lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &voiceArray[2].lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &snareVoice.lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &cymbalVoice.lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &hatVoice.lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
+	/*
+	 * Recalculate sync against the active InstrumentManager runtime slots.
+	 *
+	 * Inputs: none; tempo comes from sequencer through lfo_calcPhaseInc().
+	 * Output: every current slot LFO receives a refreshed phase increment.
+	 * This delegates instead of walking voiceArray/snareVoice/cymbalVoice/
+	 * hatVoice directly because Instrument Load can move those engine types
+	 * into different runtime slots.
+	 */
+	instrumentManager_recalcRuntimeLfoSync();
 }
 //-------------------------------------------------------------
 void lfo_retrigger(uint8_t voice)
 {
-	if(voiceArray[0].lfo.retrigger == voice+1)
-	{
-		voiceArray[0].lfo.phase = voiceArray[0].lfo.phaseOffset;
-	}
-	if(voiceArray[1].lfo.retrigger == voice+1)
-	{
-		voiceArray[1].lfo.phase = voiceArray[1].lfo.phaseOffset;
-	}
-	if(voiceArray[2].lfo.retrigger == voice+1)
-	{
-		voiceArray[2].lfo.phase = voiceArray[2].lfo.phaseOffset;
-	}
-	if(snareVoice.lfo.retrigger == voice+1)
-	{
-		snareVoice.lfo.phase = snareVoice.lfo.phaseOffset;
-	}
-	if(cymbalVoice.lfo.retrigger == voice+1)
-	{
-		cymbalVoice.lfo.phase = cymbalVoice.lfo.phaseOffset;
-	}
-	if(hatVoice.lfo.retrigger == voice+1)
-	{
-		hatVoice.lfo.phase = hatVoice.lfo.phaseOffset;
-	}
+	/*
+	 * Retrigger LFOs through the dynamic runtime dispatcher.
+	 *
+	 * Input: zero-based visible trigger track. Output: any current slot LFO
+	 * whose retrigger selector matches that track resets to phaseOffset. The
+	 * old fixed-global scan is no longer correct once instruments can be loaded
+	 * into arbitrary slots.
+	 */
+	instrumentManager_retriggerRuntimeLfos(voice);
 }
 //-------------------------------------------------------------

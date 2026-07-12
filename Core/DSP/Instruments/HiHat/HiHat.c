@@ -60,63 +60,113 @@ INCCMZ HiHatVoice hatVoice;
 //---------------------------------------------------
 void HiHat_setPan(const uint8_t pan)
 {
-	//hatVoice.panL = squareRootLut[127-pan];
-	//hatVoice.panR = squareRootLut[pan];
-	hatVoice.pan = pan;
+	HiHat_setPanVoice(&hatVoice, pan);
+}
+//---------------------------------------------------
+void HiHat_setPanVoice(HiHatVoice *voice, const uint8_t pan)
+{
+	/*
+	 * Set pan on one explicit hihat runtime instance.
+	 *
+	 * Inputs: caller-owned HiHatVoice and raw 0..127 pan. Output: the
+	 * instance pan byte changes; mixer performs gain conversion. Instrument
+	 * Load needs this helper because the Choke-capable hihat runtime can be
+	 * hosted by slot 6 without every caller writing the legacy hatVoice global.
+	 */
+	if(!voice)
+		return;
+	//voice->panL = squareRootLut[127-pan];
+	//voice->panR = squareRootLut[pan];
+	voice->pan = pan;
 }
 //---------------------------------------------------
 
+void HiHat_initVoice(HiHatVoice *voice)
+{
+	/*
+	 * Initialize one hihat runtime instance.
+	 *
+	 * Inputs: caller-owned HiHatVoice. Output: oscillator, transient, closed
+	 * and choke/open decay caches, envelope, filter, distortion, and LFO
+	 * members receive the same defaults formerly applied only to hatVoice.
+	 * InstrumentManager calls this for dynamic runtime pools while keeping
+	 * hihat-specific defaults inside the hihat module.
+	 */
+	if(!voice)
+		return;
+	SnapEg_init(&voice->snapEg);
+	HiHat_setPanVoice(voice, 64);
+	voice->vol = 0.8f;
+
+	//voice->panModifier = 1.f;
+
+	transient_init(&voice->transGen);
+
+	voice->fmModAmount1 = 0.5f;
+	voice->fmModAmount2 = 0.5f;
+
+	setDistortionShape(&voice->distortion, 2.f);
+
+	voice->modOsc.freq = 440;
+	voice->modOsc.waveform = SINE;
+	voice->modOsc.fmMod = 0;
+	voice->modOsc.midiFreq = 70<<8;
+	voice->modOsc.pitchMod = 1.0f;
+	voice->modOsc.modNodeValue = 1;
+
+	voice->modOsc2.freq = 440;
+	voice->modOsc2.waveform = NOISE;//SINE;
+	voice->modOsc2.fmMod = 0;
+	voice->modOsc2.midiFreq = 70<<8;
+	voice->modOsc2.pitchMod = 1.0f;
+	voice->modOsc2.modNodeValue = 1;
+
+	voice->osc.freq = 440;
+	voice->osc.waveform = 1;
+	voice->osc.fmMod = 1;
+	voice->osc.midiFreq = 70<<8;
+	voice->osc.pitchMod = 1.0f;
+	voice->osc.modNodeValue = 1;
+
+	voice->volumeMod = 1;
+
+	slopeEg2_init(&voice->oscVolEg);
+	voice->decayClosed = voice->oscVolEg.decay;
+	voice->decayOpen = voice->oscVolEg.decay;
+
+	SVF_init(&voice->filter);
+
+	lfo_init(&voice->lfo);
+}
+//---------------------------------------------------
 void HiHat_init()
 {
-	SnapEg_init(&hatVoice.snapEg);
-	HiHat_setPan(64);
-	hatVoice.vol = 0.8f;
-
-	//hatVoice.panModifier = 1.f;
-
-	transient_init(&hatVoice.transGen);
-
-	hatVoice.fmModAmount1 = 0.5f;
-	hatVoice.fmModAmount2 = 0.5f;
-
-	setDistortionShape(&hatVoice.distortion, 2.f);
-
-	hatVoice.modOsc.freq = 440;
-	hatVoice.modOsc.waveform = SINE;
-	hatVoice.modOsc.fmMod = 0;
-	hatVoice.modOsc.midiFreq = 70<<8;
-	hatVoice.modOsc.pitchMod = 1.0f;
-	hatVoice.modOsc.modNodeValue = 1;
-
-	hatVoice.modOsc2.freq = 440;
-	hatVoice.modOsc2.waveform = NOISE;//SINE;
-	hatVoice.modOsc2.fmMod = 0;
-	hatVoice.modOsc2.midiFreq = 70<<8;
-	hatVoice.modOsc2.pitchMod = 1.0f;
-	hatVoice.modOsc2.modNodeValue = 1;
-
-	hatVoice.osc.freq = 440;
-	hatVoice.osc.waveform = 1;
-	hatVoice.osc.fmMod = 1;
-	hatVoice.osc.midiFreq = 70<<8;
-	hatVoice.osc.pitchMod = 1.0f;
-	hatVoice.osc.modNodeValue = 1;
-
-	hatVoice.volumeMod = 1;
-
-	slopeEg2_init(&hatVoice.oscVolEg);
-
-	SVF_init(&hatVoice.filter);
-
-	lfo_init(&hatVoice.lfo);
+	HiHat_initVoice(&hatVoice);
 }
 //---------------------------------------------------
 void HiHat_trigger( uint8_t vel, uint8_t isOpen, const uint8_t note)
 {
-	lfo_retrigger(5);
+	HiHat_triggerVoice(&hatVoice, 5u, vel, isOpen, note);
+}
+//---------------------------------------------------
+void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
+                        uint8_t vel, uint8_t isOpen, const uint8_t note)
+{
+	/*
+	 * Trigger one explicit hihat runtime instance.
+	 *
+	 * Inputs: HiHatVoice pointer, logical source slot, velocity, open/choke
+	 * selector, and note. Output: LFO/velocity modulation uses source_slot,
+	 * while the supplied instance chooses closed or choke decay and receives
+	 * oscillator/envelope/transient changes. This preserves the Choke behavior
+	 * after hihats become loadable into runtime slots.
+	 */
+	if(!voice)
+		return;
+	lfo_retrigger(source_slot);
 
 	//update velocity modulation
-	modNode_updateValue(&velocityModulators[5],vel/127.f);
+	modNode_updateValue(&velocityModulators[source_slot],vel/127.f);
 	/*
 	 * Apply velocity targets that are not direct ModulationNode pointers.
 	 *
@@ -126,46 +176,61 @@ void HiHat_trigger( uint8_t vel, uint8_t isOpen, const uint8_t note)
 	 * are installed. This call stays beside modNode_updateValue() so trigger
 	 * clients do not need to know which backend the current target uses.
 	 */
-	instrumentManager_applyVelocityModulationTarget(5u, vel/127.f);
+	instrumentManager_applyVelocityModulationTarget(source_slot, vel/127.f);
 
 	float offset = 1;
-	if(hatVoice.transGen.waveform==1) //offset mode
+	if(voice->transGen.waveform==1) //offset mode
 	{
-		offset -= hatVoice.transGen.volume;
+		offset -= voice->transGen.volume;
 	}
-	if(hatVoice.osc.waveform == SINE)
-		hatVoice.osc.phase = (0x3ff<<20)*offset;//voiceArray[voiceNr].osc.startPhase ;
-	else if(hatVoice.osc.waveform > SINE && hatVoice.osc.waveform <= REC)
-		hatVoice.osc.phase = (0xff<<20)*offset;
+	if(voice->osc.waveform == SINE)
+		voice->osc.phase = (0x3ff<<20)*offset;//voiceArray[voiceNr].osc.startPhase ;
+	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
+		voice->osc.phase = (0xff<<20)*offset;
 	else
-		hatVoice.osc.phase = 0;
+		voice->osc.phase = 0;
 
-	osc_setBaseNote(&hatVoice.osc,note);
-	osc_setBaseNote(&hatVoice.modOsc,note);
-	osc_setBaseNote(&hatVoice.modOsc2,note);
+	osc_setBaseNote(&voice->osc,note);
+	osc_setBaseNote(&voice->modOsc,note);
+	osc_setBaseNote(&voice->modOsc2,note);
 
-	hatVoice.isOpen = isOpen;
-	hatVoice.oscVolEg.decay = isOpen?hatVoice.decayOpen:hatVoice.decayClosed;
+	voice->isOpen = isOpen;
+	voice->oscVolEg.decay = isOpen?voice->decayOpen:voice->decayClosed;
 
-	slopeEg2_trigger(&hatVoice.oscVolEg);
-	hatVoice.velo = vel/127.f;
-	transient_trigger(&hatVoice.transGen);
+	slopeEg2_trigger(&voice->oscVolEg);
+	voice->velo = vel/127.f;
+	transient_trigger(&voice->transGen);
 
-	SnapEg_trigger(&hatVoice.snapEg);
+	SnapEg_trigger(&voice->snapEg);
 }
 //---------------------------------------------------
 void HiHat_calcAsync( )
 {
+	HiHat_calcAsyncVoice(&hatVoice);
+}
+//---------------------------------------------------
+void HiHat_calcAsyncVoice(HiHatVoice *voice)
+{
+	/*
+	 * Calculate one hihat instance's control-rate block.
+	 *
+	 * Inputs: HiHatVoice pointer. Output: amplitude envelope, snap pitch, and
+	 * oscillator frequencies advance for that instance only. InstrumentManager
+	 * uses this so the current slot type determines which hihat object is
+	 * rendered, while the legacy wrapper remains for old fixed-slot callers.
+	 */
+	if(!voice)
+		return;
 	//calc the osc  vol eg
-	hatVoice.egValueOscVol = slopeEg2_calc(&hatVoice.oscVolEg);
+	voice->egValueOscVol = slopeEg2_calc(&voice->oscVolEg);
 
 	//turn off trigger signal if trigger gate mode is on and volume == 0
 	/* TODO DSP_PORT
 	if(trigger_isGateModeOn())
 	{
-		if(!hatVoice.egValueOscVol)
+		if(!voice->egValueOscVol)
 		{
-			if(hatVoice.isOpen)
+			if(voice->isOpen)
 			{
 				trigger_triggerVoice(TRIGGER_7, TRIGGER_OFF);
 				voiceControl_noteOff(TRIGGER_7);
@@ -178,45 +243,61 @@ void HiHat_calcAsync( )
 	*/
 
 	//calc snap EG if transient sample 0 is activated
-	if(hatVoice.transGen.waveform == 0)
+	if(voice->transGen.waveform == 0)
 	{
-		const float snapVal = SnapEg_calc(&hatVoice.snapEg, hatVoice.transGen.pitch);
-		hatVoice.osc.pitchMod = 1 + snapVal*hatVoice.transGen.volume;
+		const float snapVal = SnapEg_calc(&voice->snapEg, voice->transGen.pitch);
+		voice->osc.pitchMod = 1 + snapVal*voice->transGen.volume;
 	}
 
-	osc_setFreq(&hatVoice.osc);
-	osc_setFreq(&hatVoice.modOsc);
-	osc_setFreq(&hatVoice.modOsc2);
+	osc_setFreq(&voice->osc);
+	osc_setFreq(&voice->modOsc);
+	osc_setFreq(&voice->modOsc2);
 }
 //---------------------------------------------------
 void HiHat_calcSyncBlock(int16_t* buf, const uint8_t size)
 {
+	HiHat_calcSyncBlockVoice(&hatVoice, buf, size);
+}
+//---------------------------------------------------
+void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
+                              const uint8_t size)
+{
+	/*
+	 * Render one hihat instance into a mono block.
+	 *
+	 * Inputs: HiHatVoice pointer, destination buffer, and block size. Output:
+	 * buf receives the hihat FM, transient, envelope, and distortion output for
+	 * that instance. This helper is separate from the legacy wrapper because
+	 * InstrumentManager can now host a hihat runtime outside hatVoice.
+	 */
+	if(!voice || !buf)
+		return;
 	//2 buffers for the mod oscs
 	/* VLAs forbidden in DSP voice files — silent stack corruption.
 	** Fixed: static buffers, same as Snare/Cymbal (Session 8). */
 	static int16_t mod1[OUTPUT_DMA_SIZE], mod2[OUTPUT_DMA_SIZE];
 	//calc next mod osc samples, scaled with mod amount
-	calcNextOscSampleBlock(&hatVoice.modOsc,mod1,size, hatVoice.fmModAmount1);
-	calcNextOscSampleBlock(&hatVoice.modOsc2,mod2,size,  hatVoice.fmModAmount2);
+	calcNextOscSampleBlock(&voice->modOsc,mod1,size, voice->fmModAmount1);
+	calcNextOscSampleBlock(&voice->modOsc2,mod2,size,  voice->fmModAmount2);
 
 	//combine both mod oscs to 1 modulation signal
 	bufferTool_addBuffersSaturating(mod1,mod2,size);
 
-	calcNextOscSampleFmBlock(&hatVoice.osc,mod1,buf,size,0.5f) ;
+	calcNextOscSampleFmBlock(&voice->osc,mod1,buf,size,0.5f) ;
 
-	SVF_calcBlockZDF(&hatVoice.filter,hatVoice.filterType,buf,size);
+	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
 	//calc transient sample
-	transient_calcBlock(&hatVoice.transGen,mod1,size);
+	transient_calcBlock(&voice->transGen,mod1,size);
 
 	uint8_t j;
-	if(hatVoice.volumeMod)
+	if(voice->volumeMod)
 	{
 		for(j=0;j<size;j++)
 		{
 			//add filter to buffer
 			buf[j] = bufferTool_satAdd16(buf[j], mod1[j]);
-			buf[j] *= hatVoice.velo * hatVoice.vol * hatVoice.egValueOscVol;
+			buf[j] *= voice->velo * voice->vol * voice->egValueOscVol;
 		}
 	}
 	else
@@ -225,10 +306,10 @@ void HiHat_calcSyncBlock(int16_t* buf, const uint8_t size)
 		{
 			//add filter to buffer
 			buf[j] = bufferTool_satAdd16(buf[j], mod1[j]);
-			buf[j] *= hatVoice.vol * hatVoice.egValueOscVol;
+			buf[j] *= voice->vol * voice->egValueOscVol;
 		}
 	}
 
-	calcDistBlock(&hatVoice.distortion,buf,size);
+	calcDistBlock(&voice->distortion,buf,size);
 }
 //---------------------------------------------------

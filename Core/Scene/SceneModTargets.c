@@ -39,6 +39,9 @@ static const scene_mod_target_descriptor_t scene_mod_targets[] = {
     { SCENE_MOD_TARGET_ID(6u), SCENE_MOD_TARGET_KIND_DECIMATION_ALL, 0xffu,
       0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
       "Scene", "SampleRt", "srt" },
+    { SCENE_MOD_TARGET_ID(7u), SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY, 5u,
+      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      "Voice", "7 Decay", "7dc" },
 };
 
 static void sceneModTarget_copyPadded(char *dst, const char *src, uint8_t width)

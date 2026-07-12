@@ -27,19 +27,26 @@
  * slot and how the value reaches that instrument's runtime instance.
  */
 static const instrument_registry_entry_t instrument_registry[] = {
-    { INSTRUMENT_TYPE_DRM, "drm", ".drm",
+    { INSTRUMENT_TYPE_DRM, "drm", drum_instrument_display_label, ".drm",
+      DRUM_INSTRUMENT_TYPE_FLAGS,
       drum_param_descriptors, DRUM_PARAM_DESCRIPTOR_COUNT,
       drum_menu_pages, DRUM_MENU_PAGE_COUNT },
-    { INSTRUMENT_TYPE_SNR, "snr", ".snr",
+    { INSTRUMENT_TYPE_SNR, "snr", snare_instrument_display_label, ".snr",
+      SNARE_INSTRUMENT_TYPE_FLAGS,
       snare_param_descriptors, SNARE_PARAM_DESCRIPTOR_COUNT,
       snare_menu_pages, SNARE_MENU_PAGE_COUNT },
-    { INSTRUMENT_TYPE_CYM, "cym", ".cym",
+    { INSTRUMENT_TYPE_CYM, "cym", cymbal_instrument_display_label, ".cym",
+      CYMBAL_INSTRUMENT_TYPE_FLAGS,
       cymbal_param_descriptors, CYMBAL_PARAM_DESCRIPTOR_COUNT,
       cymbal_menu_pages, CYMBAL_MENU_PAGE_COUNT },
-    { INSTRUMENT_TYPE_HAT, "hat", ".hat",
+    { INSTRUMENT_TYPE_HAT, "hat", hihat_instrument_display_label, ".hat",
+      HIHAT_INSTRUMENT_TYPE_FLAGS,
       hihat_param_descriptors, HIHAT_PARAM_DESCRIPTOR_COUNT,
       hihat_menu_pages, HIHAT_MENU_PAGE_COUNT },
 };
+
+#define INSTRUMENT_REGISTRY_COUNT \
+    ((uint8_t)(sizeof(instrument_registry) / sizeof(instrument_registry[0])))
 
 /*
  * Resolved descriptor modulation target.
@@ -86,11 +93,60 @@ typedef struct {
  */
 static installed_mod_target_t velocity_installed_targets[INSTRUMENT_SLOT_COUNT];
 static installed_mod_target_t lfo_installed_targets[INSTRUMENT_SLOT_COUNT][2u];
+static uint8_t slot6_track7_decay_lfo_active;
+static uint8_t slot6_track7_decay_lfo_value;
+
+/*
+ * Per-slot runtime pools for loadable instrument types.
+ *
+ * Inputs: SceneData says which instrument type currently lives in each of the
+ * six storage slots. Output: InstrumentManager maps that slot/type pair to a
+ * concrete DSP object from these pools, while preserving the original globals
+ * for their native slots so legacy fixed-slot callers keep working. These
+ * pools cannot live in the voice engines because each engine owns only its own
+ * state layout; the cross-type slot policy belongs at the registry boundary.
+ */
+static DrumVoice runtime_drum_extra[INSTRUMENT_SLOT_COUNT - NUM_VOICES];
+static SnareVoice runtime_snare_slots[INSTRUMENT_SLOT_COUNT];
+static CymbalVoice runtime_cymbal_slots[INSTRUMENT_SLOT_COUNT];
+static HiHatVoice runtime_hihat_slots[INSTRUMENT_SLOT_COUNT];
 
 static uint8_t instrumentManager_resolveModulationTarget(
     uint8_t scene_index,
     instrument_param_id_t id,
     instrument_runtime_target_t *target_out);
+static instrument_type_t instrumentManager_slotType(uint8_t slot);
+static SlopeEg2 *instrumentManager_ampEg(uint8_t slot);
+
+static DrumVoice *instrumentManager_drumRuntime(uint8_t slot)
+{
+    if (slot < NUM_VOICES)
+        return &voiceArray[slot];
+    if (slot < INSTRUMENT_SLOT_COUNT)
+        return &runtime_drum_extra[slot - NUM_VOICES];
+    return 0;
+}
+
+static SnareVoice *instrumentManager_snareRuntime(uint8_t slot)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0;
+    return (slot == 3u) ? &snareVoice : &runtime_snare_slots[slot];
+}
+
+static CymbalVoice *instrumentManager_cymbalRuntime(uint8_t slot)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0;
+    return (slot == 4u) ? &cymbalVoice : &runtime_cymbal_slots[slot];
+}
+
+static HiHatVoice *instrumentManager_hihatRuntime(uint8_t slot)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0;
+    return (slot == 5u) ? &hatVoice : &runtime_hihat_slots[slot];
+}
 
 static char instrumentManager_lower(char c)
 {
@@ -129,13 +185,40 @@ const instrument_registry_entry_t *instrumentManager_registryEntry(
     instrument_type_t type)
 {
     uint8_t i;
-    for (i = 0u;
-         i < (uint8_t)(sizeof(instrument_registry) / sizeof(instrument_registry[0]));
-         i++) {
+    for (i = 0u; i < INSTRUMENT_REGISTRY_COUNT; i++) {
         if (instrument_registry[i].type == type)
             return &instrument_registry[i];
     }
     return 0;
+}
+
+uint8_t instrumentManager_registryCount(void)
+{
+    /*
+     * Public count for the private instrument registry.
+     *
+     * Inputs: none. Output: number of immutable registry rows. This is a thin
+     * accessor, but it is the narrow boundary that lets Menu/filesystem
+     * enumerate supported types without duplicating the static registry array
+     * or depending on enum contiguity.
+     */
+    return INSTRUMENT_REGISTRY_COUNT;
+}
+
+const instrument_registry_entry_t *instrumentManager_registryEntryAt(
+    uint8_t index)
+{
+    /*
+     * Indexed registry borrow.
+     *
+     * Input: zero-based registry row index. Output: const row pointer or NULL
+     * for out of range. Clients are Instrument Load type browsing and root
+     * Instrument scanning; affiliates are the static registry and the
+     * instrument-definition files that provide labels/flags.
+     */
+    if (index >= INSTRUMENT_REGISTRY_COUNT)
+        return 0;
+    return &instrument_registry[index];
 }
 
 instrument_type_t instrumentManager_typeFromText(const char *text)
@@ -143,13 +226,95 @@ instrument_type_t instrumentManager_typeFromText(const char *text)
     uint8_t i;
     if (!text)
         return INSTRUMENT_TYPE_UNKNOWN;
-    for (i = 0u;
-         i < (uint8_t)(sizeof(instrument_registry) / sizeof(instrument_registry[0]));
-         i++) {
+    for (i = 0u; i < INSTRUMENT_REGISTRY_COUNT; i++) {
         if (strcmp(text, instrument_registry[i].type_text) == 0)
             return instrument_registry[i].type;
     }
     return INSTRUMENT_TYPE_UNKNOWN;
+}
+
+const char *instrumentManager_typeDisplayLabel(instrument_type_t type)
+{
+    const instrument_registry_entry_t *entry =
+        instrumentManager_registryEntry(type);
+    /*
+     * Human-facing type label.
+     *
+     * Input: instrument type. Output: the short Load-menu label supplied by
+     * that instrument's parameter file, or blank padding for unknown types.
+     * This keeps display text out of Menu and separate from file tokens such
+     * as "drm" and "hat".
+     */
+    return entry && entry->display_label ? entry->display_label : "        ";
+}
+
+uint8_t instrumentManager_typeFlags(instrument_type_t type)
+{
+    const instrument_registry_entry_t *entry =
+        instrumentManager_registryEntry(type);
+    /*
+     * Type-level assignment flags.
+     *
+     * Input: instrument type. Output: Basic/Advanced/Choke bitmask, or zero
+     * for unknown. Callers should use this single bitmask instead of adding
+     * thin isBasic/isAdvanced wrappers that would duplicate policy checks.
+     */
+    return entry ? entry->type_flags : 0u;
+}
+
+uint8_t instrumentManager_advancedCountForScene(uint8_t scene_index,
+                                                uint8_t ignore_slot)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+    uint8_t slot;
+    uint8_t count = 0u;
+
+    /*
+     * Count assigned Advanced instruments in one Scene kit.
+     *
+     * Inputs: Scene index and an optional slot to ignore while testing a
+     * replacement. Output: number of current slots whose type carries
+     * INSTRUMENT_FLAG_ADVANCED. The ignore slot lets Instrument Load ask "what
+     * if this destination changes?" without mutating SceneData first.
+     */
+    if (!scene)
+        return 0u;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        if (slot == ignore_slot)
+            continue;
+        if (instrumentManager_typeFlags(scene->kit.instruments[slot].type) &
+            INSTRUMENT_FLAG_ADVANCED) {
+            count++;
+        }
+    }
+    return count;
+}
+
+uint8_t instrumentManager_typeSelectableForSceneSlot(
+    uint8_t scene_index, uint8_t destination_slot, instrument_type_t candidate)
+{
+    uint8_t flags = instrumentManager_typeFlags(candidate);
+    uint8_t advanced_count;
+
+    /*
+     * Apply Instrument Load assignment policy for one candidate type.
+     *
+     * Inputs: Scene index, destination slot, candidate type. Output: nonzero
+     * when the type is known and can be selected under the Basic/Advanced
+     * policy. Basic and Advanced are mutually exclusive by registry contract;
+     * an Advanced candidate is allowed only when the other kit slots contain
+     * fewer than two Advanced instruments.
+     */
+    if (destination_slot >= INSTRUMENT_SLOT_COUNT || flags == 0u)
+        return 0u;
+    if ((flags & INSTRUMENT_FLAG_BASIC) &&
+        (flags & INSTRUMENT_FLAG_ADVANCED))
+        return 0u;
+    if (!(flags & INSTRUMENT_FLAG_ADVANCED))
+        return 1u;
+    advanced_count =
+        instrumentManager_advancedCountForScene(scene_index, destination_slot);
+    return (uint8_t)(advanced_count < 2u);
 }
 
 uint8_t instrumentManager_filenameMatchesType(const char *filename,
@@ -273,49 +438,55 @@ const ParamDescriptor *instrumentManager_voicePageDescriptorIndex(
     instrument_type_t type, uint8_t voice_page, uint8_t page, uint8_t position,
     uint8_t *index_out)
 {
-    const instrument_registry_entry_t *entry =
-        instrumentManager_registryEntry(type);
-    const instrument_menu_page_t *pages;
-    uint8_t page_count;
-    uint8_t descriptor_index;
-
     /*
      * Voice-page aware variant of the menu lookup.
      *
-     * Most instrument types have one layout, but the legacy hihat UI exposed
-     * VOICE6 as closed-hat decay and VOICE7 as open-hat decay while both edit
-     * the same runtime hihat slot. Menu passes the physical voice page here so
-     * InstrumentManager can select the open-hat layout without teaching Menu
-     * hihat descriptor indices.
+     * This now delegates to the normal instrument-owned page lookup. The
+     * previous implementation switched to a private hihat_open_menu_pages[]
+     * table for VOICE7. Choke behavior is no longer a HiHat-only layout fork:
+     * Menu resolves the base descriptor first and then asks
+     * instrumentManager_chokeDescriptorIndexForBase() for a `_choke` sibling
+     * when the visible page is VOICE7 and the owning slot is slot 6.
      */
-    if (index_out)
-        *index_out = INSTRUMENT_MENU_EMPTY;
-    if (!entry)
-        return 0;
+    (void)voice_page;
+    return instrumentManager_menuDescriptorIndex(type, page, position,
+                                                 index_out);
+}
 
-    pages = entry->menu_pages;
-    page_count = entry->menu_page_count;
-    if (type == INSTRUMENT_TYPE_HAT && voice_page == 6u) {
-        pages = hihat_open_menu_pages;
-        page_count = hihat_menu_page_count;
-    }
+uint8_t instrumentManager_chokeDescriptorIndexForBase(
+    instrument_type_t type, uint8_t base_index, uint8_t *choke_index_out)
+{
+    const ParamDescriptor *base = instrumentManager_descriptor(type, base_index);
+    char choke_key[40];
+    uint8_t len = 0u;
 
-    if (!pages || page >= page_count ||
-        position >= INSTRUMENT_MENU_PAGE_CELLS)
-        return 0;
-    descriptor_index = pages[page].descriptor_index[position];
-    if (descriptor_index == INSTRUMENT_MENU_SKIP) {
-        if (index_out)
-            *index_out = descriptor_index;
-        return 0;
+    /*
+     * Resolve a descriptor's `_choke` sibling inside one instrument type.
+     *
+     * Inputs: instrument type and the base descriptor index already chosen by
+     * a normal menu page. Output: nonzero plus sibling descriptor index when
+     * the same type exposes `<base_key>_choke`. This function owns the suffix
+     * convention so Menu does not parse descriptor names and InstrumentManager
+     * does not need to know VOICE-page UI context.
+     *
+     * Clients: VOICE7 menu substitution now; future storage/save validation
+     * can reuse the same key relationship. Affiliates are the descriptor
+     * registry and instrument files that store the canonical descriptor keys.
+     */
+    if (choke_index_out)
+        *choke_index_out = INSTRUMENT_MENU_EMPTY;
+    if (!base || !base->file_key)
+        return 0u;
+    while (base->file_key[len] != '\0' &&
+           len < (uint8_t)(sizeof(choke_key) - sizeof("_choke"))) {
+        choke_key[len] = base->file_key[len];
+        len++;
     }
-    if (descriptor_index == INSTRUMENT_MENU_EMPTY ||
-        descriptor_index >= entry->descriptor_count) {
-        return 0;
-    }
-    if (index_out)
-        *index_out = descriptor_index;
-    return &entry->descriptors[descriptor_index];
+    if (base->file_key[len] != '\0')
+        return 0u;
+    memcpy(&choke_key[len], "_choke", sizeof("_choke"));
+    return (uint8_t)(instrumentManager_descriptorIndexByKey(
+        type, choke_key, choke_index_out) != 0);
 }
 
 const ParamDescriptor *instrumentManager_descriptorIndexForBinding(
@@ -746,19 +917,331 @@ uint16_t instrumentManager_stepVelocityTargetForSource(
 
 void *instrumentManager_runtimeInstance(uint8_t slot)
 {
-    switch (slot) {
-    case 0u:
-    case 1u:
-    case 2u:
-        return &voiceArray[slot];
-    case 3u:
-        return &snareVoice;
-    case 4u:
-        return &cymbalVoice;
-    case 5u:
-        return &hatVoice;
+    /*
+     * Resolve the live DSP instance for the slot's current instrument type.
+     *
+     * Input: zero-based Scene slot. Output: typed voice memory borrowed as
+     * void* for descriptor-offset writes, or NULL for an unknown type/slot.
+     * The current Scene's instrument type is deliberately consulted here so
+     * every descriptor writer, modulation resolver, and morph apply follows
+     * Instrument Load assignments instead of the old fixed physical slots.
+     */
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: return instrumentManager_drumRuntime(slot);
+    case INSTRUMENT_TYPE_SNR: return instrumentManager_snareRuntime(slot);
+    case INSTRUMENT_TYPE_CYM: return instrumentManager_cymbalRuntime(slot);
+    case INSTRUMENT_TYPE_HAT: return instrumentManager_hihatRuntime(slot);
+    default: return 0;
+    }
+}
+
+static Lfo *instrumentManager_runtimeLfo(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->lfo : 0; }
     default:
         return 0;
+    }
+}
+
+void instrumentManager_runtimeInit(void)
+{
+    uint8_t slot;
+
+    /*
+     * Initialize all dynamic runtime instances.
+     *
+     * Inputs: none; legacy engine init functions should already have prepared
+     * voiceArray[0..2], snareVoice, cymbalVoice, and hatVoice. Output: every
+     * non-native runtime pool instance is initialized with its engine defaults.
+     * This function is separate from the engine init wrappers because only
+     * InstrumentManager knows which legacy globals are preserved for
+     * compatibility and which additional per-slot instances exist.
+     */
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        if (slot >= NUM_VOICES)
+            Drum_initVoice(instrumentManager_drumRuntime(slot), slot);
+        if (slot != 3u)
+            Snare_initVoice(&runtime_snare_slots[slot]);
+        if (slot != 4u)
+            Cymbal_initVoice(&runtime_cymbal_slots[slot]);
+        if (slot != 5u)
+            HiHat_initVoice(&runtime_hihat_slots[slot]);
+    }
+}
+
+void instrumentManager_dispatchRuntimeLfos(void)
+{
+    uint8_t slot;
+
+    /*
+     * Dispatch one LFO block for every current runtime slot.
+     *
+     * Inputs: active Scene slot assignments and each slot's current runtime
+     * LFO. Output: direct ModulationNode destinations and supplemental/Scene
+     * LFO targets update exactly once per audio block. This belongs here
+     * instead of mixer.c so mixer does not duplicate the type-to-instance
+     * routing table.
+     */
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (lfo)
+            lfo_dispatchNextValue(lfo, slot);
+    }
+}
+
+void instrumentManager_recalcRuntimeLfoSync(void)
+{
+    uint8_t slot;
+
+    /*
+     * Recalculate synced LFO rates for current slot runtime instances.
+     *
+     * Inputs: tempo/sync state read by lfo_calcPhaseInc(). Output: each
+     * active slot's current instrument LFO receives a refreshed phaseInc. This
+     * replaces lfo.c's fixed global list so synced LFOs continue to work after
+     * an instrument type is loaded into a different slot.
+     */
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (lfo)
+            lfo->phaseInc = lfo_calcPhaseInc(lfo->freq, lfo->sync);
+    }
+}
+
+void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track)
+{
+    uint8_t slot;
+
+    /*
+     * Retrigger source LFOs whose retrigger selector matches a track press.
+     *
+     * Inputs: zero-based trigger track from MIDI/sequencer/voice engine, where
+     * track 6 is the alternate trigger for slot 6. Output: every current slot
+     * LFO whose retrigger field equals the visible 1-based track receives its
+     * phase offset. This cannot stay in lfo.c's old globals because current
+     * source LFO ownership now follows loaded instrument types.
+     */
+    if (trigger_track > INSTRUMENT_SLOT_COUNT)
+        return;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (lfo && lfo->retrigger == (uint8_t)(trigger_track + 1u))
+            lfo->phase = lfo->phaseOffset;
+    }
+}
+
+uint8_t instrumentManager_runtimePan(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->pan : 64u; }
+    default:
+        return 64u;
+    }
+}
+
+void instrumentManager_recalcSlotFilter(uint8_t slot)
+{
+    /*
+     * Recalculate the current slot instrument's filter coefficients.
+     *
+     * Inputs: zero-based slot. Output: the active runtime filter for that
+     * slot/type receives SVF_recalcFreq(). This small dispatcher is kept here
+     * rather than folded into mixer.c because filter ownership depends on the
+     * instrument currently loaded into the slot, not on the physical voice
+     * number.
+     */
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        if (voice) SVF_recalcFreq(&voice->filter);
+        break; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        if (voice) SVF_recalcFreq(&voice->filter);
+        break; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        if (voice) SVF_recalcFreq(&voice->filter);
+        break; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        if (voice) SVF_recalcFreq(&voice->filter);
+        break; }
+    default:
+        break;
+    }
+}
+
+void instrumentManager_calcSlotAsync(uint8_t slot)
+{
+    /*
+     * Run the current slot instrument's control-rate block.
+     *
+     * Inputs: zero-based render slot. Output: exactly one engine async
+     * function advances the active runtime instance. This is the mixer-facing
+     * half of dynamic Instrument Load; without it the menu/storage assignment
+     * would change SceneData while the audio path kept calculating the old
+     * fixed instrument engines.
+     */
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM:
+        Drum_calcVoiceAsync(instrumentManager_drumRuntime(slot), AMP_EG_SYNC);
+        break;
+    case INSTRUMENT_TYPE_SNR:
+        Snare_calcAsyncVoice(instrumentManager_snareRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_CYM:
+        Cymbal_calcAsyncVoice(instrumentManager_cymbalRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_HAT:
+        HiHat_calcAsyncVoice(instrumentManager_hihatRuntime(slot));
+        break;
+    default:
+        break;
+    }
+}
+
+void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
+                                         uint8_t size)
+{
+    /*
+     * Render the current slot instrument into one mono audio block.
+     *
+     * Inputs: zero-based render slot, output buffer, and block size. Output:
+     * the selected engine writes a mono voice block, or silence for unknown
+     * slot/type. Mixer remains responsible for decimation, pan, routing, and
+     * slider interpolation after this call.
+     */
+    if (!buf)
+        return;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM:
+        Drum_calcVoiceSyncBlock(instrumentManager_drumRuntime(slot), buf, size);
+        break;
+    case INSTRUMENT_TYPE_SNR:
+        Snare_calcSyncBlockVoice(instrumentManager_snareRuntime(slot), buf, size);
+        break;
+    case INSTRUMENT_TYPE_CYM:
+        Cymbal_calcSyncBlockVoice(instrumentManager_cymbalRuntime(slot), buf, size);
+        break;
+    case INSTRUMENT_TYPE_HAT:
+        HiHat_calcSyncBlockVoice(instrumentManager_hihatRuntime(slot), buf, size);
+        break;
+    default:
+        memset(buf, 0, size * sizeof(buf[0]));
+        break;
+    }
+}
+
+static void instrumentManager_applySlot6AlternateDecay(uint8_t alternate)
+{
+    const scene_t *scene = scene_getConst(scene_getActiveIndex());
+    const kit_instrument_slot_t *slot_state;
+    uint8_t base_index = INSTRUMENT_MENU_EMPTY;
+    instrument_type_t type;
+    SlopeEg2 *ampEg;
+    uint16_t value;
+
+    /*
+     * Apply slot-6 generated track-7 amp decay for non-Choke instruments.
+     *
+     * Inputs: alternate is nonzero when visible track 7 triggered slot 6.
+     * Output: slot 6's active amplitude envelope decay is swapped to the
+     * hidden Scene setting for track 7, or restored to the current base/morph
+     * amp_envelope_decay value for track 6. Choke instruments such as HiHat
+     * are excluded because their descriptor-owned `_choke` parameters already
+     * maintain separate runtime decay caches.
+     */
+    if (!scene)
+        return;
+    slot_state = &scene->kit.instruments[5u];
+    type = slot_state->type;
+    if (instrumentManager_typeFlags(type) & INSTRUMENT_FLAG_CHOKE)
+        return;
+    if (!instrumentManager_descriptorIndexByKey(type, "amp_envelope_decay",
+                                                &base_index)) {
+        return;
+    }
+    ampEg = instrumentManager_ampEg(5u);
+    if (!ampEg)
+        return;
+    value = alternate
+        ? (slot6_track7_decay_lfo_active
+              ? slot6_track7_decay_lfo_value
+              : scene->kit.settings.slot6_track7_amp_envelope_decay)
+        : slot_state->parameter_images.morph_interpolation[base_index];
+    if (value > 127u)
+        value = 127u;
+    slopeEg2_setDecay(ampEg, (uint8_t)value, AMP_EG_SYNC);
+}
+
+void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
+                                    uint8_t velocity)
+{
+    uint8_t slot;
+    uint8_t alternate_slot6;
+
+    /*
+     * Trigger the instrument currently assigned to a visible track.
+     *
+     * Inputs: zero-based visible trigger track 0..6, note, and velocity.
+     * Output: tracks 0..5 trigger matching storage slots; track 6 triggers
+     * slot 6 as the choke/alternate path. Choke instruments receive the
+     * alternate selector, while non-Choke slot-6 instruments borrow the hidden
+     * generated amp decay for track 7 before triggering.
+     */
+    if (trigger_track > INSTRUMENT_SLOT_COUNT)
+        return;
+    slot = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+        ? (INSTRUMENT_SLOT_COUNT - 1u)
+        : trigger_track;
+    alternate_slot6 =
+        (uint8_t)(slot == 5u && trigger_track == INSTRUMENT_SLOT_COUNT);
+    if (slot == 5u)
+        instrumentManager_applySlot6AlternateDecay(alternate_slot6);
+
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM:
+        Drum_triggerVoice(instrumentManager_drumRuntime(slot), slot,
+                          velocity, note);
+        break;
+    case INSTRUMENT_TYPE_SNR:
+        Snare_triggerVoice(instrumentManager_snareRuntime(slot), slot,
+                           velocity, note);
+        break;
+    case INSTRUMENT_TYPE_CYM:
+        Cymbal_triggerVoice(instrumentManager_cymbalRuntime(slot), slot,
+                            velocity, note);
+        break;
+    case INSTRUMENT_TYPE_HAT:
+        HiHat_triggerVoice(instrumentManager_hihatRuntime(slot), slot,
+                           velocity, alternate_slot6, note);
+        break;
+    default:
+        break;
     }
 }
 
@@ -809,87 +1292,126 @@ static OscInfo *instrumentManager_osc(uint8_t slot, const char *key)
 
     if (!key)
         return 0;
-    if (slot < 3u && type == INSTRUMENT_TYPE_DRM) {
-        if (strncmp(key, "osc1_", 5) == 0) return &voiceArray[slot].osc;
-        if (strncmp(key, "osc2_", 5) == 0) return &voiceArray[slot].modOsc;
+    if (type == INSTRUMENT_TYPE_DRM) {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        if (!voice) return 0;
+        if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
+        if (strncmp(key, "osc2_", 5) == 0) return &voice->modOsc;
     }
-    if (slot == 3u && type == INSTRUMENT_TYPE_SNR) {
-        if (strncmp(key, "osc1_", 5) == 0) return &snareVoice.osc;
-        if (strncmp(key, "noise_", 6) == 0) return &snareVoice.noiseOsc;
+    if (type == INSTRUMENT_TYPE_SNR) {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        if (!voice) return 0;
+        if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
+        if (strncmp(key, "noise_", 6) == 0) return &voice->noiseOsc;
     }
-    if (slot == 4u && type == INSTRUMENT_TYPE_CYM) {
-        if (strncmp(key, "osc1_", 5) == 0) return &cymbalVoice.osc;
-        if (strncmp(key, "osc2_", 5) == 0) return &cymbalVoice.modOsc;
-        if (strncmp(key, "osc3_", 5) == 0) return &cymbalVoice.modOsc2;
+    if (type == INSTRUMENT_TYPE_CYM) {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        if (!voice) return 0;
+        if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
+        if (strncmp(key, "osc2_", 5) == 0) return &voice->modOsc;
+        if (strncmp(key, "osc3_", 5) == 0) return &voice->modOsc2;
     }
-    if (slot == 5u && type == INSTRUMENT_TYPE_HAT) {
-        if (strncmp(key, "osc1_", 5) == 0) return &hatVoice.osc;
-        if (strncmp(key, "osc2_", 5) == 0) return &hatVoice.modOsc;
-        if (strncmp(key, "osc3_", 5) == 0) return &hatVoice.modOsc2;
+    if (type == INSTRUMENT_TYPE_HAT) {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        if (!voice) return 0;
+        if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
+        if (strncmp(key, "osc2_", 5) == 0) return &voice->modOsc;
+        if (strncmp(key, "osc3_", 5) == 0) return &voice->modOsc2;
     }
     return 0;
 }
 
 static ResonantFilter *instrumentManager_filter(uint8_t slot)
 {
-    switch (slot) {
-    case 0u:
-    case 1u:
-    case 2u: return &voiceArray[slot].filter;
-    case 3u: return &snareVoice.filter;
-    case 4u: return &cymbalVoice.filter;
-    case 5u: return &hatVoice.filter;
-    default: return 0;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? &voice->filter : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? &voice->filter : 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? &voice->filter : 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->filter : 0; }
+    default:
+        return 0;
     }
 }
 
 static SlopeEg2 *instrumentManager_ampEg(uint8_t slot)
 {
-    switch (slot) {
-    case 0u:
-    case 1u:
-    case 2u: return &voiceArray[slot].oscVolEg;
-    case 3u: return &snareVoice.oscVolEg;
-    case 4u: return &cymbalVoice.oscVolEg;
-    case 5u: return &hatVoice.oscVolEg;
-    default: return 0;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? &voice->oscVolEg : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? &voice->oscVolEg : 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? &voice->oscVolEg : 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->oscVolEg : 0; }
+    default:
+        return 0;
     }
 }
 
 static DecayEg *instrumentManager_pitchEg(uint8_t slot)
 {
-    switch (slot) {
-    case 0u:
-    case 1u:
-    case 2u: return &voiceArray[slot].oscPitchEg;
-    case 3u: return &snareVoice.oscPitchEg;
-    default: return 0;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? &voice->oscPitchEg : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? &voice->oscPitchEg : 0; }
+    default:
+        return 0;
     }
 }
 
 static Distortion *instrumentManager_distortion(uint8_t slot)
 {
-    switch (slot) {
-    case 0u:
-    case 1u:
-    case 2u: return &voiceArray[slot].distortion;
-    case 3u: return &snareVoice.distortion;
-    case 4u: return &cymbalVoice.distortion;
-    case 5u: return &hatVoice.distortion;
-    default: return 0;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? &voice->distortion : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? &voice->distortion : 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? &voice->distortion : 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->distortion : 0; }
+    default:
+        return 0;
     }
 }
 
 static TransientGenerator *instrumentManager_transient(uint8_t slot)
 {
-    switch (slot) {
-    case 0u:
-    case 1u:
-    case 2u: return &voiceArray[slot].transGen;
-    case 3u: return &snareVoice.transGen;
-    case 4u: return &cymbalVoice.transGen;
-    case 5u: return &hatVoice.transGen;
-    default: return 0;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? &voice->transGen : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? &voice->transGen : 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? &voice->transGen : 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->transGen : 0; }
+    default:
+        return 0;
     }
 }
 
@@ -971,18 +1493,11 @@ static ModulationNode *instrumentManager_lfoModNodeForSlot(uint8_t slot,
      */
     if (target_index > 1u)
         return 0;
-    switch (slot) {
-    case 0u:
-    case 1u:
-    case 2u: return target_index ? &voiceArray[slot].lfo.modTarget2
-                                  : &voiceArray[slot].lfo.modTarget;
-    case 3u: return target_index ? &snareVoice.lfo.modTarget2
-                                  : &snareVoice.lfo.modTarget;
-    case 4u: return target_index ? &cymbalVoice.lfo.modTarget2
-                                  : &cymbalVoice.lfo.modTarget;
-    case 5u: return target_index ? &hatVoice.lfo.modTarget2
-                                  : &hatVoice.lfo.modTarget;
-    default: return 0;
+    {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (!lfo)
+            return 0;
+        return target_index ? &lfo->modTarget2 : &lfo->modTarget;
     }
 }
 
@@ -1277,6 +1792,10 @@ static uint8_t instrumentManager_applyVelocitySceneTarget(
     case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
         preset_setVoiceDecimationAll(scene_getActiveIndex(), (uint8_t)value);
         return 1u;
+    case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+        preset_setSlot6Track7AmpEnvelopeDecay(scene_getActiveIndex(), 0u,
+                                              (uint8_t)value, 0u);
+        return 1u;
     default:
         return 0u;
     }
@@ -1320,6 +1839,24 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
                                        lfo_value_0_1, amount, polarity);
         preset_applyVoiceDecimationAllRuntime((uint8_t)shaped);
         return 1u;
+    case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+        base = scene->kit.settings.slot6_track7_amp_envelope_decay;
+        shaped = modNode_shapeRangeU16(base, descriptor->min_value,
+                                       descriptor->max_value,
+                                       lfo_value_0_1, amount, polarity);
+        /*
+         * LFO modulation of the generated track-7 decay is runtime-only.
+         *
+         * Inputs: retained kit setting as the base plus the shaped LFO value.
+         * Output: a hidden runtime override used by the slot-6 alternate
+         * trigger path. This cannot call the retained Scene setter because an
+         * audio-rate LFO would otherwise rewrite the saved kit setting every
+         * block; velocity targets still use the retained setter above because
+         * they are discrete trigger operations.
+         */
+        slot6_track7_decay_lfo_active = 1u;
+        slot6_track7_decay_lfo_value = (uint8_t)shaped;
+        return 1u;
     default:
         return 0u;
     }
@@ -1359,6 +1896,10 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
             scene) {
             preset_applyVoiceDecimationAllRuntime(
                 scene->settings.voice_decimation_all);
+        }
+        if (descriptor &&
+            descriptor->kind == SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY) {
+            slot6_track7_decay_lfo_active = 0u;
         }
         break; }
     default:
@@ -1643,26 +2184,53 @@ static uint8_t instrumentManager_writeSpecialRuntime(
 
     ampEg = instrumentManager_ampEg(slot);
     if (ampEg) {
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_HAT &&
+            strcmp(key, "amp_envelope_decay") == 0) {
+            HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+            /*
+             * HiHat base decay keeps its dedicated closed-hat cache.
+             *
+             * Inputs: canonical base amp_envelope_decay descriptor value for a
+             * HiHat slot. Output: the slot hihat decayClosed receives the shaped
+             * SlopeEg2 decay value used when slot 6 is triggered from track 6.
+             * This must precede the generic amp_envelope_decay branch because
+             * HiHat stores closed/open decay in separate cached floats rather
+             * than only in oscVolEg.decay.
+             */
+            if (voice)
+                voice->decayClosed = slopeEg2_calcDecay(byteValue);
+            return 1u;
+        }
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_HAT &&
+            strcmp(key, "amp_envelope_decay_choke") == 0) {
+            HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+            /*
+             * HiHat choke decay keeps the former open-hat runtime cache.
+             *
+             * Inputs: canonical amp_envelope_decay_choke descriptor value.
+             * Output: the slot hihat decayOpen receives the shaped value used
+             * when the shared hihat slot is triggered from track 7. The descriptor
+             * remains separately mod-targetable because it is a normal
+             * descriptor row, not a hidden menu-only alternate.
+             */
+            if (voice)
+                voice->decayOpen = slopeEg2_calcDecay(byteValue);
+            return 1u;
+        }
         if (strcmp(key, "amp_envelope_attack") == 0) {
             slopeEg2_setAttack(ampEg, byteValue,
-                               (uint8_t)(slot < 3u ? AMP_EG_SYNC : 0u));
+                               (uint8_t)(instrumentManager_slotType(slot) ==
+                                         INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
             return 1u;
         }
         if (strcmp(key, "amp_envelope_decay") == 0) {
             slopeEg2_setDecay(ampEg, byteValue,
-                              (uint8_t)(slot < 3u ? AMP_EG_SYNC : 0u));
+                              (uint8_t)(instrumentManager_slotType(slot) ==
+                                        INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
             return 1u;
         }
         if (strcmp(key, "amp_envelope_slope") == 0) {
             slopeEg2_setSlope(ampEg, byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "amp_envelope_decay_closed") == 0) {
-            hatVoice.decayClosed = slopeEg2_calcDecay(byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "amp_envelope_decay_open") == 0) {
-            hatVoice.decayOpen = slopeEg2_calcDecay(byteValue);
             return 1u;
         }
     }
@@ -1678,12 +2246,17 @@ static uint8_t instrumentManager_writeSpecialRuntime(
             return 1u;
         }
         if (strcmp(key, "pitch_envelope_amount") == 0) {
-            if (slot < 3u)
-                voiceArray[slot].egPitchModAmount =
-                    instrumentManager_pitchModAmount(byteValue);
-            else
-                snareVoice.egPitchModAmount =
-                    instrumentManager_pitchModAmount(byteValue);
+            if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_DRM) {
+                DrumVoice *voice = instrumentManager_drumRuntime(slot);
+                if (voice)
+                    voice->egPitchModAmount =
+                        instrumentManager_pitchModAmount(byteValue);
+            } else if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_SNR) {
+                SnareVoice *voice = instrumentManager_snareRuntime(slot);
+                if (voice)
+                    voice->egPitchModAmount =
+                        instrumentManager_pitchModAmount(byteValue);
+            }
             return 1u;
         }
     }
@@ -1707,15 +2280,10 @@ static uint8_t instrumentManager_writeSpecialRuntime(
     }
 
     if (strcmp(key, "lfo_rate") == 0) {
-        switch (slot) {
-        case 0u:
-        case 1u:
-        case 2u: lfo_setFreq(&voiceArray[slot].lfo, byteValue); break;
-        case 3u: lfo_setFreq(&snareVoice.lfo, byteValue); break;
-        case 4u: lfo_setFreq(&cymbalVoice.lfo, byteValue); break;
-        case 5u: lfo_setFreq(&hatVoice.lfo, byteValue); break;
-        default: return 0u;
-        }
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (!lfo)
+            return 0u;
+        lfo_setFreq(lfo, byteValue);
         return 1u;
     }
 

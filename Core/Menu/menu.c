@@ -92,6 +92,8 @@ static uint8_t menu_soundApplyApplyPerformanceGlobals = 0;
 static uint8_t menu_soundApplyClearStorageBusy = 0;
 static uint8_t menu_soundApplyShowStaleWarning = 0;
 static fs_stale_warning_source_t menu_soundApplyStaleWarning = FS_STALE_WARNING_NONE;
+static uint8_t menu_instrumentApplyActive = 0u;
+static uint8_t menu_instrumentApplySlot = 0u;
 static uint8_t menu_staleWarningActive = 0;
 static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
@@ -327,6 +329,42 @@ static uint8_t menu_tickSoundApply(void)
         return 1u;
 
     menu_finishSoundApply();
+    return 1u;
+}
+
+static void menu_startInstrumentApply(uint8_t slot)
+{
+    /*
+     * Start post-load apply for one Instrument slot.
+     *
+     * Input: zero-based slot just loaded from Instrument/. Output: Preset's
+     * one-slot cursor is armed and Menu keeps storage input blocked until the
+     * bounded apply finishes. This stays separate from menu_startSoundApply()
+     * because Instrument browsing should not reapply Scene settings, globals,
+     * pattern settings, or the other five kit slots.
+     */
+    menu_instrumentApplyActive = 1u;
+    menu_instrumentApplySlot = slot;
+    preset_startInstrumentApply(slot);
+}
+
+static uint8_t menu_tickInstrumentApply(void)
+{
+    /*
+     * Advance one unit of Instrument Load post-apply work.
+     *
+     * Output: nonzero while Menu should return to the main loop. When Preset's
+     * one-slot cursor finishes, storage input is unblocked and the current page
+     * is repainted so the loaded descriptor/menu state is visible.
+     */
+    if (!menu_instrumentApplyActive)
+        return 0u;
+    if (preset_tickInstrumentApply())
+        return 1u;
+    menu_instrumentApplyActive = 0u;
+    menu_storageBusy = 0u;
+    (void)menu_instrumentApplySlot;
+    menu_repaintAll();
     return 1u;
 }
 
@@ -720,6 +758,11 @@ char editDisplayBuffer[2][17];
 uint8_t menu_activePage  = 0;
 uint8_t menu_activeVoice = 0;
 uint8_t menu_playedPattern = 0;
+
+static uint8_t menu_instrumentLoadActive = 0u;
+static uint8_t menu_instrumentLoadSlot = 0u;
+static instrument_type_t menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
+static uint8_t menu_instrumentLoadIndex[INSTRUMENT_TYPE_UNKNOWN];
 static uint8_t editModeActive = 0;
 static uint8_t lastEncoderButton = 0;
 
@@ -754,6 +797,9 @@ void sendDisplayBuffer(void);
 static void menu_moveToMenuItem(int8_t inc);
 static void menu_encoderChangeParameter(int8_t inc);
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked);
+static void menu_instrumentLoadClampIndex(void);
+static void menu_instrumentLoadRequestSelection(void);
+static void menu_instrumentLoadStepType(int8_t inc);
 static uint8_t menu_nameIsEmptySlot(void);
 static uint8_t menu_paramIsMorphAmount(uint16_t paramNr);
 static uint8_t menu_isLoadSaveSelectionCurrent(void);
@@ -773,13 +819,20 @@ static void setNoteName(uint8_t num, char *buf);
 typedef enum {
     MENU_CELL_EMPTY = 0,
     MENU_CELL_STATIC,
-    MENU_CELL_INSTRUMENT
+    MENU_CELL_INSTRUMENT,
+    MENU_CELL_KIT_SETTING
 } menu_cell_kind_t;
+
+typedef enum {
+    MENU_KIT_SETTING_NONE = 0,
+    MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY
+} menu_kit_setting_kind_t;
 
 typedef struct {
     menu_cell_kind_t kind;
     uint8_t text_id;
     uint16_t static_param;
+    uint8_t kit_setting;
     uint8_t slot;
     uint8_t descriptor_index;
     const ParamDescriptor *descriptor;
@@ -904,6 +957,58 @@ static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
         }
         if (!cell.descriptor)
             return cell;
+
+        if (menu_activePage == VOICE7_PAGE &&
+            slot_index == 5u &&
+            (instrumentManager_typeFlags(slot->type) & INSTRUMENT_FLAG_CHOKE)) {
+            uint8_t choke_index;
+
+            /*
+             * Generic VOICE7 choke substitution.
+             *
+             * Inputs: the normal descriptor selected by the instrument's one
+             * menu layout, the visible VOICE page, and the owning slot. Output:
+             * when slot 6 hosts a Choke instrument and the base descriptor has
+             * a `<key>_choke` sibling, this cell displays/edits the sibling
+             * descriptor instead of the base descriptor. Menu owns the VOICE7
+             * and slot-6 context; InstrumentManager owns the descriptor suffix
+             * relationship, so neither layer has to duplicate the other's
+             * rules. Affiliates are hihat_menu_pages[], SceneData descriptor
+             * images, and modulation target lists where `_choke` rows remain
+             * separately visible.
+             */
+            if (instrumentManager_chokeDescriptorIndexForBase(
+                    slot->type, cell.descriptor_index, &choke_index)) {
+                const ParamDescriptor *choke_descriptor =
+                    instrumentManager_descriptor(slot->type, choke_index);
+                if (choke_descriptor) {
+                    cell.descriptor_index = choke_index;
+                    cell.descriptor = choke_descriptor;
+                }
+            }
+        }
+
+        if (menu_activePage == VOICE7_PAGE &&
+            slot_index == 5u &&
+            !(instrumentManager_typeFlags(slot->type) & INSTRUMENT_FLAG_CHOKE) &&
+            cell.descriptor->file_key &&
+            strcmp(cell.descriptor->file_key, "amp_envelope_decay") == 0) {
+            /*
+             * Generated non-Choke track-7 decay cell.
+             *
+             * Inputs: the base amp_envelope_decay descriptor resolved for
+             * slot 6 on VOICE7. Output: the cell borrows that descriptor's
+             * display text/dtype but commits to kit_settings_t instead of the
+             * instrument descriptor image arrays. This generated setting only
+             * exists for non-Choke instruments; Choke instruments use real
+             * `_choke` descriptors, and instruments without amp_envelope_decay
+             * naturally fall through to the normal VOICE6-style cell.
+             */
+            cell.kind = MENU_CELL_KIT_SETTING;
+            cell.kit_setting = MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY;
+            cell.slot = slot_index;
+            return cell;
+        }
 
         cell.kind = MENU_CELL_INSTRUMENT;
         cell.slot = slot_index;
@@ -1071,7 +1176,8 @@ static uint8_t menu_cellDtype(const menu_cell_t *cell)
 {
     if (!cell)
         return DTYPE_0B127;
-    if (cell->kind == MENU_CELL_INSTRUMENT)
+    if (cell->kind == MENU_CELL_INSTRUMENT ||
+        cell->kind == MENU_CELL_KIT_SETTING)
         return cell->descriptor ? cell->descriptor->dtype : DTYPE_0B127;
     if (cell->kind == MENU_CELL_STATIC && cell->static_param < NUM_PARAMS)
         return parameter_dtypes[cell->static_param];
@@ -1082,6 +1188,24 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
 {
     if (!cell)
         return 0u;
+    if (cell->kind == MENU_CELL_KIT_SETTING) {
+        /*
+         * Display generated kit-setting cells.
+         *
+         * Inputs: resolved generated cell plus current Morph endpoint mode.
+         * Output: retained kit-setting endpoint value. The cell borrows a
+         * descriptor only for text/dtype; its value is Kit-owned and therefore
+         * read through SceneData accessors rather than descriptor images.
+         */
+        if (cell->kit_setting ==
+            MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY) {
+            return voiceModeShowMorph
+                ? scene_getSlot6Track7MorphAmpEnvelopeDecay(
+                    scene_getActiveIndex())
+                : scene_getSlot6Track7AmpEnvelopeDecay(scene_getActiveIndex());
+        }
+        return 0u;
+    }
     if (cell->kind == MENU_CELL_INSTRUMENT) {
         const kit_instrument_slot_t *slot =
             scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
@@ -1100,6 +1224,27 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
 {
     if (!cell)
         return 0u;
+    if (cell->kind == MENU_CELL_KIT_SETTING) {
+        /*
+         * Commit generated kit-setting cells.
+         *
+         * Inputs: generated menu cell and edited value. Output: Preset updates
+         * the retained Kit setting endpoint selected by Morph edit mode. This
+         * cannot use preset_setInstrumentParameter() because there is no
+         * descriptor index or instrument-file storage for generated track-7
+         * decay.
+         */
+        if (cell->kit_setting ==
+            MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY) {
+            return preset_setSlot6Track7AmpEnvelopeDecay(
+                scene_getActiveIndex(),
+                voiceModeShowMorph ? INSTRUMENT_IMAGE_MORPH
+                                   : INSTRUMENT_IMAGE_MAIN,
+                (uint8_t)value,
+                (uint8_t)(!voiceModeShowMorph));
+        }
+        return 0u;
+    }
     if (cell->kind == MENU_CELL_INSTRUMENT) {
         uint8_t scene_index = scene_getActiveIndex();
         if (!cell->descriptor)
@@ -1852,6 +1997,147 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
     }
 }
 
+static void menu_instrumentLoadClampIndex(void)
+{
+    uint8_t count = filesystem_instrumentCount(menu_instrumentLoadType);
+
+    /*
+     * Clamp the per-type Instrument Load browser index.
+     *
+     * Inputs: current selected type and cached index for that type. Output:
+     * index is valid for the current filesystem cache, or zero when the list is
+     * empty. This lives in Menu because Menu owns browser state while
+     * filesystem owns only the immutable scan result.
+     */
+    if (menu_instrumentLoadType >= INSTRUMENT_TYPE_UNKNOWN)
+        menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
+    if (count == 0u) {
+        menu_instrumentLoadIndex[menu_instrumentLoadType] = 0u;
+        return;
+    }
+    if (menu_instrumentLoadIndex[menu_instrumentLoadType] >= count)
+        menu_instrumentLoadIndex[menu_instrumentLoadType] =
+            (uint8_t)(count - 1u);
+}
+
+static void menu_instrumentLoadRequestSelection(void)
+{
+    uint8_t count;
+    uint8_t index;
+
+    /*
+     * Immediately load the selected Instrument/ file.
+     *
+     * Inputs: destination slot, selected type, and per-type browser index from
+     * Menu state. Output: Preset starts a single-instrument filesystem request
+     * and Menu shows the standard storage-busy message. Empty lists do not
+     * start a request.
+     */
+    menu_instrumentLoadClampIndex();
+    count = filesystem_instrumentCount(menu_instrumentLoadType);
+    if (count == 0u)
+        return;
+    index = menu_instrumentLoadIndex[menu_instrumentLoadType];
+    if (preset_loadInstrument(menu_instrumentLoadSlot,
+                              menu_instrumentLoadType,
+                              index)) {
+        menu_beginStorageMessage("Loading instr");
+    }
+}
+
+static void menu_instrumentLoadStepType(int8_t inc)
+{
+    uint8_t registry_count = instrumentManager_registryCount();
+    uint8_t current_index = 0u;
+    uint8_t i;
+    int8_t direction = (inc < 0) ? -1 : 1;
+
+    /*
+     * Step through selectable Instrument Load types.
+     *
+     * Inputs: signed encoder direction and current destination slot. Output:
+     * selected type moves to the next registry type allowed by Basic/Advanced
+     * assignment policy. This cannot be a simple enum increment because the
+     * registry is private and the two-Advanced rule depends on the active kit.
+     */
+    if (registry_count == 0u || inc == 0)
+        return;
+    for (i = 0u; i < registry_count; i++) {
+        const instrument_registry_entry_t *entry =
+            instrumentManager_registryEntryAt(i);
+        if (entry && entry->type == menu_instrumentLoadType) {
+            current_index = i;
+            break;
+        }
+    }
+
+    for (i = 0u; i < registry_count; i++) {
+        uint8_t next_index;
+        const instrument_registry_entry_t *entry;
+        if (direction > 0)
+            next_index = (uint8_t)((current_index + 1u + i) % registry_count);
+        else
+            next_index = (uint8_t)((current_index + registry_count - 1u - i) %
+                                   registry_count);
+        entry = instrumentManager_registryEntryAt(next_index);
+        if (entry &&
+            instrumentManager_typeSelectableForSceneSlot(
+                scene_getActiveIndex(), menu_instrumentLoadSlot,
+                entry->type)) {
+            menu_instrumentLoadType = entry->type;
+            menu_instrumentLoadClampIndex();
+            return;
+        }
+    }
+}
+
+uint8_t menu_loadInstrumentIsActive(void)
+{
+    return menu_instrumentLoadActive;
+}
+
+void menu_loadInstrumentExit(void)
+{
+    /*
+     * Exit nested Instrument Load mode.
+     *
+     * Inputs: none. Output: normal Load page state becomes active again while
+     * the selected Load type/kit slot are left untouched. ButtonHandler calls
+     * this when the Load/Save mode button is pressed a second time.
+     */
+    menu_instrumentLoadActive = 0u;
+    menu_repaintAll();
+}
+
+uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
+{
+    const kit_instrument_slot_t *slot;
+
+    /*
+     * Consume a VOICE button as an Instrument Load destination selector.
+     *
+     * Inputs: zero-based VOICE button. Output: nonzero when LOAD_PAGE consumed
+     * the press. Menu owns the selected destination/type/index; encoder motion
+     * owns immediate file loads. ButtonHandler owns LED blink feedback and
+     * skips normal preview/mute/page behavior when this returns true.
+     */
+    if (menu_activePage != LOAD_PAGE || voiceNr >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    menu_instrumentLoadActive = 1u;
+    menu_instrumentLoadSlot = voiceNr;
+    slot = scene_instrumentSlotConst(scene_getActiveIndex(), voiceNr);
+    menu_instrumentLoadType = slot ? slot->type : INSTRUMENT_TYPE_DRM;
+    if (!instrumentManager_typeSelectableForSceneSlot(
+            scene_getActiveIndex(), voiceNr, menu_instrumentLoadType)) {
+        menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
+    }
+    menu_instrumentLoadClampIndex();
+    menu_setActiveVoice(voiceNr);
+    if (!menu_storageBusy)
+        menu_repaintAll();
+    return 1u;
+}
+
 /* -----------------------------------------------------------------------
 ** upr_three — uppercase 3 chars in place (exact port from original)
 ** ----------------------------------------------------------------------- */
@@ -2349,6 +2635,51 @@ static void menu_repaintLoadSavePage(void)
     memset(&editDisplayBuffer[0][0], ' ', 16);
     memset(&editDisplayBuffer[1][0], ' ', 16);
 
+    if (menu_activePage == LOAD_PAGE && menu_instrumentLoadActive) {
+        uint8_t count;
+        uint8_t index;
+        uint16_t display_index;
+
+        /*
+         * Paint nested Instrument Load mode.
+         *
+         * Inputs: selected instrument type, destination slot, and filesystem's
+         * per-type Instrument/ cache. Outputs: top row shows the type label
+         * supplied by the instrument registry; bottom row shows the one-based
+         * sorted list position plus first eight filename-stem characters. This
+         * is separate from normal menu_saveOptions painting because Instrument
+         * Load is destination-slot aware and is not a SAVE_TYPE_*.
+         */
+        menu_instrumentLoadClampIndex();
+        count = filesystem_instrumentCount(menu_instrumentLoadType);
+        index = menu_instrumentLoadIndex[menu_instrumentLoadType];
+        display_index =
+            filesystem_instrumentDisplayIndex(menu_instrumentLoadType, index);
+
+        memcpy(&editDisplayBuffer[0][0], "Load:", 5);
+        menu_copyPaddedField(&editDisplayBuffer[0][6],
+                             instrumentManager_typeDisplayLabel(
+                                 menu_instrumentLoadType),
+                             8u);
+        editDisplayBuffer[1][0] = '[';
+        if (display_index > 999u)
+            display_index = 999u;
+        editDisplayBuffer[1][1] = (display_index >= 100u)
+            ? (char)('0' + (display_index / 100u))
+            : ' ';
+        editDisplayBuffer[1][2] = (display_index >= 10u)
+            ? (char)('0' + ((display_index / 10u) % 10u))
+            : ' ';
+        editDisplayBuffer[1][3] = (char)('0' + (display_index % 10u));
+        editDisplayBuffer[1][4] = ']';
+        memcpy(&editDisplayBuffer[1][5],
+               count ? filesystem_instrumentName(menu_instrumentLoadType,
+                                                 index)
+                     : "Empty   ",
+               8);
+        return;
+    }
+
     /* Top row */
     if (menu_activePage == SAVE_PAGE)
         memcpy(&editDisplayBuffer[0][0], "Save:", 5);
@@ -2492,7 +2823,8 @@ static void menu_repaintGeneric(void)
         } else {
             uint8_t value = (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
 
-            if (cell.kind == MENU_CELL_INSTRUMENT) {
+            if (cell.kind == MENU_CELL_INSTRUMENT ||
+                cell.kind == MENU_CELL_KIT_SETTING) {
                 menu_copyPaddedField(&editDisplayBuffer[0][0],
                                      cell.descriptor->category, 8u);
                 menu_copyPaddedField(&editDisplayBuffer[0][8],
@@ -2580,7 +2912,8 @@ static void menu_repaintGeneric(void)
                                                 (uint8_t)(i + is2ndPage));
             if (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP) {
                 memcpy(&editDisplayBuffer[0][4u * i], menuText_blank, 3);
-            } else if (cell.kind == MENU_CELL_INSTRUMENT) {
+            } else if (cell.kind == MENU_CELL_INSTRUMENT ||
+                       cell.kind == MENU_CELL_KIT_SETTING) {
                 menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
                                      cell.descriptor->short_name, 3u);
             } else if (cell.kind == MENU_CELL_STATIC) {
@@ -2801,6 +3134,52 @@ checkvalid:
 ** ----------------------------------------------------------------------- */
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
+    if (menu_activePage == LOAD_PAGE && menu_instrumentLoadActive) {
+        /*
+         * Encoder handling for nested Instrument Load.
+         *
+         * Inputs: normal Load-page encoder delta/click state. Outputs: without
+         * edit mode, the cursor moves between type and file rows; in edit mode,
+         * the encoder steps selectable instrument types or sorted files and
+         * immediately requests a single-instrument load. The normal Save/Load
+         * type bitfield is intentionally bypassed because Instrument Load is a
+         * destination-slot submode, not a SAVE_TYPE_*.
+         */
+        (void)btnClicked;
+        if (editModeActive) {
+            if (menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
+                if (inc != 0) {
+                    menu_instrumentLoadStepType(inc);
+                    menu_instrumentLoadRequestSelection();
+                }
+            } else {
+                uint8_t count =
+                    filesystem_instrumentCount(menu_instrumentLoadType);
+                if (count > 0u && inc != 0) {
+                    int16_t next =
+                        (int16_t)menu_instrumentLoadIndex[menu_instrumentLoadType] +
+                        (int16_t)inc;
+                    if (next < 0)
+                        next = 0;
+                    else if (next >= (int16_t)count)
+                        next = (int16_t)(count - 1u);
+                    if ((uint8_t)next !=
+                        menu_instrumentLoadIndex[menu_instrumentLoadType]) {
+                        menu_instrumentLoadIndex[menu_instrumentLoadType] =
+                            (uint8_t)next;
+                        menu_instrumentLoadRequestSelection();
+                    }
+                }
+            }
+        } else {
+            if (inc < 0)
+                menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+            else if (inc > 0)
+                menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
+        }
+        return;
+    }
+
     if (btnClicked) {
         if ((editModeActive && menu_saveOptions.state == SAVE_STATE_OK) ||
             (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
@@ -3247,6 +3626,9 @@ void menu_pollPresetStatus(void)
     if (menu_tickSoundApply())
         return;
 
+    if (menu_tickInstrumentApply())
+        return;
+
     if (menu_tickGlobalApply())
         return;
 
@@ -3372,6 +3754,18 @@ void menu_pollPresetStatus(void)
         menu_normalizeSoundModTargets(parameter_values);
         menu_startSoundApply(0u, 1u, 1u, 0u, 1u, 1u, 1u, 0u,
                              FS_STALE_WARNING_NONE);
+        break;
+
+    case PRESET_OP_INSTRUMENT_LOAD:
+        /*
+         * Single Instrument load completion.
+         *
+         * Inputs: Preset request slot retained when the Instrument/ file load
+         * was posted. Output: only that slot is applied through Preset's
+         * one-slot cursor. This must not call menu_startSoundApply(), because
+         * that path is intentionally a whole-Kit/Scene apply operation.
+         */
+        menu_startInstrumentApply(preset_getRequestSlot());
         break;
 
     case PRESET_OP_KIT_SAVE:
@@ -3533,6 +3927,7 @@ void menu_switchPage(uint8_t pageNr)
 
     switch (pageNr) {
     case MENU_MIDI_PAGE: {
+        menu_instrumentLoadActive = 0u;
         uint8_t toggle = (menu_activePage == MENU_MIDI_PAGE);
         menu_setVoiceModeShowMorph(0u);
         menu_activePage = MENU_MIDI_PAGE;
@@ -3554,6 +3949,7 @@ void menu_switchPage(uint8_t pageNr)
     case PERFORMANCE_PAGE:
     case PATTERN_SETTINGS_PAGE:
     case SEQ_PAGE:
+        menu_instrumentLoadActive = 0u;
         menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;
         editModeActive = 0;
@@ -3574,15 +3970,18 @@ void menu_switchPage(uint8_t pageNr)
 
     case LOAD_PAGE:
         menu_setVoiceModeShowMorph(0u);
-        if (menu_activePage == LOAD_PAGE)
+        if (menu_activePage == LOAD_PAGE) {
             menu_activePage = SAVE_PAGE;
-        else
+            menu_instrumentLoadActive = 0u;
+        } else {
             menu_activePage = LOAD_PAGE;
+        }
         menu_resetSaveParameters();
         menu_requestCurrentLoadSaveSelection(0);
         break;
 
     default: /* voice pages */
+        menu_instrumentLoadActive = 0u;
         if (pageNr > VOICE7_PAGE)
             menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;

@@ -1,5 +1,7 @@
 format=helicase.kitset
 version=1
+slot6_track7_amp_envelope_decay=64
+slot6_track7_morph_amp_envelope_decay=64
 
 [slot1]
 type=drm

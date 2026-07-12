@@ -55,8 +55,16 @@ typedef struct {
      * audio_out[] is indexed by instrument slot and comes from kitset.kcg.
      * It remains Kit-owned because routing follows a Kit voice assignment, not
      * an individual instrument file and not Scene-wide performance settings.
+     *
+     * slot6_track7_amp_envelope_decay and its Morph mirror are generated
+     * kit-owned endpoint values for the shared slot-6/track-7 voice pair. They
+     * are used only when slot 6 hosts a non-Choke instrument with a base
+     * amp_envelope_decay descriptor; Choke instruments use real `_choke`
+     * descriptors inside their instrument file instead.
      */
     uint8_t audio_out[INSTRUMENT_SLOT_COUNT];
+    uint8_t slot6_track7_amp_envelope_decay;
+    uint8_t slot6_track7_morph_amp_envelope_decay;
 } kit_settings_t;
 
 typedef struct {
@@ -246,5 +254,20 @@ void scene_setVoiceMorphAmount(uint8_t scene_index, uint8_t slot,
                                uint8_t amount);
 uint8_t scene_getVoiceMorphAmount(uint8_t scene_index, uint8_t slot);
 void scene_setAllVoiceMorphAmounts(uint8_t scene_index, uint8_t amount);
+/*
+ * Kit-owned generated track-7 decay accessors.
+ *
+ * Inputs: resident Scene index plus 0..127 endpoint value for setters. Outputs
+ * are retained main/morph values, or 0 for invalid scenes. These are specific
+ * rather than a generic kit-setting accessor because the generated parameter
+ * has a fixed behavioral contract: slot 6, track 7, amp envelope decay,
+ * non-Choke fallback. Menu, Preset, storage, and future Scene mod targets use
+ * these helpers instead of reaching into kit_settings_t directly.
+ */
+void scene_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index, uint8_t value);
+uint8_t scene_getSlot6Track7AmpEnvelopeDecay(uint8_t scene_index);
+void scene_setSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index,
+                                               uint8_t value);
+uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index);
 
 #endif

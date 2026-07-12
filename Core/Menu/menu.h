@@ -272,6 +272,9 @@ void menu_start(void);
 void menu_parseEncoder(int8_t inc, uint8_t button);
 void menu_switchPage(uint8_t pageNr);
 void menu_switchSubPage(uint8_t subPageNr);
+uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr);
+uint8_t menu_loadInstrumentIsActive(void);
+void menu_loadInstrumentExit(void);
 /*
  * Morph voice view setter.
  *

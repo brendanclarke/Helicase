@@ -73,6 +73,7 @@
 #include "ParameterArray.h"
 #include "presetManager.h"
 #include "SceneData.h"
+#include "InstrumentManager.h"
 
 #include "memtest.h"
 #include <stdint.h>
@@ -90,6 +91,16 @@ static void dsp_init(void)
     Snare_init();
     Cymbal_init();
     HiHat_init();
+    /*
+     * Initialize InstrumentManager's non-native per-slot runtime pools.
+     *
+     * Inputs: the legacy engine globals have just been initialized above.
+     * Output: additional Drum/Snare/Cymbal/HiHat instances used by loadable
+     * instrument slots receive the same engine defaults before any kit/preset
+     * applies values into them. This boot step lives here because startup owns
+     * DSP lifetime; InstrumentManager owns only the type-to-runtime mapping.
+     */
+    instrumentManager_runtimeInit();
     mixer_init();
     parameterArray_init();
 
@@ -279,6 +290,20 @@ int main(void)
         if (sd_ok) {
             /* Synchronous kit scan (blocking at boot, OK) */
             filesystem_requestScanKits(NULL);
+            while (filesystem_status() == FS_STATUS_BUSY)
+                filesystem_tick();
+            filesystem_ack();
+
+            /*
+             * Synchronous Instrument/ scan.
+             *
+             * Inputs: mounted SD card before audio starts. Output:
+             * filesystem's per-type Instrument Load cache is populated so the
+             * Load page can immediately browse root Instrument files. This
+             * mirrors the Kit/ scan timing: blocking is acceptable here because
+             * audio rendering has not started yet.
+             */
+            filesystem_requestScanInstruments(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
             filesystem_ack();

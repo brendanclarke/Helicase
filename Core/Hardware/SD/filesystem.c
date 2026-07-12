@@ -84,6 +84,7 @@
 #define FS_CONTAINER_PAD_BYTE 0xffu
 #define FS_KIT_LFN_MAX 80u
 #define FS_TEXT_LINE_MAX 96u
+#define FS_INSTRUMENT_MAX_PER_TYPE 128u
 
 /* -----------------------------------------------------------------------
 ** Operation types
@@ -103,6 +104,8 @@ typedef enum {
     FS_INTERNAL_OP_LOAD_GLOBALS,
     FS_INTERNAL_OP_SAVE_GLOBALS,
     FS_INTERNAL_OP_SCAN_KITS,
+    FS_INTERNAL_OP_SCAN_INSTRUMENTS,
+    FS_INTERNAL_OP_LOAD_INSTRUMENT,
     FS_INTERNAL_OP_LOAD_NAME,
 } fs_internal_op_t;
 
@@ -187,6 +190,25 @@ static uint8_t op_line_len = 0;
 static storage_kitset_t op_kitset;
 static storage_instrument_state_t op_instrument_state;
 static uint8_t op_instrument_slot = 0;
+/*
+ * Root Instrument/ browser and single-load state.
+ *
+ * The Instrument pool is list-indexed by instrument type rather than numbered
+ * Kit slot. The cache stores an asyncfatfs-openable short filename plus the
+ * eight-character display stem for each discovered file. Counts are per
+ * instrument type; the UI display number is derived from the sorted index and
+ * visually saturates at 999.
+ */
+static uint8_t instrument_file_count[INSTRUMENT_TYPE_UNKNOWN];
+static char instrument_file_name[INSTRUMENT_TYPE_UNKNOWN]
+                                [FS_INSTRUMENT_MAX_PER_TYPE]
+                                [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+static char instrument_file_open_name[INSTRUMENT_TYPE_UNKNOWN]
+                                     [FS_INSTRUMENT_MAX_PER_TYPE]
+                                     [STORAGE_KIT_FILENAME_MAX];
+static uint8_t op_instrument_load_destination_slot = 0u;
+static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
+static uint8_t op_instrument_load_index = 0u;
 static uint32_t op_stream_index = 0;
 static uint8_t op_item_offset = 0;
 static uint8_t op_loaded_active_pattern_running = 0;
@@ -572,7 +594,8 @@ static LengthRotate filesystem_discardLengthRotate = {
     NUM_STEPS, 0u, TRACK_SCALE_OFF, 0u
 };
 
-static uint8_t filesystem_defaultTrackMidiChannel(uint8_t track)
+static uint8_t __attribute__((unused)) filesystem_defaultTrackMidiChannel(
+    uint8_t track)
 {
     /*
      * Pattern files can omit the track-settings extension. In that case the
@@ -918,6 +941,128 @@ static void filesystem_recordKitDirectory(const char *display_name,
 
     if (kb_numKits < KITBROWSER_MAX_KITS)
         kb_map[kb_numKits++] = slot;
+}
+
+static char filesystem_asciiLower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+static int8_t filesystem_compareInstrumentDisplayName(const char *a,
+                                                       const char *b)
+{
+    uint8_t i;
+
+    /*
+     * Case-insensitive fixed-display-name ordering for Instrument/.
+     *
+     * Inputs: two NUL-terminated cached display names. Output: negative,
+     * zero, or positive ordering result. This stays local to filesystem.c
+     * because the browser cache is private and Instrument Load only needs a
+     * deterministic alphanumeric order within each type.
+     */
+    for (i = 0u; i < STORAGE_KIT_DISPLAY_NAME_LEN; i++) {
+        char ca = filesystem_asciiLower(a[i]);
+        char cb = filesystem_asciiLower(b[i]);
+        if (ca < cb)
+            return -1;
+        if (ca > cb)
+            return 1;
+        if (ca == '\0')
+            break;
+    }
+    return 0;
+}
+
+static instrument_type_t filesystem_instrumentTypeFromFilename(
+    const char *filename)
+{
+    uint8_t i;
+
+    /*
+     * Classify one Instrument/ file from its extension.
+     *
+     * Input: FAT display or short filename. Output: registered instrument type
+     * or UNKNOWN. InstrumentManager owns extension matching, so filesystem does
+     * not duplicate `.drm`/`.snr`/`.cym`/`.hat` knowledge.
+     */
+    for (i = 0u; i < instrumentManager_registryCount(); i++) {
+        const instrument_registry_entry_t *entry =
+            instrumentManager_registryEntryAt(i);
+        if (entry &&
+            instrumentManager_filenameMatchesType(filename, entry->type)) {
+            return entry->type;
+        }
+    }
+    return INSTRUMENT_TYPE_UNKNOWN;
+}
+
+static void filesystem_copyInstrumentStemDisplay(char dst[9],
+                                                 const char *filename)
+{
+    char stem[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+    uint8_t i = 0u;
+
+    /*
+     * Build the Instrument Load display name from a filename stem.
+     *
+     * Input: LFN or short filename. Output: first eight printable stem
+     * characters, padded and NUL-terminated. The extension is not displayed
+     * because the top row already shows the selected instrument type.
+     */
+    while (i < STORAGE_KIT_DISPLAY_NAME_LEN &&
+           filename[i] != '\0' &&
+           filename[i] != '.') {
+        stem[i] = filename[i];
+        i++;
+    }
+    stem[i] = '\0';
+    storage_copyDisplayName(dst, stem);
+    dst[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+}
+
+static void filesystem_recordInstrumentFile(const char *display_name,
+                                            const char *open_name)
+{
+    instrument_type_t type =
+        filesystem_instrumentTypeFromFilename(open_name);
+    uint8_t count;
+    uint8_t pos;
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+    /*
+     * Insert one Instrument/ file into its per-type sorted cache.
+     *
+     * Inputs: display_name from LFN/short FAT entry and open_name as the
+     * asyncfatfs-openable short filename. Output: the per-type cache stores a
+     * display stem and open name in alphanumeric order. This cannot reuse the
+     * Kit/ cache because Kits are numbered folders while Instruments are typed
+     * filename lists.
+     */
+    if (type == INSTRUMENT_TYPE_UNKNOWN ||
+        type >= INSTRUMENT_TYPE_UNKNOWN)
+        return;
+    count = instrument_file_count[type];
+    if (count >= FS_INSTRUMENT_MAX_PER_TYPE)
+        return;
+
+    filesystem_copyInstrumentStemDisplay(display, display_name);
+    pos = count;
+    while (pos > 0u &&
+           filesystem_compareInstrumentDisplayName(
+               instrument_file_name[type][pos - 1u], display) > 0) {
+        memcpy(instrument_file_name[type][pos],
+               instrument_file_name[type][pos - 1u],
+               sizeof(instrument_file_name[type][pos]));
+        memcpy(instrument_file_open_name[type][pos],
+               instrument_file_open_name[type][pos - 1u],
+               sizeof(instrument_file_open_name[type][pos]));
+        pos--;
+    }
+    memcpy(instrument_file_name[type][pos], display,
+           sizeof(instrument_file_name[type][pos]));
+    storage_copyFilename(instrument_file_open_name[type][pos], open_name);
+    instrument_file_count[type] = (uint8_t)(count + 1u);
 }
 
 /* Read one text line from an asyncfatfs file without blocking the pump.
@@ -1402,6 +1547,166 @@ static void filesystem_loadKitDirectory_tick(void)
         filesystem_setPresetNameInvalid();
         op_close_status = FS_STATUS_ERROR;
         op_phase = 28;
+        return;
+    }
+}
+
+/* -----------------------------------------------------------------------
+** LOAD ONE ROOT INSTRUMENT state machine
+**
+** Inputs: destination slot, instrument type, and per-type browser index from
+** filesystem_requestLoadInstrument(). Outputs: only the selected Scene kit
+** slot is reset and populated from Instrument/<file>. Kit settings such as
+** audio routing and other instrument slots are preserved.
+** ----------------------------------------------------------------------- */
+static void filesystem_loadInstrument_tick(void)
+{
+    uint8_t line_ready;
+    uint8_t eof;
+    storage_status_t st;
+
+    switch (op_phase) {
+    case 0: /* VALIDATE + CHDIR ROOT */
+        if (op_instrument_load_destination_slot >= STORAGE_KIT_SLOT_COUNT ||
+            op_instrument_load_type >= INSTRUMENT_TYPE_UNKNOWN ||
+            op_instrument_load_index >=
+                instrument_file_count[op_instrument_load_type]) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1;
+        return;
+
+    case 1: /* OPEN Instrument/ */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_ROOT_INSTRUMENT, "r", on_file_opened))
+            return;
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT Instrument/ */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3;
+        return;
+
+    case 3: /* CHDIR Instrument/ */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 4;
+        return;
+
+    case 4: /* CLOSE Instrument/ handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5;
+        return;
+
+    case 5: /* WAIT CLOSE Instrument/ */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 6;
+        return;
+
+    case 6: /* OPEN selected instrument */
+        storage_instrumentStateInit(&op_instrument_state,
+                                    op_instrument_load_type,
+                                    (uint8_t)(op_instrument_load_destination_slot + 1u));
+        instrumentManager_resetSlot(
+            scene_instrumentSlot(scene_getActiveIndex(),
+                                 op_instrument_load_destination_slot),
+            op_instrument_load_type);
+        op_line_len = 0u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(
+                instrument_file_open_name[op_instrument_load_type]
+                                         [op_instrument_load_index],
+                "r",
+                on_file_opened)) {
+            return;
+        }
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT selected instrument */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 11;
+            return;
+        }
+        op_phase = 8;
+        return;
+
+    case 8: /* READ selected instrument */
+        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
+                                     sizeof(op_line_buf), &line_ready, &eof);
+        if (st == STORAGE_STATUS_WAIT)
+            return;
+        if (st != STORAGE_STATUS_OK) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 9;
+            return;
+        }
+        if (line_ready) {
+            st = storage_instrumentParseLine(
+                &op_instrument_state,
+                op_line_buf,
+                scene_instrumentSlot(scene_getActiveIndex(),
+                                     op_instrument_load_destination_slot));
+            if (st != STORAGE_STATUS_OK) {
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 9;
+            }
+            return;
+        }
+        if (eof) {
+            st = storage_instrumentFinalize(&op_instrument_state);
+            if (st != STORAGE_STATUS_OK) {
+                op_close_status = FS_STATUS_ERROR;
+            } else {
+                if (op_instrument_state.seen_morph_count == 0u) {
+                    storage_instrumentCopyMainToMorphFallback(
+                        op_instrument_load_type,
+                        (uint8_t)(op_instrument_load_destination_slot + 1u),
+                        scene_instrumentSlot(scene_getActiveIndex(),
+                                             op_instrument_load_destination_slot));
+                }
+                op_close_status = FS_STATUS_DONE;
+            }
+            op_phase = 9;
+        }
+        return;
+
+    case 9: /* CLOSE selected instrument */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 10;
+        return;
+
+    case 10: /* WAIT CLOSE selected instrument */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_phase = 11;
+        return;
+
+    case 11: /* RETURN ROOT + FINISH */
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(op_close_status);
+        return;
+
+    default:
+        op_close_status = FS_STATUS_ERROR;
+        op_phase = 11;
         return;
     }
 }
@@ -3024,6 +3329,118 @@ static void filesystem_scanKits_tick(void)
 }
 
 /* -----------------------------------------------------------------------
+** SCAN ROOT INSTRUMENT FILES state machine
+**
+** Inputs: filesystem_requestScanInstruments() clears the typed cache and
+** starts this operation. Outputs: per-type sorted Instrument/ cache populated
+** from files whose extensions match the instrument registry. Missing
+** Instrument/ is a successful empty scan so the Load Instrument UI can show an
+** empty list instead of a filesystem error.
+** ----------------------------------------------------------------------- */
+static void filesystem_scanInstruments_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* CHDIR root */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1;
+        return;
+
+    case 1: /* OPEN Instrument/ */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_ROOT_INSTRUMENT, "r", on_file_opened))
+            return;
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT_OPEN */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3;
+        return;
+
+    case 3: /* CHDIR Instrument/ */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        afatfs_findFirst(op_kit_root_dir, &op_finder);
+        filesystem_dirLfnReset();
+        op_phase = 4;
+        return;
+
+    case 4: /* FIND_NEXT */
+    {
+        fatDirectoryEntry_t *entry = NULL;
+        afatfsOperationStatus_e st = afatfs_findNext(op_kit_root_dir,
+                                                     &op_finder,
+                                                     &entry);
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLast(op_kit_root_dir);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 5;
+            return;
+        }
+        if (entry == NULL || fat_isDirectoryEntryTerminator(entry)) {
+            afatfs_findLast(op_kit_root_dir);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 5;
+            return;
+        }
+        if (fat_isDirectoryEntryEmpty(entry)) {
+            filesystem_dirLfnReset();
+            return;
+        }
+        if ((entry->attrib & 0x0fu) == 0x0fu) {
+            filesystem_dirLfnAppendEntry(entry);
+            return;
+        }
+        if (!(entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) &&
+            !(entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID)) {
+            char short_name[STORAGE_KIT_FILENAME_MAX];
+            const char *display_name;
+
+            memset(short_name, 0, sizeof(short_name));
+            fat_convertFATStyleToFilename(entry->filename, short_name);
+            filesystem_applyFatShortNameCase(short_name, entry->ntReserved);
+
+            display_name = op_lfn_valid ? op_lfn_name : short_name;
+            filesystem_recordInstrumentFile(display_name, short_name);
+        }
+        filesystem_dirLfnReset();
+        return;
+    }
+
+    case 5: /* CLOSE */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 6;
+        return;
+
+    case 6: /* WAIT_CLOSE */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 7;
+        return;
+
+    case 7: /* CHDIR root + FINISH */
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(op_close_status);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+/* -----------------------------------------------------------------------
 ** LOAD NAME state machine
 **
 ** Why this exists: browsing code needs names without loading payloads. Legacy
@@ -3835,6 +4252,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_LOAD_KIT:
         filesystem_loadKitDirectory_tick();
         break;
+    case FS_INTERNAL_OP_LOAD_INSTRUMENT:
+        filesystem_loadInstrument_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_MORPH:
         filesystem_loadKit_tick();
         break;
@@ -3864,6 +4284,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_SCAN_KITS:
         filesystem_scanKits_tick();
+        break;
+    case FS_INTERNAL_OP_SCAN_INSTRUMENTS:
+        filesystem_scanInstruments_tick();
         break;
     case FS_INTERNAL_OP_LOAD_NAME:
         filesystem_loadName_tick();
@@ -3911,6 +4334,9 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_lfn_valid = 0;
     op_line_len = 0;
     op_instrument_slot = 0;
+    op_instrument_load_destination_slot = 0u;
+    op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
+    op_instrument_load_index = 0u;
     completion_callback = cb;
     return true;
 }
@@ -3978,6 +4404,51 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb)
     return filesystem_start(FS_INTERNAL_OP_SCAN_KITS, FS_FILE_KIT, 0, cb);
 }
 
+bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
+{
+    /*
+     * Start a root Instrument/ scan.
+     *
+     * Inputs: completion callback. Output: typed Instrument browser cache is
+     * cleared immediately and repopulated asynchronously from Instrument/.
+     * Missing Instrument/ is handled inside the state machine as an empty
+     * successful scan, mirroring Kit/ scan behavior.
+     */
+    if (status == FS_STATUS_BUSY) return false;
+    memset(instrument_file_count, 0, sizeof(instrument_file_count));
+    memset(instrument_file_name, 0, sizeof(instrument_file_name));
+    memset(instrument_file_open_name, 0, sizeof(instrument_file_open_name));
+    return filesystem_start(FS_INTERNAL_OP_SCAN_INSTRUMENTS, FS_FILE_KIT, 0,
+                            cb);
+}
+
+bool filesystem_requestLoadInstrument(uint8_t destination_slot,
+                                      instrument_type_t type,
+                                      uint8_t browser_index,
+                                      fs_completion_cb_t cb)
+{
+    /*
+     * Start a single Instrument/ file load into one kit slot.
+     *
+     * Inputs: zero-based destination slot, instrument type, and per-type
+     * browser index from the most recent Instrument/ scan. Output: an async
+     * load operation that replaces only that Scene kit slot. This request is
+     * separate from filesystem_requestLoad() because the existing API carries
+     * only one slot byte, while Instrument Load needs destination slot, type,
+     * and browser index as independent coordinates.
+     */
+    if (type >= INSTRUMENT_TYPE_UNKNOWN ||
+        destination_slot >= STORAGE_KIT_SLOT_COUNT ||
+        browser_index >= instrument_file_count[type])
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_LOAD_INSTRUMENT, FS_FILE_KIT, 0, cb))
+        return false;
+    op_instrument_load_destination_slot = destination_slot;
+    op_instrument_load_type = type;
+    op_instrument_load_index = browser_index;
+    return true;
+}
+
 bool filesystem_requestLoadName(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb)
 {
     const fs_file_desc_t *desc = filesystem_desc(type);
@@ -4014,6 +4485,56 @@ const char *filesystem_kitSlotName(uint8_t zero_based_slot)
     if (!filesystem_kitSlotExists(zero_based_slot))
         return "Empty   ";
     return kit_slot_name[zero_based_slot];
+}
+
+uint8_t filesystem_instrumentCount(instrument_type_t type)
+{
+    /*
+     * Return the cached Instrument/ count for one type.
+     *
+     * Input: instrument type. Output: number of sorted files found by the most
+     * recent scan, capped by FS_INSTRUMENT_MAX_PER_TYPE. Menu uses this to
+     * bound browser indices without accessing filesystem static arrays.
+     */
+    if (type >= INSTRUMENT_TYPE_UNKNOWN)
+        return 0u;
+    return instrument_file_count[type];
+}
+
+const char *filesystem_instrumentName(instrument_type_t type,
+                                      uint8_t browser_index)
+{
+    /*
+     * Return one cached Instrument/ display name.
+     *
+     * Inputs: instrument type and zero-based browser index. Output: an
+     * eight-character NUL-terminated stem, or "Empty   " for invalid/empty
+     * selections. The returned pointer is filesystem-owned cache storage.
+     */
+    if (type >= INSTRUMENT_TYPE_UNKNOWN ||
+        browser_index >= instrument_file_count[type])
+        return "Empty   ";
+    return instrument_file_name[type][browser_index];
+}
+
+uint16_t filesystem_instrumentDisplayIndex(instrument_type_t type,
+                                           uint8_t browser_index)
+{
+    uint16_t display_index;
+
+    /*
+     * Convert a cached Instrument/ index into the visible one-based counter.
+     *
+     * Inputs: type and zero-based browser index. Output: one-based list
+     * position, visually saturated at 999. The current cache cannot exceed 128
+     * entries per type, but the saturation lives here so the UI rule stays with
+     * the browser data source if the cache grows later.
+     */
+    if (type >= INSTRUMENT_TYPE_UNKNOWN ||
+        browser_index >= instrument_file_count[type])
+        return 0u;
+    display_index = (uint16_t)browser_index + 1u;
+    return (display_index > 999u) ? 999u : display_index;
 }
 
 uint8_t filesystem_diagOp(void)

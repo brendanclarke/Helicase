@@ -604,6 +604,22 @@ static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
 
 static void handleModeButtons(uint8_t mode)
 {
+    if (!buttonHandler_getShift() &&
+        mode == SELECT_MODE_LOAD_SAVE &&
+        menu_loadInstrumentIsActive()) {
+        /*
+         * Exit nested Instrument Load mode.
+         *
+         * Inputs: Load/Save mode button while Menu is already browsing
+         * instruments. Output: the normal Load page returns and voice blink
+         * feedback is cleared. This must run before the generic mode switch so
+         * a second Load/Save press does not simply re-enter the same submode.
+         */
+        led_clearAllBlinkLeds();
+        menu_loadInstrumentExit();
+        return;
+    }
+
     if (buttonHandler_getShift() && mode == SELECT_MODE_VOICE) {
         /*
          * SHIFT+VOICE is now persistent morph voice mode.
@@ -827,6 +843,22 @@ static void handleVoiceButton(uint8_t voiceNr)
             copyClear_setSrc((int8_t)voiceNr, MODE_COPY_TRACK);
             led_setBlinkLed((uint8_t)(LED_VOICE1 + voiceNr), 1);
         }
+        return;
+    }
+
+    if (menu_loadInstrumentVoicePressed(voiceNr)) {
+        /*
+         * LOAD_PAGE voice buttons select Instrument Load destination slots.
+         *
+         * Inputs: pressed voice button while Menu is on LOAD_PAGE. Output:
+         * Menu enters/updates Instrument Load mode, active voice LED follows
+         * the selected destination, and that voice blinks until the user exits
+         * Instrument Load. Normal voice selection, mute, page switching, and
+         * stopped-transport preview are skipped for this press.
+         */
+        led_setActiveVoice(voiceNr);
+        led_clearAllBlinkLeds();
+        led_setBlinkLed((uint8_t)(LED_VOICE1 + voiceNr), 1u);
         return;
     }
 

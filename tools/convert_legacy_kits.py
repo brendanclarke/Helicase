@@ -98,14 +98,164 @@ DESCRIPTOR_KEYS = {
         "osc2_wave", "osc2_pitch_coarse", "osc2_mod_amount",
         "osc3_wave", "osc3_pitch_coarse", "osc3_mod_amount",
         "filter_freq", "filter_reso", "filter_drive", "filter_type",
-        "amp_envelope_attack", "amp_envelope_decay_closed",
-        "amp_envelope_decay_open", "amp_envelope_slope", "instrument_vol",
+        "amp_envelope_attack", "amp_envelope_decay",
+        "amp_envelope_decay_choke", "amp_envelope_slope", "instrument_vol",
         "instrument_pan", "instrument_drive", "instrument_decimation",
         "lfo_rate", "lfo_amount", "lfo_wave", "lfo_retrigger_voice",
         "lfo_sync", "lfo_offset", "velo_vol_on_off", "velo_mod_amount",
         "velo_mod_dest", "lfo_target_voice", "lfo_target_param",
         "transient_wave", "transient_vol", "transient_freq",
     ],
+}
+
+DEFAULT_PARAM_RENAMES = {
+    "DRUM": {
+        "osc_wave": "osc1_wave",
+        "coarse": "osc1_pitch_coarse",
+        "fine": "osc1_pitch_fine",
+        "mod_wave": "osc2_wave",
+        "filter_freq": "filter_freq",
+        "reso": "filter_reso",
+        "velo_attack": "amp_envelope_attack",
+        "velo_decay": "amp_envelope_decay",
+        "vol_slope": "amp_envelope_slope",
+        "pitch_decay": "pitch_envelope_decay",
+        "mod_amount": "pitch_envelope_amount",
+        "pitch_slope": "pitch_envelope_slope",
+        "fm_amount": "osc2_mod_amount",
+        "fm_freq": "osc2_pitch_coarse",
+        "volume": "instrument_vol",
+        "pan": "instrument_pan",
+        "drive": "instrument_drive",
+        "voice_decimation": "instrument_decimation",
+        "freq_lfo": "lfo_rate",
+        "amount_lfo": "lfo_amount",
+        "filter_drive": "filter_drive",
+        "mix_mod": "osc2_mod_type",
+        "volume_mod_on_off": "velo_vol_on_off",
+        "velo_mod_amt": "velo_mod_amount",
+        "vel_dest": "velo_mod_dest",
+        "wave_lfo": "lfo_wave",
+        "voice_lfo": "lfo_target_voice",
+        "target_lfo": "lfo_target_param",
+        "retrigger_lfo": "lfo_retrigger_voice",
+        "sync_lfo": "lfo_sync",
+        "offset_lfo": "lfo_offset",
+        "filter_type": "filter_type",
+        "transient_vol": "transient_vol",
+        "transient_wave": "transient_wave",
+        "transient_freq": "transient_freq",
+    },
+    "SNARE": {
+        "osc_wave": "osc1_wave",
+        "coarse": "osc1_pitch_coarse",
+        "fine": "osc1_pitch_fine",
+        "noise_freq": "noise_freq",
+        "mix": "osc1_noise_mix",
+        "filter_freq": "filter_freq",
+        "reso": "filter_reso",
+        "velo_attack": "amp_envelope_attack",
+        "velo_decay": "amp_envelope_decay",
+        "vol_slope": "amp_envelope_slope",
+        "repeat": "amp_attack_repeat",
+        "pitch_decay": "pitch_envelope_decay",
+        "mod_amount": "pitch_envelope_amount",
+        "pitch_slope": "pitch_envelope_slope",
+        "volume": "instrument_vol",
+        "pan": "instrument_pan",
+        "drive": "instrument_drive",
+        "voice_decimation": "instrument_decimation",
+        "freq_lfo": "lfo_rate",
+        "amount_lfo": "lfo_amount",
+        "filter_drive": "filter_drive",
+        "volume_mod_on_off": "velo_vol_on_off",
+        "velo_mod_amt": "velo_mod_amount",
+        "vel_dest": "velo_mod_dest",
+        "wave_lfo": "lfo_wave",
+        "voice_lfo": "lfo_target_voice",
+        "target_lfo": "lfo_target_param",
+        "retrigger_lfo": "lfo_retrigger_voice",
+        "sync_lfo": "lfo_sync",
+        "offset_lfo": "lfo_offset",
+        "filter_type": "filter_type",
+        "transient_vol": "transient_vol",
+        "transient_wave": "transient_wave",
+        "transient_freq": "transient_freq",
+    },
+    "CYMBAL": {
+        "wave1": "osc1_wave",
+        "coarse": "osc1_pitch_coarse",
+        "fine": "osc1_pitch_fine",
+        "mod_osc1_freq": "osc2_pitch_coarse",
+        "mod_osc2_freq": "osc3_pitch_coarse",
+        "mod_osc1_gain": "osc2_mod_amount",
+        "mod_osc2_gain": "osc3_mod_amount",
+        "wave2": "osc2_wave",
+        "wave3": "osc3_wave",
+        "filter_freq": "filter_freq",
+        "reso": "filter_reso",
+        "velo_attack": "amp_envelope_attack",
+        "velo_decay": "amp_envelope_decay",
+        "vol_slope": "amp_envelope_slope",
+        "repeat": "amp_attack_repeat",
+        "volume": "instrument_vol",
+        "pan": "instrument_pan",
+        "drive": "instrument_drive",
+        "voice_decimation": "instrument_decimation",
+        "freq_lfo": "lfo_rate",
+        "amount_lfo": "lfo_amount",
+        "filter_drive": "filter_drive",
+        "volume_mod_on_off": "velo_vol_on_off",
+        "velo_mod_amt": "velo_mod_amount",
+        "vel_dest": "velo_mod_dest",
+        "wave_lfo": "lfo_wave",
+        "voice_lfo": "lfo_target_voice",
+        "target_lfo": "lfo_target_param",
+        "retrigger_lfo": "lfo_retrigger_voice",
+        "sync_lfo": "lfo_sync",
+        "offset_lfo": "lfo_offset",
+        "filter_type": "filter_type",
+        "transient_vol": "transient_vol",
+        "transient_wave": "transient_wave",
+        "transient_freq": "transient_freq",
+    },
+    "HIHAT": {
+        "wave1": "osc1_wave",
+        "coarse": "osc1_pitch_coarse",
+        "fine": "osc1_pitch_fine",
+        "mod_osc1_freq": "osc2_pitch_coarse",
+        "mod_osc2_freq": "osc3_pitch_coarse",
+        "mod_osc1_gain": "osc2_mod_amount",
+        "mod_osc2_gain": "osc3_mod_amount",
+        "wave2": "osc2_wave",
+        "wave3": "osc3_wave",
+        "filter_freq": "filter_freq",
+        "reso": "filter_reso",
+        "velo_attack": "amp_envelope_attack",
+        "decay_closed": "amp_envelope_decay",
+        "decay_open": "amp_envelope_decay_choke",
+        "vol_slope": "amp_envelope_slope",
+        "volume": "instrument_vol",
+        "pan": "instrument_pan",
+        "drive": "instrument_drive",
+        "voice_decimation": "instrument_decimation",
+        "freq_lfo": "lfo_rate",
+        "amount_lfo": "lfo_amount",
+        "filter_drive": "filter_drive",
+        "volume_mod_on_off": "velo_vol_on_off",
+        "velo_mod_amt": "velo_mod_amount",
+        "vel_dest": "velo_mod_dest",
+        "wave_lfo": "lfo_wave",
+        "voice_lfo": "lfo_target_voice",
+        "target_lfo": "lfo_target_param",
+        "retrigger_lfo": "lfo_retrigger_voice",
+        "sync_lfo": "lfo_sync",
+        "offset_lfo": "lfo_offset",
+        "filter_type": "filter_type",
+        "transient_vol": "transient_vol",
+        "transient_wave": "transient_wave",
+        "transient_freq": "transient_freq",
+    },
 }
 
 # Legacy modTargets[] order copied from Core/Menu/Cc2Text.c.
@@ -585,6 +735,9 @@ def parse_param_enum() -> dict[str, int]:
 
 def parse_param_renames() -> dict[str, dict[str, str]]:
     """Return per-instrument legacy-key to file-key renames."""
+    if not PARAM_RENAME_TXT.exists():
+        return {section: dict(rows) for section, rows in DEFAULT_PARAM_RENAMES.items()}
+
     sections: dict[str, dict[str, str]] = {}
     current: str | None = None
 
@@ -741,6 +894,72 @@ def payload_value(payload: bytes, param_values: dict[str, int], param_name: str)
     return payload[index]
 
 
+def legacy_param_symbols_available(param_values: dict[str, int]) -> bool:
+    """Return true when current headers still expose legacy sound PAR_* names."""
+    required = {
+        param_name
+        for rows in INSTRUMENT_PARAMS.values()
+        for _, param_name in rows
+    }
+    required.update(f"PAR_AUDIO_OUT{slot}" for slot in range(1, 7))
+    required.add("PAR_VELOD6_OPEN")
+    return required.issubset(param_values)
+
+
+def first_param_value(path: Path, keys: set[str], default: int = 0) -> int:
+    for raw_line in path.read_text(encoding="ascii").splitlines():
+        if "=" not in raw_line:
+            continue
+        key, value = [part.strip() for part in raw_line.split("=", 1)]
+        if key in keys:
+            try:
+                return int(value, 0)
+            except ValueError:
+                return default
+    return default
+
+
+def upgrade_existing_kit_tree(kit_root: Path) -> int:
+    """Upgrade already-generated Kit/ files when legacy enum symbols are gone."""
+    if not kit_root.exists():
+        raise RuntimeError(
+            f"{kit_root} is missing and current ParameterArray.h no longer "
+            "contains legacy sound PAR_* symbols needed for fresh conversion"
+        )
+
+    upgraded = 0
+    for hat_path in sorted(kit_root.glob("*/*.hat")):
+        text = hat_path.read_text(encoding="ascii")
+        next_text = (
+            text.replace("amp_envelope_decay_closed", "amp_envelope_decay")
+                .replace("amp_envelope_decay_open", "amp_envelope_decay_choke")
+        )
+        if next_text != text:
+            hat_path.write_text(next_text, encoding="ascii")
+            upgraded += 1
+
+    for kitset_path in sorted(kit_root.glob("*/kitset.kcg")):
+        text = kitset_path.read_text(encoding="ascii")
+        if "slot6_track7_amp_envelope_decay=" in text:
+            continue
+        hat_files = sorted(kitset_path.parent.glob("*.hat"))
+        decay = first_param_value(
+            hat_files[0],
+            {"amp_envelope_decay_choke", "amp_envelope_decay_open"},
+            0,
+        ) if hat_files else 0
+        lines = text.splitlines()
+        insert_at = 2 if len(lines) >= 2 and lines[1].startswith("version=") else len(lines)
+        lines[insert_at:insert_at] = [
+            f"slot6_track7_amp_envelope_decay={decay}",
+            f"slot6_track7_morph_amp_envelope_decay={decay}",
+        ]
+        kitset_path.write_text("\n".join(lines) + "\n", encoding="ascii")
+        upgraded += 1
+
+    return upgraded
+
+
 def instrument_values(
     payload: bytes,
     param_values: dict[str, int],
@@ -793,9 +1012,12 @@ def write_kitset(
     payload: bytes,
     param_values: dict[str, int],
 ) -> None:
+    slot6_track7_decay = payload_value(payload, param_values, "PAR_VELOD6_OPEN")
     lines = [
         "format=helicase.kitset",
         "version=1",
+        f"slot6_track7_amp_envelope_decay={slot6_track7_decay}",
+        f"slot6_track7_morph_amp_envelope_decay={slot6_track7_decay}",
         "",
     ]
 
@@ -811,6 +1033,25 @@ def write_kitset(
         ])
 
     path.write_text("\n".join(lines), encoding="ascii")
+
+
+def populate_instrument_root(kit_root: Path, instrument_root: Path) -> int:
+    """Copy converted kit instruments into the flat Instrument/ browser pool."""
+    if instrument_root.exists():
+        shutil.rmtree(instrument_root)
+    instrument_root.mkdir()
+
+    copied = 0
+    for source in sorted(
+        path
+        for path in kit_root.glob("*/*")
+        if path.suffix.lower() in {".drm", ".snr", ".cym", ".hat"}
+    ):
+        kit_prefix = source.parent.name.split(" ", 1)[0]
+        destination = instrument_root / f"{kit_prefix}_{source.name}"
+        shutil.copy2(source, destination)
+        copied += 1
+    return copied
 
 
 def convert_one(
@@ -860,6 +1101,15 @@ def main() -> None:
     canonical_by_param = build_canonical_param_ids(param_renames)
     kit_root = SD_ROOT / "Kit"
 
+    if not legacy_param_symbols_available(param_values):
+        upgraded = upgrade_existing_kit_tree(kit_root)
+        instrument_count = populate_instrument_root(kit_root, SD_ROOT / "Instrument")
+        print(
+            f"upgraded existing {kit_root}; touched {upgraded} files; "
+            f"copied {instrument_count} instruments into {SD_ROOT / 'Instrument'}"
+        )
+        return
+
     # The generated directory is a mirror of the legacy Pxxx.SND files, so stale
     # kit folders or macOS metadata must be removed before writing fresh output.
     if kit_root.exists():
@@ -879,7 +1129,12 @@ def main() -> None:
             canonical_by_param,
         )
 
-    print(f"converted {len(snd_files)} legacy kits into {kit_root}")
+    instrument_count = populate_instrument_root(kit_root, SD_ROOT / "Instrument")
+
+    print(
+        f"converted {len(snd_files)} legacy kits into {kit_root}; "
+        f"copied {instrument_count} instruments into {SD_ROOT / 'Instrument'}"
+    )
 
 
 if __name__ == "__main__":

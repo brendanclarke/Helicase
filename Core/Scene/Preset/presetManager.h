@@ -57,6 +57,7 @@ typedef enum {
     PRESET_OP_ALL_SAVE,
     PRESET_OP_PERFORMANCE_LOAD,
     PRESET_OP_PERFORMANCE_SAVE,
+    PRESET_OP_INSTRUMENT_LOAD,
 } preset_op_type_t;
 
 extern char preset_currentName[8];
@@ -109,6 +110,9 @@ uint8_t preset_loadAll(uint8_t presetNr, uint8_t isAll);
 /* Read 8-byte preset name from file header (any type). */
 char*   preset_loadName(uint8_t presetNr, uint8_t what);
 void    preset_applyLoadedName(void);
+uint8_t preset_loadInstrument(uint8_t destination_slot,
+                              instrument_type_t type,
+                              uint8_t browser_index);
 
 /* Send loaded parameters to DSP synchronously. Use this before audio starts;
 ** runtime load completion should use the chunked apply API below so it cannot
@@ -156,6 +160,10 @@ uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            uint16_t value);
 uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
 void preset_applySceneSettings(uint8_t scene_index);
+uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
+                                              instrument_image_select_t image,
+                                              uint8_t value,
+                                              uint8_t record_automation);
 
 /* Runtime chunked sound apply. preset_tickDrumsetApply() applies one Scene kit
 ** slot's audio routing and non-morph runtime cells per pass, then advances the
@@ -163,6 +171,8 @@ void preset_applySceneSettings(uint8_t scene_index);
 ** operation-specific UI/global follow-up after the tick function reports idle. */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
+void    preset_startInstrumentApply(uint8_t slot);
+uint8_t preset_tickInstrumentApply(void);
 
 /*
  * Scene Morph and Scene performance settings.

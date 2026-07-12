@@ -90,6 +90,23 @@ extern CymbalVoice cymbalVoice;
 //initialize all the parameters to sane values
 void Cymbal_init();
 
+/*
+ * Pointer-based cymbal runtime entry points for dynamic instrument slots.
+ *
+ * Inputs: a caller-owned CymbalVoice instance plus the logical source slot for
+ * trigger/LFO/velocity affiliation where needed. Outputs: the same DSP state
+ * changes as the legacy cymbalVoice wrappers, but suitable for any slot that
+ * currently contains a cymbal instrument. InstrumentManager owns the dynamic
+ * pools and calls these helpers; fixed-slot code can keep using the wrappers.
+ */
+void Cymbal_initVoice(CymbalVoice *voice);
+void Cymbal_setPanVoice(CymbalVoice *voice, const uint8_t pan);
+void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
+                         const uint8_t vel, const uint8_t note);
+void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
+                               const uint8_t size);
+void Cymbal_calcAsyncVoice(CymbalVoice *voice);
+
 void Cymbal_trigger( const uint8_t vel, const uint8_t note);
 
 void Cymbal_calcSyncBlock(int16_t* buf, const uint8_t size);

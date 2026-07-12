@@ -58,6 +58,9 @@ static volatile preset_status_t  pm_status = PRESET_IDLE;
 static volatile preset_op_type_t pm_completed_op = PRESET_OP_NONE;
 static volatile uint8_t          pm_request_slot = 0;
 static volatile uint8_t          pm_request_type = SAVE_TYPE_KIT;
+static volatile uint8_t          pm_instrument_request_slot = 0u;
+static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_UNKNOWN;
+static volatile uint8_t          pm_instrument_request_index = 0u;
 
 /* Runtime loaded-kit apply cursor.
  *
@@ -78,6 +81,9 @@ static volatile uint8_t          pm_request_type = SAVE_TYPE_KIT;
  */
 static uint8_t drumset_apply_active = 0;
 static uint8_t drumset_apply_voice = 0;
+static uint8_t instrument_apply_active = 0u;
+static uint8_t instrument_apply_voice = 0u;
+static uint8_t instrument_apply_voice_done = 0u;
 static uint8_t preset_morph_initialized = 0;
 
 preset_status_t preset_getStatus(void)
@@ -156,6 +162,11 @@ static void on_performance_load_complete(void)
 static void on_name_load_complete(void)
 {
     preset_completeFilesystemOp(PRESET_OP_NAME_LOAD);
+}
+
+static void on_instrument_load_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_LOAD);
 }
 
 static void on_kit_save_complete(void)
@@ -500,6 +511,35 @@ uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot)
     return 1u;
 }
 
+uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
+                                              instrument_image_select_t image,
+                                              uint8_t value,
+                                              uint8_t record_automation)
+{
+    (void)record_automation;
+
+    /*
+     * Retain the generated non-Choke track-7 decay endpoint.
+     *
+     * Inputs: Scene index, endpoint image selector, 0..127 value, and the
+     * normal automation-recording flag used by Menu edits. Output: the
+     * generated Kit setting is updated in SceneData. This function exists
+     * beside descriptor setters because the generated value has no descriptor
+     * index and must never be saved into an instrument file. Future Scene mod
+     * target work can extend this boundary with runtime apply/automation
+     * capture without teaching Menu the kit_settings_t layout.
+     */
+    if (!scene_get(scene_index))
+        return 0u;
+    if (value > 127u)
+        value = 127u;
+    if (image == INSTRUMENT_IMAGE_MORPH)
+        scene_setSlot6Track7MorphAmpEnvelopeDecay(scene_index, value);
+    else
+        scene_setSlot6Track7AmpEnvelopeDecay(scene_index, value);
+    return 1u;
+}
+
 void preset_applySceneSettings(uint8_t scene_index)
 {
     const scene_t *scene = scene_getConst(scene_index);
@@ -533,9 +573,10 @@ void preset_applySceneSettings(uint8_t scene_index)
  *
  * Inputs: active Scene index and zero-based slot. Outputs: mixer route,
  * non-morph runtime cells are applied through typed Preset setters. Clients are
- * synchronous boot apply and preset_tickDrumsetApply().
+ * synchronous boot apply, preset_tickDrumsetApply(), and the one-slot
+ * Instrument Load apply cursor.
  */
-static void preset_applyDrumsetVoice(uint8_t voice)
+static void preset_applyKitVoice(uint8_t voice)
 {
     uint8_t scene_index = scene_getActiveIndex();
     const kit_instrument_slot_t *instrument =
@@ -571,7 +612,7 @@ void preset_sendDrumsetParameters(void)
 
     preset_applySceneSettings(scene_getActiveIndex());
     for (voice = 0; voice < 6u; voice++)
-        preset_applyDrumsetVoice(voice);
+        preset_applyKitVoice(voice);
 
     while (presetMorph_tick()) {
         /* Boot-time synchronous path: audio has not started, so drain the
@@ -595,7 +636,7 @@ uint8_t preset_tickDrumsetApply(void)
         return 0u;
 
     if (drumset_apply_voice < INSTRUMENT_SLOT_COUNT) {
-        preset_applyDrumsetVoice(drumset_apply_voice);
+        preset_applyKitVoice(drumset_apply_voice);
         drumset_apply_voice++;
         return 1u;
     }
@@ -604,6 +645,51 @@ uint8_t preset_tickDrumsetApply(void)
         return 1u;
 
     drumset_apply_active = 0u;
+    return 0u;
+}
+
+void preset_startInstrumentApply(uint8_t slot)
+{
+    /*
+     * Arm a bounded apply pass for one loaded Instrument slot.
+     *
+     * Input: zero-based kit slot that was replaced by Instrument Load. Output:
+     * a small foreground cursor applies that slot's routing/supplemental cells
+     * and queues Morph for the same slot only. This is separate from
+     * preset_startDrumsetApply() because single-instrument browsing should not
+     * reapply Scene settings or all six voices for every list movement.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT) {
+        instrument_apply_active = 0u;
+        return;
+    }
+    preset_ensureMorphInitialized();
+    presetMorph_requestVoice(scene_getActiveIndex(), slot);
+    instrument_apply_active = 1u;
+    instrument_apply_voice = slot;
+    instrument_apply_voice_done = 0u;
+}
+
+uint8_t preset_tickInstrumentApply(void)
+{
+    /*
+     * Advance the one-slot Instrument Load apply cursor.
+     *
+     * Inputs: none; state was armed by preset_startInstrumentApply(). Output:
+     * nonzero while foreground work remains. The first tick applies the slot's
+     * non-morph affiliates, then subsequent ticks drain the Morph worker's
+     * descriptor interpolation/application queue.
+     */
+    if (!instrument_apply_active)
+        return 0u;
+    if (!instrument_apply_voice_done) {
+        preset_applyKitVoice(instrument_apply_voice);
+        instrument_apply_voice_done = 1u;
+        return 1u;
+    }
+    if (presetMorph_tick())
+        return 1u;
+    instrument_apply_active = 0u;
     return 0u;
 }
 /* -----------------------------------------------------------------------
@@ -698,6 +784,34 @@ char* preset_loadName(uint8_t presetNr, uint8_t what)
 void preset_applyLoadedName(void)
 {
     memcpy(preset_currentName, filesystem_loadedName(), 8);
+}
+
+uint8_t preset_loadInstrument(uint8_t destination_slot,
+                              instrument_type_t type,
+                              uint8_t browser_index)
+{
+    /*
+     * Request one Instrument/ file load into one kit slot.
+     *
+     * Inputs: destination slot, selected instrument type, and browser index in
+     * filesystem's per-type cache. Output: asynchronous filesystem request is
+     * posted and Preset records enough context for Menu to start a one-slot
+     * apply after completion. This cannot reuse preset_loadDrumset() because
+     * that path addresses numbered Kit folders and applies all six slots.
+     */
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = destination_slot;
+    pm_request_type = SAVE_TYPE_KIT;
+    pm_instrument_request_slot = destination_slot;
+    pm_instrument_request_type = type;
+    pm_instrument_request_index = browser_index;
+    if (filesystem_requestLoadInstrument(destination_slot, type, browser_index,
+                                         on_instrument_load_complete))
+        return 1u;
+    pm_status = PRESET_IDLE;
+    return 0u;
 }
 
 /* =======================================================================

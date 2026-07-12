@@ -12,6 +12,16 @@
  * menu labels, dtype, morph/mod/automation capability flags, and runtime
  * binding into SnareVoice or a supplemental binding kind.
  */
+/*
+ * Load-menu type metadata for Snare instruments.
+ *
+ * Inputs/outputs: InstrumentManager imports this immutable label and flag
+ * byte into the central registry. Clients read it through registry accessors
+ * instead of hardcoding "Snare" or Basic policy in Menu/filesystem code.
+ * Affiliates are the Instrument Load browser and assignment-limit checks.
+ */
+const char snare_instrument_display_label[] = "Snare";
+const uint8_t snare_instrument_type_flags = SNARE_INSTRUMENT_TYPE_FLAGS;
 
 /*
  * FLAGS_IMAGE marks a normal sound parameter image cell: the value is stored

@@ -67,6 +67,10 @@ typedef struct {
 #define INSTRUMENT_PARAM_FLAG_MODULATABLE     0x02u
 #define INSTRUMENT_PARAM_FLAG_AUTOMATABLE     0x04u
 
+#define INSTRUMENT_FLAG_BASIC                 0x01u
+#define INSTRUMENT_FLAG_ADVANCED              0x02u
+#define INSTRUMENT_FLAG_CHOKE                 0x04u
+
 typedef struct {
     const char *file_key;
     const char *short_name;
@@ -97,7 +101,9 @@ typedef struct {
 typedef struct {
     instrument_type_t type;
     const char *type_text;
+    const char *display_label;
     const char *extension;
+    uint8_t type_flags;
     const ParamDescriptor *descriptors;
     uint8_t descriptor_count;
     const instrument_menu_page_t *menu_pages;
@@ -111,7 +117,16 @@ uint8_t instrumentParam_local(instrument_param_id_t id);
 
 const instrument_registry_entry_t *instrumentManager_registryEntry(
     instrument_type_t type);
+uint8_t instrumentManager_registryCount(void);
+const instrument_registry_entry_t *instrumentManager_registryEntryAt(
+    uint8_t index);
 instrument_type_t instrumentManager_typeFromText(const char *text);
+const char *instrumentManager_typeDisplayLabel(instrument_type_t type);
+uint8_t instrumentManager_typeFlags(instrument_type_t type);
+uint8_t instrumentManager_advancedCountForScene(uint8_t scene_index,
+                                                uint8_t ignore_slot);
+uint8_t instrumentManager_typeSelectableForSceneSlot(
+    uint8_t scene_index, uint8_t destination_slot, instrument_type_t candidate);
 uint8_t instrumentManager_filenameMatchesType(const char *filename,
                                                instrument_type_t type);
 const ParamDescriptor *instrumentManager_descriptor(instrument_type_t type,
@@ -128,6 +143,8 @@ const ParamDescriptor *instrumentManager_menuDescriptorIndex(
 const ParamDescriptor *instrumentManager_voicePageDescriptorIndex(
     instrument_type_t type, uint8_t voice_page, uint8_t page, uint8_t position,
     uint8_t *index_out);
+uint8_t instrumentManager_chokeDescriptorIndexForBase(
+    instrument_type_t type, uint8_t base_index, uint8_t *choke_index_out);
 /*
  * Find an instrument descriptor by runtime binding kind.
  *
@@ -258,6 +275,30 @@ void instrumentManager_updateLfoSceneTarget(uint8_t source_slot,
                                             float lfo_value_0_1,
                                             uint8_t polarity,
                                             float amount);
+/*
+ * Dynamic instrument runtime dispatcher.
+ *
+ * Inputs: logical slot/track numbers from SceneData, MIDI, mixer, and LFO
+ * timing. Outputs: the current slot type selects the correct voice engine
+ * instance for initialization, trigger, control-rate updates, audio-block
+ * rendering, pan lookup, filter refresh, and LFO dispatch/retrigger. These
+ * functions exist as a family because folding every case into callers would
+ * recreate the fixed Drum/Snare/Cymbal/HiHat slot table in multiple modules.
+ *
+ * Slots are zero-based storage/render voices 0..5. Trigger tracks are
+ * zero-based 0..6, where track 6 is the slot-6 choke/alternate trigger.
+ */
+void instrumentManager_runtimeInit(void);
+void instrumentManager_dispatchRuntimeLfos(void);
+void instrumentManager_recalcRuntimeLfoSync(void);
+void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track);
+void instrumentManager_recalcSlotFilter(uint8_t slot);
+void instrumentManager_calcSlotAsync(uint8_t slot);
+void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
+                                         uint8_t size);
+uint8_t instrumentManager_runtimePan(uint8_t slot);
+void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
+                                    uint8_t velocity);
 void *instrumentManager_runtimeInstance(uint8_t slot);
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,

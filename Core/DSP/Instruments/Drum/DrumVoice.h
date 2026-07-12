@@ -115,6 +115,25 @@ extern DrumVoice voiceArray[NUM_VOICES];
 //initialize all the parameters to sane values
 void initDrumVoice();
 
+/*
+ * Pointer-based drum runtime entry points for dynamic instrument slots.
+ *
+ * Inputs: a DrumVoice instance owned by the caller plus the logical source
+ * slot for trigger/LFO/velocity affiliation where needed. Outputs: the same
+ * DSP state changes as the legacy voiceArray wrappers below, but without
+ * requiring the instrument to live in one of the three original drum slots.
+ * Clients are InstrumentManager's six-slot runtime dispatcher; the legacy
+ * wrappers remain for old fixed-slot code and call these helpers.
+ */
+void Drum_initVoice(DrumVoice *voice, uint8_t seed_index);
+void Drum_setPanVoice(DrumVoice *voice, const uint8_t pan);
+void Drum_setPhaseVoice(DrumVoice *voice, const uint8_t phase);
+void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
+                       const uint8_t vol, const uint8_t note);
+void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf,
+                             const uint8_t size);
+void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync);
+
 void Drum_trigger(const uint8_t voiceNr, const uint8_t vol, const uint8_t note);
 
 /** block based calculation*/

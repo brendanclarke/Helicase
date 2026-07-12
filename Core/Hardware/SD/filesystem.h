@@ -45,6 +45,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "InstrumentManager.h"
 
 typedef enum {
     FS_FILE_KIT = 0,
@@ -68,6 +69,7 @@ typedef enum {
     FS_OP_LOAD,
     FS_OP_SAVE,
     FS_OP_SCAN_KITS,
+    FS_OP_SCAN_INSTRUMENTS,
     FS_OP_LOAD_NAME,
 } fs_op_kind_t;
 
@@ -98,6 +100,11 @@ bool filesystem_requestLoad(fs_file_type_t type, uint8_t slot, fs_completion_cb_
 bool filesystem_requestSave(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb);
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
+bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
+bool filesystem_requestLoadInstrument(uint8_t destination_slot,
+                                      instrument_type_t type,
+                                      uint8_t browser_index,
+                                      fs_completion_cb_t cb);
 uint8_t filesystem_installSamplesBlocking(void);
 uint8_t filesystem_installLoopsBlocking(void);
 
@@ -128,6 +135,11 @@ uint8_t     filesystem_kitSlotExists(uint8_t zero_based_slot);
  * the directory cache instead of reading legacy .SND headers.
  */
 const char *filesystem_kitSlotName(uint8_t zero_based_slot);
+uint8_t     filesystem_instrumentCount(instrument_type_t type);
+const char *filesystem_instrumentName(instrument_type_t type,
+                                      uint8_t browser_index);
+uint16_t    filesystem_instrumentDisplayIndex(instrument_type_t type,
+                                               uint8_t browser_index);
 uint8_t     filesystem_diagOp(void);
 uint8_t     filesystem_diagPhase(void);
 uint32_t    filesystem_diagBytesDone(void);

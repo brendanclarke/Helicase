@@ -31,12 +31,37 @@
 #define STORAGE_SECTION_MORPH   2u
 
 /*
- * Longest current descriptor key is "amp_envelope_decay_closed" at 25 bytes.
+ * Longest legacy descriptor key is "amp_envelope_decay_closed" at 25 bytes.
  * Keep parser scratch wider than the descriptor namespace so storage lookup
  * fails only for genuinely unknown keys, not because a valid key was truncated
  * before instrumentManager_descriptorIndexByKey() sees it.
  */
 #define STORAGE_INSTRUMENT_KEY_MAX 32u
+
+static const char *storage_canonicalInstrumentKey(
+    storage_instrument_type_t type, const char *key)
+{
+    /*
+     * Translate legacy on-card keys into current descriptor keys.
+     *
+     * Inputs: expected instrument type and the parsed assignment key. Output:
+     * canonical descriptor key to pass to InstrumentManager. This helper keeps
+     * compatibility at the storage boundary: descriptor tables expose only the
+     * current names, while older `.hat` files using closed/open decay keys keep
+     * loading without duplicate legacy descriptor rows.
+     *
+     * Clients: storage_instrumentParseLine(). Affiliates:
+     * HiHatParameters.c's canonical amp_envelope_decay and
+     * amp_envelope_decay_choke descriptors plus generated SD_CARD data.
+     */
+    if (type == STORAGE_INSTRUMENT_HAT) {
+        if (strcmp(key, "amp_envelope_decay_closed") == 0)
+            return "amp_envelope_decay";
+        if (strcmp(key, "amp_envelope_decay_open") == 0)
+            return "amp_envelope_decay_choke";
+    }
+    return key;
+}
 
 /* Exact string comparison helper.
  *
@@ -311,6 +336,44 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
             if (parsed != 1u)
                 return STORAGE_STATUS_UNSUPPORTED_VERSION;
             kit->seen_version = 1u;
+        } else if (storage_streq(key, "slot6_track7_amp_envelope_decay")) {
+            /*
+             * Optional generated non-Choke track-7 decay endpoint.
+             *
+             * Inputs: top-level kitset key in the normal 0..127 parameter
+             * domain. Output: target_kit retains the generated main endpoint
+             * used when track 7 triggers a non-Choke instrument assigned to
+             * slot 6. This is kit-owned metadata, not an instrument-file
+             * descriptor, so it is parsed from kitset.kcg rather than any
+             * `.drm`/`.snr`/`.cym`/`.hat` file.
+             */
+            if (!target_kit)
+                return STORAGE_STATUS_BAD_VALUE;
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
+            if (parsed > 127u)
+                parsed = 127u;
+            target_kit->settings.slot6_track7_amp_envelope_decay = parsed;
+        } else if (storage_streq(key,
+                    "slot6_track7_morph_amp_envelope_decay")) {
+            /*
+             * Optional generated non-Choke track-7 Morph endpoint.
+             *
+             * Inputs: top-level kitset key. Output: target_kit retains the
+             * Morph-side endpoint for the same generated track-7 decay
+             * parameter. It is optional for backward compatibility; missing
+             * keys leave SceneData defaults in place.
+             */
+            if (!target_kit)
+                return STORAGE_STATUS_BAD_VALUE;
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
+            if (parsed > 127u)
+                parsed = 127u;
+            target_kit->settings.slot6_track7_morph_amp_envelope_decay =
+                parsed;
         }
         return STORAGE_STATUS_OK;
     }
@@ -442,9 +505,11 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
 
     {
         uint8_t index;
+        const char *canonical_key =
+            storage_canonicalInstrumentKey(state->expected_type, key);
         const ParamDescriptor *descriptor =
-            instrumentManager_descriptorIndexByKey(state->expected_type, key,
-                                                   &index);
+            instrumentManager_descriptorIndexByKey(state->expected_type,
+                                                   canonical_key, &index);
         if (!descriptor)
             return STORAGE_STATUS_OK;
         if (!slot || slot->type != state->expected_type)

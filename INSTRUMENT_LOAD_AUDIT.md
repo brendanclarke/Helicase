@@ -7,12 +7,73 @@ decay, and the Load-page single-instrument workflow.
 This revision is based on the live code only. The reference/specification docs
 are not used as source of truth here.
 
+## Work Log
+
+- Implemented slice 1: registry labels/flags, HiHat canonical
+  `amp_envelope_decay` / `amp_envelope_decay_choke` keys, removal of
+  `hihat_open_menu_pages[]`, generic VOICE7 `_choke` descriptor substitution,
+  and storage aliases for old HiHat closed/open keys.
+- Verification after slice 1: `make` succeeds. The only linker output is the
+  existing nano libc syscall warnings for `_close`, `_lseek`, `_read`, and
+  `_write`.
+- Implemented slice 2 part A: generated slot-6/track-7 amp decay storage in
+  `kit_settings_t`, SceneData accessors, Preset setter, Menu generated cell
+  kind, VOICE7 non-Choke menu substitution, and optional kitset keys
+  `slot6_track7_amp_envelope_decay` /
+  `slot6_track7_morph_amp_envelope_decay`.
+- Verification after slice 2 part A: `make` succeeds with the same existing
+  nano libc syscall warnings.
+- Implemented slice 3 backend: private per-type `Instrument/` scan cache,
+  `filesystem_requestScanInstruments()`, Instrument cache accessors,
+  `filesystem_requestLoadInstrument()`, async single-instrument loader,
+  `PRESET_OP_INSTRUMENT_LOAD`, `preset_loadInstrument()`, one-slot Preset
+  apply cursor, and Menu completion handling for that cursor.
+- Verification after slice 3 backend: `make` succeeds with the same existing
+  nano libc syscall warnings.
+- Implemented slice 4 UI: boot-time `Instrument/` scan, nested Load
+  Instrument state inside `LOAD_PAGE`, type/file encoder handling, immediate
+  `preset_loadInstrument()` requests on selection changes, Instrument Load
+  repaint, VOICE-button entry/selection, blinking destination voice, and
+  Load/Save-button exit back to normal Load.
+- Verification after slice 4 UI: `make` succeeds with the same existing nano
+  libc syscall warnings.
+- Corrected Instrument Load entry behavior: pressing a VOICE button now enters
+  Instrument Load and selects/blinks the destination slot without immediately
+  replacing the slot. Encoder movement in the type/file rows still performs the
+  immediate load.
+- Implemented slice 5 runtime dispatch: added pointer-based voice-engine entry
+  points for Drum, Snare, Cymbal, and HiHat; added InstrumentManager-owned
+  per-type runtime slot pools while preserving legacy native globals for their
+  original slots; changed mixer LFO/filter/async/sync rendering to a six-slot
+  type-dispatched loop; changed `MidiVoiceControl` trigger dispatch to
+  `instrumentManager_triggerTrack()`, including track 7 as slot 6 alternate.
+- Runtime host note: the coding phase did not use the exact union-shaped host
+  proposed below. The live implementation uses per-type pools plus slot/type
+  dispatch because that preserves old native globals for compatibility with
+  remaining legacy callers while still allowing duplicate instrument types.
+- Implemented slice 6 generated track-7 decay target: non-Choke slot 6 now
+  swaps to the generated Scene kit setting when track 7 triggers it, restores
+  the normal base/morph decay when track 6 triggers it, and exposes the hidden
+  value as a Scene modulation target named `7dc`. LFO modulation uses a
+  runtime-only override; velocity targeting writes the retained kit setting.
+- Implemented slice 7 SD card/converter: `tools/convert_legacy_kits.py` now
+  emits the new HiHat keys and slot-6 alternate decay kit settings during fresh
+  conversion, has a safe upgrade fallback when the current headers no longer
+  expose legacy sound `PAR_*` symbols, and populates `SD_CARD/Instrument/`.
+  Running it upgraded 62 Kit files and copied 186 instrument files.
+- Verification after runtime/data slices: `python3 tools/convert_legacy_kits.py`
+  succeeds. `make -B` succeeds. Remaining build warnings are existing
+  low-level/USB/libc warnings: unused `eraseCount` in asyncfatfs, ignored
+  `packed` attribute in USB packet helpers, nano libc `_close/_lseek/_read/_write`,
+  and LTO serial compilation notes.
+
 ## Executive Findings
 
 The requested feature is larger than a browser plus parser operation.
 
-The current Scene kit model is already generic enough to store six slots with
-different `instrument_type_t` values, but the DSP runtime is still type-fixed:
+At audit time, the Scene kit model was already generic enough to store six
+slots with different `instrument_type_t` values, but the DSP runtime was still
+type-fixed:
 
 - slots 1-3 are `DrumVoice voiceArray[0..2]`
 - slot 4 is the single global `snareVoice`
@@ -20,12 +81,10 @@ different `instrument_type_t` values, but the DSP runtime is still type-fixed:
 - slot 6/7 is the single global `hatVoice`
 
 `instrumentManager_runtimeInstance()`, `instrumentManager_osc()`,
-`instrumentManager_filter()`, `MidiVoiceControl.c`, and `mixer.c` all enforce
-that layout. Therefore a file load can currently change the Scene descriptor
-images, but it cannot make an arbitrary slot actually render an arbitrary
-instrument type. The coding phase must introduce a real per-slot runtime host
-before the Load Instrument menu can honestly load any instrument into a voice
-slot.
+`instrumentManager_filter()`, `MidiVoiceControl.c`, and `mixer.c` all enforced
+that layout. The coding phase has now replaced those hot paths with
+InstrumentManager slot/type dispatch so a file load changes the storage image
+and the audio object that trigger/render paths use.
 
 ## Current Code Anchors
 
@@ -44,10 +103,11 @@ slot.
 - `Core/Scene/Preset/presetManager.c` applies loaded Scene state into runtime
   DSP objects in bounded foreground chunks.
 - `Core/Menu/menu.c` resolves dynamic VOICE cells from the current slot type.
-  It still has a HiHat-only VOICE7 alternate layout through
-  `instrumentManager_voicePageDescriptorIndex()`.
-- `Core/MIDI/MidiVoiceControl.c` and `Core/DSPAudio/mixer.c` are fixed to the
-  old physical type layout and must be part of this feature.
+  VOICE7 alternate cells now use generic `_choke` descriptor substitution or
+  the generated slot-6 track-7 decay cell.
+- `Core/MIDI/MidiVoiceControl.c` and `Core/DSPAudio/mixer.c` now dispatch
+  triggers/rendering through InstrumentManager's active slot type instead of
+  the old fixed physical type layout.
 
 ## Implementation Order
 
@@ -809,11 +869,12 @@ Code changes:
 - Update HiHat descriptor keys to canonical names:
   - legacy closed value writes `amp_envelope_decay`
   - legacy open value writes `amp_envelope_decay_choke`
-- Update the script descriptor key lists to match current C descriptors,
-  including `lfo_amount_2`, `lfo_polarity`, `lfo_target_voice_2`, and
-  `lfo_target_param_2`.
-- Emit kit settings for generated slot-6 track-7 decay when the slot-6 type is
-  non-Choke and has `amp_envelope_decay`.
+- Keep the script descriptor key lists sufficient for all legacy payload
+  values. New descriptor rows that have no legacy source value, such as second
+  LFO target cells, continue to default through firmware load/reset behavior.
+- Emit kit settings for generated slot-6 track-7 decay for every generated or
+  upgraded kit. Existing Choke instruments ignore the generated setting at
+  trigger time, while non-Choke slot-6 replacements can use it immediately.
 - Generate `SD_CARD/Instrument/`.
 - Copy every generated instrument file from every kit directory into
   `SD_CARD/Instrument/`.
@@ -850,7 +911,7 @@ Manual behavior checks:
 
 - Existing Kit load still loads all current kits.
 - Old `.hat` files with `amp_envelope_decay_closed/open` still load through
-  aliases, or regenerated SD files use only canonical keys.
+  aliases; regenerated and upgraded SD files now use only canonical keys.
 - HiHat in slot 6:
   - VOICE6 shows base `amp_envelope_decay`
   - VOICE7 shows `amp_envelope_decay_choke`

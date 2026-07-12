@@ -229,6 +229,75 @@ void scene_setAllVoiceMorphAmounts(uint8_t scene_index, uint8_t amount)
         scene->settings.voice_morph_amount[slot] = amount;
 }
 
+void scene_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index, uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Store the generated slot-6 track-7 base decay endpoint.
+     *
+     * Inputs: resident Scene index and a 0..127 menu-domain decay value.
+     * Output: Kit settings retain the value used when track 7 triggers a
+     * non-Choke instrument assigned to slot 6. This cannot be folded into the
+     * descriptor-image setters because the value is not part of any instrument
+     * file and has no descriptor index.
+     */
+    if (!scene)
+        return;
+    if (value > 127u)
+        value = 127u;
+    scene->kit.settings.slot6_track7_amp_envelope_decay = value;
+}
+
+uint8_t scene_getSlot6Track7AmpEnvelopeDecay(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /*
+     * Read the generated slot-6 track-7 base decay endpoint.
+     *
+     * Input: resident Scene index. Output: retained 0..127 value, or 0 for an
+     * invalid Scene. Clients are Menu display, Preset apply, storage, and the
+     * track-7 trigger path.
+     */
+    return scene ? scene->kit.settings.slot6_track7_amp_envelope_decay : 0u;
+}
+
+void scene_setSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index,
+                                               uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Store the generated slot-6 track-7 Morph decay endpoint.
+     *
+     * Inputs: resident Scene index and 0..127 value. Output: Kit settings
+     * retain the Morph-side endpoint for the generated non-Choke track-7 decay
+     * parameter. It stays separate from Scene voice_morph_amount[], which is
+     * the interpolation amount rather than an endpoint.
+     */
+    if (!scene)
+        return;
+    if (value > 127u)
+        value = 127u;
+    scene->kit.settings.slot6_track7_morph_amp_envelope_decay = value;
+}
+
+uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /*
+     * Read the generated slot-6 track-7 Morph decay endpoint.
+     *
+     * Input: resident Scene index. Output: retained 0..127 Morph endpoint, or
+     * 0 for invalid scenes. Preset/Morph code uses this with the slot-6 voice
+     * Morph amount to derive the runtime generated decay.
+     */
+    return scene ? scene->kit.settings.slot6_track7_morph_amp_envelope_decay
+                 : 0u;
+}
+
 void scene_initAll(void)
 {
     uint8_t scene_index;

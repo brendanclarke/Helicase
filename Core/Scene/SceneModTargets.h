@@ -9,6 +9,16 @@ typedef uint16_t scene_mod_target_id_t;
 typedef enum {
     SCENE_MOD_TARGET_KIND_VOICE_MORPH = 0,
     SCENE_MOD_TARGET_KIND_DECIMATION_ALL,
+    /*
+     * Generated slot-6 alternate decay.
+     *
+     * This Scene target is not owned by an instrument descriptor because it is
+     * created when a non-Choke instrument on slot 6 needs a track-7 alternate
+     * amp_envelope_decay. Inputs/outputs route through kit_settings_t rather
+     * than through a slot descriptor, while InstrumentManager consumes the
+     * value at trigger time.
+     */
+    SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY,
     SCENE_MOD_TARGET_KIND_EFFECT_PARAMETER
 } scene_mod_target_kind_t;
 

@@ -55,14 +55,104 @@ INCCMZ DrumVoice voiceArray[NUM_VOICES];
 //---------------------------------------------------
 void setPan(const uint8_t voiceNr, const uint8_t pan)
 {
-	voiceArray[voiceNr].pan = pan;
+	Drum_setPanVoice(&voiceArray[voiceNr], pan);
+}
+//---------------------------------------------------
+void Drum_setPanVoice(DrumVoice *voice, const uint8_t pan)
+{
+	/*
+	 * Set pan on an explicit drum runtime instance.
+	 *
+	 * Inputs: caller-owned DrumVoice and raw 0..127 pan. Output: the instance
+	 * pan field changes; mixer owns translating that byte through square-root
+	 * gain tables. This cannot be folded into setPan() because dynamic
+	 * Instrument Load slots are not always addressable through voiceArray[].
+	 */
+	if(!voice)
+		return;
+	voice->pan = pan;
 }
 //---------------------------------------------------
 void drum_setPhase(const uint8_t phase, const uint8_t voiceNr)
 {
+	Drum_setPhaseVoice(&voiceArray[voiceNr], phase);
+}
+//---------------------------------------------------
+void Drum_setPhaseVoice(DrumVoice *voice, const uint8_t phase)
+{
 	const uint32_t startPhase = (phase/127.f)*0xffffffff;
-	voiceArray[voiceNr].osc.startPhase = startPhase;
-	voiceArray[voiceNr].modOsc.startPhase = startPhase;
+	/*
+	 * Set oscillator start phase on one explicit drum instance.
+	 *
+	 * Inputs: DrumVoice pointer and storage byte. Output: both drum
+	 * oscillators receive the same 32-bit start phase. The helper exists
+	 * because InstrumentManager applies descriptor writes to the selected slot
+	 * instance directly; the old drum_setPhase() wrapper cannot address extra
+	 * dynamic drum slots.
+	 */
+	if(!voice)
+		return;
+	voice->osc.startPhase = startPhase;
+	voice->modOsc.startPhase = startPhase;
+}
+//---------------------------------------------------
+void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
+{
+	/*
+	 * Initialize one drum runtime instance.
+	 *
+	 * Inputs: caller-owned DrumVoice and a small seed index used only for the
+	 * original test waveform spread. Output: all DSP subobjects are placed in
+	 * the same sane state initDrumVoice() previously gave voiceArray entries.
+	 * InstrumentManager calls this for per-slot runtime pools; keeping it here
+	 * avoids duplicating oscillator/envelope/filter defaults outside DrumVoice.
+	 */
+	if(!voice)
+		return;
+
+	SnapEg_init(&voice->snapEg);
+	Drum_setPanVoice(voice,64);
+	voice->vol = 0.8f;
+	//voice->panModifier = 1.f;
+	voice->fmModAmount = 0.5f;
+	transient_init(&voice->transGen);
+#if ENABLE_DRUM_SVF
+	SVF_init(&voice->filter);
+	voice->filterType = 0x01;
+#endif
+	lfo_init(&voice->lfo);
+
+	voice->modOsc.freq = 440;
+	voice->modOsc.waveform = 1;
+	voice->modOsc.fmMod = 0;
+	voice->modOsc.midiFreq = 70<<8;
+	voice->modOsc.pitchMod = 1.0f;
+	voice->modOsc.modNodeValue = 1;
+
+	voice->volumeMod = 1;
+
+	voice->osc.freq = 440;
+	voice->osc.modNodeValue = 1;
+	voice->osc.waveform = TRI+seed_index; //for testing init to tri,saw,rec
+	voice->osc.fmMod = 0;
+	voice->osc.midiFreq = 70<<8;
+
+	DecayEg_init(&voice->oscPitchEg);
+	voice->egPitchModAmount = 0.5f;
+
+	slopeEg2_init(&voice->oscVolEg);
+	setDistortionShape(&voice->distortion, 2.f);
+
+#ifdef USE_AMP_FILTER
+	initOnePole(&voice->ampFilter);
+	setOnePoleCoef(&voice->ampFilter,ampSmoothValue);
+#endif
+
+#if ENABLE_MIX_OSC
+	voice->mixOscs = true;
+#endif
+	voice->decimationCnt = 0;
+	voice->decimationRate = 1;
 }
 //---------------------------------------------------
 void initDrumVoice()
@@ -72,61 +162,34 @@ void initDrumVoice()
 	int i;
 	for(i=0;i<NUM_VOICES;i++)
 	{
-
-		SnapEg_init(&voiceArray[i].snapEg);
-		setPan(i,64);
-		voiceArray[i].vol = 0.8f;
-		//voiceArray[i].panModifier = 1.f;
-		voiceArray[i].fmModAmount = 0.5f;
-		transient_init(&voiceArray[i].transGen);
-#if ENABLE_DRUM_SVF
-		SVF_init(&voiceArray[i].filter);
-		voiceArray[i].filterType = 0x01;
-#endif
-		lfo_init(&voiceArray[i].lfo);
-
-		voiceArray[i].modOsc.freq = 440;
-		voiceArray[i].modOsc.waveform = 1;
-		voiceArray[i].modOsc.fmMod = 0;
-		voiceArray[i].modOsc.midiFreq = 70<<8;
-		voiceArray[i].modOsc.pitchMod = 1.0f;
-		voiceArray[i].modOsc.modNodeValue = 1;
-
-		voiceArray[i].volumeMod = 1;
-
-		voiceArray[i].osc.freq = 440;
-		voiceArray[i].osc.modNodeValue = 1;
-		voiceArray[i].osc.waveform = TRI+i; //for testing init to tri,saw,rec
-		voiceArray[i].osc.fmMod = 0;
-		voiceArray[i].osc.midiFreq = 70<<8;
-
-		DecayEg_init(&voiceArray[i].oscPitchEg);
-		voiceArray[i].egPitchModAmount = 0.5f;
-
-		slopeEg2_init(&voiceArray[i].oscVolEg);
-		setDistortionShape(&voiceArray[i].distortion, 2.f);
-
-#ifdef USE_AMP_FILTER
-		initOnePole(&voiceArray[i].ampFilter);
-		setOnePoleCoef(&voiceArray[i].ampFilter,ampSmoothValue);
-#endif
-
-#if ENABLE_MIX_OSC
-		voiceArray[i].mixOscs = true;
-#endif
-		voiceArray[i].decimationCnt = 0;
-		voiceArray[i].decimationRate = 1;
-
+		Drum_initVoice(&voiceArray[i], (uint8_t)i);
 	}
 }
 //---------------------------------------------------
 void Drum_trigger(const uint8_t voiceNr, const uint8_t vol, const uint8_t note)
 {
+	Drum_triggerVoice(&voiceArray[voiceNr], voiceNr, vol, note);
+}
+//---------------------------------------------------
+void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
+                       const uint8_t vol, const uint8_t note)
+{
+	/*
+	 * Trigger one explicit drum runtime instance.
+	 *
+	 * Inputs: DrumVoice pointer, logical source slot, velocity byte, and note.
+	 * Output: LFO/velocity modulation uses source_slot while oscillator,
+	 * envelope, transient, and filter state mutate only the supplied instance.
+	 * This separation is required for Instrument Load because a drum can now
+	 * live in any of the six storage slots, not only voiceArray[0..2].
+	 */
+	if(!voice)
+		return;
 
-	lfo_retrigger(voiceNr);
+	lfo_retrigger(source_slot);
 
 	//update velocity modulation
-	modNode_updateValue(&velocityModulators[voiceNr],vol/127.f);
+	modNode_updateValue(&velocityModulators[source_slot],vol/127.f);
 	/*
 	 * Apply velocity targets that are not direct ModulationNode pointers.
 	 *
@@ -136,91 +199,107 @@ void Drum_trigger(const uint8_t voiceNr, const uint8_t vol, const uint8_t note)
 	 * are installed. This call stays beside modNode_updateValue() so trigger
 	 * clients do not need to know which backend the current target uses.
 	 */
-	instrumentManager_applyVelocityModulationTarget(voiceNr, vol/127.f);
+	instrumentManager_applyVelocityModulationTarget(source_slot, vol/127.f);
 
 	//only reset phase if envelope is closed
 #ifdef USE_AMP_FILTER
-	if((voiceArray[voiceNr].volEgValueBlock[15]<=0.01f) || (voiceArray[voiceNr].transGen.waveform==1))
+	if((voice->volEgValueBlock[15]<=0.01f) || (voice->transGen.waveform==1))
 #else
-		//if((voiceArray[voiceNr].ampFilterInput<=0.01f) || (voiceArray[voiceNr].transGen.waveform==1))
+		//if((voice->ampFilterInput<=0.01f) || (voice->transGen.waveform==1))
 #endif
 	{
 		float offset = 1;
-		if(voiceArray[voiceNr].transGen.waveform==1) //offset mode
+		if(voice->transGen.waveform==1) //offset mode
 		{
-			offset -= voiceArray[voiceNr].transGen.volume;
+			offset -= voice->transGen.volume;
 #ifdef USE_AMP_FILTER
-			setOnePoleCoef(&voiceArray[voiceNr].ampFilter,1.0f); //turn off amp filter for super snappy attack
+			setOnePoleCoef(&voice->ampFilter,1.0f); //turn off amp filter for super snappy attack
 
 		} else {
-			setOnePoleCoef(&voiceArray[voiceNr].ampFilter,ampSmoothValue);
+			setOnePoleCoef(&voice->ampFilter,ampSmoothValue);
 #endif
 		}
-		if(voiceArray[voiceNr].osc.waveform == SINE)
-			voiceArray[voiceNr].osc.phase = 1024 + ( (0x3ff<<20) - 1024)*offset;//voiceArray[voiceNr].osc.startPhase ;
-		else if(voiceArray[voiceNr].osc.waveform > SINE && voiceArray[voiceNr].osc.waveform <= REC)
-			voiceArray[voiceNr].osc.phase = (0xff<<20)*offset;
+		if(voice->osc.waveform == SINE)
+			voice->osc.phase = 1024 + ( (0x3ff<<20) - 1024)*offset;//voice->osc.startPhase ;
+		else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
+			voice->osc.phase = (0xff<<20)*offset;
 		else
-			voiceArray[voiceNr].osc.phase = 0;
+			voice->osc.phase = 0;
 
 	}
 
-	osc_setBaseNote(&voiceArray[voiceNr].osc,note);
-	osc_setBaseNote(&voiceArray[voiceNr].modOsc,note);
+	osc_setBaseNote(&voice->osc,note);
+	osc_setBaseNote(&voice->modOsc,note);
 
 
-	DecayEg_trigger(&voiceArray[voiceNr].oscPitchEg);
-	slopeEg2_trigger(&voiceArray[voiceNr].oscVolEg);
-	voiceArray[voiceNr].velo = vol/127.f;
+	DecayEg_trigger(&voice->oscPitchEg);
+	slopeEg2_trigger(&voice->oscVolEg);
+	voice->velo = vol/127.f;
 
-	transient_trigger(&voiceArray[voiceNr].transGen);
+	transient_trigger(&voice->transGen);
 
-	SnapEg_trigger(&voiceArray[voiceNr].snapEg);
+	SnapEg_trigger(&voice->snapEg);
 
 	//reset filter coeffs to prevent wrong transient
-	SVF_reset(&voiceArray[voiceNr].filter);
+	SVF_reset(&voice->filter);
 }
 //---------------------------------------------------
 void calcDrumVoiceAsync(const uint8_t voiceNr)
 {
+	Drum_calcVoiceAsync(&voiceArray[voiceNr], AMP_EG_SYNC);
+}
+//---------------------------------------------------
+void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
+{
+	/*
+	 * Calculate one drum instance's control-rate block.
+	 *
+	 * Inputs: DrumVoice pointer and the amp-envelope sync mode that belongs to
+	 * the hosting slot. Output: pitch, snap, FM amount, amp envelope smoothing,
+	 * and oscillator frequencies advance on that instance only. Instrument
+	 * Load needs this helper because the hosting slot, not voiceArray index,
+	 * now decides whether a dynamic drum is rendered.
+	 */
+	if(!voice)
+		return;
 
 
 	//add modulation eg to osc freq (1 = no change. a+eg = original freq + modulation
-	const float egPitchVal = DecayEg_calc(&voiceArray[voiceNr].oscPitchEg);
-	const float pitchEgValue = egPitchVal*voiceArray[voiceNr].egPitchModAmount;
-	voiceArray[voiceNr].osc.pitchMod = 1+pitchEgValue;
+	const float egPitchVal = DecayEg_calc(&voice->oscPitchEg);
+	const float pitchEgValue = egPitchVal*voice->egPitchModAmount;
+	voice->osc.pitchMod = 1+pitchEgValue;
 
 	//calc snap EG if transient sample 0 is activated
-	if(voiceArray[voiceNr].transGen.waveform == 0)
+	if(voice->transGen.waveform == 0)
 	{
-		const float snapVal = SnapEg_calc(&voiceArray[voiceNr].snapEg, voiceArray[voiceNr].transGen.pitch);
-		voiceArray[voiceNr].osc.pitchMod += snapVal*voiceArray[voiceNr].transGen.volume;
+		const float snapVal = SnapEg_calc(&voice->snapEg, voice->transGen.pitch);
+		voice->osc.pitchMod += snapVal*voice->transGen.volume;
 	}
 
 	// fm amount with pitch eg
-	voiceArray[voiceNr].osc.fmMod = voiceArray[voiceNr].fmModAmount * egPitchVal;
+	voice->osc.fmMod = voice->fmModAmount * egPitchVal;
 
 	//calc the osc + noise vol eg
 #if (AMP_EG_SYNC==0)
 
 	//check if in attack phase
-	if( (voiceArray[voiceNr].oscVolEg.attack == 1 ) && ((voiceArray[voiceNr].oscVolEg.state == EG_A) || (voiceArray[voiceNr].oscVolEg.state == EG_REPEAT)) )
+	if( (voice->oscVolEg.attack == 1 ) && ((voice->oscVolEg.state == EG_A) || (voice->oscVolEg.state == EG_REPEAT)) )
 	{
 			//if attack is set to 0 -> no interpolation
-		voiceArray[voiceNr].ampFilterInput = slopeEg2_calc(&voiceArray[voiceNr].oscVolEg);
-		voiceArray[voiceNr].lastGain = voiceArray[voiceNr].ampFilterInput;
+		voice->ampFilterInput = slopeEg2_calc(&voice->oscVolEg);
+		voice->lastGain = voice->ampFilterInput;
 	}
 	else
 	{
-		voiceArray[voiceNr].lastGain = voiceArray[voiceNr].ampFilterInput;
-		voiceArray[voiceNr].ampFilterInput = slopeEg2_calc(&voiceArray[voiceNr].oscVolEg);
+		voice->lastGain = voice->ampFilterInput;
+		voice->ampFilterInput = slopeEg2_calc(&voice->oscVolEg);
 	}
 
 	//turn off trigger signal if trigger gate mode is on and volume == 0
 	/* TODO DSP_PORT
 	if(trigger_isGateModeOn())
 	{
-		if(!voiceArray[voiceNr].ampFilterInput) {
+		if(!voice->ampFilterInput) {
 			trigger_triggerVoice(TRIGGER_1 + voiceNr, TRIGGER_OFF);
 			voiceControl_noteOff(TRIGGER_1 + voiceNr);
 		}
@@ -229,62 +308,80 @@ void calcDrumVoiceAsync(const uint8_t voiceNr)
 #endif
 
 	//update osc phaseInc
-	osc_setFreq(&voiceArray[voiceNr].osc);
-	osc_setFreq(&voiceArray[voiceNr].modOsc);
+	(void)amp_eg_sync;
+	osc_setFreq(&voice->osc);
+	osc_setFreq(&voice->modOsc);
 
 }
 
 //---------------------------------------------------
 void calcDrumVoiceSyncBlock(const uint8_t voiceNr, int16_t* buf, const uint8_t size)
 {
+	Drum_calcVoiceSyncBlock(&voiceArray[voiceNr], buf, size);
+}
+//---------------------------------------------------
+void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
+{
+	/*
+	 * Render one drum runtime instance into a mono block.
+	 *
+	 * Inputs: DrumVoice pointer, destination buffer, and block size. Output:
+	 * buf receives the same synthesized block the legacy wrapper produced for
+	 * voiceArray entries. This helper cannot be folded into
+	 * calcDrumVoiceSyncBlock() because mixer now selects runtime objects by
+	 * current instrument type rather than by hardcoded drum voice index.
+	 */
+	if(!voice || !buf)
+		return;
+
 	static int16_t modBuf[OUTPUT_DMA_SIZE];
 
 	//calc vol EG
 #ifdef USE_AMP_FILTER
-	calcOnePoleBlockFixedInput(&voiceArray[voiceNr].ampFilter, voiceArray[voiceNr].ampFilterInput,voiceArray[voiceNr].volEgValueBlock, size);
+	calcOnePoleBlockFixedInput(&voice->ampFilter, voice->ampFilterInput,voice->volEgValueBlock, size);
 #endif
 
 	//calc next mod osc sampleBlock
-	calcNextOscSampleBlock(&voiceArray[voiceNr].modOsc,modBuf,size,voiceArray[voiceNr].fmModAmount);
+	calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
 
-	if(voiceArray[voiceNr].mixOscs)
+	if(voice->mixOscs)
 	{
 		//calc main osc buffer
-		calcNextOscSampleBlock(&voiceArray[voiceNr].osc,buf,size, (1.f-voiceArray[voiceNr].fmModAmount));
+		calcNextOscSampleBlock(&voice->osc,buf,size, (1.f-voice->fmModAmount));
 		//add mod buffer to main osc buffer
 		bufferTool_addBuffersSaturating(buf,modBuf,size);
 	}
 	else
 	{
-		calcNextOscSampleFmBlock(&voiceArray[voiceNr].osc,modBuf,buf,size,1.0f);
+		calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
 	}
 
 	//calc transient sample
-	transient_calcBlock(&voiceArray[voiceNr].transGen,modBuf,size);
+	transient_calcBlock(&voice->transGen,modBuf,size);
 
 	//Mix with transient buffer
 	bufferTool_addBuffersSaturating(buf,modBuf,size);
 
 	//calc filter block
-	SVF_calcBlockZDF(&voiceArray[voiceNr].filter,voiceArray[voiceNr].filterType,buf,size);
+	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
 	//attentuate main OSCs by amp EG
 #ifdef USE_AMP_FILTER
-	bufferTool_multiplyWithFloatBufferDithered(&voiceArray[voiceNr].dither, buf,voiceArray[voiceNr].volEgValueBlock,size);
+	bufferTool_multiplyWithFloatBufferDithered(&voice->dither, buf,voice->volEgValueBlock,size);
 #else
-	bufferTool_addGainInterpolated(buf,voiceArray[voiceNr].ampFilterInput, voiceArray[voiceNr].lastGain, size);
+	bufferTool_addGainInterpolated(buf,voice->ampFilterInput, voice->lastGain, size);
 #endif
 
 	//MIDI velocity
-	if(voiceArray[voiceNr].volumeMod)
+	if(voice->volumeMod)
 	{
-		bufferTool_addGain(buf,voiceArray[voiceNr].velo,size);
+		bufferTool_addGain(buf,voice->velo,size);
 	}
 	//distortion
 #if (USE_FILTER_DRIVE == 0)
-	calcDistBlock(&voiceArray[voiceNr].distortion,buf,size);
+	calcDistBlock(&voice->distortion,buf,size);
 #endif
 	//channel volume
-	bufferTool_addGain(buf,voiceArray[voiceNr].vol,size);
+	bufferTool_addGain(buf,voice->vol,size);
 }
 //---------------------------------------------------

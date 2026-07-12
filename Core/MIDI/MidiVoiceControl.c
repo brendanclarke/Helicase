@@ -53,6 +53,7 @@
 #include "HiHat.h"
 #include "MidiMessages.h"
 #include "CymbalVoice.h"
+#include "InstrumentManager.h"
 // #include "ledHandler.h"
 // TODO DSP_PORT
 // #include "sequencer.h"
@@ -146,14 +147,16 @@ static uint8_t voiceControl_popPending(VoiceTriggerEvent *event)
 
 static void voiceControl_triggerNow(uint8_t voice, uint8_t note, uint8_t vel)
 {
-	if(voice < 3)
-		Drum_trigger(voice, vel, note);
-	else if(voice < 4)
-		Snare_trigger(vel, note);
-	else if(voice < 5)
-		Cymbal_trigger(vel, note);
-	else
-		HiHat_trigger(vel,voice-5,note);
+	/*
+	 * Trigger through the dynamic instrument runtime dispatcher.
+	 *
+	 * Inputs: queued visible voice/track number, note, and velocity. Output:
+	 * InstrumentManager maps tracks 1..6 to storage slots 1..6 and track 7 to
+	 * slot 6's alternate/choke trigger. This replaces the old fixed
+	 * Drum/Snare/Cymbal/HiHat call table so Instrument Load affects actual
+	 * sound generation, not just menu/storage state.
+	 */
+	instrumentManager_triggerTrack(voice, note, vel);
 
 	led_pulseLed((uint8_t)(LED_VOICE1 + voice));
 }

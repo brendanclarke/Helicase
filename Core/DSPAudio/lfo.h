@@ -111,6 +111,7 @@ void lfo_init(Lfo *lfo);
  * Scene modulation by the same source slot used when the target was installed.
  */
 void lfo_dispatchNextValue(Lfo* lfo, uint8_t source_slot);
+uint32_t lfo_calcPhaseInc(float freq, uint8_t sync);
 void lfo_setFreq(Lfo *lfo, float f);
 void lfo_setSync(Lfo* lfo, uint8_t sync);
 void lfo_recalcSync();

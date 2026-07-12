@@ -98,6 +98,23 @@ extern SnareVoice snareVoice;
 //initialize all the parameters to sane values
 void Snare_init();
 
+/*
+ * Pointer-based snare runtime entry points for dynamic instrument slots.
+ *
+ * Inputs: a caller-owned SnareVoice instance plus the logical source slot for
+ * trigger/LFO/velocity affiliation where needed. Outputs: the same DSP state
+ * mutations as the legacy single snareVoice API, but without coupling snare
+ * rendering to physical slot 4. InstrumentManager is the new client; old
+ * wrappers remain for compatibility with fixed-slot code.
+ */
+void Snare_initVoice(SnareVoice *voice);
+void Snare_setPanVoice(SnareVoice *voice, const uint8_t pan);
+void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
+                        const uint8_t vel, const uint8_t note);
+void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
+                              const uint8_t size);
+void Snare_calcAsyncVoice(SnareVoice *voice);
+
 void Snare_trigger(const uint8_t vel, const uint8_t note);
 
 /** claculate the oscillators and sample based stuff*/
