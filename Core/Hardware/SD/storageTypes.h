@@ -36,7 +36,7 @@
  * preset name buffers, which are exactly eight printable characters.
  */
 #define STORAGE_ROOT_KIT              "Kit"
-#define STORAGE_ROOT_INSTRUMENT       "Instrument"
+#define STORAGE_ROOT_INSTRUMENT       "INSTRU~1"
 #define STORAGE_KITSET_FILENAME       "kitset.kcg"
 #define STORAGE_KIT_SLOT_COUNT        6u
 #define STORAGE_KIT_MAX_SLOTS         128u

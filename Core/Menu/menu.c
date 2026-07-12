@@ -2643,12 +2643,28 @@ static void menu_repaintLoadSavePage(void)
         /*
          * Paint nested Instrument Load mode.
          *
-         * Inputs: selected instrument type, destination slot, and filesystem's
-         * per-type Instrument/ cache. Outputs: top row shows the type label
-         * supplied by the instrument registry; bottom row shows the one-based
-         * sorted list position plus first eight filename-stem characters. This
-         * is separate from normal menu_saveOptions painting because Instrument
-         * Load is destination-slot aware and is not a SAVE_TYPE_*.
+         * What: This logic re-writes the visual representation of the Instrument Load menu
+         * within the LCD editDisplayBuffer. It respects menu_saveOptions.state and
+         * editModeActive to conditionally paint '[' ']' or '>' (ARROW_SIGN) on either
+         * row 1 (Type) or row 2 (File), mirroring the original Load menu design.
+         *
+         * Why it must exist: Without conditional cursor painting, the user is blind to the 
+         * active navigation state (Type vs File slot) and edit state (navigating rows vs
+         * changing values). The prior UX hardcoded edit brackets '[]' on the bottom row
+         * while defaulting interaction to the top row, which created a confusing and 
+         * unusable menu.
+         *
+         * Inputs: selected instrument type, destination slot, filesystem's per-type
+         * Instrument/ cache, menu_saveOptions.state, editModeActive. 
+         * Outputs: top row shows the type label supplied by the instrument registry
+         * alongside appropriate selection cursor/brackets; bottom row shows the one-based
+         * sorted list position plus first eight filename-stem characters with selection
+         * cursor/brackets.
+         * Clients: Called by menu_repaint() and menu_repaintAll() whenever menu_activePage
+         * == LOAD_PAGE and a redraw is requested.
+         * Accessors: filesystem_instrumentCount, filesystem_instrumentDisplayIndex, 
+         * filesystem_instrumentName, instrumentManager_typeDisplayLabel.
+         * Affiliates: menu_handleLoadSaveMenu drives the actual state changes this reflects.
          */
         menu_instrumentLoadClampIndex();
         count = filesystem_instrumentCount(menu_instrumentLoadType);
@@ -2656,12 +2672,44 @@ static void menu_repaintLoadSavePage(void)
         display_index =
             filesystem_instrumentDisplayIndex(menu_instrumentLoadType, index);
 
+        /* --- Top Row: Load Type --- */
         memcpy(&editDisplayBuffer[0][0], "Load:", 5);
+        
+        /* Render cursor/brackets for the top row if the state is editing the type */
+        if (menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
+            if (editModeActive) {
+                /* In edit mode, show brackets around the type name */
+                editDisplayBuffer[0][5] = '[';
+                editDisplayBuffer[0][14] = ']';
+            } else {
+                /* In selection mode, show a pointer arrow */
+                editDisplayBuffer[0][5] = ARROW_SIGN;
+            }
+        }
+        
+        /* Copy the display label from the instrument registry (e.g., "Drum", "Snare") */
         menu_copyPaddedField(&editDisplayBuffer[0][6],
                              instrumentManager_typeDisplayLabel(
                                  menu_instrumentLoadType),
                              8u);
-        editDisplayBuffer[1][0] = '[';
+
+        /* --- Bottom Row: File Slot --- */
+        /* Render cursor/brackets for the bottom row if the state is editing the preset/file number */
+        if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
+            if (editModeActive) {
+                /* In edit mode, show brackets around the file index */
+                editDisplayBuffer[1][0] = '[';
+                editDisplayBuffer[1][4] = ']';
+            } else {
+                /* In selection mode, show a pointer arrow */
+                editDisplayBuffer[1][0] = ARROW_SIGN;
+            }
+        }
+
+        /* Format the display index as a 3-digit padded number.
+           Max display index is visually capped at 999. 
+           Math: integer division and modulo are used to extract hundreds, tens, and units digits.
+           Padding with ' ' is used for leading zeros on hundreds and tens. */
         if (display_index > 999u)
             display_index = 999u;
         editDisplayBuffer[1][1] = (display_index >= 100u)
@@ -2671,7 +2719,10 @@ static void menu_repaintLoadSavePage(void)
             ? (char)('0' + ((display_index / 10u) % 10u))
             : ' ';
         editDisplayBuffer[1][3] = (char)('0' + (display_index % 10u));
-        editDisplayBuffer[1][4] = ']';
+
+        /* Copy the file name to the display buffer. 
+           If the count is > 0, we query the filesystem for the file name. 
+           Otherwise, we display "Empty   " padded to 8 chars. */
         memcpy(&editDisplayBuffer[1][5],
                count ? filesystem_instrumentName(menu_instrumentLoadType,
                                                  index)
