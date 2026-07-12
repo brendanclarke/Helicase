@@ -288,6 +288,29 @@ void storage_kitsetInit(storage_kitset_t *kit)
         kit->instrument_type[i] = STORAGE_INSTRUMENT_UNKNOWN;
 }
 
+/*
+ * Derive the fixed LCD display stem retained with a Kit member.
+ *
+ * Inputs: a validated kitset `file` value and a nine-byte SceneData destination.
+ * Output: at most eight filename characters before the extension, padded with
+ * spaces and NUL terminated. Client: storage_kitsetParseLine(). This belongs
+ * next to kitset parsing rather than filesystem scanning because Kit files can
+ * reference filenames outside the root Instrument scan cache; retaining the
+ * stem here keeps the Scene display correct for either source.
+ */
+static void storage_copyInstrumentDisplayStem(char destination[9],
+                                              const char *filename)
+{
+    uint8_t i = 0u;
+
+    memset(destination, ' ', 8u);
+    while (filename[i] != '\0' && filename[i] != '.' && i < 8u) {
+        destination[i] = filename[i];
+        i++;
+    }
+    destination[8] = '\0';
+}
+
 /* See storageTypes.h for the public contract.
  *
  * The parser is intentionally incremental because filesystem.c reads from SD in
@@ -390,6 +413,10 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
         kit->seen_type_mask = (uint8_t)(kit->seen_type_mask | (1u << parsed));
     } else if (storage_streq(key, "file")) {
         storage_copyFilename(kit->instrument_file[parsed], value);
+        if (!target_kit)
+            return STORAGE_STATUS_BAD_VALUE;
+        storage_copyInstrumentDisplayStem(
+            target_kit->instrument_display_name[parsed], value);
         kit->seen_file_mask = (uint8_t)(kit->seen_file_mask | (1u << parsed));
     } else if (storage_streq(key, "audio_out")) {
         if (!target_kit)

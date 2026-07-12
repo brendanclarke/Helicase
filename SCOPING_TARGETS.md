@@ -5,14 +5,15 @@
 ## How this document is organized
 
 The work is grouped into six phases, ordered around the trajectory the code is
-actually following after Session 033. Phase 1 is complete foundation cleanup.
+actually following after Session 034. Phase 1 is complete foundation cleanup.
 Phase 2 has landed the first real filesystem/Scene bridge: root Kit directory
 loading into descriptor-backed instrument images. Phase 3 now finishes that
 partially-built foundation before the sequencer storage rewrite: instrument
 parameter load/runtime coverage, descriptor modulation and automation, Morph,
 menu/load-save work, Scene and Bank structures, and new-format load/save
-operations. Session 033 landed the main runtime/Morph portions of that work;
-the next Phase 3 emphasis is file work and the remaining automation path. Phase
+operations. Sessions 033-034 landed the runtime/Morph and Instrument Load
+portions of that work; the next Phase 3 emphasis is new-format save work and
+the remaining automation/runtime hardening path. Phase
 4 is the dynamic stack Pattern implementation that used to be
 scoped as Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup,
 copy/clear helpers, and menu controls. Phase 6 is DSP expansion.
@@ -128,9 +129,9 @@ Explicitly not completed in Phase 2:
 - Effect load/save.
 - Root `settings.cfg`; globals still use legacy `glo.cfg`.
 - Final new-format Morph load/save.
-- Descriptor-aware runtime modulation, automation, and hardware-working
-  descriptor Morph. Session 033 completed descriptor modulation and Morph; step
-  automation remains Phase 3 work.
+- Descriptor-aware step automation. Sessions 033-034 completed descriptor
+  Morph, direct descriptor velocity/LFO application, and the Instrument Load
+  runtime transaction; step automation remains Phase 3 work.
 
 ### 2.1 Current Bridge Shape
 
@@ -144,14 +145,18 @@ The current exception is `FS_FILE_KIT` load: normal kit load no longer opens a
 flat `.snd`; it scans `Kit/`, enters the cached numbered kit folder, parses
 `kitset.kcg`, and loads the six listed instrument files. `FS_FILE_KIT` save,
 `FS_FILE_MORPH`, Pattern, Performance, All, and Globals are still legacy or
-bridge paths.
+bridge paths internally. The user-visible Load/Save menu no longer offers
+Pattern, MorphKit, Perform, or All, because those choices do not have a valid
+current workflow.
 
 ### 2.2 Phase 2 Verification Anchors
 
 - Boot with `SD_CARD/Kit/001 Slak`.
 - Confirm kit scan shows the folder name from `Kit/001 Slak/`.
 - Confirm `kitset.kcg` slot type/file/audio routing is honored.
-- Confirm long descriptor keys such as `amp_envelope_decay_closed/open` parse.
+- Confirm canonical Choke descriptor keys such as `amp_envelope_decay` and
+  `amp_envelope_decay_choke` parse, while legacy HiHat spellings remain
+  compatible with converted or older files.
 - Confirm VOICE pages display descriptor layouts rather than static
   `menuPages.h` voice cells.
 - Confirm editing audible descriptor values changes DSP runtime state.
@@ -185,10 +190,24 @@ dynamic Pattern rewrite begins.
 
 Finish descriptor-backed instrument load/apply coverage:
 
-- Status after Session 033: the main descriptor runtime path is live for the
+- Status after Session 034: the main descriptor runtime path is live for the
   current Drum/Snare/Cymbal/HiHat rows, including the LFO expansion,
   voice-local decimation, velocity amount, per-voice Morph, and Scene
-  modulation targets.
+  modulation targets. Instrument registry metadata now classifies each type as
+  Basic, Advanced, and/or Choke; the Instrument Load type browser enforces the
+  two-Advanced limit while allowing any number of Basic voices.
+- HiHat uses one canonical closed-decay descriptor (`amp_envelope_decay`) and
+  an optional Choke sibling (`amp_envelope_decay_choke`). VOICE track 7
+  resolves the sibling dynamically for Choke types. A non-Choke instrument in
+  slot 6 instead receives a generated Scene-owned track-7 decay plus morph
+  endpoint; if its descriptor table has no base decay, track 7 remains the
+  regular slot-6 page.
+- Root Instrument replacement is now a staged Preset-owned transaction. The
+  filesystem validates a private payload first; the active Scene commit clears
+  every outgoing runtime modulation target, replaces the descriptor image and
+  type, resets the slot runtime, reapplies Morph/runtime images for all six
+  slots, and rebinds every modulation source. UI target-changing gestures are
+  locked until it finishes.
 - Continue verifying every loaded descriptor key has a correct runtime binding
   or explicit special writer as instruments become swappable and new file work
   starts.
@@ -203,7 +222,7 @@ Finish descriptor-backed instrument load/apply coverage:
 
 Replace the remaining legacy target runtime path for descriptor-backed targets:
 
-- Status after Session 033: velocity and LFO destinations are
+- Status after Session 034: velocity and LFO destinations are
   descriptor-aware for direct descriptor targets, supplemental voice-local
   decimation, per-voice Morph Scene targets, and Scene Decimation.
 - Make `AutomationNode` descriptor-aware instead of emitting legacy MIDI CC/CC2
@@ -214,6 +233,14 @@ Replace the remaining legacy target runtime path for descriptor-backed targets:
   recording where appropriate.
 - Keep target display helpers enumerating the active Scene descriptors and
   filtering by descriptor flags.
+- Correct direct LFO writes to byte-domain envelope parameters: they currently
+  write raw `SlopeEg2` float members for some descriptors, bypassing the
+  descriptor owner's byte-to-runtime setter and allowing a zero decay to mean
+  no envelope fall.
+- Replace fixed global-node scans in `modNode_resetTargets()` and
+  `modNode_directOriginalValueChanged()` with InstrumentManager's dynamic
+  node ownership. The Instrument Load transaction explicitly clears all
+  owners, but ordinary runtime operations still need the same complete view.
 
 ### 3.3 Morph and Per-Voice Morph
 
@@ -251,6 +278,16 @@ Complete the menu path required for descriptor-backed instruments:
 - Visible/editable per-voice Morph controls in PERF are implemented.
 - Rebuild load/save/reload menus around the typed filesystem hierarchy instead
   of the old flat slot list.
+- Status after Session 034: Kit and nested Instrument Load are usable. Root
+  `Instrument/` scans `.drm`, `.snr`, `.cym`, and `.hat` pools per type in
+  alphanumeric order; lower-row browsing loads immediately, while type changes
+  do not replace the current kit-member display/source. The display index is
+  one-based and saturates at 999. `kit_t` preserves an eight-character
+  per-slot display stem for this provenance display only.
+- Load-context SEQ LEDs now use `pat_sceneHasActiveSteps()`: in Kit Load they
+  are multi-Scene toggles and every selected target blinks; in Instrument Load
+  exactly one Scene is selected and blinks. The code is shaped for 16 Scenes
+  even though only Scene 1 is resident today.
 - Keep scene-level MIDI note/channel and `voice_decimation_all` out of
   `kitset.kcg` and instrument files.
 
@@ -267,16 +304,19 @@ sequencer storage changes:
 - Scene embedded kits are folders named `Kit <kit name>/`; the second word is
   the kit name, and that name is not stored anywhere else.
 - Store MIDI note/channel and `voice_decimation_all` as Scene settings.
+- The Session 034 Load-menu Scene controls are only a UI/selection bridge; they
+  do not implement Scene folders, sixteen resident Scene payloads, or Bank
+  storage. Keep those concerns separate from the completed Kit/Instrument
+  transaction paths.
 
 ### 3.6 Load and Save Operations
 
 Implement load/save operations for the settled file types in
 `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`:
 
-- First next-session cleanup: minor restructuring around how voice 6 is stored
-  for tracks 6+7 and choke.
-- Verify instruments can be swapped freely in kit slots without hardcoded
-  parameter assumptions.
+- Session 034 completed voice-6/track-7 Choke storage and dynamic menu/runtime
+  resolution, plus staged arbitrary Instrument replacement without hardcoded
+  parameter lists. Preserve those semantics in every save implementation.
 - Kit save writes `kitset.kcg` plus six instrument files in the same shape the
   current loader accepts.
 - Instrument pool load/save copies a descriptor-keyed instrument file into or
@@ -313,9 +353,10 @@ Implement the future autosave behavior after explicit load/save paths exist:
 - **SRAM budget for 17 scenes:** each resident scene carries settings, kit
   descriptor images, Pattern storage, and future FX state. Re-measure once the
   Scene and Bank structs are real.
-- **Voice 6/choke storage:** next file-work pass should clarify the storage
-  model for voice 6 as used by tracks 6+7 and choke/open-hat behavior before
-  save/load schemas are hardened.
+- **Descriptor automation/runtime ownership:** migrate `AutomationNode` from
+  legacy byte CC/CC2 targets to canonical descriptor/Scene targets, correct
+  raw float LFO adapter writes, and make modulation-node enumeration dynamic
+  before treating automation as feature-complete.
 - **Effect placeholders:** decide how strict `effect.fx` validation should be
   before Phase 6 has real FX stacks.
 

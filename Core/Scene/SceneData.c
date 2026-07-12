@@ -325,6 +325,13 @@ void scene_initAll(void)
             instrumentManager_resetSlot(
                 &scenes[scene_index].kit.instruments[track],
                 initial_types[track]);
+        /* Keep the LCD-facing source metadata defined before any SD load.
+         * This uses a padded literal rather than a dynamic accessor because
+         * SceneData owns the retained fallback for an unsaved/default kit. */
+        for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++) {
+            memcpy(scenes[scene_index].kit.instrument_display_name[track],
+                   "Empty   ", 9u);
+        }
         pat_initScene(scene_index);
     }
 }

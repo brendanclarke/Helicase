@@ -308,8 +308,14 @@ int main(void)
                 filesystem_tick();
             filesystem_ack();
 
-            /* Load kit 0 via presetManager (sets up status/callbacks) */
-            preset_loadDrumset(0, 0);
+            /*
+             * Load Kit 0 through the same explicit Scene-mask contract used by
+             * the Load page. At boot Scene 0 is the active resident Scene;
+             * keeping this call on the public multi-Scene path verifies that
+             * staged Kit parsing and normal runtime loading share one commit
+             * behavior instead of maintaining a special boot-only loader.
+             */
+            preset_loadKitForScenes(0, 1u);
             while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS)
                 filesystem_tick();
             menu_pollPresetStatus();  /* apply kit + ack */

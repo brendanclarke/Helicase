@@ -289,6 +289,34 @@ void instrumentManager_updateLfoSceneTarget(uint8_t source_slot,
  * zero-based 0..6, where track 6 is the slot-6 choke/alternate trigger.
  */
 void instrumentManager_runtimeInit(void);
+/*
+ * Clear the complete current modulation target graph before a slot replacement.
+ *
+ * Inputs: the active Scene's six pre-commit slot identities. Output: both LFO
+ * target pairs and the velocity target for every current source are restored,
+ * cleared, and removed from InstrumentManager's supplemental-target records.
+ * Client: Preset's staged Instrument commit, before SceneData changes type.
+ *
+ * This cannot be folded into instrumentManager_resetRuntimeSlot(): clearing
+ * must resolve source nodes through the outgoing Scene identities, while reset
+ * intentionally resolves the incoming identity after commit. Keeping the two
+ * phases explicit prevents a type swap from orphaning a dynamic-pool LFO.
+ */
+void instrumentManager_clearAllRuntimeModulationTargets(void);
+/*
+ * Reinitialize one committed slot's incoming DSP runtime instance.
+ *
+ * Input: zero-based slot whose new type is already resident in active
+ * SceneData. Output: exactly that type/slot runtime object is returned to its
+ * engine defaults before descriptor images are applied. Client: Preset's
+ * staged Instrument transaction. Affiliates are the per-type runtime pools and
+ * the preserved native Drum/Snare/Cymbal/HiHat globals.
+ *
+ * This remains separate from instrumentManager_runtimeInit(), which initializes
+ * every non-native pool once at boot and must not reset unrelated sounding
+ * voices during one Instrument load.
+ */
+void instrumentManager_resetRuntimeSlot(uint8_t slot);
 void instrumentManager_dispatchRuntimeLfos(void);
 void instrumentManager_recalcRuntimeLfoSync(void);
 void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track);

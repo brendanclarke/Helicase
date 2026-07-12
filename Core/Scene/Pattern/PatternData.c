@@ -145,6 +145,37 @@ uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t pattern)
 	return (uint8_t)((s->volume & STEP_ACTIVE_MASK) > 0);
 }
 
+uint8_t pat_sceneHasActiveSteps(uint8_t scene_index)
+{
+	uint8_t track;
+	uint8_t step;
+	const scene_t *scene;
+
+	/*
+	 * Scan the complete retained PatternSet for Load-menu Scene feedback.
+	 *
+	 * Inputs: a Scene index. Output: returns immediately when any Step's active
+	 * flag is set, otherwise zero after all tracks and steps have been checked.
+	 * Clients: menu_refreshLoadSceneLeds(); affiliates are scene_getConst() and
+	 * STEP_ACTIVE_MASK. The nested loop stays here instead of repeatedly calling
+	 * pat_isStepActive() so this owner-level query validates the Scene once and
+	 * reads its contiguous pattern storage without introducing a thin iterator.
+	 */
+	if (!pat_patternValid(scene_index))
+		return 0u;
+	scene = scene_getConst(scene_index);
+	if (!scene)
+		return 0u;
+	for (track = 0u; track < NUM_TRACKS; track++) {
+		for (step = 0u; step < NUM_STEPS; step++) {
+			if ((scene->pattern.pat_subStepPattern[track][step].volume &
+			     STEP_ACTIVE_MASK) != 0u)
+				return 1u;
+		}
+	}
+	return 0u;
+}
+
 uint8_t pat_isMainStepActive(uint8_t track, uint8_t mainStep, uint8_t pattern)
 {
 	uint16_t *mainSteps;

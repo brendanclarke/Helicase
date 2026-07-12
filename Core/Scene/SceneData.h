@@ -78,6 +78,17 @@ typedef struct {
      */
     kit_settings_t settings;
     kit_instrument_slot_t instruments[INSTRUMENT_SLOT_COUNT];
+    /*
+     * Eight-character source-file stems for the six retained instrument slots.
+     *
+     * These values are kit membership metadata, not instrument-file parameters:
+     * kitset parsing records each listed filename and Instrument-pool loading
+     * replaces the selected Scene/slot stem on success. Menu reads them to show
+     * the current kit member before the user first moves the pool browser.
+     * Storage is fixed-width and padded so it can feed the LCD directly without
+     * borrowing filesystem scan-cache memory.
+     */
+    char instrument_display_name[INSTRUMENT_SLOT_COUNT][9];
 } kit_t;
 
 typedef struct {

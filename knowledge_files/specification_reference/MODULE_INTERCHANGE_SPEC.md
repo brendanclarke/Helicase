@@ -1,6 +1,6 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 033 for the one-pattern bridge,
+Session 030 baseline, updated through Session 034 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
@@ -42,11 +42,22 @@ a generic bridge.
   descriptor-backed instrument parameters.
 - `ParameterArray` remains the legacy runtime pointer map used by older flat
   parameter paths and by `AutomationNode`. It is no longer the canonical map
-  for instrument file keys.
+  for instrument file keys. `Step` destinations are already canonical 16-bit
+  IDs, but AutomationNode still narrows them to legacy byte CC/CC2 routing;
+  descriptor step automation is therefore deliberately unfinished.
 - Descriptor-backed velocity/LFO target storage, menu display, and runtime
   application are live after Session 033 for direct descriptor targets,
   voice-local decimation, per-voice Morph, and Scene Decimation. Step
   automation remains the unfinished descriptor/Scene target path.
+- Direct descriptor modulation must use the descriptor owner's byte-domain
+  runtime writer. Do not write raw DSP members such as `SlopeEg2.decay` for a
+  byte descriptor: that bypasses the setter's unit conversion and can turn a
+  zero byte value into an indefinitely held envelope.
+- Modulation-owner scans must enumerate InstrumentManager's current dynamic
+  runtime pools. Fixed global source scans are insufficient after freely
+  replaceable instrument types; the Instrument Load transaction compensates by
+  clearing/rebinding all sources, but normal reset/original-value paths still
+  require this migration.
 - Descriptor Morph is live after Session 033. The Morph engine walks
   Scene-owned descriptor images and the active slot's descriptor table instead
   of hardcoded parameter lists.
@@ -78,6 +89,7 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_lengthRotatePtr(pattern, track)` | Bounded pointer to the per-track settings record (`LengthRotate`: length, rotation, scale, MIDI channel/note, shuffle). | filesystem, Euklid, PatternData |
 | `pat_isStepActive(track, step, pattern)` | Read sub-step active bit. | ledHandler, Sequencer playback wrappers |
 | `pat_isMainStepActive(track, mainStep, pattern)` | Read main-step active bit. | ledHandler, Sequencer playback wrappers, buttonHandler |
+| `pat_sceneHasActiveSteps(scene)` | Scan complete Scene PatternData for any active Step; hides the bridge storage shape from Load-menu LEDs. | Menu Load Scene LED helper |
 | `pat_readStep(pattern, track, step, out)` | Copy one `Step` snapshot for playback-side inspection. | Sequencer automation parsing and MIDI echo velocity |
 | `pat_getStepProbability(pattern, track, step)` | Read one step probability with safe invalid default. | Sequencer playback |
 | `pat_getStepNote(pattern, track, step)` | Read one step note with `PAT_DEFAULT_NOTE` fallback. | Sequencer playback, rolls, MIDI note echo |
@@ -239,6 +251,9 @@ edit dispatch, and post-load operation follow-up.
 | `menu_switchPage(pageNr)` / `menu_switchSubPage(subPageNr)` | Page navigation and direct Pattern/LED refresh. | buttonHandler/Menu |
 | `menu_resetActiveParameter()` | Keep active parameter valid for page. | buttonHandler/Menu |
 | `menu_setVoiceModeShowMorph(onOff)` | Toggle VOICE-page morph endpoint overlay for descriptor-backed instrument cells; repaint/edit helpers resolve the active slot's main or morph image through InstrumentManager. | buttonHandler `SHIFT+VOICE` mode |
+| `menu_loadInstrumentVoicePressed(voice)` / `menu_loadInstrumentExit()` | Enter/select or leave nested Instrument Load when no transaction owns it. | buttonHandler Load/VOICE gestures |
+| `menu_loadSceneButtonPressed(scene)` | Consume Load-context SEQ presses as Kit target toggles or Instrument one-Scene selection. | buttonHandler SEQ press/release routing |
+| `menu_loadInstrumentTransactionBusy()` | Report read-plus-commit Instrument transaction ownership; callers must not change mode, Scene, destination voice, or preview while true. | buttonHandler/Menu gates |
 | `menu_paramUsesMorphView(paramNr)` / `menu_getParameterDisplayValue(paramNr)` / `menu_getParameterEditPtr(paramNr)` | Legacy display/edit helpers for static parameter IDs. Descriptor-backed VOICE cells use the internal dynamic cell resolver instead. | Menu repaint, encoder edits, endless-pot edits |
 | `menu_showStepTrackSettingsFirstHalf()` / `menu_toggleStepTrackSettingsHalf()` | Select STEP front-page first half or toggle to the second half where per-track shuffle lives. | buttonHandler STEP-mode voice/track buttons |
 | `menu_resetSaveParameters()` | Reset load/save UI state. | load/save page |
@@ -332,6 +347,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_loadPattern(presetNr)` / `preset_savePattern(presetNr)` | Async pattern load/save. | Menu |
 | `preset_saveAll(presetNr, isAll)` / `preset_loadAll(presetNr, isAll)` | Async all/performance load/save. | Menu |
 | `preset_loadName(presetNr, what)` / `preset_applyLoadedName()` | Async slot name browsing. | Menu |
+| `preset_loadInstrument(scene, slot, type, browser_index)` | Post one immutable root Instrument request; request coordinates publish only after filesystem accepts it. | Instrument Load lower-row browser |
 | `preset_sendDrumsetParameters()` | Synchronous pre-audio Scene kit audio-routing and descriptor runtime apply. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
 | `preset_setInstrumentParameter(scene, slot, descriptor_index, image, value, recordAutomation)` | Store one descriptor-backed instrument main/morph value and apply/record when appropriate. | Menu dynamic VOICE cells, storage |
@@ -343,6 +359,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_applyVelocityModTarget(voice, targetParam)` | Direct velocity mod destination update. | Menu, preset load apply |
 | `preset_applyLfoModTarget(lfo, targetParam)` | Direct LFO mod destination update. | Menu, preset load apply |
 | `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Chunked runtime Scene kit audio-routing, descriptor runtime apply, and legacy mod-target apply. | Menu |
+| `preset_startInstrumentApply(scene, slot)` / `preset_tickInstrumentApply()` | Commit one validated staged Instrument. Active Scene path clears all outgoing modulation owners, commits/resets the incoming runtime, rebuilds all six Morph images, then normalizes/rebinds all six source target relationships. | Menu Instrument completion |
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values; per-voice Morph is the engine input. | Menu, MIDI, velocity modulation, main loop |
 | `presetMorph_setVoiceLfoModulation(source_slot, target_slot, amount, polarity, lfo_value)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay that is summed around retained per-voice Morph base values. | InstrumentManager/LFO dispatch |
 
@@ -368,6 +385,33 @@ still needs the same descriptor/Scene target migration.
 | `paramArray_setParameter(idx, newValue)` | Write one typed value into the mapped DSP field when the id/pointer are valid. | modulationNode restore/apply paths |
 | `parameterArray_init()` | Fill the sound-parameter pointer/type map. | `main.c` boot |
 | `extern parameter_values[]` | Legacy/static parameter byte store declaration. Descriptor-backed instrument values live in Scene storage. | Defined in Menu today |
+
+## Core/DSP/Instruments/InstrumentManager
+
+Affiliate modules: SceneData, Preset/Morph, Menu, filesystem/storageTypes,
+MidiVoiceControl, mixer, modulationNode, LFO/velocity paths, and all four
+instrument engines.
+
+Purpose: owns the immutable instrument registry and the active Scene
+slot-to-runtime bridge. Descriptor tables remain beside each instrument type;
+InstrumentManager supplies registry lookup, assignment policy, target
+validation, Choke sibling lookup, current type dispatch, and runtime lifecycle
+operations that callers must not duplicate.
+
+| API | Use | Usual callers / clients |
+|---|---|---|
+| `instrumentManager_registryEntry()` / `registryCount()` / `registryEntryAt()` / `typeDisplayLabel()` / `typeFlags()` | Immutable type metadata: token, extension, label, Basic/Advanced/Choke flags, descriptor and menu tables. | Menu, storage/filesystem, converter-aligned tooling |
+| `instrumentManager_typeSelectableForSceneSlot(scene, slot, type)` | Enforce any-Basic/two-Advanced replacement policy. | Instrument Load type browser |
+| `instrumentManager_chokeDescriptorIndexForBase(type, base, out)` | Resolve `<base>_choke` sibling within one type. | Menu VOICE7 resolver |
+| `instrumentManager_runtimeInstance()` / trigger/filter/async/sync/pan/LFO dispatch family | Resolve the runtime object for the current active Scene slot type. | mixer, MIDI/Sequencer trigger paths, Preset |
+| `instrumentManager_clearAllRuntimeModulationTargets()` | Restore/clear both LFO pairs and velocity target for every outgoing current source before a slot type changes. | Preset staged Instrument commit |
+| `instrumentManager_resetRuntimeSlot(slot)` | Initialize only the incoming committed slot/type runtime object. | Preset staged Instrument commit |
+| `instrumentManager_writeRuntime()` / target validation/stepping helpers | Apply descriptor/supplemental bindings and validate canonical targets against current slot types. | Preset, Menu, modulation paths |
+
+Transaction rule: clear all current owners before changing Scene slot type;
+commit the staged slot; reset the incoming runtime; rebuild retained runtime
+images; then normalize and rebind all sources. Clearing after the type swap
+cannot recover a dynamic-pool source owned by the outgoing identity.
 
 ## Core/Scene/SceneModTargets
 
@@ -487,6 +531,10 @@ descriptor-key validation to `storageTypes.c/h`.
 | `filesystem_tick()` | Pump asyncfatfs work. | main loop |
 | `filesystem_status()` / `filesystem_ack()` | Operation status protocol. | Preset/Menu |
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is now `Kit/NNN Name/kitset.kcg` plus instruments; for `FS_FILE_MORPH`, load remains legacy `.SND`. New-format saves are not implemented; saves remain legacy for now. | Preset |
+| `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
+| `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the per-type root Instrument browser cache. | main boot, Menu Instrument Load |
+| `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Validate one root Instrument file into private staging without mutating live SceneData. | Preset Instrument request |
+| `filesystem_loadedInstrumentSlot()` / `filesystem_loadedInstrumentDisplayName()` | Borrow the validated staged payload/name for Preset's ordered commit. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
 | `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the new cache and legacy `kitBrowser` map. | main startup, kitBrowser/Menu |
 | `filesystem_installSamplesBlocking()` / `filesystem_installLoopsBlocking()` | Blocking sample/loop install under audio suspend. | Menu |
@@ -503,9 +551,12 @@ Important private Phase 2 kit helpers:
   names when available, records FAT short aliases for opening, and populates
   `kb_map[]`/`kb_numKits` for legacy `kitBrowser` compatibility.
 - `filesystem_loadKitDirectory_tick()` opens the selected kit folder, parses
-  `kitset.kcg`, loads six listed instrument files, and writes descriptor-indexed
-  values into Scene kit/instrument storage. Runtime apply is handled later
-  through Preset/InstrumentManager.
+  `kitset.kcg`, and loads six listed instrument files into private `kit_t`
+  staging. It fans out the complete Kit payload only after every file validates;
+  runtime apply is handled later through Preset/InstrumentManager.
+- `filesystem_loadInstrument_tick()` parses one root Instrument into private
+  `kit_instrument_slot_t`/display-name staging. It must never reset a live Scene
+  slot during asynchronous I/O; Preset owns the post-completion transaction.
 - Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
   fallback for FAT aliases like `001SLA~1`.
 
@@ -535,9 +586,9 @@ layer. All functions in this layer use the `storage_` prefix.
 | `storage_status_t` | Parser/validator result codes. | filesystem |
 | `storage_instrument_type_t` | Format-level type enum for `.drm`, `.snr`, `.cym`, `.hat`. | kitset/instrument parser |
 | `storage_kitset_t` | Incremental parse state for `kitset.kcg`. | filesystem directory kit loader |
-| `storage_instrument_state_t` | Incremental parse state for one instrument file. | filesystem directory kit loader |
+| `storage_instrument_state_t` | Incremental parse state for one instrument file. | Kit and root-Instrument filesystem loaders |
 | `storage_kitsetInit()` / `storage_kitsetParseLine()` / `storage_kitsetFinalize()` | Validate `kitset.kcg`, collect instrument filenames/types, and write kit-level values such as audio outputs into Scene storage. | `filesystem_loadKitDirectory_tick()` |
-| `storage_instrumentStateInit()` / `storage_instrumentParseLine()` / `storage_instrumentFinalize()` | Validate one instrument file and write descriptor-indexed `[params]`/`[morph]` values into Scene storage. | `filesystem_loadKitDirectory_tick()` |
+| `storage_instrumentStateInit()` / `storage_instrumentParseLine()` / `storage_instrumentFinalize()` | Validate one instrument file and write descriptor-indexed `[params]`/`[morph]` values into caller-owned Kit/slot staging. | Kit and root-Instrument loaders |
 | `storage_instrumentCopyMainToMorphFallback()` | Copy mapped main values into morph buffer when an instrument has no `[morph]` section. | `filesystem_loadKitDirectory_tick()` |
 | `storage_instrumentTypeFromText()` / `storage_instrumentFilenameMatchesType()` | Convert/validate type strings and extensions. | kitset/instrument validation |
 | `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into zero-based slot plus eight-character display name. | Kit scan |

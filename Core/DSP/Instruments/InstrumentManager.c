@@ -117,6 +117,10 @@ static uint8_t instrumentManager_resolveModulationTarget(
     instrument_runtime_target_t *target_out);
 static instrument_type_t instrumentManager_slotType(uint8_t slot);
 static SlopeEg2 *instrumentManager_ampEg(uint8_t slot);
+static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
+                                                           uint8_t target_pair);
+static void instrumentManager_restoreVelocitySupplementalTarget(
+    uint8_t source_slot);
 
 static DrumVoice *instrumentManager_drumRuntime(uint8_t slot)
 {
@@ -978,6 +982,72 @@ void instrumentManager_runtimeInit(void)
             Cymbal_initVoice(&runtime_cymbal_slots[slot]);
         if (slot != 5u)
             HiHat_initVoice(&runtime_hihat_slots[slot]);
+    }
+}
+
+void instrumentManager_clearAllRuntimeModulationTargets(void)
+{
+    uint8_t source_slot;
+
+    /*
+     * Tear down the modulation graph while every outgoing runtime is findable.
+     *
+     * Inputs are the six active Scene slot types before a staged Instrument
+     * commit. For each source, both LFO pairs first restore supplemental owners
+     * such as Scene Morph/decimation, then direct ModulationNode destinations
+     * restore their captured runtime baseline and forget their pointer. Velocity
+     * follows the same order. Output is an empty graph ready to be rebuilt from
+     * retained Scene descriptors after the incoming runtime image is applied.
+     *
+     * The loop is intentionally all-source rather than target-slot-only: a
+     * destination in the replaced slot may be owned by any source voice, and a
+     * source in the replaced slot must be resolved before SceneData changes its
+     * type. No post-commit lookup can reliably recover an outgoing pool node.
+     */
+    for (source_slot = 0u; source_slot < INSTRUMENT_SLOT_COUNT; source_slot++) {
+        Lfo *lfo = instrumentManager_runtimeLfo(source_slot);
+        uint8_t pair;
+
+        for (pair = 0u; pair < 2u; pair++) {
+            instrumentManager_restoreLfoSupplementalTarget(source_slot, pair);
+            if (lfo) {
+                modNode_clearDestination(pair ? &lfo->modTarget2
+                                              : &lfo->modTarget);
+            }
+        }
+        instrumentManager_restoreVelocitySupplementalTarget(source_slot);
+        modNode_clearDestination(&velocityModulators[source_slot]);
+    }
+}
+
+void instrumentManager_resetRuntimeSlot(uint8_t slot)
+{
+    /*
+     * Reset only the incoming runtime selected by the committed Scene type.
+     *
+     * Input is a zero-based slot after staged SceneData commit. Output is one
+     * fully initialized engine object with stopped envelopes, default LFO
+     * nodes, and no state inherited from an earlier use of its runtime pool.
+     * Descriptor/Morph application follows in Preset and replaces these engine
+     * defaults with the loaded values. Other slots are deliberately untouched.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM:
+        Drum_initVoice(instrumentManager_drumRuntime(slot), slot);
+        break;
+    case INSTRUMENT_TYPE_SNR:
+        Snare_initVoice(instrumentManager_snareRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_CYM:
+        Cymbal_initVoice(instrumentManager_cymbalRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_HAT:
+        HiHat_initVoice(instrumentManager_hihatRuntime(slot));
+        break;
+    default:
+        break;
     }
 }
 

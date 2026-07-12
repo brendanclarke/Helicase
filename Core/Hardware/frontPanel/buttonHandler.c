@@ -91,6 +91,16 @@ uint8_t buttonHandler_resetLock = 0;
 static uint8_t buttonHandler_mutedVoices = 0;
 static int8_t buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
 static uint8_t buttonHandler_morphVoiceModeActive = 0;
+/*
+ * SEQ presses consumed by the Load menu, retained until their release edge.
+ *
+ * Menu may change page/submode between press and release while asynchronous
+ * storage completes. Remembering the consumed physical button prevents the
+ * release dispatcher from falling through into normal step erase/roll logic.
+ * ButtonHandler owns this short-lived gesture pairing; Menu owns the policy
+ * decision exposed by menu_loadSceneButtonPressed().
+ */
+static uint16_t buttonHandler_loadSceneSeqPressedMask = 0u;
 
 /* -----------------------------------------------------------------------
 ** Helpers
@@ -604,6 +614,18 @@ static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
 
 static void handleModeButtons(uint8_t mode)
 {
+    if (menu_loadInstrumentTransactionBusy()) {
+        /*
+         * Freeze mode ownership through the complete Instrument transaction.
+         *
+         * Input is any mode press after a staged Instrument request was
+         * accepted. Output is no mode, page, blink, or nested-load mutation
+         * until Preset finishes commit/rebuild/rebind and Menu releases busy.
+         * This gate precedes the special Load/Save exit branch so even that
+         * second press cannot detach UI context from the in-flight operation.
+         */
+        return;
+    }
     if (!buttonHandler_getShift() &&
         mode == SELECT_MODE_LOAD_SAVE &&
         menu_loadInstrumentIsActive()) {
@@ -815,6 +837,19 @@ static void handleVoiceButton(uint8_t voiceNr)
     uint8_t wasSelectedVoice;
     uint8_t shouldPreviewVoice;
 
+    if (menu_loadInstrumentTransactionBusy()) {
+        /*
+         * Consume voice selection and preview during Instrument commit.
+         *
+         * Input is any VOICE press while the captured destination is busy.
+         * Output is no trigger and no destination/active-voice change. Preview
+         * must be blocked as well as selection because the incoming runtime is
+         * reset and rebuilt over bounded foreground ticks before it is valid to
+         * audition.
+         */
+        return;
+    }
+
     if (copyClear_Mode >= MODE_COPY_PATTERN) {
         if (copyClear_srcSet()) {
             /*
@@ -846,18 +881,41 @@ static void handleVoiceButton(uint8_t voiceNr)
         return;
     }
 
+    /*
+     * Preserve the stopped-transport audition gesture inside Instrument Load.
+     *
+     * Input: a repeated press of Menu's current Instrument Load destination.
+     * Output: triggers that voice without reopening/resetting the nested load
+     * cursor. This remains in ButtonHandler because seq_previewVoice() is the
+     * existing front-panel audition endpoint; Menu only owns load selection.
+     * Track 7 already reaches the ordinary preview path because it is not an
+     * Instrument Load destination slot.
+     */
+    if (menu_loadInstrumentIsActive() && voiceNr == menu_getActiveVoice() &&
+        !seq_isRunning()) {
+        seq_previewVoice(voiceNr);
+        return;
+    }
+
     if (menu_loadInstrumentVoicePressed(voiceNr)) {
+        uint8_t blink_voice;
+
         /*
          * LOAD_PAGE voice buttons select Instrument Load destination slots.
          *
          * Inputs: pressed voice button while Menu is on LOAD_PAGE. Output:
          * Menu enters/updates Instrument Load mode, active voice LED follows
          * the selected destination, and that voice blinks until the user exits
-         * Instrument Load. Normal voice selection, mute, page switching, and
-         * stopped-transport preview are skipped for this press.
+         * Instrument Load. Only VOICE blink state is cleared here: clearing all
+         * blink LEDs would erase Menu's active-Scene SEQ feedback immediately
+         * after it was painted. Normal voice selection, mute, and page
+         * switching are skipped for this press.
          */
         led_setActiveVoice(voiceNr);
-        led_clearAllBlinkLeds();
+        for (blink_voice = 0u; blink_voice < INSTRUMENT_SLOT_COUNT;
+             blink_voice++) {
+            led_setBlinkLed((uint8_t)(LED_VOICE1 + blink_voice), 0u);
+        }
         led_setBlinkLed((uint8_t)(LED_VOICE1 + voiceNr), 1u);
         return;
     }
@@ -965,6 +1023,12 @@ static void processPress(uint8_t buttonNr)
 {
     int8_t seq = btn_to_seq(buttonNr);
     if (seq >= 0) {
+        if (menu_loadSceneButtonPressed((uint8_t)seq)) {
+            buttonHandler_loadSceneSeqPressedMask = (uint16_t)(
+                buttonHandler_loadSceneSeqPressedMask |
+                (uint16_t)(1u << (uint8_t)seq));
+            return;
+        }
         buttonHandler_seqButtonPressed((uint8_t)seq);
         return;
     }
@@ -1138,6 +1202,12 @@ static void processRelease(uint8_t buttonNr)
 {
     int8_t seq = btn_to_seq(buttonNr);
     if (seq >= 0) {
+        uint16_t bit = (uint16_t)(1u << (uint8_t)seq);
+        if ((buttonHandler_loadSceneSeqPressedMask & bit) != 0u) {
+            buttonHandler_loadSceneSeqPressedMask = (uint16_t)(
+                buttonHandler_loadSceneSeqPressedMask & (uint16_t)(~bit));
+            return;
+        }
         buttonHandler_seqButtonReleased((uint8_t)seq);
         return;
     }

@@ -97,14 +97,51 @@ fs_status_t filesystem_status(void);
 void        filesystem_ack(void);
 
 bool filesystem_requestLoad(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb);
+/*
+ * Load one numbered Kit directory into every Scene selected by scene_mask.
+ *
+ * Inputs: zero-based Kit browser slot, a bit per resident Scene, and completion
+ * callback. Output: one asynchronous directory read whose staged payload is
+ * copied into all selected Scene kits only after every instrument validates.
+ * Clients: preset_loadKitForScenes() and boot through the same Preset API.
+ * This cannot be folded into filesystem_requestLoad(): that generic request
+ * has no scene-mask coordinate and must keep its historical active-Scene
+ * compatibility behavior for non-UI callers.
+ */
+bool filesystem_requestLoadKitForScenes(uint8_t slot, uint16_t scene_mask,
+                                        fs_completion_cb_t cb);
 bool filesystem_requestSave(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb);
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
-bool filesystem_requestLoadInstrument(uint8_t destination_slot,
+/*
+ * Load one root Instrument/ file into an explicit Scene slot.
+ *
+ * Inputs: resident Scene index, zero-based kit slot, registry type, cache
+ * index, and completion callback. Output: one asynchronous parse into
+ * filesystem-owned staging; live SceneData and DSP state are unchanged until
+ * Preset commits the validated payload. Client: preset_loadInstrument(). The
+ * explicit Scene/slot coordinates remain immutable completion context even
+ * though parsing itself is off-scene.
+ */
+bool filesystem_requestLoadInstrument(uint8_t destination_scene,
+                                      uint8_t destination_slot,
                                       instrument_type_t type,
                                       uint8_t browser_index,
                                       fs_completion_cb_t cb);
+struct kit_instrument_slot;
+/*
+ * Read the most recently validated staged Instrument payload.
+ *
+ * Inputs: none; valid use begins after an FS_STATUS_DONE Instrument callback.
+ * Outputs: a filesystem-owned immutable slot image and eight-character display
+ * name that remain valid until the next filesystem operation starts. Clients:
+ * Preset's Instrument transaction copies them only after clearing outgoing DSP
+ * owners. These accessors cannot commit SceneData themselves because storage
+ * must not choose audio lifecycle order or reset runtime instances.
+ */
+const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
+const char *filesystem_loadedInstrumentDisplayName(void);
 uint8_t filesystem_installSamplesBlocking(void);
 uint8_t filesystem_installLoopsBlocking(void);
 

@@ -85,15 +85,33 @@ preset_status_t  preset_getStatus(void);
 preset_op_type_t preset_getCompletedOp(void);
 uint8_t          preset_getRequestSlot(void);
 uint8_t          preset_getRequestType(void);
+/*
+ * Read the explicit Scene destination retained for the active Instrument load.
+ *
+ * Output: a valid Scene index while an Instrument request is pending/completing.
+ * Client: Menu completion starts the bounded one-slot DSP apply for that exact
+ * Scene instead of assuming the Scene active when encoder movement began.
+ */
+uint8_t          preset_getRequestScene(void);
 void             preset_ackStatus(void);
 
 /* -----------------------------------------------------------------------
 ** Load/save — all async, return immediately.
 ** ----------------------------------------------------------------------- */
 
-/* Drumset (kit). isMorph=1 reads/writes the morph kit buffer/path. */
+/* Drumset (kit). isMorph=1 reads/writes the legacy morph kit buffer/path. */
 uint8_t preset_loadDrumset(uint8_t presetNr, uint8_t isMorph);
 void    preset_saveDrumset(uint8_t presetNr, uint8_t isMorph);
+/*
+ * Load one Kit directory into an explicit set of resident Scenes.
+ *
+ * Inputs: zero-based Kit slot and Scene bitmask. Output: an asynchronous Kit
+ * request whose filesystem phase stages, validates, and commits the Kit to
+ * each selected Scene. Clients: Load menu and boot. This dedicated entry point
+ * keeps scene routing at the Preset boundary instead of making Menu call the
+ * filesystem directly or overloading the legacy morph compatibility API.
+ */
+uint8_t preset_loadKitForScenes(uint8_t presetNr, uint16_t scene_mask);
 
 /* Globals — single GLO.CFG file. */
 void    preset_loadGlobals(void);
@@ -110,7 +128,8 @@ uint8_t preset_loadAll(uint8_t presetNr, uint8_t isAll);
 /* Read 8-byte preset name from file header (any type). */
 char*   preset_loadName(uint8_t presetNr, uint8_t what);
 void    preset_applyLoadedName(void);
-uint8_t preset_loadInstrument(uint8_t destination_slot,
+uint8_t preset_loadInstrument(uint8_t destination_scene,
+                              uint8_t destination_slot,
                               instrument_type_t type,
                               uint8_t browser_index);
 
@@ -171,7 +190,20 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
 ** operation-specific UI/global follow-up after the tick function reports idle. */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
-void    preset_startInstrumentApply(uint8_t slot);
+/*
+ * Commit and start bounded runtime application for one staged Instrument slot.
+ *
+ * Inputs: immutable request Scene/slot and filesystem's validated staging
+ * payload. Output: inactive Scenes receive retained state only. Active Scene
+ * commits clear all outgoing modulation owners, replace/reset the incoming
+ * runtime, rebuild all six Morph images, and rebind one normalized source per
+ * tick. Client: Menu's Instrument Load completion handler.
+ *
+ * This remains separate from the Kit cursor because Instrument commit must
+ * preserve the outgoing slot identity until targets are cleared, whereas Kit
+ * loading has already atomically replaced a fully staged six-slot payload.
+ */
+void    preset_startInstrumentApply(uint8_t scene_index, uint8_t slot);
 uint8_t preset_tickInstrumentApply(void);
 
 /*

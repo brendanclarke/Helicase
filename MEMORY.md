@@ -17,10 +17,10 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: repository root, branch `dev-burst-reduction`.
+**Current working source**: repository root, a development branch.
 
-**Session 033 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/033_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, Phase 2 directory-kit loading, the current bridge STEP/track-settings model, descriptor-backed instrument storage, descriptor Morph/LFO/velocity targets, and the future filesystem shape, also read `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` and `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
+**Session 034 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/034_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, directory Kit and root Instrument loading, descriptor-backed instrument storage, Choke/track-7 behavior, descriptor Morph/LFO/velocity targets, staged Instrument commit, and the future filesystem shape, also read `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` and `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
@@ -33,8 +33,9 @@ Session 028 removes `Core/MIDI/frontPanelParser.c/h` from live code. Former pars
 Session 029 completes the PatternData storage-ownership pass and Preset folder move. `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, and `SEQ_NEXT_RANDOM*` are gone from live code; Sequencer reads/writes pattern storage through `pat_*` helpers while keeping timing/transport/recording gates. `Core/Preset/` is now `Core/Scene/Preset/`; public names remain `preset_*`, `parameterArray_*`, and `paramArray_*`. `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign. Staging/global audits are in `STAGING_AUDIT.md` and `GLOBALS_STAGING_AUDIT.md`.
 Session 030 begins Phase 2 filesystem work. `FILESYSTEM_SPEC.md` began as the root layout spec and now forwards to `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`; `Core/Hardware/SD/storageTypes.c/h` owns kit text schemas/parameter maps with `storage_` prefixes; normal root kit load scans `Kit/NNN Name/`, loads `kitset.kcg` plus six instrument files, and keeps morph load on legacy `.SND`. Numbered folder convention is preferred `NNN Name`, compatibility `NNN_Name`, with a FAT short-alias fallback for scan aliases like `001SLA~1`. `SD_CARD/Kit/` is generated from legacy kits using the space convention.
 Session 031 completes the one-live-pattern/8-bar bridge pass and follow-ups. Live `NUM_PATTERN` is 1 while pattern files still stream the old 8-slot bridge layout; STEP front page now owns per-track length, scale, MIDI channel, MIDI note, and per-track shuffle; empty boot tracks default to 16 steps. Sequencer timing runs at corrected default speed with a 96-PPQ master step clock, per-track scale ratios, per-track shuffle, and pattern realign. LED flash is a group overlay and `led_setBlinkLed()` is idempotent. `SHIFT+VOICE` enters morph endpoint edit mode using `parameters2[]` and a blinking VOICE mode LED; stopped selected-voice re-press previews the voice. Pattern/container storage no longer imports or exports the old single shuffle byte; only per-track shuffle extension data is used, and final storage conversion remains a Phase 2 external-converter concern.
-Session 032 follows through on the instrument parameter refactor. VOICE pages are now populated from descriptor-owned layouts in `Core/DSP/Instruments/*/*Parameters.c` and menu edits write Scene descriptor images instead of static `menuPages.h`/`parameter_values[]` cells. Directory kit loading writes descriptor-indexed Scene storage, and Preset/InstrumentManager applies descriptor values back into the DSP runtime; the 001 Slak kit boots and audio mostly works after a parser key-buffer fix for `amp_envelope_decay_closed/open`. `instrument_decimation` and `velo_mod_amount` are `ROW_NOBIND_IMAGE` parameters: morphable/modulatable/automatable image values with special runtime handling instead of direct member-offset binds. Current filesystem/instrument-file authority is `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`; the former `INSTRUMENT_FILE_SPEC.md` content was folded there and the separate file was deleted.
-Session 033 lands the Phase 3 instrument runtime repair. LFO descriptor display was fixed to use exact descriptor strings, target selection now skips non-modulatable rows with one `off`, VOICE sub-pages can show 16 descriptor cells as four-cell screens, LFOs have two destination pairs plus shared polarity, and descriptor/Scene LFO targets now apply in DSP. Descriptor Morph works against Scene-owned images; PERF Morph is split into global set-all Morph plus six per-voice Morph controls and Scene Decimation `srt`. `Core/Scene/SceneModTargets.c/h` owns non-voice sound modulation targets (`1vm..6vm`, then Scene `srt`), velocity modulation can retained-set per-voice Morph/Scene Decimation, and LFO Morph modulation is a hidden overlay centered on the retained per-voice Morph base. Remaining Phase 3 gaps: descriptor-aware step automation, new-format Kit/Instrument saves, morphed-instrument load/save, Scene/Bank/Effect file structures, root `settings.cfg`, and voice 6/tracks 6+7/choke storage cleanup.
+Session 032 follows through on the instrument parameter refactor. VOICE pages are now populated from descriptor-owned layouts in `Core/DSP/Instruments/*/*Parameters.c` and menu edits write Scene descriptor images instead of static `menuPages.h`/`parameter_values[]` cells. Directory kit loading writes descriptor-indexed Scene storage, and Preset/InstrumentManager applies descriptor values back into the DSP runtime; the 001 Slak kit boots and audio mostly works after the then-canonical `amp_envelope_decay_closed/open` parser-key fix. `instrument_decimation` and `velo_mod_amount` are `ROW_NOBIND_IMAGE` parameters: morphable/modulatable/automatable image values with special runtime handling instead of direct member-offset binds. Current filesystem/instrument-file authority is `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`; the former `INSTRUMENT_FILE_SPEC.md` content was folded there and the separate file was deleted.
+Session 033 lands the Phase 3 instrument runtime repair. LFO descriptor display was fixed to use exact descriptor strings, target selection now skips non-modulatable rows with one `off`, VOICE sub-pages can show 16 descriptor cells as four-cell screens, LFOs have two destination pairs plus shared polarity, and descriptor/Scene LFO targets now apply in DSP. Descriptor Morph works against Scene-owned images; PERF Morph is split into global set-all Morph plus six per-voice Morph controls and Scene Decimation `srt`. `Core/Scene/SceneModTargets.c/h` owns non-voice sound modulation targets (`1vm..6vm`, then Scene `srt`), velocity modulation can retained-set per-voice Morph/Scene Decimation, and LFO Morph modulation is a hidden overlay centered on the retained per-voice Morph base. The then-open voice-6/tracks-6+7/Choke cleanup was completed in Session 034; descriptor-aware step automation, new-format saves, Scene/Bank/Effect structures, and root `settings.cfg` remain.
+Session 034 completes Instrument Load. InstrumentManager registry entries now own Basic/Advanced/Choke flags, display labels, extensions, and the two-Advanced replacement rule; Drum/Snare are Basic, Cymbal Advanced, HiHat Advanced|Choke. HiHat canonical decay keys are `amp_envelope_decay` and `amp_envelope_decay_choke`; legacy closed/open names remain accepted by storage. VOICE7 dynamically resolves Choke siblings, while a non-Choke slot 6 receives a generated Scene-owned track-7 decay/morph endpoint and Scene target `7dc`. Root `Instrument/` browsing/loading is live for `.drm/.snr/.cym/.hat`, as is the nested Load UI, Scene LED selection behavior, and stopped voice preview. Instrument files now stage outside live SceneData and Preset commits an active replacement atomically: clear all outgoing modulation owners, replace and reset the runtime slot, rebuild all six Morph/runtime images, then normalize/rebind all sources; UI target-changing actions stay locked throughout. The former Voice 2 long-decay fault was isolated to the old direct one-slot Instrument load lifecycle and cleared by this transaction. Remaining Phase 3 risks are descriptor-aware step automation, raw LFO float writes that bypass descriptor setters, dynamic modulation-node enumeration, and new-format save/Scene/Bank work.
 
 ---
 
@@ -364,8 +365,9 @@ Core/Scene/Preset/presetManager.c / kitBrowser.c
   root `FILESYSTEM_SPEC.md` compatibility pointer was deleted in Session 033.
   Target root directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`,
   `Wavetable`, `Effect`, and `Instrument`; future system settings live in root
-  `settings.cfg`. Current implemented directory work is root `Kit/` load only;
-  globals still use legacy `glo.cfg`.
+  `settings.cfg`. Current implemented directory load work is root `Kit/` plus
+  root `Instrument/`; new-format saves and Scene/Bank folders remain pending.
+  Globals still use legacy `glo.cfg`.
 - `storageTypes.c/h` owns Phase 2 text storage schemas and parameter maps. Keep
   it free of `asyncfatfs` calls and keep function names prefixed `storage_`.
 - Normal kit load now scans root `Kit/` directories named `NNN Name` or
@@ -373,6 +375,26 @@ Core/Scene/Preset/presetManager.c / kitBrowser.c
   New-format Kit save is not implemented yet; current save paths remain legacy.
   Morph-kit load/save remains legacy `.SND` until per-instrument morph
   persistence is designed.
+- Root `Instrument/` is a separately scanned, type-filtered source pool.
+  Instrument Load initially shows the destination slot's Kit member stem;
+  changing type only changes the type selection, and lower-row browsing is the
+  action that replaces the slot. Pool entries load immediately after their
+  private filesystem staging has validated.
+- Instrument Load is not a one-slot write. Preset owns its completion
+  transaction: clear every runtime modulation owner referencing the outgoing
+  slot before the type/image replacement, reset the incoming runtime, request
+  all six Morph/runtime applies, and normalize/rebind all source targets after
+  the images exist. Keep mode, Scene, destination, and preview input locked
+  through both read and commit phases.
+- Instrument metadata is firmware-owned registry data, not file content.
+  Basic types are unrestricted; at most two Advanced types may be present;
+  Choke enables generic VOICE7 `<base>_choke` lookup. Current flags are Drum
+  and Snare Basic, Cymbal Advanced, HiHat Advanced|Choke.
+- Canonical HiHat decay file keys are `amp_envelope_decay` and
+  `amp_envelope_decay_choke`; accept legacy `amp_envelope_decay_closed/open`
+  aliases in storage. Non-Choke slot 6 uses generated Scene setting/morph
+  endpoint `slot6_track7_amp_envelope_decay` when its descriptor table has the
+  base decay; that alternate is Scene-modulatable as `7dc`.
 - Kit scan keeps both display names and FAT short open aliases. If a card only
   exposes a short alias such as `001SLA~1`, scan falls back to the leading
   three-digit slot so the kit remains loadable.
@@ -541,6 +563,36 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Known Issues / Technical Debt
 
+### Resolved / Changed in Session 034
+- Instrument Load is complete for current instrument types. The root pool holds
+  converted `.drm`, `.snr`, `.cym`, and `.hat` files; browser order is
+  per-type alphanumeric with a one-based display number saturated at 999.
+  New-format Instrument *save* is still not implemented.
+- The visible Load/Save menu deliberately removed Pattern, MorphKit, Perform,
+  and All. Kit/Instrument Load scenes use `pat_sceneHasActiveSteps()` for LED
+  base state. Kit Load permits a zero-or-more Scene toggle mask; Instrument
+  Load selects exactly one Scene. A selected Scene blinks.
+- `kit_t.instrument_display_name[6][9]` preserves an eight-character Kit
+  member stem only for Instrument Load provenance display; it is not runtime
+  identity or a second file-authority layer.
+- The direct Instrument loader caused the observed Voice 2 long-decay/locked
+  parameter condition: loading any Drum file into that slot stayed bad, while
+  loading a Kit repaired it. The new staged transaction prevents live Scene
+  mutation during I/O and clears/rebuilds all modulation/runtime ownership on
+  commit. It also prevents rapid encoder, destination, Scene, mode, or preview
+  events from interleaving with a load.
+- Still unresolved: Pattern `Step` stores canonical 16-bit destinations but
+  `AutomationNode` is still legacy byte CC/CC2 based; migrate before enabling
+  descriptor step automation. Direct LFO application to some envelope rows
+  writes raw `SlopeEg2` floats instead of descriptor byte setters, and normal
+  modulation-node reset/original-value paths still enumerate fixed global
+  pools rather than InstrumentManager's dynamic pools.
+- Converter follow-up: regenerate instrument values by live descriptor key/ID,
+  not a hardcoded descriptor order. The Session 034 investigation found 42
+  mismatched finite LFO target pairs among 55 active first pairs in the
+  generated pool; this did not cause the long-decay fault, but the files need
+  conversion-path repair before trusting their assignment data.
+
 ### Resolved / Changed in Session 030
 - Phase 2 root filesystem spec began in `FILESYSTEM_SPEC.md`; after the
   Session 032 documentation consolidation and Session 033 closeout, the
@@ -549,7 +601,8 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   The old root pointer file was deleted in Session 033.
   Target root layout is `Bank`, `Scene`, `Kit`,
   `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, plus future root
-  `settings.cfg`. Current implemented directory load work is root `Kit/` only.
+  `settings.cfg`. Current implemented directory load work is root `Kit/` and
+  root `Instrument/`; new-format saves remain pending.
 - `SD_CARD/Kit/` generated from legacy `Pxxx.SND` files. Folders use preferred
   `NNN Name` convention, for example `004 Moch to`; `_` remains accepted for
   compatibility.
@@ -587,8 +640,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - `instrument_decimation` and `velo_mod_amount` are `ROW_NOBIND_IMAGE`
   parameters: morphable, modulatable, and automatable image values without a
   direct struct-offset bind.
-- Parser keys now allow at least 32 bytes so long keys such as
-  `amp_envelope_decay_closed/open` load correctly from the 001 Slak kit.
+- Parser keys allow at least 32 bytes. Session 034 canonicalized HiHat decay
+  to `amp_envelope_decay` / `amp_envelope_decay_choke` and retains legacy
+  closed/open aliases for compatibility.
 - Session 033 resolved the known descriptor Morph and LFO/velocity runtime
   modulation gaps. The remaining descriptor target runtime gap is step
   automation.

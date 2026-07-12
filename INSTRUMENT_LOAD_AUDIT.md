@@ -951,3 +951,86 @@ Manual behavior checks:
   appear twice.
 - Generated non-Choke track-7 decay belongs to Kit settings, not instrument
   files and not global Scene settings.
+
+## Implementation Notes: Instrument/Kit Load Refinements
+
+Completed in this pass:
+
+- Removed `Pattern`, `MorphKit`, `Perform`, and `All` from the public
+  Load/Save enum and reduced numbered preset UI storage to the one remaining
+  Kit location. The legacy persistence functions remain internally callable,
+  but use Preset-private request identifiers so they cannot reappear as menu
+  selections.
+- Added `pat_sceneHasActiveSteps(scene_index)` as the PatternData-owned query
+  used by Load Scene LEDs. It scans retained `PatternSet` step activity without
+  exposing the `Step.volume` active-bit representation to Menu/front-panel
+  callers.
+- Routed SEQ presses through `menu_loadSceneButtonPressed()`. Kit Load now owns
+  a Scene target mask and keeps the active Scene selected; Instrument Load owns
+  a single destination Scene. ButtonHandler records consumed presses through
+  release so a context change cannot turn the release into a normal step edit.
+- Added scene-aware LED repaint: active pattern data lights a Scene LED, while
+  selected Kit targets and the active/selected Instrument Scene blink. The
+  helper clears only SEQ blink state, preserving unrelated LED ownership.
+- Added staged Kit directory loading. `filesystem_requestLoadKitForScenes()`
+  parses `kitset.kcg` and all six instruments into a private `kit_t`, then
+  copies the complete result to selected Scenes only after validation succeeds.
+  The ordinary boot loader now uses the same Preset entry point.
+- Added retained eight-character instrument-file stems to `kit_t`. Kitset
+  parsing derives them from each `file=` value; root Instrument loading updates
+  the explicit Scene/slot on success. Instrument Load therefore opens on
+  `kit  <name>` and does not need to invent a pool-file selection.
+- Changed Instrument Load selection semantics: it enters on the type row with
+  brackets, type changes are display-only, and lower-row encoder motion is the
+  first action that selects and immediately loads a pool file. After a pool
+  item is shown, changing type preserves that displayed item until lower-row
+  movement selects a file for the new type.
+- Forced build verification: `make -B` completed successfully. Existing
+  toolchain/library warnings remain outside these changes.
+
+Follow-up validation still recommended on hardware:
+
+- Confirm Load Kit SEQ1 is lit/blinking with active pattern data and retains
+  that state across Kit slot changes.
+- Confirm Instrument Load opens as `[Type]` plus `kit  <slot file stem>`, and
+  changing type leaves sound and lower-row source untouched.
+- Confirm the first lower-row encoder step changes to the correct pool end
+  (last for negative, first for positive) and loads exactly that file.
+- When `SCENE_COUNT` expands, exercise multi-Scene Kit target toggles and an
+  inactive-Scene Instrument load to confirm retained data changes without an
+  unintended audible apply.
+
+### Refinement Follow-Up
+
+- Corrected Kit Load Scene selection so the active Scene is only the initial
+  target. Every SEQ Scene button now toggles its own target bit, including the
+  active Scene, allowing the load target set to be empty. Kit LEDs blink only
+  selected targets.
+- Preserved active-Scene SEQ blinking during Instrument Load. The root cause
+  was ButtonHandler clearing all persistent blink LEDs immediately after Menu
+  had drawn Scene status; it now clears only VOICE blink state. Instrument Load
+  continues to support one selected destination Scene while the active Scene
+  remains visibly blinking.
+- Removed the Instrument Load `Loading instr` LCD takeover. A selected pool
+  file still blocks concurrent input through `menu_storageBusy`, but the
+  browser display stays visible through asynchronous read/apply completion.
+- Narrowed lower-row brackets to the normal selector field: Kit source renders
+  as `[kit]name`, and pooled source retains `[001]name` behavior.
+- Restored stopped-transport preview for a repeated selected VOICE press while
+  Instrument Load is active. Track 7 already used the ordinary preview path;
+  the six Instrument destination buttons now match that behavior without
+  resetting the nested load cursor.
+## Parameter-Lock Transaction Follow-Up
+
+Implemented the lifecycle correction identified in
+`INSTRUMENT_LOAD_PARAM_LOCK_BUG.md`:
+
+- root Instrument files parse into filesystem staging rather than live SceneData;
+- Preset request coordinates publish only after request acceptance;
+- active commit clears outgoing modulation ownership before slot type mutation;
+- the incoming runtime is reset, all six Morph/runtime images are rebuilt, and
+  all six normalized source target relationships are reinstalled;
+- Instrument Load blocks encoder, Scene, VOICE preview/selection, and mode
+  changes until the read-plus-apply transaction completes.
+
+Verification: `make -j4` succeeds. Hardware stress testing remains pending.

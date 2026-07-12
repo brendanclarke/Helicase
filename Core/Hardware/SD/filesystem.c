@@ -191,6 +191,18 @@ static storage_kitset_t op_kitset;
 static storage_instrument_state_t op_instrument_state;
 static uint8_t op_instrument_slot = 0;
 /*
+ * Staged Kit payload and target mask for multi-Scene Kit Load.
+ *
+ * The directory state machine fills this isolated kit_t while every kitset and
+ * instrument file is validated. Only after the final file succeeds is it
+ * copied into the selected resident Scenes, preventing a malformed Kit from
+ * leaving a partially replaced live Scene. The mask uses Scene indices as bit
+ * positions; its callers are filesystem_requestLoadKitForScenes() and the
+ * Preset Load menu bridge.
+ */
+static kit_t op_staged_kit;
+static uint16_t op_kit_load_scene_mask = 0u;
+/*
  * Root Instrument/ browser and single-load state.
  *
  * The Instrument pool is list-indexed by instrument type rather than numbered
@@ -207,8 +219,19 @@ static char instrument_file_open_name[INSTRUMENT_TYPE_UNKNOWN]
                                      [FS_INSTRUMENT_MAX_PER_TYPE]
                                      [STORAGE_KIT_FILENAME_MAX];
 static uint8_t op_instrument_load_destination_slot = 0u;
+static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint8_t op_instrument_load_index = 0u;
+/*
+ * Validated one-Instrument staging payload.
+ *
+ * Filesystem owns these buffers from request start through completion. Parsing
+ * writes only here, so audio cannot observe a half-read type or parameter
+ * image. Preset reads the immutable result after FS_STATUS_DONE and performs
+ * the ordered modulation-clear/Scene-commit/runtime-apply transaction.
+ */
+static kit_instrument_slot_t op_staged_instrument;
+static char op_staged_instrument_display_name[9];
 static uint32_t op_stream_index = 0;
 static uint8_t op_item_offset = 0;
 static uint8_t op_loaded_active_pattern_running = 0;
@@ -1248,11 +1271,11 @@ static void filesystem_loadKit_tick(void)
 ** Inputs: op_slot is the zero-based internal kit number; kit_slot_present and
 ** kit_slot_open_name must have been populated by filesystem_requestScanKits();
 ** storageTypes owns the text schema and ParameterArray maps. Outputs:
-** parameter_values[] receives slot routing and instrument [params] data,
-** parameters2[] receives [morph] data or the main-to-morph fallback, and
+** op_staged_kit receives routing, endpoints, and source-name metadata until
+** all files validate; then selected Scene kits receive that complete payload.
 ** preset_currentName receives the kit display name, "Empty   ", or "-       ".
 **
-** Affiliates/clients: preset_loadDrumset(..., morph=0) requests
+** Affiliates/clients: preset_loadKitForScenes() requests
 ** FS_INTERNAL_OP_LOAD_KIT; filesystem_tick() dispatches that request here.
 ** menu.c initiates those requests from the Load page. asyncfatfs current
 ** directory is restored to root before finishing.
@@ -1395,9 +1418,8 @@ static void filesystem_loadKitDirectory_tick(void)
             return;
         }
         if (line_ready) {
-            st = storage_kitsetParseLine(
-                &op_kitset, op_line_buf,
-                &scene_get(scene_getActiveIndex())->kit);
+            st = storage_kitsetParseLine(&op_kitset, op_line_buf,
+                                          &op_staged_kit);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
@@ -1440,6 +1462,27 @@ static void filesystem_loadKitDirectory_tick(void)
 
     case 16: /* PREPARE NEXT INSTRUMENT */
         if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
+            uint8_t scene_index;
+
+            /*
+             * Commit the fully validated staged Kit to every selected Scene.
+             *
+             * Inputs: op_staged_kit and the request-time scene mask. Output:
+             * each selected resident Scene receives a complete copy only after
+             * all files have passed their storage validation. This cannot be
+             * merged into parsing because streaming directly into live Scenes
+             * would expose partial state on malformed Kit directories.
+             */
+            for (scene_index = 0u;
+                 scene_index < SCENE_COUNT && scene_index < 16u;
+                 scene_index++) {
+                if ((op_kit_load_scene_mask &
+                     (uint16_t)(1u << scene_index)) != 0u) {
+                    scene_t *target_scene = scene_get(scene_index);
+                    if (target_scene)
+                        target_scene->kit = op_staged_kit;
+                }
+            }
             memcpy(preset_currentName, kit_slot_name[op_slot], 8);
             op_close_status = FS_STATUS_DONE;
             op_phase = 28;
@@ -1449,7 +1492,7 @@ static void filesystem_loadKitDirectory_tick(void)
                                     op_kitset.instrument_type[op_instrument_slot],
                                     (uint8_t)(op_instrument_slot + 1u));
         instrumentManager_resetSlot(
-            scene_instrumentSlot(scene_getActiveIndex(), op_instrument_slot),
+            &op_staged_kit.instruments[op_instrument_slot],
             op_kitset.instrument_type[op_instrument_slot]);
         op_line_len = 0u;
         op_phase = 17;
@@ -1491,9 +1534,8 @@ static void filesystem_loadKitDirectory_tick(void)
         if (line_ready) {
             st = storage_instrumentParseLine(&op_instrument_state,
                                              op_line_buf,
-                                             scene_instrumentSlot(
-                                                 scene_getActiveIndex(),
-                                                 op_instrument_slot));
+                                             &op_staged_kit.instruments[
+                                                 op_instrument_slot]);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
@@ -1511,8 +1553,7 @@ static void filesystem_loadKitDirectory_tick(void)
                     storage_instrumentCopyMainToMorphFallback(
                         op_kitset.instrument_type[op_instrument_slot],
                         (uint8_t)(op_instrument_slot + 1u),
-                        scene_instrumentSlot(scene_getActiveIndex(),
-                                             op_instrument_slot));
+                        &op_staged_kit.instruments[op_instrument_slot]);
                 }
                 op_close_status = FS_STATUS_DONE;
             }
@@ -1554,10 +1595,11 @@ static void filesystem_loadKitDirectory_tick(void)
 /* -----------------------------------------------------------------------
 ** LOAD ONE ROOT INSTRUMENT state machine
 **
-** Inputs: destination slot, instrument type, and per-type browser index from
-** filesystem_requestLoadInstrument(). Outputs: only the selected Scene kit
-** slot is reset and populated from Instrument/<file>. Kit settings such as
-** audio routing and other instrument slots are preserved.
+** Inputs: destination Scene/slot, instrument type, and per-type browser index
+** from filesystem_requestLoadInstrument(). Outputs: only the selected Scene
+** staging slot is reset and populated from Instrument/<file>. Live SceneData,
+** kit settings, audio routing, and all runtime objects remain unchanged until
+** Preset commits the validated staging payload after completion.
 ** ----------------------------------------------------------------------- */
 static void filesystem_loadInstrument_tick(void)
 {
@@ -1620,8 +1662,7 @@ static void filesystem_loadInstrument_tick(void)
                                     op_instrument_load_type,
                                     (uint8_t)(op_instrument_load_destination_slot + 1u));
         instrumentManager_resetSlot(
-            scene_instrumentSlot(scene_getActiveIndex(),
-                                 op_instrument_load_destination_slot),
+            &op_staged_instrument,
             op_instrument_load_type);
         op_line_len = 0u;
         op_file_ready = false;
@@ -1660,8 +1701,7 @@ static void filesystem_loadInstrument_tick(void)
             st = storage_instrumentParseLine(
                 &op_instrument_state,
                 op_line_buf,
-                scene_instrumentSlot(scene_getActiveIndex(),
-                                     op_instrument_load_destination_slot));
+                &op_staged_instrument);
             if (st != STORAGE_STATUS_OK) {
                 op_close_status = FS_STATUS_ERROR;
                 op_phase = 9;
@@ -1677,9 +1717,20 @@ static void filesystem_loadInstrument_tick(void)
                     storage_instrumentCopyMainToMorphFallback(
                         op_instrument_load_type,
                         (uint8_t)(op_instrument_load_destination_slot + 1u),
-                        scene_instrumentSlot(scene_getActiveIndex(),
-                                             op_instrument_load_destination_slot));
+                        &op_staged_instrument);
                 }
+                /*
+                 * Stage the browser-normalized file stem beside the payload.
+                 *
+                 * Input: immutable per-type scan-cache entry selected by this
+                 * operation. Output: a nine-byte NUL-terminated name that
+                 * Preset commits with the same slot image. Keeping both staged
+                 * prevents the LCD from claiming a file belongs to a slot when
+                 * parsing or runtime commit has not completed.
+                 */
+                memcpy(op_staged_instrument_display_name,
+                       instrument_file_name[op_instrument_load_type]
+                                           [op_instrument_load_index], 9u);
                 op_close_status = FS_STATUS_DONE;
             }
             op_phase = 9;
@@ -4334,9 +4385,14 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_lfn_valid = 0;
     op_line_len = 0;
     op_instrument_slot = 0;
+    op_kit_load_scene_mask = 0u;
     op_instrument_load_destination_slot = 0u;
+    op_instrument_load_destination_scene = 0u;
     op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
     op_instrument_load_index = 0u;
+    memset(&op_staged_instrument, 0, sizeof(op_staged_instrument));
+    memset(op_staged_instrument_display_name, 0,
+           sizeof(op_staged_instrument_display_name));
     completion_callback = cb;
     return true;
 }
@@ -4349,7 +4405,8 @@ bool filesystem_requestLoad(fs_file_type_t type, uint8_t slot, fs_completion_cb_
 
     switch (type) {
     case FS_FILE_KIT:
-        return filesystem_start(FS_INTERNAL_OP_LOAD_KIT, type, slot, cb);
+        return filesystem_requestLoadKitForScenes(
+            slot, (uint16_t)(1u << scene_getActiveIndex()), cb);
     case FS_FILE_MORPH:
         return filesystem_start(FS_INTERNAL_OP_LOAD_MORPH, type, slot, cb);
     case FS_FILE_PATTERN:
@@ -4363,6 +4420,38 @@ bool filesystem_requestLoad(fs_file_type_t type, uint8_t slot, fs_completion_cb_
     default:
         return false;
     }
+}
+
+bool filesystem_requestLoadKitForScenes(uint8_t slot, uint16_t scene_mask,
+                                        fs_completion_cb_t cb)
+{
+    uint8_t scene_index;
+    uint16_t valid_mask = 0u;
+
+    /*
+     * Validate and start a staged multi-Scene Kit directory load.
+     *
+     * Inputs: Kit scan-cache slot and requested Scene bitmask. Output: one
+     * asynchronous load operation, or false without changing live Scene data.
+     * The validity loop deliberately filters mask bits against the resident
+     * allocation so a future SCENE_COUNT increase remains bounded by the
+     * current 16 physical SEQ buttons. Filesystem owns the staging lifecycle;
+     * callers receive completion only after the eventual atomic commit.
+     */
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            valid_mask = (uint16_t)(valid_mask | (uint16_t)(1u << scene_index));
+    }
+    if (valid_mask == 0u || slot >= STORAGE_KIT_MAX_SLOTS)
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_LOAD_KIT, FS_FILE_KIT, slot, cb))
+        return false;
+    op_kit_load_scene_mask = valid_mask;
+    memset(&op_staged_kit, 0, sizeof(op_staged_kit));
+    for (scene_index = 0u; scene_index < INSTRUMENT_SLOT_COUNT; scene_index++)
+        memcpy(op_staged_kit.instrument_display_name[scene_index], "Empty   ", 9u);
+    return true;
 }
 
 bool filesystem_requestSave(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb)
@@ -4422,7 +4511,8 @@ bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
                             cb);
 }
 
-bool filesystem_requestLoadInstrument(uint8_t destination_slot,
+bool filesystem_requestLoadInstrument(uint8_t destination_scene,
+                                      uint8_t destination_slot,
                                       instrument_type_t type,
                                       uint8_t browser_index,
                                       fs_completion_cb_t cb)
@@ -4430,20 +4520,22 @@ bool filesystem_requestLoadInstrument(uint8_t destination_slot,
     /*
      * Start a single Instrument/ file load into one kit slot.
      *
-     * Inputs: zero-based destination slot, instrument type, and per-type
+     * Inputs: resident destination Scene/slot, instrument type, and per-type
      * browser index from the most recent Instrument/ scan. Output: an async
-     * load operation that replaces only that Scene kit slot. This request is
-     * separate from filesystem_requestLoad() because the existing API carries
-     * only one slot byte, while Instrument Load needs destination slot, type,
-     * and browser index as independent coordinates.
+     * operation that validates one file into staging without changing that
+     * Scene kit slot. This request is separate from filesystem_requestLoad()
+     * because its generic signature has no Scene/type/cache-index coordinates,
+     * while Instrument Load needs all three as immutable completion context.
      */
-    if (type >= INSTRUMENT_TYPE_UNKNOWN ||
+    if (!scene_indexValid(destination_scene) ||
+        type >= INSTRUMENT_TYPE_UNKNOWN ||
         destination_slot >= STORAGE_KIT_SLOT_COUNT ||
         browser_index >= instrument_file_count[type])
         return false;
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_INSTRUMENT, FS_FILE_KIT, 0, cb))
         return false;
     op_instrument_load_destination_slot = destination_slot;
+    op_instrument_load_destination_scene = destination_scene;
     op_instrument_load_type = type;
     op_instrument_load_index = browser_index;
     return true;
@@ -4460,6 +4552,31 @@ bool filesystem_requestLoadName(fs_file_type_t type, uint8_t slot, fs_completion
 const char *filesystem_loadedName(void)
 {
     return loaded_name;
+}
+
+const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void)
+{
+    /*
+     * Borrow the validated one-Instrument staging image.
+     *
+     * Output is read-only filesystem storage consumed by Preset immediately
+     * after the matching completion callback. No copy or commit occurs here;
+     * the caller must preserve the outgoing runtime identity until modulation
+     * targets have been cleared.
+     */
+    return &op_staged_instrument;
+}
+
+const char *filesystem_loadedInstrumentDisplayName(void)
+{
+    /*
+     * Borrow the display stem paired with the staged Instrument image.
+     *
+     * Output is eight printable cache characters plus NUL. Preset copies this
+     * only when it commits the associated slot, so file identity and parameter
+     * identity cannot diverge on a failed or incomplete load.
+     */
+    return op_staged_instrument_display_name;
 }
 
 /* Query whether the most recent Kit/ scan found a numbered folder.

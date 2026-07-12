@@ -51,7 +51,7 @@ extern uint8_t menu_muteModeActive;
  */
 extern uint8_t voiceModeShowMorph;
 
-#define NUM_PRESET_LOCATIONS 5
+#define NUM_PRESET_LOCATIONS 1
 extern uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 
 enum PageNames {
@@ -193,10 +193,6 @@ enum saveStateEnum {
 
 enum loadSaveEnum {
     SAVE_TYPE_KIT = 0,
-    SAVE_TYPE_PATTERN,
-    SAVE_TYPE_MORPH,
-    SAVE_TYPE_PERFORMANCE,
-    SAVE_TYPE_ALL,
     SAVE_TYPE_GLO,
     SAVE_TYPE_SAMPLES,
     NUM_SAVE_TYPES
@@ -274,7 +270,29 @@ void menu_switchPage(uint8_t pageNr);
 void menu_switchSubPage(uint8_t subPageNr);
 uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr);
 uint8_t menu_loadInstrumentIsActive(void);
+/*
+ * Report whether nested Instrument Load owns an immutable in-flight transaction.
+ *
+ * Inputs: Menu's nested-load and storage/apply busy state. Output: nonzero from
+ * successful request posting through staged commit, six-slot Morph rebuild,
+ * and target rebind completion. Clients: ButtonHandler mode/voice gesture gates
+ * and Menu's Scene/exit selectors. This accessor is intentionally narrower than
+ * generic storage busy so unrelated load/save operations keep existing policy.
+ */
+uint8_t menu_loadInstrumentTransactionBusy(void);
 void menu_loadInstrumentExit(void);
+/*
+ * Consume a SEQ button as a Scene selector while Load is showing a Kit or an
+ * Instrument destination.
+ *
+ * Inputs: a zero-based SEQ/Scene index. Output: nonzero only when the current
+ * Load context owns the press; Kit Load toggles its selected-scene mask while
+ * Instrument Load changes its one destination Scene. Clients: buttonHandler's
+ * foreground press dispatcher. Menu owns this decision because it also owns
+ * the load mode, LCD cursor, and Scene LED state; ButtonHandler must remain a
+ * gesture router rather than duplicate menu-state tests.
+ */
+uint8_t menu_loadSceneButtonPressed(uint8_t scene_index);
 /*
  * Morph voice view setter.
  *

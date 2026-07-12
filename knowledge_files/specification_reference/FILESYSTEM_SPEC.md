@@ -1,15 +1,16 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative filesystem and instrument-file reference for the
-Helicase/LXR-02 firmware after Session 033. It includes the full Session 032
+Helicase/LXR-02 firmware after Session 034. It includes the full Session 032
 instrument/kit file specification formerly kept in `INSTRUMENT_FILE_SPEC.md`,
-plus the Session 033 runtime decisions for LFO, velocity modulation, Morph,
-per-voice Morph, and Scene modulation targets.
+plus the Session 033/034 runtime decisions for LFO, velocity modulation, Morph,
+per-voice Morph, Scene modulation targets, Choke behavior, and Instrument Load.
 
 Use this document to distinguish three things:
 
-- Implemented now: root `Kit/NNN Name/` directory loading into Scene-owned,
-  descriptor-indexed instrument parameter images.
+- Implemented now: root `Kit/NNN Name/` directory loading and root
+  `Instrument/` pool replacement into Scene-owned, descriptor-indexed
+  instrument parameter images.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
 - Not implemented yet: new-format saves, Scene loads/saves, Bank loads/saves,
@@ -22,7 +23,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented after Session 033:
+Implemented after Session 034:
 
 - Normal kit loading scans root `Kit/` for numbered folders.
 - Preferred kit folder names are `NNN Name`, for example `001 Slak`.
@@ -36,6 +37,8 @@ Implemented after Session 033:
 - The kit display name is the folder name after the three-digit slot prefix.
 - `kitset.kcg` is parsed as the six-slot kit manifest.
 - Six descriptor-keyed instrument text files are loaded from the kit folder.
+- Root `Instrument/` is scanned into a per-type alphanumeric browser and a
+  selected file can be loaded into one explicit Scene/voice slot.
 - Loaded instrument values write into the active `scene_t.kit` descriptor
   images, not into the old flat `parameter_values[]` sound buffer.
 - VOICE menu pages resolve through active instrument descriptor layouts in
@@ -55,6 +58,14 @@ Implemented after Session 033:
 - LFOs now expose two target selector pairs with shared oscillator settings and
   shared polarity.
 - VOICE sub-pages can expose up to 16 descriptor cells as four-cell screens.
+- Instrument registry metadata declares Basic, Advanced, and Choke loading
+  policy. Drum/Snare are Basic; Cymbal is Advanced; HiHat is Advanced|Choke.
+- Kit Load uses SEQ buttons as Scene target toggles; Instrument Load uses them
+  as one-Scene selection. Load-menu SEQ LEDs show Scene step activity and blink
+  the current target selection.
+- Root Instrument parsing is staged. An active-Scene commit clears all current
+  modulation owners before type replacement, rebuilds all six runtime Morph
+  images, then normalizes and reinstalls all source target relationships.
 
 Current bridges and limitations:
 
@@ -67,8 +78,9 @@ Current bridges and limitations:
 - `FS_FILE_MORPH` load/save still uses the legacy `.SND` morph-kit path.
 - Globals still load/save through legacy `glo.cfg`; root `settings.cfg` is the
   settled future replacement but is not wired yet.
-- Scene, Bank, Effect, Instrument-pool, Wavetable-pool, and new Pattern-pool
-  load/save operations are not implemented yet.
+- Scene, Bank, Effect, Wavetable-pool, and new Pattern-pool load/save operations
+  are not implemented yet. The Instrument pool load/browser exists; new-format
+  Instrument save does not.
 - Descriptor-backed LFO and velocity modulation runtime paths are in place for
   direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
   Decimation. The remaining target-runtime gap is step automation.
@@ -384,7 +396,8 @@ Validation rules:
 
 ## Instrument Files
 
-Status: implemented for load from root Kit folders; save not implemented.
+Status: implemented for Kit-folder and root `Instrument/` pool load; new-format
+Instrument save is not implemented.
 
 Instrument files are text key/value files with a fixed header and one or two
 parameter sections.
@@ -429,8 +442,11 @@ Section rules:
   `uint16_t`.
 - `lfo_target_voice` and `lfo_target_voice_2` are menu/runtime destination
   selectors. Voices `1..6` select voice slots and the special display value
-  `scn` selects the Scene modulation target namespace. Converted legacy kits
-  may contain zero and should be normalized by the loader/runtime before use.
+  `scn` selects the Scene modulation target namespace. Each voice/parameter pair
+  is normalized together at runtime commit: the canonical target is rebuilt for
+  the selected target voice and local descriptor, or changed to explicit off.
+  A stored pair must never have a display voice that contradicts its packed
+  canonical target slot.
 
 Instrument file metadata deliberately does not include:
 
@@ -442,7 +458,8 @@ Instrument file metadata deliberately does not include:
 The slot comes from `kitset.kcg`. The kit name comes from the kit folder.
 
 The converter provides legacy compatibility by regenerating text files from
-legacy `.SND` payloads. Firmware does not keep old text-key aliases.
+legacy `.SND` payloads. Storage keeps aliases for the prior HiHat decay text
+keys because those names were shipped before the canonical Choke convention.
 
 Morph kit loads (`FS_FILE_MORPH`) remain legacy `.SND` until final new-format
 morph save/load policy replaces them.
@@ -466,6 +483,14 @@ Current descriptor counts:
 Descriptor key lookup is type-local. The same key may exist in multiple
 instrument types but resolves against the loaded slot type.
 
+HiHat is the first Choke instrument. Its visible closed-hat row is canonical
+`amp_envelope_decay`; its alternate track-7 row is
+`amp_envelope_decay_choke`. The old `_closed` and `_open` spellings are load
+aliases only and must not be emitted by new conversion/save code. A Choke
+instrument may expose any number of `<base>_choke` descriptors. When it is in
+slot 6, VOICE7 substitutes each available sibling for its base descriptor;
+those siblings remain separate normal modulation targets.
+
 Current keys by family:
 
 - Oscillator and noise: `osc1_wave`, `osc1_pitch_coarse`,
@@ -475,8 +500,7 @@ Current keys by family:
   `osc1_noise_mix`.
 - Filter: `filter_freq`, `filter_reso`, `filter_drive`, `filter_type`.
 - Amp envelope: `amp_envelope_attack`, `amp_envelope_decay`,
-  `amp_envelope_decay_closed`, `amp_envelope_decay_open`,
-  `amp_envelope_slope`, `amp_attack_repeat`.
+  `amp_envelope_decay_choke`, `amp_envelope_slope`, `amp_attack_repeat`.
 - Pitch envelope: `pitch_envelope_decay`, `pitch_envelope_amount`,
   `pitch_envelope_slope`.
 - Voice: `instrument_vol`, `instrument_pan`, `instrument_drive`,
@@ -503,6 +527,11 @@ Current keys by family:
 The descriptor arrays live next to each instrument implementation. They own
 instrument-local meaning. `InstrumentManager` is the registry/lookup layer, not
 the owner of parameter text or per-instrument page layout.
+
+The registry also owns immutable load-policy metadata, not serialized file
+data: Basic types may appear without limit, Advanced types are limited to two
+per Kit, and Choke types opt into slot-6 VOICE7 `_choke` substitution. Current
+types are Drum/Basic, Snare/Basic, Cymbal/Advanced, and HiHat/Advanced|Choke.
 
 Descriptor flags:
 
@@ -543,6 +572,12 @@ These apply through binding kinds instead:
 Each `scene_t` owns one `kit_t`. Each `kit_t` owns six
 `kit_instrument_slot_t` records.
 
+`kit_t` also retains `instrument_display_name[6][9]`: an eight-character,
+NUL-terminated display stem for the file currently associated with each Kit
+slot. It is UI provenance only, not a path, file-open authority, or instrument
+parameter. `kit_settings_t` owns generated Kit-level values, including the
+non-Choke slot-6 track-7 alternate-decay main and Morph endpoints.
+
 Each instrument slot owns:
 
 - `type`
@@ -582,17 +617,44 @@ Boot normal-kit load path:
 4. `filesystem_requestScanKits()` scans `Kit/` into the kit-slot cache.
 5. `preset_loadDrumset(0, 0)` requests normal kit slot 0.
 6. `filesystem_loadKitDirectory_tick()` opens the cached kit folder, parses
-   `kitset.kcg`, resets each destination Scene instrument slot to the declared
-   type, then parses each listed instrument file into descriptor-indexed Scene
-   storage.
-7. Completion callback sets `PRESET_OP_KIT_LOAD`.
-8. `menu_pollPresetStatus()` starts sound apply.
-9. Before audio starts, `menu_startSoundApply()` calls
+   `kitset.kcg`, resets slots in a private staged `kit_t`, then parses each
+   listed instrument file into that staged descriptor-indexed storage.
+7. After every file validates, filesystem copies the complete staged Kit into
+   each selected Scene. It does not replace PatternData or Scene settings.
+8. Completion callback sets `PRESET_OP_KIT_LOAD`.
+9. `menu_pollPresetStatus()` starts sound apply.
+10. Before audio starts, `menu_startSoundApply()` calls
    `preset_sendDrumsetParameters()` synchronously.
 
 Runtime kit loads use the same Scene-owned apply logic, but the post-load apply
 is chunked through `preset_startDrumsetApply()` /
 `preset_tickDrumsetApply()` to avoid foreground bursts after audio is running.
+
+## Current Root Instrument Load Transaction
+
+Root Instrument Load is one explicit Scene, slot, type, and browser-index
+request. Filesystem validates the selected `Instrument/` file into private
+staging and keeps its display stem beside it; asynchronous parsing must never
+reset or alter the live destination Scene slot.
+
+For an inactive destination Scene, Preset commits retained Kit slot/name data
+only. For the active Scene, the ordered transaction is:
+
+1. clear all six current LFO target pairs and velocity targets while outgoing
+   Scene slot types still resolve their old runtime nodes;
+2. copy staged slot/name into SceneData;
+3. reset only the new type's runtime instance and apply the loaded slot route;
+4. rebuild all six retained descriptor Morph/runtime images;
+5. normalize each source's LFO voice/parameter pairs and velocity target, then
+   reinstall all six source relationships;
+6. release Menu controls.
+
+The all-source pass is required because any source may target the replaced
+slot. Menu holds the Instrument transaction lock across filesystem read,
+commit, Morph rebuild, and rebind: encoder, Scene selection, VOICE
+selection/preview, and mode changes are consumed without changing request
+context. Filesystem remains single-operation; Preset publishes completion
+coordinates only after filesystem accepts the request.
 
 ## Runtime Apply Path
 
@@ -617,7 +679,7 @@ Runtime writer coverage added in Session 032:
 - Filter frequency/resonance/drive/type use the old value shapers/setters.
 - Filter type preserves the old `value + 1` rule so DSP type `0` remains off.
 - Amp envelope attack/decay/slope use envelope setters.
-- HiHat closed/open decay use `slopeEg2_calcDecay()`.
+- HiHat base/Choke decay use `slopeEg2_calcDecay()`.
 - Pitch envelope decay/slope/amount use the existing pitch-envelope semantics.
 - Transient waveform/frequency use transient setter/old pitch formula.
 - Instrument drive uses `setDistortionShape()`.
@@ -632,11 +694,14 @@ Static non-voice pages still use `Core/Menu/menuPages.h`.
 
 Voice pages are now dynamic descriptor cells:
 
-- `VOICE1_PAGE` through `VOICE3_PAGE`: Drum layout.
-- `VOICE4_PAGE`: Snare layout.
-- `VOICE5_PAGE`: Cymbal layout.
-- `VOICE6_PAGE`: HiHat closed layout.
-- `VOICE7_PAGE`: HiHat open layout, still editing the same hihat slot.
+- `VOICE1_PAGE` through `VOICE6_PAGE` resolve the descriptor layout for the
+  instrument type currently assigned to that logical slot.
+- `VOICE7_PAGE` remains the alternate trigger/menu view for slot 6.
+- For a slot-6 Choke type, VOICE7 replaces a displayed base descriptor with its
+  available `_choke` sibling.
+- For a non-Choke slot-6 type with `amp_envelope_decay`, VOICE7 exposes the
+  generated Scene Kit alternate-decay setting; without that descriptor it uses
+  the ordinary slot-6 page.
 
 The menu resolver produces a `menu_cell_t`:
 
@@ -773,6 +838,14 @@ Therefore, the remaining descriptor target follow-up is step automation:
 display must preserve descriptor/Scene target IDs and apply through the same
 descriptor-aware runtime routes.
 
+Two additional modulation correctness follow-ups remain outside the completed
+Instrument transaction: `modNode_resetTargets()` and
+`modNode_directOriginalValueChanged()` still enumerate fixed global nodes rather
+than all dynamic runtime-pool sources, and direct modulation of shaper-backed
+fields such as envelope decay writes raw runtime floats rather than descriptor
+byte-domain values through the normal owner setter. The latter can set a zero
+envelope decrement and produce an indefinitely held sound.
+
 ## Pattern
 
 Status: current pattern load/save is a bridge shape; final storage is deferred
@@ -862,7 +935,8 @@ sequence. Effects and effect file formats are future DSP work.
 
 ## Instrument
 
-Status: settled target, not implemented as a browser/load/save pool.
+Status: root browser and one-slot load are implemented; new-format Instrument
+save is not implemented.
 
 `Instrument/` is a root-level pool of instrument files:
 
@@ -875,6 +949,12 @@ Files are browsed alphanumerically by type when loading into a kit in a scene.
 Users may copy instrument files from a kit folder into this pool. Users should
 not copy files from this pool directly into a kit folder; kit membership is
 controlled by `kitset.kcg`.
+
+Entering Instrument Load on a voice shows the current Kit membership stem.
+Changing the type row is a non-destructive filter/policy operation. Moving the
+lower row selects one root pool file and immediately starts the staged
+transaction described above. Basic/Advanced assignment policy is defined by
+the firmware registry, never by file contents.
 
 Initial recognized instrument types:
 
@@ -914,7 +994,9 @@ instrument runtime propagation:
 - Boot with `SD_CARD/Kit/001 Slak`.
 - Confirm the Kit scan shows the folder-derived kit name.
 - Confirm `kitset.kcg` slot type/file/audio routing is honored.
-- Confirm long descriptor keys such as `amp_envelope_decay_closed/open` parse.
+- Confirm canonical HiHat keys `amp_envelope_decay` and
+  `amp_envelope_decay_choke` parse; legacy `_closed/_open` aliases remain
+  compatible input only.
 - Confirm VOICE pages populate from active instrument descriptors.
 - Confirm Slak file values are visible on VOICE pages.
 - Confirm loaded voices produce audio.
@@ -924,6 +1006,12 @@ instrument runtime propagation:
 - Confirm LFO and velocity targets show one `off`, skip non-modulatable
   descriptors, and apply to direct descriptor, voice-local decimation, and
   Scene targets.
+- Confirm Instrument Load starts at `kit <stem>`, does not load while changing
+  type, loads immediately only from lower-row pool movement, and respects the
+  two-Advanced limit.
+- Confirm a completed Instrument transaction survives rapid encoder, Scene,
+  VOICE, and mode presses without changing its captured destination or leaving
+  a stale modulation target.
 - Treat step automation as pending until the descriptor-aware AutomationNode
   pass is complete.
 

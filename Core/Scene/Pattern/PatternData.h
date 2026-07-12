@@ -153,6 +153,17 @@ void pat_init(void);
 void pat_initScene(uint8_t scene_index);
 
 uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t pattern);
+/*
+ * Report whether a Scene's retained PatternSet contains any active step.
+ *
+ * Input: resident Scene index. Output: nonzero on the first Step whose active
+ * bit is set, otherwise zero, including invalid Scenes. Clients: Load-menu
+ * Scene LED feedback and future Scene/Bank browsers. This scan belongs beside
+ * PatternData storage because callers should not know that step activity lives
+ * in Step.volume; a boolean accessor avoids duplicating that representation in
+ * Menu or front-panel code.
+ */
+uint8_t pat_sceneHasActiveSteps(uint8_t scene_index);
 uint8_t pat_isMainStepActive(uint8_t track, uint8_t mainStep, uint8_t pattern);
 /*
  * Playback-safe step readers.
