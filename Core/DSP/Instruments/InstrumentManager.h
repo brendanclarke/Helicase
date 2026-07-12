@@ -71,6 +71,17 @@ typedef struct {
 #define INSTRUMENT_FLAG_ADVANCED              0x02u
 #define INSTRUMENT_FLAG_CHOKE                 0x04u
 
+#define INSTRUMENT_MOD_DOMAIN_NONE            0x00u
+#define INSTRUMENT_MOD_DOMAIN_CONTINUOUS      0x01u
+#define INSTRUMENT_MOD_DOMAIN_INTEGER         0x02u
+#define INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX     0x04u
+
+typedef struct {
+    uint16_t min_value;
+    uint16_t max_value;
+    uint8_t flags;
+} instrument_mod_domain_t;
+
 typedef struct {
     const char *file_key;
     const char *short_name;
@@ -78,6 +89,19 @@ typedef struct {
     const char *category;
     uint8_t dtype;
     uint8_t flags;
+    /*
+     * Parameter-domain modulation contract.
+     *
+     * Inputs: instrument parameter files declare this beside each descriptor
+     * row. Output: InstrumentManager uses it to decide whether transient LFO
+     * overlays may target the row and which descriptor-space value range is
+     * legal. The domain deliberately describes the value before owner-specific
+     * DSP shaping: envelope, pitch, filter, transient, distortion, and LFO-rate
+     * conversion still lives in instrumentManager_writeRuntime() and the DSP
+     * owner setters. This prevents ModulationNode from guessing from C scalar
+     * type or learning a hardcoded parameter list.
+     */
+    instrument_mod_domain_t mod_domain;
     instrument_runtime_binding_t runtime;
 } ParamDescriptor;
 
@@ -263,18 +287,21 @@ uint16_t instrumentManager_stepVelocityTargetForSource(
 void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot,
                                                      float velocity_0_1);
 /*
- * Apply one LFO sample to an installed supplemental or Scene target.
+ * Update every InstrumentManager-owned LFO destination backend for one source
+ * pair.
  *
- * Inputs: source slot, target pair, normalized LFO value, shared polarity, and
- * that pair's amount. Output: direct ModulationNode targets have already been
- * updated by lfo_dispatchNextValue(); this function handles only installed
- * slot-decimation and Scene targets without forcing them into fake pointers.
+ * Inputs: source slot, target pair, normalized LFO sample, shared polarity, and
+ * normalized pair amount. Output: descriptor adapters, slot decimation, and
+ * Scene targets receive owner-specific runtime writes. Direct ModulationNode
+ * pointers are no longer used for descriptor instrument targets because those
+ * targets must be shaped in descriptor space and applied through the normal DSP
+ * owner writer rather than through raw runtime pointers.
  */
-void instrumentManager_updateLfoSceneTarget(uint8_t source_slot,
-                                            uint8_t target_pair,
-                                            float lfo_value_0_1,
-                                            uint8_t polarity,
-                                            float amount);
+void instrumentManager_updateLfoAdapters(uint8_t source_slot,
+                                         uint8_t target_pair,
+                                         float lfo_value_0_1,
+                                         uint8_t polarity,
+                                         float amount);
 /*
  * Dynamic instrument runtime dispatcher.
  *

@@ -66,6 +66,7 @@ typedef struct {
     const ParamDescriptor *descriptor;
     Parameter parameter;
     void *waveInterpTarget;
+    instrument_mod_domain_t domain;
     mod_node_range_t range;
 } instrument_runtime_target_t;
 
@@ -80,6 +81,16 @@ typedef struct {
     uint16_t target_id;
 } installed_mod_target_t;
 
+typedef struct {
+    uint8_t active;
+    uint8_t slot;
+    uint8_t descriptor_index;
+    instrument_param_id_t id;
+    const ParamDescriptor *descriptor;
+    instrument_mod_domain_t domain;
+    uint16_t base_value;
+} instrument_lfo_target_adapter_t;
+
 /*
  * Supplemental modulation targets are installed beside, not inside,
  * ModulationNode.
@@ -93,6 +104,18 @@ typedef struct {
  */
 static installed_mod_target_t velocity_installed_targets[INSTRUMENT_SLOT_COUNT];
 static installed_mod_target_t lfo_installed_targets[INSTRUMENT_SLOT_COUNT][2u];
+/*
+ * Descriptor LFO adapters.
+ *
+ * Inputs: one source slot/pair selected by lfo_target_voice/_param. Output:
+ * every LFO block applies a temporary descriptor-domain value through
+ * instrumentManager_writeRuntime() rather than writing the resolved runtime
+ * pointer directly. The adapter keeps the target id, descriptor, legal
+ * parameter-domain range, and current Scene/Morph base so amount zero and
+ * target clear restore exactly match ordinary descriptor writes.
+ */
+static instrument_lfo_target_adapter_t
+    lfo_descriptor_targets[INSTRUMENT_SLOT_COUNT][2u];
 static uint8_t slot6_track7_decay_lfo_active;
 static uint8_t slot6_track7_decay_lfo_value;
 
@@ -121,6 +144,9 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
                                                            uint8_t target_pair);
 static void instrumentManager_restoreVelocitySupplementalTarget(
     uint8_t source_slot);
+static uint8_t instrumentManager_writeRuntimeInternal(
+    uint8_t slot, const ParamDescriptor *descriptor, uint16_t value,
+    uint8_t notify_base_change);
 
 static DrumVoice *instrumentManager_drumRuntime(uint8_t slot)
 {
@@ -590,64 +616,51 @@ void instrumentManager_resetSlot(struct kit_instrument_slot *raw_slot,
     }
 }
 
-static uint8_t instrumentManager_descriptorIsOscWaveTarget(
-    const ParamDescriptor *descriptor)
+static uint8_t instrumentManager_descriptorModDomain(
+    const ParamDescriptor *descriptor,
+    instrument_mod_domain_t *domain_out)
 {
-    const char *key;
+    instrument_mod_domain_t domain;
 
     /*
-     * Identify descriptor waveform rows that have an oscillator runtime target.
+     * Expand a descriptor-owned modulation domain into concrete bounds.
      *
-     * Inputs: one descriptor row. Output: nonzero only for osc/noise waveform
-     * fields that InstrumentManager can affiliate with an OscInfo and the
-     * bounded waveform interpolation path. This exists so generic menu-byte
-     * fields such as filter type, LFO waveform, and sync rate are not treated
-     * as safe continuous modulation destinations merely because they are stored
-     * as TYPE_UINT8.
+     * Inputs: one immutable descriptor row. Output: domain_out receives a
+     * legal descriptor-space range for transient modulation, or the function
+     * returns zero when the row is not a continuous/integer modulation target.
+     * This replaces the old dtype/runtime-type guess: a TYPE_UINT8 row can be
+     * an envelope byte, an oscillator waveform id, or a selector such as sync
+     * rate, and only the instrument descriptor owns that musical distinction.
      */
-    if (!descriptor || descriptor->runtime.parameter_type != TYPE_UINT8 ||
-        !descriptor->file_key || !strstr(descriptor->file_key, "_wave")) {
+    if (domain_out)
+        memset(domain_out, 0, sizeof(*domain_out));
+    if (!descriptor)
         return 0u;
+    domain = descriptor->mod_domain;
+    if (domain.flags == INSTRUMENT_MOD_DOMAIN_NONE)
+        return 0u;
+    if (domain.flags & INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX) {
+        domain.max_value = modNode_getMaxWaveformIndex();
     }
-    key = descriptor->file_key;
-    return (uint8_t)(strncmp(key, "osc", 3) == 0 ||
-                     strncmp(key, "noise_", 6) == 0);
+    if (domain.max_value < domain.min_value)
+        return 0u;
+    if (domain_out)
+        *domain_out = domain;
+    return 1u;
 }
 
 static uint8_t instrumentManager_descriptorSupportsModulationRange(
     const ParamDescriptor *descriptor)
 {
-    uint8_t dtype;
-
     /*
-     * Decide whether a descriptor has a defined modulation min/max contract.
+     * Descriptor-declared modulation target eligibility.
      *
-     * Inputs: descriptor metadata only, before a live runtime pointer is
-     * resolved. Output: nonzero when InstrumentManager can later build a
-     * stable range for ModulationNode. The rule deliberately excludes
-     * TYPE_UINT32, generic DTYPE_MENU bytes, and DTYPE_LFO_POLARITY: their
-     * valid values are selectors rather than continuous 0..127 modulation
-     * domains, and inventing ranges here would let LFO target selection write
-     * invalid DSP states. Oscillator/noise waveform rows are the exception
-     * because they have an explicit waveform-id range and an interpolation
-     * affiliate.
+     * Input: descriptor metadata. Output: nonzero only when the instrument file
+     * declared a modulation domain. Target browsing and DSP installation share
+     * this helper so enum selectors do not leak back into the LFO target list
+     * just because their storage happens to be a byte.
      */
-    if (!descriptor)
-        return 0u;
-    dtype = (uint8_t)(descriptor->dtype & 0x0fu);
-    switch (descriptor->runtime.parameter_type) {
-    case TYPE_FLT:
-    case TYPE_SPECIAL_F:
-        return 1u;
-    case TYPE_UINT8:
-        if (dtype == DTYPE_LFO_POLARITY)
-            return 0u;
-        if (dtype == DTYPE_MENU)
-            return instrumentManager_descriptorIsOscWaveTarget(descriptor);
-        return 1u;
-    default:
-        return 0u;
-    }
+    return instrumentManager_descriptorModDomain(descriptor, 0);
 }
 
 static uint8_t instrumentManager_descriptorIsSlotDecimationTarget(
@@ -1517,24 +1530,26 @@ static uint8_t instrumentManager_descriptorIndexForPointer(
 }
 
 static void instrumentManager_noteRuntimeValueChanged(
-    uint8_t slot, const ParamDescriptor *descriptor)
+    uint8_t slot, const ParamDescriptor *descriptor, uint16_t value)
 {
     uint8_t descriptor_index;
     instrument_param_id_t id;
     instrument_runtime_target_t target;
+    instrument_mod_domain_t domain;
+    uint8_t source_slot;
+    uint8_t pair;
 
     /*
      * Refresh descriptor-backed modulation baselines/ranges after an ordinary write.
      *
      * Inputs: slot/descriptor identify a live runtime value just changed by a
-     * menu edit, morph apply, automation write, or loaded-kit apply. Output:
-     * active direct ModulationNode targets for the same canonical descriptor id
-     * recapture their originalValue and cached min/max range. This is not a
-     * SceneData write and not automation recording; it only keeps
-     * modNode_resetTargets() restoring the latest base value and keeps LFO
-     * amount scaled by the descriptor range instead of by a stale current
-     * value. Morph does not need its own min/max pass because it already
-     * applies values through this common runtime writer.
+     * menu edit, morph apply, automation write, or loaded-kit apply, and value
+     * is the descriptor-domain value that was applied. Output: active direct
+     * ModulationNode targets for the same canonical id recapture their runtime
+     * originalValue/range, and LFO descriptor adapters refresh their
+     * descriptor-domain base cache. Temporary LFO overlay writes use the quiet
+     * runtime writer path and do not call this function, because those writes
+     * must not become the next unmodulated base.
      */
     if (!instrumentManager_descriptorIndexForPointer(slot, descriptor,
                                                      &descriptor_index)) {
@@ -1545,6 +1560,21 @@ static void instrumentManager_noteRuntimeValueChanged(
         instrumentManager_resolveModulationTarget(scene_getActiveIndex(), id,
                                                   &target)) {
         modNode_directOriginalValueChanged(id, target.range);
+    }
+    if (!instrumentManager_descriptorModDomain(descriptor, &domain))
+        return;
+    if (value < domain.min_value)
+        value = domain.min_value;
+    else if (value > domain.max_value)
+        value = domain.max_value;
+    for (source_slot = 0u; source_slot < INSTRUMENT_SLOT_COUNT; source_slot++) {
+        for (pair = 0u; pair < 2u; pair++) {
+            instrument_lfo_target_adapter_t *adapter =
+                &lfo_descriptor_targets[source_slot][pair];
+            if (adapter->active && adapter->id == id) {
+                adapter->base_value = value;
+            }
+        }
     }
 }
 
@@ -1596,19 +1626,18 @@ static uint8_t instrumentManager_buildModulationRange(
     void *waveInterpTarget,
     mod_node_range_t *range_out)
 {
-    uint8_t dtype;
+    instrument_mod_domain_t domain;
 
     /*
-     * Build the stable min/max contract for one direct modulation target.
+     * Build the stable min/max contract for one legacy direct modulation target.
      *
      * Inputs: descriptor metadata and the already resolved optional waveform
      * interpolation affiliate. Output: range_out receives the min/max values
-     * ModulationNode uses to scale amount by usable range instead of by the
-     * target's current value. This is private to InstrumentManager because it
-     * bridges descriptor dtype, scalar runtime type, and oscillator waveform
-     * affiliation; putting this in Menu would point dependencies the wrong way,
-     * and putting it in ModulationNode would make the DSP node learn registry
-     * layout.
+     * ModulationNode uses for direct-pointer backends such as velocity while
+     * they still exist. LFO descriptor targets no longer use this path; they
+     * use descriptor-domain adapters and instrumentManager_writeRuntime().
+     * Eligibility still comes from ParamDescriptor::mod_domain so target
+     * browsing and runtime installation agree without dtype guessing.
      */
     if (range_out) {
         range_out->min = 0.f;
@@ -1616,11 +1645,10 @@ static uint8_t instrumentManager_buildModulationRange(
         range_out->valid = 0u;
     }
     if (!descriptor || !range_out ||
-        !instrumentManager_descriptorSupportsModulationRange(descriptor)) {
+        !instrumentManager_descriptorModDomain(descriptor, &domain)) {
         return 0u;
     }
 
-    dtype = (uint8_t)(descriptor->dtype & 0x0fu);
     switch (descriptor->runtime.parameter_type) {
     case TYPE_FLT:
         range_out->min = 0.f;
@@ -1642,34 +1670,12 @@ static uint8_t instrumentManager_buildModulationRange(
         return 1u;
 
     case TYPE_UINT8:
-        if (waveInterpTarget) {
-            range_out->min = 0.f;
-            range_out->max = (float)modNode_getMaxWaveformIndex();
-            range_out->valid = 1u;
-            return 1u;
-        }
-        if (dtype == DTYPE_MENU)
+        if ((domain.flags & INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX) &&
+            !waveInterpTarget) {
             return 0u;
-        range_out->min = (dtype == DTYPE_1B16 || dtype == DTYPE_1B128) ? 1.f : 0.f;
-        switch (dtype) {
-        case DTYPE_MIX_FM:
-        case DTYPE_ON_OFF:
-        case DTYPE_0b1:
-            range_out->max = 1.f;
-            break;
-        case DTYPE_0B15:
-            range_out->max = 15.f;
-            break;
-        case DTYPE_1B16:
-            range_out->max = 16.f;
-            break;
-        case DTYPE_1B128:
-            range_out->max = 128.f;
-            break;
-        default:
-            range_out->max = 127.f;
-            break;
         }
+        range_out->min = (float)domain.min_value;
+        range_out->max = (float)domain.max_value;
         range_out->valid = 1u;
         return 1u;
 
@@ -1731,6 +1737,10 @@ static uint8_t instrumentManager_resolveModulationTarget(
     target_out->parameter.type = descriptor->runtime.parameter_type;
     target_out->waveInterpTarget =
         instrumentManager_waveInterpTarget(target_slot, descriptor);
+    if (!instrumentManager_descriptorModDomain(descriptor,
+                                               &target_out->domain)) {
+        return 0u;
+    }
     if (!instrumentManager_buildModulationRange(descriptor,
                                                 target_out->waveInterpTarget,
                                                 &target_out->range)) {
@@ -1825,6 +1835,37 @@ static uint8_t instrumentManager_slotDecimationBase(uint16_t id)
             scene->kit.instruments[slot].parameter_images.morph_interpolation[local];
         return (uint8_t)((value > 127u) ? 127u : value);
     }
+}
+
+static uint16_t instrumentManager_descriptorImageBase(uint8_t slot,
+                                                      uint8_t local,
+                                                      instrument_mod_domain_t domain)
+{
+    const scene_t *scene;
+    uint16_t value;
+
+    /*
+     * Read the current descriptor-domain base for an LFO adapter.
+     *
+     * Inputs: target slot, local descriptor index, and the descriptor's legal
+     * modulation domain. Output: the active Scene/Morph interpolation image
+     * clamped to that domain. This deliberately does not read the live runtime
+     * field: many DSP fields are scaled or inverted relative to storage bytes,
+     * so runtime readback would break amount-zero parity and target-clear
+     * restore for envelopes, filters, pitch, and other owner-shaped targets.
+     */
+    scene = scene_getConst(scene_getActiveIndex());
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT ||
+        local >= INSTRUMENT_PARAM_COUNT) {
+        return domain.min_value;
+    }
+    value =
+        scene->kit.instruments[slot].parameter_images.morph_interpolation[local];
+    if (value < domain.min_value)
+        return domain.min_value;
+    if (value > domain.max_value)
+        return domain.max_value;
+    return value;
 }
 
 static uint8_t instrumentManager_applyVelocitySceneTarget(
@@ -1932,6 +1973,90 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
     }
 }
 
+static const ParamDescriptor *instrumentManager_lfoAdapterDescriptor(
+    const instrument_lfo_target_adapter_t *adapter)
+{
+    const ParamDescriptor *descriptor;
+
+    /*
+     * Validate that an installed descriptor adapter still matches its slot.
+     *
+     * Input: one adapter captured when an LFO target was installed. Output:
+     * the current descriptor pointer only when the target slot still contains
+     * the same instrument descriptor row. This prevents an old LFO adapter from
+     * writing an offset from a previous instrument type after Instrument Load
+     * changes the target slot before target normalization catches up.
+     */
+    if (!adapter || !adapter->active)
+        return 0;
+    descriptor = instrumentManager_descriptor(instrumentManager_slotType(adapter->slot),
+                                              adapter->descriptor_index);
+    return (descriptor == adapter->descriptor) ? descriptor : 0;
+}
+
+static void instrumentManager_restoreLfoDescriptorTarget(uint8_t source_slot,
+                                                         uint8_t target_pair)
+{
+    instrument_lfo_target_adapter_t *adapter;
+    const ParamDescriptor *descriptor;
+
+    /*
+     * Restore the base value for one descriptor-backed LFO target.
+     *
+     * Inputs: source slot and pair whose target is being cleared or replaced.
+     * Output: the cached descriptor-domain base is applied quietly through the
+     * normal runtime writer, then the adapter is cleared. This is the
+     * parameter-space equivalent of modNode_clearDestination(): envelope,
+     * filter, pitch, and distortion owners receive the same value they would
+     * receive from a menu/load/morph write, but the restore itself is not a new
+     * retained base edit.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
+        return;
+    adapter = &lfo_descriptor_targets[source_slot][target_pair];
+    descriptor = instrumentManager_lfoAdapterDescriptor(adapter);
+    if (descriptor) {
+        (void)instrumentManager_writeRuntimeInternal(adapter->slot, descriptor,
+                                                     adapter->base_value, 0u);
+    }
+    memset(adapter, 0, sizeof(*adapter));
+}
+
+static void instrumentManager_applyLfoDescriptorTarget(uint8_t source_slot,
+                                                       uint8_t target_pair,
+                                                       float lfo_value_0_1,
+                                                       uint8_t polarity,
+                                                       float amount)
+{
+    instrument_lfo_target_adapter_t *adapter;
+    const ParamDescriptor *descriptor;
+    uint16_t shaped;
+
+    /*
+     * Apply one LFO sample to a descriptor-backed instrument target.
+     *
+     * Inputs: source LFO identity, target pair, normalized waveform value,
+     * polarity, and pair amount. Output: a temporary descriptor-domain value is
+     * shaped with original-LXR negative math and applied quietly through
+     * instrumentManager_writeRuntimeInternal(). The quiet write is essential:
+     * LFO overlays must use the same DSP scaling as ordinary writes without
+     * becoming the next base value seen by amount-zero modulation or target
+     * restore.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
+        return;
+    adapter = &lfo_descriptor_targets[source_slot][target_pair];
+    descriptor = instrumentManager_lfoAdapterDescriptor(adapter);
+    if (!descriptor)
+        return;
+    shaped = modNode_shapeParameterU16(adapter->base_value,
+                                       adapter->domain.min_value,
+                                       adapter->domain.max_value,
+                                       lfo_value_0_1, amount, polarity);
+    (void)instrumentManager_writeRuntimeInternal(adapter->slot, descriptor,
+                                                 shaped, 0u);
+}
+
 static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
                                                            uint8_t target_pair)
 {
@@ -2012,19 +2137,21 @@ static uint8_t instrumentManager_installLfoModulationTarget(
     instrument_runtime_target_t target;
 
     /*
-     * Install or clear one LFO descriptor modulation destination.
+     * Install or clear one LFO modulation destination.
      *
      * Inputs: source_slot selects the LFO that emits modulation values,
      * target_index selects destination pair 1 or 2 on that LFO, and target_id
      * is either INSTRUMENT_PARAM_INVALID for off or a canonical descriptor id
      * whose slot may differ from the source slot. Output: nonzero when the
-     * source exists and the target is cleared or installed. This helper keeps
-     * source-node lookup, descriptor target/range resolution, and direct
-     * ModulationNode installation together instead of spreading the six
-     * voice-object cases through instrumentManager_writeRuntime().
+     * source exists and the target is cleared or installed. Descriptor
+     * instrument targets are installed as parameter-domain adapters rather than
+     * direct ModulationNode pointers, so LFO amount/polarity acts on the same
+     * values that files, menus, morph, and automation store before the DSP
+     * owner converts them to runtime math.
      */
     if (!node)
         return 0u;
+    instrumentManager_restoreLfoDescriptorTarget(source_slot, target_index);
     instrumentManager_restoreLfoSupplementalTarget(source_slot, target_index);
     if (target_id == INSTRUMENT_PARAM_INVALID) {
         modNode_clearDestination(node);
@@ -2050,8 +2177,32 @@ static uint8_t instrumentManager_installLfoModulationTarget(
         modNode_clearDestination(node);
         return 0u;
     }
-    return modNode_setDirectDestination(node, target.id, target.parameter,
-                                        target.waveInterpTarget, target.range);
+    modNode_clearDestination(node);
+    {
+        instrument_lfo_target_adapter_t *adapter =
+            &lfo_descriptor_targets[source_slot][target_index];
+        /*
+         * Descriptor LFO adapter install.
+         *
+         * Inputs: resolved target descriptor, target slot/local id, and the
+         * descriptor-owned modulation domain. Output: the adapter captures the
+         * current Scene/Morph descriptor image as its base. The raw
+         * ModulationNode is intentionally empty after this point; lfo.c still
+         * reads its amount field, but InstrumentManager owns the descriptor
+         * apply/restore path so shaped DSP fields are never written directly.
+         */
+        adapter->active = 1u;
+        adapter->slot = target.slot;
+        adapter->descriptor_index = target.descriptor_index;
+        adapter->id = target.id;
+        adapter->descriptor = target.descriptor;
+        adapter->domain = target.domain;
+        adapter->base_value =
+            instrumentManager_descriptorImageBase(target.slot,
+                                                  target.descriptor_index,
+                                                  target.domain);
+    }
+    return 1u;
 }
 
 static uint8_t instrumentManager_installVelocityModulationTarget(
@@ -2139,26 +2290,31 @@ void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot,
     }
 }
 
-void instrumentManager_updateLfoSceneTarget(uint8_t source_slot,
-                                            uint8_t target_pair,
-                                            float lfo_value_0_1,
-                                            uint8_t polarity,
-                                            float amount)
+void instrumentManager_updateLfoAdapters(uint8_t source_slot,
+                                         uint8_t target_pair,
+                                         float lfo_value_0_1,
+                                         uint8_t polarity,
+                                         float amount)
 {
     const installed_mod_target_t *installed;
     uint16_t shaped;
     uint8_t base;
 
     /*
-     * Apply one LFO sample to an installed supplemental or Scene target.
+     * Apply one LFO sample to every InstrumentManager-owned target backend.
      *
      * Inputs: source slot, target pair, normalized LFO value, shared polarity,
-     * and normalized pair amount. Output: direct ModulationNode targets remain
-     * handled in lfo_dispatchNextValue(); this function handles only
-     * slot-decimation and Scene adapters.
+     * and normalized pair amount. Output: descriptor parameter-domain adapters,
+     * slot-decimation adapters, and Scene adapters receive owner-specific
+     * writes. Direct ModulationNode targets are no longer used for descriptor
+     * instrument LFO targets because those targets must pass through the normal
+     * descriptor runtime writer to preserve envelope/filter/pitch scaling.
      */
     if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
         return;
+    instrumentManager_applyLfoDescriptorTarget(source_slot, target_pair,
+                                               lfo_value_0_1, polarity,
+                                               amount);
     installed = &lfo_installed_targets[source_slot][target_pair];
     switch (installed->kind) {
     case INSTALLED_MOD_TARGET_SLOT_DECIMATION:
@@ -2360,18 +2516,29 @@ static uint8_t instrumentManager_writeSpecialRuntime(
     return 0u;
 }
 
-uint8_t instrumentManager_writeRuntime(uint8_t slot,
-                                       const ParamDescriptor *descriptor,
-                                       uint16_t value)
+static uint8_t instrumentManager_writeRuntimeInternal(
+    uint8_t slot, const ParamDescriptor *descriptor, uint16_t value,
+    uint8_t notify_base_change)
 {
     void *instance;
     Parameter parameter;
 
+    /*
+     * Apply one descriptor value to its DSP owner.
+     *
+     * Inputs: slot, descriptor, descriptor-domain value, and a notification
+     * flag. Output: the runtime owner receives the same write math used by
+     * menu/load/morph/automation paths. Public retained writes notify
+     * modulation baselines after applying; temporary LFO overlays pass
+     * notify_base_change=0 so a block-local shaped value never becomes the
+     * next unmodulated base.
+     */
     if (!descriptor)
         return 0u;
 
     if (instrumentManager_writeSpecialRuntime(slot, descriptor, value)) {
-        instrumentManager_noteRuntimeValueChanged(slot, descriptor);
+        if (notify_base_change)
+            instrumentManager_noteRuntimeValueChanged(slot, descriptor, value);
         return 1u;
     }
 
@@ -2383,7 +2550,8 @@ uint8_t instrumentManager_writeRuntime(uint8_t slot,
         parameter.ptr = (void *)((uint8_t *)instance + descriptor->runtime.offset);
         parameter.type = descriptor->runtime.parameter_type;
         instrumentManager_writeParameter(parameter, value);
-        instrumentManager_noteRuntimeValueChanged(slot, descriptor);
+        if (notify_base_change)
+            instrumentManager_noteRuntimeValueChanged(slot, descriptor, value);
         return 1u;
 
     case INSTRUMENT_BIND_SLOT_DECIMATION:
@@ -2440,4 +2608,11 @@ uint8_t instrumentManager_writeRuntime(uint8_t slot,
     default:
         return 0u;
     }
+}
+
+uint8_t instrumentManager_writeRuntime(uint8_t slot,
+                                       const ParamDescriptor *descriptor,
+                                       uint16_t value)
+{
+    return instrumentManager_writeRuntimeInternal(slot, descriptor, value, 1u);
 }

@@ -71,13 +71,16 @@ typedef enum {
 } mod_node_polarity_t;
 
 /*
- * Cached descriptor-target modulation range.
+ * Cached legacy direct-target modulation range.
  *
  * Inputs: InstrumentManager builds this from the target descriptor, scalar
  * type, and runtime affiliation when installing or refreshing a direct target.
  * Outputs: ModulationNode uses min/max to scale amount by usable range instead
  * of by the current value. This keeps small base values from collapsing LFO
  * depth and avoids descriptor/range lookup inside the audio block hot path.
+ * New descriptor-backed LFO targets should prefer InstrumentManager's
+ * parameter-domain adapters; this range remains for legacy/direct backends such
+ * as velocity while that migration is intentionally staged.
  */
 typedef struct {
 	float min;
@@ -92,9 +95,11 @@ typedef struct {
  * velocityModulators[] owns six velocity nodes. Inputs arrive through
  * modNode_setDestination() for legacy ParameterArray ids or
  * modNode_setDirectDestination() for descriptor-resolved targets. Direct
- * targets also cache a min/max contract supplied by InstrumentManager so
- * range-relative LFO polarity does not need to know descriptor tables in the
- * DSP update function. Outputs are block-local parameter overlays applied by
+ * targets also cache a min/max contract supplied by InstrumentManager for
+ * legacy/direct backends. Descriptor-backed LFO instrument targets are now
+ * installed as InstrumentManager adapters instead, because they must be shaped
+ * in descriptor parameter space and then applied through owner-specific DSP
+ * writers. Outputs are block-local parameter overlays applied by
  * modNode_updateValue()/modNode_updateValuePolarity() and restored by
  * modNode_resetTargets().
  */
@@ -180,13 +185,31 @@ void modNode_updateValue(ModulationNode* vm, float val);
 void modNode_updateValuePolarity(ModulationNode* vm, float val,
 								 uint8_t polarity);
 /*
+ * Shape a normalized modulation source against a descriptor parameter range.
+ *
+ * Inputs: retained base descriptor value, target min/max, normalized source,
+ * normalized amount, and MOD_NODE_POLARITY_* selector. Output: a clamped
+ * descriptor value suitable for instrumentManager_writeRuntime() or other
+ * owner-specific setters. Negative polarity deliberately matches original LXR:
+ * after the block reset restores the base value, the target is multiplied by
+ * `(1 - amount + amount * source)`. It is not a subtraction from the full legal
+ * range, which is what made shaped envelope/runtime fields move in the wrong
+ * direction and saturate early.
+ */
+uint16_t modNode_shapeParameterU16(uint16_t base,
+								   uint16_t min_value,
+								   uint16_t max_value,
+								   float source_0_1,
+								   float amount_0_1,
+								   uint8_t polarity);
+/*
  * Shape a normalized modulation source against an explicit integer range.
  *
  * Inputs: retained base value, target min/max, normalized source,
  * normalized amount, and MOD_NODE_POLARITY_* selector. Output: a clamped
- * integer target value. This is the range-only form of the descriptor
- * modulation math used by ModulationNode, provided for supplemental and Scene
- * targets that have a real range but no direct runtime Parameter pointer.
+ * integer target value. This compatibility name now forwards to the
+ * parameter-domain shaper so supplemental and Scene targets share the same
+ * original-LXR negative polarity as descriptor adapters.
  *
  * This helper must be separate from modNode_rangeValue() because Scene targets
  * and slot-decimation targets are not ModulationNode destinations and should

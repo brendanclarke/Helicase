@@ -48,6 +48,7 @@ INSTRUMENT_RENAME_SECTIONS = {
 INSTRUMENT_PARAM_COUNT = 64
 INSTRUMENT_PARAM_INVALID = 0xFFFF
 CANONICAL_TARGET_KEYS = {"velo_mod_dest", "lfo_target_param"}
+LFO_TARGET_VOICE_KEYS = {"lfo_target_voice", "lfo_target_voice_2"}
 
 # Descriptor order is the generic storage index for each instrument type.
 # ParameterArray only allocates slot storage; the firmware's instrument files
@@ -919,6 +920,59 @@ def first_param_value(path: Path, keys: set[str], default: int = 0) -> int:
     return default
 
 
+def rewrite_lfo_self_targets(path: Path, source_slot: int) -> bool:
+    """Rewrite absolute self-target LFO voices in one instrument file.
+
+    The self decision uses only the source Kit slot and the LFO voice selector.
+    The paired target parameter intentionally stays numeric: firmware load
+    normalization combines that local descriptor identity with the loaded
+    numeric destination voice. This keeps "self" as a storage alias instead of
+    inventing a new descriptor, Scene, or runtime value.
+    """
+    changed = False
+    next_lines: list[str] = []
+
+    for raw_line in path.read_text(encoding="ascii").splitlines():
+        if "=" not in raw_line:
+            next_lines.append(raw_line)
+            continue
+
+        key, value = [part.strip() for part in raw_line.split("=", 1)]
+        if key in LFO_TARGET_VOICE_KEYS and value == str(source_slot):
+            next_lines.append(f"{key}=self")
+            changed = True
+        else:
+            next_lines.append(raw_line)
+
+    if changed:
+        path.write_text("\n".join(next_lines) + "\n", encoding="ascii")
+    return changed
+
+
+def upgrade_kitset_lfo_self_targets(kitset_path: Path) -> int:
+    """Upgrade LFO self selectors for all files referenced by one kitset."""
+    touched = 0
+    current_slot = 0
+
+    for raw_line in kitset_path.read_text(encoding="ascii").splitlines():
+        line = raw_line.strip()
+        if (line.startswith("[slot") and line.endswith("]") and
+                len(line) == len("[slot1]") and line[5].isdigit()):
+            current_slot = int(line[5])
+            continue
+        if current_slot < 1 or current_slot > len(INSTRUMENT_FILES):
+            continue
+        if "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if key != "file":
+            continue
+        if rewrite_lfo_self_targets(kitset_path.parent / value, current_slot):
+            touched += 1
+
+    return touched
+
+
 def upgrade_existing_kit_tree(kit_root: Path) -> int:
     """Upgrade already-generated Kit/ files when legacy enum symbols are gone."""
     if not kit_root.exists():
@@ -957,6 +1011,9 @@ def upgrade_existing_kit_tree(kit_root: Path) -> int:
         kitset_path.write_text("\n".join(lines) + "\n", encoding="ascii")
         upgraded += 1
 
+    for kitset_path in sorted(kit_root.glob("*/kitset.kcg")):
+        upgraded += upgrade_kitset_lfo_self_targets(kitset_path)
+
     return upgraded
 
 
@@ -966,7 +1023,7 @@ def instrument_values(
     param_renames: dict[str, dict[str, str]],
     canonical_by_param: dict[str, int],
     slot: int,
-) -> list[tuple[str, int]]:
+) -> list[tuple[str, int | str]]:
     values = []
     section = INSTRUMENT_RENAME_SECTIONS[slot]
     renames = param_renames.get(section)
@@ -981,7 +1038,13 @@ def instrument_values(
     for key, param_name in INSTRUMENT_PARAMS[slot]:
         file_key = renames[key]
         value = payload_value(payload, param_values, param_name)
-        if file_key in CANONICAL_TARGET_KEYS:
+        if file_key in LFO_TARGET_VOICE_KEYS and value == slot:
+            # "self" is chosen from the source slot and LFO voice selector
+            # only. The paired lfo_target_param remains the converter's
+            # numeric canonical target so firmware normalization can combine
+            # its local descriptor with the loaded destination voice.
+            value = "self"
+        elif file_key in CANONICAL_TARGET_KEYS:
             value = legacy_target_to_canonical(value, canonical_by_param)
         values.append((file_key, value))
     return values
@@ -990,7 +1053,7 @@ def instrument_values(
 def write_instrument(
     path: Path,
     instrument_type: str,
-    values: list[tuple[str, int]],
+    values: list[tuple[str, int | str]],
 ) -> None:
     lines = [
         "format=helicase.instrument",
@@ -1036,7 +1099,14 @@ def write_kitset(
 
 
 def populate_instrument_root(kit_root: Path, instrument_root: Path) -> int:
-    """Copy converted kit instruments into the flat Instrument/ browser pool."""
+    """Copy converted kit instruments into the flat Instrument/ browser pool.
+
+    Root Instrument filenames intentionally stay equal to their Kit member
+    filenames. The firmware's Instrument browser stores an eight-character stem
+    beside the staged payload, and changing the root pool to add kit-number
+    prefixes would be an unrelated user-visible browser rename. Duplicate
+    stems are rejected instead of silently overwriting a member.
+    """
     if instrument_root.exists():
         shutil.rmtree(instrument_root)
     instrument_root.mkdir()
@@ -1047,8 +1117,12 @@ def populate_instrument_root(kit_root: Path, instrument_root: Path) -> int:
         for path in kit_root.glob("*/*")
         if path.suffix.lower() in {".drm", ".snr", ".cym", ".hat"}
     ):
-        kit_prefix = source.parent.name.split(" ", 1)[0]
-        destination = instrument_root / f"{kit_prefix}_{source.name}"
+        destination = instrument_root / source.name
+        if destination.exists():
+            raise RuntimeError(
+                f"duplicate root Instrument filename would be overwritten: "
+                f"{source.name}"
+            )
         shutil.copy2(source, destination)
         copied += 1
     return copied

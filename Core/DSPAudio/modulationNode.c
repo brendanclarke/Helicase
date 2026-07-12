@@ -603,31 +603,35 @@ static uint8_t modNode_rangeValue(ModulationNode* vm,
 	return 1u;
 }
 
-uint16_t modNode_shapeRangeU16(uint16_t base,
-							   uint16_t min_value,
-							   uint16_t max_value,
-							   float source_0_1,
-							   float amount_0_1,
-							   uint8_t polarity)
+uint16_t modNode_shapeParameterU16(uint16_t base,
+								   uint16_t min_value,
+								   uint16_t max_value,
+								   float source_0_1,
+								   float amount_0_1,
+								   uint8_t polarity)
 {
-	float width;
-	float delta;
+	float base_f;
+	float min_f;
+	float max_f;
 	float shaped;
 
 	/*
-	 * Shape an explicit integer range with the same polarity contract as
-	 * descriptor-backed ModulationNode targets.
+	 * Shape a descriptor-domain value for LFO adapter application.
 	 *
 	 * Inputs: base is the retained/current value, min/max define the legal
 	 * target range, source_0_1 is the normalized LFO/velocity source, amount is
 	 * normalized 0..1, and polarity is a mod_node_polarity_t value. Output is a
-	 * clamped integer suitable for owner-specific setters such as
-	 * instrumentManager_writeRuntime() or presetMorphEngine.
+	 * clamped integer descriptor value suitable for owner-specific setters such
+	 * as instrumentManager_writeRuntime() or presetMorphEngine.
 	 *
-	 * This function cannot use ModulationNode internals because supplemental
-	 * targets such as slot decimation and Scene Morph do not have direct
-	 * Parameter pointers. Keeping one exported range helper prevents those
-	 * adapters from copying slightly different negative/positive/bipolar math.
+	 * Negative polarity deliberately matches original LXR's value-relative
+	 * contract. After the block reset restores the base value, original LXR
+	 * writes `base * amount * source + (1 - amount) * base`. For zero-based
+	 * descriptor domains this is exactly `base * (1 - amount + amount *
+	 * source)`: it moves down from base toward zero and never subtracts a full
+	 * legal range. The min-value translation below preserves that behavior for
+	 * any future non-zero descriptor domain by modulating the distance above
+	 * min_value.
 	 */
 	if (max_value < min_value) {
 		uint16_t t = min_value;
@@ -649,27 +653,55 @@ uint16_t modNode_shapeRangeU16(uint16_t base,
 	else if (base > max_value)
 		base = max_value;
 
-	width = (float)max_value - (float)min_value;
+	base_f = (float)base;
+	min_f = (float)min_value;
+	max_f = (float)max_value;
 	switch (polarity)
 	{
 		case MOD_NODE_POLARITY_POSITIVE:
-			delta = amount_0_1 * source_0_1 * width;
+			shaped = base_f +
+				amount_0_1 * source_0_1 * (max_f - base_f);
 			break;
 
-		case MOD_NODE_POLARITY_BIPOLAR:
-			delta = amount_0_1 * ((source_0_1 * 2.f) - 1.f) * (width * 0.5f);
-			break;
+		case MOD_NODE_POLARITY_BIPOLAR: {
+			float signed_source = (source_0_1 * 2.f) - 1.f;
+			float headroom = (signed_source >= 0.f)
+				? (max_f - base_f)
+				: (base_f - min_f);
+			shaped = base_f + amount_0_1 * signed_source * headroom;
+			break; }
 
 		default:
-			delta = -amount_0_1 * (1.f - source_0_1) * width;
+			shaped = min_f +
+				(base_f - min_f) *
+				(1.f - amount_0_1 + amount_0_1 * source_0_1);
 			break;
 	}
-	shaped = modNode_clampFloat((float)base + delta,
-								(float)min_value,
-								(float)max_value);
+	shaped = modNode_clampFloat(shaped, min_f, max_f);
 	if (shaped <= 0.f)
 		return 0u;
 	return (uint16_t)(shaped + 0.5f);
+}
+
+uint16_t modNode_shapeRangeU16(uint16_t base,
+							   uint16_t min_value,
+							   uint16_t max_value,
+							   float source_0_1,
+							   float amount_0_1,
+							   uint8_t polarity)
+{
+	/*
+	 * Compatibility wrapper for supplemental integer LFO targets.
+	 *
+	 * Inputs/outputs match the older range helper. It now delegates to the
+	 * descriptor parameter shaper so slot decimation and Scene targets use the
+	 * same original-LXR negative polarity as descriptor LFO adapters. Keeping
+	 * the wrapper avoids duplicating polarity math in InstrumentManager and
+	 * preserves existing call sites while changing the one behavior that must
+	 * become LXR-compatible.
+	 */
+	return modNode_shapeParameterU16(base, min_value, max_value,
+									 source_0_1, amount_0_1, polarity);
 }
 
 static float modNode_legacyNegativeValue(ModulationNode* vm,

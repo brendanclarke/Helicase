@@ -77,20 +77,22 @@ typedef struct LfoStruct
 	 *
 	 * modTarget and modTarget2 are not two independent LFOs. They share phase,
 	 * waveform, rate, sync, offset, retrigger, and polarity, but each target
-	 * owns its own amount, resolved runtime pointer, restore baseline, cached
-	 * min/max range, and waveform-interpolation affiliation. Keeping these as
-	 * two ModulationNode instances prevents one target selection from
-	 * overwriting the other target's DSP pointer or baseline.
+	 * owns its own amount and any remaining legacy direct backend state.
+	 * Descriptor instrument targets may now be installed in InstrumentManager
+	 * adapters rather than these raw ModulationNode slots; the slots remain the
+	 * per-pair amount owners and still support any intentionally retained direct
+	 * pointer backend.
 	 */
 	ModulationNode modTarget2;
 	/*
 	 * Shared application polarity for both destinations.
 	 *
 	 * Inputs: descriptor/menu writes store a mod_node_polarity_t value here.
-	 * Output: lfo_dispatchNextValue() passes it to ModulationNode so target
-	 * shaping can use cached descriptor ranges. Polarity belongs to Lfo rather
-	 * than each destination because the requested UI shape is one shared LFO
-	 * with two destinations and independent amounts.
+	 * Output: lfo_dispatchNextValue() passes it to ModulationNode for legacy
+	 * direct backends and to InstrumentManager for descriptor/supplemental
+	 * adapters. Polarity belongs to Lfo rather than each destination because
+	 * the requested UI shape is one shared LFO with two destinations and
+	 * independent amounts.
 	 */
 	uint8_t		polarity;
 	float		modNodeValue;

@@ -575,24 +575,38 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
             return STORAGE_STATUS_OK;
         }
 
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-
         if (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE ||
             descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE_2) {
-                /*
-                 * Legacy converted kits can contain zero here because the old
-                 * flat LFO target voice byte was repaired only during apply.
-                 * SceneData now owns the generic storage cell, so clamp both
-                 * LFO target voice selector pairs while parsing. Clients are
-                 * filesystem_loadKitDirectory_tick() and Preset's later
-                 * instrument-runtime apply.
-                 */
+            /*
+             * Resolve file-only self targets at the storage boundary.
+             *
+             * Inputs: lfo_target_voice/lfo_target_voice_2 value text and the
+             * parser's one-based destination slot. Output: the ordinary
+             * numeric selector stored in SceneData. The self token is not a
+             * Menu value, descriptor sentinel, or DSP runtime state; Preset's
+             * LFO pair normalization intentionally receives only numeric voice
+             * selectors and packed parameter IDs. Numeric parsing keeps the
+             * legacy clamp because old converted files can contain zero here.
+             */
+            if (storage_streq(value, "self")) {
+                if (state->expected_slot < 1u ||
+                    state->expected_slot > STORAGE_KIT_SLOT_COUNT) {
+                    return STORAGE_STATUS_BAD_SLOT;
+                }
+                parsed = state->expected_slot;
+            } else {
+                st = storage_parseU8(value, &parsed);
+                if (st != STORAGE_STATUS_OK)
+                    return st;
                 if (parsed < 1u)
                     parsed = 1u;
                 else if (parsed > STORAGE_KIT_SLOT_COUNT)
                     parsed = STORAGE_KIT_SLOT_COUNT;
+            }
+        } else {
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
         }
 
         if (state->current_section == STORAGE_SECTION_MORPH) {
