@@ -101,6 +101,75 @@ const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
     return &scene->kit.instruments[slot];
 }
 
+static void scene_copyInstrumentSourceName(kit_t *kit, uint8_t slot,
+                                           const char *filename_or_stem)
+{
+    uint8_t i = 0u;
+
+    /*
+     * Normalize one instrument source name into Scene-owned metadata.
+     *
+     * Inputs may be a filename with extension or a raw stem. Output updates the
+     * 16-character save stem and the eight-character LCD field together. The
+     * copy stops before '.' so `.drm`/`.snr`/`.cym`/`.hat` extensions do not
+     * become part of either retained name.
+     */
+    if (!kit || slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (!filename_or_stem)
+        filename_or_stem = "";
+    memset(kit->instrument_stem[slot], 0,
+           sizeof(kit->instrument_stem[slot]));
+    memset(kit->instrument_display_name[slot], ' ', 8u);
+    while (filename_or_stem[i] != '\0' &&
+           filename_or_stem[i] != '.' &&
+           i < SCENE_INSTRUMENT_STEM_LEN) {
+        char c = filename_or_stem[i];
+        if (c < 32 || c > 126)
+            c = '_';
+        kit->instrument_stem[slot][i] = c;
+        if (i < 8u)
+            kit->instrument_display_name[slot][i] = c;
+        i++;
+    }
+    if (i == 0u) {
+        memcpy(kit->instrument_stem[slot], "inst", 4u);
+        memcpy(kit->instrument_display_name[slot], "inst    ", 8u);
+    }
+    kit->instrument_stem[slot][SCENE_INSTRUMENT_STEM_LEN] = '\0';
+    kit->instrument_display_name[slot][8] = '\0';
+}
+
+void scene_setKitInstrumentSourceName(kit_t *kit, uint8_t slot,
+                                      const char *filename_or_stem)
+{
+    /*
+     * Retain Kit-member source metadata while staging or editing a Kit.
+     *
+     * Inputs: caller-owned Kit storage, zero-based slot, and source filename or
+     * stem. Output: both display and save names are updated inside that Kit.
+     * Filesystem uses this while parsing into staging before a Scene exists.
+     */
+    scene_copyInstrumentSourceName(kit, slot, filename_or_stem);
+}
+
+void scene_setInstrumentSourceName(uint8_t scene_index, uint8_t slot,
+                                   const char *filename_or_stem)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Retain one resident instrument source stem for later Kit Save.
+     *
+     * Inputs: resident Scene/slot plus filename or raw stem. Output: Scene kit
+     * metadata updates only when coordinates are valid. The DSP instrument
+     * images are not touched because source names are storage/UI metadata.
+     */
+    if (!scene)
+        return;
+    scene_copyInstrumentSourceName(&scene->kit, slot, filename_or_stem);
+}
+
 void scene_setTrackMidiChannel(uint8_t scene_index, uint8_t track,
                                uint8_t channel)
 {
@@ -325,12 +394,17 @@ void scene_initAll(void)
             instrumentManager_resetSlot(
                 &scenes[scene_index].kit.instruments[track],
                 initial_types[track]);
-        /* Keep the LCD-facing source metadata defined before any SD load.
-         * This uses a padded literal rather than a dynamic accessor because
-         * SceneData owns the retained fallback for an unsaved/default kit. */
+        /*
+         * Keep source metadata defined before any SD load.
+         *
+         * Defaults are meaningful save stems (`inst_vo1`..`inst_vo6`) and the
+         * helper derives the eight-character LCD display from the same source.
+         */
         for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++) {
-            memcpy(scenes[scene_index].kit.instrument_display_name[track],
-                   "Empty   ", 9u);
+            char fallback[9] = { 'i', 'n', 's', 't', '_', 'v', 'o',
+                                 (char)('1' + track), '\0' };
+            scene_setKitInstrumentSourceName(&scenes[scene_index].kit,
+                                             track, fallback);
         }
         pat_initScene(scene_index);
     }

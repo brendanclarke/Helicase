@@ -51,8 +51,16 @@ extern uint8_t menu_muteModeActive;
  */
 extern uint8_t voiceModeShowMorph;
 
-#define NUM_PRESET_LOCATIONS 1
-extern uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
+/*
+ * Numbered Load/Save browser slots retained by Menu.
+ *
+ * Kit and KitMrp are separate UI entries but both browse numbered Kit/
+ * directories. Settings/Samples are unnumbered and never index this array.
+ * Keeping the count at the first non-kit load type prevents KitMrp from
+ * reusing the normal Kit cursor storage by accident.
+ */
+#define NUM_PRESET_LOCATIONS 2
+extern uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 
 enum PageNames {
     VOICE1_PAGE, VOICE2_PAGE, VOICE3_PAGE,
@@ -193,6 +201,17 @@ enum saveStateEnum {
 
 enum loadSaveEnum {
     SAVE_TYPE_KIT = 0,
+    /*
+     * Kit Morph is a load-page mode, not a separate persisted file type.
+     *
+     * It intentionally sits immediately after SAVE_TYPE_KIT because the UI
+     * should scroll from "Kit" to "KitMrp" before Settings/Samples. Both
+     * entries browse the same Kit/ directory cache; the distinction is the
+     * Preset commit endpoint: normal Kit replaces the selected Scene kit,
+     * KitMrp copies source normal values into the selected Scenes' current
+     * morph endpoints.
+     */
+    SAVE_TYPE_KIT_MORPH,
     SAVE_TYPE_GLO,
     SAVE_TYPE_SAMPLES,
     NUM_SAVE_TYPES

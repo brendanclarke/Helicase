@@ -15,6 +15,15 @@
  * than indexing scenes[] directly.
  */
 #define SCENE_COUNT 1u
+/*
+ * Retained instrument source stem length.
+ *
+ * This is Scene-owned rather than storageTypes-owned so SceneData can retain
+ * save metadata without including the SD parser header. The first 16 filename
+ * stem characters survive Kit/Instrument load and later drive Kit Save member
+ * filename generation; the LCD-facing display name remains eight characters.
+ */
+#define SCENE_INSTRUMENT_STEM_LEN 16u
 
 typedef struct {
     /*
@@ -79,16 +88,15 @@ typedef struct {
     kit_settings_t settings;
     kit_instrument_slot_t instruments[INSTRUMENT_SLOT_COUNT];
     /*
-     * Eight-character source-file stems for the six retained instrument slots.
+     * Instrument source names are retained separately for display and save.
      *
-     * These values are kit membership metadata, not instrument-file parameters:
-     * kitset parsing records each listed filename and Instrument-pool loading
-     * replaces the selected Scene/slot stem on success. Menu reads them to show
-     * the current kit member before the user first moves the pool browser.
-     * Storage is fixed-width and padded so it can feed the LCD directly without
-     * borrowing filesystem scan-cache memory.
+     * instrument_display_name is the eight-character LCD field. instrument_stem
+     * keeps the first 16 filename stem characters loaded from Kit/Instrument
+     * files so a later Kit Save can regenerate useful member filenames. Neither
+     * field is a DSP parameter, and neither is editable from the UI yet.
      */
     char instrument_display_name[INSTRUMENT_SLOT_COUNT][9];
+    char instrument_stem[INSTRUMENT_SLOT_COUNT][SCENE_INSTRUMENT_STEM_LEN + 1u];
 } kit_t;
 
 typedef struct {
@@ -220,6 +228,18 @@ kit_instrument_slot_t *scene_instrumentSlot(uint8_t scene_index, uint8_t slot);
  */
 const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
                                                        uint8_t slot);
+/*
+ * Retain one instrument source stem for later Kit Save.
+ *
+ * Inputs may be a filename with extension or a raw stem. Output updates both
+ * the 16-character save stem and the eight-character LCD display name. Central
+ * ownership avoids Kit load, Instrument load, and future Scene/Bank load
+ * deriving subtly different names from the same file.
+ */
+void scene_setInstrumentSourceName(uint8_t scene_index, uint8_t slot,
+                                   const char *filename_or_stem);
+void scene_setKitInstrumentSourceName(kit_t *kit, uint8_t slot,
+                                      const char *filename_or_stem);
 /*
  * Store one track's MIDI channel setting.
  *

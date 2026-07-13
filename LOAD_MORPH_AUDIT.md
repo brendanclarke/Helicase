@@ -119,18 +119,16 @@ Planned copy policy:
 - If the staged source slot type matches the destination slot type, copy each
   morphable descriptor's source normal value into the destination morph value by
   descriptor index.
-- If the types differ, copy only morphable descriptors whose file keys match in
-  both source and destination descriptor tables.
-- If a destination morphable descriptor has no matching source key, leave its
-  current morph endpoint unchanged.
+- If the types differ, do not morph-load that slot at all. Leave the entire
+  destination morph endpoint unchanged for that slot.
 - Never copy non-morphable descriptors during morph load.
 - Never copy source display names, type tags, audio routing, or supplemental LFO
   target bindings during morph load.
 
 Why this policy: descriptor indices are only guaranteed to mean the same thing
-within the same instrument type. Key matching preserves shared musical controls
-across types where possible and avoids unsafe index-based writes when the types
-differ.
+within the same instrument type. Treating a type mismatch as no-change keeps
+KitMrp and InstrumentMrp per-instrument and avoids inventing cross-type morph
+semantics.
 
 Kit settings that have explicit morph endpoints should follow the same idea:
 copy the source normal kit-setting endpoint into the destination morph kit
@@ -140,7 +138,9 @@ setting. The current known example is:
 - destination `slot6_track7_morph_amp_envelope_decay`
 
 Normal routing/settings that do not have morph endpoints are not part of Kit
-Morph Load.
+Morph Load. Generated kit morph settings such as slot-6/track-7 decay follow
+the same matching-slot rule: if the associated source and destination
+instrument types differ, the generated morph setting is left unchanged.
 
 ## Code Plan
 
@@ -443,7 +443,7 @@ Comment block:
  * This request walks the same Kit/ directory parser as normal Kit Load, but it
  * leaves op_staged_kit untouched for Preset to inspect after completion.
  * Filesystem cannot commit KitMrp itself because it does not know which
- * descriptor keys are safe to copy into the currently loaded destination kit.
+ * source and destination slots have matching instrument types.
  */
 ```
 
@@ -549,29 +549,22 @@ Add static helpers near the existing instrument commit/apply code:
 static void preset_copyInstrumentNormalToMorphByIndex(
     kit_instrument_slot_t *destination,
     const kit_instrument_slot_t *source);
-
-static void preset_copyInstrumentNormalToMorphByKey(
-    kit_instrument_slot_t *destination,
-    const kit_instrument_slot_t *source);
 ```
 
 Use `instrumentManager_getDescriptor(type, index)` or the existing descriptor
-iteration API. If no descriptor lookup by key exists, add one to
-`InstrumentManager` rather than comparing display labels. File keys are the
-storage identity.
+iteration API.
 
 Copy only descriptors where:
 
+- source and destination instrument types match
 - destination descriptor exists
 - destination descriptor is morphable
-- source descriptor exists
-- source descriptor key matches the destination descriptor key
 
 The copied value is:
 
 ```c
-destination->parameter_images.morph_instrument_parameters[dst_index] =
-    source->parameter_images.instrument_parameters[src_index];
+destination->parameter_images.morph_instrument_parameters[index] =
+    source->parameter_images.instrument_parameters[index];
 ```
 
 Then queue:
@@ -595,19 +588,6 @@ Comment block:
  */
 ```
 
-For the key-mapping helper:
-
-```c
-/*
- * Key-based copy is used when source and destination instrument types differ.
- *
- * Descriptor indices are type-local, so index copying across types can write a
- * pitch value into an envelope field or similar. File keys are the persisted
- * parameter identity; matching them preserves shared controls and leaves
- * destination-only controls unchanged.
- */
-```
-
 ### 13. `Core/Scene/Preset/presetManager.c`: Kit Morph Commit
 
 Implement a static commit helper called after `PRESET_OP_KIT_MORPH_LOAD`
@@ -625,7 +605,7 @@ Algorithm:
    - copy supported normal kit settings into their morph settings
    - for each instrument slot:
      - if source type equals destination type, copy by descriptor index
-     - otherwise copy by descriptor key
+     - otherwise leave that destination slot unchanged
      - request morph rebuild for that voice
 3. If any selected scene is the active scene, run the bounded morph worker until
    clean using the same async/tick pattern as normal load.
@@ -638,9 +618,9 @@ Comment block:
  *
  * This deliberately preserves the destination kit's slot types, display names,
  * audio routing, and supplemental modulation bindings. Only morphable endpoint
- * values are copied. Matching source/destination types can use descriptor
- * indices; mismatched types fall back to file-key matching so the operation
- * remains musically useful without corrupting type-local parameter layouts.
+ * values are copied. Matching source/destination types use descriptor indices;
+ * mismatched types are skipped completely so no cross-type morph semantics are
+ * invented by the loader.
  */
 ```
 
@@ -743,11 +723,6 @@ Comment block:
 - `Core/Hardware/SD/filesystem.h`
 - `Core/Hardware/SD/filesystem.c`
 
-Possible small support change if no file-key descriptor lookup exists:
-
-- `Core/DSP/Instruments/InstrumentManager.h`
-- `Core/DSP/Instruments/InstrumentManager.c`
-
 No parser changes are expected in:
 
 - `Core/Hardware/SD/storageTypes.h`
@@ -800,10 +775,24 @@ No parser changes are expected in:
      modulation targets.
    - Legacy `.SND` morph load path remains untouched.
 
-## Open Decision To Confirm Before Coding
+## Decision Confirmed
 
 For Kit Morph Load with mismatched source/destination instrument types, this
-plan uses file-key matching for shared morphable parameters and leaves
-unmatched destination morph endpoints unchanged. That is safer than replacing
-types and more useful than skipping the whole slot, but it is still a design
-choice worth confirming before implementation.
+plan treats the mismatched slot as a no-change operation. The same principle
+applies to Instrument Morph Load: if the staged instrument type does not match
+the current destination slot type, that instrument morph load does not change
+the destination morph endpoint.
+
+## Work Notes
+
+- Updated the plan before coding so mismatched KitMrp and InstrumentMrp loads
+  are strict no-change operations instead of cross-type key-mapped copies.
+- Implemented the load-only `KitMrp` menu type and the one-per-destination-type
+  `InstrumentMrp` row.
+- Added filesystem KitMrp staging that reuses the normal Kit/ parser but skips
+  live Scene replacement.
+- Added Preset morph-load request/commit/apply paths that copy only same-type
+  morphable normal endpoints into resident morph endpoints.
+- Verified with `make -j4`; build succeeded with the existing nano syscall
+  linker warnings.
+- Verified with `git diff --check`; no whitespace errors.

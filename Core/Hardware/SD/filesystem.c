@@ -92,6 +92,7 @@
 typedef enum {
     FS_INTERNAL_OP_NONE,
     FS_INTERNAL_OP_LOAD_KIT,
+    FS_INTERNAL_OP_LOAD_KIT_MORPH,
     FS_INTERNAL_OP_SAVE_KIT,
     FS_INTERNAL_OP_LOAD_MORPH,
     FS_INTERNAL_OP_SAVE_MORPH,
@@ -135,7 +136,14 @@ static const fs_file_desc_t fs_file_descs[] = {
 static fs_internal_op_t current_op   = FS_INTERNAL_OP_NONE;
 static fs_status_t      status       = FS_STATUS_IDLE;
 static uint8_t          op_phase     = 0;
-static uint8_t          op_slot      = 0;
+/*
+ * Current numbered operation slot.
+ *
+ * Kit directories now span user slots 001..999, so the common request field
+ * must be wider than uint8_t even though older .snd/.pat/.prf payloads still
+ * use only the low three decimal digits for their legacy filenames.
+ */
+static uint16_t         op_slot      = 0;
 static fs_file_type_t   op_file_type = FS_FILE_KIT;
 static afatfsFilePtr_t  op_file      = NULL;
 static volatile bool    op_file_ready = false;
@@ -191,14 +199,31 @@ static storage_kitset_t op_kitset;
 static storage_instrument_state_t op_instrument_state;
 static uint8_t op_instrument_slot = 0;
 /*
+ * Kit Save directory/text writer scratch.
+ *
+ * filesystem_saveKitDirectory_tick() streams kitset.kcg and six instrument
+ * files without allocating a whole file image. storageTypes formats one line at
+ * a time; these fields retain the current filename set, line buffer, byte
+ * offset, and schema line index across asynchronous afatfs ticks.
+ */
+static char op_save_kit_dir_name[STORAGE_KIT_FILENAME_MAX];
+static char op_save_instrument_file[STORAGE_KIT_SLOT_COUNT]
+                                    [STORAGE_KIT_FILENAME_MAX];
+static char op_write_line_buf[FS_TEXT_LINE_MAX];
+static uint16_t op_write_line_len = 0u;
+static uint16_t op_write_line_offset = 0u;
+static uint16_t op_write_line_index = 0u;
+/*
  * Staged Kit payload and target mask for multi-Scene Kit Load.
  *
  * The directory state machine fills this isolated kit_t while every kitset and
  * instrument file is validated. Only after the final file succeeds is it
- * copied into the selected resident Scenes, preventing a malformed Kit from
- * leaving a partially replaced live Scene. The mask uses Scene indices as bit
- * positions; its callers are filesystem_requestLoadKitForScenes() and the
- * Preset Load menu bridge.
+ * copied into the selected resident Scenes for normal Kit Load, preventing a
+ * malformed Kit from leaving a partially replaced live Scene. KitMrp uses the
+ * same staging image but skips the filesystem commit so Preset can copy only
+ * same-type morphable endpoints into the current resident kits. The mask uses
+ * Scene indices as bit positions; its callers are the normal Kit and KitMrp
+ * request helpers.
  */
 static kit_t op_staged_kit;
 static uint16_t op_kit_load_scene_mask = 0u;
@@ -218,6 +243,9 @@ static char instrument_file_name[INSTRUMENT_TYPE_UNKNOWN]
 static char instrument_file_open_name[INSTRUMENT_TYPE_UNKNOWN]
                                      [FS_INSTRUMENT_MAX_PER_TYPE]
                                      [STORAGE_KIT_FILENAME_MAX];
+static char instrument_file_stem[INSTRUMENT_TYPE_UNKNOWN]
+                                [FS_INSTRUMENT_MAX_PER_TYPE]
+                                [SCENE_INSTRUMENT_STEM_LEN + 1u];
 static uint8_t op_instrument_load_destination_slot = 0u;
 static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
@@ -232,6 +260,7 @@ static uint8_t op_instrument_load_index = 0u;
  */
 static kit_instrument_slot_t op_staged_instrument;
 static char op_staged_instrument_display_name[9];
+static char op_staged_instrument_stem[SCENE_INSTRUMENT_STEM_LEN + 1u];
 static uint32_t op_stream_index = 0;
 static uint8_t op_item_offset = 0;
 static uint8_t op_loaded_active_pattern_running = 0;
@@ -263,8 +292,8 @@ extern uint8_t parameters2[END_OF_SOUND_PARAMETERS];
  * Directory() populates both the new scan cache and this legacy map until the
  * browser is rewritten around the new filesystem contract.
  */
-extern uint8_t kb_map[];
-extern uint8_t kb_numKits;
+extern uint16_t kb_map[];
+extern uint16_t kb_numKits;
 
 /* Apply FAT NT lowercase flags to a short 8.3 filename.
  *
@@ -514,7 +543,7 @@ static uint8_t filesystem_detectUnsupportedCardLayout(void)
     return 0;
 }
 
-static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint8_t num)
+static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint16_t num)
 {
     const fs_file_desc_t *desc = filesystem_desc(type);
     uint8_t i;
@@ -532,9 +561,9 @@ static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint8_t num)
     }
 
     buf[0] = 'p';
-    buf[1] = '0' + (num / 100);
-    buf[2] = '0' + ((num / 10) % 10);
-    buf[3] = '0' + (num % 10);
+    buf[1] = (char)('0' + ((num / 100u) % 10u));
+    buf[2] = (char)('0' + ((num / 10u) % 10u));
+    buf[3] = (char)('0' + (num % 10u));
     for (i = 0; desc->extension[i] && i < 4u; i++)
         buf[4u + i] = desc->extension[i];
     buf[4u + i] = '\0';
@@ -789,7 +818,7 @@ static void filesystem_copyEightCharName(char dst[8], const char *src)
  * "Empty   " when the slot is absent. Client: filesystem_loadName_tick() for
  * FS_FILE_KIT, replacing the old behavior of opening Pxxx.SND headers.
  */
-static void filesystem_setLoadedNameFromKitSlot(uint8_t slot)
+static void filesystem_setLoadedNameFromKitSlot(uint16_t slot)
 {
     if (slot < STORAGE_KIT_MAX_SLOTS && kit_slot_present[slot]) {
         filesystem_copyEightCharName(loaded_name, kit_slot_name[slot]);
@@ -903,13 +932,13 @@ static void filesystem_dirLfnAppendEntry(const fatDirectoryEntry_t *entry)
  *
  * Inputs: open_name is the 8.3 alias used by afatfs_fopen(). Outputs: the scan
  * cache and kitBrowser compatibility map are populated if the alias starts with
- * a valid 001..128 slot number and has some non-empty tail. Client:
+ * a valid 001..999 slot number and has some non-empty tail. Client:
  * filesystem_recordKitDirectory() after normal LFN parsing fails.
  */
 static void filesystem_recordKitShortAlias(const char *open_name)
 {
     uint16_t number;
-    uint8_t slot;
+    uint16_t slot;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN];
 
     if (open_name[0] < '0' || open_name[0] > '9' ||
@@ -926,7 +955,7 @@ static void filesystem_recordKitShortAlias(const char *open_name)
         return;
     }
 
-    slot = (uint8_t)(number - 1u);
+    slot = (uint16_t)(number - 1u);
     storage_copyDisplayName(display, open_name + 3u);
     kit_slot_present[slot] = 1u;
     memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
@@ -949,7 +978,7 @@ static void filesystem_recordKitShortAlias(const char *open_name)
 static void filesystem_recordKitDirectory(const char *display_name,
                                           const char *open_name)
 {
-    uint8_t slot;
+    uint16_t slot;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN];
 
     if (!storage_parseNumberedFolder(display_name, &slot, display)) {
@@ -1044,6 +1073,33 @@ static void filesystem_copyInstrumentStemDisplay(char dst[9],
     dst[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
 }
 
+static void filesystem_copyInstrumentStem16(
+    char dst[SCENE_INSTRUMENT_STEM_LEN + 1u],
+    const char *filename)
+{
+    uint8_t i = 0u;
+
+    /*
+     * Retain the longer source stem used by later Kit Save.
+     *
+     * Input is the LFN display name when available, falling back to the short
+     * open name. Output is the first 16 stem characters before the extension,
+     * NUL-terminated, and paired with the eight-character Instrument browser
+     * display cached beside it.
+     */
+    memset(dst, 0, SCENE_INSTRUMENT_STEM_LEN + 1u);
+    while (filename &&
+           filename[i] != '\0' &&
+           filename[i] != '.' &&
+           i < SCENE_INSTRUMENT_STEM_LEN) {
+        char c = filename[i];
+        dst[i] = (c >= 32 && c <= 126) ? c : '_';
+        i++;
+    }
+    if (i == 0u)
+        memcpy(dst, "inst", 5u);
+}
+
 static void filesystem_recordInstrumentFile(const char *display_name,
                                             const char *open_name)
 {
@@ -1080,11 +1136,16 @@ static void filesystem_recordInstrumentFile(const char *display_name,
         memcpy(instrument_file_open_name[type][pos],
                instrument_file_open_name[type][pos - 1u],
                sizeof(instrument_file_open_name[type][pos]));
+        memcpy(instrument_file_stem[type][pos],
+               instrument_file_stem[type][pos - 1u],
+               sizeof(instrument_file_stem[type][pos]));
         pos--;
     }
     memcpy(instrument_file_name[type][pos], display,
            sizeof(instrument_file_name[type][pos]));
     storage_copyFilename(instrument_file_open_name[type][pos], open_name);
+    filesystem_copyInstrumentStem16(instrument_file_stem[type][pos],
+                                    display_name);
     instrument_file_count[type] = (uint8_t)(count + 1u);
 }
 
@@ -1465,25 +1526,28 @@ static void filesystem_loadKitDirectory_tick(void)
             uint8_t scene_index;
 
             /*
-             * Commit the fully validated staged Kit to every selected Scene.
+             * Commit only normal Kit Load from filesystem.
              *
-             * Inputs: op_staged_kit and the request-time scene mask. Output:
-             * each selected resident Scene receives a complete copy only after
-             * all files have passed their storage validation. This cannot be
-             * merged into parsing because streaming directly into live Scenes
-             * would expose partial state on malformed Kit directories.
+             * Inputs: op_staged_kit and the request-time Scene mask. Output:
+             * normal Kit Load replaces selected resident Scene kits only after
+             * all files have passed validation. KitMrp deliberately skips this
+             * assignment and leaves op_staged_kit available through
+             * filesystem_loadedKit(), because Preset must preserve destination
+             * slot identity and copy only same-type morphable endpoint values.
              */
-            for (scene_index = 0u;
-                 scene_index < SCENE_COUNT && scene_index < 16u;
-                 scene_index++) {
-                if ((op_kit_load_scene_mask &
-                     (uint16_t)(1u << scene_index)) != 0u) {
-                    scene_t *target_scene = scene_get(scene_index);
-                    if (target_scene)
-                        target_scene->kit = op_staged_kit;
+            if (current_op == FS_INTERNAL_OP_LOAD_KIT) {
+                for (scene_index = 0u;
+                     scene_index < SCENE_COUNT && scene_index < 16u;
+                     scene_index++) {
+                    if ((op_kit_load_scene_mask &
+                         (uint16_t)(1u << scene_index)) != 0u) {
+                        scene_t *target_scene = scene_get(scene_index);
+                        if (target_scene)
+                            target_scene->kit = op_staged_kit;
+                    }
                 }
+                memcpy(preset_currentName, kit_slot_name[op_slot], 8);
             }
-            memcpy(preset_currentName, kit_slot_name[op_slot], 8);
             op_close_status = FS_STATUS_DONE;
             op_phase = 28;
             return;
@@ -1731,6 +1795,10 @@ static void filesystem_loadInstrument_tick(void)
                 memcpy(op_staged_instrument_display_name,
                        instrument_file_name[op_instrument_load_type]
                                            [op_instrument_load_index], 9u);
+                memcpy(op_staged_instrument_stem,
+                       instrument_file_stem[op_instrument_load_type]
+                                           [op_instrument_load_index],
+                       sizeof(op_staged_instrument_stem));
                 op_close_status = FS_STATUS_DONE;
             }
             op_phase = 9;
@@ -1758,6 +1826,384 @@ static void filesystem_loadInstrument_tick(void)
     default:
         op_close_status = FS_STATUS_ERROR;
         op_phase = 11;
+        return;
+    }
+}
+
+static char filesystem_saveNameChar(char c)
+{
+    if (c >= 'a' && c <= 'z')
+        return c;
+    if (c >= 'A' && c <= 'Z')
+        return (char)(c + ('a' - 'A'));
+    if (c >= '0' && c <= '9')
+        return c;
+    if (c == '_')
+        return c;
+    return '_';
+}
+
+static void filesystem_makeKitDirectorySaveName(char dst[STORAGE_KIT_FILENAME_MAX],
+                                                uint16_t slot)
+{
+    uint16_t display = (uint16_t)(slot + 1u);
+    uint8_t pos = 3u;
+    uint8_t i;
+
+    /*
+     * Build the 8.3 physical Kit folder name used by firmware saves.
+     *
+     * asyncfatfs can scan LFNs but currently creates only short FAT entries.
+     * The saved folder therefore starts with the required 001..999 prefix and
+     * uses up to five sanitized kit-name characters after it. The scan fallback
+     * accepts this short alias and displays preset_currentName from cache.
+     */
+    if (display > 999u)
+        display = 999u;
+    dst[0] = (char)('0' + (display / 100u));
+    dst[1] = (char)('0' + ((display / 10u) % 10u));
+    dst[2] = (char)('0' + (display % 10u));
+    for (i = 0u; i < 8u && pos < 8u; i++) {
+        char c = preset_currentName[i];
+        if (c == '\0')
+            break;
+        if (c == ' ')
+            continue;
+        dst[pos++] = filesystem_saveNameChar(c);
+    }
+    if (pos == 3u) {
+        dst[pos++] = 'k';
+        dst[pos++] = 'i';
+        dst[pos++] = 't';
+    }
+    dst[pos] = '\0';
+}
+
+static void filesystem_prepareSavedInstrumentFilenames(const kit_t *kit)
+{
+    uint8_t forced[STORAGE_KIT_SLOT_COUNT];
+    uint8_t slot;
+
+    /*
+     * Generate duplicate-safe instrument filenames for one Kit save.
+     *
+     * Inputs: Scene-retained 16-character stems and slot types. Output: six
+     * 8.3-safe filenames. Only colliding basenames are regenerated with a
+     * voice suffix, so meaningful loaded names remain intact when unique while
+     * duplicate stems still produce distinct kitset references.
+     */
+    memset(forced, 0, sizeof(forced));
+    for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
+        storage_makeSavedInstrumentFilename(
+            op_save_instrument_file[slot],
+            kit->instrument_stem[slot],
+            kit->instruments[slot].type,
+            (uint8_t)(slot + 1u),
+            0u);
+    }
+    for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
+        uint8_t other;
+        for (other = 0u; other < slot; other++) {
+            if (strcmp(op_save_instrument_file[slot],
+                       op_save_instrument_file[other]) == 0) {
+                if (!forced[other]) {
+                    storage_makeSavedInstrumentFilename(
+                        op_save_instrument_file[other],
+                        kit->instrument_stem[other],
+                        kit->instruments[other].type,
+                        (uint8_t)(other + 1u),
+                        1u);
+                    forced[other] = 1u;
+                }
+                storage_makeSavedInstrumentFilename(
+                    op_save_instrument_file[slot],
+                    kit->instrument_stem[slot],
+                    kit->instruments[slot].type,
+                    (uint8_t)(slot + 1u),
+                    1u);
+                forced[slot] = 1u;
+            }
+        }
+    }
+}
+
+static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
+                                                             void *),
+                                        void *ctx)
+{
+    /*
+     * Stream text save files one line at a time.
+     *
+     * Kit instruments can be larger than the generic 512-byte staging buffer,
+     * and save must keep foreground work bounded like the existing pattern
+     * writer. The filesystem state machine owns write offsets while
+     * storageTypes owns line contents.
+     */
+    if (op_write_line_len == 0u) {
+        op_write_line_len = next_line(op_write_line_buf,
+                                      sizeof(op_write_line_buf),
+                                      ctx);
+        op_write_line_offset = 0u;
+        if (op_write_line_len == 0u)
+            return 0u;
+    }
+    op_write_line_offset = (uint16_t)(op_write_line_offset +
+        afatfs_fwrite(op_file,
+                      (const uint8_t *)op_write_line_buf +
+                          op_write_line_offset,
+                      op_write_line_len - op_write_line_offset));
+    if (op_write_line_offset >= op_write_line_len) {
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_write_line_index++;
+    }
+    return 1u;
+}
+
+typedef struct {
+    const kit_t *kit;
+} filesystem_kitset_write_ctx_t;
+
+static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap, void *raw)
+{
+    filesystem_kitset_write_ctx_t *ctx = (filesystem_kitset_write_ctx_t *)raw;
+    return storage_formatKitsetLine(dst, cap, ctx->kit,
+                                    op_save_instrument_file,
+                                    op_write_line_index);
+}
+
+typedef struct {
+    const kit_instrument_slot_t *instrument;
+    storage_instrument_type_t type;
+    uint8_t voice;
+} filesystem_instrument_write_ctx_t;
+
+static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
+                                             void *raw)
+{
+    filesystem_instrument_write_ctx_t *ctx =
+        (filesystem_instrument_write_ctx_t *)raw;
+    return storage_formatInstrumentLine(dst, cap, ctx->instrument, ctx->type,
+                                        ctx->voice, op_write_line_index);
+}
+
+/* -----------------------------------------------------------------------
+** SAVE KIT DIRECTORY state machine
+**
+** Creates/opens Kit/<NNNxxxxx>/, writes kitset.kcg, and writes six instrument
+** files from the active Scene kit. Stale unreferenced files may remain because
+** asyncfatfs has no recursive directory replace; kitset.kcg is authoritative.
+** ----------------------------------------------------------------------- */
+static void filesystem_saveKitDirectory_tick(void)
+{
+    const scene_t *scene = scene_getConst(scene_getActiveIndex());
+    const kit_t *kit = scene ? &scene->kit : NULL;
+
+    switch (op_phase) {
+    case 0: /* CHDIR ROOT */
+        if (!kit || op_slot >= STORAGE_KIT_MAX_SLOTS) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_makeKitDirectorySaveName(op_save_kit_dir_name, op_slot);
+        filesystem_prepareSavedInstrumentFilenames(kit);
+        op_phase = 1;
+        return;
+
+    case 1: /* MKDIR/OPEN Kit */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir(STORAGE_ROOT_KIT, on_file_opened))
+            return;
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT Kit */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3;
+        return;
+
+    case 3: /* CHDIR Kit */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 4;
+        return;
+
+    case 4: /* CLOSE Kit handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5;
+        return;
+
+    case 5: /* WAIT CLOSE Kit */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 6;
+        return;
+
+    case 6: /* MKDIR/OPEN target kit folder */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir(op_save_kit_dir_name, on_file_opened))
+            return;
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT target kit folder */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_phase = 8;
+        return;
+
+    case 8: /* CHDIR target kit folder */
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 9;
+        return;
+
+    case 9: /* CLOSE target kit handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 10;
+        return;
+
+    case 10: /* WAIT CLOSE target kit */
+        if (!op_close_done) return;
+        op_kit_slot_dir = NULL;
+        op_phase = 11;
+        return;
+
+    case 11: /* OPEN kitset.kcg */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_KITSET_FILENAME, "w", on_file_opened))
+            return;
+        op_phase = 12;
+        return;
+
+    case 12: /* WAIT kitset.kcg */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 13;
+        return;
+
+    case 13: /* WRITE kitset.kcg */
+    {
+        filesystem_kitset_write_ctx_t ctx = { kit };
+        if (filesystem_writeTextLine(filesystem_nextKitsetLine, &ctx))
+            return;
+        op_phase = 14;
+        return;
+    }
+
+    case 14: /* CLOSE kitset.kcg */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 15;
+        return;
+
+    case 15: /* WAIT CLOSE kitset.kcg */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_instrument_slot = 0u;
+        op_phase = 16;
+        return;
+
+    case 16: /* OPEN next instrument */
+        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
+            op_phase = 24;
+            return;
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(op_save_instrument_file[op_instrument_slot],
+                          "w", on_file_opened)) {
+            return;
+        }
+        op_phase = 17;
+        return;
+
+    case 17: /* WAIT instrument */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 18;
+        return;
+
+    case 18: /* WRITE complete instrument text */
+    {
+        filesystem_instrument_write_ctx_t ctx = {
+            &kit->instruments[op_instrument_slot],
+            kit->instruments[op_instrument_slot].type,
+            (uint8_t)(op_instrument_slot + 1u)
+        };
+        if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
+            return;
+        op_phase = 20;
+        return;
+    }
+
+    case 20: /* CLOSE instrument */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 21;
+        return;
+
+    case 21: /* WAIT CLOSE instrument */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_instrument_slot++;
+        op_phase = 16;
+        return;
+
+    case 24: /* RETURN ROOT + UPDATE CACHE */
+        if (!afatfs_chdir(NULL))
+            return;
+        kit_slot_present[op_slot] = 1u;
+        filesystem_copyEightCharName(kit_slot_name[op_slot],
+                                     preset_currentName);
+        kit_slot_name[op_slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        storage_copyFilename(kit_slot_open_name[op_slot],
+                             op_save_kit_dir_name);
+        {
+            uint8_t found = 0u;
+            uint16_t i;
+            for (i = 0u; i < kb_numKits; i++) {
+                if (kb_map[i] == op_slot) {
+                    found = 1u;
+                    break;
+                }
+            }
+            if (!found && kb_numKits < KITBROWSER_MAX_KITS)
+                kb_map[kb_numKits++] = op_slot;
+        }
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
         return;
     }
 }
@@ -4301,6 +4747,7 @@ void filesystem_tick(void)
 
     switch (current_op) {
     case FS_INTERNAL_OP_LOAD_KIT:
+    case FS_INTERNAL_OP_LOAD_KIT_MORPH:
         filesystem_loadKitDirectory_tick();
         break;
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:
@@ -4310,6 +4757,8 @@ void filesystem_tick(void)
         filesystem_loadKit_tick();
         break;
     case FS_INTERNAL_OP_SAVE_KIT:
+        filesystem_saveKitDirectory_tick();
+        break;
     case FS_INTERNAL_OP_SAVE_MORPH:
         filesystem_saveKit_tick();
         break;
@@ -4363,7 +4812,7 @@ void filesystem_ack(void)
 ** Request functions
 ** ----------------------------------------------------------------------- */
 static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
-                             uint8_t slot, fs_completion_cb_t cb)
+                             uint16_t slot, fs_completion_cb_t cb)
 {
     if (status == FS_STATUS_BUSY) return false;
     status = FS_STATUS_BUSY;
@@ -4380,6 +4829,11 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_item_offset = 0;
     op_loaded_active_pattern_running = 0;
     op_file_version = 0;
+    op_write_line_len = 0u;
+    op_write_line_offset = 0u;
+    op_write_line_index = 0u;
+    memset(op_save_kit_dir_name, 0, sizeof(op_save_kit_dir_name));
+    memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
     op_kit_root_dir = NULL;
     op_kit_slot_dir = NULL;
     op_lfn_valid = 0;
@@ -4393,11 +4847,12 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(&op_staged_instrument, 0, sizeof(op_staged_instrument));
     memset(op_staged_instrument_display_name, 0,
            sizeof(op_staged_instrument_display_name));
+    memset(op_staged_instrument_stem, 0, sizeof(op_staged_instrument_stem));
     completion_callback = cb;
     return true;
 }
 
-bool filesystem_requestLoad(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb)
+bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb)
 {
     const fs_file_desc_t *desc = filesystem_desc(type);
     if (desc == NULL || !desc->supports_load)
@@ -4422,7 +4877,7 @@ bool filesystem_requestLoad(fs_file_type_t type, uint8_t slot, fs_completion_cb_
     }
 }
 
-bool filesystem_requestLoadKitForScenes(uint8_t slot, uint16_t scene_mask,
+bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
                                         fs_completion_cb_t cb)
 {
     uint8_t scene_index;
@@ -4454,7 +4909,40 @@ bool filesystem_requestLoadKitForScenes(uint8_t slot, uint16_t scene_mask,
     return true;
 }
 
-bool filesystem_requestSave(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb)
+bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
+                                             uint16_t scene_mask,
+                                             fs_completion_cb_t cb)
+{
+    uint8_t scene_index;
+    uint16_t valid_mask = 0u;
+
+    /*
+     * Validate and start a staged KitMrp directory load.
+     *
+     * Inputs mirror normal Kit Load so the browser, missing-slot behavior, and
+     * Scene selection mask stay identical. Output differs at the final state
+     * machine phase: filesystem validates every kit file into op_staged_kit but
+     * does not replace any live Scene. Preset owns the later same-type morph
+     * endpoint copy because only Preset can preserve current slot identity and
+     * refresh the Morph worker without reapplying routing.
+     */
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            valid_mask = (uint16_t)(valid_mask | (uint16_t)(1u << scene_index));
+    }
+    if (valid_mask == 0u || slot >= STORAGE_KIT_MAX_SLOTS)
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_LOAD_KIT_MORPH, FS_FILE_KIT, slot, cb))
+        return false;
+    op_kit_load_scene_mask = valid_mask;
+    memset(&op_staged_kit, 0, sizeof(op_staged_kit));
+    for (scene_index = 0u; scene_index < INSTRUMENT_SLOT_COUNT; scene_index++)
+        memcpy(op_staged_kit.instrument_display_name[scene_index], "Empty   ", 9u);
+    return true;
+}
+
+bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb)
 {
     const fs_file_desc_t *desc = filesystem_desc(type);
     if (desc == NULL || !desc->supports_save)
@@ -4462,7 +4950,7 @@ bool filesystem_requestSave(fs_file_type_t type, uint8_t slot, fs_completion_cb_
 
     switch (type) {
     case FS_FILE_KIT:
-        return filesystem_start(FS_INTERNAL_OP_SAVE_KIT, type, slot, cb);
+        return filesystem_requestSaveKitDirectory(slot, cb);
     case FS_FILE_MORPH:
         return filesystem_start(FS_INTERNAL_OP_SAVE_MORPH, type, slot, cb);
     case FS_FILE_PATTERN:
@@ -4476,6 +4964,21 @@ bool filesystem_requestSave(fs_file_type_t type, uint8_t slot, fs_completion_cb_
     default:
         return false;
     }
+}
+
+bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb)
+{
+    /*
+     * Post a new-format Kit directory save.
+     *
+     * Inputs: zero-based Kit folder slot and completion callback. Output: an
+     * async operation that creates/opens Kit/<NNNxxxxx>/, writes kitset.kcg,
+     * and writes six instrument files from the active Scene kit. This boundary
+     * keeps directory saves separate from legacy flat Morph saves.
+     */
+    if (slot >= STORAGE_KIT_MAX_SLOTS)
+        return false;
+    return filesystem_start(FS_INTERNAL_OP_SAVE_KIT, FS_FILE_KIT, slot, cb);
 }
 
 bool filesystem_requestScanKits(fs_completion_cb_t cb)
@@ -4507,6 +5010,7 @@ bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
     memset(instrument_file_count, 0, sizeof(instrument_file_count));
     memset(instrument_file_name, 0, sizeof(instrument_file_name));
     memset(instrument_file_open_name, 0, sizeof(instrument_file_open_name));
+    memset(instrument_file_stem, 0, sizeof(instrument_file_stem));
     return filesystem_start(FS_INTERNAL_OP_SCAN_INSTRUMENTS, FS_FILE_KIT, 0,
                             cb);
 }
@@ -4541,7 +5045,7 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
     return true;
 }
 
-bool filesystem_requestLoadName(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb)
+bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb)
 {
     const fs_file_desc_t *desc = filesystem_desc(type);
     if (desc == NULL || !desc->has_name_header)
@@ -4552,6 +5056,20 @@ bool filesystem_requestLoadName(fs_file_type_t type, uint8_t slot, fs_completion
 const char *filesystem_loadedName(void)
 {
     return loaded_name;
+}
+
+const kit_t *filesystem_loadedKit(void)
+{
+    /*
+     * Borrow the validated Kit directory staging image.
+     *
+     * Output is read-only filesystem storage consumed by Preset immediately
+     * after a matching KitMrp completion callback. Normal Kit Load still keeps
+     * its historical atomic commit inside filesystem; this accessor exists only
+     * for morph-load commit policy, where Preset must copy endpoint values into
+     * the current resident kit without replacing types, routing, or names.
+     */
+    return &op_staged_kit;
 }
 
 const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void)
@@ -4579,13 +5097,25 @@ const char *filesystem_loadedInstrumentDisplayName(void)
     return op_staged_instrument_display_name;
 }
 
+const char *filesystem_loadedInstrumentStem(void)
+{
+    /*
+     * Borrow the retained source stem paired with a staged Instrument image.
+     *
+     * Output remains valid until the next filesystem operation starts. Preset
+     * commits this only with the matching staged payload so Kit Save metadata
+     * cannot claim a filename for a slot that failed to load.
+     */
+    return op_staged_instrument_stem;
+}
+
 /* Query whether the most recent Kit/ scan found a numbered folder.
  *
  * Input: zero-based slot used by menu/preset code. Output: nonzero if a
  * Kit/NNN Name folder exists. Clients: filesystem_kitSlotName() and future UI
  * code that wants to distinguish absent slots from malformed present kits.
  */
-uint8_t filesystem_kitSlotExists(uint8_t zero_based_slot)
+uint8_t filesystem_kitSlotExists(uint16_t zero_based_slot)
 {
     if (zero_based_slot >= STORAGE_KIT_MAX_SLOTS)
         return 0u;
@@ -4597,7 +5127,7 @@ uint8_t filesystem_kitSlotExists(uint8_t zero_based_slot)
  * Input: zero-based slot. Output: NUL-terminated eight-character cached name,
  * or "Empty   " for absent/out-of-range slots. Client: menu.c's Load page.
  */
-const char *filesystem_kitSlotName(uint8_t zero_based_slot)
+const char *filesystem_kitSlotName(uint16_t zero_based_slot)
 {
     if (!filesystem_kitSlotExists(zero_based_slot))
         return "Empty   ";

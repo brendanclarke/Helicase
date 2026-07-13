@@ -19,8 +19,8 @@ make && make img   →   build/LXRV2_lxr02.img
 
 **Current working source**: repository root, a development branch.
 
-**Session 034 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
-`knowledge_files/log_archive/034_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, directory Kit and root Instrument loading, descriptor-backed instrument storage, Choke/track-7 behavior, descriptor Morph/LFO/velocity targets, staged Instrument commit, and the future filesystem shape, also read `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` and `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
+**Session 035 note**: read `knowledge_files/log_archive/015_SESSION_HANDOFF_LOG.md` through
+`knowledge_files/log_archive/035_SESSION_HANDOFF_LOG.md` before related work. For current module boundaries after parser removal, Pattern/Preset ownership moves, directory Kit load/save, root Instrument loading, Kit/Instrument Morph Load, descriptor-backed instrument storage, Choke/track-7 behavior, descriptor Morph/LFO/velocity targets, LFO `self` storage, descriptor-domain LFO modulation, staged Instrument commit, and the future filesystem shape, also read `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` and `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
 Session 019 adds TIM3 sequencer timing owner, interrupt-driven USART3, MidiRealtime timestamped ring, real CLK/RST jack backend, voice trigger pending ring, PAR_EXT_SYNC, CC1→MORPH, BAR1/BAR2 MIDI path, and corrects OUTPUT_DMA_SIZE to 32. Session 020 completes RV5-RV10 slider control as independent mixer-stage multipliers with per-block interpolation and configurable log taper.
 Session 021 confirms OUT jack-detect mapping (OUT1L/OUT1R/OUT2L/OUT2R = PD6/PD7/PB4/PB6); after Session 025 all four jack-detect pins are retained state sampled by the 500Hz foreground service, while PD6/PD7 EXTI remains masked and PD6/PD7 use internal pull-ups to retain inserted=HIGH.
 Session 022 introduces `sample_mx_t` (signed 24-bit in int32_t), widens mixer summing/output buffers/codec packer to carry true 24-bit audio, and documents the `dth` global menu option plan (not yet wired). Voice sync-blocks and distortion remain int16_t* (deferred).
@@ -34,8 +34,9 @@ Session 029 completes the PatternData storage-ownership pass and Preset folder m
 Session 030 begins Phase 2 filesystem work. `FILESYSTEM_SPEC.md` began as the root layout spec and now forwards to `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`; `Core/Hardware/SD/storageTypes.c/h` owns kit text schemas/parameter maps with `storage_` prefixes; normal root kit load scans `Kit/NNN Name/`, loads `kitset.kcg` plus six instrument files, and keeps morph load on legacy `.SND`. Numbered folder convention is preferred `NNN Name`, compatibility `NNN_Name`, with a FAT short-alias fallback for scan aliases like `001SLA~1`. `SD_CARD/Kit/` is generated from legacy kits using the space convention.
 Session 031 completes the one-live-pattern/8-bar bridge pass and follow-ups. Live `NUM_PATTERN` is 1 while pattern files still stream the old 8-slot bridge layout; STEP front page now owns per-track length, scale, MIDI channel, MIDI note, and per-track shuffle; empty boot tracks default to 16 steps. Sequencer timing runs at corrected default speed with a 96-PPQ master step clock, per-track scale ratios, per-track shuffle, and pattern realign. LED flash is a group overlay and `led_setBlinkLed()` is idempotent. `SHIFT+VOICE` enters morph endpoint edit mode using `parameters2[]` and a blinking VOICE mode LED; stopped selected-voice re-press previews the voice. Pattern/container storage no longer imports or exports the old single shuffle byte; only per-track shuffle extension data is used, and final storage conversion remains a Phase 2 external-converter concern.
 Session 032 follows through on the instrument parameter refactor. VOICE pages are now populated from descriptor-owned layouts in `Core/DSP/Instruments/*/*Parameters.c` and menu edits write Scene descriptor images instead of static `menuPages.h`/`parameter_values[]` cells. Directory kit loading writes descriptor-indexed Scene storage, and Preset/InstrumentManager applies descriptor values back into the DSP runtime; the 001 Slak kit boots and audio mostly works after the then-canonical `amp_envelope_decay_closed/open` parser-key fix. `instrument_decimation` and `velo_mod_amount` are `ROW_NOBIND_IMAGE` parameters: morphable/modulatable/automatable image values with special runtime handling instead of direct member-offset binds. Current filesystem/instrument-file authority is `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`; the former `INSTRUMENT_FILE_SPEC.md` content was folded there and the separate file was deleted.
-Session 033 lands the Phase 3 instrument runtime repair. LFO descriptor display was fixed to use exact descriptor strings, target selection now skips non-modulatable rows with one `off`, VOICE sub-pages can show 16 descriptor cells as four-cell screens, LFOs have two destination pairs plus shared polarity, and descriptor/Scene LFO targets now apply in DSP. Descriptor Morph works against Scene-owned images; PERF Morph is split into global set-all Morph plus six per-voice Morph controls and Scene Decimation `srt`. `Core/Scene/SceneModTargets.c/h` owns non-voice sound modulation targets (`1vm..6vm`, then Scene `srt`), velocity modulation can retained-set per-voice Morph/Scene Decimation, and LFO Morph modulation is a hidden overlay centered on the retained per-voice Morph base. The then-open voice-6/tracks-6+7/Choke cleanup was completed in Session 034; descriptor-aware step automation, new-format saves, Scene/Bank/Effect structures, and root `settings.cfg` remain.
-Session 034 completes Instrument Load. InstrumentManager registry entries now own Basic/Advanced/Choke flags, display labels, extensions, and the two-Advanced replacement rule; Drum/Snare are Basic, Cymbal Advanced, HiHat Advanced|Choke. HiHat canonical decay keys are `amp_envelope_decay` and `amp_envelope_decay_choke`; legacy closed/open names remain accepted by storage. VOICE7 dynamically resolves Choke siblings, while a non-Choke slot 6 receives a generated Scene-owned track-7 decay/morph endpoint and Scene target `7dc`. Root `Instrument/` browsing/loading is live for `.drm/.snr/.cym/.hat`, as is the nested Load UI, Scene LED selection behavior, and stopped voice preview. Instrument files now stage outside live SceneData and Preset commits an active replacement atomically: clear all outgoing modulation owners, replace and reset the runtime slot, rebuild all six Morph/runtime images, then normalize/rebind all sources; UI target-changing actions stay locked throughout. The former Voice 2 long-decay fault was isolated to the old direct one-slot Instrument load lifecycle and cleared by this transaction. Remaining Phase 3 risks are descriptor-aware step automation, raw LFO float writes that bypass descriptor setters, dynamic modulation-node enumeration, and new-format save/Scene/Bank work.
+Session 033 lands the Phase 3 instrument runtime repair. LFO descriptor display was fixed to use exact descriptor strings, target selection now skips non-modulatable rows with one `off`, VOICE sub-pages can show 16 descriptor cells as four-cell screens, LFOs have two destination pairs plus shared polarity, and descriptor/Scene LFO targets now apply in DSP. Descriptor Morph works against Scene-owned images; PERF Morph is split into global set-all Morph plus six per-voice Morph controls and Scene Decimation `srt`. `Core/Scene/SceneModTargets.c/h` owns non-voice sound modulation targets (`1vm..6vm`, then Scene `srt`), velocity modulation can retained-set per-voice Morph/Scene Decimation, and LFO Morph modulation is a hidden overlay centered on the retained per-voice Morph base. The then-open voice-6/tracks-6+7/Choke cleanup was completed in Session 034; the then-open normal Kit Save and descriptor-domain LFO scaling were completed in Session 035. Descriptor-aware step automation, standalone Instrument Save, Scene/Bank/Effect structures, and root `settings.cfg` remain.
+Session 034 completes Instrument Load. InstrumentManager registry entries now own Basic/Advanced/Choke flags, display labels, extensions, and the two-Advanced replacement rule; Drum/Snare are Basic, Cymbal Advanced, HiHat Advanced|Choke. HiHat canonical decay keys are `amp_envelope_decay` and `amp_envelope_decay_choke`; legacy closed/open names remain accepted by storage. VOICE7 dynamically resolves Choke siblings, while a non-Choke slot 6 receives a generated Scene-owned track-7 decay/morph endpoint and Scene target `7dc`. Root `Instrument/` browsing/loading is live for `.drm/.snr/.cym/.hat`, as is the nested Load UI, Scene LED selection behavior, and stopped voice preview. Instrument files now stage outside live SceneData and Preset commits an active replacement atomically: clear all outgoing modulation owners, replace and reset the runtime slot, rebuild all six Morph/runtime images, then normalize/rebind all sources; UI target-changing actions stay locked throughout. The former Voice 2 long-decay fault was isolated to the old direct one-slot Instrument load lifecycle and cleared by this transaction. Session 035 later fixed descriptor LFO raw-runtime writes for direct descriptor targets; remaining Phase 3 risks are descriptor-aware step automation, dynamic modulation-node enumeration for non-adapter paths, standalone Instrument Save, and Scene/Bank work.
+Session 035 completes a major Phase 3 save/load/modulation pass. Kit and Instrument Morph Load are live: KitMrp parses a normal Kit directory and copies source normal endpoints into resident morph endpoints only for matching slot types; InstrumentMrp is available only for the destination slot's current type and follows the same same-type/no-change rule. LFO target voice storage now supports file-only `self` on `lfo_target_voice`/`lfo_target_voice_2`; load resolves it immediately to the destination slot and Kit Save emits it only for own-slot LFO voice selectors. Descriptor LFO modulation now uses descriptor-owned parameter-domain metadata and InstrumentManager adapters, applying temporary values through `instrumentManager_writeRuntime()`; negative polarity matches original LXR value-relative math in parameter space. Normal `Save:[Kit     ]` now writes new-format `Kit/<NNNxxxxx>/kitset.kcg` plus six instrument files with `[params]` and `[morph]`; root Kit slots are 001..999 with `uint16_t` plumbing. SceneData retains default and loaded instrument stems (`inst_vo1`..`inst_vo6`, first 16 filename stem chars) for display/save provenance. asyncfatfs core files were not expanded this session: save code reuses existing `afatfs_mkdir()`, `afatfs_fopen(..., "w", ...)`, `afatfs_fclose()`, and `afatfs_chdir()`. Current asyncfatfs creates 8.3 entries only; true LFN creation, atomic rename/replace, and recursive directory replace remain future core primitives. Remaining Phase 3 risks are standalone Instrument Save, Scene/Bank structures, descriptor-aware step automation, and dynamic modulation-node enumeration for non-adapter paths.
 
 ---
 
@@ -102,7 +103,9 @@ Session 034 completes Instrument Load. InstrumentManager registry entries now ow
 │       ├── 030_SESSION_HANDOFF_LOG.md
 │       ├── 031_SESSION_HANDOFF_LOG.md
 │       ├── 032_SESSION_HANDOFF_LOG.md
-│       └── 033_SESSION_HANDOFF_LOG.md
+│       ├── 033_SESSION_HANDOFF_LOG.md
+│       ├── 034_SESSION_HANDOFF_LOG.md
+│       └── 035_SESSION_HANDOFF_LOG.md
 └── Core/
     ├── globals.h
     ├── datatypes.h
@@ -125,9 +128,9 @@ Session 034 completes Instrument Load. InstrumentManager registry entries now ow
     │   │       ├── encoder.c/h      ← SW42, TIM1 IC, Dannegger, accel + rebound suppression
     │   │       └── endlessPots.c/h  ← RV1-4, atan2 delta tracking
     │   ├── SD/
-    │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations; normal kit load now scans/loads root Kit/ directories
-    │   │   ├── storageTypes.c/h     ← Phase 2 kit text schema, numbered-folder parser, instrument parameter maps
-    │   │   ├── kitBrowser.c/h       ← kit-only 128-slot gap-tolerant browser
+    │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations; normal kit load/save uses root Kit/ directories
+    │   │   ├── storageTypes.c/h     ← Kit/instrument text parser+writer, numbered-folder parser, descriptor file schema helpers
+    │   │   ├── kitBrowser.c/h       ← kit-only 999-slot gap-tolerant compatibility browser
     │   │   ├── SPI/
     │   │   │   ├── spi_sd.c/h       ← bit-bang SPI: PC12/PD2/PC8/PD0
     │   │   │   └── sd_routines.c/h  ← SD_init() only; blocking read/write superseded
@@ -347,7 +350,7 @@ The STM32F765 has an internal 12-bit DAC on PA4 (DAC1_OUT) and PA5 (DAC2_OUT). T
 ```
 Core/Scene/Preset/presetManager.c / kitBrowser.c
   → filesystem.c (typed operations: kit/morph/pattern/performance/all/globals)
-    → asyncfatfs/asyncfatfs.c (afatfs_fopen/fread/fwrite/fclose/poll)
+    → asyncfatfs/asyncfatfs.c (afatfs_fopen/fread/fwrite/fclose/mkdir/chdir/poll)
       → asyncfatfs/sdcard_lxr02.c (sector transfer FSM, 16 bytes/burst)
         → SPI/spi_sd.c (bit-bang SPI)
 ```
@@ -365,16 +368,28 @@ Core/Scene/Preset/presetManager.c / kitBrowser.c
   root `FILESYSTEM_SPEC.md` compatibility pointer was deleted in Session 033.
   Target root directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`,
   `Wavetable`, `Effect`, and `Instrument`; future system settings live in root
-  `settings.cfg`. Current implemented directory load work is root `Kit/` plus
-  root `Instrument/`; new-format saves and Scene/Bank folders remain pending.
-  Globals still use legacy `glo.cfg`.
-- `storageTypes.c/h` owns Phase 2 text storage schemas and parameter maps. Keep
-  it free of `asyncfatfs` calls and keep function names prefixed `storage_`.
+  `settings.cfg`. Current implemented directory work is root `Kit/` load/save
+  plus root `Instrument/` load; standalone Instrument Save and Scene/Bank
+  folders remain pending. Globals still use legacy `glo.cfg`.
+- `storageTypes.c/h` owns text storage schemas, parser/writer helpers, and
+  descriptor-keyed parameter maps. Keep it free of `asyncfatfs` calls and keep
+  function names prefixed `storage_`.
 - Normal kit load now scans root `Kit/` directories named `NNN Name` or
   compatibility `NNN_Name`, then loads `kitset.kcg` plus six instrument files.
-  New-format Kit save is not implemented yet; current save paths remain legacy.
-  Morph-kit load/save remains legacy `.SND` until per-instrument morph
-  persistence is designed.
+  Normal Kit Save now creates/opens a numbered Kit directory and writes
+  `kitset.kcg` plus six instrument files. Kit slots are 001..999 on disk and
+  `uint16_t` 0..998 in code. Morph-kit save remains legacy `.SND` until final
+  morph-save persistence is designed.
+- Session 035 did not modify asyncfatfs core files. Future save code should
+  reuse the existing primitives through filesystem state machines:
+  `afatfs_mkdir()`, `afatfs_fopen(..., "w", ...)`, `afatfs_fclose()`,
+  `afatfs_chdir()`, and file `afatfs_funlink()`. Do not recreate local FAT
+  writers in callers.
+- Current asyncfatfs creates short 8.3 entries only. It can scan/display LFNs,
+  but firmware-created Kit folders and instrument files are sanitized short
+  physical names until a real asyncfatfs LFN creation primitive exists. Atomic
+  rename/replace and recursive directory replace/delete are also missing core
+  primitives.
 - Root `Instrument/` is a separately scanned, type-filtered source pool.
   Instrument Load initially shows the destination slot's Kit member stem;
   changing type only changes the type selection, and lower-row browsing is the

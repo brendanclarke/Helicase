@@ -349,6 +349,38 @@ static void menu_startInstrumentApply(uint8_t scene_index, uint8_t slot)
     preset_startInstrumentApply(scene_index, slot);
 }
 
+static void menu_startKitMorphApply(void)
+{
+    /*
+     * Start post-load apply for a staged KitMrp operation.
+     *
+     * Output: Preset commits same-type morph endpoints and drains only the
+     * Morph worker. Menu reuses the instrument-apply polling gate because this
+     * is endpoint refresh work, not a normal Kit replacement that should run
+     * Scene settings, routing, or target rebinds.
+     */
+    menu_instrumentApplyActive = 1u;
+    menu_instrumentApplySlot = 0u;
+    menu_storageBusy = 1u;
+    preset_startKitMorphApply();
+}
+
+static void menu_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Start post-load apply for one staged InstrumentMrp operation.
+     *
+     * Output: Preset copies only same-type morphable endpoint values into the
+     * current destination slot and drains the Morph worker for the active
+     * Scene. The browser remains open because slot identity and display name do
+     * not change.
+     */
+    menu_instrumentApplyActive = 1u;
+    menu_instrumentApplySlot = slot;
+    menu_storageBusy = 1u;
+    preset_startInstrumentMorphApply(scene_index, slot);
+}
+
 static uint8_t menu_tickInstrumentApply(void)
 {
     /*
@@ -748,7 +780,7 @@ static uint8_t menuIndex = 0;
 static uint8_t menu_voiceSubPageScreen[NUM_SUB_PAGES];
 
 uint8_t menu_numSamples = 0;
-uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
+uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 uint8_t menu_shownPattern = 0;
 uint8_t menu_currentBar = 0;
 uint8_t menu_muteModeActive = 0;
@@ -763,6 +795,17 @@ uint8_t menu_playedPattern = 0;
 static uint8_t menu_instrumentLoadActive = 0u;
 static uint8_t menu_instrumentLoadSlot = 0u;
 static instrument_type_t menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
+/*
+ * Instrument Morph browser mode is derived from the destination slot type.
+ *
+ * baseType is captured from the currently loaded slot when Instrument Load is
+ * entered or its destination Scene changes. morphMode is only UI/dispatch
+ * state: it inserts the one legal "...Mrp" row after that base type and asks
+ * Preset to copy the selected file into the resident morph endpoint instead of
+ * replacing the slot.
+ */
+static instrument_type_t menu_instrumentLoadBaseType = INSTRUMENT_TYPE_DRM;
+static uint8_t menu_instrumentLoadMorphMode = 0u;
 static uint8_t menu_instrumentLoadIndex[INSTRUMENT_TYPE_UNKNOWN];
 /*
  * Load-menu Scene and Instrument-source state.
@@ -820,6 +863,8 @@ static void menu_encoderChangeParameter(int8_t inc);
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked);
 static void menu_instrumentLoadClampIndex(void);
 static void menu_instrumentLoadRequestSelection(void);
+static void menu_instrumentLoadRefreshBaseType(uint8_t preserve_selected_type);
+static void menu_instrumentLoadCopyTypeLabel(char *dest);
 static void menu_instrumentLoadStepType(int8_t inc);
 static void menu_refreshLoadSceneLeds(void);
 static uint8_t menu_paramIsMorphAmount(uint16_t paramNr);
@@ -834,6 +879,7 @@ static void menu_endlessPotMappingChanged(void);
 static uint8_t menu_cpuUseWidgetVisible(void);
 static void menu_formatCpuUsePercent3(char *buf);
 static void menu_formatCpuUsePercent4(char *buf);
+static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot);
 static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value);
 static void setNoteName(uint8_t num, char *buf);
 
@@ -1984,7 +2030,7 @@ static uint8_t menu_isLoadSaveSelectionCurrent(void)
 static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
 {
     uint8_t what = menu_saveOptions.what;
-    uint8_t slot = (what < SAVE_TYPE_GLO) ? menu_currentPresetNr[what] : 0;
+    uint16_t slot = (what < SAVE_TYPE_GLO) ? menu_currentPresetNr[what] : 0u;
 
     menu_deferSelectionRequest = 0;
     menu_deferSelectionLoadKit = loadKitOnLoadPage;
@@ -1992,15 +2038,26 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         preset_loadName(0, what);
         return;
     }
-    /* Kit directory names come from the scan cache already used by repaint.
-     * Do not issue a legacy .SND header read merely by entering Load: it can
-     * occupy the single SD operation slot before the user selects a Kit. */
-    if (menu_activePage == LOAD_PAGE && what == SAVE_TYPE_KIT &&
+    /*
+     * Kit and KitMrp share the same browser slot but have different commit
+     * semantics.
+     *
+     * Normal Kit Load replaces the selected Scene kits. KitMrp stages the same
+     * Kit/ directory, then Preset copies staged normal endpoint values into the
+     * already-loaded kits' morph endpoints. The display-name refresh path must
+     * not call filesystem_requestLoadName() for either entry because new-format
+     * Kit directories do not use the legacy flat name reader.
+     */
+    if (menu_activePage == LOAD_PAGE && what < SAVE_TYPE_GLO &&
         !loadKitOnLoadPage)
         return;
     if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
         what == SAVE_TYPE_KIT) {
         if (!preset_loadKitForScenes(slot, menu_kitLoadSceneMask))
+            menu_deferSelectionRequest = 1;
+    } else if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
+               what == SAVE_TYPE_KIT_MORPH) {
+        if (!preset_loadKitMorphForScenes(slot, menu_kitLoadSceneMask))
             menu_deferSelectionRequest = 1;
     } else {
         preset_loadName(slot, what);
@@ -2040,26 +2097,98 @@ static void menu_instrumentLoadRequestSelection(void)
     /*
      * Immediately load the selected Instrument/ file.
      *
-     * Inputs: destination Scene/slot, selected type, and per-type browser
-     * index from Menu state. Output: Preset starts a single-instrument
-     * filesystem request and retains the browser display while input is busy.
-     * Empty lists do not start a request.
+     * Inputs: destination Scene/slot, selected type, morph-row flag, and
+     * per-type browser index from Menu state. Output: normal rows replace the
+     * destination slot; the morph row copies the staged file's normal endpoint
+     * into the current slot's morph endpoint. Empty lists do not start a
+     * request, and Preset still validates the same-type rule before accepting
+     * an InstrumentMrp request.
      */
     menu_instrumentLoadClampIndex();
     count = filesystem_instrumentCount(menu_instrumentLoadType);
     if (count == 0u)
         return;
     index = menu_instrumentLoadIndex[menu_instrumentLoadType];
-    if (preset_loadInstrument(menu_instrumentLoadScene,
-                              menu_instrumentLoadSlot,
-                              menu_instrumentLoadType,
-                              index)) {
+    if ((menu_instrumentLoadMorphMode &&
+         preset_loadInstrumentMorph(menu_instrumentLoadScene,
+                                    menu_instrumentLoadSlot,
+                                    menu_instrumentLoadType,
+                                    index)) ||
+        (!menu_instrumentLoadMorphMode &&
+         preset_loadInstrument(menu_instrumentLoadScene,
+                               menu_instrumentLoadSlot,
+                               menu_instrumentLoadType,
+                               index))) {
         /* Keep the asynchronous request exclusive without replacing the
          * Instrument browser with a transient progress screen. The cursor and
          * filename remain visible until the bounded completion/apply path
          * repaints them, which makes rapid pool browsing feel continuous. */
         menu_storageBusy = 1u;
     }
+}
+
+static void menu_instrumentLoadRefreshBaseType(uint8_t preserve_selected_type)
+{
+    const kit_instrument_slot_t *slot =
+        scene_instrumentSlotConst(menu_instrumentLoadScene,
+                                  menu_instrumentLoadSlot);
+    instrument_type_t previous_type = menu_instrumentLoadType;
+
+    /*
+     * Refresh the InstrumentMrp base type from the destination slot.
+     *
+     * Inputs: current destination Scene/slot and whether a normal selected type
+     * should be preserved when it remains legal. Output: baseType always
+     * follows the resident slot type, because the only morph row allowed is the
+     * currently loaded instrument type. If the selected normal type is no
+     * longer valid for the destination, the browser falls back to baseType and
+     * clears morph mode.
+     */
+    menu_instrumentLoadBaseType = slot ? slot->type : INSTRUMENT_TYPE_DRM;
+    if (!instrumentManager_typeSelectableForSceneSlot(
+            menu_instrumentLoadScene, menu_instrumentLoadSlot,
+            menu_instrumentLoadBaseType)) {
+        menu_instrumentLoadBaseType = INSTRUMENT_TYPE_DRM;
+    }
+    if (preserve_selected_type && !menu_instrumentLoadMorphMode &&
+        instrumentManager_typeSelectableForSceneSlot(
+            menu_instrumentLoadScene, menu_instrumentLoadSlot,
+            previous_type)) {
+        menu_instrumentLoadType = previous_type;
+    } else {
+        menu_instrumentLoadType = menu_instrumentLoadBaseType;
+        menu_instrumentLoadMorphMode = 0u;
+    }
+    menu_instrumentLoadClampIndex();
+}
+
+static void menu_instrumentLoadCopyTypeLabel(char *dest)
+{
+    char label[9];
+    const char *base_label = instrumentManager_typeDisplayLabel(
+        menu_instrumentLoadType);
+
+    /*
+     * Build the fixed eight-character Load label used by the LCD.
+     *
+     * Normal rows show the instrument type label as before. The morph row
+     * appends "Mrp" to the captured base type, producing labels such as
+     * "DrumMrp ". Padding and truncation live here so repaint cannot resize or
+     * corrupt the LCD field.
+     */
+    menu_copyPaddedField(label, base_label, 8u);
+    if (menu_instrumentLoadMorphMode) {
+        uint8_t len = 0u;
+        while (len < 8u && label[len] != ' ')
+            len++;
+        if (len < 8u) label[len++] = 'M';
+        if (len < 8u) label[len++] = 'r';
+        if (len < 8u) label[len++] = 'p';
+        while (len < 8u)
+            label[len++] = ' ';
+        label[8] = '\0';
+    }
+    memcpy(dest, label, 8u);
 }
 
 static void menu_instrumentLoadStepType(int8_t inc)
@@ -2070,16 +2199,25 @@ static void menu_instrumentLoadStepType(int8_t inc)
     int8_t direction = (inc < 0) ? -1 : 1;
 
     /*
-     * Step through selectable Instrument Load types.
+     * Step through the logical Instrument Load type list.
      *
-     * Inputs: signed encoder direction and current destination slot. Output:
-     * selected type moves to the next registry type allowed by Basic/Advanced
-     * assignment policy. This cannot be a simple enum increment because the
-     * registry is private and the two-Advanced rule depends on the selected
-     * destination Scene kit.
+     * Inputs: signed encoder direction, current destination slot, and captured
+     * base type. Output: selectable normal instrument types still follow the
+     * registry order, but one extra morph row is inserted immediately after the
+     * resident destination type. Other types do not expose "...Mrp" because a
+     * mismatched morph load is explicitly a no-change operation.
      */
     if (registry_count == 0u || inc == 0)
         return;
+    if (inc > 0 && !menu_instrumentLoadMorphMode &&
+        menu_instrumentLoadType == menu_instrumentLoadBaseType) {
+        menu_instrumentLoadMorphMode = 1u;
+        return;
+    }
+    if (inc < 0 && menu_instrumentLoadMorphMode) {
+        menu_instrumentLoadMorphMode = 0u;
+        return;
+    }
     for (i = 0u; i < registry_count; i++) {
         const instrument_registry_entry_t *entry =
             instrumentManager_registryEntryAt(i);
@@ -2103,6 +2241,9 @@ static void menu_instrumentLoadStepType(int8_t inc)
                 menu_instrumentLoadScene, menu_instrumentLoadSlot,
                 entry->type)) {
             menu_instrumentLoadType = entry->type;
+            menu_instrumentLoadMorphMode =
+                (uint8_t)(direction < 0 &&
+                          entry->type == menu_instrumentLoadBaseType);
             menu_instrumentLoadClampIndex();
             return;
         }
@@ -2136,7 +2277,7 @@ static void menu_refreshLoadSceneLeds(void)
         led_setBlinkLed((uint8_t)(LED_SEQ1 + scene_index), 0u);
         led_setValue(0u, (uint8_t)(LED_SEQ1 + scene_index));
     }
-    if (!menu_instrumentLoadActive && menu_saveOptions.what != SAVE_TYPE_KIT)
+    if (!menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
         return;
     for (scene_index = 0u;
          scene_index < SCENE_COUNT && scene_index < 16u;
@@ -2173,7 +2314,7 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
     if (menu_activePage != LOAD_PAGE || scene_index >= SCENE_COUNT ||
         scene_index >= 16u)
         return 0u;
-    if (!menu_instrumentLoadActive && menu_saveOptions.what != SAVE_TYPE_KIT)
+    if (!menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
         return 0u;
     if (menu_instrumentLoadActive && menu_storageBusy) {
         /*
@@ -2190,6 +2331,7 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
     bit = (uint16_t)(1u << scene_index);
     if (menu_instrumentLoadActive) {
         menu_instrumentLoadScene = scene_index;
+        menu_instrumentLoadRefreshBaseType(1u);
     } else {
         menu_kitLoadSceneMask = (uint16_t)(menu_kitLoadSceneMask ^ bit);
     }
@@ -2250,6 +2392,8 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
             menu_instrumentLoadScene, voiceNr, menu_instrumentLoadType)) {
         menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
     }
+    menu_instrumentLoadBaseType = menu_instrumentLoadType;
+    menu_instrumentLoadMorphMode = 0u;
     menu_instrumentLoadClampIndex();
     menu_setActiveVoice(voiceNr);
     menu_refreshLoadSceneLeds();
@@ -2294,6 +2438,24 @@ void numtostrpu(char *buf, uint8_t num, char pad)
     else if (buf[0]==pad) buf[1]=pad;
     else          buf[1]='0';
     buf[2]=(char)('0'+num);
+}
+
+static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot)
+{
+    uint16_t display = (uint16_t)(zero_based_slot + 1u);
+
+    /*
+     * Format Kit folder numbers independently from byte-valued parameters.
+     *
+     * Kit slots now span 001..999, while numtostrpu() remains a uint8_t helper
+     * for menu parameter values. This helper keeps Load/Save folder display
+     * from wrapping above 255.
+     */
+    if (display > 999u)
+        display = 999u;
+    dst[0] = (char)('0' + (display / 100u));
+    dst[1] = (char)('0' + ((display / 10u) % 10u));
+    dst[2] = (char)('0' + (display % 10u));
 }
 
 void numtostrps(char *buf, int8_t num)
@@ -2824,11 +2986,7 @@ static void menu_repaintLoadSavePage(void)
             }
         }
         
-        /* Copy the display label from the instrument registry (e.g., "Drum", "Snare") */
-        menu_copyPaddedField(&editDisplayBuffer[0][6],
-                             instrumentManager_typeDisplayLabel(
-                                 menu_instrumentLoadType),
-                             8u);
+        menu_instrumentLoadCopyTypeLabel(&editDisplayBuffer[0][6]);
 
         /* Render cursor/brackets for the kit-member/pool-source row. */
         if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
@@ -2884,6 +3042,7 @@ static void menu_repaintLoadSavePage(void)
     const char *toptxt = "Kit     ";
     switch (menu_saveOptions.what) {
     case SAVE_TYPE_KIT:         toptxt = "Kit     "; break;
+    case SAVE_TYPE_KIT_MORPH:   toptxt = "KitMrp  "; break;
     case SAVE_TYPE_GLO:         toptxt = "Settings"; break;
     case SAVE_TYPE_SAMPLES:     toptxt = "Samples "; break;
     }
@@ -2900,15 +3059,23 @@ static void menu_repaintLoadSavePage(void)
 
     /* Bottom row */
     if (menu_saveOptions.what < SAVE_TYPE_GLO) {
-        uint8_t displayPreset = menu_currentPresetNr[menu_saveOptions.what];
+        uint16_t displayPreset = menu_currentPresetNr[menu_saveOptions.what];
         const char *displayName = preset_currentName;
 
-        if (menu_activePage == LOAD_PAGE && menu_saveOptions.what == SAVE_TYPE_KIT) {
-            displayPreset = (uint8_t)(displayPreset + 1u);
-            displayName = filesystem_kitSlotName(menu_currentPresetNr[SAVE_TYPE_KIT]);
+        /*
+         * KitMrp reuses the Kit browser presentation.
+         *
+         * Both Kit entries show the same numbered Kit/ scan-cache names. The
+         * top-row type tells selection dispatch whether the staged Kit replaces
+         * the resident kit or copies same-type normal endpoints into morph
+         * storage.
+         */
+        if (menu_activePage == LOAD_PAGE && menu_saveOptions.what < SAVE_TYPE_GLO) {
+            displayName = filesystem_kitSlotName(
+                menu_currentPresetNr[menu_saveOptions.what]);
         }
 
-        numtostrpu(&editDisplayBuffer[1][1], displayPreset, ' ');
+        menu_formatPresetNumber3(&editDisplayBuffer[1][1], displayPreset);
         if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
             if (editModeActive) {
                 editDisplayBuffer[1][0] = '[';
@@ -2945,7 +3112,7 @@ static void menu_repaintLoadSavePage(void)
         }
     } else {
         /* Load page */
-        if (menu_saveOptions.what != SAVE_TYPE_KIT) {
+        if (menu_saveOptions.what >= SAVE_TYPE_GLO) {
             memcpy(&editDisplayBuffer[1][14], menuText_ok, 2);
             if ((menu_saveOptions.state == SAVE_STATE_OK) ||
                 (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
@@ -3407,31 +3574,54 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
         switch (menu_saveOptions.state) {
         case SAVE_STATE_EDIT_TYPE:
             if (inc < 0) {
-                if (menu_saveOptions.what != 0) menu_saveOptions.what--;
+                if (menu_saveOptions.what != 0) {
+                    menu_saveOptions.what--;
+                    if (menu_activePage == SAVE_PAGE &&
+                        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+                        menu_saveOptions.what = SAVE_TYPE_KIT;
+                    }
+                }
             } else if (inc > 0) {
-                if (menu_saveOptions.what < SAVE_TYPE_SAMPLES) menu_saveOptions.what++;
+                if (menu_saveOptions.what < SAVE_TYPE_SAMPLES) {
+                    menu_saveOptions.what++;
+                    /*
+                     * KitMrp is load-only in this pass.
+                     *
+                     * The enum value exists so Load can expose the morph-load
+                     * endpoint. Save semantics will be defined in the later
+                     * kit/instrument save pass, so Save skips this transient
+                     * load mode while keeping normal Kit, Settings, and
+                     * Samples behavior unchanged.
+                     */
+                    if (menu_activePage == SAVE_PAGE &&
+                        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+                        menu_saveOptions.what = SAVE_TYPE_GLO;
+                    }
+                }
             }
             menu_requestCurrentLoadSaveSelection(0);
             menu_refreshLoadSceneLeds();
             break;
         case SAVE_STATE_EDIT_PRESET_NR: {
             /* Settings and Samples are unnumbered Load/Save choices. Keeping
-             * this guard beside the only menu_currentPresetNr[] index prevents
-             * a future cursor-state change from treating their enum values as
-             * preset-array coordinates after the UI pool was reduced to Kit. */
+             * this guard beside the kit-backed menu_currentPresetNr[] access
+             * prevents their enum values from being treated as numbered preset
+             * coordinates. Kit and KitMrp are the only entries below
+             * SAVE_TYPE_GLO. */
             if (menu_saveOptions.what >= SAVE_TYPE_GLO) {
                 menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
                 break;
             }
             /* Saturating add - original `kit > 0` and `kit <= 125` checks
-            ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. Kits use
-            ** 0..127 internally so they can display/open 001..128 folders;
-            ** the older numbered file pools remain capped at 0..125 here. */
-            int16_t maxPreset = (menu_saveOptions.what == SAVE_TYPE_KIT) ? 127 : 125;
+            ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. Kit
+            ** slots are now uint16_t because the directory layout exposes
+            ** 001..999 folders, while the guard keeps non-kit menu entries
+            ** away from the numbered-slot path. */
+            int16_t maxPreset = (menu_saveOptions.what < SAVE_TYPE_GLO) ? 998 : 125;
             int16_t newPreset = (int16_t)menu_currentPresetNr[menu_saveOptions.what] + (int16_t)inc;
             if (newPreset < 0)        newPreset = 0;
             else if (newPreset > maxPreset) newPreset = maxPreset;
-            menu_currentPresetNr[menu_saveOptions.what] = (uint8_t)newPreset;
+            menu_currentPresetNr[menu_saveOptions.what] = (uint16_t)newPreset;
             if (inc != 0) {
                 if (menu_activePage == LOAD_PAGE) {
                     /* Kit load reads the name in its own phase 2 -
@@ -3466,7 +3656,7 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     if (menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1)
                         menu_saveOptions.state = SAVE_STATE_OK;
                     if (menu_saveOptions.state == SAVE_STATE_OK &&
-                        menu_saveOptions.what == SAVE_TYPE_KIT)
+                        menu_saveOptions.what < SAVE_TYPE_GLO)
                         menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
                 }
             }
@@ -3871,6 +4061,27 @@ void menu_pollPresetStatus(void)
         break;
     }
 
+    case PRESET_OP_KIT_MORPH_LOAD:
+    {
+        if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+            !menu_isLoadSaveSelectionCurrent()) {
+            retrySelectionAfterAck = 1;
+            retrySelectionLoadKit = 1;
+            break;
+        }
+
+        /*
+         * KitMrp completion keeps the resident kit identity.
+         *
+         * The selected Kit/ directory has only been staged by filesystem.
+         * Preset now copies same-type normal endpoint values into current morph
+         * endpoints and drains the Morph worker without applying routing,
+         * replacing types, or rebinding modulation targets.
+         */
+        menu_startKitMorphApply();
+        break;
+    }
+
     case PRESET_OP_GLOBALS_LOAD:
     {
         fs_stale_warning_source_t stale_src = filesystem_takeStaleGlobalsWarning();
@@ -3948,6 +4159,19 @@ void menu_pollPresetStatus(void)
          */
         menu_startInstrumentApply(preset_getRequestScene(),
                                   preset_getRequestSlot());
+        menu_refreshLoadSceneLeds();
+        break;
+
+    case PRESET_OP_INSTRUMENT_MORPH_LOAD:
+        /*
+         * Single InstrumentMrp completion.
+         *
+         * Inputs: the destination Scene/slot retained when the Instrument/ file
+         * load was posted. Output: only that slot's morph endpoint is updated,
+         * and only if the staged type still matches the resident slot type.
+         */
+        menu_startInstrumentMorphApply(preset_getRequestScene(),
+                                       preset_getRequestSlot());
         menu_refreshLoadSceneLeds();
         break;
 
@@ -4217,6 +4441,10 @@ void menu_switchPage(uint8_t pageNr)
 ** ----------------------------------------------------------------------- */
 void menu_resetSaveParameters(void)
 {
+    if (menu_activePage == SAVE_PAGE &&
+        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+        menu_saveOptions.what = SAVE_TYPE_KIT;
+    }
     if (menu_saveOptions.what >= SAVE_TYPE_GLO) {
         menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
         menu_saveOptions.what  = SAVE_TYPE_KIT;

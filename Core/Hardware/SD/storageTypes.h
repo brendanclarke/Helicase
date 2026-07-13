@@ -39,7 +39,14 @@
 #define STORAGE_ROOT_INSTRUMENT       "INSTRU~1"
 #define STORAGE_KITSET_FILENAME       "kitset.kcg"
 #define STORAGE_KIT_SLOT_COUNT        6u
-#define STORAGE_KIT_MAX_SLOTS         128u
+/*
+ * Kit folders are numbered directory entries, not legacy file slots.
+ *
+ * The old 128 limit came from P000.SND..P127.SND. New-format Kit/ folders are
+ * addressed by a three-digit 001..999 prefix, so the storage boundary exposes
+ * 999 slots and callers that hold Kit browser positions must use uint16_t.
+ */
+#define STORAGE_KIT_MAX_SLOTS         999u
 #define STORAGE_KIT_FILENAME_MAX      13u
 #define STORAGE_KIT_DISPLAY_NAME_LEN  8u
 
@@ -225,7 +232,7 @@ uint8_t storage_instrumentFilenameMatchesType(const char *filename,
 /* Parse a numbered folder name like "001 Slak" into internal slot/name data.
  *
  * Inputs: display/LFN folder name, zero_based_slot output pointer, and an
- * eight-char display buffer. The name must begin with a three-digit 001..128
+ * eight-char display buffer. The name must begin with a three-digit 001..999
  * slot ID followed by at least one space or underscore separator; additional
  * spaces/underscores before the visible name are skipped. Spaces inside the
  * visible eight-character name are preserved. Outputs: nonzero on a valid
@@ -233,7 +240,7 @@ uint8_t storage_instrumentFilenameMatchesType(const char *filename,
  * display text. Client: filesystem_recordKitDirectory() during Kit/ scans.
  */
 uint8_t storage_parseNumberedFolder(const char *name,
-                                    uint8_t *zero_based_slot,
+                                    uint16_t *zero_based_slot,
                                     char display[STORAGE_KIT_DISPLAY_NAME_LEN]);
 
 /* Copy arbitrary text into the firmware's fixed eight-character name format.
@@ -253,5 +260,55 @@ void storage_copyDisplayName(char dst[STORAGE_KIT_DISPLAY_NAME_LEN],
  */
 void storage_copyFilename(char dst[STORAGE_KIT_FILENAME_MAX],
                           const char *src);
+
+/*
+ * Convert registry instrument types back into storage schema text.
+ *
+ * Save code needs the inverse of the parser's type lookup for kitset.kcg and
+ * instrument file headers. Unknown types return NULL so filesystem can reject
+ * impossible saves before creating partial Kit folder contents.
+ */
+const char *storage_instrumentTypeToText(storage_instrument_type_t type);
+
+/*
+ * Return the instrument filename extension for a storage type.
+ *
+ * The extension intentionally shares the same lowercase token as the type
+ * field today, keeping saved 8.3 filenames aligned with the loader's extension
+ * validator.
+ */
+const char *storage_instrumentTypeExtension(storage_instrument_type_t type);
+/*
+ * Text save helpers mirror the parser-owned schema.
+ *
+ * Filesystem streams one line at a time, but storageTypes owns which keys are
+ * emitted and how descriptor-indexed images become [params]/[morph] text.
+ * Keeping writers next to parsers prevents save from drifting away from the
+ * accepted load grammar.
+ */
+uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
+                                 const kit_t *kit,
+                                 const char file_names[STORAGE_KIT_SLOT_COUNT]
+                                                      [STORAGE_KIT_FILENAME_MAX],
+                                 uint16_t line_index);
+uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
+                                     const kit_instrument_slot_t *instrument,
+                                     storage_instrument_type_t type,
+                                     uint8_t one_based_voice,
+                                     uint16_t line_index);
+/*
+ * Build an 8.3-safe saved instrument filename from Scene-retained metadata.
+ *
+ * The source stem can be longer than the physical FAT name because SceneData
+ * retains the first 16 characters for future LFN support. Current asyncfatfs
+ * creation is 8.3-only, so this helper sanitizes to a short basename and adds
+ * a voice suffix when requested to avoid duplicate kit member filenames.
+ */
+void storage_makeSavedInstrumentFilename(
+    char dst[STORAGE_KIT_FILENAME_MAX],
+    const char *stem,
+    storage_instrument_type_t type,
+    uint8_t one_based_voice,
+    uint8_t force_voice_suffix);
 
 #endif /* STORAGETYPES_H_ */

@@ -55,9 +55,9 @@
 /* -----------------------------------------------------------------------
 ** State - kb_map and kb_numKits are extern'd by filesystem.c for scan writes
 ** ----------------------------------------------------------------------- */
-uint8_t  kb_map[KITBROWSER_MAX_KITS];
-uint8_t  kb_numKits   = 0;
-static uint8_t  kb_mapIndex  = 0;
+uint16_t kb_map[KITBROWSER_MAX_KITS];
+uint16_t kb_numKits   = 0;
+static uint16_t kb_mapIndex  = 0;
 static volatile uint8_t kb_dirty = 0;
 static volatile uint8_t kb_name_pending = 0;
 
@@ -84,16 +84,16 @@ static void kb_onNameLoaded(void)
 static void kb_repaint(void)
 {
     char buf[17];
-    uint8_t kitNr = kb_map[kb_mapIndex];
+    uint16_t kitNr = (uint16_t)(kb_map[kb_mapIndex] + 1u);
 
     /* Row 1 */
     buf[0]  = 'K'; buf[1]  = 'i'; buf[2]  = 't'; buf[3]  = ' ';
     buf[4]  = ' '; buf[5]  = ' '; buf[6]  = ' '; buf[7]  = ' ';
     buf[8]  = ' '; buf[9]  = ' '; buf[10] = ' '; buf[11] = ' ';
     buf[12] = ' ';
-    buf[13] = '0' + (kitNr / 100);
-    buf[14] = '0' + ((kitNr / 10) % 10);
-    buf[15] = '0' + (kitNr % 10);
+    buf[13] = (char)('0' + (kitNr / 100u));
+    buf[14] = (char)('0' + ((kitNr / 10u) % 10u));
+    buf[15] = (char)('0' + (kitNr % 10u));
     buf[16] = '\0';
     lcd_setcursor(0, 1);
     lcd_string(buf);
@@ -150,8 +150,8 @@ void kitBrowser_encoderDelta(int8_t delta)
     if (next < 0)              next = 0;
     if (next >= kb_numKits)    next = kb_numKits - 1;
 
-    if ((uint8_t)next != kb_mapIndex) {
-        kb_mapIndex = (uint8_t)next;
+    if ((uint16_t)next != kb_mapIndex) {
+        kb_mapIndex = (uint16_t)next;
         kb_dirty = 1;
     }
 }
@@ -183,7 +183,7 @@ void kitBrowser_tick(void)
     kb_repaint();
 }
 
-uint8_t kitBrowser_getCurrentKit(void)
+uint16_t kitBrowser_getCurrentKit(void)
 {
     return kb_map[kb_mapIndex];
 }

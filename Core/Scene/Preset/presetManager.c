@@ -57,7 +57,7 @@ char preset_currentName[8];
 ** ----------------------------------------------------------------------- */
 static volatile preset_status_t  pm_status = PRESET_IDLE;
 static volatile preset_op_type_t pm_completed_op = PRESET_OP_NONE;
-static volatile uint8_t          pm_request_slot = 0;
+static volatile uint16_t         pm_request_slot = 0;
 static volatile uint8_t          pm_request_type = SAVE_TYPE_KIT;
 /* Legacy persistence requests survive temporarily for format compatibility,
  * but they no longer occupy Load/Save menu types. Keeping these out of
@@ -72,6 +72,7 @@ static volatile uint8_t          pm_instrument_request_slot = 0u;
 static volatile uint8_t          pm_instrument_request_scene = 0u;
 static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_UNKNOWN;
 static volatile uint8_t          pm_instrument_request_index = 0u;
+static volatile uint16_t         pm_kit_request_scene_mask = 0u;
 
 /* Runtime loaded-kit apply cursor.
  *
@@ -96,6 +97,7 @@ static uint8_t instrument_apply_active = 0u;
 static uint8_t instrument_apply_scene = 0u;
 static uint8_t instrument_apply_phase = 0u;
 static uint8_t instrument_apply_rebind_source = 0u;
+static uint8_t instrument_apply_morph_only = 0u;
 enum {
     INSTRUMENT_APPLY_PHASE_MORPH_REBUILD = 0u,
     INSTRUMENT_APPLY_PHASE_TARGET_REBIND
@@ -112,7 +114,7 @@ preset_op_type_t preset_getCompletedOp(void)
     return pm_completed_op;
 }
 
-uint8_t preset_getRequestSlot(void)
+uint16_t preset_getRequestSlot(void)
 {
     return pm_request_slot;
 }
@@ -164,6 +166,19 @@ static void on_kit_load_complete(void)
 	preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
 }
 
+static void on_kit_morph_load_complete(void)
+{
+    /*
+     * Complete a staged new-format Kit Morph load.
+     *
+     * Filesystem has parsed the selected Kit/ directory into its staging
+     * buffer but has not committed it to SceneData. Naming this as KitMrp lets
+     * Menu/Preset run the morph-endpoint copy path instead of the normal Kit
+     * replacement/apply path.
+     */
+    preset_completeFilesystemOp(PRESET_OP_KIT_MORPH_LOAD);
+}
+
 static void on_morph_load_complete(void)
 {
     preset_completeFilesystemOp(PRESET_OP_MORPH_LOAD);
@@ -197,6 +212,19 @@ static void on_name_load_complete(void)
 static void on_instrument_load_complete(void)
 {
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_LOAD);
+}
+
+static void on_instrument_morph_load_complete(void)
+{
+    /*
+     * Complete a staged Instrument Morph load.
+     *
+     * The Instrument/ file was parsed by the normal single-instrument loader.
+     * Preset will copy only same-type morphable normal endpoint values into the
+     * resident destination slot, preserving slot identity and modulation
+     * bindings.
+     */
+    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_LOAD);
 }
 
 static void on_kit_save_complete(void)
@@ -235,6 +263,7 @@ static fs_file_type_t preset_fileTypeFromSaveType(uint8_t what, uint8_t *hasName
 
     switch (what) {
     case SAVE_TYPE_KIT:         return FS_FILE_KIT;
+    case SAVE_TYPE_KIT_MORPH:   return FS_FILE_KIT;
     case SAVE_TYPE_GLO:
         if (hasName) *hasName = 0;
         return FS_FILE_GLOBALS;
@@ -808,6 +837,160 @@ uint8_t preset_tickDrumsetApply(void)
     return 0u;
 }
 
+static uint8_t preset_copyInstrumentNormalToMorphIfSameType(
+    kit_instrument_slot_t *destination,
+    const kit_instrument_slot_t *source)
+{
+    const instrument_registry_entry_t *entry;
+    uint8_t index;
+    uint8_t copied = 0u;
+
+    /*
+     * Copy one staged source normal endpoint into a resident morph endpoint.
+     *
+     * Inputs: destination resident slot and staged source slot. Output:
+     * morphable descriptor values are copied by descriptor index only when the
+     * instrument types match. A mismatch is a complete no-change for that slot,
+     * which keeps KitMrp/InstrumentMrp per-instrument and avoids inventing
+     * cross-type parameter mapping in the loader.
+     */
+    if (!destination || !source || destination->type != source->type)
+        return 0u;
+    entry = instrumentManager_registryEntry(destination->type);
+    if (!entry)
+        return 0u;
+    for (index = 0u; index < entry->descriptor_count; index++) {
+        const ParamDescriptor *descriptor = &entry->descriptors[index];
+        if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+            continue;
+        destination->parameter_images.morph_instrument_parameters[index] =
+            source->parameter_images.instrument_parameters[index];
+        copied = 1u;
+    }
+    return copied;
+}
+
+static uint8_t preset_commitStagedInstrumentNormalToMorph(
+    uint8_t scene_index,
+    uint8_t slot)
+{
+    const kit_instrument_slot_t *staged =
+        (const kit_instrument_slot_t *)filesystem_loadedInstrumentSlot();
+    kit_instrument_slot_t *destination = scene_instrumentSlot(scene_index, slot);
+
+    /*
+     * Commit a staged Instrument file as a morph endpoint update.
+     *
+     * Unlike preset_startInstrumentApply(), this path does not replace the slot,
+     * copy the display name, reset runtime, or clear/rebind modulation. If the
+     * staged type no longer matches the resident destination type, the operation
+     * is no-change. Otherwise only morphable normal endpoint bytes are copied,
+     * and the Morph worker reapplies the current morph amount.
+     */
+    if (!destination || !staged || slot >= INSTRUMENT_SLOT_COUNT ||
+        staged->type != destination->type ||
+        staged->type != (instrument_type_t)pm_instrument_request_type) {
+        return 0u;
+    }
+    return preset_copyInstrumentNormalToMorphIfSameType(destination, staged);
+}
+
+static uint8_t preset_commitStagedKitNormalToMorph(void)
+{
+    const kit_t *source = filesystem_loadedKit();
+    uint8_t scene_index;
+    uint8_t active_queued = 0u;
+
+    /*
+     * Commit staged Kit normal endpoints into resident Kit morph endpoints.
+     *
+     * This deliberately preserves destination kit slot types, display names,
+     * audio routing, and supplemental modulation bindings. For each slot, a
+     * matching source/destination instrument type copies morphable descriptor
+     * values by index; a mismatch skips the whole slot as a no-change. The
+     * generated slot-6/track-7 morph setting follows the same matching-slot
+     * rule.
+     */
+    if (!source)
+        return 0u;
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        scene_t *scene;
+        uint8_t slot;
+        if ((pm_kit_request_scene_mask &
+             (uint16_t)(1u << scene_index)) == 0u) {
+            continue;
+        }
+        scene = scene_get(scene_index);
+        if (!scene)
+            continue;
+        for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+            if (preset_copyInstrumentNormalToMorphIfSameType(
+                    &scene->kit.instruments[slot],
+                    &source->instruments[slot]) &&
+                scene_index == scene_getActiveIndex()) {
+                presetMorph_requestVoice(scene_index, slot);
+                active_queued = 1u;
+            }
+        }
+        if (INSTRUMENT_SLOT_COUNT > 5u &&
+            scene->kit.instruments[5].type == source->instruments[5].type) {
+            scene->kit.settings.slot6_track7_morph_amp_envelope_decay =
+                source->settings.slot6_track7_amp_envelope_decay;
+            if (scene_index == scene_getActiveIndex()) {
+                presetMorph_requestVoice(scene_index, 5u);
+                active_queued = 1u;
+            }
+        }
+    }
+    return active_queued;
+}
+
+void preset_startKitMorphApply(void)
+{
+    /*
+     * Commit staged KitMrp endpoints and arm a morph-only runtime refresh.
+     *
+     * KitMrp changes morph endpoint storage only. It must not use the normal
+     * drumset apply cursor because that cursor reapplies Scene settings,
+     * routing, and supplemental target bindings for a replaced kit. Here the
+     * resident kit identity is preserved and only the Morph worker is drained.
+     */
+    instrument_apply_active = 0u;
+    preset_ensureMorphInitialized();
+    if (preset_commitStagedKitNormalToMorph()) {
+        instrument_apply_active = 1u;
+        instrument_apply_scene = scene_getActiveIndex();
+        instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
+        instrument_apply_rebind_source = 0u;
+        instrument_apply_morph_only = 1u;
+    }
+}
+
+void preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Commit staged InstrumentMrp endpoints and arm a morph-only refresh.
+     *
+     * InstrumentMrp preserves the destination slot identity. It copies no
+     * display name, performs no routing apply, and does not clear/rebind
+     * modulation targets. A type mismatch is a no-change operation; the cursor
+     * remains inactive and Menu will simply unlock on the next poll.
+     */
+    instrument_apply_active = 0u;
+    preset_ensureMorphInitialized();
+    if (preset_commitStagedInstrumentNormalToMorph(scene_index, slot) &&
+        scene_index == scene_getActiveIndex()) {
+        presetMorph_requestVoice(scene_index, slot);
+        instrument_apply_active = 1u;
+        instrument_apply_scene = scene_index;
+        instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
+        instrument_apply_rebind_source = 0u;
+        instrument_apply_morph_only = 1u;
+    }
+}
+
 void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
 {
     const kit_instrument_slot_t *staged =
@@ -837,8 +1020,16 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
     if (scene_index == scene_getActiveIndex())
         instrumentManager_clearAllRuntimeModulationTargets();
     scene->kit.instruments[slot] = *staged;
-    memcpy(scene->kit.instrument_display_name[slot],
-           filesystem_loadedInstrumentDisplayName(), 9u);
+    /*
+     * Commit Instrument source-name metadata with the staged payload.
+     *
+     * Filesystem captures the selected Instrument filename stem beside the
+     * parsed descriptor image. SceneData derives both the 16-character save stem
+     * and the eight-character LCD field only after this commit succeeds, so
+     * failed loads cannot rename the resident slot.
+     */
+    scene_setInstrumentSourceName(scene_index, slot,
+                                  filesystem_loadedInstrumentStem());
 
     if (scene_index != scene_getActiveIndex())
         return;
@@ -851,6 +1042,7 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
     instrument_apply_scene = scene_index;
     instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
     instrument_apply_rebind_source = 0u;
+    instrument_apply_morph_only = 0u;
 }
 
 uint8_t preset_tickInstrumentApply(void)
@@ -870,6 +1062,11 @@ uint8_t preset_tickInstrumentApply(void)
     if (instrument_apply_phase == INSTRUMENT_APPLY_PHASE_MORPH_REBUILD) {
         if (presetMorph_tick())
             return 1u;
+        if (instrument_apply_morph_only) {
+            instrument_apply_active = 0u;
+            instrument_apply_morph_only = 0u;
+            return 0u;
+        }
         instrument_apply_phase = INSTRUMENT_APPLY_PHASE_TARGET_REBIND;
         instrument_apply_rebind_source = 0u;
         return 1u;
@@ -888,12 +1085,13 @@ uint8_t preset_tickInstrumentApply(void)
         return 1u;
     }
     instrument_apply_active = 0u;
+    instrument_apply_morph_only = 0u;
     return 0u;
 }
 /* -----------------------------------------------------------------------
 ** preset_loadDrumset — post async kit load request.
 ** ----------------------------------------------------------------------- */
-uint8_t preset_loadDrumset(uint8_t presetNr, uint8_t isMorph)
+uint8_t preset_loadDrumset(uint16_t presetNr, uint8_t isMorph)
 {
     fs_file_type_t type = isMorph ? FS_FILE_MORPH : FS_FILE_KIT;
     fs_completion_cb_t cb = isMorph ? on_morph_load_complete : on_kit_load_complete;
@@ -912,7 +1110,7 @@ uint8_t preset_loadDrumset(uint8_t presetNr, uint8_t isMorph)
     return 0;
 }
 
-uint8_t preset_loadKitForScenes(uint8_t presetNr, uint16_t scene_mask)
+uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask)
 {
     /*
      * Post the Scene-targeted Kit directory load used by current Load UI.
@@ -935,10 +1133,35 @@ uint8_t preset_loadKitForScenes(uint8_t presetNr, uint16_t scene_mask)
     return 0u;
 }
 
+uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask)
+{
+    /*
+     * Post a new-format Kit Morph load.
+     *
+     * Inputs: Kit browser slot and selected Scene mask. Output: filesystem
+     * parses the same Kit/ directory used by normal Kit Load but stages only;
+     * Preset later copies staged normal endpoint values into resident morph
+     * endpoints for matching instrument types. Mismatched slots are no-change
+     * by design, so KitMrp remains per-instrument instead of replacing kit
+     * membership.
+     */
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = presetNr;
+    pm_request_type = SAVE_TYPE_KIT_MORPH;
+    pm_kit_request_scene_mask = scene_mask;
+    if (filesystem_requestLoadKitMorphForScenes(presetNr, scene_mask,
+                                                on_kit_morph_load_complete))
+        return 1u;
+    pm_status = PRESET_IDLE;
+    return 0u;
+}
+
 /* -----------------------------------------------------------------------
 ** preset_saveDrumset — post async kit save request.
 ** ----------------------------------------------------------------------- */
-void preset_saveDrumset(uint8_t presetNr, uint8_t isMorph)
+void preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
 {
     fs_file_type_t type = isMorph ? FS_FILE_MORPH : FS_FILE_KIT;
     fs_completion_cb_t cb = isMorph ? on_morph_save_complete : on_kit_save_complete;
@@ -948,7 +1171,16 @@ void preset_saveDrumset(uint8_t presetNr, uint8_t isMorph)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = isMorph ? PRESET_REQUEST_LEGACY_MORPH : SAVE_TYPE_KIT;
-    if (!filesystem_requestSave(type, presetNr, cb))
+    /*
+     * Normal Kit Save now targets the directory Kit format.
+     *
+     * The old flat .SND writer remains only for legacy morph compatibility.
+     * Saving SAVE_TYPE_KIT streams the active Scene kit through the new storage
+     * schema so [params] and [morph] endpoints round-trip with the directory
+     * Kit loader.
+     */
+    if ((!isMorph && !filesystem_requestSaveKitDirectory(presetNr, cb)) ||
+        (isMorph && !filesystem_requestSave(type, presetNr, cb)))
         pm_status = PRESET_IDLE;
 }
 
@@ -983,7 +1215,7 @@ void preset_saveGlobals(void)
 /* -----------------------------------------------------------------------
 ** preset_loadName — post async name load request.
 ** ----------------------------------------------------------------------- */
-char* preset_loadName(uint8_t presetNr, uint8_t what)
+char* preset_loadName(uint16_t presetNr, uint8_t what)
 {
     uint8_t hasName = 0;
     fs_file_type_t type = preset_fileTypeFromSaveType(what, &hasName);
@@ -1035,6 +1267,45 @@ uint8_t preset_loadInstrument(uint8_t destination_scene,
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = destination_slot;
     pm_request_type = SAVE_TYPE_KIT;
+    pm_instrument_request_scene = destination_scene;
+    pm_instrument_request_slot = destination_slot;
+    pm_instrument_request_type = type;
+    pm_instrument_request_index = browser_index;
+    return 1u;
+}
+
+uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
+                                   uint8_t destination_slot,
+                                   instrument_type_t type,
+                                   uint8_t browser_index)
+{
+    const kit_instrument_slot_t *destination =
+        scene_instrumentSlotConst(destination_scene, destination_slot);
+
+    /*
+     * Post an Instrument Morph load for the destination slot's current type.
+     *
+     * The type equality check is intentional. InstrumentMrp is an endpoint
+     * update for the currently loaded slot, not a type-changing operation. The
+     * parser stages a full Instrument file through the normal loader, but the
+     * later commit copies only same-type morphable normal endpoint values into
+     * the resident morph image.
+     */
+    if (!destination || destination_slot >= INSTRUMENT_SLOT_COUNT ||
+        type >= INSTRUMENT_TYPE_UNKNOWN || destination->type != type) {
+        return 0u;
+    }
+
+    filesystem_ack();
+    if (!filesystem_requestLoadInstrument(destination_scene, destination_slot,
+                                          type, browser_index,
+                                          on_instrument_morph_load_complete)) {
+        return 0u;
+    }
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = destination_slot;
+    pm_request_type = SAVE_TYPE_KIT_MORPH;
     pm_instrument_request_scene = destination_scene;
     pm_instrument_request_slot = destination_slot;
     pm_instrument_request_type = type;

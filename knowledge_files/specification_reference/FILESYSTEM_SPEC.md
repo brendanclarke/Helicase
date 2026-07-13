@@ -1,21 +1,23 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative filesystem and instrument-file reference for the
-Helicase/LXR-02 firmware after Session 034. It includes the full Session 032
+Helicase/LXR-02 firmware after Session 035. It includes the full Session 032
 instrument/kit file specification formerly kept in `INSTRUMENT_FILE_SPEC.md`,
-plus the Session 033/034 runtime decisions for LFO, velocity modulation, Morph,
-per-voice Morph, Scene modulation targets, Choke behavior, and Instrument Load.
+plus the Session 033-035 runtime decisions for LFO, velocity modulation, Morph,
+per-voice Morph, Scene modulation targets, Choke behavior, Instrument Load,
+Kit/Instrument Morph Load, Kit Save, and storage-only LFO `self` routing.
 
 Use this document to distinguish three things:
 
-- Implemented now: root `Kit/NNN Name/` directory loading and root
-  `Instrument/` pool replacement into Scene-owned, descriptor-indexed
-  instrument parameter images.
+- Implemented now: root `Kit/NNN Name/` directory loading, root
+  `Instrument/` pool replacement into Scene-owned descriptor-indexed
+  instrument parameter images, Kit/Instrument Morph Load, and normal
+  new-format Kit Save.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: new-format saves, Scene loads/saves, Bank loads/saves,
-  Effect loads/saves, root `settings.cfg`, final new-format Morph save/load
-  behavior, and descriptor-backed step automation playback.
+- Not implemented yet: standalone Instrument Save, Scene loads/saves, Bank
+  loads/saves, Effect loads/saves, root `settings.cfg`, final new-format Morph
+  save behavior, and descriptor-backed step automation playback.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -23,7 +25,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented after Session 034:
+Implemented after Session 035:
 
 - Normal kit loading scans root `Kit/` for numbered folders.
 - Preferred kit folder names are `NNN Name`, for example `001 Slak`.
@@ -66,6 +68,34 @@ Implemented after Session 034:
 - Root Instrument parsing is staged. An active-Scene commit clears all current
   modulation owners before type replacement, rebuilds all six runtime Morph
   images, then normalizes and reinstalls all source target relationships.
+- Kit Morph Load is a Load menu entry `Load:[KitMrp  ]`. It parses the same
+  root Kit directory as normal Kit Load, but Preset copies source normal
+  endpoint values into resident morph endpoints only for slots whose instrument
+  types match. Mismatched source/destination slots are no-change.
+- Instrument Morph Load is the nested Instrument Load type-row sibling for the
+  currently loaded slot type only, shown as `<Type>Mrp`. It loads the selected
+  root Instrument file through normal staging, then copies staged normal
+  endpoint values into the destination slot's morph endpoint only when the
+  slot type still matches.
+- Normal `Save:[Kit     ]` writes the active Scene kit to the directory Kit
+  format: a numbered `Kit/` folder, `kitset.kcg`, and six descriptor-keyed
+  instrument files containing `[params]` and `[morph]`.
+- Root Kit scan/load/save slot range is now 001..999. Internal Kit slot indices
+  are `uint16_t` 0..998. Voice slots remain byte-sized 0..5.
+- Kit and Instrument load retain per-slot source names in SceneData: an
+  eight-character display field and a 16-character logical stem used by Kit
+  Save filename generation. Defaults are `inst_vo1`..`inst_vo6`.
+- Instrument text files accept `self` only for `lfo_target_voice` and
+  `lfo_target_voice_2`. The parser resolves it immediately to the file's
+  expected one-based destination slot; SceneData, Menu, Preset, and DSP runtime
+  still see ordinary numeric voice selectors.
+- Kit Save emits `self` for an LFO target voice when the stored numeric target
+  equals the source instrument's own one-based slot. Cross-slot LFO targets
+  remain decimal voice numbers.
+- Descriptor-backed LFO targets use descriptor-owned parameter-domain metadata
+  and apply temporary LFO-shaped values through the normal descriptor runtime
+  writer. Negative polarity matches original LXR value-relative behavior in
+  parameter space instead of subtracting a full raw runtime range.
 
 Current bridges and limitations:
 
@@ -73,17 +103,18 @@ Current bridges and limitations:
   can raise it to 17 later.
 - Pattern/container storage remains a bridge shape and will be replaced by the
   later dynamic stack Pattern implementation.
-- `FS_FILE_KIT` save still writes the legacy flat `.snd` format. New Kit folder
-  save has not been implemented.
+- `FS_FILE_KIT` save now routes to the new Kit directory writer. The old flat
+  `.snd` Kit writer is no longer the normal Kit Save path.
 - `FS_FILE_MORPH` load/save still uses the legacy `.SND` morph-kit path.
 - Globals still load/save through legacy `glo.cfg`; root `settings.cfg` is the
   settled future replacement but is not wired yet.
 - Scene, Bank, Effect, Wavetable-pool, and new Pattern-pool load/save operations
-  are not implemented yet. The Instrument pool load/browser exists; new-format
-  Instrument save does not.
+  are not implemented yet. The Instrument pool load/browser exists; standalone
+  new-format Instrument save does not.
 - Descriptor-backed LFO and velocity modulation runtime paths are in place for
   direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
-  Decimation. The remaining target-runtime gap is step automation.
+  Decimation. LFO direct descriptor overlays now go through descriptor-domain
+  adapters; the remaining target-runtime gap is step automation.
 - `AutomationNode` and the current step automation storage/playback path still
   use legacy/narrow target IDs and must be rebuilt for descriptor and Scene
   modulation targets.
@@ -260,8 +291,10 @@ Kit/
   002 <kit name>/
 ```
 
-Kit folders can be loaded into the active scene. Slot numbers do not need to be
-contiguous, and missing slots are shown as empty in the UI.
+Kit folders can be loaded into the active scene and saved from the active Scene
+kit. Slot numbers do not need to be contiguous, and missing slots are shown as
+empty in the UI. Root Kit slots are addressed as 001..999 on disk and
+zero-based 0..998 in firmware.
 
 A kit folder contains:
 
@@ -314,9 +347,12 @@ Initial instrument file types:
 These correspond to the four existing original LXR instrument types. Additional
 instrument types may be added later.
 
-Future Kit save behavior: saving a Kit writes a folder in this same shape:
-`kitset.kcg` plus six descriptor-keyed instrument files. No new-format save
-operations have been implemented yet.
+Implemented Kit save behavior: saving a Kit writes a folder in this same shape:
+`kitset.kcg` plus six descriptor-keyed instrument files. Current asyncfatfs
+creation support is 8.3-only, so firmware-created folders/files use sanitized
+short physical names such as `001SLAK` or `SLAKD1.DRM`. Long names scanned from
+SD remain display data; creating true LFN entries is a future asyncfatfs
+capability, not something callers should recreate locally.
 
 ### `kitset.kcg`
 
@@ -447,6 +483,14 @@ Section rules:
   the selected target voice and local descriptor, or changed to explicit off.
   A stored pair must never have a display voice that contradicts its packed
   canonical target slot.
+- `self` is accepted only for `lfo_target_voice` and `lfo_target_voice_2`.
+  It is a storage-only relocation alias resolved by the parser with
+  `storage_instrument_state_t.expected_slot` before writing Scene-owned
+  descriptor images. It is never a Menu value, SceneData sentinel, packed
+  `instrument_param_id_t`, or DSP runtime value.
+- New save code must emit `self` only when the numeric LFO voice selector
+  equals the source instrument's own one-based slot. Explicit cross-slot
+  modulation remains a decimal voice number.
 
 Instrument file metadata deliberately does not include:
 
@@ -572,11 +616,19 @@ These apply through binding kinds instead:
 Each `scene_t` owns one `kit_t`. Each `kit_t` owns six
 `kit_instrument_slot_t` records.
 
-`kit_t` also retains `instrument_display_name[6][9]`: an eight-character,
-NUL-terminated display stem for the file currently associated with each Kit
-slot. It is UI provenance only, not a path, file-open authority, or instrument
-parameter. `kit_settings_t` owns generated Kit-level values, including the
-non-Choke slot-6 track-7 alternate-decay main and Morph endpoints.
+`kit_t` also retains instrument source-name metadata:
+
+- `instrument_display_name[6][9]`: eight-character, NUL-terminated LCD/display
+  stem.
+- `instrument_stem[6][17]`: first 16 stem characters retained for later Kit
+  Save member filename generation.
+
+These are UI/storage provenance only, not paths, file-open authority, or
+instrument parameters. Defaults are `inst_vo1`..`inst_vo6`. Kit load derives
+them from `kitset.kcg file=` entries; root Instrument load commits the selected
+Instrument filename stem only after the staged payload succeeds. `kit_settings_t`
+owns generated Kit-level values, including the non-Choke slot-6 track-7
+alternate-decay main and Morph endpoints.
 
 Each instrument slot owns:
 
@@ -792,8 +844,9 @@ Current LFO shape:
   `lfo_target_voice_2/lfo_target_param_2/lfo_amount_2`.
 - `lfo_polarity` is shared by both target pairs and displays only `neg`, `pos`,
   and `bi`.
-- Negative polarity applies downward from the base/default value, matching the
-  previous behavior.
+- Negative polarity applies original-LXR value-relative math in descriptor
+  parameter space: `base * (1 - amount + amount * source)` for zero-based
+  domains. It does not subtract a full raw runtime range.
 - Positive polarity applies upward from the base/default value.
 - Bipolar polarity applies equally around the base/default value where the
   destination range allows it.
@@ -813,7 +866,12 @@ Current velocity modulation behavior:
 
 Current LFO modulation behavior:
 
-- Direct descriptor targets write through the descriptor-aware runtime path.
+- Direct descriptor targets install InstrumentManager adapters, not raw
+  runtime pointers. The adapter captures the Scene/Morph base descriptor value
+  and descriptor modulation domain, shapes the temporary parameter-domain value,
+  and applies it through `instrumentManager_writeRuntime()` so envelopes,
+  filters, pitch, transient, distortion, and LFO-rate writers keep their normal
+  scaling and side effects.
 - Voice-local `instrument_decimation` uses the special supplemental binding.
 - Per-voice Morph LFO modulation is a hidden secondary layer centered around
   the retained per-voice Morph base value. It does not move the PERF menu value.
@@ -838,13 +896,12 @@ Therefore, the remaining descriptor target follow-up is step automation:
 display must preserve descriptor/Scene target IDs and apply through the same
 descriptor-aware runtime routes.
 
-Two additional modulation correctness follow-ups remain outside the completed
-Instrument transaction: `modNode_resetTargets()` and
+The main remaining modulation correctness follow-up is dynamic owner enumeration
+for non-adapter paths: `modNode_resetTargets()` and
 `modNode_directOriginalValueChanged()` still enumerate fixed global nodes rather
-than all dynamic runtime-pool sources, and direct modulation of shaper-backed
-fields such as envelope decay writes raw runtime floats rather than descriptor
-byte-domain values through the normal owner setter. The latter can set a zero
-envelope decrement and produce an indefinitely held sound.
+than all dynamic runtime-pool sources. Descriptor LFO targets no longer use the
+raw runtime-float backend, but any future direct backend must not write shaped
+DSP members such as `SlopeEg2.decay` for byte-domain descriptors.
 
 ## Pattern
 
@@ -935,8 +992,8 @@ sequence. Effects and effect file formats are future DSP work.
 
 ## Instrument
 
-Status: root browser and one-slot load are implemented; new-format Instrument
-save is not implemented.
+Status: root browser, one-slot load, and Instrument Morph Load are implemented;
+standalone new-format Instrument save is not implemented.
 
 `Instrument/` is a root-level pool of instrument files:
 
@@ -967,23 +1024,51 @@ Initial recognized instrument types:
 
 ## Save Operations
 
-New-format save operations have not been implemented yet.
+Implemented:
 
-Settled future behavior:
+- Kit save writes a `Kit/<NNNxxxxx>/` folder in the same logical shape the
+  current loader accepts: `kitset.kcg` plus six instrument files. Physical names
+  are 8.3-safe because asyncfatfs currently creates short entries only.
 
-- Kit save writes a `Kit/NNN <kit name>/` folder in the same shape the current
-  loader already accepts: `kitset.kcg` plus six instrument files.
+Still future:
+
 - Scene save writes `sceneset.scg`, `Kit <kit name>/`, `pattern.pat`, and
   `effect.fx`.
 - Bank save writes `bankset.bcg` plus up to 16 numbered Scene folders.
-- Instrument save writes descriptor-keyed text files.
+- Standalone Instrument save writes descriptor-keyed text files.
 - Pattern save writes the final dynamic-stack pattern format once implemented.
 - Effect save writes the selected effect stack/settings format once effects
   exist.
 - `settings.cfg` save writes system/global settings and the last loaded bank.
 
-The current legacy save paths are implementation leftovers and should not be
-used as the new-format specification.
+The current legacy non-Kit save paths are implementation leftovers and should
+not be used as the new-format specification.
+
+### asyncfatfs Primitive Boundary
+
+Session 035 did not add new asyncfatfs primitives. Future save code should
+reuse the existing core file APIs instead of recreating local FAT writers:
+
+- `afatfs_mkdir(name, cb)` creates or opens a short-name directory and returns
+  an open handle through the callback.
+- `afatfs_fopen(name, "w", cb)` creates/truncates a short-name file.
+- `afatfs_fclose(handle, cb)` closes opened files/directories.
+- `afatfs_chdir(handle_or_NULL)` changes current directory or returns to root.
+- `afatfs_funlink(file, cb)` exists for files but is not a recursive directory
+  replace primitive.
+
+Known missing primitives:
+
+- true LFN creation;
+- atomic rename/replace for `.tmp` save promotion;
+- recursive directory delete/replace.
+
+Therefore current Kit Save overwrites authoritative files (`kitset.kcg` and the
+six files it references) and may leave stale unreferenced files in the folder.
+The loader ignores them because `kitset.kcg` is authoritative. Future
+Scene/Bank/autosave work should either use the same overwrite-authoritative
+policy or add the missing asyncfatfs primitive once, in asyncfatfs/filesystem,
+not per caller.
 
 ## Verification Anchors
 
@@ -1012,6 +1097,14 @@ instrument runtime propagation:
 - Confirm a completed Instrument transaction survives rapid encoder, Scene,
   VOICE, and mode presses without changing its captured destination or leaving
   a stale modulation target.
+- Confirm Kit Save creates/opens the target Kit folder, writes `kitset.kcg`,
+  writes six instrument files with one header, one `[params]`, and one `[morph]`
+  section each, and can be loaded again.
+- Confirm saved LFO self-targets emit `self` only on LFO voice selector keys
+  whose numeric value equals the source slot.
+- Confirm Kit slots above 255 display and save/load without wrapping.
+- Confirm LFO negative polarity on envelope decay follows the visible parameter
+  direction and amount scale through the descriptor writer.
 - Treat step automation as pending until the descriptor-aware AutomationNode
   pass is complete.
 

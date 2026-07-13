@@ -46,6 +46,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "InstrumentManager.h"
+#include "SceneData.h"
 
 typedef enum {
     FS_FILE_KIT = 0,
@@ -96,7 +97,7 @@ void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
 void        filesystem_ack(void);
 
-bool filesystem_requestLoad(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb);
+bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 /*
  * Load one numbered Kit directory into every Scene selected by scene_mask.
  *
@@ -108,10 +109,31 @@ bool filesystem_requestLoad(fs_file_type_t type, uint8_t slot, fs_completion_cb_
  * has no scene-mask coordinate and must keep its historical active-Scene
  * compatibility behavior for non-UI callers.
  */
-bool filesystem_requestLoadKitForScenes(uint8_t slot, uint16_t scene_mask,
+bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
                                         fs_completion_cb_t cb);
-bool filesystem_requestSave(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb);
-bool filesystem_requestLoadName(fs_file_type_t type, uint8_t slot, fs_completion_cb_t cb);
+/*
+ * Stage one numbered Kit directory for a Preset-owned morph commit.
+ *
+ * Inputs: zero-based Kit browser slot, resident Scene mask, and completion
+ * callback. Output: one asynchronous directory read into filesystem-owned
+ * staging with no live Scene replacement. Preset reads the staged kit after
+ * completion and copies only same-type morphable normal endpoints into the
+ * currently loaded destination kit morph endpoints.
+ */
+bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
+                                             uint16_t scene_mask,
+                                             fs_completion_cb_t cb);
+bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
+/*
+ * Post a new-format Kit directory save.
+ *
+ * Inputs: 0-based Kit folder slot and completion callback. Output: an async
+ * operation that creates/opens Kit/<NNN name>/, writes kitset.kcg, and writes
+ * six instrument files from the active Scene kit. Legacy flat save remains
+ * separate so directory save cannot accidentally emit Pxxx.SND bytes.
+ */
+bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb);
+bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
 /*
@@ -131,6 +153,16 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       fs_completion_cb_t cb);
 struct kit_instrument_slot;
 /*
+ * Read the most recently validated staged Kit directory payload.
+ *
+ * Inputs: none; valid use begins after an FS_STATUS_DONE KitMrp callback.
+ * Output: a filesystem-owned immutable kit image that remains valid until the
+ * next filesystem operation starts. Client: Preset's morph-load commit copies
+ * selected endpoint values from this staging image without letting filesystem
+ * choose Scene or DSP lifecycle policy.
+ */
+const kit_t *filesystem_loadedKit(void);
+/*
  * Read the most recently validated staged Instrument payload.
  *
  * Inputs: none; valid use begins after an FS_STATUS_DONE Instrument callback.
@@ -142,6 +174,14 @@ struct kit_instrument_slot;
  */
 const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
 const char *filesystem_loadedInstrumentDisplayName(void);
+/*
+ * Read the staged Instrument source stem captured during root Instrument load.
+ *
+ * Output is the first retained filename-stem characters from the selected
+ * Instrument/ entry. Preset copies it into SceneData only after the staged
+ * Instrument commit succeeds, keeping save metadata paired with the payload.
+ */
+const char *filesystem_loadedInstrumentStem(void);
 uint8_t filesystem_installSamplesBlocking(void);
 uint8_t filesystem_installLoopsBlocking(void);
 
@@ -156,13 +196,13 @@ const char *filesystem_loadedName(void);
 /* Query the Phase 2 Kit/ scan cache for a numbered kit folder.
  *
  * Input: zero_based_slot is the internal slot index used by preset/menu code;
- * SD folder names are one-based 001 Name through 128 Name, with underscore
+ * SD folder names are one-based 001 Name through 999 Name, with underscore
  * accepted as a compatibility separator. Output: nonzero when
  * filesystem_requestScanKits() has found a matching Kit/NNN Name directory.
  * Clients: menu.c and any future load/save UI that must show explicit Empty
  * slots without trying to open a missing directory.
  */
-uint8_t     filesystem_kitSlotExists(uint8_t zero_based_slot);
+uint8_t     filesystem_kitSlotExists(uint16_t zero_based_slot);
 
 /* Return the eight-character display name from the Phase 2 Kit/ scan cache.
  *
@@ -171,7 +211,7 @@ uint8_t     filesystem_kitSlotExists(uint8_t zero_based_slot);
  * slots. Client: menu_repaintLoadSavePage() displays kit names directly from
  * the directory cache instead of reading legacy .SND headers.
  */
-const char *filesystem_kitSlotName(uint8_t zero_based_slot);
+const char *filesystem_kitSlotName(uint16_t zero_based_slot);
 uint8_t     filesystem_instrumentCount(instrument_type_t type);
 const char *filesystem_instrumentName(instrument_type_t type,
                                       uint8_t browser_index);

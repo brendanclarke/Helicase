@@ -63,6 +63,122 @@ static const char *storage_canonicalInstrumentKey(
     return key;
 }
 
+static uint8_t storage_formatLiteral(char *dst, uint16_t capacity,
+                                     const char *text)
+{
+    uint16_t len = 0u;
+
+    /*
+     * Copy a known schema literal without using printf-family code.
+     *
+     * The firmware link does not provide heap/syscall stubs required by
+     * newlib's formatted I/O path. Save writers only need tiny decimal/schema
+     * lines, so these bounded helpers keep storage formatting deterministic and
+     * avoid pulling in host-style stdio support.
+     */
+    if (!dst || capacity == 0u || len >= capacity)
+        return 0u;
+    if (!text)
+        return 0u;
+    while (text[len] != '\0')
+        len++;
+    if (len >= capacity)
+        return 0u;
+    memcpy(dst, text, len + 1u);
+    return (uint8_t)len;
+}
+
+static uint8_t storage_formatAssignmentText(char *dst, uint16_t capacity,
+                                            const char *key,
+                                            const char *value)
+{
+    uint16_t len = 0u;
+
+    /*
+     * Format "key=value\n" for save files.
+     *
+     * Inputs are schema-owned keys and already-sanitized storage tokens, so the
+     * helper only performs bounded concatenation. Returning zero on overflow
+     * lets filesystem stop rather than write a truncated assignment.
+     */
+    if (!dst || capacity == 0u || !key || !value)
+        return 0u;
+    while (*key != '\0') {
+        if (len + 1u >= capacity)
+            return 0u;
+        dst[len++] = *key++;
+    }
+    if (len + 1u >= capacity)
+        return 0u;
+    dst[len++] = '=';
+    while (*value != '\0') {
+        if (len + 1u >= capacity)
+            return 0u;
+        dst[len++] = *value++;
+    }
+    if (len + 1u >= capacity)
+        return 0u;
+    dst[len++] = '\n';
+    dst[len] = '\0';
+    return (uint8_t)len;
+}
+
+static uint8_t storage_formatAssignmentU16(char *dst, uint16_t capacity,
+                                           const char *key,
+                                           uint16_t value)
+{
+    char digits[6];
+    uint8_t digit_count = 0u;
+    uint16_t divisor = 10000u;
+    uint8_t seen = 0u;
+
+    /*
+     * Format "key=<decimal>\n" for byte/range parameter values.
+     *
+     * Values are uint16_t because descriptor images are indexed by firmware
+     * parameter storage, but current schema lines remain small enough for the
+     * shared FS_TEXT_LINE_MAX buffer.
+     */
+    while (divisor > 0u) {
+        uint8_t digit = (uint8_t)(value / divisor);
+        if (digit != 0u || seen || divisor == 1u) {
+            digits[digit_count++] = (char)('0' + digit);
+            seen = 1u;
+        }
+        value = (uint16_t)(value % divisor);
+        divisor = (uint16_t)(divisor / 10u);
+    }
+    digits[digit_count] = '\0';
+    return storage_formatAssignmentText(dst, capacity, key, digits);
+}
+
+static uint8_t storage_formatSlotHeader(char *dst, uint16_t capacity,
+                                        uint8_t one_based_slot)
+{
+    uint16_t len = 0u;
+
+    /*
+     * Format "[slotN]\n" without stdio.
+     *
+     * Kit slot count is six today, but the helper accepts any single decimal
+     * digit so the call site documents the on-card section grammar directly.
+     */
+    if (!dst || capacity < 9u || one_based_slot == 0u ||
+        one_based_slot > 9u) {
+        return 0u;
+    }
+    dst[len++] = '[';
+    dst[len++] = 's';
+    dst[len++] = 'l';
+    dst[len++] = 'o';
+    dst[len++] = 't';
+    dst[len++] = (char)('0' + one_based_slot);
+    dst[len++] = ']';
+    dst[len++] = '\n';
+    dst[len] = '\0';
+    return (uint8_t)len;
+}
+
 /* Exact string comparison helper.
  *
  * Inputs: two NUL-terminated strings. Output: nonzero only for byte-for-byte
@@ -236,17 +352,285 @@ uint8_t storage_instrumentFilenameMatchesType(const char *filename,
     return instrumentManager_filenameMatchesType(filename, type);
 }
 
+const char *storage_instrumentTypeToText(storage_instrument_type_t type)
+{
+    /*
+     * Convert runtime instrument type to storage schema text.
+     *
+     * Inputs: registered instrument type. Output: lowercase token used by both
+     * kitset.kcg and instrument metadata. Returning NULL for unknown types lets
+     * filesystem reject an impossible save before it writes a partial file.
+     */
+    switch (type) {
+    case STORAGE_INSTRUMENT_DRM: return "drm";
+    case STORAGE_INSTRUMENT_SNR: return "snr";
+    case STORAGE_INSTRUMENT_CYM: return "cym";
+    case STORAGE_INSTRUMENT_HAT: return "hat";
+    default: return NULL;
+    }
+}
+
+const char *storage_instrumentTypeExtension(storage_instrument_type_t type)
+{
+    /*
+     * Convert runtime instrument type to the 8.3 file extension.
+     *
+     * The extension is kept beside the type text because save and load must
+     * agree on the same storage-level type vocabulary.
+     */
+    return storage_instrumentTypeToText(type);
+}
+
+static char storage_filenameChar(char c)
+{
+    if (c >= 'a' && c <= 'z')
+        return c;
+    if (c >= 'A' && c <= 'Z')
+        return (char)(c + ('a' - 'A'));
+    if (c >= '0' && c <= '9')
+        return c;
+    if (c == '_')
+        return c;
+    return '_';
+}
+
+void storage_makeSavedInstrumentFilename(
+    char dst[STORAGE_KIT_FILENAME_MAX],
+    const char *stem,
+    storage_instrument_type_t type,
+    uint8_t one_based_voice,
+    uint8_t force_voice_suffix)
+{
+    const char *ext = storage_instrumentTypeExtension(type);
+    char base[9];
+    uint8_t i = 0u;
+    uint8_t base_limit = force_voice_suffix ? 6u : 8u;
+
+    /*
+     * Build an 8.3-safe saved instrument filename from Scene metadata.
+     *
+     * The retained stem may be 16 characters for future LFN support, but the
+     * current asyncfatfs writer creates only short names. When requested, the
+     * last two basename cells become v1..v6 so duplicate stems cannot collide
+     * inside one saved Kit folder.
+     */
+    if (!ext)
+        ext = "drm";
+    if (!stem || stem[0] == '\0')
+        stem = "inst";
+    memset(base, 0, sizeof(base));
+    while (stem[i] != '\0' && stem[i] != '.' && i < base_limit) {
+        base[i] = storage_filenameChar(stem[i]);
+        i++;
+    }
+    if (i == 0u)
+        base[i++] = 'i';
+    if (force_voice_suffix) {
+        while (i < 6u)
+            base[i++] = '_';
+        base[i++] = 'v';
+        base[i++] = (one_based_voice >= 1u && one_based_voice <= 9u)
+            ? (char)('0' + one_based_voice) : 'x';
+    }
+    i = 0u;
+    while (base[i] != '\0' && i < 8u) {
+        dst[i] = base[i];
+        i++;
+    }
+    dst[i++] = '.';
+    while (*ext != '\0' && i < (STORAGE_KIT_FILENAME_MAX - 1u))
+        dst[i++] = *ext++;
+    dst[i] = '\0';
+}
+
+uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
+                                 const kit_t *kit,
+                                 const char file_names[STORAGE_KIT_SLOT_COUNT]
+                                                      [STORAGE_KIT_FILENAME_MAX],
+                                 uint16_t line_index)
+{
+    uint8_t slot;
+    uint8_t field;
+    const char *type_text;
+
+    /*
+     * Emit one kitset.kcg line in the same schema accepted by the parser.
+     *
+     * Filesystem owns async writes and calls this with monotonically advancing
+     * line indices. storageTypes owns the key order, type text, generated
+     * track-7 endpoint names, and per-slot file/audio fields.
+     */
+    if (!dst || capacity == 0u || !kit || !file_names)
+        return 0u;
+    if (line_index == 0u)
+        return storage_formatLiteral(dst, capacity,
+                                     "format=helicase.kitset\n");
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "version=1\n");
+    if (line_index == 2u)
+        return storage_formatAssignmentU16(
+            dst, capacity, "slot6_track7_amp_envelope_decay",
+            kit->settings.slot6_track7_amp_envelope_decay);
+    if (line_index == 3u)
+        return storage_formatAssignmentU16(
+            dst, capacity, "slot6_track7_morph_amp_envelope_decay",
+            kit->settings.slot6_track7_morph_amp_envelope_decay);
+    if (line_index == 4u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    line_index = (uint16_t)(line_index - 5u);
+    slot = (uint8_t)(line_index / 5u);
+    field = (uint8_t)(line_index % 5u);
+    if (slot >= STORAGE_KIT_SLOT_COUNT)
+        return 0u;
+    type_text = storage_instrumentTypeToText(kit->instruments[slot].type);
+    if (!type_text)
+        return 0u;
+    switch (field) {
+    case 0u:
+        return storage_formatSlotHeader(dst, capacity,
+                                        (uint8_t)(slot + 1u));
+    case 1u:
+        return storage_formatAssignmentText(dst, capacity, "type",
+                                            type_text);
+    case 2u:
+        return storage_formatAssignmentText(dst, capacity, "file",
+                                            file_names[slot]);
+    case 3u:
+        return storage_formatAssignmentU16(dst, capacity, "audio_out",
+                                           kit->settings.audio_out[slot]);
+    default:
+        return storage_formatLiteral(dst, capacity, "\n");
+    }
+}
+
+static uint8_t storage_descriptorWritableInSection(
+    const ParamDescriptor *descriptor,
+    uint8_t morph_section)
+{
+    if (!descriptor || !descriptor->file_key)
+        return 0u;
+    if (!morph_section)
+        return 1u;
+    return (uint8_t)((descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u);
+}
+
+static uint16_t storage_descriptorValueForSection(
+    const kit_instrument_slot_t *instrument,
+    uint8_t descriptor_index,
+    uint8_t morph_section)
+{
+    return morph_section
+        ? instrument->parameter_images.morph_instrument_parameters[descriptor_index]
+        : instrument->parameter_images.instrument_parameters[descriptor_index];
+}
+
+uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
+                                     const kit_instrument_slot_t *instrument,
+                                     storage_instrument_type_t type,
+                                     uint8_t one_based_voice,
+                                     uint16_t line_index)
+{
+    const instrument_registry_entry_t *entry =
+        instrumentManager_registryEntry(type);
+    uint16_t descriptor_ordinal;
+    uint8_t i;
+    const char *type_text = storage_instrumentTypeToText(type);
+
+    /*
+     * Emit one complete instrument-file line from descriptor-owned Scene images.
+     *
+     * The writer produces metadata, one [params] block, then one [morph] block
+     * in a single monotonically-indexed sequence. Keeping the section switch
+     * here instead of in filesystem.c prevents async write phases from knowing
+     * descriptor counts, and it guarantees the file header is emitted exactly
+     * once for each saved Instrument.
+     */
+    if (!dst || capacity == 0u || !instrument || !entry || !type_text)
+        return 0u;
+    if (line_index == 0u)
+        return storage_formatLiteral(dst, capacity,
+                                     "format=helicase.instrument\n");
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "version=1\n");
+    if (line_index == 2u)
+        return storage_formatAssignmentText(dst, capacity, "type",
+                                            type_text);
+    if (line_index == 3u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    if (line_index == 4u)
+        return storage_formatLiteral(dst, capacity, "[params]\n");
+
+    descriptor_ordinal = (uint16_t)(line_index - 5u);
+    for (i = 0u; i < entry->descriptor_count; i++) {
+        const ParamDescriptor *descriptor = &entry->descriptors[i];
+        if (!storage_descriptorWritableInSection(descriptor, 0u))
+            continue;
+        if (descriptor_ordinal > 0u) {
+            descriptor_ordinal--;
+            continue;
+        }
+        if ((descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE ||
+             descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE_2) &&
+            storage_descriptorValueForSection(instrument, i, 0u) ==
+                one_based_voice) {
+            /*
+             * Save the file-only LFO self token at the storage boundary.
+             *
+             * SceneData stores ordinary numeric voice selectors. When a
+             * selector points back to the instrument's own one-based slot,
+             * writing "self" preserves the intent across future loads into a
+             * different slot. The token is never stored in SceneData.
+             */
+            return storage_formatAssignmentText(dst, capacity,
+                                                descriptor->file_key,
+                                                "self");
+        }
+        return storage_formatAssignmentU16(dst, capacity,
+            descriptor->file_key,
+            storage_descriptorValueForSection(instrument, i, 0u));
+    }
+    if (descriptor_ordinal == 0u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    descriptor_ordinal--;
+    if (descriptor_ordinal == 0u)
+        return storage_formatLiteral(dst, capacity, "[morph]\n");
+    descriptor_ordinal--;
+    for (i = 0u; i < entry->descriptor_count; i++) {
+        const ParamDescriptor *descriptor = &entry->descriptors[i];
+        if (!storage_descriptorWritableInSection(descriptor, 1u))
+            continue;
+        if (descriptor_ordinal > 0u) {
+            descriptor_ordinal--;
+            continue;
+        }
+        /*
+         * Morph storage writes only morphable endpoint descriptors.
+         *
+         * Target/routing descriptors are intentionally omitted here because the
+         * loader treats them as single-endpoint setup cells. That keeps saved
+         * morph data aligned with the existing parser contract: [morph] changes
+         * values that can interpolate, while [params] owns instrument routing.
+         */
+        return storage_formatAssignmentU16(dst, capacity,
+            descriptor->file_key,
+            storage_descriptorValueForSection(instrument, i, 1u));
+    }
+    if (descriptor_ordinal == 0u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    return 0u;
+}
+
 /* See storageTypes.h for the public contract.
  *
  * Folder numbers are one-based on the SD card because they are user-visible:
- * 001 Name through 128 Name. The returned slot is zero-based because preset,
+ * 001 Name through 999 Name. The returned slot is zero-based because preset,
  * menu, and ParameterArray code already use zero-based indices internally. The
  * separator may be space or underscore for compatibility with older generated
  * folders, but display-name copying starts after any separator run so internal
  * spaces in names such as "Moch to" are preserved.
  */
 uint8_t storage_parseNumberedFolder(const char *name,
-                                    uint8_t *zero_based_slot,
+                                    uint16_t *zero_based_slot,
                                     char display[STORAGE_KIT_DISPLAY_NAME_LEN])
 {
     uint16_t number;
@@ -271,7 +655,7 @@ uint8_t storage_parseNumberedFolder(const char *name,
     if (*display_start == '\0')
         return 0u;
 
-    *zero_based_slot = (uint8_t)(number - 1u);
+    *zero_based_slot = (uint16_t)(number - 1u);
     storage_copyDisplayName(display, display_start);
     return 1u;
 }
@@ -286,29 +670,6 @@ void storage_kitsetInit(storage_kitset_t *kit)
     memset(kit, 0, sizeof(*kit));
     for (uint8_t i = 0u; i < STORAGE_KIT_SLOT_COUNT; i++)
         kit->instrument_type[i] = STORAGE_INSTRUMENT_UNKNOWN;
-}
-
-/*
- * Derive the fixed LCD display stem retained with a Kit member.
- *
- * Inputs: a validated kitset `file` value and a nine-byte SceneData destination.
- * Output: at most eight filename characters before the extension, padded with
- * spaces and NUL terminated. Client: storage_kitsetParseLine(). This belongs
- * next to kitset parsing rather than filesystem scanning because Kit files can
- * reference filenames outside the root Instrument scan cache; retaining the
- * stem here keeps the Scene display correct for either source.
- */
-static void storage_copyInstrumentDisplayStem(char destination[9],
-                                              const char *filename)
-{
-    uint8_t i = 0u;
-
-    memset(destination, ' ', 8u);
-    while (filename[i] != '\0' && filename[i] != '.' && i < 8u) {
-        destination[i] = filename[i];
-        i++;
-    }
-    destination[8] = '\0';
 }
 
 /* See storageTypes.h for the public contract.
@@ -415,8 +776,7 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
         storage_copyFilename(kit->instrument_file[parsed], value);
         if (!target_kit)
             return STORAGE_STATUS_BAD_VALUE;
-        storage_copyInstrumentDisplayStem(
-            target_kit->instrument_display_name[parsed], value);
+        scene_setKitInstrumentSourceName(target_kit, parsed, value);
         kit->seen_file_mask = (uint8_t)(kit->seen_file_mask | (1u << parsed));
     } else if (storage_streq(key, "audio_out")) {
         if (!target_kit)

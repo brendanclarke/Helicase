@@ -39,11 +39,18 @@
 
 #include <stdint.h>
 
-#define KITBROWSER_MAX_KITS  128
+/*
+ * Keep the compatibility kit browser aligned with directory Kit slots.
+ *
+ * The current Load page reads filesystem's scan cache directly, but filesystem
+ * still populates kb_map for older clients. Widening the map prevents scanned
+ * folders above 255 from wrapping into the wrong legacy browser entry.
+ */
+#define KITBROWSER_MAX_KITS  999
 
 uint8_t kitBrowser_init(void);
 void    kitBrowser_encoderDelta(int8_t delta);
 void    kitBrowser_tick(void);
-uint8_t kitBrowser_getCurrentKit(void);
+uint16_t kitBrowser_getCurrentKit(void);
 
 #endif

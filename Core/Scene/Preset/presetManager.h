@@ -58,6 +58,8 @@ typedef enum {
     PRESET_OP_PERFORMANCE_LOAD,
     PRESET_OP_PERFORMANCE_SAVE,
     PRESET_OP_INSTRUMENT_LOAD,
+    PRESET_OP_KIT_MORPH_LOAD,
+    PRESET_OP_INSTRUMENT_MORPH_LOAD,
 } preset_op_type_t;
 
 extern char preset_currentName[8];
@@ -83,7 +85,7 @@ void    preset_init(void);
 ** ----------------------------------------------------------------------- */
 preset_status_t  preset_getStatus(void);
 preset_op_type_t preset_getCompletedOp(void);
-uint8_t          preset_getRequestSlot(void);
+uint16_t         preset_getRequestSlot(void);
 uint8_t          preset_getRequestType(void);
 /*
  * Read the explicit Scene destination retained for the active Instrument load.
@@ -100,8 +102,8 @@ void             preset_ackStatus(void);
 ** ----------------------------------------------------------------------- */
 
 /* Drumset (kit). isMorph=1 reads/writes the legacy morph kit buffer/path. */
-uint8_t preset_loadDrumset(uint8_t presetNr, uint8_t isMorph);
-void    preset_saveDrumset(uint8_t presetNr, uint8_t isMorph);
+uint8_t preset_loadDrumset(uint16_t presetNr, uint8_t isMorph);
+void    preset_saveDrumset(uint16_t presetNr, uint8_t isMorph);
 /*
  * Load one Kit directory into an explicit set of resident Scenes.
  *
@@ -111,7 +113,17 @@ void    preset_saveDrumset(uint8_t presetNr, uint8_t isMorph);
  * keeps scene routing at the Preset boundary instead of making Menu call the
  * filesystem directly or overloading the legacy morph compatibility API.
  */
-uint8_t preset_loadKitForScenes(uint8_t presetNr, uint16_t scene_mask);
+uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask);
+/*
+ * Load a new-format Kit directory into the selected Scenes' morph endpoints.
+ *
+ * Inputs: zero-based Kit slot and Scene bitmask. Output: an asynchronous Kit/
+ * directory request whose filesystem phase only stages the source kit; Preset
+ * then copies source normal endpoints into resident morph endpoints for slots
+ * whose instrument types match. Mismatched source/destination slot types are
+ * deliberately no-change so morph load remains a per-instrument operation.
+ */
+uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask);
 
 /* Globals — single GLO.CFG file. */
 void    preset_loadGlobals(void);
@@ -126,12 +138,24 @@ void    preset_saveAll(uint8_t presetNr, uint8_t isAll);
 uint8_t preset_loadAll(uint8_t presetNr, uint8_t isAll);
 
 /* Read 8-byte preset name from file header (any type). */
-char*   preset_loadName(uint8_t presetNr, uint8_t what);
+char*   preset_loadName(uint16_t presetNr, uint8_t what);
 void    preset_applyLoadedName(void);
 uint8_t preset_loadInstrument(uint8_t destination_scene,
                               uint8_t destination_slot,
                               instrument_type_t type,
                               uint8_t browser_index);
+/*
+ * Load one Instrument/ file into the destination slot's morph endpoint.
+ *
+ * Inputs mirror preset_loadInstrument(), but the requested type must match the
+ * slot's currently loaded type. Output: the file is parsed through the normal
+ * Instrument loader, then only same-type morphable normal endpoint values are
+ * copied into the resident morph image. Type mismatches are rejected/no-change.
+ */
+uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
+                                   uint8_t destination_slot,
+                                   instrument_type_t type,
+                                   uint8_t browser_index);
 
 /* Send loaded parameters to DSP synchronously. Use this before audio starts;
 ** runtime load completion should use the chunked apply API below so it cannot
@@ -204,6 +228,16 @@ uint8_t preset_tickDrumsetApply(void);
  * loading has already atomically replaced a fully staged six-slot payload.
  */
 void    preset_startInstrumentApply(uint8_t scene_index, uint8_t slot);
+/*
+ * Commit staged morph-load endpoints and drain the Morph worker.
+ *
+ * KitMrp and InstrumentMrp change endpoint values only. They must not clear
+ * modulation, reset instrument runtime objects, replace display names, or
+ * apply routing. These starters preserve slot identity and reuse the bounded
+ * Morph worker so active-scene interpolation is refreshed safely.
+ */
+void    preset_startKitMorphApply(void);
+void    preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot);
 uint8_t preset_tickInstrumentApply(void);
 
 /*
