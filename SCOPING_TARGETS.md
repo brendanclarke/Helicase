@@ -304,6 +304,9 @@ sequencer storage changes:
 - Define `sceneset.scg` contents and validation.
 - Define `bankset.bcg` contents and validation.
 - Keep root `Scene/` and `Bank/` folders numbered with gap-tolerant browsing.
+- Root `Scene/` is a user library/pool like root `Kit/` and root
+  `Instrument/`: explicit Scene Save writes there, explicit Scene Load imports
+  from there, and root Scene files are not autosaved.
 - Scene embedded kits are folders named `Kit <kit name>/`; the second word is
   the kit name, and that name is not stored anywhere else.
 - Store MIDI note/channel and `voice_decimation_all` as Scene settings.
@@ -338,16 +341,21 @@ Implement load/save operations for the settled file types in
 - Morphed-instrument save must preserve `[params]` and `[morph]` endpoint
   images and the current descriptor-key vocabulary.
 - Scene load/save writes `sceneset.scg`, `Kit <kit name>/`, `pattern.pat`, and
-  `effect.fx`.
+  `effect.fx`. Root `Scene/` load/save is library/pool exchange only and is not
+  part of the autosave workspace.
 - Add an FX slot shim so Scene folders can validate/store `effect.fx` before
   Phase 6 implements full effects.
-- Bank load/save writes `bankset.bcg` plus up to 16 Scene folders.
+- Bank load/save writes `bankset.bcg` plus up to 16 Scene folders. Bank
+  load/save operations start with all 16 Scenes selected; SEQ buttons narrow the
+  operation to a subset of Scenes before commit.
 - Pattern load/save stays bridge-only until Phase 4 replaces the Pattern file
   format.
 - Effect load/save may initially validate placeholders; real FX parameters land
   in Phase 6.
-- `settings.cfg` replaces `glo.cfg` for system settings and last-loaded-bank
-  selection.
+- `settings.cfg` replaces `glo.cfg` for system settings and active-bank number
+  selection. `settings.cfg` has a `.settings.cfg` autosave/backer file; both are
+  updated/re-written when closing the global settings menu or loading/saving a
+  Bank.
 
 asyncfatfs note for future save code:
 
@@ -359,14 +367,146 @@ asyncfatfs note for future save code:
 
 ### 3.7 Debounced Autosave and Reload
 
-Implement the future autosave behavior after explicit load/save paths exist:
+Implement debounced autosave after explicit Bank save paths exist. The original
+one-file wording is not sufficient once a resident Bank has sixteen editable
+Scenes: menu parameter edits may target any subset of Scenes, and one gesture
+can dirty multiple embedded Kits/Instruments at once.
 
-- Parameter edits mark the owning file stale.
-- A 5-second idle timer writes the live working file.
-- Continuous edits force a write after 30 seconds.
-- Explicit SAVE updates the dot-shadow snapshot.
-- RELOAD restores the working file from the dot-shadow.
-- Use `.tmp` writes and a rename/replace primitive for power-loss safety.
+Architecture decision:
+
+- Bank is the only autosaved workspace. Root `Scene/`, `Kit/`, `Instrument/`,
+  `Pattern/`, and `Effect/` folders are libraries/pools and remain explicit
+  load/save/copy/import/export targets.
+- Treat the active Bank as a working set with per-file dirty records, not as one
+  active file. Resident `scene_t` memory is authoritative; autosave is delayed
+  persistence from that memory into dot-file backers inside the active Bank
+  folder.
+- The currently playing/viewed Scene and the Scene edit target set are separate
+  concepts. Voice mode keeps one active Scene for audition/playback focus, but
+  SEQ buttons may toggle any subset of the 16 Bank Scenes as the target set for
+  Voice/Kit/Instrument parameter edits. A single encoder gesture may therefore
+  mutate one Scene, all 16 Scenes, or any subset such as Scenes 5-8.
+- Multi-Scene Voice/Kit/Instrument edits are binding first-class behavior, not
+  copy-after-edit convenience. They support workflows such as using the Bank as
+  one shared conceptual Kit with 16 Patterns, or reconciling a parameter change
+  across a selected Scene range. On disk these remain Scene-local Kit and
+  Instrument copies unless a later feature explicitly adds shared-file/link
+  semantics.
+- Track dirty state by `(bank_scene_index, file_domain, optional_slot)`.
+  Minimum domains:
+  - `bankset.bcg`
+  - `scene/sceneset.scg`
+  - `scene/kit/kitset.kcg`
+  - `scene/kit/instrument[0..5]`
+  - `scene/effect.fx`
+  - `scene/pattern.pat`
+- Autosave applies only to committed Bank Scene slots 1..16. The future
+  seventeenth landing/staging Scene is excluded until it is committed into a
+  Bank slot.
+- The active Bank is identified by number, not by folder display name. Root
+  `settings.cfg` records that number; `.settings.cfg` is its autosave/backer
+  file. Closing the global settings menu or loading/saving a Bank rewrites both
+  root settings files so the active-bank pointer and settings snapshot agree.
+
+Dirty ownership:
+
+- Add a small Scene/Bank dirty-ledger module rather than scattering filesystem
+  calls through Menu. Mutation owners mark dirty after they successfully change
+  retained Scene/Bank memory.
+- Parameter editing code must pass a Scene edit mask into the mutation owner.
+  The owner applies the same logical edit to every selected resident Scene and
+  marks dirty records for every affected Scene/file. Repeated knob movement
+  updates the same records and refreshes their debounce timers; it must not
+  enqueue one write per encoder tick.
+- Descriptor main endpoint edits dirty only
+  `scene/kit/instrument[slot]`.
+- Descriptor Morph endpoint edits dirty only
+  `scene/kit/instrument[slot]`, because `[morph]` lives in the same instrument
+  file.
+- Supplemental descriptor image values such as LFO target selectors,
+  per-instrument decimation, and velocity amount dirty
+  `scene/kit/instrument[slot]` unless the storage spec later moves a specific
+  value elsewhere.
+- Kit-level settings, slot type/file membership, audio routing, and generated
+  slot-6/track-7 decay values dirty `scene/kit/kitset.kcg`; if the edited value
+  lives inside a specific instrument file, dirty that instrument file instead.
+- Scene settings such as MIDI note/channel, global Morph, per-voice Morph
+  amounts, and `voice_decimation_all` dirty `scene/sceneset.scg`.
+- Effect parameter edits dirty `scene/effect.fx`.
+- Pattern edits dirty `scene/pattern.pat`, but pattern editing is not part of
+  the multi-Scene parameter-toggle behavior. Pattern autosave can therefore stay
+  active/viewed-scene scoped until Phase 4 changes the Pattern model.
+- Bank-level metadata edits dirty `bankset.bcg`.
+- Instrument, Kit, and Scene copy/paste inside the active Bank are batch
+  resident-memory mutations. They mark destination dirty records for dot-file
+  autosave, but they do not update committed non-dot Bank files until explicit
+  Bank SAVE promotes the selected dot-file backers.
+
+Debounce policy:
+
+- Each dirty record stores `first_dirty_tick`, `last_dirty_tick`, and an
+  `in_flight` flag.
+- A write becomes eligible after 5 seconds with no further edits to that record.
+- A continuously edited record is forced eligible after 30 seconds from
+  `first_dirty_tick` even if edits continue.
+- The filesystem writer remains single-operation serialized. When several
+  records are eligible, write oldest forced records first, then oldest idle
+  records. Keep the record dirty if the write fails.
+- A successful autosave clears only the record that was written. Other dirty
+  records in the same Scene remain pending.
+- Autosave must not change live DSP state. It serializes retained Scene/Bank
+  data only.
+
+Committed files, dot-file backers, SAVE, and RELOAD:
+
+- Inside an active Bank, the non-dot filename is the committed save/load file:
+  `sceneset.scg`, `kitset.kcg`, `pattern.pat`, `effect.fx`, instrument files,
+  and `bankset.bcg` are the user's explicit SAVE/LOAD truth.
+- The matching dot-file is the autosave working backer:
+  `.sceneset.scg`, `.kitset.kcg`, `.pattern.pat`, `.effect.fx`, `.slakd1.drm`,
+  `.bankset.bcg`, etc. Autosave writes dirty records to these dot-files, not to
+  the committed non-dot files.
+- Bank SAVE is the commit operation. It waits for the autosave scheduler to
+  finish all selected dirty dot-file writes, then copies/promotes the selected
+  dot-file backers over the matching non-dot committed filenames.
+- Bank LOAD reads from non-dot committed files. Bank load/save operations start
+  with all Scenes selected; SEQ buttons can restrict the operation to a subset.
+- Startup/resume should normally load valid dot-file backers for the active
+  Bank so unsaved autosaved work returns frictionlessly. If a dot-file is
+  missing or fails validation, fall back to the matching committed non-dot file.
+  The committed non-dot file remains the explicit SAVE/LOAD truth, while the
+  dot-file is the resumable working state.
+- RELOAD applies to Scene scope. It reads the selected Scene's non-dot committed
+  files into resident memory and resets that Scene's dot-file backers to match
+  the committed files. It is therefore "discard autosaved working edits for this
+  Scene and return to the committed Scene state."
+- If a RELOAD Scene contains dirty or in-flight autosaves, cancel, drain, or
+  supersede those jobs before replacing memory and dot-file backers from the
+  committed non-dot files.
+- Dot-file autosave should eventually write through a temporary file and
+  rename/replace it over the dot-file after close/flush. On startup, a leftover
+  `.tmp` indicates an incomplete temporary write. Ignore/delete that `.tmp`,
+  then use the previous dot-file if it validates; only fall back to non-dot if
+  the dot-file itself is missing or invalid.
+
+Implementation sequencing:
+
+- First implement explicit Bank file writers and a reusable write-job API per
+  file domain. Root Scene Save/Load can reuse Scene serializers, but it remains
+  a library/pool operation outside the Bank autosave ledger.
+- Then add a dirty-ledger API, for example
+  `sceneDirty_markSceneSettings(scene)`,
+  `sceneDirty_markKitset(scene)`,
+  `sceneDirty_markInstrument(scene, slot)`,
+  `sceneDirty_markPattern(scene)`, and
+  `sceneDirty_markEffect(scene)`.
+- Wire dirty marks into Preset/SceneData/Pattern/Effect mutation owners, not
+  directly into generic Menu paint/edit code.
+- Add the autosave scheduler after explicit writes are proven.
+- Add dot-file promotion/copy and Scene RELOAD after asyncfatfs has atomic
+  rename/replace or an equivalent safe copy/replace primitive. Until then,
+  autosave may write dot-files with current overwrite semantics only behind an
+  explicit "not power-loss safe yet" development gate.
 
 ### Open Engineering Questions
 
@@ -384,8 +524,9 @@ Implement the future autosave behavior after explicit load/save paths exist:
 
 ### Suggested Complementary Features
 
-- **Scene reload shortcut:** bind the future dot-shadow RELOAD primitive to a
-  shortcut for reverting the currently playing Scene.
+- **Scene reload shortcut:** bind the future Scene RELOAD primitive to a
+  shortcut for reverting the currently playing Scene from its committed
+  non-dot Bank files and resetting that Scene's dot-file backers.
 - **Bank load indicator:** show a small persistent indicator while background
   bank loading locks load/save/reload.
 

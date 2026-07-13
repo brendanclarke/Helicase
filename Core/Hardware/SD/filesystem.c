@@ -93,6 +93,8 @@ typedef enum {
     FS_INTERNAL_OP_NONE,
     FS_INTERNAL_OP_LOAD_KIT,
     FS_INTERNAL_OP_LOAD_KIT_MORPH,
+    FS_INTERNAL_OP_LOAD_SCENE,
+    FS_INTERNAL_OP_SAVE_SCENE,
     FS_INTERNAL_OP_SAVE_KIT,
     FS_INTERNAL_OP_LOAD_MORPH,
     FS_INTERNAL_OP_SAVE_MORPH,
@@ -105,6 +107,7 @@ typedef enum {
     FS_INTERNAL_OP_LOAD_GLOBALS,
     FS_INTERNAL_OP_SAVE_GLOBALS,
     FS_INTERNAL_OP_SCAN_KITS,
+    FS_INTERNAL_OP_SCAN_SCENES,
     FS_INTERNAL_OP_SCAN_INSTRUMENTS,
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
     FS_INTERNAL_OP_LOAD_NAME,
@@ -122,6 +125,7 @@ typedef struct {
 
 static const fs_file_desc_t fs_file_descs[] = {
     { FS_FILE_KIT,         ".snd", NULL,      1, 1, 1, 1 },
+    { FS_FILE_SCENE,       NULL,   NULL,      1, 0, 1, 1 },
     { FS_FILE_MORPH,       ".snd", NULL,      1, 1, 1, 1 },
     { FS_FILE_PATTERN,     ".pat", NULL,      1, 1, 1, 1 },
     { FS_FILE_PERFORMANCE, ".prf", NULL,      1, 1, 1, 1 },
@@ -188,6 +192,21 @@ static char loaded_name[9];
 static uint8_t kit_slot_present[STORAGE_KIT_MAX_SLOTS];
 static char kit_slot_name[STORAGE_KIT_MAX_SLOTS][STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static char kit_slot_open_name[STORAGE_KIT_MAX_SLOTS][STORAGE_KIT_FILENAME_MAX];
+/*
+ * Root Scene/ directory scan cache.
+ *
+ * Scene folders use the same numbered "NNN Name" convention as Kit folders,
+ * but their occupancy and display names are independent library state. Keeping
+ * a separate cache prevents a Scene slot from borrowing a Kit open alias or
+ * showing a Kit name in Load:[Scene]. Each open name is the FAT short alias
+ * that asyncfatfs can reopen after the scan; each display name is the actual
+ * LFN-derived user label truncated/padded to the LCD field.
+ */
+static uint8_t scene_slot_present[STORAGE_SCENE_MAX_SLOTS];
+static char scene_slot_name[STORAGE_SCENE_MAX_SLOTS]
+                           [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+static char scene_slot_open_name[STORAGE_SCENE_MAX_SLOTS]
+                                [STORAGE_KIT_FILENAME_MAX];
 static afatfsFilePtr_t op_kit_root_dir = NULL;
 static afatfsFilePtr_t op_kit_slot_dir = NULL;
 static afatfsFinder_t op_finder;
@@ -233,6 +252,39 @@ static uint16_t op_write_line_index = 0u;
  */
 static kit_t op_staged_kit;
 static uint16_t op_kit_load_scene_mask = 0u;
+/*
+ * Staged Scene payload and Scene-specific operation scratch.
+ *
+ * Scene Load validates every child before writing resident memory: sceneset,
+ * embedded Kit, bridge Pattern, and placeholder Effect. The same staging Scene
+ * is also reused by save helpers that need a source Scene pointer stable across
+ * asynchronous phases. op_scene_display_name is the eight-character name that
+ * sceneset.scg writes/reads; it is intentionally separate from any embedded Kit
+ * directory name.
+ */
+static scene_t op_staged_scene;
+static uint16_t op_scene_load_scene_mask = 0u;
+static uint8_t op_scene_source_index = 0u;
+static char op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+static char op_scene_dir_name[STORAGE_KIT_FILENAME_MAX];
+static char op_scene_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_scene_child_open_name[STORAGE_KIT_FILENAME_MAX];
+static char op_scene_pattern_open_name[STORAGE_KIT_FILENAME_MAX];
+static char op_scene_effect_open_name[STORAGE_KIT_FILENAME_MAX];
+static storage_sceneset_t op_sceneset_state;
+static storage_effect_state_t op_effect_state;
+/*
+ * Scene load helper prototypes.
+ *
+ * The Scene loader is kept beside the Kit directory loader, but a few generic
+ * Scene-name helpers live with the save/scan helpers later in this file.
+ * Declaring them here keeps the C translation unit explicit under gnu11 and
+ * avoids implicit-function warnings when the state machine calls them.
+ */
+static void filesystem_initStagedScene(scene_t *scene);
+static uint8_t filesystem_nameStartsWithKitSpace(const char *name);
+static uint8_t filesystem_nameHasExtension(const char *name,
+                                           const char *extension);
 /*
  * Root Instrument/ browser and single-load state.
  *
@@ -746,6 +798,57 @@ static LengthRotate *filesystem_patternLengthPtr(uint8_t pattern, uint8_t track)
     return pat_lengthRotatePtr(scene_getActiveIndex(), track);
 }
 
+static Step *filesystem_patternSetStepPtr(PatternSet *pattern_set,
+                                          uint8_t pattern,
+                                          uint8_t track,
+                                          uint8_t step)
+{
+    /*
+     * Borrow one Step from a staged Scene PatternSet.
+     *
+     * Scene Load must not write through live PatternData while it is still
+     * validating sibling files. Inputs are the bridge file coordinates; output
+     * is a mutable staged Step for pattern 0 or the discard record for legacy
+     * non-live patterns. The bounds mirror PatternData's current one-pattern
+     * bridge shape.
+     */
+    if (pattern != 0u)
+        return &filesystem_discardStep;
+    if (!pattern_set || track >= NUM_TRACKS || step >= NUM_STEPS)
+        return NULL;
+    return &pattern_set->pat_subStepPattern[track][step];
+}
+
+static uint16_t *filesystem_patternSetMainPtr(PatternSet *pattern_set,
+                                              uint8_t pattern,
+                                              uint8_t track)
+{
+    if (pattern != 0u)
+        return &filesystem_discardMainSteps;
+    if (!pattern_set || track >= NUM_TRACKS)
+        return NULL;
+    return &pattern_set->pat_mainSteps[track];
+}
+
+static PatternSetting *filesystem_patternSetSettingPtr(PatternSet *pattern_set,
+                                                       uint8_t pattern)
+{
+    if (pattern != 0u)
+        return &filesystem_discardPatternSetting;
+    return pattern_set ? &pattern_set->pat_patternSettings : NULL;
+}
+
+static LengthRotate *filesystem_patternSetLengthPtr(PatternSet *pattern_set,
+                                                    uint8_t pattern,
+                                                    uint8_t track)
+{
+    if (pattern != 0u)
+        return &filesystem_discardLengthRotate;
+    if (!pattern_set || track >= NUM_TRACKS)
+        return NULL;
+    return &pattern_set->pat_patternLengthRotate[track];
+}
+
 static void filesystem_packStep(const Step *step, uint8_t *buf)
 {
     buf[0] = step->volume;
@@ -999,6 +1102,66 @@ static void filesystem_recordKitDirectory(const char *display_name,
 
     if (kb_numKits < KITBROWSER_MAX_KITS)
         kb_map[kb_numKits++] = slot;
+}
+
+static void filesystem_recordSceneShortAlias(const char *open_name)
+{
+    uint16_t number;
+    uint16_t slot;
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN];
+
+    /*
+     * FAT short-alias fallback for Scene folders.
+     *
+     * Inputs: an asyncfatfs-openable 8.3 alias such as 001SLA~1. Output:
+     * Scene scan cache entry when the alias begins with a valid 001..999
+     * prefix. This mirrors the Kit fallback but deliberately avoids kb_map
+     * because Scene and Kit library occupancy are independent.
+     */
+    if (open_name[0] < '0' || open_name[0] > '9' ||
+        open_name[1] < '0' || open_name[1] > '9' ||
+        open_name[2] < '0' || open_name[2] > '9') {
+        return;
+    }
+    number = (uint16_t)((uint16_t)(open_name[0] - '0') * 100u +
+                        (uint16_t)(open_name[1] - '0') * 10u +
+                        (uint16_t)(open_name[2] - '0'));
+    if (number == 0u || number > STORAGE_SCENE_MAX_SLOTS ||
+        open_name[3] == '\0') {
+        return;
+    }
+    slot = (uint16_t)(number - 1u);
+    storage_copyDisplayName(display, open_name + 3u);
+    scene_slot_present[slot] = 1u;
+    memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
+    scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    storage_copyFilename(scene_slot_open_name[slot], open_name);
+}
+
+static void filesystem_recordSceneDirectory(const char *display_name,
+                                            const char *open_name)
+{
+    uint16_t slot;
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN];
+
+    /*
+     * Record one root Scene/ numbered folder.
+     *
+     * Inputs: display_name from LFN when available and open_name as the FAT
+     * alias. Output: Scene cache only. The display must come from actual FAT
+     * directory data, not from a future sceneset.scg value, so the UI never
+     * presents a filename register that lies about what is on the card.
+     */
+    if (!storage_parseNumberedFolder(display_name, &slot, display)) {
+        filesystem_recordSceneShortAlias(open_name);
+        return;
+    }
+    if (slot >= STORAGE_SCENE_MAX_SLOTS)
+        return;
+    scene_slot_present[slot] = 1u;
+    memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
+    scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    storage_copyFilename(scene_slot_open_name[slot], open_name);
 }
 
 static char filesystem_asciiLower(char c)
@@ -1663,6 +1826,920 @@ static void filesystem_loadKitDirectory_tick(void)
 }
 
 /* -----------------------------------------------------------------------
+** LOAD SCENE DIRECTORY state machine
+**
+** Scene folders are validated as a unit before resident SceneData changes.
+** The loader enters Scene/<NNN Name>/ from the root Scene scan cache, discovers
+** child filenames from actual FAT entries, parses sceneset.scg into
+** op_staged_scene.settings, parses the first Kit* directory into
+** op_staged_scene.kit, parses the first .pat bridge file into
+** op_staged_scene.pattern, validates the first .fx placeholder, then copies
+** the finished staged Scene to every destination bit in
+** op_scene_load_scene_mask.
+**
+** Inputs: op_slot and op_scene_load_scene_mask are set by
+** filesystem_requestLoadSceneForScenes(). Outputs: selected resident Scenes
+** receive a full Scene image only after all required files validate. The
+** displayed Scene name comes from the Scene folder scan/sceneset, while the
+** embedded Kit name comes only from the "Kit <name>" child directory.
+** ----------------------------------------------------------------------- */
+static void filesystem_loadSceneDirectory_tick(void)
+{
+    uint8_t line_ready;
+    uint8_t eof;
+    storage_status_t st;
+
+    switch (op_phase) {
+    case 0: /* VALIDATE CACHE + INIT STAGING + CHDIR ROOT */
+        if (op_slot >= STORAGE_SCENE_MAX_SLOTS ||
+            !scene_slot_present[op_slot]) {
+            filesystem_setPresetNameEmpty();
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        filesystem_initStagedScene(&op_staged_scene);
+        memcpy(preset_currentName, scene_slot_name[op_slot], 8u);
+        memcpy(op_scene_display_name, scene_slot_name[op_slot],
+               STORAGE_SCENE_DISPLAY_NAME_LEN);
+        op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+        memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
+        memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
+        memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1;
+        return;
+
+    case 1: /* OPEN root Scene/ */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_ROOT_SCENE, "r", on_file_opened))
+            return;
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT root Scene/ */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameEmpty();
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3;
+        return;
+
+    case 3: /* CHDIR root Scene/ */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 4;
+        return;
+
+    case 4: /* CLOSE root Scene/ handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5;
+        return;
+
+    case 5: /* WAIT root Scene/ close */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 6;
+        return;
+
+    case 6: /* OPEN selected Scene directory */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(scene_slot_open_name[op_slot], "r", on_file_opened))
+            return;
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT selected Scene directory */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameEmpty();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_phase = 8;
+        return;
+
+    case 8: /* CHDIR selected Scene + start child scan */
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        afatfs_findFirst(op_kit_slot_dir, &op_finder);
+        filesystem_dirLfnReset();
+        op_phase = 9;
+        return;
+
+    case 9: /* SCAN first Kit*, .pat, and .fx child names */
+    {
+        fatDirectoryEntry_t *entry = NULL;
+        afatfsOperationStatus_e ast = afatfs_findNext(op_kit_slot_dir,
+                                                      &op_finder,
+                                                      &entry);
+        if (ast == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (ast == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLast(op_kit_slot_dir);
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 10;
+            return;
+        }
+        if (entry == NULL || fat_isDirectoryEntryTerminator(entry)) {
+            afatfs_findLast(op_kit_slot_dir);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 10;
+            return;
+        }
+        if (fat_isDirectoryEntryEmpty(entry)) {
+            filesystem_dirLfnReset();
+            return;
+        }
+        if ((entry->attrib & 0x0fu) == 0x0fu) {
+            filesystem_dirLfnAppendEntry(entry);
+            return;
+        }
+        if (!(entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID)) {
+            char short_name[STORAGE_KIT_FILENAME_MAX];
+            const char *display_name;
+
+            memset(short_name, 0, sizeof(short_name));
+            fat_convertFATStyleToFilename(entry->filename, short_name);
+            filesystem_applyFatShortNameCase(short_name, entry->ntReserved);
+            display_name = op_lfn_valid ? op_lfn_name : short_name;
+
+            /*
+             * Child discovery follows the user-editable Scene contract.
+             *
+             * Directories are considered only for "Kit <name>" and files are
+             * considered by extension. The first matching FAT entry is staged;
+             * later parser phases decide whether it is valid. This means the
+             * UI reports the exact on-card names rather than a metadata cache.
+             */
+            if ((entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) != 0u) {
+                if (op_scene_child_open_name[0] == '\0' &&
+                    filesystem_nameStartsWithKitSpace(display_name)) {
+                    storage_copyFilename(op_scene_child_open_name, short_name);
+                }
+            } else {
+                if (op_scene_pattern_open_name[0] == '\0' &&
+                    filesystem_nameHasExtension(display_name, ".pat")) {
+                    storage_copyFilename(op_scene_pattern_open_name, short_name);
+                } else if (op_scene_effect_open_name[0] == '\0' &&
+                           filesystem_nameHasExtension(display_name, ".fx")) {
+                    storage_copyFilename(op_scene_effect_open_name, short_name);
+                }
+            }
+        }
+        filesystem_dirLfnReset();
+        return;
+    }
+
+    case 10: /* CLOSE selected Scene scan handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 11;
+        return;
+
+    case 11: /* WAIT selected Scene close */
+        if (!op_close_done) return;
+        op_kit_slot_dir = NULL;
+        if (op_close_status != FS_STATUS_DONE ||
+            op_scene_child_open_name[0] == '\0' ||
+            op_scene_pattern_open_name[0] == '\0' ||
+            op_scene_effect_open_name[0] == '\0') {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_phase = 12;
+        return;
+
+    case 12: /* OPEN sceneset.scg */
+        storage_scenesetInit(&op_sceneset_state);
+        op_line_len = 0u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_SCENESET_FILENAME, "r", on_file_opened))
+            return;
+        op_phase = 13;
+        return;
+
+    case 13: /* WAIT sceneset.scg */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_phase = 14;
+        return;
+
+    case 14: /* READ sceneset.scg */
+        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
+                                     sizeof(op_line_buf), &line_ready, &eof);
+        if (st == STORAGE_STATUS_WAIT)
+            return;
+        if (st != STORAGE_STATUS_OK) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 15;
+            return;
+        }
+        if (line_ready) {
+            st = storage_scenesetParseLine(&op_sceneset_state,
+                                           op_line_buf,
+                                           &op_staged_scene,
+                                           op_scene_display_name);
+            if (st != STORAGE_STATUS_OK) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 15;
+            }
+            return;
+        }
+        if (eof) {
+            st = storage_scenesetFinalize(&op_sceneset_state);
+            op_close_status = (st == STORAGE_STATUS_OK)
+                ? FS_STATUS_DONE
+                : FS_STATUS_ERROR;
+            if (st != STORAGE_STATUS_OK)
+                filesystem_setPresetNameInvalid();
+            op_phase = 15;
+        }
+        return;
+
+    case 15: /* CLOSE sceneset.scg */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 16;
+        return;
+
+    case 16: /* WAIT sceneset.scg close */
+        if (!op_close_done) return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            op_phase = 72;
+            return;
+        }
+        op_phase = 17;
+        return;
+
+    case 17: /* OPEN embedded Kit directory */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(op_scene_child_open_name, "r", on_file_opened))
+            return;
+        op_phase = 18;
+        return;
+
+    case 18: /* WAIT embedded Kit directory */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_phase = 19;
+        return;
+
+    case 19: /* CHDIR embedded Kit */
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 20;
+        return;
+
+    case 20: /* CLOSE embedded Kit handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 21;
+        return;
+
+    case 21: /* WAIT embedded Kit close */
+        if (!op_close_done) return;
+        op_kit_slot_dir = NULL;
+        op_phase = 22;
+        return;
+
+    case 22: /* OPEN embedded kitset.kcg */
+        storage_kitsetInit(&op_kitset);
+        op_line_len = 0u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_KITSET_FILENAME, "r", on_file_opened))
+            return;
+        op_phase = 23;
+        return;
+
+    case 23: /* WAIT embedded kitset.kcg */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_phase = 24;
+        return;
+
+    case 24: /* READ embedded kitset.kcg */
+        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
+                                     sizeof(op_line_buf), &line_ready, &eof);
+        if (st == STORAGE_STATUS_WAIT)
+            return;
+        if (st != STORAGE_STATUS_OK) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 25;
+            return;
+        }
+        if (line_ready) {
+            st = storage_kitsetParseLine(&op_kitset, op_line_buf,
+                                          &op_staged_scene.kit);
+            if (st != STORAGE_STATUS_OK) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 25;
+            }
+            return;
+        }
+        if (eof) {
+            st = storage_kitsetFinalize(&op_kitset);
+            op_close_status = (st == STORAGE_STATUS_OK)
+                ? FS_STATUS_DONE
+                : FS_STATUS_ERROR;
+            if (st != STORAGE_STATUS_OK)
+                filesystem_setPresetNameInvalid();
+            op_phase = 25;
+        }
+        return;
+
+    case 25: /* CLOSE embedded kitset.kcg */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 26;
+        return;
+
+    case 26: /* WAIT embedded kitset.kcg close */
+        if (!op_close_done) return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            op_phase = 72;
+            return;
+        }
+        op_instrument_slot = 0u;
+        op_phase = 27;
+        return;
+
+    case 27: /* PREPARE/OPEN next embedded instrument */
+        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
+            op_phase = 33;
+            return;
+        }
+        storage_instrumentStateInit(&op_instrument_state,
+                                    op_kitset.instrument_type[op_instrument_slot],
+                                    (uint8_t)(op_instrument_slot + 1u));
+        instrumentManager_resetSlot(
+            &op_staged_scene.kit.instruments[op_instrument_slot],
+            op_kitset.instrument_type[op_instrument_slot]);
+        op_line_len = 0u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(op_kitset.instrument_file[op_instrument_slot],
+                          "r",
+                          on_file_opened))
+            return;
+        op_phase = 28;
+        return;
+
+    case 28: /* WAIT embedded instrument */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_phase = 29;
+        return;
+
+    case 29: /* READ embedded instrument */
+        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
+                                     sizeof(op_line_buf), &line_ready, &eof);
+        if (st == STORAGE_STATUS_WAIT)
+            return;
+        if (st != STORAGE_STATUS_OK) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 30;
+            return;
+        }
+        if (line_ready) {
+            st = storage_instrumentParseLine(&op_instrument_state,
+                                             op_line_buf,
+                                             &op_staged_scene.kit.instruments[
+                                                 op_instrument_slot]);
+            if (st != STORAGE_STATUS_OK) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 30;
+            }
+            return;
+        }
+        if (eof) {
+            st = storage_instrumentFinalize(&op_instrument_state);
+            if (st != STORAGE_STATUS_OK) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+            } else {
+                if (op_instrument_state.seen_morph_count == 0u) {
+                    storage_instrumentCopyMainToMorphFallback(
+                        op_kitset.instrument_type[op_instrument_slot],
+                        (uint8_t)(op_instrument_slot + 1u),
+                        &op_staged_scene.kit.instruments[op_instrument_slot]);
+                }
+                op_close_status = FS_STATUS_DONE;
+            }
+            op_phase = 30;
+        }
+        return;
+
+    case 30: /* CLOSE embedded instrument */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 31;
+        return;
+
+    case 31: /* WAIT embedded instrument close */
+        if (!op_close_done) return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            op_phase = 72;
+            return;
+        }
+        op_instrument_slot++;
+        op_phase = 27;
+        return;
+
+    case 33: /* REENTER selected Scene before pattern/effect files */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 34;
+        return;
+
+    case 34: /* OPEN root Scene/ again */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_ROOT_SCENE, "r", on_file_opened))
+            return;
+        op_phase = 35;
+        return;
+
+    case 35: /* WAIT root Scene/ reopen */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 36;
+        return;
+
+    case 36: /* CHDIR root Scene/ again */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 37;
+        return;
+
+    case 37: /* CLOSE root Scene/ again */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 38;
+        return;
+
+    case 38: /* WAIT root Scene/ close again */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 39;
+        return;
+
+    case 39: /* OPEN selected Scene again */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(scene_slot_open_name[op_slot], "r", on_file_opened))
+            return;
+        op_phase = 40;
+        return;
+
+    case 40: /* WAIT selected Scene reopen */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_phase = 41;
+        return;
+
+    case 41: /* CHDIR selected Scene again */
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 42;
+        return;
+
+    case 42: /* CLOSE selected Scene handle again */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 43;
+        return;
+
+    case 43: /* WAIT selected Scene close again */
+        if (!op_close_done) return;
+        op_kit_slot_dir = NULL;
+        op_phase = 44;
+        return;
+
+    case 44: /* OPEN bridge pattern */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(op_scene_pattern_open_name, "r", on_file_opened))
+            return;
+        op_phase = 45;
+        return;
+
+    case 45: /* WAIT bridge pattern */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_stream_index = 0u;
+        op_item_offset = 0u;
+        op_phase = 46;
+        return;
+
+    case 46: /* READ pattern name/header */
+    {
+        uint32_t n = filesystem_readStreamChunk(staging_buf, 8u);
+        if (op_item_offset >= 8u) {
+            op_item_offset = 0u;
+            op_stream_index = 0u;
+            op_phase = 47;
+        } else if (n == 0u && afatfs_feof(op_file)) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 54;
+        }
+        return;
+    }
+
+    case 47: /* READ pattern steps */
+    {
+        uint8_t pattern, track, step_nr;
+        Step *step;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_STEP_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 48;
+            return;
+        }
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
+        if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
+            filesystem_patternStepAddress(op_stream_index, &pattern, &track,
+                                          &step_nr);
+            step = filesystem_patternSetStepPtr(&op_staged_scene.pattern,
+                                                pattern, track, step_nr);
+            if (!step) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 54;
+                return;
+            }
+            filesystem_unpackStep(step, staging_buf);
+            op_item_offset = 0u;
+            op_stream_index++;
+        } else if (n == 0u && afatfs_feof(op_file)) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 54;
+        }
+        return;
+    }
+
+    case 48: /* READ pattern main steps */
+    {
+        uint8_t pattern, track;
+        uint16_t *main_steps;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_MAIN_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 49;
+            return;
+        }
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
+        if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
+            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+            main_steps = filesystem_patternSetMainPtr(&op_staged_scene.pattern,
+                                                      pattern, track);
+            if (!main_steps) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 54;
+                return;
+            }
+            *main_steps = (uint16_t)staging_buf[0] |
+                          ((uint16_t)staging_buf[1] << 8);
+            op_item_offset = 0u;
+            op_stream_index++;
+        } else if (n == 0u && afatfs_feof(op_file)) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 54;
+        }
+        return;
+    }
+
+    case 49: /* READ pattern settings */
+    {
+        PatternSetting *setting;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_SETTINGS_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 50;
+            return;
+        }
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
+        if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
+            setting = filesystem_patternSetSettingPtr(&op_staged_scene.pattern,
+                                                      (uint8_t)op_stream_index);
+            if (!setting) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 54;
+                return;
+            }
+            setting->nextPattern = staging_buf[0];
+            setting->changeBar = staging_buf[1];
+            op_item_offset = 0u;
+            op_stream_index++;
+        } else if (n == 0u && afatfs_feof(op_file)) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 54;
+        }
+        return;
+    }
+
+    case 50: /* READ pattern lengths */
+    {
+        uint8_t pattern, track;
+        LengthRotate *lr;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 51;
+            return;
+        }
+        n = filesystem_readStreamChunk(staging_buf, 1u);
+        if (op_item_offset >= 1u || (n == 0u && afatfs_feof(op_file))) {
+            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+            lr = filesystem_patternSetLengthPtr(&op_staged_scene.pattern,
+                                                pattern, track);
+            if (!lr) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 54;
+                return;
+            }
+            lr->length = (op_item_offset >= 1u) ? staging_buf[0] : 0u;
+            filesystem_defaultTrackSettings(lr, track);
+            op_item_offset = 0u;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 51: /* READ optional rotate/scale extension */
+    {
+        uint8_t pattern, track;
+        LengthRotate *lr;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 52;
+            return;
+        }
+        n = filesystem_readStreamChunk(staging_buf,
+                                       FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+            lr = filesystem_patternSetLengthPtr(&op_staged_scene.pattern,
+                                                pattern, track);
+            if (!lr) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 54;
+                return;
+            }
+            lr->rotate = staging_buf[0];
+            lr->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
+                ? staging_buf[1]
+                : TRACK_SCALE_OFF;
+            op_item_offset = 0u;
+            op_stream_index++;
+        } else if (n == 0u && afatfs_feof(op_file)) {
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 54;
+        }
+        return;
+    }
+
+    case 52: /* READ optional shuffle extension */
+    {
+        uint8_t pattern, track;
+        LengthRotate *lr;
+        uint32_t n;
+
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 54;
+            return;
+        }
+        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
+            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+            lr = filesystem_patternSetLengthPtr(&op_staged_scene.pattern,
+                                                pattern, track);
+            if (!lr) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 54;
+                return;
+            }
+            lr->shuffle = (staging_buf[0] <= 127u) ? staging_buf[0] : 0u;
+            op_item_offset = 0u;
+            op_stream_index++;
+        } else if (n == 0u && afatfs_feof(op_file)) {
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 54;
+        }
+        return;
+    }
+
+    case 54: /* CLOSE bridge pattern */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 55;
+        return;
+
+    case 55: /* WAIT bridge pattern close */
+        if (!op_close_done) return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            op_phase = 72;
+            return;
+        }
+        op_phase = 56;
+        return;
+
+    case 56: /* OPEN effect placeholder */
+        storage_effectStateInit(&op_effect_state);
+        op_line_len = 0u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(op_scene_effect_open_name, "r", on_file_opened))
+            return;
+        op_phase = 57;
+        return;
+
+    case 57: /* WAIT effect placeholder */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 72;
+            return;
+        }
+        op_phase = 58;
+        return;
+
+    case 58: /* READ effect placeholder */
+        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
+                                     sizeof(op_line_buf), &line_ready, &eof);
+        if (st == STORAGE_STATUS_WAIT)
+            return;
+        if (st != STORAGE_STATUS_OK) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 59;
+            return;
+        }
+        if (line_ready) {
+            st = storage_effectParseLine(&op_effect_state, op_line_buf);
+            if (st != STORAGE_STATUS_OK) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 59;
+            }
+            return;
+        }
+        if (eof) {
+            st = storage_effectFinalize(&op_effect_state);
+            op_close_status = (st == STORAGE_STATUS_OK)
+                ? FS_STATUS_DONE
+                : FS_STATUS_ERROR;
+            if (st != STORAGE_STATUS_OK)
+                filesystem_setPresetNameInvalid();
+            op_phase = 59;
+        }
+        return;
+
+    case 59: /* CLOSE effect placeholder */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 60;
+        return;
+
+    case 60: /* WAIT effect placeholder close */
+        if (!op_close_done) return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            op_phase = 72;
+            return;
+        }
+        op_phase = 61;
+        return;
+
+    case 61: /* COMMIT staged Scene to selected resident slots */
+    {
+        uint8_t scene_index;
+
+        /*
+         * Atomic resident apply point.
+         *
+         * The loop is the only place this loader mutates SceneData. Inputs are
+         * the validated op_staged_scene image and request-time destination
+         * mask. Output replaces every selected resident Scene with identical
+         * settings, pattern, and kit content. The active Scene runtime apply is
+         * handled after filesystem completion by Preset/Menu, matching Kit
+         * Load's owner boundary.
+         */
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((op_scene_load_scene_mask &
+                 (uint16_t)(1u << scene_index)) != 0u) {
+                scene_t *target = scene_get(scene_index);
+                if (target)
+                    *target = op_staged_scene;
+            }
+        }
+        memcpy(preset_currentName, op_scene_display_name, 8u);
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 72;
+        return;
+    }
+
+    case 72: /* RETURN ROOT + FINISH */
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(op_close_status);
+        return;
+
+    default:
+        filesystem_setPresetNameInvalid();
+        op_close_status = FS_STATUS_ERROR;
+        op_phase = 72;
+        return;
+    }
+}
+
+/* -----------------------------------------------------------------------
 ** LOAD ONE ROOT INSTRUMENT state machine
 **
 ** Inputs: destination Scene/slot, instrument type, and per-type browser index
@@ -1983,6 +3060,155 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
         op_write_line_index++;
     }
     return 1u;
+}
+
+static void filesystem_initStagedScene(scene_t *scene)
+{
+    static const instrument_type_t initial_types[INSTRUMENT_SLOT_COUNT] = {
+        INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM,
+        INSTRUMENT_TYPE_SNR, INSTRUMENT_TYPE_CYM, INSTRUMENT_TYPE_HAT
+    };
+    uint8_t slot;
+    uint8_t track;
+
+    /*
+     * Build safe defaults for a filesystem-owned staged Scene.
+     *
+     * SceneData's scene_initAll() initializes resident scenes[] directly. Scene
+     * Load needs the same style of defaults in private staging memory so
+     * optional sceneset keys can be absent without leaving random bytes, and so
+     * a failed child file never mutates resident Scene state.
+     */
+    if (!scene)
+        return;
+    memset(scene, 0, sizeof(*scene));
+    scene->settings.voice_decimation_all = 127u;
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        scene->settings.midi_channel[track] = (uint8_t)(track + 1u);
+        scene->settings.midi_note[track] = PAT_DEFAULT_NOTE;
+    }
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        char fallback[9] = { 'i', 'n', 's', 't', '_', 'v', 'o',
+                             (char)('1' + slot), '\0' };
+        instrumentManager_resetSlot(&scene->kit.instruments[slot],
+                                    initial_types[slot]);
+        scene_setKitInstrumentSourceName(&scene->kit, slot, fallback);
+    }
+}
+
+static uint8_t filesystem_nameStartsWithKitSpace(const char *name)
+{
+    /*
+     * Identify embedded Scene Kit directories.
+     *
+     * Inputs: display/LFN or short alias text from FAT. Output: nonzero only
+     * for names beginning with "Kit ". The text after that space is the loaded
+     * Kit name; sceneset.scg must never store or override it.
+     */
+    return (uint8_t)(name &&
+                     name[0] == 'K' && name[1] == 'i' &&
+                     name[2] == 't' && name[3] == ' ');
+}
+
+static uint8_t filesystem_nameHasExtension(const char *name,
+                                           const char *extension)
+{
+    uint8_t dot = 0xffu;
+    uint8_t i = 0u;
+
+    /*
+     * Case-insensitive filename extension check for Scene child discovery.
+     *
+     * Users may rename/move .pat and .fx files between Scenes. The loader scans
+     * directory entries and accepts the first matching extension, then validates
+     * the file contents before committing the staged Scene.
+     */
+    if (!name || !extension)
+        return 0u;
+    while (name[i] != '\0') {
+        if (name[i] == '.')
+            dot = i;
+        i++;
+    }
+    if (dot == 0xffu)
+        return 0u;
+    i = 0u;
+    while (extension[i] != '\0') {
+        char a = filesystem_asciiLower(name[dot + i]);
+        char b = filesystem_asciiLower(extension[i]);
+        if (a != b)
+            return 0u;
+        i++;
+    }
+    return (uint8_t)(name[dot + i] == '\0');
+}
+
+static void filesystem_trimmedKitDirectoryName(char *dst,
+                                               const char display[8])
+{
+    uint8_t end = STORAGE_SCENE_DISPLAY_NAME_LEN;
+    uint8_t i;
+
+    /*
+     * Build the embedded Scene Kit directory name without persisting LCD tail
+     * padding as FAT spaces.
+     *
+     * Inputs: fixed-width Scene save display name. Output: "Kit <name>" with
+     * trailing display spaces removed, or "Kit Scene" if the display field is
+     * empty. The eight-character Scene name still writes unchanged to
+     * sceneset.scg; this helper only prevents ugly directory names such as
+     * "Kit Slak    ".
+     */
+    while (end > 0u && display[end - 1u] == ' ')
+        end--;
+    memcpy(dst, "Kit ", 4u);
+    if (end == 0u) {
+        memcpy(dst + 4u, "Scene", 6u);
+        return;
+    }
+    for (i = 0u; i < end && (4u + i) < AFATFS_LONG_FILENAME_MAX; i++)
+        dst[4u + i] = display[i];
+    dst[4u + i] = '\0';
+}
+
+static void filesystem_makeSceneDirectoryDisplayName(char *dst, uint16_t slot)
+{
+    /*
+     * Build "NNN Name" for root Scene saves.
+     *
+     * Inputs: zero-based library slot and op_scene_display_name. Output:
+     * display component passed to asyncfatfs LFN mkdir. Decimal math is kept
+     * explicit because slot numbers are user-facing one-based 001..999.
+     */
+    uint16_t number = (uint16_t)(slot + 1u);
+    uint8_t i;
+
+    dst[0] = (char)('0' + ((number / 100u) % 10u));
+    dst[1] = (char)('0' + ((number / 10u) % 10u));
+    dst[2] = (char)('0' + (number % 10u));
+    dst[3] = ' ';
+    for (i = 0u; i < STORAGE_SCENE_DISPLAY_NAME_LEN; i++)
+        dst[4u + i] = op_scene_display_name[i];
+    dst[4u + STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+}
+
+typedef struct {
+    const scene_t *scene;
+    const char *display;
+} filesystem_sceneset_write_ctx_t;
+
+static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap, void *raw)
+{
+    filesystem_sceneset_write_ctx_t *ctx =
+        (filesystem_sceneset_write_ctx_t *)raw;
+    return storage_formatScenesetLine(dst, cap, ctx->scene, ctx->display,
+                                      op_write_line_index);
+}
+
+static uint8_t filesystem_nextEffectLine(char *dst, uint16_t cap, void *raw)
+{
+    (void)raw;
+    return storage_formatEffectPlaceholderLine(dst, cap, op_write_line_index);
 }
 
 typedef struct {
@@ -3874,6 +5100,758 @@ static void filesystem_scanKits_tick(void)
 }
 
 /* -----------------------------------------------------------------------
+** SAVE SCENE DIRECTORY state machine
+**
+** Creates/opens Scene/<NNN Name>/, writes sceneset.scg, writes an embedded
+** Kit <Name>/ using the same kitset/instrument serializers as root Kit Save,
+** writes the current bridge pattern.pat, and writes placeholder effects.fx.
+**
+** Inputs: op_slot is the root Scene library slot, op_scene_source_index is the
+** resident Scene being saved, and op_scene_display_name is the eight-character
+** UI/library name. Output: root Scene scan cache is updated from the actual
+** LFN display name and asyncfatfs alias returned by mkdir_lfn().
+** ----------------------------------------------------------------------- */
+static void filesystem_saveSceneDirectory_tick(void)
+{
+    const scene_t *scene = scene_getConst(op_scene_source_index);
+    const kit_t *kit = scene ? &scene->kit : NULL;
+
+    switch (op_phase) {
+    case 0: /* CHDIR ROOT + PREPARE NAMES */
+        if (!scene || !kit || op_slot >= STORAGE_SCENE_MAX_SLOTS) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        memset(op_scene_dir_name, 0, sizeof(op_scene_dir_name));
+        filesystem_makeSceneDirectoryDisplayName(op_scene_dir_display_name,
+                                                 op_slot);
+        filesystem_prepareSavedInstrumentFilenames(kit);
+        op_phase = 1;
+        return;
+
+    case 1: /* MKDIR/OPEN Scene root */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir(STORAGE_ROOT_SCENE, on_file_opened))
+            return;
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT Scene root */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3;
+        return;
+
+    case 3: /* CHDIR Scene root */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 4;
+        return;
+
+    case 4: /* CLOSE Scene root handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5;
+        return;
+
+    case 5: /* WAIT CLOSE Scene root */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 6;
+        return;
+
+    case 6: /* MKDIR/OPEN target Scene folder */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir_lfn(op_scene_dir_display_name,
+                              op_scene_dir_name,
+                              on_file_opened))
+            return;
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT target Scene folder */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_phase = 8;
+        return;
+
+    case 8: /* CHDIR target Scene folder */
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 9;
+        return;
+
+    case 9: /* CLOSE target Scene handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 10;
+        return;
+
+    case 10: /* WAIT CLOSE target Scene */
+        if (!op_close_done) return;
+        op_kit_slot_dir = NULL;
+        op_phase = 11;
+        return;
+
+    case 11: /* OPEN sceneset.scg */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_SCENESET_FILENAME, "w", on_file_opened))
+            return;
+        op_phase = 12;
+        return;
+
+    case 12: /* WAIT sceneset.scg */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 13;
+        return;
+
+    case 13: /* WRITE sceneset.scg */
+    {
+        filesystem_sceneset_write_ctx_t ctx = {
+            scene,
+            op_scene_display_name
+        };
+        if (filesystem_writeTextLine(filesystem_nextScenesetLine, &ctx))
+            return;
+        op_phase = 14;
+        return;
+    }
+
+    case 14: /* CLOSE sceneset.scg */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 15;
+        return;
+
+    case 15: /* WAIT CLOSE sceneset.scg */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_phase = 16;
+        return;
+
+    case 16: /* MKDIR/OPEN embedded Kit <name> */
+    {
+        char kit_dir[AFATFS_LONG_FILENAME_MAX + 1u];
+
+        /*
+         * Temporary embedded Kit naming policy.
+         *
+         * SceneData does not yet retain a per-Scene Kit display name, so the
+         * first implementation derives "Kit <SceneName>" from the Scene save
+         * name. sceneset.scg still does not store this name; Scene Load will
+         * discover the first valid Kit* directory.
+         */
+        filesystem_trimmedKitDirectoryName(kit_dir, op_scene_display_name);
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir_lfn(kit_dir, op_save_kit_dir_name, on_file_opened))
+            return;
+        op_phase = 17;
+        return;
+    }
+
+    case 17: /* WAIT embedded Kit */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_phase = 18;
+        return;
+
+    case 18: /* CHDIR embedded Kit */
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 19;
+        return;
+
+    case 19: /* CLOSE embedded Kit handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 20;
+        return;
+
+    case 20: /* WAIT CLOSE embedded Kit */
+        if (!op_close_done) return;
+        op_kit_slot_dir = NULL;
+        op_instrument_slot = 0u;
+        op_phase = 21;
+        return;
+
+    case 21: /* OPEN next embedded instrument */
+        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
+            op_phase = 26;
+            return;
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                op_save_instrument_display_file[op_instrument_slot],
+                "w",
+                op_save_instrument_file[op_instrument_slot],
+                on_file_opened))
+            return;
+        op_phase = 22;
+        return;
+
+    case 22: /* WAIT instrument */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 23;
+        return;
+
+    case 23: /* WRITE instrument */
+    {
+        filesystem_instrument_write_ctx_t ctx = {
+            &kit->instruments[op_instrument_slot],
+            kit->instruments[op_instrument_slot].type,
+            (uint8_t)(op_instrument_slot + 1u)
+        };
+        if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
+            return;
+        op_phase = 24;
+        return;
+    }
+
+    case 24: /* CLOSE instrument */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 25;
+        return;
+
+    case 25: /* WAIT CLOSE instrument */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_instrument_slot++;
+        op_phase = 21;
+        return;
+
+    case 26: /* OPEN embedded kitset.kcg */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_KITSET_FILENAME, "w", on_file_opened))
+            return;
+        op_phase = 27;
+        return;
+
+    case 27: /* WAIT kitset.kcg */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 28;
+        return;
+
+    case 28: /* WRITE embedded kitset.kcg */
+    {
+        filesystem_kitset_write_ctx_t ctx = { kit };
+        if (filesystem_writeTextLine(filesystem_nextKitsetLine, &ctx))
+            return;
+        op_phase = 29;
+        return;
+    }
+
+    case 29: /* CLOSE kitset.kcg */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 30;
+        return;
+
+    case 30: /* WAIT CLOSE kitset.kcg */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_phase = 31;
+        return;
+
+    case 31: /* RETURN ROOT before reopening target Scene */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 32;
+        return;
+
+    case 32: /* REOPEN Scene root */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_ROOT_SCENE, "r", on_file_opened))
+            return;
+        op_phase = 33;
+        return;
+
+    case 33: /* WAIT Scene root reopen */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 34;
+        return;
+
+    case 34: /* CHDIR Scene root */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 35;
+        return;
+
+    case 35: /* CLOSE Scene root */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 36;
+        return;
+
+    case 36: /* WAIT CLOSE Scene root */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 37;
+        return;
+
+    case 37: /* OPEN target Scene alias */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(op_scene_dir_name, "r", on_file_opened))
+            return;
+        op_phase = 38;
+        return;
+
+    case 38: /* WAIT target Scene alias */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_phase = 39;
+        return;
+
+    case 39: /* CHDIR target Scene */
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 40;
+        return;
+
+    case 40: /* CLOSE target Scene alias */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 41;
+        return;
+
+    case 41: /* WAIT CLOSE target Scene alias */
+        if (!op_close_done) return;
+        op_kit_slot_dir = NULL;
+        op_phase = 42;
+        return;
+
+    case 42: /* OPEN pattern.pat */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen("pattern.pat", "w", on_file_opened))
+            return;
+        op_phase = 43;
+        return;
+
+    case 43: /* WAIT pattern.pat */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_stream_index = 0u;
+        op_item_offset = 0u;
+        op_phase = 44;
+        return;
+
+    case 44: /* WRITE pattern name */
+        filesystem_writeStreamChunk((const uint8_t *)op_scene_display_name, 8);
+        if (op_item_offset >= 8u) {
+            op_item_offset = 0u;
+            op_stream_index = 0u;
+            op_phase = 45;
+        }
+        return;
+
+    case 45: /* WRITE pattern steps */
+    {
+        uint8_t pattern, track, step_nr;
+        Step *step;
+        if (op_stream_index >= FS_PATTERN_STEP_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 46;
+            return;
+        }
+        filesystem_patternStepAddress(op_stream_index, &pattern, &track,
+                                      &step_nr);
+        step = filesystem_patternSetStepPtr((PatternSet *)&scene->pattern,
+                                            pattern, track, step_nr);
+        if (!step) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        filesystem_packStep(step, staging_buf);
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
+        if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
+            op_item_offset = 0u;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 46: /* WRITE pattern main steps */
+    {
+        uint8_t pattern, track;
+        uint16_t *main_steps;
+        if (op_stream_index >= FS_PATTERN_MAIN_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 47;
+            return;
+        }
+        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+        main_steps = filesystem_patternSetMainPtr((PatternSet *)&scene->pattern,
+                                                  pattern, track);
+        if (!main_steps) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        staging_buf[0] = (uint8_t)(*main_steps & 0xffu);
+        staging_buf[1] = (uint8_t)(*main_steps >> 8);
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
+        if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
+            op_item_offset = 0u;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 47: /* WRITE pattern settings */
+    {
+        PatternSetting *setting;
+        if (op_stream_index >= FS_PATTERN_SETTINGS_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 48;
+            return;
+        }
+        setting = filesystem_patternSetSettingPtr((PatternSet *)&scene->pattern,
+                                                  (uint8_t)op_stream_index);
+        if (!setting) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        staging_buf[0] = setting->nextPattern;
+        staging_buf[1] = setting->changeBar;
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
+        if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
+            op_item_offset = 0u;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 48: /* WRITE pattern lengths */
+    {
+        uint8_t pattern, track;
+        LengthRotate *lr;
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 49;
+            return;
+        }
+        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+        lr = filesystem_patternSetLengthPtr((PatternSet *)&scene->pattern,
+                                            pattern, track);
+        if (!lr) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        staging_buf[0] = lr->length;
+        filesystem_writeStreamChunk(staging_buf, 1u);
+        if (op_item_offset >= 1u) {
+            op_item_offset = 0u;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 49: /* WRITE pattern rotate/scale extension */
+    {
+        uint8_t pattern, track;
+        LengthRotate *lr;
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_stream_index = 0u;
+            op_item_offset = 0u;
+            op_phase = 50;
+            return;
+        }
+        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+        lr = filesystem_patternSetLengthPtr((PatternSet *)&scene->pattern,
+                                            pattern, track);
+        if (!lr) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        staging_buf[0] = lr->rotate;
+        staging_buf[1] = lr->scale;
+        filesystem_writeStreamChunk(staging_buf,
+                                    FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
+            op_item_offset = 0u;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 50: /* WRITE pattern shuffle extension */
+    {
+        uint8_t pattern, track;
+        LengthRotate *lr;
+        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
+            op_phase = 51;
+            return;
+        }
+        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+        lr = filesystem_patternSetLengthPtr((PatternSet *)&scene->pattern,
+                                            pattern, track);
+        if (!lr) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        staging_buf[0] = lr->shuffle;
+        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
+        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
+            op_item_offset = 0u;
+            op_stream_index++;
+        }
+        return;
+    }
+
+    case 51: /* CLOSE pattern.pat */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 52;
+        return;
+
+    case 52: /* WAIT CLOSE pattern.pat */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_phase = 53;
+        return;
+
+    case 53: /* OPEN effects.fx */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen("effects.fx", "w", on_file_opened))
+            return;
+        op_phase = 54;
+        return;
+
+    case 54: /* WAIT effects.fx */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 55;
+        return;
+
+    case 55: /* WRITE effects.fx placeholder */
+        if (filesystem_writeTextLine(filesystem_nextEffectLine, NULL))
+            return;
+        op_phase = 56;
+        return;
+
+    case 56: /* CLOSE effects.fx */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 57;
+        return;
+
+    case 57: /* WAIT CLOSE effects.fx */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_phase = 58;
+        return;
+
+    case 58: /* RETURN ROOT + UPDATE CACHE */
+        if (!afatfs_chdir(NULL))
+            return;
+        {
+            uint16_t parsed_slot;
+            char parsed_display[STORAGE_SCENE_DISPLAY_NAME_LEN];
+            if (storage_parseNumberedFolder(op_scene_dir_display_name,
+                                            &parsed_slot,
+                                            parsed_display) &&
+                parsed_slot == op_slot) {
+                scene_slot_present[op_slot] = 1u;
+                memcpy(scene_slot_name[op_slot], parsed_display,
+                       STORAGE_SCENE_DISPLAY_NAME_LEN);
+                scene_slot_name[op_slot][STORAGE_SCENE_DISPLAY_NAME_LEN] =
+                    '\0';
+                storage_copyFilename(scene_slot_open_name[op_slot],
+                                     op_scene_dir_name);
+            }
+        }
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+/* -----------------------------------------------------------------------
+** SCAN SCENE DIRECTORIES state machine
+**
+** Inputs: filesystem_requestScanScenes() clears the Scene slot cache and
+** starts this operation. Output: Scene/NNN Name folders populate
+** scene_slot_present/name/open_name. Missing Scene/ is a successful empty
+** scan, matching Kit/ behavior.
+**
+** The long-filename loop is intentionally duplicated from Kit scan instead of
+** reusing Kit recording callbacks: Scene slots and Kit slots are separate root
+** libraries and must never share occupancy or display-name state.
+** ----------------------------------------------------------------------- */
+static void filesystem_scanScenes_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* CHDIR root */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1;
+        return;
+
+    case 1: /* OPEN Scene/ */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_ROOT_SCENE, "r", on_file_opened))
+            return;
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT_OPEN */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3;
+        return;
+
+    case 3: /* CHDIR Scene/ and begin directory iteration */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        afatfs_findFirst(op_kit_root_dir, &op_finder);
+        filesystem_dirLfnReset();
+        op_phase = 4;
+        return;
+
+    case 4: /* FIND_NEXT */
+    {
+        fatDirectoryEntry_t *entry = NULL;
+        afatfsOperationStatus_e st = afatfs_findNext(op_kit_root_dir,
+                                                     &op_finder,
+                                                     &entry);
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLast(op_kit_root_dir);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 5;
+            return;
+        }
+        if (entry == NULL || fat_isDirectoryEntryTerminator(entry)) {
+            afatfs_findLast(op_kit_root_dir);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 5;
+            return;
+        }
+        if (fat_isDirectoryEntryEmpty(entry)) {
+            filesystem_dirLfnReset();
+            return;
+        }
+        if ((entry->attrib & 0x0fu) == 0x0fu) {
+            filesystem_dirLfnAppendEntry(entry);
+            return;
+        }
+        if ((entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) &&
+            !(entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID)) {
+            char short_name[STORAGE_KIT_FILENAME_MAX];
+            const char *display_name;
+
+            memset(short_name, 0, sizeof(short_name));
+            fat_convertFATStyleToFilename(entry->filename, short_name);
+            filesystem_applyFatShortNameCase(short_name, entry->ntReserved);
+
+            display_name = op_lfn_valid ? op_lfn_name : short_name;
+            filesystem_recordSceneDirectory(display_name, short_name);
+        }
+        filesystem_dirLfnReset();
+        return;
+    }
+
+    case 5: /* CLOSE */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 6;
+        return;
+
+    case 6: /* WAIT_CLOSE */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 7;
+        return;
+
+    case 7: /* CHDIR root + FINISH */
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(op_close_status);
+        return;
+
+    default:
+        op_close_status = FS_STATUS_ERROR;
+        op_phase = 7;
+        return;
+    }
+}
+
+/* -----------------------------------------------------------------------
 ** SCAN ROOT INSTRUMENT FILES state machine
 **
 ** Inputs: filesystem_requestScanInstruments() clears the typed cache and
@@ -4798,6 +6776,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:
         filesystem_loadKitDirectory_tick();
         break;
+    case FS_INTERNAL_OP_LOAD_SCENE:
+        filesystem_loadSceneDirectory_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:
         filesystem_loadInstrument_tick();
         break;
@@ -4806,6 +6787,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_SAVE_KIT:
         filesystem_saveKitDirectory_tick();
+        break;
+    case FS_INTERNAL_OP_SAVE_SCENE:
+        filesystem_saveSceneDirectory_tick();
         break;
     case FS_INTERNAL_OP_SAVE_MORPH:
         filesystem_saveKit_tick();
@@ -4832,6 +6816,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_SCAN_KITS:
         filesystem_scanKits_tick();
+        break;
+    case FS_INTERNAL_OP_SCAN_SCENES:
+        filesystem_scanScenes_tick();
         break;
     case FS_INTERNAL_OP_SCAN_INSTRUMENTS:
         filesystem_scanInstruments_tick();
@@ -4885,6 +6872,15 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
     memset(op_save_instrument_display_file, 0,
            sizeof(op_save_instrument_display_file));
+    memset(&op_staged_scene, 0, sizeof(op_staged_scene));
+    op_scene_load_scene_mask = 0u;
+    op_scene_source_index = 0u;
+    memset(op_scene_display_name, 0, sizeof(op_scene_display_name));
+    memset(op_scene_dir_name, 0, sizeof(op_scene_dir_name));
+    memset(op_scene_dir_display_name, 0, sizeof(op_scene_dir_display_name));
+    memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
+    memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
+    memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
     op_kit_root_dir = NULL;
     op_kit_slot_dir = NULL;
     op_lfn_valid = 0;
@@ -4912,6 +6908,9 @@ bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb
     switch (type) {
     case FS_FILE_KIT:
         return filesystem_requestLoadKitForScenes(
+            slot, (uint16_t)(1u << scene_getActiveIndex()), cb);
+    case FS_FILE_SCENE:
+        return filesystem_requestLoadSceneForScenes(
             slot, (uint16_t)(1u << scene_getActiveIndex()), cb);
     case FS_FILE_MORPH:
         return filesystem_start(FS_INTERNAL_OP_LOAD_MORPH, type, slot, cb);
@@ -5002,6 +7001,8 @@ bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb
     switch (type) {
     case FS_FILE_KIT:
         return filesystem_requestSaveKitDirectory(slot, cb);
+    case FS_FILE_SCENE:
+        return false;
     case FS_FILE_MORPH:
         return filesystem_start(FS_INTERNAL_OP_SAVE_MORPH, type, slot, cb);
     case FS_FILE_PATTERN:
@@ -5033,6 +7034,65 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb)
     return filesystem_start(FS_INTERNAL_OP_SAVE_KIT, FS_FILE_KIT, slot, cb);
 }
 
+bool filesystem_requestSaveSceneDirectory(
+    uint16_t slot,
+    uint8_t source_scene,
+    const char display_name[8],
+    fs_completion_cb_t cb)
+{
+    /*
+     * Post a root Scene directory save.
+     *
+     * Inputs: root Scene slot, resident source Scene, and fixed-width display
+     * name supplied by the Save UI. Output: asynchronous writer creates the
+     * Scene folder shape and updates the Scene scan cache after the directory
+     * physically exists. The display name is copied at request time so later
+     * menu edits cannot change an in-flight save target.
+     */
+    if (slot >= STORAGE_SCENE_MAX_SLOTS ||
+        !scene_indexValid(source_scene) ||
+        !display_name)
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_SAVE_SCENE, FS_FILE_SCENE, slot, cb))
+        return false;
+    op_scene_source_index = source_scene;
+    memcpy(op_scene_display_name, display_name, STORAGE_SCENE_DISPLAY_NAME_LEN);
+    op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    return true;
+}
+
+bool filesystem_requestLoadSceneForScenes(uint16_t slot,
+                                          uint16_t scene_mask,
+                                          fs_completion_cb_t cb)
+{
+    uint8_t scene_index;
+    uint16_t valid_mask = 0u;
+
+    /*
+     * Validate and start a staged Scene directory load.
+     *
+     * Inputs mirror Kit Load: root Scene library slot plus destination Scene
+     * mask. Output is one asynchronous operation that parses the Scene folder
+     * into op_staged_scene and commits it only if sceneset.scg, the embedded
+     * Kit, the bridge pattern, and placeholder effect all validate. The mask
+     * filtering is deliberately shared with Kit Load so future 16-Scene banks
+     * can call this same public boundary.
+     */
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            valid_mask = (uint16_t)(valid_mask | (uint16_t)(1u << scene_index));
+    }
+    if (valid_mask == 0u || slot >= STORAGE_SCENE_MAX_SLOTS ||
+        !scene_slot_present[slot])
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_LOAD_SCENE, FS_FILE_SCENE, slot, cb))
+        return false;
+    op_scene_load_scene_mask = valid_mask;
+    filesystem_initStagedScene(&op_staged_scene);
+    return true;
+}
+
 bool filesystem_requestScanKits(fs_completion_cb_t cb)
 {
     if (status == FS_STATUS_BUSY) return false;
@@ -5046,6 +7106,22 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb)
     memset(kit_slot_name, 0, sizeof(kit_slot_name));
     memset(kit_slot_open_name, 0, sizeof(kit_slot_open_name));
     return filesystem_start(FS_INTERNAL_OP_SCAN_KITS, FS_FILE_KIT, 0, cb);
+}
+
+bool filesystem_requestScanScenes(fs_completion_cb_t cb)
+{
+    /*
+     * Start a root Scene/ numbered-folder scan.
+     *
+     * Inputs: completion callback. Output: the Scene library cache is cleared
+     * immediately and then repopulated from actual FAT directory entries. This
+     * mirrors Kit scan but intentionally has no kitBrowser compatibility map.
+     */
+    if (status == FS_STATUS_BUSY) return false;
+    memset(scene_slot_present, 0, sizeof(scene_slot_present));
+    memset(scene_slot_name, 0, sizeof(scene_slot_name));
+    memset(scene_slot_open_name, 0, sizeof(scene_slot_open_name));
+    return filesystem_start(FS_INTERNAL_OP_SCAN_SCENES, FS_FILE_SCENE, 0, cb);
 }
 
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
@@ -5184,6 +7260,35 @@ const char *filesystem_kitSlotName(uint16_t zero_based_slot)
     if (!filesystem_kitSlotExists(zero_based_slot))
         return "Empty   ";
     return kit_slot_name[zero_based_slot];
+}
+
+uint8_t filesystem_sceneSlotExists(uint16_t zero_based_slot)
+{
+    /*
+     * Query the root Scene/ scan cache.
+     *
+     * Input: zero-based library slot. Output: nonzero only when the latest
+     * Scene scan found a numbered Scene folder at that slot.
+     */
+    if (zero_based_slot >= STORAGE_SCENE_MAX_SLOTS)
+        return 0u;
+    return scene_slot_present[zero_based_slot];
+}
+
+const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
+{
+    /*
+     * Return an eight-character root Scene library display name.
+     *
+     * Input: zero-based library slot. Output: cached display name for existing
+     * Scenes, or "Empty   " for missing/out-of-range slots. Menu uses this
+     * directly for Load:[Scene] and Save overwrite planning.
+     */
+    if (zero_based_slot >= STORAGE_SCENE_MAX_SLOTS ||
+        !scene_slot_present[zero_based_slot]) {
+        return "Empty   ";
+    }
+    return scene_slot_name[zero_based_slot];
 }
 
 uint8_t filesystem_instrumentCount(instrument_type_t type)

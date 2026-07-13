@@ -2017,6 +2017,63 @@ static uint8_t menu_isLoadSaveSelectionCurrent(void)
                      preset_getRequestSlot() == menu_currentPresetNr[what]);
 }
 
+static uint8_t menu_firstSelectedSceneFromMask(uint16_t mask)
+{
+    uint8_t scene_index;
+
+    /*
+     * Pick the lowest-numbered selected resident Scene.
+     *
+     * Save placement starts with the lowest selected Bank Scene and maps later
+     * selected Scenes to following library slots. SCENE_COUNT is one today, but
+     * this loop already preserves the future Bank rule and keeps an empty mask
+     * from indexing SceneData accidentally.
+     */
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((mask & (uint16_t)(1u << scene_index)) != 0u)
+            return scene_index;
+    }
+    return scene_getActiveIndex();
+}
+
+static uint8_t menu_currentSaveWouldOverwrite(void)
+{
+    uint8_t i;
+    const char *existing = NULL;
+
+    /*
+     * Compute the OK/OW indicator without mutating save state.
+     *
+     * Inputs: current Save type, target library slot, and edited
+     * preset_currentName. Output: nonzero when the target slot is occupied by a
+     * different name and confirming would overwrite on-card data. The later
+     * multi-Scene save pass should extend this loop across every selected
+     * source Scene and subsequent target slot; with SCENE_COUNT=1 this single
+     * comparison is the complete active behavior.
+     */
+    if (menu_activePage != SAVE_PAGE)
+        return 0u;
+    if (menu_saveOptions.what == SAVE_TYPE_KIT) {
+        uint16_t slot = menu_currentPresetNr[SAVE_TYPE_KIT];
+        if (!filesystem_kitSlotExists(slot))
+            return 0u;
+        existing = filesystem_kitSlotName(slot);
+    } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+        uint16_t slot = menu_currentPresetNr[SAVE_TYPE_SCENE];
+        if (!filesystem_sceneSlotExists(slot))
+            return 0u;
+        existing = filesystem_sceneSlotName(slot);
+    } else {
+        return 0u;
+    }
+    for (i = 0u; i < 8u; i++) {
+        if (existing[i] != preset_currentName[i])
+            return 1u;
+    }
+    return 0u;
+}
+
 /* Request the filesystem action that corresponds to the current Load/Save page
  * selection.
  *
@@ -2059,6 +2116,15 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
                what == SAVE_TYPE_KIT_MORPH) {
         if (!preset_loadKitMorphForScenes(slot, menu_kitLoadSceneMask))
             menu_deferSelectionRequest = 1;
+    } else if (what == SAVE_TYPE_SCENE) {
+        /*
+         * Scene folders are explicit-OK operations.
+         *
+         * Encoder movement updates the displayed root Scene library name only.
+         * Unlike Kit Load, it must not start a Scene replacement while the user
+         * scrolls across slots.
+         */
+        memcpy(preset_currentName, filesystem_sceneSlotName(slot), 8u);
     } else {
         preset_loadName(slot, what);
         if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
@@ -2271,13 +2337,18 @@ static void menu_refreshLoadSceneLeds(void)
      * does not disturb MODE or voice feedback owned elsewhere. Clients are
      * mode entry/exit, Scene buttons, and load completion repaint paths.
      */
-    if (menu_activePage != LOAD_PAGE)
+    if (menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE)
         return;
     for (scene_index = 0u; scene_index < 16u; scene_index++) {
         led_setBlinkLed((uint8_t)(LED_SEQ1 + scene_index), 0u);
         led_setValue(0u, (uint8_t)(LED_SEQ1 + scene_index));
     }
-    if (!menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
+    if (menu_activePage == SAVE_PAGE &&
+        menu_saveOptions.what != SAVE_TYPE_KIT &&
+        menu_saveOptions.what != SAVE_TYPE_SCENE)
+        return;
+    if (menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
         return;
     for (scene_index = 0u;
          scene_index < SCENE_COUNT && scene_index < 16u;
@@ -2311,10 +2382,16 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
      * policy depends on Menu's nested Instrument source/cursor state and must
      * repaint the LCD plus Scene LEDs as one UI transaction.
      */
-    if (menu_activePage != LOAD_PAGE || scene_index >= SCENE_COUNT ||
+    if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        scene_index >= SCENE_COUNT ||
         scene_index >= 16u)
         return 0u;
-    if (!menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
+    if (menu_activePage == SAVE_PAGE &&
+        menu_saveOptions.what != SAVE_TYPE_KIT &&
+        menu_saveOptions.what != SAVE_TYPE_SCENE)
+        return 0u;
+    if (menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
         return 0u;
     if (menu_instrumentLoadActive && menu_storageBusy) {
         /*
@@ -3043,6 +3120,7 @@ static void menu_repaintLoadSavePage(void)
     switch (menu_saveOptions.what) {
     case SAVE_TYPE_KIT:         toptxt = "Kit     "; break;
     case SAVE_TYPE_KIT_MORPH:   toptxt = "KitMrp  "; break;
+    case SAVE_TYPE_SCENE:       toptxt = "Scene   "; break;
     case SAVE_TYPE_GLO:         toptxt = "Settings"; break;
     case SAVE_TYPE_SAMPLES:     toptxt = "Samples "; break;
     }
@@ -3071,8 +3149,13 @@ static void menu_repaintLoadSavePage(void)
          * storage.
          */
         if (menu_activePage == LOAD_PAGE && menu_saveOptions.what < SAVE_TYPE_GLO) {
-            displayName = filesystem_kitSlotName(
-                menu_currentPresetNr[menu_saveOptions.what]);
+            if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+                displayName = filesystem_sceneSlotName(
+                    menu_currentPresetNr[SAVE_TYPE_SCENE]);
+            } else {
+                displayName = filesystem_kitSlotName(
+                    menu_currentPresetNr[menu_saveOptions.what]);
+            }
         }
 
         menu_formatPresetNumber3(&editDisplayBuffer[1][1], displayPreset);
@@ -3105,14 +3188,18 @@ static void menu_repaintLoadSavePage(void)
                 }
             }
         }
-        memcpy(&editDisplayBuffer[1][14], menuText_ok, 2);
+        if (menu_currentSaveWouldOverwrite())
+            memcpy(&editDisplayBuffer[1][14], "OW", 2);
+        else
+            memcpy(&editDisplayBuffer[1][14], menuText_ok, 2);
         if ((menu_saveOptions.state == SAVE_STATE_OK) ||
             (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
             editDisplayBuffer[1][13] = ARROW_SIGN;
         }
     } else {
         /* Load page */
-        if (menu_saveOptions.what >= SAVE_TYPE_GLO) {
+        if (menu_saveOptions.what >= SAVE_TYPE_GLO ||
+            menu_saveOptions.what == SAVE_TYPE_SCENE) {
             memcpy(&editDisplayBuffer[1][14], menuText_ok, 2);
             if ((menu_saveOptions.state == SAVE_STATE_OK) ||
                 (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
@@ -3551,12 +3638,25 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             if (menu_activePage == SAVE_PAGE) {
                 switch (menu_saveOptions.what) {
                 case SAVE_TYPE_KIT:     preset_saveDrumset(menu_currentPresetNr[SAVE_TYPE_KIT], 0); break;
+                case SAVE_TYPE_SCENE:
+                    preset_saveScene(menu_currentPresetNr[SAVE_TYPE_SCENE],
+                                     menu_firstSelectedSceneFromMask(
+                                         menu_kitLoadSceneMask),
+                                     preset_currentName);
+                    break;
                 case SAVE_TYPE_GLO:     preset_saveGlobals(); break;
                 default: break;
                 }
                 menu_resetSaveParameters();
             } else {
                 switch (menu_saveOptions.what) {
+                case SAVE_TYPE_SCENE:
+                    if (!preset_loadSceneForScenes(
+                            menu_currentPresetNr[SAVE_TYPE_SCENE],
+                            menu_kitLoadSceneMask)) {
+                        menu_storageBusy = 0u;
+                    }
+                    break;
                 case SAVE_TYPE_GLO:
                     preset_loadGlobals();
                     /* menu_resetSaveParameters deferred to menu_pollPresetStatus() */
@@ -3595,7 +3695,7 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                      */
                     if (menu_activePage == SAVE_PAGE &&
                         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
-                        menu_saveOptions.what = SAVE_TYPE_GLO;
+                        menu_saveOptions.what = SAVE_TYPE_SCENE;
                     }
                 }
             }
@@ -3656,7 +3756,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     if (menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1)
                         menu_saveOptions.state = SAVE_STATE_OK;
                     if (menu_saveOptions.state == SAVE_STATE_OK &&
-                        menu_saveOptions.what < SAVE_TYPE_GLO)
+                        menu_saveOptions.what < SAVE_TYPE_GLO &&
+                        menu_saveOptions.what != SAVE_TYPE_SCENE)
                         menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
                 }
             }
@@ -4176,6 +4277,7 @@ void menu_pollPresetStatus(void)
         break;
 
     case PRESET_OP_KIT_SAVE:
+    case PRESET_OP_SCENE_SAVE:
     case PRESET_OP_MORPH_SAVE:
     case PRESET_OP_GLOBALS_SAVE:
     case PRESET_OP_PATTERN_SAVE:

@@ -143,8 +143,14 @@ settings.cfg
 ```
 
 `settings.cfg` replaces legacy `GLO.CFG`/`glo.cfg` as the future system-settings
-file. It stores system-level settings and a reference to the last loaded bank.
-At boot, the future firmware should load the bank recorded there.
+file. It stores system-level settings and the active Bank number, not the Bank
+display name. At boot, the future firmware should load the numbered Bank
+recorded there.
+
+`settings.cfg` has a root-level dot-file backer named `.settings.cfg`. Closing
+the global settings menu rewrites both files. Loading or saving a Bank also
+rewrites both files so the retained active-bank number and global settings
+snapshot stay synchronized.
 
 Current code note: boot still loads legacy `glo.cfg`. Do not document
 `settings.cfg` as implemented until `FS_FILE_GLOBALS` has moved off `glo.cfg`.
@@ -190,8 +196,9 @@ Bank/
   002 <bank name>/
 ```
 
-A bank represents all non-global data loaded as one performance set. The last
-loaded bank is recorded in future `settings.cfg`.
+A bank represents all non-global data loaded as one performance set. The active
+bank number is recorded in future `settings.cfg`; the bank display name is not
+the persistent selector.
 
 Each bank folder contains exactly one bank-level config file:
 
@@ -236,7 +243,10 @@ Scene/
 ```
 
 Scene folders in this pool can be loaded into a bank scene slot. They use the
-same folder structure as scene folders inside a bank.
+same folder structure as scene folders inside a bank. Root `Scene/` is a
+library/pool like root `Kit/` and root `Instrument/`: explicit Scene Save writes
+there, explicit Scene Load imports from there, and root Scene files are not
+autosaved.
 
 A scene folder contains:
 
@@ -1040,7 +1050,9 @@ Still future:
 - Pattern save writes the final dynamic-stack pattern format once implemented.
 - Effect save writes the selected effect stack/settings format once effects
   exist.
-- `settings.cfg` save writes system/global settings and the last loaded bank.
+- `settings.cfg` save writes system/global settings and the active bank number.
+  Its `.settings.cfg` backer is rewritten alongside it when closing the global
+  settings menu or loading/saving a Bank.
 
 The current legacy non-Kit save paths are implementation leftovers and should
 not be used as the new-format specification.
@@ -1117,7 +1129,25 @@ instrument runtime propagation:
 
 Status: settled target, not implemented.
 
-Future debounced autosave applies to files inside a loaded bank:
+Bank is the only autosaved workspace. Root-library folders such as `Scene/`,
+`Kit/`, `Instrument/`, `Pattern/`, and `Effect/` are explicit
+load/save/copy/import/export pools and are not autosaved.
+
+The active Bank is a resident workspace containing 16 editable Scenes. The
+currently playing/viewed Scene is only the audition/playback focus. Voice mode
+also has a Scene edit target set, toggled with SEQ buttons, that may contain any
+subset of the 16 Scenes. Voice/Kit/Instrument parameter edits apply to every
+Scene in that edit target set as one logical batch edit. Pattern edits are
+excluded from this multi-Scene parameter behavior and remain active/viewed-Scene
+scoped until the final Pattern model says otherwise.
+
+This multi-Scene edit behavior is binding. It supports workflows where the Bank
+is treated as one conceptual Kit with 16 Patterns, or where a selected Scene
+range receives the same parameter reconciliation. Storage still remains
+Scene-local: identical Kits or Instruments across Scenes are separate copies on
+disk unless a future feature explicitly introduces linked/shared files.
+
+Inside the active Bank, autosave applies to dot-file backers for:
 
 - Per-instrument files.
 - Scene `effect.fx`.
@@ -1126,22 +1156,56 @@ Future debounced autosave applies to files inside a loaded bank:
 - Embedded kit `kitset.kcg`.
 - `bankset.bcg` as needed.
 
-Root-library files and folders are explicit load/save/copy/import only, not
-autosaved.
+Committed and autosaved filenames:
+
+- The non-dot filename is the committed save/load file. Examples:
+  `sceneset.scg`, `kitset.kcg`, `slakd1.drm`, `pattern.pat`, `effect.fx`, and
+  `bankset.bcg`.
+- The matching dot-file is the autosave working backer. Examples:
+  `.sceneset.scg`, `.kitset.kcg`, `.slakd1.drm`, `.pattern.pat`, `.effect.fx`,
+  and `.bankset.bcg`.
+- Autosave writes dirty retained-memory state to dot-file backers only.
+- Bank SAVE waits for selected autosave writes to finish, then copies/promotes
+  the selected dot-file backers over the matching non-dot committed files.
+- Bank LOAD reads the non-dot committed files.
+- Bank load/save operations start with all 16 Scenes selected. SEQ buttons can
+  restrict the operation to a subset of Scenes before commit.
+- Startup/resume normally loads valid dot-file backers for the active Bank, so
+  autosaved working changes return without requiring explicit SAVE. If a
+  dot-file is missing or fails validation, fall back to the matching non-dot
+  committed file.
 
 Mechanism:
 
-- A parameter edit marks its owning file stale and starts or resets a 5-second
-  idle timer.
-- If edits continue for 30 seconds without a 5-second gap, force a write.
-- Debounced writes go to the live working file.
-- A dot-shadow file keeps the last state committed by explicit menu SAVE.
-- RELOAD restores the working file from the dot-shadow.
-- Writes should use a `.tmp` file and replace the live file only after the
-  temporary file is complete.
+- A parameter edit marks its owning dot-file backer stale and starts or resets a
+  5-second idle timer.
+- A multi-Scene Voice/Kit/Instrument edit marks the owning dot-file backer stale
+  for each selected Scene affected by that batch edit. Repeated knob motion
+  refreshes the same dirty records rather than enqueueing per-tick writes.
+- If edits continue for 30 seconds without a 5-second gap, force a dot-file
+  write.
+- The autosave scheduler is bank-wide and tracks dirty records by Scene, file
+  domain, and optional instrument slot.
+- A successful autosave clears only the dirty record for the dot-file that was
+  written. It does not update the committed non-dot file.
+- Instrument, Kit, and Scene copy/paste within the active Bank are resident
+  memory batch mutations. They dirty destination dot-file backers and do not
+  change committed non-dot files until explicit Bank SAVE.
+- RELOAD applies to Scene scope. It reads the selected Scene's non-dot committed
+  files into resident memory and resets the selected Scene's dot-file backers to
+  match those committed files.
+- Dot-file autosave should use a temp-file-then-rename/replace sequence when
+  the asyncfatfs primitive exists. On startup, a leftover `.tmp` means the temp
+  write was incomplete; ignore/delete it, then use the previous dot-file if it
+  validates. Only fall back to non-dot when the dot-file itself is missing or
+  invalid.
+- Root `settings.cfg` records the active Bank number and has a `.settings.cfg`
+  backer. Closing the global settings menu or loading/saving a Bank rewrites
+  both settings files.
 
-Implementation note: confirm or add the required asyncfatfs rename/replace
-primitive before relying on `.tmp` replacement for power-loss safety.
+Implementation note: confirm or add the required asyncfatfs rename/replace or
+safe copy/replace primitive before relying on dot-file promotion for
+power-loss-safe Bank SAVE.
 
 ## Example Target Layout
 

@@ -232,6 +232,16 @@ static void on_kit_save_complete(void)
     preset_completeFilesystemOp(PRESET_OP_KIT_SAVE);
 }
 
+static void on_scene_load_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_SCENE_LOAD);
+}
+
+static void on_scene_save_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_SCENE_SAVE);
+}
+
 static void on_morph_save_complete(void)
 {
     preset_completeFilesystemOp(PRESET_OP_MORPH_SAVE);
@@ -264,6 +274,7 @@ static fs_file_type_t preset_fileTypeFromSaveType(uint8_t what, uint8_t *hasName
     switch (what) {
     case SAVE_TYPE_KIT:         return FS_FILE_KIT;
     case SAVE_TYPE_KIT_MORPH:   return FS_FILE_KIT;
+    case SAVE_TYPE_SCENE:       return FS_FILE_SCENE;
     case SAVE_TYPE_GLO:
         if (hasName) *hasName = 0;
         return FS_FILE_GLOBALS;
@@ -1158,6 +1169,29 @@ uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask)
     return 0u;
 }
 
+uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask)
+{
+    /*
+     * Post an explicit root Scene Load request.
+     *
+     * Inputs: root Scene library slot and destination Scene mask from Menu.
+     * Output: nonzero only when filesystem accepts the staged multi-file
+     * Scene load. Scene Load is separate from Kit Load because its completion
+     * may replace settings, pattern, effect state, and the embedded Kit.
+     */
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = presetNr;
+    pm_request_type = SAVE_TYPE_SCENE;
+    pm_kit_request_scene_mask = scene_mask;
+    if (filesystem_requestLoadSceneForScenes(presetNr, scene_mask,
+                                             on_scene_load_complete))
+        return 1u;
+    pm_status = PRESET_IDLE;
+    return 0u;
+}
+
 /* -----------------------------------------------------------------------
 ** preset_saveDrumset — post async kit save request.
 ** ----------------------------------------------------------------------- */
@@ -1181,6 +1215,29 @@ void preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
      */
     if ((!isMorph && !filesystem_requestSaveKitDirectory(presetNr, cb)) ||
         (isMorph && !filesystem_requestSave(type, presetNr, cb)))
+        pm_status = PRESET_IDLE;
+}
+
+void preset_saveScene(uint16_t presetNr, uint8_t source_scene,
+                      const char display_name[8])
+{
+    /*
+     * Post a root Scene directory save.
+     *
+     * Inputs are captured from the Save UI: target library slot,
+     * lowest-numbered selected resident Scene, and the display name used for
+     * the numbered folder plus sceneset.scg. Output is an async filesystem
+     * writer; completion is reported as PRESET_OP_SCENE_SAVE so Menu can clear
+     * busy state and repaint without applying DSP runtime.
+     */
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = presetNr;
+    pm_request_type = SAVE_TYPE_SCENE;
+    if (!filesystem_requestSaveSceneDirectory(presetNr, source_scene,
+                                              display_name,
+                                              on_scene_save_complete))
         pm_status = PRESET_IDLE;
 }
 

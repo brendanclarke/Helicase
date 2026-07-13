@@ -295,6 +295,20 @@ int main(void)
             filesystem_ack();
 
             /*
+             * Synchronous Scene/ scan.
+             *
+             * Inputs: mounted SD card before audio starts. Output: the root
+             * Scene library cache is populated so Load:[Scene] can browse
+             * numbered Scene folders without kicking off a scan from the menu
+             * foreground. This mirrors Kit/ scan timing and is safe here
+             * because audio rendering has not started yet.
+             */
+            filesystem_requestScanScenes(NULL);
+            while (filesystem_status() == FS_STATUS_BUSY)
+                filesystem_tick();
+            filesystem_ack();
+
+            /*
              * Synchronous Instrument/ scan.
              *
              * Inputs: mounted SD card before audio starts. Output:

@@ -59,7 +59,7 @@ extern uint8_t voiceModeShowMorph;
  * Keeping the count at the first non-kit load type prevents KitMrp from
  * reusing the normal Kit cursor storage by accident.
  */
-#define NUM_PRESET_LOCATIONS 2
+#define NUM_PRESET_LOCATIONS 3
 extern uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 
 enum PageNames {
@@ -212,6 +212,7 @@ enum loadSaveEnum {
      * morph endpoints.
      */
     SAVE_TYPE_KIT_MORPH,
+    SAVE_TYPE_SCENE,
     SAVE_TYPE_GLO,
     SAVE_TYPE_SAMPLES,
     NUM_SAVE_TYPES
@@ -301,15 +302,15 @@ uint8_t menu_loadInstrumentIsActive(void);
 uint8_t menu_loadInstrumentTransactionBusy(void);
 void menu_loadInstrumentExit(void);
 /*
- * Consume a SEQ button as a Scene selector while Load is showing a Kit or an
- * Instrument destination.
+ * Consume a SEQ button as a Scene selector while Load/Save owns Scene targets.
  *
  * Inputs: a zero-based SEQ/Scene index. Output: nonzero only when the current
- * Load context owns the press; Kit Load toggles its selected-scene mask while
- * Instrument Load changes its one destination Scene. Clients: buttonHandler's
- * foreground press dispatcher. Menu owns this decision because it also owns
- * the load mode, LCD cursor, and Scene LED state; ButtonHandler must remain a
- * gesture router rather than duplicate menu-state tests.
+ * Load/Save context owns the press; Kit/Scene Load and Kit/Scene Save toggle
+ * the selected-scene mask while Instrument Load changes its one destination
+ * Scene. Clients: buttonHandler's foreground press dispatcher. Menu owns this
+ * decision because it also owns the load mode, LCD cursor, and Scene LED
+ * state; ButtonHandler must remain a gesture router rather than duplicate
+ * menu-state tests.
  */
 uint8_t menu_loadSceneButtonPressed(uint8_t scene_index);
 /*

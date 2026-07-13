@@ -291,6 +291,55 @@ static storage_status_t storage_parseU16(const char *text, uint16_t *out)
     return STORAGE_STATUS_OK;
 }
 
+static storage_status_t storage_parseCsvU8(const char *text,
+                                           uint8_t *values,
+                                           uint8_t expected_count,
+                                           uint8_t max_value)
+{
+    uint8_t index = 0u;
+
+    /*
+     * Parse a fixed-count comma-separated byte list.
+     *
+     * Inputs: value text such as "1,2,3", caller-owned output array, required
+     * item count, and maximum accepted value for each cell. Output: the array
+     * is filled only as each token validates; callers treat any BAD_VALUE
+     * result as a rejected line/file. The loop is intentionally strict about
+     * count and separators so a truncated sceneset like "1,2" cannot silently
+     * leave old settings in later Scene tracks.
+     */
+    if (!values || expected_count == 0u)
+        return STORAGE_STATUS_BAD_VALUE;
+    while (index < expected_count) {
+        uint8_t parsed = 0u;
+        storage_status_t st;
+        const char *start = text;
+
+        while (*text != '\0' && *text != ',')
+            text++;
+        if (*text == ',') {
+            char token[4];
+            uint8_t len = (uint8_t)(text - start);
+            if (len == 0u || len >= sizeof(token))
+                return STORAGE_STATUS_BAD_VALUE;
+            memcpy(token, start, len);
+            token[len] = '\0';
+            st = storage_parseU8(token, &parsed);
+            text++;
+        } else {
+            st = storage_parseU8(start, &parsed);
+        }
+        if (st != STORAGE_STATUS_OK || parsed > max_value)
+            return STORAGE_STATUS_BAD_VALUE;
+        values[index++] = parsed;
+        if (*(text - 1) != ',' && *text == '\0')
+            break;
+    }
+    if (index != expected_count || *storage_trimLeft(text) != '\0')
+        return STORAGE_STATUS_BAD_VALUE;
+    return STORAGE_STATUS_OK;
+}
+
 /* See storageTypes.h for the public contract.
  *
  * Implementation detail: display names are fixed-width LCD fields, not C
@@ -441,6 +490,142 @@ void storage_makeSavedInstrumentFilename(
     while (*ext != '\0' && i < (STORAGE_KIT_FILENAME_MAX - 1u))
         dst[i++] = *ext++;
     dst[i] = '\0';
+}
+
+void storage_scenesetInit(storage_sceneset_t *state)
+{
+    /*
+     * Clear sceneset parser guard bits before the first line.
+     *
+     * Inputs/outputs: caller-owned parser state. Filesystem initializes the
+     * staged Scene separately so missing optional settings preserve SceneData's
+     * defaults while required guard bits are tracked here.
+     */
+    if (state)
+        memset(state, 0, sizeof(*state));
+}
+
+storage_status_t storage_scenesetParseLine(
+    storage_sceneset_t *state,
+    const char *line,
+    scene_t *target_scene,
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN])
+{
+    char key[32];
+    const char *value;
+    storage_status_t st;
+    uint8_t parsed;
+
+    /*
+     * Parse one sceneset.scg line.
+     *
+     * Required metadata validates the folder and supplies the user-visible
+     * Scene name. Optional settings write directly into the staged Scene. The
+     * embedded Kit name is intentionally absent from this grammar; filesystem
+     * discovers the first valid "Kit *" directory while walking the Scene
+     * folder so users can move Kits between Scenes by moving directories.
+     */
+    if (!state || !line)
+        return STORAGE_STATUS_BAD_VALUE;
+    line = storage_trimLeft(line);
+    if (*line == '\0' || *line == '#')
+        return STORAGE_STATUS_OK;
+    st = storage_splitKeyValue(line, key, sizeof(key), &value);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+
+    if (storage_streq(key, "format")) {
+        if (!storage_streq(value, "helicase.sceneset"))
+            return STORAGE_STATUS_INVALID_FORMAT;
+        state->seen_format = 1u;
+    } else if (storage_streq(key, "version")) {
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed != 1u)
+            return STORAGE_STATUS_UNSUPPORTED_VERSION;
+        state->seen_version = 1u;
+    } else if (storage_streq(key, "name")) {
+        if (!display)
+            return STORAGE_STATUS_BAD_VALUE;
+        storage_copyDisplayName(display, value);
+        state->seen_name = 1u;
+    } else if (storage_streq(key, "morph_amount")) {
+        if (!target_scene)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        target_scene->settings.morph_amount = parsed;
+    } else if (storage_streq(key, "voice_morph_amount")) {
+        if (!target_scene)
+            return STORAGE_STATUS_BAD_VALUE;
+        /*
+         * Six comma cells map directly to instrument slots 1..6.
+         *
+         * The parser rejects short or long lists instead of partially applying
+         * them, because per-slot Morph is an audible Scene setting and a
+         * shifted list would make every later voice wrong.
+         */
+        return storage_parseCsvU8(value,
+                                  target_scene->settings.voice_morph_amount,
+                                  INSTRUMENT_SLOT_COUNT,
+                                  255u);
+    } else if (storage_streq(key, "voice_decimation_all")) {
+        if (!target_scene)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        target_scene->settings.voice_decimation_all =
+            (parsed > 127u) ? 127u : parsed;
+    } else if (storage_streq(key, "midi_channel")) {
+        if (!target_scene)
+            return STORAGE_STATUS_BAD_VALUE;
+        /*
+         * Seven comma cells map to the bridge tracks.
+         *
+         * Channels are currently 1..16. Zero is rejected here because the
+         * SceneData accessors still treat 1..16 as the valid bridge domain;
+         * a future MIDI-off sentinel should update this parser alongside the
+         * SceneData contract.
+         */
+        st = storage_parseCsvU8(value,
+                                target_scene->settings.midi_channel,
+                                NUM_TRACKS,
+                                16u);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        for (parsed = 0u; parsed < NUM_TRACKS; parsed++) {
+            if (target_scene->settings.midi_channel[parsed] < 1u)
+                return STORAGE_STATUS_BAD_VALUE;
+        }
+    } else if (storage_streq(key, "midi_note")) {
+        if (!target_scene)
+            return STORAGE_STATUS_BAD_VALUE;
+        return storage_parseCsvU8(value,
+                                  target_scene->settings.midi_note,
+                                  NUM_TRACKS,
+                                  127u);
+    }
+    return STORAGE_STATUS_OK;
+}
+
+storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state)
+{
+    /*
+     * Convert streamed sceneset bits into a load/no-load decision.
+     *
+     * Required fields are intentionally small: format/version protect against
+     * loading a wrong text file, and name gives Save/OW matching a stable
+     * display identity. Optional settings may be absent for forward/backward
+     * compatibility because SceneData defaults are safe.
+     */
+    if (!state || !state->seen_format || !state->seen_version ||
+        !state->seen_name) {
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    }
+    return STORAGE_STATUS_OK;
 }
 
 static char storage_displayFilenameChar(char c)
@@ -704,6 +889,211 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
     if (descriptor_ordinal == 0u)
         return storage_formatLiteral(dst, capacity, "\n");
     return 0u;
+}
+
+static uint8_t storage_formatCsvU8(char *dst, uint16_t capacity,
+                                   const char *key,
+                                   const uint8_t *values,
+                                   uint8_t count)
+{
+    uint16_t len = 0u;
+    uint8_t i;
+
+    /*
+     * Format one fixed-count byte CSV assignment.
+     *
+     * Inputs are the schema key and an array whose order is already defined by
+     * SceneData: six instrument slots or seven bridge tracks. Output is
+     * "key=a,b,c\n". The digit loop avoids stdio and keeps the write path
+     * bounded for filesystem_writeTextLine().
+     */
+    if (!dst || capacity == 0u || !key || !values || count == 0u)
+        return 0u;
+    while (*key != '\0') {
+        if (len + 1u >= capacity)
+            return 0u;
+        dst[len++] = *key++;
+    }
+    if (len + 1u >= capacity)
+        return 0u;
+    dst[len++] = '=';
+    for (i = 0u; i < count; i++) {
+        uint8_t value = values[i];
+        uint8_t hundreds = (uint8_t)(value / 100u);
+        uint8_t tens = (uint8_t)((value / 10u) % 10u);
+        uint8_t ones = (uint8_t)(value % 10u);
+        if (i != 0u) {
+            if (len + 1u >= capacity)
+                return 0u;
+            dst[len++] = ',';
+        }
+        if (hundreds != 0u) {
+            if (len + 1u >= capacity)
+                return 0u;
+            dst[len++] = (char)('0' + hundreds);
+        }
+        if (hundreds != 0u || tens != 0u) {
+            if (len + 1u >= capacity)
+                return 0u;
+            dst[len++] = (char)('0' + tens);
+        }
+        if (len + 1u >= capacity)
+            return 0u;
+        dst[len++] = (char)('0' + ones);
+    }
+    if (len + 1u >= capacity)
+        return 0u;
+    dst[len++] = '\n';
+    dst[len] = '\0';
+    return (uint8_t)len;
+}
+
+uint8_t storage_formatScenesetLine(
+    char *dst,
+    uint16_t capacity,
+    const scene_t *scene,
+    const char display[STORAGE_SCENE_DISPLAY_NAME_LEN],
+    uint16_t line_index)
+{
+    char name[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+
+    /*
+     * Emit one sceneset.scg line.
+     *
+     * The order mirrors the generated SD_CARD fixture and the parser above.
+     * The embedded Kit directory is deliberately omitted: Scene load discovers
+     * the first valid "Kit *" directory so users can move Kits between Scene
+     * folders without editing sceneset.scg.
+     */
+    if (!dst || capacity == 0u || !scene || !display)
+        return 0u;
+    switch (line_index) {
+    case 0:
+        return storage_formatLiteral(dst, capacity,
+                                     "format=helicase.sceneset\n");
+    case 1:
+        return storage_formatLiteral(dst, capacity, "version=1\n");
+    case 2:
+        memcpy(name, display, STORAGE_SCENE_DISPLAY_NAME_LEN);
+        name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+        return storage_formatAssignmentText(dst, capacity, "name", name);
+    case 3:
+        return storage_formatAssignmentU16(dst, capacity, "morph_amount",
+                                           scene->settings.morph_amount);
+    case 4:
+        return storage_formatCsvU8(dst, capacity, "voice_morph_amount",
+                                   scene->settings.voice_morph_amount,
+                                   INSTRUMENT_SLOT_COUNT);
+    case 5:
+        return storage_formatAssignmentU16(
+            dst, capacity, "voice_decimation_all",
+            scene->settings.voice_decimation_all);
+    case 6:
+        return storage_formatCsvU8(dst, capacity, "midi_channel",
+                                   scene->settings.midi_channel,
+                                   NUM_TRACKS);
+    case 7:
+        return storage_formatCsvU8(dst, capacity, "midi_note",
+                                   scene->settings.midi_note,
+                                   NUM_TRACKS);
+    default:
+        return 0u;
+    }
+}
+
+void storage_effectStateInit(storage_effect_state_t *state)
+{
+    /*
+     * Clear placeholder effect validation bits.
+     *
+     * Effect files have no runtime payload yet, but Scene load still requires
+     * a guarded .fx file so the folder contract stays stable before Phase 6.
+     */
+    if (state)
+        memset(state, 0, sizeof(*state));
+}
+
+storage_status_t storage_effectParseLine(storage_effect_state_t *state,
+                                         const char *line)
+{
+    char key[24];
+    const char *value;
+    storage_status_t st;
+    uint8_t parsed;
+
+    /*
+     * Parse one placeholder .fx line.
+     *
+     * Unknown keys are ignored for forward compatibility with future effect
+     * schemas, but the v1 placeholder guard must be present for this first
+     * implementation to accept the file as a valid Scene effect.
+     */
+    if (!state || !line)
+        return STORAGE_STATUS_BAD_VALUE;
+    line = storage_trimLeft(line);
+    if (*line == '\0' || *line == '#')
+        return STORAGE_STATUS_OK;
+    st = storage_splitKeyValue(line, key, sizeof(key), &value);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+    if (storage_streq(key, "format")) {
+        if (!storage_streq(value, "helicase.effect"))
+            return STORAGE_STATUS_INVALID_FORMAT;
+        state->seen_format = 1u;
+    } else if (storage_streq(key, "version")) {
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed != 1u)
+            return STORAGE_STATUS_UNSUPPORTED_VERSION;
+        state->seen_version = 1u;
+    } else if (storage_streq(key, "placeholder")) {
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed != 1u)
+            return STORAGE_STATUS_BAD_VALUE;
+        state->seen_placeholder = 1u;
+    }
+    return STORAGE_STATUS_OK;
+}
+
+storage_status_t storage_effectFinalize(const storage_effect_state_t *state)
+{
+    /*
+     * Validate the first-pass effect file.
+     *
+     * Until real FX data exists, requiring placeholder=1 prevents arbitrary
+     * .fx files from being mistaken for loadable effect state.
+     */
+    if (!state || !state->seen_format || !state->seen_version ||
+        !state->seen_placeholder) {
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    }
+    return STORAGE_STATUS_OK;
+}
+
+uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
+                                            uint16_t line_index)
+{
+    /*
+     * Emit the v1 placeholder effect file.
+     *
+     * Filesystem uses this while Scene Save has no concrete effect runtime
+     * payload to serialize. The guarded file keeps the Scene folder shape
+     * stable and gives Scene Load something explicit to validate.
+     */
+    switch (line_index) {
+    case 0:
+        return storage_formatLiteral(dst, capacity,
+                                     "format=helicase.effect\n");
+    case 1:
+        return storage_formatLiteral(dst, capacity, "version=1\n");
+    case 2:
+        return storage_formatAssignmentU16(dst, capacity, "placeholder", 1u);
+    default:
+        return 0u;
+    }
 }
 
 /* See storageTypes.h for the public contract.

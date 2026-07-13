@@ -92,13 +92,13 @@ static uint8_t buttonHandler_mutedVoices = 0;
 static int8_t buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
 static uint8_t buttonHandler_morphVoiceModeActive = 0;
 /*
- * SEQ presses consumed by the Load menu, retained until their release edge.
+ * SEQ presses consumed by the Load/Save menu, retained until their release edge.
  *
  * Menu may change page/submode between press and release while asynchronous
  * storage completes. Remembering the consumed physical button prevents the
  * release dispatcher from falling through into normal step erase/roll logic.
- * ButtonHandler owns this short-lived gesture pairing; Menu owns the policy
- * decision exposed by menu_loadSceneButtonPressed().
+ * ButtonHandler owns this short-lived gesture pairing; Menu owns whether the
+ * current Load/Save context treats SEQ buttons as Scene target toggles.
  */
 static uint16_t buttonHandler_loadSceneSeqPressedMask = 0u;
 

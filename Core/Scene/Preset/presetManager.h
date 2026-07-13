@@ -60,6 +60,8 @@ typedef enum {
     PRESET_OP_INSTRUMENT_LOAD,
     PRESET_OP_KIT_MORPH_LOAD,
     PRESET_OP_INSTRUMENT_MORPH_LOAD,
+    PRESET_OP_SCENE_LOAD,
+    PRESET_OP_SCENE_SAVE,
 } preset_op_type_t;
 
 extern char preset_currentName[8];
@@ -114,6 +116,17 @@ void    preset_saveDrumset(uint16_t presetNr, uint8_t isMorph);
  * filesystem directly or overloading the legacy morph compatibility API.
  */
 uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask);
+/*
+ * Load/Save root Scene library folders.
+ *
+ * Load inputs mirror Kit Load: root Scene library slot and destination Scene
+ * bitmask. Save inputs are a root Scene library slot, source resident Scene,
+ * and fixed eight-character display name captured from the Save UI. Outputs
+ * are asynchronous Preset operations completed through PRESET_OP_SCENE_*.
+ */
+uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
+void    preset_saveScene(uint16_t presetNr, uint8_t source_scene,
+                         const char display_name[8]);
 /*
  * Load a new-format Kit directory into the selected Scenes' morph endpoints.
  *

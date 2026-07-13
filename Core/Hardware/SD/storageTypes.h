@@ -36,8 +36,10 @@
  * preset name buffers, which are exactly eight printable characters.
  */
 #define STORAGE_ROOT_KIT              "Kit"
+#define STORAGE_ROOT_SCENE            "Scene"
 #define STORAGE_ROOT_INSTRUMENT       "INSTRU~1"
 #define STORAGE_KITSET_FILENAME       "kitset.kcg"
+#define STORAGE_SCENESET_FILENAME     "sceneset.scg"
 #define STORAGE_KIT_SLOT_COUNT        6u
 /*
  * Kit folders are numbered directory entries, not legacy file slots.
@@ -47,8 +49,10 @@
  * 999 slots and callers that hold Kit browser positions must use uint16_t.
  */
 #define STORAGE_KIT_MAX_SLOTS         999u
+#define STORAGE_SCENE_MAX_SLOTS       999u
 #define STORAGE_KIT_FILENAME_MAX      13u
 #define STORAGE_KIT_DISPLAY_NAME_LEN  8u
+#define STORAGE_SCENE_DISPLAY_NAME_LEN STORAGE_KIT_DISPLAY_NAME_LEN
 
 /* Result codes returned by every parser/validator in this layer.
  *
@@ -133,6 +137,38 @@ typedef struct {
     uint8_t seen_param_count;
     uint8_t seen_morph_count;
 } storage_instrument_state_t;
+
+/*
+ * Incremental parse state for sceneset.scg.
+ *
+ * The file validates a Scene folder and stores Scene-level settings only. It
+ * deliberately does not store the embedded Kit directory name: Scene loading
+ * discovers the first valid "Kit *" directory in the folder and uses the text
+ * after "Kit " as the loaded Kit name. Inputs arrive one NUL-terminated line
+ * at a time. Outputs are validation bits, a caller-owned eight-character Scene
+ * display name, and writes into scene_t::settings. Clients are future
+ * filesystem Scene load/save state machines and SD_CARD fixture generators.
+ */
+typedef struct {
+    uint8_t seen_format;
+    uint8_t seen_version;
+    uint8_t seen_name;
+} storage_sceneset_t;
+
+/*
+ * Incremental validation state for placeholder effect files.
+ *
+ * Real effect storage is future DSP work. Scene folders still always contain
+ * an effect file, so the first pass accepts a tiny guarded placeholder:
+ * format=helicase.effect, version=1, placeholder=1. Inputs are text lines from
+ * filesystem.c; outputs are validation bits used to accept or reject the first
+ * discovered .fx file.
+ */
+typedef struct {
+    uint8_t seen_format;
+    uint8_t seen_version;
+    uint8_t seen_placeholder;
+} storage_effect_state_t;
 
 /* Initialize kitset parse state before the first line of kitset.kcg.
  *
@@ -229,6 +265,22 @@ storage_instrument_type_t storage_instrumentTypeFromText(const char *text);
 uint8_t storage_instrumentFilenameMatchesType(const char *filename,
                                               storage_instrument_type_t type);
 
+/*
+ * Initialize, parse, and finalize sceneset.scg.
+ *
+ * Inputs: parser state, one text line at a time, optional target Scene, and a
+ * fixed display-name buffer. Outputs: required guard/name bits plus retained
+ * Scene settings. Missing optional settings leave the caller's defaults in
+ * place, so filesystem should initialize the staged Scene before parsing.
+ */
+void storage_scenesetInit(storage_sceneset_t *state);
+storage_status_t storage_scenesetParseLine(
+    storage_sceneset_t *state,
+    const char *line,
+    scene_t *target_scene,
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
+storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state);
+
 /* Parse a numbered folder name like "001 Slak" into internal slot/name data.
  *
  * Inputs: display/LFN folder name, zero_based_slot output pointer, and an
@@ -296,6 +348,27 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
                                      storage_instrument_type_t type,
                                      uint8_t one_based_voice,
                                      uint16_t line_index);
+/*
+ * Stream one sceneset.scg line from a resident Scene.
+ *
+ * Inputs: destination buffer, Scene pointer, eight-character display name, and
+ * monotonic line index owned by filesystem.c. Output: number of bytes written,
+ * or zero when the schema is complete. The writer mirrors
+ * storage_scenesetParseLine(); it never emits a Kit directory name.
+ */
+uint8_t storage_formatScenesetLine(
+    char *dst,
+    uint16_t capacity,
+    const scene_t *scene,
+    const char display[STORAGE_SCENE_DISPLAY_NAME_LEN],
+    uint16_t line_index);
+
+void storage_effectStateInit(storage_effect_state_t *state);
+storage_status_t storage_effectParseLine(storage_effect_state_t *state,
+                                         const char *line);
+storage_status_t storage_effectFinalize(const storage_effect_state_t *state);
+uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
+                                            uint16_t line_index);
 /*
  * Build an 8.3-safe saved instrument filename from Scene-retained metadata.
  *

@@ -50,6 +50,7 @@
 
 typedef enum {
     FS_FILE_KIT = 0,
+    FS_FILE_SCENE,
     FS_FILE_PATTERN,
     FS_FILE_MORPH,
     FS_FILE_PERFORMANCE,
@@ -123,6 +124,18 @@ bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
 bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
                                              uint16_t scene_mask,
                                              fs_completion_cb_t cb);
+/*
+ * Load one numbered root Scene directory into every selected resident Scene.
+ *
+ * Inputs: zero-based root Scene library slot, destination Scene mask, and
+ * completion callback. Output: asynchronous staged Scene load; resident Scene
+ * memory changes only after sceneset.scg, one embedded Kit directory, one
+ * pattern file, and one effect file validate. Scene Load is explicit-OK from
+ * the UI, unlike Kit Load's instant-on-scroll behavior.
+ */
+bool filesystem_requestLoadSceneForScenes(uint16_t slot,
+                                          uint16_t scene_mask,
+                                          fs_completion_cb_t cb);
 bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 /*
  * Post a new-format Kit directory save.
@@ -133,8 +146,22 @@ bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb
  * separate so directory save cannot accidentally emit Pxxx.SND bytes.
  */
 bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb);
+/*
+ * Save one resident Scene into one numbered root Scene library slot.
+ *
+ * Inputs: zero-based root Scene slot, source resident Scene index, display name
+ * for sceneset/folder creation, and completion callback. Output: Scene/<NNN
+ * Name>/ containing sceneset.scg, embedded Kit <name>/, bridge pattern.pat,
+ * and a placeholder effects.fx until real effects exist.
+ */
+bool filesystem_requestSaveSceneDirectory(
+    uint16_t slot,
+    uint8_t source_scene,
+    const char display_name[8],
+    fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
+bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
 /*
  * Load one root Instrument/ file into an explicit Scene slot.
@@ -212,6 +239,8 @@ uint8_t     filesystem_kitSlotExists(uint16_t zero_based_slot);
  * the directory cache instead of reading legacy .SND headers.
  */
 const char *filesystem_kitSlotName(uint16_t zero_based_slot);
+uint8_t     filesystem_sceneSlotExists(uint16_t zero_based_slot);
+const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
 uint8_t     filesystem_instrumentCount(instrument_type_t type);
 const char *filesystem_instrumentName(instrument_type_t type,
                                       uint8_t browser_index);
