@@ -545,7 +545,7 @@ storage text parsing/formatting and descriptor-key validation to
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is `Kit/NNN Name/kitset.kcg` plus instruments and save routes to the new Kit directory writer. For `FS_FILE_MORPH`, load/save remains legacy `.SND`. | Preset |
 | `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
 | `filesystem_requestLoadKitMorphForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging only so Preset can copy matching source normal endpoints into resident morph endpoints. | Preset/Menu KitMrp Load |
-| `filesystem_requestSaveKitDirectory(slot, cb)` | Create/open `Kit/<NNNxxxxx>/`, stream `kitset.kcg`, and stream six descriptor-keyed instrument files from the active Scene kit. | Preset/Menu Kit Save |
+| `filesystem_requestSaveKitDirectory(slot, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. | Preset/Menu Kit Save |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the per-type root Instrument browser cache. | main boot, Menu Instrument Load |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Validate one root Instrument file into private staging without mutating live SceneData. | Preset Instrument request |
 | `filesystem_loadedInstrumentSlot()` / `filesystem_loadedInstrumentDisplayName()` / `filesystem_loadedInstrumentStem()` | Borrow the validated staged payload/name/stem for Preset's ordered commit and later Kit Save metadata. | Preset only |
@@ -581,16 +581,15 @@ Important private Phase 2 kit helpers:
 
 asyncfatfs boundary:
 
-- No asyncfatfs core files changed in Session 035. Future save code should use
-  the existing primitives (`afatfs_mkdir`, `afatfs_fopen(..., "w", ...)`,
-  `afatfs_fclose`, `afatfs_chdir`, and file `afatfs_funlink`) through
-  filesystem state machines instead of creating one-off FAT writers.
-- Current asyncfatfs creates short 8.3 entries only. It can scan/display LFNs,
-  but firmware-created Kit folders and Instrument member files are sanitized
-  8.3 physical names until a real asyncfatfs LFN creation primitive exists.
-- Missing core primitives are atomic rename/replace, true LFN creation, and
-  recursive directory delete/replace. Add each once at the asyncfatfs/filesystem
-  boundary before relying on it from Scene/Bank/autosave code.
+- Session 036 adds asyncfatfs LFN component creation through
+  `afatfs_mkdir_lfn()` and `afatfs_fopen_lfn()`. The primitives create VFAT LFN
+  entries, return the generated 8.3 alias for existing open paths, and keep
+  callers out of raw FAT directory-entry writing.
+- Future save code should reuse/extend those filesystem state-machine
+  primitives instead of creating one-off FAT writers.
+- Missing core primitives are atomic rename/replace and recursive directory
+  delete/replace. Add each once at the asyncfatfs/filesystem boundary before
+  relying on it from Scene/Bank/autosave code.
 
 Private but important pattern serialization helpers:
 

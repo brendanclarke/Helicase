@@ -348,11 +348,11 @@ These correspond to the four existing original LXR instrument types. Additional
 instrument types may be added later.
 
 Implemented Kit save behavior: saving a Kit writes a folder in this same shape:
-`kitset.kcg` plus six descriptor-keyed instrument files. Current asyncfatfs
-creation support is 8.3-only, so firmware-created folders/files use sanitized
-short physical names such as `001SLAK` or `SLAKD1.DRM`. Long names scanned from
-SD remain display data; creating true LFN entries is a future asyncfatfs
-capability, not something callers should recreate locally.
+`kitset.kcg` plus six descriptor-keyed instrument files. Session 036 adds
+asyncfatfs LFN component creation, so firmware-created Kit folders and member
+instrument files preserve display spaces and mixed case through VFAT LFN
+entries while returning generated 8.3 aliases for existing open paths and
+`kitset.kcg` references.
 
 ### `kitset.kcg`
 
@@ -1026,9 +1026,10 @@ Initial recognized instrument types:
 
 Implemented:
 
-- Kit save writes a `Kit/<NNNxxxxx>/` folder in the same logical shape the
-  current loader accepts: `kitset.kcg` plus six instrument files. Physical names
-  are 8.3-safe because asyncfatfs currently creates short entries only.
+- Kit save writes a `Kit/<NNN Name>/` folder in the same logical shape the
+  current loader accepts: `kitset.kcg` plus six instrument files. The folder and
+  member files are created through asyncfatfs LFN primitives, with returned 8.3
+  aliases used for `kitset.kcg` references/open paths.
 
 Still future:
 
@@ -1046,12 +1047,17 @@ not be used as the new-format specification.
 
 ### asyncfatfs Primitive Boundary
 
-Session 035 did not add new asyncfatfs primitives. Future save code should
-reuse the existing core file APIs instead of recreating local FAT writers:
+Session 036 adds asyncfatfs LFN component creation. Future save code should
+reuse the existing core file APIs or their LFN companions instead of recreating
+local FAT writers:
 
 - `afatfs_mkdir(name, cb)` creates or opens a short-name directory and returns
   an open handle through the callback.
+- `afatfs_mkdir_lfn(display_name, alias_out, cb)` creates or opens a directory
+  with VFAT LFN display entries and returns its generated 8.3 alias.
 - `afatfs_fopen(name, "w", cb)` creates/truncates a short-name file.
+- `afatfs_fopen_lfn(display_name, "w", alias_out, cb)` creates/truncates a file
+  with VFAT LFN display entries and returns its generated 8.3 alias.
 - `afatfs_fclose(handle, cb)` closes opened files/directories.
 - `afatfs_chdir(handle_or_NULL)` changes current directory or returns to root.
 - `afatfs_funlink(file, cb)` exists for files but is not a recursive directory
@@ -1059,7 +1065,6 @@ reuse the existing core file APIs instead of recreating local FAT writers:
 
 Known missing primitives:
 
-- true LFN creation;
 - atomic rename/replace for `.tmp` save promotion;
 - recursive directory delete/replace.
 

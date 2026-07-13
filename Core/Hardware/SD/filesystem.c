@@ -203,12 +203,18 @@ static uint8_t op_instrument_slot = 0;
  *
  * filesystem_saveKitDirectory_tick() streams kitset.kcg and six instrument
  * files without allocating a whole file image. storageTypes formats one line at
- * a time; these fields retain the current filename set, line buffer, byte
- * offset, and schema line index across asynchronous afatfs ticks.
+ * a time; these fields retain both visible LFN components and returned 8.3
+ * aliases. kitset.kcg stores the aliases because existing asyncfatfs open
+ * calls are alias-based, while scans display the LFN entries created by the new
+ * asyncfatfs long-name primitives. The remaining fields track the active line
+ * buffer, byte offset, and schema line index across asynchronous afatfs ticks.
  */
 static char op_save_kit_dir_name[STORAGE_KIT_FILENAME_MAX];
+static char op_save_kit_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_save_instrument_file[STORAGE_KIT_SLOT_COUNT]
                                     [STORAGE_KIT_FILENAME_MAX];
+static char op_save_instrument_display_file[STORAGE_KIT_SLOT_COUNT]
+                                           [AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_write_line_buf[FS_TEXT_LINE_MAX];
 static uint16_t op_write_line_len = 0u;
 static uint16_t op_write_line_offset = 0u;
@@ -1830,49 +1836,63 @@ static void filesystem_loadInstrument_tick(void)
     }
 }
 
-static char filesystem_saveNameChar(char c)
+static char filesystem_saveDisplayNameChar(char c)
 {
+    /*
+     * Sanitize one character for a firmware-created Kit LFN component.
+     *
+     * This is deliberately less destructive than the old 8.3 helper: spaces
+     * and mixed case are valid display-name data and must reach asyncfatfs so
+     * it can emit VFAT LFN entries. Only control bytes and FAT-forbidden
+     * punctuation are replaced.
+     */
+    if (c >= '0' && c <= '9')
+        return c;
     if (c >= 'a' && c <= 'z')
         return c;
     if (c >= 'A' && c <= 'Z')
-        return (char)(c + ('a' - 'A'));
-    if (c >= '0' && c <= '9')
         return c;
-    if (c == '_')
+    if (c == ' ' || c == '_' || c == '-' || c == '(' || c == ')')
         return c;
+    if (c == '\0')
+        return '\0';
     return '_';
 }
 
-static void filesystem_makeKitDirectorySaveName(char dst[STORAGE_KIT_FILENAME_MAX],
-                                                uint16_t slot)
+static void filesystem_makeKitDirectoryDisplayName(
+    char dst[AFATFS_LONG_FILENAME_MAX + 1u],
+    uint16_t slot)
 {
     uint16_t display = (uint16_t)(slot + 1u);
-    uint8_t pos = 3u;
+    uint8_t pos = 4u;
+    uint8_t last_meaningful = 4u;
     uint8_t i;
 
     /*
-     * Build the 8.3 physical Kit folder name used by firmware saves.
+     * Build the visible Kit folder name used by firmware saves.
      *
-     * asyncfatfs can scan LFNs but currently creates only short FAT entries.
-     * The saved folder therefore starts with the required 001..999 prefix and
-     * uses up to five sanitized kit-name characters after it. The scan fallback
-     * accepts this short alias and displays preset_currentName from cache.
+     * The directory component follows the spec-preferred `NNN Name` form and
+     * preserves spaces/case from the eight-character preset name field. The
+     * asyncfatfs LFN create primitive will choose a separate short alias for
+     * opening; callers must not treat this display string as an open name.
      */
     if (display > 999u)
         display = 999u;
     dst[0] = (char)('0' + (display / 100u));
     dst[1] = (char)('0' + ((display / 10u) % 10u));
     dst[2] = (char)('0' + (display % 10u));
-    for (i = 0u; i < 8u && pos < 8u; i++) {
-        char c = preset_currentName[i];
+    dst[3] = ' ';
+    for (i = 0u; i < 8u && pos < AFATFS_LONG_FILENAME_MAX; i++) {
+        char c = filesystem_saveDisplayNameChar(preset_currentName[i]);
         if (c == '\0')
             break;
-        if (c == ' ')
-            continue;
-        dst[pos++] = filesystem_saveNameChar(c);
+        dst[pos++] = c;
+        if (c != ' ')
+            last_meaningful = pos;
     }
-    if (pos == 3u) {
-        dst[pos++] = 'k';
+    pos = last_meaningful;
+    if (pos == 4u) {
+        dst[pos++] = 'K';
         dst[pos++] = 'i';
         dst[pos++] = 't';
     }
@@ -1885,17 +1905,20 @@ static void filesystem_prepareSavedInstrumentFilenames(const kit_t *kit)
     uint8_t slot;
 
     /*
-     * Generate duplicate-safe instrument filenames for one Kit save.
+     * Generate duplicate-safe visible instrument filenames for one Kit save.
      *
-     * Inputs: Scene-retained 16-character stems and slot types. Output: six
-     * 8.3-safe filenames. Only colliding basenames are regenerated with a
-     * voice suffix, so meaningful loaded names remain intact when unique while
-     * duplicate stems still produce distinct kitset references.
+     * Inputs: Scene-retained 16-character stems and slot types. Output: six LFN
+     * display components plus cleared alias slots. Only colliding visible names
+     * are regenerated with a voice suffix, so meaningful loaded names remain
+     * intact when unique while duplicate stems still produce distinct kitset
+     * references after asyncfatfs returns their aliases.
      */
     memset(forced, 0, sizeof(forced));
+    memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
-        storage_makeSavedInstrumentFilename(
-            op_save_instrument_file[slot],
+        storage_makeSavedInstrumentDisplayFilename(
+            op_save_instrument_display_file[slot],
+            sizeof(op_save_instrument_display_file[slot]),
             kit->instrument_stem[slot],
             kit->instruments[slot].type,
             (uint8_t)(slot + 1u),
@@ -1904,19 +1927,21 @@ static void filesystem_prepareSavedInstrumentFilenames(const kit_t *kit)
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
         uint8_t other;
         for (other = 0u; other < slot; other++) {
-            if (strcmp(op_save_instrument_file[slot],
-                       op_save_instrument_file[other]) == 0) {
+            if (strcmp(op_save_instrument_display_file[slot],
+                       op_save_instrument_display_file[other]) == 0) {
                 if (!forced[other]) {
-                    storage_makeSavedInstrumentFilename(
-                        op_save_instrument_file[other],
+                    storage_makeSavedInstrumentDisplayFilename(
+                        op_save_instrument_display_file[other],
+                        sizeof(op_save_instrument_display_file[other]),
                         kit->instrument_stem[other],
                         kit->instruments[other].type,
                         (uint8_t)(other + 1u),
                         1u);
                     forced[other] = 1u;
                 }
-                storage_makeSavedInstrumentFilename(
-                    op_save_instrument_file[slot],
+                storage_makeSavedInstrumentDisplayFilename(
+                    op_save_instrument_display_file[slot],
+                    sizeof(op_save_instrument_display_file[slot]),
                     kit->instrument_stem[slot],
                     kit->instruments[slot].type,
                     (uint8_t)(slot + 1u),
@@ -1990,9 +2015,11 @@ static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
 /* -----------------------------------------------------------------------
 ** SAVE KIT DIRECTORY state machine
 **
-** Creates/opens Kit/<NNNxxxxx>/, writes kitset.kcg, and writes six instrument
-** files from the active Scene kit. Stale unreferenced files may remain because
-** asyncfatfs has no recursive directory replace; kitset.kcg is authoritative.
+** Creates/opens Kit/<NNN Name>/ with asyncfatfs LFN creation, writes six
+** instrument files from the active Scene kit with visible LFN stems, then
+** writes kitset.kcg with the returned short aliases. Stale unreferenced files
+** may remain because asyncfatfs has no recursive directory replace;
+** kitset.kcg is authoritative for which member files belong to the Kit.
 ** ----------------------------------------------------------------------- */
 static void filesystem_saveKitDirectory_tick(void)
 {
@@ -2007,7 +2034,9 @@ static void filesystem_saveKitDirectory_tick(void)
         }
         if (!afatfs_chdir(NULL))
             return;
-        filesystem_makeKitDirectorySaveName(op_save_kit_dir_name, op_slot);
+        memset(op_save_kit_dir_name, 0, sizeof(op_save_kit_dir_name));
+        filesystem_makeKitDirectoryDisplayName(op_save_kit_display_name,
+                                               op_slot);
         filesystem_prepareSavedInstrumentFilenames(kit);
         op_phase = 1;
         return;
@@ -2051,7 +2080,9 @@ static void filesystem_saveKitDirectory_tick(void)
     case 6: /* MKDIR/OPEN target kit folder */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_mkdir(op_save_kit_dir_name, on_file_opened))
+        if (!afatfs_mkdir_lfn(op_save_kit_display_name,
+                              op_save_kit_dir_name,
+                              on_file_opened))
             return;
         op_phase = 7;
         return;
@@ -2081,7 +2112,8 @@ static void filesystem_saveKitDirectory_tick(void)
     case 10: /* WAIT CLOSE target kit */
         if (!op_close_done) return;
         op_kit_slot_dir = NULL;
-        op_phase = 11;
+        op_instrument_slot = 0u;
+        op_phase = 16;
         return;
 
     case 11: /* OPEN kitset.kcg */
@@ -2122,19 +2154,21 @@ static void filesystem_saveKitDirectory_tick(void)
     case 15: /* WAIT CLOSE kitset.kcg */
         if (!op_close_done) return;
         op_file = NULL;
-        op_instrument_slot = 0u;
-        op_phase = 16;
+        op_phase = 24;
         return;
 
     case 16: /* OPEN next instrument */
         if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
-            op_phase = 24;
+            op_phase = 11;
             return;
         }
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(op_save_instrument_file[op_instrument_slot],
-                          "w", on_file_opened)) {
+        if (!afatfs_fopen_lfn(
+                op_save_instrument_display_file[op_instrument_slot],
+                "w",
+                op_save_instrument_file[op_instrument_slot],
+                on_file_opened)) {
             return;
         }
         op_phase = 17;
@@ -2181,15 +2215,29 @@ static void filesystem_saveKitDirectory_tick(void)
     case 24: /* RETURN ROOT + UPDATE CACHE */
         if (!afatfs_chdir(NULL))
             return;
-        kit_slot_present[op_slot] = 1u;
-        filesystem_copyEightCharName(kit_slot_name[op_slot],
-                                     preset_currentName);
-        kit_slot_name[op_slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-        storage_copyFilename(kit_slot_open_name[op_slot],
-                             op_save_kit_dir_name);
         {
+            uint16_t parsed_slot;
+            char parsed_display[STORAGE_KIT_DISPLAY_NAME_LEN];
             uint8_t found = 0u;
             uint16_t i;
+            /*
+             * Update the Kit browser cache with the same display/open-name pair
+             * that was physically created: the LFN display component and the
+             * returned asyncfatfs short alias. This removes the previous false
+             * register where the UI showed preset_currentName even though the
+             * card only contained a different 8.3 entry.
+             */
+            if (storage_parseNumberedFolder(op_save_kit_display_name,
+                                            &parsed_slot,
+                                            parsed_display) &&
+                parsed_slot == op_slot) {
+                kit_slot_present[op_slot] = 1u;
+                memcpy(kit_slot_name[op_slot], parsed_display,
+                       STORAGE_KIT_DISPLAY_NAME_LEN);
+                kit_slot_name[op_slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+                storage_copyFilename(kit_slot_open_name[op_slot],
+                                     op_save_kit_dir_name);
+            }
             for (i = 0u; i < kb_numKits; i++) {
                 if (kb_map[i] == op_slot) {
                     found = 1u;
@@ -4833,7 +4881,10 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_write_line_offset = 0u;
     op_write_line_index = 0u;
     memset(op_save_kit_dir_name, 0, sizeof(op_save_kit_dir_name));
+    memset(op_save_kit_display_name, 0, sizeof(op_save_kit_display_name));
     memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
+    memset(op_save_instrument_display_file, 0,
+           sizeof(op_save_instrument_display_file));
     op_kit_root_dir = NULL;
     op_kit_slot_dir = NULL;
     op_lfn_valid = 0;
@@ -4972,9 +5023,10 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb)
      * Post a new-format Kit directory save.
      *
      * Inputs: zero-based Kit folder slot and completion callback. Output: an
-     * async operation that creates/opens Kit/<NNNxxxxx>/, writes kitset.kcg,
-     * and writes six instrument files from the active Scene kit. This boundary
-     * keeps directory saves separate from legacy flat Morph saves.
+     * async operation that creates/opens Kit/<NNN Name>/ with an LFN display
+     * entry, writes six LFN-visible instrument files from the active Scene kit,
+     * then writes kitset.kcg with the returned open aliases. This boundary keeps
+     * directory saves separate from legacy flat Morph saves.
      */
     if (slot >= STORAGE_KIT_MAX_SLOTS)
         return false;

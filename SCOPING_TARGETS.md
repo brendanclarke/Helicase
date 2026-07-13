@@ -320,10 +320,10 @@ Implement load/save operations for the settled file types in
 - Session 034 completed voice-6/track-7 Choke storage and dynamic menu/runtime
   resolution, plus staged arbitrary Instrument replacement without hardcoded
   parameter lists. Preserve those semantics in every save implementation.
-- Session 035 completed normal Kit Save. It writes `kitset.kcg` plus six
-  instrument files in the same logical shape the current loader accepts. Current
-  firmware-created physical names are 8.3-safe short names because asyncfatfs
-  can scan LFNs but does not create LFN directory entries.
+- Session 035 completed normal Kit Save. Session 036 repaired its filesystem
+  naming path: Kit Save now creates VFAT LFN entries for the visible Kit folder
+  and six instrument files, while retaining returned 8.3 aliases for
+  `kitset.kcg` and open paths.
 - Session 035 widened root Kit slots to 001..999 and stores Kit slot indices as
   `uint16_t` through filesystem, presetManager, menu, and kitBrowser.
 - Session 035 added storage-only LFO `self` routing: load resolves `self` on
@@ -351,13 +351,11 @@ Implement load/save operations for the settled file types in
 
 asyncfatfs note for future save code:
 
-- Session 035 did not add new asyncfatfs primitives. It reused existing
-  `afatfs_mkdir()`, `afatfs_fopen(..., "w", ...)`, `afatfs_fclose()`, and
-  `afatfs_chdir()` through a filesystem-owned async state machine. Future
-  Scene/Bank/Instrument save code should reuse/extend that filesystem boundary,
-  not recreate FAT file writers.
-- Missing core primitives before autosave/power-loss-safe replacement are true
-  LFN creation, atomic rename/replace, and recursive directory replace/delete.
+- Session 036 adds asyncfatfs LFN component creation via `afatfs_mkdir_lfn()`
+  and `afatfs_fopen_lfn()`. Future Scene/Bank/Instrument save code should
+  reuse/extend that filesystem boundary, not recreate FAT file writers.
+- Missing core primitives before autosave/power-loss-safe replacement are
+  atomic rename/replace and recursive directory replace/delete.
 
 ### 3.7 Debounced Autosave and Reload
 

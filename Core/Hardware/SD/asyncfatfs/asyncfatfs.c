@@ -112,6 +112,7 @@ enum {
     AFATFS_CREATEFILE_PHASE_INITIAL = 0,
     AFATFS_CREATEFILE_PHASE_FIND_FILE,
     AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE,
+    AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE,
     AFATFS_CREATEFILE_PHASE_SUCCESS,
     AFATFS_CREATEFILE_PHASE_FAILURE,
 };
@@ -208,6 +209,28 @@ typedef struct afatfsCreateFile_t {
 
     uint8_t phase;
     uint8_t filename[FAT_FILENAME_LENGTH];
+    /*
+     * Optional long-name creation state.
+     *
+     * The original asyncfatfs create path only carries one 11-byte FAT short
+     * name. The LFN-capable path keeps that exact SFN in filename[] so all
+     * existing open/truncate/close logic still works, and adds a bounded ASCII
+     * display component used only when a new directory entry must be created.
+     * openNameOut is caller-owned storage that receives the generated 8.3 alias
+     * once the request has selected it; callers can keep using short-alias
+     * opens without learning raw FAT internals. freeRunStart/freeRunLength are
+     * populated while scanning the current directory for a sector-local run
+     * large enough to hold LFN entries plus the final SFN entry.
+     */
+    uint8_t longNameEnabled;
+    uint8_t lfnEntryCount;
+    uint8_t freeRunLength;
+    uint8_t scanLongNameValid;
+    uint16_t aliasOrdinal;
+    char longName[AFATFS_LONG_FILENAME_MAX + 1u];
+    char scanLongName[AFATFS_LONG_FILENAME_MAX + 1u];
+    char *openNameOut;
+    afatfsDirEntryPointer_t freeRunStart;
 } afatfsCreateFile_t;
 
 typedef struct afatfsSeek_t {
@@ -2539,6 +2562,431 @@ static void afatfs_fileLoadDirectoryEntry(afatfsFile_t *file, fatDirectoryEntry_
         : AFATFS_FILE_TYPE_NORMAL;
 }
 
+static bool afatfs_isLfnDirectoryEntry(const fatDirectoryEntry_t *entry)
+{
+    /*
+     * Recognize FAT long-filename fragments.
+     *
+     * This helper deliberately checks the masked low attribute nibble instead
+     * of comparing every bit in attrib. The same convention is already used by
+     * filesystem.c scanners and keeps the low-level create matcher aligned with
+     * the higher-level load/display code.
+     */
+    return entry && ((entry->attrib & 0x0f) == 0x0f);
+}
+
+static uint8_t afatfs_lfnChecksum(const uint8_t fatFilename[FAT_FILENAME_LENGTH])
+{
+    uint8_t sum = 0u;
+
+    /*
+     * Standard VFAT checksum for tying an LFN chain to its owning short entry.
+     *
+     * Every LFN fragment stores this byte. Scanners use it to prove the
+     * preceding fragments belong to the following SFN, and host operating
+     * systems rely on it for mixed-case/space display names.
+     */
+    for (uint8_t i = 0u; i < FAT_FILENAME_LENGTH; i++)
+        sum = (uint8_t)(((sum & 1u) ? 0x80u : 0u) + (sum >> 1u) +
+                        fatFilename[i]);
+    return sum;
+}
+
+static bool afatfs_lfnCharAllowed(char c)
+{
+    /*
+     * Filter one ASCII character for firmware-created LFNs.
+     *
+     * FAT LFNs are UTF-16, but this firmware UI and storage schema are ASCII.
+     * We preserve printable ASCII including spaces and case, while replacing
+     * FAT-forbidden punctuation before it reaches on-card metadata.
+     */
+    if (c < 0x20 || c > 0x7e)
+        return false;
+    switch (c) {
+    case '"':
+    case '*':
+    case '/':
+    case ':':
+    case '<':
+    case '>':
+    case '?':
+    case '\\':
+    case '|':
+    case 0x7f:
+        return false;
+    default:
+        return true;
+    }
+}
+
+static char afatfs_lfnSanitizeChar(char c)
+{
+    /*
+     * Convert unsupported display-name bytes into a visible safe placeholder.
+     *
+     * This is intentionally separate from SFN alias generation: LFNs preserve
+     * spaces and case, whereas aliases are an uppercase 8.3 compatibility key.
+     */
+    return afatfs_lfnCharAllowed(c) ? c : '_';
+}
+
+static char afatfs_sfnChar(char c)
+{
+    /*
+     * Convert one display-name byte into a legal SFN alias byte.
+     *
+     * Spaces and punctuation are skipped by the alias builder. This function
+     * only returns characters that can safely appear in the generated 8.3
+     * alias before fat_convertFilenameToFATStyle() copies it to the raw entry.
+     */
+    if (c >= 'a' && c <= 'z')
+        return (char)(c - ('a' - 'A'));
+    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        return c;
+    if (c == '_')
+        return c;
+    return '\0';
+}
+
+static void afatfs_copyShortAliasText(
+    const uint8_t fatFilename[FAT_FILENAME_LENGTH],
+    char out[AFATFS_SHORT_FILENAME_MAX])
+{
+    /*
+     * Convert the selected raw SFN alias back to printable 8.3 text.
+     *
+     * Callers cache this returned open name and pass it to ordinary
+     * afatfs_fopen(); keeping the conversion here prevents higher layers from
+     * depending on the raw 11-byte FAT layout.
+     */
+    fat_convertFATStyleToFilename((const char *)fatFilename, out);
+}
+
+static uint8_t afatfs_copySanitizedLongName(char *dst, const char *src)
+{
+    uint8_t len = 0u;
+
+    /*
+     * Copy one path component into bounded create-state storage.
+     *
+     * asyncfatfs still does not accept slash-separated paths. The long-name
+     * API is a component create/open primitive in the current working
+     * directory, mirroring afatfs_fopen()/afatfs_mkdir().
+     */
+    if (!dst || !src)
+        return 0u;
+    while (*src != '\0' && len < AFATFS_LONG_FILENAME_MAX) {
+        dst[len++] = afatfs_lfnSanitizeChar(*src++);
+    }
+    dst[len] = '\0';
+    return len;
+}
+
+static bool afatfs_generateShortAlias(afatfsCreateFile_t *opState)
+{
+    char base[9];
+    char ext[4];
+    char alias[AFATFS_SHORT_FILENAME_MAX];
+    const char *name = opState->longName;
+    const char *dot = NULL;
+    uint8_t baseLen = 0u;
+    uint8_t extLen = 0u;
+    uint8_t aliasLen = 0u;
+    uint16_t ordinal = opState->aliasOrdinal;
+
+    /*
+     * Generate one deterministic 8.3 alias candidate for an LFN component.
+     *
+     * Ordinal zero tries the most readable alias first. Later ordinals use the
+     * familiar "~N" suffix so colliding long names can still live in the same
+     * directory. The caller scans for collisions and bumps aliasOrdinal until a
+     * matching existing entry or free alias is found.
+     */
+    memset(base, 0, sizeof(base));
+    memset(ext, 0, sizeof(ext));
+    memset(alias, 0, sizeof(alias));
+
+    for (const char *p = name; *p != '\0'; p++) {
+        if (*p == '.')
+            dot = p;
+    }
+
+    for (const char *p = name; *p != '\0' && p != dot; p++) {
+        char c = afatfs_sfnChar(*p);
+        if (c != '\0' && baseLen < sizeof(base) - 1u)
+            base[baseLen++] = c;
+    }
+    if (baseLen == 0u) {
+        base[baseLen++] = 'F';
+        base[baseLen++] = 'I';
+        base[baseLen++] = 'L';
+        base[baseLen++] = 'E';
+    }
+
+    if (dot && dot[1] != '\0') {
+        for (const char *p = dot + 1; *p != '\0' && extLen < 3u; p++) {
+            char c = afatfs_sfnChar(*p);
+            if (c != '\0')
+                ext[extLen++] = c;
+        }
+    }
+
+    if (ordinal > 0u) {
+        char suffix[6];
+        uint8_t suffixLen = 0u;
+        uint16_t value = ordinal;
+        char digits[5];
+        uint8_t digitCount = 0u;
+        uint8_t baseLimit;
+
+        if (ordinal > 9999u)
+            return false;
+        do {
+            digits[digitCount++] = (char)('0' + (value % 10u));
+            value = (uint16_t)(value / 10u);
+        } while (value != 0u && digitCount < sizeof(digits));
+        suffix[suffixLen++] = '~';
+        while (digitCount > 0u)
+            suffix[suffixLen++] = digits[--digitCount];
+        suffix[suffixLen] = '\0';
+
+        baseLimit = (uint8_t)(8u - suffixLen);
+        if (baseLen > baseLimit)
+            baseLen = baseLimit;
+        memcpy(alias, base, baseLen);
+        aliasLen = baseLen;
+        memcpy(alias + aliasLen, suffix, suffixLen);
+        aliasLen = (uint8_t)(aliasLen + suffixLen);
+    } else {
+        if (baseLen > 8u)
+            baseLen = 8u;
+        memcpy(alias, base, baseLen);
+        aliasLen = baseLen;
+    }
+
+    if (extLen > 0u) {
+        alias[aliasLen++] = '.';
+        memcpy(alias + aliasLen, ext, extLen);
+        aliasLen = (uint8_t)(aliasLen + extLen);
+    }
+    alias[aliasLen] = '\0';
+
+    fat_convertFilenameToFATStyle(alias, opState->filename);
+    if (opState->openNameOut)
+        afatfs_copyShortAliasText(opState->filename, opState->openNameOut);
+    return true;
+}
+
+static void afatfs_lfnScanReset(afatfsCreateFile_t *opState)
+{
+    /*
+     * Clear the in-progress LFN scanner for create/open matching.
+     *
+     * The create state machine walks ordinary directory entries before it
+     * decides whether to open, collide, or create. This scanner mirrors the
+     * higher-level directory browsers so a matching SFN alias is only reused
+     * when the preceding LFN chain matches the requested display name.
+     */
+    memset(opState->scanLongName, 0, sizeof(opState->scanLongName));
+    opState->scanLongNameValid = 0u;
+}
+
+static void afatfs_lfnScanAppend(afatfsCreateFile_t *opState,
+                                 const fatDirectoryEntry_t *entry)
+{
+    static const uint8_t offsets[13] = {
+        1u, 3u, 5u, 7u, 9u,
+        14u, 16u, 18u, 20u, 22u, 24u,
+        28u, 30u
+    };
+    const uint8_t *raw = (const uint8_t *)entry;
+    uint8_t seq = raw[0] & 0x1fu;
+
+    /*
+     * Reconstruct one ASCII-safe LFN while scanning for existing aliases.
+     *
+     * Only the low ASCII subset is supported for firmware-created names today.
+     * Non-ASCII entries are treated as mismatches, which prevents overwriting a
+     * host-created file whose alias happens to collide with our generated SFN.
+     */
+    if (seq == 0u || seq > ((AFATFS_LONG_FILENAME_MAX + 12u) / 13u)) {
+        afatfs_lfnScanReset(opState);
+        return;
+    }
+    if (raw[0] & 0x40u) {
+        memset(opState->scanLongName, 0, sizeof(opState->scanLongName));
+        opState->scanLongNameValid = 1u;
+    } else if (!opState->scanLongNameValid) {
+        return;
+    }
+
+    uint8_t pos = (uint8_t)((seq - 1u) * 13u);
+    for (uint8_t i = 0u; i < 13u && pos < AFATFS_LONG_FILENAME_MAX; i++, pos++) {
+        uint16_t ch = (uint16_t)raw[offsets[i]] |
+                      ((uint16_t)raw[offsets[i] + 1u] << 8);
+        if (ch == 0x0000u)
+            break;
+        if (ch == 0xffffu)
+            continue;
+        if (ch >= 0x80u) {
+            opState->scanLongNameValid = 0u;
+            return;
+        }
+        opState->scanLongName[pos] = (char)ch;
+    }
+}
+
+static bool afatfs_existingEntryMatchesRequest(afatfsCreateFile_t *opState)
+{
+    /*
+     * Decide whether a matching SFN alias is the requested long name.
+     *
+     * Short-name creates retain old behavior. Long-name creates only reuse an
+     * existing alias if the preceding LFN chain matches the requested display
+     * component. Otherwise the alias is treated as a collision and the caller
+     * generates a "~N" candidate.
+     */
+    if (!opState->longNameEnabled)
+        return true;
+    return opState->scanLongNameValid &&
+           strcmp(opState->scanLongName, opState->longName) == 0;
+}
+
+static void afatfs_noteFreeDirectoryEntry(afatfsCreateFile_t *opState,
+                                          const afatfsFinder_t *finder)
+{
+    uint8_t needed = (uint8_t)(opState->lfnEntryCount + 1u);
+
+    /*
+     * Track a contiguous free run in one directory sector.
+     *
+     * VFAT LFN entries must immediately precede their owning SFN entry. By
+     * constraining the first implementation to a sector-local run, the writer
+     * can later cache one sector and write the whole chain atomically relative
+     * to asyncfatfs cache ownership, without assuming directory clusters are
+     * physically contiguous.
+     */
+    if (finder->entryIndex < 0)
+        return;
+    if (opState->freeRunLength == 0u ||
+        finder->sectorNumberPhysical != opState->freeRunStart.sectorNumberPhysical ||
+        finder->entryIndex == 0) {
+        opState->freeRunStart = *finder;
+        opState->freeRunLength = 1u;
+    } else {
+        opState->freeRunLength++;
+    }
+    if (opState->freeRunLength > AFATFS_FILES_PER_DIRECTORY_SECTOR)
+        opState->freeRunLength = AFATFS_FILES_PER_DIRECTORY_SECTOR;
+    (void)needed;
+}
+
+static bool afatfs_freeRunIsReady(const afatfsCreateFile_t *opState)
+{
+    /*
+     * Report whether the current scan has found enough adjacent slots for the
+     * requested LFN fragment count plus the final SFN entry.
+     */
+    return opState->freeRunLength >= (uint8_t)(opState->lfnEntryCount + 1u);
+}
+
+static void afatfs_writeLfnChar(uint8_t *raw, uint8_t offset, uint16_t value)
+{
+    raw[offset] = (uint8_t)(value & 0xffu);
+    raw[offset + 1u] = (uint8_t)(value >> 8);
+}
+
+static void afatfs_writeLfnDirectoryEntry(fatDirectoryEntry_t *entry,
+                                          const afatfsCreateFile_t *opState,
+                                          uint8_t lfnIndexFromStart,
+                                          uint8_t checksum)
+{
+    static const uint8_t offsets[13] = {
+        1u, 3u, 5u, 7u, 9u,
+        14u, 16u, 18u, 20u, 22u, 24u,
+        28u, 30u
+    };
+    uint8_t ordinal = (uint8_t)(opState->lfnEntryCount - lfnIndexFromStart);
+    uint8_t nameOffset = (uint8_t)((ordinal - 1u) * 13u);
+    uint8_t wroteTerminator = 0u;
+    uint8_t *raw = (uint8_t *)entry;
+
+    /*
+     * Emit one VFAT LFN fragment.
+     *
+     * Directory order is highest ordinal first, then descending fragments, then
+     * the SFN entry. The scanner reconstructs text by using ordinal to place
+     * each 13-character fragment back into the display-name buffer.
+     */
+    memset(entry, 0, sizeof(*entry));
+    raw[0] = ordinal;
+    if (lfnIndexFromStart == 0u)
+        raw[0] |= 0x40u;
+    entry->attrib = 0x0f;
+    raw[12] = 0u;
+    raw[13] = checksum;
+    entry->firstClusterLow = 0u;
+
+    for (uint8_t i = 0u; i < 13u; i++) {
+        uint16_t value;
+        char c = opState->longName[nameOffset + i];
+        if (!wroteTerminator && c != '\0') {
+            value = (uint16_t)(uint8_t)c;
+        } else if (!wroteTerminator) {
+            value = 0x0000u;
+            wroteTerminator = 1u;
+        } else {
+            value = 0xffffu;
+        }
+        afatfs_writeLfnChar(raw, offsets[i], value);
+    }
+}
+
+static afatfsOperationStatus_e afatfs_createLongDirectoryEntries(
+    afatfsFile_t *file)
+{
+    afatfsCreateFile_t *opState = &file->operation.state.createFile;
+    uint8_t *sector;
+    afatfsOperationStatus_e status;
+    uint8_t checksum = afatfs_lfnChecksum(opState->filename);
+    fatDirectoryEntry_t *entries;
+    uint8_t sfnIndex;
+
+    /*
+     * Write the reserved LFN run and final SFN entry into one cached sector.
+     *
+     * The SFN entry is written last because it is the authoritative entry that
+     * ordinary FAT readers open. If power is lost before that point, the card
+     * may contain orphan LFN fragments but not a complete file/directory entry.
+     */
+    status = afatfs_cacheSector(opState->freeRunStart.sectorNumberPhysical,
+                                &sector,
+                                AFATFS_CACHE_READ | AFATFS_CACHE_WRITE,
+                                0);
+    if (status != AFATFS_OPERATION_SUCCESS)
+        return status;
+
+    entries = (fatDirectoryEntry_t *)sector + opState->freeRunStart.entryIndex;
+    for (uint8_t i = 0u; i < opState->lfnEntryCount; i++)
+        afatfs_writeLfnDirectoryEntry(&entries[i], opState, i, checksum);
+
+    sfnIndex = opState->lfnEntryCount;
+    memset(&entries[sfnIndex], 0, sizeof(entries[sfnIndex]));
+    memcpy(entries[sfnIndex].filename, opState->filename, FAT_FILENAME_LENGTH);
+    entries[sfnIndex].attrib = file->attrib;
+    entries[sfnIndex].creationDate = AFATFS_DEFAULT_FILE_DATE;
+    entries[sfnIndex].creationTime = AFATFS_DEFAULT_FILE_TIME;
+    entries[sfnIndex].lastWriteDate = AFATFS_DEFAULT_FILE_DATE;
+    entries[sfnIndex].lastWriteTime = AFATFS_DEFAULT_FILE_TIME;
+
+    afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
+    file->directoryEntryPos = opState->freeRunStart;
+    file->directoryEntryPos.entryIndex =
+        (int16_t)(file->directoryEntryPos.entryIndex + opState->lfnEntryCount);
+    return AFATFS_OPERATION_SUCCESS;
+}
+
 static void afatfs_createFileContinue(afatfsFile_t *file)
 {
     afatfsCreateFile_t *opState = &file->operation.state.createFile;
@@ -2550,6 +2998,8 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
     switch (opState->phase) {
         case AFATFS_CREATEFILE_PHASE_INITIAL:
             afatfs_findFirst(&afatfs.currentDirectory, &file->directoryEntryPos);
+            opState->freeRunLength = 0u;
+            afatfs_lfnScanReset(opState);
             opState->phase = AFATFS_CREATEFILE_PHASE_FIND_FILE;
             goto doMore;
         break;
@@ -2559,11 +3009,30 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
 
                 switch (status) {
                     case AFATFS_OPERATION_SUCCESS:
-                        // Is this the last entry in the directory?
-                        if (entry == NULL || fat_isDirectoryEntryTerminator(entry)) {
+                        /*
+                         * Directory exhaustion and terminators are where the
+                         * create path diverges. Short-name creation can use
+                         * the old one-entry allocator. LFN creation must keep
+                         * looking until it has a sector-local run large enough
+                         * for every LFN fragment plus the final SFN entry.
+                         */
+                        if (entry == NULL) {
                             afatfs_findLast(&afatfs.currentDirectory);
 
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0) {
+                                if (opState->longNameEnabled) {
+                                    status = afatfs_extendSubdirectory(
+                                        &afatfs.currentDirectory, NULL, NULL);
+                                    if (status == AFATFS_OPERATION_SUCCESS) {
+                                        opState->freeRunLength = 0u;
+                                        opState->phase = AFATFS_CREATEFILE_PHASE_FIND_FILE;
+                                        break;
+                                    }
+                                    if (status == AFATFS_OPERATION_IN_PROGRESS)
+                                        break;
+                                    opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                                    goto doMore;
+                                }
                                 // The file didn't already exist, so we can create it. Allocate a new directory entry
                                 afatfs_findFirst(&afatfs.currentDirectory, &file->directoryEntryPos);
 
@@ -2575,14 +3044,68 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                 opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
                                 goto doMore;
                             }
-                        } else if (strncmp(entry->filename, (char*) opState->filename, FAT_FILENAME_LENGTH) == 0) {
-                            // We found a file with this name!
-                            afatfs_fileLoadDirectoryEntry(file, entry);
-
+                        } else if (!opState->longNameEnabled &&
+                                   fat_isDirectoryEntryTerminator(entry)) {
                             afatfs_findLast(&afatfs.currentDirectory);
 
-                            opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
+                            if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0) {
+                                afatfs_findFirst(&afatfs.currentDirectory,
+                                                 &file->directoryEntryPos);
+                                opState->phase =
+                                    AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE;
+                                goto doMore;
+                            }
+                            opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
                             goto doMore;
+                        } else if (opState->longNameEnabled &&
+                                   (fat_isDirectoryEntryEmpty(entry) ||
+                                    fat_isDirectoryEntryTerminator(entry))) {
+                            afatfs_noteFreeDirectoryEntry(opState,
+                                                          &file->directoryEntryPos);
+                            if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0 &&
+                                afatfs_freeRunIsReady(opState)) {
+                                afatfs_findLast(&afatfs.currentDirectory);
+                                opState->phase =
+                                    AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE;
+                                goto doMore;
+                            }
+                            afatfs_lfnScanReset(opState);
+                        } else if (afatfs_isLfnDirectoryEntry(entry)) {
+                            opState->freeRunLength = 0u;
+                            if (opState->longNameEnabled)
+                                afatfs_lfnScanAppend(opState, entry);
+                            else
+                                afatfs_lfnScanReset(opState);
+                        } else if (strncmp(entry->filename, (char*) opState->filename, FAT_FILENAME_LENGTH) == 0) {
+                            if (afatfs_existingEntryMatchesRequest(opState)) {
+                                // We found a file with this name!
+                                afatfs_fileLoadDirectoryEntry(file, entry);
+
+                                afatfs_findLast(&afatfs.currentDirectory);
+
+                                opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
+                                goto doMore;
+                            }
+                            /*
+                             * The SFN alias collided with another LFN entry.
+                             * Generate the next "~N" candidate and restart the
+                             * directory scan from the beginning so duplicate
+                             * handling remains deterministic.
+                             */
+                            opState->aliasOrdinal++;
+                            if (!afatfs_generateShortAlias(opState)) {
+                                afatfs_findLast(&afatfs.currentDirectory);
+                                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                                goto doMore;
+                            }
+                            afatfs_findFirst(&afatfs.currentDirectory,
+                                             &file->directoryEntryPos);
+                            opState->freeRunLength = 0u;
+                            afatfs_lfnScanReset(opState);
+                            break;
+                        } else {
+                            opState->freeRunLength = 0u;
+                            afatfs_lfnScanReset(opState);
                         } // Else this entry doesn't match, fall through and continue the search
                     break;
                     case AFATFS_OPERATION_FAILURE:
@@ -2612,6 +3135,20 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                 fprintf(stderr, "Adding directory entry for %.*s to sector %u\n", FAT_FILENAME_LENGTH, opState->filename, file->directoryEntryPos.sectorNumberPhysical);
 #endif
 
+                opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
+                goto doMore;
+            } else if (status == AFATFS_OPERATION_FAILURE) {
+                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                goto doMore;
+            }
+        break;
+        case AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE:
+            status = afatfs_createLongDirectoryEntries(file);
+
+            if (status == AFATFS_OPERATION_SUCCESS) {
+#ifdef AFATFS_DEBUG_VERBOSE
+                fprintf(stderr, "Adding LFN directory entry for %s as %.*s to sector %u\n", opState->longName, FAT_FILENAME_LENGTH, opState->filename, file->directoryEntryPos.sectorNumberPhysical);
+#endif
                 opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
                 goto doMore;
             } else if (status == AFATFS_OPERATION_FAILURE) {
@@ -2680,8 +3217,18 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
             opState->callback(file);
         break;
         case AFATFS_CREATEFILE_PHASE_FAILURE:
+            /*
+             * Release the handle on every failed create/open.
+             *
+             * The old path only changed type, but the LFN path has more
+             * validation/collision-failure exits. Clearing the queued operation
+             * here guarantees callers can retry and the open-file pool does not
+             * retain a dead CREATE_FILE operation after callback(NULL).
+             */
             file->type = AFATFS_FILE_TYPE_NONE;
-            opState->callback(NULL);
+            file->operation.operation = AFATFS_FILE_OPERATION_NONE;
+            if (opState->callback)
+                opState->callback(NULL);
         break;
     }
 }
@@ -2754,10 +3301,17 @@ bool afatfs_funlink(afatfsFilePtr_t file, afatfsCallback_t callback)
  *                    it does not exist.
  * callback         - Called when the operation is complete
  */
-static afatfsFilePtr_t afatfs_createFile(afatfsFilePtr_t file, const char *name, uint8_t attrib, uint8_t fileMode,
+static afatfsFilePtr_t afatfs_createFileInternal(
+        afatfsFilePtr_t file,
+        const char *name,
+        uint8_t attrib,
+        uint8_t fileMode,
+        char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+        bool createLongName,
         afatfsFileCallback_t callback)
 {
     afatfsCreateFile_t *opState = &file->operation.state.createFile;
+    uint8_t longNameLength = 0u;
 
     afatfs_initFileHandle(file);
 
@@ -2773,7 +3327,40 @@ static afatfsFilePtr_t afatfs_createFile(afatfsFilePtr_t file, const char *name,
         file->attrib = afatfs.currentDirectory.attrib;
         file->type = afatfs.currentDirectory.type;
     } else {
-        fat_convertFilenameToFATStyle(name, opState->filename);
+        /*
+         * Select the physical short alias before the async create scan starts.
+         *
+         * Legacy callers pass createLongName=false and retain the exact old
+         * behavior: one input component is converted directly to an uppercase
+         * 8.3 FAT name. LFN callers keep a sanitized display component in
+         * opState->longName and generate an SFN alias candidate that the scan
+         * can collision-test and return through openNameOut.
+         */
+        if (createLongName) {
+            longNameLength = afatfs_copySanitizedLongName(opState->longName,
+                                                         name);
+            if (longNameLength == 0u) {
+                file->type = AFATFS_FILE_TYPE_NONE;
+                file->operation.operation = AFATFS_FILE_OPERATION_NONE;
+                if (callback)
+                    callback(NULL);
+                return file;
+            }
+            opState->longNameEnabled = 1u;
+            opState->lfnEntryCount =
+                (uint8_t)((longNameLength + 12u) / 13u);
+            opState->aliasOrdinal = 0u;
+            opState->openNameOut = openNameOut;
+            if (!afatfs_generateShortAlias(opState)) {
+                file->type = AFATFS_FILE_TYPE_NONE;
+                file->operation.operation = AFATFS_FILE_OPERATION_NONE;
+                if (callback)
+                    callback(NULL);
+                return file;
+            }
+        } else {
+            fat_convertFilenameToFATStyle(name, opState->filename);
+        }
         file->attrib = attrib;
 
         if ((attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) != 0) {
@@ -2795,6 +3382,20 @@ static afatfsFilePtr_t afatfs_createFile(afatfsFilePtr_t file, const char *name,
     afatfs_createFileContinue(file);
 
     return file;
+}
+
+static afatfsFilePtr_t afatfs_createFile(afatfsFilePtr_t file, const char *name, uint8_t attrib, uint8_t fileMode,
+        afatfsFileCallback_t callback)
+{
+    /*
+     * Compatibility wrapper for original short-name callers.
+     *
+     * Keeping this small wrapper means all pre-existing call sites continue to
+     * route through the same symbol and keep 8.3-only semantics unless they opt
+     * into the explicit LFN API.
+     */
+    return afatfs_createFileInternal(file, name, attrib, fileMode, NULL, false,
+                                     callback);
 }
 
 static void afatfs_fcloseContinue(afatfsFilePtr_t file)
@@ -2889,6 +3490,35 @@ bool afatfs_mkdir(const char *filename, afatfsFileCallback_t callback)
     return file != NULL;
 }
 
+bool afatfs_mkdir_lfn(const char *displayName,
+                      char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                      afatfsFileCallback_t callback)
+{
+    afatfsFilePtr_t file = afatfs_allocateFileHandle();
+
+    /*
+     * Create/open a directory with a VFAT display name.
+     *
+     * The returned handle behaves exactly like afatfs_mkdir(); the only new
+     * contract is that a newly-created directory receives LFN fragments for
+     * displayName and openNameOut receives the generated 8.3 alias. Higher
+     * layers can cache the alias for existing afatfs_fopen()/chdir flows while
+     * scans display the preserved long name.
+     */
+    if (file) {
+        afatfs_createFileInternal(file, displayName,
+                                  FAT_FILE_ATTRIBUTE_DIRECTORY,
+                                  AFATFS_FILE_MODE_CREATE |
+                                      AFATFS_FILE_MODE_READ |
+                                      AFATFS_FILE_MODE_WRITE,
+                                  openNameOut, true, callback);
+    } else if (callback) {
+        callback(NULL);
+    }
+
+    return file != NULL;
+}
+
 /**
  * Change the working directory to the directory with the given handle (use fopen). Pass NULL for `directory` in order to
  * change to the root directory.
@@ -2931,6 +3561,49 @@ bool afatfs_chdir(afatfsFilePtr_t directory)
     }
 }
 
+static uint8_t afatfs_modeFromString(const char *mode)
+{
+    uint8_t fileMode = 0;
+
+    /*
+     * Parse the original asyncfatfs fopen mode strings in one shared place.
+     *
+     * The new LFN open path must behave exactly like afatfs_fopen() for read,
+     * write, append, read/write, and optional contiguous/freefile flags. Keeping
+     * this as a helper prevents future mode fixes from accidentally applying to
+     * only one filename family.
+     */
+    if (!mode)
+        return 0u;
+    switch (mode[0]) {
+        case 'r':
+            fileMode = AFATFS_FILE_MODE_READ;
+        break;
+        case 'w':
+            fileMode = AFATFS_FILE_MODE_WRITE | AFATFS_FILE_MODE_CREATE;
+        break;
+        case 'a':
+            fileMode = AFATFS_FILE_MODE_APPEND | AFATFS_FILE_MODE_CREATE;
+        break;
+    }
+
+    switch (mode[1]) {
+        case '+':
+            fileMode |= AFATFS_FILE_MODE_READ;
+
+            if (fileMode == AFATFS_FILE_MODE_READ) {
+                fileMode |= AFATFS_FILE_MODE_WRITE;
+            }
+        break;
+        case 's':
+#ifdef AFATFS_USE_FREEFILE
+            fileMode |= AFATFS_FILE_MODE_CONTIGUOUS | AFATFS_FILE_MODE_RETAIN_DIRECTORY;
+#endif
+        break;
+    }
+    return fileMode;
+}
+
 /**
  * Begin the process of opening a file with the given name in the current working directory (paths in the filename are
  * not supported) using the given mode.
@@ -2959,35 +3632,8 @@ bool afatfs_chdir(afatfsFilePtr_t directory)
  */
 bool afatfs_fopen(const char *filename, const char *mode, afatfsFileCallback_t complete)
 {
-    uint8_t fileMode = 0;
+    uint8_t fileMode = afatfs_modeFromString(mode);
     afatfsFilePtr_t file;
-
-    switch (mode[0]) {
-        case 'r':
-            fileMode = AFATFS_FILE_MODE_READ;
-        break;
-        case 'w':
-            fileMode = AFATFS_FILE_MODE_WRITE | AFATFS_FILE_MODE_CREATE;
-        break;
-        case 'a':
-            fileMode = AFATFS_FILE_MODE_APPEND | AFATFS_FILE_MODE_CREATE;
-        break;
-    }
-
-    switch (mode[1]) {
-        case '+':
-            fileMode |= AFATFS_FILE_MODE_READ;
-
-            if (fileMode == AFATFS_FILE_MODE_READ) {
-                fileMode |= AFATFS_FILE_MODE_WRITE;
-            }
-        break;
-        case 's':
-#ifdef AFATFS_USE_FREEFILE
-            fileMode |= AFATFS_FILE_MODE_CONTIGUOUS | AFATFS_FILE_MODE_RETAIN_DIRECTORY;
-#endif
-        break;
-    }
 
     file = afatfs_allocateFileHandle();
 
@@ -2997,6 +3643,32 @@ bool afatfs_fopen(const char *filename, const char *mode, afatfsFileCallback_t c
         complete(NULL);
     }
 
+    return file != NULL;
+}
+
+bool afatfs_fopen_lfn(const char *displayName,
+                      const char *mode,
+                      char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                      afatfsFileCallback_t complete)
+{
+    uint8_t fileMode = afatfs_modeFromString(mode);
+    afatfsFilePtr_t file = afatfs_allocateFileHandle();
+
+    /*
+     * Open/create a file using a preserved display component plus SFN alias.
+     *
+     * This is the system-wide long-name companion to afatfs_fopen(). It still
+     * operates in the current working directory and still returns a normal file
+     * handle, but when creation is needed it emits VFAT LFN entries and writes
+     * the generated short alias to openNameOut for later fast/open-by-alias
+     * workflows.
+     */
+    if (file) {
+        afatfs_createFileInternal(file, displayName, FAT_FILE_ATTRIBUTE_ARCHIVE,
+                                  fileMode, openNameOut, true, complete);
+    } else if (complete) {
+        complete(NULL);
+    }
     return file != NULL;
 }
 

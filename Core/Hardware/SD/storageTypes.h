@@ -299,10 +299,11 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
 /*
  * Build an 8.3-safe saved instrument filename from Scene-retained metadata.
  *
- * The source stem can be longer than the physical FAT name because SceneData
- * retains the first 16 characters for future LFN support. Current asyncfatfs
- * creation is 8.3-only, so this helper sanitizes to a short basename and adds
- * a voice suffix when requested to avoid duplicate kit member filenames.
+ * The source stem can be longer than a FAT short alias because SceneData
+ * retains the first 16 characters. This compatibility helper still sanitizes
+ * to a short basename and adds a voice suffix when requested; LFN-capable save
+ * paths should use storage_makeSavedInstrumentDisplayFilename() and let
+ * asyncfatfs return the alias actually selected on disk.
  */
 void storage_makeSavedInstrumentFilename(
     char dst[STORAGE_KIT_FILENAME_MAX],
@@ -310,5 +311,22 @@ void storage_makeSavedInstrumentFilename(
     storage_instrument_type_t type,
     uint8_t one_based_voice,
     uint8_t force_voice_suffix);
+
+/*
+ * Build a visible Instrument member filename for LFN-capable saves.
+ *
+ * Inputs mirror storage_makeSavedInstrumentFilename(), but the output is a
+ * user-facing long filename component rather than an 8.3 open alias. Spaces
+ * and upper/lowercase ASCII are preserved where FAT permits them; invalid FAT
+ * display characters are replaced with underscores. Filesystem.c passes this
+ * display component to asyncfatfs and receives the generated 8.3 alias back for
+ * kitset.kcg, keeping visible names and open names distinct.
+ */
+void storage_makeSavedInstrumentDisplayFilename(char *dst,
+                                                uint8_t capacity,
+                                                const char *stem,
+                                                storage_instrument_type_t type,
+                                                uint8_t one_based_voice,
+                                                uint8_t force_voice_suffix);
 
 #endif /* STORAGETYPES_H_ */

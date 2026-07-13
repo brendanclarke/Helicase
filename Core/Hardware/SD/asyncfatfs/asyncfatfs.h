@@ -43,7 +43,23 @@ typedef enum {
 typedef void (*afatfsFileCallback_t)(afatfsFilePtr_t file);
 typedef void (*afatfsCallback_t)();
 
+/*
+ * Public filename buffer sizes for asyncfatfs-created aliases.
+ *
+ * Why this lives in the public header: higher-level filesystem code needs a
+ * stable, system-wide scratch size for the short alias returned by the new LFN
+ * creation calls. AFATFS_SHORT_FILENAME_MAX is the printable 8.3 form
+ * ("12345678.EXT") plus NUL. AFATFS_LONG_FILENAME_MAX bounds one path
+ * component handled by the async writer; paths are still not accepted here.
+ */
+#define AFATFS_SHORT_FILENAME_MAX 13u
+#define AFATFS_LONG_FILENAME_MAX  48u
+
 bool afatfs_fopen(const char *filename, const char *mode, afatfsFileCallback_t complete);
+bool afatfs_fopen_lfn(const char *displayName,
+                      const char *mode,
+                      char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                      afatfsFileCallback_t complete);
 bool afatfs_ftruncate(afatfsFilePtr_t file, afatfsFileCallback_t callback);
 bool afatfs_fclose(afatfsFilePtr_t file, afatfsCallback_t callback);
 bool afatfs_funlink(afatfsFilePtr_t file, afatfsCallback_t callback);
@@ -56,6 +72,9 @@ afatfsOperationStatus_e afatfs_fseek(afatfsFilePtr_t file, int32_t offset, afatf
 bool afatfs_ftell(afatfsFilePtr_t file, uint32_t *position);
 
 bool afatfs_mkdir(const char *filename, afatfsFileCallback_t complete);
+bool afatfs_mkdir_lfn(const char *displayName,
+                      char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                      afatfsFileCallback_t complete);
 bool afatfs_chdir(afatfsFilePtr_t dirHandle);
 
 void afatfs_findFirst(afatfsFilePtr_t directory, afatfsFinder_t *finder);

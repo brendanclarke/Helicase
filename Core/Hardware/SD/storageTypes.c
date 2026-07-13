@@ -409,10 +409,10 @@ void storage_makeSavedInstrumentFilename(
     /*
      * Build an 8.3-safe saved instrument filename from Scene metadata.
      *
-     * The retained stem may be 16 characters for future LFN support, but the
-     * current asyncfatfs writer creates only short names. When requested, the
-     * last two basename cells become v1..v6 so duplicate stems cannot collide
-     * inside one saved Kit folder.
+     * The retained stem may be 16 characters, while some compatibility callers
+     * still need an explicit short alias. When requested, the last two basename
+     * cells become v1..v6 so duplicate stems cannot collide inside one saved
+     * Kit folder. LFN save paths use the display-name helper below instead.
      */
     if (!ext)
         ext = "drm";
@@ -441,6 +441,92 @@ void storage_makeSavedInstrumentFilename(
     while (*ext != '\0' && i < (STORAGE_KIT_FILENAME_MAX - 1u))
         dst[i++] = *ext++;
     dst[i] = '\0';
+}
+
+static char storage_displayFilenameChar(char c)
+{
+    /*
+     * Sanitize one character for a FAT long filename display component.
+     *
+     * Unlike storage_filenameChar(), this helper intentionally preserves case
+     * and spaces. It only replaces control bytes and FAT-forbidden punctuation,
+     * so firmware-created LFNs can round-trip the human-facing stem as closely
+     * as the current ASCII UI allows.
+     */
+    if (c < 0x20 || c > 0x7e)
+        return '_';
+    switch (c) {
+    case '"':
+    case '*':
+    case '/':
+    case ':':
+    case '<':
+    case '>':
+    case '?':
+    case '\\':
+    case '|':
+    case 0x7f:
+        return '_';
+    default:
+        return c;
+    }
+}
+
+void storage_makeSavedInstrumentDisplayFilename(char *dst,
+                                                uint8_t capacity,
+                                                const char *stem,
+                                                storage_instrument_type_t type,
+                                                uint8_t one_based_voice,
+                                                uint8_t force_voice_suffix)
+{
+    const char *ext = storage_instrumentTypeExtension(type);
+    uint8_t pos = 0u;
+    uint8_t last_meaningful = 0u;
+
+    /*
+     * Build the visible LFN component for one saved Kit member file.
+     *
+     * The old 8.3 helper remains the compatibility fallback and alias generator
+     * input. This helper is for the new asyncfatfs LFN create path: it keeps
+     * the retained Scene stem's spaces/case, trims unsafe trailing spaces/dots,
+     * optionally appends a duplicate-breaking voice suffix, and finally appends
+     * the descriptor-owned extension.
+     */
+    if (!dst || capacity == 0u)
+        return;
+    if (!ext)
+        ext = "drm";
+    if (!stem || stem[0] == '\0')
+        stem = "inst";
+    while (stem[pos] != '\0' && stem[pos] != '.' &&
+           pos + 1u < capacity && pos < SCENE_INSTRUMENT_STEM_LEN) {
+        char c = storage_displayFilenameChar(stem[pos]);
+        dst[pos] = c;
+        if (c != ' ' && c != '.')
+            last_meaningful = (uint8_t)(pos + 1u);
+        pos++;
+    }
+    if (last_meaningful == 0u) {
+        const char *fallback = "inst";
+        pos = 0u;
+        while (fallback[pos] != '\0' && pos + 1u < capacity) {
+            dst[pos] = fallback[pos];
+            pos++;
+        }
+        last_meaningful = pos;
+    }
+    pos = last_meaningful;
+    if (force_voice_suffix && pos + 3u < capacity) {
+        dst[pos++] = '_';
+        dst[pos++] = 'v';
+        dst[pos++] = (one_based_voice >= 1u && one_based_voice <= 9u)
+            ? (char)('0' + one_based_voice) : 'x';
+    }
+    if (pos + 1u < capacity)
+        dst[pos++] = '.';
+    while (*ext != '\0' && pos + 1u < capacity)
+        dst[pos++] = *ext++;
+    dst[pos] = '\0';
 }
 
 uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
