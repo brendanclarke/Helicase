@@ -241,6 +241,50 @@ typedef struct afatfsCreateFile_t {
     afatfsDirEntryPointer_t freeRunStart;
 } afatfsCreateFile_t;
 
+typedef enum {
+    AFATFS_RENAME_OBJECT_PHASE_INITIAL = 0,
+    AFATFS_RENAME_OBJECT_PHASE_FIND_SOURCE,
+    AFATFS_RENAME_OBJECT_PHASE_LOAD_SOURCE_ENTRY,
+    AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_NAME,
+    AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN_BEGIN,
+    AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN,
+    AFATFS_RENAME_OBJECT_PHASE_WAIT_EXTEND,
+    AFATFS_RENAME_OBJECT_PHASE_WRITE_NEW_RUN,
+    AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_RUN,
+    AFATFS_RENAME_OBJECT_PHASE_FINISH,
+} afatfsRenameObjectPhase_e;
+
+typedef struct afatfsRenameObject_t {
+    uint8_t active;
+    uint8_t succeeded;
+    uint8_t movedEntryRun;
+    uint8_t oldEntryCount;
+    afatfsRenameObjectPhase_e phase;
+    afatfsMatchMode_t matchMode;
+    afatfsCallback_t callback;
+    char oldName[AFATFS_LONG_FILENAME_MAX + 1u];
+    char newName[AFATFS_LONG_FILENAME_MAX + 1u];
+    char generatedOpenName[AFATFS_SHORT_FILENAME_MAX];
+    char *openNameOut;
+    afatfsObjectFinder_t objectFinder;
+    afatfsObjectInfo_t source;
+    fatDirectoryEntry_t sourceEntry;
+    afatfsCreateFile_t newNameState;
+    afatfsFinder_t rawFinder;
+    afatfsDirEntryPointer_t oldRunStart;
+    afatfsDirEntryPointer_t newRunStart;
+} afatfsRenameObject_t;
+
+typedef enum {
+    AFATFS_REMOVE_OBJECTS_PHASE_INITIAL = 0,
+    AFATFS_REMOVE_OBJECTS_PHASE_SCAN,
+    AFATFS_REMOVE_OBJECTS_PHASE_LOAD_ENTRY,
+    AFATFS_REMOVE_OBJECTS_PHASE_TRUNCATE_FILE,
+    AFATFS_REMOVE_OBJECTS_PHASE_RETIRE_NAME_RUN,
+    AFATFS_REMOVE_OBJECTS_PHASE_RESTART_SCAN,
+    AFATFS_REMOVE_OBJECTS_PHASE_FINISH,
+} afatfsRemoveObjectsPhase_e;
+
 typedef struct afatfsSeek_t {
     afatfsFileCallback_t callback;
 
@@ -419,6 +463,56 @@ typedef struct afatfsFile_t {
     struct afatfsFileOperation_t operation;
 } afatfsFile_t;
 
+/*
+ * Global same-name object removal operation.
+ *
+ * What: Owns the asynchronous scan/delete loop used before case-insensitive
+ * overwrite. It scans the current directory, removes one matching physical
+ * object, restarts the scan, and repeats until no matches remain.
+ *
+ * Why: FAT directories can contain externally-created names that differ only by
+ * case. Product overwrite must collapse those variants into one newly written
+ * object. Restarting after each deletion avoids keeping a raw finder cursor
+ * alive across mutations to the same directory sector.
+ *
+ * Inputs retained here: displayName and matchMode define the product identity;
+ * mode restricts whether directories are ignored or only empty directories may
+ * be retired. callback returns control to filesystem.c once all matching
+ * objects are gone.
+ *
+ * Outputs/effects: file cluster chains are freed through the existing truncate
+ * code path, and complete LFN/SFN name runs are retired through the shared
+ * name-run helper. The syntheticFile never escapes asyncfatfs.
+ *
+ * Affiliates/clients: afatfs_poll(), afatfs_findNextObject(),
+ * afatfs_ftruncateContinue(), afatfs_retireObjectNameRun(), filesystem.c
+ * overwrite preflight.
+ */
+typedef struct afatfsRemoveObjects_t {
+    /* Non-zero while the global remove-by-display-name state machine owns the current directory scan. */
+    uint8_t active;
+    /* Latched terminal result used by the FINISH phase before the callback releases the slot. */
+    uint8_t succeeded;
+    /* Current async phase; each phase performs at most the next disk/cache-dependent step. */
+    afatfsRemoveObjectsPhase_e phase;
+    /* Caller-selected display-name comparison policy, normally case-insensitive for overwrite. */
+    afatfsMatchMode_t matchMode;
+    /* Caller-selected object scope; directory deletion is intentionally disabled until recursive support. */
+    afatfsRemoveObjectMode_t mode;
+    /* Completion callback supplied by filesystem.c or diagnostics; it receives no payload. */
+    afatfsCallback_t callback;
+    /* Sanitized target component copied once so caller-owned menu buffers can change while we scan. */
+    char displayName[AFATFS_LONG_FILENAME_MAX + 1u];
+    /* LFN-aware scanner state for the current pass through afatfs.currentDirectory. */
+    afatfsObjectFinder_t finder;
+    /* Most recently matched object; retained across load/truncate/retire phases. */
+    afatfsObjectInfo_t object;
+    /* Copy of the matched SFN directory entry, used to seed syntheticFile before truncating. */
+    fatDirectoryEntry_t sourceEntry;
+    /* Private file handle used only to reuse the existing cluster-chain truncate logic. */
+    afatfsFile_t syntheticFile;
+} afatfsRemoveObjects_t;
+
 typedef enum {
     AFATFS_INITIALIZATION_READ_MBR,
     AFATFS_INITIALIZATION_READ_VOLUME_ID,
@@ -478,6 +572,9 @@ typedef struct afatfs_t {
     // The current working directory:
     afatfsFile_t currentDirectory;
 
+    afatfsRenameObject_t renameObject;
+    afatfsRemoveObjects_t removeObjects;
+
     uint32_t partitionStartSector; // The physical sector that the first partition on the device begins at
 
     uint32_t fatStartSector; // The first sector of the first FAT
@@ -507,6 +604,8 @@ typedef struct afatfs_t {
 static afatfs_t afatfs;
 
 static void afatfs_fileOperationContinue(afatfsFile_t *file);
+static void afatfs_renameObjectContinue(void);
+static void afatfs_removeObjectsContinue(void);
 static uint8_t* afatfs_fileLockCursorSectorForWrite(afatfsFilePtr_t file);
 static uint8_t* afatfs_fileRetainCursorSectorForRead(afatfsFilePtr_t file);
 
@@ -2322,6 +2421,26 @@ static void afatfs_objectScanAppendLfn(afatfsObjectFinder_t *finder,
     finder->lfnEntryCount++;
 }
 
+static bool afatfs_isStructuralDotEntry(const fatDirectoryEntry_t *entry)
+{
+    /*
+     * Hide only FAT's synthetic directory links.
+     *
+     * Ordinary host files may begin with '.', and product scanners should see
+     * those concrete objects. The structural entries are SFN directory records
+     * whose raw base is "." or ".." padded with spaces.
+     */
+    if (!entry || (entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) == 0)
+        return false;
+    if (entry->filename[0] != '.')
+        return false;
+    if (entry->filename[1] == ' ')
+        return true;
+    if (entry->filename[1] != '.')
+        return false;
+    return entry->filename[2] == ' ';
+}
+
 void afatfs_findFirstObject(afatfsFilePtr_t directory,
                             afatfsObjectFinder_t *finder)
 {
@@ -2382,7 +2501,7 @@ afatfsOperationStatus_e afatfs_findNextObject(afatfsFilePtr_t directory,
 
         fat_convertFATStyleToFilename(entry->filename, object->shortName);
         fat_applyFilenameCaseFlags(object->shortName, entry->ntReserved);
-        if (object->shortName[0] == '.') {
+        if (afatfs_isStructuralDotEntry(entry)) {
             afatfs_objectScanReset(finder);
             continue;
         }
@@ -3449,13 +3568,17 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                              *
                              * Read-only LFN opens cannot resolve by inventing
                              * a new "~N" alias; if the display component did
-                             * not match this entry, the colliding SFN proves
-                             * that the requested object is absent under the
-                             * current exact-case policy. Create/write modes
-                             * still generate the next "~N" candidate and
-                             * restart the scan so duplicate display names or
-                             * same-folded SFN names do not reuse the wrong
-                             * physical entry.
+                             * not match this entry under the caller's display
+                             * policy, the colliding SFN proves that the
+                             * requested object is absent for this open.
+                             * Create/write modes still generate the next
+                             * "~N" candidate and restart the scan so duplicate
+                             * display names or same-folded SFN names do not
+                             * reuse the wrong physical entry. Product overwrite
+                             * removes same-casefold physical duplicates before
+                             * it reaches this create path, so a new object
+                             * created here is the single surviving visible
+                             * variant.
                              */
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) == 0u) {
                                 afatfs_findLast(&afatfs.currentDirectory);
@@ -3822,6 +3945,768 @@ static afatfsFilePtr_t afatfs_createFileInternal(
     afatfs_createFileContinue(file);
 
     return file;
+}
+
+static bool afatfs_entryPointerEquals(const afatfsDirEntryPointer_t *a,
+                                      const afatfsDirEntryPointer_t *b)
+{
+    return a->sectorNumberPhysical == b->sectorNumberPhysical &&
+           a->entryIndex == b->entryIndex;
+}
+
+static bool afatfs_renameObjectRunIsSectorLocal(
+        const afatfsObjectInfo_t *object)
+{
+    /*
+     * The current LFN writer reserves one contiguous run inside one sector.
+     * Keep rename on the same footing until cross-sector VFAT runs are added.
+     */
+    if (object->sfnEntry.entryIndex < 0)
+        return false;
+    if (object->lfnEntryCount == 0u)
+        return true;
+    if (object->lfnFirstEntry.entryIndex < 0)
+        return false;
+    return object->lfnFirstEntry.sectorNumberPhysical ==
+               object->sfnEntry.sectorNumberPhysical &&
+           object->lfnFirstEntry.entryIndex + object->lfnEntryCount ==
+               object->sfnEntry.entryIndex;
+}
+
+static afatfsOperationStatus_e afatfs_retireObjectNameRun(
+        const afatfsObjectInfo_t *object)
+{
+    uint8_t *sector;
+    afatfsOperationStatus_e status;
+    afatfsDirEntryPointer_t runStart;
+    uint8_t entryCount;
+    fatDirectoryEntry_t *entries;
+
+    /*
+     * Retire one object's complete VFAT name entry run.
+     *
+     * What: Marks the checksum-verified LFN fragments and the owning SFN entry
+     * as deleted. It operates only on the directory entries that name the
+     * object.
+     *
+     * Why: Removing or moving a VFAT object must not leave orphan display
+     * fragments visible to later scans. afatfs_funlink() currently marks only
+     * the SFN entry, which is acceptable for old short-name files but not for
+     * case-preserving LFN overwrite.
+     *
+     * Inputs: afatfsObjectInfo_t from afatfs_findNextObject(). Its
+     * lfnFirstEntry, lfnEntryCount, and sfnEntry identify the entry run. The
+     * helper requires the current sector-local run shape used by the existing
+     * LFN writer.
+     *
+     * Outputs/effects: directory cache sector is marked dirty after entries are
+     * marked deleted. It does not free clusters and does not inspect directory
+     * children.
+     *
+     * Affiliates/clients: afatfs_renameObjectRetireOldRun(),
+     * afatfs_removeObjects_lfn(), future recursive delete, and save overwrite
+     * preflight.
+     */
+    if (!object || !afatfs_renameObjectRunIsSectorLocal(object))
+        return AFATFS_OPERATION_FAILURE;
+
+    entryCount = (uint8_t)(object->lfnEntryCount + 1u);
+    runStart = (object->lfnEntryCount != 0u)
+        ? object->lfnFirstEntry
+        : object->sfnEntry;
+    if (runStart.entryIndex < 0 ||
+        runStart.entryIndex + entryCount > AFATFS_FILES_PER_DIRECTORY_SECTOR) {
+        return AFATFS_OPERATION_FAILURE;
+    }
+
+    status = afatfs_cacheSector(runStart.sectorNumberPhysical,
+                                &sector,
+                                AFATFS_CACHE_READ | AFATFS_CACHE_WRITE,
+                                0);
+    if (status != AFATFS_OPERATION_SUCCESS)
+        return status;
+
+    entries = (fatDirectoryEntry_t *)sector + runStart.entryIndex;
+    for (uint8_t i = 0u; i < entryCount; i++) {
+        /*
+         * Mark every name entry in the run deleted.
+         *
+         * This includes all LFN fragments and the owning SFN entry. The loop
+         * does not touch clusters; callers that delete file data free the
+         * cluster chain before retiring the visible name metadata.
+         */
+        entries[i].filename[0] = FAT_DELETED_FILE_MARKER;
+    }
+
+    afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
+    return AFATFS_OPERATION_SUCCESS;
+}
+
+static void afatfs_renameObjectSetOldRunStart(afatfsRenameObject_t *op)
+{
+    op->oldEntryCount = (uint8_t)(op->source.lfnEntryCount + 1u);
+    if (op->source.lfnEntryCount != 0u) {
+        op->oldRunStart = op->source.lfnFirstEntry;
+    } else {
+        op->oldRunStart = op->source.sfnEntry;
+    }
+}
+
+static void afatfs_renameObjectCopyOpenName(const char *src, char *dst)
+{
+    if (!dst)
+        return;
+    for (uint8_t i = 0u; i < AFATFS_SHORT_FILENAME_MAX; i++) {
+        dst[i] = src ? src[i] : '\0';
+        if (dst[i] == '\0')
+            return;
+    }
+    dst[AFATFS_SHORT_FILENAME_MAX - 1u] = '\0';
+}
+
+static void afatfs_renameObjectFinish(bool success)
+{
+    afatfsRenameObject_t *op = &afatfs.renameObject;
+    afatfsCallback_t callback = op->callback;
+
+    op->succeeded = success ? 1u : 0u;
+    if (success) {
+        afatfs_renameObjectCopyOpenName(op->generatedOpenName,
+                                        op->openNameOut);
+    }
+    op->active = 0u;
+    if (callback)
+        callback();
+}
+
+static bool afatfs_renameObjectRawEntryMatchesNew(
+        afatfsRenameObject_t *op,
+        const fatDirectoryEntry_t *entry)
+{
+    char shortDisplay[AFATFS_SHORT_FILENAME_MAX];
+
+    if (op->newNameState.scanLongNameValid &&
+        op->newNameState.scanLongNameChecksum ==
+            afatfs_lfnChecksum((const uint8_t *)entry->filename)) {
+        return fat_compareDisplayName(
+                   op->newNameState.scanLongName,
+                   op->newNameState.longName,
+                   op->matchMode == AFATFS_MATCH_CASE_SENSITIVE) == 0;
+    }
+
+    afatfs_copyShortAliasText((const uint8_t *)entry->filename,
+                              entry->ntReserved,
+                              shortDisplay);
+    return fat_compareDisplayName(
+               shortDisplay,
+               op->newNameState.longName,
+               op->matchMode == AFATFS_MATCH_CASE_SENSITIVE) == 0;
+}
+
+static void afatfs_renameObjectRestartCollisionScan(afatfsRenameObject_t *op)
+{
+    afatfs_findFirst(&afatfs.currentDirectory, &op->rawFinder);
+    op->newNameState.freeRunLength = 0u;
+    afatfs_lfnScanReset(&op->newNameState);
+}
+
+static bool afatfs_renameObjectCanRewriteInPlace(
+        const afatfsRenameObject_t *op)
+{
+    uint8_t newEntryCount =
+        (uint8_t)(op->newNameState.lfnEntryCount + 1u);
+
+    if (newEntryCount > op->oldEntryCount)
+        return false;
+    if (!afatfs_renameObjectRunIsSectorLocal(&op->source))
+        return false;
+    if ((uint16_t)op->source.sfnEntry.entryIndex <
+        op->newNameState.lfnEntryCount)
+        return false;
+    return true;
+}
+
+static afatfsOperationStatus_e afatfs_renameObjectWriteRun(
+        afatfsRenameObject_t *op)
+{
+    uint8_t *sector;
+    afatfsOperationStatus_e status;
+    fatDirectoryEntry_t *entries;
+    uint8_t newLfnCount = op->newNameState.lfnEntryCount;
+    uint8_t newEntryCount = (uint8_t)(newLfnCount + 1u);
+    uint8_t checksum = afatfs_lfnChecksum(op->newNameState.filename);
+
+    if (op->newRunStart.entryIndex < 0 ||
+        op->newRunStart.entryIndex + newEntryCount >
+            AFATFS_FILES_PER_DIRECTORY_SECTOR) {
+        return AFATFS_OPERATION_FAILURE;
+    }
+
+    status = afatfs_cacheSector(op->newRunStart.sectorNumberPhysical,
+                                &sector,
+                                AFATFS_CACHE_READ | AFATFS_CACHE_WRITE,
+                                0);
+    if (status != AFATFS_OPERATION_SUCCESS)
+        return status;
+
+    entries = (fatDirectoryEntry_t *)sector + op->newRunStart.entryIndex;
+
+    if (!op->movedEntryRun && op->oldEntryCount > newEntryCount) {
+        uint8_t staleCount = (uint8_t)(op->oldEntryCount - newEntryCount);
+        fatDirectoryEntry_t *stale =
+            (fatDirectoryEntry_t *)sector + op->oldRunStart.entryIndex;
+        for (uint8_t i = 0u; i < staleCount; i++)
+            stale[i].filename[0] = FAT_DELETED_FILE_MARKER;
+    }
+
+    for (uint8_t i = 0u; i < newLfnCount; i++)
+        afatfs_writeLfnDirectoryEntry(&entries[i],
+                                      &op->newNameState,
+                                      i,
+                                      checksum);
+
+    entries[newLfnCount] = op->sourceEntry;
+    memcpy(entries[newLfnCount].filename,
+           op->newNameState.filename,
+           FAT_FILENAME_LENGTH);
+    entries[newLfnCount].ntReserved = op->newNameState.shortNameCaseFlags;
+
+    afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
+    return AFATFS_OPERATION_SUCCESS;
+}
+
+static afatfsOperationStatus_e afatfs_renameObjectRetireOldRun(
+        afatfsRenameObject_t *op)
+{
+    (void)op->oldRunStart;
+    (void)op->oldEntryCount;
+    return afatfs_retireObjectNameRun(&op->source);
+}
+
+static void afatfs_renameObjectChooseRun(afatfsRenameObject_t *op)
+{
+    if (afatfs_renameObjectCanRewriteInPlace(op)) {
+        op->movedEntryRun = 0u;
+        op->newRunStart = op->source.sfnEntry;
+        op->newRunStart.entryIndex =
+            (int16_t)(op->newRunStart.entryIndex -
+                      op->newNameState.lfnEntryCount);
+    } else {
+        op->movedEntryRun = 1u;
+        op->newRunStart = op->newNameState.freeRunStart;
+    }
+}
+
+static void afatfs_renameObjectContinue(void)
+{
+    afatfsRenameObject_t *op = &afatfs.renameObject;
+    afatfsOperationStatus_e status;
+
+    if (!op->active)
+        return;
+
+doMore:
+    switch (op->phase) {
+    case AFATFS_RENAME_OBJECT_PHASE_INITIAL:
+        if (afatfs_fileIsBusy(&afatfs.currentDirectory))
+            return;
+        afatfs_findFirstObject(&afatfs.currentDirectory, &op->objectFinder);
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_FIND_SOURCE;
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_FIND_SOURCE:
+        status = afatfs_findNextObject(&afatfs.currentDirectory,
+                                       &op->objectFinder,
+                                       &op->source);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(&afatfs.currentDirectory, &op->objectFinder);
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        if (op->source.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(&afatfs.currentDirectory, &op->objectFinder);
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        /*
+         * Source scan: match the old display component under the caller's
+         * policy.
+         *
+         * Production Kit/Scene saves pass case-insensitive matching because an
+         * occupied slot is the same product object even if the on-card
+         * component case differs from the user-entered replacement. Exact
+         * diagnostics may still pass case-sensitive matching when they need to
+         * probe raw VFAT behavior.
+         */
+        if (fat_compareDisplayName(
+                op->source.displayName,
+                op->oldName,
+                op->matchMode == AFATFS_MATCH_CASE_SENSITIVE) != 0) {
+            return;
+        }
+        afatfs_findLastObject(&afatfs.currentDirectory, &op->objectFinder);
+        if (!afatfs_renameObjectRunIsSectorLocal(&op->source)) {
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        afatfs_renameObjectSetOldRunStart(op);
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_LOAD_SOURCE_ENTRY;
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_LOAD_SOURCE_ENTRY:
+    {
+        uint8_t *sector;
+        status = afatfs_cacheSector(op->source.sfnEntry.sectorNumberPhysical,
+                                    &sector,
+                                    AFATFS_CACHE_READ,
+                                    0);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE ||
+            op->source.sfnEntry.entryIndex < 0) {
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        op->sourceEntry =
+            ((fatDirectoryEntry_t *)sector)[op->source.sfnEntry.entryIndex];
+        /*
+         * Same-display fast path.
+         *
+         * Under case-insensitive matching, folded equality is not enough to
+         * skip work: a case-only rename must still rewrite the LFN/SFN run so
+         * the visible card name changes to newName. Only byte-identical display
+         * text can use this success shortcut.
+         */
+        if (fat_compareDisplayName(op->source.displayName,
+                                   op->newName,
+                                   true) == 0) {
+            afatfs_renameObjectCopyOpenName(op->source.shortName,
+                                            op->generatedOpenName);
+            op->succeeded = 1u;
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_NAME;
+        goto doMore;
+    }
+
+    case AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_NAME:
+    {
+        uint8_t len;
+        memset(&op->newNameState, 0, sizeof(op->newNameState));
+        len = afatfs_copySanitizedLongName(op->newNameState.longName,
+                                           op->newName);
+        if (len == 0u) {
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        op->newNameState.longNameEnabled = 1u;
+        op->newNameState.lfnEntryCount = (uint8_t)((len + 12u) / 13u);
+        op->newNameState.matchMode = op->matchMode;
+        op->newNameState.aliasOrdinal = 0u;
+        op->newNameState.openNameOut = op->generatedOpenName;
+        if (!afatfs_generateShortAlias(&op->newNameState)) {
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN_BEGIN;
+        goto doMore;
+    }
+
+    case AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN_BEGIN:
+        if (afatfs_fileIsBusy(&afatfs.currentDirectory))
+            return;
+        afatfs_renameObjectRestartCollisionScan(op);
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN;
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN:
+    {
+        fatDirectoryEntry_t *entry = NULL;
+        status = afatfs_findNext(&afatfs.currentDirectory,
+                                 &op->rawFinder,
+                                 &entry);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLast(&afatfs.currentDirectory);
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        if (entry == NULL) {
+            afatfs_findLast(&afatfs.currentDirectory);
+            if (afatfs_renameObjectCanRewriteInPlace(op) ||
+                afatfs_freeRunIsReady(&op->newNameState)) {
+                afatfs_renameObjectChooseRun(op);
+                op->phase = AFATFS_RENAME_OBJECT_PHASE_WRITE_NEW_RUN;
+                goto doMore;
+            }
+            if (afatfs_fileIsBusy(&afatfs.currentDirectory))
+                return;
+            status = afatfs_extendSubdirectory(&afatfs.currentDirectory,
+                                               NULL,
+                                               NULL);
+            if (status == AFATFS_OPERATION_FAILURE) {
+                op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+                goto doMore;
+            }
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_WAIT_EXTEND;
+            return;
+        }
+        if (fat_isDirectoryEntryEmpty(entry) ||
+            fat_isDirectoryEntryTerminator(entry)) {
+            afatfs_noteFreeDirectoryEntry(&op->newNameState, &op->rawFinder);
+            afatfs_lfnScanReset(&op->newNameState);
+            return;
+        }
+        if (afatfs_isLfnDirectoryEntry(entry)) {
+            op->newNameState.freeRunLength = 0u;
+            afatfs_lfnScanAppend(&op->newNameState, entry);
+            return;
+        }
+        if ((entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID) != 0u) {
+            op->newNameState.freeRunLength = 0u;
+            afatfs_lfnScanReset(&op->newNameState);
+            return;
+        }
+        if (!afatfs_entryPointerEquals(&op->rawFinder, &op->source.sfnEntry) &&
+            afatfs_renameObjectRawEntryMatchesNew(op, entry)) {
+            afatfs_findLast(&afatfs.currentDirectory);
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        if (!afatfs_entryPointerEquals(&op->rawFinder, &op->source.sfnEntry) &&
+            memcmp(entry->filename,
+                   op->newNameState.filename,
+                   FAT_FILENAME_LENGTH) == 0) {
+            afatfs_findLast(&afatfs.currentDirectory);
+            op->newNameState.aliasOrdinal++;
+            if (!afatfs_generateShortAlias(&op->newNameState)) {
+                op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+                goto doMore;
+            }
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN_BEGIN;
+            goto doMore;
+        }
+        op->newNameState.freeRunLength = 0u;
+        afatfs_lfnScanReset(&op->newNameState);
+        return;
+    }
+
+    case AFATFS_RENAME_OBJECT_PHASE_WAIT_EXTEND:
+        if (afatfs_fileIsBusy(&afatfs.currentDirectory))
+            return;
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN_BEGIN;
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_WRITE_NEW_RUN:
+        status = afatfs_renameObjectWriteRun(op);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        if (op->movedEntryRun) {
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_RUN;
+        } else {
+            op->succeeded = 1u;
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+        }
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_RUN:
+        status = afatfs_renameObjectRetireOldRun(op);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_SUCCESS)
+            op->succeeded = 1u;
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_FINISH:
+        afatfs_renameObjectFinish(op->succeeded != 0u);
+        return;
+    }
+}
+
+bool afatfs_renameObject_lfn(const char *oldDisplayName,
+                             const char *newDisplayName,
+                             afatfsMatchMode_t matchMode,
+                             char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                             afatfsCallback_t complete)
+{
+    afatfsRenameObject_t *op = &afatfs.renameObject;
+
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        op->active ||
+        afatfs_fileIsBusy(&afatfs.currentDirectory)) {
+        return false;
+    }
+
+    memset(op, 0, sizeof(*op));
+    if (openNameOut)
+        openNameOut[0] = '\0';
+    if (afatfs_copySanitizedLongName(op->oldName, oldDisplayName) == 0u ||
+        afatfs_copySanitizedLongName(op->newName, newDisplayName) == 0u) {
+        return false;
+    }
+
+    op->active = 1u;
+    op->phase = AFATFS_RENAME_OBJECT_PHASE_INITIAL;
+    op->matchMode = matchMode;
+    op->callback = complete;
+    op->openNameOut = openNameOut;
+    afatfs_renameObjectContinue();
+    return true;
+}
+
+static uint8_t afatfs_removeObjectMatches(
+        const afatfsRemoveObjects_t *op,
+        const afatfsObjectInfo_t *object)
+{
+    /*
+     * Match under the requested policy, not raw byte equality.
+     *
+     * Production overwrite passes case-insensitive matching so every case
+     * variant of the same user-facing filename is removed. Exact diagnostics
+     * can still pass case-sensitive matching to test a single physical display
+     * component.
+     */
+    return (uint8_t)(
+        object &&
+        object->kind != AFATFS_OBJECT_NONE &&
+        fat_compareDisplayName(object->displayName,
+                               op->displayName,
+                               op->matchMode ==
+                                   AFATFS_MATCH_CASE_SENSITIVE) == 0);
+}
+
+static uint8_t afatfs_removeObjectDirectoryAllowed(
+        const afatfsRemoveObjects_t *op,
+        const afatfsObjectInfo_t *object)
+{
+    (void)op;
+    (void)object;
+
+    /*
+     * Directory handling is intentionally conservative.
+     *
+     * Removing a non-empty directory requires recursive traversal, which is a
+     * separate primitive. For this Morph/Kit pass, file overwrite removes
+     * duplicate files completely; directory-shaped saves preserve the selected
+     * directory and ignore later duplicate directories until recursive delete
+     * exists.
+     */
+    return 0u;
+}
+
+static void afatfs_removeObjectPrepareSyntheticFile(
+        afatfsRemoveObjects_t *op)
+{
+    /*
+     * Build a synthetic file handle from the source SFN entry.
+     *
+     * The truncate code already knows how to release a file cluster chain and
+     * mark one SFN entry deleted. This synthetic handle supplies exactly the
+     * metadata it expects: directoryEntryPos, firstCluster, cursorCluster,
+     * logicalSize, physicalSize, type, attrib, and a truncate operation state.
+     * The handle is private to the remove operation and is never returned to
+     * callers.
+     */
+    afatfs_initFileHandle(&op->syntheticFile);
+    afatfs_fileLoadDirectoryEntry(&op->syntheticFile, &op->sourceEntry);
+    op->syntheticFile.directoryEntryPos = op->object.sfnEntry;
+    op->syntheticFile.mode = AFATFS_FILE_MODE_WRITE;
+}
+
+static void afatfs_removeObjectsFinish(bool success)
+{
+    afatfsRemoveObjects_t *op = &afatfs.removeObjects;
+    afatfsCallback_t callback = op->callback;
+
+    /*
+     * Finish exactly once and release the global removal slot.
+     *
+     * complete is deliberately callback-only like rename: callers sequence the
+     * next open/create phase from their own filesystem state machine, while
+     * asyncfatfs keeps no persistent success object to return.
+     */
+    op->succeeded = success ? 1u : 0u;
+    op->active = 0u;
+    if (callback)
+        callback();
+}
+
+static void afatfs_removeObjectsContinue(void)
+{
+    afatfsRemoveObjects_t *op = &afatfs.removeObjects;
+    afatfsOperationStatus_e status;
+
+    if (!op->active)
+        return;
+
+doMore:
+    switch (op->phase) {
+    case AFATFS_REMOVE_OBJECTS_PHASE_INITIAL:
+        if (afatfs_fileIsBusy(&afatfs.currentDirectory))
+            return;
+        afatfs_findFirstObject(&afatfs.currentDirectory, &op->finder);
+        op->phase = AFATFS_REMOVE_OBJECTS_PHASE_SCAN;
+        goto doMore;
+
+    case AFATFS_REMOVE_OBJECTS_PHASE_SCAN:
+        status = afatfs_findNextObject(&afatfs.currentDirectory,
+                                       &op->finder,
+                                       &op->object);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(&afatfs.currentDirectory, &op->finder);
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
+            goto doMore;
+        }
+        if (op->object.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(&afatfs.currentDirectory, &op->finder);
+            op->succeeded = 1u;
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
+            goto doMore;
+        }
+        if (!afatfs_removeObjectMatches(op, &op->object)) {
+            /*
+             * Yield after one non-matching object.
+             *
+             * The finder retains its cursor, so the next poll resumes at the
+             * following object. This keeps overwrite cleanup asynchronous even
+             * in large directories where most entries do not match the target
+             * display component.
+             */
+            return;
+        }
+        if (op->object.kind == AFATFS_OBJECT_DIRECTORY &&
+            !afatfs_removeObjectDirectoryAllowed(op, &op->object)) {
+            /*
+             * Matching directories are deliberately skipped for this pass.
+             *
+             * Yield instead of tight-looping so externally duplicated
+             * directory names do not make one poll call walk the rest of the
+             * directory. The scan still completes on later polls.
+             */
+            return;
+        }
+        afatfs_findLastObject(&afatfs.currentDirectory, &op->finder);
+        if (!afatfs_renameObjectRunIsSectorLocal(&op->object)) {
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
+            goto doMore;
+        }
+        op->phase = AFATFS_REMOVE_OBJECTS_PHASE_LOAD_ENTRY;
+        goto doMore;
+
+    case AFATFS_REMOVE_OBJECTS_PHASE_LOAD_ENTRY:
+    {
+        uint8_t *sector;
+        status = afatfs_cacheSector(op->object.sfnEntry.sectorNumberPhysical,
+                                    &sector,
+                                    AFATFS_CACHE_READ,
+                                    0);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE ||
+            op->object.sfnEntry.entryIndex < 0) {
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
+            goto doMore;
+        }
+        op->sourceEntry =
+            ((fatDirectoryEntry_t *)sector)[op->object.sfnEntry.entryIndex];
+        if (op->object.kind == AFATFS_OBJECT_FILE) {
+            afatfs_removeObjectPrepareSyntheticFile(op);
+            if (!afatfs_ftruncate(&op->syntheticFile, NULL)) {
+                op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
+                goto doMore;
+            }
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_TRUNCATE_FILE;
+        } else {
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_RETIRE_NAME_RUN;
+        }
+        goto doMore;
+    }
+
+    case AFATFS_REMOVE_OBJECTS_PHASE_TRUNCATE_FILE:
+        status = afatfs_ftruncateContinue(&op->syntheticFile, true);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
+            goto doMore;
+        }
+        op->phase = AFATFS_REMOVE_OBJECTS_PHASE_RETIRE_NAME_RUN;
+        goto doMore;
+
+    case AFATFS_REMOVE_OBJECTS_PHASE_RETIRE_NAME_RUN:
+        /*
+         * Retire the LFN/SFN entry run after cluster release.
+         *
+         * Cluster release must happen first for files so no newly-created
+         * object can reuse a directory entry that still points at live
+         * clusters. The shared run helper then removes both LFN fragments and
+         * the already-deleted SFN entry from the visible directory namespace.
+         */
+        status = afatfs_retireObjectNameRun(&op->object);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
+            goto doMore;
+        }
+        op->phase = AFATFS_REMOVE_OBJECTS_PHASE_RESTART_SCAN;
+        goto doMore;
+
+    case AFATFS_REMOVE_OBJECTS_PHASE_RESTART_SCAN:
+        /*
+         * Restart the scan after every deletion.
+         *
+         * Directory sectors have just been mutated and the previous finder may
+         * point into an entry run that no longer exists. Restarting is cheaper
+         * and safer than trying to repair raw scan state in place, and
+         * overwrite cleanup is a bounded foreground filesystem operation rather
+         * than an audio-thread path.
+         */
+        op->phase = AFATFS_REMOVE_OBJECTS_PHASE_INITIAL;
+        goto doMore;
+
+    case AFATFS_REMOVE_OBJECTS_PHASE_FINISH:
+        afatfs_removeObjectsFinish(op->succeeded != 0u);
+        return;
+    }
+}
+
+bool afatfs_removeObjects_lfn(const char *displayName,
+                              afatfsMatchMode_t matchMode,
+                              afatfsRemoveObjectMode_t mode,
+                              afatfsCallback_t complete)
+{
+    afatfsRemoveObjects_t *op = &afatfs.removeObjects;
+
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        op->active ||
+        afatfs.renameObject.active ||
+        afatfs_fileIsBusy(&afatfs.currentDirectory)) {
+        return false;
+    }
+
+    memset(op, 0, sizeof(*op));
+    if (afatfs_copySanitizedLongName(op->displayName, displayName) == 0u)
+        return false;
+
+    op->active = 1u;
+    op->phase = AFATFS_REMOVE_OBJECTS_PHASE_INITIAL;
+    op->matchMode = matchMode;
+    op->mode = mode;
+    op->callback = complete;
+    afatfs_removeObjectsContinue();
+    return true;
 }
 
 static afatfsFilePtr_t afatfs_createFile(afatfsFilePtr_t file, const char *name, uint8_t attrib, uint8_t fileMode,
@@ -4657,6 +5542,8 @@ void afatfs_poll()
             break;
             case AFATFS_FILESYSTEM_STATE_READY:
                 afatfs_fileOperationsPoll();
+                afatfs_renameObjectContinue();
+                afatfs_removeObjectsContinue();
             break;
             default:
                 ;

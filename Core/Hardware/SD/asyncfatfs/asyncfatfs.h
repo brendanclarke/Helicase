@@ -58,6 +58,20 @@ typedef enum {
 } afatfsObjectKind_t;
 
 /*
+ * Scope selector for afatfs_removeObjects_lfn().
+ *
+ * AFATFS_REMOVE_FILES_ONLY is the current production overwrite mode: matching
+ * files are removed, matching directories are left in place because deleting a
+ * directory safely requires a recursive child walk. AFATFS_REMOVE_EMPTY_DIRECTORIES
+ * is reserved for the later non-recursive directory cleanup step; asyncfatfs.c
+ * currently keeps it conservative until that emptiness check lands.
+ */
+typedef enum {
+    AFATFS_REMOVE_FILES_ONLY = 0,
+    AFATFS_REMOVE_EMPTY_DIRECTORIES,
+} afatfsRemoveObjectMode_t;
+
+/*
  * LFN-aware directory object returned by afatfs_findNextObject().
  *
  * displayName is the firmware-facing component name: a checksum-verified VFAT
@@ -106,6 +120,71 @@ bool afatfs_fopen_lfn(const char *displayName,
 bool afatfs_ftruncate(afatfsFilePtr_t file, afatfsFileCallback_t callback);
 bool afatfs_fclose(afatfsFilePtr_t file, afatfsCallback_t callback);
 bool afatfs_funlink(afatfsFilePtr_t file, afatfsCallback_t callback);
+
+/*
+ * Rename one object in the current directory by display component.
+ *
+ * What: Starts an asynchronous rename of one file or directory named by a
+ * single visible component. Matching follows matchMode; production callers use
+ * case-insensitive matching so a case-only save can refresh visible casing. The
+ * operation updates the complete VFAT LFN/SFN name entry run and returns the
+ * new asyncfatfs-openable short alias in openNameOut when requested.
+ *
+ * Why: Numbered directory saves must change `NNN OldName/` into
+ * `NNN NewName/` while preserving children. The slot number is the product
+ * identity; the FAT directory entry run is only visible metadata plus the
+ * short alias needed by existing open paths.
+ *
+ * Inputs: oldDisplayName and newDisplayName are current-directory components,
+ * not paths. openNameOut may be NULL. complete fires after success or failure;
+ * callers inspect openNameOut[0] or their outer filesystem state to decide
+ * whether the rename succeeded.
+ *
+ * Outputs/effects: first cluster, file size, attributes, timestamps, and
+ * directory children are preserved. Only the object name entry run changes.
+ *
+ * Affiliates/clients: filesystem.c Kit, KitMrp, Scene, Bank, and future Effect
+ * directory-shaped save phases; asyncfatfs object scanning; LFN/SFN name
+ * generation helpers.
+ */
+bool afatfs_renameObject_lfn(const char *oldDisplayName,
+                             const char *newDisplayName,
+                             afatfsMatchMode_t matchMode,
+                             char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                             afatfsCallback_t complete);
+
+/*
+ * Remove all objects whose display name matches one component.
+ *
+ * What: Scans the current directory and removes every object whose visible
+ * display component matches displayName under matchMode. File removal frees the
+ * file's cluster chain and retires the full VFAT LFN/SFN entry run. Directory
+ * removal is limited by mode and must never recursively delete children.
+ *
+ * Why: Product overwrite is case-insensitive and case-preserving. If an
+ * external filesystem created `Kick.drm` and `kick.drm`, saving `KiCk.drm`
+ * must remove both old physical variants before writing one new object with the
+ * user's entered case. afatfs_funlink() cannot do this because it needs an open
+ * handle and deletes only the SFN entry.
+ *
+ * Inputs: displayName is a single component in the current directory.
+ * AFATFS_REMOVE_FILES_ONLY is used before Instrument and Kit member file
+ * writes. AFATFS_REMOVE_EMPTY_DIRECTORIES is reserved for directory-shaped save
+ * cleanup when recursive delete is not available.
+ *
+ * Outputs/effects: callbacks fire once the scan has reached the end or failed.
+ * A successful no-op is allowed when no matching object exists. The operation
+ * restarts its scan after each deletion because retiring entries mutates the
+ * directory being scanned.
+ *
+ * Affiliates/clients: filesystem.c file overwrite preflight, duplicate
+ * case-fold cleanup, future recursive directory deletion, FAT chain truncate
+ * helpers, and VFAT entry-run retirement helpers.
+ */
+bool afatfs_removeObjects_lfn(const char *displayName,
+                              afatfsMatchMode_t matchMode,
+                              afatfsRemoveObjectMode_t mode,
+                              afatfsCallback_t complete);
 
 bool afatfs_feof(afatfsFilePtr_t file);
 void afatfs_fputc(afatfsFilePtr_t file, uint8_t c);

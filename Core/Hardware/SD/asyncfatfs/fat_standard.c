@@ -155,6 +155,58 @@ int8_t fat_compareDisplayName(const char *a, const char *b,
     }
 }
 
+int8_t fat_compareDisplayNameCasefoldThenCase(const char *a, const char *b)
+{
+    const char *rawA;
+    const char *rawB;
+
+    /*
+     * Normalize NULLs once so both comparison passes can treat missing inputs
+     * as empty display components. Callers use this for scanned FAT names and
+     * save-target names, neither of which should be a path or a NULL pointer
+     * once validation has succeeded, but this keeps the helper total.
+     */
+    if (!a)
+        a = "";
+    if (!b)
+        b = "";
+    rawA = a;
+    rawB = b;
+
+    /*
+     * First pass: compare case-folded bytes.
+     *
+     * This pass implements the universal case-insensitive product identity. If
+     * the folded bytes differ, the names are different product objects and
+     * normal alphabetical order decides their relative position.
+     */
+    for (;;) {
+        char ca = fat_compareFold(*a++);
+        char cb = fat_compareFold(*b++);
+        if (ca != cb)
+            return (ca < cb) ? -1 : 1;
+        if (ca == '\0')
+            break;
+    }
+
+    /*
+     * Second pass: compare original bytes only after folded equality.
+     *
+     * This does not make the product identity case-sensitive. It only chooses
+     * the display winner when an externally edited card already contains
+     * duplicate same-casefold names. ASCII uppercase letters sort before
+     * lowercase letters, matching the required capital-first policy.
+     */
+    for (;;) {
+        char ca = *rawA++;
+        char cb = *rawB++;
+        if (ca != cb)
+            return (ca < cb) ? -1 : 1;
+        if (ca == '\0')
+            return 0;
+    }
+}
+
 uint8_t fat_calculateFilenameCaseFlags(const char *filename)
 {
     uint8_t flags = 0u;

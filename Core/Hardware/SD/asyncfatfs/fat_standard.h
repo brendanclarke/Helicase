@@ -150,6 +150,31 @@ bool fat_lfnCharAllowed(char c);
 char fat_lfnSanitizeChar(char c);
 int8_t fat_compareDisplayName(const char *a, const char *b,
                               bool case_sensitive);
+/*
+ * Compare two FAT display components for product browser order.
+ *
+ * What: Sorts by ASCII case-folded text first, then by the original display
+ * bytes when the folded text is identical. The raw-byte tiebreaker makes
+ * uppercase letters sort before lowercase letters for the same character.
+ *
+ * Why: User-facing load/save is case-insensitive but case-preserving. If an
+ * externally edited card contains `fiRstfile.snr` and `firStfile.snr`, both
+ * names match the same product object. The browser must expose exactly one
+ * deterministic winner, and the capital-letter-first tiebreaker chooses
+ * `fiRstfile.snr`.
+ *
+ * Inputs: NUL-terminated ASCII display components returned by asyncfatfs object
+ * iteration or built by storage save-name helpers. These are components, not
+ * paths.
+ *
+ * Output: strcmp-style ordering. Zero means byte-identical display text, not
+ * merely same-casefold text.
+ *
+ * Affiliates/clients: filesystem.c Instrument browser insertion, File/Dir
+ * diagnostics if sorted duplicate hiding is added there, Kit/Scene duplicate
+ * slot arbitration, and overwrite duplicate collection.
+ */
+int8_t fat_compareDisplayNameCasefoldThenCase(const char *a, const char *b);
 
 uint8_t fat_calculateFilenameCaseFlags(const char *filename);
 void fat_applyFilenameCaseFlags(char *filename, uint8_t ntReserved);
