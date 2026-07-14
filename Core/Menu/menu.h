@@ -59,7 +59,7 @@ extern uint8_t voiceModeShowMorph;
  * Keeping the count at the first non-kit load type prevents KitMrp from
  * reusing the normal Kit cursor storage by accident.
  */
-#define NUM_PRESET_LOCATIONS 3
+#define NUM_PRESET_LOCATIONS 7
 extern uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 
 enum PageNames {
@@ -200,7 +200,18 @@ enum saveStateEnum {
 };
 
 enum loadSaveEnum {
-    SAVE_TYPE_KIT = 0,
+    SAVE_TYPE_FILE = 0,
+    SAVE_TYPE_DIR,
+    /*
+     * File/Dir remain the exact-case asyncfatfs diagnostics; Kit is the first
+     * musical entry promoted back onto the panel.
+     *
+     * The remaining musical entries stay enumerated so their lower layers can
+     * compile while menu.c gates reachability through its restored-type
+     * whitelist. That avoids accidentally exposing stale save paths before
+     * each format has been retested against the expanded asyncfatfs API.
+     */
+    SAVE_TYPE_KIT,
     /*
      * Kit Morph is a load-page mode, not a separate persisted file type.
      *

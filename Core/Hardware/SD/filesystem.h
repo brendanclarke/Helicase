@@ -59,6 +59,14 @@ typedef enum {
     FS_FILE_SAMPLES,
 } fs_file_type_t;
 
+#define FS_TEST_NAME_MAX 48u
+#define FS_TEST_RESULT_BYTES 4u
+
+typedef enum {
+    FS_TEST_RESULT_BYTES_READY = 0,
+    FS_TEST_RESULT_DIRECTORY
+} fs_test_result_kind_t;
+
 typedef enum {
     FS_STATUS_IDLE,
     FS_STATUS_BUSY,
@@ -102,7 +110,7 @@ bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb
 /*
  * Load one numbered Kit directory into every Scene selected by scene_mask.
  *
- * Inputs: zero-based Kit browser slot, a bit per resident Scene, and completion
+ * Inputs: direct Kit library slot 000..999, a bit per resident Scene, and completion
  * callback. Output: one asynchronous directory read whose staged payload is
  * copied into all selected Scene kits only after every instrument validates.
  * Clients: preset_loadKitForScenes() and boot through the same Preset API.
@@ -115,7 +123,7 @@ bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
 /*
  * Stage one numbered Kit directory for a Preset-owned morph commit.
  *
- * Inputs: zero-based Kit browser slot, resident Scene mask, and completion
+ * Inputs: direct Kit library slot 000..999, resident Scene mask, and completion
  * callback. Output: one asynchronous directory read into filesystem-owned
  * staging with no live Scene replacement. Preset reads the staged kit after
  * completion and copies only same-type morphable normal endpoints into the
@@ -127,7 +135,7 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
 /*
  * Load one numbered root Scene directory into every selected resident Scene.
  *
- * Inputs: zero-based root Scene library slot, destination Scene mask, and
+ * Inputs: direct root Scene library slot 000..999, destination Scene mask, and
  * completion callback. Output: asynchronous staged Scene load; resident Scene
  * memory changes only after sceneset.scg, one embedded Kit directory, one
  * pattern file, and one effect file validate. Scene Load is explicit-OK from
@@ -140,7 +148,7 @@ bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb
 /*
  * Post a new-format Kit directory save.
  *
- * Inputs: 0-based Kit folder slot and completion callback. Output: an async
+ * Inputs: direct Kit folder slot 000..999 and completion callback. Output: an async
  * operation that creates/opens Kit/<NNN name>/, writes kitset.kcg, and writes
  * six instrument files from the active Scene kit. Legacy flat save remains
  * separate so directory save cannot accidentally emit Pxxx.SND bytes.
@@ -149,7 +157,7 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb);
 /*
  * Save one resident Scene into one numbered root Scene library slot.
  *
- * Inputs: zero-based root Scene slot, source resident Scene index, display name
+ * Inputs: direct root Scene slot 000..999, source resident Scene index, display name
  * for sceneset/folder creation, and completion callback. Output: Scene/<NNN
  * Name>/ containing sceneset.scg, embedded Kit <name>/, bridge pattern.pat,
  * and a placeholder effects.fx until real effects exist.
@@ -164,6 +172,44 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
 /*
+ * Generic asyncfatfs File/Dir test browser and payload API.
+ *
+ * These calls are the only load/save surface expected to work during the
+ * asyncfatfs expansion. Inputs are exact root-level display components with
+ * preserved case, never slash-separated paths. Outputs are filesystem-owned
+ * scan caches and a four-byte result record used by Menu's two-second test
+ * display. Affiliates: asyncfatfs LFN object iterator/open/create APIs and
+ * presetManager's PRESET_OP_TEST_* completion wrappers.
+ */
+bool filesystem_requestScanTestFiles(fs_completion_cb_t cb);
+bool filesystem_requestScanTestDirs(fs_completion_cb_t cb);
+/*
+ * Generic asyncfatfs File/Dir diagnostic browser accessors.
+ *
+ * These temporary test menus list concrete root objects exactly as asyncfatfs
+ * reports them after structural FAT filtering: VFAT fragments, deleted
+ * entries, volume labels, and structural dot entries are hidden, but ordinary
+ * names beginning with '.' remain selectable because they are valid files or
+ * directories. Inputs: root scan requests and selected display names. Outputs:
+ * case-preserved display names, four read/write test bytes, or a child
+ * directory display name.
+ */
+uint8_t filesystem_testFileCount(void);
+uint8_t filesystem_testDirCount(void);
+const char *filesystem_testFileName(uint8_t index);
+const char *filesystem_testDirName(uint8_t index);
+bool filesystem_requestLoadTestFile(const char *display_name,
+                                    fs_completion_cb_t cb);
+bool filesystem_requestLoadTestDir(const char *display_name,
+                                   fs_completion_cb_t cb);
+bool filesystem_requestSaveTestFile(const char *display_name,
+                                    fs_completion_cb_t cb);
+bool filesystem_requestSaveTestDir(const char *display_name,
+                                   fs_completion_cb_t cb);
+fs_test_result_kind_t filesystem_testResultKind(void);
+const uint8_t *filesystem_testResultBytes(void);
+const char *filesystem_testResultName(void);
+/*
  * Load one root Instrument/ file into an explicit Scene slot.
  *
  * Inputs: resident Scene index, zero-based kit slot, registry type, cache
@@ -177,6 +223,20 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,
                                       instrument_type_t type,
                                       uint8_t browser_index,
+                                      fs_completion_cb_t cb);
+/*
+ * Save one resident kit voice as a root Instrument/ file.
+ *
+ * Inputs: resident source Scene index, zero-based kit voice slot, display stem
+ * from the Save UI, and completion callback. Output: asynchronous
+ * Instrument/<stem.ext> write using the source slot's current type and
+ * storageTypes instrument serializer. The source slot is a six-voice kit
+ * coordinate; it is unrelated to the 000..999 library-slot numbering used by
+ * Kit and Scene folders. Client: preset_saveInstrument().
+ */
+bool filesystem_requestSaveInstrument(uint8_t source_scene,
+                                      uint8_t source_slot,
+                                      const char *display_name,
                                       fs_completion_cb_t cb);
 struct kit_instrument_slot;
 /*
@@ -222,9 +282,9 @@ const char *filesystem_loadedName(void);
 
 /* Query the Phase 2 Kit/ scan cache for a numbered kit folder.
  *
- * Input: zero_based_slot is the internal slot index used by preset/menu code;
- * SD folder names are one-based 001 Name through 999 Name, with underscore
- * accepted as a compatibility separator. Output: nonzero when
+ * Input: slot is the direct Kit library index used by preset/menu code; SD
+ * folder names are 000 Name through 999 Name, with underscore accepted as a
+ * compatibility separator. Slot 000 is real. Output: nonzero when
  * filesystem_requestScanKits() has found a matching Kit/NNN Name directory.
  * Clients: menu.c and any future load/save UI that must show explicit Empty
  * slots without trying to open a missing directory.

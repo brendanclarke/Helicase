@@ -1,10 +1,11 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 035 for the one-pattern bridge,
+Session 030 baseline, updated through Session 036 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
-descriptor Morph, per-voice Morph, and Scene modulation targets. This spec
+descriptor Morph, per-voice Morph, Scene modulation targets, asyncfatfs
+LFN/case expansion, restored Kit load/save, and root Instrument Save. This spec
 records the live module API boundaries
 after `frontPanelParser.c/h` removal, the PatternData storage-ownership pass,
 the `Core/Preset` -> `Core/Scene/Preset` folder move, the first Phase 2
@@ -31,8 +32,15 @@ a generic bridge.
   `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
 - Normal root Kit loads and saves are directory-based. Kit Morph Load and
   Instrument Morph Load copy normal source endpoints into morph endpoints for
-  same-type slots; mismatched slots are no-change. Morph Kit save remains
-  legacy `.SND` until final morph-save policy replaces it.
+  same-type slots; mismatched slots are no-change. Root Instrument Save writes
+  one resident voice to the root Instrument pool. Morph Kit save remains legacy
+  `.SND` until final morph-save policy replaces it.
+- Numbered library slots are direct `000..999`; slot `000` is real. This does
+  not change instrument file voice coordinates, which remain one-based `1..6`.
+- asyncfatfs owns exact-case filename behavior. Product code should use
+  filesystem/asyncfatfs object/LFN APIs instead of local FAT/LFN reconstruction.
+  Dot-prefixed files are ordinary filesystem objects and must not be hidden by
+  asyncfatfs.
 - Filesystem shape, instrument file shape, descriptor tables, Scene storage,
   menu layout, and DSP propagation are specified in
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
@@ -257,12 +265,12 @@ edit dispatch, and post-load operation follow-up.
 | `menu_switchPage(pageNr)` / `menu_switchSubPage(subPageNr)` | Page navigation and direct Pattern/LED refresh. | buttonHandler/Menu |
 | `menu_resetActiveParameter()` | Keep active parameter valid for page. | buttonHandler/Menu |
 | `menu_setVoiceModeShowMorph(onOff)` | Toggle VOICE-page morph endpoint overlay for descriptor-backed instrument cells; repaint/edit helpers resolve the active slot's main or morph image through InstrumentManager. | buttonHandler `SHIFT+VOICE` mode |
-| `menu_loadInstrumentVoicePressed(voice)` / `menu_loadInstrumentExit()` | Enter/select or leave nested Instrument Load when no transaction owns it. | buttonHandler Load/VOICE gestures |
-| `menu_loadSceneButtonPressed(scene)` | Consume Load-context SEQ presses as Kit target toggles or Instrument one-Scene selection. | buttonHandler SEQ press/release routing |
-| `menu_loadInstrumentTransactionBusy()` | Report read-plus-commit Instrument transaction ownership; callers must not change mode, Scene, destination voice, or preview while true. | buttonHandler/Menu gates |
+| `menu_loadInstrumentVoicePressed(voice)` / `menu_loadInstrumentExit()` | Enter/select or leave nested Instrument Load or Save when no transaction owns it. Load uses the voice as destination; Save uses it as source for root Instrument export. | buttonHandler Load/Save VOICE gestures |
+| `menu_loadSceneButtonPressed(scene)` | Consume Load/Save-context SEQ presses as Kit target toggles, Instrument Load one-Scene selection, or Instrument Save source-Scene selection. | buttonHandler SEQ press/release routing |
+| `menu_loadInstrumentTransactionBusy()` | Report read/save-plus-commit Instrument transaction ownership; callers must not change mode, Scene, destination/source voice, or preview while true. | buttonHandler/Menu gates |
 | `menu_paramUsesMorphView(paramNr)` / `menu_getParameterDisplayValue(paramNr)` / `menu_getParameterEditPtr(paramNr)` | Legacy display/edit helpers for static parameter IDs. Descriptor-backed VOICE cells use the internal dynamic cell resolver instead. | Menu repaint, encoder edits, endless-pot edits |
 | `menu_showStepTrackSettingsFirstHalf()` / `menu_toggleStepTrackSettingsHalf()` | Select STEP front-page first half or toggle to the second half where per-track shuffle lives. | buttonHandler STEP-mode voice/track buttons |
-| `menu_resetSaveParameters()` | Reset load/save UI state. | load/save page |
+| `menu_resetSaveParameters()` | Reset load/save UI state while preserving the promoted File/Dir/Kit type whitelist and clearing nested Instrument state. | load/save page |
 | `menu_setNumSamples(num)` | Sample count display state. | sample/filesystem paths |
 | `menu_getActivePage()` / `menu_getSubPage()` | Read visible page/subpage. | buttonHandler, ledHandler |
 | `menu_getActiveVoice()` / `menu_setActiveVoice(voiceNr)` | UI active voice. | buttonHandler, MidiParser, PatternData callers |
@@ -348,7 +356,7 @@ prefixes remain `preset_*` for the mechanical move.
 |---|---|---|
 | `preset_init()` | Initialize preset operation status. | boot |
 | `preset_getStatus()` / `preset_getCompletedOp()` / `preset_getRequestSlot()` / `preset_getRequestType()` / `preset_ackStatus()` | Async operation status protocol. | Menu |
-| `preset_loadDrumset(presetNr, isMorph)` / `preset_saveDrumset(presetNr, isMorph)` | Async kit/morph load/save. | Menu |
+| `preset_loadDrumset(presetNr, isMorph)` / `preset_saveDrumset(presetNr, isMorph)` | Async kit/morph load/save. Normal Kit Save returns acceptance so Menu locks busy only after filesystem accepts the request. | Menu |
 | `preset_loadKitMorphForScenes(presetNr, scene_mask)` | Parse a Kit directory through normal staging, then copy source normal endpoint values into selected resident morph endpoints only where source/destination instrument types match. | Menu KitMrp Load |
 | `preset_loadGlobals()` / `preset_saveGlobals()` | Async globals load/save. | Menu |
 | `preset_loadPattern(presetNr)` / `preset_savePattern(presetNr)` | Async pattern load/save. | Menu |
@@ -356,6 +364,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_loadName(presetNr, what)` / `preset_applyLoadedName()` | Async slot name browsing. | Menu |
 | `preset_loadInstrument(scene, slot, type, browser_index)` | Post one immutable root Instrument request; request coordinates publish only after filesystem accepts it. | Instrument Load lower-row browser |
 | `preset_loadInstrumentMorph(scene, slot, type, browser_index)` | Post one root Instrument request for morph endpoint import; type must match the destination slot and only morphable source normal endpoint values are copied into the resident morph image. | Instrument Load `<Type>Mrp` lower-row browser |
+| `preset_saveInstrument(scene, slot, display_name)` | Post one root Instrument Save request from a resident Scene/voice slot. The display stem is captured at request acceptance and filesystem writes `Instrument/<stem.ext>`. | Instrument Save nested Save-page OK |
 | `preset_sendDrumsetParameters()` | Synchronous pre-audio Scene kit audio-routing and descriptor runtime apply. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
 | `preset_setInstrumentParameter(scene, slot, descriptor_index, image, value, recordAutomation)` | Store one descriptor-backed instrument main/morph value and apply/record when appropriate. | Menu dynamic VOICE cells, storage |
@@ -533,9 +542,10 @@ storageTypes, SceneData.
 
 Purpose: public typed async filesystem facade. It serializes pattern data
 through PatternData accessors after Session 028. Normal kit load/save scans,
-opens, and writes root `Kit/NNN Name/` directory-format data, while leaving
-storage text parsing/formatting and descriptor-key validation to
-`storageTypes.c/h`.
+opens, and writes root `Kit/NNN Name/` directory-format data, root Instrument
+Load/Save operates on the root `Instrument/` pool, and generic File/Dir
+diagnostics exercise exact-case asyncfatfs behavior. Storage text
+parsing/formatting and descriptor-key validation stay in `storageTypes.c/h`.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
@@ -543,27 +553,29 @@ storage text parsing/formatting and descriptor-key validation to
 | `filesystem_tick()` | Pump asyncfatfs work. | main loop |
 | `filesystem_status()` / `filesystem_ack()` | Operation status protocol. | Preset/Menu |
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is `Kit/NNN Name/kitset.kcg` plus instruments and save routes to the new Kit directory writer. For `FS_FILE_MORPH`, load/save remains legacy `.SND`. | Preset |
-| `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
+| `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one direct Kit library slot `000..999` into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
 | `filesystem_requestLoadKitMorphForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging only so Preset can copy matching source normal endpoints into resident morph endpoints. | Preset/Menu KitMrp Load |
 | `filesystem_requestSaveKitDirectory(slot, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. | Preset/Menu Kit Save |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the per-type root Instrument browser cache. | main boot, Menu Instrument Load |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Validate one root Instrument file into private staging without mutating live SceneData. | Preset Instrument request |
+| `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. | Preset Instrument Save |
 | `filesystem_loadedInstrumentSlot()` / `filesystem_loadedInstrumentDisplayName()` / `filesystem_loadedInstrumentStem()` | Borrow the validated staged payload/name/stem for Preset's ordered commit and later Kit Save metadata. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
 | `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the new cache and legacy `kitBrowser` map. | main startup, kitBrowser/Menu |
 | `filesystem_installSamplesBlocking()` / `filesystem_installLoopsBlocking()` | Blocking sample/loop install under audio suspend. | Menu |
 | `filesystem_loadedName()` | Read loaded name buffer. | Preset |
-| `filesystem_kitSlotExists(zero_based_slot)` | Query the Phase 2 Kit scan cache for a numbered folder. | Menu/future browsers |
-| `filesystem_kitSlotName(zero_based_slot)` | Return cached eight-character Kit display name or `Empty   `. | Menu Load page |
+| `filesystem_kitSlotExists(slot)` | Query the Kit scan cache for a direct `000..999` numbered folder. | Menu/future browsers |
+| `filesystem_kitSlotName(slot)` | Return cached eight-character Kit display name or `Empty   `. | Menu Load page |
+| `filesystem_requestScanTestFiles()` / `filesystem_requestScanTestDirs()` and File/Dir test accessors | Temporary diagnostic exact-case root file/directory scans and four-byte read/write results. Dot-prefixed names are not hidden. | Preset/Menu File/Dir diagnostics |
 | `filesystem_diagOp()` / `filesystem_diagPhase()` / `filesystem_diagBytesDone()` | Diagnostics. | diagnostics/future UI |
 | `filesystem_lastMountResult()` / `filesystem_bootDetectedUnsupportedCard()` | Boot/card status. | main/Menu |
 | `filesystem_takeStaleGlobalsWarning()` | One-shot stale globals warning source. | Menu |
 
 Important private Phase 2 kit helpers:
 
-- `filesystem_scanKits_tick()` enters root `Kit/`, reconstructs LFN display
-  names when available, records FAT short aliases for opening, and populates
-  `kb_map[]`/`kb_numKits` for legacy `kitBrowser` compatibility.
+- `filesystem_scanKits_tick()` opens root `Kit/` by exact display component,
+  iterates asyncfatfs objects, records display names and FAT short aliases, and
+  populates `kb_map[]`/`kb_numKits` for legacy `kitBrowser` compatibility.
 - `filesystem_loadKitDirectory_tick()` opens the selected kit folder, parses
   `kitset.kcg`, and loads six listed instrument files into private `kit_t`
   staging. It fans out the complete Kit payload only after every file validates;
@@ -571,20 +583,29 @@ Important private Phase 2 kit helpers:
 - `filesystem_loadInstrument_tick()` parses one root Instrument into private
   `kit_instrument_slot_t`/display-name staging. It must never reset a live Scene
   slot during asynchronous I/O; Preset owns the post-completion transaction.
+- `filesystem_saveInstrument_tick()` writes one resident Scene/voice slot into
+  root `Instrument/` with `afatfs_mkdir_lfn()` plus `afatfs_fopen_lfn()`,
+  streams `storage_formatInstrumentLine()`, and updates the Instrument browser
+  cache from the actual display/alias pair.
 - `filesystem_saveKitDirectory_tick()` creates/opens root `Kit/`, creates/opens
-  the target short-name Kit folder, streams `kitset.kcg`, streams six
-  instrument files, and updates the scan cache when complete. Stale
+  the target LFN Kit folder or existing scan-cache identity, streams six
+  instrument files first, streams `kitset.kcg` after member aliases are known,
+  and updates the scan cache when complete. Stale
   unreferenced files may remain because asyncfatfs has no recursive directory
   replace; `kitset.kcg` is authoritative.
 - Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
-  fallback for FAT aliases like `001SLA~1`.
+  fallback for FAT aliases like `000INI~1` or `001SLA~1`.
 
 asyncfatfs boundary:
 
-- Session 036 adds asyncfatfs LFN component creation through
-  `afatfs_mkdir_lfn()` and `afatfs_fopen_lfn()`. The primitives create VFAT LFN
-  entries, return the generated 8.3 alias for existing open paths, and keep
-  callers out of raw FAT directory-entry writing.
+- Session 036 adds asyncfatfs LFN component creation and object iteration
+  through `afatfs_mkdir_lfn()`, `afatfs_fopen_lfn()`,
+  `afatfs_opendir_lfn()`, and `afatfs_findNextObject()`. The primitives create
+  VFAT LFN entries, preserve SFN display case, return generated 8.3 aliases for
+  identity opens, expose file/directory kind, and keep callers out of raw FAT
+  directory-entry writing.
+- asyncfatfs must not hide ordinary dot-prefixed files/directories. Product
+  scanners filter after object iteration.
 - Future save code should reuse/extend those filesystem state-machine
   primitives instead of creating one-off FAT writers.
 - Missing core primitives are atomic rename/replace and recursive directory
@@ -624,9 +645,9 @@ layer use the `storage_` prefix.
 | `storage_instrumentCopyMainToMorphFallback()` | Copy mapped main values into morph buffer when an instrument has no `[morph]` section. | `filesystem_loadKitDirectory_tick()` |
 | `storage_instrumentTypeFromText()` / `storage_instrumentFilenameMatchesType()` | Convert/validate type strings and extensions. | kitset/instrument validation |
 | `storage_instrumentTypeToText()` / `storage_instrumentTypeExtension()` | Convert type enum back into schema token/extension for save. | Kit Save writer |
-| `storage_formatKitsetLine()` / `storage_formatInstrumentLine()` | Emit one bounded schema line at a time for streaming Kit Save. Instrument emission writes `self` for own-slot LFO voice selectors. | filesystem Kit Save |
-| `storage_makeSavedInstrumentFilename()` | Generate duplicate-resolved, 8.3-safe instrument member filenames from Scene-retained stems and slot type. | filesystem Kit Save |
-| `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into zero-based slot plus eight-character display name; range is 001..999. | Kit scan |
+| `storage_formatKitsetLine()` / `storage_formatInstrumentLine()` | Emit one bounded schema line at a time for streaming Kit Save and root Instrument Save. Instrument emission writes `self` for own-slot LFO voice selectors. | filesystem Kit/Instrument Save |
+| `storage_makeSavedInstrumentDisplayFilename()` | Generate visible LFN instrument filenames from Scene-retained stems, slot type, and optional duplicate-breaking voice suffix. asyncfatfs returns the final short alias. | filesystem Kit/Instrument Save |
+| `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into direct `000..999` slot plus eight-character display name. Slot `000` is real. | Kit/Scene scan |
 | `storage_copyDisplayName()` / `storage_copyFilename()` | Fixed-width display-name normalization and short filename copying. | filesystem/parser code |
 
 Current ownership decisions:
@@ -641,10 +662,10 @@ Current ownership decisions:
   `kitset.kcg` or instrument files; they belong in Scene settings.
 - Missing instrument `[morph]` data is treated as "copy main parameters into
   morph" for morphable descriptors.
-- Kit Save writes the same folder shape the loader accepts. Instrument files
-  emit metadata once, then one `[params]` section and one `[morph]` section.
-  Supplemental target selectors are written in `[params]` only; `[morph]`
-  writes morphable endpoint descriptors only.
+- Kit Save and root Instrument Save write the same instrument file schema the
+  loader accepts. Instrument files emit metadata once, then one `[params]`
+  section and one `[morph]` section. Supplemental target selectors are written
+  in `[params]` only; `[morph]` writes morphable endpoint descriptors only.
 - `self` is a file-only LFO voice selector token. storageTypes resolves it on
   load and emits it on save only when the selector points at the saved
   instrument's own slot.

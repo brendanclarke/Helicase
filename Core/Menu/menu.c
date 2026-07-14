@@ -99,6 +99,16 @@ static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
 
 #define MENU_STALE_WARNING_MS 2000u
+#define MENU_TEST_RESULT_MS 2000u
+#define MENU_INSTRUMENT_SAVE_NAME_LEN 8u
+
+static char menu_testEditName[FS_TEST_NAME_MAX + 1u] = "test.bin";
+static uint8_t menu_testResultActive = 0u;
+static uint8_t menu_testResultError = 0u;
+static uint16_t menu_testResultStart = 0u;
+static fs_test_result_kind_t menu_testResultKind = FS_TEST_RESULT_BYTES_READY;
+static uint8_t menu_testResultBytes[FS_TEST_RESULT_BYTES];
+static char menu_testResultName[FS_TEST_NAME_MAX + 1u];
 
 /* Globals can touch hardware/system settings rather than only DSP voice state.
 ** Before audio starts, applying all globals immediately is harmless. After
@@ -795,6 +805,9 @@ uint8_t menu_playedPattern = 0;
 static uint8_t menu_instrumentLoadActive = 0u;
 static uint8_t menu_instrumentLoadSlot = 0u;
 static instrument_type_t menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
+static uint8_t menu_instrumentSaveMode = 0u;
+static char menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN + 1u] =
+    "Inst    ";
 /*
  * Instrument Morph browser mode is derived from the destination slot type.
  *
@@ -2074,6 +2087,173 @@ static uint8_t menu_currentSaveWouldOverwrite(void)
     return 0u;
 }
 
+static uint8_t menu_loadSaveTypeIsRestored(uint8_t what)
+{
+    /*
+     * Gate the promoted Load/Save type list in one place.
+     *
+     * File and Dir remain as asyncfatfs diagnostics. Kit is the first musical
+     * operation restored on top of the new exact-case filesystem layer. Scene,
+     * Settings, Samples, and KitMrp stay compiled but unreachable until their
+     * own promotion passes are retested.
+     */
+    return (uint8_t)(what == SAVE_TYPE_FILE ||
+                     what == SAVE_TYPE_DIR ||
+                     what == SAVE_TYPE_KIT);
+}
+
+static uint8_t menu_nextRestoredLoadSaveType(uint8_t current, int8_t inc)
+{
+    static const uint8_t restored_types[] = {
+        SAVE_TYPE_FILE,
+        SAVE_TYPE_DIR,
+        SAVE_TYPE_KIT
+    };
+    uint8_t count = (uint8_t)(sizeof(restored_types) /
+                              sizeof(restored_types[0]));
+    uint8_t index = 0u;
+    uint8_t i;
+
+    /*
+     * Step through only the currently validated Load/Save entries.
+     *
+     * Inputs: current SAVE_TYPE_* and signed encoder direction. Output: the
+     * next reachable type with wraparound. Keeping this as a small whitelist
+     * prevents stale compiled branches from becoming panel-reachable just
+     * because enum order happens to place them near Kit.
+     */
+    for (i = 0u; i < count; i++) {
+        if (restored_types[i] == current) {
+            index = i;
+            break;
+        }
+    }
+    if (inc < 0)
+        index = (uint8_t)((index + count - 1u) % count);
+    else if (inc > 0)
+        index = (uint8_t)((index + 1u) % count);
+    return restored_types[index];
+}
+
+static uint8_t menu_testObjectCount(uint8_t what)
+{
+    /*
+     * Return the cached root browser count for the temporary File/Dir menus.
+     *
+     * Menu owns only the selected index in menu_currentPresetNr[]; filesystem
+     * owns the immutable exact-case names discovered by asyncfatfs.
+     */
+    return (what == SAVE_TYPE_DIR) ? filesystem_testDirCount()
+                                   : filesystem_testFileCount();
+}
+
+static const char *menu_testObjectName(uint8_t what, uint8_t index)
+{
+    return (what == SAVE_TYPE_DIR) ? filesystem_testDirName(index)
+                                   : filesystem_testFileName(index);
+}
+
+static const char *menu_currentTestName(void)
+{
+    /*
+     * Select the exact display component used by the current test operation.
+     *
+     * Load pages read from the filesystem scan cache; Save pages use the
+     * bounded editor buffer. The storage request copies the returned text again
+     * before it starts, so later encoder movement cannot retarget an in-flight
+     * async operation.
+     */
+    if (menu_activePage == LOAD_PAGE) {
+        uint8_t what = menu_saveOptions.what;
+        uint8_t count = menu_testObjectCount(what);
+        uint16_t index = menu_currentPresetNr[what];
+        if (count == 0u)
+            return "";
+        if (index >= count)
+            index = (uint16_t)(count - 1u);
+        return menu_testObjectName(what, (uint8_t)index);
+    }
+    return menu_testEditName;
+}
+
+static void menu_requestTestScan(uint8_t what)
+{
+    /*
+     * Refresh the root File/Dir test cache for Load pages.
+     *
+     * This is posted through Preset so completion follows the same poll path as
+     * other storage operations. Save pages do not scan before editing because
+     * overwrite behavior is intentionally delegated to the exact "w" open.
+     */
+    if (menu_activePage != LOAD_PAGE)
+        return;
+    if ((what == SAVE_TYPE_FILE && preset_scanTestFiles()) ||
+        (what == SAVE_TYPE_DIR && preset_scanTestDirs())) {
+        menu_storageBusy = 1u;
+    } else {
+        menu_deferSelectionRequest = 1u;
+    }
+}
+
+static void menu_showTestResult(void)
+{
+    /*
+     * Draw the two-second result overlay for File/Dir tests.
+     *
+     * Successful byte results display all four diagnostic bytes exactly once:
+     * the top row shows bytes 0 and 1, and the bottom row shows bytes 2 and 3.
+     * Directory-child results show the first eight characters of the child
+     * directory name. Failed File/Dir test operations show ERR explicitly so
+     * storage bugs do not look like an ordinary browser repaint.
+     */
+    memset(editDisplayBuffer, ' ', 2u * 17u);
+    if (menu_testResultError) {
+        /*
+         * Show File/Dir test failures explicitly.
+         *
+         * Silent fallback to the browser hides the exact failure mode this
+         * temporary storage surface is meant to reveal. A two-second ERR
+         * overlay makes failed SFN/LFN opens visible without blocking the main
+         * loop.
+         */
+        memcpy(&editDisplayBuffer[0][6], "ERR", 3u);
+        memcpy(&editDisplayBuffer[1][6], "ERR", 3u);
+        return;
+    }
+    if (menu_testResultKind == FS_TEST_RESULT_DIRECTORY) {
+        memcpy(&editDisplayBuffer[0][0], "Dir:", 4u);
+        for (uint8_t i = 0u; i < 8u; i++) {
+            char c = menu_testResultName[i];
+            editDisplayBuffer[0][5u + i] = c ? c : ' ';
+        }
+        memcpy(&editDisplayBuffer[1][0], "Dir:", 4u);
+        for (uint8_t i = 0u; i < 8u; i++) {
+            char c = menu_testResultName[i];
+            editDisplayBuffer[1][5u + i] = c ? c : ' ';
+        }
+        return;
+    }
+
+    for (uint8_t row = 0u; row < 2u; row++) {
+        for (uint8_t i = 0u; i < 2u; i++) {
+            static const char hex[] = "0123456789ABCDEF";
+            uint8_t col = (uint8_t)(i * 8u);
+            uint8_t b = menu_testResultBytes[(row * 2u) + i];
+            /*
+             * Display all four diagnostic bytes exactly once.
+             *
+             * This layout fits two 0xNN tokens per 16-cell row and makes
+             * byte-order/persistence errors visible. Repeating the top row
+             * would hide short reads and duplicated payload generation.
+             */
+            editDisplayBuffer[row][col + 0u] = '0';
+            editDisplayBuffer[row][col + 1u] = 'x';
+            editDisplayBuffer[row][col + 2u] = hex[(b >> 4u) & 0x0fu];
+            editDisplayBuffer[row][col + 3u] = hex[b & 0x0fu];
+        }
+    }
+}
+
 /* Request the filesystem action that corresponds to the current Load/Save page
  * selection.
  *
@@ -2091,6 +2271,16 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
 
     menu_deferSelectionRequest = 0;
     menu_deferSelectionLoadKit = loadKitOnLoadPage;
+    if (what == SAVE_TYPE_FILE || what == SAVE_TYPE_DIR) {
+        /*
+         * Temporary asyncfatfs test entries do not use legacy preset-name
+         * readers or numbered Kit/Scene slots. On Load, refresh the root
+         * object cache; on Save, the visible name comes from menu_testEditName
+         * and no filesystem request is needed until OK is clicked.
+         */
+        menu_requestTestScan(what);
+        return;
+    }
     if (what >= SAVE_TYPE_GLO) {
         preset_loadName(0, what);
         return;
@@ -2316,6 +2506,56 @@ static void menu_instrumentLoadStepType(int8_t inc)
     }
 }
 
+static void menu_instrumentSaveSeedName(void)
+{
+    const scene_t *scene = scene_getConst(menu_instrumentLoadScene);
+    const kit_t *kit = scene ? &scene->kit : NULL;
+    const char *source = "Inst    ";
+    uint8_t i;
+    uint8_t non_space = 0u;
+
+    /*
+     * Seed nested Instrument Save from the selected resident kit slot.
+     *
+     * Inputs: source Scene/voice retained by Instrument mode. Output: an
+     * eight-character editable stem. The source is the slot's display name,
+     * not a root Instrument browser entry, because Save exports the currently
+     * loaded resident instrument even when it originally came from a Kit
+     * folder or was edited in place.
+     */
+    if (kit && menu_instrumentLoadSlot < INSTRUMENT_SLOT_COUNT)
+        source = kit->instrument_display_name[menu_instrumentLoadSlot];
+    for (i = 0u; i < MENU_INSTRUMENT_SAVE_NAME_LEN; i++) {
+        char c = source[i];
+        if (c == '\0')
+            c = ' ';
+        menu_instrumentSaveName[i] = c;
+        if (c != ' ')
+            non_space = 1u;
+    }
+    if (!non_space)
+        memcpy(menu_instrumentSaveName, "Inst    ",
+               MENU_INSTRUMENT_SAVE_NAME_LEN);
+    menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+}
+
+static void menu_instrumentSaveRequestSelection(void)
+{
+    /*
+     * Start one root Instrument Save from nested Save mode.
+     *
+     * Inputs are copied by Preset/filesystem at request acceptance time:
+     * source Scene, source voice slot, and the editable eight-character stem.
+     * Output is menu_storageBusy only when the async request was accepted, so
+     * failed validation leaves the menu interactive instead of getting stuck.
+     */
+    if (preset_saveInstrument(menu_instrumentLoadScene,
+                              menu_instrumentLoadSlot,
+                              menu_instrumentSaveName)) {
+        menu_storageBusy = 1u;
+    }
+}
+
 uint8_t menu_loadInstrumentIsActive(void)
 {
     return menu_instrumentLoadActive;
@@ -2387,6 +2627,7 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
         scene_index >= 16u)
         return 0u;
     if (menu_activePage == SAVE_PAGE &&
+        !menu_instrumentLoadActive &&
         menu_saveOptions.what != SAVE_TYPE_KIT &&
         menu_saveOptions.what != SAVE_TYPE_SCENE)
         return 0u;
@@ -2409,6 +2650,8 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
     if (menu_instrumentLoadActive) {
         menu_instrumentLoadScene = scene_index;
         menu_instrumentLoadRefreshBaseType(1u);
+        if (menu_instrumentSaveMode)
+            menu_instrumentSaveSeedName();
     } else {
         menu_kitLoadSceneMask = (uint16_t)(menu_kitLoadSceneMask ^ bit);
     }
@@ -2421,15 +2664,17 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
 void menu_loadInstrumentExit(void)
 {
     /*
-     * Exit nested Instrument Load mode.
+     * Exit nested Instrument Load/Save mode.
      *
-     * Inputs: none. Output: normal Load page state becomes active again while
-     * the selected Load type/kit slot are left untouched. ButtonHandler calls
-     * this when the Load/Save mode button is pressed a second time.
+     * Inputs: none. Output: normal Load/Save page state becomes active again
+     * while the selected top-level type/kit slot are left untouched.
+     * ButtonHandler calls this when the Load/Save mode button is pressed a
+     * second time.
      */
     if (menu_loadInstrumentTransactionBusy())
         return;
     menu_instrumentLoadActive = 0u;
+    menu_instrumentSaveMode = 0u;
     menu_refreshLoadSceneLeds();
     menu_repaintAll();
 }
@@ -2439,14 +2684,16 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     const kit_instrument_slot_t *slot;
 
     /*
-     * Consume a VOICE button as an Instrument Load destination selector.
+     * Consume a VOICE button as an Instrument Load destination or Save source.
      *
-     * Inputs: zero-based VOICE button. Output: nonzero when LOAD_PAGE consumed
-     * the press. Menu owns the selected destination/type/index; encoder motion
-     * owns immediate file loads. ButtonHandler owns LED blink feedback and
-     * skips normal preview/mute/page behavior when this returns true.
+     * Inputs: zero-based VOICE button. Output: nonzero when Load/Save consumed
+     * the press. Load mode treats the voice as a destination for Instrument/
+     * browsing. Save mode treats it as the resident source to export into the
+     * root Instrument/ pool. ButtonHandler owns LED blink feedback and skips
+     * normal preview/mute/page behavior when this returns true.
      */
-    if (menu_activePage != LOAD_PAGE || voiceNr >= INSTRUMENT_SLOT_COUNT)
+    if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        voiceNr >= INSTRUMENT_SLOT_COUNT)
         return 0u;
     if (menu_loadInstrumentTransactionBusy()) {
         /*
@@ -2458,10 +2705,14 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
         return 1u;
     }
     menu_instrumentLoadActive = 1u;
+    menu_instrumentSaveMode = (uint8_t)(menu_activePage == SAVE_PAGE);
     menu_instrumentLoadSlot = voiceNr;
     menu_instrumentLoadScene = scene_getActiveIndex();
     menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
-    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+    menu_saveOptions.what = SAVE_TYPE_KIT;
+    menu_saveOptions.state = menu_instrumentSaveMode
+        ? SAVE_STATE_EDIT_NAME1
+        : SAVE_STATE_EDIT_TYPE;
     editModeActive = 1u;
     slot = scene_instrumentSlotConst(menu_instrumentLoadScene, voiceNr);
     menu_instrumentLoadType = slot ? slot->type : INSTRUMENT_TYPE_DRM;
@@ -2472,6 +2723,8 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadBaseType = menu_instrumentLoadType;
     menu_instrumentLoadMorphMode = 0u;
     menu_instrumentLoadClampIndex();
+    if (menu_instrumentSaveMode)
+        menu_instrumentSaveSeedName();
     menu_setActiveVoice(voiceNr);
     menu_refreshLoadSceneLeds();
     if (!menu_storageBusy)
@@ -2519,14 +2772,15 @@ void numtostrpu(char *buf, uint8_t num, char pad)
 
 static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot)
 {
-    uint16_t display = (uint16_t)(zero_based_slot + 1u);
+    uint16_t display = zero_based_slot;
 
     /*
-     * Format Kit folder numbers independently from byte-valued parameters.
+     * Format library folder numbers independently from byte-valued parameters.
      *
-     * Kit slots now span 001..999, while numtostrpu() remains a uint8_t helper
-     * for menu parameter values. This helper keeps Load/Save folder display
-     * from wrapping above 255.
+     * Kit/Scene and other library slots now span 000..999, with slot 000 a
+     * real save/load location. numtostrpu() remains a uint8_t helper for menu
+     * parameter values, so this helper keeps Load/Save folder display from
+     * wrapping above 255 and avoids the old slot+1 presentation.
      */
     if (display > 999u)
         display = 999u;
@@ -2991,8 +3245,8 @@ void menu_repaint(void)
  * Why this needed a Phase 2 change: the Load page now displays Kit/ directory
  * slots using filesystem_kitSlotName() from the scan cache, not the currently
  * loaded preset_currentName or a legacy .SND name header. The visible kit
- * number is one-based to match folders like 001 Name, while
- * menu_currentPresetNr[] remains zero-based for presetManager/filesystem calls.
+ * number is the direct 000..999 library slot; 000 is a real folder prefix, not
+ * an internal sentinel.
  *
  * Inputs: menu_activePage, menu_saveOptions, menu_currentPresetNr[],
  * preset_currentName, editModeActive. Outputs: editDisplayBuffer plus optional
@@ -3007,14 +3261,19 @@ static void menu_repaintLoadSavePage(void)
     memset(&editDisplayBuffer[0][0], ' ', 16);
     memset(&editDisplayBuffer[1][0], ' ', 16);
 
-    if (menu_activePage == LOAD_PAGE && menu_instrumentLoadActive) {
+    if (menu_testResultActive) {
+        menu_showTestResult();
+        return;
+    }
+
+    if (menu_instrumentLoadActive) {
         uint8_t count;
         uint8_t index;
         uint16_t display_index;
         const kit_t *kit;
 
         /*
-         * Paint nested Instrument Load mode.
+         * Paint nested Instrument Load/Save mode.
          *
          * What: This logic re-writes the visual representation of the Instrument Load menu
          * within the LCD editDisplayBuffer. It respects menu_saveOptions.state and
@@ -3040,6 +3299,44 @@ static void menu_repaintLoadSavePage(void)
          * filesystem_instrumentName, instrumentManager_typeDisplayLabel.
          * Affiliates: menu_handleLoadSaveMenu drives the actual state changes this reflects.
          */
+        if (menu_instrumentSaveMode) {
+            /*
+             * Paint nested Instrument Save mode.
+             *
+             * Inputs: source Scene/voice, source type, editable stem, cursor
+             * state, and OK selection. Output: a compact Save:[Type] page that
+             * uses the normal eight-character encoder editor before writing a
+             * root Instrument/<stem.ext> file. The type row is informational:
+             * the saved extension comes from the resident source slot and is
+             * not user-swappable in this export workflow.
+             */
+            memcpy(&editDisplayBuffer[0][0], "Save:", 5u);
+            menu_instrumentLoadCopyTypeLabel(&editDisplayBuffer[0][6]);
+            editDisplayBuffer[0][5] = '[';
+            editDisplayBuffer[0][14] = ']';
+            for (uint8_t i = 0u; i < MENU_INSTRUMENT_SAVE_NAME_LEN; i++) {
+                char c = menu_instrumentSaveName[i];
+                editDisplayBuffer[1][5u + i] = c ? c : ' ';
+            }
+            if (menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
+                menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
+                uint8_t ci =
+                    (uint8_t)(menu_saveOptions.state - SAVE_STATE_EDIT_NAME1);
+                if (editModeActive) {
+                    editDisplayBuffer[1][4u + ci] = '[';
+                    editDisplayBuffer[1][6u + ci] = ']';
+                } else {
+                    cur_want_on = 1u;
+                    cur_want_col = (uint8_t)(5u + ci);
+                    cur_want_row = 2u;
+                }
+            }
+            memcpy(&editDisplayBuffer[1][14], menuText_ok, 2u);
+            if (menu_saveOptions.state == SAVE_STATE_OK)
+                editDisplayBuffer[1][13] = ARROW_SIGN;
+            return;
+        }
+
         menu_instrumentLoadClampIndex();
         count = filesystem_instrumentCount(menu_instrumentLoadShownType);
         index = menu_instrumentLoadShownIndex;
@@ -3069,7 +3366,7 @@ static void menu_repaintLoadSavePage(void)
         if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
             if (editModeActive) {
                 /* Bracket only the fixed Kit/list selector field, matching the
-                 * normal `[001]name` Load geometry. The source name remains a
+                 * normal `[000]name` Load geometry. The source name remains a
                  * read-only identity display, never part of the selection. */
                 editDisplayBuffer[1][0] = '[';
                 editDisplayBuffer[1][4] = ']';
@@ -3116,8 +3413,10 @@ static void menu_repaintLoadSavePage(void)
     else
         memcpy(&editDisplayBuffer[0][0], "Load:", 5);
 
-    const char *toptxt = "Kit     ";
+    const char *toptxt = "File    ";
     switch (menu_saveOptions.what) {
+    case SAVE_TYPE_FILE:        toptxt = "File    "; break;
+    case SAVE_TYPE_DIR:         toptxt = "Dir     "; break;
     case SAVE_TYPE_KIT:         toptxt = "Kit     "; break;
     case SAVE_TYPE_KIT_MORPH:   toptxt = "KitMrp  "; break;
     case SAVE_TYPE_SCENE:       toptxt = "Scene   "; break;
@@ -3133,6 +3432,56 @@ static void menu_repaintLoadSavePage(void)
         } else {
             editDisplayBuffer[0][5] = ARROW_SIGN;
         }
+    }
+
+    if (menu_saveOptions.what == SAVE_TYPE_FILE ||
+        menu_saveOptions.what == SAVE_TYPE_DIR) {
+        const char *name = menu_currentTestName();
+        uint8_t count = menu_testObjectCount(menu_saveOptions.what);
+
+        /*
+         * Temporary File/Dir test presentation.
+         *
+         * Load pages show the selected root object from the exact-case scan
+         * cache; Save pages show the bounded filename editor. Both modes keep
+         * the right-side OK affordance because the selected action is explicit
+         * and no older instant-load behavior should survive this test surface.
+         */
+        if (menu_activePage == LOAD_PAGE) {
+            uint16_t displayPreset = menu_currentPresetNr[menu_saveOptions.what];
+            if (count != 0u && displayPreset >= count)
+                displayPreset = (uint16_t)(count - 1u);
+            menu_formatPresetNumber3(&editDisplayBuffer[1][1], displayPreset);
+            if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
+                if (editModeActive) {
+                    editDisplayBuffer[1][0] = '[';
+                    editDisplayBuffer[1][4] = ']';
+                } else {
+                    editDisplayBuffer[1][0] = ARROW_SIGN;
+                }
+            }
+        }
+        for (uint8_t i = 0u; i < 8u; i++) {
+            char c = name[i];
+            editDisplayBuffer[1][5u + i] = c ? c : ' ';
+        }
+        if (menu_activePage == SAVE_PAGE &&
+            menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
+            menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
+            uint8_t ci = (uint8_t)(menu_saveOptions.state - SAVE_STATE_EDIT_NAME1);
+            if (editModeActive) {
+                editDisplayBuffer[1][4u + ci] = '[';
+                editDisplayBuffer[1][6u + ci] = ']';
+            } else {
+                cur_want_on = 1u;
+                cur_want_col = (uint8_t)(5u + ci);
+                cur_want_row = 2u;
+            }
+        }
+        memcpy(&editDisplayBuffer[1][14], menuText_ok, 2u);
+        if (menu_saveOptions.state == SAVE_STATE_OK)
+            editDisplayBuffer[1][13] = ARROW_SIGN;
+        return;
     }
 
     /* Bottom row */
@@ -3578,7 +3927,49 @@ checkvalid:
 ** ----------------------------------------------------------------------- */
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
-    if (menu_activePage == LOAD_PAGE && menu_instrumentLoadActive) {
+    if (menu_instrumentLoadActive) {
+        if (menu_instrumentSaveMode) {
+            /*
+             * Encoder handling for nested Instrument Save.
+             *
+             * Inputs: Save-page encoder delta/click state after the global
+             * edit-mode toggle. Output: name characters wrap through printable
+             * ASCII while OK posts one root Instrument Save. This intentionally
+             * bypasses pool browsing because Save exports the selected resident
+             * source slot, not a file selected from Instrument/.
+             */
+            if (btnClicked && editModeActive &&
+                menu_saveOptions.state == SAVE_STATE_OK) {
+                menu_instrumentSaveRequestSelection();
+                return;
+            }
+            if (editModeActive) {
+                if (inc != 0 &&
+                    menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
+                    menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
+                    uint8_t ci = (uint8_t)(menu_saveOptions.state -
+                                           SAVE_STATE_EDIT_NAME1);
+                    char c = (char)(menu_instrumentSaveName[ci] + inc);
+                    if (c < 0x20)
+                        c = 0x7e;
+                    else if (c > 0x7e)
+                        c = 0x20;
+                    menu_instrumentSaveName[ci] = c;
+                    menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] =
+                        '\0';
+                }
+            } else {
+                if (inc < 0) {
+                    if (menu_saveOptions.state > SAVE_STATE_EDIT_NAME1)
+                        menu_saveOptions.state--;
+                } else if (inc > 0) {
+                    if (menu_saveOptions.state < SAVE_STATE_OK)
+                        menu_saveOptions.state++;
+                }
+            }
+            return;
+        }
+
         /*
          * Encoder handling for nested Instrument Load.
          *
@@ -3637,7 +4028,18 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 
             if (menu_activePage == SAVE_PAGE) {
                 switch (menu_saveOptions.what) {
-                case SAVE_TYPE_KIT:     preset_saveDrumset(menu_currentPresetNr[SAVE_TYPE_KIT], 0); break;
+                case SAVE_TYPE_FILE:
+                    if (preset_saveTestFile(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_DIR:
+                    if (preset_saveTestDir(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_KIT:
+                    if (preset_saveDrumset(menu_currentPresetNr[SAVE_TYPE_KIT], 0))
+                        menu_storageBusy = 1u;
+                    break;
                 case SAVE_TYPE_SCENE:
                     preset_saveScene(menu_currentPresetNr[SAVE_TYPE_SCENE],
                                      menu_firstSelectedSceneFromMask(
@@ -3647,9 +4049,20 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 case SAVE_TYPE_GLO:     preset_saveGlobals(); break;
                 default: break;
                 }
-                menu_resetSaveParameters();
+                if (menu_saveOptions.what != SAVE_TYPE_FILE &&
+                    menu_saveOptions.what != SAVE_TYPE_DIR &&
+                    menu_saveOptions.what != SAVE_TYPE_KIT)
+                    menu_resetSaveParameters();
             } else {
                 switch (menu_saveOptions.what) {
+                case SAVE_TYPE_FILE:
+                    if (preset_loadTestFile(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_DIR:
+                    if (preset_loadTestDir(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
                 case SAVE_TYPE_SCENE:
                     if (!preset_loadSceneForScenes(
                             menu_currentPresetNr[SAVE_TYPE_SCENE],
@@ -3673,36 +4086,41 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
     if (editModeActive) {
         switch (menu_saveOptions.state) {
         case SAVE_STATE_EDIT_TYPE:
-            if (inc < 0) {
-                if (menu_saveOptions.what != 0) {
-                    menu_saveOptions.what--;
-                    if (menu_activePage == SAVE_PAGE &&
-                        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
-                        menu_saveOptions.what = SAVE_TYPE_KIT;
-                    }
-                }
-            } else if (inc > 0) {
-                if (menu_saveOptions.what < SAVE_TYPE_SAMPLES) {
-                    menu_saveOptions.what++;
-                    /*
-                     * KitMrp is load-only in this pass.
-                     *
-                     * The enum value exists so Load can expose the morph-load
-                     * endpoint. Save semantics will be defined in the later
-                     * kit/instrument save pass, so Save skips this transient
-                     * load mode while keeping normal Kit, Settings, and
-                     * Samples behavior unchanged.
-                     */
-                    if (menu_activePage == SAVE_PAGE &&
-                        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
-                        menu_saveOptions.what = SAVE_TYPE_SCENE;
-                    }
-                }
-            }
+            if (inc != 0)
+                menu_saveOptions.what =
+                    menu_nextRestoredLoadSaveType(menu_saveOptions.what, inc);
             menu_requestCurrentLoadSaveSelection(0);
             menu_refreshLoadSceneLeds();
             break;
         case SAVE_STATE_EDIT_PRESET_NR: {
+            if (menu_saveOptions.what == SAVE_TYPE_FILE ||
+                menu_saveOptions.what == SAVE_TYPE_DIR) {
+                uint8_t count = menu_testObjectCount(menu_saveOptions.what);
+                int16_t maxPreset = (count == 0u) ? 0 : (int16_t)(count - 1u);
+                int16_t newPreset =
+                    (int16_t)menu_currentPresetNr[menu_saveOptions.what] +
+                    (int16_t)inc;
+
+                /*
+                 * File/Dir Load browser index.
+                 *
+                 * The exact names live in filesystem's scan cache. This
+                 * saturating index is the only state Menu owns, so scrolling
+                 * cannot synthesize paths or fallback names that asyncfatfs
+                 * has not actually reported.
+                 */
+                if (menu_activePage == SAVE_PAGE) {
+                    menu_saveOptions.state = SAVE_STATE_EDIT_NAME1;
+                    break;
+                }
+                if (newPreset < 0)
+                    newPreset = 0;
+                else if (newPreset > maxPreset)
+                    newPreset = maxPreset;
+                menu_currentPresetNr[menu_saveOptions.what] =
+                    (uint16_t)newPreset;
+                break;
+            }
             /* Settings and Samples are unnumbered Load/Save choices. Keeping
              * this guard beside the kit-backed menu_currentPresetNr[] access
              * prevents their enum values from being treated as numbered preset
@@ -3715,9 +4133,9 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             /* Saturating add - original `kit > 0` and `kit <= 125` checks
             ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. Kit
             ** slots are now uint16_t because the directory layout exposes
-            ** 001..999 folders, while the guard keeps non-kit menu entries
-            ** away from the numbered-slot path. */
-            int16_t maxPreset = (menu_saveOptions.what < SAVE_TYPE_GLO) ? 998 : 125;
+            ** 000..999 folders, with 000 real, while the guard keeps non-kit
+            ** menu entries away from the numbered-slot path. */
+            int16_t maxPreset = (menu_saveOptions.what < SAVE_TYPE_GLO) ? 999 : 125;
             int16_t newPreset = (int16_t)menu_currentPresetNr[menu_saveOptions.what] + (int16_t)inc;
             if (newPreset < 0)        newPreset = 0;
             else if (newPreset > maxPreset) newPreset = maxPreset;
@@ -3737,8 +4155,29 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
         default:
             if (inc != 0 && menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
                 menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
-                preset_currentName[menu_saveOptions.state - SAVE_STATE_EDIT_NAME1] =
-                    (char)(preset_currentName[menu_saveOptions.state - SAVE_STATE_EDIT_NAME1] + inc);
+                uint8_t ci = (uint8_t)(menu_saveOptions.state -
+                                       SAVE_STATE_EDIT_NAME1);
+                if (menu_saveOptions.what == SAVE_TYPE_FILE ||
+                    menu_saveOptions.what == SAVE_TYPE_DIR) {
+                    /*
+                     * Temporary File/Dir save-name editor.
+                     *
+                     * The first eight characters are editable on the LCD. The
+                     * buffer itself is long-name sized so future UI work can
+                     * add horizontal scrolling without touching filesystem or
+                     * asyncfatfs again.
+                     */
+                    char c = (char)(menu_testEditName[ci] + inc);
+                    if (c < 0x20)
+                        c = 0x7e;
+                    else if (c > 0x7e)
+                        c = 0x20;
+                    menu_testEditName[ci] = c;
+                    menu_testEditName[FS_TEST_NAME_MAX] = '\0';
+                } else {
+                    preset_currentName[ci] =
+                        (char)(preset_currentName[ci] + inc);
+                }
             }
             break;
         }
@@ -3757,7 +4196,9 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         menu_saveOptions.state = SAVE_STATE_OK;
                     if (menu_saveOptions.state == SAVE_STATE_OK &&
                         menu_saveOptions.what < SAVE_TYPE_GLO &&
-                        menu_saveOptions.what != SAVE_TYPE_SCENE)
+                        menu_saveOptions.what != SAVE_TYPE_SCENE &&
+                        menu_saveOptions.what != SAVE_TYPE_FILE &&
+                        menu_saveOptions.what != SAVE_TYPE_DIR)
                         menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
                 }
             }
@@ -4113,6 +4554,21 @@ void menu_pollPresetStatus(void)
         return;
     }
 
+    if (menu_testResultActive &&
+        (uint16_t)(time_sysTick - menu_testResultStart) >= MENU_TEST_RESULT_MS) {
+        /*
+         * End the nonblocking File/Dir result overlay.
+         *
+         * The storage operation is already complete; this timer only controls
+         * how long the copied byte/Dir result remains on the LCD before the
+         * ordinary test menu is repainted.
+         */
+        menu_testResultActive = 0u;
+        if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+            menu_repaintAll();
+        menu_testResultError = 0u;
+    }
+
     if (menu_staleWarningActive) {
         if ((uint16_t)(time_sysTick - menu_staleWarningStart) >= MENU_STALE_WARNING_MS) {
             menu_staleWarningActive = 0;
@@ -4276,7 +4732,71 @@ void menu_pollPresetStatus(void)
         menu_refreshLoadSceneLeds();
         break;
 
+    case PRESET_OP_TEST_SCAN:
+        /*
+         * Root File/Dir scan completion.
+         *
+         * Clamp the browser index to the newly scanned cache and repaint the
+         * exact-case display names. No preset state is applied because this is
+         * only the asyncfatfs test browser surface. Failed scans use the same
+         * ERR overlay as failed opens so temporary storage diagnostics never
+         * fail silently.
+         */
+        menu_storageBusy = 0u;
+        if (!preset_getCompletedOk()) {
+            menu_testResultError = 1u;
+            menu_testResultActive = 1u;
+            menu_testResultStart = time_sysTick;
+            menu_repaintAll();
+            break;
+        }
+        if ((menu_saveOptions.what == SAVE_TYPE_FILE ||
+             menu_saveOptions.what == SAVE_TYPE_DIR) &&
+            menu_currentPresetNr[menu_saveOptions.what] >=
+                menu_testObjectCount(menu_saveOptions.what)) {
+            uint8_t count = menu_testObjectCount(menu_saveOptions.what);
+            menu_currentPresetNr[menu_saveOptions.what] =
+                (count == 0u) ? 0u : (uint16_t)(count - 1u);
+        }
+        menu_repaintAll();
+        break;
+
+    case PRESET_OP_TEST_FILE_LOAD:
+    case PRESET_OP_TEST_DIR_LOAD:
+    case PRESET_OP_TEST_FILE_SAVE:
+    case PRESET_OP_TEST_DIR_SAVE:
+    {
+        const uint8_t *bytes = filesystem_testResultBytes();
+        uint8_t completed_ok = preset_getCompletedOk();
+
+        /*
+         * Snapshot the filesystem test result for a timed LCD overlay.
+         *
+         * The result storage in filesystem.c is reused by later requests, so
+         * Menu copies it before acking Preset. The overlay is Menu-owned and
+         * expires by wall-clock tick without blocking audio or filesystem
+         * polling. Failed test operations deliberately keep their op identity
+         * through Preset so this branch can show ERR instead of silently
+         * repainting the browser.
+         */
+        menu_storageBusy = 0u;
+        menu_testResultError = (uint8_t)!completed_ok;
+        menu_testResultKind = completed_ok ? filesystem_testResultKind()
+                                           : FS_TEST_RESULT_BYTES_READY;
+        memcpy(menu_testResultBytes, bytes, FS_TEST_RESULT_BYTES);
+        memset(menu_testResultName, 0, sizeof(menu_testResultName));
+        if (completed_ok) {
+            strncpy(menu_testResultName, filesystem_testResultName(),
+                    FS_TEST_NAME_MAX);
+        }
+        menu_testResultActive = 1u;
+        menu_testResultStart = time_sysTick;
+        menu_repaintAll();
+        break;
+    }
+
     case PRESET_OP_KIT_SAVE:
+    case PRESET_OP_INSTRUMENT_SAVE:
     case PRESET_OP_SCENE_SAVE:
     case PRESET_OP_MORPH_SAVE:
     case PRESET_OP_GLOBALS_SAVE:
@@ -4284,6 +4804,7 @@ void menu_pollPresetStatus(void)
     case PRESET_OP_ALL_SAVE:
     case PRESET_OP_PERFORMANCE_SAVE:
         /* Save complete - reset save UI */
+        menu_storageBusy = 0u;
         menu_resetSaveParameters();
         break;
 
@@ -4543,17 +5064,23 @@ void menu_switchPage(uint8_t pageNr)
 ** ----------------------------------------------------------------------- */
 void menu_resetSaveParameters(void)
 {
-    if (menu_activePage == SAVE_PAGE &&
-        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
-        menu_saveOptions.what = SAVE_TYPE_KIT;
-    }
-    if (menu_saveOptions.what >= SAVE_TYPE_GLO) {
-        menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
-        menu_saveOptions.what  = SAVE_TYPE_KIT;
-    } else {
-        editModeActive = 1;
+    /*
+     * Reset Load/Save cursor state without reopening stale menu entries.
+     *
+     * File/Dir diagnostics and Kit are the currently promoted entries. Other
+     * enum values remain compiled but gated, so a completion from a legacy
+     * helper cannot leave the panel parked on an unvalidated save path.
+     */
+    if (!menu_loadSaveTypeIsRestored(menu_saveOptions.what))
+        menu_saveOptions.what = SAVE_TYPE_FILE;
+
+    menu_instrumentLoadActive = 0u;
+    menu_instrumentSaveMode = 0u;
+    editModeActive = 1;
+    if (menu_activePage == LOAD_PAGE)
         menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
-    }
+    else
+        menu_saveOptions.state = SAVE_STATE_EDIT_NAME1;
     menu_repaintAll();
 }
 

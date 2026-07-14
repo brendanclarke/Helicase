@@ -8,6 +8,12 @@ historical anchors, not current ownership names. Re-run the size/nm commands
 before making new SRAM/flash decisions; for current filesystem, instrument
 storage, and menu ownership, read `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
 
+Session 036 note: asyncfatfs gained VFAT LFN creation/open helpers,
+case-preserving short-name behavior, exact-case LFN matching, and object
+iteration after this memory snapshot. The `afatfs` size listed below is
+historical and must be remeasured before any SRAM decision involving the
+filesystem layer.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.

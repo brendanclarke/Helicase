@@ -58,10 +58,16 @@ typedef enum {
     PRESET_OP_PERFORMANCE_LOAD,
     PRESET_OP_PERFORMANCE_SAVE,
     PRESET_OP_INSTRUMENT_LOAD,
+    PRESET_OP_INSTRUMENT_SAVE,
     PRESET_OP_KIT_MORPH_LOAD,
     PRESET_OP_INSTRUMENT_MORPH_LOAD,
     PRESET_OP_SCENE_LOAD,
     PRESET_OP_SCENE_SAVE,
+    PRESET_OP_TEST_SCAN,
+    PRESET_OP_TEST_FILE_LOAD,
+    PRESET_OP_TEST_DIR_LOAD,
+    PRESET_OP_TEST_FILE_SAVE,
+    PRESET_OP_TEST_DIR_SAVE,
 } preset_op_type_t;
 
 extern char preset_currentName[8];
@@ -87,6 +93,16 @@ void    preset_init(void);
 ** ----------------------------------------------------------------------- */
 preset_status_t  preset_getStatus(void);
 preset_op_type_t preset_getCompletedOp(void);
+/*
+ * Report whether the most recent asynchronous filesystem completion succeeded.
+ *
+ * Old musical load/save paths historically collapse many failures to
+ * PRESET_OP_NONE, but the temporary File/Dir asyncfatfs tests must distinguish
+ * a real zero-byte/zero-value result from a failed open/read. Menu reads this
+ * flag before acknowledging PRESET_OP_TEST_* completions so it can show an
+ * explicit ERR overlay without changing older completion semantics.
+ */
+uint8_t          preset_getCompletedOk(void);
 uint16_t         preset_getRequestSlot(void);
 uint8_t          preset_getRequestType(void);
 /*
@@ -105,11 +121,11 @@ void             preset_ackStatus(void);
 
 /* Drumset (kit). isMorph=1 reads/writes the legacy morph kit buffer/path. */
 uint8_t preset_loadDrumset(uint16_t presetNr, uint8_t isMorph);
-void    preset_saveDrumset(uint16_t presetNr, uint8_t isMorph);
+uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph);
 /*
  * Load one Kit directory into an explicit set of resident Scenes.
  *
- * Inputs: zero-based Kit slot and Scene bitmask. Output: an asynchronous Kit
+ * Inputs: direct Kit library slot 000..999 and Scene bitmask. Output: an asynchronous Kit
  * request whose filesystem phase stages, validates, and commits the Kit to
  * each selected Scene. Clients: Load menu and boot. This dedicated entry point
  * keeps scene routing at the Preset boundary instead of making Menu call the
@@ -130,7 +146,7 @@ void    preset_saveScene(uint16_t presetNr, uint8_t source_scene,
 /*
  * Load a new-format Kit directory into the selected Scenes' morph endpoints.
  *
- * Inputs: zero-based Kit slot and Scene bitmask. Output: an asynchronous Kit/
+ * Inputs: direct Kit library slot 000..999 and Scene bitmask. Output: an asynchronous Kit/
  * directory request whose filesystem phase only stages the source kit; Preset
  * then copies source normal endpoints into resident morph endpoints for slots
  * whose instrument types match. Mismatched source/destination slot types are
@@ -158,6 +174,18 @@ uint8_t preset_loadInstrument(uint8_t destination_scene,
                               instrument_type_t type,
                               uint8_t browser_index);
 /*
+ * Save one resident kit voice into the root Instrument/ pool.
+ *
+ * Inputs: source Scene, zero-based kit voice slot, and the visible stem from
+ * nested Save:[Instrument] editing. Output: nonzero only when filesystem
+ * accepts the asynchronous write. This is not a numbered library-slot save;
+ * the slot coordinate selects one of the six resident kit instruments, while
+ * asyncfatfs creates or overwrites Instrument/<stem.ext> by exact case.
+ */
+uint8_t preset_saveInstrument(uint8_t source_scene,
+                              uint8_t source_slot,
+                              const char *display_name);
+/*
  * Load one Instrument/ file into the destination slot's morph endpoint.
  *
  * Inputs mirror preset_loadInstrument(), but the requested type must match the
@@ -169,6 +197,20 @@ uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
                                    uint8_t destination_slot,
                                    instrument_type_t type,
                                    uint8_t browser_index);
+/*
+ * Generic File/Dir asyncfatfs expansion test requests.
+ *
+ * These operations deliberately bypass musical preset state. Inputs are exact
+ * root-level display names from the temporary Load/Save menus. Outputs are only
+ * Preset completion events; Menu reads scan caches and four-byte/Dir results
+ * from filesystem.h after PRESET_OP_TEST_* completes.
+ */
+uint8_t preset_scanTestFiles(void);
+uint8_t preset_scanTestDirs(void);
+uint8_t preset_loadTestFile(const char *display_name);
+uint8_t preset_loadTestDir(const char *display_name);
+uint8_t preset_saveTestFile(const char *display_name);
+uint8_t preset_saveTestDir(const char *display_name);
 
 /* Send loaded parameters to DSP synchronously. Use this before audio starts;
 ** runtime load completion should use the chunked apply API below so it cannot

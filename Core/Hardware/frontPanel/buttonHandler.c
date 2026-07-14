@@ -630,12 +630,13 @@ static void handleModeButtons(uint8_t mode)
         mode == SELECT_MODE_LOAD_SAVE &&
         menu_loadInstrumentIsActive()) {
         /*
-         * Exit nested Instrument Load mode.
+         * Exit nested Instrument Load/Save mode.
          *
-         * Inputs: Load/Save mode button while Menu is already browsing
-         * instruments. Output: the normal Load page returns and voice blink
-         * feedback is cleared. This must run before the generic mode switch so
-         * a second Load/Save press does not simply re-enter the same submode.
+         * Inputs: Load/Save mode button while Menu is already browsing or
+         * exporting instruments. Output: the normal Load/Save page returns and
+         * voice blink feedback is cleared. This must run before the generic
+         * mode switch so a second Load/Save press does not simply re-enter the
+         * same submode.
          */
         led_clearAllBlinkLeds();
         menu_loadInstrumentExit();
@@ -901,15 +902,16 @@ static void handleVoiceButton(uint8_t voiceNr)
         uint8_t blink_voice;
 
         /*
-         * LOAD_PAGE voice buttons select Instrument Load destination slots.
+         * Load/Save voice buttons select nested Instrument slots.
          *
-         * Inputs: pressed voice button while Menu is on LOAD_PAGE. Output:
-         * Menu enters/updates Instrument Load mode, active voice LED follows
-         * the selected destination, and that voice blinks until the user exits
-         * Instrument Load. Only VOICE blink state is cleared here: clearing all
-         * blink LEDs would erase Menu's active-Scene SEQ feedback immediately
-         * after it was painted. Normal voice selection, mute, and page
-         * switching are skipped for this press.
+         * Inputs: pressed voice button while Menu owns Load or Save. Output:
+         * Load enters/updates Instrument Load destination mode; Save
+         * enters/updates root Instrument Save source mode. In both cases the
+         * active voice LED follows the selected slot and blinks until the user
+         * exits the nested Instrument surface. Only VOICE blink state is
+         * cleared here: clearing all blink LEDs would erase Menu's active-Scene
+         * SEQ feedback immediately after it was painted. Normal voice
+         * selection, mute, and page switching are skipped for this press.
          */
         led_setActiveVoice(voiceNr);
         for (blink_voice = 0u; blink_voice < INSTRUMENT_SLOT_COUNT;

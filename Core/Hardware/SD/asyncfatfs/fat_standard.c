@@ -39,6 +39,122 @@ bool fat_isDirectoryEntryEmpty(fatDirectoryEntry_t *entry)
     return (unsigned char) entry->filename[0] == FAT_DELETED_FILE_MARKER;
 }
 
+bool fat_isLongDirectoryEntry(const fatDirectoryEntry_t *entry)
+{
+    /*
+     * Identify VFAT long filename fragments before ordinary object handling.
+     *
+     * The low four attribute bits equal 0x0f for an LFN entry. The upper bits
+     * are not identity, so masking keeps the check tolerant of media written by
+     * host drivers that preserve reserved bits differently.
+     */
+    return entry && ((entry->attrib & FAT_FILE_ATTRIBUTE_LFN) ==
+                     FAT_FILE_ATTRIBUTE_LFN);
+}
+
+uint8_t fat_lfnChecksum(const uint8_t fatFilename[FAT_FILENAME_LENGTH])
+{
+    uint8_t sum = 0u;
+
+    /*
+     * Standard VFAT checksum tying an LFN fragment chain to one SFN entry.
+     *
+     * Every long-name fragment stores this value. Scanners must compare it
+     * against the following short entry before trusting reconstructed display
+     * text; otherwise stale fragments from a deleted file could name the wrong
+     * object.
+     */
+    for (uint8_t i = 0u; i < FAT_FILENAME_LENGTH; i++)
+        sum = (uint8_t)(((sum & 1u) ? 0x80u : 0u) + (sum >> 1u) +
+                        fatFilename[i]);
+    return sum;
+}
+
+bool fat_lfnCharAllowed(char c)
+{
+    /*
+     * Validate the ASCII subset used by firmware-created VFAT names.
+     *
+     * FAT LFN storage is UTF-16LE, but the front panel editor and current
+     * storage schema are printable ASCII. Rejecting slash and FAT-forbidden
+     * punctuation here prevents one component API from accidentally accepting a
+     * path or a name a desktop FAT driver would reject.
+     */
+    if (c < 0x20 || c > 0x7e)
+        return false;
+    switch (c) {
+    case '"':
+    case '*':
+    case '/':
+    case ':':
+    case '<':
+    case '>':
+    case '?':
+    case '\\':
+    case '|':
+    case 0x7f:
+        return false;
+    default:
+        return true;
+    }
+}
+
+char fat_lfnSanitizeChar(char c)
+{
+    /*
+     * Convert unsupported display characters to a visible safe placeholder.
+     *
+     * Writers use this before encoding UTF-16LE fragments. Scanners do not use
+     * it to silently accept arbitrary Unicode; unsupported host-created bytes
+     * are handled by the scanner's substitution policy.
+     */
+    return fat_lfnCharAllowed(c) ? c : '_';
+}
+
+static char fat_compareFold(char c)
+{
+    /*
+     * ASCII-only case fold used when a caller asks for compatibility matching.
+     *
+     * The new File/Dir test paths request case-sensitive matching, but keeping
+     * this helper lets legacy wrappers keep ordinary FAT case-insensitive
+     * behavior without teaching callers how VFAT display strings are stored.
+     */
+    if (c >= 'A' && c <= 'Z')
+        return (char)(c + ('a' - 'A'));
+    return c;
+}
+
+int8_t fat_compareDisplayName(const char *a, const char *b,
+                              bool case_sensitive)
+{
+    /*
+     * Compare two reconstructed display components under a declared policy.
+     *
+     * Inputs are NUL-terminated ASCII component names, never paths. Output is
+     * strcmp-style ordering so callers can use the same helper for exact opens
+     * and alphanumeric menu sorting. Case-sensitive mode is byte-for-byte and
+     * is the policy required by the File/Dir asyncfatfs expansion tests.
+     */
+    if (!a)
+        a = "";
+    if (!b)
+        b = "";
+
+    for (;;) {
+        char ca = *a++;
+        char cb = *b++;
+        if (!case_sensitive) {
+            ca = fat_compareFold(ca);
+            cb = fat_compareFold(cb);
+        }
+        if (ca != cb)
+            return (ca < cb) ? -1 : 1;
+        if (ca == '\0')
+            return 0;
+    }
+}
+
 uint8_t fat_calculateFilenameCaseFlags(const char *filename)
 {
     uint8_t flags = 0u;

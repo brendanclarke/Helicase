@@ -57,6 +57,15 @@ char preset_currentName[8];
 ** ----------------------------------------------------------------------- */
 static volatile preset_status_t  pm_status = PRESET_IDLE;
 static volatile preset_op_type_t pm_completed_op = PRESET_OP_NONE;
+/*
+ * Success flag for the most recent filesystem completion.
+ *
+ * The old menu often treats failed load/save as "no completed op", but the
+ * asyncfatfs expansion tests must distinguish a real zero-byte result from a
+ * failed open/read. This flag lets Menu show an explicit ERR overlay while
+ * leaving the existing operation enum and musical completion paths intact.
+ */
+static volatile uint8_t          pm_completed_ok = 0u;
 static volatile uint16_t         pm_request_slot = 0;
 static volatile uint8_t          pm_request_type = SAVE_TYPE_KIT;
 /* Legacy persistence requests survive temporarily for format compatibility,
@@ -114,6 +123,11 @@ preset_op_type_t preset_getCompletedOp(void)
     return pm_completed_op;
 }
 
+uint8_t preset_getCompletedOk(void)
+{
+    return pm_completed_ok;
+}
+
 uint16_t preset_getRequestSlot(void)
 {
     return pm_request_slot;
@@ -142,6 +156,7 @@ void preset_ackStatus(void)
 {
     pm_status = PRESET_IDLE;
     pm_completed_op = PRESET_OP_NONE;
+    pm_completed_ok = 0u;
 }
 
 /* -----------------------------------------------------------------------
@@ -150,9 +165,26 @@ void preset_ackStatus(void)
 static void preset_completeFilesystemOp(preset_op_type_t completed_op)
 {
     fs_status_t fs_status = filesystem_status();
+    uint8_t completed_ok = (uint8_t)(fs_status == FS_STATUS_DONE);
+    uint8_t is_test_op = (uint8_t)(completed_op == PRESET_OP_TEST_SCAN ||
+                                   completed_op == PRESET_OP_TEST_FILE_LOAD ||
+                                   completed_op == PRESET_OP_TEST_DIR_LOAD ||
+                                   completed_op == PRESET_OP_TEST_FILE_SAVE ||
+                                   completed_op == PRESET_OP_TEST_DIR_SAVE);
 
     filesystem_ack();
-    if (fs_status == FS_STATUS_DONE) {
+    pm_completed_ok = completed_ok;
+    if (completed_ok || is_test_op) {
+        /*
+         * Preserve completion success for temporary File/Dir diagnostics.
+         *
+         * Existing musical callers keep their historical failure behavior:
+         * failed operations generally surface as PRESET_OP_NONE. The File/Dir
+         * storage tests are different because a silent failure hides the exact
+         * asyncfatfs bug being tested. For test operations, keep the requested
+         * op identity even on error and let Menu decide between byte/Dir
+         * result and ERR overlay using pm_completed_ok.
+         */
         pm_completed_op = completed_op;
         pm_status = PRESET_UPDATE_READY;
     } else {
@@ -214,6 +246,19 @@ static void on_instrument_load_complete(void)
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_LOAD);
 }
 
+static void on_instrument_save_complete(void)
+{
+    /*
+     * Complete one root Instrument Save.
+     *
+     * Filesystem has already written Instrument/<name.ext>, closed it, and
+     * updated its Instrument browser cache. Preset reports a save completion
+     * rather than an apply completion because no SceneData or DSP runtime state
+     * changes when exporting a resident instrument.
+     */
+    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_SAVE);
+}
+
 static void on_instrument_morph_load_complete(void)
 {
     /*
@@ -265,6 +310,37 @@ static void on_all_save_complete(void)
 static void on_performance_save_complete(void)
 {
     preset_completeFilesystemOp(PRESET_OP_PERFORMANCE_SAVE);
+}
+
+static void on_test_scan_complete(void)
+{
+    /*
+     * Complete a generic File/Dir test scan.
+     *
+     * No SceneData or DSP state is touched; Menu will read the filesystem
+     * scan cache directly and repaint the temporary browser list.
+     */
+    preset_completeFilesystemOp(PRESET_OP_TEST_SCAN);
+}
+
+static void on_test_file_load_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_TEST_FILE_LOAD);
+}
+
+static void on_test_dir_load_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_TEST_DIR_LOAD);
+}
+
+static void on_test_file_save_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_TEST_FILE_SAVE);
+}
+
+static void on_test_dir_save_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_TEST_DIR_SAVE);
 }
 
 static fs_file_type_t preset_fileTypeFromSaveType(uint8_t what, uint8_t *hasName)
@@ -1195,7 +1271,7 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask)
 /* -----------------------------------------------------------------------
 ** preset_saveDrumset — post async kit save request.
 ** ----------------------------------------------------------------------- */
-void preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
+uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
 {
     fs_file_type_t type = isMorph ? FS_FILE_MORPH : FS_FILE_KIT;
     fs_completion_cb_t cb = isMorph ? on_morph_save_complete : on_kit_save_complete;
@@ -1214,8 +1290,11 @@ void preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
      * Kit loader.
      */
     if ((!isMorph && !filesystem_requestSaveKitDirectory(presetNr, cb)) ||
-        (isMorph && !filesystem_requestSave(type, presetNr, cb)))
+        (isMorph && !filesystem_requestSave(type, presetNr, cb))) {
         pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
 }
 
 void preset_saveScene(uint16_t presetNr, uint8_t source_scene,
@@ -1331,6 +1410,36 @@ uint8_t preset_loadInstrument(uint8_t destination_scene,
     return 1u;
 }
 
+uint8_t preset_saveInstrument(uint8_t source_scene,
+                              uint8_t source_slot,
+                              const char *display_name)
+{
+    /*
+     * Post one immutable root Instrument Save request.
+     *
+     * Inputs: resident source Scene/voice and the user-edited file stem. Output
+     * is nonzero only after filesystem accepts the write. Completion context
+     * retains the source coordinates for UI bookkeeping, but no runtime apply
+     * follows because saving does not mutate resident SceneData.
+     */
+    filesystem_ack();
+    if (!filesystem_requestSaveInstrument(source_scene,
+                                          source_slot,
+                                          display_name,
+                                          on_instrument_save_complete)) {
+        return 0u;
+    }
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = source_slot;
+    pm_request_type = SAVE_TYPE_KIT;
+    pm_instrument_request_scene = source_scene;
+    pm_instrument_request_slot = source_slot;
+    pm_instrument_request_type = INSTRUMENT_TYPE_UNKNOWN;
+    pm_instrument_request_index = 0u;
+    return 1u;
+}
+
 uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
                                    uint8_t destination_slot,
                                    instrument_type_t type,
@@ -1367,6 +1476,89 @@ uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
     pm_instrument_request_slot = destination_slot;
     pm_instrument_request_type = type;
     pm_instrument_request_index = browser_index;
+    return 1u;
+}
+
+uint8_t preset_scanTestFiles(void)
+{
+    /*
+     * Post the temporary Load:[File] root scan.
+     *
+     * This is a storage diagnostic operation, not a musical preset action.
+     * Preset participates only so Menu can reuse the existing async completion
+     * poll and avoid calling filesystem.c directly from encoder handlers.
+     */
+    filesystem_ack();
+    if (!filesystem_requestScanTestFiles(on_test_scan_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_type = SAVE_TYPE_FILE;
+    pm_request_slot = 0u;
+    return 1u;
+}
+
+uint8_t preset_scanTestDirs(void)
+{
+    filesystem_ack();
+    if (!filesystem_requestScanTestDirs(on_test_scan_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_type = SAVE_TYPE_DIR;
+    pm_request_slot = 0u;
+    return 1u;
+}
+
+uint8_t preset_loadTestFile(const char *display_name)
+{
+    filesystem_ack();
+    if (!filesystem_requestLoadTestFile(display_name,
+                                        on_test_file_load_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_type = SAVE_TYPE_FILE;
+    pm_request_slot = 0u;
+    return 1u;
+}
+
+uint8_t preset_loadTestDir(const char *display_name)
+{
+    filesystem_ack();
+    if (!filesystem_requestLoadTestDir(display_name,
+                                       on_test_dir_load_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_type = SAVE_TYPE_DIR;
+    pm_request_slot = 0u;
+    return 1u;
+}
+
+uint8_t preset_saveTestFile(const char *display_name)
+{
+    filesystem_ack();
+    if (!filesystem_requestSaveTestFile(display_name,
+                                        on_test_file_save_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_type = SAVE_TYPE_FILE;
+    pm_request_slot = 0u;
+    return 1u;
+}
+
+uint8_t preset_saveTestDir(const char *display_name)
+{
+    filesystem_ack();
+    if (!filesystem_requestSaveTestDir(display_name,
+                                       on_test_dir_save_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_type = SAVE_TYPE_DIR;
+    pm_request_slot = 0u;
     return 1u;
 }
 

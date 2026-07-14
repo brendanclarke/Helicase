@@ -1,5 +1,10 @@
 # OSC_INTERP_AUDIT.md
 
+Session 036 note: this is a historical feature audit for oscillator waveform
+interpolation. The persistence mechanism still depends on the legacy globals
+save/load path, but current filename, case-sensitivity, and future
+`settings.cfg` policy live in `FILESYSTEM_SPEC.md`.
+
 ## Goal
 Add simple/fast/dirty oscillator waveform interpolation for modulation-driven waveform automation, with a global ON/OFF setting that persists in global save/load.
 

@@ -233,6 +233,7 @@ typedef struct afatfsCreateFile_t {
     uint8_t freeRunLength;
     uint8_t scanLongNameValid;
     uint8_t scanLongNameChecksum;
+    afatfsMatchMode_t matchMode;
     uint16_t aliasOrdinal;
     char longName[AFATFS_LONG_FILENAME_MAX + 1u];
     char scanLongName[AFATFS_LONG_FILENAME_MAX + 1u];
@@ -860,6 +861,20 @@ bool afatfs_flush()
      * write callback has either synced the sector or re-marked it dirty.
      */
     return (bool)!afatfs.cacheFlushInProgress;
+}
+
+bool afatfs_sync()
+{
+    /*
+     * Public persistence boundary for callers that have finished a write flow.
+     *
+     * Today this is a named wrapper around afatfs_flush(), whose implementation
+     * already waits for dirty sectors and in-flight SD writes. Keeping a
+     * separate API lets filesystem.c express save completion in storage terms
+     * and leaves room for future metadata/FAT barriers without changing every
+     * caller again.
+     */
+    return afatfs_flush();
 }
 
 /**
@@ -2230,6 +2245,205 @@ void afatfs_findFirst(afatfsFilePtr_t directory, afatfsFinder_t *finder)
     finder->entryIndex = -1;
 }
 
+static void afatfs_objectScanReset(afatfsObjectFinder_t *finder)
+{
+    /*
+     * Clear the pending VFAT fragment chain for object enumeration.
+     *
+     * The raw finder can encounter deleted entries, ordinary SFN entries, or a
+     * terminator at any time. Resetting the LFN side state at those boundaries
+     * prevents stale fragments from naming the next physical file/directory.
+     */
+    finder->lfnValid = 0u;
+    finder->lfnChecksum = 0u;
+    finder->lfnEntryCount = 0u;
+    memset(finder->lfnName, 0, sizeof(finder->lfnName));
+    finder->lfnFirstEntry.sectorNumberPhysical = 0u;
+    finder->lfnFirstEntry.entryIndex = -1;
+}
+
+static void afatfs_objectScanAppendLfn(afatfsObjectFinder_t *finder,
+                                       const afatfsFinder_t *rawFinder,
+                                       const fatDirectoryEntry_t *entry)
+{
+    static const uint8_t offsets[FAT_LFN_CHARS_PER_ENTRY] = {
+        1u, 3u, 5u, 7u, 9u,
+        14u, 16u, 18u, 20u, 22u, 24u,
+        28u, 30u
+    };
+    const uint8_t *raw = (const uint8_t *)entry;
+    uint8_t seq = raw[0] & 0x1fu;
+
+    /*
+     * Rebuild one ASCII-safe VFAT display name while walking raw entries.
+     *
+     * VFAT stores the final text fragment first and marks it with 0x40. The
+     * low five bits are the one-based ordinal, so `(seq - 1) * 13` recovers
+     * the absolute display-name offset for this fragment. The checksum must
+     * remain identical across fragments; final validation happens when the next
+     * SFN entry arrives because that entry owns the physical object metadata.
+     */
+    if (seq == 0u ||
+        seq > ((AFATFS_LONG_FILENAME_MAX + FAT_LFN_CHARS_PER_ENTRY - 1u) /
+               FAT_LFN_CHARS_PER_ENTRY)) {
+        afatfs_objectScanReset(finder);
+        return;
+    }
+
+    if (raw[0] & FAT_LFN_LAST_LONG_ENTRY) {
+        afatfs_objectScanReset(finder);
+        finder->lfnValid = 1u;
+        finder->lfnChecksum = raw[13];
+        finder->lfnFirstEntry = *rawFinder;
+    } else if (!finder->lfnValid) {
+        return;
+    } else if (finder->lfnChecksum != raw[13]) {
+        afatfs_objectScanReset(finder);
+        return;
+    }
+
+    uint8_t pos = (uint8_t)((seq - 1u) * FAT_LFN_CHARS_PER_ENTRY);
+    for (uint8_t i = 0u;
+         i < FAT_LFN_CHARS_PER_ENTRY && pos < AFATFS_LONG_FILENAME_MAX;
+         i++, pos++) {
+        uint16_t ch = (uint16_t)raw[offsets[i]] |
+                      ((uint16_t)raw[offsets[i] + 1u] << 8);
+        if (ch == 0x0000u)
+            break;
+        if (ch == 0xffffu)
+            continue;
+        /*
+         * Firmware-created names are ASCII today. Host-created non-ASCII names
+         * are retained as visible underscores so object sorting and browsing
+         * stay bounded without pretending we have full Unicode rendering.
+         */
+        finder->lfnName[pos] = (ch < 0x80u) ? (char)ch : '_';
+    }
+    finder->lfnEntryCount++;
+}
+
+void afatfs_findFirstObject(afatfsFilePtr_t directory,
+                            afatfsObjectFinder_t *finder)
+{
+    /*
+     * Initialize an LFN-aware directory scan.
+     *
+     * This wraps the raw afatfs_findFirst() cursor with VFAT reconstruction
+     * state. Callers must pair it with afatfs_findLastObject() just as raw
+     * scanners pair findFirst/findLast, because the underlying directory sector
+     * may be retained in the asyncfatfs cache while scanning.
+     */
+    afatfs_findFirst(directory, &finder->raw);
+    afatfs_objectScanReset(finder);
+}
+
+afatfsOperationStatus_e afatfs_findNextObject(afatfsFilePtr_t directory,
+                                              afatfsObjectFinder_t *finder,
+                                              afatfsObjectInfo_t *object)
+{
+    /*
+     * Return the next concrete file/directory object from a FAT directory.
+     *
+     * Output kind == AFATFS_OBJECT_NONE means the directory is exhausted. LFN,
+     * deleted, volume-label, dot, and terminator records are not returned as
+     * objects. The loop intentionally consumes multiple raw entries per public
+     * object so higher layers cannot accidentally treat a VFAT fragment as a
+     * file they should open or display.
+     */
+    if (!object)
+        return AFATFS_OPERATION_FAILURE;
+
+    memset(object, 0, sizeof(*object));
+    object->kind = AFATFS_OBJECT_NONE;
+
+    for (;;) {
+        fatDirectoryEntry_t *entry = NULL;
+        afatfsOperationStatus_e status =
+            afatfs_findNext(directory, &finder->raw, &entry);
+
+        if (status != AFATFS_OPERATION_SUCCESS)
+            return status;
+        if (entry == NULL || fat_isDirectoryEntryTerminator(entry)) {
+            afatfs_objectScanReset(finder);
+            return AFATFS_OPERATION_SUCCESS;
+        }
+        if (fat_isDirectoryEntryEmpty(entry)) {
+            afatfs_objectScanReset(finder);
+            continue;
+        }
+        if (fat_isLongDirectoryEntry(entry)) {
+            afatfs_objectScanAppendLfn(finder, &finder->raw, entry);
+            continue;
+        }
+        if (entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID) {
+            afatfs_objectScanReset(finder);
+            continue;
+        }
+
+        fat_convertFATStyleToFilename(entry->filename, object->shortName);
+        fat_applyFilenameCaseFlags(object->shortName, entry->ntReserved);
+        if (object->shortName[0] == '.') {
+            afatfs_objectScanReset(finder);
+            continue;
+        }
+
+        object->kind = (entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY)
+            ? AFATFS_OBJECT_DIRECTORY
+            : AFATFS_OBJECT_FILE;
+        object->attrib = entry->attrib;
+        object->ntReserved = entry->ntReserved;
+        object->sfnEntry = finder->raw;
+
+        if (finder->lfnValid &&
+            finder->lfnChecksum ==
+                fat_lfnChecksum((const uint8_t *)entry->filename) &&
+            finder->lfnName[0] != '\0') {
+            uint8_t i;
+
+            /*
+             * Prefer checksum-verified VFAT display text. This is the exact
+             * mixed-case spelling the test menus must show and match.
+             */
+            for (i = 0u;
+                 i < AFATFS_LONG_FILENAME_MAX && finder->lfnName[i] != '\0';
+                 i++)
+                object->displayName[i] = finder->lfnName[i];
+            object->displayName[i] = '\0';
+            object->hasLongName = 1u;
+            object->lfnEntryCount = finder->lfnEntryCount;
+            object->lfnFirstEntry = finder->lfnFirstEntry;
+        } else {
+            uint8_t i;
+
+            /*
+             * Fall back to the case-preserved SFN alias when no valid LFN
+             * chain belongs to this object. This keeps legacy 8.3 media fully
+             * browsable while still hiding raw uppercase storage bytes.
+             */
+            for (i = 0u;
+                 i < AFATFS_LONG_FILENAME_MAX &&
+                 object->shortName[i] != '\0';
+                 i++)
+                object->displayName[i] = object->shortName[i];
+            object->displayName[i] = '\0';
+        }
+
+        afatfs_objectScanReset(finder);
+        return AFATFS_OPERATION_SUCCESS;
+    }
+}
+
+void afatfs_findLastObject(afatfsFilePtr_t directory,
+                           afatfsObjectFinder_t *finder)
+{
+    /*
+     * Release resources retained by the underlying raw directory scan and
+     * discard any incomplete LFN chain from the caller's finder state.
+     */
+    afatfs_objectScanReset(finder);
+    afatfs_findLast(directory);
+}
+
 static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *directory)
 {
     afatfsExtendSubdirectory_t *opState = &directory->operation.state.extendSubdirectory;
@@ -2630,70 +2844,29 @@ static void afatfs_fileLoadDirectoryEntry(afatfsFile_t *file, fatDirectoryEntry_
 static bool afatfs_isLfnDirectoryEntry(const fatDirectoryEntry_t *entry)
 {
     /*
-     * Recognize FAT long-filename fragments.
+     * Recognize FAT long-filename fragments through the shared FAT helper.
      *
-     * This helper deliberately checks the masked low attribute nibble instead
-     * of comparing every bit in attrib. The same convention is already used by
-     * filesystem.c scanners and keeps the low-level create matcher aligned with
-     * the higher-level load/display code.
+     * Keeping this wrapper avoids churn in the create/open state machine while
+     * moving the actual on-disk rule into fat_standard.c, where the object
+     * iterator and future delete/rename code use the same classification.
      */
-    return entry && ((entry->attrib & 0x0f) == 0x0f);
+    return fat_isLongDirectoryEntry(entry);
 }
 
 static uint8_t afatfs_lfnChecksum(const uint8_t fatFilename[FAT_FILENAME_LENGTH])
 {
-    uint8_t sum = 0u;
-
     /*
-     * Standard VFAT checksum for tying an LFN chain to its owning short entry.
-     *
-     * Every LFN fragment stores this byte. Scanners use it to prove the
-     * preceding fragments belong to the following SFN, and host operating
-     * systems rely on it for mixed-case/space display names.
+     * Compatibility wrapper around the shared VFAT checksum helper.
      */
-    for (uint8_t i = 0u; i < FAT_FILENAME_LENGTH; i++)
-        sum = (uint8_t)(((sum & 1u) ? 0x80u : 0u) + (sum >> 1u) +
-                        fatFilename[i]);
-    return sum;
-}
-
-static bool afatfs_lfnCharAllowed(char c)
-{
-    /*
-     * Filter one ASCII character for firmware-created LFNs.
-     *
-     * FAT LFNs are UTF-16, but this firmware UI and storage schema are ASCII.
-     * We preserve printable ASCII including spaces and case, while replacing
-     * FAT-forbidden punctuation before it reaches on-card metadata.
-     */
-    if (c < 0x20 || c > 0x7e)
-        return false;
-    switch (c) {
-    case '"':
-    case '*':
-    case '/':
-    case ':':
-    case '<':
-    case '>':
-    case '?':
-    case '\\':
-    case '|':
-    case 0x7f:
-        return false;
-    default:
-        return true;
-    }
+    return fat_lfnChecksum(fatFilename);
 }
 
 static char afatfs_lfnSanitizeChar(char c)
 {
     /*
-     * Convert unsupported display-name bytes into a visible safe placeholder.
-     *
-     * This is intentionally separate from SFN alias generation: LFNs preserve
-     * spaces and case, whereas aliases are an uppercase 8.3 compatibility key.
+     * Compatibility wrapper around the shared LFN sanitizer.
      */
-    return afatfs_lfnCharAllowed(c) ? c : '_';
+    return fat_lfnSanitizeChar(c);
 }
 
 static char afatfs_sfnChar(char c)
@@ -3187,23 +3360,47 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                 afatfs_lfnScanReset(opState);
                         } else if (opState->longNameEnabled) {
                             uint8_t displayMatches = 0u;
+                            char shortDisplay[AFATFS_SHORT_FILENAME_MAX];
 
                             /*
-                             * For LFN requests, identity is the completed
-                             * display component, not the first generated SFN
-                             * alias candidate. Host tools or earlier firmware
-                             * may have assigned a different alias to the same
-                             * visible name. If the preceding LFN chain is
-                             * checksum-valid for this SFN entry and the
-                             * display text matches, open that entry and return
-                             * its actual alias to the caller.
+                             * Match LFN requests against the same display
+                             * component returned by the object iterator.
+                             *
+                             * A FAT object may have a checksum-valid VFAT
+                             * long-name chain, or it may be a plain short-name
+                             * entry whose display spelling comes from
+                             * filename[] plus ntReserved case bits.
+                             * Load:[File] and Load:[Dir] browse both forms
+                             * through afatfs_findNextObject(), so open/create
+                             * must resolve the same display string here.
+                             * Without the SFN-display fallback, existing card
+                             * files such as GLO.CFG, P000.ALL, samples/, and
+                             * Instrument directory files list correctly but fail when OK
+                             * is selected because the generated alias is
+                             * mistaken for an unrelated collision.
                              */
                             if (opState->scanLongNameValid &&
                                 opState->scanLongNameChecksum ==
-                                    afatfs_lfnChecksum((const uint8_t *)entry->filename) &&
-                                strcmp(opState->scanLongName,
-                                       opState->longName) == 0) {
-                                displayMatches = 1u;
+                                    afatfs_lfnChecksum((const uint8_t *)entry->filename)) {
+                                if (fat_compareDisplayName(
+                                        opState->scanLongName,
+                                        opState->longName,
+                                        opState->matchMode ==
+                                            AFATFS_MATCH_CASE_SENSITIVE) == 0) {
+                                    displayMatches = 1u;
+                                }
+                            } else {
+                                afatfs_copyShortAliasText(
+                                    (const uint8_t *)entry->filename,
+                                    entry->ntReserved,
+                                    shortDisplay);
+                                if (fat_compareDisplayName(
+                                        shortDisplay,
+                                        opState->longName,
+                                        opState->matchMode ==
+                                            AFATFS_MATCH_CASE_SENSITIVE) == 0) {
+                                    displayMatches = 1u;
+                                }
                             }
                             if (displayMatches) {
                                 uint8_t requestedDirectory =
@@ -3247,11 +3444,24 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                 break;
                             }
                             /*
-                             * The SFN alias collided with another LFN entry.
-                             * Generate the next "~N" candidate and restart the
-                             * directory scan from the beginning so duplicate
-                             * handling remains deterministic.
+                             * Alias collision is only useful when creation is
+                             * allowed.
+                             *
+                             * Read-only LFN opens cannot resolve by inventing
+                             * a new "~N" alias; if the display component did
+                             * not match this entry, the colliding SFN proves
+                             * that the requested object is absent under the
+                             * current exact-case policy. Create/write modes
+                             * still generate the next "~N" candidate and
+                             * restart the scan so duplicate display names or
+                             * same-folded SFN names do not reuse the wrong
+                             * physical entry.
                              */
+                            if ((file->mode & AFATFS_FILE_MODE_CREATE) == 0u) {
+                                afatfs_findLast(&afatfs.currentDirectory);
+                                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                                goto doMore;
+                            }
                             opState->aliasOrdinal++;
                             if (!afatfs_generateShortAlias(opState)) {
                                 afatfs_findLast(&afatfs.currentDirectory);
@@ -3524,6 +3734,7 @@ static afatfsFilePtr_t afatfs_createFileInternal(
         const char *name,
         uint8_t attrib,
         uint8_t fileMode,
+        afatfsMatchMode_t matchMode,
         char openNameOut[AFATFS_SHORT_FILENAME_MAX],
         bool createLongName,
         afatfsFileCallback_t callback)
@@ -3537,6 +3748,7 @@ static afatfsFilePtr_t afatfs_createFileInternal(
     file->operation.operation = AFATFS_FILE_OPERATION_CREATE_FILE;
 
     file->mode = fileMode;
+    opState->matchMode = matchMode;
 
     if (strcmp(name, ".") == 0) {
         file->firstCluster = afatfs.currentDirectory.firstCluster;
@@ -3622,7 +3834,9 @@ static afatfsFilePtr_t afatfs_createFile(afatfsFilePtr_t file, const char *name,
      * route through the same symbol and keep 8.3-only semantics unless they opt
      * into the explicit LFN API.
      */
-    return afatfs_createFileInternal(file, name, attrib, fileMode, NULL, false,
+    return afatfs_createFileInternal(file, name, attrib, fileMode,
+                                     AFATFS_MATCH_CASE_INSENSITIVE,
+                                     NULL, false,
                                      callback);
 }
 
@@ -3719,6 +3933,7 @@ bool afatfs_mkdir(const char *filename, afatfsFileCallback_t callback)
 }
 
 bool afatfs_mkdir_lfn(const char *displayName,
+                      afatfsMatchMode_t matchMode,
                       char openNameOut[AFATFS_SHORT_FILENAME_MAX],
                       afatfsFileCallback_t callback)
 {
@@ -3731,7 +3946,9 @@ bool afatfs_mkdir_lfn(const char *displayName,
      * contract is that a newly-created directory receives LFN fragments for
      * displayName and openNameOut receives the generated 8.3 alias. Higher
      * layers can cache the alias for existing afatfs_fopen()/chdir flows while
-     * scans display the preserved long name.
+     * scans display the preserved long name. matchMode selects whether an
+     * existing LFN must match byte-for-byte, which is required by the File/Dir
+     * test menus, or through compatibility ASCII folding.
      */
     if (file) {
         afatfs_createFileInternal(file, displayName,
@@ -3739,6 +3956,37 @@ bool afatfs_mkdir_lfn(const char *displayName,
                                   AFATFS_FILE_MODE_CREATE |
                                       AFATFS_FILE_MODE_READ |
                                       AFATFS_FILE_MODE_WRITE,
+                                  matchMode,
+                                  openNameOut, true, callback);
+    } else if (callback) {
+        callback(NULL);
+    }
+
+    return file != NULL;
+}
+
+bool afatfs_opendir_lfn(const char *displayName,
+                        afatfsMatchMode_t matchMode,
+                        char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                        afatfsFileCallback_t callback)
+{
+    afatfsFilePtr_t file = afatfs_allocateFileHandle();
+
+    /*
+     * Open an existing directory by its preserved display component.
+     *
+     * This is deliberately separate from afatfs_mkdir_lfn(): Load:[Dir] must
+     * prove that the selected directory already exists and must not create a
+     * fresh empty directory when a case-sensitive lookup misses. Inputs mirror
+     * mkdir_lfn except fileMode omits AFATFS_FILE_MODE_CREATE; output is a
+     * directory handle suitable for afatfs_chdir() and object enumeration.
+     */
+    if (file) {
+        afatfs_createFileInternal(file, displayName,
+                                  FAT_FILE_ATTRIBUTE_DIRECTORY,
+                                  AFATFS_FILE_MODE_READ |
+                                      AFATFS_FILE_MODE_WRITE,
+                                  matchMode,
                                   openNameOut, true, callback);
     } else if (callback) {
         callback(NULL);
@@ -3876,6 +4124,7 @@ bool afatfs_fopen(const char *filename, const char *mode, afatfsFileCallback_t c
 
 bool afatfs_fopen_lfn(const char *displayName,
                       const char *mode,
+                      afatfsMatchMode_t matchMode,
                       char openNameOut[AFATFS_SHORT_FILENAME_MAX],
                       afatfsFileCallback_t complete)
 {
@@ -3889,11 +4138,13 @@ bool afatfs_fopen_lfn(const char *displayName,
      * operates in the current working directory and still returns a normal file
      * handle, but when creation is needed it emits VFAT LFN entries and writes
      * the generated short alias to openNameOut for later fast/open-by-alias
-     * workflows.
+     * workflows. matchMode controls only display-name lookup; creation still
+     * writes exactly the sanitized component supplied by the caller.
      */
     if (file) {
         afatfs_createFileInternal(file, displayName, FAT_FILE_ATTRIBUTE_ARCHIVE,
-                                  fileMode, openNameOut, true, complete);
+                                  fileMode, matchMode, openNameOut, true,
+                                  complete);
     } else if (complete) {
         complete(NULL);
     }

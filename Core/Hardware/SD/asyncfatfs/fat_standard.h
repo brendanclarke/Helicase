@@ -26,9 +26,12 @@
 #define FAT_FILE_ATTRIBUTE_VOLUME_ID 0x08
 #define FAT_FILE_ATTRIBUTE_DIRECTORY 0x10
 #define FAT_FILE_ATTRIBUTE_ARCHIVE   0x20
+#define FAT_FILE_ATTRIBUTE_LFN       0x0fu
 
 #define FAT_FILENAME_LENGTH 11
 #define FAT_DELETED_FILE_MARKER 0xE5
+#define FAT_LFN_LAST_LONG_ENTRY 0x40u
+#define FAT_LFN_CHARS_PER_ENTRY 13u
 
 /*
  * FAT short-name case preservation bits.
@@ -131,6 +134,22 @@ bool fat_isFreeSpace(uint32_t clusterNumber);
 
 bool fat_isDirectoryEntryTerminator(fatDirectoryEntry_t *entry);
 bool fat_isDirectoryEntryEmpty(fatDirectoryEntry_t *entry);
+/*
+ * VFAT long-name helpers shared by asyncfatfs scanners and writers.
+ *
+ * Why these live beside the FAT directory structs: long filename fragments are
+ * part of the on-disk FAT directory grammar, not a Kit/Scene storage rule.
+ * Inputs are raw 8.3 directory names or ASCII display components. Outputs are
+ * the checksum/comparison decisions used to bind an LFN chain to the following
+ * SFN entry. Callers: asyncfatfs create/open matching, object enumeration, and
+ * any future delete/rename path that must touch the whole VFAT entry chain.
+ */
+bool fat_isLongDirectoryEntry(const fatDirectoryEntry_t *entry);
+uint8_t fat_lfnChecksum(const uint8_t fatFilename[FAT_FILENAME_LENGTH]);
+bool fat_lfnCharAllowed(char c);
+char fat_lfnSanitizeChar(char c);
+int8_t fat_compareDisplayName(const char *a, const char *b,
+                              bool case_sensitive);
 
 uint8_t fat_calculateFilenameCaseFlags(const char *filename);
 void fat_applyFilenameCaseFlags(char *filename, uint8_t ntReserved);

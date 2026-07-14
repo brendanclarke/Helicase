@@ -43,10 +43,10 @@
  * Keep the compatibility kit browser aligned with directory Kit slots.
  *
  * The current Load page reads filesystem's scan cache directly, but filesystem
- * still populates kb_map for older clients. Widening the map prevents scanned
- * folders above 255 from wrapping into the wrong legacy browser entry.
+ * still populates kb_map for older clients. The range is 000..999, so this map
+ * needs 1000 entries; slot 000 is a real Kit slot, not a missing sentinel.
  */
-#define KITBROWSER_MAX_KITS  999
+#define KITBROWSER_MAX_KITS  1000
 
 uint8_t kitBrowser_init(void);
 void    kitBrowser_encoderDelta(int8_t delta);

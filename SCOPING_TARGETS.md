@@ -5,17 +5,20 @@
 ## How this document is organized
 
 The work is grouped into six phases, ordered around the trajectory the code is
-actually following after Session 035. Phase 1 is complete foundation cleanup.
+actually following after Session 036. Phase 1 is complete foundation cleanup.
 Phase 2 has landed the first real filesystem/Scene bridge: root Kit directory
 loading into descriptor-backed instrument images. Phase 3 now finishes that
 partially-built foundation before the sequencer storage rewrite: instrument
 parameter load/runtime coverage, descriptor modulation and automation, Morph,
 menu/load-save work, Scene and Bank structures, and new-format load/save
-operations. Sessions 033-035 landed the runtime/Morph path, Instrument Load,
+operations. Sessions 033-036 landed the runtime/Morph path, Instrument Load,
 Kit/Instrument Morph Load, descriptor-domain LFO repair, LFO `self` storage,
-and normal new-format Kit Save. The next Phase 3 emphasis is standalone
-Instrument Save, Scene/Bank structures, and descriptor-aware automation. Phase
-4 is the dynamic stack Pattern implementation that used to be
+normal new-format Kit Save, asyncfatfs LFN/case support, direct `000..999`
+slots, restored Kit load/save reachability, and standalone root Instrument
+Save. The next Phase 3 emphasis is to redo Morph Save and Scene Load/Save on
+the Session 036 asyncfatfs foundation before starting Bank, while
+descriptor-aware automation remains a parallel runtime follow-up. Phase 4 is
+the dynamic stack Pattern implementation that used to be
 scoped as Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup,
 copy/clear helpers, and menu controls. Phase 6 is DSP expansion.
 
@@ -234,10 +237,9 @@ Replace the remaining legacy target runtime path for descriptor-backed targets:
   recording where appropriate.
 - Keep target display helpers enumerating the active Scene descriptors and
   filtering by descriptor flags.
-- Correct direct LFO writes to byte-domain envelope parameters: they currently
-  write raw `SlopeEg2` float members for some descriptors, bypassing the
-  descriptor owner's byte-to-runtime setter and allowing a zero decay to mean
-  no envelope fall.
+- Session 035 corrected direct descriptor LFO writes by routing them through
+  InstrumentManager descriptor-domain adapters and runtime writers. Keep that
+  adapter path as the model for any future modulation/automation writer.
 - Replace fixed global-node scans in `modNode_resetTargets()` and
   `modNode_directOriginalValueChanged()` with InstrumentManager's dynamic
   node ownership. The Instrument Load transaction explicitly clears all
@@ -279,8 +281,14 @@ Complete the menu path required for descriptor-backed instruments:
 - Visible/editable per-voice Morph controls in PERF are implemented.
 - Rebuild load/save/reload menus around the typed filesystem hierarchy instead
   of the old flat slot list.
-- Status after Session 035: Kit, Kit Morph, nested Instrument, and same-type
-  Instrument Morph Load are usable. Root
+- Status after Session 036: top-level File/Dir diagnostics and Kit are the
+  only promoted Load/Save type-cycler entries. Kit Load/Save are restored on
+  the asyncfatfs LFN/case foundation. VOICE press on Load enters nested
+  Instrument Load; VOICE press on Save enters root Instrument Save.
+- Status after Session 035: Kit Morph, nested Instrument, and same-type
+  Instrument Morph Load are usable in code, but KitMrp is gated from the normal
+  type cycler until Morph Save and related promotion are redone deliberately.
+  Root
   `Instrument/` scans `.drm`, `.snr`, `.cym`, and `.hat` pools per type in
   alphanumeric order; lower-row browsing loads immediately, while type changes
   do not replace the current kit-member display/source. The display index is
@@ -327,25 +335,32 @@ Implement load/save operations for the settled file types in
   naming path: Kit Save now creates VFAT LFN entries for the visible Kit folder
   and six instrument files, while retaining returned 8.3 aliases for
   `kitset.kcg` and open paths.
-- Session 035 widened root Kit slots to 001..999 and stores Kit slot indices as
-  `uint16_t` through filesystem, presetManager, menu, and kitBrowser.
+- Session 036 corrected numbered library slots to direct `000..999`; slot
+  `000` is real for all filetypes. Kit/Scene library slots use `uint16_t`
+  plumbing through filesystem, presetManager, menu, and kitBrowser. Instrument
+  file voice coordinates remain one-based `1..6`.
 - Session 035 added storage-only LFO `self` routing: load resolves `self` on
   `lfo_target_voice`/`lfo_target_voice_2` to the destination slot, and Kit Save
   emits `self` only when an LFO voice selector points at the saved instrument's
   own slot.
-- Standalone Instrument Save remains to implement. It should use the same
-  descriptor-keyed writer and `self` serialization rule used by Kit Save.
+- Standalone root Instrument Save is implemented. It uses the same
+  descriptor-keyed writer and `self` serialization rule used by Kit Save and is
+  entered from Save-page VOICE press.
 - Instrument pool load copies a descriptor-keyed instrument file into a kit
   voice slot. Instrument Morph Load copies source normal endpoint values into
   the current slot's morph endpoint only when the type matches.
-- Morphed-instrument save must preserve `[params]` and `[morph]` endpoint
-  images and the current descriptor-key vocabulary.
-- Scene load/save writes `sceneset.scg`, `Kit <kit name>/`, `pattern.pat`, and
-  `effect.fx`. Root `Scene/` load/save is library/pool exchange only and is not
-  part of the autosave workspace.
+- Morph Save must be reimplemented before Bank. The intended `Save:[KitMrp]`
+  writes current interpolation parameters into normal `[params]` endpoints and
+  writes normal endpoints into `[morph]` endpoints for morphable parameters;
+  non-morphable parameters remain normal-only.
+- Scene Load/Save must be redone before Bank. It writes/reads `sceneset.scg`,
+  `Kit <kit name>/`, `pattern.pat`, and `effect.fx` through the Session 036
+  asyncfatfs foundation. Root `Scene/` load/save is library/pool exchange only
+  and is not part of the autosave workspace.
 - Add an FX slot shim so Scene folders can validate/store `effect.fx` before
   Phase 6 implements full effects.
-- Bank load/save writes `bankset.bcg` plus up to 16 Scene folders. Bank
+- Bank load/save must wait until Morph Save and Scene Load/Save are stable.
+  Bank load/save writes `bankset.bcg` plus up to 16 Scene folders. Bank
   load/save operations start with all 16 Scenes selected; SEQ buttons narrow the
   operation to a subset of Scenes before commit.
 - Pattern load/save stays bridge-only until Phase 4 replaces the Pattern file
@@ -359,9 +374,10 @@ Implement load/save operations for the settled file types in
 
 asyncfatfs note for future save code:
 
-- Session 036 adds asyncfatfs LFN component creation via `afatfs_mkdir_lfn()`
-  and `afatfs_fopen_lfn()`. Future Scene/Bank/Instrument save code should
-  reuse/extend that filesystem boundary, not recreate FAT file writers.
+- Session 036 adds asyncfatfs LFN component creation and object iteration via
+  `afatfs_mkdir_lfn()`, `afatfs_fopen_lfn()`, `afatfs_opendir_lfn()`, and
+  `afatfs_findNextObject()`. Future Scene/Bank save code should reuse/extend
+  that filesystem boundary, not recreate FAT file writers.
 - Missing core primitives before autosave/power-loss-safe replacement are
   atomic rename/replace and recursive directory replace/delete.
 

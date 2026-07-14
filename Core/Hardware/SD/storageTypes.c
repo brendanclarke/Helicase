@@ -1098,19 +1098,22 @@ uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
 
 /* See storageTypes.h for the public contract.
  *
- * Folder numbers are one-based on the SD card because they are user-visible:
- * 001 Name through 999 Name. The returned slot is zero-based because preset,
- * menu, and ParameterArray code already use zero-based indices internally. The
- * separator may be space or underscore for compatibility with older generated
- * folders, but display-name copying starts after any separator run so internal
- * spaces in names such as "Moch to" are preserved.
+ * Folder numbers are literal library slots on the SD card:
+ * 000 Name through 999 Name. Slot 000 is a real slot, not an empty sentinel, so
+ * the returned slot is the parsed number itself. The separator may be space or
+ * underscore for compatibility with older generated folders, but display-name
+ * copying starts after any separator run so internal spaces in names such as
+ * "Moch to" are preserved.
  */
 uint8_t storage_parseNumberedFolder(const char *name,
-                                    uint16_t *zero_based_slot,
+                                    uint16_t *slot,
                                     char display[STORAGE_KIT_DISPLAY_NAME_LEN])
 {
     uint16_t number;
     const char *display_start;
+
+    if (!name || !slot || !display)
+        return 0u;
 
     if (name[0] < '0' || name[0] > '9' ||
         name[1] < '0' || name[1] > '9' ||
@@ -1122,7 +1125,14 @@ uint8_t storage_parseNumberedFolder(const char *name,
     number = (uint16_t)((uint16_t)(name[0] - '0') * 100u +
                         (uint16_t)(name[1] - '0') * 10u +
                         (uint16_t)(name[2] - '0'));
-    if (number == 0u || number > STORAGE_KIT_MAX_SLOTS)
+    /*
+     * Compare against the array count, not the highest display number.
+     *
+     * With STORAGE_KIT_MAX_SLOTS == 1000, valid prefixes are exactly
+     * 000..999. This avoids the previous one-based `number - 1` mapping that
+     * made 000 impossible and shifted every folder by one slot.
+     */
+    if (number >= STORAGE_KIT_MAX_SLOTS)
         return 0u;
 
     display_start = name + 3u;
@@ -1131,7 +1141,7 @@ uint8_t storage_parseNumberedFolder(const char *name,
     if (*display_start == '\0')
         return 0u;
 
-    *zero_based_slot = (uint16_t)(number - 1u);
+    *slot = number;
     storage_copyDisplayName(display, display_start);
     return 1u;
 }

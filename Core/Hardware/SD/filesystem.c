@@ -73,6 +73,7 @@
 #include "sequencer.h"
 #include "PatternData.h"
 #include "timebase.h"
+#include "random.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -85,6 +86,7 @@
 #define FS_KIT_LFN_MAX 80u
 #define FS_TEXT_LINE_MAX 96u
 #define FS_INSTRUMENT_MAX_PER_TYPE 128u
+#define FS_TEST_OBJECT_MAX 64u
 
 /* -----------------------------------------------------------------------
 ** Operation types
@@ -111,7 +113,14 @@ typedef enum {
     FS_INTERNAL_OP_SCAN_SCENES,
     FS_INTERNAL_OP_SCAN_INSTRUMENTS,
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
+    FS_INTERNAL_OP_SAVE_INSTRUMENT,
     FS_INTERNAL_OP_LOAD_NAME,
+    FS_INTERNAL_OP_SCAN_TEST_FILES,
+    FS_INTERNAL_OP_SCAN_TEST_DIRS,
+    FS_INTERNAL_OP_LOAD_TEST_FILE,
+    FS_INTERNAL_OP_LOAD_TEST_DIR,
+    FS_INTERNAL_OP_SAVE_TEST_FILE,
+    FS_INTERNAL_OP_SAVE_TEST_DIR,
 } fs_internal_op_t;
 
 typedef struct {
@@ -155,9 +164,9 @@ static fs_status_t      op_flush_final_status = FS_STATUS_DONE;
 /*
  * Current numbered operation slot.
  *
- * Kit directories now span user slots 001..999, so the common request field
- * must be wider than uint8_t even though older .snd/.pat/.prf payloads still
- * use only the low three decimal digits for their legacy filenames.
+ * Kit/Scene directories now span user slots 000..999, so the common request
+ * field must be wider than uint8_t even though older .snd/.pat/.prf payloads
+ * still use only the low three decimal digits for their legacy filenames.
  */
 static uint16_t         op_slot      = 0;
 static fs_file_type_t   op_file_type = FS_FILE_KIT;
@@ -222,6 +231,17 @@ static char scene_slot_open_name[STORAGE_SCENE_MAX_SLOTS]
 static afatfsFilePtr_t op_kit_root_dir = NULL;
 static afatfsFilePtr_t op_kit_slot_dir = NULL;
 static afatfsFinder_t op_finder;
+/*
+ * LFN-aware object scan scratch for production Kit/Instrument browsers.
+ *
+ * Scene scan still uses the older raw finder until Scene is promoted in a
+ * later pass. Kit and Instrument restoration should use asyncfatfs' object
+ * iterator so their display names, short aliases, and file/directory kinds are
+ * resolved by the same code proven by the File/Dir diagnostics.
+ */
+static afatfsObjectFinder_t op_object_finder;
+static afatfsObjectInfo_t op_object;
+static char op_root_open_name[AFATFS_SHORT_FILENAME_MAX];
 static char op_lfn_name[FS_KIT_LFN_MAX];
 static uint8_t op_lfn_valid = 0;
 static char op_line_buf[FS_TEXT_LINE_MAX];
@@ -306,6 +326,34 @@ static uint8_t filesystem_nameStartsWithKitSpace(const char *name);
 static uint8_t filesystem_nameHasExtension(const char *name,
                                            const char *extension);
 /*
+ * Root Instrument Save state machine declaration.
+ *
+ * filesystem_tick() dispatches every asynchronous operation from one switch
+ * near the public facade. The save implementation lives beside Instrument
+ * Load and the text-line writer helpers later in this file, so this prototype
+ * keeps the single dispatcher explicit without moving a large state machine
+ * above the related parser/serializer context.
+ */
+static void filesystem_saveInstrument_tick(void);
+typedef struct {
+    const kit_instrument_slot_t *instrument;
+    storage_instrument_type_t type;
+    uint8_t voice;
+} filesystem_instrument_write_ctx_t;
+/*
+ * Shared text-writer helpers used by Kit Save and root Instrument Save.
+ *
+ * The Instrument Save state machine appears before the Kit Save helpers so it
+ * can sit beside Instrument Load. These declarations make the dependency
+ * explicit: storageTypes supplies one logical text line, while filesystem.c
+ * owns asyncfatfs write offsets and foreground pacing.
+ */
+static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
+                                             void *raw);
+static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
+                                                             void *),
+                                        void *ctx);
+/*
  * Root Instrument/ browser and single-load state.
  *
  * The Instrument pool is list-indexed by instrument type rather than numbered
@@ -329,6 +377,19 @@ static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint8_t op_instrument_load_index = 0u;
 /*
+ * Root Instrument Save request scratch.
+ *
+ * These fields capture the source Scene/slot and the exact display filename at
+ * request acceptance time. Menu may continue moving after the request starts,
+ * but the writer must serialize the originally selected resident instrument
+ * into the root Instrument/ pool.
+ */
+static uint8_t op_instrument_save_source_scene = 0u;
+static uint8_t op_instrument_save_source_slot = 0u;
+static instrument_type_t op_instrument_save_type = INSTRUMENT_TYPE_UNKNOWN;
+static char op_instrument_save_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_instrument_save_open_name[AFATFS_SHORT_FILENAME_MAX];
+/*
  * Validated one-Instrument staging payload.
  *
  * Filesystem owns these buffers from request start through completion. Parsing
@@ -346,6 +407,28 @@ static uint8_t op_file_version = 0;
 static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
 static uint8_t fs_boot_detected_unsupported_card = 0;
 static fs_stale_warning_source_t fs_stale_warning_pending = FS_STALE_WARNING_NONE;
+/*
+ * Root-level File/Dir test caches for the asyncfatfs expansion menu.
+ *
+ * These are intentionally independent of Kit/Scene/Instrument caches. The
+ * expansion tests need to prove generic LFN behavior at the filesystem layer:
+ * scan every root file or directory, preserve exact case in displayName, sort
+ * by that visible component, and reopen by exact case-sensitive display text.
+ */
+static char fs_test_file_name[FS_TEST_OBJECT_MAX][FS_TEST_NAME_MAX + 1u];
+static char fs_test_dir_name[FS_TEST_OBJECT_MAX][FS_TEST_NAME_MAX + 1u];
+static uint8_t fs_test_file_count = 0u;
+static uint8_t fs_test_dir_count = 0u;
+static char op_test_name[FS_TEST_NAME_MAX + 1u];
+static char op_test_child_name[FS_TEST_NAME_MAX + 1u];
+static char op_test_short_alias[AFATFS_SHORT_FILENAME_MAX];
+static uint8_t op_test_bytes[FS_TEST_RESULT_BYTES];
+static fs_test_result_kind_t op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
+static uint32_t fs_test_payload_counter = 0u;
+static afatfsObjectFinder_t op_test_object_finder;
+static afatfsObjectInfo_t op_test_object;
+static afatfsObjectKind_t op_test_best_kind = AFATFS_OBJECT_NONE;
+static afatfsFilePtr_t op_test_dir = NULL;
 
 #define FS_IDLE_POLL_MS 5u
 /* Session 025 keeps glo.cfg/.all raw and unversioned. The only explicitly
@@ -407,6 +490,150 @@ static const fs_file_desc_t *filesystem_desc(fs_file_type_t type)
 static uint8_t filesystem_isPowerOfTwoU8(uint8_t value)
 {
     return (uint8_t)(value && ((value & (uint8_t)(value - 1u)) == 0u));
+}
+
+static void filesystem_copyTestName(char dst[FS_TEST_NAME_MAX + 1u],
+                                    const char *src)
+{
+    uint8_t i = 0u;
+
+    /*
+     * Copy one exact root-level test component into bounded filesystem state.
+     *
+     * Inputs come from asyncfatfs displayName or Menu's filename editor.
+     * Output is NUL-terminated and never contains slash-separated paths. The
+     * low-level LFN writer will sanitize FAT-forbidden punctuation again, but
+     * stripping slash here preserves the public one-component filesystem
+     * contract and prevents a test menu from implying path parsing exists.
+     */
+    if (!src)
+        src = "";
+    while (i < FS_TEST_NAME_MAX && src[i] != '\0' && src[i] != '/' &&
+           src[i] != '\\') {
+        char c = src[i];
+        dst[i] = (c >= 0x20 && c <= 0x7e) ? c : '_';
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static void filesystem_insertTestName(char names[FS_TEST_OBJECT_MAX]
+                                                [FS_TEST_NAME_MAX + 1u],
+                                      uint8_t *count,
+                                      const char *name)
+{
+    uint8_t pos = 0u;
+
+    /*
+     * Insert one scanned object into the root test cache in display order.
+     *
+     * The comparison is intentionally case-sensitive because these menus are
+     * the proof surface for exact-case asyncfatfs lookup. When the cache is
+     * full, names beyond the retained sorted window are dropped deterministically
+     * rather than wrapping or corrupting earlier entries.
+     */
+    while (pos < *count &&
+           fat_compareDisplayName(names[pos], name, true) <= 0)
+        pos++;
+
+    if (*count < FS_TEST_OBJECT_MAX) {
+        for (uint8_t i = *count; i > pos; i--)
+            filesystem_copyTestName(names[i], names[i - 1u]);
+        filesystem_copyTestName(names[pos], name);
+        (*count)++;
+        return;
+    }
+
+    if (pos >= FS_TEST_OBJECT_MAX)
+        return;
+    for (uint8_t i = (uint8_t)(FS_TEST_OBJECT_MAX - 1u); i > pos; i--)
+        filesystem_copyTestName(names[i], names[i - 1u]);
+    filesystem_copyTestName(names[pos], name);
+}
+
+static void filesystem_makeTestBytes(void)
+{
+    uint32_t value;
+
+    /*
+     * Build a four-byte diagnostic payload without assuming back-to-back
+     * RNG_DR reads are fresh.
+     *
+     * GetRngValue() reads the hardware RNG data register directly and may
+     * return the same 16-bit word when called twice in the same foreground
+     * pass. The File and Dir save tests need four visibly independent bytes so
+     * the LCD result can prove byte order and file persistence. Seed a tiny
+     * software mixer from one hardware sample, the system tick, and an
+     * incrementing counter; this is a test payload, not cryptographic
+     * randomness.
+     */
+    fs_test_payload_counter++;
+    value = ((uint32_t)(uint16_t)GetRngValue() << 16) ^
+            ((uint32_t)time_sysTick << 1) ^
+            (fs_test_payload_counter * 0x9e3779b9u);
+    /*
+     * Xorshift32 diffusion spreads the 16-bit hardware sample, foreground
+     * tick, and monotonically increasing counter across all four output bytes.
+     * The arithmetic is intentionally fixed-width unsigned math so the same
+     * byte order is written to the file and copied to the LCD result overlay.
+     */
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    op_test_bytes[0] = (uint8_t)(value & 0xffu);
+    op_test_bytes[1] = (uint8_t)((value >> 8) & 0xffu);
+    op_test_bytes[2] = (uint8_t)((value >> 16) & 0xffu);
+    op_test_bytes[3] = (uint8_t)((value >> 24) & 0xffu);
+    op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
+}
+
+static uint8_t filesystem_readTestBytesTick(void)
+{
+    /*
+     * Incrementally read up to four bytes from the current open file.
+     *
+     * Output: nonzero when the result buffer is complete or EOF has been
+     * reached. Missing bytes remain zero so empty or short files produce a
+     * deterministic display instead of stale data from a previous test.
+     */
+    while (op_item_offset < FS_TEST_RESULT_BYTES) {
+        uint32_t n = afatfs_fread(op_file,
+                                  op_test_bytes + op_item_offset,
+                                  (uint32_t)(FS_TEST_RESULT_BYTES -
+                                             op_item_offset));
+        if (n != 0u) {
+            op_item_offset = (uint8_t)(op_item_offset + n);
+            op_bytes_done += n;
+            continue;
+        }
+        if (afatfs_feof(op_file))
+            return 1u;
+        return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t filesystem_writeTestBytesTick(void)
+{
+    /*
+     * Incrementally write the four-byte test payload to the current file.
+     *
+     * afatfs_fwrite() may accept fewer bytes than requested when cache or SD
+     * state is busy. The offset is therefore advanced only by the accepted
+     * count and the state machine retries until all four bytes have been
+     * handed to asyncfatfs.
+     */
+    while (op_item_offset < FS_TEST_RESULT_BYTES) {
+        uint32_t n = afatfs_fwrite(op_file,
+                                   op_test_bytes + op_item_offset,
+                                   (uint32_t)(FS_TEST_RESULT_BYTES -
+                                              op_item_offset));
+        if (n == 0u)
+            return 0u;
+        op_item_offset = (uint8_t)(op_item_offset + n);
+        op_bytes_done += n;
+    }
+    return 1u;
 }
 
 static uint8_t filesystem_hasFatBootSignature(const uint8_t *sector)
@@ -947,13 +1174,13 @@ static void filesystem_flushFinish_tick(void)
      * Final save/load persistence gate.
      *
      * filesystem_tick() has already called afatfs_poll() for this foreground
-     * pass. Calling afatfs_flush() here either starts/continues one bounded
+     * pass. Calling afatfs_sync() here either starts/continues one bounded
      * cache write or confirms that no dirty sector and no in-flight sector
      * write remains. Only then is completion_callback invoked, so Preset/Menu
      * cannot display save completion while the removable card still lacks the
      * sectors that make the saved object discoverable.
      */
-    if (!afatfs_flush())
+    if (!afatfs_sync())
         return;
 
     filesystem_complete(op_flush_final_status);
@@ -1096,7 +1323,8 @@ static void filesystem_dirLfnAppendEntry(const fatDirectoryEntry_t *entry)
  *
  * Inputs: open_name is the 8.3 alias used by afatfs_fopen(). Outputs: the scan
  * cache and kitBrowser compatibility map are populated if the alias starts with
- * a valid 001..999 slot number and has some non-empty tail. Client:
+ * a valid 000..999 slot number and has some non-empty tail. Slot 000 is a real
+ * Kit slot, so the parsed number maps directly to the cache index. Client:
  * filesystem_recordKitDirectory() after normal LFN parsing fails.
  */
 static void filesystem_recordKitShortAlias(const char *open_name)
@@ -1114,12 +1342,11 @@ static void filesystem_recordKitShortAlias(const char *open_name)
     number = (uint16_t)((uint16_t)(open_name[0] - '0') * 100u +
                         (uint16_t)(open_name[1] - '0') * 10u +
                         (uint16_t)(open_name[2] - '0'));
-    if (number == 0u || number > STORAGE_KIT_MAX_SLOTS ||
-        open_name[3] == '\0') {
+    if (number >= STORAGE_KIT_MAX_SLOTS || open_name[3] == '\0') {
         return;
     }
 
-    slot = (uint16_t)(number - 1u);
+    slot = number;
     storage_copyDisplayName(display, open_name + 3u);
     kit_slot_present[slot] = 1u;
     memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
@@ -1169,9 +1396,10 @@ static void filesystem_recordSceneShortAlias(const char *open_name)
      * FAT short-alias fallback for Scene folders.
      *
      * Inputs: an asyncfatfs-openable 8.3 alias such as 001SLA~1. Output:
-     * Scene scan cache entry when the alias begins with a valid 001..999
-     * prefix. This mirrors the Kit fallback but deliberately avoids kb_map
-     * because Scene and Kit library occupancy are independent.
+     * Scene scan cache entry when the alias begins with a valid 000..999
+     * prefix. Slot 000 is real, so the parsed number maps directly to the
+     * cache index. This mirrors the Kit fallback but deliberately avoids
+     * kb_map because Scene and Kit library occupancy are independent.
      */
     if (open_name[0] < '0' || open_name[0] > '9' ||
         open_name[1] < '0' || open_name[1] > '9' ||
@@ -1181,11 +1409,10 @@ static void filesystem_recordSceneShortAlias(const char *open_name)
     number = (uint16_t)((uint16_t)(open_name[0] - '0') * 100u +
                         (uint16_t)(open_name[1] - '0') * 10u +
                         (uint16_t)(open_name[2] - '0'));
-    if (number == 0u || number > STORAGE_SCENE_MAX_SLOTS ||
-        open_name[3] == '\0') {
+    if (number >= STORAGE_SCENE_MAX_SLOTS || open_name[3] == '\0') {
         return;
     }
-    slot = (uint16_t)(number - 1u);
+    slot = number;
     storage_copyDisplayName(display, open_name + 3u);
     scene_slot_present[slot] = 1u;
     memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
@@ -1328,7 +1555,7 @@ static void filesystem_recordInstrumentFile(const char *display_name,
                                             const char *open_name)
 {
     instrument_type_t type =
-        filesystem_instrumentTypeFromFilename(open_name);
+        filesystem_instrumentTypeFromFilename(display_name);
     uint8_t count;
     uint8_t pos;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
@@ -1336,12 +1563,15 @@ static void filesystem_recordInstrumentFile(const char *display_name,
     /*
      * Insert one Instrument/ file into its per-type sorted cache.
      *
-     * Inputs: display_name from LFN/short FAT entry and open_name as the
+     * Inputs: display_name from asyncfatfs object metadata and open_name as the
      * asyncfatfs-openable short filename. Output: the per-type cache stores a
-     * display stem and open name in alphanumeric order. This cannot reuse the
-     * Kit/ cache because Kits are numbered folders while Instruments are typed
-     * filename lists.
+     * display stem and open name in alphanumeric order. Classification prefers
+     * the visible filename first, because a host-created long file may have a
+     * generated short alias that is less meaningful than its display extension;
+     * the alias fallback keeps legacy alias-only media loadable.
      */
+    if (type == INSTRUMENT_TYPE_UNKNOWN)
+        type = filesystem_instrumentTypeFromFilename(open_name);
     if (type == INSTRUMENT_TYPE_UNKNOWN ||
         type >= INSTRUMENT_TYPE_UNKNOWN)
         return;
@@ -1371,6 +1601,63 @@ static void filesystem_recordInstrumentFile(const char *display_name,
     filesystem_copyInstrumentStem16(instrument_file_stem[type][pos],
                                     display_name);
     instrument_file_count[type] = (uint8_t)(count + 1u);
+}
+
+static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
+                                                      const char *open_name)
+{
+    instrument_type_t type =
+        filesystem_instrumentTypeFromFilename(display_name);
+    uint8_t i;
+
+    /*
+     * Replace one cached Instrument/ entry after a root Instrument Save.
+     *
+     * Inputs are the visible filename passed to afatfs_fopen_lfn() and the
+     * short alias returned by asyncfatfs. Output: the per-type browser cache is
+     * updated in-place so a saved file is immediately available for Instrument
+     * Load without requiring a full root Instrument/ rescan. Matching by alias
+     * removes overwritten files; matching by display stem removes the common
+     * case where a new save reused the same visible name but asyncfatfs chose a
+     * different short alias. Dot-prefixed files are not filtered here; the
+     * product type classifier decides whether the name is an Instrument file.
+     */
+    if (type == INSTRUMENT_TYPE_UNKNOWN)
+        type = filesystem_instrumentTypeFromFilename(open_name);
+    if (type == INSTRUMENT_TYPE_UNKNOWN || type >= INSTRUMENT_TYPE_UNKNOWN)
+        return;
+
+    for (i = 0u; i < instrument_file_count[type]; ) {
+        char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+        uint8_t remove = 0u;
+
+        filesystem_copyInstrumentStemDisplay(display, display_name);
+        if (strcmp(instrument_file_open_name[type][i], open_name) == 0 ||
+            strncmp(instrument_file_name[type][i], display,
+                    STORAGE_KIT_DISPLAY_NAME_LEN) == 0) {
+            remove = 1u;
+        }
+
+        if (remove) {
+            uint8_t j;
+            for (j = i; (uint8_t)(j + 1u) < instrument_file_count[type]; j++) {
+                memcpy(instrument_file_name[type][j],
+                       instrument_file_name[type][j + 1u],
+                       sizeof(instrument_file_name[type][j]));
+                memcpy(instrument_file_open_name[type][j],
+                       instrument_file_open_name[type][j + 1u],
+                       sizeof(instrument_file_open_name[type][j]));
+                memcpy(instrument_file_stem[type][j],
+                       instrument_file_stem[type][j + 1u],
+                       sizeof(instrument_file_stem[type][j]));
+            }
+            instrument_file_count[type]--;
+            continue;
+        }
+        i++;
+    }
+
+    filesystem_recordInstrumentFile(display_name, open_name);
 }
 
 /* Read one text line from an asyncfatfs file without blocking the pump.
@@ -1587,7 +1874,11 @@ static void filesystem_loadKitDirectory_tick(void)
     case 1: /* OPEN Kit/ */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(STORAGE_ROOT_KIT, "r", on_file_opened))
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_KIT,
+                                AFATFS_MATCH_CASE_SENSITIVE,
+                                op_root_open_name,
+                                on_file_opened))
             return;
         op_phase = 2;
         return;
@@ -1789,6 +2080,15 @@ static void filesystem_loadKitDirectory_tick(void)
     case 17: /* OPEN INSTRUMENT */
         op_file_ready = false;
         op_file = NULL;
+        /*
+         * Open kit member files exactly as kitset.kcg names them.
+         *
+         * Current Kit Save writes asyncfatfs-returned short aliases into
+         * kitset.kcg, so this open is an identity open inside the
+         * already-selected Kit directory. If a future schema stores long
+         * display filenames here, this is the single phase that should move to
+         * afatfs_fopen_lfn().
+         */
         if (!afatfs_fopen(op_kitset.instrument_file[op_instrument_slot],
                           "r",
                           on_file_opened)) {
@@ -2832,7 +3132,11 @@ static void filesystem_loadInstrument_tick(void)
     case 1: /* OPEN Instrument/ */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(STORAGE_ROOT_INSTRUMENT, "r", on_file_opened))
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_INSTRUMENT,
+                                AFATFS_MATCH_CASE_SENSITIVE,
+                                op_root_open_name,
+                                on_file_opened))
             return;
         op_phase = 2;
         return;
@@ -2875,6 +3179,15 @@ static void filesystem_loadInstrument_tick(void)
         op_line_len = 0u;
         op_file_ready = false;
         op_file = NULL;
+        /*
+         * Open the selected Instrument file by scan-cache identity.
+         *
+         * Menu selects a typed cache index, not a freshly-entered filename.
+         * The cached short alias belongs to the exact object returned by the
+         * Instrument/ scan, so the open cannot drift to another same-display
+         * candidate while the load is in flight. Display/stem metadata is
+         * committed only after the parser validates the file.
+         */
         if (!afatfs_fopen(
                 instrument_file_open_name[op_instrument_load_type]
                                          [op_instrument_load_index],
@@ -2974,6 +3287,184 @@ static void filesystem_loadInstrument_tick(void)
     }
 }
 
+/* -----------------------------------------------------------------------
+** SAVE ONE ROOT INSTRUMENT state machine
+**
+** Inputs: source Scene/slot, captured instrument type, and exact visible
+** filename from filesystem_requestSaveInstrument(). Output: creates/opens
+** Instrument/<filename> with case-preserving LFN support, streams the source
+** resident instrument text into that file, updates the Instrument browser
+** cache with the returned short alias, and finishes only after the write has
+** been closed and sync-flushed by filesystem_finish().
+** ----------------------------------------------------------------------- */
+static void filesystem_saveInstrument_tick(void)
+{
+    const scene_t *scene = scene_getConst(op_instrument_save_source_scene);
+    const kit_instrument_slot_t *instrument =
+        (scene && op_instrument_save_source_slot < STORAGE_KIT_SLOT_COUNT)
+            ? &scene->kit.instruments[op_instrument_save_source_slot]
+            : NULL;
+
+    switch (op_phase) {
+    case 0: /* VALIDATE + CHDIR ROOT */
+        /*
+         * Revalidate the captured source before opening any filesystem object.
+         *
+         * Inputs were copied at request acceptance time, but SceneData is live
+         * RAM. The type comparison prevents a delayed save from serializing a
+         * different instrument type under the filename/extension chosen for the
+         * original source slot.
+         */
+        if (!instrument ||
+            op_instrument_save_source_slot >= STORAGE_KIT_SLOT_COUNT ||
+            op_instrument_save_type >= INSTRUMENT_TYPE_UNKNOWN ||
+            instrument->type != op_instrument_save_type ||
+            op_instrument_save_display_name[0] == '\0') {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1;
+        return;
+
+    case 1: /* MKDIR/OPEN Instrument/ */
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        /*
+         * Create/open the root Instrument directory through the LFN path.
+         *
+         * The visible root name is currently short, but keeping the writer on
+         * mkdir_lfn() makes case preservation and case-sensitive matching use
+         * the same asyncfatfs code path as File/Dir diagnostics and Kit Save.
+         */
+        if (!afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_root_open_name,
+                              on_file_opened))
+            return;
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT Instrument/ */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3;
+        return;
+
+    case 3: /* CHDIR Instrument/ */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 4;
+        return;
+
+    case 4: /* CLOSE Instrument/ handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5;
+        return;
+
+    case 5: /* WAIT CLOSE Instrument/ */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 6;
+        return;
+
+    case 6: /* OPEN target instrument file */
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_instrument_save_open_name, 0,
+               sizeof(op_instrument_save_open_name));
+        /*
+         * Open the exact visible Instrument filename with write semantics.
+         *
+         * fopen_lfn() is required here rather than fopen(): the user-facing
+         * Instrument pool may contain mixed case, spaces, and long stems. The
+         * returned short alias is retained so the browser cache can reopen the
+         * same physical object after this save without requiring a rescan.
+         */
+        if (!afatfs_fopen_lfn(op_instrument_save_display_name,
+                              "w",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_instrument_save_open_name,
+                              on_file_opened))
+            return;
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT target instrument file */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 8;
+        return;
+
+    case 8: /* WRITE complete instrument text */
+    {
+        filesystem_instrument_write_ctx_t ctx = {
+            instrument,
+            op_instrument_save_type,
+            (uint8_t)(op_instrument_save_source_slot + 1u)
+        };
+        /*
+         * Stream one storageTypes line per foreground tick as needed.
+         *
+         * The voice field is intentionally source_slot + 1 because Instrument
+         * files describe one of the six kit voices, not the 000..999 library
+         * slot space. That one-based voice coordinate is consumed by the
+         * parser and by LFO self-target resolution inside storageTypes.
+         */
+        if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
+            return;
+        op_phase = 9;
+        return;
+    }
+
+    case 9: /* CLOSE target instrument file */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 10;
+        return;
+
+    case 10: /* WAIT CLOSE target instrument file */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_phase = 11;
+        return;
+
+    case 11: /* RETURN ROOT + UPDATE CACHE */
+        if (!afatfs_chdir(NULL))
+            return;
+        /*
+         * Make the saved file immediately visible to nested Instrument Load.
+         *
+         * Inputs are the exact display filename and returned asyncfatfs short
+         * alias. The helper removes older matching cache entries before adding
+         * this one, so re-saving the same visible Instrument updates selection
+         * identity instead of showing duplicate browser rows.
+         */
+        filesystem_updateInstrumentCacheAfterSave(
+            op_instrument_save_display_name,
+            op_instrument_save_open_name);
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
 static char filesystem_saveDisplayNameChar(char c)
 {
     /*
@@ -3001,7 +3492,7 @@ static void filesystem_makeKitDirectoryDisplayName(
     char dst[AFATFS_LONG_FILENAME_MAX + 1u],
     uint16_t slot)
 {
-    uint16_t display = (uint16_t)(slot + 1u);
+    uint16_t display = slot;
     uint8_t pos = 4u;
     uint8_t last_meaningful = 4u;
     uint8_t i;
@@ -3013,6 +3504,8 @@ static void filesystem_makeKitDirectoryDisplayName(
      * preserves spaces/case from the eight-character preset name field. The
      * asyncfatfs LFN create primitive will choose a separate short alias for
      * opening; callers must not treat this display string as an open name.
+     * Slot 000 is a real library slot, so the visible prefix is the direct
+     * op_slot value rather than op_slot + 1.
      */
     if (display > 999u)
         display = 999u;
@@ -3239,9 +3732,10 @@ static void filesystem_makeSceneDirectoryDisplayName(char *dst, uint16_t slot)
      *
      * Inputs: zero-based library slot and op_scene_display_name. Output:
      * display component passed to asyncfatfs LFN mkdir. Decimal math is kept
-     * explicit because slot numbers are user-facing one-based 001..999.
+     * explicit because slot numbers are user-facing 000..999 and slot 000 is
+     * a real Scene library slot.
      */
-    uint16_t number = (uint16_t)(slot + 1u);
+    uint16_t number = slot;
     uint8_t i;
 
     dst[0] = (char)('0' + ((number / 100u) % 10u));
@@ -3283,12 +3777,6 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap, void *raw)
                                     op_save_instrument_file,
                                     op_write_line_index);
 }
-
-typedef struct {
-    const kit_instrument_slot_t *instrument;
-    storage_instrument_type_t type;
-    uint8_t voice;
-} filesystem_instrument_write_ctx_t;
 
 static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
                                              void *raw)
@@ -3332,7 +3820,19 @@ static void filesystem_saveKitDirectory_tick(void)
     case 1: /* MKDIR/OPEN Kit */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_mkdir(STORAGE_ROOT_KIT, on_file_opened))
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        /*
+         * Create/open the root Kit directory through the LFN-aware path.
+         *
+         * "Kit" is a short display component today, but using mkdir_lfn keeps
+         * this production writer on the same case-preserving path as long Kit
+         * folders and prevents future root-name changes from falling back to
+         * raw uppercase SFN behavior.
+         */
+        if (!afatfs_mkdir_lfn(STORAGE_ROOT_KIT,
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_root_open_name,
+                              on_file_opened))
             return;
         op_phase = 2;
         return;
@@ -3386,6 +3886,7 @@ static void filesystem_saveKitDirectory_tick(void)
                 return;
         } else {
             if (!afatfs_mkdir_lfn(op_save_kit_display_name,
+                                  AFATFS_MATCH_CASE_SENSITIVE,
                                   op_save_kit_dir_name,
                                   on_file_opened))
                 return;
@@ -3479,6 +3980,7 @@ static void filesystem_saveKitDirectory_tick(void)
         if (!afatfs_fopen_lfn(
                 op_save_instrument_display_file[op_instrument_slot],
                 "w",
+                AFATFS_MATCH_CASE_SENSITIVE,
                 op_save_instrument_file[op_instrument_slot],
                 on_file_opened)) {
             return;
@@ -5075,9 +5577,9 @@ static void filesystem_saveGlobals_tick(void)
 **
 ** Why this exists: the menu still browses fixed numeric slots, but the card now
 ** stores kits as folders named 001 Name, 002 Name, etc. This scanner opens the
-** root Kit/ directory, walks every FAT entry, reconstructs any LFN display name,
-** accepts only numbered folders via storage_parseNumberedFolder(), and caches
-** both the user display name and short open name.
+** root Kit/ directory by exact display name, walks asyncfatfs-resolved objects,
+** accepts only numbered directories via storage_parseNumberedFolder(), and
+** caches both the user display name and short open name.
 **
 ** Inputs: no slot input; filesystem_requestScanKits() clears the cache and
 ** starts this op. Outputs: kit_slot_present/name/open_name and the legacy
@@ -5100,7 +5602,19 @@ static void filesystem_scanKits_tick(void)
     case 1: /* OPEN Kit/ */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(STORAGE_ROOT_KIT, "r", on_file_opened))
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        /*
+         * Open the root Kit directory through the LFN-aware directory path.
+         *
+         * "Kit" is a short display component today, but using opendir_lfn keeps
+         * production scans on the same case-preserving lookup path as long
+         * Kit folders and prevents future root-name changes from falling back
+         * to raw uppercase SFN behavior.
+         */
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_KIT,
+                                AFATFS_MATCH_CASE_SENSITIVE,
+                                op_root_open_name,
+                                on_file_opened))
             return;
         op_phase = 2;
         return;
@@ -5118,52 +5632,52 @@ static void filesystem_scanKits_tick(void)
     case 3: /* CHDIR Kit/ */
         if (!afatfs_chdir(op_kit_root_dir))
             return;
-        afatfs_findFirst(op_kit_root_dir, &op_finder);
-        filesystem_dirLfnReset();
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
         op_phase = 4;
         return;
 
     case 4: /* FIND_NEXT */
     {
-        fatDirectoryEntry_t *entry = NULL;
-        afatfsOperationStatus_e st = afatfs_findNext(op_kit_root_dir,
-                                                     &op_finder,
-                                                     &entry);
+        /*
+         * One public object may consume several raw FAT entries.
+         *
+         * The iterator can return IN_PROGRESS while cache sectors are
+         * unavailable, so this phase advances only after SUCCESS. A NONE
+         * object means end of directory, not an empty Kit slot; missing slot
+         * semantics are handled by the numbered-folder cache after scanning.
+         */
+        afatfsOperationStatus_e st =
+            afatfs_findNextObject(op_kit_root_dir,
+                                  &op_object_finder,
+                                  &op_object);
         if (st == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (st == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLast(op_kit_root_dir);
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_close_status = FS_STATUS_ERROR;
             op_phase = 5;
             return;
         }
-        if (entry == NULL || fat_isDirectoryEntryTerminator(entry)) {
-            afatfs_findLast(op_kit_root_dir);
+        if (op_object.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_close_status = FS_STATUS_DONE;
             op_phase = 5;
             return;
         }
-        if (fat_isDirectoryEntryEmpty(entry)) {
-            filesystem_dirLfnReset();
-            return;
+        /*
+         * Scan Kit/ through the asyncfatfs object iterator.
+         *
+         * Inputs are concrete objects with displayName already resolved from
+         * VFAT LFN fragments or SFN case bits. Output: only numbered directory
+         * components become Kit browser slots. The product-level numbered
+         * folder parser is the filter; asyncfatfs has already handled
+         * structural FAT records, and it intentionally does not hide ordinary
+         * dot-prefixed names.
+         */
+        if (op_object.kind == AFATFS_OBJECT_DIRECTORY) {
+            filesystem_recordKitDirectory(op_object.displayName,
+                                          op_object.shortName);
         }
-        if ((entry->attrib & 0x0fu) == 0x0fu) {
-            filesystem_dirLfnAppendEntry(entry);
-            return;
-        }
-        if ((entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) &&
-            !(entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID)) {
-            char short_name[STORAGE_KIT_FILENAME_MAX];
-            const char *display_name;
-
-            memset(short_name, 0, sizeof(short_name));
-            fat_convertFATStyleToFilename(entry->filename, short_name);
-            fat_applyFilenameCaseFlags(short_name, entry->ntReserved);
-
-            display_name = op_lfn_valid ? op_lfn_name : short_name;
-            filesystem_recordKitDirectory(display_name, short_name);
-        }
-        filesystem_dirLfnReset();
         return;
     }
 
@@ -5280,6 +5794,7 @@ static void filesystem_saveSceneDirectory_tick(void)
                 return;
         } else {
             if (!afatfs_mkdir_lfn(op_scene_dir_display_name,
+                                  AFATFS_MATCH_CASE_SENSITIVE,
                                   op_scene_dir_name,
                                   on_file_opened))
                 return;
@@ -5383,7 +5898,10 @@ static void filesystem_saveSceneDirectory_tick(void)
         filesystem_trimmedKitDirectoryName(kit_dir, op_scene_display_name);
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_mkdir_lfn(kit_dir, op_save_kit_dir_name, on_file_opened))
+        if (!afatfs_mkdir_lfn(kit_dir,
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_save_kit_dir_name,
+                              on_file_opened))
             return;
         op_phase = 17;
         return;
@@ -5433,6 +5951,7 @@ static void filesystem_saveSceneDirectory_tick(void)
         if (!afatfs_fopen_lfn(
                 op_save_instrument_display_file[op_instrument_slot],
                 "w",
+                AFATFS_MATCH_CASE_SENSITIVE,
                 op_save_instrument_file[op_instrument_slot],
                 on_file_opened))
             return;
@@ -6006,7 +6525,19 @@ static void filesystem_scanInstruments_tick(void)
     case 1: /* OPEN Instrument/ */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(STORAGE_ROOT_INSTRUMENT, "r", on_file_opened))
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        /*
+         * Open the root Instrument directory by exact display component.
+         *
+         * Older code used the generated alias INSTRU~1. The restored
+         * production browser must instead depend on asyncfatfs' case-preserved
+         * LFN/SFN lookup so files saved under Instrument/ are scanned from the
+         * directory the user sees on the card.
+         */
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_INSTRUMENT,
+                                AFATFS_MATCH_CASE_SENSITIVE,
+                                op_root_open_name,
+                                on_file_opened))
             return;
         op_phase = 2;
         return;
@@ -6024,52 +6555,43 @@ static void filesystem_scanInstruments_tick(void)
     case 3: /* CHDIR Instrument/ */
         if (!afatfs_chdir(op_kit_root_dir))
             return;
-        afatfs_findFirst(op_kit_root_dir, &op_finder);
-        filesystem_dirLfnReset();
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
         op_phase = 4;
         return;
 
     case 4: /* FIND_NEXT */
     {
-        fatDirectoryEntry_t *entry = NULL;
-        afatfsOperationStatus_e st = afatfs_findNext(op_kit_root_dir,
-                                                     &op_finder,
-                                                     &entry);
+        afatfsOperationStatus_e st =
+            afatfs_findNextObject(op_kit_root_dir,
+                                  &op_object_finder,
+                                  &op_object);
         if (st == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (st == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLast(op_kit_root_dir);
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_close_status = FS_STATUS_ERROR;
             op_phase = 5;
             return;
         }
-        if (entry == NULL || fat_isDirectoryEntryTerminator(entry)) {
-            afatfs_findLast(op_kit_root_dir);
+        if (op_object.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_close_status = FS_STATUS_DONE;
             op_phase = 5;
             return;
         }
-        if (fat_isDirectoryEntryEmpty(entry)) {
-            filesystem_dirLfnReset();
-            return;
+        /*
+         * Keep all ordinary files visible to the product classifier.
+         *
+         * Dot-prefixed files are not hidden here by filesystem policy. They
+         * simply fail the registered instrument extension/type check unless
+         * they are genuine instrument files. displayName is the user-facing LFN
+         * or case-preserved SFN spelling; shortName is the identity alias used
+         * by the current file-open path after selection.
+         */
+        if (op_object.kind == AFATFS_OBJECT_FILE) {
+            filesystem_recordInstrumentFile(op_object.displayName,
+                                            op_object.shortName);
         }
-        if ((entry->attrib & 0x0fu) == 0x0fu) {
-            filesystem_dirLfnAppendEntry(entry);
-            return;
-        }
-        if (!(entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) &&
-            !(entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID)) {
-            char short_name[STORAGE_KIT_FILENAME_MAX];
-            const char *display_name;
-
-            memset(short_name, 0, sizeof(short_name));
-            fat_convertFATStyleToFilename(entry->filename, short_name);
-            fat_applyFilenameCaseFlags(short_name, entry->ntReserved);
-
-            display_name = op_lfn_valid ? op_lfn_name : short_name;
-            filesystem_recordInstrumentFile(display_name, short_name);
-        }
-        filesystem_dirLfnReset();
         return;
     }
 
@@ -6816,6 +7338,446 @@ uint8_t filesystem_installLoopsBlocking(void)
     return filesystem_installSampleFolderBlocking("loops", 1, 1);
 }
 
+/* -----------------------------------------------------------------------
+** Generic asyncfatfs File/Dir test operations
+** ----------------------------------------------------------------------- */
+static void filesystem_scanTestObjects_tick(uint8_t want_dirs)
+{
+    switch (op_phase) {
+    case 0:
+        /*
+         * Always scan from the volume root.
+         *
+         * These menus are deliberately generic asyncfatfs tests, not Kit/Scene
+         * browsers. Resetting CWD to root makes the visible list independent
+         * of whichever older storage state machine last entered a directory.
+         */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(".", "r", on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_test_dir = op_file;
+        afatfs_findFirstObject(op_test_dir, &op_test_object_finder);
+        op_phase = 2u;
+        return;
+
+    case 2:
+        for (;;) {
+            afatfsOperationStatus_e st =
+                afatfs_findNextObject(op_test_dir,
+                                      &op_test_object_finder,
+                                      &op_test_object);
+            if (st == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (st == AFATFS_OPERATION_FAILURE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                op_phase = 5u;
+                return;
+            }
+            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                op_phase = 3u;
+                return;
+            }
+            /*
+             * Insert only the requested object class. The iterator has already
+             * hidden VFAT fragments, deleted entries, labels, and structural
+             * dot entries. It intentionally does not hide ordinary names that
+             * begin with '.', because dot-prefixed files and directories are
+             * legal FAT objects and the diagnostic browser must reflect the
+             * filesystem exactly.
+             */
+            if (!want_dirs && op_test_object.kind == AFATFS_OBJECT_FILE) {
+                filesystem_insertTestName(fs_test_file_name,
+                                          &fs_test_file_count,
+                                          op_test_object.displayName);
+            } else if (want_dirs &&
+                       op_test_object.kind == AFATFS_OBJECT_DIRECTORY) {
+                filesystem_insertTestName(fs_test_dir_name,
+                                          &fs_test_dir_count,
+                                          op_test_object.displayName);
+            }
+        }
+
+    case 3:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 4u;
+        return;
+
+    case 4:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 5:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 6u;
+        return;
+
+    case 6:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+static void filesystem_loadTestFile_tick(void)
+{
+    switch (op_phase) {
+    case 0:
+        memset(op_test_bytes, 0, sizeof(op_test_bytes));
+        op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(op_test_name, "r",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_test_short_alias,
+                              on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_phase = 2u;
+        return;
+
+    case 2:
+        if (!filesystem_readTestBytesTick())
+            return;
+        op_phase = 3u;
+        return;
+
+    case 3:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 4u;
+        return;
+
+    case 4:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+    }
+}
+
+static void filesystem_loadTestDir_tick(void)
+{
+    switch (op_phase) {
+    case 0:
+        memset(op_test_bytes, 0, sizeof(op_test_bytes));
+        memset(op_test_child_name, 0, sizeof(op_test_child_name));
+        op_test_best_kind = AFATFS_OBJECT_NONE;
+        op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn(op_test_name,
+                                AFATFS_MATCH_CASE_SENSITIVE,
+                                op_test_short_alias,
+                                on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_test_dir = op_file;
+        if (!afatfs_chdir(op_test_dir))
+            return;
+        afatfs_findFirstObject(op_test_dir, &op_test_object_finder);
+        op_phase = 2u;
+        return;
+
+    case 2:
+        for (;;) {
+            afatfsOperationStatus_e st =
+                afatfs_findNextObject(op_test_dir,
+                                      &op_test_object_finder,
+                                      &op_test_object);
+            if (st == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (st == AFATFS_OPERATION_FAILURE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                op_phase = 10u;
+                return;
+            }
+            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                op_phase = 3u;
+                return;
+            }
+            /*
+             * Retain the first alphanumerically-sorted child by exact display
+             * case. This avoids depending on raw directory order, which can
+             * vary after deletes or host-side file creation. Dot-prefixed
+             * names remain eligible here: they are real filesystem entries,
+             * and this diagnostic path must not apply hidden-file policy above
+             * asyncfatfs.
+             */
+            if (op_test_best_kind == AFATFS_OBJECT_NONE ||
+                fat_compareDisplayName(op_test_object.displayName,
+                                       op_test_child_name,
+                                       true) < 0) {
+                op_test_best_kind = op_test_object.kind;
+                filesystem_copyTestName(op_test_child_name,
+                                        op_test_object.displayName);
+            }
+        }
+
+    case 3:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 4u;
+        return;
+
+    case 4:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        if (op_test_best_kind == AFATFS_OBJECT_NONE) {
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (op_test_best_kind == AFATFS_OBJECT_DIRECTORY) {
+            op_test_result_kind = FS_TEST_RESULT_DIRECTORY;
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(op_test_child_name, "r",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_test_short_alias,
+                              on_file_opened))
+            return;
+        op_phase = 5u;
+        return;
+
+    case 5:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_phase = 6u;
+        return;
+
+    case 6:
+        if (!filesystem_readTestBytesTick())
+            return;
+        op_phase = 7u;
+        return;
+
+    case 7:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 8u;
+        return;
+
+    case 8:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 10:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 11u;
+        return;
+
+    case 11:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        (void)afatfs_chdir(NULL);
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+static void filesystem_saveTestFile_tick(void)
+{
+    switch (op_phase) {
+    case 0:
+        filesystem_makeTestBytes();
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(op_test_name, "w",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_test_short_alias,
+                              on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_phase = 2u;
+        return;
+
+    case 2:
+        if (!filesystem_writeTestBytesTick())
+            return;
+        op_phase = 3u;
+        return;
+
+    case 3:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 4u;
+        return;
+
+    case 4:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+    }
+}
+
+static void filesystem_saveTestDir_tick(void)
+{
+    switch (op_phase) {
+    case 0:
+        filesystem_makeTestBytes();
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir_lfn(op_test_name,
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_test_short_alias,
+                              on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_test_dir = op_file;
+        if (!afatfs_chdir(op_test_dir))
+            return;
+        op_phase = 2u;
+        return;
+
+    case 2:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 3u;
+        return;
+
+    case 3:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        /*
+         * Save:[Dir] writes a child file with the same exact display name as
+         * the directory, proving both LFN directory creation and LFN file
+         * creation inside that new current directory.
+         */
+        if (!afatfs_fopen_lfn(op_test_name, "w",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              op_test_short_alias,
+                              on_file_opened))
+            return;
+        op_phase = 4u;
+        return;
+
+    case 4:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_phase = 5u;
+        return;
+
+    case 5:
+        if (!filesystem_writeTestBytesTick())
+            return;
+        op_phase = 6u;
+        return;
+
+    case 6:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 7u;
+        return;
+
+    case 7:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+    }
+}
+
 /* =======================================================================
 ** Public API
 ** ======================================================================= */
@@ -6896,6 +7858,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:
         filesystem_loadInstrument_tick();
         break;
+    case FS_INTERNAL_OP_SAVE_INSTRUMENT:
+        filesystem_saveInstrument_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_MORPH:
         filesystem_loadKit_tick();
         break;
@@ -6940,6 +7905,24 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_LOAD_NAME:
         filesystem_loadName_tick();
         break;
+    case FS_INTERNAL_OP_SCAN_TEST_FILES:
+        filesystem_scanTestObjects_tick(0u);
+        break;
+    case FS_INTERNAL_OP_SCAN_TEST_DIRS:
+        filesystem_scanTestObjects_tick(1u);
+        break;
+    case FS_INTERNAL_OP_LOAD_TEST_FILE:
+        filesystem_loadTestFile_tick();
+        break;
+    case FS_INTERNAL_OP_LOAD_TEST_DIR:
+        filesystem_loadTestDir_tick();
+        break;
+    case FS_INTERNAL_OP_SAVE_TEST_FILE:
+        filesystem_saveTestFile_tick();
+        break;
+    case FS_INTERNAL_OP_SAVE_TEST_DIR:
+        filesystem_saveTestDir_tick();
+        break;
     default: break;
     }
 }
@@ -6975,6 +7958,21 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_close_status = FS_STATUS_DONE;
     op_flush_final_status = FS_STATUS_DONE;
     op_bytes_done = 0;
+    /*
+     * Reset the generic File/Dir test scratch for every filesystem request.
+     *
+     * The test result is shared by all four new menu operations, so it must be
+     * cleared even when the next request is an old Kit/Scene operation. That
+     * prevents a later PRESET_OP_TEST_* completion from displaying bytes or a
+     * child-directory label that belonged to an earlier save/load attempt.
+     */
+    memset(op_test_name, 0, sizeof(op_test_name));
+    memset(op_test_child_name, 0, sizeof(op_test_child_name));
+    memset(op_test_short_alias, 0, sizeof(op_test_short_alias));
+    memset(op_test_bytes, 0, sizeof(op_test_bytes));
+    op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
+    op_test_best_kind = AFATFS_OBJECT_NONE;
+    op_test_dir = NULL;
     op_stream_index = 0;
     op_item_offset = 0;
     op_loaded_active_pattern_running = 0;
@@ -7006,6 +8004,13 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_instrument_load_destination_scene = 0u;
     op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
     op_instrument_load_index = 0u;
+    op_instrument_save_source_scene = 0u;
+    op_instrument_save_source_slot = 0u;
+    op_instrument_save_type = INSTRUMENT_TYPE_UNKNOWN;
+    memset(op_instrument_save_display_name, 0,
+           sizeof(op_instrument_save_display_name));
+    memset(op_instrument_save_open_name, 0,
+           sizeof(op_instrument_save_open_name));
     memset(&op_staged_instrument, 0, sizeof(op_staged_instrument));
     memset(op_staged_instrument_display_name, 0,
            sizeof(op_staged_instrument_display_name));
@@ -7258,6 +8263,161 @@ bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
                             cb);
 }
 
+bool filesystem_requestScanTestFiles(fs_completion_cb_t cb)
+{
+    /*
+     * Start a root file scan for Load:[File].
+     *
+     * Output: fs_test_file_name/count are cleared immediately and rebuilt from
+     * asyncfatfs object metadata. Directories are ignored here so the menu can
+     * prove file enumeration without Scene/Kit folder assumptions.
+     */
+    if (status == FS_STATUS_BUSY)
+        return false;
+    fs_test_file_count = 0u;
+    memset(fs_test_file_name, 0, sizeof(fs_test_file_name));
+    return filesystem_start(FS_INTERNAL_OP_SCAN_TEST_FILES, FS_FILE_KIT, 0, cb);
+}
+
+bool filesystem_requestScanTestDirs(fs_completion_cb_t cb)
+{
+    /*
+     * Start a root directory scan for Load:[Dir].
+     *
+     * Output: fs_test_dir_name/count are cleared immediately and rebuilt from
+     * exact-case asyncfatfs display components. Files are ignored so the menu
+     * can test directory creation/opening independently of file listing.
+     */
+    if (status == FS_STATUS_BUSY)
+        return false;
+    fs_test_dir_count = 0u;
+    memset(fs_test_dir_name, 0, sizeof(fs_test_dir_name));
+    return filesystem_start(FS_INTERNAL_OP_SCAN_TEST_DIRS, FS_FILE_KIT, 0, cb);
+}
+
+uint8_t filesystem_testFileCount(void)
+{
+    return fs_test_file_count;
+}
+
+uint8_t filesystem_testDirCount(void)
+{
+    return fs_test_dir_count;
+}
+
+const char *filesystem_testFileName(uint8_t index)
+{
+    if (index >= fs_test_file_count)
+        return "";
+    return fs_test_file_name[index];
+}
+
+const char *filesystem_testDirName(uint8_t index)
+{
+    if (index >= fs_test_dir_count)
+        return "";
+    return fs_test_dir_name[index];
+}
+
+bool filesystem_requestLoadTestFile(const char *display_name,
+                                    fs_completion_cb_t cb)
+{
+    char name[FS_TEST_NAME_MAX + 1u];
+
+    /*
+     * Load the first four bytes from an exact root file display name.
+     *
+     * Inputs are copied at request time so later menu edits cannot retarget an
+     * in-flight open. Output is filesystem_testResultBytes() after completion.
+     */
+    filesystem_copyTestName(name, display_name);
+    if (name[0] == '\0')
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_LOAD_TEST_FILE, FS_FILE_KIT, 0, cb))
+        return false;
+    filesystem_copyTestName(op_test_name, name);
+    return true;
+}
+
+bool filesystem_requestLoadTestDir(const char *display_name,
+                                   fs_completion_cb_t cb)
+{
+    char name[FS_TEST_NAME_MAX + 1u];
+
+    /*
+     * Load the first sorted child from an exact root directory display name.
+     *
+     * Output is either four bytes from the first child file or a directory name
+     * in filesystem_testResultName() when the first sorted child is a
+     * subdirectory. Empty directories complete as errors because there is no
+     * data or child label to display.
+     */
+    filesystem_copyTestName(name, display_name);
+    if (name[0] == '\0')
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_LOAD_TEST_DIR, FS_FILE_KIT, 0, cb))
+        return false;
+    filesystem_copyTestName(op_test_name, name);
+    return true;
+}
+
+bool filesystem_requestSaveTestFile(const char *display_name,
+                                    fs_completion_cb_t cb)
+{
+    char name[FS_TEST_NAME_MAX + 1u];
+
+    /*
+     * Save four random bytes to an exact root file display name.
+     *
+     * Existing files are overwritten by afatfs_fopen_lfn(..., "w", exact).
+     * Completion exposes the bytes that were written so Menu can display the
+     * same result that should be visible to a desktop reader.
+     */
+    filesystem_copyTestName(name, display_name);
+    if (name[0] == '\0')
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_SAVE_TEST_FILE, FS_FILE_KIT, 0, cb))
+        return false;
+    filesystem_copyTestName(op_test_name, name);
+    return true;
+}
+
+bool filesystem_requestSaveTestDir(const char *display_name,
+                                   fs_completion_cb_t cb)
+{
+    char name[FS_TEST_NAME_MAX + 1u];
+
+    /*
+     * Create/open an exact root directory and write a same-name child file.
+     *
+     * This proves long-name directory creation and long-name file creation
+     * inside the entered directory in one operation. The child filename equals
+     * the directory display component byte-for-byte after bounded copy.
+     */
+    filesystem_copyTestName(name, display_name);
+    if (name[0] == '\0')
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_SAVE_TEST_DIR, FS_FILE_KIT, 0, cb))
+        return false;
+    filesystem_copyTestName(op_test_name, name);
+    return true;
+}
+
+fs_test_result_kind_t filesystem_testResultKind(void)
+{
+    return op_test_result_kind;
+}
+
+const uint8_t *filesystem_testResultBytes(void)
+{
+    return op_test_bytes;
+}
+
+const char *filesystem_testResultName(void)
+{
+    return op_test_child_name;
+}
+
 bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,
                                       instrument_type_t type,
@@ -7285,6 +8445,62 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
     op_instrument_load_destination_scene = destination_scene;
     op_instrument_load_type = type;
     op_instrument_load_index = browser_index;
+    return true;
+}
+
+bool filesystem_requestSaveInstrument(uint8_t source_scene,
+                                      uint8_t source_slot,
+                                      const char *display_name,
+                                      fs_completion_cb_t cb)
+{
+    const scene_t *scene = scene_getConst(source_scene);
+    const kit_instrument_slot_t *instrument =
+        (scene && source_slot < STORAGE_KIT_SLOT_COUNT)
+            ? &scene->kit.instruments[source_slot]
+            : NULL;
+    char display[AFATFS_LONG_FILENAME_MAX + 1u];
+
+    /*
+     * Capture one root Instrument Save request.
+     *
+     * Inputs: resident source Scene/voice slot and a user-visible stem from
+     * Menu. Output: an asynchronous writer targeting Instrument/<stem.ext>.
+     * This request deliberately uses the specific Instrument writer instead of
+     * filesystem_requestSave(), because the generic API has only a library slot
+     * number and cannot express source Scene, source voice, or typed filename
+     * construction.
+     */
+    if (!instrument ||
+        source_slot >= STORAGE_KIT_SLOT_COUNT ||
+        instrument->type >= INSTRUMENT_TYPE_UNKNOWN)
+        return false;
+    storage_makeSavedInstrumentDisplayFilename(display,
+                                               sizeof(display),
+                                               display_name,
+                                               instrument->type,
+                                               (uint8_t)(source_slot + 1u),
+                                               0u);
+    if (display[0] == '\0')
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_SAVE_INSTRUMENT,
+                          FS_FILE_KIT,
+                          0u,
+                          cb))
+        return false;
+    /*
+     * Save the immutable request coordinates after filesystem_start() clears
+     * operation scratch. The captured type protects the writer from serializing
+     * a later slot replacement under the wrong file extension; the captured
+     * display component protects the write target from encoder movement while
+     * asyncfatfs is busy.
+     */
+    op_instrument_save_source_scene = source_scene;
+    op_instrument_save_source_slot = source_slot;
+    op_instrument_save_type = instrument->type;
+    strncpy(op_instrument_save_display_name, display,
+            sizeof(op_instrument_save_display_name) - 1u);
+    op_instrument_save_display_name[
+        sizeof(op_instrument_save_display_name) - 1u] = '\0';
     return true;
 }
 

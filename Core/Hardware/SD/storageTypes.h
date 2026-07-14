@@ -28,32 +28,34 @@
 
 /* Public storage constants for the Phase 2 kit directory loader.
  *
- * STORAGE_ROOT_KIT and STORAGE_KITSET_FILENAME are the literal on-card names
- * that filesystem.c opens. STORAGE_KIT_SLOT_COUNT is the synth voice count in
- * one kit. STORAGE_KIT_MAX_SLOTS is the number of numbered Kit/ folders the
- * browser exposes. STORAGE_KIT_FILENAME_MAX is 8.3 plus NUL because asyncfatfs
- * opens short names. STORAGE_KIT_DISPLAY_NAME_LEN mirrors the existing LCD and
- * preset name buffers, which are exactly eight printable characters.
+ * Root directory literals are exact display components.
+ *
+ * asyncfatfs now preserves and matches case through SFN case bits and VFAT LFN
+ * entries, so production code asks for "Instrument" rather than the old
+ * compatibility alias "INSTRU~1". Callers that need to open these roots should
+ * use the LFN-aware directory APIs when the operation is part of the new
+ * production storage surface.
  *
  * System file literals are written in their intended display case. asyncfatfs
- * preserves all-lowercase 8.3 names through FAT ntReserved case bits, so callers
- * should not uppercase these constants to match raw SFN storage.
+ * preserves all-lowercase 8.3 names through FAT ntReserved case bits, so
+ * callers should not uppercase these constants to match raw SFN storage.
  */
 #define STORAGE_ROOT_KIT              "Kit"
 #define STORAGE_ROOT_SCENE            "Scene"
-#define STORAGE_ROOT_INSTRUMENT       "INSTRU~1"
+#define STORAGE_ROOT_INSTRUMENT       "Instrument"
 #define STORAGE_KITSET_FILENAME       "kitset.kcg"
 #define STORAGE_SCENESET_FILENAME     "sceneset.scg"
 #define STORAGE_KIT_SLOT_COUNT        6u
 /*
- * Kit folders are numbered directory entries, not legacy file slots.
+ * Kit and Scene folders are numbered directory entries, not legacy file slots.
  *
  * The old 128 limit came from P000.SND..P127.SND. New-format Kit/ folders are
- * addressed by a three-digit 001..999 prefix, so the storage boundary exposes
- * 999 slots and callers that hold Kit browser positions must use uint16_t.
+ * now addressed by a three-digit 000..999 prefix, so the storage boundary
+ * exposes 1000 slots and callers that hold library positions must use
+ * uint16_t. Slot 000 is a real save/load slot, not an empty sentinel.
  */
-#define STORAGE_KIT_MAX_SLOTS         999u
-#define STORAGE_SCENE_MAX_SLOTS       999u
+#define STORAGE_KIT_MAX_SLOTS         1000u
+#define STORAGE_SCENE_MAX_SLOTS       1000u
 #define STORAGE_KIT_FILENAME_MAX      13u
 #define STORAGE_KIT_DISPLAY_NAME_LEN  8u
 #define STORAGE_SCENE_DISPLAY_NAME_LEN STORAGE_KIT_DISPLAY_NAME_LEN
@@ -285,18 +287,19 @@ storage_status_t storage_scenesetParseLine(
     char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
 storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state);
 
-/* Parse a numbered folder name like "001 Slak" into internal slot/name data.
+/* Parse a numbered folder name like "000 Slak" into internal slot/name data.
  *
- * Inputs: display/LFN folder name, zero_based_slot output pointer, and an
- * eight-char display buffer. The name must begin with a three-digit 001..999
- * slot ID followed by at least one space or underscore separator; additional
+ * Inputs: display/LFN folder name, slot output pointer, and an eight-char
+ * display buffer. The name must begin with a three-digit 000..999 slot ID
+ * followed by at least one space or underscore separator; additional
  * spaces/underscores before the visible name are skipped. Spaces inside the
  * visible eight-character name are preserved. Outputs: nonzero on a valid
- * prefix/name, zero-based slot for menu/preset code, and sanitized/padded
- * display text. Client: filesystem_recordKitDirectory() during Kit/ scans.
+ * prefix/name, direct 0..999 slot for menu/preset code, and sanitized/padded
+ * display text. Slot 000 is a real library slot, not a sentinel. Client:
+ * filesystem_recordKitDirectory() during Kit/ scans.
  */
 uint8_t storage_parseNumberedFolder(const char *name,
-                                    uint16_t *zero_based_slot,
+                                    uint16_t *slot,
                                     char display[STORAGE_KIT_DISPLAY_NAME_LEN]);
 
 /* Copy arbitrary text into the firmware's fixed eight-character name format.

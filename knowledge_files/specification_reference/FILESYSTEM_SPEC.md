@@ -1,23 +1,26 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative filesystem and instrument-file reference for the
-Helicase/LXR-02 firmware after Session 035. It includes the full Session 032
+Helicase/LXR-02 firmware after Session 036. It includes the full Session 032
 instrument/kit file specification formerly kept in `INSTRUMENT_FILE_SPEC.md`,
-plus the Session 033-035 runtime decisions for LFO, velocity modulation, Morph,
+plus the Session 033-036 runtime decisions for LFO, velocity modulation, Morph,
 per-voice Morph, Scene modulation targets, Choke behavior, Instrument Load,
-Kit/Instrument Morph Load, Kit Save, and storage-only LFO `self` routing.
+Kit/Instrument Morph Load, Kit Save, root Instrument Save, asyncfatfs LFN/case
+behavior, and storage-only LFO `self` routing.
 
 Use this document to distinguish three things:
 
-- Implemented now: root `Kit/NNN Name/` directory loading, root
+- Implemented now: root `Kit/NNN Name/` directory loading/saving, root
   `Instrument/` pool replacement into Scene-owned descriptor-indexed
   instrument parameter images, Kit/Instrument Morph Load, and normal
-  new-format Kit Save.
+  new-format Kit Save, root Instrument Save, and File/Dir asyncfatfs
+  diagnostics.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: standalone Instrument Save, Scene loads/saves, Bank
-  loads/saves, Effect loads/saves, root `settings.cfg`, final new-format Morph
-  save behavior, and descriptor-backed step automation playback.
+- Not implemented yet: final new-format Morph Save, redone Scene loads/saves
+  on the Session 036 asyncfatfs foundation, Bank loads/saves, Effect
+  loads/saves, root `settings.cfg`, and descriptor-backed step automation
+  playback.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -25,22 +28,25 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented after Session 035:
+Implemented after Session 036:
 
-- Normal kit loading scans root `Kit/` for numbered folders.
-- Preferred kit folder names are `NNN Name`, for example `001 Slak`.
+- Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
+  object iteration.
+- Preferred kit folder names are `NNN Name`, for example `000 Init` or
+  `001 Slak`.
 - Compatibility kit folder names with a single underscore after the slot,
   `NNN_Name`, are accepted.
 - FAT short-alias fallback accepts aliases beginning with a valid three-digit
-  slot prefix, such as `001SLA~1`.
-- The Kit scan cache stores both the eight-character display name and the FAT
-  open name. Long filenames are display/UI data; asyncfatfs opens the cached
-  short alias in the current directory.
+  slot prefix, such as `000INI~1` or `001SLA~1`.
+- The Kit scan cache stores both the eight-character display name and the
+  asyncfatfs-returned FAT short alias. Long filenames are display/UI data; the
+  cached short alias is scan-cache identity for reopening the exact object.
 - The kit display name is the folder name after the three-digit slot prefix.
 - `kitset.kcg` is parsed as the six-slot kit manifest.
 - Six descriptor-keyed instrument text files are loaded from the kit folder.
-- Root `Instrument/` is scanned into a per-type alphanumeric browser and a
-  selected file can be loaded into one explicit Scene/voice slot.
+- Root `Instrument/` is scanned with asyncfatfs object iteration into a per-type
+  alphanumeric browser and a selected file can be loaded into one explicit
+  Scene/voice slot.
 - Loaded instrument values write into the active `scene_t.kit` descriptor
   images, not into the old flat `parameter_values[]` sound buffer.
 - VOICE menu pages resolve through active instrument descriptor layouts in
@@ -80,8 +86,12 @@ Implemented after Session 035:
 - Normal `Save:[Kit     ]` writes the active Scene kit to the directory Kit
   format: a numbered `Kit/` folder, `kitset.kcg`, and six descriptor-keyed
   instrument files containing `[params]` and `[morph]`.
-- Root Kit scan/load/save slot range is now 001..999. Internal Kit slot indices
-  are `uint16_t` 0..998. Voice slots remain byte-sized 0..5.
+- Root Kit/Scene-style scan/load/save slot range is now direct `000..999`.
+  Slot `000` is a real library slot for all numbered filetypes. Firmware
+  library slot variables are `uint16_t`; voice slots remain byte-sized `0..5`.
+- Root Instrument Save is implemented from nested Save-page VOICE mode. It
+  writes one resident Scene voice to `Instrument/<stem.ext>` using the same
+  descriptor-keyed instrument text writer used by Kit Save member files.
 - Kit and Instrument load retain per-slot source names in SceneData: an
   eight-character display field and a 16-character logical stem used by Kit
   Save filename generation. Defaults are `inst_vo1`..`inst_vo6`.
@@ -109,8 +119,7 @@ Current bridges and limitations:
 - Globals still load/save through legacy `glo.cfg`; root `settings.cfg` is the
   settled future replacement but is not wired yet.
 - Scene, Bank, Effect, Wavetable-pool, and new Pattern-pool load/save operations
-  are not implemented yet. The Instrument pool load/browser exists; standalone
-  new-format Instrument save does not.
+  are not implemented/promoted yet. Root Instrument load/save exists.
 - Descriptor-backed LFO and velocity modulation runtime paths are in place for
   direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
   Decimation. LFO direct descriptor overlays now go through descriptor-domain
@@ -120,6 +129,8 @@ Current bridges and limitations:
   modulation targets.
 - New Scene modulation target IDs are runtime/menu IDs, not a completed file
   save/load schema for Scene folders.
+- Before Bank work begins, Morph Save and Scene Load/Save must be deliberately
+  redone and hardware-tested on the Session 036 asyncfatfs foundation.
 
 ## Root Layout
 
@@ -164,25 +175,29 @@ loader/browser code.
 subdirectories. Numbered folders use this form:
 
 ```text
+000 <name>
 001 <name>
 002 <name>
 003 <name>
 ...
 ```
 
-The numeric prefix is the slot number shown in the UI. Numbers do not need to
-be contiguous. Browsers should scan slots sequentially and show missing slots as
-empty, for example `003: Empty` when slot 3 has no matching folder.
+The numeric prefix is the direct library slot number shown in the UI. Slot
+`000` is a real slot, not a sentinel. Numbers do not need to be contiguous.
+Browsers should scan slots sequentially and show missing slots as empty, for
+example `003: Empty` when slot 3 has no matching folder.
 
 Names after the numeric prefix are user-facing labels. The preferred separator
-after the three-digit slot number is a space, as in `001 Slak`, but loaders may
-accept an underscore for compatibility with older generated folders, as in
-`001_Slak`. Spaces inside the displayed name are valid. The numeric prefix is
-authoritative for slot order; folders should not be sorted only by full
-filename.
+after the three-digit slot number is a space, as in `000 Init` or `001 Slak`,
+but loaders may accept an underscore for compatibility with older generated
+folders, as in `000_Init` or `001_Slak`. Spaces inside the displayed name are
+valid. The numeric prefix is authoritative for slot order; folders should not
+be sorted only by full filename.
 
-For root kits, `NNN` is one-based on disk and maps to zero-based internal preset
-slot `NNN - 1`.
+For root Kit/Scene-style libraries, `NNN` is direct on disk and maps to the
+same firmware library slot number. Do not add or subtract 1 for browser/library
+slot identity. This is separate from instrument file voice coordinates, which
+remain one-based `1..6` inside instrument text schemas.
 
 ## Bank
 
@@ -192,8 +207,8 @@ Status: settled target, not implemented.
 
 ```text
 Bank/
+  000 <bank name>/
   001 <bank name>/
-  002 <bank name>/
 ```
 
 A bank represents all non-global data loaded as one performance set. The active
@@ -213,17 +228,18 @@ folder without a valid `bankset.bcg` must not be loaded as a bank.
 Each bank folder also contains up to 16 scene folders:
 
 ```text
-Bank/001 <bank name>/
+Bank/000 <bank name>/
   bankset.bcg
+  000 <scene name>/
   001 <scene name>/
-  002 <scene name>/
   ...
-  016 <scene name>/
+  015 <scene name>/
 ```
 
-Scene slot numbers inside a bank do not need to be contiguous. Missing scene
-slots are shown as empty in the UI. A user may exchange scene folders between
-banks.
+Scene slot numbers inside a bank do not need to be contiguous. The initial
+16-scene bank target uses direct scene folder slots `000..015` for the 16
+resident bank scenes. Missing scene slots are shown as empty in the UI. A user
+may exchange scene folders between banks.
 
 Future background bank loading uses 17 resident `scene_t` slots: 16 bank scene
 slots plus one landing/staging scene so the currently playing scene can keep
@@ -231,15 +247,17 @@ playing while a new bank streams in.
 
 ## Scene
 
-Status: Scene storage exists in SRAM for the active scene; Scene file
-load/save is not implemented.
+Status: Scene storage exists in SRAM for the active scene. Earlier Scene
+load/save code exists historically, but Scene Load/Save is not considered
+promoted after the Session 036 asyncfatfs shift and must be deliberately redone
+and retested before Bank work.
 
 `Scene/` is a root-level pool of user-copyable scene folders:
 
 ```text
 Scene/
+  000 <scene name>/
   001 <scene name>/
-  002 <scene name>/
 ```
 
 Scene folders in this pool can be loaded into a bank scene slot. They use the
@@ -290,21 +308,21 @@ files.
 
 ## Kit
 
-Status: root Kit folder load is implemented; new-format Kit save is not
-implemented.
+Status: root Kit folder load and new-format Kit save are implemented on the
+Session 036 asyncfatfs LFN/case foundation.
 
 `Kit/` is a root-level pool of numbered kit folders:
 
 ```text
 Kit/
+  000 <kit name>/
   001 <kit name>/
-  002 <kit name>/
 ```
 
 Kit folders can be loaded into the active scene and saved from the active Scene
 kit. Slot numbers do not need to be contiguous, and missing slots are shown as
-empty in the UI. Root Kit slots are addressed as 001..999 on disk and
-zero-based 0..998 in firmware.
+empty in the UI. Root Kit slots are addressed as direct `000..999` on disk and
+in firmware library-slot state.
 
 A kit folder contains:
 
@@ -323,6 +341,9 @@ Concrete current test-card example:
 ```text
 SD_CARD/
   Kit/
+    000 Init/
+      kitset.kcg
+      ...
     001 Slak/
       kitset.kcg
       slakd1.drm
@@ -336,7 +357,7 @@ SD_CARD/
 `kitset.kcg` is the kit folder guard/version file plus the six-slot instrument
 manifest. The kit name comes only from the folder name:
 
-- Root kit pool: `Kit/NNN <kit name>/`
+- Root kit pool: `Kit/NNN <kit name>/` where `NNN` is direct `000..999`
 - Scene embedded kit: `Kit <kit name>/`
 
 The kit name is never stored inside `kitset.kcg`.
@@ -359,10 +380,10 @@ instrument types may be added later.
 
 Implemented Kit save behavior: saving a Kit writes a folder in this same shape:
 `kitset.kcg` plus six descriptor-keyed instrument files. Session 036 adds
-asyncfatfs LFN component creation, so firmware-created Kit folders and member
-instrument files preserve display spaces and mixed case through VFAT LFN
-entries while returning generated 8.3 aliases for existing open paths and
-`kitset.kcg` references.
+asyncfatfs LFN component creation/object iteration, so firmware-created Kit
+folders and member instrument files preserve display spaces and mixed case
+through VFAT LFN entries while returning generated 8.3 aliases for existing
+open paths and `kitset.kcg` references.
 
 ### `kitset.kcg`
 
@@ -442,11 +463,12 @@ Validation rules:
 
 ## Instrument Files
 
-Status: implemented for Kit-folder and root `Instrument/` pool load; new-format
-Instrument save is not implemented.
+Status: implemented for Kit-folder files, root `Instrument/` pool load, and
+root Instrument Save.
 
 Instrument files are text key/value files with a fixed header and one or two
-parameter sections.
+parameter sections. Kit Save member files and root Instrument Save use the same
+schema and the same `storage_formatInstrumentLine()` writer.
 
 Example:
 
@@ -516,7 +538,10 @@ legacy `.SND` payloads. Storage keeps aliases for the prior HiHat decay text
 keys because those names were shipped before the canonical Choke convention.
 
 Morph kit loads (`FS_FILE_MORPH`) remain legacy `.SND` until final new-format
-morph save/load policy replaces them.
+morph save/load policy replaces them. `Load:[KitMrp]` and nested
+InstrumentMrp already use new-format Kit/Instrument text payloads for loading
+normal source endpoints into morph endpoints, but final Morph Save is still a
+separate pending design.
 
 ## Canonical Instrument Keys
 
@@ -962,14 +987,14 @@ Status: settled target, not implemented.
 
 ```text
 Wavetable/
+  000 <wavetable name>/
   001 <wavetable name>/
-  002 <wavetable name>/
 ```
 
 Each wavetable folder contains an alphanumerically sorted set of `.wav` files:
 
 ```text
-Wavetable/001 <wavetable name>/
+Wavetable/000 <wavetable name>/
   <sample a>.wav
   <sample b>.wav
   <sample c>.wav
@@ -1002,8 +1027,8 @@ sequence. Effects and effect file formats are future DSP work.
 
 ## Instrument
 
-Status: root browser, one-slot load, and Instrument Morph Load are implemented;
-standalone new-format Instrument save is not implemented.
+Status: root browser, one-slot load, Instrument Morph Load, and standalone
+root Instrument Save are implemented.
 
 `Instrument/` is a root-level pool of instrument files:
 
@@ -1013,7 +1038,8 @@ Instrument/
 ```
 
 Files are browsed alphanumerically by type when loading into a kit in a scene.
-Users may copy instrument files from a kit folder into this pool. Users should
+Users may copy instrument files from a kit folder into this pool, or save one
+resident voice to the pool from nested Save-page Instrument Save. Users should
 not copy files from this pool directly into a kit folder; kit membership is
 controlled by `kitset.kcg`.
 
@@ -1022,6 +1048,13 @@ Changing the type row is a non-destructive filter/policy operation. Moving the
 lower row selects one root pool file and immediately starts the staged
 transaction described above. Basic/Advanced assignment policy is defined by
 the firmware registry, never by file contents.
+
+Entering Instrument Save on a voice from the Save page shows the source slot's
+current type and an eight-character editable stem. OK writes the selected
+resident Scene/voice to `Instrument/<stem.ext>`, where the extension comes from
+the source slot type. The source Scene, source voice slot, type, and visible
+target filename are captured when the request is accepted so later UI movement
+cannot retarget an in-flight save.
 
 Initial recognized instrument types:
 
@@ -1032,6 +1065,34 @@ Initial recognized instrument types:
 .hat
 ```
 
+## Current Load/Save Menu Reachability
+
+Status after Session 036:
+
+- `Load:[File    ]` / `Save:[File    ]` remain diagnostic asyncfatfs test
+  entries for exact root file scan/open/create/overwrite.
+- `Load:[Dir     ]` / `Save:[Dir     ]` remain diagnostic asyncfatfs test
+  entries for exact root directory scan/open/create and same-name child file
+  writes.
+- `Load:[Kit     ]` and `Save:[Kit     ]` are the only promoted musical
+  top-level entries.
+- VOICE press on the Load page enters nested Instrument Load.
+- VOICE press on the Save page enters nested Instrument Save.
+
+Still compiled but intentionally gated from the normal type cycler:
+
+- `KitMrp`
+- `Scene`
+- `Settings` / Globals
+- `Samples`
+- Pattern
+- All
+- Performance
+- legacy Morph
+
+Do not widen the type cycler by enum order. Promote one operation at a time
+after retesting it on the Session 036 asyncfatfs foundation.
+
 ## Save Operations
 
 Implemented:
@@ -1040,13 +1101,20 @@ Implemented:
   current loader accepts: `kitset.kcg` plus six instrument files. The folder and
   member files are created through asyncfatfs LFN primitives, with returned 8.3
   aliases used for `kitset.kcg` references/open paths.
+- Instrument save writes one resident Scene/voice slot to the root
+  `Instrument/` pool. It creates/opens the root with LFN/case-sensitive
+  asyncfatfs APIs, opens the target display filename with `afatfs_fopen_lfn()`,
+  streams the descriptor-keyed instrument schema, and updates the root
+  Instrument browser cache from the returned display/alias pair.
 
 Still future:
 
 - Scene save writes `sceneset.scg`, `Kit <kit name>/`, `pattern.pat`, and
   `effect.fx`.
 - Bank save writes `bankset.bcg` plus up to 16 numbered Scene folders.
-- Standalone Instrument save writes descriptor-keyed text files.
+- Morph Save writes current interpolation parameters into normal endpoints and
+  normal endpoints into morph endpoints for morphable parameters; this is not
+  implemented and must be redone before Bank.
 - Pattern save writes the final dynamic-stack pattern format once implemented.
 - Effect save writes the selected effect stack/settings format once effects
   exist.
@@ -1059,21 +1127,39 @@ not be used as the new-format specification.
 
 ### asyncfatfs Primitive Boundary
 
-Session 036 adds asyncfatfs LFN component creation. Future save code should
-reuse the existing core file APIs or their LFN companions instead of recreating
-local FAT writers:
+Session 036 adds asyncfatfs LFN component creation and object iteration. Future
+save code should reuse the existing core file APIs or their LFN companions
+instead of recreating local FAT writers:
 
-- `afatfs_mkdir(name, cb)` creates or opens a short-name directory and returns
-  an open handle through the callback.
-- `afatfs_mkdir_lfn(display_name, alias_out, cb)` creates or opens a directory
-  with VFAT LFN display entries and returns its generated 8.3 alias.
+- `afatfs_mkdir(name, cb)` creates or opens a compatibility short-name
+  directory and returns an open handle through the callback.
+- `afatfs_mkdir_lfn(display_name, match_mode, alias_out, cb)` creates or opens
+  a directory with VFAT LFN display entries and returns its generated 8.3
+  alias.
 - `afatfs_fopen(name, "w", cb)` creates/truncates a short-name file.
-- `afatfs_fopen_lfn(display_name, "w", alias_out, cb)` creates/truncates a file
-  with VFAT LFN display entries and returns its generated 8.3 alias.
+- `afatfs_fopen_lfn(display_name, "w", match_mode, alias_out, cb)` creates or
+  truncates a file with VFAT LFN display entries and returns its generated 8.3
+  alias.
+- `afatfs_opendir_lfn(display_name, match_mode, alias_out, cb)` opens a
+  directory by exact display component when used with
+  `AFATFS_MATCH_CASE_SENSITIVE`.
+- `afatfs_findFirstObject()` / `afatfs_findNextObject()` iterate real directory
+  objects with resolved display name, short alias, and file/directory kind.
 - `afatfs_fclose(handle, cb)` closes opened files/directories.
 - `afatfs_chdir(handle_or_NULL)` changes current directory or returns to root.
 - `afatfs_funlink(file, cb)` exists for files but is not a recursive directory
   replace primitive.
+
+Name policy:
+
+- asyncfatfs preserves display case for SFN entries and VFAT LFN entries.
+- New production Kit/Instrument operations use case-sensitive LFN matching.
+- Dot-prefixed files and directories are ordinary objects and must not be
+  hidden by asyncfatfs. Product scanners can filter by product naming or file
+  type after object iteration.
+- Compatibility short-name APIs remain for old fixed system files and aliases,
+  but new production save surfaces should prefer the LFN/case-sensitive
+  component APIs.
 
 Known missing primitives:
 
@@ -1119,7 +1205,8 @@ instrument runtime propagation:
   section each, and can be loaded again.
 - Confirm saved LFO self-targets emit `self` only on LFO voice selector keys
   whose numeric value equals the source slot.
-- Confirm Kit slots above 255 display and save/load without wrapping.
+- Confirm Kit slots `000`, above 255, and `999` display and save/load without
+  wrapping or off-by-one mapping.
 - Confirm LFO negative polarity on envelope decay follows the visible parameter
   direction and amount scale through the descriptor writer.
 - Treat step automation as pending until the descriptor-aware AutomationNode
@@ -1212,9 +1299,9 @@ power-loss-safe Bank SAVE.
 ```text
 settings.cfg
 Bank/
-  001 Factory/
+  000 Factory/
     bankset.bcg
-    001 Breakbeat/
+    000 Breakbeat/
       sceneset.scg
       Kit 909ish/
         kitset.kcg
@@ -1227,7 +1314,7 @@ Bank/
       pattern.pat
       effect.fx
 Scene/
-  001 Loose Jam/
+  000 Loose Jam/
     sceneset.scg
     Kit Loose/
       kitset.kcg
@@ -1235,7 +1322,7 @@ Scene/
     pattern.pat
     effect.fx
 Kit/
-  001 909ish/
+  000 909ish/
     kitset.kcg
     909kik.drm
     dark.drm
@@ -1248,7 +1335,7 @@ Pattern/
 Sample/
   glass_hit.wav
 Wavetable/
-  001 Vowels/
+  000 Vowels/
     a.wav
     e.wav
     i.wav
