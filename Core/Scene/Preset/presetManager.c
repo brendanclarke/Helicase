@@ -259,6 +259,20 @@ static void on_instrument_save_complete(void)
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_SAVE);
 }
 
+static void on_instrument_morph_save_complete(void)
+{
+    /*
+     * Complete one root Instrument Morph Save.
+     *
+     * Filesystem has written Instrument/<name.ext> with the Morph Save
+     * projection, where [params] holds the current interpolated endpoint and
+     * [morph] holds the resident normal endpoint. Preset reports this as a
+     * separate completion so Menu can reset nested Save UI without treating it
+     * as a normal Instrument export or a legacy flat Morph file.
+     */
+    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_SAVE);
+}
+
 static void on_instrument_morph_load_complete(void)
 {
     /*
@@ -275,6 +289,19 @@ static void on_instrument_morph_load_complete(void)
 static void on_kit_save_complete(void)
 {
     preset_completeFilesystemOp(PRESET_OP_KIT_SAVE);
+}
+
+static void on_kit_morph_save_complete(void)
+{
+    /*
+     * Complete one new-format Kit Morph Save.
+     *
+     * Filesystem has serialized the active Scene's Kit/ directory through the
+     * Morph Save projection. Resident SceneData, runtime voices, retained Kit
+     * name, and resident Instrument source names are unchanged by this export,
+     * so completion is purely a Save UI/busy-state notification.
+     */
+    preset_completeFilesystemOp(PRESET_OP_KIT_MORPH_SAVE);
 }
 
 static void on_scene_load_complete(void)
@@ -1297,6 +1324,31 @@ uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
     return 1u;
 }
 
+uint8_t preset_saveKitMorph(uint16_t presetNr)
+{
+    /*
+     * Post one new-format Kit Morph Save request.
+     *
+     * Inputs: root Kit library slot 000..999 selected by Save:[KitMrp].
+     * Output: nonzero only when filesystem accepts an asynchronous Kit/
+     * directory write. The active Scene is captured inside filesystem so the
+     * save remains immutable even if the panel Scene changes before completion.
+     * Affiliates: filesystem_requestSaveKitMorphDirectory(), storageTypes'
+     * Morph Save write views, and Menu's Save:[KitMrp] OK handler.
+     */
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = presetNr;
+    pm_request_type = SAVE_TYPE_KIT_MORPH;
+    if (!filesystem_requestSaveKitMorphDirectory(
+            presetNr, on_kit_morph_save_complete)) {
+        pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
+}
+
 void preset_saveScene(uint16_t presetNr, uint8_t source_scene,
                       const char display_name[8])
 {
@@ -1433,6 +1485,40 @@ uint8_t preset_saveInstrument(uint8_t source_scene,
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = source_slot;
     pm_request_type = SAVE_TYPE_KIT;
+    pm_instrument_request_scene = source_scene;
+    pm_instrument_request_slot = source_slot;
+    pm_instrument_request_type = INSTRUMENT_TYPE_UNKNOWN;
+    pm_instrument_request_index = 0u;
+    return 1u;
+}
+
+uint8_t preset_saveInstrumentMorph(uint8_t source_scene,
+                                   uint8_t source_slot,
+                                   const char *display_name)
+{
+    /*
+     * Post one immutable root Instrument Morph Save request.
+     *
+     * Inputs: resident source Scene/voice plus the edited Instrument stem.
+     * Output: nonzero only when filesystem accepts the write. The request type
+     * is KitMrp because the nested Instrument Save surface is reached from the
+     * Kit/KitMrp Load-Save context, but completion stays instrument-specific so
+     * Menu can clear nested busy state exactly like normal Instrument Save.
+     * Affiliates: filesystem_requestSaveInstrumentMorph(), storageTypes'
+     * Morph Save write view, and menu_instrumentSaveRequestSelection().
+     */
+    filesystem_ack();
+    if (!filesystem_requestSaveInstrumentMorph(
+            source_scene,
+            source_slot,
+            display_name,
+            on_instrument_morph_save_complete)) {
+        return 0u;
+    }
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = source_slot;
+    pm_request_type = SAVE_TYPE_KIT_MORPH;
     pm_instrument_request_scene = source_scene;
     pm_instrument_request_slot = source_slot;
     pm_instrument_request_type = INSTRUMENT_TYPE_UNKNOWN;

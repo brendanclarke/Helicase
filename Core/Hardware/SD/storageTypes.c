@@ -724,22 +724,75 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
     dst[pos] = '\0';
 }
 
-uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
-                                 const kit_t *kit,
-                                 const char file_names[STORAGE_KIT_SLOT_COUNT]
-                                                      [STORAGE_KIT_FILENAME_MAX],
-                                 uint16_t line_index)
+static uint16_t storage_interpolateMorphEndpoint(uint16_t normal,
+                                                 uint16_t morph,
+                                                 uint8_t amount)
+{
+    int32_t numerator;
+
+    /*
+     * Interpolate retained Morph endpoints for file-save projection.
+     *
+     * What: Computes the same 0..255 endpoint interpolation used by the runtime
+     * Morph worker, but only from retained SceneData values supplied in the
+     * write view.
+     *
+     * Why: Morph Save writes a portable file image; it must not include the
+     * hidden LFO Morph overlay or depend on presetMorphEngine's bounded worker
+     * state. Duplicating the tiny arithmetic here keeps storageTypes
+     * self-contained while matching the runtime endpoint contract.
+     *
+     * Inputs: normal endpoint, morph endpoint, and retained per-voice Morph
+     * amount. Output: rounded descriptor-domain value; exact amount 0 and 255
+     * return exact endpoints.
+     *
+     * Affiliates/clients: storage_valueForInstrumentSaveSection(),
+     * storage_formatKitsetLineView(), presetMorphEngine.c interpolation
+     * contract.
+     */
+    if (amount == 0u)
+        return normal;
+    if (amount == 255u)
+        return morph;
+
+    numerator = (int32_t)normal * 255 +
+                ((int32_t)morph - (int32_t)normal) * amount;
+    numerator += 127;
+    if (numerator < 0)
+        return 0u;
+    return (uint16_t)(numerator / 255);
+}
+
+uint8_t storage_formatKitsetLineView(
+    char *dst,
+    uint16_t capacity,
+    const storage_kitset_write_view_t *view,
+    uint16_t line_index)
 {
     uint8_t slot;
     uint8_t field;
     const char *type_text;
+    const kit_t *kit = view ? view->kit : NULL;
+    const char (*file_names)[STORAGE_KIT_FILENAME_MAX] =
+        view ? view->file_names : NULL;
 
     /*
-     * Emit one kitset.kcg line in the same schema accepted by the parser.
+     * Emit one kitset.kcg line from a selected save view.
      *
-     * Filesystem owns async writes and calls this with monotonically advancing
-     * line indices. storageTypes owns the key order, type text, generated
-     * track-7 endpoint names, and per-slot file/audio fields.
+     * What: Streams kitset metadata, generated slot-6/track-7 endpoint fields,
+     * per-slot member file aliases, and routing fields.
+     *
+     * Why: normal Kit Save and KitMrp Save share the same kitset schema and
+     * async write phases. The write view lets storageTypes apply the Morph Save
+     * endpoint projection to generated kit-owned fields while filesystem.c
+     * remains unaware of kitset key order.
+     *
+     * Inputs: destination line buffer, capacity, immutable kitset write view,
+     * and monotonic line index. Output: byte count for one line, or zero when
+     * the schema is complete.
+     *
+     * Affiliates/clients: filesystem_nextKitsetLine(), normal Kit Save,
+     * KitMrp Save, storage_formatKitsetLine() wrapper.
      */
     if (!dst || capacity == 0u || !kit || !file_names)
         return 0u;
@@ -748,14 +801,61 @@ uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
                                      "format=helicase.kitset\n");
     if (line_index == 1u)
         return storage_formatLiteral(dst, capacity, "version=1\n");
-    if (line_index == 2u)
+    if (line_index == 2u) {
+        uint16_t value = kit->settings.slot6_track7_amp_envelope_decay;
+        /*
+         * Project the generated slot-6/track-7 normal decay for Morph Save.
+         *
+         * What: Applies the same interpolated endpoint rule used for morphable
+         * Instrument descriptors to the kit-owned generated normal decay key.
+         *
+         * Why: this endpoint is stored in kitset.kcg rather than an Instrument
+         * file, but it still participates in slot 6's normal/morph endpoint
+         * pair. KitMrp Save must serialize the current interpolated value into
+         * the normal key.
+         *
+         * Inputs: normal generated decay, morph generated decay, retained
+         * slot-6 Morph amount, and save mode. Output: value written to
+         * slot6_track7_amp_envelope_decay.
+         *
+         * Affiliates/clients: storage_formatKitsetLineView(), KitMrp Save,
+         * Choke/non-Choke slot-6 generated track behavior.
+         */
+        if (view->mode == STORAGE_INSTRUMENT_SAVE_MORPH) {
+            value = storage_interpolateMorphEndpoint(
+                kit->settings.slot6_track7_amp_envelope_decay,
+                kit->settings.slot6_track7_morph_amp_envelope_decay,
+                view->slot6_morph_amount);
+        }
         return storage_formatAssignmentU16(
             dst, capacity, "slot6_track7_amp_envelope_decay",
-            kit->settings.slot6_track7_amp_envelope_decay);
-    if (line_index == 3u)
+            value);
+    }
+    if (line_index == 3u) {
+        uint16_t value = kit->settings.slot6_track7_morph_amp_envelope_decay;
+        /*
+         * Project the generated slot-6/track-7 morph decay for Morph Save.
+         *
+         * What: Writes the current normal generated endpoint into the morph key
+         * when KitMrp Save is active.
+         *
+         * Why: Morph Save flips morphable endpoint storage so a later normal
+         * load can treat the saved interpolation as its main sound while the
+         * prior normal endpoint becomes the file's morph side. The generated
+         * slot-6/track-7 pair follows that same rule even though it is kitset
+         * metadata.
+         *
+         * Inputs: kit settings and save mode. Output: value written to
+         * slot6_track7_morph_amp_envelope_decay.
+         *
+         * Affiliates/clients: storage_formatKitsetLineView(), KitMrp Save.
+         */
+        if (view->mode == STORAGE_INSTRUMENT_SAVE_MORPH)
+            value = kit->settings.slot6_track7_amp_envelope_decay;
         return storage_formatAssignmentU16(
             dst, capacity, "slot6_track7_morph_amp_envelope_decay",
-            kit->settings.slot6_track7_morph_amp_envelope_decay);
+            value);
+    }
     if (line_index == 4u)
         return storage_formatLiteral(dst, capacity, "\n");
     line_index = (uint16_t)(line_index - 5u);
@@ -784,6 +884,35 @@ uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
     }
 }
 
+uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
+                                 const kit_t *kit,
+                                 const char file_names[STORAGE_KIT_SLOT_COUNT]
+                                                      [STORAGE_KIT_FILENAME_MAX],
+                                 uint16_t line_index)
+{
+    storage_kitset_write_view_t view = {
+        kit,
+        file_names,
+        0u,
+        STORAGE_INSTRUMENT_SAVE_NORMAL
+    };
+
+    /*
+     * Preserve the normal-save public kitset formatter contract.
+     *
+     * What: Adapts existing normal Kit Save call sites to the save-view
+     * formatter with STORAGE_INSTRUMENT_SAVE_NORMAL.
+     *
+     * Why: Phase 3 adds KitMrp Save projection without forcing every normal
+     * writer to construct a view. The old symbol remains the stable normal-save
+     * API for fixtures, tests, and any direct formatter callers.
+     *
+     * Affiliates/clients: filesystem_nextKitsetLine(),
+     * storage_formatKitsetLineView(), generated SD_CARD fixtures.
+     */
+    return storage_formatKitsetLineView(dst, capacity, &view, line_index);
+}
+
 static uint8_t storage_descriptorWritableInSection(
     const ParamDescriptor *descriptor,
     uint8_t morph_section)
@@ -795,38 +924,88 @@ static uint8_t storage_descriptorWritableInSection(
     return (uint8_t)((descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u);
 }
 
-static uint16_t storage_descriptorValueForSection(
-    const kit_instrument_slot_t *instrument,
+static uint16_t storage_valueForInstrumentSaveSection(
+    const storage_instrument_write_view_t *view,
+    const ParamDescriptor *descriptor,
     uint8_t descriptor_index,
     uint8_t morph_section)
 {
-    return morph_section
-        ? instrument->parameter_images.morph_instrument_parameters[descriptor_index]
-        : instrument->parameter_images.instrument_parameters[descriptor_index];
-}
-
-uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
-                                     const kit_instrument_slot_t *instrument,
-                                     storage_instrument_type_t type,
-                                     uint8_t one_based_voice,
-                                     uint16_t line_index)
-{
-    const instrument_registry_entry_t *entry =
-        instrumentManager_registryEntry(type);
-    uint16_t descriptor_ordinal;
-    uint8_t i;
-    const char *type_text = storage_instrumentTypeToText(type);
+    const kit_instrument_slot_t *instrument = view ? view->instrument : NULL;
+    uint16_t normal;
+    uint16_t morph;
 
     /*
-     * Emit one complete instrument-file line from descriptor-owned Scene images.
+     * Resolve one descriptor value for the selected save view.
      *
-     * The writer produces metadata, one [params] block, then one [morph] block
-     * in a single monotonically-indexed sequence. Keeping the section switch
-     * here instead of in filesystem.c prevents async write phases from knowing
-     * descriptor counts, and it guarantees the file header is emitted exactly
-     * once for each saved Instrument.
+     * What: Chooses the value written into either [params] or [morph] for one
+     * descriptor-indexed storage key.
+     *
+     * Why: Morph Save is not a new file format. It is a projection of the
+     * resident endpoint images into the existing normal Instrument schema:
+     * morphable [params] become the current interpolated value, and morphable
+     * [morph] become the current normal endpoint. Non-morphable setup cells
+     * remain single-ended.
+     *
+     * Inputs: write view, descriptor metadata, descriptor index, and section
+     * flag. Output: descriptor value to serialize. Section eligibility is still
+     * enforced by storage_descriptorWritableInSection().
+     *
+     * Affiliates/clients: storage_formatInstrumentLineView(), KitMrp Save,
+     * InstrumentMrp Save, normal Instrument Save wrapper.
      */
-    if (!dst || capacity == 0u || !instrument || !entry || !type_text)
+    if (!instrument)
+        return 0u;
+    normal = instrument->parameter_images.instrument_parameters[descriptor_index];
+    morph =
+        instrument->parameter_images.morph_instrument_parameters[descriptor_index];
+    if (view->mode != STORAGE_INSTRUMENT_SAVE_MORPH) {
+        return morph_section ? morph : normal;
+    }
+    if (morph_section)
+        return normal;
+    if (descriptor &&
+        (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
+        return storage_interpolateMorphEndpoint(normal, morph,
+                                                view->morph_amount);
+    }
+    return normal;
+}
+
+uint8_t storage_formatInstrumentLineView(
+    char *dst,
+    uint16_t capacity,
+    const storage_instrument_write_view_t *view,
+    uint16_t line_index)
+{
+    const instrument_registry_entry_t *entry =
+        view ? instrumentManager_registryEntry(view->type) : NULL;
+    uint16_t descriptor_ordinal;
+    uint8_t i;
+    const char *type_text = view ? storage_instrumentTypeToText(view->type) : NULL;
+
+    /*
+     * Emit one complete Instrument file line from a selected save view.
+     *
+     * What: Streams metadata, [params], and [morph] lines for one resident
+     * Instrument slot. The write view decides whether morphable descriptor
+     * values are written as normal Save endpoints or Morph Save's
+     * interpolated/normal projection.
+     *
+     * Why: Filesystem state machines must stay descriptor-agnostic. This
+     * formatter owns descriptor iteration, section ordering, morphability
+     * filtering, and the file-only `self` token for own-slot LFO voice
+     * selectors.
+     *
+     * Inputs: destination line buffer, capacity, immutable write view, and
+     * monotonic line index. Output: byte count for one line, or zero when the
+     * file is complete.
+     *
+     * Affiliates/clients: filesystem_writeTextLine(),
+     * filesystem_nextInstrumentLine(), root Instrument Save, Kit member Save,
+     * KitMrp Save, InstrumentMrp Save.
+     */
+    if (!dst || capacity == 0u || !view || !view->instrument ||
+        !entry || !type_text)
         return 0u;
     if (line_index == 0u)
         return storage_formatLiteral(dst, capacity,
@@ -852,8 +1031,8 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
         }
         if ((descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE ||
              descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE_2) &&
-            storage_descriptorValueForSection(instrument, i, 0u) ==
-                one_based_voice) {
+            storage_valueForInstrumentSaveSection(view, descriptor, i, 0u) ==
+                view->one_based_voice) {
             /*
              * Save the file-only LFO self token at the storage boundary.
              *
@@ -868,7 +1047,7 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
         }
         return storage_formatAssignmentU16(dst, capacity,
             descriptor->file_key,
-            storage_descriptorValueForSection(instrument, i, 0u));
+            storage_valueForInstrumentSaveSection(view, descriptor, i, 0u));
     }
     if (descriptor_ordinal == 0u)
         return storage_formatLiteral(dst, capacity, "\n");
@@ -894,11 +1073,41 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
          */
         return storage_formatAssignmentU16(dst, capacity,
             descriptor->file_key,
-            storage_descriptorValueForSection(instrument, i, 1u));
+            storage_valueForInstrumentSaveSection(view, descriptor, i, 1u));
     }
     if (descriptor_ordinal == 0u)
         return storage_formatLiteral(dst, capacity, "\n");
     return 0u;
+}
+
+uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
+                                     const kit_instrument_slot_t *instrument,
+                                     storage_instrument_type_t type,
+                                     uint8_t one_based_voice,
+                                     uint16_t line_index)
+{
+    storage_instrument_write_view_t view = {
+        instrument,
+        type,
+        one_based_voice,
+        0u,
+        STORAGE_INSTRUMENT_SAVE_NORMAL
+    };
+
+    /*
+     * Preserve the normal-save public formatter contract.
+     *
+     * What: Adapts the existing call sites to the new write-view formatter with
+     * STORAGE_INSTRUMENT_SAVE_NORMAL.
+     *
+     * Why: Phase 3 adds Morph Save projection without forcing every normal
+     * writer call site to construct a view. The old symbol remains the stable
+     * normal-save API for Kit Save, Instrument Save, and tests.
+     *
+     * Affiliates/clients: filesystem_nextInstrumentLine(), generated fixtures,
+     * future unit tests that compare normal Instrument output.
+     */
+    return storage_formatInstrumentLineView(dst, capacity, &view, line_index);
 }
 
 static uint8_t storage_formatCsvU8(char *dst, uint16_t capacity,

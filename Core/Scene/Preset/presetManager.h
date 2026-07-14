@@ -61,6 +61,16 @@ typedef enum {
     PRESET_OP_INSTRUMENT_SAVE,
     PRESET_OP_KIT_MORPH_LOAD,
     PRESET_OP_INSTRUMENT_MORPH_LOAD,
+    /*
+     * New-format Morph Save completions.
+     *
+     * Kit/Instrument Morph Save are distinct from legacy PRESET_OP_MORPH_SAVE
+     * so Menu can reset the correct UI surface without implying a flat .snd
+     * file was written. Neither completion triggers runtime apply or retained
+     * name updates.
+     */
+    PRESET_OP_KIT_MORPH_SAVE,
+    PRESET_OP_INSTRUMENT_MORPH_SAVE,
     PRESET_OP_SCENE_LOAD,
     PRESET_OP_SCENE_SAVE,
     PRESET_OP_TEST_SCAN,
@@ -153,6 +163,14 @@ void    preset_saveScene(uint16_t presetNr, uint8_t source_scene,
  * deliberately no-change so morph load remains a per-instrument operation.
  */
 uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask);
+/*
+ * Save the active resident Kit through the KitMrp projection.
+ *
+ * Inputs: target root Kit library slot. Output: asynchronous new-format Kit
+ * directory save using Morph Save endpoint mapping. Completion reports a save
+ * only; no runtime apply follows because resident SceneData is unchanged.
+ */
+uint8_t preset_saveKitMorph(uint16_t presetNr);
 
 /* Globals — single GLO.CFG file. */
 void    preset_loadGlobals(void);
@@ -185,6 +203,16 @@ uint8_t preset_loadInstrument(uint8_t destination_scene,
 uint8_t preset_saveInstrument(uint8_t source_scene,
                               uint8_t source_slot,
                               const char *display_name);
+/*
+ * Save one resident Instrument through the InstrumentMrp projection.
+ *
+ * Inputs: source Scene/slot plus edited root Instrument stem. Output:
+ * asynchronous Instrument/<stem.ext> save using Morph Save endpoint mapping.
+ * Completion does not rename the resident slot or apply runtime state.
+ */
+uint8_t preset_saveInstrumentMorph(uint8_t source_scene,
+                                   uint8_t source_slot,
+                                   const char *display_name);
 /*
  * Load one Instrument/ file into the destination slot's morph endpoint.
  *

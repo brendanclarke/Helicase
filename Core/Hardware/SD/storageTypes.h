@@ -338,6 +338,83 @@ const char *storage_instrumentTypeToText(storage_instrument_type_t type);
  */
 const char *storage_instrumentTypeExtension(storage_instrument_type_t type);
 /*
+ * Instrument/Kitset text save value projection.
+ *
+ * What: Selects whether storage text writers emit the resident endpoint images
+ * as a normal save, or as a Morph Save projection.
+ *
+ * Why: normal Save and Morph Save use the same text schemas, descriptor keys,
+ * section ordering, and asyncfatfs overwrite path. Their difference is only
+ * the value chosen for morphable endpoint cells. Keeping the mode in
+ * storageTypes lets filesystem.c sequence SD writes without learning
+ * descriptor counts or morphability flags.
+ *
+ * Affiliates/clients: storage_instrument_write_view_t,
+ * storage_kitset_write_view_t, filesystem save state machines.
+ */
+typedef enum {
+    STORAGE_INSTRUMENT_SAVE_NORMAL = 0u,
+    STORAGE_INSTRUMENT_SAVE_MORPH
+} storage_instrument_save_mode_t;
+
+/*
+ * Instrument text save value view.
+ *
+ * What: Describes how storage_formatInstrumentLineView() should project one
+ * resident instrument slot into an on-card Instrument file.
+ *
+ * Why: normal Save and Morph Save use the same text schema, descriptor keys,
+ * self-token handling, and section ordering, but they choose different values
+ * for morphable cells. Keeping the mode in storageTypes lets filesystem.c
+ * sequence SD writes without learning descriptor counts or morphability flags.
+ *
+ * Inputs: instrument points at the Scene-owned slot image; type is the
+ * registry/storage type for descriptor lookup; one_based_voice drives the
+ * file-only `self` token; morph_amount is the retained per-slot Morph amount
+ * used only by STORAGE_INSTRUMENT_SAVE_MORPH.
+ *
+ * Outputs: no state is stored in the view. The formatter reads it line by line
+ * while filesystem.c owns op_write_line_index.
+ *
+ * Affiliates/clients: filesystem_saveKitDirectory_tick(),
+ * filesystem_saveInstrument_tick(), KitMrp Save, InstrumentMrp Save.
+ */
+typedef struct {
+    const kit_instrument_slot_t *instrument;
+    storage_instrument_type_t type;
+    uint8_t one_based_voice;
+    uint8_t morph_amount;
+    storage_instrument_save_mode_t mode;
+} storage_instrument_write_view_t;
+
+/*
+ * Kitset text save value view.
+ *
+ * What: Describes how storage_formatKitsetLineView() should serialize kitset
+ * metadata, per-slot file aliases, routing, and the generated slot-6/track-7
+ * decay endpoint pair.
+ *
+ * Why: most KitMrp Save data lives in member Instrument files, but the
+ * generated track-7 decay pair is kit-owned metadata. The same Morph Save value
+ * rule must apply there without teaching filesystem.c about the key order or
+ * generated field names.
+ *
+ * Inputs: kit is the resident source Kit, file_names are returned asyncfatfs
+ * aliases for the six already-written member files, slot6_morph_amount is the
+ * retained per-voice Morph amount for slot index 5, and mode selects normal vs
+ * Morph Save projection.
+ *
+ * Affiliates/clients: filesystem_nextKitsetLine(), normal Kit Save, KitMrp
+ * Save, storage_formatInstrumentLineView().
+ */
+typedef struct {
+    const kit_t *kit;
+    const char (*file_names)[STORAGE_KIT_FILENAME_MAX];
+    uint8_t slot6_morph_amount;
+    storage_instrument_save_mode_t mode;
+} storage_kitset_write_view_t;
+
+/*
  * Text save helpers mirror the parser-owned schema.
  *
  * Filesystem streams one line at a time, but storageTypes owns which keys are
@@ -350,11 +427,21 @@ uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
                                  const char file_names[STORAGE_KIT_SLOT_COUNT]
                                                       [STORAGE_KIT_FILENAME_MAX],
                                  uint16_t line_index);
+uint8_t storage_formatKitsetLineView(
+    char *dst,
+    uint16_t capacity,
+    const storage_kitset_write_view_t *view,
+    uint16_t line_index);
 uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
                                      const kit_instrument_slot_t *instrument,
                                      storage_instrument_type_t type,
                                      uint8_t one_based_voice,
                                      uint16_t line_index);
+uint8_t storage_formatInstrumentLineView(
+    char *dst,
+    uint16_t capacity,
+    const storage_instrument_write_view_t *view,
+    uint16_t line_index);
 /*
  * Stream one sceneset.scg line from a resident Scene.
  *

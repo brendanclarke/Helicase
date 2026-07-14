@@ -14,6 +14,13 @@ iteration after this memory snapshot. The `afatfs` size listed below is
 historical and must be remeasured before any SRAM decision involving the
 filesystem layer.
 
+Session 037 note: Morph Save menu promotion changed Menu reachability but not
+the historical memory numbers below. Load/Save type cycling now treats KitMrp
+as the promoted row immediately after Kit, and nested Instrument Save exposes
+its top `Save:[Type]` row as a visible cursor target so normal Instrument Save
+can be switched to `TypeMrp` before editing the filename. Re-run the memory
+audit before using these UI changes to infer code-size or SRAM impact.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.

@@ -155,6 +155,20 @@ bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb
  */
 bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb);
 /*
+ * Post a new-format Kit Morph directory save.
+ *
+ * Inputs: direct Kit folder slot 000..999 and completion callback. Output: an
+ * async save to Kit/<NNN name>/ using the same rename/overwrite path as normal
+ * Kit Save, but each owned Instrument file is written through the Morph Save
+ * endpoint projection. The save updates filesystem/browser cache state but
+ * does not update the resident Kit display name.
+ *
+ * Affiliates/clients: preset_saveKitMorph(), menu Save:[KitMrp],
+ * filesystem_saveKitDirectory_tick().
+ */
+bool filesystem_requestSaveKitMorphDirectory(uint16_t slot,
+                                             fs_completion_cb_t cb);
+/*
  * Save one resident Scene into one numbered root Scene library slot.
  *
  * Inputs: direct root Scene slot 000..999, source resident Scene index, display name
@@ -238,6 +252,22 @@ bool filesystem_requestSaveInstrument(uint8_t source_scene,
                                       uint8_t source_slot,
                                       const char *display_name,
                                       fs_completion_cb_t cb);
+/*
+ * Save one resident kit voice as a root Instrument Morph file.
+ *
+ * Inputs: resident source Scene/voice, edited display stem, and completion
+ * callback. Output: asynchronous Instrument/<stem.ext> write using the source
+ * slot's current type and Morph Save endpoint projection. The target filename
+ * and overwrite rules match normal Instrument Save; retained Instrument source
+ * name is not updated on completion.
+ *
+ * Affiliates/clients: preset_saveInstrumentMorph(), nested Save:[TypeMrp],
+ * filesystem_saveInstrument_tick().
+ */
+bool filesystem_requestSaveInstrumentMorph(uint8_t source_scene,
+                                           uint8_t source_slot,
+                                           const char *display_name,
+                                           fs_completion_cb_t cb);
 struct kit_instrument_slot;
 /*
  * Read the most recently validated staged Kit directory payload.

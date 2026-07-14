@@ -870,20 +870,63 @@ Acceptance:
 
 ### Phase 3: Morph Load and Morph Save
 
-This rolls the previous Phase 6 and Phase 7 into one later Morph phase. Do not
-expand or implement it until Phase 2 is complete and tested; Morph Save must use
-the exact same directory ensure/rename and file replace helpers created for
-normal saves.
+This rolls the previous Phase 6 and Phase 7 into one Morph implementation pass.
+The source dive shows that Morph Load is already implemented behind reachability
+gates, while Morph Save still uses the legacy flat `.snd` path. Phase 3 should
+therefore promote the existing Morph Load behavior and add new-format KitMrp and
+InstrumentMrp Save paths that reuse the Phase 2 directory/file overwrite
+machinery.
 
-Deferred work:
+Implementation shape:
 
-- Promote KitMrp and InstrumentMrp Load reachability.
-- Preserve existing Preset same-type morph endpoint copy semantics.
-- Add KitMrp and InstrumentMrp Save request paths.
-- Add storageTypes save-view support for Morph Save endpoint mapping.
-- Keep retained names unchanged for every Morph operation.
+- Promote `SAVE_TYPE_KIT_MORPH` in the top-level Load/Save type cycle.
+- Keep KitMrp Load exactly on the existing staged Kit directory path:
+  `filesystem_requestLoadKitMorphForScenes()` ->
+  `FS_INTERNAL_OP_LOAD_KIT_MORPH` -> `filesystem_loadKitDirectory_tick()` ->
+  `PRESET_OP_KIT_MORPH_LOAD` -> `preset_startKitMorphApply()`.
+- Keep InstrumentMrp Load on the existing nested Instrument Load row:
+  `menu_instrumentLoadMorphMode` ->
+  `preset_loadInstrumentMorph()` -> normal Instrument staging ->
+  `preset_startInstrumentMorphApply()`.
+- Add explicit new-format KitMrp Save APIs instead of routing UI through
+  `FS_FILE_MORPH` / `FS_INTERNAL_OP_SAVE_MORPH`.
+- Add explicit InstrumentMrp Save APIs instead of overloading normal
+  `preset_saveInstrument()` completion.
+- Add a storageTypes instrument write-view that can emit either normal save
+  values or Morph Save values while keeping descriptor section ownership inside
+  storageTypes.
+- Keep Phase 2 asyncfatfs behavior: case-insensitive, case-preserving overwrite,
+  directory rename for occupied Kit slots, and remove-all-same-casefold files
+  before writing owned Instrument files.
+- Update root Kit/Instrument browser caches after successful Morph Save because
+  on-card objects changed.
+- Do not update retained Kit, Scene, or Instrument names after Morph Load or
+  Morph Save.
 
-Acceptance will be expanded after the normal-save phase lands.
+Acceptance:
+
+- Load type cycle exposes `KitMrp` next to `Kit`; saving `KitMrp` is available
+  only after the new-format Morph Save path is compiled in.
+- KitMrp Load copies staged source normal endpoint values into resident morph
+  endpoints only for same-type slots; mismatches remain no-change.
+- InstrumentMrp Load remains tied to the selected destination slot's current
+  type and does not replace slot identity or retained names.
+- KitMrp Save writes `Kit/NNN <edited-name>/` through the same rename/overwrite
+  path as normal Kit Save.
+- KitMrp Save member files write interpolated current values into `[params]`
+  and current normal endpoints into `[morph]` for morphable descriptors.
+- KitMrp Save writes non-morphable descriptors exactly as normal single-endpoint
+  values and does not add them to `[morph]`.
+- KitMrp Save applies the same interpolated/normal flip to generated slot-6
+  track-7 kitset morph fields.
+- InstrumentMrp Save writes one root `Instrument/<stem.ext>` file with the same
+  Morph Save endpoint mapping.
+- Morph Saves show `OW` by the same identity rules as normal saves.
+- Morph Saves do not mutate `kit.display_name`,
+  `kit.instrument_display_name[][]`, `kit.instrument_stem[][]`, or
+  `scene.display_name`.
+- Legacy flat `FS_FILE_MORPH` load/save remains compiled only as a compatibility
+  path; the promoted UI does not use it for new-format Morph Save.
 
 ## Real Code Dive: asyncfatfs Rename/Overwrite Implementation
 
@@ -2920,6 +2963,1311 @@ Verification notes for this pass:
 - Local compile was not run because `make`, `gcc`, `clang`, and
   `arm-none-eabi-gcc` are not available in this environment.
 
+## Real Code Dive: Morph Implementation (Phase 3)
+
+This section is based on the current source tree after the Phase 2 normal-save
+implementation pass.
+
+### Current Code Facts
+
+- `menu.h` already has `SAVE_TYPE_KIT_MORPH` immediately after
+  `SAVE_TYPE_KIT`.
+- `menu.c` already renders `KitMrp`, dispatches hidden KitMrp Load through
+  `preset_loadKitMorphForScenes()`, and has nested InstrumentMrp Load state via
+  `menu_instrumentLoadMorphMode`.
+- `presetManager.c` already implements KitMrp Load and InstrumentMrp Load commit
+  semantics:
+  - `preset_commitStagedKitNormalToMorph()` copies only same-type source normal
+    endpoint values into resident morph endpoint images.
+  - `preset_commitStagedInstrumentNormalToMorph()` does the same for one slot.
+  - `preset_startKitMorphApply()` and `preset_startInstrumentMorphApply()` drain
+    only the Morph worker and do not rebind routing or replace slot identity.
+- `filesystem.c` already stages KitMrp Load through
+  `FS_INTERNAL_OP_LOAD_KIT_MORPH` and the normal Kit directory parser. The final
+  commit branch in `filesystem_loadKitDirectory_tick()` writes live SceneData
+  only when `current_op == FS_INTERNAL_OP_LOAD_KIT`.
+- `filesystem.c` still routes `FS_INTERNAL_OP_SAVE_MORPH` to
+  `filesystem_saveKit_tick()`, the legacy flat `.snd` writer. New-format
+  KitMrp Save must not use that route.
+- `storageTypes.c` already owns the descriptor-aware text writer for Instrument
+  files. `storage_formatInstrumentLine()` emits `[params]` from
+  `instrument_parameters[]` and `[morph]` from
+  `morph_instrument_parameters[]`. That is the correct owner for Morph Save's
+  endpoint flip because filesystem.c should not walk descriptor tables.
+- `storageTypes.c` also owns `storage_formatKitsetLine()`, which currently
+  writes both generated slot-6/track-7 normal and morph decay endpoints directly
+  from `kit->settings`.
+- `presetMorphEngine.c` has the retained Morph interpolation arithmetic, but the
+  helper is currently static. Phase 3 should not make storageTypes depend on the
+  worker's hidden LFO layer; Morph Save uses retained per-slot
+  `scene->settings.voice_morph_amount[]` only.
+
+### Storage Write View
+
+Add a small write-view type to `Core/Hardware/SD/storageTypes.h`.
+
+Recommended declarations:
+
+```c
+typedef enum {
+    STORAGE_INSTRUMENT_SAVE_NORMAL = 0u,
+    STORAGE_INSTRUMENT_SAVE_MORPH
+} storage_instrument_save_mode_t;
+
+typedef struct {
+    const kit_instrument_slot_t *instrument;
+    storage_instrument_type_t type;
+    uint8_t one_based_voice;
+    uint8_t morph_amount;
+    storage_instrument_save_mode_t mode;
+} storage_instrument_write_view_t;
+```
+
+Comment block for the enum/struct:
+
+```c
+/*
+ * Instrument text save value view.
+ *
+ * What: Describes how storage_formatInstrumentLineView() should project one
+ * resident instrument slot into an on-card Instrument file.
+ *
+ * Why: normal Save and Morph Save use the same text schema, descriptor keys,
+ * self-token handling, and section ordering, but they choose different values
+ * for morphable cells. Keeping the mode in storageTypes lets filesystem.c
+ * sequence SD writes without learning descriptor counts or morphability flags.
+ *
+ * Inputs: instrument points at the Scene-owned slot image; type is the
+ * registry/storage type for descriptor lookup; one_based_voice drives the
+ * file-only `self` token; morph_amount is the retained per-slot Morph amount
+ * used only by STORAGE_INSTRUMENT_SAVE_MORPH.
+ *
+ * Outputs: no state is stored in the view. The formatter reads it line by line
+ * while filesystem.c owns op_write_line_index.
+ *
+ * Affiliates/clients: filesystem_saveKitDirectory_tick(),
+ * filesystem_saveInstrument_tick(), KitMrp Save, InstrumentMrp Save.
+ */
+```
+
+Add this public formatter:
+
+```c
+uint8_t storage_formatInstrumentLineView(
+    char *dst,
+    uint16_t capacity,
+    const storage_instrument_write_view_t *view,
+    uint16_t line_index);
+```
+
+Keep the existing `storage_formatInstrumentLine()` signature as a wrapper for
+normal save:
+
+```c
+uint8_t storage_formatInstrumentLine(...)
+{
+    storage_instrument_write_view_t view = {
+        instrument,
+        type,
+        one_based_voice,
+        0u,
+        STORAGE_INSTRUMENT_SAVE_NORMAL
+    };
+    return storage_formatInstrumentLineView(dst, capacity, &view, line_index);
+}
+```
+
+Comment beside the wrapper:
+
+```c
+/*
+ * Preserve the normal-save public formatter contract.
+ *
+ * What: Adapts the existing call sites to the new write-view formatter with
+ * STORAGE_INSTRUMENT_SAVE_NORMAL.
+ *
+ * Why: Phase 3 adds Morph Save projection without forcing every normal writer
+ * call site to construct a view. The old symbol remains the stable normal-save
+ * API for Kit Save, Instrument Save, and tests.
+ *
+ * Affiliates/clients: filesystem_nextInstrumentLine(), generated fixtures,
+ * future unit tests that compare normal Instrument output.
+ */
+```
+
+In `storageTypes.c`, add a private interpolation helper near
+`storage_descriptorValueForSection()`:
+
+```c
+static uint16_t storage_interpolateMorphEndpoint(uint16_t normal,
+                                                 uint16_t morph,
+                                                 uint8_t amount);
+```
+
+Use the same arithmetic contract as `presetMorph_interpolate()`:
+
+```c
+if (amount == 0u) return normal;
+if (amount == 255u) return morph;
+numerator = (int32_t)normal * 255 +
+            ((int32_t)morph - (int32_t)normal) * amount;
+numerator += 127;
+if (numerator < 0) return 0u;
+return (uint16_t)(numerator / 255);
+```
+
+Comment:
+
+```c
+/*
+ * Interpolate retained Morph endpoints for file-save projection.
+ *
+ * What: Computes the same 0..255 endpoint interpolation used by the runtime
+ * Morph worker, but only from retained SceneData values supplied in the write
+ * view.
+ *
+ * Why: Morph Save writes a portable file image; it must not include the hidden
+ * LFO Morph overlay or depend on presetMorphEngine's bounded worker state.
+ * Duplicating the tiny arithmetic here keeps storageTypes self-contained while
+ * matching the runtime endpoint contract.
+ *
+ * Inputs: normal endpoint, morph endpoint, and retained per-voice Morph amount.
+ * Output: rounded descriptor-domain value; exact amount 0 and 255 return exact
+ * endpoints.
+ *
+ * Affiliates/clients: storage_valueForInstrumentSaveSection(),
+ * presetMorphEngine.c interpolation contract.
+ */
+```
+
+Replace `storage_descriptorValueForSection()` with a view-aware helper:
+
+```c
+static uint16_t storage_valueForInstrumentSaveSection(
+    const storage_instrument_write_view_t *view,
+    uint8_t descriptor_index,
+    uint8_t morph_section);
+```
+
+Rules:
+
+- normal mode, `[params]`: `instrument_parameters[index]`;
+- normal mode, `[morph]`: `morph_instrument_parameters[index]`;
+- Morph Save mode, `[params]`, morphable descriptor:
+  interpolated normal/morph at `view->morph_amount`;
+- Morph Save mode, `[params]`, non-morphable descriptor:
+  `instrument_parameters[index]`;
+- Morph Save mode, `[morph]`, morphable descriptor:
+  `instrument_parameters[index]`;
+- Morph Save mode, `[morph]`, non-morphable descriptor:
+  no write because `storage_descriptorWritableInSection()` already filters
+  `[morph]` to morphable descriptors.
+
+Comment:
+
+```c
+/*
+ * Resolve one descriptor value for the selected save view.
+ *
+ * What: Chooses the value written into either [params] or [morph] for one
+ * descriptor-indexed storage key.
+ *
+ * Why: Morph Save is not a new file format. It is a projection of the resident
+ * endpoint images into the existing normal Instrument schema: morphable
+ * [params] become the current interpolated value, and morphable [morph] become
+ * the current normal endpoint. Non-morphable setup cells remain single-ended.
+ *
+ * Inputs: write view, descriptor index, and section flag. Output: descriptor
+ * value to serialize. Section eligibility is still enforced by
+ * storage_descriptorWritableInSection().
+ *
+ * Affiliates/clients: storage_formatInstrumentLineView(), KitMrp Save,
+ * InstrumentMrp Save, normal Instrument Save wrapper.
+ */
+```
+
+Change the existing `storage_formatInstrumentLine()` implementation body into
+`storage_formatInstrumentLineView()`.
+
+Inside it:
+
+- replace direct `instrument`, `type`, and `one_based_voice` locals with
+  `view->instrument`, `view->type`, and `view->one_based_voice`;
+- replace `storage_descriptorValueForSection(instrument, i, section)` calls
+  with `storage_valueForInstrumentSaveSection(view, i, section)`;
+- preserve the `self` serialization rule only in `[params]`, exactly as today;
+- keep `[morph]` omission of target/routing descriptors exactly as today.
+
+Comment at the renamed formatter:
+
+```c
+/*
+ * Emit one complete Instrument file line from a selected save view.
+ *
+ * What: Streams metadata, [params], and [morph] lines for one resident
+ * Instrument slot. The write view decides whether morphable descriptor values
+ * are written as normal Save endpoints or Morph Save's interpolated/normal
+ * projection.
+ *
+ * Why: Filesystem state machines must stay descriptor-agnostic. This formatter
+ * owns descriptor iteration, section ordering, morphability filtering, and the
+ * file-only `self` token for own-slot LFO voice selectors.
+ *
+ * Inputs: destination line buffer, capacity, immutable write view, and
+ * monotonic line index. Output: byte count for one line, or zero when the file
+ * is complete.
+ *
+ * Affiliates/clients: filesystem_writeTextLine(),
+ * filesystem_nextInstrumentLine(), root Instrument Save, Kit member Save,
+ * KitMrp Save, InstrumentMrp Save.
+ */
+```
+
+### Kitset Generated Track-7 Morph Save View
+
+The generated slot-6 track-7 decay pair is in `kitset.kcg`, not in an
+Instrument file. Add a storageTypes kitset write view rather than making
+filesystem compute those two values.
+
+Recommended declarations in `storageTypes.h`:
+
+```c
+typedef struct {
+    const kit_t *kit;
+    const char (*file_names)[STORAGE_KIT_FILENAME_MAX];
+    uint8_t slot6_morph_amount;
+    storage_instrument_save_mode_t mode;
+} storage_kitset_write_view_t;
+
+uint8_t storage_formatKitsetLineView(
+    char *dst,
+    uint16_t capacity,
+    const storage_kitset_write_view_t *view,
+    uint16_t line_index);
+```
+
+Keep `storage_formatKitsetLine()` as a normal-save wrapper.
+
+Comment for the kitset view:
+
+```c
+/*
+ * Kitset text save value view.
+ *
+ * What: Describes how storage_formatKitsetLineView() should serialize kitset
+ * metadata, per-slot file aliases, routing, and the generated slot-6/track-7
+ * decay endpoint pair.
+ *
+ * Why: most KitMrp Save data lives in member Instrument files, but the
+ * generated track-7 decay pair is kit-owned metadata. The same Morph Save value
+ * rule must apply there without teaching filesystem.c about the key order or
+ * generated field names.
+ *
+ * Inputs: kit is the resident source Kit, file_names are returned asyncfatfs
+ * aliases for the six already-written member files, slot6_morph_amount is the
+ * retained per-voice Morph amount for slot index 5, and mode selects normal vs
+ * Morph Save projection.
+ *
+ * Affiliates/clients: filesystem_nextKitsetLine(), normal Kit Save, KitMrp
+ * Save, storage_formatInstrumentLineView().
+ */
+```
+
+In `storage_formatKitsetLineView()`:
+
+- line 0/1 stay format/version;
+- line 2 `slot6_track7_amp_envelope_decay`:
+  - normal mode: `kit->settings.slot6_track7_amp_envelope_decay`;
+  - Morph Save: interpolate normal/morph generated values at
+    `slot6_morph_amount`;
+- line 3 `slot6_track7_morph_amp_envelope_decay`:
+  - normal mode: `kit->settings.slot6_track7_morph_amp_envelope_decay`;
+  - Morph Save: `kit->settings.slot6_track7_amp_envelope_decay`;
+- all slot headers, `type`, `file`, and `audio_out` lines stay unchanged.
+
+Comment beside the line 2/3 branch:
+
+```c
+/*
+ * Project the generated slot-6/track-7 decay pair for Morph Save.
+ *
+ * What: Applies the same interpolated/normal endpoint flip used for morphable
+ * Instrument descriptors to the kit-owned generated track-7 decay values.
+ *
+ * Why: these generated endpoints are stored in kitset.kcg rather than an
+ * Instrument file, but they still represent a normal/morph endpoint pair for
+ * slot 6's track-7 voice. Morph Save must keep their semantics aligned with
+ * descriptor-backed endpoints.
+ *
+ * Inputs: normal generated decay, morph generated decay, retained slot-6 Morph
+ * amount, and save mode. Output: the value written to the current kitset key.
+ *
+ * Affiliates/clients: storage_formatKitsetLineView(), KitMrp Save, Choke/non-
+ * Choke slot-6 generated track behavior.
+ */
+```
+
+### Filesystem Internal Operations and Public APIs
+
+In `Core/Hardware/SD/filesystem.c`, add internal operations:
+
+```c
+FS_INTERNAL_OP_SAVE_KIT_MORPH,
+FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH,
+```
+
+Keep legacy `FS_INTERNAL_OP_SAVE_MORPH` as the flat `.snd` compatibility writer.
+
+Comment near the enum entries:
+
+```c
+/*
+ * New-format Morph Save operations.
+ *
+ * SAVE_KIT_MORPH and SAVE_INSTRUMENT_MORPH write the Phase 2 text directory
+ * and root Instrument formats with Morph Save value projection. They are
+ * intentionally separate from SAVE_MORPH, which remains the legacy flat .snd
+ * compatibility path until old preset support is removed.
+ */
+```
+
+In `filesystem.h`, add:
+
+```c
+bool filesystem_requestSaveKitMorphDirectory(uint16_t slot,
+                                             fs_completion_cb_t cb);
+bool filesystem_requestSaveInstrumentMorph(uint8_t source_scene,
+                                           uint8_t source_slot,
+                                           const char *display_name,
+                                           fs_completion_cb_t cb);
+```
+
+Comment for KitMrp Save API:
+
+```c
+/*
+ * Post a new-format Kit Morph directory save.
+ *
+ * Inputs: direct Kit folder slot 000..999 and completion callback. Output: an
+ * async save to Kit/<NNN name>/ using the same rename/overwrite path as normal
+ * Kit Save, but each owned Instrument file is written through the Morph Save
+ * endpoint projection. The save updates filesystem/browser cache state but
+ * does not update the resident Kit display name.
+ *
+ * Affiliates/clients: preset_saveKitMorph(), menu Save:[KitMrp],
+ * filesystem_saveKitDirectory_tick().
+ */
+```
+
+Comment for InstrumentMrp Save API:
+
+```c
+/*
+ * Save one resident kit voice as a root Instrument Morph file.
+ *
+ * Inputs: resident source Scene/voice, edited display stem, and completion
+ * callback. Output: asynchronous Instrument/<stem.ext> write using the source
+ * slot's current type and Morph Save endpoint projection. The target filename
+ * and overwrite rules match normal Instrument Save; retained Instrument source
+ * name is not updated on completion.
+ *
+ * Affiliates/clients: preset_saveInstrumentMorph(), nested Save:[TypeMrp],
+ * filesystem_saveInstrument_tick().
+ */
+```
+
+In `filesystem_start()`, reset no new large buffers if the implementation uses
+`current_op` to distinguish save mode. If adding a scratch source Scene for Kit
+Save, reset it here:
+
+```c
+op_kit_save_source_scene = scene_getActiveIndex();
+```
+
+Comment:
+
+```c
+/*
+ * Capture/reset Kit save source coordinates.
+ *
+ * What: Initializes the resident Scene index used by normal Kit Save and
+ * KitMrp Save before request-specific code overwrites it.
+ *
+ * Why: save state machines run asynchronously. The source Scene must be the
+ * one accepted by the request, not a later UI selection.
+ *
+ * Affiliates/clients: filesystem_requestSaveKitDirectory(),
+ * filesystem_requestSaveKitMorphDirectory(), filesystem_saveKitDirectory_tick().
+ */
+```
+
+Add `filesystem_requestSaveKitMorphDirectory()`:
+
+```c
+bool filesystem_requestSaveKitMorphDirectory(uint16_t slot,
+                                             fs_completion_cb_t cb)
+{
+    if (slot >= STORAGE_KIT_MAX_SLOTS)
+        return false;
+    return filesystem_start(FS_INTERNAL_OP_SAVE_KIT_MORPH,
+                            FS_FILE_KIT,
+                            slot,
+                            cb);
+}
+```
+
+Comment:
+
+```c
+/*
+ * Start KitMrp Save on the normal Kit directory writer.
+ *
+ * What: Selects the Kit directory save state machine with a Morph Save internal
+ * operation tag.
+ *
+ * Why: KitMrp Save owns the same on-card product object as normal Kit Save:
+ * Kit/NNN Name plus six member Instrument files and kitset.kcg. Only the
+ * endpoint values inside those text files change.
+ *
+ * Inputs: target Kit slot and completion callback. Output: filesystem busy
+ * state or false if the slot is invalid/busy.
+ *
+ * Affiliates/clients: preset_saveKitMorph(), menu Save:[KitMrp],
+ * filesystem_saveKitDirectory_tick().
+ */
+```
+
+Add a shared Instrument save request helper or a sibling
+`filesystem_requestSaveInstrumentMorph()` that duplicates only request capture.
+Recommended helper:
+
+```c
+static bool filesystem_requestSaveInstrumentMode(
+    fs_internal_op_t op,
+    uint8_t source_scene,
+    uint8_t source_slot,
+    const char *display_name,
+    fs_completion_cb_t cb);
+```
+
+Both normal and Morph APIs call it with
+`FS_INTERNAL_OP_SAVE_INSTRUMENT` or `FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH`.
+
+Comment:
+
+```c
+/*
+ * Capture one root Instrument save request.
+ *
+ * What: Converts a resident source Scene/voice plus an edited stem into the
+ * exact visible Instrument/<stem.ext> target and records immutable source
+ * coordinates for the asynchronous writer.
+ *
+ * Why: normal Instrument Save and InstrumentMrp Save share filename/type
+ * construction, overwrite behavior, and source validation. Their only
+ * difference is the storage write view and whether retained source-name
+ * metadata is updated after success.
+ *
+ * Inputs: internal save op, source Scene/slot, edited display stem, completion
+ * callback. Outputs: op_instrument_save_* scratch and filesystem busy state.
+ *
+ * Affiliates/clients: filesystem_requestSaveInstrument(),
+ * filesystem_requestSaveInstrumentMorph(), filesystem_saveInstrument_tick().
+ */
+```
+
+### Filesystem Writer Contexts
+
+Replace current local context structs:
+
+```c
+typedef struct {
+    const kit_t *kit;
+} filesystem_kitset_write_ctx_t;
+
+typedef struct {
+    const kit_instrument_slot_t *instrument;
+    storage_instrument_type_t type;
+    uint8_t voice;
+} filesystem_instrument_write_ctx_t;
+```
+
+with save-view aware contexts:
+
+```c
+typedef struct {
+    storage_kitset_write_view_t view;
+} filesystem_kitset_write_ctx_t;
+
+typedef struct {
+    storage_instrument_write_view_t view;
+} filesystem_instrument_write_ctx_t;
+```
+
+Update callbacks:
+
+```c
+static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap, void *raw)
+{
+    filesystem_kitset_write_ctx_t *ctx =
+        (filesystem_kitset_write_ctx_t *)raw;
+    return storage_formatKitsetLineView(dst, cap, &ctx->view,
+                                        op_write_line_index);
+}
+
+static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
+                                             void *raw)
+{
+    filesystem_instrument_write_ctx_t *ctx =
+        (filesystem_instrument_write_ctx_t *)raw;
+    return storage_formatInstrumentLineView(dst, cap, &ctx->view,
+                                            op_write_line_index);
+}
+```
+
+Comment:
+
+```c
+/*
+ * Stream text lines through storage-owned save views.
+ *
+ * What: Adapts filesystem's generic line writer to storageTypes' Kitset and
+ * Instrument save-view formatters.
+ *
+ * Why: filesystem.c owns asynchronous file sequencing, returned aliases, and
+ * write offsets. storageTypes owns text schemas, descriptor iteration, and
+ * normal-vs-Morph endpoint projection.
+ *
+ * Inputs: opaque context built in the active save phase and op_write_line_index
+ * advanced by filesystem_writeTextLine(). Output: one formatted line or zero
+ * at schema completion.
+ *
+ * Affiliates/clients: filesystem_saveKitDirectory_tick(),
+ * filesystem_saveInstrument_tick(), storageTypes save-view formatters.
+ */
+```
+
+### `filesystem_saveKitDirectory_tick()` Changes
+
+At function start, compute source scene and morph mode:
+
+```c
+const scene_t *scene = scene_getConst(op_kit_save_source_scene);
+const kit_t *kit = scene ? &scene->kit : NULL;
+uint8_t morph_save =
+    (uint8_t)(current_op == FS_INTERNAL_OP_SAVE_KIT_MORPH);
+```
+
+If not adding `op_kit_save_source_scene` yet, keep current
+`scene_getActiveIndex()` for Phase 3 and document the limitation. Preferred
+implementation is to add the captured source field now because it also improves
+normal Kit Save.
+
+Comment:
+
+```c
+/*
+ * Resolve the immutable Kit save source and save projection.
+ *
+ * What: Selects the resident Kit accepted by the request and records whether
+ * this state-machine run is normal Kit Save or KitMrp Save.
+ *
+ * Why: both operations write the same directory object, but Morph Save changes
+ * the values emitted inside member Instrument files and kitset generated
+ * endpoint fields. The source Scene must not drift while asyncfatfs is busy.
+ *
+ * Inputs: request-time source Scene and current internal operation. Outputs:
+ * local source Kit pointer and morph_save flag for writer contexts.
+ *
+ * Affiliates/clients: filesystem_requestSaveKitDirectory(),
+ * filesystem_requestSaveKitMorphDirectory(), storageTypes save views.
+ */
+```
+
+Case 20 member Instrument write context changes from:
+
+```c
+filesystem_instrument_write_ctx_t ctx = {
+    &kit->instruments[op_instrument_slot],
+    kit->instruments[op_instrument_slot].type,
+    (uint8_t)(op_instrument_slot + 1u)
+};
+```
+
+to:
+
+```c
+filesystem_instrument_write_ctx_t ctx = {{
+    &kit->instruments[op_instrument_slot],
+    kit->instruments[op_instrument_slot].type,
+    (uint8_t)(op_instrument_slot + 1u),
+    scene ? scene->settings.voice_morph_amount[op_instrument_slot] : 0u,
+    morph_save ? STORAGE_INSTRUMENT_SAVE_MORPH
+               : STORAGE_INSTRUMENT_SAVE_NORMAL
+}};
+```
+
+Comment beside the context:
+
+```c
+/*
+ * Build the member Instrument save view for this Kit slot.
+ *
+ * What: Passes the resident slot image, storage type, one-based file voice,
+ * retained per-slot Morph amount, and normal-vs-Morph save mode to
+ * storageTypes.
+ *
+ * Why: Kit Save and KitMrp Save share file sequencing and alias capture. The
+ * only per-member difference is how morphable endpoint values are projected
+ * into [params] and [morph].
+ *
+ * Inputs: op_instrument_slot selects the Kit member currently being written.
+ * Output: one context consumed by filesystem_nextInstrumentLine().
+ *
+ * Affiliates/clients: storage_formatInstrumentLineView(), Morph Save value
+ * rule, LFO `self` token serialization.
+ */
+```
+
+Case 13 kitset write context changes from:
+
+```c
+filesystem_kitset_write_ctx_t ctx = { kit };
+```
+
+to:
+
+```c
+filesystem_kitset_write_ctx_t ctx = {{
+    kit,
+    op_save_instrument_file,
+    scene ? scene->settings.voice_morph_amount[5u] : 0u,
+    morph_save ? STORAGE_INSTRUMENT_SAVE_MORPH
+               : STORAGE_INSTRUMENT_SAVE_NORMAL
+}};
+```
+
+Guard slot index 5 with `INSTRUMENT_SLOT_COUNT > 5u` if using a non-literal.
+
+Comment:
+
+```c
+/*
+ * Build the kitset save view after all member aliases are known.
+ *
+ * What: Passes the resident Kit, returned member-file aliases, slot-6 Morph
+ * amount, and normal-vs-Morph mode into storageTypes.
+ *
+ * Why: kitset.kcg owns generated slot-6/track-7 endpoint fields. KitMrp Save
+ * must project those fields with the same value rule as descriptor-backed
+ * Instrument files, while filesystem.c remains unaware of kitset key order.
+ *
+ * Inputs: op_save_instrument_file[] contains aliases returned by previous
+ * fopen_lfn() calls. Output: line formatter context for kitset.kcg.
+ *
+ * Affiliates/clients: storage_formatKitsetLineView(), generated track-7 decay
+ * storage, KitMrp Save.
+ */
+```
+
+Final case 24 cache update should update filesystem caches for both normal and
+Morph saves, but retain resident Kit name only for normal save:
+
+```c
+if (!morph_save) {
+    scene_setResidentKitDisplayName(op_kit_save_source_scene,
+                                    preset_currentName);
+}
+```
+
+Comment:
+
+```c
+/*
+ * Retain Kit identity only for normal Kit Save.
+ *
+ * What: Updates the resident Kit display name after normal Kit Save completes,
+ * while KitMrp Save updates only the on-card browser/cache identity.
+ *
+ * Why: Morph Save exports a transformed file image. It must not rename the
+ * currently loaded Kit or change the name used to seed later normal saves.
+ *
+ * Inputs: morph_save flag and request-time source Scene. Outputs:
+ * scene->kit.display_name for normal save only.
+ *
+ * Affiliates/clients: Menu Save editor seeding, KitMrp Save no-name-change
+ * acceptance tests.
+ */
+```
+
+### `filesystem_saveInstrument_tick()` Changes
+
+At function start:
+
+```c
+uint8_t morph_save =
+    (uint8_t)(current_op == FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH);
+```
+
+Case 9 context changes to:
+
+```c
+filesystem_instrument_write_ctx_t ctx = {{
+    instrument,
+    op_instrument_save_type,
+    (uint8_t)(op_instrument_save_source_slot + 1u),
+    scene ? scene->settings.voice_morph_amount[
+                op_instrument_save_source_slot] : 0u,
+    morph_save ? STORAGE_INSTRUMENT_SAVE_MORPH
+               : STORAGE_INSTRUMENT_SAVE_NORMAL
+}};
+```
+
+Comment:
+
+```c
+/*
+ * Build the root Instrument save view.
+ *
+ * What: Captures the source slot image, file voice coordinate, retained
+ * per-slot Morph amount, and normal-vs-Morph save mode for the formatter.
+ *
+ * Why: normal Instrument Save and InstrumentMrp Save share all asyncfatfs
+ * overwrite behavior. Their only storage difference is the endpoint projection
+ * inside the Instrument text file.
+ *
+ * Inputs: request-time source Scene/slot and current internal operation.
+ * Output: one context consumed by filesystem_nextInstrumentLine().
+ *
+ * Affiliates/clients: storage_formatInstrumentLineView(),
+ * filesystem_requestSaveInstrumentMode(), nested Instrument Save UI.
+ */
+```
+
+Final case 12 currently calls `scene_setInstrumentSourceName()` unconditionally.
+Wrap it:
+
+```c
+if (!morph_save) {
+    scene_setInstrumentSourceName(op_instrument_save_source_scene,
+                                  op_instrument_save_source_slot,
+                                  op_instrument_save_display_name);
+}
+```
+
+Comment:
+
+```c
+/*
+ * Retain Instrument source name only for normal Instrument Save.
+ *
+ * What: Skips resident source-name mutation when this writer was entered for
+ * InstrumentMrp Save.
+ *
+ * Why: Morph Save writes a transformed file while preserving the currently
+ * loaded Instrument identity. Updating the retained stem would make later
+ * normal Kit/Instrument Save pretend the morph-export filename is the loaded
+ * source.
+ *
+ * Inputs: morph_save flag plus request-time source Scene/slot. Outputs:
+ * SceneData source-name metadata for normal save only.
+ *
+ * Affiliates/clients: menu_instrumentSaveSeedName(), normal root Instrument
+ * Save, InstrumentMrp Save no-name-change tests.
+ */
+```
+
+### Preset Manager APIs
+
+In `Core/Scene/Preset/presetManager.h`, add operation enum values after current
+Morph load ops:
+
+```c
+PRESET_OP_KIT_MORPH_SAVE,
+PRESET_OP_INSTRUMENT_MORPH_SAVE,
+```
+
+Comment:
+
+```c
+/*
+ * New-format Morph Save completions.
+ *
+ * Kit/Instrument Morph Save are distinct from legacy PRESET_OP_MORPH_SAVE so
+ * Menu can reset the correct UI surface without implying a flat .snd file was
+ * written. Neither completion triggers runtime apply or retained-name updates.
+ */
+```
+
+Add prototypes:
+
+```c
+uint8_t preset_saveKitMorph(uint16_t presetNr);
+uint8_t preset_saveInstrumentMorph(uint8_t source_scene,
+                                   uint8_t source_slot,
+                                   const char *display_name);
+```
+
+Comment for `preset_saveKitMorph()`:
+
+```c
+/*
+ * Save the active resident Kit through the KitMrp projection.
+ *
+ * Inputs: target root Kit library slot. Output: asynchronous new-format Kit
+ * directory save using Morph Save endpoint mapping. Completion reports a save
+ * only; no runtime apply follows because resident SceneData is unchanged.
+ */
+```
+
+Comment for `preset_saveInstrumentMorph()`:
+
+```c
+/*
+ * Save one resident Instrument through the InstrumentMrp projection.
+ *
+ * Inputs: source Scene/slot plus edited root Instrument stem. Output:
+ * asynchronous Instrument/<stem.ext> save using Morph Save endpoint mapping.
+ * Completion does not rename the resident slot or apply runtime state.
+ */
+```
+
+In `presetManager.c`, add callbacks:
+
+```c
+static void on_kit_morph_save_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_KIT_MORPH_SAVE);
+}
+
+static void on_instrument_morph_save_complete(void)
+{
+    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_SAVE);
+}
+```
+
+Comment:
+
+```c
+/*
+ * Complete a new-format Morph Save.
+ *
+ * Filesystem has already written the transformed file/directory image and
+ * updated browser caches. Preset reports save completion only; resident
+ * SceneData and DSP runtime state are intentionally unchanged.
+ */
+```
+
+Add `preset_saveKitMorph()`:
+
+```c
+uint8_t preset_saveKitMorph(uint16_t presetNr)
+{
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = presetNr;
+    pm_request_type = SAVE_TYPE_KIT_MORPH;
+    if (!filesystem_requestSaveKitMorphDirectory(
+            presetNr, on_kit_morph_save_complete)) {
+        pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
+}
+```
+
+Add `preset_saveInstrumentMorph()` mirroring `preset_saveInstrument()` but
+calling `filesystem_requestSaveInstrumentMorph()` and reporting
+`PRESET_OP_INSTRUMENT_MORPH_SAVE`.
+
+Do not change `preset_saveDrumset(presetNr, isMorph)` in this pass unless there
+is a deliberate compatibility decision. It currently routes `isMorph` to the
+legacy flat `.snd` save path. The new UI should call `preset_saveKitMorph()`.
+
+### Menu Promotion and Dispatch
+
+In `menu_loadSaveTypeIsRestored()` and `restored_types[]`, add
+`SAVE_TYPE_KIT_MORPH`:
+
+```c
+return (uint8_t)(what == SAVE_TYPE_FILE ||
+                 what == SAVE_TYPE_DIR ||
+                 what == SAVE_TYPE_KIT ||
+                 what == SAVE_TYPE_KIT_MORPH);
+```
+
+Comment update:
+
+```c
+/*
+ * Gate promoted Load/Save types.
+ *
+ * File and Dir remain asyncfatfs diagnostics. Kit and KitMrp are now the
+ * restored musical directory operations: both browse the same Kit/ slot cache,
+ * but Kit replaces resident endpoints while KitMrp copies or writes through
+ * Morph endpoint projection.
+ */
+```
+
+In `menu_currentSaveWouldOverwrite()`, treat KitMrp like Kit:
+
+```c
+if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+    menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+    uint16_t slot = menu_currentPresetNr[menu_saveOptions.what];
+    return filesystem_kitSlotExists(slot);
+}
+```
+
+Comment:
+
+```c
+/*
+ * Treat Kit and KitMrp saves as the same numbered product identity.
+ *
+ * What: Reports OW for either save mode when the target Kit slot exists.
+ *
+ * Why: Morph Save writes the same Kit/NNN directory object as normal Kit Save.
+ * The endpoint projection changes file contents, not overwrite identity.
+ *
+ * Affiliates/clients: filesystem_requestSaveKitDirectory(),
+ * filesystem_requestSaveKitMorphDirectory(), LCD OK/OW display.
+ */
+```
+
+In `menu_seedCurrentSaveNameFromResident()`, seed KitMrp from resident Kit name:
+
+```c
+if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+    menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+    memcpy(preset_currentName,
+           scene_kitDisplayName(scene_getActiveIndex()),
+           8u);
+}
+```
+
+Comment:
+
+```c
+/*
+ * Seed KitMrp Save from resident Kit identity.
+ *
+ * What: Uses the same editable name seed as normal Kit Save.
+ *
+ * Why: KitMrp Save targets a Kit directory slot but must not derive the edit
+ * field from the highlighted slot's current or empty display text.
+ *
+ * Affiliates/clients: scene_kitDisplayName(), preset_saveKitMorph(),
+ * filesystem_makeKitDirectoryDisplayName().
+ */
+```
+
+In the Save OK switch:
+
+```c
+case SAVE_TYPE_KIT_MORPH:
+    if (preset_saveKitMorph(
+            menu_currentPresetNr[SAVE_TYPE_KIT_MORPH]))
+        menu_storageBusy = 1u;
+    break;
+```
+
+Reset condition should treat KitMrp like Kit if the current Kit save UI expects
+to remain visible until completion:
+
+```c
+if (menu_saveOptions.what != SAVE_TYPE_FILE &&
+    menu_saveOptions.what != SAVE_TYPE_DIR &&
+    menu_saveOptions.what != SAVE_TYPE_KIT &&
+    menu_saveOptions.what != SAVE_TYPE_KIT_MORPH)
+    menu_resetSaveParameters();
+```
+
+Comment:
+
+```c
+/*
+ * Dispatch KitMrp Save through the new-format Morph writer.
+ *
+ * What: Posts a Kit directory save with Morph Save endpoint projection.
+ *
+ * Why: the legacy FS_FILE_MORPH flat writer is not the promoted Save:[KitMrp]
+ * behavior. The UI-visible KitMrp save must share normal Kit overwrite and
+ * directory rename semantics.
+ *
+ * Affiliates/clients: preset_saveKitMorph(), filesystem_requestSaveKitMorphDirectory().
+ */
+```
+
+### Nested InstrumentMrp Save UI
+
+Use the existing nested Instrument Save surface and `menu_instrumentLoadMorphMode`
+as the normal-vs-Mrp selector.
+
+Historical note: `LOAD_SAVE_FOLLOWUP.md` said Save mode should not expose
+InstrumentMrp. That was the correct gating rule before Morph Save semantics were
+implemented. This Phase 3 plan supersedes that gate by adding the explicit
+InstrumentMrp Save writer and request path first, then exposing the UI row.
+
+Current Save VOICE entry sets:
+
+```c
+menu_saveOptions.state = SAVE_STATE_EDIT_NAME1;
+editModeActive = 1u;
+menu_instrumentLoadMorphMode = 0u;
+```
+
+Change it to enter the type row first:
+
+```c
+menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+editModeActive = 1u;
+menu_instrumentLoadMorphMode = 0u;
+```
+
+Comment:
+
+```c
+/*
+ * Enter nested Instrument Save on the type/projection row.
+ *
+ * What: Starts Save-page VOICE mode with the source slot type selected and the
+ * Morph projection flag cleared.
+ *
+ * Why: InstrumentMrp Save is not a different destination file type; it is a
+ * normal root Instrument filename written through a Morph Save value view. The
+ * user needs one row to choose normal type vs TypeMrp before editing the stem.
+ *
+ * Affiliates/clients: menu_instrumentLoadCopyTypeLabel(),
+ * menu_instrumentSaveRequestSelection(), preset_saveInstrumentMorph().
+ */
+```
+
+In `menu_handleLoadSaveMenu()` save-mode branch:
+
+- when `editModeActive && state == SAVE_STATE_EDIT_TYPE && inc != 0`, toggle
+  `menu_instrumentLoadMorphMode` between 0 and 1;
+- when not edit mode, allow row movement from `SAVE_STATE_EDIT_TYPE` through
+  `SAVE_STATE_OK`;
+- name editing remains unchanged;
+- OK dispatch calls normal or Morph save based on the flag.
+
+Comment beside the type-row toggle:
+
+```c
+/*
+ * Toggle nested Instrument Save projection.
+ *
+ * What: Encoder movement on the Save type row switches between the resident
+ * source type label and its TypeMrp variant.
+ *
+ * Why: root Instrument and InstrumentMrp Save share the same edited filename
+ * and overwrite target. The row selects only which endpoint projection the
+ * writer uses.
+ *
+ * Inputs: menu_instrumentLoadMorphMode and encoder direction. Output: LCD type
+ * label changes through menu_instrumentLoadCopyTypeLabel().
+ *
+ * Affiliates/clients: menu_repaintLoadSavePage(),
+ * menu_instrumentSaveRequestSelection(), preset_saveInstrumentMorph().
+ */
+```
+
+Update `menu_instrumentSaveRequestSelection()`:
+
+```c
+uint8_t accepted = menu_instrumentLoadMorphMode
+    ? preset_saveInstrumentMorph(menu_instrumentLoadScene,
+                                 menu_instrumentLoadSlot,
+                                 menu_instrumentSaveName)
+    : preset_saveInstrument(menu_instrumentLoadScene,
+                            menu_instrumentLoadSlot,
+                            menu_instrumentSaveName);
+if (accepted)
+    menu_storageBusy = 1u;
+```
+
+Comment:
+
+```c
+/*
+ * Start normal or Morph root Instrument Save from nested Save mode.
+ *
+ * What: Dispatches the accepted source Scene/slot and edited stem to either
+ * the normal writer or InstrumentMrp writer.
+ *
+ * Why: the two saves share target filename construction and OW display, but
+ * only normal save updates retained source-name metadata after filesystem
+ * success.
+ *
+ * Affiliates/clients: preset_saveInstrument(), preset_saveInstrumentMorph(),
+ * filesystem_saveInstrument_tick().
+ */
+```
+
+Nested save repaint already uses `menu_instrumentLoadCopyTypeLabel()`, which
+appends `Mrp` when `menu_instrumentLoadMorphMode` is set. Keep that behavior.
+Ensure the top row brackets/cursor reflect `SAVE_STATE_EDIT_TYPE`; currently
+the nested Save repaint always brackets the type row.
+
+### Menu Completion
+
+Add the new completion ops to the existing save-complete group:
+
+```c
+case PRESET_OP_KIT_MORPH_SAVE:
+case PRESET_OP_INSTRUMENT_MORPH_SAVE:
+```
+
+Comment:
+
+```c
+/*
+ * Morph Save completion is UI-only.
+ *
+ * What: Clears busy/reset state for KitMrp and InstrumentMrp saves.
+ *
+ * Why: filesystem has written the exported object and updated browser caches,
+ * but resident SceneData and runtime DSP state are intentionally unchanged.
+ *
+ * Affiliates/clients: preset_saveKitMorph(), preset_saveInstrumentMorph(),
+ * no-retained-name-update acceptance tests.
+ */
+```
+
+### Legacy Morph Compatibility Boundary
+
+Do not remove these in Phase 3:
+
+- `FS_FILE_MORPH`;
+- `FS_INTERNAL_OP_LOAD_MORPH`;
+- `FS_INTERNAL_OP_SAVE_MORPH`;
+- `filesystem_loadKit_tick()`;
+- `filesystem_saveKit_tick()`;
+- `preset_loadDrumset(..., isMorph=1)`;
+- `preset_saveDrumset(..., isMorph=1)`;
+- `PRESET_OP_MORPH_LOAD`;
+- `PRESET_OP_MORPH_SAVE`.
+
+But do not route promoted `KitMrp` or `InstrumentMrp` UI operations through
+them.
+
+Add/update comments where the new APIs sit near legacy APIs:
+
+```c
+/*
+ * Legacy flat Morph files are compatibility-only.
+ *
+ * The promoted KitMrp and InstrumentMrp UI saves write the new text
+ * Kit/Instrument formats through explicit Morph Save APIs. FS_FILE_MORPH and
+ * FS_INTERNAL_OP_SAVE_MORPH remain compiled so old callers can still reach
+ * Pxxx.SND behavior until legacy preset support is deliberately removed.
+ */
+```
+
+### Phase 3 Verification Checklist
+
+Code checks:
+
+```text
+git diff --check
+make
+make img
+```
+
+Functional tests:
+
+- Load type cycle exposes `KitMrp` and still loads normal `Kit`.
+- KitMrp Load on same-type slots changes only morph endpoints.
+- KitMrp Load with mismatched source/destination slot type is no-change for
+  that slot.
+- Instrument nested Load exposes exactly one `TypeMrp` row after the destination
+  slot's current type.
+- InstrumentMrp Load changes only the selected slot's morph endpoints.
+- Save type cycle exposes `KitMrp`.
+- KitMrp Save to empty slot writes `Kit/NNN <name>/`, six member files, and
+  `kitset.kcg`.
+- KitMrp Save to occupied slot shows `OW`, renames the folder to the edited
+  case/name, and collapses same-casefold member duplicates.
+- Inspect one saved KitMrp member file:
+  - morphable `[params]` values equal current interpolation at that slot's
+    retained Morph amount;
+  - morphable `[morph]` values equal current normal endpoints;
+  - non-morphable routing/target keys appear only in `[params]`.
+- Inspect KitMrp `kitset.kcg` generated slot-6 track-7 values against the same
+  interpolation/normal rule.
+- Nested Save VOICE mode can choose normal type or `TypeMrp`.
+- InstrumentMrp Save shows `OW` for same-casefold root Instrument targets and
+  leaves one newly cased file after overwrite.
+- Normal Instrument Save still updates retained source name; InstrumentMrp Save
+  does not.
+- Normal Kit Save still updates retained Kit name; KitMrp Save does not.
+- Legacy flat Morph load/save still compiles and remains unreachable from the
+  promoted KitMrp UI.
+
+### Phase 3 Implementation Pass Notes
+
+Status: code implementation pass performed after Phase 2 rename/replace landed.
+
+Implemented storage projection:
+
+- `Core/Hardware/SD/storageTypes.h` now exposes normal-vs-Morph save view
+  structures for Instrument files and `kitset.kcg`.
+- `Core/Hardware/SD/storageTypes.c` now routes normal save call sites through
+  view wrappers, and Morph Save views project morphable `[params]` as the
+  current interpolation at the retained per-voice Morph amount while projecting
+  `[morph]` as the resident normal endpoint.
+- The generated slot-6/track-7 kitset endpoint pair follows the same Morph Save
+  rule as descriptor-backed Instrument parameters.
+
+Implemented filesystem operations:
+
+- `Core/Hardware/SD/filesystem.h/.c` now add explicit
+  `filesystem_requestSaveKitMorphDirectory()` and
+  `filesystem_requestSaveInstrumentMorph()` APIs.
+- Normal Kit Save and KitMrp Save share the Phase 2 LFN-aware directory
+  ensure/rename/replace flow; the internal operation selects only the storage
+  value projection and resident-name update behavior.
+- Normal Instrument Save and InstrumentMrp Save share the Phase 2
+  case-insensitive, case-preserving root Instrument overwrite flow; the internal
+  operation selects only the storage value projection and resident source-name
+  update behavior.
+- Scene Save call sites were updated to build explicit normal save views so the
+  shared formatter changes cannot accidentally apply Morph Save projection to
+  embedded Scene kit files.
+
+Implemented Preset/Menu promotion:
+
+- `Core/Scene/Preset/presetManager.h/.c` now expose and complete
+  `preset_saveKitMorph()` and `preset_saveInstrumentMorph()` as distinct
+  new-format save operations.
+- `Core/Menu/menu.c` now promotes `KitMrp` into the restored Load/Save type
+  cycle, gives it the same Kit-directory overwrite identity as normal Kit, and
+  posts `preset_saveKitMorph()` from Save OK.
+- Nested Instrument Save now starts on the projection/type row. Encoder edits
+  on that row toggle normal Instrument Save vs `TypeMrp`; the name rows and
+  case-insensitive `OW` check continue to use the resident source slot type and
+  edited filename stem.
+- Save completions for KitMrp and InstrumentMrp use the common storage-save
+  cleanup path because they do not mutate resident SceneData or DSP runtime.
+
+Verification notes from this pass:
+
+- Targeted grep review confirmed the new filesystem internal operations dispatch
+  to `filesystem_saveKitDirectory_tick()` and `filesystem_saveInstrument_tick()`.
+- Targeted grep review confirmed all `filesystem_instrument_write_ctx_t` and
+  `filesystem_kitset_write_ctx_t` construction sites now build explicit normal
+  or Morph save views.
+- `git diff --check -- Core/Hardware/SD/storageTypes.h Core/Hardware/SD/storageTypes.c Core/Hardware/SD/filesystem.h Core/Hardware/SD/filesystem.c Core/Scene/Preset/presetManager.h Core/Scene/Preset/presetManager.c Core/Menu/menu.c LOAD_SAVE_EXPANSION_ADD_MORPH.md`
+  passed after normalizing `presetManager.c/.h` working-tree line endings back
+  to LF.
+- `git ls-files --eol` reports LF working-tree line endings for every file
+  touched in this pass.
+- Local compile was not available in this workspace (`command -v make gcc clang
+  arm-none-eabi-gcc cmake ninja` returned no tools). Run the firmware build on
+  the normal toolchain before hardware smoke testing.
+
 ## Remaining Decisions
 
 Product semantics are settled for files, numbered blank folder names, retained
@@ -2936,9 +4284,6 @@ Still open:
 - **Blank root Instrument names:** decide whether standalone Instrument blank
   names should remain `inst.<ext>`, become blank-stem extension files, or be
   disallowed in UI.
-- **Morph Save implementation shape:** defer until Phase 3. Choose between a
-  temporary save-view copy and a storageTypes descriptor accessor/context flag
-  after normal save rename/replace helpers are proven.
 ## Build and Test Checklist
 
 For each implementation phase:

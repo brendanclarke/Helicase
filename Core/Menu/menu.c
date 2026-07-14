@@ -2073,7 +2073,17 @@ static void menu_seedCurrentSaveNameFromResident(void)
      */
     if (menu_activePage != SAVE_PAGE)
         return;
-    if (menu_saveOptions.what == SAVE_TYPE_KIT) {
+    if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+        /*
+         * Kit and KitMrp Save seed from the same resident Kit name.
+         *
+         * Inputs: active Scene's retained Kit display name. Output:
+         * preset_currentName becomes the editable eight-cell stem for either
+         * Save:[Kit] or Save:[KitMrp]. KitMrp changes only endpoint projection
+         * during serialization; it must not imply a separate resident object
+         * name or fall through to target-slot occupancy text.
+         */
         memcpy(preset_currentName,
                scene_kitDisplayName(scene_getActiveIndex()),
                8u);
@@ -2135,8 +2145,17 @@ static uint8_t menu_currentSaveWouldOverwrite(void)
         return filesystem_instrumentTargetExists(type,
                                                  menu_instrumentSaveName);
     }
-    if (menu_saveOptions.what == SAVE_TYPE_KIT) {
-        uint16_t slot = menu_currentPresetNr[SAVE_TYPE_KIT];
+    if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+        uint16_t slot = menu_currentPresetNr[menu_saveOptions.what];
+        /*
+         * Kit and KitMrp overwrite the same numbered Kit/ directory slots.
+         *
+         * Input: the visible target slot for the currently selected Save type.
+         * Output: nonzero when a Kit/NNN Name folder already exists. The save
+         * projection does not affect replacement identity: normal Kit Save and
+         * KitMrp Save both rename/replace the target Kit directory.
+         */
         return filesystem_kitSlotExists(slot);
     }
     if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
@@ -2151,14 +2170,15 @@ static uint8_t menu_loadSaveTypeIsRestored(uint8_t what)
     /*
      * Gate the promoted Load/Save type list in one place.
      *
-     * File and Dir remain as asyncfatfs diagnostics. Kit is the first musical
-     * operation restored on top of the new exact-case filesystem layer. Scene,
-     * Settings, Samples, and KitMrp stay compiled but unreachable until their
-     * own promotion passes are retested.
+     * File and Dir remain as asyncfatfs diagnostics. Kit and KitMrp are the
+     * currently promoted musical directory writers/readers. Scene, Settings,
+     * and Samples stay compiled but unreachable until their own promotion
+     * passes are retested.
      */
     return (uint8_t)(what == SAVE_TYPE_FILE ||
                      what == SAVE_TYPE_DIR ||
-                     what == SAVE_TYPE_KIT);
+                     what == SAVE_TYPE_KIT ||
+                     what == SAVE_TYPE_KIT_MORPH);
 }
 
 static uint8_t menu_nextRestoredLoadSaveType(uint8_t current, int8_t inc)
@@ -2166,7 +2186,8 @@ static uint8_t menu_nextRestoredLoadSaveType(uint8_t current, int8_t inc)
     static const uint8_t restored_types[] = {
         SAVE_TYPE_FILE,
         SAVE_TYPE_DIR,
-        SAVE_TYPE_KIT
+        SAVE_TYPE_KIT,
+        SAVE_TYPE_KIT_MORPH
     };
     uint8_t count = (uint8_t)(sizeof(restored_types) /
                               sizeof(restored_types[0]));
@@ -2600,19 +2621,71 @@ static void menu_instrumentSaveSeedName(void)
 
 static void menu_instrumentSaveRequestSelection(void)
 {
+    uint8_t accepted;
+
     /*
      * Start one root Instrument Save from nested Save mode.
      *
-     * Inputs are copied by Preset/filesystem at request acceptance time:
-     * source Scene, source voice slot, and the editable eight-character stem.
-     * Output is menu_storageBusy only when the async request was accepted, so
-     * failed validation leaves the menu interactive instead of getting stuck.
+     * Inputs are copied by Preset/filesystem at request acceptance time: source
+     * Scene, source voice slot, the Normal/Morph projection selector, and the
+     * editable eight-character stem. Output is menu_storageBusy only when the
+     * async request was accepted, so failed validation leaves the menu
+     * interactive instead of getting stuck.
+     *
+     * Affiliates: preset_saveInstrument() writes the normal endpoint image,
+     * while preset_saveInstrumentMorph() writes [params] as the current
+     * interpolated Morph endpoint and [morph] as the resident normal endpoint.
      */
-    if (preset_saveInstrument(menu_instrumentLoadScene,
-                              menu_instrumentLoadSlot,
-                              menu_instrumentSaveName)) {
+    accepted = menu_instrumentLoadMorphMode
+        ? preset_saveInstrumentMorph(menu_instrumentLoadScene,
+                                     menu_instrumentLoadSlot,
+                                     menu_instrumentSaveName)
+        : preset_saveInstrument(menu_instrumentLoadScene,
+                                menu_instrumentLoadSlot,
+                                menu_instrumentSaveName);
+    if (accepted) {
         menu_storageBusy = 1u;
     }
+}
+
+static uint8_t menu_instrumentSaveStepSelectionState(uint8_t state,
+                                                     int8_t inc)
+{
+    /*
+     * Move the nested Instrument Save selection cursor over visible fields.
+     *
+     * What: Skips SAVE_STATE_EDIT_PRESET_NR, which is a valid top-level
+     * Load/Save row but has no meaning in root Instrument Save.
+     *
+     * Why: Instrument Save has only three selectable regions: the top
+     * Normal/Mrp projection row, the eight filename characters, and OK/OW.
+     * Letting selection movement pass through the hidden preset-number state
+     * makes the type row feel unreachable and leaves the LCD without a cursor
+     * for one encoder detent.
+     *
+     * Inputs: current save state and signed encoder delta while edit mode is
+     * off. Output: the next visible Instrument Save state, clamped at both
+     * ends. Affiliates/clients: menu_handleLoadSaveMenu(),
+     * menu_repaintLoadSavePage(), menu_loadInstrumentVoicePressed().
+     */
+    if (inc < 0) {
+        if (state == SAVE_STATE_OK)
+            return SAVE_STATE_EDIT_NAME8;
+        if (state > SAVE_STATE_EDIT_NAME1 &&
+            state <= SAVE_STATE_EDIT_NAME8)
+            return (uint8_t)(state - 1u);
+        return SAVE_STATE_EDIT_TYPE;
+    }
+    if (inc > 0) {
+        if (state == SAVE_STATE_EDIT_TYPE)
+            return SAVE_STATE_EDIT_NAME1;
+        if (state >= SAVE_STATE_EDIT_NAME1 &&
+            state < SAVE_STATE_EDIT_NAME8)
+            return (uint8_t)(state + 1u);
+        if (state == SAVE_STATE_EDIT_NAME8)
+            return SAVE_STATE_OK;
+    }
+    return state;
 }
 
 uint8_t menu_loadInstrumentIsActive(void)
@@ -2644,6 +2717,7 @@ static void menu_refreshLoadSceneLeds(void)
     }
     if (menu_activePage == SAVE_PAGE &&
         menu_saveOptions.what != SAVE_TYPE_KIT &&
+        menu_saveOptions.what != SAVE_TYPE_KIT_MORPH &&
         menu_saveOptions.what != SAVE_TYPE_SCENE)
         return;
     if (menu_activePage == LOAD_PAGE &&
@@ -2688,6 +2762,7 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
     if (menu_activePage == SAVE_PAGE &&
         !menu_instrumentLoadActive &&
         menu_saveOptions.what != SAVE_TYPE_KIT &&
+        menu_saveOptions.what != SAVE_TYPE_KIT_MORPH &&
         menu_saveOptions.what != SAVE_TYPE_SCENE)
         return 0u;
     if (menu_activePage == LOAD_PAGE &&
@@ -2769,10 +2844,17 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadScene = scene_getActiveIndex();
     menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
     menu_saveOptions.what = SAVE_TYPE_KIT;
-    menu_saveOptions.state = menu_instrumentSaveMode
-        ? SAVE_STATE_EDIT_NAME1
-        : SAVE_STATE_EDIT_TYPE;
-    editModeActive = 1u;
+    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+    /*
+     * Nested Instrument Save starts with the top row selected, not editing.
+     *
+     * Inputs: the selected source VOICE button and current Save/Load page.
+     * Output: Save mode shows the selection cursor on `Save:[Type]` so the
+     * user can enter edit mode and scroll to `TypeMrp` before moving to the
+     * name/OK fields. Load mode preserves its existing immediate type-edit
+     * behavior for Instrument Load browsing.
+     */
+    editModeActive = menu_instrumentSaveMode ? 0u : 1u;
     slot = scene_instrumentSlotConst(menu_instrumentLoadScene, voiceNr);
     menu_instrumentLoadType = slot ? slot->type : INSTRUMENT_TYPE_DRM;
     if (!instrumentManager_typeSelectableForSceneSlot(
@@ -3363,16 +3445,33 @@ static void menu_repaintLoadSavePage(void)
              * Paint nested Instrument Save mode.
              *
              * Inputs: source Scene/voice, source type, editable stem, cursor
-             * state, and OK selection. Output: a compact Save:[Type] page that
-             * uses the normal eight-character encoder editor before writing a
-             * root Instrument/<stem.ext> file. The type row is informational:
-             * the saved extension comes from the resident source slot and is
-             * not user-swappable in this export workflow.
+             * state, Normal/Morph projection selector, and OK selection.
+             * Output: a compact Save:[Type] page that uses the normal
+             * eight-character encoder editor before writing a root
+             * Instrument/<stem.ext> file. The source instrument type remains
+             * fixed by the resident slot; the top row toggles only which
+             * endpoint projection the writer uses.
              */
             memcpy(&editDisplayBuffer[0][0], "Save:", 5u);
+            if (menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
+                /*
+                 * Render the editable Normal/Morph projection row.
+                 *
+                 * Inputs: editModeActive and menu_instrumentLoadMorphMode.
+                 * Output: brackets mean encoder movement toggles the save
+                 * projection; an arrow means the row is selected but not being
+                 * edited. The label itself is generated by the same helper used
+                 * by Instrument Load so "DrumMrp" and similar rows stay padded
+                 * and truncated identically.
+                 */
+                if (editModeActive) {
+                    editDisplayBuffer[0][5] = '[';
+                    editDisplayBuffer[0][14] = ']';
+                } else {
+                    editDisplayBuffer[0][5] = ARROW_SIGN;
+                }
+            }
             menu_instrumentLoadCopyTypeLabel(&editDisplayBuffer[0][6]);
-            editDisplayBuffer[0][5] = '[';
-            editDisplayBuffer[0][14] = ']';
             for (uint8_t i = 0u; i < MENU_INSTRUMENT_SAVE_NAME_LEN; i++) {
                 char c = menu_instrumentSaveName[i];
                 editDisplayBuffer[1][5u + i] = c ? c : ' ';
@@ -4001,8 +4100,9 @@ checkvalid:
 **
 ** Phase 2 kit-load affiliate: when the Load page is editing a kit slot, encoder
 ** movement calls menu_requestCurrentLoadSaveSelection(1), which posts a
-** Scene-mask-aware Kit directory request for Kit/NNN Name. The Save page keeps
-** only Kit, Settings, and Samples visible while new save writers are pending.
+** Scene-mask-aware Kit directory request for Kit/NNN Name. KitMrp is adjacent
+** to Kit in the promoted type cycle and reuses the same numbered Kit browser
+** while dispatching to the Morph Save/Load projection.
 ** ----------------------------------------------------------------------- */
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
@@ -4012,8 +4112,9 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
              * Encoder handling for nested Instrument Save.
              *
              * Inputs: Save-page encoder delta/click state after the global
-             * edit-mode toggle. Output: name characters wrap through printable
-             * ASCII while OK posts one root Instrument Save. This intentionally
+             * edit-mode toggle. Output: the top row toggles Normal vs Morph
+             * Save projection, name characters wrap through printable ASCII,
+             * and OK posts one root Instrument Save. This intentionally
              * bypasses pool browsing because Save exports the selected resident
              * source slot, not a file selected from Instrument/.
              */
@@ -4024,6 +4125,19 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             }
             if (editModeActive) {
                 if (inc != 0 &&
+                    menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
+                    /*
+                     * Toggle the nested Instrument Save projection.
+                     *
+                     * Inputs: any encoder delta while the top row is in edit
+                     * mode. Output: zero selects normal Instrument Save; one
+                     * selects InstrumentMrp. The resident source type is not
+                     * changed here, so filename extension and overwrite checks
+                     * remain tied to SceneData's current slot type.
+                     */
+                    menu_instrumentLoadMorphMode =
+                        (uint8_t)!menu_instrumentLoadMorphMode;
+                } else if (inc != 0 &&
                     menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
                     menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
                     uint8_t ci = (uint8_t)(menu_saveOptions.state -
@@ -4038,12 +4152,19 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         '\0';
                 }
             } else {
-                if (inc < 0) {
-                    if (menu_saveOptions.state > SAVE_STATE_EDIT_NAME1)
-                        menu_saveOptions.state--;
-                } else if (inc > 0) {
-                    if (menu_saveOptions.state < SAVE_STATE_OK)
-                        menu_saveOptions.state++;
+                if (inc != 0) {
+                    /*
+                     * Move across only the visible Instrument Save fields.
+                     *
+                     * Inputs: signed encoder delta while the nested Save page
+                     * is in selection mode. Output: the selection cursor can
+                     * land on the top projection row, each name character, and
+                     * OK/OW, but never on the hidden preset-number row used by
+                     * top-level Kit/Scene save.
+                     */
+                    menu_saveOptions.state =
+                        menu_instrumentSaveStepSelectionState(
+                            menu_saveOptions.state, inc);
                 }
             }
             return;
@@ -4119,6 +4240,21 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     if (preset_saveDrumset(menu_currentPresetNr[SAVE_TYPE_KIT], 0))
                         menu_storageBusy = 1u;
                     break;
+                case SAVE_TYPE_KIT_MORPH:
+                    /*
+                     * Save:[KitMrp] writes the active resident Kit with Morph
+                     * Save endpoint projection into the selected Kit/ slot.
+                     *
+                     * Inputs: the KitMrp cursor's numbered target. Output:
+                     * async filesystem work begins and Menu stays on the Save
+                     * surface until PRESET_OP_KIT_MORPH_SAVE completes. Normal
+                     * Kit and KitMrp intentionally use independent browser
+                     * cursors but the same root Kit directory namespace.
+                     */
+                    if (preset_saveKitMorph(
+                            menu_currentPresetNr[SAVE_TYPE_KIT_MORPH]))
+                        menu_storageBusy = 1u;
+                    break;
                 case SAVE_TYPE_SCENE:
                     preset_saveScene(menu_currentPresetNr[SAVE_TYPE_SCENE],
                                      menu_firstSelectedSceneFromMask(
@@ -4130,7 +4266,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 }
                 if (menu_saveOptions.what != SAVE_TYPE_FILE &&
                     menu_saveOptions.what != SAVE_TYPE_DIR &&
-                    menu_saveOptions.what != SAVE_TYPE_KIT)
+                    menu_saveOptions.what != SAVE_TYPE_KIT &&
+                    menu_saveOptions.what != SAVE_TYPE_KIT_MORPH)
                     menu_resetSaveParameters();
             } else {
                 switch (menu_saveOptions.what) {
@@ -4901,14 +5038,24 @@ void menu_pollPresetStatus(void)
     }
 
     case PRESET_OP_KIT_SAVE:
+    case PRESET_OP_KIT_MORPH_SAVE:
     case PRESET_OP_INSTRUMENT_SAVE:
+    case PRESET_OP_INSTRUMENT_MORPH_SAVE:
     case PRESET_OP_SCENE_SAVE:
     case PRESET_OP_MORPH_SAVE:
     case PRESET_OP_GLOBALS_SAVE:
     case PRESET_OP_PATTERN_SAVE:
     case PRESET_OP_ALL_SAVE:
     case PRESET_OP_PERFORMANCE_SAVE:
-        /* Save complete - reset save UI */
+        /*
+         * Save completion cleanup.
+         *
+         * Normal and Morph-projected Kit/Instrument saves mutate only storage,
+         * not resident SceneData or DSP runtime. They can therefore share the
+         * same busy-state and Save UI reset path as the existing save
+         * completions while preserving distinct operation enums for dispatch
+         * and future result messaging.
+         */
         menu_storageBusy = 0u;
         menu_resetSaveParameters();
         break;
@@ -5172,9 +5319,9 @@ void menu_resetSaveParameters(void)
     /*
      * Reset Load/Save cursor state without reopening stale menu entries.
      *
-     * File/Dir diagnostics and Kit are the currently promoted entries. Other
-     * enum values remain compiled but gated, so a completion from a legacy
-     * helper cannot leave the panel parked on an unvalidated save path.
+     * File/Dir diagnostics plus Kit/KitMrp are the currently promoted entries.
+     * Other enum values remain compiled but gated, so a completion from a
+     * legacy helper cannot leave the panel parked on an unvalidated save path.
      */
     if (!menu_loadSaveTypeIsRestored(menu_saveOptions.what))
         menu_saveOptions.what = SAVE_TYPE_FILE;
