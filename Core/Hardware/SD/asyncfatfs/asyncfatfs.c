@@ -209,6 +209,7 @@ typedef struct afatfsCreateFile_t {
 
     uint8_t phase;
     uint8_t filename[FAT_FILENAME_LENGTH];
+    uint8_t shortNameCaseFlags;
     /*
      * Optional long-name creation state.
      *
@@ -221,11 +222,17 @@ typedef struct afatfsCreateFile_t {
      * opens without learning raw FAT internals. freeRunStart/freeRunLength are
      * populated while scanning the current directory for a sector-local run
      * large enough to hold LFN entries plus the final SFN entry.
+     *
+     * shortNameCaseFlags describes filename[]: the raw 8.3 key remains
+     * uppercase for FAT lookup, while these ntReserved bits preserve
+     * all-lowercase display names such as kitset.kcg and slakd1.drm without
+     * changing case-insensitive open behavior.
      */
     uint8_t longNameEnabled;
     uint8_t lfnEntryCount;
     uint8_t freeRunLength;
     uint8_t scanLongNameValid;
+    uint8_t scanLongNameChecksum;
     uint16_t aliasOrdinal;
     char longName[AFATFS_LONG_FILENAME_MAX + 1u];
     char scanLongName[AFATFS_LONG_FILENAME_MAX + 1u];
@@ -812,7 +819,15 @@ static int afatfs_allocateCacheSector(uint32_t sectorIndex)
 }
 
 /**
- * Attempt to flush dirty cache pages out to the sdcard, returning true if all flushable data has been flushed.
+ * Attempt to flush dirty cache pages out to the sdcard.
+ *
+ * The return value is intentionally stricter than "no dirty sectors were found
+ * this pass": it remains false while a previously-started sector write is still
+ * waiting for sdcard_poll() to deliver afatfs_sdcardWriteComplete(). Filesystem
+ * save completion uses this as the last persistence boundary before it tells
+ * Menu/Preset that a save is done; without the in-flight check, the UI can
+ * return to normal while the directory entry or FAT sector that names a new Kit
+ * folder is still only in transit.
  */
 bool afatfs_flush()
 {
@@ -838,7 +853,13 @@ bool afatfs_flush()
         }
     }
 
-    return true;
+    /*
+     * cacheDirtyEntries is decremented when the write is queued, not when the
+     * card reports completion. Keep reporting "not flushed" across that gap so
+     * callers that care about removable-media visibility can wait until the
+     * write callback has either synced the sector or re-marked it dirty.
+     */
+    return (bool)!afatfs.cacheFlushInProgress;
 }
 
 /**
@@ -1475,6 +1496,12 @@ static afatfsOperationStatus_e afatfs_saveDirectoryEntry(afatfsFilePtr_t file, a
                 entry->fileSize = 0;
             }
 
+            /*
+             * FAT32 stores the first cluster split across high/low 16-bit
+             * fields. This assignment is what turns a visible directory entry
+             * into an enterable directory after appendRegularFreeClusterContinue()
+             * chooses a cluster for a newly-created subdirectory.
+             */
             entry->firstClusterHigh = file->firstCluster >> 16;
             entry->firstClusterLow = file->firstCluster & 0xFFFF;
         } else {
@@ -1512,7 +1539,16 @@ static afatfsOperationStatus_e afatfs_appendRegularFreeClusterContinue(afatfsFil
                 case AFATFS_FIND_CLUSTER_FOUND:
                     afatfs.lastClusterAllocated = opState->searchCluster;
 
-                    // Make the cluster available for us to write in
+                    /*
+                     * Assign the new cluster to the active cursor before the
+                     * FAT and directory entry are fully committed. Directory
+                     * initialization relies on this exactly like fwrite(): the
+                     * following zero-fill phase needs a physical sector to
+                     * write. When previousCluster is zero this is also the
+                     * first cluster of the file/directory, so
+                     * saveDirectoryEntry() must publish it in firstClusterHigh
+                     * and firstClusterLow before mkdir reports success.
+                     */
                     file->cursorCluster = opState->searchCluster;
                     file->physicalSize += afatfs_clusterSize();
 
@@ -2227,9 +2263,25 @@ static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *d
                     return status;
                 }
 
+                /*
+                 * Zero every sector in the newly-appended cluster. FAT
+                 * directory scans stop at empty entries, so clearing the whole
+                 * cluster prevents stale card data from looking like child
+                 * files. sectorInCluster is compared against
+                 * sectorsPerCluster - 1 because both values are zero-based
+                 * within the new cluster.
+                 */
                 memset(sectorBuffer, 0, AFATFS_SECTOR_SIZE);
 
-                // If this is the first sector of a non-root directory, create the "." and ".." entries
+                /*
+                 * The first sector of a non-root subdirectory must start with
+                 * "." and "..". directory->firstCluster points "." back at
+                 * this directory; parentDirectory supplied by mkdir/create
+                 * points ".." back at the directory that contained the
+                 * newly-created entry. Later directory extensions pass
+                 * parentDirectory == NULL and skip this block because
+                 * cursorOffset is no longer zero.
+                 */
                 if (directory->directoryEntryPos.sectorNumberPhysical != 0 && directory->cursorOffset == 0) {
                     fatDirectoryEntry_t *dirEntries = (fatDirectoryEntry_t *) sectorBuffer;
 
@@ -2351,6 +2403,19 @@ static afatfsOperationStatus_e afatfs_allocateDirectoryEntry(afatfsFilePtr_t dir
                 return AFATFS_OPERATION_SUCCESS;
             }
         } else {
+            /*
+             * This allocator may extend an already-initialized current
+             * directory, but it must not create the first cluster of a
+             * subdirectory. The first cluster needs a real parentDirectory so
+             * ".." can be written correctly; only mkdir/create still has that
+             * parent available before chdir() copies the child into
+             * currentDirectory.
+             */
+            if (directory->type == AFATFS_FILE_TYPE_DIRECTORY &&
+                directory->directoryEntryPos.sectorNumberPhysical != 0 &&
+                directory->firstCluster == 0) {
+                return AFATFS_OPERATION_FAILURE;
+            }
             // Need to extend directory size by adding a cluster
             result = afatfs_extendSubdirectory(directory, NULL, NULL);
 
@@ -2636,13 +2701,14 @@ static char afatfs_sfnChar(char c)
     /*
      * Convert one display-name byte into a legal SFN alias byte.
      *
-     * Spaces and punctuation are skipped by the alias builder. This function
-     * only returns characters that can safely appear in the generated 8.3
-     * alias before fat_convertFilenameToFATStyle() copies it to the raw entry.
+     * Spaces and punctuation are skipped by the alias builder. Alphabetic case
+     * is preserved in the printable alias so fat_calculateFilenameCaseFlags()
+     * can later decide whether the on-card SFN should display as lowercase.
+     * fat_convertFilenameToFATStyle() still uppercases the raw FAT key.
      */
-    if (c >= 'a' && c <= 'z')
-        return (char)(c - ('a' - 'A'));
-    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+    if ((c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9'))
         return c;
     if (c == '_')
         return c;
@@ -2650,17 +2716,19 @@ static char afatfs_sfnChar(char c)
 }
 
 static void afatfs_copyShortAliasText(
-    const uint8_t fatFilename[FAT_FILENAME_LENGTH],
-    char out[AFATFS_SHORT_FILENAME_MAX])
+        const uint8_t fatFilename[FAT_FILENAME_LENGTH],
+        uint8_t ntReserved,
+        char out[AFATFS_SHORT_FILENAME_MAX])
 {
     /*
-     * Convert the selected raw SFN alias back to printable 8.3 text.
+     * Return the printable alias exactly as FAT readers should display it.
      *
-     * Callers cache this returned open name and pass it to ordinary
-     * afatfs_fopen(); keeping the conversion here prevents higher layers from
-     * depending on the raw 11-byte FAT layout.
+     * The raw SFN is uppercase, but ntReserved may mark the base and/or
+     * extension as lowercase. Callers store this string in kitset.kcg and later
+     * pass it back to afatfs_fopen(), whose lookup remains case-insensitive.
      */
     fat_convertFATStyleToFilename((const char *)fatFilename, out);
+    fat_applyFilenameCaseFlags(out, ntReserved);
 }
 
 static uint8_t afatfs_copySanitizedLongName(char *dst, const char *src)
@@ -2772,9 +2840,19 @@ static bool afatfs_generateShortAlias(afatfsCreateFile_t *opState)
     }
     alias[aliasLen] = '\0';
 
+    /*
+     * The generated SFN alias is still the physical lookup key for an LFN
+     * object. Store lowercase-display flags for that alias too, so kitset.kcg
+     * can receive the same case-preserved open name that host tools display for
+     * the final SFN entry. The LFN entry remains the authoritative mixed-case
+     * display name.
+     */
+    opState->shortNameCaseFlags = fat_calculateFilenameCaseFlags(alias);
     fat_convertFilenameToFATStyle(alias, opState->filename);
     if (opState->openNameOut)
-        afatfs_copyShortAliasText(opState->filename, opState->openNameOut);
+        afatfs_copyShortAliasText(opState->filename,
+                                  opState->shortNameCaseFlags,
+                                  opState->openNameOut);
     return true;
 }
 
@@ -2787,9 +2865,15 @@ static void afatfs_lfnScanReset(afatfsCreateFile_t *opState)
      * decides whether to open, collide, or create. This scanner mirrors the
      * higher-level directory browsers so a matching SFN alias is only reused
      * when the preceding LFN chain matches the requested display name.
+     * scanLongNameChecksum stores the VFAT checksum from the accumulated LFN
+     * fragments. Display-name matching may open an object whose SFN alias
+     * differs from our generated candidate, so the following SFN entry must
+     * prove it owns the accumulated LFN chain before strcmp(scanLongName,
+     * longName) is trusted.
      */
     memset(opState->scanLongName, 0, sizeof(opState->scanLongName));
     opState->scanLongNameValid = 0u;
+    opState->scanLongNameChecksum = 0u;
 }
 
 static void afatfs_lfnScanAppend(afatfsCreateFile_t *opState,
@@ -2809,6 +2893,12 @@ static void afatfs_lfnScanAppend(afatfsCreateFile_t *opState,
      * Only the low ASCII subset is supported for firmware-created names today.
      * Non-ASCII entries are treated as mismatches, which prevents overwriting a
      * host-created file whose alias happens to collide with our generated SFN.
+     * VFAT stores the last text fragment first and identifies it with bit 0x40.
+     * The low five bits are a one-based ordinal, so (seq - 1) * 13 maps each
+     * fragment back to its absolute character offset in the reconstructed
+     * display component. Every fragment also carries the checksum of the
+     * following SFN entry; keep only chains with a consistent checksum so the
+     * normal-entry branch can prove the display name belongs to that SFN.
      */
     if (seq == 0u || seq > ((AFATFS_LONG_FILENAME_MAX + 12u) / 13u)) {
         afatfs_lfnScanReset(opState);
@@ -2817,7 +2907,11 @@ static void afatfs_lfnScanAppend(afatfsCreateFile_t *opState,
     if (raw[0] & 0x40u) {
         memset(opState->scanLongName, 0, sizeof(opState->scanLongName));
         opState->scanLongNameValid = 1u;
+        opState->scanLongNameChecksum = raw[13];
     } else if (!opState->scanLongNameValid) {
+        return;
+    } else if (opState->scanLongNameChecksum != raw[13]) {
+        afatfs_lfnScanReset(opState);
         return;
     }
 
@@ -2835,22 +2929,6 @@ static void afatfs_lfnScanAppend(afatfsCreateFile_t *opState,
         }
         opState->scanLongName[pos] = (char)ch;
     }
-}
-
-static bool afatfs_existingEntryMatchesRequest(afatfsCreateFile_t *opState)
-{
-    /*
-     * Decide whether a matching SFN alias is the requested long name.
-     *
-     * Short-name creates retain old behavior. Long-name creates only reuse an
-     * existing alias if the preceding LFN chain matches the requested display
-     * component. Otherwise the alias is treated as a collision and the caller
-     * generates a "~N" candidate.
-     */
-    if (!opState->longNameEnabled)
-        return true;
-    return opState->scanLongNameValid &&
-           strcmp(opState->scanLongName, opState->longName) == 0;
 }
 
 static void afatfs_noteFreeDirectoryEntry(afatfsCreateFile_t *opState,
@@ -2975,6 +3053,12 @@ static afatfsOperationStatus_e afatfs_createLongDirectoryEntries(
     memset(&entries[sfnIndex], 0, sizeof(entries[sfnIndex]));
     memcpy(entries[sfnIndex].filename, opState->filename, FAT_FILENAME_LENGTH);
     entries[sfnIndex].attrib = file->attrib;
+    /*
+     * The LFN fragments preserve the full display name. The final SFN entry
+     * still needs coherent ntReserved case bits because higher layers cache and
+     * write the returned alias into files such as kitset.kcg.
+     */
+    entries[sfnIndex].ntReserved = opState->shortNameCaseFlags;
     entries[sfnIndex].creationDate = AFATFS_DEFAULT_FILE_DATE;
     entries[sfnIndex].creationTime = AFATFS_DEFAULT_FILE_TIME;
     entries[sfnIndex].lastWriteDate = AFATFS_DEFAULT_FILE_DATE;
@@ -2985,6 +3069,31 @@ static afatfsOperationStatus_e afatfs_createLongDirectoryEntries(
     file->directoryEntryPos.entryIndex =
         (int16_t)(file->directoryEntryPos.entryIndex + opState->lfnEntryCount);
     return AFATFS_OPERATION_SUCCESS;
+}
+
+static void afatfs_handoffCreatedDirectoryToInitializer(
+    afatfsFile_t *file,
+    afatfsFileCallback_t callback)
+{
+    /*
+     * Newly-created directories cannot complete through the ordinary
+     * empty-file success path.
+     *
+     * CREATE_FILE is still active when the parent directory entry has just
+     * been written, so afatfs_extendSubdirectory() would reject the handle as
+     * busy and its operation union would overwrite createFile state. The
+     * handoff is deliberate: preserve the original callback, clear
+     * CREATE_FILE, then let EXTEND_SUBDIRECTORY own the handle until it has
+     * allocated the first cluster and initialized "." / "..".
+     *
+     * Inputs: file is the newly-created directory entry; callback is the
+     * original afatfs_mkdir()/afatfs_mkdir_lfn() completion. Output: callback
+     * is invoked by EXTEND_SUBDIRECTORY with file or NULL. Affiliates:
+     * afatfs_createFileContinue(), afatfs_extendSubdirectory(),
+     * afatfs_appendRegularFreeClusterContinue(), afatfs_saveDirectoryEntry().
+     */
+    file->operation.operation = AFATFS_FILE_OPERATION_NONE;
+    (void)afatfs_extendSubdirectory(file, &afatfs.currentDirectory, callback);
 }
 
 static void afatfs_createFileContinue(afatfsFile_t *file)
@@ -3076,15 +3185,66 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                 afatfs_lfnScanAppend(opState, entry);
                             else
                                 afatfs_lfnScanReset(opState);
-                        } else if (strncmp(entry->filename, (char*) opState->filename, FAT_FILENAME_LENGTH) == 0) {
-                            if (afatfs_existingEntryMatchesRequest(opState)) {
+                        } else if (opState->longNameEnabled) {
+                            uint8_t displayMatches = 0u;
+
+                            /*
+                             * For LFN requests, identity is the completed
+                             * display component, not the first generated SFN
+                             * alias candidate. Host tools or earlier firmware
+                             * may have assigned a different alias to the same
+                             * visible name. If the preceding LFN chain is
+                             * checksum-valid for this SFN entry and the
+                             * display text matches, open that entry and return
+                             * its actual alias to the caller.
+                             */
+                            if (opState->scanLongNameValid &&
+                                opState->scanLongNameChecksum ==
+                                    afatfs_lfnChecksum((const uint8_t *)entry->filename) &&
+                                strcmp(opState->scanLongName,
+                                       opState->longName) == 0) {
+                                displayMatches = 1u;
+                            }
+                            if (displayMatches) {
+                                uint8_t requestedDirectory =
+                                    (file->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) != 0u;
+                                uint8_t existingDirectory =
+                                    (entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) != 0u;
+
+                                /*
+                                 * Do not resolve a same-display-name file as a
+                                 * directory or a directory as a file. FAT
+                                 * permits both attributes in raw entries, but
+                                 * this component API is typed by its caller:
+                                 * mkdir_lfn() requests directories and
+                                 * fopen_lfn() requests archive files. A type
+                                 * mismatch is a real collision, not an
+                                 * invitation to make another visible duplicate.
+                                 */
+                                if (requestedDirectory != existingDirectory) {
+                                    afatfs_findLast(&afatfs.currentDirectory);
+                                    opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                                    goto doMore;
+                                }
                                 // We found a file with this name!
                                 afatfs_fileLoadDirectoryEntry(file, entry);
+                                if (opState->openNameOut)
+                                    afatfs_copyShortAliasText(
+                                        (const uint8_t *)entry->filename,
+                                        entry->ntReserved,
+                                        opState->openNameOut);
 
                                 afatfs_findLast(&afatfs.currentDirectory);
 
                                 opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
                                 goto doMore;
+                            }
+                            if (strncmp(entry->filename,
+                                        (char*) opState->filename,
+                                        FAT_FILENAME_LENGTH) != 0) {
+                                opState->freeRunLength = 0u;
+                                afatfs_lfnScanReset(opState);
+                                break;
                             }
                             /*
                              * The SFN alias collided with another LFN entry.
@@ -3103,6 +3263,30 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                             opState->freeRunLength = 0u;
                             afatfs_lfnScanReset(opState);
                             break;
+                        } else if (strncmp(entry->filename, (char*) opState->filename, FAT_FILENAME_LENGTH) == 0) {
+                            /*
+                             * Existing short-name files opened for write should
+                             * also pick up the caller's display-case metadata.
+                             * This lets a save over an older KITSET.KCG entry
+                             * refresh ntReserved so host tools display
+                             * kitset.kcg after the file is truncated/rewritten.
+                             * Read-only opens leave metadata untouched.
+                             */
+                            if ((file->mode & (AFATFS_FILE_MODE_WRITE |
+                                               AFATFS_FILE_MODE_APPEND)) != 0u) {
+                                entry->ntReserved =
+                                    opState->shortNameCaseFlags;
+                                afatfs_cacheSectorMarkDirty(
+                                    afatfs_getCacheDescriptorForBuffer(
+                                        (uint8_t*)entry));
+                            }
+                            // We found a short-name file with this name!
+                            afatfs_fileLoadDirectoryEntry(file, entry);
+
+                            afatfs_findLast(&afatfs.currentDirectory);
+
+                            opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
+                            goto doMore;
                         } else {
                             opState->freeRunLength = 0u;
                             afatfs_lfnScanReset(opState);
@@ -3126,6 +3310,13 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
 
                 memcpy(entry->filename, opState->filename, FAT_FILENAME_LENGTH);
                 entry->attrib = file->attrib;
+                /*
+                 * Preserve the caller's 8.3 display case in ntReserved while
+                 * keeping filename[] as the uppercase FAT lookup key. This is
+                 * what makes newly-created lowercase system files show as
+                 * kitset.kcg instead of KITSET.KCG.
+                 */
+                entry->ntReserved = opState->shortNameCaseFlags;
                 entry->creationDate = AFATFS_DEFAULT_FILE_DATE;
                 entry->creationTime = AFATFS_DEFAULT_FILE_TIME;
                 entry->lastWriteDate = AFATFS_DEFAULT_FILE_DATE;
@@ -3135,6 +3326,20 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                 fprintf(stderr, "Adding directory entry for %.*s to sector %u\n", FAT_FILENAME_LENGTH, opState->filename, file->directoryEntryPos.sectorNumberPhysical);
 #endif
 
+                /*
+                 * A just-created directory entry still has firstCluster == 0.
+                 * Regular files can remain in that state until fwrite(), but
+                 * directories must be initialized before the mkdir callback
+                 * because callers immediately chdir() and create children.
+                 * callback is copied before the handoff because switching the
+                 * file operation to EXTEND_SUBDIRECTORY overwrites the
+                 * createFile union storage.
+                 */
+                if (file->type == AFATFS_FILE_TYPE_DIRECTORY) {
+                    afatfsFileCallback_t callback = opState->callback;
+                    afatfs_handoffCreatedDirectoryToInitializer(file, callback);
+                    return;
+                }
                 opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
                 goto doMore;
             } else if (status == AFATFS_OPERATION_FAILURE) {
@@ -3149,6 +3354,19 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
 #ifdef AFATFS_DEBUG_VERBOSE
                 fprintf(stderr, "Adding LFN directory entry for %s as %.*s to sector %u\n", opState->longName, FAT_FILENAME_LENGTH, opState->filename, file->directoryEntryPos.sectorNumberPhysical);
 #endif
+                /*
+                 * LFN directory creation writes the visible VFAT fragments and
+                 * final SFN entry first, then uses the same
+                 * directory-initialization handoff as short mkdir(). The LFN
+                 * entries are only names; the child directory is not usable
+                 * until its first cluster is allocated and recorded in the SFN
+                 * entry.
+                 */
+                if (file->type == AFATFS_FILE_TYPE_DIRECTORY) {
+                    afatfsFileCallback_t callback = opState->callback;
+                    afatfs_handoffCreatedDirectoryToInitializer(file, callback);
+                    return;
+                }
                 opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
                 goto doMore;
             } else if (status == AFATFS_OPERATION_FAILURE) {
@@ -3332,9 +3550,10 @@ static afatfsFilePtr_t afatfs_createFileInternal(
          *
          * Legacy callers pass createLongName=false and retain the exact old
          * behavior: one input component is converted directly to an uppercase
-         * 8.3 FAT name. LFN callers keep a sanitized display component in
-         * opState->longName and generate an SFN alias candidate that the scan
-         * can collision-test and return through openNameOut.
+         * 8.3 FAT name while retaining FAT display-case bits. LFN callers keep
+         * a sanitized display component in opState->longName and generate an
+         * SFN alias candidate that the scan can collision-test and return
+         * through openNameOut.
          */
         if (createLongName) {
             longNameLength = afatfs_copySanitizedLongName(opState->longName,
@@ -3359,6 +3578,15 @@ static afatfsFilePtr_t afatfs_createFileInternal(
                 return file;
             }
         } else {
+            /*
+             * Preserve display case for ordinary 8.3 callers before converting
+             * the raw FAT key to uppercase. This is what lets system files
+             * created through afatfs_fopen appear as kitset.kcg,
+             * sceneset.scg, pattern.pat, effects.fx, and glo.cfg while keeping
+             * existing case-insensitive open behavior.
+             */
+            opState->shortNameCaseFlags =
+                fat_calculateFilenameCaseFlags(name);
             fat_convertFilenameToFATStyle(name, opState->filename);
         }
         file->attrib = attrib;

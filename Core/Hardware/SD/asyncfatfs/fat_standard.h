@@ -30,6 +30,18 @@
 #define FAT_FILENAME_LENGTH 11
 #define FAT_DELETED_FILE_MARKER 0xE5
 
+/*
+ * FAT short-name case preservation bits.
+ *
+ * Raw 8.3 names are stored uppercase in directoryEntry.filename. These bits in
+ * directoryEntry.ntReserved tell FAT-aware readers to display the base and/or
+ * extension as lowercase. They do not make FAT lookups case-sensitive and they
+ * cannot represent mixed-case text; exact mixed-case display must use VFAT LFN
+ * entries.
+ */
+#define FAT_NTRES_LOWERCASE_BASE 0x08u
+#define FAT_NTRES_LOWERCASE_EXT  0x10u
+
 #define FAT_MAKE_DATE(year, month, day)     (day | (month << 5) | ((year - 1980) << 9))
 #define FAT_MAKE_TIME(hour, minute, second) ((second / 2) | (minute << 5) | (hour << 11))
 
@@ -120,5 +132,7 @@ bool fat_isFreeSpace(uint32_t clusterNumber);
 bool fat_isDirectoryEntryTerminator(fatDirectoryEntry_t *entry);
 bool fat_isDirectoryEntryEmpty(fatDirectoryEntry_t *entry);
 
+uint8_t fat_calculateFilenameCaseFlags(const char *filename);
+void fat_applyFilenameCaseFlags(char *filename, uint8_t ntReserved);
 void fat_convertFilenameToFATStyle(const char *filename, uint8_t *fatFilename);
 void fat_convertFATStyleToFilename(const char *fatFilename, char *filename);

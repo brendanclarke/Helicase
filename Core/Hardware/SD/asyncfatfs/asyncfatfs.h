@@ -71,6 +71,17 @@ uint32_t afatfs_fread(afatfsFilePtr_t file, uint8_t *buffer, uint32_t len);
 afatfsOperationStatus_e afatfs_fseek(afatfsFilePtr_t file, int32_t offset, afatfsSeek_e whence);
 bool afatfs_ftell(afatfsFilePtr_t file, uint32_t *position);
 
+/*
+ * Directory create/open contract.
+ *
+ * The callback receives either NULL or a directory handle that is immediately
+ * safe to pass to afatfs_chdir(). For newly-created subdirectories that means
+ * asyncfatfs has already allocated the first cluster, written the firstCluster
+ * fields back into the parent SFN entry, zero-filled the cluster, and created
+ * "." / ".." entries. Regular files may still allocate their first cluster
+ * lazily on first fwrite(); directories may not because callers create children
+ * through currentDirectory immediately after chdir().
+ */
 bool afatfs_mkdir(const char *filename, afatfsFileCallback_t complete);
 bool afatfs_mkdir_lfn(const char *displayName,
                       char openNameOut[AFATFS_SHORT_FILENAME_MAX],
@@ -81,6 +92,14 @@ void afatfs_findFirst(afatfsFilePtr_t directory, afatfsFinder_t *finder);
 afatfsOperationStatus_e afatfs_findNext(afatfsFilePtr_t directory, afatfsFinder_t *finder, fatDirectoryEntry_t **dirEntry);
 void afatfs_findLast(afatfsFilePtr_t directory);
 
+/*
+ * Drain dirty cache sectors to the SD card.
+ *
+ * Return value: true only when there are no dirty cache entries and no sector
+ * write callback is still pending. Save completion code depends on this stricter
+ * boundary so UI-visible "done" cannot outrun the final FAT/directory sectors
+ * that make a newly-created folder visible to a desktop reader after power-off.
+ */
 bool afatfs_flush();
 void afatfs_init();
 bool afatfs_destroy(bool dirty);

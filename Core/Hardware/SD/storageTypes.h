@@ -34,6 +34,10 @@
  * browser exposes. STORAGE_KIT_FILENAME_MAX is 8.3 plus NUL because asyncfatfs
  * opens short names. STORAGE_KIT_DISPLAY_NAME_LEN mirrors the existing LCD and
  * preset name buffers, which are exactly eight printable characters.
+ *
+ * System file literals are written in their intended display case. asyncfatfs
+ * preserves all-lowercase 8.3 names through FAT ntReserved case bits, so callers
+ * should not uppercase these constants to match raw SFN storage.
  */
 #define STORAGE_ROOT_KIT              "Kit"
 #define STORAGE_ROOT_SCENE            "Scene"

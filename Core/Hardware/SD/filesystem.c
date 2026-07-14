@@ -91,6 +91,7 @@
 ** ----------------------------------------------------------------------- */
 typedef enum {
     FS_INTERNAL_OP_NONE,
+    FS_INTERNAL_OP_FLUSH_FINISH,
     FS_INTERNAL_OP_LOAD_KIT,
     FS_INTERNAL_OP_LOAD_KIT_MORPH,
     FS_INTERNAL_OP_LOAD_SCENE,
@@ -140,6 +141,17 @@ static const fs_file_desc_t fs_file_descs[] = {
 static fs_internal_op_t current_op   = FS_INTERNAL_OP_NONE;
 static fs_status_t      status       = FS_STATUS_IDLE;
 static uint8_t          op_phase     = 0;
+/*
+ * Deferred completion status used by FS_INTERNAL_OP_FLUSH_FINISH.
+ *
+ * Successful operations now finish in two steps: the individual state machine
+ * closes its files, then the filesystem facade keeps status BUSY while
+ * asyncfatfs drains dirty FAT, directory, and data sectors to the SD card. This
+ * retained status is the value reported to Preset/Menu only after afatfs_flush()
+ * confirms that no dirty or in-flight write remains. The affiliate boundary is
+ * filesystem_finish(), filesystem_flushFinish_tick(), and completion_callback.
+ */
+static fs_status_t      op_flush_final_status = FS_STATUS_DONE;
 /*
  * Current numbered operation slot.
  *
@@ -234,6 +246,14 @@ static char op_save_instrument_file[STORAGE_KIT_SLOT_COUNT]
                                     [STORAGE_KIT_FILENAME_MAX];
 static char op_save_instrument_display_file[STORAGE_KIT_SLOT_COUNT]
                                            [AFATFS_LONG_FILENAME_MAX + 1u];
+/*
+ * Tracks whether the current root Kit/Scene save entered an existing numbered
+ * directory by scan-cache alias or created a new directory by LFN display name.
+ * Existing-directory saves overwrite authoritative child files but do not
+ * rename the folder; cache updates must therefore preserve the scanned display
+ * name instead of pretending preset_currentName changed on-card metadata.
+ */
+static uint8_t op_save_opened_existing_dir = 0u;
 static char op_write_line_buf[FS_TEXT_LINE_MAX];
 static uint16_t op_write_line_len = 0u;
 static uint16_t op_write_line_offset = 0u;
@@ -352,14 +372,6 @@ extern uint8_t parameters2[END_OF_SOUND_PARAMETERS];
  */
 extern uint16_t kb_map[];
 extern uint16_t kb_numKits;
-
-/* Apply FAT NT lowercase flags to a short 8.3 filename.
- *
- * Input: mutable NUL-terminated short filename plus ntReserved flags from the
- * FAT directory entry. Output: filename edited in place. Clients: sample scan
- * and Kit/ scan code after fat_convertFATStyleToFilename().
- */
-static void filesystem_applyFatShortNameCase(char *filename, uint8_t ntReserved);
 
 /* -----------------------------------------------------------------------
 ** fopen callback - asyncfatfs fires this when file open completes
@@ -893,7 +905,7 @@ static uint32_t filesystem_readStreamChunk(uint8_t *buf, uint8_t len)
     return n;
 }
 
-static void filesystem_finish(fs_status_t final_status)
+static void filesystem_complete(fs_status_t final_status)
 {
     status = final_status;
     current_op = FS_INTERNAL_OP_NONE;
@@ -902,6 +914,49 @@ static void filesystem_finish(fs_status_t final_status)
         completion_callback = NULL;
         cb();
     }
+}
+
+static void filesystem_finish(fs_status_t final_status)
+{
+    if (final_status == FS_STATUS_DONE) {
+        /*
+         * Do not publish a successful filesystem operation until asyncfatfs has
+         * persisted every dirty sector the operation left behind.
+         *
+         * Inputs: final_status is the state-machine result after all files have
+         * been closed. Output: status remains FS_STATUS_BUSY and the normal
+         * completion callback is deferred. This prevents the Save UI from
+         * resetting before the directory entry, FAT allocation, and short/long
+         * name sectors for a new Kit folder are visible on a freshly-mounted SD
+         * card. Error exits keep their historical immediate callback path
+         * because some failures may leave an open handle or locked cache sector
+         * that cannot be safely drained here.
+         */
+        op_flush_final_status = final_status;
+        current_op = FS_INTERNAL_OP_FLUSH_FINISH;
+        op_phase = 0u;
+        return;
+    }
+
+    filesystem_complete(final_status);
+}
+
+static void filesystem_flushFinish_tick(void)
+{
+    /*
+     * Final save/load persistence gate.
+     *
+     * filesystem_tick() has already called afatfs_poll() for this foreground
+     * pass. Calling afatfs_flush() here either starts/continues one bounded
+     * cache write or confirms that no dirty sector and no in-flight sector
+     * write remains. Only then is completion_callback invoked, so Preset/Menu
+     * cannot display save completion while the removable card still lacks the
+     * sectors that make the saved object discoverable.
+     */
+    if (!afatfs_flush())
+        return;
+
+    filesystem_complete(op_flush_final_status);
 }
 
 /* Copy display text into an exact eight-character preset/LCD field.
@@ -1970,7 +2025,13 @@ static void filesystem_loadSceneDirectory_tick(void)
 
             memset(short_name, 0, sizeof(short_name));
             fat_convertFATStyleToFilename(entry->filename, short_name);
-            filesystem_applyFatShortNameCase(short_name, entry->ntReserved);
+            /*
+             * Preserve FAT short-name display case before recording the open
+             * alias. The raw SFN remains case-insensitive uppercase, but
+             * ntReserved marks all-lowercase base/extension names created by
+             * firmware or host tools.
+             */
+            fat_applyFilenameCaseFlags(short_name, entry->ntReserved);
             display_name = op_lfn_valid ? op_lfn_name : short_name;
 
             /*
@@ -3264,6 +3325,7 @@ static void filesystem_saveKitDirectory_tick(void)
         filesystem_makeKitDirectoryDisplayName(op_save_kit_display_name,
                                                op_slot);
         filesystem_prepareSavedInstrumentFilenames(kit);
+        op_save_opened_existing_dir = 0u;
         op_phase = 1;
         return;
 
@@ -3306,10 +3368,28 @@ static void filesystem_saveKitDirectory_tick(void)
     case 6: /* MKDIR/OPEN target kit folder */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_mkdir_lfn(op_save_kit_display_name,
-                              op_save_kit_dir_name,
-                              on_file_opened))
-            return;
+        op_save_opened_existing_dir = 0u;
+        /*
+         * Occupied Kit slots are entered by the short alias discovered during
+         * the last Kit scan. The visible folder name is on-card metadata and
+         * cannot be renamed by this save path; opening the known alias prevents
+         * mkdir_lfn() from re-solving VFAT collision rules and accidentally
+         * creating a duplicate visible folder. Empty slots still use
+         * mkdir_lfn() so firmware-created folders get the preferred
+         * "NNN Name" display component.
+         */
+        if (kit_slot_present[op_slot] && kit_slot_open_name[op_slot][0] != '\0') {
+            op_save_opened_existing_dir = 1u;
+            storage_copyFilename(op_save_kit_dir_name,
+                                 kit_slot_open_name[op_slot]);
+            if (!afatfs_fopen(op_save_kit_dir_name, "r", on_file_opened))
+                return;
+        } else {
+            if (!afatfs_mkdir_lfn(op_save_kit_display_name,
+                                  op_save_kit_dir_name,
+                                  on_file_opened))
+                return;
+        }
         op_phase = 7;
         return;
 
@@ -3390,6 +3470,12 @@ static void filesystem_saveKitDirectory_tick(void)
         }
         op_file_ready = false;
         op_file = NULL;
+        /*
+         * Member instruments are written before kitset.kcg because each
+         * fopen_lfn() returns the physical alias that kitset.kcg must
+         * reference. If a later member open/write fails, no new kitset is
+         * committed for that partial save.
+         */
         if (!afatfs_fopen_lfn(
                 op_save_instrument_display_file[op_instrument_slot],
                 "w",
@@ -3447,16 +3533,22 @@ static void filesystem_saveKitDirectory_tick(void)
             uint8_t found = 0u;
             uint16_t i;
             /*
-             * Update the Kit browser cache with the same display/open-name pair
-             * that was physically created: the LFN display component and the
-             * returned asyncfatfs short alias. This removes the previous false
-             * register where the UI showed preset_currentName even though the
-             * card only contained a different 8.3 entry.
+             * Cache update mirrors what happened on disk. A newly-created slot
+             * receives the display component returned by
+             * filesystem_makeKitDirectoryDisplayName() and the alias returned
+             * by mkdir_lfn(). An occupied slot was opened by an existing alias
+             * and was not renamed, so its cached display name remains the
+             * scanned folder name while the child kitset/instrument files
+             * become the authoritative overwritten data.
              */
-            if (storage_parseNumberedFolder(op_save_kit_display_name,
-                                            &parsed_slot,
-                                            parsed_display) &&
-                parsed_slot == op_slot) {
+            kit_slot_present[op_slot] = 1u;
+            if (op_save_opened_existing_dir) {
+                storage_copyFilename(kit_slot_open_name[op_slot],
+                                     op_save_kit_dir_name);
+            } else if (storage_parseNumberedFolder(op_save_kit_display_name,
+                                                   &parsed_slot,
+                                                   parsed_display) &&
+                       parsed_slot == op_slot) {
                 kit_slot_present[op_slot] = 1u;
                 memcpy(kit_slot_name[op_slot], parsed_display,
                        STORAGE_KIT_DISPLAY_NAME_LEN);
@@ -5066,7 +5158,7 @@ static void filesystem_scanKits_tick(void)
 
             memset(short_name, 0, sizeof(short_name));
             fat_convertFATStyleToFilename(entry->filename, short_name);
-            filesystem_applyFatShortNameCase(short_name, entry->ntReserved);
+            fat_applyFilenameCaseFlags(short_name, entry->ntReserved);
 
             display_name = op_lfn_valid ? op_lfn_name : short_name;
             filesystem_recordKitDirectory(display_name, short_name);
@@ -5128,6 +5220,7 @@ static void filesystem_saveSceneDirectory_tick(void)
         filesystem_makeSceneDirectoryDisplayName(op_scene_dir_display_name,
                                                  op_slot);
         filesystem_prepareSavedInstrumentFilenames(kit);
+        op_save_opened_existing_dir = 0u;
         op_phase = 1;
         return;
 
@@ -5170,10 +5263,27 @@ static void filesystem_saveSceneDirectory_tick(void)
     case 6: /* MKDIR/OPEN target Scene folder */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_mkdir_lfn(op_scene_dir_display_name,
-                              op_scene_dir_name,
-                              on_file_opened))
-            return;
+        op_save_opened_existing_dir = 0u;
+        /*
+         * Root Scene overwrite follows the same rule as Kit overwrite: enter
+         * the scanned directory by alias when the slot already exists, and
+         * create a new LFN directory only for empty slots. This prevents
+         * duplicate visible Scene folders while asyncfatfs still lacks
+         * recursive replace/rename.
+         */
+        if (scene_slot_present[op_slot] &&
+            scene_slot_open_name[op_slot][0] != '\0') {
+            op_save_opened_existing_dir = 1u;
+            storage_copyFilename(op_scene_dir_name,
+                                 scene_slot_open_name[op_slot]);
+            if (!afatfs_fopen(op_scene_dir_name, "r", on_file_opened))
+                return;
+        } else {
+            if (!afatfs_mkdir_lfn(op_scene_dir_display_name,
+                                  op_scene_dir_name,
+                                  on_file_opened))
+                return;
+        }
         op_phase = 7;
         return;
 
@@ -5260,6 +5370,15 @@ static void filesystem_saveSceneDirectory_tick(void)
          * first implementation derives "Kit <SceneName>" from the Scene save
          * name. sceneset.scg still does not store this name; Scene Load will
          * discover the first valid Kit* directory.
+         *
+         * Embedded Scene Kit directories are still display-name opened because
+         * there is no child scan cache in the save path. With display-name-first
+         * LFN matching this reuses an existing "Kit <SceneName>" child. If the
+         * root Scene is overwritten with a different display name, the old
+         * embedded Kit directory may remain until asyncfatfs gains recursive
+         * replace/rename; Scene Load discovers the first valid Kit* child, so
+         * full Scene overwrite cleanup is a later storage primitive, not part
+         * of the normal Kit Save blocker.
          */
         filesystem_trimmedKitDirectoryName(kit_dir, op_scene_display_name);
         op_file_ready = false;
@@ -5306,6 +5425,11 @@ static void filesystem_saveSceneDirectory_tick(void)
         }
         op_file_ready = false;
         op_file = NULL;
+        /*
+         * Embedded instruments follow the same ordering as root Kit Save:
+         * write member files first so every returned alias is available before
+         * kitset.kcg is emitted.
+         */
         if (!afatfs_fopen_lfn(
                 op_save_instrument_display_file[op_instrument_slot],
                 "w",
@@ -5713,11 +5837,21 @@ static void filesystem_saveSceneDirectory_tick(void)
         {
             uint16_t parsed_slot;
             char parsed_display[STORAGE_SCENE_DISPLAY_NAME_LEN];
-            if (storage_parseNumberedFolder(op_scene_dir_display_name,
-                                            &parsed_slot,
-                                            parsed_display) &&
-                parsed_slot == op_slot) {
-                scene_slot_present[op_slot] = 1u;
+            /*
+             * Mirror the root Scene directory operation in the scan cache.
+             * Created slots receive the new display component and returned
+             * alias. Occupied slots were opened by existing alias and were not
+             * renamed, so preserve their scanned display name while confirming
+             * the alias remains present.
+             */
+            scene_slot_present[op_slot] = 1u;
+            if (op_save_opened_existing_dir) {
+                storage_copyFilename(scene_slot_open_name[op_slot],
+                                     op_scene_dir_name);
+            } else if (storage_parseNumberedFolder(op_scene_dir_display_name,
+                                                   &parsed_slot,
+                                                   parsed_display) &&
+                       parsed_slot == op_slot) {
                 memcpy(scene_slot_name[op_slot], parsed_display,
                        STORAGE_SCENE_DISPLAY_NAME_LEN);
                 scene_slot_name[op_slot][STORAGE_SCENE_DISPLAY_NAME_LEN] =
@@ -5817,7 +5951,7 @@ static void filesystem_scanScenes_tick(void)
 
             memset(short_name, 0, sizeof(short_name));
             fat_convertFATStyleToFilename(entry->filename, short_name);
-            filesystem_applyFatShortNameCase(short_name, entry->ntReserved);
+            fat_applyFilenameCaseFlags(short_name, entry->ntReserved);
 
             display_name = op_lfn_valid ? op_lfn_name : short_name;
             filesystem_recordSceneDirectory(display_name, short_name);
@@ -5930,7 +6064,7 @@ static void filesystem_scanInstruments_tick(void)
 
             memset(short_name, 0, sizeof(short_name));
             fat_convertFATStyleToFilename(entry->filename, short_name);
-            filesystem_applyFatShortNameCase(short_name, entry->ntReserved);
+            fat_applyFilenameCaseFlags(short_name, entry->ntReserved);
 
             display_name = op_lfn_valid ? op_lfn_name : short_name;
             filesystem_recordInstrumentFile(display_name, short_name);
@@ -6236,29 +6370,6 @@ static uint8_t filesystem_isWavName(const char *filename)
         (filename[i - 1u] == 'V' || filename[i - 1u] == 'v'));
 }
 
-static void filesystem_applyFatShortNameCase(char *filename, uint8_t ntReserved)
-{
-    if (ntReserved & 0x08u) {
-        for (uint8_t i = 0; filename[i] != '\0' && filename[i] != '.'; i++) {
-            if (filename[i] >= 'A' && filename[i] <= 'Z')
-                filename[i] = (char)(filename[i] + ('a' - 'A'));
-        }
-    }
-
-    if (ntReserved & 0x10u) {
-        uint8_t i = 0;
-        while (filename[i] != '\0' && filename[i] != '.')
-            i++;
-        if (filename[i] == '.')
-            i++;
-        while (filename[i] != '\0') {
-            if (filename[i] >= 'A' && filename[i] <= 'Z')
-                filename[i] = (char)(filename[i] + ('a' - 'A'));
-            i++;
-        }
-    }
-}
-
 static void filesystem_sampleNameFromFilename(char dst[3], const char *filename)
 {
     for (uint8_t i = 0; i < 3u; i++) {
@@ -6546,7 +6657,7 @@ static uint8_t filesystem_scanSamples(afatfsFilePtr_t dir, uint32_t planned_addr
 
         memset(filename, 0, sizeof(filename));
         fat_convertFATStyleToFilename(entry->filename, filename);
-        filesystem_applyFatShortNameCase(filename, entry->ntReserved);
+        fat_applyFilenameCaseFlags(filename, entry->ntReserved);
         const char *display_filename =
             (lfn_valid && filesystem_isWavName(lfn_name)) ? lfn_name : filename;
 
@@ -6772,6 +6883,9 @@ void filesystem_tick(void)
     if (status != FS_STATUS_BUSY) return;
 
     switch (current_op) {
+    case FS_INTERNAL_OP_FLUSH_FINISH:
+        filesystem_flushFinish_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_KIT:
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:
         filesystem_loadKitDirectory_tick();
@@ -6859,6 +6973,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_file_ready = false;
     op_close_done = false;
     op_close_status = FS_STATUS_DONE;
+    op_flush_final_status = FS_STATUS_DONE;
     op_bytes_done = 0;
     op_stream_index = 0;
     op_item_offset = 0;
