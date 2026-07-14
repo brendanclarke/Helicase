@@ -667,15 +667,16 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
     const char *ext = storage_instrumentTypeExtension(type);
     uint8_t pos = 0u;
     uint8_t last_meaningful = 0u;
+    uint8_t stem_limit = force_voice_suffix ? 7u : SCENE_INSTRUMENT_STEM_LEN;
 
     /*
      * Build the visible LFN component for one saved Kit member file.
      *
      * The old 8.3 helper remains the compatibility fallback and alias generator
      * input. This helper is for the new asyncfatfs LFN create path: it keeps
-     * the retained Scene stem's spaces/case, trims unsafe trailing spaces/dots,
-     * optionally appends a duplicate-breaking voice suffix, and finally appends
-     * the descriptor-owned extension.
+     * the retained Scene stem's spaces/case, trims unsafe trailing spaces/dots
+     * for standalone files, writes a Kit member voice number into character 8
+     * when requested, and finally appends the descriptor-owned extension.
      */
     if (!dst || capacity == 0u)
         return;
@@ -684,7 +685,7 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
     if (!stem || stem[0] == '\0')
         stem = "inst";
     while (stem[pos] != '\0' && stem[pos] != '.' &&
-           pos + 1u < capacity && pos < SCENE_INSTRUMENT_STEM_LEN) {
+           pos + 1u < capacity && pos < stem_limit) {
         char c = storage_displayFilenameChar(stem[pos]);
         dst[pos] = c;
         if (c != ' ' && c != '.')
@@ -701,9 +702,18 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
         last_meaningful = pos;
     }
     pos = last_meaningful;
-    if (force_voice_suffix && pos + 3u < capacity) {
-        dst[pos++] = '_';
-        dst[pos++] = 'v';
+    if (force_voice_suffix && capacity > 9u) {
+        /*
+         * Force the Kit member voice marker into stem character 8.
+         *
+         * Character positions are one-based in the storage rule and zero-based
+         * in this buffer, so index 7 receives the voice digit. Padding with
+         * spaces keeps short retained names case-preserved without inventing a
+         * visible `_vN` suffix. The later dot/extension makes these spaces
+         * internal filename data rather than unsafe trailing spaces.
+         */
+        while (pos < 7u)
+            dst[pos++] = ' ';
         dst[pos++] = (one_based_voice >= 1u && one_based_voice <= 9u)
             ? (char)('0' + one_based_voice) : 'x';
     }
@@ -1135,13 +1145,28 @@ uint8_t storage_parseNumberedFolder(const char *name,
     if (number >= STORAGE_KIT_MAX_SLOTS)
         return 0u;
 
-    display_start = name + 3u;
-    while (*display_start == '_' || *display_start == ' ')
-        display_start++;
-    if (*display_start == '\0')
-        return 0u;
+    display_start = name + 4u;
 
     *slot = number;
+    /*
+     * Accept a blank numbered-folder display name.
+     *
+     * What: `NNN ` is a valid numbered folder component. The parsed display
+     * field becomes eight spaces, matching a retained internal blank name.
+     *
+     * Why: Blank is a real user-entered name, not an empty-slot sentinel. Slot
+     * occupancy comes from the numeric prefix and validated folder contents;
+     * the UI string `Empty` is only the display for an absent slot.
+     *
+     * Inputs: FAT display component beginning with three digits and a space or
+     * underscore. Outputs: slot receives 000..999 directly; display receives
+     * the post-separator text padded to the fixed LCD width, or all spaces
+     * when blank.
+     *
+     * Affiliates/clients: filesystem_recordKitDirectory(),
+     * filesystem_recordSceneDirectory(), Kit/Scene Save UI, retained-name
+     * storage.
+     */
     storage_copyDisplayName(display, display_start);
     return 1u;
 }

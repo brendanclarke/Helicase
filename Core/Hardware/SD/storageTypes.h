@@ -398,9 +398,12 @@ void storage_makeSavedInstrumentFilename(
  * Inputs mirror storage_makeSavedInstrumentFilename(), but the output is a
  * user-facing long filename component rather than an 8.3 open alias. Spaces
  * and upper/lowercase ASCII are preserved where FAT permits them; invalid FAT
- * display characters are replaced with underscores. Filesystem.c passes this
- * display component to asyncfatfs and receives the generated 8.3 alias back for
- * kitset.kcg, keeping visible names and open names distinct.
+ * display characters are replaced with underscores. When force_voice_suffix is
+ * nonzero, character 8 of the stem is the one-based voice number, padding
+ * shorter stems with spaces and truncating longer stems before that cell.
+ * Filesystem.c passes this display component to asyncfatfs and receives the
+ * generated 8.3 alias back for kitset.kcg, keeping visible names and open names
+ * distinct.
  */
 void storage_makeSavedInstrumentDisplayFilename(char *dst,
                                                 uint8_t capacity,

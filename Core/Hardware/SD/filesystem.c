@@ -61,6 +61,7 @@
 
 #include "filesystem.h"
 #include "asyncfatfs.h"
+#include "fat_standard.h"
 #include "storageTypes.h"
 #include "SceneData.h"
 #include "sd_routines.h"
@@ -274,6 +275,11 @@ static char op_save_instrument_display_file[STORAGE_KIT_SLOT_COUNT]
  * name instead of pretending preset_currentName changed on-card metadata.
  */
 static uint8_t op_save_opened_existing_dir = 0u;
+static uint8_t op_remove_done = 0u;
+static uint8_t op_rename_done = 0u;
+static uint8_t op_save_found_existing_dir = 0u;
+static char op_save_existing_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_save_existing_open_name[AFATFS_SHORT_FILENAME_MAX];
 static char op_write_line_buf[FS_TEXT_LINE_MAX];
 static uint16_t op_write_line_len = 0u;
 static uint16_t op_write_line_offset = 0u;
@@ -472,6 +478,45 @@ static volatile bool op_close_done = false;
 static void on_file_closed(void)
 {
     op_close_done = true;
+}
+
+static void on_remove_complete(void)
+{
+    /*
+     * Mark completion of asyncfatfs overwrite preflight work.
+     *
+     * What: Latches that afatfs_removeObjects_lfn() has called back. The
+     * following state-machine phase decides success by opening the expected
+     * object with the target display name.
+     *
+     * Why: File overwrite is now a two-step operation: collapse same-casefold
+     * file variants before writing, then create exactly one object with the
+     * user's entered case. The filesystem pump needs this callback bridge
+     * between asyncfatfs completion and the next phase.
+     *
+     * Affiliates/clients: filesystem_saveKitDirectory_tick(),
+     * filesystem_saveInstrument_tick(), future KitMrp/InstrumentMrp Save.
+     */
+    op_remove_done = 1u;
+}
+
+static void on_rename_complete(void)
+{
+    /*
+     * Mark completion of asyncfatfs directory rename work.
+     *
+     * What: Latches that afatfs_renameObject_lfn() has called back. The
+     * following phase opens the returned alias stored in the save scratch.
+     *
+     * Why: Occupied numbered directory saves preserve the existing directory
+     * tree but must refresh its visible component. Rename is asynchronous, so
+     * the save state machine needs a distinct completion latch before entering
+     * the directory.
+     *
+     * Affiliates/clients: filesystem_saveKitDirectory_tick(), future Scene and
+     * Morph directory-shaped saves.
+     */
+    op_rename_done = 1u;
 }
 
 /* -----------------------------------------------------------------------
@@ -1311,6 +1356,42 @@ static void filesystem_dirLfnAppendEntry(const fatDirectoryEntry_t *entry)
     }
 }
 
+static uint8_t filesystem_displayPrecedesCached(const char *candidate,
+                                                const char *cached)
+{
+    /*
+     * Keep the earliest display variant by product order.
+     *
+     * Slot number is the product identity, so externally-created duplicate
+     * directories for the same `NNN` slot must not appear as separate products.
+     * The casefold-first/raw-case tiebreak chooses a deterministic
+     * representative with capital letters before lowercase, while later
+     * duplicate directories are ignored until recursive delete exists.
+     */
+    return (uint8_t)(fat_compareDisplayNameCasefoldThenCase(candidate,
+                                                            cached) < 0);
+}
+
+static void filesystem_noteKitBrowserSlot(uint16_t slot)
+{
+    uint16_t i;
+
+    /*
+     * Add one Kit slot to the legacy kitBrowser bridge at most once.
+     *
+     * The product scan cache is now slot-addressed, but kitBrowser still uses
+     * a compact map of present slots. Duplicate same-slot folders must not
+     * create duplicate browser rows while we are choosing a canonical cache
+     * representative.
+     */
+    for (i = 0u; i < kb_numKits; i++) {
+        if (kb_map[i] == slot)
+            return;
+    }
+    if (kb_numKits < KITBROWSER_MAX_KITS)
+        kb_map[kb_numKits++] = slot;
+}
+
 /* Record a kit directory when FAT only gives us the generated short alias.
  *
  * Why this exists: folder names with spaces depend on FAT long-filename entries
@@ -1331,7 +1412,7 @@ static void filesystem_recordKitShortAlias(const char *open_name)
 {
     uint16_t number;
     uint16_t slot;
-    char display[STORAGE_KIT_DISPLAY_NAME_LEN];
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 
     if (open_name[0] < '0' || open_name[0] > '9' ||
         open_name[1] < '0' || open_name[1] > '9' ||
@@ -1348,13 +1429,16 @@ static void filesystem_recordKitShortAlias(const char *open_name)
 
     slot = number;
     storage_copyDisplayName(display, open_name + 3u);
+    display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    if (kit_slot_present[slot] &&
+        !filesystem_displayPrecedesCached(display, kit_slot_name[slot])) {
+        return;
+    }
     kit_slot_present[slot] = 1u;
     memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
     kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     storage_copyFilename(kit_slot_open_name[slot], open_name);
-
-    if (kb_numKits < KITBROWSER_MAX_KITS)
-        kb_map[kb_numKits++] = slot;
+    filesystem_noteKitBrowserSlot(slot);
 }
 
 /* Record one numbered kit directory discovered during a Kit/ scan.
@@ -1370,27 +1454,50 @@ static void filesystem_recordKitDirectory(const char *display_name,
                                           const char *open_name)
 {
     uint16_t slot;
-    char display[STORAGE_KIT_DISPLAY_NAME_LEN];
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 
     if (!storage_parseNumberedFolder(display_name, &slot, display)) {
         filesystem_recordKitShortAlias(open_name);
         return;
     }
+    /*
+     * Terminate the fixed-width display scratch before duplicate ordering.
+     *
+     * What: storage_parseNumberedFolder() fills exactly eight display cells,
+     * matching LCD and SceneData storage. filesystem_displayPrecedesCached()
+     * compares C strings, so the local scratch gets a ninth byte here before
+     * it participates in casefold/case-preserving sort order.
+     *
+     * Why: duplicate same-slot directories are unusual external-card damage,
+     * but when they exist the product must hide every later casefold-equivalent
+     * entry and show only the capital-first winner. That comparison must never
+     * read past the eight display cells returned by storageTypes.
+     *
+     * Inputs: parsed folder display component and existing slot cache entry.
+     * Outputs: safe transient C string; the stored cache remains exactly eight
+     * display cells plus its own terminator.
+     *
+     * Affiliates/clients: filesystem_recordKitShortAlias(),
+     * filesystem_recordSceneDirectory(), fat_compareDisplayNameCasefoldThenCase().
+     */
+    display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
 
+    if (kit_slot_present[slot] &&
+        !filesystem_displayPrecedesCached(display, kit_slot_name[slot])) {
+        return;
+    }
     kit_slot_present[slot] = 1u;
     memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
     kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     storage_copyFilename(kit_slot_open_name[slot], open_name);
-
-    if (kb_numKits < KITBROWSER_MAX_KITS)
-        kb_map[kb_numKits++] = slot;
+    filesystem_noteKitBrowserSlot(slot);
 }
 
 static void filesystem_recordSceneShortAlias(const char *open_name)
 {
     uint16_t number;
     uint16_t slot;
-    char display[STORAGE_SCENE_DISPLAY_NAME_LEN];
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 
     /*
      * FAT short-alias fallback for Scene folders.
@@ -1414,6 +1521,11 @@ static void filesystem_recordSceneShortAlias(const char *open_name)
     }
     slot = number;
     storage_copyDisplayName(display, open_name + 3u);
+    display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    if (scene_slot_present[slot] &&
+        !filesystem_displayPrecedesCached(display, scene_slot_name[slot])) {
+        return;
+    }
     scene_slot_present[slot] = 1u;
     memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
     scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
@@ -1424,7 +1536,7 @@ static void filesystem_recordSceneDirectory(const char *display_name,
                                             const char *open_name)
 {
     uint16_t slot;
-    char display[STORAGE_SCENE_DISPLAY_NAME_LEN];
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 
     /*
      * Record one root Scene/ numbered folder.
@@ -1440,41 +1552,47 @@ static void filesystem_recordSceneDirectory(const char *display_name,
     }
     if (slot >= STORAGE_SCENE_MAX_SLOTS)
         return;
+    /*
+     * Terminate the fixed-width Scene display scratch before duplicate sorting.
+     *
+     * What: Converts the eight-byte storageTypes display field into a transient
+     * C string solely for the capital-first duplicate-selection comparison.
+     *
+     * Why: Scene folders share the same case-insensitive/case-preserving
+     * product rule as Kit folders. External duplicate Scene slot names must be
+     * ignored after the first sorted winner without allowing the comparator to
+     * scan beyond the parsed display buffer.
+     *
+     * Inputs: parsed Scene folder display text and existing Scene cache entry.
+     * Outputs: safe transient C string; the Scene cache write below preserves
+     * the fixed eight display cells used by the LCD.
+     *
+     * Affiliates/clients: filesystem_recordKitDirectory(),
+     * menu_currentSaveWouldOverwrite(), future normal Scene Save.
+     */
+    display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    if (scene_slot_present[slot] &&
+        !filesystem_displayPrecedesCached(display, scene_slot_name[slot])) {
+        return;
+    }
     scene_slot_present[slot] = 1u;
     memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
     scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
     storage_copyFilename(scene_slot_open_name[slot], open_name);
 }
 
-static char filesystem_asciiLower(char c)
-{
-    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
-}
-
 static int8_t filesystem_compareInstrumentDisplayName(const char *a,
                                                        const char *b)
 {
-    uint8_t i;
-
     /*
-     * Case-insensitive fixed-display-name ordering for Instrument/.
+     * Sort Instrument rows by product display order.
      *
-     * Inputs: two NUL-terminated cached display names. Output: negative,
-     * zero, or positive ordering result. This stays local to filesystem.c
-     * because the browser cache is private and Instrument Load only needs a
-     * deterministic alphanumeric order within each type.
+     * Product identity is case-insensitive, but externally-created duplicate
+     * case variants need a deterministic representative. The shared FAT helper
+     * compares casefolded text first and raw ASCII second, so uppercase wins
+     * before lowercase for the same folded character.
      */
-    for (i = 0u; i < STORAGE_KIT_DISPLAY_NAME_LEN; i++) {
-        char ca = filesystem_asciiLower(a[i]);
-        char cb = filesystem_asciiLower(b[i]);
-        if (ca < cb)
-            return -1;
-        if (ca > cb)
-            return 1;
-        if (ca == '\0')
-            break;
-    }
-    return 0;
+    return fat_compareDisplayNameCasefoldThenCase(a, b);
 }
 
 static instrument_type_t filesystem_instrumentTypeFromFilename(
@@ -1551,6 +1669,27 @@ static void filesystem_copyInstrumentStem16(
         memcpy(dst, "inst", 5u);
 }
 
+static uint8_t filesystem_instrumentCacheStemMatches(
+        instrument_type_t type,
+        uint8_t index,
+        const char *display_stem)
+{
+    /*
+     * Test whether one cached Instrument row is the same product object.
+     *
+     * Inputs: type/index in the Instrument browser cache plus an eight-character
+     * display stem. Output: nonzero when the cached row has the same folded
+     * stem. Instrument type is part of identity because `.drm` and `.snr`
+     * files with the same stem are different products.
+     */
+    return (uint8_t)(
+        type < INSTRUMENT_TYPE_UNKNOWN &&
+        index < instrument_file_count[type] &&
+        fat_compareDisplayName(instrument_file_name[type][index],
+                               display_stem,
+                               false) == 0);
+}
+
 static void filesystem_recordInstrumentFile(const char *display_name,
                                             const char *open_name)
 {
@@ -1575,11 +1714,49 @@ static void filesystem_recordInstrumentFile(const char *display_name,
     if (type == INSTRUMENT_TYPE_UNKNOWN ||
         type >= INSTRUMENT_TYPE_UNKNOWN)
         return;
+    filesystem_copyInstrumentStemDisplay(display, display_name);
+    /*
+     * Suppress same-casefold Instrument browser duplicates.
+     *
+     * What: Before inserting a scanned Instrument/ object, compare it against
+     * existing cached rows for the same instrument type. If the display stem
+     * matches case-insensitively, keep only the filename that sorts first by
+     * folded text and raw ASCII case.
+     *
+     * Why: Externally edited FAT cards may contain names that differ only by
+     * case. Product policy treats those as one object; later variants must not
+     * appear in the Load UI even though asyncfatfs reports every physical FAT
+     * object.
+     *
+     * Inputs: display_name and open_name come from afatfs_findNextObject().
+     * Outputs: the per-type cache either keeps its existing representative,
+     * replaces it with an earlier-sorting variant, or inserts a new product
+     * object.
+     *
+     * Affiliates/clients: filesystem_requestScanInstruments(), nested
+     * Instrument Load, root Instrument Save cache update,
+     * fat_compareDisplayNameCasefoldThenCase().
+     */
+    for (pos = 0u; pos < instrument_file_count[type]; pos++) {
+        if (!filesystem_instrumentCacheStemMatches(type, pos, display))
+            continue;
+        if (filesystem_compareInstrumentDisplayName(
+                display,
+                instrument_file_name[type][pos]) < 0) {
+            memcpy(instrument_file_name[type][pos], display,
+                   sizeof(instrument_file_name[type][pos]));
+            storage_copyFilename(instrument_file_open_name[type][pos],
+                                 open_name);
+            filesystem_copyInstrumentStem16(instrument_file_stem[type][pos],
+                                            display_name);
+        }
+        return;
+    }
+
     count = instrument_file_count[type];
     if (count >= FS_INSTRUMENT_MAX_PER_TYPE)
         return;
 
-    filesystem_copyInstrumentStemDisplay(display, display_name);
     pos = count;
     while (pos > 0u &&
            filesystem_compareInstrumentDisplayName(
@@ -1611,16 +1788,22 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
     uint8_t i;
 
     /*
-     * Replace one cached Instrument/ entry after a root Instrument Save.
+     * Refresh browser cache after case-insensitive overwrite.
      *
-     * Inputs are the visible filename passed to afatfs_fopen_lfn() and the
-     * short alias returned by asyncfatfs. Output: the per-type browser cache is
-     * updated in-place so a saved file is immediately available for Instrument
-     * Load without requiring a full root Instrument/ rescan. Matching by alias
-     * removes overwritten files; matching by display stem removes the common
-     * case where a new save reused the same visible name but asyncfatfs chose a
-     * different short alias. Dot-prefixed files are not filtered here; the
-     * product type classifier decides whether the name is an Instrument file.
+     * What: Removes every cached row whose filename alias or display stem
+     * matches the saved target under case-insensitive comparison, then inserts
+     * the one returned by the completed save.
+     *
+     * Why: The SD card has already collapsed same-casefold physical files into
+     * one visible object. The in-RAM browser cache must mirror that immediately
+     * so the next nested load cannot select a stale duplicate alias.
+     *
+     * Inputs: display_name is the target case just written; open_name is the
+     * short alias returned by asyncfatfs. Outputs: per-type Instrument cache
+     * contains one row for the saved object.
+     *
+     * Affiliates/clients: filesystem_saveInstrument_tick(),
+     * filesystem_recordInstrumentFile(), nested Instrument Load.
      */
     if (type == INSTRUMENT_TYPE_UNKNOWN)
         type = filesystem_instrumentTypeFromFilename(open_name);
@@ -1632,9 +1815,12 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
         uint8_t remove = 0u;
 
         filesystem_copyInstrumentStemDisplay(display, display_name);
-        if (strcmp(instrument_file_open_name[type][i], open_name) == 0 ||
-            strncmp(instrument_file_name[type][i], display,
-                    STORAGE_KIT_DISPLAY_NAME_LEN) == 0) {
+        if (fat_compareDisplayName(instrument_file_open_name[type][i],
+                                   open_name,
+                                   false) == 0 ||
+            fat_compareDisplayName(instrument_file_name[type][i],
+                                   display,
+                                   false) == 0) {
             remove = 1u;
         }
 
@@ -2057,8 +2243,33 @@ static void filesystem_loadKitDirectory_tick(void)
                     if ((op_kit_load_scene_mask &
                          (uint16_t)(1u << scene_index)) != 0u) {
                         scene_t *target_scene = scene_get(scene_index);
-                        if (target_scene)
+                        if (target_scene) {
                             target_scene->kit = op_staged_kit;
+                            /*
+                             * Update retained Kit identity only for normal Kit
+                             * Load.
+                             *
+                             * What: Copies the selected Kit folder display name
+                             * into each destination resident Kit after the
+                             * entire directory validates and commits.
+                             *
+                             * Why: KitMrp uses the same file parser but copies
+                             * endpoint values into morph images only. Morph
+                             * operations must not rename the resident Kit or
+                             * its member Instruments.
+                             *
+                             * Inputs: the scan-cache name for op_slot and the
+                             * destination Scene selected by the Load page.
+                             * Outputs: target_scene->kit.display_name mirrors
+                             * the on-card Kit folder identity now resident in
+                             * RAM.
+                             *
+                             * Affiliates/clients: filesystem_loadKitDirectory_tick(),
+                             * Preset KitMrp completion, Save editor seeding.
+                             */
+                            scene_setKitDisplayName(&target_scene->kit,
+                                                    kit_slot_name[op_slot]);
+                        }
                     }
                 }
                 memcpy(preset_currentName, kit_slot_name[op_slot], 8);
@@ -3340,7 +3551,7 @@ static void filesystem_saveInstrument_tick(void)
          * the same asyncfatfs code path as File/Dir diagnostics and Kit Save.
          */
         if (!afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
                               op_root_open_name,
                               on_file_opened))
             return;
@@ -3375,7 +3586,42 @@ static void filesystem_saveInstrument_tick(void)
         op_phase = 6;
         return;
 
-    case 6: /* OPEN target instrument file */
+    case 6: /* REMOVE target instrument variants */
+        /*
+         * Remove case-variant Instrument files before saving one root
+         * Instrument.
+         *
+         * What: In Instrument/, removes every file whose display component
+         * matches the requested target under case-insensitive comparison.
+         *
+         * Why: The root Instrument pool is user-copyable from desktop
+         * filesystems. If a card contains both `fiRstfile.snr` and
+         * `firStfile.snr`, the browser exposes only the capital-first winner,
+         * and overwrite must collapse all physical variants into the newly
+         * entered case.
+         *
+         * Inputs: op_instrument_save_display_name is the captured target
+         * filename from Menu after extension/type construction. Output: the
+         * following fopen_lfn() writes one replacement file and returns its
+         * short alias for cache update.
+         *
+         * Affiliates/clients: filesystem_updateInstrumentCacheAfterSave(),
+         * afatfs_removeObjects_lfn(), afatfs_fopen_lfn(), nested Instrument
+         * Save UI.
+         */
+        op_remove_done = 0u;
+        if (!afatfs_removeObjects_lfn(op_instrument_save_display_name,
+                                      AFATFS_MATCH_CASE_INSENSITIVE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete)) {
+            return;
+        }
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT remove + OPEN target instrument file */
+        if (!op_remove_done)
+            return;
         op_file_ready = false;
         op_file = NULL;
         memset(op_instrument_save_open_name, 0,
@@ -3390,14 +3636,14 @@ static void filesystem_saveInstrument_tick(void)
          */
         if (!afatfs_fopen_lfn(op_instrument_save_display_name,
                               "w",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
                               op_instrument_save_open_name,
                               on_file_opened))
             return;
-        op_phase = 7;
+        op_phase = 8;
         return;
 
-    case 7: /* WAIT target instrument file */
+    case 8: /* WAIT target instrument file */
         if (!op_file_ready) return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
@@ -3406,10 +3652,10 @@ static void filesystem_saveInstrument_tick(void)
         op_write_line_index = 0u;
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
-        op_phase = 8;
+        op_phase = 9;
         return;
 
-    case 8: /* WRITE complete instrument text */
+    case 9: /* WRITE complete instrument text */
     {
         filesystem_instrument_write_ctx_t ctx = {
             instrument,
@@ -3426,23 +3672,23 @@ static void filesystem_saveInstrument_tick(void)
          */
         if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
             return;
-        op_phase = 9;
+        op_phase = 10;
         return;
     }
 
-    case 9: /* CLOSE target instrument file */
+    case 10: /* CLOSE target instrument file */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 10;
+            op_phase = 11;
         return;
 
-    case 10: /* WAIT CLOSE target instrument file */
+    case 11: /* WAIT CLOSE target instrument file */
         if (!op_close_done) return;
         op_file = NULL;
-        op_phase = 11;
+        op_phase = 12;
         return;
 
-    case 11: /* RETURN ROOT + UPDATE CACHE */
+    case 12: /* RETURN ROOT + UPDATE CACHE */
         if (!afatfs_chdir(NULL))
             return;
         /*
@@ -3456,6 +3702,26 @@ static void filesystem_saveInstrument_tick(void)
         filesystem_updateInstrumentCacheAfterSave(
             op_instrument_save_display_name,
             op_instrument_save_open_name);
+        /*
+         * Retain the saved root Instrument identity after durable success.
+         *
+         * What: Copies the exact user-entered display stem for the saved
+         * Instrument back into the resident Scene/slot source-name field.
+         *
+         * Why: normal Instrument Save exports the currently loaded slot and
+         * should make future Save editor seeding reflect the file just written.
+         * This update is deliberately after close, root return, and browser
+         * cache update so a failed write does not rename resident metadata.
+         *
+         * Inputs: request-time source Scene/slot and the captured visible save
+         * filename. Outputs: SceneData retained Instrument display name.
+         *
+         * Affiliates/clients: menu_instrumentSaveSeedName(),
+         * preset_saveInstrument(), Morph Instrument Save exclusion.
+         */
+        scene_setInstrumentSourceName(op_instrument_save_source_scene,
+                                      op_instrument_save_source_slot,
+                                      op_instrument_save_display_name);
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -3498,14 +3764,24 @@ static void filesystem_makeKitDirectoryDisplayName(
     uint8_t i;
 
     /*
-     * Build the visible Kit folder name used by firmware saves.
+     * Preserve blank Kit save names.
      *
-     * The directory component follows the spec-preferred `NNN Name` form and
-     * preserves spaces/case from the eight-character preset name field. The
-     * asyncfatfs LFN create primitive will choose a separate short alias for
-     * opening; callers must not treat this display string as an open name.
-     * Slot 000 is a real library slot, so the visible prefix is the direct
-     * op_slot value rather than op_slot + 1.
+     * What: Builds a root numbered Kit folder component: `NNN ` plus exactly
+     * the sanitized edited Kit name. If every name character is blank, the
+     * component ends after the separator space.
+     *
+     * Why: The internal retained Kit name can be blank. Falling back to `Kit`
+     * would silently rename a real blank root Kit save and break the Save UI
+     * contract that `Empty` means absent slot, not blank-named slot. This does
+     * not apply to Scene embedded Kits, whose directory name is always
+     * `Kit <kit-name>`.
+     *
+     * Inputs: op_slot is the direct 000..999 library slot; preset_currentName
+     * is the fixed-width editable retained Kit name. Output: LFN display
+     * component passed to asyncfatfs rename/mkdir.
+     *
+     * Affiliates/clients: filesystem_saveKitDirectory_tick(), KitMrp Save, Kit
+     * scan cache update, storage_parseNumberedFolder().
      */
     if (display > 999u)
         display = 999u;
@@ -3522,29 +3798,32 @@ static void filesystem_makeKitDirectoryDisplayName(
             last_meaningful = pos;
     }
     pos = last_meaningful;
-    if (pos == 4u) {
-        dst[pos++] = 'K';
-        dst[pos++] = 'i';
-        dst[pos++] = 't';
-    }
     dst[pos] = '\0';
 }
 
 static void filesystem_prepareSavedInstrumentFilenames(const kit_t *kit)
 {
-    uint8_t forced[STORAGE_KIT_SLOT_COUNT];
     uint8_t slot;
 
     /*
-     * Generate duplicate-safe visible instrument filenames for one Kit save.
+     * Generate voice-numbered member Instrument filenames.
      *
-     * Inputs: Scene-retained 16-character stems and slot types. Output: six LFN
-     * display components plus cleared alias slots. Only colliding visible names
-     * are regenerated with a voice suffix, so meaningful loaded names remain
-     * intact when unique while duplicate stems still produce distinct kitset
-     * references after asyncfatfs returns their aliases.
+     * What: Builds one visible filename for each Kit member using the retained
+     * per-voice Instrument stem and always forcing the one-based voice number
+     * into character 8 of the stem.
+     *
+     * Why: Kit Save owns six member files in one directory. Two voices may
+     * retain the same Instrument name, and the save must still produce six
+     * distinct authoritative member files without depending on asyncfatfs alias
+     * suffixes.
+     *
+     * Inputs: resident Kit source stems and slot types. Outputs: visible LFN
+     * file components in op_save_instrument_display_file[] and cleared returned
+     * alias buffers in op_save_instrument_file[].
+     *
+     * Affiliates/clients: storage_makeSavedInstrumentDisplayFilename(),
+     * filesystem_saveKitDirectory_tick(), kitset.kcg file references.
      */
-    memset(forced, 0, sizeof(forced));
     memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
         storage_makeSavedInstrumentDisplayFilename(
@@ -3553,34 +3832,94 @@ static void filesystem_prepareSavedInstrumentFilenames(const kit_t *kit)
             kit->instrument_stem[slot],
             kit->instruments[slot].type,
             (uint8_t)(slot + 1u),
-            0u);
+            1u);
     }
-    for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
-        uint8_t other;
-        for (other = 0u; other < slot; other++) {
-            if (strcmp(op_save_instrument_display_file[slot],
-                       op_save_instrument_display_file[other]) == 0) {
-                if (!forced[other]) {
-                    storage_makeSavedInstrumentDisplayFilename(
-                        op_save_instrument_display_file[other],
-                        sizeof(op_save_instrument_display_file[other]),
-                        kit->instrument_stem[other],
-                        kit->instruments[other].type,
-                        (uint8_t)(other + 1u),
-                        1u);
-                    forced[other] = 1u;
-                }
-                storage_makeSavedInstrumentDisplayFilename(
-                    op_save_instrument_display_file[slot],
-                    sizeof(op_save_instrument_display_file[slot]),
-                    kit->instrument_stem[slot],
-                    kit->instruments[slot].type,
-                    (uint8_t)(slot + 1u),
-                    1u);
-                forced[slot] = 1u;
-            }
-        }
+}
+
+static uint8_t filesystem_objectMatchesSaveSlot(
+        const afatfsObjectInfo_t *object,
+        uint16_t requested_slot)
+{
+    uint16_t parsed_slot;
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN];
+
+    /*
+     * Test whether one scanned directory belongs to the requested save slot.
+     *
+     * What: Accepts the normal LFN `NNN Name` component first and falls back to
+     * an old generated short alias whose first three characters are digits.
+     *
+     * Why: Slot number is the product identity. Save must find and rename an
+     * occupied slot even if a host or older firmware exposed only a generated
+     * short alias during scan.
+     *
+     * Inputs: asyncfatfs object metadata from the current Kit/ directory and
+     * the direct 000..999 slot number. Output: nonzero when this directory is
+     * the physical representative for that slot.
+     *
+     * Affiliates/clients: filesystem_saveKitDirectory_tick(), asyncfatfs
+     * rename, storage_parseNumberedFolder().
+     */
+    if (!object || object->kind != AFATFS_OBJECT_DIRECTORY)
+        return 0u;
+    if (storage_parseNumberedFolder(object->displayName,
+                                    &parsed_slot,
+                                    display) &&
+        parsed_slot == requested_slot) {
+        return 1u;
     }
+    if (object->shortName[0] >= '0' && object->shortName[0] <= '9' &&
+        object->shortName[1] >= '0' && object->shortName[1] <= '9' &&
+        object->shortName[2] >= '0' && object->shortName[2] <= '9') {
+        parsed_slot = (uint16_t)(
+            (uint16_t)(object->shortName[0] - '0') * 100u +
+            (uint16_t)(object->shortName[1] - '0') * 10u +
+            (uint16_t)(object->shortName[2] - '0'));
+        return (uint8_t)(parsed_slot == requested_slot);
+    }
+    return 0u;
+}
+
+static void filesystem_noteSaveSlotCandidate(const afatfsObjectInfo_t *object)
+{
+    /*
+     * Find the canonical directory object for one numbered Kit slot.
+     *
+     * What: Records the best directory object whose visible name or
+     * compatibility short alias parses as the requested `NNN` slot.
+     *
+     * Why: Slot number is product identity. An occupied save must rename that
+     * directory to the edited display component before rewriting child files,
+     * instead of creating a duplicate or preserving the old visible name.
+     *
+     * Inputs: op_slot is the requested root Kit slot; afatfs current directory
+     * is already Kit/. Outputs: op_save_existing_display_name receives the
+     * visible source component, and op_save_kit_dir_name receives its open
+     * alias.
+     *
+     * Duplicate policy: if external editing created several same-slot variants,
+     * choose the one that sorts first by case-folded text with raw ASCII as a
+     * tiebreaker. Later duplicate directories are hidden from product behavior
+     * until recursive directory delete is implemented.
+     *
+     * Affiliates/clients: filesystem_saveKitDirectory_tick(), KitMrp save,
+     * Scene embedded Kit save, asyncfatfs rename, storage_parseNumberedFolder().
+     */
+    if (!filesystem_objectMatchesSaveSlot(object, op_slot))
+        return;
+    if (op_save_found_existing_dir &&
+        !filesystem_displayPrecedesCached(object->displayName,
+                                          op_save_existing_display_name)) {
+        return;
+    }
+    op_save_found_existing_dir = 1u;
+    strncpy(op_save_existing_display_name,
+            object->displayName,
+            sizeof(op_save_existing_display_name) - 1u);
+    op_save_existing_display_name[
+        sizeof(op_save_existing_display_name) - 1u] = '\0';
+    storage_copyFilename(op_save_existing_open_name, object->shortName);
+    storage_copyFilename(op_save_kit_dir_name, object->shortName);
 }
 
 static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
@@ -3662,6 +4001,18 @@ static uint8_t filesystem_nameStartsWithKitSpace(const char *name)
     return (uint8_t)(name &&
                      name[0] == 'K' && name[1] == 'i' &&
                      name[2] == 't' && name[3] == ' ');
+}
+
+static char filesystem_asciiLower(char c)
+{
+    /*
+     * Fold one ASCII byte for local extension checks.
+     *
+     * This helper is not used for product identity sorting; those paths use
+     * fat_compareDisplayName* so duplicate case policy stays centralized in
+     * the FAT display-name helpers.
+     */
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
 }
 
 static uint8_t filesystem_nameHasExtension(const char *name,
@@ -3830,7 +4181,7 @@ static void filesystem_saveKitDirectory_tick(void)
          * raw uppercase SFN behavior.
          */
         if (!afatfs_mkdir_lfn(STORAGE_ROOT_KIT,
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
                               op_root_open_name,
                               on_file_opened))
             return;
@@ -3850,76 +4201,238 @@ static void filesystem_saveKitDirectory_tick(void)
     case 3: /* CHDIR Kit */
         if (!afatfs_chdir(op_kit_root_dir))
             return;
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
+        op_save_found_existing_dir = 0u;
+        memset(op_save_existing_display_name, 0,
+               sizeof(op_save_existing_display_name));
+        memset(op_save_existing_open_name, 0,
+               sizeof(op_save_existing_open_name));
         op_phase = 4;
         return;
 
-    case 4: /* CLOSE Kit handle */
+    case 4: /* SCAN target kit slot directory */
+    {
+        afatfsOperationStatus_e st =
+            afatfs_findNextObject(op_kit_root_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 5;
+            return;
+        }
+        if (op_object.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 5;
+            return;
+        }
+        filesystem_noteSaveSlotCandidate(&op_object);
+        return;
+    }
+
+    case 5: /* CLOSE Kit handle */
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 5;
+            op_phase = 6;
         return;
 
-    case 5: /* WAIT CLOSE Kit */
+    case 6: /* WAIT CLOSE Kit */
         if (!op_close_done) return;
         op_kit_root_dir = NULL;
-        op_phase = 6;
-        return;
-
-    case 6: /* MKDIR/OPEN target kit folder */
-        op_file_ready = false;
-        op_file = NULL;
-        op_save_opened_existing_dir = 0u;
-        /*
-         * Occupied Kit slots are entered by the short alias discovered during
-         * the last Kit scan. The visible folder name is on-card metadata and
-         * cannot be renamed by this save path; opening the known alias prevents
-         * mkdir_lfn() from re-solving VFAT collision rules and accidentally
-         * creating a duplicate visible folder. Empty slots still use
-         * mkdir_lfn() so firmware-created folders get the preferred
-         * "NNN Name" display component.
-         */
-        if (kit_slot_present[op_slot] && kit_slot_open_name[op_slot][0] != '\0') {
-            op_save_opened_existing_dir = 1u;
-            storage_copyFilename(op_save_kit_dir_name,
-                                 kit_slot_open_name[op_slot]);
-            if (!afatfs_fopen(op_save_kit_dir_name, "r", on_file_opened))
-                return;
-        } else {
-            if (!afatfs_mkdir_lfn(op_save_kit_display_name,
-                                  AFATFS_MATCH_CASE_SENSITIVE,
-                                  op_save_kit_dir_name,
-                                  on_file_opened))
-                return;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(op_close_status);
+            return;
         }
         op_phase = 7;
         return;
 
-    case 7: /* WAIT target kit folder */
+    case 7: /* ENSURE target kit folder */
+        op_file_ready = false;
+        op_file = NULL;
+        if (op_save_found_existing_dir) {
+            /*
+             * Ensure the occupied Kit slot has the edited display component.
+             *
+             * Byte-exact equality means the existing LFN/SFN run is already
+             * correct. Case-only differences must still call rename so FAT
+             * preserves the user's newly entered case.
+             */
+            if (fat_compareDisplayName(op_save_existing_display_name,
+                                       op_save_kit_display_name,
+                                       true) == 0) {
+                storage_copyFilename(op_save_kit_dir_name,
+                                     op_save_existing_open_name);
+                if (!afatfs_fopen(op_save_kit_dir_name, "r", on_file_opened))
+                    return;
+                op_phase = 9;
+                return;
+            }
+            op_rename_done = 0u;
+            memset(op_save_kit_dir_name, 0, sizeof(op_save_kit_dir_name));
+            if (!afatfs_renameObject_lfn(op_save_existing_display_name,
+                                         op_save_kit_display_name,
+                                         AFATFS_MATCH_CASE_INSENSITIVE,
+                                         op_save_kit_dir_name,
+                                         on_rename_complete)) {
+                return;
+            }
+            op_phase = 8;
+            return;
+        } else {
+            if (!afatfs_mkdir_lfn(op_save_kit_display_name,
+                                  AFATFS_MATCH_CASE_INSENSITIVE,
+                                  op_save_kit_dir_name,
+                                  on_file_opened))
+                return;
+            op_phase = 9;
+            return;
+        }
+
+    case 8: /* WAIT rename + OPEN target kit folder */
+        if (!op_rename_done)
+            return;
+        if (op_save_kit_dir_name[0] == '\0') {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(op_save_kit_dir_name, "r", on_file_opened))
+            return;
+        op_phase = 9;
+        return;
+
+    case 9: /* WAIT target kit folder */
         if (!op_file_ready) return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
         op_kit_slot_dir = op_file;
-        op_phase = 8;
+        op_phase = 10;
         return;
 
-    case 8: /* CHDIR target kit folder */
+    case 10: /* CHDIR target kit folder + CLOSE handle */
         if (!afatfs_chdir(op_kit_slot_dir))
             return;
-        op_phase = 9;
-        return;
-
-    case 9: /* CLOSE target kit handle */
         op_close_done = false;
         if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
-            op_phase = 10;
+            op_phase = 19;
         return;
 
-    case 10: /* WAIT CLOSE target kit */
+    case 19: /* WAIT CLOSE target kit */
         if (!op_close_done) return;
         op_kit_slot_dir = NULL;
         op_instrument_slot = 0u;
+        op_phase = 16;
+        return;
+
+    case 16: /* REMOVE next instrument variants */
+        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
+            op_phase = 11;
+            return;
+        }
+        /*
+         * Collapse same-casefold member-file variants before writing.
+         *
+         * What: Deletes every physical file in the Kit directory whose display
+         * name matches the target member filename under case-insensitive
+         * comparison.
+         *
+         * Why: `Kick.drm` and `kick.drm` can exist only after external
+         * filesystem edits, but product save must treat them as one object.
+         * Removing all variants before fopen_lfn("w") guarantees the saved Kit
+         * contains exactly one member file with the case generated from
+         * retained Scene metadata.
+         *
+         * Inputs: op_save_instrument_display_file[op_instrument_slot] is the
+         * visible target name; op_instrument_slot identifies which Kit member
+         * is being written.
+         *
+         * Outputs/effects: duplicate files are removed from FAT and the
+         * following fopen_lfn() creates the single authoritative file.
+         * Directories with the same folded component are ignored by
+         * AFATFS_REMOVE_FILES_ONLY.
+         *
+         * Affiliates/clients: afatfs_removeObjects_lfn(), afatfs_fopen_lfn(),
+         * storage_formatInstrumentLine(), kitset.kcg alias collection.
+         */
+        op_remove_done = 0u;
+        if (!afatfs_removeObjects_lfn(
+                op_save_instrument_display_file[op_instrument_slot],
+                AFATFS_MATCH_CASE_INSENSITIVE,
+                AFATFS_REMOVE_FILES_ONLY,
+                on_remove_complete)) {
+            return;
+        }
+        op_phase = 17;
+        return;
+
+    case 17: /* WAIT remove + OPEN next instrument */
+        if (!op_remove_done)
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        /*
+         * Member instruments are written before kitset.kcg because each
+         * fopen_lfn() returns the physical alias that kitset.kcg must
+         * reference. If a later member open/write fails, no new kitset is
+         * committed for that partial save.
+         */
+        if (!afatfs_fopen_lfn(
+                op_save_instrument_display_file[op_instrument_slot],
+                "w",
+                AFATFS_MATCH_CASE_INSENSITIVE,
+                op_save_instrument_file[op_instrument_slot],
+                on_file_opened)) {
+            return;
+        }
+        op_phase = 18;
+        return;
+
+    case 18: /* WAIT instrument */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 20;
+        return;
+
+    case 20: /* WRITE complete instrument text */
+    {
+        filesystem_instrument_write_ctx_t ctx = {
+            &kit->instruments[op_instrument_slot],
+            kit->instruments[op_instrument_slot].type,
+            (uint8_t)(op_instrument_slot + 1u)
+        };
+        if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
+            return;
+        op_phase = 21;
+        return;
+    }
+
+    case 21: /* CLOSE instrument */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 22;
+        return;
+
+    case 22: /* WAIT CLOSE instrument */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_phase = 23;
+        return;
+
+    case 23: /* ADVANCE instrument */
+        op_instrument_slot++;
         op_phase = 16;
         return;
 
@@ -3964,108 +4477,45 @@ static void filesystem_saveKitDirectory_tick(void)
         op_phase = 24;
         return;
 
-    case 16: /* OPEN next instrument */
-        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
-            op_phase = 11;
-            return;
-        }
-        op_file_ready = false;
-        op_file = NULL;
-        /*
-         * Member instruments are written before kitset.kcg because each
-         * fopen_lfn() returns the physical alias that kitset.kcg must
-         * reference. If a later member open/write fails, no new kitset is
-         * committed for that partial save.
-         */
-        if (!afatfs_fopen_lfn(
-                op_save_instrument_display_file[op_instrument_slot],
-                "w",
-                AFATFS_MATCH_CASE_SENSITIVE,
-                op_save_instrument_file[op_instrument_slot],
-                on_file_opened)) {
-            return;
-        }
-        op_phase = 17;
-        return;
-
-    case 17: /* WAIT instrument */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        op_phase = 18;
-        return;
-
-    case 18: /* WRITE complete instrument text */
-    {
-        filesystem_instrument_write_ctx_t ctx = {
-            &kit->instruments[op_instrument_slot],
-            kit->instruments[op_instrument_slot].type,
-            (uint8_t)(op_instrument_slot + 1u)
-        };
-        if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
-            return;
-        op_phase = 20;
-        return;
-    }
-
-    case 20: /* CLOSE instrument */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 21;
-        return;
-
-    case 21: /* WAIT CLOSE instrument */
-        if (!op_close_done) return;
-        op_file = NULL;
-        op_instrument_slot++;
-        op_phase = 16;
-        return;
-
     case 24: /* RETURN ROOT + UPDATE CACHE */
         if (!afatfs_chdir(NULL))
             return;
         {
             uint16_t parsed_slot;
             char parsed_display[STORAGE_KIT_DISPLAY_NAME_LEN];
-            uint8_t found = 0u;
-            uint16_t i;
             /*
-             * Cache update mirrors what happened on disk. A newly-created slot
-             * receives the display component returned by
-             * filesystem_makeKitDirectoryDisplayName() and the alias returned
-             * by mkdir_lfn(). An occupied slot was opened by an existing alias
-             * and was not renamed, so its cached display name remains the
-             * scanned folder name while the child kitset/instrument files
-             * become the authoritative overwritten data.
+             * Commit Kit save identity after all owned files have been
+             * rewritten.
+             *
+             * What: Updates the Kit scan cache and resident Kit display name
+             * from the target directory actually written by this save.
+             *
+             * Why: An occupied slot may have been renamed, and same-casefold
+             * duplicates may have been collapsed. The in-RAM browser and
+             * retained SceneData identity must mirror the durable on-card
+             * result only after the save is complete.
+             *
+             * Inputs: op_save_kit_display_name and op_save_kit_dir_name from
+             * the ensure/rename path. Outputs: kit_slot_* cache, kb_map, and
+             * resident Kit name.
+             *
+             * Affiliates/clients: menu_currentSaveWouldOverwrite(), future
+             * KitMrp Save, boot/rescan behavior.
              */
-            kit_slot_present[op_slot] = 1u;
-            if (op_save_opened_existing_dir) {
-                storage_copyFilename(kit_slot_open_name[op_slot],
-                                     op_save_kit_dir_name);
-            } else if (storage_parseNumberedFolder(op_save_kit_display_name,
-                                                   &parsed_slot,
-                                                   parsed_display) &&
-                       parsed_slot == op_slot) {
+            if (storage_parseNumberedFolder(op_save_kit_display_name,
+                                            &parsed_slot,
+                                            parsed_display) &&
+                parsed_slot == op_slot) {
                 kit_slot_present[op_slot] = 1u;
                 memcpy(kit_slot_name[op_slot], parsed_display,
                        STORAGE_KIT_DISPLAY_NAME_LEN);
                 kit_slot_name[op_slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
                 storage_copyFilename(kit_slot_open_name[op_slot],
                                      op_save_kit_dir_name);
+                filesystem_noteKitBrowserSlot(op_slot);
+                scene_setResidentKitDisplayName(scene_getActiveIndex(),
+                                                preset_currentName);
             }
-            for (i = 0u; i < kb_numKits; i++) {
-                if (kb_map[i] == op_slot) {
-                    found = 1u;
-                    break;
-                }
-            }
-            if (!found && kb_numKits < KITBROWSER_MAX_KITS)
-                kb_map[kb_numKits++] = op_slot;
         }
         filesystem_finish(FS_STATUS_DONE);
         return;
@@ -7985,6 +8435,12 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
     memset(op_save_instrument_display_file, 0,
            sizeof(op_save_instrument_display_file));
+    op_remove_done = 0u;
+    op_rename_done = 0u;
+    op_save_found_existing_dir = 0u;
+    memset(op_save_existing_display_name, 0,
+           sizeof(op_save_existing_display_name));
+    memset(op_save_existing_open_name, 0, sizeof(op_save_existing_open_name));
     memset(&op_staged_scene, 0, sizeof(op_staged_scene));
     op_scene_load_scene_mask = 0u;
     op_scene_source_index = 0u;
@@ -8620,6 +9076,46 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
         return "Empty   ";
     }
     return scene_slot_name[zero_based_slot];
+}
+
+uint8_t filesystem_instrumentTargetExists(instrument_type_t type,
+                                          const char *display_stem)
+{
+    char display_file[AFATFS_LONG_FILENAME_MAX + 1u];
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+    /*
+     * Query whether a root Instrument save target already exists.
+     *
+     * What: Builds the same visible `stem.ext` component that root Instrument
+     * Save will write, then checks the current Instrument/ scan cache for a
+     * case-insensitive match of the same instrument type.
+     *
+     * Why: Menu must render persistent `OW` before the user confirms Save.
+     * Numbered slots can answer from occupancy caches, but root Instrument Save
+     * is filename-based and needs the extension/type rule owned by filesystem.
+     *
+     * Inputs: resident instrument type and the eight-character Save editor
+     * stem. Outputs: nonzero when confirming would overwrite at least one
+     * on-card same-casefold Instrument file.
+     *
+     * Affiliates/clients: menu_currentSaveWouldOverwrite(), root Instrument
+     * Save, Instrument browser duplicate suppression.
+     */
+    if (type >= INSTRUMENT_TYPE_UNKNOWN || !display_stem)
+        return 0u;
+    storage_makeSavedInstrumentDisplayFilename(display_file,
+                                               sizeof(display_file),
+                                               display_stem,
+                                               type,
+                                               0u,
+                                               0u);
+    filesystem_copyInstrumentStemDisplay(display, display_file);
+    for (uint8_t i = 0u; i < instrument_file_count[type]; i++) {
+        if (filesystem_instrumentCacheStemMatches(type, i, display))
+            return 1u;
+    }
+    return 0u;
 }
 
 uint8_t filesystem_instrumentCount(instrument_type_t type)

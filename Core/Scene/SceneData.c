@@ -101,6 +101,109 @@ const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
     return &scene->kit.instruments[slot];
 }
 
+static void scene_copyDisplayName(
+    char dst[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u],
+    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
+{
+    uint8_t i;
+
+    /*
+     * Normalize a retained object display name.
+     *
+     * Inputs are fixed-width Save/Load display bytes, not NUL-terminated C
+     * strings. Output is the same eight-cell field plus NUL for resident
+     * SceneData storage. Blank/all-space names are preserved because blank is
+     * a valid user name; the UI sentinel `Empty` is handled by filesystem/menu
+     * slot occupancy logic, not by this helper.
+     */
+    if (!dst)
+        return;
+    for (i = 0u; i < SCENE_OBJECT_DISPLAY_NAME_LEN; i++) {
+        char c = name ? name[i] : ' ';
+        dst[i] = (c >= 0x20 && c <= 0x7e) ? c : ' ';
+    }
+    dst[SCENE_OBJECT_DISPLAY_NAME_LEN] = '\0';
+}
+
+void scene_setKitDisplayName(
+    kit_t *kit,
+    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
+{
+    /*
+     * Store a resident Kit name without touching sound data.
+     *
+     * Inputs: a Kit record and eight display bytes. Output: kit->display_name
+     * updates only when the Kit pointer is valid. This is used after normal
+     * load/save completion; Morph paths intentionally do not call it.
+     */
+    if (!kit)
+        return;
+    scene_copyDisplayName(kit->display_name, name);
+}
+
+void scene_setResidentKitDisplayName(
+    uint8_t scene_index,
+    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Store the active resident Kit identity by Scene coordinate.
+     *
+     * Inputs: resident Scene index plus eight display bytes. Output: the
+     * embedded Kit's retained name changes without modifying instrument slots,
+     * routing, or Morph endpoints.
+     */
+    if (!scene)
+        return;
+    scene_setKitDisplayName(&scene->kit, name);
+}
+
+void scene_setSceneDisplayName(
+    uint8_t scene_index,
+    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Store one resident Scene identity.
+     *
+     * Inputs: resident Scene index plus eight display bytes. Output:
+     * scene->display_name updates only for valid coordinates. This separates
+     * resident Scene naming from root Scene slot occupancy display.
+     */
+    if (!scene)
+        return;
+    scene_copyDisplayName(scene->display_name, name);
+}
+
+const char *scene_kitDisplayName(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /*
+     * Borrow the retained Kit name for Save editor seeding.
+     *
+     * Output is always an eight-character NUL-terminated string. Invalid Scene
+     * indices return a blank resident name, not the library-slot word `Empty`.
+     */
+    return scene ? scene->kit.display_name : "        ";
+}
+
+const char *scene_sceneDisplayName(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /*
+     * Borrow the retained Scene name for Save editor seeding.
+     *
+     * Output is always an eight-character NUL-terminated string. Invalid Scene
+     * indices return a blank resident name because absent-slot text belongs to
+     * filesystem scan caches, not SceneData.
+     */
+    return scene ? scene->display_name : "        ";
+}
+
 static void scene_copyInstrumentSourceName(kit_t *kit, uint8_t slot,
                                            const char *filename_or_stem)
 {
@@ -390,6 +493,15 @@ void scene_initAll(void)
         for (track = 0u; track < NUM_TRACKS; track++)
             scenes[scene_index].settings.midi_channel[track] =
                 (uint8_t)(track + 1u);
+        /*
+         * Initialize retained object names to blank, not Empty.
+         *
+         * Blank is a valid resident name and the Save editor must preserve it.
+         * The visible word `Empty` belongs only to missing library slots
+         * reported by filesystem/menu scan caches.
+         */
+        scene_setSceneDisplayName(scene_index, "        ");
+        scene_setResidentKitDisplayName(scene_index, "        ");
         for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++)
             instrumentManager_resetSlot(
                 &scenes[scene_index].kit.instruments[track],

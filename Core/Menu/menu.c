@@ -2050,39 +2050,98 @@ static uint8_t menu_firstSelectedSceneFromMask(uint16_t mask)
     return scene_getActiveIndex();
 }
 
-static uint8_t menu_currentSaveWouldOverwrite(void)
+static void menu_seedCurrentSaveNameFromResident(void)
 {
-    uint8_t i;
-    const char *existing = NULL;
+    uint8_t scene_index;
 
     /*
-     * Compute the OK/OW indicator without mutating save state.
+     * Enter Save name editing with resident identity.
      *
-     * Inputs: current Save type, target library slot, and edited
-     * preset_currentName. Output: nonzero when the target slot is occupied by a
-     * different name and confirming would overwrite on-card data. The later
-     * multi-Scene save pass should extend this loop across every selected
-     * source Scene and subsequent target slot; with SCENE_COUNT=1 this single
-     * comparison is the complete active behavior.
+     * What: Copies the saved object's retained name into the editable field
+     * when the cursor moves from target-slot selection into character editing.
+     *
+     * Why: The slot row displays target occupancy, while the character row
+     * edits the name that will be written. Empty target slots must not erase or
+     * replace the resident Kit or Scene name.
+     *
+     * Inputs: current Save type, active Scene, and Save Scene selection mask.
+     * Outputs: preset_currentName receives exactly eight display cells for the
+     * object that will be serialized when OK is confirmed.
+     *
+     * Affiliates/clients: menu_handleLoadSaveMenu(), SceneData retained-name
+     * accessors, filesystem save request capture, persistent OK/OW display.
+     */
+    if (menu_activePage != SAVE_PAGE)
+        return;
+    if (menu_saveOptions.what == SAVE_TYPE_KIT) {
+        memcpy(preset_currentName,
+               scene_kitDisplayName(scene_getActiveIndex()),
+               8u);
+    } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+        scene_index = menu_firstSelectedSceneFromMask(menu_kitLoadSceneMask);
+        memcpy(preset_currentName,
+               scene_sceneDisplayName(scene_index),
+               8u);
+    }
+}
+
+static uint8_t menu_currentSaveWouldOverwrite(void)
+{
+    /*
+     * Compute persistent overwrite display from product identity.
+     *
+     * What: Returns nonzero whenever the pending Save action targets an
+     * existing product object. For numbered saves, the slot number is the
+     * identity. For root Instrument Save, the target filename plus type
+     * extension is matched case-insensitively inside Instrument/.
+     *
+     * Why: `OW` warns about replacement, not about whether the edited text
+     * differs from the old display name. A save to an occupied slot overwrites
+     * even when the name is unchanged, and a case-only Instrument filename
+     * match overwrites on FAT.
+     *
+     * Inputs: active Save submode, target slot, nested Instrument source type,
+     * and the edited root Instrument stem. Output: nonzero for the `OW` LCD
+     * affordance; no filesystem or menu state is mutated.
+     *
+     * Affiliates/clients: menu_repaintLoadSavePage(), filesystem slot caches,
+     * filesystem_instrumentTargetExists(), Save OK click handlers.
      */
     if (menu_activePage != SAVE_PAGE)
         return 0u;
+    if (menu_instrumentLoadActive && menu_instrumentSaveMode) {
+        const kit_instrument_slot_t *slot =
+            scene_instrumentSlotConst(menu_instrumentLoadScene,
+                                      menu_instrumentLoadSlot);
+        instrument_type_t type = slot ? slot->type : menu_instrumentLoadType;
+        /*
+         * Use the live source slot type for root Instrument overwrite.
+         *
+         * What: Derives the extension/type identity from SceneData at repaint
+         * time, falling back to Menu's cached type only if the source slot is
+         * unavailable.
+         *
+         * Why: the save request itself revalidates the live source slot before
+         * writing. The `OW` indicator should match that accepted request target
+         * if a resident instrument type changed after entering nested Save.
+         *
+         * Inputs: selected source Scene/voice and editable Instrument stem.
+         * Outputs: nonzero when `stem.ext` already exists in the typed root
+         * Instrument cache under case-insensitive comparison.
+         *
+         * Affiliates/clients: menu_instrumentSaveRequestSelection(),
+         * filesystem_requestSaveInstrument(), filesystem_instrumentTargetExists().
+         */
+        return filesystem_instrumentTargetExists(type,
+                                                 menu_instrumentSaveName);
+    }
     if (menu_saveOptions.what == SAVE_TYPE_KIT) {
         uint16_t slot = menu_currentPresetNr[SAVE_TYPE_KIT];
-        if (!filesystem_kitSlotExists(slot))
-            return 0u;
-        existing = filesystem_kitSlotName(slot);
-    } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
-        uint16_t slot = menu_currentPresetNr[SAVE_TYPE_SCENE];
-        if (!filesystem_sceneSlotExists(slot))
-            return 0u;
-        existing = filesystem_sceneSlotName(slot);
-    } else {
-        return 0u;
+        return filesystem_kitSlotExists(slot);
     }
-    for (i = 0u; i < 8u; i++) {
-        if (existing[i] != preset_currentName[i])
-            return 1u;
+    if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+        uint16_t slot = menu_currentPresetNr[SAVE_TYPE_SCENE];
+        return filesystem_sceneSlotExists(slot);
     }
     return 0u;
 }
@@ -3331,7 +3390,27 @@ static void menu_repaintLoadSavePage(void)
                     cur_want_row = 2u;
                 }
             }
-            memcpy(&editDisplayBuffer[1][14], menuText_ok, 2u);
+            /*
+             * Show root Instrument overwrite state in the nested Save surface.
+             *
+             * What: Reuses the shared Save identity query even though nested
+             * Instrument Save returns before the generic Save-page renderer.
+             *
+             * Why: root Instrument overwrite is filename/type based rather
+             * than numbered-slot based. The user must see `OW` for
+             * case-insensitive matches such as `fiRstfile.snr` before OK
+             * collapses all variants to the newly entered case.
+             *
+             * Inputs: menu_instrumentSaveName and source instrument type.
+             * Outputs: bottom-right LCD affordance is either OK or OW.
+             *
+             * Affiliates/clients: menu_currentSaveWouldOverwrite(),
+             * filesystem_instrumentTargetExists(), filesystem_saveInstrument_tick().
+             */
+            if (menu_currentSaveWouldOverwrite())
+                memcpy(&editDisplayBuffer[1][14], "OW", 2u);
+            else
+                memcpy(&editDisplayBuffer[1][14], menuText_ok, 2u);
             if (menu_saveOptions.state == SAVE_STATE_OK)
                 editDisplayBuffer[1][13] = ARROW_SIGN;
             return;
@@ -4190,7 +4269,33 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             }
         } else if (inc > 0) {
             if (menu_saveOptions.state < SAVE_STATE_OK) {
+                uint8_t previous_state = menu_saveOptions.state;
                 menu_saveOptions.state++;
+                /*
+                 * Seed the editable Save name at the slot-to-name boundary.
+                 *
+                 * What: Detects the selection-mode transition from target slot
+                 * to character editing and restores preset_currentName from
+                 * resident Kit/Scene identity before the first character can
+                 * be edited.
+                 *
+                 * Why: Encoder movement over target slots may have shown or
+                 * loaded slot occupancy text. The Save filename must be the
+                 * resident object's retained name, including the all-blank
+                 * name, rather than `Empty` or the previous occupant's label.
+                 *
+                 * Inputs: previous and new Save state plus current Save type.
+                 * Outputs: preset_currentName is ready for EDIT_NAME1..8 and
+                 * for the eventual filesystem save request.
+                 *
+                 * Affiliates/clients: menu_seedCurrentSaveNameFromResident(),
+                 * filesystem_saveKitDirectory_tick(), future Scene Save.
+                 */
+                if (menu_activePage == SAVE_PAGE &&
+                    previous_state == SAVE_STATE_EDIT_PRESET_NR &&
+                    menu_saveOptions.state == SAVE_STATE_EDIT_NAME1) {
+                    menu_seedCurrentSaveNameFromResident();
+                }
                 if (menu_activePage == LOAD_PAGE) {
                     if (menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1)
                         menu_saveOptions.state = SAVE_STATE_OK;

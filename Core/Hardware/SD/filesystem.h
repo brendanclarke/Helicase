@@ -301,6 +301,26 @@ uint8_t     filesystem_kitSlotExists(uint16_t zero_based_slot);
 const char *filesystem_kitSlotName(uint16_t zero_based_slot);
 uint8_t     filesystem_sceneSlotExists(uint16_t zero_based_slot);
 const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
+/*
+ * Query whether a root Instrument save target already exists.
+ *
+ * What: Builds the same visible `stem.ext` component that root Instrument Save
+ * will write, then checks the current Instrument/ scan cache for a
+ * case-insensitive match of the same instrument type.
+ *
+ * Why: Menu must render persistent `OW` before the user confirms Save.
+ * Numbered slots can answer from occupancy caches, but root Instrument Save is
+ * filename-based and needs the extension/type rule owned by filesystem.
+ *
+ * Inputs: resident instrument type and the eight-character Save editor stem.
+ * Outputs: nonzero when confirming would overwrite at least one on-card
+ * same-casefold Instrument file.
+ *
+ * Affiliates/clients: menu_currentSaveWouldOverwrite(), root Instrument Save,
+ * Instrument browser duplicate suppression.
+ */
+uint8_t     filesystem_instrumentTargetExists(instrument_type_t type,
+                                              const char *display_stem);
 uint8_t     filesystem_instrumentCount(instrument_type_t type);
 const char *filesystem_instrumentName(instrument_type_t type,
                                       uint8_t browser_index);

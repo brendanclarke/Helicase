@@ -16,6 +16,15 @@
  */
 #define SCENE_COUNT 1u
 /*
+ * Fixed-width resident object display names.
+ *
+ * Kit, Scene, and Instrument browser/editor names use the LCD's eight visible
+ * character cells plus a local NUL terminator for C helpers. This constant
+ * keeps object identity metadata in SceneData without depending on the SD
+ * storage parser's naming constants.
+ */
+#define SCENE_OBJECT_DISPLAY_NAME_LEN 8u
+/*
  * Retained instrument source stem length.
  *
  * This is Scene-owned rather than storageTypes-owned so SceneData can retain
@@ -88,6 +97,24 @@ typedef struct {
     kit_settings_t settings;
     kit_instrument_slot_t instruments[INSTRUMENT_SLOT_COUNT];
     /*
+     * Retained Kit display name.
+     *
+     * What: Eight printable characters plus NUL naming the resident Kit for
+     * Save editor seeding. This is storage/UI metadata, not a DSP parameter and
+     * not a filesystem short alias.
+     *
+     * Why: Slot browsing displays on-card Kit/NNN names, while Save character
+     * entry must start from the currently loaded or last-saved resident Kit
+     * identity. Keeping that identity in SceneData prevents the Save UI from
+     * mistaking an empty slot display for the Kit's internal name.
+     *
+     * Inputs: normal Kit Load and successful normal Kit Save. Morph Load/Save
+     * must not write this field. Output clients: Menu Save editor seeding,
+     * root Kit Save folder-name construction, and future Scene embedded Kit
+     * naming.
+     */
+    char display_name[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u];
+    /*
      * Instrument source names are retained separately for display and save.
      *
      * instrument_display_name is the eight-character LCD field. instrument_stem
@@ -149,11 +176,27 @@ typedef struct {
     /*
      * Resident Scene record.
      *
-     * settings holds Scene-level performance/settings data, pattern holds the
-     * current bridge PatternSet, and kit holds the embedded six-slot Kit. The
-     * struct is the unit that future Bank loading will multiply to sixteen
-     * playable Scenes plus a staging/landing Scene.
+     * display_name is the resident Scene's own storage/UI identity. settings
+     * holds Scene-level performance/settings data, pattern holds the current
+     * bridge PatternSet, and kit holds the embedded six-slot Kit. The struct is
+     * the unit that future Bank loading will multiply to sixteen playable
+     * Scenes plus a staging/landing Scene.
      */
+    /*
+     * Retained Scene display name.
+     *
+     * What: Eight printable characters plus NUL naming the resident Scene for
+     * Save editor seeding and sceneset.scg output.
+     *
+     * Why: Root Scene slot display is on-card library state. The resident Scene
+     * needs its own name so saving to an empty or differently named slot does
+     * not derive identity from the slot browser sentinel.
+     *
+     * Inputs: normal Scene Load and successful normal Scene Save. Morph
+     * operations must not write this field. Output clients: Save UI,
+     * filesystem_requestSaveSceneDirectory(), and future Bank Scene lists.
+     */
+    char display_name[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u];
     scene_settings_t settings;
     PatternSet pattern;
     kit_t kit;
@@ -211,6 +254,48 @@ uint8_t scene_getActiveIndex(void);
  * unexpectedly perform a large foreground update.
  */
 uint8_t scene_selectActive(uint8_t scene_index);
+/*
+ * Retain one Kit display name in Kit-owned storage.
+ *
+ * What: Copies exactly eight display cells into kit->display_name, sanitizing
+ * non-printable bytes to spaces and appending NUL.
+ *
+ * Why: Kit name is resident data, separate from a root Kit library slot's
+ * current folder name. Normal Kit Save updates this field only after the save
+ * succeeds; Morph operations leave it alone.
+ *
+ * Inputs: caller-owned Kit pointer and fixed-width eight-character display
+ * field. Outputs: kit->display_name when kit is non-NULL.
+ *
+ * Affiliates/clients: filesystem normal Kit Load/Save completion, Menu Save
+ * editor seeding, Scene embedded Kit naming.
+ */
+void scene_setKitDisplayName(kit_t *kit,
+                             const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+void scene_setResidentKitDisplayName(
+    uint8_t scene_index,
+    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+/*
+ * Retain one resident Scene display name.
+ *
+ * What: Copies exactly eight display cells into the selected resident Scene,
+ * sanitizing non-printable bytes to spaces and appending NUL.
+ *
+ * Why: Scene Save needs an internal name independent of the root Scene slot
+ * currently highlighted by the browser. This also gives future Bank work a
+ * Scene-local name field instead of overloading preset_currentName.
+ *
+ * Inputs: resident Scene index and fixed-width display field. Outputs:
+ * scenes[index].display_name when the index is valid.
+ *
+ * Affiliates/clients: filesystem Scene Load/Save, Menu Save editor seeding,
+ * future Bank Scene lists.
+ */
+void scene_setSceneDisplayName(
+    uint8_t scene_index,
+    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+const char *scene_kitDisplayName(uint8_t scene_index);
+const char *scene_sceneDisplayName(uint8_t scene_index);
 /*
  * Borrow a mutable instrument slot from a Scene's embedded Kit.
  *

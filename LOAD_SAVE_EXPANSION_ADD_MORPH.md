@@ -811,112 +811,79 @@ Acceptance:
 - reject rename onto an existing different object;
 - confirm unrelated root objects remain visible.
 
-### Phase 2: Retained Names and Save UI Split
+### Phase 2: Normal Save Identity, UI, Rename, and Replace
 
-- Add retained Kit name storage.
-- Add retained Scene name storage now, while leaving Scene Load/Save UI gated
-  until the Scene-specific pass.
-- Split save slot display from save edit-name state in Menu.
-- Seed editor from retained object name when entering character entry.
-- Leave blank names untouched; for numbered slots, all-blank user text produces
-  the visible component `NNN `.
-- Allow real `Empty` names.
+This combines the previous Phases 2-5. Do this as one implementation pass
+because the pieces are coupled:
 
-Acceptance:
+- retained Kit/Scene/Instrument names decide the Save editor seed;
+- slot occupancy and filename existence decide persistent `OK`/`OW`;
+- the same edited name must be used by the menu request, filesystem rename,
+  file overwrite, cache refresh, and retained-name commit;
+- normal Kit Save and normal Instrument Save are the production proofs that the
+  asyncfatfs rename/remove foundation is correct.
 
-- Save slot scroll shows `Empty` for absent slots.
-- Clicking into the name field shows retained Kit/Instrument name, not `Empty`,
-  unless that retained name is literally `Empty`.
-- Saving updates only the saved object's retained name.
-- Morph load/save does not update retained names.
+Work:
 
-### Phase 3: Persistent OK/OW
-
-- Change slot overwrite predicate to occupied-slot based.
-- Add Instrument library filename existence helper with case-insensitive
-  matching and case-preserving returned display data.
-- Use filename plus extension for Instrument `OW`.
-- Keep `OW` rendered continuously while the current request would overwrite.
-
-Acceptance:
-
-- occupied Kit slot always shows `OW`;
-- empty Kit slot shows `ok`;
-- standalone Instrument Save defaults to current retained name and shows `OW`
-  when the matching file exists under case-insensitive comparison;
-- editing the Instrument name to a non-existing target changes `OW` to `ok`.
-
-### Phase 4: Normal Kit Save Rename/Replace
-
-- Replace the current occupied-folder preserve-name path with rename-if-needed
-  before entering the slot directory.
-- Generate member Instrument filenames using retained names and voice number at
-  character 8.
-- Write or replace all member files.
-- Write or replace `kitset.kcg`.
-- Update Kit scan cache from the actual current display/alias pair.
-- Update retained Kit name only after successful normal save.
+- Add resident retained Kit and Scene display-name fields in SceneData, plus
+  small copy/set helpers. Instrument retained name storage already exists and
+  stays display+stem because Kit member filenames need the 16-character stem.
+- Split Save UI slot display from Save editor contents. Slot scrolling shows
+  `Empty` or the scanned slot name, while entering character edit seeds from
+  the retained object name.
+- Preserve blank names. A blank root Kit name saves as `NNN ` and a blank
+  retained name remains blank; the literal text `Empty` is just another name.
+- Make `OK`/`OW` persistent and identity-based. Numbered slots show `OW` when
+  occupied. Root Instrument Save shows `OW` when the target `stem.ext` exists
+  under case-insensitive comparison.
+- Replace root Kit Save's occupied-folder open path with ensure-by-slot:
+  scan/find the numbered directory, rename it to the edited component when
+  needed, then enter it.
+- Collapse same-casefold Kit member files before writing each member, then
+  create one replacement file with the generated visible case.
+- Collapse same-casefold root Instrument files before writing, then create one
+  replacement file with the edited visible case.
+- Update browser caches after successful saves so the in-RAM UI immediately
+  mirrors the on-card case-insensitive overwrite result.
+- Update retained Kit/Scene/Instrument names only after successful normal save.
+  Morph load/save must not update retained names.
 
 Acceptance:
 
-- occupied Kit save changes the folder name to the edited name;
-- expected member files and `kitset.kcg` reflect the current Kit;
-- duplicate Instrument names inside a Kit produce unique voice-numbered member
-  files;
-- unrelated extra files in the Kit folder do not break load or save;
-- power-cycle/reboot scan sees the saved Kit under the new name.
+- Save slot scroll shows `Empty` for absent slots, but entering the name field
+  shows the retained Kit/Scene/Instrument name, not the slot display sentinel.
+- Blank Kit save name creates or renames the root folder to `NNN `.
+- Occupied Kit slot always shows `OW`, even when the edited name equals the
+  existing slot display.
+- Empty Kit slot shows `ok`.
+- Occupied Kit save changes the folder name to the edited name while preserving
+  child directory contents not owned by the save.
+- Kit Save writes exactly one file for each expected member Instrument and one
+  `kitset.kcg`; duplicate retained Instrument names become voice-numbered
+  member filenames.
+- Root Instrument Save shows `OW` for case-only matches such as `Kick.drm` vs
+  `kick.drm`.
+- Root Instrument overwrite leaves one visible target file whose case matches
+  the newly entered display component.
+- Reboot/rescan shows the saved Kit/Instrument under the new visible name.
+- Successful normal saves update only the saved object's retained name.
 
-### Phase 5: Normal Instrument Save Replace
+### Phase 3: Morph Load and Morph Save
 
-- Detect case-insensitive target filename existence for `OW`.
-- Use the LFN-aware write path to replace an existing file or create a missing
-  file.
-- Preserve standalone Instrument filename exactly after sanitization and type
-  extension.
-- Update retained Instrument name only after successful normal save.
+This rolls the previous Phase 6 and Phase 7 into one later Morph phase. Do not
+expand or implement it until Phase 2 is complete and tested; Morph Save must use
+the exact same directory ensure/rename and file replace helpers created for
+normal saves.
 
-Acceptance:
+Deferred work:
 
-- saving a new Instrument file shows `ok`;
-- saving over an existing target, including a case-only match, shows `OW`;
-- overwrite leaves one visible target file whose case matches the newly entered
-  display component;
-- reloading the saved file updates that slot's retained name from the filename.
-
-### Phase 6: Morph Load Promotion
-
-- Add KitMrp to Load type whitelist.
-- Add InstrumentMrp nested Load selection.
-- Preserve existing Preset same-type endpoint-copy semantics.
-- Verify no retained names change.
-
-Acceptance:
-
-- KitMrp copies matching source normal endpoints into resident morph endpoints;
-- InstrumentMrp copies matching source normal endpoints into the selected
-  resident slot's morph endpoints;
-- mismatched types are no-change;
-- current Morph amounts are reapplied through the bounded Morph worker.
-
-### Phase 7: Morph Save
-
-- Add filesystem/Preset/Menu request paths for Kit Morph Save.
-- Add filesystem/Preset/Menu request paths for Instrument Morph Save.
+- Promote KitMrp and InstrumentMrp Load reachability.
+- Preserve existing Preset same-type morph endpoint copy semantics.
+- Add KitMrp and InstrumentMrp Save request paths.
 - Add storageTypes save-view support for Morph Save endpoint mapping.
-- Use the same directory rename and file replace behavior as normal save.
-- Do not update retained names on Morph Save.
+- Keep retained names unchanged for every Morph operation.
 
-Acceptance:
-
-- KitMrp Save writes file `[params]` as current interpolated values and
-  `[morph]` as prior normal endpoints;
-- InstrumentMrp Save does the same for one selected voice;
-- normal save behavior remains unchanged;
-- Morph Save does not rename Kit, Scene, or Instrument retained names;
-- loading the saved file normally produces the interpolated values as normal
-  endpoints;
-- loading the saved file as Morph produces the interpolated values into morph
-  endpoints, consistent with Morph Load rules.
+Acceptance will be expanded after the normal-save phase lands.
 
 ## Real Code Dive: asyncfatfs Rename/Overwrite Implementation
 
@@ -1345,6 +1312,12 @@ Comment replacement:
 
 ### `filesystem.c` Changes
 
+Historical note: this subsection was written during the asyncfatfs foundation
+planning pass. It records the original integration intent, but the exact
+next-pass implementation plan is now the later section
+`Real Code Dive: Combined Normal Save Integration (Phase 2)`. When details
+conflict, follow the Phase 2 section.
+
 #### 1. Add overwrite-preflight scratch
 
 Add generic save scratch for remove/rename callbacks:
@@ -1623,6 +1596,10 @@ Comment block:
 
 ### `menu.c` Changes Tied To Overwrite
 
+Historical note: this subsection is superseded by the later Phase 2 Menu plan,
+which includes the exact Instrument target-existence helper and Save editor
+seeding changes.
+
 The current `menu_currentSaveWouldOverwrite()` returns `OW` for Kit/Scene only
 when the occupied slot name differs from `preset_currentName`. Change it to:
 
@@ -1708,41 +1685,1260 @@ Verification notes:
   compiler/build pass was possible here. Run the normal `make`/`make img`
   checklist on a toolchain-equipped machine before hardware testing.
 
-### Scope Decisions Still Needed
+## Real Code Dive: Combined Normal Save Integration (Phase 2)
 
-1. **Duplicate non-empty directories:** file overwrite can remove all
-   same-casefold variants now. Removing duplicate non-empty directories requires
-   recursive delete, which is explicitly not part of the current asyncfatfs
-   primitive. For Kit/Scene slot directories, the proposed behavior is: choose
-   the capital-first product representative, rename that directory, rewrite its
-   expected children, and hide later duplicate directories from browsers. Decide
-   whether this is acceptable until recursive directory delete lands, or whether
-   duplicate non-empty directories should make save fail.
-2. **Diagnostics policy:** File/Dir diagnostic menus currently use
-   case-sensitive LFN calls to probe raw behavior. Decide whether diagnostics
-   should remain exact-case tests or switch to production
-   case-insensitive/case-preserving behavior.
-3. **Blank root Instrument names:** Kit/Scene blank names are now decided. Root
-   Instrument Save currently funnels blank stems through
-   `storage_makeSavedInstrumentDisplayFilename()`, which falls back to `inst`.
-   Decide whether standalone Instrument blank names should become `.drm/.snr`
-   style filenames, remain `inst.<ext>`, or be disallowed in the UI.
-## Open Implementation Questions
+This section expands the combined normal-save phase that replaces old Phases
+2-5. It is based on the current source tree after the asyncfatfs rename/remove
+pass.
 
-Product semantics are settled for files and numbered blank folder names. The
-remaining product-scope decisions are listed in the real-code dive above.
+The pass is deliberately not Morph work. It creates the normal-save semantics
+that Morph Save will later reuse.
 
-The remaining questions are implementation choices to answer while coding:
+### Current Source Facts
 
-- Should the asyncfatfs rename API be public display-name based only, or should
-  filesystem.c use a private object-info helper after scanning a numbered slot?
-- For longer target names that need a larger LFN entry run, should rename always
-  move to a new entry run, or use in-place rewrite when the old run is large
-  enough and move only when necessary?
-- Is the cleaner Morph Save implementation a temporary `kit_t`/slot copy or a
-  storageTypes save-view accessor?
-- Where exactly should retained Kit and Scene names live in `SceneData.h` so
-  future Bank work can multiply them cleanly?
+- `SceneData.h` already retains per-Instrument names in `kit_t`:
+  `instrument_display_name[slot][9]` and
+  `instrument_stem[slot][SCENE_INSTRUMENT_STEM_LEN + 1u]`.
+- `kit_t` does not yet retain the Kit's own display name.
+- `scene_t` does not yet retain the Scene's own display name.
+- `preset_currentName[8]` is still the Save page edit buffer and is also used
+  by older load-name behavior. It is not sufficient as resident object identity.
+- `filesystem_saveKitDirectory_tick()` phase 6 currently opens an occupied Kit
+  slot through `kit_slot_open_name[op_slot]` and intentionally does not rename
+  the directory.
+- `filesystem_makeKitDirectoryDisplayName()` currently substitutes `Kit` when
+  the edited name is blank. This conflicts with the confirmed `NNN ` blank-name
+  rule.
+- Kit member file save and root Instrument save currently use
+  `AFATFS_MATCH_CASE_SENSITIVE` and do not call `afatfs_removeObjects_lfn()`
+  before writing.
+- `filesystem_recordInstrumentFile()` inserts every scanned physical file. It
+  does not suppress same-casefold duplicate stems.
+- `filesystem_updateInstrumentCacheAfterSave()` removes cache rows by exact
+  alias or exact fixed display stem; it does not collapse case variants.
+- `menu_currentSaveWouldOverwrite()` returns `OW` for Kit/Scene only when the
+  occupied slot name differs from `preset_currentName`; it returns no `OW` for
+  root Instrument Save.
+- `filesystem.h` does not expose a root Instrument target-existence helper, so
+  Menu cannot compute persistent Instrument `OW` without new API.
+
+### `SceneData.h` Changes
+
+Add one shared display-name length for retained object names near the existing
+stem length:
+
+```c
+#define SCENE_OBJECT_DISPLAY_NAME_LEN 8u
+```
+
+Keep `SCENE_INSTRUMENT_STEM_LEN` unchanged. Do not add a Kit stem unless a
+future feature needs it; Kit and Scene normal saves only need the eight
+character editor/display field today.
+
+Add Kit retained display name before the existing per-Instrument retained names:
+
+```c
+    /*
+     * Retained Kit display name.
+     *
+     * What: Eight printable characters plus NUL naming the resident Kit for
+     * Save editor seeding. This is storage/UI metadata, not a DSP parameter and
+     * not a filename alias.
+     *
+     * Why: Slot browsing displays on-card Kit/NNN names, while Save character
+     * entry must start from the currently loaded or last-saved resident Kit
+     * identity. Keeping that identity in SceneData prevents the Save UI from
+     * mistaking an empty slot display for the Kit's internal name.
+     *
+     * Inputs: normal Kit Load and successful normal Kit Save. Morph Load/Save
+     * must not write this field. Output clients: Menu Save editor seeding,
+     * root Kit Save folder-name construction, and future Scene embedded Kit
+     * naming.
+     */
+    char display_name[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u];
+```
+
+Add Scene retained display name inside `scene_t`, before `settings`:
+
+```c
+    /*
+     * Retained Scene display name.
+     *
+     * What: Eight printable characters plus NUL naming the resident Scene for
+     * Save editor seeding and sceneset.scg output.
+     *
+     * Why: Root Scene slot display is on-card library state. The resident Scene
+     * needs its own name so saving to an empty or differently named slot does
+     * not derive identity from the slot browser sentinel.
+     *
+     * Inputs: normal Scene Load and successful normal Scene Save. Morph
+     * operations must not write this field. Output clients: Save UI,
+     * filesystem_requestSaveSceneDirectory(), and future Bank Scene lists.
+     */
+    char display_name[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u];
+```
+
+Add public setter declarations after the existing `scene_selectActive()` block:
+
+```c
+void scene_setKitDisplayName(kit_t *kit, const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+void scene_setResidentKitDisplayName(uint8_t scene_index,
+                                     const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+void scene_setSceneDisplayName(uint8_t scene_index,
+                               const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+const char *scene_kitDisplayName(uint8_t scene_index);
+const char *scene_sceneDisplayName(uint8_t scene_index);
+```
+
+Header comment for `scene_setKitDisplayName()`:
+
+```c
+/*
+ * Retain one Kit display name in Kit-owned storage.
+ *
+ * What: Copies exactly eight display cells into kit->display_name, sanitizing
+ * non-printable bytes to spaces and appending NUL.
+ *
+ * Why: Kit name is resident data, separate from a root Kit library slot's
+ * current folder name. Normal Kit Save updates this field only after the save
+ * succeeds; Morph operations leave it alone.
+ *
+ * Inputs: caller-owned Kit pointer and fixed-width eight-character display
+ * field. Outputs: kit->display_name when kit is non-NULL.
+ *
+ * Affiliates/clients: filesystem normal Kit Load/Save completion, Menu Save
+ * editor seeding, Scene embedded Kit naming.
+ */
+```
+
+Header comment for `scene_setSceneDisplayName()`:
+
+```c
+/*
+ * Retain one resident Scene display name.
+ *
+ * What: Copies exactly eight display cells into the selected resident Scene,
+ * sanitizing non-printable bytes to spaces and appending NUL.
+ *
+ * Why: Scene Save needs an internal name independent of the root Scene slot
+ * currently highlighted by the browser. This also gives future Bank work a
+ * Scene-local name field instead of overloading preset_currentName.
+ *
+ * Inputs: resident Scene index and fixed-width display field. Outputs:
+ * scenes[index].display_name when the index is valid.
+ *
+ * Affiliates/clients: filesystem Scene Load/Save, Menu Save editor seeding,
+ * future Bank Scene lists.
+ */
+```
+
+### `SceneData.c` Changes
+
+Add a private display-name copy helper near `scene_copyInstrumentSourceName()`:
+
+```c
+static void scene_copyDisplayName(char dst[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u],
+                                  const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
+{
+    uint8_t i;
+
+    /*
+     * Normalize a retained object display name.
+     *
+     * Inputs are fixed-width Save/Load display bytes, not NUL-terminated C
+     * strings. Output is the same eight-cell field plus NUL for resident
+     * SceneData storage. Blank/all-space names are preserved because blank is
+     * a valid user name; the UI sentinel `Empty` is handled by filesystem/menu
+     * slot occupancy logic, not by this helper.
+     */
+    if (!dst)
+        return;
+    for (i = 0u; i < SCENE_OBJECT_DISPLAY_NAME_LEN; i++) {
+        char c = name ? name[i] : ' ';
+        dst[i] = (c >= 0x20 && c <= 0x7e) ? c : ' ';
+    }
+    dst[SCENE_OBJECT_DISPLAY_NAME_LEN] = '\0';
+}
+```
+
+Implement the new setters/accessors:
+
+```c
+void scene_setKitDisplayName(kit_t *kit,
+                             const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
+{
+    if (!kit)
+        return;
+    scene_copyDisplayName(kit->display_name, name);
+}
+
+void scene_setResidentKitDisplayName(
+        uint8_t scene_index,
+        const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
+{
+    scene_t *scene = scene_get(scene_index);
+    if (!scene)
+        return;
+    scene_setKitDisplayName(&scene->kit, name);
+}
+
+void scene_setSceneDisplayName(uint8_t scene_index,
+                               const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
+{
+    scene_t *scene = scene_get(scene_index);
+    if (!scene)
+        return;
+    scene_copyDisplayName(scene->display_name, name);
+}
+
+const char *scene_kitDisplayName(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+    return scene ? scene->kit.display_name : "        ";
+}
+
+const char *scene_sceneDisplayName(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+    return scene ? scene->display_name : "        ";
+}
+```
+
+Initialization update: in the Scene/Kit initialization path, set default Kit and
+Scene names to blank spaces, not `"Empty   "`. `Empty` is an absent-slot
+display sentinel owned by filesystem/menu.
+
+Comment beside initialization:
+
+```c
+/*
+ * Initialize retained object names to blank, not Empty.
+ *
+ * Blank is a valid resident name and the Save editor must preserve it. The
+ * visible word `Empty` belongs only to missing library slots reported by the
+ * scan cache.
+ */
+```
+
+### `storageTypes.c/h` Changes
+
+Change `storage_parseNumberedFolder()` so `NNN ` is valid. The current
+function must stop rejecting an empty post-separator display string.
+
+Required behavior:
+
+- three leading decimal digits are still mandatory;
+- separator remains space or underscore;
+- slot number maps directly to 0..999;
+- display bytes after the separator are copied with `storage_copyDisplayName()`;
+- when the component ends immediately after the separator, return success and
+  output eight spaces.
+
+Implementation comment:
+
+```c
+/*
+ * Accept a blank numbered-folder display name.
+ *
+ * What: `NNN ` is a valid numbered folder component. The parsed display field
+ * becomes eight spaces, matching a retained internal blank name.
+ *
+ * Why: Blank is a real user-entered name, not an empty-slot sentinel. Slot
+ * occupancy comes from the numeric prefix and validated folder contents; the
+ * UI string `Empty` is only the display for an absent slot.
+ *
+ * Inputs: FAT display component beginning with three digits and a space or
+ * underscore. Outputs: slot receives 000..999 directly; display receives the
+ * post-separator text padded to the fixed LCD width, or all spaces when blank.
+ *
+ * Affiliates/clients: filesystem_recordKitDirectory(),
+ * filesystem_recordSceneDirectory(), Kit/Scene Save UI, retained-name storage.
+ */
+```
+
+No header signature change is needed.
+
+### `filesystem.h` Changes
+
+Add a public helper for persistent Instrument Save `OW`:
+
+```c
+uint8_t filesystem_instrumentTargetExists(instrument_type_t type,
+                                          const char *display_stem);
+```
+
+Header comment:
+
+```c
+/*
+ * Query whether a root Instrument save target already exists.
+ *
+ * What: Builds the same visible `stem.ext` component that root Instrument Save
+ * will write, then checks the current Instrument/ scan cache for a
+ * case-insensitive match of the same instrument type.
+ *
+ * Why: Menu must render persistent `OW` before the user confirms Save.
+ * Numbered slots can answer from occupancy caches, but root Instrument Save is
+ * filename-based and needs the extension/type rule owned by filesystem.
+ *
+ * Inputs: resident instrument type and the eight-character Save editor stem.
+ * Outputs: nonzero when confirming would overwrite at least one on-card
+ * same-casefold Instrument file.
+ *
+ * Affiliates/clients: menu_currentSaveWouldOverwrite(), root Instrument Save,
+ * Instrument browser duplicate suppression.
+ */
+```
+
+### `filesystem.c` Includes and Scratch
+
+Add:
+
+```c
+#include "fat_standard.h"
+```
+
+This is needed for `fat_compareDisplayName()` and
+`fat_compareDisplayNameCasefoldThenCase()` in product cache sorting and
+duplicate checks.
+
+Replace the old `op_save_opened_existing_dir` meaning with explicit
+ensure/rename scratch:
+
+```c
+static uint8_t op_remove_done = 0u;
+static uint8_t op_rename_done = 0u;
+static uint8_t op_save_found_existing_dir = 0u;
+static char op_save_existing_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_save_existing_open_name[AFATFS_SHORT_FILENAME_MAX];
+```
+
+Callback helpers:
+
+```c
+static void on_remove_complete(void)
+{
+    op_remove_done = 1u;
+}
+
+static void on_rename_complete(void)
+{
+    op_rename_done = 1u;
+}
+```
+
+Callback comment:
+
+```c
+/*
+ * Mark completion of asyncfatfs overwrite preflight work.
+ *
+ * What: Latches that afatfs_removeObjects_lfn() or afatfs_renameObject_lfn()
+ * has called back. The following state-machine phase decides success by
+ * opening the expected object with the returned alias/display name.
+ *
+ * Why: File overwrite and occupied-slot save are now multi-step operations:
+ * collapse same-casefold file variants before writing, and rename an existing
+ * numbered directory before entering it. The filesystem pump needs a tiny
+ * callback bridge between asyncfatfs completion and the next state-machine
+ * phase.
+ *
+ * Affiliates/clients: filesystem_saveKitDirectory_tick(),
+ * filesystem_saveSceneDirectory_tick(), filesystem_saveInstrument_tick(),
+ * future KitMrp/InstrumentMrp Save.
+ */
+```
+
+### `filesystem.c` Kit/Scene Scan Duplicate Policy
+
+Update `filesystem_recordKitDirectory()` and `filesystem_recordSceneDirectory()`
+so duplicate numbered directories do not replace an earlier representative
+arbitrarily.
+
+New helper:
+
+```c
+static uint8_t filesystem_displayPrecedesCached(const char *candidate,
+                                                const char *cached)
+{
+    return (uint8_t)(fat_compareDisplayNameCasefoldThenCase(candidate,
+                                                            cached) < 0);
+}
+```
+
+Use it after parsing a numbered folder:
+
+```c
+if (kit_slot_present[slot] &&
+    !filesystem_displayPrecedesCached(display, kit_slot_name[slot])) {
+    return;
+}
+```
+
+Then write the cache entry as today. Scene uses the same rule with
+`scene_slot_present/name/open_name`.
+
+Comment:
+
+```c
+/*
+ * Keep the earliest display variant by product order.
+ *
+ * Slot number is the product identity, so externally-created duplicate
+ * directories for the same `NNN` slot must not appear as separate products.
+ * The casefold-first/raw-case tiebreak chooses a deterministic representative
+ * with capital letters before lowercase, while later duplicate directories are
+ * ignored until recursive delete exists.
+ */
+```
+
+### `filesystem.c` Instrument Browser Duplicate Suppression
+
+Replace `filesystem_compareInstrumentDisplayName()` body with the shared helper
+or make it a wrapper:
+
+```c
+static int8_t filesystem_compareInstrumentDisplayName(const char *a,
+                                                       const char *b)
+{
+    return fat_compareDisplayNameCasefoldThenCase(a, b);
+}
+```
+
+Add a same-product helper for type+stem:
+
+```c
+static uint8_t filesystem_instrumentCacheEntryMatches(
+        instrument_type_t type,
+        uint8_t index,
+        const char *display_name)
+{
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+    filesystem_copyInstrumentStemDisplay(display, display_name);
+    return (uint8_t)(
+        type < INSTRUMENT_TYPE_UNKNOWN &&
+        index < instrument_file_count[type] &&
+        fat_compareDisplayName(instrument_file_name[type][index],
+                               display,
+                               false) == 0);
+}
+```
+
+Modify `filesystem_recordInstrumentFile()`:
+
+1. classify type as today;
+2. build `display` and `stem16`;
+3. scan existing cache rows for same type and case-insensitive display stem;
+4. if found, compare full visible filename by
+   `fat_compareDisplayNameCasefoldThenCase(display_name, existing_display_name)`;
+5. keep the earlier representative and discard the later one;
+6. if the new one wins, replace that cache row's name/open/stem without
+   incrementing `instrument_file_count[type]`;
+7. otherwise insert sorted as today.
+
+Add a temporary full-display cache only if needed. If not adding another cache
+array, compare the eight-character stem because Instrument browser identity is
+type + displayed stem; the overwrite path still removes full same-casefold
+physical filenames before writing.
+
+Comment:
+
+```c
+/*
+ * Suppress same-casefold Instrument browser duplicates.
+ *
+ * What: Before inserting a scanned Instrument/ object, compare it against
+ * existing cached rows for the same instrument type. If the display stem
+ * matches case-insensitively, keep only the filename that sorts first by folded
+ * text and raw ASCII case.
+ *
+ * Why: Externally edited FAT cards may contain names that differ only by case.
+ * Product policy treats those as one object; later variants must not appear in
+ * the Load UI even though asyncfatfs reports every physical FAT object.
+ *
+ * Inputs: display_name and open_name come from afatfs_findNextObject().
+ * Outputs: the per-type cache either keeps its existing representative,
+ * replaces it with an earlier-sorting variant, or inserts a new product object.
+ *
+ * Affiliates/clients: filesystem_requestScanInstruments(), nested Instrument
+ * Load, root Instrument Save cache update,
+ * fat_compareDisplayNameCasefoldThenCase().
+ */
+```
+
+Implement `filesystem_instrumentTargetExists()` near the other Instrument cache
+accessors:
+
+```c
+uint8_t filesystem_instrumentTargetExists(instrument_type_t type,
+                                          const char *display_stem)
+{
+    char display_file[AFATFS_LONG_FILENAME_MAX + 1u];
+
+    if (type >= INSTRUMENT_TYPE_UNKNOWN || !display_stem)
+        return 0u;
+    storage_makeSavedInstrumentDisplayFilename(display_file,
+                                               sizeof(display_file),
+                                               display_stem,
+                                               type,
+                                               0u,
+                                               0u);
+    for (uint8_t i = 0u; i < instrument_file_count[type]; i++) {
+        if (filesystem_instrumentCacheEntryMatches(type, i, display_file))
+            return 1u;
+    }
+    return 0u;
+}
+```
+
+### `filesystem.c` Instrument Cache Update After Save
+
+Update `filesystem_updateInstrumentCacheAfterSave()` so it removes every
+same-casefold cached row for the saved target type/stem before inserting the
+new one.
+
+Replace the exact checks:
+
+```c
+strcmp(instrument_file_open_name[type][i], open_name) == 0 ||
+strncmp(instrument_file_name[type][i], display, STORAGE_KIT_DISPLAY_NAME_LEN) == 0
+```
+
+with:
+
+```c
+fat_compareDisplayName(instrument_file_open_name[type][i],
+                       open_name,
+                       false) == 0 ||
+fat_compareDisplayName(instrument_file_name[type][i],
+                       display,
+                       false) == 0
+```
+
+Comment:
+
+```c
+/*
+ * Refresh browser cache after case-insensitive overwrite.
+ *
+ * What: Removes every cached row whose filename alias or display stem matches
+ * the saved target under case-insensitive comparison, then inserts the one
+ * returned by the completed save.
+ *
+ * Why: The SD card has already collapsed same-casefold physical files into one
+ * visible object. The in-RAM browser cache must mirror that immediately so the
+ * next nested load cannot select a stale duplicate alias.
+ *
+ * Inputs: display_name is the target case just written; open_name is the short
+ * alias returned by asyncfatfs. Outputs: per-type Instrument cache contains one
+ * row for the saved object.
+ *
+ * Affiliates/clients: filesystem_saveInstrument_tick(),
+ * filesystem_recordInstrumentFile(), nested Instrument Load.
+ */
+```
+
+### `filesystem.c` Kit Display Name Construction
+
+Change `filesystem_makeKitDirectoryDisplayName()` so it never substitutes
+`Kit` for a blank save name.
+
+Remove:
+
+```c
+if (pos == 4u) {
+    dst[pos++] = 'K';
+    dst[pos++] = 'i';
+    dst[pos++] = 't';
+}
+```
+
+Keep the existing trim behavior by setting `pos = last_meaningful`. For an
+all-space name, `pos` remains `4`, so the output is `NNN ` plus NUL.
+
+Comment replacement:
+
+```c
+/*
+ * Preserve blank Kit save names.
+ *
+ * What: Builds a root numbered Kit folder component: `NNN ` plus exactly the
+ * sanitized edited Kit name. If every name character is blank, the component
+ * ends after the separator space.
+ *
+ * Why: The internal retained Kit name can be blank. Falling back to `Kit`
+ * would silently rename a real blank root Kit save and break the Save UI
+ * contract that `Empty` means absent slot, not blank-named slot. This does not
+ * apply to Scene embedded Kits, whose directory name is always
+ * `Kit <kit-name>`.
+ *
+ * Inputs: op_slot is the direct 000..999 library slot; preset_currentName is
+ * the fixed-width editable retained Kit name. Output: LFN display component
+ * passed to asyncfatfs rename/mkdir.
+ *
+ * Affiliates/clients: filesystem_saveKitDirectory_tick(), KitMrp Save, Kit
+ * scan cache update, storage_parseNumberedFolder().
+ */
+```
+
+### `filesystem.c` Kit Member Filename Generation
+
+Change `filesystem_prepareSavedInstrumentFilenames()` so every Kit member file
+gets the voice number forced into character 8, not only duplicates.
+
+Replace both-pass duplicate logic with a single pass:
+
+```c
+memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
+for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
+    storage_makeSavedInstrumentDisplayFilename(
+        op_save_instrument_display_file[slot],
+        sizeof(op_save_instrument_display_file[slot]),
+        kit->instrument_stem[slot],
+        kit->instruments[slot].type,
+        (uint8_t)(slot + 1u),
+        1u);
+}
+```
+
+Comment:
+
+```c
+/*
+ * Generate voice-numbered member Instrument filenames.
+ *
+ * What: Builds one visible filename for each Kit member using the retained
+ * per-voice Instrument stem and always forcing the one-based voice number into
+ * character 8 of the stem.
+ *
+ * Why: Kit Save owns six member files in one directory. Two voices may retain
+ * the same Instrument name, and the save must still produce six distinct
+ * authoritative member files without depending on asyncfatfs alias suffixes.
+ *
+ * Inputs: resident Kit source stems and slot types. Outputs: visible LFN file
+ * components in op_save_instrument_display_file[] and cleared returned-alias
+ * buffers in op_save_instrument_file[].
+ *
+ * Affiliates/clients: storage_makeSavedInstrumentDisplayFilename(),
+ * filesystem_saveKitDirectory_tick(), kitset.kcg file references.
+ */
+```
+
+### `filesystem.c` Ensure Numbered Directory Helper
+
+Factor root Kit/Scene directory ensure behavior into small helpers before
+rewriting save phases. If keeping separate Kit and Scene helpers is simpler,
+share only the inner scan/compare logic.
+
+Recommended helper shape for Kit:
+
+```c
+static uint8_t filesystem_findKitSlotDirectoryForSave(void);
+static uint8_t filesystem_startEnsureKitSlotDirectory(void);
+```
+
+`filesystem_findKitSlotDirectoryForSave()` assumes asyncfatfs current directory
+is `Kit/` and scans with `afatfs_findNextObject()`.
+
+Outputs:
+
+- `op_save_found_existing_dir`;
+- `op_save_existing_display_name`;
+- `op_save_existing_open_name`;
+- `op_save_kit_dir_name` when an alias is already known.
+
+Scan rule:
+
+```c
+if (object.kind == AFATFS_OBJECT_DIRECTORY &&
+    storage_parseNumberedFolder(object.displayName, &slot, display) &&
+    slot == op_slot) {
+    choose by fat_compareDisplayNameCasefoldThenCase(object.displayName,
+                                                     best_display) < 0;
+}
+```
+
+Comment:
+
+```c
+/*
+ * Find the canonical directory object for one numbered Kit slot.
+ *
+ * What: Scans the current Kit/ directory for directory objects whose visible
+ * name or compatibility short alias parses as the requested `NNN` slot.
+ *
+ * Why: Slot number is product identity. An occupied save must rename that
+ * directory to the edited display component before rewriting child files,
+ * instead of creating a duplicate or preserving the old visible name.
+ *
+ * Inputs: op_slot is the requested root Kit slot; afatfs current directory is
+ * already Kit/. Outputs: op_save_existing_display_name receives the visible
+ * source component, and op_save_kit_dir_name receives its open alias.
+ *
+ * Duplicate policy: if external editing created several same-slot variants,
+ * choose the one that sorts first by case-folded text with raw ASCII as a
+ * tiebreaker. Later duplicate directories are hidden from product behavior
+ * until recursive directory delete is implemented.
+ *
+ * Affiliates/clients: filesystem_saveKitDirectory_tick(), KitMrp save, Scene
+ * embedded Kit save, asyncfatfs rename, storage_parseNumberedFolder().
+ */
+```
+
+Helper flow:
+
+1. if no existing directory: call
+   `afatfs_mkdir_lfn(op_save_kit_display_name,
+                     AFATFS_MATCH_CASE_INSENSITIVE,
+                     op_save_kit_dir_name,
+                     on_file_opened)`;
+2. if existing display byte-equals target: open by `op_save_kit_dir_name`;
+3. if existing display differs: call
+   `afatfs_renameObject_lfn(op_save_existing_display_name,
+                            op_save_kit_display_name,
+                            AFATFS_MATCH_CASE_INSENSITIVE,
+                            op_save_kit_dir_name,
+                            on_rename_complete)`, wait for callback, then open
+   by returned alias.
+
+Byte equality check:
+
+```c
+fat_compareDisplayName(op_save_existing_display_name,
+                       op_save_kit_display_name,
+                       true) == 0
+```
+
+Use case-insensitive matching only for finding the source; use byte equality to
+decide whether a case-only rename is needed.
+
+### `filesystem_saveKitDirectory_tick()` Phase Rewrite
+
+Replace phases 6-10 with ensure/rename phases. Suggested phase map:
+
+```text
+6  BEGIN slot directory scan
+7  SCAN slot directory
+8  START mkdir/rename/open selected directory
+9  WAIT mkdir/open or rename
+10 OPEN renamed directory by returned alias if needed
+11 WAIT target kit folder
+12 CHDIR target kit folder
+13 CLOSE target kit handle
+14 WAIT CLOSE target kit
+15 START first member file remove preflight
+```
+
+Then renumber the old member/kitset phases or insert the new phases into the
+existing gaps. The important sequence is:
+
+1. after `Kit/` is current directory, find slot by `NNN`;
+2. create or rename to `op_save_kit_display_name`;
+3. open the resulting directory by alias;
+4. chdir into it;
+5. for each member file, remove same-casefold variants;
+6. write member file with LFN `"w"` and case-insensitive matching;
+7. write `kitset.kcg`;
+8. return root;
+9. update cache and retained name.
+
+Member remove phase before existing member open:
+
+```c
+op_remove_done = 0u;
+if (!afatfs_removeObjects_lfn(
+        op_save_instrument_display_file[op_instrument_slot],
+        AFATFS_MATCH_CASE_INSENSITIVE,
+        AFATFS_REMOVE_FILES_ONLY,
+        on_remove_complete)) {
+    return;
+}
+```
+
+Then:
+
+```c
+if (!op_remove_done)
+    return;
+...
+afatfs_fopen_lfn(op_save_instrument_display_file[op_instrument_slot],
+                 "w",
+                 AFATFS_MATCH_CASE_INSENSITIVE,
+                 op_save_instrument_file[op_instrument_slot],
+                 on_file_opened)
+```
+
+Comment beside member remove:
+
+```c
+/*
+ * Collapse same-casefold member-file variants before writing.
+ *
+ * What: Deletes every physical file in the Kit directory whose display name
+ * matches the target member filename under case-insensitive comparison.
+ *
+ * Why: `Kick.drm` and `kick.drm` can exist only after external filesystem
+ * edits, but product save must treat them as one object. Removing all variants
+ * before fopen_lfn("w") guarantees the saved Kit contains exactly one member
+ * file with the case generated from retained Scene metadata.
+ *
+ * Inputs: op_save_instrument_display_file[op_instrument_slot] is the visible
+ * target name; op_instrument_slot identifies which Kit member is being written.
+ *
+ * Outputs/effects: duplicate files are removed from FAT and the following
+ * fopen_lfn() creates the single authoritative file. Directories with the same
+ * folded component are ignored by AFATFS_REMOVE_FILES_ONLY.
+ *
+ * Affiliates/clients: afatfs_removeObjects_lfn(), afatfs_fopen_lfn(),
+ * storage_formatInstrumentLine(), kitset.kcg alias collection.
+ */
+```
+
+Cache update in final phase:
+
+- set `kit_slot_present[op_slot] = 1u`;
+- parse `op_save_kit_display_name` with `storage_parseNumberedFolder()`;
+- copy parsed display to `kit_slot_name[op_slot]` even for occupied saves;
+- copy returned alias `op_save_kit_dir_name` to `kit_slot_open_name[op_slot]`;
+- add `op_slot` to `kb_map` if absent;
+- call `scene_setResidentKitDisplayName(scene_getActiveIndex(),
+  preset_currentName)` only after every file closes and root chdir succeeds.
+
+Comment:
+
+```c
+/*
+ * Commit Kit save identity after all owned files have been rewritten.
+ *
+ * What: Updates the Kit scan cache and resident Kit display name from the
+ * target directory actually written by this save.
+ *
+ * Why: An occupied slot may have been renamed, and same-casefold duplicates may
+ * have been collapsed. The in-RAM browser and retained SceneData identity must
+ * mirror the durable on-card result only after the save is complete.
+ *
+ * Inputs: op_save_kit_display_name and op_save_kit_dir_name from the
+ * ensure/rename path. Outputs: kit_slot_* cache, kb_map, and resident Kit name.
+ *
+ * Affiliates/clients: menu_currentSaveWouldOverwrite(), future KitMrp Save,
+ * boot/rescan behavior.
+ */
+```
+
+### `filesystem_saveInstrument_tick()` Phase Rewrite
+
+Switch root `Instrument/` creation/open to case-insensitive matching:
+
+```c
+afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
+                 AFATFS_MATCH_CASE_INSENSITIVE,
+                 op_root_open_name,
+                 on_file_opened)
+```
+
+Insert remove-before-open phases after entering `Instrument/` and before the
+current target file open.
+
+Suggested phase map:
+
+```text
+6  REMOVE target casefold variants
+7  WAIT REMOVE
+8  OPEN target instrument file
+9  WAIT target instrument file
+10 WRITE complete instrument text
+11 CLOSE target instrument file
+12 WAIT CLOSE target instrument file
+13 RETURN ROOT + UPDATE CACHE + RETAIN NAME
+```
+
+Remove call:
+
+```c
+op_remove_done = 0u;
+if (!afatfs_removeObjects_lfn(op_instrument_save_display_name,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              AFATFS_REMOVE_FILES_ONLY,
+                              on_remove_complete)) {
+    return;
+}
+```
+
+Open call:
+
+```c
+afatfs_fopen_lfn(op_instrument_save_display_name,
+                 "w",
+                 AFATFS_MATCH_CASE_INSENSITIVE,
+                 op_instrument_save_open_name,
+                 on_file_opened)
+```
+
+Comment:
+
+```c
+/*
+ * Remove case-variant Instrument files before saving one root Instrument.
+ *
+ * What: In Instrument/, removes every file whose display component matches the
+ * requested target under case-insensitive comparison.
+ *
+ * Why: The root Instrument pool is user-copyable from desktop filesystems. If
+ * a card contains both `fiRstfile.snr` and `firStfile.snr`, the browser exposes
+ * only the capital-first winner, and overwrite must collapse all physical
+ * variants into the newly entered case.
+ *
+ * Inputs: op_instrument_save_display_name is the captured target filename from
+ * Menu after extension/type construction. Output: the following fopen_lfn()
+ * writes one replacement file and returns its short alias for cache update.
+ *
+ * Affiliates/clients: filesystem_updateInstrumentCacheAfterSave(),
+ * afatfs_removeObjects_lfn(), afatfs_fopen_lfn(), nested Instrument Save UI.
+ */
+```
+
+Final retained-name update:
+
+```c
+scene_setInstrumentSourceName(op_instrument_save_source_scene,
+                              op_instrument_save_source_slot,
+                              op_instrument_save_display_name);
+```
+
+Do this only after `filesystem_updateInstrumentCacheAfterSave()` and only for
+normal Instrument Save. Morph Save will later skip it.
+
+### `filesystem_requestSaveInstrument()` Capture
+
+Keep request-time capture of source Scene/slot/type. Build
+`op_instrument_save_display_name` exactly once from the Save editor stem and
+the captured resident type using
+`storage_makeSavedInstrumentDisplayFilename(... force_voice_suffix = 0u)`.
+
+Comment:
+
+```c
+/*
+ * Capture the root Instrument save target before asynchronous work starts.
+ *
+ * What: Converts the eight-character Save editor stem plus the resident slot's
+ * current instrument type into the exact visible `stem.ext` component that
+ * will be written in Instrument/.
+ *
+ * Why: Menu state can move while the filesystem operation is pending. The save
+ * must serialize the source slot and filename accepted at OK click time, not a
+ * later UI selection.
+ *
+ * Inputs: source Scene/slot and display stem. Outputs:
+ * op_instrument_save_* scratch for filesystem_saveInstrument_tick().
+ *
+ * Affiliates/clients: menu nested Instrument Save, persistent OW helper,
+ * storage_makeSavedInstrumentDisplayFilename().
+ */
+```
+
+### Normal Load Retained-Name Updates
+
+Normal Kit Load already copies a complete staged Kit into selected Scenes. Add
+retained Kit display update in the normal-load success branch, not in KitMrp:
+
+```c
+scene_setResidentKitDisplayName(scene_index, kit_slot_name[op_slot]);
+```
+
+Do this for every selected destination Scene after validation succeeds.
+
+Normal Scene Load should call:
+
+```c
+scene_setSceneDisplayName(scene_index, scene_slot_name[op_slot]);
+```
+
+when Scene Load is promoted. The storage field can land now even if Scene UI
+stays gated.
+
+Normal Instrument Load already updates retained Instrument name through Preset
+using `filesystem_loadedInstrumentDisplayName()` and
+`filesystem_loadedInstrumentStem()`. Leave Morph Instrument Load unchanged so it
+does not call `scene_setInstrumentSourceName()`.
+
+Comment:
+
+```c
+/*
+ * Update retained Kit identity only for normal Kit Load.
+ *
+ * What: Copies the selected Kit folder display name into each destination
+ * resident Kit after the entire directory validates and commits.
+ *
+ * Why: KitMrp uses the same file parser but copies endpoint values into morph
+ * images only. Morph operations must not rename the resident Kit or its member
+ * Instruments.
+ *
+ * Affiliates/clients: filesystem_loadKitDirectory_tick(), Preset KitMrp
+ * completion, Save editor seeding.
+ */
+```
+
+### `presetManager.c/h` Changes
+
+Normal Kit Save completion should not rely on `preset_currentName` as the only
+retained name. After filesystem success, Preset/Menu completion can continue to
+clear status as today, but the actual retained Kit update should live in
+`filesystem_saveKitDirectory_tick()` final phase because filesystem knows the
+save completed and which Scene/slot was saved.
+
+For Save editor seeding, add or use small Preset helpers that copy resident
+names into `preset_currentName`:
+
+```c
+char *preset_prepareKitSaveName(uint8_t scene_index);
+char *preset_prepareSceneSaveName(uint8_t scene_index);
+char *preset_prepareInstrumentSaveName(uint8_t scene_index, uint8_t slot);
+```
+
+Implementation:
+
+```c
+memcpy(preset_currentName, scene_kitDisplayName(scene_index), 8u);
+...
+memcpy(preset_currentName, scene_sceneDisplayName(scene_index), 8u);
+...
+memcpy(preset_currentName,
+       scene_getConst(scene_index)->kit.instrument_display_name[slot],
+       8u);
+```
+
+If adding Preset wrappers feels unnecessary, Menu may call SceneData accessors
+directly. Prefer Preset wrappers only if they keep current Save-page ownership
+cleaner.
+
+Comment:
+
+```c
+/*
+ * Seed the Save editor from resident identity, not slot display.
+ *
+ * What: Copies the currently loaded object's retained name into
+ * preset_currentName before character editing begins.
+ *
+ * Why: Slot scrolling is library browsing. The editable save name belongs to
+ * the resident Kit, Scene, or Instrument and must not become `Empty` simply
+ * because the highlighted target slot is absent.
+ *
+ * Affiliates/clients: menu_handleLoadSaveMenu(), SceneData retained-name
+ * fields, filesystem save request capture.
+ */
+```
+
+### `menu.c` Save UI Changes
+
+Change `menu_currentSaveWouldOverwrite()`:
+
+```c
+if (menu_saveOptions.what == SAVE_TYPE_KIT)
+    return filesystem_kitSlotExists(menu_currentPresetNr[SAVE_TYPE_KIT]);
+if (menu_saveOptions.what == SAVE_TYPE_SCENE)
+    return filesystem_sceneSlotExists(menu_currentPresetNr[SAVE_TYPE_SCENE]);
+if (menu_instrumentLoadActive && menu_activePage == SAVE_PAGE)
+    return filesystem_instrumentTargetExists(menu_instrumentLoadType,
+                                             menu_instrumentSaveName);
+return 0u;
+```
+
+If Instrument Save still routes through `preset_currentName` rather than
+`menu_instrumentSaveName` at the exact call site, use that same source. The key
+rule is: query the stem that will be captured by
+`filesystem_requestSaveInstrument()`.
+
+Comment:
+
+```c
+/*
+ * Compute persistent overwrite display from product identity.
+ *
+ * What: Returns nonzero whenever the pending Save action targets an existing
+ * product object. For numbered saves, the slot number is the identity. For
+ * root Instrument Save, the target filename plus type extension is matched
+ * case-insensitively inside Instrument/.
+ *
+ * Why: `OW` warns about replacement, not about whether the edited text differs
+ * from the old display name. A save to an occupied slot overwrites even when
+ * the name is unchanged, and a case-only Instrument filename match overwrites
+ * on FAT.
+ *
+ * Affiliates/clients: menu_repaintLoadSavePage(), filesystem slot caches,
+ * filesystem_instrumentTargetExists(), Save OK click handlers.
+ */
+```
+
+Change slot-to-name transition in `menu_handleLoadSaveMenu()`:
+
+- when entering Kit Save character edit, seed `preset_currentName` from
+  retained Kit name, not `filesystem_kitSlotName(slot)`;
+- when entering Scene Save character edit, seed from retained Scene name;
+- when entering nested Instrument Save name edit, keep current behavior that
+  seeds from the selected slot's retained Instrument display name.
+
+The existing `menu_prepareInstrumentSaveName()` already reads
+`kit->instrument_display_name[menu_instrumentLoadSlot]`; keep that behavior.
+
+Comment:
+
+```c
+/*
+ * Enter Save name editing with resident identity.
+ *
+ * What: Copies the saved object's retained name into the editable field when
+ * the cursor moves from slot/type selection into character editing.
+ *
+ * Why: The slot row displays target occupancy, while the character row edits
+ * the name that will be written. Empty target slots must not erase or replace
+ * the resident Kit/Scene/Instrument name.
+ *
+ * Affiliates/clients: preset_currentName, menu_instrumentSaveName,
+ * SceneData retained-name accessors, persistent OK/OW display.
+ */
+```
+
+### `menu_loadSaveTypeIsRestored()`
+
+Do not promote Morph in this pass. Keep current restored types as File, Dir,
+and Kit unless normal Instrument Save is already reachable through nested
+Instrument mode. If the normal-save pass exposes root Instrument Save from the
+nested Instrument Save UI, that path is not a `SAVE_TYPE_*` promotion; it is a
+destination-slot submode.
+
+Morph type promotion remains Phase 3.
+
+### Build/Test Checklist For Phase 2
+
+Code-level checks:
+
+```text
+git diff --check
+make
+make img
+```
+
+Functional tests:
+
+- Boot, scan Kit, and confirm empty slots display `Empty`.
+- Save Kit to an empty slot with blank name; confirm folder is `NNN `.
+- Save Kit to an occupied slot with a changed name; confirm folder is renamed
+  and unrelated extra files inside remain.
+- Save Kit with duplicate retained Instrument names; confirm all six member
+  files are distinct by voice-numbered character 8.
+- Put `Kick.drm` and `kick.drm` in a Kit directory externally; save the Kit and
+  confirm only the generated member case remains.
+- Save root Instrument to a new filename; `ok` is shown and retained
+  Instrument name updates on success.
+- Save root Instrument over a case-only existing filename; `OW` is shown and
+  only the newly entered case remains on card.
+- Load the saved root Instrument normally; retained Instrument name updates
+  from the file stem.
+- Run KitMrp/InstrumentMrp load smoke tests if still reachable through direct
+  calls, and confirm retained names do not change.
+
+### Phase 2 Implementation Pass Notes
+
+Current pass status:
+
+- Added resident Kit and Scene display-name storage in `SceneData`.
+  - `SCENE_OBJECT_DISPLAY_NAME_LEN` defines the shared eight-cell object name.
+  - `kit_t.display_name` stores the currently resident Kit name, independent of
+    the highlighted root Kit slot.
+  - `scene_t.display_name` stores the currently resident Scene name for future
+    Scene Save/Load work.
+  - `scene_setKitDisplayName()`, `scene_setResidentKitDisplayName()`,
+    `scene_setSceneDisplayName()`, `scene_kitDisplayName()`, and
+    `scene_sceneDisplayName()` centralize sanitizing/copying.
+  - `scene_initAll()` initializes both retained object names to all blanks, not
+    `Empty`.
+
+- Updated storage/display helpers.
+  - `storage_parseNumberedFolder()` now accepts `NNN ` with an all-blank display
+    component so blank-named Kit/Scene slots are valid.
+  - `storage_makeSavedInstrumentDisplayFilename()` now uses character 8 of the
+    stem for the one-based Kit voice marker when `force_voice_suffix` is set,
+    producing six deterministic member filenames without `_vN`.
+
+- Updated filesystem cache identity and duplicate policy.
+  - Kit and Scene scan caches now keep only the first same-slot duplicate by
+    `fat_compareDisplayNameCasefoldThenCase()`, matching the capital-first
+    product rule.
+  - Instrument scan/cache duplicate suppression now uses the same casefold then
+    raw-case sort.
+  - Parsed fixed-width display buffers are explicitly NUL-terminated before
+    duplicate sorting so the comparator never reads beyond the eight display
+    cells.
+  - `filesystem_instrumentTargetExists()` exposes the root Instrument overwrite
+    query used by Menu for persistent `OW`.
+
+- Reworked normal Kit Save.
+  - Root `Kit` creation/open uses case-insensitive LFN matching.
+  - The save scans `Kit/` for the target slot, chooses the canonical existing
+    same-slot directory, renames it to the edited visible component when needed,
+    or creates it when absent.
+  - Each owned member Instrument file is preceded by
+    `afatfs_removeObjects_lfn(..., AFATFS_MATCH_CASE_INSENSITIVE,
+    AFATFS_REMOVE_FILES_ONLY, ...)` so external case variants collapse to one
+    newly written file.
+  - Final cache update writes the target folder display name and returned open
+    alias, updates `kb_map`, and retains the resident Kit display name only
+    after all file writes and the root return succeed.
+
+- Reworked normal root Instrument Save.
+  - Root `Instrument` creation/open uses case-insensitive LFN matching.
+  - Save removes all casefold-equivalent file variants before opening the target
+    with `afatfs_fopen_lfn(..., "w", AFATFS_MATCH_CASE_INSENSITIVE, ...)`.
+  - The Instrument browser cache is updated after close/root return, then the
+    resident Instrument source name is retained for future Save editor seeding.
+
+- Updated normal Kit Load retained identity.
+  - Normal Kit Load commits `kit_slot_name[op_slot]` into each destination
+    resident Kit after the staged directory validates.
+  - KitMrp Load remains excluded from resident-name updates.
+
+- Updated Save UI behavior.
+  - `menu_currentSaveWouldOverwrite()` now reports numbered Kit/Scene overwrite
+    from slot occupancy, not display-name difference.
+  - Nested root Instrument Save reports overwrite through
+    `filesystem_instrumentTargetExists()` and renders `OW` in its early-return
+    repaint path.
+  - Entering Kit/Scene Save name editing reseeds `preset_currentName` from
+    resident SceneData identity so empty target slots do not overwrite the
+    editable name with `Empty` or a previous slot occupant.
+
+Verification notes for this pass:
+
+- `git diff --check -- <Phase 2 touched files>` passed after line-ending
+  normalization.
+- `git ls-files --eol` reports LF working-tree endings for every touched file,
+  avoiding the earlier fake whole-file diff presentation.
+- Local compile was not run because `make`, `gcc`, `clang`, and
+  `arm-none-eabi-gcc` are not available in this environment.
+
+## Remaining Decisions
+
+Product semantics are settled for files, numbered blank folder names, retained
+Kit/Scene name placement, and the asyncfatfs public rename/remove APIs.
+
+Still open:
+
+- **Duplicate non-empty directories:** decide whether ignored later duplicate
+  numbered directories remain acceptable until recursive delete lands, or
+  whether a duplicate same-slot directory should make normal save fail.
+- **Diagnostics policy:** decide whether File/Dir diagnostic menus should remain
+  exact-case tests or switch to production case-insensitive/case-preserving
+  behavior.
+- **Blank root Instrument names:** decide whether standalone Instrument blank
+  names should remain `inst.<ext>`, become blank-stem extension files, or be
+  disallowed in UI.
+- **Morph Save implementation shape:** defer until Phase 3. Choose between a
+  temporary save-view copy and a storageTypes descriptor accessor/context flag
+  after normal save rename/replace helpers are proven.
 ## Build and Test Checklist
 
 For each implementation phase:
