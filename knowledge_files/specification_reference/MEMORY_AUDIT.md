@@ -21,6 +21,12 @@ its top `Save:[Type]` row as a visible cursor target so normal Instrument Save
 can be switched to `TypeMrp` before editing the filename. Re-run the memory
 audit before using these UI changes to infer code-size or SRAM impact.
 
+Session 038 note: Kit/KitMrp save retest found a possible asyncfatfs cleanup
+stall before member-file creation. `afatfs_removeObjects_lfn()` now advances
+past matching directories when running in `AFATFS_REMOVE_FILES_ONLY` mode
+instead of revisiting the same undeletable directory forever. This changes
+control flow only; it does not change the historical memory measurements below.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.

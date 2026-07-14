@@ -57,6 +57,27 @@
 #define STORAGE_KIT_MAX_SLOTS         1000u
 #define STORAGE_SCENE_MAX_SLOTS       1000u
 #define STORAGE_KIT_FILENAME_MAX      13u
+/*
+ * Maximum Kit member filename stored in kitset.kcg.
+ *
+ * What: Allows kitset.kcg to store the user-visible LFN component generated
+ * for member Instrument files, not only the returned 8.3 alias.
+ *
+ * Why: Instruments inside Kits have a product naming convention: the eighth
+ * stem character is forced to the one-based voice number. That convention must
+ * be visible in both the real member filename and the kitset reference. Short
+ * aliases collapse spaces and can turn a convention-preserving display name
+ * into text such as `slakd11.drm`, so the schema field needs LFN-sized storage.
+ *
+ * Inputs/outputs: parser and formatter buffers for `file=` lines. The value
+ * mirrors asyncfatfs' current single-component LFN limit without making this
+ * storage-format layer call asyncfatfs directly.
+ *
+ * Affiliates/clients: storage_kitset_t, storage_kitset_write_view_t,
+ * filesystem_loadKitDirectory_tick(), filesystem_saveKitDirectory_tick(),
+ * filesystem_saveSceneDirectory_tick().
+ */
+#define STORAGE_KIT_MEMBER_FILENAME_MAX 49u
 #define STORAGE_KIT_DISPLAY_NAME_LEN  8u
 #define STORAGE_SCENE_DISPLAY_NAME_LEN STORAGE_KIT_DISPLAY_NAME_LEN
 
@@ -109,7 +130,8 @@ typedef instrument_type_t storage_instrument_type_t;
  * kitset.kcg files.
  */
 typedef struct {
-    char instrument_file[STORAGE_KIT_SLOT_COUNT][STORAGE_KIT_FILENAME_MAX];
+    char instrument_file[STORAGE_KIT_SLOT_COUNT]
+                        [STORAGE_KIT_MEMBER_FILENAME_MAX];
     storage_instrument_type_t instrument_type[STORAGE_KIT_SLOT_COUNT];
     uint8_t current_slot;
     uint8_t seen_format;
@@ -319,6 +341,17 @@ void storage_copyDisplayName(char dst[STORAGE_KIT_DISPLAY_NAME_LEN],
  */
 void storage_copyFilename(char dst[STORAGE_KIT_FILENAME_MAX],
                           const char *src);
+/*
+ * Copy a kitset.kcg member Instrument filename.
+ *
+ * Input: src is a single FAT display component from a `file=` line or a save
+ * generator. Output: dst is NUL-terminated and large enough for the
+ * convention-preserving LFN member name. Clients use this for Kit member
+ * references, while storage_copyFilename() remains the short-alias helper.
+ */
+void storage_copyKitMemberFilename(
+    char dst[STORAGE_KIT_MEMBER_FILENAME_MAX],
+    const char *src);
 
 /*
  * Convert registry instrument types back into storage schema text.
@@ -409,7 +442,7 @@ typedef struct {
  */
 typedef struct {
     const kit_t *kit;
-    const char (*file_names)[STORAGE_KIT_FILENAME_MAX];
+    const char (*file_names)[STORAGE_KIT_MEMBER_FILENAME_MAX];
     uint8_t slot6_morph_amount;
     storage_instrument_save_mode_t mode;
 } storage_kitset_write_view_t;
@@ -425,7 +458,7 @@ typedef struct {
 uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
                                  const kit_t *kit,
                                  const char file_names[STORAGE_KIT_SLOT_COUNT]
-                                                      [STORAGE_KIT_FILENAME_MAX],
+                                      [STORAGE_KIT_MEMBER_FILENAME_MAX],
                                  uint16_t line_index);
 uint8_t storage_formatKitsetLineView(
     char *dst,

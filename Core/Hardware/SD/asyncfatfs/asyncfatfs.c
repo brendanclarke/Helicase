@@ -4588,13 +4588,32 @@ doMore:
         if (op->object.kind == AFATFS_OBJECT_DIRECTORY &&
             !afatfs_removeObjectDirectoryAllowed(op, &op->object)) {
             /*
-             * Matching directories are deliberately skipped for this pass.
+             * Skip matching directories that this removal mode may not delete.
              *
-             * Yield instead of tight-looping so externally duplicated
-             * directory names do not make one poll call walk the rest of the
-             * directory. The scan still completes on later polls.
+             * What: Leaves the current directory-shaped object untouched,
+             * clears any pending LFN fragments that belonged to it, and
+             * continues the scan at the following raw directory entry.
+             *
+             * Why: AFATFS_REMOVE_FILES_ONLY is used before Kit and Instrument
+             * file saves to collapse same-casefold file variants. If a host
+             * filesystem created a directory with the same display component,
+             * that directory must not be recursively removed here, but the
+             * scan must still advance. Returning without advancing would
+             * revisit the same matching directory on every poll and stall the
+             * caller before it can create the replacement file.
+             *
+             * Inputs: op->object is the matching directory returned by the
+             * current afatfs_findNextObject() call. Outputs/effects: no FAT
+             * entries are changed; the raw finder remains positioned after
+             * the skipped object so the next state-machine pass can inspect the
+             * following object or reach directory exhaustion.
+             *
+             * Affiliates/clients: filesystem_saveKitDirectory_tick(),
+             * filesystem_saveInstrument_tick(), KitMrp Save, InstrumentMrp
+             * Save, and future recursive directory cleanup.
              */
-            return;
+            afatfs_objectScanReset(&op->finder);
+            goto doMore;
         }
         afatfs_findLastObject(&afatfs.currentDirectory, &op->finder);
         if (!afatfs_renameObjectRunIsSectorLocal(&op->object)) {
