@@ -14,7 +14,7 @@ This repository ports the original firmware written for the Sonic Potions LXR Dr
 - Memory mapping is updated for the M7, and there is 1.5MB available for sample storage in flash.
 - The mixbus and output buffers use the full 24-bit width of the DACs. 
 
-Other than that, the firmware is designed to work as closely as possible to the Sonic Potions LXR, version 0.37. Kit/pattern/performance/all formats are kept compatible where the hardware allows; legacy 22-byte `glo.cfg`/ALL globals are accepted and migrated, while current globals use the LXR-02 23-byte span. Additions/differences:
+Other than that, the firmware is designed to work as closely as possible to the Sonic Potions LXR, version 0.37. Kit/pattern/performance/all formats are kept compatible. Additions/differences:
 - The voice faders work. The log curve can be changed in config.h
 - The "STEP" mode button is labeled "LOAD" on the LXR02. Pressing "LOAD" gets you step mode, as per 0.37
 - The "< BAR >" buttons trigger the selected voice at 127/64 velocity and can be recorded. 
