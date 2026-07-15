@@ -36,6 +36,12 @@ files from the target folder before writing the six authoritative members.
 InstrumentMrp Save captures its Morph projection mode as request state before
 asynchronous writes begin.
 
+Session 040 note: Empty Kit saves now bypass the occupied-slot stale member
+cleanup scan after creating the target Kit directory. The cleanup remains active
+for slots that already existed, but new empty slots close the just-created
+directory handle and continue directly to the six member writes so the operation
+can reach its final sync without a needless pre-write directory enumeration.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.

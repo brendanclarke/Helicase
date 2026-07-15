@@ -4469,9 +4469,39 @@ static void filesystem_saveKitDirectory_tick(void)
         op_phase = 10;
         return;
 
-    case 10: /* CHDIR target kit folder + START cleanup scan */
+    case 10: /* CHDIR target kit folder + MAYBE START cleanup scan */
         if (!afatfs_chdir(op_kit_slot_dir))
             return;
+        /*
+         * Run the broad stale-member cleanup only for an occupied Kit slot.
+         *
+         * What: op_save_found_existing_dir is the scan result from the root
+         * `/Kit` directory. A true value means this save is replacing an
+         * existing slot folder; a false value means afatfs_mkdir_lfn() just
+         * created a new, empty target directory for this operation.
+         *
+         * Why: brand-new empty slots cannot contain stale member Instrument
+         * files. Skipping directory enumeration here avoids inserting another
+         * asynchronous failure point before the first member file writes and
+         * before filesystem_finish(FS_STATUS_DONE) performs the final sync
+         * that makes the newly-created directory durable on card.
+         *
+         * Inputs: op_kit_slot_dir is the open handle returned for the selected
+         * Kit folder; op_save_found_existing_dir preserves whether that handle
+         * came from an existing slot path or from a new mkdir path.
+         *
+         * Outputs/effects: occupied slots continue into the stale-file scan;
+         * empty slots close their just-created directory handle and continue
+         * directly to the six authoritative member writes.
+         *
+         * Affiliates/clients: filesystem_noteSaveSlotCandidate(),
+         * afatfs_mkdir_lfn(), filesystem_saveKitDirectory_tick() phases 25/27.
+         */
+        if (!op_save_found_existing_dir) {
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 27;
+            return;
+        }
         afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
         op_phase = 25;
         return;
