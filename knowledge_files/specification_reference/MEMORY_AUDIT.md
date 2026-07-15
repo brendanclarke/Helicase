@@ -42,6 +42,12 @@ for slots that already existed, but new empty slots close the just-created
 directory handle and continue directly to the six member writes so the operation
 can reach its final sync without a needless pre-write directory enumeration.
 
+Session 041 note: Opened FAT subdirectories now reconstruct one cluster of
+allocated physical size from firstCluster instead of deriving physicalSize from
+the on-disk fileSize field. FAT stores directory fileSize as zero, which made
+Kit Save's open `/Kit` -> scan/create child path behave as though `/Kit` had no
+allocated directory cluster even though Save:[Dir] still worked from root.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.

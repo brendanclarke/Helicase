@@ -2953,11 +2953,40 @@ static void afatfs_fileLoadDirectoryEntry(afatfsFile_t *file, fatDirectoryEntry_
 {
     file->firstCluster = (uint32_t) (entry->firstClusterHigh << 16) | entry->firstClusterLow;
     file->logicalSize = entry->fileSize;
-    file->physicalSize = roundUpTo(entry->fileSize, afatfs_clusterSize());
     file->attrib = entry->attrib;
     file->type = (entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY)
         ? AFATFS_FILE_TYPE_DIRECTORY
         : AFATFS_FILE_TYPE_NORMAL;
+    /*
+     * Reconstruct allocated size for opened subdirectories.
+     *
+     * What: FAT directory entries store fileSize as zero for directories, even
+     * when firstCluster points at one or more allocated directory clusters.
+     * Normal files can derive physicalSize from fileSize, but directories need
+     * at least one cluster of allocated-size metadata as soon as firstCluster is
+     * nonzero.
+     *
+     * Why: Kit Save opens `/Kit`, chdir() copies that handle into
+     * currentDirectory, and then mkdir_lfn() creates the selected `NNN Name`
+     * child inside it. If the opened `/Kit` handle reports physicalSize == 0,
+     * directory scans immediately behave as though the allocated cluster is
+     * absent. Save:[Dir] does not expose this because it creates directly in
+     * root before scanning an existing subdirectory.
+     *
+     * Inputs: entry is the SFN record for an existing file or directory.
+     * Outputs/effects: file->physicalSize is the rounded file size for normal
+     * files, or one cluster for an existing subdirectory with a first cluster.
+     * Empty/new directory creation still starts from firstCluster == 0 and is
+     * initialized by afatfs_extendSubdirectory().
+     *
+     * Affiliates/clients: afatfs_chdir(), afatfs_findNext(),
+     * afatfs_createFileContinue(), filesystem_saveKitDirectory_tick().
+     */
+    if (file->type == AFATFS_FILE_TYPE_DIRECTORY && file->firstCluster != 0u) {
+        file->physicalSize = afatfs_clusterSize();
+    } else {
+        file->physicalSize = roundUpTo(entry->fileSize, afatfs_clusterSize());
+    }
 }
 
 static bool afatfs_isLfnDirectoryEntry(const fatDirectoryEntry_t *entry)
