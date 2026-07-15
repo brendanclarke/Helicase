@@ -285,8 +285,9 @@ storage_instrument_type_t storage_instrumentTypeFromText(const char *text);
 
 /* Check that an instrument filename extension agrees with its declared type.
  *
- * Inputs: short 8.3 filename from kitset.kcg and expected type. Output: nonzero
- * when extensions match (.drm/.snr/.cym/.hat). Client:
+ * Inputs: member filename from kitset.kcg and expected type. Output: nonzero
+ * when extensions match (.drm/.snr/.cym/.hat), whether the filename is a
+ * convention-preserving LFN display component or an older 8.3 alias. Client:
  * storage_kitsetFinalize(), which prevents an obviously wrong file from being
  * loaded into a slot before filesystem.c opens it.
  */
@@ -424,18 +425,18 @@ typedef struct {
  * Kitset text save value view.
  *
  * What: Describes how storage_formatKitsetLineView() should serialize kitset
- * metadata, per-slot file aliases, routing, and the generated slot-6/track-7
- * decay endpoint pair.
+ * metadata, per-slot visible member filenames, routing, and the generated
+ * slot-6/track-7 decay endpoint pair.
  *
  * Why: most KitMrp Save data lives in member Instrument files, but the
  * generated track-7 decay pair is kit-owned metadata. The same Morph Save value
  * rule must apply there without teaching filesystem.c about the key order or
  * generated field names.
  *
- * Inputs: kit is the resident source Kit, file_names are returned asyncfatfs
- * aliases for the six already-written member files, slot6_morph_amount is the
- * retained per-voice Morph amount for slot index 5, and mode selects normal vs
- * Morph Save projection.
+ * Inputs: kit is the resident source Kit; file_names are the exact LFN display
+ * components generated for the six already-written member files; slot6_morph_amount
+ * is the retained per-voice Morph amount for slot index 5; mode selects normal
+ * vs Morph Save projection.
  *
  * Affiliates/clients: filesystem_nextKitsetLine(), normal Kit Save, KitMrp
  * Save, storage_formatInstrumentLineView().
@@ -521,9 +522,10 @@ void storage_makeSavedInstrumentFilename(
  * display characters are replaced with underscores. When force_voice_suffix is
  * nonzero, character 8 of the stem is the one-based voice number, padding
  * shorter stems with spaces and truncating longer stems before that cell.
- * Filesystem.c passes this display component to asyncfatfs and receives the
- * generated 8.3 alias back for kitset.kcg, keeping visible names and open names
- * distinct.
+ * Filesystem.c passes this display component to asyncfatfs and also writes it
+ * into kitset.kcg. asyncfatfs may still return a generated 8.3 alias for its
+ * own reopen/cache needs, but the schema-visible Kit member identity remains
+ * the convention-preserving display filename.
  */
 void storage_makeSavedInstrumentDisplayFilename(char *dst,
                                                 uint8_t capacity,

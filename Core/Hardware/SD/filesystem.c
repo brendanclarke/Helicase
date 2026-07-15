@@ -266,17 +266,17 @@ static uint8_t op_instrument_slot = 0;
  * filesystem_saveKitDirectory_tick() streams kitset.kcg and six instrument
  * files without allocating a whole file image. storageTypes formats one line at
  * a time; these fields retain both visible LFN components and returned 8.3
- * aliases. kitset.kcg stores the aliases because existing asyncfatfs open
- * calls are alias-based, while scans display the LFN entries created by the new
- * asyncfatfs long-name primitives. The remaining fields track the active line
- * buffer, byte offset, and schema line index across asynchronous afatfs ticks.
+ * aliases. kitset.kcg stores the visible LFN member filenames so the
+ * instrument-names-in-kits convention remains authoritative in the text schema:
+ * stem character eight is the one-based voice number. The short aliases remain
+ * local asyncfatfs reopen/cache scratch only.
  */
 static char op_save_kit_dir_name[STORAGE_KIT_FILENAME_MAX];
 static char op_save_kit_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_save_instrument_file[STORAGE_KIT_SLOT_COUNT]
                                     [STORAGE_KIT_FILENAME_MAX];
 static char op_save_instrument_display_file[STORAGE_KIT_SLOT_COUNT]
-                                           [AFATFS_LONG_FILENAME_MAX + 1u];
+                                           [STORAGE_KIT_MEMBER_FILENAME_MAX];
 /*
  * Tracks whether the current root Kit/Scene save entered an existing numbered
  * directory by scan-cache alias or created a new directory by LFN display name.
@@ -416,6 +416,8 @@ static uint8_t op_instrument_save_source_slot = 0u;
 static instrument_type_t op_instrument_save_type = INSTRUMENT_TYPE_UNKNOWN;
 static char op_instrument_save_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_instrument_save_open_name[AFATFS_SHORT_FILENAME_MAX];
+static storage_instrument_save_mode_t op_instrument_save_mode =
+    STORAGE_INSTRUMENT_SAVE_NORMAL;
 /*
  * Validated one-Instrument staging payload.
  *
@@ -2313,17 +2315,28 @@ static void filesystem_loadKitDirectory_tick(void)
         op_file_ready = false;
         op_file = NULL;
         /*
-         * Open kit member files exactly as kitset.kcg names them.
+         * Open Kit member files by the kitset-visible display component.
          *
-         * Current Kit Save writes asyncfatfs-returned short aliases into
-         * kitset.kcg, so this open is an identity open inside the
-         * already-selected Kit directory. If a future schema stores long
-         * display filenames here, this is the single phase that should move to
-         * afatfs_fopen_lfn().
+         * What: Resolves the `file=` value from kitset.kcg through the
+         * LFN-aware open path instead of treating it as a short alias.
+         *
+         * Why: Kit member filenames carry the convention that stem character
+         * eight is the one-based voice number. kitset.kcg now stores that
+         * visible filename, while older 8.3 kitsets still load because
+         * afatfs_fopen_lfn() also matches SFN display names.
+         *
+         * Inputs: op_kitset.instrument_file[op_instrument_slot] from the
+         * parsed kitset. Output: op_file receives the matching Instrument file
+         * handle in the selected Kit directory.
+         *
+         * Affiliates/clients: storage_kitsetParseLine(),
+         * filesystem_saveKitDirectory_tick(), storage_makeSavedInstrumentDisplayFilename().
          */
-        if (!afatfs_fopen(op_kitset.instrument_file[op_instrument_slot],
-                          "r",
-                          on_file_opened)) {
+        if (!afatfs_fopen_lfn(op_kitset.instrument_file[op_instrument_slot],
+                              "r",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              NULL,
+                              on_file_opened)) {
             return;
         }
         op_phase = 18;
@@ -2807,9 +2820,27 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_line_len = 0u;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(op_kitset.instrument_file[op_instrument_slot],
-                          "r",
-                          on_file_opened))
+        /*
+         * Open embedded Scene Kit members through their visible kitset names.
+         *
+         * What: Uses the same LFN-aware member-file lookup as root Kit Load.
+         *
+         * Why: embedded Kits and root Kits share the Instrument-in-Kit naming
+         * convention. The `file=` entry should point at the display filename
+         * with the forced eighth-character voice number, not a collapsed short
+         * alias.
+         *
+         * Inputs: parsed sceneset child Kit's kitset member filename. Output:
+         * op_file receives the selected embedded Instrument file handle.
+         *
+         * Affiliates/clients: filesystem_loadKitDirectory_tick(),
+         * filesystem_saveSceneDirectory_tick(), storage_kitsetParseLine().
+         */
+        if (!afatfs_fopen_lfn(op_kitset.instrument_file[op_instrument_slot],
+                              "r",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              NULL,
+                              on_file_opened))
             return;
         op_phase = 28;
         return;
@@ -3537,7 +3568,7 @@ static void filesystem_saveInstrument_tick(void)
             ? &scene->kit.instruments[op_instrument_save_source_slot]
             : NULL;
     uint8_t morph_save =
-        (uint8_t)(current_op == FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH);
+        (uint8_t)(op_instrument_save_mode == STORAGE_INSTRUMENT_SAVE_MORPH);
 
     switch (op_phase) {
     case 0: /* VALIDATE + CHDIR ROOT */
@@ -3686,8 +3717,7 @@ static void filesystem_saveInstrument_tick(void)
             (uint8_t)(op_instrument_save_source_slot + 1u),
             scene ? scene->settings.voice_morph_amount[
                         op_instrument_save_source_slot] : 0u,
-            morph_save ? STORAGE_INSTRUMENT_SAVE_MORPH
-                       : STORAGE_INSTRUMENT_SAVE_NORMAL
+            op_instrument_save_mode
         }};
         /*
          * Build the root Instrument save view.
@@ -3700,8 +3730,8 @@ static void filesystem_saveInstrument_tick(void)
          * asyncfatfs overwrite behavior. Their only storage difference is the
          * endpoint projection inside the Instrument text file.
          *
-         * Inputs: request-time source Scene/slot and current internal
-         * operation. Output: one context consumed by
+         * Inputs: request-time source Scene/slot and captured save projection
+         * mode. Output: one context consumed by
          * filesystem_nextInstrumentLine().
          *
          * Affiliates/clients: storage_formatInstrumentLineView(),
@@ -4087,6 +4117,33 @@ static uint8_t filesystem_nameHasExtension(const char *name,
     return (uint8_t)(name[dot + i] == '\0');
 }
 
+static uint8_t filesystem_nameIsInstrumentFile(const char *name)
+{
+    /*
+     * Identify member Instrument files inside a saved Kit directory.
+     *
+     * What: Recognizes the four current root Instrument extensions using the
+     * same case-insensitive extension helper as Scene child discovery.
+     *
+     * Why: overwriting an existing Kit folder must not leave stale member files
+     * such as `slakd1.drm` beside newly generated convention names like
+     * `slakd1 1.drm`. The directory cannot be recursively replaced yet, but
+     * regular Instrument files in the selected Kit folder can be removed before
+     * the six authoritative members and kitset.kcg are written.
+     *
+     * Inputs: FAT display component from afatfs_findNextObject(). Output:
+     * nonzero for `.drm`, `.snr`, `.cym`, or `.hat` files.
+     *
+     * Affiliates/clients: filesystem_saveKitDirectory_tick(),
+     * afatfs_removeObjects_lfn(), storage_makeSavedInstrumentDisplayFilename().
+     */
+    return (uint8_t)(
+        filesystem_nameHasExtension(name, ".drm") ||
+        filesystem_nameHasExtension(name, ".snr") ||
+        filesystem_nameHasExtension(name, ".cym") ||
+        filesystem_nameHasExtension(name, ".hat"));
+}
+
 static void filesystem_trimmedKitDirectoryName(char *dst,
                                                const char display[8])
 {
@@ -4169,9 +4226,10 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap, void *raw)
      * What: Adapts filesystem's generic line writer to storageTypes'
      * normal-vs-Morph kitset formatter.
      *
-     * Why: filesystem.c owns asynchronous file sequencing, returned aliases,
-     * and write offsets. storageTypes owns kitset text schema, generated
-     * endpoint projection, and key ordering.
+     * Why: filesystem.c owns asynchronous file sequencing, visible member
+     * filename generation, local returned aliases, and write offsets.
+     * storageTypes owns kitset text schema, generated endpoint projection, and
+     * key ordering.
      *
      * Inputs: opaque context built in the active save phase and
      * op_write_line_index advanced by filesystem_writeTextLine(). Output: one
@@ -4216,9 +4274,11 @@ static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
 **
 ** Creates/opens Kit/<NNN Name>/ with asyncfatfs LFN creation, writes six
 ** instrument files from the active Scene kit with visible LFN stems, then
-** writes kitset.kcg with the returned short aliases. Stale unreferenced files
-** may remain because asyncfatfs has no recursive directory replace;
-** kitset.kcg is authoritative for which member files belong to the Kit.
+** writes kitset.kcg with those visible member filenames. Occupied saves first
+** remove stale member Instrument files from the target directory so old naming
+** conventions do not remain beside the newly authoritative six files.
+** Non-instrument files and child directories are preserved until recursive
+** directory replacement exists.
 ** ----------------------------------------------------------------------- */
 static void filesystem_saveKitDirectory_tick(void)
 {
@@ -4420,8 +4480,73 @@ static void filesystem_saveKitDirectory_tick(void)
     case 19: /* WAIT CLOSE target kit */
         if (!op_close_done) return;
         op_kit_slot_dir = NULL;
-        op_instrument_slot = 0u;
-        op_phase = 16;
+        afatfs_findFirstObject(&afatfs.currentDirectory, &op_object_finder);
+        op_phase = 25;
+        return;
+
+    case 25: /* REMOVE stale instrument files from target kit */
+    {
+        afatfsOperationStatus_e st =
+            afatfs_findNextObject(&afatfs.currentDirectory,
+                                  &op_object_finder,
+                                  &op_object);
+        /*
+         * Clean the selected Kit directory before writing member files.
+         *
+         * What: Scans the current target Kit directory and removes existing
+         * regular Instrument files, regardless of whether their names match
+         * the six names about to be generated.
+         *
+         * Why: saving over an occupied Kit slot can change the member filename
+         * convention. Without this pass, old files such as `slakd1.drm` remain
+         * beside the new eighth-character voice-number filenames and make the
+         * on-card folder look wrong even though kitset.kcg is authoritative.
+         *
+         * Inputs: currentDirectory is already the target Kit folder; object
+         * iteration yields display names and file/directory kind. Output:
+         * stale `.drm/.snr/.cym/.hat` files are removed before the six current
+         * members are written. Non-instrument files and directories are left
+         * alone; kitset.kcg is overwritten later.
+         *
+         * Affiliates/clients: filesystem_nameIsInstrumentFile(),
+         * afatfs_removeObjects_lfn(), storage_formatKitsetLineView().
+         */
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(&afatfs.currentDirectory,
+                                  &op_object_finder);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (op_object.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(&afatfs.currentDirectory,
+                                  &op_object_finder);
+            op_instrument_slot = 0u;
+            op_phase = 16;
+            return;
+        }
+        if (op_object.kind == AFATFS_OBJECT_FILE &&
+            filesystem_nameIsInstrumentFile(op_object.displayName)) {
+            afatfs_findLastObject(&afatfs.currentDirectory,
+                                  &op_object_finder);
+            op_remove_done = 0u;
+            if (!afatfs_removeObjects_lfn(op_object.displayName,
+                                          AFATFS_MATCH_CASE_INSENSITIVE,
+                                          AFATFS_REMOVE_FILES_ONLY,
+                                          on_remove_complete)) {
+                return;
+            }
+            op_phase = 26;
+        }
+        return;
+    }
+
+    case 26: /* WAIT stale instrument removal */
+        if (!op_remove_done)
+            return;
+        afatfs_findFirstObject(&afatfs.currentDirectory, &op_object_finder);
+        op_phase = 25;
         return;
 
     case 16: /* REMOVE next instrument variants */
@@ -4452,7 +4577,7 @@ static void filesystem_saveKitDirectory_tick(void)
          * AFATFS_REMOVE_FILES_ONLY.
          *
          * Affiliates/clients: afatfs_removeObjects_lfn(), afatfs_fopen_lfn(),
-         * storage_formatInstrumentLine(), kitset.kcg alias collection.
+         * storage_formatInstrumentLine(), kitset.kcg member filename storage.
          */
         op_remove_done = 0u;
         if (!afatfs_removeObjects_lfn(
@@ -4471,10 +4596,11 @@ static void filesystem_saveKitDirectory_tick(void)
         op_file_ready = false;
         op_file = NULL;
         /*
-         * Member instruments are written before kitset.kcg because each
-         * fopen_lfn() returns the physical alias that kitset.kcg must
-         * reference. If a later member open/write fails, no new kitset is
-         * committed for that partial save.
+         * Member instruments are written before kitset.kcg so a failed member
+         * open/write cannot commit a kitset that points at files which were
+         * never successfully rewritten. kitset.kcg stores the visible display
+         * filename generated in op_save_instrument_display_file[]; the returned
+         * short alias is local asyncfatfs scratch only.
          */
         if (!afatfs_fopen_lfn(
                 op_save_instrument_display_file[op_instrument_slot],
@@ -4516,8 +4642,8 @@ static void filesystem_saveKitDirectory_tick(void)
          * voice, retained per-slot Morph amount, and normal-vs-Morph save mode
          * to storageTypes.
          *
-         * Why: Kit Save and KitMrp Save share file sequencing and alias
-         * capture. The only per-member difference is how morphable endpoint
+         * Why: Kit Save and KitMrp Save share file sequencing and member-name
+         * generation. The only per-member difference is how morphable endpoint
          * values are projected into [params] and [morph].
          *
          * Inputs: op_instrument_slot selects the Kit member currently being
@@ -4574,26 +4700,26 @@ static void filesystem_saveKitDirectory_tick(void)
     {
         filesystem_kitset_write_ctx_t ctx = {{
             kit,
-            op_save_instrument_file,
+            op_save_instrument_display_file,
             (scene && INSTRUMENT_SLOT_COUNT > 5u)
                 ? scene->settings.voice_morph_amount[5u] : 0u,
             morph_save ? STORAGE_INSTRUMENT_SAVE_MORPH
                        : STORAGE_INSTRUMENT_SAVE_NORMAL
         }};
         /*
-         * Build the kitset save view after all member aliases are known.
+         * Build the kitset save view after all member files are written.
          *
-         * What: Passes the resident Kit, returned member-file aliases, slot-6
-         * Morph amount, and normal-vs-Morph mode into storageTypes.
+         * What: Passes the resident Kit, visible member-file display names,
+         * slot-6 Morph amount, and normal-vs-Morph mode into storageTypes.
          *
          * Why: kitset.kcg owns generated slot-6/track-7 endpoint fields.
          * KitMrp Save must project those fields with the same value rule as
          * descriptor-backed Instrument files, while filesystem.c remains
          * unaware of kitset key order.
          *
-         * Inputs: op_save_instrument_file[] contains aliases returned by
-         * previous fopen_lfn() calls. Output: line formatter context for
-         * kitset.kcg.
+         * Inputs: op_save_instrument_display_file[] contains the visible
+         * filenames that were just opened/written for each member file. Output:
+         * line formatter context for kitset.kcg.
          *
          * Affiliates/clients: storage_formatKitsetLineView(), generated
          * track-7 decay storage, KitMrp Save.
@@ -6553,8 +6679,8 @@ static void filesystem_saveSceneDirectory_tick(void)
         op_file = NULL;
         /*
          * Embedded instruments follow the same ordering as root Kit Save:
-         * write member files first so every returned alias is available before
-         * kitset.kcg is emitted.
+         * write member files first so kitset.kcg is emitted only after every
+         * convention-preserving member filename has been written.
          */
         if (!afatfs_fopen_lfn(
                 op_save_instrument_display_file[op_instrument_slot],
@@ -6643,15 +6769,16 @@ static void filesystem_saveSceneDirectory_tick(void)
     {
         filesystem_kitset_write_ctx_t ctx = {{
             kit,
-            op_save_instrument_file,
+            op_save_instrument_display_file,
             0u,
             STORAGE_INSTRUMENT_SAVE_NORMAL
         }};
         /*
          * Write embedded Scene kitset through the normal save view.
          *
-         * What: Supplies the embedded Kit and already-returned member aliases
-         * to the shared kitset formatter with STORAGE_INSTRUMENT_SAVE_NORMAL.
+         * What: Supplies the embedded Kit and already-written member display
+         * filenames to the shared kitset formatter with
+         * STORAGE_INSTRUMENT_SAVE_NORMAL.
          *
          * Why: Scene Save serializes the resident Kit exactly as normal Kit
          * storage, including generated slot-6/track-7 fields. Morph Save
@@ -8669,6 +8796,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_instrument_save_source_scene = 0u;
     op_instrument_save_source_slot = 0u;
     op_instrument_save_type = INSTRUMENT_TYPE_UNKNOWN;
+    op_instrument_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
     memset(op_instrument_save_display_name, 0,
            sizeof(op_instrument_save_display_name));
     memset(op_instrument_save_open_name, 0,
@@ -8808,8 +8936,8 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb)
      * Inputs: zero-based Kit folder slot and completion callback. Output: an
      * async operation that creates/opens Kit/<NNN Name>/ with an LFN display
      * entry, writes six LFN-visible instrument files from the active Scene kit,
-     * then writes kitset.kcg with the returned open aliases. This boundary keeps
-     * directory saves separate from legacy flat Morph saves.
+     * then writes kitset.kcg with those visible member filenames. This boundary
+     * keeps directory saves separate from legacy flat Morph saves.
      */
     if (slot >= STORAGE_KIT_MAX_SLOTS)
         return false;
@@ -9230,6 +9358,28 @@ static bool filesystem_requestSaveInstrumentMode(fs_internal_op_t op,
     op_instrument_save_source_scene = source_scene;
     op_instrument_save_source_slot = source_slot;
     op_instrument_save_type = instrument->type;
+    /*
+     * Capture the root Instrument save projection with the accepted request.
+     *
+     * What: Stores whether this request is normal Instrument Save or
+     * InstrumentMrp Save after filesystem_start() clears shared operation
+     * scratch.
+     *
+     * Why: the writer streams many async ticks after the menu click. Its value
+     * projection should be request-owned state, not a fresh inference from
+     * generic operation plumbing at each write phase.
+     *
+     * Inputs: internal save op accepted above. Output:
+     * op_instrument_save_mode consumed by filesystem_saveInstrument_tick() and
+     * storage_formatInstrumentLineView().
+     *
+     * Affiliates/clients: preset_saveInstrumentMorph(), nested Instrument Save
+     * type row, STORAGE_INSTRUMENT_SAVE_MORPH endpoint projection.
+     */
+    op_instrument_save_mode =
+        (op == FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH)
+            ? STORAGE_INSTRUMENT_SAVE_MORPH
+            : STORAGE_INSTRUMENT_SAVE_NORMAL;
     strncpy(op_instrument_save_display_name, display,
             sizeof(op_instrument_save_display_name) - 1u);
     op_instrument_save_display_name[

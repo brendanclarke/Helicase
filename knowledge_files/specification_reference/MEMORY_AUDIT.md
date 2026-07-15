@@ -27,6 +27,15 @@ past matching directories when running in `AFATFS_REMOVE_FILES_ONLY` mode
 instead of revisiting the same undeletable directory forever. This changes
 control flow only; it does not change the historical memory measurements below.
 
+Session 039 note: Kit member filenames in `kitset.kcg` now store the visible
+LFN display component rather than asyncfatfs' collapsed 8.3 alias, so the
+eighth-stem-character-is-voice-number convention is represented in the schema
+itself. Kit and embedded Scene Kit loaders open those `file=` entries through
+the LFN-aware path. Occupied Kit saves also remove stale member Instrument
+files from the target folder before writing the six authoritative members.
+InstrumentMrp Save captures its Morph projection mode as request state before
+asynchronous writes begin.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.

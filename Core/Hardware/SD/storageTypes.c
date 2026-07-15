@@ -377,6 +377,40 @@ void storage_copyFilename(char dst[STORAGE_KIT_FILENAME_MAX],
     dst[i] = '\0';
 }
 
+void storage_copyKitMemberFilename(
+    char dst[STORAGE_KIT_MEMBER_FILENAME_MAX],
+    const char *src)
+{
+    uint8_t i;
+
+    /*
+     * Preserve a Kit member's visible filename exactly as kitset.kcg names it.
+     *
+     * What: Copies one NUL-terminated component into the LFN-sized kit member
+     * field, truncating only at the storage component limit.
+     *
+     * Why: Kit member filenames are not merely reopen aliases; they carry the
+     * on-card naming convention where stem character eight is the voice
+     * number. Short-alias copying would erase padding spaces and can produce
+     * misleading references such as `slakd11.drm`.
+     *
+     * Inputs: src from a parsed `file=` line or generated save display name.
+     * Output: dst is a safe NUL-terminated component for kitset storage and
+     * later afatfs_fopen_lfn() lookup.
+     *
+     * Affiliates/clients: storage_kitsetParseLine(),
+     * storage_formatKitsetLineView(), filesystem Kit/Scene load and save.
+     */
+    if (!src)
+        src = "";
+    for (i = 0u;
+         i < (STORAGE_KIT_MEMBER_FILENAME_MAX - 1u) && src[i] != '\0';
+         i++) {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
+}
+
 /* See storageTypes.h for the public contract.
  *
  * This is deliberately strict and lowercase because the schema tokens are
@@ -773,14 +807,14 @@ uint8_t storage_formatKitsetLineView(
     uint8_t field;
     const char *type_text;
     const kit_t *kit = view ? view->kit : NULL;
-    const char (*file_names)[STORAGE_KIT_FILENAME_MAX] =
+    const char (*file_names)[STORAGE_KIT_MEMBER_FILENAME_MAX] =
         view ? view->file_names : NULL;
 
     /*
      * Emit one kitset.kcg line from a selected save view.
      *
      * What: Streams kitset metadata, generated slot-6/track-7 endpoint fields,
-     * per-slot member file aliases, and routing fields.
+     * per-slot member display filenames, and routing fields.
      *
      * Why: normal Kit Save and KitMrp Save share the same kitset schema and
      * async write phases. The write view lets storageTypes apply the Morph Save
@@ -788,8 +822,9 @@ uint8_t storage_formatKitsetLineView(
      * remains unaware of kitset key order.
      *
      * Inputs: destination line buffer, capacity, immutable kitset write view,
-     * and monotonic line index. Output: byte count for one line, or zero when
-     * the schema is complete.
+     * and monotonic line index. file_names must be the visible LFN components
+     * generated for the member files, not asyncfatfs' returned aliases. Output:
+     * byte count for one line, or zero when the schema is complete.
      *
      * Affiliates/clients: filesystem_nextKitsetLine(), normal Kit Save,
      * KitMrp Save, storage_formatKitsetLine() wrapper.
@@ -887,7 +922,7 @@ uint8_t storage_formatKitsetLineView(
 uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
                                  const kit_t *kit,
                                  const char file_names[STORAGE_KIT_SLOT_COUNT]
-                                                      [STORAGE_KIT_FILENAME_MAX],
+                                      [STORAGE_KIT_MEMBER_FILENAME_MAX],
                                  uint16_t line_index)
 {
     storage_kitset_write_view_t view = {
@@ -1493,7 +1528,7 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
         kit->instrument_type[parsed] = type;
         kit->seen_type_mask = (uint8_t)(kit->seen_type_mask | (1u << parsed));
     } else if (storage_streq(key, "file")) {
-        storage_copyFilename(kit->instrument_file[parsed], value);
+        storage_copyKitMemberFilename(kit->instrument_file[parsed], value);
         if (!target_kit)
             return STORAGE_STATUS_BAD_VALUE;
         scene_setKitInstrumentSourceName(target_kit, parsed, value);
