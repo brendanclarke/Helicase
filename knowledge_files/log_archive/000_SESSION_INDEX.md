@@ -45,6 +45,7 @@
 | 034 | 2026-07-12 | local working directory, a development branch | Instrument Load completion: instrument registry flags, Choke/track-7 behavior, root Instrument pool/load UI, scene-aware Kit/Instrument load refinements, and staged transactional Instrument commit to eliminate stale modulation/runtime state |
 | 035 | 2026-07-13 | local working directory, branch `dev-phase2-filesys` | Phase 3 Kit/Instrument Morph Load, LFO `self` storage, descriptor-domain LFO scaling, and new-format Kit Save to `Kit/` directories |
 | 036 | 2026-07-14 | local working directory, development branch | asyncfatfs LFN/case expansion, File/Dir diagnostics, Kit Save repair, `000` slot policy, restored Kit load/save, and root Instrument Save |
+| 037 | 2026-07-15 | local working directory, branch `dev-phase2-filesys` | FAILED TESTING: Morph save/load expansion and asyncfatfs rename/replace attempts left Kit Save unable to create/load usable Kit directories; consider rollback to Session 036 boundary or pre-LFN expansion |
 
 ---
 
@@ -410,3 +411,7 @@ One paragraph summary.
 ```
 
 Add any new cross-session facts to the Key Cross-Session Facts table.
+
+### 037 — Failed Morph/Kit Save Expansion Attempt (2026-07-15)
+Attempted Morph Kit/Instrument save expansion, asyncfatfs LFN rename/replace policy, menu exposure fixes, and repeated Kit Save repairs. User hardware testing failed: Kit Save still does not create/load a usable Kit directory, and optimistic cache insertion briefly made nonexistent/unloadable Kits appear in the list. Treat this session as failed and high-risk; next session should isolate or roll back rather than stack more patches.
+- **Find here**: failed Kit Save, failed KitMrp/InstrumentMrp expansion, asyncfatfs LFN rename/replace attempts, fake Kit cache issue, rollback boundary notes
