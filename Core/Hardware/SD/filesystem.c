@@ -4469,25 +4469,28 @@ static void filesystem_saveKitDirectory_tick(void)
         op_phase = 10;
         return;
 
-    case 10: /* CHDIR target kit folder + CLOSE handle */
+    case 10: /* CHDIR target kit folder + START cleanup scan */
         if (!afatfs_chdir(op_kit_slot_dir))
             return;
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
-            op_phase = 19;
+        afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
+        op_phase = 25;
         return;
 
     case 19: /* WAIT CLOSE target kit */
         if (!op_close_done) return;
         op_kit_slot_dir = NULL;
-        afatfs_findFirstObject(&afatfs.currentDirectory, &op_object_finder);
-        op_phase = 25;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(op_close_status);
+            return;
+        }
+        op_instrument_slot = 0u;
+        op_phase = 16;
         return;
 
     case 25: /* REMOVE stale instrument files from target kit */
     {
         afatfsOperationStatus_e st =
-            afatfs_findNextObject(&afatfs.currentDirectory,
+            afatfs_findNextObject(op_kit_slot_dir,
                                   &op_object_finder,
                                   &op_object);
         /*
@@ -4502,11 +4505,11 @@ static void filesystem_saveKitDirectory_tick(void)
          * beside the new eighth-character voice-number filenames and make the
          * on-card folder look wrong even though kitset.kcg is authoritative.
          *
-         * Inputs: currentDirectory is already the target Kit folder; object
-         * iteration yields display names and file/directory kind. Output:
-         * stale `.drm/.snr/.cym/.hat` files are removed before the six current
-         * members are written. Non-instrument files and directories are left
-         * alone; kitset.kcg is overwritten later.
+         * Inputs: op_kit_slot_dir is the still-open target Kit folder handle,
+         * and currentDirectory is already a chdir() copy of the same folder for
+         * removal by display name. Output: stale `.drm/.snr/.cym/.hat` files
+         * are removed before the six current members are written. Non-instrument
+         * files and directories are left alone; kitset.kcg is overwritten later.
          *
          * Affiliates/clients: filesystem_nameIsInstrumentFile(),
          * afatfs_removeObjects_lfn(), storage_formatKitsetLineView().
@@ -4514,22 +4517,20 @@ static void filesystem_saveKitDirectory_tick(void)
         if (st == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (st == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLastObject(&afatfs.currentDirectory,
-                                  &op_object_finder);
-            filesystem_finish(FS_STATUS_ERROR);
+            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 27;
             return;
         }
         if (op_object.kind == AFATFS_OBJECT_NONE) {
-            afatfs_findLastObject(&afatfs.currentDirectory,
-                                  &op_object_finder);
-            op_instrument_slot = 0u;
-            op_phase = 16;
+            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 27;
             return;
         }
         if (op_object.kind == AFATFS_OBJECT_FILE &&
             filesystem_nameIsInstrumentFile(op_object.displayName)) {
-            afatfs_findLastObject(&afatfs.currentDirectory,
-                                  &op_object_finder);
+            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
             op_remove_done = 0u;
             if (!afatfs_removeObjects_lfn(op_object.displayName,
                                           AFATFS_MATCH_CASE_INSENSITIVE,
@@ -4545,8 +4546,14 @@ static void filesystem_saveKitDirectory_tick(void)
     case 26: /* WAIT stale instrument removal */
         if (!op_remove_done)
             return;
-        afatfs_findFirstObject(&afatfs.currentDirectory, &op_object_finder);
+        afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
         op_phase = 25;
+        return;
+
+    case 27: /* CLOSE target kit after cleanup scan */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 19;
         return;
 
     case 16: /* REMOVE next instrument variants */
