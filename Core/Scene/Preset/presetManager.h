@@ -48,8 +48,6 @@ typedef enum {
     PRESET_OP_MORPH_LOAD,
     PRESET_OP_GLOBALS_LOAD,
     PRESET_OP_NAME_LOAD,
-    PRESET_OP_KIT_SAVE,
-    PRESET_OP_MORPH_SAVE,
     PRESET_OP_GLOBALS_SAVE,
     PRESET_OP_PATTERN_LOAD,
     PRESET_OP_PATTERN_SAVE,
@@ -59,20 +57,19 @@ typedef enum {
     PRESET_OP_PERFORMANCE_SAVE,
     PRESET_OP_INSTRUMENT_LOAD,
     PRESET_OP_INSTRUMENT_SAVE,
+    PRESET_OP_KIT_SAVE,
     PRESET_OP_KIT_MORPH_LOAD,
+    PRESET_OP_KIT_MORPH_SAVE,
     PRESET_OP_INSTRUMENT_MORPH_LOAD,
     /*
      * New-format Morph Save completions.
      *
-     * Kit/Instrument Morph Save are distinct from legacy PRESET_OP_MORPH_SAVE
-     * so Menu can reset the correct UI surface without implying a flat .snd
-     * file was written. Neither completion triggers runtime apply or retained
-     * name updates.
+     * Instrument Morph Save is distinct from normal Instrument Save so Menu can
+     * reset the correct UI surface without implying a flat .snd file was
+     * written. It does not trigger runtime apply or retained name updates.
      */
-    PRESET_OP_KIT_MORPH_SAVE,
     PRESET_OP_INSTRUMENT_MORPH_SAVE,
     PRESET_OP_SCENE_LOAD,
-    PRESET_OP_SCENE_SAVE,
     PRESET_OP_TEST_SCAN,
     PRESET_OP_TEST_FILE_LOAD,
     PRESET_OP_TEST_DIR_LOAD,
@@ -106,11 +103,9 @@ preset_op_type_t preset_getCompletedOp(void);
 /*
  * Report whether the most recent asynchronous filesystem completion succeeded.
  *
- * Old musical load/save paths historically collapse many failures to
- * PRESET_OP_NONE, but the temporary File/Dir asyncfatfs tests must distinguish
- * a real zero-byte/zero-value result from a failed open/read. Menu reads this
- * flag before acknowledging PRESET_OP_TEST_* completions so it can show an
- * explicit ERR overlay without changing older completion semantics.
+ * Menu reads this flag before acknowledging completions so it can distinguish
+ * success cleanup from a failed filesystem operation and show the
+ * filesystem_errorCode() overlay.
  */
 uint8_t          preset_getCompletedOk(void);
 uint16_t         preset_getRequestSlot(void);
@@ -129,7 +124,13 @@ void             preset_ackStatus(void);
 ** Load/save — all async, return immediately.
 ** ----------------------------------------------------------------------- */
 
-/* Drumset (kit). isMorph=1 reads/writes the legacy morph kit buffer/path. */
+/*
+ * Drumset (kit).
+ *
+ * Load keeps the legacy isMorph compatibility flag. Save uses isMorph=1 for
+ * new-format KitMrp projection: current interpolated endpoints are written to
+ * both normal and morph file values.
+ */
 uint8_t preset_loadDrumset(uint16_t presetNr, uint8_t isMorph);
 uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph);
 /*
@@ -143,16 +144,13 @@ uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph);
  */
 uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask);
 /*
- * Load/Save root Scene library folders.
+ * Load root Scene library folders.
  *
  * Load inputs mirror Kit Load: root Scene library slot and destination Scene
- * bitmask. Save inputs are a root Scene library slot, source resident Scene,
- * and fixed eight-character display name captured from the Save UI. Outputs
- * are asynchronous Preset operations completed through PRESET_OP_SCENE_*.
+ * bitmask. Output is an asynchronous Preset operation completed through
+ * PRESET_OP_SCENE_LOAD.
  */
 uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
-void    preset_saveScene(uint16_t presetNr, uint8_t source_scene,
-                         const char display_name[8]);
 /*
  * Load a new-format Kit directory into the selected Scenes' morph endpoints.
  *
@@ -163,15 +161,6 @@ void    preset_saveScene(uint16_t presetNr, uint8_t source_scene,
  * deliberately no-change so morph load remains a per-instrument operation.
  */
 uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask);
-/*
- * Save the active resident Kit through the KitMrp projection.
- *
- * Inputs: target root Kit library slot. Output: asynchronous new-format Kit
- * directory save using Morph Save endpoint mapping. Completion reports a save
- * only; no runtime apply follows because resident SceneData is unchanged.
- */
-uint8_t preset_saveKitMorph(uint16_t presetNr);
-
 /* Globals — single GLO.CFG file. */
 void    preset_loadGlobals(void);
 void    preset_saveGlobals(void);
@@ -239,6 +228,7 @@ uint8_t preset_loadTestFile(const char *display_name);
 uint8_t preset_loadTestDir(const char *display_name);
 uint8_t preset_saveTestFile(const char *display_name);
 uint8_t preset_saveTestDir(const char *display_name);
+uint8_t preset_saveTestSimpleDir(const char *display_name);
 
 /* Send loaded parameters to DSP synchronously. Use this before audio starts;
 ** runtime load completion should use the chunked apply API below so it cannot

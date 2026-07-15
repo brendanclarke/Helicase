@@ -98,20 +98,14 @@ typedef enum {
     FS_INTERNAL_OP_LOAD_KIT,
     FS_INTERNAL_OP_LOAD_KIT_MORPH,
     FS_INTERNAL_OP_LOAD_SCENE,
-    FS_INTERNAL_OP_SAVE_SCENE,
     FS_INTERNAL_OP_SAVE_KIT,
     /*
-     * New-format Morph Save operations.
-     *
-     * SAVE_KIT_MORPH and SAVE_INSTRUMENT_MORPH write the Phase 2 text
-     * directory and root Instrument formats with Morph Save value projection.
-     * They are intentionally separate from SAVE_MORPH, which remains the
-     * legacy flat .snd compatibility path until old preset support is removed.
+     * Instrument Morph Save writes the root Instrument format with Morph Save
+     * value projection. It is intentionally separate from the legacy flat .snd
+     * morph load compatibility path.
      */
-    FS_INTERNAL_OP_SAVE_KIT_MORPH,
     FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH,
     FS_INTERNAL_OP_LOAD_MORPH,
-    FS_INTERNAL_OP_SAVE_MORPH,
     FS_INTERNAL_OP_LOAD_PATTERN,
     FS_INTERNAL_OP_SAVE_PATTERN,
     FS_INTERNAL_OP_LOAD_ALL,
@@ -132,6 +126,7 @@ typedef enum {
     FS_INTERNAL_OP_LOAD_TEST_DIR,
     FS_INTERNAL_OP_SAVE_TEST_FILE,
     FS_INTERNAL_OP_SAVE_TEST_DIR,
+    FS_INTERNAL_OP_SAVE_TEST_SIMPLE_DIR,
 } fs_internal_op_t;
 
 typedef struct {
@@ -145,9 +140,9 @@ typedef struct {
 } fs_file_desc_t;
 
 static const fs_file_desc_t fs_file_descs[] = {
-    { FS_FILE_KIT,         ".snd", NULL,      1, 1, 1, 1 },
-    { FS_FILE_SCENE,       NULL,   NULL,      1, 0, 1, 1 },
-    { FS_FILE_MORPH,       ".snd", NULL,      1, 1, 1, 1 },
+    { FS_FILE_KIT,         ".snd", NULL,      1, 1, 1, 0 },
+    { FS_FILE_SCENE,       NULL,   NULL,      1, 0, 1, 0 },
+    { FS_FILE_MORPH,       ".snd", NULL,      1, 1, 1, 0 },
     { FS_FILE_PATTERN,     ".pat", NULL,      1, 1, 1, 1 },
     { FS_FILE_PERFORMANCE, ".prf", NULL,      1, 1, 1, 1 },
     { FS_FILE_ALL,         ".all", NULL,      1, 1, 1, 1 },
@@ -161,6 +156,7 @@ static const fs_file_desc_t fs_file_descs[] = {
 static fs_internal_op_t current_op   = FS_INTERNAL_OP_NONE;
 static fs_status_t      status       = FS_STATUS_IDLE;
 static uint8_t          op_phase     = 0;
+static char             fs_error_code[9];
 /*
  * Deferred completion status used by FS_INTERNAL_OP_FLUSH_FINISH.
  *
@@ -260,40 +256,90 @@ static uint8_t op_line_len = 0;
 static storage_kitset_t op_kitset;
 static storage_instrument_state_t op_instrument_state;
 static uint8_t op_instrument_slot = 0;
-/*
- * Kit Save directory/text writer scratch.
- *
- * filesystem_saveKitDirectory_tick() streams kitset.kcg and six instrument
- * files without allocating a whole file image. storageTypes formats one line at
- * a time; these fields retain both visible LFN components and returned 8.3
- * aliases. kitset.kcg stores the visible LFN member filenames so the
- * instrument-names-in-kits convention remains authoritative in the text schema:
- * stem character eight is the one-based voice number. The short aliases remain
- * local asyncfatfs reopen/cache scratch only.
- */
-static char op_save_kit_dir_name[STORAGE_KIT_FILENAME_MAX];
-static char op_save_kit_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
-static char op_save_instrument_file[STORAGE_KIT_SLOT_COUNT]
-                                    [STORAGE_KIT_FILENAME_MAX];
-static char op_save_instrument_display_file[STORAGE_KIT_SLOT_COUNT]
-                                           [STORAGE_KIT_MEMBER_FILENAME_MAX];
-/*
- * Tracks whether the current root Kit/Scene save entered an existing numbered
- * directory by scan-cache alias or created a new directory by LFN display name.
- * Existing-directory saves overwrite authoritative child files but do not
- * rename the folder; cache updates must therefore preserve the scanned display
- * name instead of pretending preset_currentName changed on-card metadata.
- */
-static uint8_t op_save_opened_existing_dir = 0u;
 static uint8_t op_remove_done = 0u;
-static uint8_t op_rename_done = 0u;
-static uint8_t op_save_found_existing_dir = 0u;
-static char op_save_existing_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
-static char op_save_existing_open_name[AFATFS_SHORT_FILENAME_MAX];
+/*
+ * Shared streaming writer scratch.
+ *
+ * Kit Save, root Instrument Save, and future text-shaped saves do not allocate
+ * whole files in RAM. storageTypes/filesystem_next* callbacks produce one
+ * line at a time into op_write_line_buf, while op_write_line_offset tracks
+ * partial asyncfatfs writes of that line. op_write_line_index is the logical
+ * schema line number, not a byte offset.
+ */
 static char op_write_line_buf[FS_TEXT_LINE_MAX];
 static uint16_t op_write_line_len = 0u;
 static uint16_t op_write_line_offset = 0u;
 static uint16_t op_write_line_index = 0u;
+/*
+ * Request-time Kit Save state.
+ *
+ * The source Scene, visible target folder name, visible member filenames, and
+ * normal/Morph projection mode are captured when Preset posts the request.
+ * Encoder/menu movement after acceptance must not retarget an in-flight save.
+ * The open-name buffer stores asyncfatfs' returned 8.3 alias for reopening the
+ * newly-created LFN directory.
+ */
+static char op_save_kit_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_save_kit_member_display_file[STORAGE_KIT_SLOT_COUNT]
+                                            [STORAGE_KIT_MEMBER_FILENAME_MAX];
+static char op_save_kit_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
+static uint8_t op_kit_save_source_scene = 0u;
+static storage_instrument_save_mode_t op_kit_save_mode =
+    STORAGE_INSTRUMENT_SAVE_NORMAL;
+
+#define FS_DELETE_DEPTH_MAX 8u
+
+/*
+ * Delete helpers are state machines because asyncfatfs exposes only
+ * foreground-pumped operations. Slot delete scans /Kit/ for all physical
+ * directories matching a numbered slot. Tree delete removes one visible
+ * directory component recursively after the caller has entered its parent.
+ */
+typedef enum {
+    FS_DELETE_SLOT_IDLE = 0u,
+    FS_DELETE_SLOT_OPEN_SCAN,
+    FS_DELETE_SLOT_WAIT_SCAN,
+    FS_DELETE_SLOT_SCAN_NEXT,
+    FS_DELETE_SLOT_CLOSE_SCAN,
+    FS_DELETE_SLOT_WAIT_CLOSE_SCAN,
+    FS_DELETE_SLOT_DELETE_MATCH,
+    FS_DELETE_SLOT_DONE,
+    FS_DELETE_SLOT_ERROR
+} fs_delete_slot_phase_t;
+
+typedef enum {
+    FS_DELETE_TREE_IDLE = 0u,
+    FS_DELETE_TREE_OPEN_TARGET,
+    FS_DELETE_TREE_WAIT_TARGET,
+    FS_DELETE_TREE_CLOSE_TARGET,
+    FS_DELETE_TREE_OPEN_SCAN,
+    FS_DELETE_TREE_WAIT_SCAN,
+    FS_DELETE_TREE_SCAN_NEXT,
+    FS_DELETE_TREE_CLOSE_SCAN_BEFORE_CHILD,
+    FS_DELETE_TREE_HANDLE_CHILD,
+    FS_DELETE_TREE_WAIT_FILE_REMOVE,
+    FS_DELETE_TREE_WAIT_CHILD_DIR,
+    FS_DELETE_TREE_CLOSE_CHILD_DIR,
+    FS_DELETE_TREE_OPEN_PARENT,
+    FS_DELETE_TREE_WAIT_PARENT,
+    FS_DELETE_TREE_CLOSE_PARENT,
+    FS_DELETE_TREE_REMOVE_EMPTY_DIR,
+    FS_DELETE_TREE_WAIT_REMOVE_EMPTY_DIR,
+    FS_DELETE_TREE_DONE,
+    FS_DELETE_TREE_ERROR
+} fs_delete_tree_phase_t;
+
+static fs_delete_tree_phase_t op_delete_tree_phase = FS_DELETE_TREE_IDLE;
+static uint8_t op_delete_tree_depth = 0u;
+static char op_delete_tree_name_stack[FS_DELETE_DEPTH_MAX]
+                                     [AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_delete_tree_child_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_delete_tree_child_open_name[AFATFS_SHORT_FILENAME_MAX];
+static afatfsObjectKind_t op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
+static afatfsFilePtr_t op_delete_tree_dir = NULL;
+static fs_delete_slot_phase_t op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
+static afatfsFilePtr_t op_delete_slot_dir = NULL;
+static char op_delete_slot_target_name[AFATFS_LONG_FILENAME_MAX + 1u];
 /*
  * Staged Kit payload and target mask for multi-Scene Kit Load.
  *
@@ -309,19 +355,6 @@ static uint16_t op_write_line_index = 0u;
 static kit_t op_staged_kit;
 static uint16_t op_kit_load_scene_mask = 0u;
 /*
- * Request-time resident Kit save source.
- *
- * What: Captures which resident Scene supplies the Kit for normal Kit Save and
- * KitMrp Save.
- *
- * Why: save state machines run asynchronously. The source Scene must be the
- * one accepted by the request, not a later UI selection or active-Scene change.
- *
- * Affiliates/clients: filesystem_requestSaveKitDirectory(),
- * filesystem_requestSaveKitMorphDirectory(), filesystem_saveKitDirectory_tick().
- */
-static uint8_t op_kit_save_source_scene = 0u;
-/*
  * Staged Scene payload and Scene-specific operation scratch.
  *
  * Scene Load validates every child before writing resident memory: sceneset,
@@ -333,10 +366,7 @@ static uint8_t op_kit_save_source_scene = 0u;
  */
 static scene_t op_staged_scene;
 static uint16_t op_scene_load_scene_mask = 0u;
-static uint8_t op_scene_source_index = 0u;
 static char op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
-static char op_scene_dir_name[STORAGE_KIT_FILENAME_MAX];
-static char op_scene_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_scene_child_open_name[STORAGE_KIT_FILENAME_MAX];
 static char op_scene_pattern_open_name[STORAGE_KIT_FILENAME_MAX];
 static char op_scene_effect_open_name[STORAGE_KIT_FILENAME_MAX];
@@ -354,6 +384,12 @@ static void filesystem_initStagedScene(scene_t *scene);
 static uint8_t filesystem_nameStartsWithKitSpace(const char *name);
 static uint8_t filesystem_nameHasExtension(const char *name,
                                            const char *extension);
+static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
+                                                    uint16_t morph,
+                                                    uint8_t amount);
+static void filesystem_saveKitDirectory_tick(void);
+static void filesystem_deleteTreeStart(const char *display_name);
+static fs_status_t filesystem_deleteTree_tick(void);
 /*
  * Root Instrument Save state machine declaration.
  *
@@ -377,6 +413,8 @@ typedef struct {
  */
 static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
                                              void *raw);
+static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
+                                         void *raw);
 static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
                                                              void *),
                                         void *ctx);
@@ -451,6 +489,7 @@ static uint8_t fs_test_dir_count = 0u;
 static char op_test_name[FS_TEST_NAME_MAX + 1u];
 static char op_test_child_name[FS_TEST_NAME_MAX + 1u];
 static char op_test_short_alias[AFATFS_SHORT_FILENAME_MAX];
+static char op_test_parent_alias[AFATFS_SHORT_FILENAME_MAX];
 static uint8_t op_test_bytes[FS_TEST_RESULT_BYTES];
 static fs_test_result_kind_t op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
 static uint32_t fs_test_payload_counter = 0u;
@@ -458,6 +497,13 @@ static afatfsObjectFinder_t op_test_object_finder;
 static afatfsObjectInfo_t op_test_object;
 static afatfsObjectKind_t op_test_best_kind = AFATFS_OBJECT_NONE;
 static afatfsFilePtr_t op_test_dir = NULL;
+static uint8_t op_test_lookup_result = 0u;
+static uint8_t op_test_verify_seen_alias = 0u;
+static uint8_t op_test_verify_seen_fold = 0u;
+
+#define FS_TEST_LOOKUP_ERROR 0u
+#define FS_TEST_LOOKUP_OPEN_ALIAS 1u
+#define FS_TEST_LOOKUP_CREATE 2u
 
 #define FS_IDLE_POLL_MS 5u
 /* Session 025 keeps glo.cfg/.all raw and unversioned. The only explicitly
@@ -517,29 +563,10 @@ static void on_remove_complete(void)
      * user's entered case. The filesystem pump needs this callback bridge
      * between asyncfatfs completion and the next phase.
      *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(),
-     * filesystem_saveInstrument_tick(), KitMrp Save, InstrumentMrp Save.
+     * Affiliates/clients: filesystem_saveInstrument_tick() and
+     * InstrumentMrp Save.
      */
     op_remove_done = 1u;
-}
-
-static void on_rename_complete(void)
-{
-    /*
-     * Mark completion of asyncfatfs directory rename work.
-     *
-     * What: Latches that afatfs_renameObject_lfn() has called back. The
-     * following phase opens the returned alias stored in the save scratch.
-     *
-     * Why: Occupied numbered directory saves preserve the existing directory
-     * tree but must refresh its visible component. Rename is asynchronous, so
-     * the save state machine needs a distinct completion latch before entering
-     * the directory.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(), future Scene and
-     * Morph directory-shaped saves.
-     */
-    op_rename_done = 1u;
 }
 
 /* -----------------------------------------------------------------------
@@ -566,23 +593,33 @@ static void filesystem_copyTestName(char dst[FS_TEST_NAME_MAX + 1u],
     uint8_t i = 0u;
 
     /*
-     * Copy one exact root-level test component into bounded filesystem state.
+     * Copy and normalize one single-component test name into bounded
+     * filesystem state.
      *
      * Inputs come from asyncfatfs displayName or Menu's filename editor.
      * Output is NUL-terminated and never contains slash-separated paths. The
-     * low-level LFN writer will sanitize FAT-forbidden punctuation again, but
-     * stripping slash here preserves the public one-component filesystem
-     * contract and prevents a test menu from implying path parsing exists.
+     * low-level LFN writer applies the same policy again, but doing it here
+     * keeps compare/verification state identical to the component that
+     * asyncfatfs will actually create. The Save menu editor is fixed-width and
+     * space-padded, so trailing spaces and periods must be stripped before the
+     * request records its target.
      */
     if (!src)
         src = "";
     while (i < FS_TEST_NAME_MAX && src[i] != '\0' && src[i] != '/' &&
            src[i] != '\\') {
         char c = src[i];
-        dst[i] = (c >= 0x20 && c <= 0x7e) ? c : '_';
+        dst[i] = fat_lfnCharAllowed(c) ? c : '_';
         i++;
     }
+    while (i > 0u && (dst[i - 1u] == ' ' || dst[i - 1u] == '.'))
+        i--;
     dst[i] = '\0';
+}
+
+static void filesystem_setTestDiag(const char *code)
+{
+    filesystem_copyTestName(op_test_child_name, code);
 }
 
 static void filesystem_insertTestName(char names[FS_TEST_OBJECT_MAX]
@@ -935,12 +972,6 @@ static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint16_t num
     return true;
 }
 
-static uint8_t filesystem_morphSaveUsesBase(uint16_t index)
-{
-    (void)index;
-    return 0;
-}
-
 /* Pattern files are large enough that they must be streamed. These helpers
  * define the on-card byte order explicitly:
  *   name[8]
@@ -1200,8 +1231,76 @@ static uint32_t filesystem_readStreamChunk(uint8_t *buf, uint8_t len)
     return n;
 }
 
+static const char *filesystem_errorPrefix(fs_internal_op_t op)
+{
+    switch (op) {
+    case FS_INTERNAL_OP_FLUSH_FINISH:          return "Flush";
+    case FS_INTERNAL_OP_LOAD_KIT:              return "KitL";
+    case FS_INTERNAL_OP_LOAD_KIT_MORPH:        return "KMrL";
+    case FS_INTERNAL_OP_LOAD_SCENE:            return "ScnL";
+    case FS_INTERNAL_OP_SAVE_KIT:              return "KitS";
+    case FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH: return "IMrS";
+    case FS_INTERNAL_OP_LOAD_MORPH:            return "MrpL";
+    case FS_INTERNAL_OP_LOAD_PATTERN:          return "PatL";
+    case FS_INTERNAL_OP_SAVE_PATTERN:          return "PatS";
+    case FS_INTERNAL_OP_LOAD_ALL:              return "AllL";
+    case FS_INTERNAL_OP_SAVE_ALL:              return "AllS";
+    case FS_INTERNAL_OP_LOAD_PERFORMANCE:      return "PrfL";
+    case FS_INTERNAL_OP_SAVE_PERFORMANCE:      return "PrfS";
+    case FS_INTERNAL_OP_LOAD_GLOBALS:          return "GloL";
+    case FS_INTERNAL_OP_SAVE_GLOBALS:          return "GloS";
+    case FS_INTERNAL_OP_SCAN_KITS:             return "KitSc";
+    case FS_INTERNAL_OP_SCAN_SCENES:           return "ScnSc";
+    case FS_INTERNAL_OP_SCAN_INSTRUMENTS:      return "InsSc";
+    case FS_INTERNAL_OP_LOAD_INSTRUMENT:       return "InsL";
+    case FS_INTERNAL_OP_SAVE_INSTRUMENT:       return "InsS";
+    case FS_INTERNAL_OP_LOAD_NAME:             return "NameL";
+    case FS_INTERNAL_OP_SCAN_TEST_FILES:       return "TFiSc";
+    case FS_INTERNAL_OP_SCAN_TEST_DIRS:        return "TDiSc";
+    case FS_INTERNAL_OP_LOAD_TEST_FILE:        return "TFiL";
+    case FS_INTERNAL_OP_LOAD_TEST_DIR:         return "TDiL";
+    case FS_INTERNAL_OP_SAVE_TEST_FILE:        return "TFiS";
+    case FS_INTERNAL_OP_SAVE_TEST_DIR:         return "TDiS";
+    case FS_INTERNAL_OP_SAVE_TEST_SIMPLE_DIR:  return "TSdS";
+    default:                                   return "Fs";
+    }
+}
+
+static void filesystem_makeAutoErrorCode(fs_internal_op_t failed_op,
+                                         uint8_t failed_phase)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    const char *prefix = filesystem_errorPrefix(failed_op);
+    uint8_t i = 0u;
+
+    while (i < 6u && prefix[i] != '\0') {
+        fs_error_code[i] = prefix[i];
+        i++;
+    }
+    fs_error_code[i++] = hex[(failed_phase >> 4) & 0x0fu];
+    fs_error_code[i++] = hex[failed_phase & 0x0fu];
+    fs_error_code[i] = '\0';
+}
+
+static void filesystem_makeNamedErrorCode(const char *prefix,
+                                          uint8_t failed_phase)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    uint8_t i = 0u;
+
+    while (i < 6u && prefix && prefix[i] != '\0') {
+        fs_error_code[i] = prefix[i];
+        i++;
+    }
+    fs_error_code[i++] = hex[(failed_phase >> 4) & 0x0fu];
+    fs_error_code[i++] = hex[failed_phase & 0x0fu];
+    fs_error_code[i] = '\0';
+}
+
 static void filesystem_complete(fs_status_t final_status)
 {
+    if (final_status == FS_STATUS_ERROR && fs_error_code[0] == '\0')
+        filesystem_makeAutoErrorCode(current_op, op_phase);
     status = final_status;
     current_op = FS_INTERNAL_OP_NONE;
     if (completion_callback) {
@@ -1213,7 +1312,9 @@ static void filesystem_complete(fs_status_t final_status)
 
 static void filesystem_finish(fs_status_t final_status)
 {
-    if (final_status == FS_STATUS_DONE) {
+    uint8_t flush_before_complete = (uint8_t)(final_status == FS_STATUS_DONE);
+
+    if (flush_before_complete) {
         /*
          * Do not publish a successful filesystem operation until asyncfatfs has
          * persisted every dirty sector the operation left behind.
@@ -1221,11 +1322,8 @@ static void filesystem_finish(fs_status_t final_status)
          * Inputs: final_status is the state-machine result after all files have
          * been closed. Output: status remains FS_STATUS_BUSY and the normal
          * completion callback is deferred. This prevents the Save UI from
-         * resetting before the directory entry, FAT allocation, and short/long
-         * name sectors for a new Kit folder are visible on a freshly-mounted SD
-         * card. Error exits keep their historical immediate callback path
-         * because some failures may leave an open handle or locked cache sector
-         * that cannot be safely drained here.
+         * resetting before the directory entry, FAT allocation, and data
+         * sectors for a saved object are visible on a freshly-mounted SD card.
          */
         op_flush_final_status = final_status;
         current_op = FS_INTERNAL_OP_FLUSH_FINISH;
@@ -1516,6 +1614,33 @@ static void filesystem_recordKitDirectory(const char *display_name,
     filesystem_noteKitBrowserSlot(slot);
 }
 
+static void filesystem_recordSavedKitDirectory(const char *display_name,
+                                               const char *open_name)
+{
+    uint16_t slot;
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+    /*
+     * Save is authoritative for its target slot.
+     *
+     * The scan-cache duplicate rule intentionally keeps the earliest
+     * casefold/case-preserving name when the SD card already contains multiple
+     * physical directories for one numbered slot. That rule is wrong after a
+     * successful Save:[Kit]: the just-written directory is the only intended
+     * resident slot identity and must replace any stale cached name.
+     */
+    if (!storage_parseNumberedFolder(display_name, &slot, display) ||
+        slot >= STORAGE_KIT_MAX_SLOTS) {
+        return;
+    }
+    display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    kit_slot_present[slot] = 1u;
+    memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
+    kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    storage_copyFilename(kit_slot_open_name[slot], open_name);
+    filesystem_noteKitBrowserSlot(slot);
+}
+
 static void filesystem_recordSceneShortAlias(const char *open_name)
 {
     uint16_t number;
@@ -1590,8 +1715,8 @@ static void filesystem_recordSceneDirectory(const char *display_name,
      * Outputs: safe transient C string; the Scene cache write below preserves
      * the fixed eight display cells used by the LCD.
      *
-     * Affiliates/clients: filesystem_recordKitDirectory(),
-     * menu_currentSaveWouldOverwrite(), future normal Scene Save.
+     * Affiliates/clients: filesystem_recordKitDirectory() and Scene library
+     * load browsing.
      */
     display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
     if (scene_slot_present[slot] &&
@@ -2085,7 +2210,7 @@ static void filesystem_loadKitDirectory_tick(void)
         op_file = NULL;
         memset(op_root_open_name, 0, sizeof(op_root_open_name));
         if (!afatfs_opendir_lfn(STORAGE_ROOT_KIT,
-                                AFATFS_MATCH_CASE_SENSITIVE,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
                                 op_root_open_name,
                                 on_file_opened))
             return;
@@ -2133,6 +2258,7 @@ static void filesystem_loadKitDirectory_tick(void)
         if (!op_file_ready) return;
         if (op_file == NULL) {
             filesystem_setPresetNameEmpty();
+            filesystem_makeNamedErrorCode("KDir", op_phase);
             op_close_status = FS_STATUS_ERROR;
             op_phase = 28;
             return;
@@ -2179,6 +2305,7 @@ static void filesystem_loadKitDirectory_tick(void)
         if (!op_file_ready) return;
         if (op_file == NULL) {
             filesystem_setPresetNameInvalid();
+            filesystem_makeNamedErrorCode("KSet", op_phase);
             op_close_status = FS_STATUS_ERROR;
             op_phase = 28;
             return;
@@ -2193,6 +2320,7 @@ static void filesystem_loadKitDirectory_tick(void)
             return;
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
+            filesystem_makeNamedErrorCode("KSet", op_phase);
             op_close_status = FS_STATUS_ERROR;
             /*
              * A read error can occur after kitset.kcg is open. Route through
@@ -2207,6 +2335,7 @@ static void filesystem_loadKitDirectory_tick(void)
                                           &op_staged_kit);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
+                filesystem_makeNamedErrorCode("KSet", op_phase);
                 op_close_status = FS_STATUS_ERROR;
                 /*
                  * Malformed kitset data still owns an open file handle. Close
@@ -2220,6 +2349,7 @@ static void filesystem_loadKitDirectory_tick(void)
             st = storage_kitsetFinalize(&op_kitset);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
+                filesystem_makeNamedErrorCode("KSet", op_phase);
                 op_close_status = FS_STATUS_ERROR;
             } else {
                 op_close_status = FS_STATUS_DONE;
@@ -2329,8 +2459,8 @@ static void filesystem_loadKitDirectory_tick(void)
          * parsed kitset. Output: op_file receives the matching Instrument file
          * handle in the selected Kit directory.
          *
-         * Affiliates/clients: storage_kitsetParseLine(),
-         * filesystem_saveKitDirectory_tick(), storage_makeSavedInstrumentDisplayFilename().
+         * Affiliates/clients: storage_kitsetParseLine() and
+         * storage_makeSavedInstrumentDisplayFilename().
          */
         if (!afatfs_fopen_lfn(op_kitset.instrument_file[op_instrument_slot],
                               "r",
@@ -2346,6 +2476,7 @@ static void filesystem_loadKitDirectory_tick(void)
         if (!op_file_ready) return;
         if (op_file == NULL) {
             filesystem_setPresetNameInvalid();
+            filesystem_makeNamedErrorCode("KIns", op_phase);
             op_close_status = FS_STATUS_ERROR;
             op_phase = 28;
             return;
@@ -2360,6 +2491,7 @@ static void filesystem_loadKitDirectory_tick(void)
             return;
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
+            filesystem_makeNamedErrorCode("KIns", op_phase);
             op_close_status = FS_STATUS_ERROR;
             op_phase = 20;
             return;
@@ -2371,6 +2503,7 @@ static void filesystem_loadKitDirectory_tick(void)
                                                  op_instrument_slot]);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
+                filesystem_makeNamedErrorCode("KIns", op_phase);
                 op_close_status = FS_STATUS_ERROR;
                 op_phase = 20;
             }
@@ -2380,6 +2513,7 @@ static void filesystem_loadKitDirectory_tick(void)
             st = storage_instrumentFinalize(&op_instrument_state);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
+                filesystem_makeNamedErrorCode("KIns", op_phase);
                 op_close_status = FS_STATUS_ERROR;
             } else {
                 if (op_instrument_state.seen_morph_count == 0u) {
@@ -2833,8 +2967,8 @@ static void filesystem_loadSceneDirectory_tick(void)
          * Inputs: parsed sceneset child Kit's kitset member filename. Output:
          * op_file receives the selected embedded Instrument file handle.
          *
-         * Affiliates/clients: filesystem_loadKitDirectory_tick(),
-         * filesystem_saveSceneDirectory_tick(), storage_kitsetParseLine().
+         * Affiliates/clients: filesystem_loadKitDirectory_tick() and
+         * storage_kitsetParseLine().
          */
         if (!afatfs_fopen_lfn(op_kitset.instrument_file[op_instrument_slot],
                               "r",
@@ -3593,54 +3727,119 @@ static void filesystem_saveInstrument_tick(void)
         op_phase = 1;
         return;
 
-    case 1: /* MKDIR/OPEN Instrument/ */
+    case 1: /* SCAN root for existing Instrument/ */
         op_file_ready = false;
         op_file = NULL;
         memset(op_root_open_name, 0, sizeof(op_root_open_name));
         /*
-         * Create/open the root Instrument directory through the LFN path.
+         * Instrument is a long root component, so do not start with
+         * mkdir_lfn("Instrument").
          *
-         * The visible root name is currently short, but keeping the writer on
-         * mkdir_lfn() makes case preservation and case-sensitive matching use
-         * the same asyncfatfs code path as File/Dir diagnostics and Kit Save.
+         * A create-capable LFN lookup that misses an existing root LFN can
+         * allocate a second physical Instrument directory. Saving a root
+         * Instrument must first prove whether one already exists by scanning
+         * the root object list and opening the matching directory by its exact
+         * short alias. Only a scan miss creates a fresh Instrument/.
          */
-        if (!afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
-                              AFATFS_MATCH_CASE_INSENSITIVE,
-                              op_root_open_name,
-                              on_file_opened))
+        if (!afatfs_fopen(".", "r", on_file_opened))
             return;
         op_phase = 2;
         return;
 
-    case 2: /* WAIT Instrument/ */
+    case 2: /* WAIT root scan */
         if (!op_file_ready) return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
         op_kit_root_dir = op_file;
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
         op_phase = 3;
         return;
 
-    case 3: /* CHDIR Instrument/ */
-        if (!afatfs_chdir(op_kit_root_dir))
+    case 3: /* FIND Instrument/ in root */
+    {
+        afatfsOperationStatus_e st =
+            afatfs_findNextObject(op_kit_root_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
             return;
-        op_phase = 4;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (op_object.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_phase = 4;
+            return;
+        }
+        if (op_object.kind == AFATFS_OBJECT_DIRECTORY &&
+            fat_compareDisplayName(op_object.displayName,
+                                   STORAGE_ROOT_INSTRUMENT,
+                                   false) == 0) {
+            storage_copyFilename(op_root_open_name, op_object.shortName);
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_phase = 4;
+        }
         return;
+    }
 
-    case 4: /* CLOSE Instrument/ handle */
+    case 4: /* CLOSE root scan */
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
             op_phase = 5;
         return;
 
-    case 5: /* WAIT CLOSE Instrument/ */
+    case 5: /* WAIT root scan close + OPEN/CREATE Instrument/ */
         if (!op_close_done) return;
         op_kit_root_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (op_root_open_name[0] != '\0') {
+            if (!afatfs_opendir(op_root_open_name, on_file_opened))
+                return;
+        } else {
+            if (!afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
+                                  AFATFS_MATCH_CASE_INSENSITIVE,
+                                  op_root_open_name,
+                                  on_file_opened)) {
+                return;
+            }
+        }
         op_phase = 6;
         return;
 
-    case 6: /* REMOVE target instrument variants */
+    case 6: /* WAIT Instrument/ */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 7;
+        return;
+
+    case 7: /* CHDIR Instrument/ */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 8;
+        return;
+
+    case 8: /* CLOSE Instrument/ handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 9;
+        return;
+
+    case 9: /* WAIT CLOSE Instrument/ */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 10;
+        return;
+
+    case 10: /* REMOVE target instrument variants */
         /*
          * Remove case-variant Instrument files before saving one root
          * Instrument.
@@ -3670,10 +3869,10 @@ static void filesystem_saveInstrument_tick(void)
                                       on_remove_complete)) {
             return;
         }
-        op_phase = 7;
+        op_phase = 11;
         return;
 
-    case 7: /* WAIT remove + OPEN target instrument file */
+    case 11: /* WAIT remove + OPEN target instrument file */
         if (!op_remove_done)
             return;
         op_file_ready = false;
@@ -3694,10 +3893,10 @@ static void filesystem_saveInstrument_tick(void)
                               op_instrument_save_open_name,
                               on_file_opened))
             return;
-        op_phase = 8;
+        op_phase = 12;
         return;
 
-    case 8: /* WAIT target instrument file */
+    case 12: /* WAIT target instrument file */
         if (!op_file_ready) return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
@@ -3706,10 +3905,10 @@ static void filesystem_saveInstrument_tick(void)
         op_write_line_index = 0u;
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
-        op_phase = 9;
+        op_phase = 13;
         return;
 
-    case 9: /* WRITE complete instrument text */
+    case 13: /* WRITE complete instrument text */
     {
         filesystem_instrument_write_ctx_t ctx = {{
             instrument,
@@ -3739,23 +3938,23 @@ static void filesystem_saveInstrument_tick(void)
          */
         if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
             return;
-        op_phase = 10;
+        op_phase = 14;
         return;
     }
 
-    case 10: /* CLOSE target instrument file */
+    case 14: /* CLOSE target instrument file */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 11;
+            op_phase = 15;
         return;
 
-    case 11: /* WAIT CLOSE target instrument file */
+    case 15: /* WAIT CLOSE target instrument file */
         if (!op_close_done) return;
         op_file = NULL;
-        op_phase = 12;
+        op_phase = 16;
         return;
 
-    case 12: /* RETURN ROOT + UPDATE CACHE */
+    case 16: /* RETURN ROOT + UPDATE CACHE */
         if (!afatfs_chdir(NULL))
             return;
         /*
@@ -3798,197 +3997,6 @@ static void filesystem_saveInstrument_tick(void)
         filesystem_finish(FS_STATUS_ERROR);
         return;
     }
-}
-
-static char filesystem_saveDisplayNameChar(char c)
-{
-    /*
-     * Sanitize one character for a firmware-created Kit LFN component.
-     *
-     * This is deliberately less destructive than the old 8.3 helper: spaces
-     * and mixed case are valid display-name data and must reach asyncfatfs so
-     * it can emit VFAT LFN entries. Only control bytes and FAT-forbidden
-     * punctuation are replaced.
-     */
-    if (c >= '0' && c <= '9')
-        return c;
-    if (c >= 'a' && c <= 'z')
-        return c;
-    if (c >= 'A' && c <= 'Z')
-        return c;
-    if (c == ' ' || c == '_' || c == '-' || c == '(' || c == ')')
-        return c;
-    if (c == '\0')
-        return '\0';
-    return '_';
-}
-
-static void filesystem_makeKitDirectoryDisplayName(
-    char dst[AFATFS_LONG_FILENAME_MAX + 1u],
-    uint16_t slot)
-{
-    uint16_t display = slot;
-    uint8_t pos = 4u;
-    uint8_t last_meaningful = 4u;
-    uint8_t i;
-
-    /*
-     * Preserve blank Kit save names.
-     *
-     * What: Builds a root numbered Kit folder component: `NNN ` plus exactly
-     * the sanitized edited Kit name. If every name character is blank, the
-     * component ends after the separator space.
-     *
-     * Why: The internal retained Kit name can be blank. Falling back to `Kit`
-     * would silently rename a real blank root Kit save and break the Save UI
-     * contract that `Empty` means absent slot, not blank-named slot. This does
-     * not apply to Scene embedded Kits, whose directory name is always
-     * `Kit <kit-name>`.
-     *
-     * Inputs: op_slot is the direct 000..999 library slot; preset_currentName
-     * is the fixed-width editable retained Kit name. Output: LFN display
-     * component passed to asyncfatfs rename/mkdir.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(), KitMrp Save, Kit
-     * scan cache update, storage_parseNumberedFolder().
-     */
-    if (display > 999u)
-        display = 999u;
-    dst[0] = (char)('0' + (display / 100u));
-    dst[1] = (char)('0' + ((display / 10u) % 10u));
-    dst[2] = (char)('0' + (display % 10u));
-    dst[3] = ' ';
-    for (i = 0u; i < 8u && pos < AFATFS_LONG_FILENAME_MAX; i++) {
-        char c = filesystem_saveDisplayNameChar(preset_currentName[i]);
-        if (c == '\0')
-            break;
-        dst[pos++] = c;
-        if (c != ' ')
-            last_meaningful = pos;
-    }
-    pos = last_meaningful;
-    dst[pos] = '\0';
-}
-
-static void filesystem_prepareSavedInstrumentFilenames(const kit_t *kit)
-{
-    uint8_t slot;
-
-    /*
-     * Generate voice-numbered member Instrument filenames.
-     *
-     * What: Builds one visible filename for each Kit member using the retained
-     * per-voice Instrument stem and always forcing the one-based voice number
-     * into character 8 of the stem.
-     *
-     * Why: Kit Save owns six member files in one directory. Two voices may
-     * retain the same Instrument name, and the save must still produce six
-     * distinct authoritative member files without depending on asyncfatfs alias
-     * suffixes.
-     *
-     * Inputs: resident Kit source stems and slot types. Outputs: visible LFN
-     * file components in op_save_instrument_display_file[] and cleared returned
-     * alias buffers in op_save_instrument_file[].
-     *
-     * Affiliates/clients: storage_makeSavedInstrumentDisplayFilename(),
-     * filesystem_saveKitDirectory_tick(), kitset.kcg file references.
-     */
-    memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
-    for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
-        storage_makeSavedInstrumentDisplayFilename(
-            op_save_instrument_display_file[slot],
-            sizeof(op_save_instrument_display_file[slot]),
-            kit->instrument_stem[slot],
-            kit->instruments[slot].type,
-            (uint8_t)(slot + 1u),
-            1u);
-    }
-}
-
-static uint8_t filesystem_objectMatchesSaveSlot(
-        const afatfsObjectInfo_t *object,
-        uint16_t requested_slot)
-{
-    uint16_t parsed_slot;
-    char display[STORAGE_KIT_DISPLAY_NAME_LEN];
-
-    /*
-     * Test whether one scanned directory belongs to the requested save slot.
-     *
-     * What: Accepts the normal LFN `NNN Name` component first and falls back to
-     * an old generated short alias whose first three characters are digits.
-     *
-     * Why: Slot number is the product identity. Save must find and rename an
-     * occupied slot even if a host or older firmware exposed only a generated
-     * short alias during scan.
-     *
-     * Inputs: asyncfatfs object metadata from the current Kit/ directory and
-     * the direct 000..999 slot number. Output: nonzero when this directory is
-     * the physical representative for that slot.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(), asyncfatfs
-     * rename, storage_parseNumberedFolder().
-     */
-    if (!object || object->kind != AFATFS_OBJECT_DIRECTORY)
-        return 0u;
-    if (storage_parseNumberedFolder(object->displayName,
-                                    &parsed_slot,
-                                    display) &&
-        parsed_slot == requested_slot) {
-        return 1u;
-    }
-    if (object->shortName[0] >= '0' && object->shortName[0] <= '9' &&
-        object->shortName[1] >= '0' && object->shortName[1] <= '9' &&
-        object->shortName[2] >= '0' && object->shortName[2] <= '9') {
-        parsed_slot = (uint16_t)(
-            (uint16_t)(object->shortName[0] - '0') * 100u +
-            (uint16_t)(object->shortName[1] - '0') * 10u +
-            (uint16_t)(object->shortName[2] - '0'));
-        return (uint8_t)(parsed_slot == requested_slot);
-    }
-    return 0u;
-}
-
-static void filesystem_noteSaveSlotCandidate(const afatfsObjectInfo_t *object)
-{
-    /*
-     * Find the canonical directory object for one numbered Kit slot.
-     *
-     * What: Records the best directory object whose visible name or
-     * compatibility short alias parses as the requested `NNN` slot.
-     *
-     * Why: Slot number is product identity. An occupied save must rename that
-     * directory to the edited display component before rewriting child files,
-     * instead of creating a duplicate or preserving the old visible name.
-     *
-     * Inputs: op_slot is the requested root Kit slot; afatfs current directory
-     * is already Kit/. Outputs: op_save_existing_display_name receives the
-     * visible source component, and op_save_kit_dir_name receives its open
-     * alias.
-     *
-     * Duplicate policy: if external editing created several same-slot variants,
-     * choose the one that sorts first by case-folded text with raw ASCII as a
-     * tiebreaker. Later duplicate directories are hidden from product behavior
-     * until recursive directory delete is implemented.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(), KitMrp save,
-     * Scene embedded Kit save, asyncfatfs rename, storage_parseNumberedFolder().
-     */
-    if (!filesystem_objectMatchesSaveSlot(object, op_slot))
-        return;
-    if (op_save_found_existing_dir &&
-        !filesystem_displayPrecedesCached(object->displayName,
-                                          op_save_existing_display_name)) {
-        return;
-    }
-    op_save_found_existing_dir = 1u;
-    strncpy(op_save_existing_display_name,
-            object->displayName,
-            sizeof(op_save_existing_display_name) - 1u);
-    op_save_existing_display_name[
-        sizeof(op_save_existing_display_name) - 1u] = '\0';
-    storage_copyFilename(op_save_existing_open_name, object->shortName);
-    storage_copyFilename(op_save_kit_dir_name, object->shortName);
 }
 
 static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
@@ -4117,131 +4125,6 @@ static uint8_t filesystem_nameHasExtension(const char *name,
     return (uint8_t)(name[dot + i] == '\0');
 }
 
-static uint8_t filesystem_nameIsInstrumentFile(const char *name)
-{
-    /*
-     * Identify member Instrument files inside a saved Kit directory.
-     *
-     * What: Recognizes the four current root Instrument extensions using the
-     * same case-insensitive extension helper as Scene child discovery.
-     *
-     * Why: overwriting an existing Kit folder must not leave stale member files
-     * such as `slakd1.drm` beside newly generated convention names like
-     * `slakd1 1.drm`. The directory cannot be recursively replaced yet, but
-     * regular Instrument files in the selected Kit folder can be removed before
-     * the six authoritative members and kitset.kcg are written.
-     *
-     * Inputs: FAT display component from afatfs_findNextObject(). Output:
-     * nonzero for `.drm`, `.snr`, `.cym`, or `.hat` files.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(),
-     * afatfs_removeObjects_lfn(), storage_makeSavedInstrumentDisplayFilename().
-     */
-    return (uint8_t)(
-        filesystem_nameHasExtension(name, ".drm") ||
-        filesystem_nameHasExtension(name, ".snr") ||
-        filesystem_nameHasExtension(name, ".cym") ||
-        filesystem_nameHasExtension(name, ".hat"));
-}
-
-static void filesystem_trimmedKitDirectoryName(char *dst,
-                                               const char display[8])
-{
-    uint8_t end = STORAGE_SCENE_DISPLAY_NAME_LEN;
-    uint8_t i;
-
-    /*
-     * Build the embedded Scene Kit directory name without persisting LCD tail
-     * padding as FAT spaces.
-     *
-     * Inputs: fixed-width Scene save display name. Output: "Kit <name>" with
-     * trailing display spaces removed, or "Kit Scene" if the display field is
-     * empty. The eight-character Scene name still writes unchanged to
-     * sceneset.scg; this helper only prevents ugly directory names such as
-     * "Kit Slak    ".
-     */
-    while (end > 0u && display[end - 1u] == ' ')
-        end--;
-    memcpy(dst, "Kit ", 4u);
-    if (end == 0u) {
-        memcpy(dst + 4u, "Scene", 6u);
-        return;
-    }
-    for (i = 0u; i < end && (4u + i) < AFATFS_LONG_FILENAME_MAX; i++)
-        dst[4u + i] = display[i];
-    dst[4u + i] = '\0';
-}
-
-static void filesystem_makeSceneDirectoryDisplayName(char *dst, uint16_t slot)
-{
-    /*
-     * Build "NNN Name" for root Scene saves.
-     *
-     * Inputs: zero-based library slot and op_scene_display_name. Output:
-     * display component passed to asyncfatfs LFN mkdir. Decimal math is kept
-     * explicit because slot numbers are user-facing 000..999 and slot 000 is
-     * a real Scene library slot.
-     */
-    uint16_t number = slot;
-    uint8_t i;
-
-    dst[0] = (char)('0' + ((number / 100u) % 10u));
-    dst[1] = (char)('0' + ((number / 10u) % 10u));
-    dst[2] = (char)('0' + (number % 10u));
-    dst[3] = ' ';
-    for (i = 0u; i < STORAGE_SCENE_DISPLAY_NAME_LEN; i++)
-        dst[4u + i] = op_scene_display_name[i];
-    dst[4u + STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-}
-
-typedef struct {
-    const scene_t *scene;
-    const char *display;
-} filesystem_sceneset_write_ctx_t;
-
-static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap, void *raw)
-{
-    filesystem_sceneset_write_ctx_t *ctx =
-        (filesystem_sceneset_write_ctx_t *)raw;
-    return storage_formatScenesetLine(dst, cap, ctx->scene, ctx->display,
-                                      op_write_line_index);
-}
-
-static uint8_t filesystem_nextEffectLine(char *dst, uint16_t cap, void *raw)
-{
-    (void)raw;
-    return storage_formatEffectPlaceholderLine(dst, cap, op_write_line_index);
-}
-
-typedef struct {
-    storage_kitset_write_view_t view;
-} filesystem_kitset_write_ctx_t;
-
-static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap, void *raw)
-{
-    filesystem_kitset_write_ctx_t *ctx = (filesystem_kitset_write_ctx_t *)raw;
-    /*
-     * Stream one kitset line through a storage-owned save view.
-     *
-     * What: Adapts filesystem's generic line writer to storageTypes'
-     * normal-vs-Morph kitset formatter.
-     *
-     * Why: filesystem.c owns asynchronous file sequencing, visible member
-     * filename generation, local returned aliases, and write offsets.
-     * storageTypes owns kitset text schema, generated endpoint projection, and
-     * key ordering.
-     *
-     * Inputs: opaque context built in the active save phase and
-     * op_write_line_index advanced by filesystem_writeTextLine(). Output: one
-     * formatted line or zero at schema completion.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(),
-     * filesystem_saveSceneDirectory_tick(), storage_formatKitsetLineView().
-     */
-    return storage_formatKitsetLineView(dst, cap, &ctx->view,
-                                        op_write_line_index);
-}
-
 static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
                                              void *raw)
 {
@@ -4261,426 +4144,774 @@ static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
      * op_write_line_index advanced by filesystem_writeTextLine(). Output: one
      * formatted line or zero at schema completion.
      *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(),
-     * filesystem_saveInstrument_tick(), filesystem_saveSceneDirectory_tick(),
+     * Affiliates/clients: filesystem_saveInstrument_tick() and
      * storage_formatInstrumentLineView().
      */
     return storage_formatInstrumentLineView(dst, cap, &ctx->view,
                                             op_write_line_index);
 }
 
-/* -----------------------------------------------------------------------
-** SAVE KIT DIRECTORY state machine
-**
-** Creates/opens Kit/<NNN Name>/ with asyncfatfs LFN creation, writes six
-** instrument files from the active Scene kit with visible LFN stems, then
-** writes kitset.kcg with those visible member filenames. Occupied saves first
-** remove stale member Instrument files from the target directory so old naming
-** conventions do not remain beside the newly authoritative six files.
-** Non-instrument files and child directories are preserved until recursive
-** directory replacement exists.
-** ----------------------------------------------------------------------- */
+static void filesystem_copyLongComponent(char *dst, uint16_t cap,
+                                         const char *src)
+{
+    uint16_t i = 0u;
+
+    if (!dst || cap == 0u)
+        return;
+    if (!src)
+        src = "";
+    while (i + 1u < cap && src[i] != '\0') {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static void filesystem_makeNumberedKitDir(char *dst,
+                                          uint16_t slot,
+                                          const char display[8])
+{
+    dst[0] = (char)('0' + ((slot / 100u) % 10u));
+    dst[1] = (char)('0' + ((slot / 10u) % 10u));
+    dst[2] = (char)('0' + (slot % 10u));
+    dst[3] = ' ';
+    for (uint8_t i = 0u; i < STORAGE_KIT_DISPLAY_NAME_LEN; i++)
+        dst[4u + i] = display ? display[i] : ' ';
+    dst[4u + STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+}
+
+static uint8_t filesystem_appendChar(char *dst, uint16_t cap,
+                                     uint16_t *pos, char c)
+{
+    if (!dst || !pos || *pos + 1u >= cap)
+        return 0u;
+    dst[(*pos)++] = c;
+    dst[*pos] = '\0';
+    return 1u;
+}
+
+static uint8_t filesystem_appendText(char *dst, uint16_t cap,
+                                     uint16_t *pos, const char *text)
+{
+    if (!text)
+        return 0u;
+    while (*text != '\0') {
+        if (!filesystem_appendChar(dst, cap, pos, *text++))
+            return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t filesystem_appendU16(char *dst, uint16_t cap,
+                                    uint16_t *pos, uint16_t value)
+{
+    char digits[5];
+    uint8_t count = 0u;
+
+    do {
+        digits[count++] = (char)('0' + (value % 10u));
+        value = (uint16_t)(value / 10u);
+    } while (value != 0u && count < sizeof(digits));
+    while (count > 0u) {
+        if (!filesystem_appendChar(dst, cap, pos, digits[--count]))
+            return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t filesystem_formatAssignmentTextLine(char *dst, uint16_t cap,
+                                                   const char *key,
+                                                   const char *value)
+{
+    uint16_t pos = 0u;
+
+    if (cap == 0u)
+        return 0u;
+    dst[0] = '\0';
+    if (!filesystem_appendText(dst, cap, &pos, key) ||
+        !filesystem_appendChar(dst, cap, &pos, '=') ||
+        !filesystem_appendText(dst, cap, &pos, value) ||
+        !filesystem_appendChar(dst, cap, &pos, '\n')) {
+        return 0u;
+    }
+    return (uint8_t)pos;
+}
+
+static uint8_t filesystem_formatAssignmentU16Line(char *dst, uint16_t cap,
+                                                  const char *key,
+                                                  uint16_t value)
+{
+    uint16_t pos = 0u;
+
+    if (cap == 0u)
+        return 0u;
+    dst[0] = '\0';
+    if (!filesystem_appendText(dst, cap, &pos, key) ||
+        !filesystem_appendChar(dst, cap, &pos, '=') ||
+        !filesystem_appendU16(dst, cap, &pos, value) ||
+        !filesystem_appendChar(dst, cap, &pos, '\n')) {
+        return 0u;
+    }
+    return (uint8_t)pos;
+}
+
+static uint8_t filesystem_formatLiteralLine(char *dst, uint16_t cap,
+                                            const char *text)
+{
+    uint16_t pos = 0u;
+
+    if (cap == 0u)
+        return 0u;
+    dst[0] = '\0';
+    if (!filesystem_appendText(dst, cap, &pos, text))
+        return 0u;
+    return (uint8_t)pos;
+}
+
+static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
+                                         void *raw)
+{
+    const kit_t *kit = (const kit_t *)raw;
+    const scene_t *source_scene = scene_getConst(op_kit_save_source_scene);
+    uint16_t index = op_write_line_index;
+    uint8_t slot;
+    uint8_t field;
+
+    if (!kit)
+        return 0u;
+    if (index == 0u)
+        return filesystem_formatLiteralLine(dst, cap,
+                                            "format=helicase.kitset\n");
+    if (index == 1u)
+        return filesystem_formatLiteralLine(dst, cap, "version=1\n");
+    if (index == 2u)
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "slot6_track7_amp_envelope_decay",
+            (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_MORPH &&
+             op_kit_save_source_scene < SCENE_COUNT)
+                ? filesystem_interpolateMorphEndpoint(
+                      kit->settings.slot6_track7_amp_envelope_decay,
+                      kit->settings.slot6_track7_morph_amp_envelope_decay,
+                      source_scene
+                          ? source_scene->settings.voice_morph_amount[5u]
+                          : 0u)
+                : kit->settings.slot6_track7_amp_envelope_decay);
+    if (index == 3u)
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "slot6_track7_morph_amp_envelope_decay",
+            (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_MORPH)
+                ? filesystem_interpolateMorphEndpoint(
+                      kit->settings.slot6_track7_amp_envelope_decay,
+                      kit->settings.slot6_track7_morph_amp_envelope_decay,
+                      source_scene
+                          ? source_scene->settings.voice_morph_amount[5u]
+                          : 0u)
+                : kit->settings.slot6_track7_morph_amp_envelope_decay);
+    if (index == 4u)
+        return filesystem_formatLiteralLine(dst, cap, "\n");
+
+    index = (uint16_t)(index - 5u);
+    slot = (uint8_t)(index / 5u);
+    field = (uint8_t)(index % 5u);
+    if (slot >= STORAGE_KIT_SLOT_COUNT)
+        return 0u;
+
+    switch (field) {
+    case 0u:
+        if (cap < 9u)
+            return 0u;
+        dst[0] = '[';
+        dst[1] = 's';
+        dst[2] = 'l';
+        dst[3] = 'o';
+        dst[4] = 't';
+        dst[5] = (char)('1' + slot);
+        dst[6] = ']';
+        dst[7] = '\n';
+        dst[8] = '\0';
+        return 8u;
+    case 1u:
+        return filesystem_formatAssignmentTextLine(
+            dst, cap, "type",
+            storage_instrumentTypeToText(kit->instruments[slot].type));
+    case 2u:
+        return filesystem_formatAssignmentTextLine(
+            dst, cap, "file", op_save_kit_member_display_file[slot]);
+    case 3u:
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "audio_out", kit->settings.audio_out[slot]);
+    default:
+        return filesystem_formatLiteralLine(dst, cap, "\n");
+    }
+}
+
+/*
+ * Recursive directory deletion helper for directory-shaped saves.
+ *
+ * Contract:
+ * - The caller must have already chdir'd into the parent directory that owns
+ *   display_name.
+ * - display_name is one visible LFN component, not a slash-separated path.
+ * - Missing targets are treated as successful no-ops, so save paths can call
+ *   this unconditionally before recreating a directory.
+ * - On success, the asyncfatfs current directory is back at the original
+ *   parent directory. On error, the caller must finish the filesystem op and
+ *   rely on filesystem_start()/future ops to return to a known root.
+ *
+ * How it works:
+ * - Open the target by LFN, chdir into it, and scan one object at a time.
+ * - Files are removed with AFATFS_REMOVE_FILES_ONLY.
+ * - Subdirectories are opened by their short alias and processed depth-first.
+ * - Once a directory scan is empty, chdir to its parent and remove that now
+ *   empty directory with AFATFS_REMOVE_EMPTY_DIRECTORIES.
+ *
+ * Why this lives in filesystem.c:
+ * asyncfatfs exposes single-directory primitives only. It can remove an empty
+ * directory entry and free its cluster chain, but it intentionally does not
+ * recurse through children. Directory-shaped product saves, including Kit Save
+ * today and Scene/Morph-style writers later, need the higher-level overwrite
+ * policy: delete the whole old tree, then write one clean replacement tree.
+ *
+ * Limits:
+ * FS_DELETE_DEPTH_MAX bounds recursion so corrupted or host-created deep trees
+ * cannot consume unbounded firmware state. Kit saves should only need depth 2
+ * (/Kit/NNN Name/member files); deeper user-created contents are deleted up to
+ * this bound and otherwise turn into a filesystem error screen.
+ *
+ * Affiliates/clients: filesystem_saveKitDirectory_tick(), future directory
+ * save operations, afatfs_findNextObject(), afatfs_removeObjects_lfn(), and
+ * asyncfatfs AFATFS_REMOVE_EMPTY_DIRECTORIES.
+ */
+static void filesystem_deleteTreeStart(const char *display_name)
+{
+    memset(op_delete_tree_name_stack, 0, sizeof(op_delete_tree_name_stack));
+    memset(op_delete_tree_child_name, 0, sizeof(op_delete_tree_child_name));
+    memset(op_delete_tree_child_open_name, 0,
+           sizeof(op_delete_tree_child_open_name));
+    op_delete_tree_depth = 0u;
+    op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
+    op_delete_tree_dir = NULL;
+    filesystem_copyLongComponent(op_delete_tree_name_stack[0],
+                                 sizeof(op_delete_tree_name_stack[0]),
+                                 display_name);
+    op_delete_tree_phase = FS_DELETE_TREE_OPEN_TARGET;
+}
+
+static uint8_t filesystem_directoryObjectMatchesKitSlot(
+        const afatfsObjectInfo_t *object,
+        uint16_t slot)
+{
+    uint16_t parsed_slot;
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+    if (!object || object->kind != AFATFS_OBJECT_DIRECTORY)
+        return 0u;
+    if (storage_parseNumberedFolder(object->displayName,
+                                    &parsed_slot,
+                                    display) &&
+        parsed_slot == slot) {
+        return 1u;
+    }
+    if (object->shortName[0] >= '0' && object->shortName[0] <= '9' &&
+        object->shortName[1] >= '0' && object->shortName[1] <= '9' &&
+        object->shortName[2] >= '0' && object->shortName[2] <= '9') {
+        parsed_slot = (uint16_t)(
+            (uint16_t)(object->shortName[0] - '0') * 100u +
+            (uint16_t)(object->shortName[1] - '0') * 10u +
+            (uint16_t)(object->shortName[2] - '0'));
+        return (uint8_t)(parsed_slot == slot);
+    }
+    return 0u;
+}
+
+static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
+                                                    uint16_t morph,
+                                                    uint8_t amount)
+{
+    int32_t numerator;
+
+    /*
+     * Match storageTypes' Morph Save endpoint interpolation for kitset fields.
+     *
+     * Kit member Instrument files delegate Morph Save projection to
+     * storage_formatInstrumentLineView(). The generated slot-6/track-7 bridge
+     * lives in kitset.kcg instead of an Instrument descriptor table, so it
+     * needs the same tiny endpoint interpolation here.
+     */
+    if (amount == 0u)
+        return normal;
+    if (amount == 255u)
+        return morph;
+    numerator = (int32_t)normal * 255 +
+                ((int32_t)morph - (int32_t)normal) * amount;
+    numerator += 127;
+    if (numerator < 0)
+        return 0u;
+    return (uint16_t)(numerator / 255);
+}
+
+static void filesystem_deleteKitSlotDirectoriesStart(void)
+{
+    memset(op_delete_slot_target_name, 0,
+           sizeof(op_delete_slot_target_name));
+    op_delete_slot_dir = NULL;
+    op_delete_slot_phase = FS_DELETE_SLOT_OPEN_SCAN;
+}
+
+static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
+{
+    fs_status_t delete_status;
+
+    for (;;) {
+        switch (op_delete_slot_phase) {
+        case FS_DELETE_SLOT_IDLE:
+        case FS_DELETE_SLOT_DONE:
+            return FS_STATUS_DONE;
+        case FS_DELETE_SLOT_ERROR:
+            return FS_STATUS_ERROR;
+
+        case FS_DELETE_SLOT_OPEN_SCAN:
+            op_file_ready = false;
+            op_file = NULL;
+            if (!afatfs_fopen(".", "r", on_file_opened))
+                return FS_STATUS_BUSY;
+            op_delete_slot_phase = FS_DELETE_SLOT_WAIT_SCAN;
+            return FS_STATUS_BUSY;
+
+        case FS_DELETE_SLOT_WAIT_SCAN:
+            if (!op_file_ready)
+                return FS_STATUS_BUSY;
+            if (!op_file) {
+                filesystem_makeNamedErrorCode(
+                    "KDel", (uint8_t)op_delete_slot_phase);
+                op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            op_delete_slot_dir = op_file;
+            afatfs_findFirstObject(op_delete_slot_dir, &op_object_finder);
+            op_delete_slot_phase = FS_DELETE_SLOT_SCAN_NEXT;
+            break;
+
+        case FS_DELETE_SLOT_SCAN_NEXT:
+        {
+            afatfsOperationStatus_e st =
+                afatfs_findNextObject(op_delete_slot_dir,
+                                      &op_object_finder,
+                                      &op_object);
+            if (st == AFATFS_OPERATION_IN_PROGRESS)
+                return FS_STATUS_BUSY;
+            if (st == AFATFS_OPERATION_FAILURE) {
+                afatfs_findLastObject(op_delete_slot_dir,
+                                      &op_object_finder);
+                filesystem_makeNamedErrorCode(
+                    "KDel", (uint8_t)op_delete_slot_phase);
+                op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            if (op_object.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op_delete_slot_dir,
+                                      &op_object_finder);
+                op_delete_slot_target_name[0] = '\0';
+                op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
+                break;
+            }
+            if (filesystem_directoryObjectMatchesKitSlot(&op_object,
+                                                         op_slot)) {
+                filesystem_copyLongComponent(
+                    op_delete_slot_target_name,
+                    sizeof(op_delete_slot_target_name),
+                    op_object.displayName);
+                afatfs_findLastObject(op_delete_slot_dir,
+                                      &op_object_finder);
+                op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
+                break;
+            }
+            break;
+        }
+
+        case FS_DELETE_SLOT_CLOSE_SCAN:
+            op_close_done = false;
+            if (!afatfs_fclose(op_delete_slot_dir, on_file_closed))
+                return FS_STATUS_BUSY;
+            op_delete_slot_phase = FS_DELETE_SLOT_WAIT_CLOSE_SCAN;
+            return FS_STATUS_BUSY;
+
+        case FS_DELETE_SLOT_WAIT_CLOSE_SCAN:
+            if (!op_close_done)
+                return FS_STATUS_BUSY;
+            op_delete_slot_dir = NULL;
+            if (op_delete_slot_target_name[0] == '\0') {
+                op_delete_slot_phase = FS_DELETE_SLOT_DONE;
+                return FS_STATUS_DONE;
+            }
+            filesystem_deleteTreeStart(op_delete_slot_target_name);
+            op_delete_slot_phase = FS_DELETE_SLOT_DELETE_MATCH;
+            return FS_STATUS_BUSY;
+
+        case FS_DELETE_SLOT_DELETE_MATCH:
+            delete_status = filesystem_deleteTree_tick();
+            if (delete_status == FS_STATUS_BUSY)
+                return FS_STATUS_BUSY;
+            if (delete_status == FS_STATUS_ERROR) {
+                op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            memset(op_delete_slot_target_name, 0,
+                   sizeof(op_delete_slot_target_name));
+            op_delete_slot_phase = FS_DELETE_SLOT_OPEN_SCAN;
+            break;
+        }
+    }
+}
+
+static fs_status_t filesystem_deleteTree_tick(void)
+{
+    for (;;) {
+        switch (op_delete_tree_phase) {
+        case FS_DELETE_TREE_IDLE:
+        case FS_DELETE_TREE_DONE:
+            return FS_STATUS_DONE;
+        case FS_DELETE_TREE_ERROR:
+            return FS_STATUS_ERROR;
+
+        case FS_DELETE_TREE_OPEN_TARGET:
+            op_file_ready = false;
+            op_file = NULL;
+            if (!afatfs_opendir_lfn(op_delete_tree_name_stack[0],
+                                    AFATFS_MATCH_CASE_INSENSITIVE,
+                                    op_delete_tree_child_open_name,
+                                    on_file_opened)) {
+                return FS_STATUS_BUSY;
+            }
+            op_delete_tree_phase = FS_DELETE_TREE_WAIT_TARGET;
+            return FS_STATUS_BUSY;
+
+        case FS_DELETE_TREE_WAIT_TARGET:
+            if (!op_file_ready)
+                return FS_STATUS_BUSY;
+            if (!op_file) {
+                op_delete_tree_phase = FS_DELETE_TREE_DONE;
+                return FS_STATUS_DONE;
+            }
+            op_delete_tree_dir = op_file;
+            if (!afatfs_chdir(op_delete_tree_dir))
+                return FS_STATUS_BUSY;
+            op_delete_tree_phase = FS_DELETE_TREE_CLOSE_TARGET;
+            break;
+
+        case FS_DELETE_TREE_CLOSE_TARGET:
+            op_close_done = false;
+            if (!afatfs_fclose(op_delete_tree_dir, on_file_closed))
+                return FS_STATUS_BUSY;
+            op_delete_tree_phase = FS_DELETE_TREE_CLOSE_CHILD_DIR;
+            return FS_STATUS_BUSY;
+
+        case FS_DELETE_TREE_CLOSE_CHILD_DIR:
+            if (!op_close_done)
+                return FS_STATUS_BUSY;
+            op_delete_tree_dir = NULL;
+            op_delete_tree_phase = FS_DELETE_TREE_OPEN_SCAN;
+            break;
+
+        case FS_DELETE_TREE_OPEN_SCAN:
+            op_file_ready = false;
+            op_file = NULL;
+            if (!afatfs_fopen(".", "r", on_file_opened))
+                return FS_STATUS_BUSY;
+            op_delete_tree_phase = FS_DELETE_TREE_WAIT_SCAN;
+            return FS_STATUS_BUSY;
+
+        case FS_DELETE_TREE_WAIT_SCAN:
+            if (!op_file_ready)
+                return FS_STATUS_BUSY;
+            if (!op_file) {
+                filesystem_makeNamedErrorCode(
+                    "Del", (uint8_t)op_delete_tree_phase);
+                op_delete_tree_phase = FS_DELETE_TREE_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            op_delete_tree_dir = op_file;
+            afatfs_findFirstObject(op_delete_tree_dir, &op_object_finder);
+            op_delete_tree_phase = FS_DELETE_TREE_SCAN_NEXT;
+            break;
+
+        case FS_DELETE_TREE_SCAN_NEXT:
+        {
+            afatfsOperationStatus_e st =
+                afatfs_findNextObject(op_delete_tree_dir,
+                                      &op_object_finder,
+                                      &op_object);
+            if (st == AFATFS_OPERATION_IN_PROGRESS)
+                return FS_STATUS_BUSY;
+            if (st == AFATFS_OPERATION_FAILURE) {
+                afatfs_findLastObject(op_delete_tree_dir, &op_object_finder);
+                filesystem_makeNamedErrorCode(
+                    "Del", (uint8_t)op_delete_tree_phase);
+                op_delete_tree_phase = FS_DELETE_TREE_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            if (op_object.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op_delete_tree_dir, &op_object_finder);
+                op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
+            } else {
+                filesystem_copyLongComponent(op_delete_tree_child_name,
+                                             sizeof(op_delete_tree_child_name),
+                                             op_object.displayName);
+                filesystem_copyLongComponent(
+                    op_delete_tree_child_open_name,
+                    sizeof(op_delete_tree_child_open_name),
+                    op_object.shortName);
+                op_delete_tree_child_kind = op_object.kind;
+                afatfs_findLastObject(op_delete_tree_dir, &op_object_finder);
+            }
+            op_delete_tree_phase = FS_DELETE_TREE_CLOSE_SCAN_BEFORE_CHILD;
+            break;
+        }
+
+        case FS_DELETE_TREE_CLOSE_SCAN_BEFORE_CHILD:
+            op_close_done = false;
+            if (!afatfs_fclose(op_delete_tree_dir, on_file_closed))
+                return FS_STATUS_BUSY;
+            op_delete_tree_phase = FS_DELETE_TREE_HANDLE_CHILD;
+            return FS_STATUS_BUSY;
+
+        case FS_DELETE_TREE_HANDLE_CHILD:
+            if (!op_close_done)
+                return FS_STATUS_BUSY;
+            op_delete_tree_dir = NULL;
+            if (op_delete_tree_child_kind == AFATFS_OBJECT_FILE) {
+                op_remove_done = 0u;
+                if (!afatfs_removeObjects_lfn(op_delete_tree_child_name,
+                                              AFATFS_MATCH_CASE_INSENSITIVE,
+                                              AFATFS_REMOVE_FILES_ONLY,
+                                              on_remove_complete)) {
+                    return FS_STATUS_BUSY;
+                }
+                op_delete_tree_phase = FS_DELETE_TREE_WAIT_FILE_REMOVE;
+                return FS_STATUS_BUSY;
+            }
+            if (op_delete_tree_child_kind == AFATFS_OBJECT_DIRECTORY) {
+                if (op_delete_tree_depth + 1u >= FS_DELETE_DEPTH_MAX) {
+                    filesystem_makeNamedErrorCode(
+                        "Del", (uint8_t)op_delete_tree_phase);
+                    op_delete_tree_phase = FS_DELETE_TREE_ERROR;
+                    return FS_STATUS_ERROR;
+                }
+                op_file_ready = false;
+                op_file = NULL;
+                if (!afatfs_opendir(op_delete_tree_child_open_name,
+                                    on_file_opened)) {
+                    return FS_STATUS_BUSY;
+                }
+                op_delete_tree_phase = FS_DELETE_TREE_WAIT_CHILD_DIR;
+                return FS_STATUS_BUSY;
+            }
+            op_delete_tree_phase = FS_DELETE_TREE_OPEN_PARENT;
+            break;
+
+        case FS_DELETE_TREE_WAIT_FILE_REMOVE:
+            if (!op_remove_done)
+                return FS_STATUS_BUSY;
+            op_delete_tree_phase = FS_DELETE_TREE_OPEN_SCAN;
+            break;
+
+        case FS_DELETE_TREE_WAIT_CHILD_DIR:
+            if (!op_file_ready)
+                return FS_STATUS_BUSY;
+            if (!op_file) {
+                filesystem_makeNamedErrorCode(
+                    "Del", (uint8_t)op_delete_tree_phase);
+                op_delete_tree_phase = FS_DELETE_TREE_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            op_delete_tree_dir = op_file;
+            if (!afatfs_chdir(op_delete_tree_dir))
+                return FS_STATUS_BUSY;
+            op_delete_tree_depth++;
+            filesystem_copyLongComponent(
+                op_delete_tree_name_stack[op_delete_tree_depth],
+                sizeof(op_delete_tree_name_stack[op_delete_tree_depth]),
+                op_delete_tree_child_name);
+            op_delete_tree_phase = FS_DELETE_TREE_CLOSE_CHILD_DIR;
+            break;
+
+        case FS_DELETE_TREE_OPEN_PARENT:
+        {
+            afatfsOperationStatus_e st = afatfs_chdirParent();
+            if (st == AFATFS_OPERATION_IN_PROGRESS)
+                return FS_STATUS_BUSY;
+            if (st == AFATFS_OPERATION_FAILURE) {
+                filesystem_makeNamedErrorCode(
+                    "Del", (uint8_t)op_delete_tree_phase);
+                op_delete_tree_phase = FS_DELETE_TREE_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            op_delete_tree_phase = FS_DELETE_TREE_REMOVE_EMPTY_DIR;
+            break;
+        }
+
+        case FS_DELETE_TREE_WAIT_PARENT:
+        case FS_DELETE_TREE_CLOSE_PARENT:
+            op_delete_tree_phase = FS_DELETE_TREE_ERROR;
+            return FS_STATUS_ERROR;
+
+        case FS_DELETE_TREE_REMOVE_EMPTY_DIR:
+            op_delete_tree_dir = NULL;
+            op_remove_done = 0u;
+            if (!afatfs_removeObjects_lfn(
+                    op_delete_tree_name_stack[op_delete_tree_depth],
+                    AFATFS_MATCH_CASE_INSENSITIVE,
+                    AFATFS_REMOVE_EMPTY_DIRECTORIES,
+                    on_remove_complete)) {
+                return FS_STATUS_BUSY;
+            }
+            op_delete_tree_phase = FS_DELETE_TREE_WAIT_REMOVE_EMPTY_DIR;
+            return FS_STATUS_BUSY;
+
+        case FS_DELETE_TREE_WAIT_REMOVE_EMPTY_DIR:
+            if (!op_remove_done)
+                return FS_STATUS_BUSY;
+            if (op_delete_tree_depth == 0u) {
+                op_delete_tree_phase = FS_DELETE_TREE_DONE;
+                return FS_STATUS_DONE;
+            }
+            op_delete_tree_depth--;
+            op_delete_tree_phase = FS_DELETE_TREE_OPEN_SCAN;
+            break;
+        }
+    }
+}
+
 static void filesystem_saveKitDirectory_tick(void)
 {
     const scene_t *scene = scene_getConst(op_kit_save_source_scene);
     const kit_t *kit = scene ? &scene->kit : NULL;
-    uint8_t morph_save =
-        (uint8_t)(current_op == FS_INTERNAL_OP_SAVE_KIT_MORPH);
+    fs_status_t delete_status;
 
-    /*
-     * Resolve the immutable Kit save source and save projection.
-     *
-     * What: Selects the resident Kit accepted by the request and records
-     * whether this state-machine run is normal Kit Save or KitMrp Save.
-     *
-     * Why: both operations write the same directory object, but Morph Save
-     * changes the values emitted inside member Instrument files and kitset
-     * generated endpoint fields. The source Scene must not drift while
-     * asyncfatfs is busy.
-     *
-     * Inputs: request-time source Scene and current internal operation.
-     * Outputs: local source Kit pointer and morph_save flag for writer
-     * contexts.
-     *
-     * Affiliates/clients: filesystem_requestSaveKitDirectory(),
-     * filesystem_requestSaveKitMorphDirectory(), storageTypes save views.
-     */
     switch (op_phase) {
-    case 0: /* CHDIR ROOT */
-        if (!kit || op_slot >= STORAGE_KIT_MAX_SLOTS) {
+    case 0:
+        if (!kit || op_slot >= STORAGE_KIT_MAX_SLOTS ||
+            op_save_kit_dir_display_name[0] == '\0') {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
         if (!afatfs_chdir(NULL))
             return;
-        memset(op_save_kit_dir_name, 0, sizeof(op_save_kit_dir_name));
-        filesystem_makeKitDirectoryDisplayName(op_save_kit_display_name,
-                                               op_slot);
-        filesystem_prepareSavedInstrumentFilenames(kit);
-        op_save_opened_existing_dir = 0u;
-        op_phase = 1;
+        op_phase = 1u;
         return;
 
-    case 1: /* MKDIR/OPEN Kit */
+    case 1:
         op_file_ready = false;
         op_file = NULL;
         memset(op_root_open_name, 0, sizeof(op_root_open_name));
-        /*
-         * Create/open the root Kit directory through the LFN-aware path.
-         *
-         * "Kit" is a short display component today, but using mkdir_lfn keeps
-         * this production writer on the same case-preserving path as long Kit
-         * folders and prevents future root-name changes from falling back to
-         * raw uppercase SFN behavior.
-         */
         if (!afatfs_mkdir_lfn(STORAGE_ROOT_KIT,
                               AFATFS_MATCH_CASE_INSENSITIVE,
                               op_root_open_name,
-                              on_file_opened))
+                              on_file_opened)) {
             return;
-        op_phase = 2;
+        }
+        op_phase = 2u;
         return;
 
-    case 2: /* WAIT Kit */
-        if (!op_file_ready) return;
+    case 2:
+        if (!op_file_ready)
+            return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
         op_kit_root_dir = op_file;
-        op_phase = 3;
-        return;
-
-    case 3: /* CHDIR Kit */
         if (!afatfs_chdir(op_kit_root_dir))
             return;
-        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
-        op_save_found_existing_dir = 0u;
-        memset(op_save_existing_display_name, 0,
-               sizeof(op_save_existing_display_name));
-        memset(op_save_existing_open_name, 0,
-               sizeof(op_save_existing_open_name));
-        op_phase = 4;
+        op_phase = 3u;
         return;
 
-    case 4: /* SCAN target kit slot directory */
-    {
-        afatfsOperationStatus_e st =
-            afatfs_findNextObject(op_kit_root_dir,
-                                  &op_object_finder,
-                                  &op_object);
-        if (st == AFATFS_OPERATION_IN_PROGRESS)
-            return;
-        if (st == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 5;
-            return;
-        }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
-            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 5;
-            return;
-        }
-        filesystem_noteSaveSlotCandidate(&op_object);
-        return;
-    }
-
-    case 5: /* CLOSE Kit handle */
+    case 3:
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 6;
+            op_phase = 4u;
         return;
 
-    case 6: /* WAIT CLOSE Kit */
-        if (!op_close_done) return;
+    case 4:
+        if (!op_close_done)
+            return;
         op_kit_root_dir = NULL;
-        if (op_close_status != FS_STATUS_DONE) {
-            filesystem_finish(op_close_status);
-            return;
-        }
-        op_phase = 7;
+        /*
+         * Remove every physical directory for this numbered Kit slot before
+         * creating the fresh one.
+         *
+         * This is stronger than deleting a cached old name plus the requested
+         * new name. A card can contain duplicate same-slot folders such as
+         * "003 RedSnap" and "003 Slak"; the scan cache will expose only one,
+         * so overwrite must discover and delete all matching numbered folders
+         * directly from /Kit/.
+         */
+        filesystem_deleteKitSlotDirectoriesStart();
+        op_phase = 5u;
         return;
 
-    case 7: /* ENSURE target kit folder */
-        op_file_ready = false;
-        op_file = NULL;
-        if (op_save_found_existing_dir) {
-            /*
-             * Ensure the occupied Kit slot has the edited display component.
-             *
-             * Byte-exact equality means the existing LFN/SFN run is already
-             * correct. Case-only differences must still call rename so FAT
-             * preserves the user's newly entered case.
-             */
-            if (fat_compareDisplayName(op_save_existing_display_name,
-                                       op_save_kit_display_name,
-                                       true) == 0) {
-                storage_copyFilename(op_save_kit_dir_name,
-                                     op_save_existing_open_name);
-                if (!afatfs_fopen(op_save_kit_dir_name, "r", on_file_opened))
-                    return;
-                op_phase = 9;
-                return;
-            }
-            op_rename_done = 0u;
-            memset(op_save_kit_dir_name, 0, sizeof(op_save_kit_dir_name));
-            if (!afatfs_renameObject_lfn(op_save_existing_display_name,
-                                         op_save_kit_display_name,
-                                         AFATFS_MATCH_CASE_INSENSITIVE,
-                                         op_save_kit_dir_name,
-                                         on_rename_complete)) {
-                return;
-            }
-            op_phase = 8;
+    case 5:
+        delete_status = filesystem_deleteKitSlotDirectories_tick();
+        if (delete_status == FS_STATUS_BUSY)
             return;
-        } else {
-            if (!afatfs_mkdir_lfn(op_save_kit_display_name,
-                                  AFATFS_MATCH_CASE_INSENSITIVE,
-                                  op_save_kit_dir_name,
-                                  on_file_opened))
-                return;
-            op_phase = 9;
-            return;
-        }
-
-    case 8: /* WAIT rename + OPEN target kit folder */
-        if (!op_rename_done)
-            return;
-        if (op_save_kit_dir_name[0] == '\0') {
+        if (delete_status == FS_STATUS_ERROR) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(op_save_kit_dir_name, "r", on_file_opened))
-            return;
-        op_phase = 9;
+        op_phase = 8u;
         return;
 
-    case 9: /* WAIT target kit folder */
-        if (!op_file_ready) return;
+    case 8:
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_save_kit_dir_open_name, 0, sizeof(op_save_kit_dir_open_name));
+        if (!afatfs_mkdir_lfn(op_save_kit_dir_display_name,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_save_kit_dir_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 9u;
+        return;
+
+    case 9:
+        if (!op_file_ready)
+            return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
         op_kit_slot_dir = op_file;
-        op_phase = 10;
-        return;
-
-    case 10: /* CHDIR target kit folder + MAYBE START cleanup scan */
         if (!afatfs_chdir(op_kit_slot_dir))
             return;
-        /*
-         * Run the broad stale-member cleanup only for an occupied Kit slot.
-         *
-         * What: op_save_found_existing_dir is the scan result from the root
-         * `/Kit` directory. A true value means this save is replacing an
-         * existing slot folder; a false value means afatfs_mkdir_lfn() just
-         * created a new, empty target directory for this operation.
-         *
-         * Why: brand-new empty slots cannot contain stale member Instrument
-         * files. Skipping directory enumeration here avoids inserting another
-         * asynchronous failure point before the first member file writes and
-         * before filesystem_finish(FS_STATUS_DONE) performs the final sync
-         * that makes the newly-created directory durable on card.
-         *
-         * Inputs: op_kit_slot_dir is the open handle returned for the selected
-         * Kit folder; op_save_found_existing_dir preserves whether that handle
-         * came from an existing slot path or from a new mkdir path.
-         *
-         * Outputs/effects: occupied slots continue into the stale-file scan;
-         * empty slots close their just-created directory handle and continue
-         * directly to the six authoritative member writes.
-         *
-         * Affiliates/clients: filesystem_noteSaveSlotCandidate(),
-         * afatfs_mkdir_lfn(), filesystem_saveKitDirectory_tick() phases 25/27.
-         */
-        if (!op_save_found_existing_dir) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 27;
-            return;
-        }
-        afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
-        op_phase = 25;
+        op_phase = 10u;
         return;
 
-    case 19: /* WAIT CLOSE target kit */
-        if (!op_close_done) return;
-        op_kit_slot_dir = NULL;
-        if (op_close_status != FS_STATUS_DONE) {
-            filesystem_finish(op_close_status);
-            return;
-        }
-        op_instrument_slot = 0u;
-        op_phase = 16;
-        return;
-
-    case 25: /* REMOVE stale instrument files from target kit */
-    {
-        afatfsOperationStatus_e st =
-            afatfs_findNextObject(op_kit_slot_dir,
-                                  &op_object_finder,
-                                  &op_object);
-        /*
-         * Clean the selected Kit directory before writing member files.
-         *
-         * What: Scans the current target Kit directory and removes existing
-         * regular Instrument files, regardless of whether their names match
-         * the six names about to be generated.
-         *
-         * Why: saving over an occupied Kit slot can change the member filename
-         * convention. Without this pass, old files such as `slakd1.drm` remain
-         * beside the new eighth-character voice-number filenames and make the
-         * on-card folder look wrong even though kitset.kcg is authoritative.
-         *
-         * Inputs: op_kit_slot_dir is the still-open target Kit folder handle,
-         * and currentDirectory is already a chdir() copy of the same folder for
-         * removal by display name. Output: stale `.drm/.snr/.cym/.hat` files
-         * are removed before the six current members are written. Non-instrument
-         * files and directories are left alone; kitset.kcg is overwritten later.
-         *
-         * Affiliates/clients: filesystem_nameIsInstrumentFile(),
-         * afatfs_removeObjects_lfn(), storage_formatKitsetLineView().
-         */
-        if (st == AFATFS_OPERATION_IN_PROGRESS)
-            return;
-        if (st == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 27;
-            return;
-        }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
-            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 27;
-            return;
-        }
-        if (op_object.kind == AFATFS_OBJECT_FILE &&
-            filesystem_nameIsInstrumentFile(op_object.displayName)) {
-            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
-            op_remove_done = 0u;
-            if (!afatfs_removeObjects_lfn(op_object.displayName,
-                                          AFATFS_MATCH_CASE_INSENSITIVE,
-                                          AFATFS_REMOVE_FILES_ONLY,
-                                          on_remove_complete)) {
-                return;
-            }
-            op_phase = 26;
-        }
-        return;
-    }
-
-    case 26: /* WAIT stale instrument removal */
-        if (!op_remove_done)
-            return;
-        afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
-        op_phase = 25;
-        return;
-
-    case 27: /* CLOSE target kit after cleanup scan */
+    case 10:
         op_close_done = false;
         if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
-            op_phase = 19;
+            op_phase = 11u;
         return;
 
-    case 16: /* REMOVE next instrument variants */
-        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
-            op_phase = 11;
+    case 11:
+        if (!op_close_done)
             return;
-        }
-        /*
-         * Skip per-member overwrite cleanup in a brand-new Kit directory.
-         *
-         * What: op_save_found_existing_dir remains false only when this save
-         * created the selected Kit folder during the current operation. In
-         * that case there cannot be old `Kick.drm`/`kick.drm` variants inside
-         * the child directory yet, so the next valid action is member file
-         * creation.
-         *
-         * Why: empty-slot Kit Save must not insert extra async delete scans
-         * between successful directory creation and first member creation.
-         * Those scans are useful only for occupied folders and any failure
-         * before final filesystem_finish(FS_STATUS_DONE) prevents the new
-         * directory from being synced to card.
-         *
-         * Inputs: op_save_found_existing_dir is captured while scanning `/Kit`
-         * for the requested numbered slot. Outputs/effects: new directories go
-         * directly to phase 17 with op_remove_done already satisfied; occupied
-         * directories still remove same-casefold member-file variants before
-         * each overwrite.
-         *
-         * Affiliates/clients: afatfs_removeObjects_lfn(),
-         * afatfs_fopen_lfn(), filesystem_saveKitDirectory_tick() phases 17/18.
-         */
-        if (!op_save_found_existing_dir) {
-            op_remove_done = 1u;
-            op_phase = 17;
-            return;
-        }
-        /*
-         * Collapse same-casefold member-file variants before writing.
-         *
-         * What: Deletes every physical file in the Kit directory whose display
-         * name matches the target member filename under case-insensitive
-         * comparison.
-         *
-         * Why: `Kick.drm` and `kick.drm` can exist only after external
-         * filesystem edits, but product save must treat them as one object.
-         * Removing all variants before fopen_lfn("w") guarantees the saved Kit
-         * contains exactly one member file with the case generated from
-         * retained Scene metadata.
-         *
-         * Inputs: op_save_instrument_display_file[op_instrument_slot] is the
-         * visible target name; op_instrument_slot identifies which Kit member
-         * is being written.
-         *
-         * Outputs/effects: duplicate files are removed from FAT and the
-         * following fopen_lfn() creates the single authoritative file.
-         * Directories with the same folded component are ignored by
-         * AFATFS_REMOVE_FILES_ONLY.
-         *
-         * Affiliates/clients: afatfs_removeObjects_lfn(), afatfs_fopen_lfn(),
-         * storage_formatInstrumentLine(), kitset.kcg member filename storage.
-         */
-        op_remove_done = 0u;
-        if (!afatfs_removeObjects_lfn(
-                op_save_instrument_display_file[op_instrument_slot],
-                AFATFS_MATCH_CASE_INSENSITIVE,
-                AFATFS_REMOVE_FILES_ONLY,
-                on_remove_complete)) {
-            return;
-        }
-        op_phase = 17;
-        return;
-
-    case 17: /* WAIT remove + OPEN next instrument */
-        if (!op_remove_done)
-            return;
+        op_kit_slot_dir = NULL;
         op_file_ready = false;
         op_file = NULL;
-        /*
-         * Member instruments are written before kitset.kcg so a failed member
-         * open/write cannot commit a kitset that points at files which were
-         * never successfully rewritten. kitset.kcg stores the visible display
-         * filename generated in op_save_instrument_display_file[]; the returned
-         * short alias is local asyncfatfs scratch only.
-         */
-        if (!afatfs_fopen_lfn(
-                op_save_instrument_display_file[op_instrument_slot],
-                "w",
-                AFATFS_MATCH_CASE_INSENSITIVE,
-                op_save_instrument_file[op_instrument_slot],
-                on_file_opened)) {
+        if (!afatfs_fopen_lfn(STORAGE_KITSET_FILENAME,
+                              "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened)) {
             return;
         }
-        op_phase = 18;
+        op_phase = 12u;
         return;
 
-    case 18: /* WAIT instrument */
-        if (!op_file_ready) return;
+    case 12:
+        if (!op_file_ready)
+            return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -4688,262 +4919,99 @@ static void filesystem_saveKitDirectory_tick(void)
         op_write_line_index = 0u;
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
-        op_phase = 20;
+        op_phase = 13u;
         return;
 
-    case 20: /* WRITE complete instrument text */
+    case 13:
+        if (filesystem_writeTextLine(filesystem_nextKitsetLine, (void *)kit))
+            return;
+        op_phase = 14u;
+        return;
+
+    case 14:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 15u;
+        return;
+
+    case 15:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_instrument_slot = 0u;
+        op_phase = 16u;
+        return;
+
+    case 16:
+        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
+            op_phase = 21u;
+            return;
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        if (!afatfs_fopen_lfn(
+                op_save_kit_member_display_file[op_instrument_slot],
+                "w",
+                AFATFS_MATCH_CASE_INSENSITIVE,
+                op_root_open_name,
+                on_file_opened)) {
+            return;
+        }
+        op_phase = 17u;
+        return;
+
+    case 17:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 18u;
+        return;
+
+    case 18:
     {
         filesystem_instrument_write_ctx_t ctx = {{
             &kit->instruments[op_instrument_slot],
             kit->instruments[op_instrument_slot].type,
             (uint8_t)(op_instrument_slot + 1u),
             scene ? scene->settings.voice_morph_amount[op_instrument_slot] : 0u,
-            morph_save ? STORAGE_INSTRUMENT_SAVE_MORPH
-                       : STORAGE_INSTRUMENT_SAVE_NORMAL
+            op_kit_save_mode
         }};
-        /*
-         * Build the member Instrument save view for this Kit slot.
-         *
-         * What: Passes the resident slot image, storage type, one-based file
-         * voice, retained per-slot Morph amount, and normal-vs-Morph save mode
-         * to storageTypes.
-         *
-         * Why: Kit Save and KitMrp Save share file sequencing and member-name
-         * generation. The only per-member difference is how morphable endpoint
-         * values are projected into [params] and [morph].
-         *
-         * Inputs: op_instrument_slot selects the Kit member currently being
-         * written. Output: one context consumed by
-         * filesystem_nextInstrumentLine().
-         *
-         * Affiliates/clients: storage_formatInstrumentLineView(), Morph Save
-         * value rule, LFO `self` token serialization.
-         */
         if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
             return;
-        op_phase = 21;
+        op_phase = 19u;
         return;
     }
 
-    case 21: /* CLOSE instrument */
+    case 19:
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 22;
+            op_phase = 20u;
         return;
 
-    case 22: /* WAIT CLOSE instrument */
-        if (!op_close_done) return;
+    case 20:
+        if (!op_close_done)
+            return;
         op_file = NULL;
-        op_phase = 23;
-        return;
-
-    case 23: /* ADVANCE instrument */
         op_instrument_slot++;
-        op_phase = 16;
+        op_phase = 16u;
         return;
 
-    case 11: /* OPEN kitset.kcg */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(STORAGE_KITSET_FILENAME, "w", on_file_opened))
-            return;
-        op_phase = 12;
-        return;
-
-    case 12: /* WAIT kitset.kcg */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        op_phase = 13;
-        return;
-
-    case 13: /* WRITE kitset.kcg */
-    {
-        filesystem_kitset_write_ctx_t ctx = {{
-            kit,
-            op_save_instrument_display_file,
-            (scene && INSTRUMENT_SLOT_COUNT > 5u)
-                ? scene->settings.voice_morph_amount[5u] : 0u,
-            morph_save ? STORAGE_INSTRUMENT_SAVE_MORPH
-                       : STORAGE_INSTRUMENT_SAVE_NORMAL
-        }};
-        /*
-         * Build the kitset save view after all member files are written.
-         *
-         * What: Passes the resident Kit, visible member-file display names,
-         * slot-6 Morph amount, and normal-vs-Morph mode into storageTypes.
-         *
-         * Why: kitset.kcg owns generated slot-6/track-7 endpoint fields.
-         * KitMrp Save must project those fields with the same value rule as
-         * descriptor-backed Instrument files, while filesystem.c remains
-         * unaware of kitset key order.
-         *
-         * Inputs: op_save_instrument_display_file[] contains the visible
-         * filenames that were just opened/written for each member file. Output:
-         * line formatter context for kitset.kcg.
-         *
-         * Affiliates/clients: storage_formatKitsetLineView(), generated
-         * track-7 decay storage, KitMrp Save.
-         */
-        if (filesystem_writeTextLine(filesystem_nextKitsetLine, &ctx))
-            return;
-        op_phase = 14;
-        return;
-    }
-
-    case 14: /* CLOSE kitset.kcg */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 15;
-        return;
-
-    case 15: /* WAIT CLOSE kitset.kcg */
-        if (!op_close_done) return;
-        op_file = NULL;
-        op_phase = 24;
-        return;
-
-    case 24: /* RETURN ROOT + UPDATE RESIDENT NAME */
+    case 21:
         if (!afatfs_chdir(NULL))
             return;
-        {
-            uint16_t parsed_slot;
-            char parsed_display[STORAGE_KIT_DISPLAY_NAME_LEN];
-            /*
-             * Update only resident identity after a successful Kit save.
-             *
-             * What: normal Kit Save may rename the resident Kit that was just
-             * exported. This phase updates that SceneData display name after
-             * all member files and kitset.kcg have closed.
-             *
-             * Why: the Kit browser cache must not be updated here. A save
-             * state machine knows the intended display name and generated
-             * alias, but only a later `/Kit` directory scan can prove that FAT
-             * now contains an enumerable, loadable directory. Publishing cache
-             * entries here created fake Load-page rows for saves that had not
-             * produced a usable on-card Kit.
-             *
-             * Inputs: op_save_kit_display_name is parsed only to verify that
-             * the completed save still names the requested numbered slot.
-             * Outputs: scene->kit.display_name for normal Kit Save only.
-             *
-             * Affiliates/clients: presetManager Kit-save completion now starts
-             * filesystem_requestScanKits(), and that scan is the only writer
-             * for kit_slot_present/name/open_name after a save.
-             */
-            if (storage_parseNumberedFolder(op_save_kit_display_name,
-                                            &parsed_slot,
-                                            parsed_display) &&
-                parsed_slot == op_slot) {
-                if (!morph_save) {
-                    /*
-                     * Retain Kit identity only for normal Kit Save.
-                     *
-                     * What: Updates the resident Kit display name after normal
-                     * Kit Save completes, while KitMrp Save updates only the
-                     * on-card browser/cache identity.
-                     *
-                     * Why: Morph Save exports a transformed file image. It
-                     * must not rename the currently loaded Kit or change the
-                     * name used to seed later normal saves.
-                     *
-                     * Inputs: morph_save flag and request-time source Scene.
-                     * Outputs: scene->kit.display_name for normal save only.
-                     *
-                     * Affiliates/clients: Menu Save editor seeding, KitMrp
-                     * Save no-name-change acceptance tests.
-                     */
-                    scene_setResidentKitDisplayName(op_kit_save_source_scene,
-                                                    preset_currentName);
-                }
-            }
+        filesystem_recordSavedKitDirectory(op_save_kit_dir_display_name,
+                                           op_save_kit_dir_open_name);
+        if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_NORMAL) {
+            scene_setResidentKitDisplayName(op_kit_save_source_scene,
+                                            preset_currentName);
         }
-        filesystem_finish(FS_STATUS_DONE);
-        return;
-
-    default:
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
-}
-
-/* -----------------------------------------------------------------------
-** SAVE KIT state machine
-**
-** Phases: 0=stage, 1=open, 2=wait_open, 3=write, 4=close,
-**         5=wait_close, 6=done
-** ----------------------------------------------------------------------- */
-static void filesystem_saveKit_tick(void)
-{
-    uint16_t i;
-
-    switch (op_phase) {
-    case 0: /* STAGE - copy name + params into staging buffer */
-        memcpy(staging_buf, preset_currentName, 8);
-        if (current_op == FS_INTERNAL_OP_SAVE_MORPH) {
-            for (i = 0; i < END_OF_SOUND_PARAMETERS; i++) {
-                staging_buf[8u + i] = filesystem_morphSaveUsesBase(i)
-                    ? parameter_values[i]
-                    : preset_getMorphValue(i, parameter_values[PAR_MORPH]);
-            }
-        } else {
-            memcpy(staging_buf + 8, parameter_values, END_OF_SOUND_PARAMETERS);
-        }
-        staging_len = 8 + END_OF_SOUND_PARAMETERS;
-        op_phase = 1;
-        return;
-
-    case 1: /* OPEN */
-    {
-        char fname[13];
-        if (!filesystem_makeFilename(fname, op_file_type, op_slot)) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(fname, "w", on_file_opened)) {
-            return;  /* retry next tick */
-        }
-        op_phase = 2;
-        return;
-    }
-
-    case 2: /* WAIT_OPEN */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_phase = 3;
-        op_bytes_done = 0;
-        return;
-
-    case 3: /* WRITE */
-    {
-        uint32_t n = afatfs_fwrite(op_file,
-                                   staging_buf + op_bytes_done,
-                                   staging_len - op_bytes_done);
-        op_bytes_done += n;
-        if (op_bytes_done >= staging_len) {
-            op_phase = 4;
-        }
-        return;
-    }
-
-    case 4: /* CLOSE */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 5;
-        return;
-
-    case 5: /* WAIT_CLOSE */
-        if (!op_close_done) return;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -6408,7 +6476,7 @@ static void filesystem_scanKits_tick(void)
          * to raw uppercase SFN behavior.
          */
         if (!afatfs_opendir_lfn(STORAGE_ROOT_KIT,
-                                AFATFS_MATCH_CASE_SENSITIVE,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
                                 op_root_open_name,
                                 on_file_opened))
             return;
@@ -6493,723 +6561,6 @@ static void filesystem_scanKits_tick(void)
         if (!afatfs_chdir(NULL))
             return;
         filesystem_finish(op_close_status);
-        return;
-
-    default:
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
-}
-
-/* -----------------------------------------------------------------------
-** SAVE SCENE DIRECTORY state machine
-**
-** Creates/opens Scene/<NNN Name>/, writes sceneset.scg, writes an embedded
-** Kit <Name>/ using the same kitset/instrument serializers as root Kit Save,
-** writes the current bridge pattern.pat, and writes placeholder effects.fx.
-**
-** Inputs: op_slot is the root Scene library slot, op_scene_source_index is the
-** resident Scene being saved, and op_scene_display_name is the eight-character
-** UI/library name. Output: root Scene scan cache is updated from the actual
-** LFN display name and asyncfatfs alias returned by mkdir_lfn().
-** ----------------------------------------------------------------------- */
-static void filesystem_saveSceneDirectory_tick(void)
-{
-    const scene_t *scene = scene_getConst(op_scene_source_index);
-    const kit_t *kit = scene ? &scene->kit : NULL;
-
-    switch (op_phase) {
-    case 0: /* CHDIR ROOT + PREPARE NAMES */
-        if (!scene || !kit || op_slot >= STORAGE_SCENE_MAX_SLOTS) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        if (!afatfs_chdir(NULL))
-            return;
-        memset(op_scene_dir_name, 0, sizeof(op_scene_dir_name));
-        filesystem_makeSceneDirectoryDisplayName(op_scene_dir_display_name,
-                                                 op_slot);
-        filesystem_prepareSavedInstrumentFilenames(kit);
-        op_save_opened_existing_dir = 0u;
-        op_phase = 1;
-        return;
-
-    case 1: /* MKDIR/OPEN Scene root */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_mkdir(STORAGE_ROOT_SCENE, on_file_opened))
-            return;
-        op_phase = 2;
-        return;
-
-    case 2: /* WAIT Scene root */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_kit_root_dir = op_file;
-        op_phase = 3;
-        return;
-
-    case 3: /* CHDIR Scene root */
-        if (!afatfs_chdir(op_kit_root_dir))
-            return;
-        op_phase = 4;
-        return;
-
-    case 4: /* CLOSE Scene root handle */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 5;
-        return;
-
-    case 5: /* WAIT CLOSE Scene root */
-        if (!op_close_done) return;
-        op_kit_root_dir = NULL;
-        op_phase = 6;
-        return;
-
-    case 6: /* MKDIR/OPEN target Scene folder */
-        op_file_ready = false;
-        op_file = NULL;
-        op_save_opened_existing_dir = 0u;
-        /*
-         * Root Scene overwrite follows the same rule as Kit overwrite: enter
-         * the scanned directory by alias when the slot already exists, and
-         * create a new LFN directory only for empty slots. This prevents
-         * duplicate visible Scene folders while asyncfatfs still lacks
-         * recursive replace/rename.
-         */
-        if (scene_slot_present[op_slot] &&
-            scene_slot_open_name[op_slot][0] != '\0') {
-            op_save_opened_existing_dir = 1u;
-            storage_copyFilename(op_scene_dir_name,
-                                 scene_slot_open_name[op_slot]);
-            if (!afatfs_fopen(op_scene_dir_name, "r", on_file_opened))
-                return;
-        } else {
-            if (!afatfs_mkdir_lfn(op_scene_dir_display_name,
-                                  AFATFS_MATCH_CASE_SENSITIVE,
-                                  op_scene_dir_name,
-                                  on_file_opened))
-                return;
-        }
-        op_phase = 7;
-        return;
-
-    case 7: /* WAIT target Scene folder */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_kit_slot_dir = op_file;
-        op_phase = 8;
-        return;
-
-    case 8: /* CHDIR target Scene folder */
-        if (!afatfs_chdir(op_kit_slot_dir))
-            return;
-        op_phase = 9;
-        return;
-
-    case 9: /* CLOSE target Scene handle */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
-            op_phase = 10;
-        return;
-
-    case 10: /* WAIT CLOSE target Scene */
-        if (!op_close_done) return;
-        op_kit_slot_dir = NULL;
-        op_phase = 11;
-        return;
-
-    case 11: /* OPEN sceneset.scg */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(STORAGE_SCENESET_FILENAME, "w", on_file_opened))
-            return;
-        op_phase = 12;
-        return;
-
-    case 12: /* WAIT sceneset.scg */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        op_phase = 13;
-        return;
-
-    case 13: /* WRITE sceneset.scg */
-    {
-        filesystem_sceneset_write_ctx_t ctx = {
-            scene,
-            op_scene_display_name
-        };
-        if (filesystem_writeTextLine(filesystem_nextScenesetLine, &ctx))
-            return;
-        op_phase = 14;
-        return;
-    }
-
-    case 14: /* CLOSE sceneset.scg */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 15;
-        return;
-
-    case 15: /* WAIT CLOSE sceneset.scg */
-        if (!op_close_done) return;
-        op_file = NULL;
-        op_phase = 16;
-        return;
-
-    case 16: /* MKDIR/OPEN embedded Kit <name> */
-    {
-        char kit_dir[AFATFS_LONG_FILENAME_MAX + 1u];
-
-        /*
-         * Temporary embedded Kit naming policy.
-         *
-         * SceneData does not yet retain a per-Scene Kit display name, so the
-         * first implementation derives "Kit <SceneName>" from the Scene save
-         * name. sceneset.scg still does not store this name; Scene Load will
-         * discover the first valid Kit* directory.
-         *
-         * Embedded Scene Kit directories are still display-name opened because
-         * there is no child scan cache in the save path. With display-name-first
-         * LFN matching this reuses an existing "Kit <SceneName>" child. If the
-         * root Scene is overwritten with a different display name, the old
-         * embedded Kit directory may remain until asyncfatfs gains recursive
-         * replace/rename; Scene Load discovers the first valid Kit* child, so
-         * full Scene overwrite cleanup is a later storage primitive, not part
-         * of the normal Kit Save blocker.
-         */
-        filesystem_trimmedKitDirectoryName(kit_dir, op_scene_display_name);
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_mkdir_lfn(kit_dir,
-                              AFATFS_MATCH_CASE_SENSITIVE,
-                              op_save_kit_dir_name,
-                              on_file_opened))
-            return;
-        op_phase = 17;
-        return;
-    }
-
-    case 17: /* WAIT embedded Kit */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_kit_slot_dir = op_file;
-        op_phase = 18;
-        return;
-
-    case 18: /* CHDIR embedded Kit */
-        if (!afatfs_chdir(op_kit_slot_dir))
-            return;
-        op_phase = 19;
-        return;
-
-    case 19: /* CLOSE embedded Kit handle */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
-            op_phase = 20;
-        return;
-
-    case 20: /* WAIT CLOSE embedded Kit */
-        if (!op_close_done) return;
-        op_kit_slot_dir = NULL;
-        op_instrument_slot = 0u;
-        op_phase = 21;
-        return;
-
-    case 21: /* OPEN next embedded instrument */
-        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
-            op_phase = 26;
-            return;
-        }
-        op_file_ready = false;
-        op_file = NULL;
-        /*
-         * Embedded instruments follow the same ordering as root Kit Save:
-         * write member files first so kitset.kcg is emitted only after every
-         * convention-preserving member filename has been written.
-         */
-        if (!afatfs_fopen_lfn(
-                op_save_instrument_display_file[op_instrument_slot],
-                "w",
-                AFATFS_MATCH_CASE_SENSITIVE,
-                op_save_instrument_file[op_instrument_slot],
-                on_file_opened))
-            return;
-        op_phase = 22;
-        return;
-
-    case 22: /* WAIT instrument */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        op_phase = 23;
-        return;
-
-    case 23: /* WRITE instrument */
-    {
-        filesystem_instrument_write_ctx_t ctx = {{
-            &kit->instruments[op_instrument_slot],
-            kit->instruments[op_instrument_slot].type,
-            (uint8_t)(op_instrument_slot + 1u),
-            0u,
-            STORAGE_INSTRUMENT_SAVE_NORMAL
-        }};
-        /*
-         * Write embedded Scene Kit member files through the normal save view.
-         *
-         * What: Supplies the Scene-embedded Kit instrument slot to the shared
-         * Instrument formatter with STORAGE_INSTRUMENT_SAVE_NORMAL.
-         *
-         * Why: Scene Save embeds an ordinary Kit image. It should inherit the
-         * descriptor schema and self-token handling from normal Kit Save while
-         * staying independent from KitMrp's endpoint projection.
-         *
-         * Affiliates/clients: filesystem_saveSceneDirectory_tick(),
-         * storage_formatInstrumentLineView().
-         */
-        if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
-            return;
-        op_phase = 24;
-        return;
-    }
-
-    case 24: /* CLOSE instrument */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 25;
-        return;
-
-    case 25: /* WAIT CLOSE instrument */
-        if (!op_close_done) return;
-        op_file = NULL;
-        op_instrument_slot++;
-        op_phase = 21;
-        return;
-
-    case 26: /* OPEN embedded kitset.kcg */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(STORAGE_KITSET_FILENAME, "w", on_file_opened))
-            return;
-        op_phase = 27;
-        return;
-
-    case 27: /* WAIT kitset.kcg */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        op_phase = 28;
-        return;
-
-    case 28: /* WRITE embedded kitset.kcg */
-    {
-        filesystem_kitset_write_ctx_t ctx = {{
-            kit,
-            op_save_instrument_display_file,
-            0u,
-            STORAGE_INSTRUMENT_SAVE_NORMAL
-        }};
-        /*
-         * Write embedded Scene kitset through the normal save view.
-         *
-         * What: Supplies the embedded Kit and already-written member display
-         * filenames to the shared kitset formatter with
-         * STORAGE_INSTRUMENT_SAVE_NORMAL.
-         *
-         * Why: Scene Save serializes the resident Kit exactly as normal Kit
-         * storage, including generated slot-6/track-7 fields. Morph Save
-         * projection belongs only to explicit KitMrp export.
-         *
-         * Affiliates/clients: filesystem_saveSceneDirectory_tick(),
-         * storage_formatKitsetLineView().
-         */
-        if (filesystem_writeTextLine(filesystem_nextKitsetLine, &ctx))
-            return;
-        op_phase = 29;
-        return;
-    }
-
-    case 29: /* CLOSE kitset.kcg */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 30;
-        return;
-
-    case 30: /* WAIT CLOSE kitset.kcg */
-        if (!op_close_done) return;
-        op_file = NULL;
-        op_phase = 31;
-        return;
-
-    case 31: /* RETURN ROOT before reopening target Scene */
-        if (!afatfs_chdir(NULL))
-            return;
-        op_phase = 32;
-        return;
-
-    case 32: /* REOPEN Scene root */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(STORAGE_ROOT_SCENE, "r", on_file_opened))
-            return;
-        op_phase = 33;
-        return;
-
-    case 33: /* WAIT Scene root reopen */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_kit_root_dir = op_file;
-        op_phase = 34;
-        return;
-
-    case 34: /* CHDIR Scene root */
-        if (!afatfs_chdir(op_kit_root_dir))
-            return;
-        op_phase = 35;
-        return;
-
-    case 35: /* CLOSE Scene root */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 36;
-        return;
-
-    case 36: /* WAIT CLOSE Scene root */
-        if (!op_close_done) return;
-        op_kit_root_dir = NULL;
-        op_phase = 37;
-        return;
-
-    case 37: /* OPEN target Scene alias */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(op_scene_dir_name, "r", on_file_opened))
-            return;
-        op_phase = 38;
-        return;
-
-    case 38: /* WAIT target Scene alias */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_kit_slot_dir = op_file;
-        op_phase = 39;
-        return;
-
-    case 39: /* CHDIR target Scene */
-        if (!afatfs_chdir(op_kit_slot_dir))
-            return;
-        op_phase = 40;
-        return;
-
-    case 40: /* CLOSE target Scene alias */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
-            op_phase = 41;
-        return;
-
-    case 41: /* WAIT CLOSE target Scene alias */
-        if (!op_close_done) return;
-        op_kit_slot_dir = NULL;
-        op_phase = 42;
-        return;
-
-    case 42: /* OPEN pattern.pat */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen("pattern.pat", "w", on_file_opened))
-            return;
-        op_phase = 43;
-        return;
-
-    case 43: /* WAIT pattern.pat */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_stream_index = 0u;
-        op_item_offset = 0u;
-        op_phase = 44;
-        return;
-
-    case 44: /* WRITE pattern name */
-        filesystem_writeStreamChunk((const uint8_t *)op_scene_display_name, 8);
-        if (op_item_offset >= 8u) {
-            op_item_offset = 0u;
-            op_stream_index = 0u;
-            op_phase = 45;
-        }
-        return;
-
-    case 45: /* WRITE pattern steps */
-    {
-        uint8_t pattern, track, step_nr;
-        Step *step;
-        if (op_stream_index >= FS_PATTERN_STEP_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 46;
-            return;
-        }
-        filesystem_patternStepAddress(op_stream_index, &pattern, &track,
-                                      &step_nr);
-        step = filesystem_patternSetStepPtr((PatternSet *)&scene->pattern,
-                                            pattern, track, step_nr);
-        if (!step) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        filesystem_packStep(step, staging_buf);
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
-        if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
-            op_item_offset = 0u;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 46: /* WRITE pattern main steps */
-    {
-        uint8_t pattern, track;
-        uint16_t *main_steps;
-        if (op_stream_index >= FS_PATTERN_MAIN_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 47;
-            return;
-        }
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        main_steps = filesystem_patternSetMainPtr((PatternSet *)&scene->pattern,
-                                                  pattern, track);
-        if (!main_steps) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        staging_buf[0] = (uint8_t)(*main_steps & 0xffu);
-        staging_buf[1] = (uint8_t)(*main_steps >> 8);
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
-        if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
-            op_item_offset = 0u;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 47: /* WRITE pattern settings */
-    {
-        PatternSetting *setting;
-        if (op_stream_index >= FS_PATTERN_SETTINGS_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 48;
-            return;
-        }
-        setting = filesystem_patternSetSettingPtr((PatternSet *)&scene->pattern,
-                                                  (uint8_t)op_stream_index);
-        if (!setting) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        staging_buf[0] = setting->nextPattern;
-        staging_buf[1] = setting->changeBar;
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
-        if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
-            op_item_offset = 0u;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 48: /* WRITE pattern lengths */
-    {
-        uint8_t pattern, track;
-        LengthRotate *lr;
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 49;
-            return;
-        }
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        lr = filesystem_patternSetLengthPtr((PatternSet *)&scene->pattern,
-                                            pattern, track);
-        if (!lr) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        staging_buf[0] = lr->length;
-        filesystem_writeStreamChunk(staging_buf, 1u);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0u;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 49: /* WRITE pattern rotate/scale extension */
-    {
-        uint8_t pattern, track;
-        LengthRotate *lr;
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 50;
-            return;
-        }
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        lr = filesystem_patternSetLengthPtr((PatternSet *)&scene->pattern,
-                                            pattern, track);
-        if (!lr) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        staging_buf[0] = lr->rotate;
-        staging_buf[1] = lr->scale;
-        filesystem_writeStreamChunk(staging_buf,
-                                    FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
-            op_item_offset = 0u;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 50: /* WRITE pattern shuffle extension */
-    {
-        uint8_t pattern, track;
-        LengthRotate *lr;
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_phase = 51;
-            return;
-        }
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        lr = filesystem_patternSetLengthPtr((PatternSet *)&scene->pattern,
-                                            pattern, track);
-        if (!lr) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        staging_buf[0] = lr->shuffle;
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
-            op_item_offset = 0u;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 51: /* CLOSE pattern.pat */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 52;
-        return;
-
-    case 52: /* WAIT CLOSE pattern.pat */
-        if (!op_close_done) return;
-        op_file = NULL;
-        op_phase = 53;
-        return;
-
-    case 53: /* OPEN effects.fx */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen("effects.fx", "w", on_file_opened))
-            return;
-        op_phase = 54;
-        return;
-
-    case 54: /* WAIT effects.fx */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        op_phase = 55;
-        return;
-
-    case 55: /* WRITE effects.fx placeholder */
-        if (filesystem_writeTextLine(filesystem_nextEffectLine, NULL))
-            return;
-        op_phase = 56;
-        return;
-
-    case 56: /* CLOSE effects.fx */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 57;
-        return;
-
-    case 57: /* WAIT CLOSE effects.fx */
-        if (!op_close_done) return;
-        op_file = NULL;
-        op_phase = 58;
-        return;
-
-    case 58: /* RETURN ROOT + UPDATE CACHE */
-        if (!afatfs_chdir(NULL))
-            return;
-        {
-            uint16_t parsed_slot;
-            char parsed_display[STORAGE_SCENE_DISPLAY_NAME_LEN];
-            /*
-             * Mirror the root Scene directory operation in the scan cache.
-             * Created slots receive the new display component and returned
-             * alias. Occupied slots were opened by existing alias and were not
-             * renamed, so preserve their scanned display name while confirming
-             * the alias remains present.
-             */
-            scene_slot_present[op_slot] = 1u;
-            if (op_save_opened_existing_dir) {
-                storage_copyFilename(scene_slot_open_name[op_slot],
-                                     op_scene_dir_name);
-            } else if (storage_parseNumberedFolder(op_scene_dir_display_name,
-                                                   &parsed_slot,
-                                                   parsed_display) &&
-                       parsed_slot == op_slot) {
-                memcpy(scene_slot_name[op_slot], parsed_display,
-                       STORAGE_SCENE_DISPLAY_NAME_LEN);
-                scene_slot_name[op_slot][STORAGE_SCENE_DISPLAY_NAME_LEN] =
-                    '\0';
-                storage_copyFilename(scene_slot_open_name[op_slot],
-                                     op_scene_dir_name);
-            }
-        }
-        filesystem_finish(FS_STATUS_DONE);
         return;
 
     default:
@@ -8525,6 +7876,60 @@ static void filesystem_saveTestDir_tick(void)
         filesystem_makeTestBytes();
         if (!afatfs_chdir(NULL))
             return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        /*
+         * Save:[Dir] now targets /Kit/<name>/ instead of /<name>/.
+         *
+         * The root Kit directory is created on demand so a clean card can run
+         * this diagnostic without a separate setup step. The user-entered
+         * component remains exact-case LFN data for the child directory below.
+         */
+        if (!afatfs_mkdir_lfn(STORAGE_ROOT_KIT,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened))
+            return;
+        op_phase = 2u;
+        return;
+
+    case 2:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setTestDiag("RootOpn");
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3u;
+        return;
+
+    case 3:
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 4u;
+        return;
+
+    case 4:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5u;
+        return;
+
+    case 5:
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        op_phase = 6u;
+        return;
+
+    case 6:
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_mkdir_lfn(op_test_name,
@@ -8532,29 +7937,30 @@ static void filesystem_saveTestDir_tick(void)
                               op_test_short_alias,
                               on_file_opened))
             return;
-        op_phase = 1u;
+        op_phase = 7u;
         return;
 
-    case 1:
+    case 7:
         if (!op_file_ready)
             return;
         if (!op_file) {
+            (void)afatfs_chdir(NULL);
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
         op_test_dir = op_file;
         if (!afatfs_chdir(op_test_dir))
             return;
-        op_phase = 2u;
+        op_phase = 8u;
         return;
 
-    case 2:
+    case 8:
         op_close_done = false;
         if (afatfs_fclose(op_test_dir, on_file_closed))
-            op_phase = 3u;
+            op_phase = 9u;
         return;
 
-    case 3:
+    case 9:
         if (!op_close_done)
             return;
         op_test_dir = NULL;
@@ -8570,10 +7976,10 @@ static void filesystem_saveTestDir_tick(void)
                               op_test_short_alias,
                               on_file_opened))
             return;
-        op_phase = 4u;
+        op_phase = 10u;
         return;
 
-    case 4:
+    case 10:
         if (!op_file_ready)
             return;
         if (!op_file) {
@@ -8582,28 +7988,390 @@ static void filesystem_saveTestDir_tick(void)
             return;
         }
         op_item_offset = 0u;
-        op_phase = 5u;
+        op_phase = 11u;
         return;
 
-    case 5:
+    case 11:
         if (!filesystem_writeTestBytesTick())
             return;
-        op_phase = 6u;
+        op_phase = 12u;
         return;
 
-    case 6:
+    case 12:
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 7u;
+            op_phase = 13u;
         return;
 
-    case 7:
+    case 13:
         if (!op_close_done)
             return;
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
         filesystem_finish(FS_STATUS_DONE);
+        return;
+    }
+}
+
+static void filesystem_saveTestSimpleDir_tick(void)
+{
+    switch (op_phase) {
+    case 0:
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(".", "r", on_file_opened))
+            return;
+        op_phase = 2u;
+        return;
+
+    case 2:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_test_dir = op_file;
+        afatfs_findFirstObject(op_test_dir, &op_test_object_finder);
+        op_phase = 3u;
+        return;
+
+    case 3:
+        for (;;) {
+            afatfsOperationStatus_e st =
+                afatfs_findNextObject(op_test_dir,
+                                      &op_test_object_finder,
+                                      &op_test_object);
+            if (st == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (st == AFATFS_OPERATION_FAILURE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                filesystem_setTestDiag("RootScn");
+                op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
+                op_phase = 4u;
+                return;
+            }
+            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                op_test_lookup_result = FS_TEST_LOOKUP_CREATE;
+                op_phase = 4u;
+                return;
+            }
+            if (fat_compareDisplayName(op_test_object.displayName,
+                                       op_test_name,
+                                       true) == 0) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                if (op_test_object.kind == AFATFS_OBJECT_DIRECTORY) {
+                    memcpy(op_test_parent_alias,
+                           op_test_object.shortName,
+                           sizeof(op_test_parent_alias));
+                    op_test_lookup_result = FS_TEST_LOOKUP_OPEN_ALIAS;
+                } else {
+                    filesystem_setTestDiag("RootFil");
+                    op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
+                }
+                op_phase = 4u;
+                return;
+            }
+        }
+
+    case 4:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 5u;
+        return;
+
+    case 5:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (op_test_lookup_result == FS_TEST_LOOKUP_OPEN_ALIAS) {
+            if (!afatfs_opendir(op_test_parent_alias, on_file_opened)) {
+                filesystem_setTestDiag("RootQue");
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+        } else if (op_test_lookup_result == FS_TEST_LOOKUP_CREATE) {
+            if (!afatfs_mkdir_lfn(op_test_name,
+                                  AFATFS_MATCH_CASE_SENSITIVE,
+                                  op_test_parent_alias,
+                                  on_file_opened)) {
+                filesystem_setTestDiag("RootQue");
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+        } else {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 6u;
+        return;
+
+    case 6:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setTestDiag("RootCb");
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_test_dir = op_file;
+        if (!afatfs_chdir(op_test_dir))
+            return;
+        op_phase = 7u;
+        return;
+
+    case 7:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 8u;
+        return;
+
+    case 8:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        op_phase = 9u;
+        return;
+
+    case 9:
+        if (!afatfs_sync())
+            return;
+        op_phase = 10u;
+        return;
+
+    case 10:
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(".", "r", on_file_opened))
+            return;
+        op_phase = 11u;
+        return;
+
+    case 11:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setTestDiag("ParOpn");
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_test_dir = op_file;
+        afatfs_findFirstObject(op_test_dir, &op_test_object_finder);
+        op_phase = 12u;
+        return;
+
+    case 12:
+        for (;;) {
+            afatfsOperationStatus_e st =
+                afatfs_findNextObject(op_test_dir,
+                                      &op_test_object_finder,
+                                      &op_test_object);
+            if (st == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (st == AFATFS_OPERATION_FAILURE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                filesystem_setTestDiag("ParScn");
+                op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
+                op_phase = 13u;
+                return;
+            }
+            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                op_test_lookup_result = FS_TEST_LOOKUP_CREATE;
+                op_phase = 13u;
+                return;
+            }
+            if (fat_compareDisplayName(op_test_object.displayName,
+                                       op_test_name,
+                                       true) == 0) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                if (op_test_object.kind == AFATFS_OBJECT_DIRECTORY) {
+                    memcpy(op_test_short_alias,
+                           op_test_object.shortName,
+                           sizeof(op_test_short_alias));
+                    op_test_lookup_result = FS_TEST_LOOKUP_OPEN_ALIAS;
+                } else {
+                    filesystem_setTestDiag("ParFile");
+                    op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
+                }
+                op_phase = 13u;
+                return;
+            }
+        }
+
+    case 13:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 14u;
+        return;
+
+    case 14:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (op_test_lookup_result == FS_TEST_LOOKUP_OPEN_ALIAS) {
+            if (!afatfs_opendir(op_test_short_alias, on_file_opened)) {
+                filesystem_setTestDiag("ChdQue");
+                (void)afatfs_chdir(NULL);
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+        } else if (op_test_lookup_result == FS_TEST_LOOKUP_CREATE) {
+            if (!afatfs_mkdir_lfn(op_test_name,
+                                  AFATFS_MATCH_CASE_SENSITIVE,
+                                  op_test_short_alias,
+                                  on_file_opened)) {
+                filesystem_setTestDiag("ChdQue");
+                (void)afatfs_chdir(NULL);
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+        } else {
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 15u;
+        return;
+
+    case 15:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setTestDiag("ChdCb");
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_test_dir = op_file;
+        op_phase = 16u;
+        return;
+
+    case 16:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 17u;
+        return;
+
+    case 17:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        if (!afatfs_opendir(op_test_parent_alias, on_file_opened)) {
+            filesystem_setTestDiag("VerQue");
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 18u;
+        return;
+
+    case 18:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setTestDiag("VerOpn");
+            (void)afatfs_chdir(NULL);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_test_dir = op_file;
+        afatfs_findFirstObject(op_test_dir, &op_test_object_finder);
+        op_test_verify_seen_alias = 0u;
+        op_test_verify_seen_fold = 0u;
+        op_phase = 19u;
+        return;
+
+    case 19:
+        for (;;) {
+            afatfsOperationStatus_e st =
+                afatfs_findNextObject(op_test_dir,
+                                      &op_test_object_finder,
+                                      &op_test_object);
+            if (st == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (st == AFATFS_OPERATION_FAILURE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                filesystem_setTestDiag("VerScn");
+                op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
+                op_phase = 20u;
+                return;
+            }
+            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                if (op_test_verify_seen_alias)
+                    filesystem_setTestDiag("VerSfn");
+                else if (op_test_verify_seen_fold)
+                    filesystem_setTestDiag("VerFold");
+                else
+                    filesystem_setTestDiag("VerNone");
+                op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
+                op_phase = 20u;
+                return;
+            }
+            if (fat_compareDisplayName(op_test_object.displayName,
+                                       op_test_name,
+                                       false) == 0) {
+                op_test_verify_seen_fold = 1u;
+            }
+            if (op_test_short_alias[0] != '\0' &&
+                fat_compareDisplayName(op_test_object.shortName,
+                                       op_test_short_alias,
+                                       false) == 0) {
+                op_test_verify_seen_alias = 1u;
+            }
+            if (fat_compareDisplayName(op_test_object.displayName,
+                                       op_test_name,
+                                       true) == 0) {
+                if (op_test_object.kind == AFATFS_OBJECT_DIRECTORY) {
+                    afatfs_findLastObject(op_test_dir,
+                                          &op_test_object_finder);
+                    filesystem_copyTestName(op_test_child_name, op_test_name);
+                    op_test_result_kind = FS_TEST_RESULT_DIRECTORY;
+                    op_test_lookup_result = FS_TEST_LOOKUP_OPEN_ALIAS;
+                    op_phase = 20u;
+                    return;
+                }
+                afatfs_findLastObject(op_test_dir, &op_test_object_finder);
+                filesystem_setTestDiag("VerFile");
+                op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
+                op_phase = 20u;
+                return;
+            }
+        }
+
+    case 20:
+        op_close_done = false;
+        if (afatfs_fclose(op_test_dir, on_file_closed))
+            op_phase = 21u;
+        return;
+
+    case 21:
+        if (!op_close_done)
+            return;
+        op_test_dir = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(op_test_lookup_result == FS_TEST_LOOKUP_OPEN_ALIAS
+                          ? FS_STATUS_DONE
+                          : FS_STATUS_ERROR);
         return;
     }
 }
@@ -8616,6 +8384,7 @@ void filesystem_initAfterCardReady(void)
 {
     current_op = FS_INTERNAL_OP_NONE;
     status = FS_STATUS_IDLE;
+    memset(fs_error_code, 0, sizeof(fs_error_code));
     afatfs_init();
 }
 
@@ -8685,6 +8454,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_LOAD_SCENE:
         filesystem_loadSceneDirectory_tick();
         break;
+    case FS_INTERNAL_OP_SAVE_KIT:
+        filesystem_saveKitDirectory_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:
         filesystem_loadInstrument_tick();
         break;
@@ -8694,16 +8466,6 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_LOAD_MORPH:
         filesystem_loadKit_tick();
-        break;
-    case FS_INTERNAL_OP_SAVE_KIT:
-    case FS_INTERNAL_OP_SAVE_KIT_MORPH:
-        filesystem_saveKitDirectory_tick();
-        break;
-    case FS_INTERNAL_OP_SAVE_SCENE:
-        filesystem_saveSceneDirectory_tick();
-        break;
-    case FS_INTERNAL_OP_SAVE_MORPH:
-        filesystem_saveKit_tick();
         break;
     case FS_INTERNAL_OP_LOAD_PATTERN:
         filesystem_loadPattern_tick();
@@ -8755,6 +8517,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_SAVE_TEST_DIR:
         filesystem_saveTestDir_tick();
         break;
+    case FS_INTERNAL_OP_SAVE_TEST_SIMPLE_DIR:
+        filesystem_saveTestSimpleDir_tick();
+        break;
     default: break;
     }
 }
@@ -8762,6 +8527,11 @@ void filesystem_tick(void)
 fs_status_t filesystem_status(void)
 {
     return status;
+}
+
+const char *filesystem_errorCode(void)
+{
+    return fs_error_code;
 }
 
 void filesystem_ack(void)
@@ -8784,10 +8554,12 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_phase = 0;
     op_slot = slot;
     op_file_type = type;
+    memset(fs_error_code, 0, sizeof(fs_error_code));
     op_file = NULL;
     op_file_ready = false;
     op_close_done = false;
     op_close_status = FS_STATUS_DONE;
+    op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
     op_flush_final_status = FS_STATUS_DONE;
     op_bytes_done = 0;
     /*
@@ -8801,10 +8573,13 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(op_test_name, 0, sizeof(op_test_name));
     memset(op_test_child_name, 0, sizeof(op_test_child_name));
     memset(op_test_short_alias, 0, sizeof(op_test_short_alias));
+    memset(op_test_parent_alias, 0, sizeof(op_test_parent_alias));
     memset(op_test_bytes, 0, sizeof(op_test_bytes));
     op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
     op_test_best_kind = AFATFS_OBJECT_NONE;
     op_test_dir = NULL;
+    op_test_verify_seen_alias = 0u;
+    op_test_verify_seen_fold = 0u;
     op_stream_index = 0;
     op_item_offset = 0;
     op_loaded_active_pattern_running = 0;
@@ -8812,23 +8587,28 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_write_line_len = 0u;
     op_write_line_offset = 0u;
     op_write_line_index = 0u;
-    memset(op_save_kit_dir_name, 0, sizeof(op_save_kit_dir_name));
-    memset(op_save_kit_display_name, 0, sizeof(op_save_kit_display_name));
-    memset(op_save_instrument_file, 0, sizeof(op_save_instrument_file));
-    memset(op_save_instrument_display_file, 0,
-           sizeof(op_save_instrument_display_file));
     op_remove_done = 0u;
-    op_rename_done = 0u;
-    op_save_found_existing_dir = 0u;
-    memset(op_save_existing_display_name, 0,
-           sizeof(op_save_existing_display_name));
-    memset(op_save_existing_open_name, 0, sizeof(op_save_existing_open_name));
+    op_kit_save_source_scene = 0u;
+    op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
+    memset(op_save_kit_dir_display_name, 0,
+           sizeof(op_save_kit_dir_display_name));
+    memset(op_save_kit_member_display_file, 0,
+           sizeof(op_save_kit_member_display_file));
+    memset(op_save_kit_dir_open_name, 0, sizeof(op_save_kit_dir_open_name));
+    op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
+    op_delete_slot_dir = NULL;
+    memset(op_delete_slot_target_name, 0,
+           sizeof(op_delete_slot_target_name));
+    op_delete_tree_phase = FS_DELETE_TREE_IDLE;
+    op_delete_tree_depth = 0u;
+    op_delete_tree_dir = NULL;
+    memset(op_delete_tree_name_stack, 0, sizeof(op_delete_tree_name_stack));
+    memset(op_delete_tree_child_name, 0, sizeof(op_delete_tree_child_name));
+    memset(op_delete_tree_child_open_name, 0,
+           sizeof(op_delete_tree_child_open_name));
     memset(&op_staged_scene, 0, sizeof(op_staged_scene));
     op_scene_load_scene_mask = 0u;
-    op_scene_source_index = 0u;
     memset(op_scene_display_name, 0, sizeof(op_scene_display_name));
-    memset(op_scene_dir_name, 0, sizeof(op_scene_dir_name));
-    memset(op_scene_dir_display_name, 0, sizeof(op_scene_dir_display_name));
     memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
     memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
     memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
@@ -8838,19 +8618,6 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_line_len = 0;
     op_instrument_slot = 0;
     op_kit_load_scene_mask = 0u;
-    /*
-     * Capture/reset Kit save source coordinates.
-     *
-     * What: Initializes the resident Scene index used by normal Kit Save and
-     * KitMrp Save before request-specific code can overwrite it.
-     *
-     * Why: save state machines run asynchronously. The source Scene must be the
-     * one accepted by the request, not a later UI selection.
-     *
-     * Affiliates/clients: filesystem_requestSaveKitDirectory(),
-     * filesystem_requestSaveKitMorphDirectory(), filesystem_saveKitDirectory_tick().
-     */
-    op_kit_save_source_scene = scene_getActiveIndex();
     op_instrument_load_destination_slot = 0u;
     op_instrument_load_destination_scene = 0u;
     op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
@@ -8922,12 +8689,49 @@ bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
     }
     if (valid_mask == 0u || slot >= STORAGE_KIT_MAX_SLOTS)
         return false;
+    if (!kit_slot_present[slot]) {
+        filesystem_setPresetNameEmpty();
+        return false;
+    }
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_KIT, FS_FILE_KIT, slot, cb))
         return false;
     op_kit_load_scene_mask = valid_mask;
     memset(&op_staged_kit, 0, sizeof(op_staged_kit));
     for (scene_index = 0u; scene_index < INSTRUMENT_SLOT_COUNT; scene_index++)
         memcpy(op_staged_kit.instrument_display_name[scene_index], "Empty   ", 9u);
+    return true;
+}
+
+bool filesystem_requestSaveKitDirectory(uint16_t slot,
+                                        uint8_t source_scene,
+                                        const char display_name[8],
+                                        uint8_t morph_projection,
+                                        fs_completion_cb_t cb)
+{
+    const scene_t *scene = scene_getConst(source_scene);
+    uint8_t voice;
+
+    if (!scene || !display_name || slot >= STORAGE_KIT_MAX_SLOTS)
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_SAVE_KIT, FS_FILE_KIT, slot, cb))
+        return false;
+
+    op_kit_save_source_scene = source_scene;
+    op_kit_save_mode = morph_projection ? STORAGE_INSTRUMENT_SAVE_MORPH
+                                        : STORAGE_INSTRUMENT_SAVE_NORMAL;
+    filesystem_makeNumberedKitDir(op_save_kit_dir_display_name,
+                                  slot,
+                                  display_name);
+
+    for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++) {
+        storage_makeSavedInstrumentDisplayFilename(
+            op_save_kit_member_display_file[voice],
+            sizeof(op_save_kit_member_display_file[voice]),
+            scene->kit.instrument_stem[voice],
+            scene->kit.instruments[voice].type,
+            (uint8_t)(voice + 1u),
+            1u);
+    }
     return true;
 }
 
@@ -8955,6 +8759,10 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
     }
     if (valid_mask == 0u || slot >= STORAGE_KIT_MAX_SLOTS)
         return false;
+    if (!kit_slot_present[slot]) {
+        filesystem_setPresetNameEmpty();
+        return false;
+    }
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_KIT_MORPH, FS_FILE_KIT, slot, cb))
         return false;
     op_kit_load_scene_mask = valid_mask;
@@ -8972,11 +8780,11 @@ bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb
 
     switch (type) {
     case FS_FILE_KIT:
-        return filesystem_requestSaveKitDirectory(slot, cb);
+        return false;
     case FS_FILE_SCENE:
         return false;
     case FS_FILE_MORPH:
-        return filesystem_start(FS_INTERNAL_OP_SAVE_MORPH, type, slot, cb);
+        return false;
     case FS_FILE_PATTERN:
         return filesystem_start(FS_INTERNAL_OP_SAVE_PATTERN, type, slot, cb);
     case FS_FILE_ALL:
@@ -8988,109 +8796,6 @@ bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb
     default:
         return false;
     }
-}
-
-bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb)
-{
-    /*
-     * Post a new-format Kit directory save.
-     *
-     * Inputs: zero-based Kit folder slot and completion callback. Output: an
-     * async operation that creates/opens Kit/<NNN Name>/ with an LFN display
-     * entry, writes six LFN-visible instrument files from the active Scene kit,
-     * then writes kitset.kcg with those visible member filenames. This boundary
-     * keeps directory saves separate from legacy flat Morph saves.
-     */
-    if (slot >= STORAGE_KIT_MAX_SLOTS)
-        return false;
-    if (!filesystem_start(FS_INTERNAL_OP_SAVE_KIT, FS_FILE_KIT, slot, cb))
-        return false;
-    /*
-     * Capture the normal Kit Save source Scene.
-     *
-     * What: Stores the active Scene index accepted by this request after
-     * filesystem_start() clears operation scratch.
-     *
-     * Why: the Kit directory writer now supports both normal and Morph saves
-     * through one state machine. Both modes must read from the request-time
-     * resident Kit rather than a later active-Scene selection.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(), normal Kit Save
-     * retained-name update.
-     */
-    op_kit_save_source_scene = scene_getActiveIndex();
-    return true;
-}
-
-bool filesystem_requestSaveKitMorphDirectory(uint16_t slot,
-                                             fs_completion_cb_t cb)
-{
-    /*
-     * Start KitMrp Save on the normal Kit directory writer.
-     *
-     * What: Selects the Kit directory save state machine with a Morph Save
-     * internal operation tag.
-     *
-     * Why: KitMrp Save owns the same on-card product object as normal Kit Save:
-     * Kit/NNN Name plus six member Instrument files and kitset.kcg. Only the
-     * endpoint values inside those text files change.
-     *
-     * Inputs: target Kit slot and completion callback. Output: filesystem busy
-     * state or false if the slot is invalid/busy.
-     *
-     * Affiliates/clients: preset_saveKitMorph(), menu Save:[KitMrp],
-     * filesystem_saveKitDirectory_tick().
-     */
-    if (slot >= STORAGE_KIT_MAX_SLOTS)
-        return false;
-    if (!filesystem_start(FS_INTERNAL_OP_SAVE_KIT_MORPH,
-                          FS_FILE_KIT,
-                          slot,
-                          cb)) {
-        return false;
-    }
-    /*
-     * Capture the KitMrp Save source Scene.
-     *
-     * What: Stores the active Scene index accepted by this request after
-     * filesystem_start() clears operation scratch.
-     *
-     * Why: KitMrp Save exports a transformed view of the resident Kit. The
-     * source must remain stable even if Menu changes Scene selection while SD
-     * writes are in progress.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick(),
-     * storageTypes Morph Save views.
-     */
-    op_kit_save_source_scene = scene_getActiveIndex();
-    return true;
-}
-
-bool filesystem_requestSaveSceneDirectory(
-    uint16_t slot,
-    uint8_t source_scene,
-    const char display_name[8],
-    fs_completion_cb_t cb)
-{
-    /*
-     * Post a root Scene directory save.
-     *
-     * Inputs: root Scene slot, resident source Scene, and fixed-width display
-     * name supplied by the Save UI. Output: asynchronous writer creates the
-     * Scene folder shape and updates the Scene scan cache after the directory
-     * physically exists. The display name is copied at request time so later
-     * menu edits cannot change an in-flight save target.
-     */
-    if (slot >= STORAGE_SCENE_MAX_SLOTS ||
-        !scene_indexValid(source_scene) ||
-        !display_name)
-        return false;
-    if (!filesystem_start(FS_INTERNAL_OP_SAVE_SCENE, FS_FILE_SCENE, slot, cb))
-        return false;
-    op_scene_source_index = source_scene;
-    memcpy(op_scene_display_name, display_name, STORAGE_SCENE_DISPLAY_NAME_LEN);
-    op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-    return true;
 }
 
 bool filesystem_requestLoadSceneForScenes(uint16_t slot,
@@ -9300,17 +9005,37 @@ bool filesystem_requestSaveTestDir(const char *display_name,
     char name[FS_TEST_NAME_MAX + 1u];
 
     /*
-     * Create/open an exact root directory and write a same-name child file.
+     * Create/open an exact directory under /Kit and write a same-name child
+     * file.
      *
      * This proves long-name directory creation and long-name file creation
-     * inside the entered directory in one operation. The child filename equals
-     * the directory display component byte-for-byte after bounded copy.
+     * inside the entered directory in one operation, while exercising the Kit
+     * parent directory path. The child filename equals the directory display
+     * component byte-for-byte after bounded copy.
      */
     filesystem_copyTestName(name, display_name);
     if (name[0] == '\0')
         return false;
     if (!filesystem_start(FS_INTERNAL_OP_SAVE_TEST_DIR, FS_FILE_KIT, 0, cb))
         return false;
+    filesystem_copyTestName(op_test_name, name);
+    return true;
+}
+
+bool filesystem_requestSaveTestSimpleDir(const char *display_name,
+                                         fs_completion_cb_t cb)
+{
+    char name[FS_TEST_NAME_MAX + 1u];
+
+    filesystem_copyTestName(name, display_name);
+    if (name[0] == '\0')
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_SAVE_TEST_SIMPLE_DIR,
+                          FS_FILE_KIT,
+                          0,
+                          cb)) {
+        return false;
+    }
     filesystem_copyTestName(op_test_name, name);
     return true;
 }

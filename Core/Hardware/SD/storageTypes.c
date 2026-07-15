@@ -152,33 +152,6 @@ static uint8_t storage_formatAssignmentU16(char *dst, uint16_t capacity,
     return storage_formatAssignmentText(dst, capacity, key, digits);
 }
 
-static uint8_t storage_formatSlotHeader(char *dst, uint16_t capacity,
-                                        uint8_t one_based_slot)
-{
-    uint16_t len = 0u;
-
-    /*
-     * Format "[slotN]\n" without stdio.
-     *
-     * Kit slot count is six today, but the helper accepts any single decimal
-     * digit so the call site documents the on-card section grammar directly.
-     */
-    if (!dst || capacity < 9u || one_based_slot == 0u ||
-        one_based_slot > 9u) {
-        return 0u;
-    }
-    dst[len++] = '[';
-    dst[len++] = 's';
-    dst[len++] = 'l';
-    dst[len++] = 'o';
-    dst[len++] = 't';
-    dst[len++] = (char)('0' + one_based_slot);
-    dst[len++] = ']';
-    dst[len++] = '\n';
-    dst[len] = '\0';
-    return (uint8_t)len;
-}
-
 /* Exact string comparison helper.
  *
  * Inputs: two NUL-terminated strings. Output: nonzero only for byte-for-byte
@@ -246,7 +219,8 @@ static storage_status_t storage_splitKeyValue(const char *line,
     key[i] = '\0';
     storage_trimRight(key);
     *value = storage_trimLeft(eq + 1u);
-    return (key[0] == '\0') ? STORAGE_STATUS_INVALID_FORMAT : STORAGE_STATUS_OK;
+    return (key[0] == '\0') ? STORAGE_STATUS_INVALID_FORMAT
+                            : STORAGE_STATUS_OK;
 }
 
 /* Parse an unsigned byte from decimal text.
@@ -278,6 +252,7 @@ static storage_status_t storage_parseU16(const char *text, uint16_t *out)
 {
     uint32_t value = 0u;
     uint8_t digits = 0u;
+
     while (*text >= '0' && *text <= '9') {
         value = value * 10u + (uint8_t)(*text - '0');
         if (value > 65535u)
@@ -394,12 +369,12 @@ void storage_copyKitMemberFilename(
      * number. Short-alias copying would erase padding spaces and can produce
      * misleading references such as `slakd11.drm`.
      *
-     * Inputs: src from a parsed `file=` line or generated save display name.
-     * Output: dst is a safe NUL-terminated component for kitset storage and
-     * later afatfs_fopen_lfn() lookup.
+     * Inputs: src from a parsed `file=` line. Output: dst is a safe
+     * NUL-terminated component for kitset storage and later
+     * afatfs_fopen_lfn() lookup.
      *
-     * Affiliates/clients: storage_kitsetParseLine(),
-     * storage_formatKitsetLineView(), filesystem Kit/Scene load and save.
+     * Affiliates/clients: storage_kitsetParseLine() and filesystem Kit/Scene
+     * load.
      */
     if (!src)
         src = "";
@@ -594,13 +569,6 @@ storage_status_t storage_scenesetParseLine(
     } else if (storage_streq(key, "voice_morph_amount")) {
         if (!target_scene)
             return STORAGE_STATUS_BAD_VALUE;
-        /*
-         * Six comma cells map directly to instrument slots 1..6.
-         *
-         * The parser rejects short or long lists instead of partially applying
-         * them, because per-slot Morph is an audible Scene setting and a
-         * shifted list would make every later voice wrong.
-         */
         return storage_parseCsvU8(value,
                                   target_scene->settings.voice_morph_amount,
                                   INSTRUMENT_SLOT_COUNT,
@@ -616,14 +584,6 @@ storage_status_t storage_scenesetParseLine(
     } else if (storage_streq(key, "midi_channel")) {
         if (!target_scene)
             return STORAGE_STATUS_BAD_VALUE;
-        /*
-         * Seven comma cells map to the bridge tracks.
-         *
-         * Channels are currently 1..16. Zero is rejected here because the
-         * SceneData accessors still treat 1..16 as the valid bridge domain;
-         * a future MIDI-off sentinel should update this parser alongside the
-         * SceneData contract.
-         */
         st = storage_parseCsvU8(value,
                                 target_scene->settings.midi_channel,
                                 NUM_TRACKS,
@@ -651,8 +611,8 @@ storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state)
      * Convert streamed sceneset bits into a load/no-load decision.
      *
      * Required fields are intentionally small: format/version protect against
-     * loading a wrong text file, and name gives Save/OW matching a stable
-     * display identity. Optional settings may be absent for forward/backward
+     * loading a wrong text file, and name gives Scene load a stable display
+     * identity. Optional settings may be absent for forward/backward
      * compatibility because SceneData defaults are safe.
      */
     if (!state || !state->seen_format || !state->seen_version ||
@@ -704,13 +664,13 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
     uint8_t stem_limit = force_voice_suffix ? 7u : SCENE_INSTRUMENT_STEM_LEN;
 
     /*
-     * Build the visible LFN component for one saved Kit member file.
+     * Build the visible LFN component for one saved Instrument file.
      *
      * The old 8.3 helper remains the compatibility fallback and alias generator
-     * input. This helper is for the new asyncfatfs LFN create path: it keeps
-     * the retained Scene stem's spaces/case, trims unsafe trailing spaces/dots
-     * for standalone files, writes a Kit member voice number into character 8
-     * when requested, and finally appends the descriptor-owned extension.
+     * input. This helper is for the asyncfatfs LFN create path: it keeps the
+     * retained Scene stem's spaces/case, trims unsafe trailing spaces/dots for
+     * standalone files, writes an optional voice number into character 8, and
+     * finally appends the descriptor-owned extension.
      */
     if (!dst || capacity == 0u)
         return;
@@ -737,15 +697,6 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
     }
     pos = last_meaningful;
     if (force_voice_suffix && capacity > 9u) {
-        /*
-         * Force the Kit member voice marker into stem character 8.
-         *
-         * Character positions are one-based in the storage rule and zero-based
-         * in this buffer, so index 7 receives the voice digit. Padding with
-         * spaces keeps short retained names case-preserved without inventing a
-         * visible `_vN` suffix. The later dot/extension makes these spaces
-         * internal filename data rather than unsafe trailing spaces.
-         */
         while (pos < 7u)
             dst[pos++] = ' ';
         dst[pos++] = (one_based_voice >= 1u && one_based_voice <= 9u)
@@ -780,9 +731,8 @@ static uint16_t storage_interpolateMorphEndpoint(uint16_t normal,
      * amount. Output: rounded descriptor-domain value; exact amount 0 and 255
      * return exact endpoints.
      *
-     * Affiliates/clients: storage_valueForInstrumentSaveSection(),
-     * storage_formatKitsetLineView(), presetMorphEngine.c interpolation
-     * contract.
+     * Affiliates/clients: storage_valueForInstrumentSaveSection() and
+     * presetMorphEngine.c interpolation contract.
      */
     if (amount == 0u)
         return normal;
@@ -795,157 +745,6 @@ static uint16_t storage_interpolateMorphEndpoint(uint16_t normal,
     if (numerator < 0)
         return 0u;
     return (uint16_t)(numerator / 255);
-}
-
-uint8_t storage_formatKitsetLineView(
-    char *dst,
-    uint16_t capacity,
-    const storage_kitset_write_view_t *view,
-    uint16_t line_index)
-{
-    uint8_t slot;
-    uint8_t field;
-    const char *type_text;
-    const kit_t *kit = view ? view->kit : NULL;
-    const char (*file_names)[STORAGE_KIT_MEMBER_FILENAME_MAX] =
-        view ? view->file_names : NULL;
-
-    /*
-     * Emit one kitset.kcg line from a selected save view.
-     *
-     * What: Streams kitset metadata, generated slot-6/track-7 endpoint fields,
-     * per-slot member display filenames, and routing fields.
-     *
-     * Why: normal Kit Save and KitMrp Save share the same kitset schema and
-     * async write phases. The write view lets storageTypes apply the Morph Save
-     * endpoint projection to generated kit-owned fields while filesystem.c
-     * remains unaware of kitset key order.
-     *
-     * Inputs: destination line buffer, capacity, immutable kitset write view,
-     * and monotonic line index. file_names must be the visible LFN components
-     * generated for the member files, not asyncfatfs' returned aliases. Output:
-     * byte count for one line, or zero when the schema is complete.
-     *
-     * Affiliates/clients: filesystem_nextKitsetLine(), normal Kit Save,
-     * KitMrp Save, storage_formatKitsetLine() wrapper.
-     */
-    if (!dst || capacity == 0u || !kit || !file_names)
-        return 0u;
-    if (line_index == 0u)
-        return storage_formatLiteral(dst, capacity,
-                                     "format=helicase.kitset\n");
-    if (line_index == 1u)
-        return storage_formatLiteral(dst, capacity, "version=1\n");
-    if (line_index == 2u) {
-        uint16_t value = kit->settings.slot6_track7_amp_envelope_decay;
-        /*
-         * Project the generated slot-6/track-7 normal decay for Morph Save.
-         *
-         * What: Applies the same interpolated endpoint rule used for morphable
-         * Instrument descriptors to the kit-owned generated normal decay key.
-         *
-         * Why: this endpoint is stored in kitset.kcg rather than an Instrument
-         * file, but it still participates in slot 6's normal/morph endpoint
-         * pair. KitMrp Save must serialize the current interpolated value into
-         * the normal key.
-         *
-         * Inputs: normal generated decay, morph generated decay, retained
-         * slot-6 Morph amount, and save mode. Output: value written to
-         * slot6_track7_amp_envelope_decay.
-         *
-         * Affiliates/clients: storage_formatKitsetLineView(), KitMrp Save,
-         * Choke/non-Choke slot-6 generated track behavior.
-         */
-        if (view->mode == STORAGE_INSTRUMENT_SAVE_MORPH) {
-            value = storage_interpolateMorphEndpoint(
-                kit->settings.slot6_track7_amp_envelope_decay,
-                kit->settings.slot6_track7_morph_amp_envelope_decay,
-                view->slot6_morph_amount);
-        }
-        return storage_formatAssignmentU16(
-            dst, capacity, "slot6_track7_amp_envelope_decay",
-            value);
-    }
-    if (line_index == 3u) {
-        uint16_t value = kit->settings.slot6_track7_morph_amp_envelope_decay;
-        /*
-         * Project the generated slot-6/track-7 morph decay for Morph Save.
-         *
-         * What: Writes the current normal generated endpoint into the morph key
-         * when KitMrp Save is active.
-         *
-         * Why: Morph Save flips morphable endpoint storage so a later normal
-         * load can treat the saved interpolation as its main sound while the
-         * prior normal endpoint becomes the file's morph side. The generated
-         * slot-6/track-7 pair follows that same rule even though it is kitset
-         * metadata.
-         *
-         * Inputs: kit settings and save mode. Output: value written to
-         * slot6_track7_morph_amp_envelope_decay.
-         *
-         * Affiliates/clients: storage_formatKitsetLineView(), KitMrp Save.
-         */
-        if (view->mode == STORAGE_INSTRUMENT_SAVE_MORPH)
-            value = kit->settings.slot6_track7_amp_envelope_decay;
-        return storage_formatAssignmentU16(
-            dst, capacity, "slot6_track7_morph_amp_envelope_decay",
-            value);
-    }
-    if (line_index == 4u)
-        return storage_formatLiteral(dst, capacity, "\n");
-    line_index = (uint16_t)(line_index - 5u);
-    slot = (uint8_t)(line_index / 5u);
-    field = (uint8_t)(line_index % 5u);
-    if (slot >= STORAGE_KIT_SLOT_COUNT)
-        return 0u;
-    type_text = storage_instrumentTypeToText(kit->instruments[slot].type);
-    if (!type_text)
-        return 0u;
-    switch (field) {
-    case 0u:
-        return storage_formatSlotHeader(dst, capacity,
-                                        (uint8_t)(slot + 1u));
-    case 1u:
-        return storage_formatAssignmentText(dst, capacity, "type",
-                                            type_text);
-    case 2u:
-        return storage_formatAssignmentText(dst, capacity, "file",
-                                            file_names[slot]);
-    case 3u:
-        return storage_formatAssignmentU16(dst, capacity, "audio_out",
-                                           kit->settings.audio_out[slot]);
-    default:
-        return storage_formatLiteral(dst, capacity, "\n");
-    }
-}
-
-uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
-                                 const kit_t *kit,
-                                 const char file_names[STORAGE_KIT_SLOT_COUNT]
-                                      [STORAGE_KIT_MEMBER_FILENAME_MAX],
-                                 uint16_t line_index)
-{
-    storage_kitset_write_view_t view = {
-        kit,
-        file_names,
-        0u,
-        STORAGE_INSTRUMENT_SAVE_NORMAL
-    };
-
-    /*
-     * Preserve the normal-save public kitset formatter contract.
-     *
-     * What: Adapts existing normal Kit Save call sites to the save-view
-     * formatter with STORAGE_INSTRUMENT_SAVE_NORMAL.
-     *
-     * Why: Phase 3 adds KitMrp Save projection without forcing every normal
-     * writer to construct a view. The old symbol remains the stable normal-save
-     * API for fixtures, tests, and any direct formatter callers.
-     *
-     * Affiliates/clients: filesystem_nextKitsetLine(),
-     * storage_formatKitsetLineView(), generated SD_CARD fixtures.
-     */
-    return storage_formatKitsetLineView(dst, capacity, &view, line_index);
 }
 
 static uint8_t storage_descriptorWritableInSection(
@@ -977,16 +776,17 @@ static uint16_t storage_valueForInstrumentSaveSection(
      *
      * Why: Morph Save is not a new file format. It is a projection of the
      * resident endpoint images into the existing normal Instrument schema:
-     * morphable [params] become the current interpolated value, and morphable
-     * [morph] become the current normal endpoint. Non-morphable setup cells
-     * remain single-ended.
+     * morphable [params] and [morph] both become the current interpolated
+     * value. Saving the same value twice makes a loaded Morph Save sound the
+     * same at either morph endpoint instead of creating an inverted pair.
+     * Non-morphable setup cells remain single-ended.
      *
      * Inputs: write view, descriptor metadata, descriptor index, and section
      * flag. Output: descriptor value to serialize. Section eligibility is still
      * enforced by storage_descriptorWritableInSection().
      *
-     * Affiliates/clients: storage_formatInstrumentLineView(), KitMrp Save,
-     * InstrumentMrp Save, normal Instrument Save wrapper.
+     * Affiliates/clients: storage_formatInstrumentLineView(),
+     * InstrumentMrp Save, and normal Instrument Save wrapper.
      */
     if (!instrument)
         return 0u;
@@ -996,8 +796,6 @@ static uint16_t storage_valueForInstrumentSaveSection(
     if (view->mode != STORAGE_INSTRUMENT_SAVE_MORPH) {
         return morph_section ? morph : normal;
     }
-    if (morph_section)
-        return normal;
     if (descriptor &&
         (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
         return storage_interpolateMorphEndpoint(normal, morph,
@@ -1024,7 +822,7 @@ uint8_t storage_formatInstrumentLineView(
      * What: Streams metadata, [params], and [morph] lines for one resident
      * Instrument slot. The write view decides whether morphable descriptor
      * values are written as normal Save endpoints or Morph Save's
-     * interpolated/normal projection.
+     * interpolated-to-both-endpoints projection.
      *
      * Why: Filesystem state machines must stay descriptor-agnostic. This
      * formatter owns descriptor iteration, section ordering, morphability
@@ -1036,8 +834,8 @@ uint8_t storage_formatInstrumentLineView(
      * file is complete.
      *
      * Affiliates/clients: filesystem_writeTextLine(),
-     * filesystem_nextInstrumentLine(), root Instrument Save, Kit member Save,
-     * KitMrp Save, InstrumentMrp Save.
+     * filesystem_nextInstrumentLine(), root Instrument Save, and
+     * InstrumentMrp Save.
      */
     if (!dst || capacity == 0u || !view || !view->instrument ||
         !entry || !type_text)
@@ -1145,116 +943,6 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
     return storage_formatInstrumentLineView(dst, capacity, &view, line_index);
 }
 
-static uint8_t storage_formatCsvU8(char *dst, uint16_t capacity,
-                                   const char *key,
-                                   const uint8_t *values,
-                                   uint8_t count)
-{
-    uint16_t len = 0u;
-    uint8_t i;
-
-    /*
-     * Format one fixed-count byte CSV assignment.
-     *
-     * Inputs are the schema key and an array whose order is already defined by
-     * SceneData: six instrument slots or seven bridge tracks. Output is
-     * "key=a,b,c\n". The digit loop avoids stdio and keeps the write path
-     * bounded for filesystem_writeTextLine().
-     */
-    if (!dst || capacity == 0u || !key || !values || count == 0u)
-        return 0u;
-    while (*key != '\0') {
-        if (len + 1u >= capacity)
-            return 0u;
-        dst[len++] = *key++;
-    }
-    if (len + 1u >= capacity)
-        return 0u;
-    dst[len++] = '=';
-    for (i = 0u; i < count; i++) {
-        uint8_t value = values[i];
-        uint8_t hundreds = (uint8_t)(value / 100u);
-        uint8_t tens = (uint8_t)((value / 10u) % 10u);
-        uint8_t ones = (uint8_t)(value % 10u);
-        if (i != 0u) {
-            if (len + 1u >= capacity)
-                return 0u;
-            dst[len++] = ',';
-        }
-        if (hundreds != 0u) {
-            if (len + 1u >= capacity)
-                return 0u;
-            dst[len++] = (char)('0' + hundreds);
-        }
-        if (hundreds != 0u || tens != 0u) {
-            if (len + 1u >= capacity)
-                return 0u;
-            dst[len++] = (char)('0' + tens);
-        }
-        if (len + 1u >= capacity)
-            return 0u;
-        dst[len++] = (char)('0' + ones);
-    }
-    if (len + 1u >= capacity)
-        return 0u;
-    dst[len++] = '\n';
-    dst[len] = '\0';
-    return (uint8_t)len;
-}
-
-uint8_t storage_formatScenesetLine(
-    char *dst,
-    uint16_t capacity,
-    const scene_t *scene,
-    const char display[STORAGE_SCENE_DISPLAY_NAME_LEN],
-    uint16_t line_index)
-{
-    char name[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
-
-    /*
-     * Emit one sceneset.scg line.
-     *
-     * The order mirrors the generated SD_CARD fixture and the parser above.
-     * The embedded Kit directory is deliberately omitted: Scene load discovers
-     * the first valid "Kit *" directory so users can move Kits between Scene
-     * folders without editing sceneset.scg.
-     */
-    if (!dst || capacity == 0u || !scene || !display)
-        return 0u;
-    switch (line_index) {
-    case 0:
-        return storage_formatLiteral(dst, capacity,
-                                     "format=helicase.sceneset\n");
-    case 1:
-        return storage_formatLiteral(dst, capacity, "version=1\n");
-    case 2:
-        memcpy(name, display, STORAGE_SCENE_DISPLAY_NAME_LEN);
-        name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-        return storage_formatAssignmentText(dst, capacity, "name", name);
-    case 3:
-        return storage_formatAssignmentU16(dst, capacity, "morph_amount",
-                                           scene->settings.morph_amount);
-    case 4:
-        return storage_formatCsvU8(dst, capacity, "voice_morph_amount",
-                                   scene->settings.voice_morph_amount,
-                                   INSTRUMENT_SLOT_COUNT);
-    case 5:
-        return storage_formatAssignmentU16(
-            dst, capacity, "voice_decimation_all",
-            scene->settings.voice_decimation_all);
-    case 6:
-        return storage_formatCsvU8(dst, capacity, "midi_channel",
-                                   scene->settings.midi_channel,
-                                   NUM_TRACKS);
-    case 7:
-        return storage_formatCsvU8(dst, capacity, "midi_note",
-                                   scene->settings.midi_note,
-                                   NUM_TRACKS);
-    default:
-        return 0u;
-    }
-}
-
 void storage_effectStateInit(storage_effect_state_t *state)
 {
     /*
@@ -1327,29 +1015,6 @@ storage_status_t storage_effectFinalize(const storage_effect_state_t *state)
     return STORAGE_STATUS_OK;
 }
 
-uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
-                                            uint16_t line_index)
-{
-    /*
-     * Emit the v1 placeholder effect file.
-     *
-     * Filesystem uses this while Scene Save has no concrete effect runtime
-     * payload to serialize. The guarded file keeps the Scene folder shape
-     * stable and gives Scene Load something explicit to validate.
-     */
-    switch (line_index) {
-    case 0:
-        return storage_formatLiteral(dst, capacity,
-                                     "format=helicase.effect\n");
-    case 1:
-        return storage_formatLiteral(dst, capacity, "version=1\n");
-    case 2:
-        return storage_formatAssignmentU16(dst, capacity, "placeholder", 1u);
-    default:
-        return 0u;
-    }
-}
-
 /* See storageTypes.h for the public contract.
  *
  * Folder numbers are literal library slots on the SD card:
@@ -1408,8 +1073,7 @@ uint8_t storage_parseNumberedFolder(const char *name,
      * when blank.
      *
      * Affiliates/clients: filesystem_recordKitDirectory(),
-     * filesystem_recordSceneDirectory(), Kit/Scene Save UI, retained-name
-     * storage.
+     * filesystem_recordSceneDirectory(), and retained-name storage.
      */
     storage_copyDisplayName(display, display_start);
     return 1u;

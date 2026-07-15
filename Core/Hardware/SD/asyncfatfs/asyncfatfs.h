@@ -63,8 +63,9 @@ typedef enum {
  * AFATFS_REMOVE_FILES_ONLY is the current production overwrite mode: matching
  * files are removed, matching directories are left in place because deleting a
  * directory safely requires a recursive child walk. AFATFS_REMOVE_EMPTY_DIRECTORIES
- * is reserved for the later non-recursive directory cleanup step; asyncfatfs.c
- * currently keeps it conservative until that emptiness check lands.
+ * is the final low-level step for filesystem.c's recursive deleter: callers
+ * must have already removed every child, because asyncfatfs deliberately does
+ * not scan or prove directory emptiness here.
  */
 typedef enum {
     AFATFS_REMOVE_FILES_ONLY = 0,
@@ -167,10 +168,12 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
  * user's entered case. afatfs_funlink() cannot do this because it needs an open
  * handle and deletes only the SFN entry.
  *
- * Inputs: displayName is a single component in the current directory.
+ * Inputs: displayName is a single component in the current directory. LFN
+ * operations convert unsupported display characters to '_' and strip trailing
+ * spaces and periods before matching or creating objects.
  * AFATFS_REMOVE_FILES_ONLY is used before Instrument and Kit member file
- * writes. AFATFS_REMOVE_EMPTY_DIRECTORIES is reserved for directory-shaped save
- * cleanup when recursive delete is not available.
+ * writes. AFATFS_REMOVE_EMPTY_DIRECTORIES is used only by filesystem.c after
+ * its recursive delete state machine has emptied the target directory.
  *
  * Outputs/effects: callbacks fire once the scan has reached the end or failed.
  * A successful no-op is allowed when no matching object exists. The operation
@@ -178,8 +181,8 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
  * directory being scanned.
  *
  * Affiliates/clients: filesystem.c file overwrite preflight, duplicate
- * case-fold cleanup, future recursive directory deletion, FAT chain truncate
- * helpers, and VFAT entry-run retirement helpers.
+ * case-fold cleanup, recursive directory deletion, FAT chain truncate helpers,
+ * and VFAT entry-run retirement helpers.
  */
 bool afatfs_removeObjects_lfn(const char *displayName,
                               afatfsMatchMode_t matchMode,
@@ -203,8 +206,16 @@ bool afatfs_ftell(afatfsFilePtr_t file, uint32_t *position);
  * "." / ".." entries. Regular files may still allocate their first cluster
  * lazily on first fwrite(); directories may not because callers create children
  * through currentDirectory immediately after chdir().
+ *
+ * The *_lfn variants take one visible component in the current directory. They
+ * sanitize unsupported UI characters to '_', strip trailing spaces/periods,
+ * optionally match case-insensitively, and return an 8.3 alias in openNameOut
+ * when the object is opened or created. Product code should store that alias
+ * only as a reopen/chdir implementation detail; visible schemas such as
+ * kitset.kcg should store the display component.
  */
 bool afatfs_mkdir(const char *filename, afatfsFileCallback_t complete);
+bool afatfs_opendir(const char *filename, afatfsFileCallback_t complete);
 bool afatfs_mkdir_lfn(const char *displayName,
                       afatfsMatchMode_t matchMode,
                       char openNameOut[AFATFS_SHORT_FILENAME_MAX],
@@ -214,6 +225,7 @@ bool afatfs_opendir_lfn(const char *displayName,
                         char openNameOut[AFATFS_SHORT_FILENAME_MAX],
                         afatfsFileCallback_t complete);
 bool afatfs_chdir(afatfsFilePtr_t dirHandle);
+afatfsOperationStatus_e afatfs_chdirParent(void);
 
 void afatfs_findFirst(afatfsFilePtr_t directory, afatfsFinder_t *finder);
 afatfsOperationStatus_e afatfs_findNext(afatfsFilePtr_t directory, afatfsFinder_t *finder, fatDirectoryEntry_t **dirEntry);

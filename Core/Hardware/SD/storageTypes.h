@@ -73,9 +73,7 @@
  * mirrors asyncfatfs' current single-component LFN limit without making this
  * storage-format layer call asyncfatfs directly.
  *
- * Affiliates/clients: storage_kitset_t, storage_kitset_write_view_t,
- * filesystem_loadKitDirectory_tick(), filesystem_saveKitDirectory_tick(),
- * filesystem_saveSceneDirectory_tick().
+ * Affiliates/clients: storage_kitset_t and filesystem_loadKitDirectory_tick().
  */
 #define STORAGE_KIT_MEMBER_FILENAME_MAX 49u
 #define STORAGE_KIT_DISPLAY_NAME_LEN  8u
@@ -372,19 +370,20 @@ const char *storage_instrumentTypeToText(storage_instrument_type_t type);
  */
 const char *storage_instrumentTypeExtension(storage_instrument_type_t type);
 /*
- * Instrument/Kitset text save value projection.
+ * Instrument text save value projection.
  *
  * What: Selects whether storage text writers emit the resident endpoint images
  * as a normal save, or as a Morph Save projection.
  *
  * Why: normal Save and Morph Save use the same text schemas, descriptor keys,
  * section ordering, and asyncfatfs overwrite path. Their difference is only
- * the value chosen for morphable endpoint cells. Keeping the mode in
+ * the value chosen for morphable endpoint cells: Morph Save writes the current
+ * interpolated value into both [params] and [morph]. Keeping the mode in
  * storageTypes lets filesystem.c sequence SD writes without learning
  * descriptor counts or morphability flags.
  *
- * Affiliates/clients: storage_instrument_write_view_t,
- * storage_kitset_write_view_t, filesystem save state machines.
+ * Affiliates/clients: storage_instrument_write_view_t and root Instrument
+ * save state machines.
  */
 typedef enum {
     STORAGE_INSTRUMENT_SAVE_NORMAL = 0u,
@@ -399,7 +398,8 @@ typedef enum {
  *
  * Why: normal Save and Morph Save use the same text schema, descriptor keys,
  * self-token handling, and section ordering, but they choose different values
- * for morphable cells. Keeping the mode in storageTypes lets filesystem.c
+ * for morphable cells. In Morph Save, [params] and [morph] receive the same
+ * interpolated value. Keeping the mode in storageTypes lets filesystem.c
  * sequence SD writes without learning descriptor counts or morphability flags.
  *
  * Inputs: instrument points at the Scene-owned slot image; type is the
@@ -410,8 +410,8 @@ typedef enum {
  * Outputs: no state is stored in the view. The formatter reads it line by line
  * while filesystem.c owns op_write_line_index.
  *
- * Affiliates/clients: filesystem_saveKitDirectory_tick(),
- * filesystem_saveInstrument_tick(), KitMrp Save, InstrumentMrp Save.
+ * Affiliates/clients: filesystem_saveInstrument_tick() and InstrumentMrp
+ * Save.
  */
 typedef struct {
     const kit_instrument_slot_t *instrument;
@@ -422,33 +422,6 @@ typedef struct {
 } storage_instrument_write_view_t;
 
 /*
- * Kitset text save value view.
- *
- * What: Describes how storage_formatKitsetLineView() should serialize kitset
- * metadata, per-slot visible member filenames, routing, and the generated
- * slot-6/track-7 decay endpoint pair.
- *
- * Why: most KitMrp Save data lives in member Instrument files, but the
- * generated track-7 decay pair is kit-owned metadata. The same Morph Save value
- * rule must apply there without teaching filesystem.c about the key order or
- * generated field names.
- *
- * Inputs: kit is the resident source Kit; file_names are the exact LFN display
- * components generated for the six already-written member files; slot6_morph_amount
- * is the retained per-voice Morph amount for slot index 5; mode selects normal
- * vs Morph Save projection.
- *
- * Affiliates/clients: filesystem_nextKitsetLine(), normal Kit Save, KitMrp
- * Save, storage_formatInstrumentLineView().
- */
-typedef struct {
-    const kit_t *kit;
-    const char (*file_names)[STORAGE_KIT_MEMBER_FILENAME_MAX];
-    uint8_t slot6_morph_amount;
-    storage_instrument_save_mode_t mode;
-} storage_kitset_write_view_t;
-
-/*
  * Text save helpers mirror the parser-owned schema.
  *
  * Filesystem streams one line at a time, but storageTypes owns which keys are
@@ -456,16 +429,6 @@ typedef struct {
  * Keeping writers next to parsers prevents save from drifting away from the
  * accepted load grammar.
  */
-uint8_t storage_formatKitsetLine(char *dst, uint16_t capacity,
-                                 const kit_t *kit,
-                                 const char file_names[STORAGE_KIT_SLOT_COUNT]
-                                      [STORAGE_KIT_MEMBER_FILENAME_MAX],
-                                 uint16_t line_index);
-uint8_t storage_formatKitsetLineView(
-    char *dst,
-    uint16_t capacity,
-    const storage_kitset_write_view_t *view,
-    uint16_t line_index);
 uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
                                      const kit_instrument_slot_t *instrument,
                                      storage_instrument_type_t type,
@@ -476,27 +439,10 @@ uint8_t storage_formatInstrumentLineView(
     uint16_t capacity,
     const storage_instrument_write_view_t *view,
     uint16_t line_index);
-/*
- * Stream one sceneset.scg line from a resident Scene.
- *
- * Inputs: destination buffer, Scene pointer, eight-character display name, and
- * monotonic line index owned by filesystem.c. Output: number of bytes written,
- * or zero when the schema is complete. The writer mirrors
- * storage_scenesetParseLine(); it never emits a Kit directory name.
- */
-uint8_t storage_formatScenesetLine(
-    char *dst,
-    uint16_t capacity,
-    const scene_t *scene,
-    const char display[STORAGE_SCENE_DISPLAY_NAME_LEN],
-    uint16_t line_index);
-
 void storage_effectStateInit(storage_effect_state_t *state);
 storage_status_t storage_effectParseLine(storage_effect_state_t *state,
                                          const char *line);
 storage_status_t storage_effectFinalize(const storage_effect_state_t *state);
-uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
-                                            uint16_t line_index);
 /*
  * Build an 8.3-safe saved instrument filename from Scene-retained metadata.
  *

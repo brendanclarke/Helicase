@@ -1114,6 +1114,16 @@ static void processPress(uint8_t buttonNr)
 
     case BUT_BAR1:
         led_setValue(1, LED_BAR1);
+        /*
+         * Load/Save name editing borrows BAR1/BAR2 as text helpers.
+         *
+         * Menu owns that context because it knows whether a character cell is
+         * selected and which buffer is active. If Menu consumes the press,
+         * normal bar navigation is skipped; otherwise BAR buttons keep their
+         * sequencer bar-selection behavior.
+         */
+        if (menu_loadSaveBarButtonPressed(0u))
+            break;
         if (menu_currentBar > 0u)
             buttonHandler_selectBar((uint8_t)(menu_currentBar - 1u));
         else
@@ -1122,6 +1132,12 @@ static void processPress(uint8_t buttonNr)
 
     case BUT_BAR2:
         led_setValue(1, LED_BAR2);
+        /*
+         * See BAR1 above. BAR2 is insert-space-forward in Load/Save character
+         * entry and ordinary next-bar selection everywhere else.
+         */
+        if (menu_loadSaveBarButtonPressed(1u))
+            break;
         if (menu_currentBar < (NUM_BARS - 1u))
             buttonHandler_selectBar((uint8_t)(menu_currentBar + 1u));
         else

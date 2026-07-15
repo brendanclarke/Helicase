@@ -1,26 +1,27 @@
 # Helicase SD Card Filesystem Specification
 
-This is the authoritative filesystem and instrument-file reference for the
-Helicase/LXR-02 firmware after Session 036. It includes the full Session 032
-instrument/kit file specification formerly kept in `INSTRUMENT_FILE_SPEC.md`,
-plus the Session 033-036 runtime decisions for LFO, velocity modulation, Morph,
-per-voice Morph, Scene modulation targets, Choke behavior, Instrument Load,
-Kit/Instrument Morph Load, Kit Save, root Instrument Save, asyncfatfs LFN/case
-behavior, and storage-only LFO `self` routing.
+This is the authoritative product-level filesystem and instrument-file
+reference for the Helicase/LXR-02 firmware after Session 038. It includes the
+full Session 032 instrument/kit file specification formerly kept in
+`INSTRUMENT_FILE_SPEC.md`, plus the Session 033-038 runtime decisions for LFO,
+velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
+behavior, Instrument Load, Kit/Instrument Morph Load, Kit/Instrument Morph
+Save, Kit Save, root Instrument Save, and storage-only LFO `self` routing.
+Low-level asyncfatfs API contracts and caller rules now live in
+`ASYNCFATFS_REFERENCE.md`.
 
 Use this document to distinguish three things:
 
 - Implemented now: root `Kit/NNN Name/` directory loading/saving, root
   `Instrument/` pool replacement into Scene-owned descriptor-indexed
-  instrument parameter images, Kit/Instrument Morph Load, and normal
-  new-format Kit Save, root Instrument Save, and File/Dir asyncfatfs
-  diagnostics.
+  instrument parameter images, Kit/Instrument Morph Load, Kit/Instrument Morph
+  Save, normal new-format Kit Save, root Instrument Save, and File/Dir
+  asyncfatfs diagnostics.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: final new-format Morph Save, redone Scene loads/saves
-  on the Session 036 asyncfatfs foundation, Bank loads/saves, Effect
-  loads/saves, root `settings.cfg`, and descriptor-backed step automation
-  playback.
+- Not implemented yet: redone Scene loads/saves on the Session 036 asyncfatfs
+  foundation, Bank loads/saves, Effect loads/saves, root `settings.cfg`, and
+  descriptor-backed step automation playback.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -129,8 +130,8 @@ Current bridges and limitations:
   modulation targets.
 - New Scene modulation target IDs are runtime/menu IDs, not a completed file
   save/load schema for Scene folders.
-- Before Bank work begins, Morph Save and Scene Load/Save must be deliberately
-  redone and hardware-tested on the Session 036 asyncfatfs foundation.
+- Before Bank work begins, Scene Load/Save must be deliberately redone and
+  hardware-tested on the Session 036 asyncfatfs foundation.
 
 ## Root Layout
 
@@ -537,11 +538,12 @@ The converter provides legacy compatibility by regenerating text files from
 legacy `.SND` payloads. Storage keeps aliases for the prior HiHat decay text
 keys because those names were shipped before the canonical Choke convention.
 
-Morph kit loads (`FS_FILE_MORPH`) remain legacy `.SND` until final new-format
-morph save/load policy replaces them. `Load:[KitMrp]` and nested
-InstrumentMrp already use new-format Kit/Instrument text payloads for loading
-normal source endpoints into morph endpoints, but final Morph Save is still a
-separate pending design.
+Legacy flat morph kit loads (`FS_FILE_MORPH`) remain legacy `.SND`.
+`Load:[KitMrp]` and nested InstrumentMrp use new-format Kit/Instrument text
+payloads for loading normal source endpoints into morph endpoints.
+`Save:[KitMrp]` and nested InstrumentMrp Save also use the new-format text
+payloads; their Morph Save projection writes the current interpolated value
+into both normal and morph endpoint fields.
 
 ## Canonical Instrument Keys
 
@@ -1081,7 +1083,6 @@ Status after Session 036:
 
 Still compiled but intentionally gated from the normal type cycler:
 
-- `KitMrp`
 - `Scene`
 - `Settings` / Globals
 - `Samples`
@@ -1106,15 +1107,17 @@ Implemented:
   asyncfatfs APIs, opens the target display filename with `afatfs_fopen_lfn()`,
   streams the descriptor-keyed instrument schema, and updates the root
   Instrument browser cache from the returned display/alias pair.
+- KitMrp and InstrumentMrp Save use the same text schemas as normal saves, but
+  for morphable parameters they write the current per-voice interpolated value
+  into both `[params]` and `[morph]`. This is a flattened snapshot of the
+  current morph position, not an inverted endpoint pair. Morph Save does not
+  rename the resident kit or instruments.
 
 Still future:
 
 - Scene save writes `sceneset.scg`, `Kit <kit name>/`, `pattern.pat`, and
   `effect.fx`.
 - Bank save writes `bankset.bcg` plus up to 16 numbered Scene folders.
-- Morph Save writes current interpolation parameters into normal endpoints and
-  normal endpoints into morph endpoints for morphable parameters; this is not
-  implemented and must be redone before Bank.
 - Pattern save writes the final dynamic-stack pattern format once implemented.
 - Effect save writes the selected effect stack/settings format once effects
   exist.
@@ -1125,53 +1128,19 @@ Still future:
 The current legacy non-Kit save paths are implementation leftovers and should
 not be used as the new-format specification.
 
-### asyncfatfs Primitive Boundary
+### asyncfatfs Boundary
 
-Session 036 adds asyncfatfs LFN component creation and object iteration. Future
-save code should reuse the existing core file APIs or their LFN companions
-instead of recreating local FAT writers:
+The low-level asyncfatfs API, LFN/SFN alias rules, object iteration behavior,
+filename sanitization, and caller checklist live in
+`ASYNCFATFS_REFERENCE.md`. This product-level spec assumes callers go through
+`filesystem.c` or those documented asyncfatfs primitives instead of rebuilding
+FAT/VFAT traversal locally.
 
-- `afatfs_mkdir(name, cb)` creates or opens a compatibility short-name
-  directory and returns an open handle through the callback.
-- `afatfs_mkdir_lfn(display_name, match_mode, alias_out, cb)` creates or opens
-  a directory with VFAT LFN display entries and returns its generated 8.3
-  alias.
-- `afatfs_fopen(name, "w", cb)` creates/truncates a short-name file.
-- `afatfs_fopen_lfn(display_name, "w", match_mode, alias_out, cb)` creates or
-  truncates a file with VFAT LFN display entries and returns its generated 8.3
-  alias.
-- `afatfs_opendir_lfn(display_name, match_mode, alias_out, cb)` opens a
-  directory by exact display component when used with
-  `AFATFS_MATCH_CASE_SENSITIVE`.
-- `afatfs_findFirstObject()` / `afatfs_findNextObject()` iterate real directory
-  objects with resolved display name, short alias, and file/directory kind.
-- `afatfs_fclose(handle, cb)` closes opened files/directories.
-- `afatfs_chdir(handle_or_NULL)` changes current directory or returns to root.
-- `afatfs_funlink(file, cb)` exists for files but is not a recursive directory
-  replace primitive.
-
-Name policy:
-
-- asyncfatfs preserves display case for SFN entries and VFAT LFN entries.
-- New production Kit/Instrument operations use case-sensitive LFN matching.
-- Dot-prefixed files and directories are ordinary objects and must not be
-  hidden by asyncfatfs. Product scanners can filter by product naming or file
-  type after object iteration.
-- Compatibility short-name APIs remain for old fixed system files and aliases,
-  but new production save surfaces should prefer the LFN/case-sensitive
-  component APIs.
-
-Known missing primitives:
-
-- atomic rename/replace for `.tmp` save promotion;
-- recursive directory delete/replace.
-
-Therefore current Kit Save overwrites authoritative files (`kitset.kcg` and the
-six files it references) and may leave stale unreferenced files in the folder.
-The loader ignores them because `kitset.kcg` is authoritative. Future
-Scene/Bank/autosave work should either use the same overwrite-authoritative
-policy or add the missing asyncfatfs primitive once, in asyncfatfs/filesystem,
-not per caller.
+Current production Kit and Instrument saves use the Session 038 recursive
+directory cleanup/file overwrite behavior from `filesystem.c` where the product
+operation requires replacement. Future Scene/Bank/autosave work still needs an
+atomic rename/replace primitive for `.tmp` promotion before it can claim
+power-loss-safe commit semantics.
 
 ## Verification Anchors
 

@@ -103,15 +103,13 @@ typedef struct {
      * Save editor seeding. This is storage/UI metadata, not a DSP parameter and
      * not a filesystem short alias.
      *
-     * Why: Slot browsing displays on-card Kit/NNN names, while Save character
-     * entry must start from the currently loaded or last-saved resident Kit
-     * identity. Keeping that identity in SceneData prevents the Save UI from
-     * mistaking an empty slot display for the Kit's internal name.
+     * Why: Slot browsing displays on-card Kit/NNN names, while the resident
+     * Kit still needs a stable internal identity for display and future
+     * embedded use. Keeping that identity in SceneData prevents an empty slot
+     * display from being mistaken for the Kit's internal name.
      *
-     * Inputs: normal Kit Load and successful normal Kit Save. Morph Load/Save
-     * must not write this field. Output clients: Menu Save editor seeding,
-     * root Kit Save folder-name construction, and future Scene embedded Kit
-     * naming.
+     * Inputs: normal Kit Load. Morph Load must not write this field. Output
+     * clients: resident display and future Scene embedded Kit naming.
      */
     char display_name[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u];
     /*
@@ -189,12 +187,11 @@ typedef struct {
      * Save editor seeding and sceneset.scg output.
      *
      * Why: Root Scene slot display is on-card library state. The resident Scene
-     * needs its own name so saving to an empty or differently named slot does
-     * not derive identity from the slot browser sentinel.
+     * needs its own name so runtime identity does not derive from the browser
+     * sentinel for an empty or differently named slot.
      *
-     * Inputs: normal Scene Load and successful normal Scene Save. Morph
-     * operations must not write this field. Output clients: Save UI,
-     * filesystem_requestSaveSceneDirectory(), and future Bank Scene lists.
+     * Inputs: normal Scene Load. Morph operations must not write this field.
+     * Output clients: resident display and future Bank Scene lists.
      */
     char display_name[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u];
     scene_settings_t settings;
@@ -281,9 +278,9 @@ void scene_setResidentKitDisplayName(
  * What: Copies exactly eight display cells into the selected resident Scene,
  * sanitizing non-printable bytes to spaces and appending NUL.
  *
- * Why: Scene Save needs an internal name independent of the root Scene slot
- * currently highlighted by the browser. This also gives future Bank work a
- * Scene-local name field instead of overloading preset_currentName.
+ * Why: the resident Scene needs an internal name independent of the root Scene
+ * slot currently highlighted by the browser. This also gives future Bank work
+ * a Scene-local name field instead of overloading preset_currentName.
  *
  * Inputs: resident Scene index and fixed-width display field. Outputs:
  * scenes[index].display_name when the index is valid.

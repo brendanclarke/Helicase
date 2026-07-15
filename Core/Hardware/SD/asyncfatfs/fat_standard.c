@@ -73,29 +73,40 @@ uint8_t fat_lfnChecksum(const uint8_t fatFilename[FAT_FILENAME_LENGTH])
 bool fat_lfnCharAllowed(char c)
 {
     /*
-     * Validate the ASCII subset used by firmware-created VFAT names.
+     * Validate the encoder-enterable subset used by firmware-created VFAT
+     * names.
      *
      * FAT LFN storage is UTF-16LE, but the front panel editor and current
-     * storage schema are printable ASCII. Rejecting slash and FAT-forbidden
-     * punctuation here prevents one component API from accidentally accepting a
-     * path or a name a desktop FAT driver would reject.
+     * storage schema are a deliberately small printable ASCII set. Keeping the
+     * writer stricter than generic FAT LFN avoids names that the product cannot
+     * reliably re-enter, delete, or round-trip through desktop filesystems.
      */
-    if (c < 0x20 || c > 0x7e)
-        return false;
-    switch (c) {
-    case '"':
-    case '*':
-    case '/':
-    case ':':
-    case '<':
-    case '>':
-    case '?':
-    case '\\':
-    case '|':
-    case 0x7f:
-        return false;
-    default:
+    if ((c >= 'A' && c <= 'Z') ||
+        (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9'))
         return true;
+
+    switch (c) {
+    case ' ':
+    case '_':
+    case '-':
+    case '.':
+    case '(':
+    case ')':
+    case '[':
+    case ']':
+    case '+':
+    case '=':
+    case '@':
+    case '#':
+    case '$':
+    case '%':
+    case '&':
+    case '!':
+    case '\'':
+        return true;
+    default:
+        return false;
     }
 }
 

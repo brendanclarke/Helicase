@@ -202,6 +202,7 @@ enum saveStateEnum {
 enum loadSaveEnum {
     SAVE_TYPE_FILE = 0,
     SAVE_TYPE_DIR,
+    SAVE_TYPE_SIMPLE_DIR,
     /*
      * File/Dir remain the exact-case asyncfatfs diagnostics; Kit is the first
      * musical entry promoted back onto the panel.
@@ -301,6 +302,7 @@ void menu_switchPage(uint8_t pageNr);
 void menu_switchSubPage(uint8_t subPageNr);
 uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr);
 uint8_t menu_loadInstrumentIsActive(void);
+uint8_t menu_loadSaveBarButtonPressed(uint8_t advance);
 /*
  * Report whether nested Instrument Load owns an immutable in-flight transaction.
  *
@@ -313,14 +315,15 @@ uint8_t menu_loadInstrumentIsActive(void);
 uint8_t menu_loadInstrumentTransactionBusy(void);
 void menu_loadInstrumentExit(void);
 /*
- * Consume a SEQ button as a Scene selector while Load/Save owns Scene targets.
+ * Consume a SEQ button as a Scene selector while Load or nested Instrument Save
+ * owns Scene targets.
  *
  * Inputs: a zero-based SEQ/Scene index. Output: nonzero only when the current
- * Load/Save context owns the press; Kit/Scene Load and Kit/Scene Save toggle
- * the selected-scene mask while Instrument Load changes its one destination
- * Scene. Clients: buttonHandler's foreground press dispatcher. Menu owns this
- * decision because it also owns the load mode, LCD cursor, and Scene LED
- * state; ButtonHandler must remain a gesture router rather than duplicate
+ * context owns the press; Kit/Scene Load toggles the selected-scene mask while
+ * Instrument Load/Save changes its one destination Scene. Clients:
+ * buttonHandler's foreground press dispatcher. Menu owns this decision because
+ * it also owns the mode, LCD cursor, and Scene LED state; ButtonHandler must
+ * remain a gesture router rather than duplicate
  * menu-state tests.
  */
 uint8_t menu_loadSceneButtonPressed(uint8_t scene_index);

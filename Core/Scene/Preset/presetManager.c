@@ -174,16 +174,15 @@ static void preset_completeFilesystemOp(preset_op_type_t completed_op)
 
     filesystem_ack();
     pm_completed_ok = completed_ok;
-    if (completed_ok || is_test_op) {
+    if (completed_ok || is_test_op || completed_op != PRESET_OP_NONE) {
         /*
-         * Preserve completion success for temporary File/Dir diagnostics.
+         * Preserve completion identity for operations that report failure.
          *
-         * Existing musical callers keep their historical failure behavior:
-         * failed operations generally surface as PRESET_OP_NONE. The File/Dir
-         * storage tests are different because a silent failure hides the exact
-         * asyncfatfs bug being tested. For test operations, keep the requested
-         * op identity even on error and let Menu decide between byte/Dir
-         * result and ERR overlay using pm_completed_ok.
+         * Older musical callers once collapsed failures to PRESET_OP_NONE,
+         * which made the UI silently reset with no clue where filesystem.c had
+         * stopped. Keep the requested op identity on error and let Menu decide
+         * between success cleanup and an ERR overlay using pm_completed_ok and
+         * filesystem_errorCode().
          */
         pm_completed_op = completed_op;
         pm_status = PRESET_UPDATE_READY;
@@ -196,6 +195,33 @@ static void preset_completeFilesystemOp(preset_op_type_t completed_op)
 static void on_kit_load_complete(void)
 {
 	preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
+}
+
+static void on_kit_save_complete(void)
+{
+    /*
+     * Report one completed normal Kit directory save.
+     *
+     * filesystem.c has already handled slot cleanup, directory creation,
+     * member-file streaming, kitset emission, and final flush/error reporting.
+     * Preset keeps this callback intentionally small: Menu only needs the
+     * operation identity so it can clear Save busy state and repaint at the
+     * top-row type selector.
+     */
+    preset_completeFilesystemOp(PRESET_OP_KIT_SAVE);
+}
+
+static void on_kit_morph_save_complete(void)
+{
+    /*
+     * Report one completed KitMrp directory save.
+     *
+     * KitMrp uses the same directory writer as normal Kit Save, but filesystem
+     * serializes the Morph Save projection: current interpolated values are
+     * written into both normal and morph endpoint sections. Resident Scene kit
+     * names and instrument stems are not changed by this export.
+     */
+    preset_completeFilesystemOp(PRESET_OP_KIT_MORPH_SAVE);
 }
 
 static void on_kit_morph_load_complete(void)
@@ -265,10 +291,10 @@ static void on_instrument_morph_save_complete(void)
      * Complete one root Instrument Morph Save.
      *
      * Filesystem has written Instrument/<name.ext> with the Morph Save
-     * projection, where [params] holds the current interpolated endpoint and
-     * [morph] holds the resident normal endpoint. Preset reports this as a
-     * separate completion so Menu can reset nested Save UI without treating it
-     * as a normal Instrument export or a legacy flat Morph file.
+     * projection, where [params] and [morph] both hold the current
+     * interpolated endpoint. Preset reports this as a separate completion so
+     * Menu can reset nested Save UI without treating it as a normal Instrument
+     * export or a legacy flat Morph file.
      */
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_SAVE);
 }
@@ -286,100 +312,9 @@ static void on_instrument_morph_load_complete(void)
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_LOAD);
 }
 
-static void on_kit_save_rescan_complete(void)
-{
-    /*
-     * Publish normal Kit Save completion after a real `/Kit` rescan.
-     *
-     * What: reports PRESET_OP_KIT_SAVE only after filesystem_requestScanKits()
-     * has cleared and rebuilt the Kit browser cache from FAT directory entries.
-     *
-     * Why: the save writer knows what it tried to create, but the Load page
-     * must show only directories that a later scan can enumerate and open.
-     * Keeping the public completion delayed until the scan finishes prevents
-     * fake cache rows for failed or partially-written Kit directories.
-     *
-     * Inputs: filesystem_status() is the scan result. Output: Preset/Menu sees
-     * the original Kit-save operation complete; the scan remains an internal
-     * cache-refresh step rather than a separate user-visible operation.
-     *
-     * Affiliates/clients: on_kit_save_complete(),
-     * filesystem_requestScanKits(), menu_pollPresetStatus().
-     */
-    preset_completeFilesystemOp(PRESET_OP_KIT_SAVE);
-}
-
-static void on_kit_save_complete(void)
-{
-    /*
-     * Replace optimistic Kit cache updates with a real post-save scan.
-     *
-     * What: after a successful normal Kit Save, immediately starts
-     * filesystem_requestScanKits() and defers PRESET_OP_KIT_SAVE reporting to
-     * on_kit_save_rescan_complete(). Failed saves keep the normal completion
-     * path so Menu can clear busy state without repopulating the browser.
-     *
-     * Why: Kit Save used to insert kit_slot_present/name/open_name directly
-     * from the intended save name. That made a fake Load-page entry possible
-     * when the directory was not actually enumerable/loadable from the card.
-     *
-     * Inputs: filesystem_status() from the just-finished save. Output: either
-     * a queued Kit scan, or the ordinary Kit-save completion if the save failed
-     * or the scan request cannot be posted.
-     *
-     * Affiliates/clients: filesystem_saveKitDirectory_tick() phase 24 no
-     * longer writes the Kit scan cache; filesystem_scanKits_tick() owns it.
-     */
-    if (filesystem_status() == FS_STATUS_DONE &&
-        filesystem_requestScanKits(on_kit_save_rescan_complete)) {
-        return;
-    }
-    preset_completeFilesystemOp(PRESET_OP_KIT_SAVE);
-}
-
-static void on_kit_morph_save_rescan_complete(void)
-{
-    /*
-     * Publish KitMrp Save completion after the same real Kit cache rescan used
-     * by normal Kit Save.
-     *
-     * KitMrp writes the same root Kit directory namespace as normal Kit Save,
-     * so its visible Load-page consequences must also come from the scanner
-     * instead of from save-intent metadata.
-     */
-    preset_completeFilesystemOp(PRESET_OP_KIT_MORPH_SAVE);
-}
-
-static void on_kit_morph_save_complete(void)
-{
-    /*
-     * Complete one new-format Kit Morph Save.
-     *
-     * Filesystem has serialized the active Scene's Kit/ directory through the
-     * Morph Save projection. Resident SceneData, runtime voices, retained Kit
-     * name, and resident Instrument source names are unchanged by this export,
-     * so completion is purely a Save UI/busy-state notification.
-     */
-    if (filesystem_status() == FS_STATUS_DONE &&
-        filesystem_requestScanKits(on_kit_morph_save_rescan_complete)) {
-        return;
-    }
-    preset_completeFilesystemOp(PRESET_OP_KIT_MORPH_SAVE);
-}
-
 static void on_scene_load_complete(void)
 {
     preset_completeFilesystemOp(PRESET_OP_SCENE_LOAD);
-}
-
-static void on_scene_save_complete(void)
-{
-    preset_completeFilesystemOp(PRESET_OP_SCENE_SAVE);
-}
-
-static void on_morph_save_complete(void)
-{
-    preset_completeFilesystemOp(PRESET_OP_MORPH_SAVE);
 }
 
 static void on_globals_save_complete(void)
@@ -1310,6 +1245,37 @@ uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask)
     return 0u;
 }
 
+uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
+{
+    uint8_t source_scene = scene_getActiveIndex();
+
+    /*
+     * Post normal Kit Save or KitMrp Save to the shared directory writer.
+     *
+     * Inputs are captured here because filesystem work is asynchronous: the
+     * target slot, active source Scene, editable eight-cell display name, and
+     * Morph projection flag must remain fixed even if the user moves the panel
+     * before the SD operation completes. The Morph flag is not a legacy flat
+     * .SND request; it selects the new-format snapshot-twice projection inside
+     * storage/filesystem.
+     */
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = presetNr;
+    pm_request_type = isMorph ? SAVE_TYPE_KIT_MORPH : SAVE_TYPE_KIT;
+    if (filesystem_requestSaveKitDirectory(presetNr,
+                                           source_scene,
+                                           preset_currentName,
+                                           isMorph,
+                                           isMorph ? on_kit_morph_save_complete
+                                                   : on_kit_save_complete)) {
+        return 1u;
+    }
+    pm_status = PRESET_IDLE;
+    return 0u;
+}
+
 uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask)
 {
     /*
@@ -1356,83 +1322,6 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask)
         return 1u;
     pm_status = PRESET_IDLE;
     return 0u;
-}
-
-/* -----------------------------------------------------------------------
-** preset_saveDrumset — post async kit save request.
-** ----------------------------------------------------------------------- */
-uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
-{
-    fs_file_type_t type = isMorph ? FS_FILE_MORPH : FS_FILE_KIT;
-    fs_completion_cb_t cb = isMorph ? on_morph_save_complete : on_kit_save_complete;
-
-    filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
-    pm_completed_op = PRESET_OP_NONE;
-    pm_request_slot = presetNr;
-    pm_request_type = isMorph ? PRESET_REQUEST_LEGACY_MORPH : SAVE_TYPE_KIT;
-    /*
-     * Normal Kit Save now targets the directory Kit format.
-     *
-     * The old flat .SND writer remains only for legacy morph compatibility.
-     * Saving SAVE_TYPE_KIT streams the active Scene kit through the new storage
-     * schema so [params] and [morph] endpoints round-trip with the directory
-     * Kit loader.
-     */
-    if ((!isMorph && !filesystem_requestSaveKitDirectory(presetNr, cb)) ||
-        (isMorph && !filesystem_requestSave(type, presetNr, cb))) {
-        pm_status = PRESET_IDLE;
-        return 0u;
-    }
-    return 1u;
-}
-
-uint8_t preset_saveKitMorph(uint16_t presetNr)
-{
-    /*
-     * Post one new-format Kit Morph Save request.
-     *
-     * Inputs: root Kit library slot 000..999 selected by Save:[KitMrp].
-     * Output: nonzero only when filesystem accepts an asynchronous Kit/
-     * directory write. The active Scene is captured inside filesystem so the
-     * save remains immutable even if the panel Scene changes before completion.
-     * Affiliates: filesystem_requestSaveKitMorphDirectory(), storageTypes'
-     * Morph Save write views, and Menu's Save:[KitMrp] OK handler.
-     */
-    filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
-    pm_completed_op = PRESET_OP_NONE;
-    pm_request_slot = presetNr;
-    pm_request_type = SAVE_TYPE_KIT_MORPH;
-    if (!filesystem_requestSaveKitMorphDirectory(
-            presetNr, on_kit_morph_save_complete)) {
-        pm_status = PRESET_IDLE;
-        return 0u;
-    }
-    return 1u;
-}
-
-void preset_saveScene(uint16_t presetNr, uint8_t source_scene,
-                      const char display_name[8])
-{
-    /*
-     * Post a root Scene directory save.
-     *
-     * Inputs are captured from the Save UI: target library slot,
-     * lowest-numbered selected resident Scene, and the display name used for
-     * the numbered folder plus sceneset.scg. Output is an async filesystem
-     * writer; completion is reported as PRESET_OP_SCENE_SAVE so Menu can clear
-     * busy state and repaint without applying DSP runtime.
-     */
-    filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
-    pm_completed_op = PRESET_OP_NONE;
-    pm_request_slot = presetNr;
-    pm_request_type = SAVE_TYPE_SCENE;
-    if (!filesystem_requestSaveSceneDirectory(presetNr, source_scene,
-                                              display_name,
-                                              on_scene_save_complete))
-        pm_status = PRESET_IDLE;
 }
 
 /* -----------------------------------------------------------------------
@@ -1707,6 +1596,19 @@ uint8_t preset_saveTestDir(const char *display_name)
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_type = SAVE_TYPE_DIR;
+    pm_request_slot = 0u;
+    return 1u;
+}
+
+uint8_t preset_saveTestSimpleDir(const char *display_name)
+{
+    filesystem_ack();
+    if (!filesystem_requestSaveTestSimpleDir(display_name,
+                                             on_test_dir_save_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_type = SAVE_TYPE_SIMPLE_DIR;
     pm_request_slot = 0u;
     return 1u;
 }

@@ -104,6 +104,7 @@ uint8_t     filesystem_initCardAndMountBlocking(void);
 void        filesystem_initAfterCardReady(void);
 void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
+const char *filesystem_errorCode(void);
 void        filesystem_ack(void);
 
 bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
@@ -119,6 +120,20 @@ bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb
  * compatibility behavior for non-UI callers.
  */
 bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
+                                        fs_completion_cb_t cb);
+/*
+ * Save one root Kit directory from a resident Scene.
+ *
+ * Inputs: direct root Kit slot, source Scene, eight-cell display name, Morph
+ * projection flag, and completion callback. Output: asynchronous recursive
+ * slot replacement in /Kit/. morph_projection=0 writes normal Kit endpoints;
+ * morph_projection!=0 writes KitMrp's flattened current interpolation into
+ * both normal and morph endpoint storage and does not rename the resident kit.
+ */
+bool filesystem_requestSaveKitDirectory(uint16_t slot,
+                                        uint8_t source_scene,
+                                        const char display_name[8],
+                                        uint8_t morph_projection,
                                         fs_completion_cb_t cb);
 /*
  * Stage one numbered Kit directory for a Preset-owned morph commit.
@@ -145,42 +160,6 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
                                           uint16_t scene_mask,
                                           fs_completion_cb_t cb);
 bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
-/*
- * Post a new-format Kit directory save.
- *
- * Inputs: direct Kit folder slot 000..999 and completion callback. Output: an async
- * operation that creates/opens Kit/<NNN name>/, writes kitset.kcg, and writes
- * six instrument files from the active Scene kit. Legacy flat save remains
- * separate so directory save cannot accidentally emit Pxxx.SND bytes.
- */
-bool filesystem_requestSaveKitDirectory(uint16_t slot, fs_completion_cb_t cb);
-/*
- * Post a new-format Kit Morph directory save.
- *
- * Inputs: direct Kit folder slot 000..999 and completion callback. Output: an
- * async save to Kit/<NNN name>/ using the same rename/overwrite path as normal
- * Kit Save, but each owned Instrument file is written through the Morph Save
- * endpoint projection. The save updates filesystem/browser cache state but
- * does not update the resident Kit display name.
- *
- * Affiliates/clients: preset_saveKitMorph(), menu Save:[KitMrp],
- * filesystem_saveKitDirectory_tick().
- */
-bool filesystem_requestSaveKitMorphDirectory(uint16_t slot,
-                                             fs_completion_cb_t cb);
-/*
- * Save one resident Scene into one numbered root Scene library slot.
- *
- * Inputs: direct root Scene slot 000..999, source resident Scene index, display name
- * for sceneset/folder creation, and completion callback. Output: Scene/<NNN
- * Name>/ containing sceneset.scg, embedded Kit <name>/, bridge pattern.pat,
- * and a placeholder effects.fx until real effects exist.
- */
-bool filesystem_requestSaveSceneDirectory(
-    uint16_t slot,
-    uint8_t source_scene,
-    const char display_name[8],
-    fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
@@ -189,11 +168,12 @@ bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
  * Generic asyncfatfs File/Dir test browser and payload API.
  *
  * These calls are the only load/save surface expected to work during the
- * asyncfatfs expansion. Inputs are exact root-level display components with
- * preserved case, never slash-separated paths. Outputs are filesystem-owned
- * scan caches and a four-byte result record used by Menu's two-second test
- * display. Affiliates: asyncfatfs LFN object iterator/open/create APIs and
- * presetManager's PRESET_OP_TEST_* completion wrappers.
+ * asyncfatfs expansion. Inputs are exact single-component display names with
+ * preserved case, never slash-separated paths. File operations and Dir scan/load
+ * still use the root; Save:[Dir] creates its directory under /Kit/. Outputs are
+ * filesystem-owned scan caches and a four-byte result record used by Menu's
+ * two-second test display. Affiliates: asyncfatfs LFN object iterator/open/create
+ * APIs and presetManager's PRESET_OP_TEST_* completion wrappers.
  */
 bool filesystem_requestScanTestFiles(fs_completion_cb_t cb);
 bool filesystem_requestScanTestDirs(fs_completion_cb_t cb);
@@ -220,6 +200,8 @@ bool filesystem_requestSaveTestFile(const char *display_name,
                                     fs_completion_cb_t cb);
 bool filesystem_requestSaveTestDir(const char *display_name,
                                    fs_completion_cb_t cb);
+bool filesystem_requestSaveTestSimpleDir(const char *display_name,
+                                         fs_completion_cb_t cb);
 fs_test_result_kind_t filesystem_testResultKind(void);
 const uint8_t *filesystem_testResultBytes(void);
 const char *filesystem_testResultName(void);
