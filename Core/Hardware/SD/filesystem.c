@@ -4592,6 +4592,35 @@ static void filesystem_saveKitDirectory_tick(void)
             return;
         }
         /*
+         * Skip per-member overwrite cleanup in a brand-new Kit directory.
+         *
+         * What: op_save_found_existing_dir remains false only when this save
+         * created the selected Kit folder during the current operation. In
+         * that case there cannot be old `Kick.drm`/`kick.drm` variants inside
+         * the child directory yet, so the next valid action is member file
+         * creation.
+         *
+         * Why: empty-slot Kit Save must not insert extra async delete scans
+         * between successful directory creation and first member creation.
+         * Those scans are useful only for occupied folders and any failure
+         * before final filesystem_finish(FS_STATUS_DONE) prevents the new
+         * directory from being synced to card.
+         *
+         * Inputs: op_save_found_existing_dir is captured while scanning `/Kit`
+         * for the requested numbered slot. Outputs/effects: new directories go
+         * directly to phase 17 with op_remove_done already satisfied; occupied
+         * directories still remove same-casefold member-file variants before
+         * each overwrite.
+         *
+         * Affiliates/clients: afatfs_removeObjects_lfn(),
+         * afatfs_fopen_lfn(), filesystem_saveKitDirectory_tick() phases 17/18.
+         */
+        if (!op_save_found_existing_dir) {
+            op_remove_done = 1u;
+            op_phase = 17;
+            return;
+        }
+        /*
          * Collapse same-casefold member-file variants before writing.
          *
          * What: Deletes every physical file in the Kit directory whose display

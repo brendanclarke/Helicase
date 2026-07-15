@@ -55,6 +55,12 @@ the original save completion only after that scan rebuilds the cache from
 enumerated `/Kit` entries. This prevents the Load page from showing a Kit slot
 that the card scanner cannot actually see and later load.
 
+Session 043 note: Fresh empty-slot Kit saves now skip per-member
+case-insensitive remove scans before writing the six member files. Those remove
+passes are needed only when replacing an existing Kit directory; in a newly
+created directory they add asynchronous failure points before final sync and can
+prevent the new folder from becoming durable if member writing is never reached.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.
