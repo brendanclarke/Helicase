@@ -4779,42 +4779,38 @@ static void filesystem_saveKitDirectory_tick(void)
         op_phase = 24;
         return;
 
-    case 24: /* RETURN ROOT + UPDATE CACHE */
+    case 24: /* RETURN ROOT + UPDATE RESIDENT NAME */
         if (!afatfs_chdir(NULL))
             return;
         {
             uint16_t parsed_slot;
             char parsed_display[STORAGE_KIT_DISPLAY_NAME_LEN];
             /*
-             * Commit Kit save identity after all owned files have been
-             * rewritten.
+             * Update only resident identity after a successful Kit save.
              *
-             * What: Updates the Kit scan cache and resident Kit display name
-             * from the target directory actually written by this save.
+             * What: normal Kit Save may rename the resident Kit that was just
+             * exported. This phase updates that SceneData display name after
+             * all member files and kitset.kcg have closed.
              *
-             * Why: An occupied slot may have been renamed, and same-casefold
-             * duplicates may have been collapsed. The in-RAM browser and
-             * retained SceneData identity must mirror the durable on-card
-             * result only after the save is complete.
+             * Why: the Kit browser cache must not be updated here. A save
+             * state machine knows the intended display name and generated
+             * alias, but only a later `/Kit` directory scan can prove that FAT
+             * now contains an enumerable, loadable directory. Publishing cache
+             * entries here created fake Load-page rows for saves that had not
+             * produced a usable on-card Kit.
              *
-             * Inputs: op_save_kit_display_name and op_save_kit_dir_name from
-             * the ensure/rename path. Outputs: kit_slot_* cache, kb_map, and
-             * resident Kit name.
+             * Inputs: op_save_kit_display_name is parsed only to verify that
+             * the completed save still names the requested numbered slot.
+             * Outputs: scene->kit.display_name for normal Kit Save only.
              *
-             * Affiliates/clients: menu_currentSaveWouldOverwrite(),
-             * KitMrp Save, boot/rescan behavior.
+             * Affiliates/clients: presetManager Kit-save completion now starts
+             * filesystem_requestScanKits(), and that scan is the only writer
+             * for kit_slot_present/name/open_name after a save.
              */
             if (storage_parseNumberedFolder(op_save_kit_display_name,
                                             &parsed_slot,
                                             parsed_display) &&
                 parsed_slot == op_slot) {
-                kit_slot_present[op_slot] = 1u;
-                memcpy(kit_slot_name[op_slot], parsed_display,
-                       STORAGE_KIT_DISPLAY_NAME_LEN);
-                kit_slot_name[op_slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-                storage_copyFilename(kit_slot_open_name[op_slot],
-                                     op_save_kit_dir_name);
-                filesystem_noteKitBrowserSlot(op_slot);
                 if (!morph_save) {
                     /*
                      * Retain Kit identity only for normal Kit Save.

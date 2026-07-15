@@ -286,9 +286,68 @@ static void on_instrument_morph_load_complete(void)
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_LOAD);
 }
 
+static void on_kit_save_rescan_complete(void)
+{
+    /*
+     * Publish normal Kit Save completion after a real `/Kit` rescan.
+     *
+     * What: reports PRESET_OP_KIT_SAVE only after filesystem_requestScanKits()
+     * has cleared and rebuilt the Kit browser cache from FAT directory entries.
+     *
+     * Why: the save writer knows what it tried to create, but the Load page
+     * must show only directories that a later scan can enumerate and open.
+     * Keeping the public completion delayed until the scan finishes prevents
+     * fake cache rows for failed or partially-written Kit directories.
+     *
+     * Inputs: filesystem_status() is the scan result. Output: Preset/Menu sees
+     * the original Kit-save operation complete; the scan remains an internal
+     * cache-refresh step rather than a separate user-visible operation.
+     *
+     * Affiliates/clients: on_kit_save_complete(),
+     * filesystem_requestScanKits(), menu_pollPresetStatus().
+     */
+    preset_completeFilesystemOp(PRESET_OP_KIT_SAVE);
+}
+
 static void on_kit_save_complete(void)
 {
+    /*
+     * Replace optimistic Kit cache updates with a real post-save scan.
+     *
+     * What: after a successful normal Kit Save, immediately starts
+     * filesystem_requestScanKits() and defers PRESET_OP_KIT_SAVE reporting to
+     * on_kit_save_rescan_complete(). Failed saves keep the normal completion
+     * path so Menu can clear busy state without repopulating the browser.
+     *
+     * Why: Kit Save used to insert kit_slot_present/name/open_name directly
+     * from the intended save name. That made a fake Load-page entry possible
+     * when the directory was not actually enumerable/loadable from the card.
+     *
+     * Inputs: filesystem_status() from the just-finished save. Output: either
+     * a queued Kit scan, or the ordinary Kit-save completion if the save failed
+     * or the scan request cannot be posted.
+     *
+     * Affiliates/clients: filesystem_saveKitDirectory_tick() phase 24 no
+     * longer writes the Kit scan cache; filesystem_scanKits_tick() owns it.
+     */
+    if (filesystem_status() == FS_STATUS_DONE &&
+        filesystem_requestScanKits(on_kit_save_rescan_complete)) {
+        return;
+    }
     preset_completeFilesystemOp(PRESET_OP_KIT_SAVE);
+}
+
+static void on_kit_morph_save_rescan_complete(void)
+{
+    /*
+     * Publish KitMrp Save completion after the same real Kit cache rescan used
+     * by normal Kit Save.
+     *
+     * KitMrp writes the same root Kit directory namespace as normal Kit Save,
+     * so its visible Load-page consequences must also come from the scanner
+     * instead of from save-intent metadata.
+     */
+    preset_completeFilesystemOp(PRESET_OP_KIT_MORPH_SAVE);
 }
 
 static void on_kit_morph_save_complete(void)
@@ -301,6 +360,10 @@ static void on_kit_morph_save_complete(void)
      * name, and resident Instrument source names are unchanged by this export,
      * so completion is purely a Save UI/busy-state notification.
      */
+    if (filesystem_status() == FS_STATUS_DONE &&
+        filesystem_requestScanKits(on_kit_morph_save_rescan_complete)) {
+        return;
+    }
     preset_completeFilesystemOp(PRESET_OP_KIT_MORPH_SAVE);
 }
 

@@ -48,6 +48,13 @@ the on-disk fileSize field. FAT stores directory fileSize as zero, which made
 Kit Save's open `/Kit` -> scan/create child path behave as though `/Kit` had no
 allocated directory cluster even though Save:[Dir] still worked from root.
 
+Session 042 note: Kit Save and KitMrp Save no longer insert optimistic
+kit_slot_present/name/open_name entries from the intended save path. Save
+completion now starts a real `filesystem_requestScanKits()` pass and reports
+the original save completion only after that scan rebuilds the cache from
+enumerated `/Kit` entries. This prevents the Load page from showing a Kit slot
+that the card scanner cannot actually see and later load.
+
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.
