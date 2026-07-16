@@ -475,7 +475,7 @@ void storage_makeSavedInstrumentFilename(
     if (!ext)
         ext = "drm";
     if (!stem || stem[0] == '\0')
-        stem = "inst";
+        stem = "none";
     memset(base, 0, sizeof(base));
     while (stem[i] != '\0' && stem[i] != '.' && i < base_limit) {
         base[i] = storage_filenameChar(stem[i]);
@@ -528,14 +528,16 @@ storage_status_t storage_scenesetParseLine(
     /*
      * Parse one sceneset.scg line.
      *
-     * Required metadata validates the folder and supplies the user-visible
-     * Scene name. Optional settings write directly into the staged Scene. The
-     * embedded Kit name is intentionally absent from this grammar; filesystem
-     * discovers the first valid "Kit *" directory while walking the Scene
-     * folder so users can move Kits between Scenes by moving directories.
+     * Required metadata validates the folder only. Object identity is never
+     * owned by this file: the Scene name comes from "Scene/NN Name", and the
+     * embedded Kit name comes from "Kit <name>". Optional settings write
+     * directly into the staged Scene. The display argument is retained only so
+     * older call sites keep their signature while name= compatibility below
+     * deliberately ignores the value.
      */
     if (!state || !line)
         return STORAGE_STATUS_BAD_VALUE;
+    (void)display;
     line = storage_trimLeft(line);
     if (*line == '\0' || *line == '#')
         return STORAGE_STATUS_OK;
@@ -555,10 +557,15 @@ storage_status_t storage_scenesetParseLine(
             return STORAGE_STATUS_UNSUPPORTED_VERSION;
         state->seen_version = 1u;
     } else if (storage_streq(key, "name")) {
-        if (!display)
-            return STORAGE_STATUS_BAD_VALUE;
-        storage_copyDisplayName(display, value);
-        state->seen_name = 1u;
+        /*
+         * Compatibility-only ignore for early Scene fixtures.
+         *
+         * Inputs: a legacy name= line, if present. Output: no parser state and
+         * no resident display field changes. Writers never emit this key
+         * because object names are universally owned by directories/files, not
+         * by the files' own payloads.
+         */
+        return STORAGE_STATUS_OK;
     } else if (storage_streq(key, "morph_amount")) {
         if (!target_scene)
             return STORAGE_STATUS_BAD_VALUE;
@@ -601,6 +608,58 @@ storage_status_t storage_scenesetParseLine(
                                   target_scene->settings.midi_note,
                                   NUM_TRACKS,
                                   127u);
+    } else if (storage_streq(key, "audio_out")) {
+        /*
+         * Parse Scene-owned per-voice output routing.
+         *
+         * Inputs: exactly six comma-separated route values in the current
+         * 0..5 mixer/menu domain. Output: staged Scene settings are written
+         * directly and seen_audio_out records that legacy embedded kitset
+         * routing should not be imported later.
+         */
+        if (!target_scene)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseCsvU8(value,
+                                target_scene->settings.audio_out,
+                                INSTRUMENT_SLOT_COUNT,
+                                5u);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        state->seen_audio_out = 1u;
+    } else if (storage_streq(key, "fx_send_amount")) {
+        /*
+         * Parse retained future FX-send amounts.
+         *
+         * Inputs: six comma-separated 0..127 values, one per instrument slot.
+         * Output: staged Scene settings update; runtime FX routing is not
+         * applied by storage.
+         */
+        if (!target_scene)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseCsvU8(value,
+                                target_scene->settings.fx_send_amount,
+                                INSTRUMENT_SLOT_COUNT,
+                                127u);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        state->seen_fx_send_amount = 1u;
+    } else if (storage_streq(key, "fader_setting")) {
+        /*
+         * Parse retained future fader topology modes.
+         *
+         * Inputs: six comma-separated values in the current 0..2 mode domain.
+         * Output: staged Scene settings update; runtime behavior is future
+         * mixer/FX work.
+         */
+        if (!target_scene)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseCsvU8(value,
+                                target_scene->settings.fader_setting,
+                                INSTRUMENT_SLOT_COUNT,
+                                2u);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        state->seen_fader_setting = 1u;
     }
     return STORAGE_STATUS_OK;
 }
@@ -611,12 +670,12 @@ storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state)
      * Convert streamed sceneset bits into a load/no-load decision.
      *
      * Required fields are intentionally small: format/version protect against
-     * loading a wrong text file, and name gives Scene load a stable display
-     * identity. Optional settings may be absent for forward/backward
-     * compatibility because SceneData defaults are safe.
+     * loading a wrong text file. Scene and Kit names are not required here
+     * because filesystem.c already captured them from directory names before
+     * parsing sceneset.scg. Optional settings may be absent for
+     * forward/backward compatibility because SceneData defaults are safe.
      */
-    if (!state || !state->seen_format || !state->seen_version ||
-        !state->seen_name) {
+    if (!state || !state->seen_format || !state->seen_version) {
         return STORAGE_STATUS_MISSING_REQUIRED;
     }
     return STORAGE_STATUS_OK;
@@ -687,7 +746,14 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
         pos++;
     }
     if (last_meaningful == 0u) {
-        const char *fallback = "inst";
+        const char *fallback = "none";
+        /*
+         * Fall back to the universal uninitialized stem.
+         *
+         * Inputs: an empty or all-space retained stem. Output: the same
+         * filename convention used by initialized defaults, so force-suffix
+         * saves produce `none   N.ext` instead of `inst   N.ext`.
+         */
         pos = 0u;
         while (fallback[pos] != '\0' && pos + 1u < capacity) {
             dst[pos] = fallback[pos];
@@ -1015,6 +1081,451 @@ storage_status_t storage_effectFinalize(const storage_effect_state_t *state)
     return STORAGE_STATUS_OK;
 }
 
+void storage_patternStubStateInit(storage_pattern_stub_state_t *state)
+{
+    /*
+     * Clear Scene/Bank pattern text validation bits.
+     *
+     * Inputs/output: caller-owned parse state. Filesystem already seeded the
+     * staged PatternSet through PatternData before reading the file; v1
+     * placeholder files therefore validate without changing that default, while
+     * v2 track lines selectively overlay active-step bits and track timing.
+     */
+    if (state)
+        memset(state, 0, sizeof(*state));
+}
+
+static storage_status_t storage_patternDraftParseTrack(
+    storage_pattern_stub_state_t *state,
+    const char *key,
+    const char *value,
+    PatternSet *pattern)
+{
+    uint8_t track;
+    uint8_t length;
+    uint8_t scale;
+    char token[4];
+    uint8_t token_len = 0u;
+    uint8_t step;
+    uint16_t main_steps = 0u;
+    LengthRotate *lr;
+
+    /*
+     * Parse one draft v2 `trackN=` line.
+     *
+     * Key input: exactly track1..track7, using one-based user track numbers so
+     * the file mirrors the hardware front panel. Value input:
+     * `<length>,<scale>,<128 bits>`. Outputs: PatternSet length/scale fields
+     * and the STEP_ACTIVE_MASK bit in every Step.volume cell for this track.
+     * All non-stored Step data has already been initialized to defaults.
+     */
+    if (!state || !key || !value || !pattern)
+        return STORAGE_STATUS_BAD_VALUE;
+    if (key[0] != 't' || key[1] != 'r' || key[2] != 'a' ||
+        key[3] != 'c' || key[4] != 'k' ||
+        key[5] < '1' || key[5] > '7' || key[6] != '\0') {
+        return STORAGE_STATUS_OK;
+    }
+    track = (uint8_t)(key[5] - '1');
+
+    /*
+     * Decimal length parser.
+     *
+     * The token buffer permits 1..128. Zero and values above NUM_STEPS are
+     * rejected because the draft file stores the real playback length, not the
+     * legacy "0 means default" compatibility byte.
+     */
+    value = storage_trimLeft(value);
+    while (*value != ',' && *value != '\0') {
+        if (token_len >= (sizeof(token) - 1u))
+            return STORAGE_STATUS_BAD_VALUE;
+        token[token_len++] = *value++;
+    }
+    token[token_len] = '\0';
+    if (*value != ',' || storage_parseU8(token, &length) != STORAGE_STATUS_OK ||
+        length == 0u || length > NUM_STEPS) {
+        return STORAGE_STATUS_BAD_VALUE;
+    }
+    value++;
+
+    /*
+     * Decimal scale parser.
+     *
+     * Scale is the PatternData TRACK_SCALE_* table index. The upper bound keeps
+     * future/corrupt values from indexing outside pat_trackScaleRatios at
+     * playback time.
+     */
+    token_len = 0u;
+    value = storage_trimLeft(value);
+    while (*value != ',' && *value != '\0') {
+        if (token_len >= (sizeof(token) - 1u))
+            return STORAGE_STATUS_BAD_VALUE;
+        token[token_len++] = *value++;
+    }
+    token[token_len] = '\0';
+    if (*value != ',' || storage_parseU8(token, &scale) != STORAGE_STATUS_OK ||
+        scale >= TRACK_SCALE_COUNT) {
+        return STORAGE_STATUS_BAD_VALUE;
+    }
+    value++;
+
+    /*
+     * 128-character active-step bitmap.
+     *
+     * Each character maps directly to Step[track][step]. `1` sets
+     * STEP_ACTIVE_MASK and `0` clears it while preserving the lower seven
+     * default velocity bits. The same loop builds the legacy 16-bit main-step
+     * shadow with step % 16, matching pat_recordNote() and the current
+     * 16-button LED row projection. The 128-bit Step array remains the source
+     * of truth; this mask is only the bridge compatibility mirror.
+     */
+    for (step = 0u; step < NUM_STEPS; step++) {
+        Step *s = &pattern->pat_subStepPattern[track][step];
+        if (value[step] == '1') {
+            s->volume = (uint8_t)((s->volume & STEP_VOLUME_MASK) |
+                                  STEP_ACTIVE_MASK);
+            main_steps = (uint16_t)(main_steps |
+                         (uint16_t)(1u << (step % NUM_STEPS_PER_BAR)));
+        } else if (value[step] == '0') {
+            s->volume = (uint8_t)(s->volume & STEP_VOLUME_MASK);
+        } else {
+            return STORAGE_STATUS_BAD_VALUE;
+        }
+    }
+    if (storage_trimLeft(&value[NUM_STEPS])[0] != '\0')
+        return STORAGE_STATUS_BAD_VALUE;
+
+    lr = &pattern->pat_patternLengthRotate[track];
+    lr->length = length;
+    lr->scale = scale;
+    pattern->pat_mainSteps[track] = main_steps;
+    state->seen_track_mask = (uint8_t)(state->seen_track_mask |
+                                       (uint8_t)(1u << track));
+    return STORAGE_STATUS_OK;
+}
+
+storage_status_t storage_patternStubParseLine(
+    storage_pattern_stub_state_t *state,
+    const char *line,
+    PatternSet *pattern)
+{
+    char key[24];
+    const char *value;
+    storage_status_t st;
+    uint8_t parsed;
+
+    /*
+     * Parse one Scene/Bank pattern text line.
+     *
+     * Inputs: a complete NUL-terminated text line with CR/LF already removed.
+     * Outputs: v1 placeholder validation bits or v2 draft PatternSet edits.
+     * Unknown keys are ignored so future pattern schemas can append metadata
+     * while this draft reader keeps accepting the fields it owns.
+     */
+    if (!state || !line)
+        return STORAGE_STATUS_BAD_VALUE;
+    line = storage_trimLeft(line);
+    if (*line == '\0' || *line == '#')
+        return STORAGE_STATUS_OK;
+    st = storage_splitKeyValue(line, key, sizeof(key), &value);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+    if (storage_streq(key, "format")) {
+        if (!storage_streq(value, "helicase.pattern"))
+            return STORAGE_STATUS_INVALID_FORMAT;
+        state->seen_format = 1u;
+    } else if (storage_streq(key, "version")) {
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed != 1u && parsed != 2u)
+            return STORAGE_STATUS_UNSUPPORTED_VERSION;
+        state->version = parsed;
+        state->seen_version = 1u;
+    } else if (storage_streq(key, "placeholder")) {
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed != 1u)
+            return STORAGE_STATUS_BAD_VALUE;
+        state->seen_placeholder = 1u;
+    } else {
+        st = storage_patternDraftParseTrack(state, key, value, pattern);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+    }
+    return STORAGE_STATUS_OK;
+}
+
+storage_status_t storage_patternStubFinalize(
+    const storage_pattern_stub_state_t *state)
+{
+    /*
+     * Validate pattern text after EOF.
+     *
+     * Version 1 requires the placeholder guard and leaves PatternSet defaults
+     * untouched. Version 2 requires all seven track lines because partial
+     * pattern recall would silently clear or mis-time tracks.
+     */
+    if (!state || !state->seen_format || !state->seen_version) {
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    }
+    if (state->version == 1u) {
+        if (!state->seen_placeholder)
+            return STORAGE_STATUS_MISSING_REQUIRED;
+        return STORAGE_STATUS_OK;
+    }
+    if (state->version == 2u) {
+        if (state->seen_track_mask != 0x7fu)
+            return STORAGE_STATUS_MISSING_REQUIRED;
+        return STORAGE_STATUS_OK;
+    }
+    return STORAGE_STATUS_UNSUPPORTED_VERSION;
+}
+
+static uint8_t storage_appendDecimalU16(char *dst,
+                                        uint16_t capacity,
+                                        uint16_t *pos,
+                                        uint16_t value)
+{
+    char digits[6];
+    uint8_t count = 0u;
+    uint16_t divisor = 10000u;
+    uint8_t seen = 0u;
+
+    if (!dst || !pos)
+        return 0u;
+    while (divisor > 0u) {
+        uint8_t digit = (uint8_t)(value / divisor);
+        if (digit != 0u || seen || divisor == 1u) {
+            digits[count++] = (char)('0' + digit);
+            seen = 1u;
+        }
+        value = (uint16_t)(value % divisor);
+        divisor = (uint16_t)(divisor / 10u);
+    }
+    for (uint8_t i = 0u; i < count; i++) {
+        if (*pos + 1u >= capacity)
+            return 0u;
+        dst[(*pos)++] = digits[i];
+    }
+    dst[*pos] = '\0';
+    return 1u;
+}
+
+void storage_banksetInit(storage_bankset_t *state)
+{
+    /*
+     * Clear Bank config parse state and default active_scene to 0.
+     *
+     * Inputs/output: caller-owned state before reading bankset.bcg. The
+     * default matters for early or hand-authored Bank folders: format/version
+     * still validate the file, while absent active_scene means "try slot 00".
+     */
+    if (state)
+        memset(state, 0, sizeof(*state));
+}
+
+storage_status_t storage_banksetParseLine(storage_bankset_t *state,
+                                          const char *line)
+{
+    char key[24];
+    const char *value;
+    storage_status_t st;
+    uint8_t parsed;
+
+    /*
+     * Parse one bankset.bcg assignment.
+     *
+     * The file is Bank-level config, not identity storage. Unknown keys are
+     * ignored so future Bank metadata can be appended. A legacy or accidental
+     * name= line is also ignored by that rule; no parser branch ever copies it
+     * into resident BankData.
+     */
+    if (!state || !line)
+        return STORAGE_STATUS_BAD_VALUE;
+    line = storage_trimLeft(line);
+    if (*line == '\0' || *line == '#')
+        return STORAGE_STATUS_OK;
+    st = storage_splitKeyValue(line, key, sizeof(key), &value);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+    if (storage_streq(key, "format")) {
+        if (!storage_streq(value, "helicase.bankset"))
+            return STORAGE_STATUS_INVALID_FORMAT;
+        state->seen_format = 1u;
+    } else if (storage_streq(key, "version")) {
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed != 1u)
+            return STORAGE_STATUS_UNSUPPORTED_VERSION;
+        state->seen_version = 1u;
+    } else if (storage_streq(key, "active_scene")) {
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed >= STORAGE_BANK_SCENE_MAX_SLOTS)
+            return STORAGE_STATUS_BAD_SLOT;
+        state->active_scene = parsed;
+        state->seen_active_scene = 1u;
+    }
+    return STORAGE_STATUS_OK;
+}
+
+storage_status_t storage_banksetFinalize(const storage_bankset_t *state)
+{
+    /*
+     * Validate bankset.bcg after EOF.
+     *
+     * Required fields are only the guard and version. active_scene is optional
+     * because an empty Bank is valid and the initialized default 0 gives the
+     * loader a deterministic first child to try before it falls back to the
+     * lowest present child or root Scene/Kit defaults.
+     */
+    if (!state || !state->seen_format || !state->seen_version)
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    return STORAGE_STATUS_OK;
+}
+
+uint8_t storage_formatBanksetLine(char *dst,
+                                  uint16_t capacity,
+                                  const storage_bankset_t *state,
+                                  uint16_t line_index)
+{
+    uint8_t active_scene = state ? state->active_scene : 0u;
+
+    /*
+     * Emit the minimal v1 Bank config one line at a time.
+     *
+     * Inputs: logical line index from filesystem's streaming writer and the
+     * Bank-level active Scene slot. Output: format/version/active_scene text,
+     * or zero after the schema ends. The active_scene value is decimal schema
+     * data, not a directory prefix, so it is intentionally not zero-padded.
+     */
+    if (active_scene >= STORAGE_BANK_SCENE_MAX_SLOTS)
+        active_scene = 0u;
+    switch (line_index) {
+    case 0u:
+        return storage_formatLiteral(dst, capacity,
+                                     "format=helicase.bankset\n");
+    case 1u:
+        return storage_formatLiteral(dst, capacity, "version=1\n");
+    case 2u:
+        return storage_formatAssignmentU16(dst, capacity, "active_scene",
+                                           active_scene);
+    default:
+        return 0u;
+    }
+}
+
+uint8_t storage_formatEffectPlaceholderLine(char *dst,
+                                            uint16_t capacity,
+                                            uint16_t line_index)
+{
+    /*
+     * Emit one v1 placeholder effect line for Scene Save.
+     *
+     * Inputs: logical zero-based line index from filesystem's streaming writer.
+     * Output: a complete text line length, or zero after the schema ends.
+     * Keeping the writer beside the parser ensures the accepted placeholder
+     * contract and emitted contract remain identical.
+     */
+    switch (line_index) {
+    case 0u:
+        return storage_formatLiteral(dst, capacity,
+                                     "format=helicase.effect\n");
+    case 1u:
+        return storage_formatLiteral(dst, capacity, "version=1\n");
+    case 2u:
+        return storage_formatLiteral(dst, capacity, "placeholder=1\n");
+    default:
+        return 0u;
+    }
+}
+
+uint8_t storage_formatPatternStubLine(char *dst,
+                                      uint16_t capacity,
+                                      const PatternSet *pattern,
+                                      uint16_t line_index)
+{
+    uint16_t pos = 0u;
+    uint8_t track;
+    const LengthRotate *lr;
+
+    /*
+     * Emit one draft v2 Scene/Bank pattern line for Scene Save.
+     *
+     * Inputs: logical zero-based line index and the PatternSet owned by the
+     * Scene being saved. Output: format/version followed by seven track rows.
+     * Each track row stores the real 128-step active bitmap plus length/scale.
+     * All other step fields intentionally stay out of this draft schema.
+     */
+    if (!dst || capacity == 0u || !pattern)
+        return 0u;
+    if (line_index == 0u) {
+        return storage_formatLiteral(dst, capacity,
+                                     "format=helicase.pattern\n");
+    }
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "version=2\n");
+    if (line_index < 2u || line_index >= (uint16_t)(2u + NUM_TRACKS))
+        return 0u;
+
+    track = (uint8_t)(line_index - 2u);
+    lr = &pattern->pat_patternLengthRotate[track];
+
+    /*
+     * Assemble `trackN=<length>,<scale>,<bits>\n`.
+     *
+     * The first math expression converts zero-based C track indices to the
+     * one-based product labels used in the file. The 128-iteration loop writes
+     * exactly one character per real bridge step; it reads only
+     * STEP_ACTIVE_MASK and deliberately ignores velocity, note, probability,
+     * and automation fields so loading can reuse PatternData defaults.
+     */
+    if (pos + 7u >= capacity)
+        return 0u;
+    dst[pos++] = 't';
+    dst[pos++] = 'r';
+    dst[pos++] = 'a';
+    dst[pos++] = 'c';
+    dst[pos++] = 'k';
+    dst[pos++] = (char)('1' + track);
+    dst[pos++] = '=';
+    if (!storage_appendDecimalU16(dst, capacity, &pos,
+                                  (lr->length == 0u ||
+                                   lr->length > NUM_STEPS)
+                                      ? PAT_DEFAULT_TRACK_LENGTH
+                                      : lr->length)) {
+        return 0u;
+    }
+    if (pos + 1u >= capacity)
+        return 0u;
+    dst[pos++] = ',';
+    if (!storage_appendDecimalU16(dst, capacity, &pos,
+                                  (lr->scale < TRACK_SCALE_COUNT)
+                                      ? lr->scale
+                                      : TRACK_SCALE_OFF)) {
+        return 0u;
+    }
+    if (pos + 1u >= capacity)
+        return 0u;
+    dst[pos++] = ',';
+    for (uint8_t step = 0u; step < NUM_STEPS; step++) {
+        if (pos + 1u >= capacity)
+            return 0u;
+        dst[pos++] =
+            (pattern->pat_subStepPattern[track][step].volume &
+             STEP_ACTIVE_MASK) ? '1' : '0';
+    }
+    if (pos + 1u >= capacity)
+        return 0u;
+    dst[pos++] = '\n';
+    dst[pos] = '\0';
+    return (uint8_t)pos;
+}
+
 /* See storageTypes.h for the public contract.
  *
  * Folder numbers are literal library slots on the SD card:
@@ -1079,6 +1590,67 @@ uint8_t storage_parseNumberedFolder(const char *name,
     return 1u;
 }
 
+uint8_t storage_parseBankSceneFolder(
+    const char *name,
+    uint8_t *slot,
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN])
+{
+    uint8_t number;
+
+    /*
+     * Parse the Bank-local two-digit Scene namespace.
+     *
+     * Inputs: visible child directory component inside one Bank. Output:
+     * direct Bank Scene slot 0..15 plus the post-separator display name. The
+     * arithmetic is deliberately two digits only: `(tens * 10) + ones`.
+     * Accepting the root three-digit parser here would make `Scene/000` and
+     * `Bank/000/00` look like the same kind of object, which they are not.
+     */
+    if (!name || !slot || !display)
+        return 0u;
+    if (name[0] < '0' || name[0] > '9' ||
+        name[1] < '0' || name[1] > '9' ||
+        (name[2] != '_' && name[2] != ' ')) {
+        return 0u;
+    }
+    number = (uint8_t)((uint8_t)(name[0] - '0') * 10u +
+                       (uint8_t)(name[1] - '0'));
+    if (number >= STORAGE_BANK_SCENE_MAX_SLOTS)
+        return 0u;
+    *slot = number;
+    storage_copyDisplayName(display, name + 3u);
+    return 1u;
+}
+
+void storage_formatBankSceneDir(
+    char *dst,
+    uint16_t capacity,
+    uint8_t slot,
+    const char display[STORAGE_SCENE_DISPLAY_NAME_LEN])
+{
+    uint8_t i;
+
+    /*
+     * Format `SS <name>` for a Bank-local Scene child folder.
+     *
+     * Inputs: direct slot 0..15 and eight display cells. Output: a
+     * NUL-terminated FAT display component. The digit math is the inverse of
+     * storage_parseBankSceneFolder(): tens is slot / 10, ones is slot % 10.
+     * Out-of-range inputs clamp to slot 00 so callers cannot generate a
+     * syntactically valid but product-invalid child such as "99 Name".
+     */
+    if (!dst || capacity < (uint16_t)(3u + STORAGE_SCENE_DISPLAY_NAME_LEN + 1u))
+        return;
+    if (slot >= STORAGE_BANK_SCENE_MAX_SLOTS)
+        slot = 0u;
+    dst[0] = (char)('0' + (slot / 10u));
+    dst[1] = (char)('0' + (slot % 10u));
+    dst[2] = ' ';
+    for (i = 0u; i < STORAGE_SCENE_DISPLAY_NAME_LEN; i++)
+        dst[3u + i] = display ? display[i] : ' ';
+    dst[3u + STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+}
+
 /* See storageTypes.h for the public contract.
  *
  * UNKNOWN instrument types make missing [slotN] type lines distinguishable from
@@ -1095,10 +1667,11 @@ void storage_kitsetInit(storage_kitset_t *kit)
  *
  * The parser is intentionally incremental because filesystem.c reads from SD in
  * small chunks. Top-level fields validate only the file guard/version.
- * [slot1]..[slot6] sections collect instrument type, filename, and audio_out
- * for each voice. The kit display name is owned by the folder name, and
- * performance controls such as voice_decimation_all are not stored in
- * kitset.kcg.
+ * [slot1]..[slot6] sections collect instrument type and filename for each
+ * voice. Legacy audio_out lines are accepted into side storage only; routing
+ * is now Scene-owned and lives in sceneset.scg. The kit display name is owned
+ * by the folder name, and performance controls such as voice_decimation_all
+ * are not stored in kitset.kcg.
  */
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                                          const char *line,
@@ -1198,15 +1771,48 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
         scene_setKitInstrumentSourceName(target_kit, parsed, value);
         kit->seen_file_mask = (uint8_t)(kit->seen_file_mask | (1u << parsed));
     } else if (storage_streq(key, "audio_out")) {
-        if (!target_kit)
-            return STORAGE_STATUS_BAD_VALUE;
-        st = storage_parseU8(value, &target_kit->settings.audio_out[parsed]);
+        /*
+         * Accept old kitset routing without making it Kit-owned.
+         *
+         * Inputs: per-slot audio_out from pre-Scene-routing kitset files.
+         * Output: compatibility side data in storage_kitset_t. Root Kit Load
+         * ignores this field; Scene Load may import it only when sceneset.scg
+         * lacks its own audio_out line.
+         */
+        st = storage_parseU8(value, &kit->legacy_audio_out[parsed]);
         if (st != STORAGE_STATUS_OK)
             return st;
         kit->seen_audio_out_mask = (uint8_t)(kit->seen_audio_out_mask | (1u << parsed));
     }
 
     return STORAGE_STATUS_OK;
+}
+
+uint8_t storage_kitsetHasCompleteLegacyAudioOut(const storage_kitset_t *kit)
+{
+    const uint8_t all_slots = (uint8_t)((1u << STORAGE_KIT_SLOT_COUNT) - 1u);
+
+    /*
+     * Report whether an old kitset supplied routing for every slot.
+     *
+     * Inputs: completed kitset parse state. Output: nonzero when all six
+     * legacy audio_out bits are present. The bit expression deliberately
+     * mirrors storage_kitsetFinalize() so partial hand-edited files never
+     * import mixed default/legacy routes into a Scene.
+     */
+    return (uint8_t)(kit && kit->seen_audio_out_mask == all_slots);
+}
+
+const uint8_t *storage_kitsetLegacyAudioOut(const storage_kitset_t *kit)
+{
+    /*
+     * Borrow the retained legacy routing array.
+     *
+     * Input: completed kitset parse state. Output: six route bytes or NULL.
+     * Caller must first check storage_kitsetHasCompleteLegacyAudioOut() unless
+     * it intentionally handles partial legacy data.
+     */
+    return kit ? kit->legacy_audio_out : 0;
 }
 
 /* See storageTypes.h for the public contract.
@@ -1223,8 +1829,7 @@ storage_status_t storage_kitsetFinalize(const storage_kitset_t *kit)
         return STORAGE_STATUS_MISSING_REQUIRED;
     }
     if (kit->seen_type_mask != all_slots ||
-        kit->seen_file_mask != all_slots ||
-        kit->seen_audio_out_mask != all_slots) {
+        kit->seen_file_mask != all_slots) {
         return STORAGE_STATUS_MISSING_REQUIRED;
     }
     for (uint8_t i = 0u; i < STORAGE_KIT_SLOT_COUNT; i++) {

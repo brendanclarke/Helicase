@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SD_ROOT = ROOT / "SD_CARD"
-PARAMETER_ARRAY_H = ROOT / "Core" / "Scene" / "Preset" / "ParameterArray.h"
+PARAMETER_ARRAY_H = ROOT / "Core" / "Bank" / "Scene" / "Preset" / "ParameterArray.h"
 PARAM_RENAME_TXT = ROOT / "param_rename.txt"
 
 # Voice slots and extensions are fixed by storageTypes.c. The short filename
@@ -1085,13 +1085,13 @@ def write_kitset(
     ]
 
     for slot, (instrument_type, filename, _) in enumerate(files, start=1):
-        audio_param = f"PAR_AUDIO_OUT{slot}"
-        audio_out = payload_value(payload, param_values, audio_param)
+        # Scene data owns per-voice audio_out now. Root Kit conversion writes
+        # only membership and generated slot-6/track-7 decay; old generated
+        # kitsets with audio_out remain loadable as compatibility input.
         lines.extend([
             f"[slot{slot}]",
             f"type={instrument_type}",
             f"file={filename}",
-            f"audio_out={audio_out}",
             "",
         ])
 

@@ -42,9 +42,11 @@
  */
 #define STORAGE_ROOT_KIT              "Kit"
 #define STORAGE_ROOT_SCENE            "Scene"
+#define STORAGE_ROOT_BANK             "Bank"
 #define STORAGE_ROOT_INSTRUMENT       "Instrument"
 #define STORAGE_KITSET_FILENAME       "kitset.kcg"
 #define STORAGE_SCENESET_FILENAME     "sceneset.scg"
+#define STORAGE_BANKSET_FILENAME      "bankset.bcg"
 #define STORAGE_KIT_SLOT_COUNT        6u
 /*
  * Kit and Scene folders are numbered directory entries, not legacy file slots.
@@ -56,6 +58,8 @@
  */
 #define STORAGE_KIT_MAX_SLOTS         1000u
 #define STORAGE_SCENE_MAX_SLOTS       1000u
+#define STORAGE_BANK_MAX_SLOTS        1000u
+#define STORAGE_BANK_SCENE_MAX_SLOTS  16u
 #define STORAGE_KIT_FILENAME_MAX      13u
 /*
  * Maximum Kit member filename stored in kitset.kcg.
@@ -123,14 +127,16 @@ typedef instrument_type_t storage_instrument_type_t;
  * hand-edited files.
  *
  * Inputs arrive through storage_kitsetParseLine(). Outputs are this struct and
- * writes to scene->kit.settings.audio_out[]. Clients are
- * filesystem_loadKitDirectory_tick() in filesystem.c and the generated
- * kitset.kcg files.
+ * writes to Kit source names. Legacy audio_out lines are retained in
+ * legacy_audio_out[] only so Scene Load can import old embedded Kits when
+ * sceneset.scg has no audio_out line. New writers must not emit audio_out in
+ * kitset.kcg.
  */
 typedef struct {
     char instrument_file[STORAGE_KIT_SLOT_COUNT]
                         [STORAGE_KIT_MEMBER_FILENAME_MAX];
     storage_instrument_type_t instrument_type[STORAGE_KIT_SLOT_COUNT];
+    uint8_t legacy_audio_out[STORAGE_KIT_SLOT_COUNT];
     uint8_t current_slot;
     uint8_t seen_format;
     uint8_t seen_version;
@@ -168,17 +174,25 @@ typedef struct {
  * Incremental parse state for sceneset.scg.
  *
  * The file validates a Scene folder and stores Scene-level settings only. It
- * deliberately does not store the embedded Kit directory name: Scene loading
- * discovers the first valid "Kit *" directory in the folder and uses the text
- * after "Kit " as the loaded Kit name. Inputs arrive one NUL-terminated line
- * at a time. Outputs are validation bits, a caller-owned eight-character Scene
- * display name, and writes into scene_t::settings. Clients are future
+ * deliberately stores no object name: the Scene name is owned by the numbered
+ * Scene directory, and the embedded Kit name is owned by the "Kit <name>"
+ * child directory. Inputs arrive one NUL-terminated line at a time. Outputs
+ * are validation bits and writes into scene_t::settings. Clients are
  * filesystem Scene load/save state machines and SD_CARD fixture generators.
  */
 typedef struct {
     uint8_t seen_format;
     uint8_t seen_version;
-    uint8_t seen_name;
+    /*
+     * Optional v1 Scene setting presence bits.
+     *
+     * Missing fields preserve filesystem_initStagedScene() defaults so old
+     * Scene folders still load. Scene Load uses seen_audio_out to decide
+     * whether legacy embedded kitset audio_out lines should be imported.
+     */
+    uint8_t seen_audio_out;
+    uint8_t seen_fx_send_amount;
+    uint8_t seen_fader_setting;
 } storage_sceneset_t;
 
 /*
@@ -196,6 +210,50 @@ typedef struct {
     uint8_t seen_placeholder;
 } storage_effect_state_t;
 
+/*
+ * Incremental validation state for Scene/Bank draft pattern text files.
+ *
+ * Version 1 is the older thin placeholder:
+ *   format=helicase.pattern, version=1, placeholder=1
+ *
+ * Version 2 is the current draft Scene/Bank payload:
+ *   format=helicase.pattern
+ *   version=2
+ *   track1=<length>,<scale>,<128 on/off chars>
+ *   ...
+ *   track7=<length>,<scale>,<128 on/off chars>
+ *
+ * Only step on/off is stored; note, velocity, probability, automation,
+ * rotation, shuffle, and pattern-next data remain PatternData defaults. This is
+ * deliberately not the final pattern schema. It exists so Scene/Bank saves
+ * recall the 128x7 active-step grid and the two required per-track timing
+ * values while the real dynamic pattern format is still pending.
+ */
+typedef struct {
+    uint8_t seen_format;
+    uint8_t seen_version;
+    uint8_t version;
+    uint8_t seen_placeholder;
+    uint8_t seen_track_mask;
+} storage_pattern_stub_state_t;
+
+/*
+ * Incremental parse state for bankset.bcg.
+ *
+ * The Bank display name is owned only by the root Bank directory
+ * `Bank/NNN <name>/`. bankset.bcg validates the folder and carries Bank-level
+ * control values. active_scene is a Bank-local slot number in 00..15, not a
+ * root Scene library slot. The writer always emits active_scene; the parser
+ * allows it to be absent and keeps the initialized default 0 so early empty
+ * placeholder Banks remain loadable.
+ */
+typedef struct {
+    uint8_t seen_format;
+    uint8_t seen_version;
+    uint8_t seen_active_scene;
+    uint8_t active_scene;
+} storage_bankset_t;
+
 /* Initialize kitset parse state before the first line of kitset.kcg.
  *
  * Input/output: kit points to caller-owned storage_kitset_t scratch. The
@@ -208,18 +266,29 @@ void storage_kitsetInit(storage_kitset_t *kit);
  *
  * Inputs: kit is the state initialized by storage_kitsetInit(); line is one
  * NUL-terminated line with CR/LF already removed; target_kit is the Scene kit
- * being assembled. Outputs: updated parse state and audio routing settings.
+ * being assembled. Outputs: updated parse state, source-name metadata, and
+ * optional legacy audio routing side data.
  * Unknown keys are ignored for forward compatibility;
  * malformed required keys return an error status.
  */
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                                          const char *line,
                                          kit_t *target_kit);
+/*
+ * Read legacy kitset audio routing side data.
+ *
+ * Inputs: completed kitset parse state. Output: nonzero only when every slot
+ * supplied an old audio_out line; the array accessor returns the retained
+ * six-route compatibility values. New root Kit loads ignore these values,
+ * while Scene Load may use them as a fallback for old sceneset.scg files.
+ */
+uint8_t storage_kitsetHasCompleteLegacyAudioOut(const storage_kitset_t *kit);
+const uint8_t *storage_kitsetLegacyAudioOut(const storage_kitset_t *kit);
 
 /* Validate that all required kitset.kcg fields were present and coherent.
  *
  * Input: kit parse state after EOF. Output: OK or an error status. This checks
- * the file guard/version, all six type/file/audio_out fields, and that listed
+ * the file guard/version, all six type/file fields, and that listed
  * filenames have extensions matching their declared instrument type.
  */
 storage_status_t storage_kitsetFinalize(const storage_kitset_t *kit);
@@ -296,9 +365,11 @@ uint8_t storage_instrumentFilenameMatchesType(const char *filename,
  * Initialize, parse, and finalize sceneset.scg.
  *
  * Inputs: parser state, one text line at a time, optional target Scene, and a
- * fixed display-name buffer. Outputs: required guard/name bits plus retained
- * Scene settings. Missing optional settings leave the caller's defaults in
- * place, so filesystem should initialize the staged Scene before parsing.
+ * legacy fixed display-name buffer retained for call-site compatibility.
+ * Outputs: required guard bits plus retained Scene settings. The parser never
+ * stores a Scene name from file contents; missing optional settings leave the
+ * caller's defaults in place, so filesystem should initialize the staged Scene
+ * before parsing.
  */
 void storage_scenesetInit(storage_sceneset_t *state);
 storage_status_t storage_scenesetParseLine(
@@ -322,6 +393,34 @@ storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state);
 uint8_t storage_parseNumberedFolder(const char *name,
                                     uint16_t *slot,
                                     char display[STORAGE_KIT_DISPLAY_NAME_LEN]);
+
+/*
+ * Parse a Bank-local Scene folder such as "00 Slak".
+ *
+ * Inputs: one child directory display name from inside a Bank. Outputs:
+ * nonzero only for the two-digit Bank workspace namespace 00..15, direct
+ * Bank-local slot, and eight display cells. This must not share the root
+ * three-digit parser: root Scene library slots and Bank-local Scene slots are
+ * different product identities.
+ */
+uint8_t storage_parseBankSceneFolder(
+    const char *name,
+    uint8_t *slot,
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
+
+/*
+ * Format one Bank-local Scene child directory.
+ *
+ * Inputs: Bank-local slot 0..15 and eight Scene display cells. Output:
+ * `SS <name>` where SS is two decimal digits. Slot 0 maps to "00", not
+ * "000", keeping Bank workspace Scene slots visibly distinct from root Scene
+ * library entries.
+ */
+void storage_formatBankSceneDir(
+    char *dst,
+    uint16_t capacity,
+    uint8_t slot,
+    const char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
 
 /* Copy arbitrary text into the firmware's fixed eight-character name format.
  *
@@ -443,6 +542,54 @@ void storage_effectStateInit(storage_effect_state_t *state);
 storage_status_t storage_effectParseLine(storage_effect_state_t *state,
                                          const char *line);
 storage_status_t storage_effectFinalize(const storage_effect_state_t *state);
+/*
+ * Initialize/parse/finalize Scene/Bank pattern text.
+ *
+ * Inputs are complete text lines from filesystem.c. Outputs are validation
+ * bits plus PatternSet step-active/length/scale edits for v2 track lines. The
+ * caller's PatternSet must already be seeded through pat_initPatternSet() so
+ * omitted draft data, old placeholders, and non-stored step fields all keep the
+ * same defaults.
+ */
+void storage_patternStubStateInit(storage_pattern_stub_state_t *state);
+storage_status_t storage_patternStubParseLine(
+    storage_pattern_stub_state_t *state,
+    const char *line,
+    PatternSet *pattern);
+storage_status_t storage_patternStubFinalize(
+    const storage_pattern_stub_state_t *state);
+/*
+ * Stream placeholder/draft Scene child files one line at a time.
+ *
+ * Inputs: destination buffer, capacity, and logical zero-based line index from
+ * filesystem's generic text writer. Outputs: the number of bytes written,
+ * including the trailing newline, or zero when the tiny schema has ended.
+ * Clients: Scene Save and Bank-local Scene Save for effects.fx and
+ * pattern.pat.
+ */
+uint8_t storage_formatEffectPlaceholderLine(char *dst,
+                                            uint16_t capacity,
+                                            uint16_t line_index);
+uint8_t storage_formatPatternStubLine(char *dst,
+                                      uint16_t capacity,
+                                      const PatternSet *pattern,
+                                      uint16_t line_index);
+/*
+ * Initialize/parse/finalize and stream the Bank-level config file.
+ *
+ * bankset.bcg is a guard/config file only. It never stores a Bank name; the
+ * directory name owns identity. active_scene is a Bank-local 00..15 Scene
+ * slot and is emitted by the writer, while the parser defaults it to 0 if the
+ * line is absent.
+ */
+void storage_banksetInit(storage_bankset_t *state);
+storage_status_t storage_banksetParseLine(storage_bankset_t *state,
+                                          const char *line);
+storage_status_t storage_banksetFinalize(const storage_bankset_t *state);
+uint8_t storage_formatBanksetLine(char *dst,
+                                  uint16_t capacity,
+                                  const storage_bankset_t *state,
+                                  uint16_t line_index);
 /*
  * Build an 8.3-safe saved instrument filename from Scene-retained metadata.
  *

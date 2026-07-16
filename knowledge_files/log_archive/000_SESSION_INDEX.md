@@ -46,6 +46,8 @@
 | 035 | 2026-07-13 | local working directory, branch `dev-phase2-filesys` | Phase 3 Kit/Instrument Morph Load, LFO `self` storage, descriptor-domain LFO scaling, and new-format Kit Save to `Kit/` directories |
 | 036 | 2026-07-14 | local working directory, development branch | asyncfatfs LFN/case expansion, File/Dir diagnostics, Kit Save repair, `000` slot policy, restored Kit load/save, and root Instrument Save |
 | 037 | 2026-07-15 | local working directory, branch `dev-phase2-filesys` | FAILED TESTING: Morph save/load expansion and asyncfatfs rename/replace attempts left Kit Save unable to create/load usable Kit directories; consider rollback to Session 036 boundary or pre-LFN expansion |
+| 038 | 2026-07-15 | local working directory, branch `dev-phase2-filesys` | Save/Load repair: recursive Kit overwrite, root Instrument Save repair, KitMrp/InstrumentMrp Save projection, Load/Save UI polish, asyncfatfs reference |
+| 039 | 2026-07-16 | local working directory, branch `dev-phase2-filesys` | Scene and Bank directory bridge: Scene-owned mix settings, root Scene Save/Load, BankData, Bank boot/load/save, v2 draft pattern.pat, Dev Mode menu gate |
 
 ---
 
@@ -269,7 +271,7 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | `instrument_decimation` and `velo_mod_amount` are `ROW_NOBIND_IMAGE`: morphable/modulatable/automatable image values with no direct struct-offset runtime bind | 032 |
 | Descriptor Morph was broken after Session 032 and fixed in Session 033; Morph now runs per voice from Scene-owned descriptor images | 032, 033 |
 | LFO/velocity target assignment storage/display existed after Session 032; Session 033 added descriptor/Scene runtime modulation, while step automation still needs descriptor-aware `AutomationNode` work | 032, 033 |
-| Scene modulation targets live in `Core/Scene/SceneModTargets.c/h`: initial order is `1vm..6vm`, then Scene `srt`; future FX targets join this namespace | 033 |
+| Scene modulation targets live in `Core/Bank/Scene/SceneModTargets.c/h`: initial order is `1vm..6vm`, then Scene `srt`; future FX targets join this namespace | 033, 039 |
 | Instrument parser keys allow at least 32 bytes; HiHat canonical keys are `amp_envelope_decay` and `amp_envelope_decay_choke`, while storage accepts legacy closed/open aliases | 032, 034 |
 | Instrument registry metadata is firmware-only: Drum/Snare Basic, Cymbal Advanced, HiHat Advanced|Choke; a replacement may not take a Kit above two Advanced types | 034 |
 | Root Instrument Load validates into private staging; active commit clears all modulation owners, replaces/resets the slot, rebuilds all six runtime/Morph images, then normalizes and rebinds all sources while UI target switches are locked | 034 |
@@ -281,21 +283,21 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | Normal `Save:[Kit     ]` writes directory Kit format: `Kit/<NNN Name>/kitset.kcg` plus six visible instrument files with `[params]` and `[morph]`; `kitset.kcg` stores asyncfatfs-returned 8.3 aliases for member opens | 035, 036 |
 | asyncfatfs now supports case-preserving SFN display, VFAT LFN create/open for files and directories, case-sensitive LFN matching, object iteration, and returned short aliases; atomic rename/replace and recursive directory replace remain missing primitives | 036 |
 | Dot-prefixed files/directories are real filesystem objects and must not be hidden by asyncfatfs. Product scanners may filter by product naming/type rules, but the filesystem layer and File/Dir diagnostics do not suppress ordinary `.` names | 036 |
-| Top-level Load/Save cycling is currently whitelisted to File, Dir, and Kit. Scene, Settings, Samples, KitMrp, and legacy containers remain compiled but gated until each is retested/promoted deliberately | 036 |
+| Top-level Load/Save cycling promotes Kit, KitMrp, Scene, and Bank; File/Dir/sDir diagnostics remain compiled but appear only when `CONFIG_DEV_MODE != 0` | 039 |
 | Root Instrument Save is implemented from nested Save-page VOICE mode and writes one resident voice to `Instrument/<stem.ext>` using the same descriptor-keyed writer as Kit member files | 036 |
-| Morph Save and Scene Load/Save must be deliberately redone on the Session 036 asyncfatfs foundation before starting Bank implementation | 036 |
+| Scene Load/Save and the first Bank Load/Save bridge are implemented; future Bank work is the 16-Scene workspace, save/load masks, autosave, and safe rename/promotion | 039 |
 | Pattern step destinations use canonical 16-bit IDs, but `AutomationNode` is still legacy byte CC/CC2; dynamic modulation-node enumeration also remains follow-up runtime work | 034, 035 |
 | ResonantFilter.c double literals (0.5*, 1.0-) on lines 141/167 — software emulation in hot loop | 013 |
 | Kit save writes canonical 236 bytes (8-byte name + END_OF_SOUND_PARAMETERS sound bytes); short kit loads zero-fill missing sound bytes | 013, 017 |
 | Sequencer sources imported from original LXR: sequencer + EuklidGenerator + SomData + SomGenerator; sequencer_.c retained as legacy reference | 014 |
-| frontPanelParser.c/h deleted; protocol opcodes replaced by direct owner APIs and `Core/Scene/Pattern/PatternData.c/h` | 028 |
+| frontPanelParser.c/h deleted; protocol opcodes replaced by direct owner APIs and `Core/Bank/Scene/Pattern/PatternData.c/h` | 028, 039 |
 | `led_processSeqLedState()` drains Sequencer LED dirty flags in the foreground main loop; do not move it to TIM3 without auditing Menu/button/LED state access | 028 |
 | Pattern API boundary: UI/copy/filesystem/generator code should call `pat_*`; Sequencer no longer exposes `seq_patternSet`/`seq_tmpPattern`/`seq_selectedStep` compatibility names in live code | 028, 029 |
-| `Core/Preset` moved to `Core/Scene/Preset`; public names remain `preset_*`, `parameterArray_*`, `paramArray_*`, and `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign | 029 |
+| `Core/Preset` moved to `Core/Bank/Scene/Preset`; public names remain `preset_*`, `parameterArray_*`, `paramArray_*`, and `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign | 029, 039 |
 | Active-pattern load staging buffer (`pat_tmpPattern`) stays for now and should come out with the 17th Scene/background-bank-load design; it should be the only necessary temporary pattern storage | 029 |
 | Future globals direction: replace raw duplicated globals with canonical settings structs split scene-level, bank-level, and system-level; exact membership TBD during Scene/file redesign | 029 |
 | Phase 2 root SD layout and current Kit/instrument file state are documented in `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`: `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, and root `settings.cfg` | 030, 032 |
-| Root `Kit/` load is now directory-based for normal kits: scan `Kit/NNN Name`, load `kitset.kcg` plus six instrument files; morph load remains legacy `.SND` for now | 030 |
+| Root `Kit/` load is directory-based for normal Kit and KitMrp workflows: scan `Kit/NNN Name`, load `kitset.kcg` plus six instrument files | 030, 035, 039 |
 | Numbered folders prefer `NNN Name`; loaders may accept `NNN_Name`; Kit scan also has a FAT short-alias fallback for names like `001SLA~1` | 030 |
 | `storageTypes.c/h` owns Phase 2 kit text schemas and parameter maps; all functions in that layer must use the `storage_` prefix | 030 |
 | New code must be commented at detailed contract level: why it exists, what it does, inputs/outputs, and clients/accessors/affiliates | 030 |
@@ -419,3 +421,7 @@ Attempted Morph Kit/Instrument save expansion, asyncfatfs LFN rename/replace pol
 ### 038 — Save/Load Repair, KitMrp/InstrumentMrp Save, And Asyncfatfs Documentation (2026-07-15)
 Recovered from Session 037 by removing broken Scene/Kit/Morph save remnants, rebuilding Kit Save on recursive directory replacement and verified exact-card scan behavior, restoring Instrument Save without corrupting root `Instrument/`, adding diagnostic filesystem error reporting, and tightening Load/Save hardware UI behavior. `Save:[KitMrp]` and nested InstrumentMrp Save now use new-format text payloads with current interpolated values written to both endpoint sections, while resident kit/instrument names remain unchanged. Added/updated Session 038 source-of-truth logs, filesystem specs, and asyncfatfs reference documentation.
 - **Find here**: Session 037 cleanup/correction, recursive Kit overwrite, filesystem error overlays, Save:[KitMrp], InstrumentMrp Save projection, Load/Save endless-pot/BAR behavior, asyncfatfs API reference
+
+### 039 — Scene/Bank Directory Bridge And Draft Pattern Persistence (2026-07-16)
+Implemented Scene-owned per-voice mix settings, root Scene Load/Save, BankData, Bank scan/load/save, Bank-first boot fallback, `Bank/000 Slak/00 Slak` fixture generation, and the source move to `Core/Bank/Scene/`. Hardware retests fixed Save Scene reachability, OK/OW completion cursor reset, per-voice VOICE `mix` Scene setting pages, the no-file-self-name rule, Scene/Kit/Bank retained-name seeding, Scene Save root-wipe prevention, Bank child Scene re-entry, Load Bank OK affordance, universal `none` defaults, `ERR BnkL06` display-name open-key failure, and hidden diagnostic menu entries behind `CONFIG_DEV_MODE`. Scene/Bank saves now emit draft v2 text `pattern.pat` rows with 128x7 step-active bits plus per-track length/scale while still loading v1 placeholders.
+- **Find here**: Scene data ownership, Scene Save/Load, BankData, Bank Load/Save, Bank boot fallback, Scene/Bank deletion safety, `ERR BnkL06`, no `name=` fields, universal `none`, v2 pattern.pat draft, Dev Mode Load/Save diagnostics

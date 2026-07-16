@@ -25,7 +25,8 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/Hardware/USB/App \
           -ICore/Hardware/USB/OTG_Driver/src \
           -ICore/Menu \
-          -ICore/Scene/Preset \
+          -ICore/Bank \
+          -ICore/Bank/Scene/Preset \
           -ICore/MIDI \
           -ICore/DSPAudio \
           -ICore/DSP/Instruments \
@@ -33,8 +34,8 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Snare \
           -ICore/DSP/Instruments/Cymbal \
           -ICore/DSP/Instruments/HiHat \
-          -ICore/Scene \
-          -ICore/Scene/Pattern \
+          -ICore/Bank/Scene \
+          -ICore/Bank/Scene/Pattern \
           -ICore/Sequencer \
           -ICore/SampleRom \
           -ICore/compat
@@ -87,11 +88,12 @@ SRCS = \
   Core/Menu/Cc2Text.c \
   Core/Menu/copyClearTools.c \
   Core/Menu/screensaver.c \
-  Core/Scene/Preset/presetManager.c \
-  Core/Scene/Preset/presetMorphEngine.c \
-  Core/Scene/Preset/ParameterArray.c \
-  Core/Scene/SceneData.c \
-  Core/Scene/SceneModTargets.c \
+  Core/Bank/Scene/Preset/presetManager.c \
+  Core/Bank/Scene/Preset/presetMorphEngine.c \
+  Core/Bank/Scene/Preset/ParameterArray.c \
+  Core/Bank/BankData.c \
+  Core/Bank/Scene/SceneData.c \
+  Core/Bank/Scene/SceneModTargets.c \
   Core/DSP/Instruments/InstrumentManager.c \
   Core/DSP/Instruments/Drum/DrumParameters.c \
   Core/DSP/Instruments/Snare/SnareParameters.c \
@@ -102,10 +104,10 @@ SRCS = \
   Core/MIDI/Uart.c \
 	  Core/MIDI/MidiVoiceControl.c \
 	  Core/MIDI/MidiParser.c \
-  Core/Scene/Pattern/PatternData.c \
-  Core/Scene/Pattern/EuklidGenerator.c \
-  Core/Scene/Pattern/SomGenerator.c \
-  Core/Scene/Pattern/SomData.c \
+  Core/Bank/Scene/Pattern/PatternData.c \
+  Core/Bank/Scene/Pattern/EuklidGenerator.c \
+  Core/Bank/Scene/Pattern/SomGenerator.c \
+  Core/Bank/Scene/Pattern/SomData.c \
 	  Core/Sequencer/sequencer.c \
 	  Core/Sequencer/sequencerTimer.c \
 	  Core/Sequencer/clockSync.c \

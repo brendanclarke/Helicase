@@ -5,30 +5,32 @@
 ## How this document is organized
 
 The work is grouped into six phases, ordered around the trajectory the code is
-actually following after Session 036. Phase 1 is complete foundation cleanup.
-Phase 2 has landed the first real filesystem/Scene bridge: root Kit directory
-loading into descriptor-backed instrument images. Phase 3 now finishes that
-partially-built foundation before the sequencer storage rewrite: instrument
-parameter load/runtime coverage, descriptor modulation and automation, Morph,
-menu/load-save work, Scene and Bank structures, and new-format load/save
-operations. Sessions 033-038 landed the runtime/Morph path, Instrument Load,
-Kit/Instrument Morph Load, descriptor-domain LFO repair, LFO `self` storage,
-normal and Morph new-format Kit Save, root Instrument and InstrumentMrp Save,
-asyncfatfs LFN/case support, direct `000..999` slots, restored Kit load/save
-reachability, recursive Kit-slot replacement, and Load/Save hardware menu
-repair. The next Phase 3 emphasis is to redo Scene Load/Save on the Session
-036-038 filesystem foundation before starting Bank, while descriptor-aware
-automation remains a parallel runtime follow-up. Phase 4 is the dynamic stack
-Pattern implementation that used to be
-scoped as Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup,
-copy/clear helpers, and menu controls. Phase 6 is DSP expansion.
+actually following after Session 039. Phase 1 is complete foundation cleanup.
+Phase 2 landed the first real filesystem/Scene bridge: root Kit directory
+loading into descriptor-backed instrument images. Phase 3 now finishes the
+directory/text filesystem bridge before the sequencer storage rewrite:
+instrument parameter load/runtime coverage, descriptor modulation and
+automation, Morph, menu/load-save work, Scene and Bank structures, and
+new-format load/save operations. Sessions 033-039 landed the runtime/Morph
+path, Instrument Load, Kit/Instrument Morph Load, descriptor-domain LFO repair,
+LFO `self` storage, normal and Morph new-format Kit Save, root Instrument and
+InstrumentMrp Save, asyncfatfs LFN/case support, direct `000..999` slots,
+recursive Kit/Scene slot replacement rules, Load/Save hardware menu repair,
+Scene-owned mix settings, root Scene Load/Save, the first root Bank
+scan/load/save bridge, Bank-first boot fallback, and draft Scene/Bank
+`pattern.pat` persistence. The next Phase 3 emphasis is the real 16-Scene Bank
+workspace, Bank-local Scene toggle/save/load semantics, and later autosave
+promotion; descriptor-aware automation remains a parallel runtime follow-up.
+Phase 4 is the dynamic stack Pattern implementation that used to be scoped as
+Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup, copy/clear
+helpers, and menu controls. Phase 6 is DSP expansion.
 
 Within each phase, features are grouped by **where they live in the codebase**, per your original request, so a given implementation pass touches a small, coherent set of files.
 
 1. **Phase 1 — Foundation Refactors** (no new features; your four listed refactor/reorg tasks, including burst reduction)
-2. **Phase 2 — Directory Kit Loading & Descriptor Scene Bridge** (`Core/Hardware/SD/`, `Core/Scene/`, `Core/DSP/Instruments/`)
-3. **Phase 3 — Finish Filesystem, Instrument Runtime, Morph & Menus** (`Core/Scene/`, `Core/Hardware/SD/`, `Core/Menu/`, `Core/Scene/Preset/`)
-4. **Phase 4 — Dynamic Stack Pattern Implementation** (`Core/Scene/Pattern/`, dynamic event pool)
+2. **Phase 2 — Directory Kit Loading & Descriptor Scene Bridge** (`Core/Hardware/SD/`, `Core/Bank/Scene/`, `Core/DSP/Instruments/`)
+3. **Phase 3 — Finish Filesystem, Instrument Runtime, Morph & Menus** (`Core/Bank/Scene/`, `Core/Hardware/SD/`, `Core/Menu/`, `Core/Bank/Scene/Preset/`)
+4. **Phase 4 — Dynamic Stack Pattern Implementation** (`Core/Bank/Scene/Pattern/`, dynamic event pool)
 5. **Phase 5 — MIDI, UI & Performance Workflow Cleanup** (`Core/Menu/`, `Core/MIDI/`, `Core/Hardware/frontPanel/`)
 6. **Phase 6 — DSP Expansion** (`Core/DSPAudio/` — new voices, oscillators, FX bus)
 
@@ -38,7 +40,7 @@ Every phase ends with **Open Engineering Questions** (things that need a decisio
 
 ## Phase 1 — Foundation Refactors
 
-**Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Scene/Pattern/`, `Core/Preset/` → `Core/Scene/Preset/`
+**Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Bank/Scene/Pattern/`, `Core/Preset/` → `Core/Bank/Scene/Preset/`
 
 **Current status:** completed across Sessions 027-029. Burst reduction,
 frontPanelParser removal, PatternData ownership, and the Preset folder move are
@@ -82,14 +84,14 @@ Since Phase 4 is about to replace this entire pattern data model (8 fixed patter
 
 Recommendation: move first, rewrite second, as two separate commits. Move everything pattern-storage-and-servicing-related (the structs above, the `Step`/`PatternSet` types, load/save helpers, step-advance logic, euklid/patgen generators) into `Core/Sequencer/Pattern/`, rename the moved functions with the `pat_*` prefix, and get it compiling and behaving identically to before. Then do the Phase 4 rewrite inside that new location. Two reasons: first, a pure rename-and-move is easy to verify byte-for-byte (same behavior, different file/name), so if something breaks you know it's the move, not new logic; second, `seq_tick()` and the timer wiring stay in `sequencer.c` (they're timing/scheduling, not pattern storage), so the move needs a clean line between "what moves to `Pattern/`" and "what stays in `sequencer.c` as the scheduler that calls into `Pattern/`" — deciding that boundary is easier without simultaneously redesigning the data the boundary is passing around.
 
-### 1.4 Move `Core/Preset/` into `Core/Scene/Preset/`
+### 1.4 Move `Core/Preset/` into Scene/Bank-owned Preset
 
 Completed in Session 029. `presetManager.c/.h` and `ParameterArray.c/.h` now
-live under `Core/Scene/Preset/`; public function prefixes intentionally remain
+live under `Core/Bank/Scene/Preset/`; public function prefixes intentionally remain
 `preset_*`, `parameterArray_*`, and `paramArray_*`.
 
 The include-path knock-on was handled in the same session: `Makefile` uses
-`-ICore/Scene/Preset` and source paths under `Core/Scene/Preset/`.
+`-ICore/Bank/Scene/Preset` and source paths under `Core/Bank/Scene/Preset/`.
 
 **Suggested complementary step:** since 1.2, 1.3, and 1.4 all touch `frontPanelParser.c`'s call sites in overlapping files (`presetManager.c` and `sequencer.c` both `#include "frontPanelParser.h"`), doing 1.2 *before* 1.3/1.4 means the direct-wiring pass only has to happen once, against the pre-move file layout, rather than being redone against new paths. The order above (1.1 → 1.2 → 1.3 → 1.4) reflects that.
 
@@ -101,7 +103,7 @@ The include-path knock-on was handled in the same session: `Makefile` uses
 
 ## Phase 2 — Directory Kit Loading & Descriptor Scene Bridge
 
-**Location:** `Core/Scene/` (post-move), `Core/Hardware/SD/filesystem.c`, `Core/Hardware/SD/asyncfatfs/`
+**Location:** `Core/Bank/Scene/` (post-move), `Core/Hardware/SD/filesystem.c`, `Core/Hardware/SD/asyncfatfs/`
 
 This phase is now the completed bridge that made the later filesystem work
 possible. It did not implement the full Bank/Scene hierarchy. It settled the
@@ -129,8 +131,8 @@ Implemented through Sessions 030-032:
 Explicitly not completed in Phase 2:
 
 - New-format save operations.
-- Scene folder load/save.
-- Bank folder load/save.
+- Scene folder load/save. Implemented later in Session 039.
+- Bank folder load/save. Implemented later in Session 039 as a one-resident-Scene bridge, not the final 16-Scene workspace.
 - Effect load/save.
 - Root `settings.cfg`; globals still use legacy `glo.cfg`.
 - Final new-format Morph load/save was not part of Phase 2; Kit/Instrument
@@ -184,8 +186,8 @@ Perform, or All, because those choices do not have a valid current workflow.
 
 ## Phase 3 — Finish Filesystem, Instrument Runtime, Morph & Menus
 
-**Location:** `Core/Scene/`, `Core/Hardware/SD/filesystem.c`,
-`Core/Hardware/SD/storageTypes.c`, `Core/Scene/Preset/`, `Core/Menu/`,
+**Location:** `Core/Bank/Scene/`, `Core/Hardware/SD/filesystem.c`,
+`Core/Hardware/SD/storageTypes.c`, `Core/Bank/Scene/Preset/`, `Core/Menu/`,
 `Core/DSP/Instruments/`
 
 This phase finishes the work that Phase 2 intentionally exposed but did not
@@ -285,16 +287,17 @@ Complete the menu path required for descriptor-backed instruments:
 - Visible/editable per-voice Morph controls in PERF are implemented.
 - Rebuild load/save/reload menus around the typed filesystem hierarchy instead
   of the old flat slot list.
-- Status after Session 038: top-level File/Dir diagnostics, sDir diagnostic
-  Save, Kit, and KitMrp are promoted on the Load/Save type cycler where
-  applicable. Kit Load/Save are restored on the asyncfatfs LFN/case foundation,
-  and Kit Save recursively replaces all physical directories for the target
-  slot before writing the new folder. VOICE press on Load enters nested
-  Instrument Load; VOICE press on Save enters root Instrument Save and
-  InstrumentMrp Save. Hardware pots now navigate the Load/Save hierarchy
-  directly: pot 1 walks main Load items, per-voice Instrument Load items, main
-  Save items, and per-voice Instrument Save items; pot 2 changes slot/item; pot
-  3 moves or deselects the cursor; pot 4 edits characters.
+- Status after Sessions 038-039: Kit, KitMrp, Scene, and Bank are promoted on
+  the Load/Save type cycler where applicable. File/Dir/sDir diagnostics remain
+  compiled but normally hidden behind `CONFIG_DEV_MODE`. Kit Load/Save are
+  restored on the asyncfatfs LFN/case foundation, and Kit Save recursively
+  replaces all physical directories for the target slot before writing the new
+  folder. VOICE press on Load enters nested Instrument Load; VOICE press on Save
+  enters root Instrument Save and InstrumentMrp Save. Hardware pots now navigate
+  the Load/Save hierarchy directly: pot 1 walks main Load items, per-voice
+  Instrument Load items, main Save items, and per-voice Instrument Save items;
+  pot 2 changes slot/item; pot 3 moves or deselects the cursor; pot 4 edits
+  characters.
 - Status after Sessions 035-038: Kit Morph, nested Instrument, and same-type
   Instrument Morph Load are usable in code. KitMrp Save and InstrumentMrp Save
   are live new-format writers: they snapshot the current interpolated
@@ -310,6 +313,11 @@ Complete the menu path required for descriptor-backed instruments:
   are multi-Scene toggles and every selected target blinks; in Instrument Load
   exactly one Scene is selected and blinks. The code is shaped for 16 Scenes
   even though only Scene 1 is resident today.
+- Status after Session 039: Scene and Bank are promoted top-level Load/Save
+  entries with explicit OK/OW confirmation. File/Dir/sDir diagnostics are
+  compiled but hidden unless `CONFIG_DEV_MODE != 0`. Scene and Bank operations
+  return the cursor to the top-row type field when they complete. Load Bank
+  shows an OK affordance and does not load while scrolling.
 - Keep scene-level MIDI note/channel and `voice_decimation_all` out of
   `kitset.kcg` and instrument files.
 
@@ -319,9 +327,12 @@ Define the real structures and file ownership before implementing large
 sequencer storage changes:
 
 - Raise the Scene model toward 17 resident scenes: 16 bank scenes plus one
-  load/landing slot.
-- Define `sceneset.scg` contents and validation.
-- Define `bankset.bcg` contents and validation.
+  load/landing slot. Session 039 still has `SCENE_COUNT == 1` and only bridges
+  Bank slot `00` into that one resident Scene.
+- `sceneset.scg` contents and validation are defined and implemented for the
+  current Scene bridge. It stores Scene settings, never object names.
+- `bankset.bcg` contents and validation are defined and implemented for v1:
+  format/version plus `active_scene`.
 - Keep root `Scene/` and `Bank/` folders numbered with gap-tolerant browsing.
 - Root `Scene/` is a user library/pool like root `Kit/` and root
   `Instrument/`: explicit Scene Save writes there, explicit Scene Load imports
@@ -329,10 +340,13 @@ sequencer storage changes:
 - Scene embedded kits are folders named `Kit <kit name>/`; the second word is
   the kit name, and that name is not stored anywhere else.
 - Store MIDI note/channel and `voice_decimation_all` as Scene settings.
-- The Session 034 Load-menu Scene controls are only a UI/selection bridge; they
-  do not implement Scene folders, sixteen resident Scene payloads, or Bank
-  storage. Keep those concerns separate from the completed Kit/Instrument
-  transaction paths.
+- Session 039 implements root Scene folders and the first Bank storage bridge.
+  It does not implement sixteen resident Scene payloads, multi-Scene edit
+  masks, Bank-local Scene toggles, or autosave.
+- Bank-local Scene folders are two-digit `00..15`, not root three-digit
+  `000..999` library folders.
+- Object names are directory/file names. `sceneset.scg`, `bankset.bcg`, and
+  instrument files must not acquire `name=` fields.
 
 ### 3.6 Load and Save Operations
 
@@ -365,18 +379,20 @@ Implement load/save operations for the settled file types in
   `[params]` and `[morph]` endpoint storage for morphable values; non-morphable
   values remain normal-only. Morph Save is therefore a flattened current-state
   snapshot, not an inverted endpoint export.
-- Scene Load/Save must be redone before Bank. It writes/reads `sceneset.scg`,
-  `Kit <kit name>/`, `pattern.pat`, and `effect.fx` through the Session 036
-  asyncfatfs foundation. Root `Scene/` load/save is library/pool exchange only
-  and is not part of the autosave workspace.
-- Add an FX slot shim so Scene folders can validate/store `effect.fx` before
+- Scene Load/Save is implemented. It writes/reads `sceneset.scg`,
+  `Kit <kit name>/`, `pattern.pat`, and `effects.fx` through the Session
+  036-039 asyncfatfs foundation. Root `Scene/` load/save is library/pool
+  exchange only and is not part of the autosave workspace.
+- Add an FX slot shim so Scene folders can validate/store `effects.fx` before
   Phase 6 implements full effects.
-- Bank load/save must wait until Scene Load/Save is stable.
-  Bank load/save writes `bankset.bcg` plus up to 16 Scene folders. Bank
-  load/save operations start with all 16 Scenes selected; SEQ buttons narrow the
-  operation to a subset of Scenes before commit.
+- Bank load/save is implemented as the initial one-resident-Scene bridge.
+  Final Bank load/save still needs the 16-Scene workspace, SEQ-button Scene
+  toggles, per-Scene save/load masks, and preservation of untoggled Bank-local
+  child Scene folders.
 - Pattern load/save stays bridge-only until Phase 4 replaces the Pattern file
-  format.
+  format. Session 039's Scene/Bank `pattern.pat` v2 draft stores only
+  128x7 step-active bits plus per-track length/scale and keeps all other step
+  data at PatternData defaults.
 - Effect load/save may initially validate placeholders; real FX parameters land
   in Phase 6.
 - `settings.cfg` replaces `glo.cfg` for system settings and active-bank number
@@ -389,8 +405,9 @@ asyncfatfs note for future save code:
 - Session 036 adds asyncfatfs LFN component creation and object iteration;
   Session 038 adds documented filename sanitization expectations and
   filesystem-level recursive directory cleanup used by Kit-slot replacement.
-  Future Scene/Bank save code should reuse/extend that filesystem boundary,
-  not recreate FAT file writers. See
+  Session 039 proves Scene/Bank save must scope recursive deletion by parent
+  directory and visible product-name parser; future save code should
+  reuse/extend that filesystem boundary, not recreate FAT file writers. See
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`.
 - Missing core primitive before autosave/power-loss-safe replacement is atomic
   rename/replace for temporary-file promotion.
@@ -428,7 +445,7 @@ Architecture decision:
   - `scene/sceneset.scg`
   - `scene/kit/kitset.kcg`
   - `scene/kit/instrument[0..5]`
-  - `scene/effect.fx`
+  - `scene/effects.fx`
   - `scene/pattern.pat`
 - Autosave applies only to committed Bank Scene slots 1..16. The future
   seventeenth landing/staging Scene is excluded until it is committed into a
@@ -462,7 +479,7 @@ Dirty ownership:
   lives inside a specific instrument file, dirty that instrument file instead.
 - Scene settings such as MIDI note/channel, global Morph, per-voice Morph
   amounts, and `voice_decimation_all` dirty `scene/sceneset.scg`.
-- Effect parameter edits dirty `scene/effect.fx`.
+- Effect parameter edits dirty `scene/effects.fx`.
 - Pattern edits dirty `scene/pattern.pat`, but pattern editing is not part of
   the multi-Scene parameter-toggle behavior. Pattern autosave can therefore stay
   active/viewed-scene scoped until Phase 4 changes the Pattern model.
@@ -490,10 +507,10 @@ Debounce policy:
 Committed files, dot-file backers, SAVE, and RELOAD:
 
 - Inside an active Bank, the non-dot filename is the committed save/load file:
-  `sceneset.scg`, `kitset.kcg`, `pattern.pat`, `effect.fx`, instrument files,
+  `sceneset.scg`, `kitset.kcg`, `pattern.pat`, `effects.fx`, instrument files,
   and `bankset.bcg` are the user's explicit SAVE/LOAD truth.
 - The matching dot-file is the autosave working backer:
-  `.sceneset.scg`, `.kitset.kcg`, `.pattern.pat`, `.effect.fx`, `.slakd1.drm`,
+  `.sceneset.scg`, `.kitset.kcg`, `.pattern.pat`, `.effects.fx`, `.slakd1.drm`,
   `.bankset.bcg`, etc. Autosave writes dirty records to these dot-files, not to
   the committed non-dot files.
 - Bank SAVE is the commit operation. It waits for the autosave scheduler to
@@ -549,7 +566,7 @@ Implementation sequencing:
   legacy byte CC/CC2 targets to canonical descriptor/Scene targets, correct
   raw float LFO adapter writes, and make modulation-node enumeration dynamic
   before treating automation as feature-complete.
-- **Effect placeholders:** decide how strict `effect.fx` validation should be
+- **Effect placeholders:** decide how strict `effects.fx` validation should be
   before Phase 6 has real FX stacks.
 
 ### Suggested Complementary Features

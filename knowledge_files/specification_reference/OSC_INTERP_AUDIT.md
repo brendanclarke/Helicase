@@ -48,7 +48,7 @@ Result:
 - Loading `GLO.CFG` restores and reapplies it.
 
 ## File-Level Changes
-1. `Core/Preset/ParameterArray.h`
+1. `Core/Bank/Scene/Preset/ParameterArray.h`
 - Added `PAR_OSC_WAVE_INTERP` in global params.
 
 2. `Core/Menu/menu.h`

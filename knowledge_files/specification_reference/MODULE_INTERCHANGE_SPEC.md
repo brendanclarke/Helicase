@@ -1,14 +1,15 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 036 for the one-pattern bridge,
+Session 030 baseline, updated through Session 039 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
 descriptor Morph, per-voice Morph, Scene modulation targets, asyncfatfs
 LFN/case expansion, restored Kit load/save, root Instrument Save, and
-Kit/Instrument Morph Save. This spec records the live module API boundaries
+Kit/Instrument Morph Save, root Scene Load/Save, and the first Bank
+Load/Save bridge. This spec records the live module API boundaries
 after `frontPanelParser.c/h` removal, the PatternData storage-ownership pass,
-the `Core/Preset` -> `Core/Scene/Preset` folder move, the first Phase 2
+the `Core/Preset` -> `Core/Bank/Scene/Preset` folder move, the first Phase 2
 directory-kit filesystem boundary, and the current bridge pattern behavior. The
 goal is to make the direct-call ownership clear so future work does not recreate
 a generic bridge.
@@ -28,7 +29,7 @@ a generic bridge.
   it must not index PatternData storage arrays directly.
 - `pat_tmpPattern` is the only active-pattern load staging buffer and is
   retained until the 17th Scene/background-bank-load design replaces it.
-- Preset code lives under `Core/Scene/Preset/`, but public API names remain
+- Preset code lives under `Core/Bank/Scene/Preset/`, but public API names remain
   `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
 - Normal root Kit loads and saves are directory-based. Kit Morph Load and
   Instrument Morph Load copy normal source endpoints into morph endpoints for
@@ -36,6 +37,9 @@ a generic bridge.
   one resident voice to the root Instrument pool. Kit/Instrument Morph Save
   writes the current per-voice interpolated value into both normal and morph
   endpoint fields.
+- Scene and Bank load/save are directory-based in the Session 039 bridge.
+  Root Scene is a library/pool. Root Bank is the current workspace selector,
+  but only one resident Scene is implemented so far.
 - Numbered library slots are direct `000..999`; slot `000` is real. This does
   not change instrument file voice coordinates, which remain one-based `1..6`.
 - asyncfatfs owns exact-case filename behavior. Product code should use
@@ -77,7 +81,7 @@ a generic bridge.
   Scene-owned descriptor images and the active slot's descriptor table instead
   of hardcoded parameter lists.
 - Scene-level sound modulation targets live in
-  `Core/Scene/SceneModTargets.c/h`. The first target set is `1vm..6vm` plus
+  `Core/Bank/Scene/SceneModTargets.c/h`. The first target set is `1vm..6vm` plus
   Scene Decimation `srt`; future FX parameters join that namespace instead of
   being inserted into per-instrument descriptor tables.
 - Pattern/container storage is still a Phase 2 bridge shape. It does not
@@ -85,7 +89,7 @@ a generic bridge.
   live shuffle storage, and final migration/backfill is expected to happen in
   external Python converters once storage settles.
 
-## Core/Scene/Pattern/PatternData
+## Core/Bank/Scene/Pattern/PatternData
 
 Affiliate modules: Menu, buttonHandler, ledHandler, copyClearTools, filesystem,
 Sequencer, EuklidGenerator, Preset/MidiParser indirectly through Sequencer
@@ -146,7 +150,7 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_applyPatternSettingsToMenu(pattern)` | Copy pattern settings into menu params. | Menu load/apply paths, buttonHandler pattern view |
 | `pat_applyTrackSettingsToMenu(pattern, track)` | Copy track settings into menu params. | buttonHandler, led follow paths, Menu voice page |
 
-## Core/Scene/Pattern/EuklidGenerator
+## Core/Bank/Scene/Pattern/EuklidGenerator
 
 Affiliate modules: Menu, buttonHandler, ledHandler, PatternData.
 
@@ -163,7 +167,7 @@ PatternData.
 | `euklid_rotatePattern(length, amount)` | Rotate generated mask. | Euklid internals |
 | `euklid_transferPattern(trackNr, patternNr)` | Transfer generated mask/length into PatternData. | Euklid internals |
 
-## Core/Scene/Pattern/SomGenerator
+## Core/Bank/Scene/Pattern/SomGenerator
 
 Affiliate modules: Menu, Sequencer, random, SomData.
 
@@ -344,13 +348,13 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
 | `seq_offsetTrackStepIndexForRotation(trackNr, oldRot, newRot, len)` | Narrow runtime hook for live rotation compensation. | PatternData only |
 
-## Core/Scene/Preset/presetManager
+## Core/Bank/Scene/Preset/presetManager
 
 Affiliate modules: filesystem, Menu, MidiParser, Sequencer, DSP voice/mod nodes,
 InstrumentManager, SceneData.
 
 Purpose: owns preset load/save status, Scene kit apply, and sound-parameter
-application. The folder now lives under `Core/Scene/Preset/`; public function
+application. The folder now lives under `Core/Bank/Scene/Preset/`; public function
 prefixes remain `preset_*` for the mechanical move.
 
 | API | Use | Usual callers / clients |
@@ -367,6 +371,9 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_loadInstrumentMorph(scene, slot, type, browser_index)` | Post one root Instrument request for morph endpoint import; type must match the destination slot and only morphable source normal endpoint values are copied into the resident morph image. | Instrument Load `<Type>Mrp` lower-row browser |
 | `preset_saveInstrument(scene, slot, display_name)` | Post one root Instrument Save request from a resident Scene/voice slot. The display stem is captured at request acceptance and filesystem writes `Instrument/<stem.ext>`. | Instrument Save nested Save-page OK |
 | `preset_saveInstrumentMorph(scene, slot, display_name)` | Post one root InstrumentMrp Save request. The writer uses the normal Instrument schema but writes the current interpolated values into both endpoint sections and does not rename resident source metadata. | Instrument Save `<Type>Mrp` OK |
+| `preset_loadSceneForScenes(presetNr, scene_mask)` / `preset_saveScene(presetNr)` | Load/save root Scene library folders through the staged Scene payload reader/writer. | Load/Save Scene |
+| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr)` | Load/save root Bank folders. Current bridge loads/saves one resident Scene and uses fallback when a Bank contains no child Scene. | Load/Save Bank, boot |
+| `preset_loadFirstAvailableSceneOrKit()` | Fallback after absent/empty Bank: lowest root Scene, then lowest root Kit, then defaults. | boot, Bank Load completion |
 | `preset_sendDrumsetParameters()` | Synchronous pre-audio Scene kit audio-routing and descriptor runtime apply. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
 | `preset_setInstrumentParameter(scene, slot, descriptor_index, image, value, recordAutomation)` | Store one descriptor-backed instrument main/morph value and apply/record when appropriate. | Menu dynamic VOICE cells, storage |
@@ -384,7 +391,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values; per-voice Morph is the engine input. | Menu, MIDI, velocity modulation, main loop |
 | `presetMorph_setVoiceLfoModulation(source_slot, target_slot, amount, polarity, lfo_value)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay that is summed around retained per-voice Morph base values. | InstrumentManager/LFO dispatch |
 
-## Core/Scene/Preset/ParameterArray
+## Core/Bank/Scene/Preset/ParameterArray
 
 Affiliate modules: Menu, Preset manager, MidiParser, modulationNode, DSP voice
 modules, mixer, filesystem, PatternData.
@@ -435,7 +442,7 @@ commit the staged slot; reset the incoming runtime; rebuild retained runtime
 images; then normalize and rebind all sources. Clearing after the type swap
 cannot recover a dynamic-pool source owned by the outgoing identity.
 
-## Core/Scene/SceneModTargets
+## Core/Bank/Scene/SceneModTargets
 
 Affiliate modules: Menu, InstrumentManager, Preset/Morph, future FX modules.
 
@@ -558,6 +565,8 @@ parsing/formatting and descriptor-key validation stay in `storageTypes.c/h`.
 | `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one direct Kit library slot `000..999` into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
 | `filesystem_requestLoadKitMorphForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging only so Preset can copy matching source normal endpoints into resident morph endpoints. | Preset/Menu KitMrp Load |
 | `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
+| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse a root `Scene/<NNN Name>/` folder into staged Scene memory, including `sceneset.scg`, embedded Kit, pattern bridge/stub, and effect placeholder, then commit to selected resident Scenes after all children validate. | Preset/Menu Scene Load, boot |
+| `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, thin `pattern.pat`, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the per-type root Instrument browser cache. | main boot, Menu Instrument Load |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Validate one root Instrument file into private staging without mutating live SceneData. | Preset Instrument request |
 | `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` / `filesystem_requestSaveInstrumentMorph(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. The Morph variant writes current interpolated values into both endpoint sections and preserves resident source naming. | Preset Instrument Save |
@@ -595,6 +604,12 @@ Important private Phase 2 kit helpers:
   member aliases are known. `kitset.kcg` remains authoritative for load, but
   Session 038 Kit Save no longer relies on leaving stale unreferenced files in
   place.
+- `filesystem_loadSceneDirectory_tick()` validates complete Scene folders in
+  private staging. It imports legacy embedded-kit `audio_out` only when
+  `sceneset.scg` lacks Scene-owned `audio_out`.
+- `filesystem_saveSceneDirectory_tick()` writes the current Scene folder shape:
+  `sceneset.scg`, embedded Kit without `audio_out`, six instruments, thin
+  `pattern.pat`, and placeholder `effects.fx`.
 - Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
   fallback for FAT aliases like `000INI~1` or `001SLA~1`.
 
@@ -639,26 +654,33 @@ layer use the `storage_` prefix.
 | `storage_instrument_type_t` | Format-level type enum for `.drm`, `.snr`, `.cym`, `.hat`. | kitset/instrument parser |
 | `storage_kitset_t` | Incremental parse state for `kitset.kcg`. | filesystem directory kit loader |
 | `storage_instrument_state_t` | Incremental parse state for one instrument file. | Kit and root-Instrument filesystem loaders |
-| `storage_kitsetInit()` / `storage_kitsetParseLine()` / `storage_kitsetFinalize()` | Validate `kitset.kcg`, collect instrument filenames/types, and write kit-level values such as audio outputs into Scene storage. | `filesystem_loadKitDirectory_tick()` |
+| `storage_kitsetInit()` / `storage_kitsetParseLine()` / `storage_kitsetFinalize()` | Validate `kitset.kcg`, collect instrument filenames/types, and retain legacy `audio_out` side data without making it required. | Kit and Scene filesystem loaders |
+| `storage_kitsetHasCompleteLegacyAudioOut()` / `storage_kitsetLegacyAudioOut()` | Expose complete legacy embedded-kit routing only for Scene Load fallback when `sceneset.scg` has no `audio_out`. | `filesystem_loadSceneDirectory_tick()` |
 | `storage_instrumentStateInit()` / `storage_instrumentParseLine()` / `storage_instrumentFinalize()` | Validate one instrument file and write descriptor-indexed `[params]`/`[morph]` values into caller-owned Kit/slot staging. | Kit and root-Instrument loaders |
 | `storage_instrumentCopyMainToMorphFallback()` | Copy mapped main values into morph buffer when an instrument has no `[morph]` section. | `filesystem_loadKitDirectory_tick()` |
 | `storage_instrumentTypeFromText()` / `storage_instrumentFilenameMatchesType()` | Convert/validate type strings and extensions. | kitset/instrument validation |
 | `storage_instrumentTypeToText()` / `storage_instrumentTypeExtension()` | Convert type enum back into schema token/extension for save. | Kit Save writer |
 | `storage_formatKitsetLine()` / `storage_formatInstrumentLine()` | Emit one bounded schema line at a time for streaming Kit Save and root Instrument Save. Instrument emission writes `self` for own-slot LFO voice selectors. | filesystem Kit/Instrument Save |
 | `storage_makeSavedInstrumentDisplayFilename()` | Generate visible LFN instrument filenames from Scene-retained stems, slot type, and optional duplicate-breaking voice suffix. asyncfatfs returns the final short alias. | filesystem Kit/Instrument Save |
+| `storage_patternStubStateInit()` / `storage_patternStubParseLine()` / `storage_patternStubFinalize()` | Validate thin Scene `pattern.pat` placeholders. | Scene Load |
+| `storage_formatPatternStubLine()` / `storage_formatEffectPlaceholderLine()` | Emit thin Scene placeholder child files one line at a time. | Scene Save |
 | `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into direct `000..999` slot plus eight-character display name. Slot `000` is real. | Kit/Scene scan |
 | `storage_copyDisplayName()` / `storage_copyFilename()` | Fixed-width display-name normalization and short filename copying. | filesystem/parser code |
 
 Current ownership decisions:
 
 - `kitset.kcg` owns only format/version validation plus per-slot kit
-  membership, instrument filenames, instrument types, and `audio_out`.
+  membership, instrument filenames, and instrument types.
+- Legacy `audio_out` lines in `kitset.kcg` are compatibility-only side data.
+  New writers do not emit them. Root Kit Load ignores them; Scene Load may
+  import them only for old embedded Kits when `sceneset.scg` lacks `audio_out`.
 - The kit name comes only from the kit folder name. It is not stored in
   `kitset.kcg`.
 - Instrument files own per-voice descriptor values, including volume, pan, and
   optional `[morph]` endpoint values.
-- MIDI note/channel values and `voice_decimation_all` do not belong in
-  `kitset.kcg` or instrument files; they belong in Scene settings.
+- MIDI note/channel values, `voice_decimation_all`, per-voice audio routing,
+  FX send amount, and fader mode do not belong in `kitset.kcg` or instrument
+  files; they belong in Scene settings.
 - Missing instrument `[morph]` data is treated as "copy main parameters into
   morph" for morphable descriptors.
 - Kit Save, KitMrp Save, root Instrument Save, and InstrumentMrp Save write the same instrument file schema the

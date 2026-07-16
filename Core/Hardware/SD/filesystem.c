@@ -64,6 +64,7 @@
 #include "fat_standard.h"
 #include "storageTypes.h"
 #include "SceneData.h"
+#include "BankData.h"
 #include "sd_routines.h"
 #include "spi_sd.h"
 #include "presetManager.h"
@@ -85,7 +86,15 @@
 #define FS_CONTAINER_KIT_LEN 512u
 #define FS_CONTAINER_PAD_BYTE 0xffu
 #define FS_KIT_LFN_MAX 80u
-#define FS_TEXT_LINE_MAX 96u
+/*
+ * Text line buffer for storageTypes schemas.
+ *
+ * Most files fit under 96 bytes, but the draft Scene/Bank pattern format writes
+ * `trackN=<length>,<scale>,<128 on/off bits>`, which needs roughly 142 bytes
+ * including newline/NUL. Keep this shared buffer large enough for that row
+ * while still avoiding whole-file staging.
+ */
+#define FS_TEXT_LINE_MAX 160u
 #define FS_INSTRUMENT_MAX_PER_TYPE 128u
 #define FS_TEST_OBJECT_MAX 64u
 
@@ -98,7 +107,10 @@ typedef enum {
     FS_INTERNAL_OP_LOAD_KIT,
     FS_INTERNAL_OP_LOAD_KIT_MORPH,
     FS_INTERNAL_OP_LOAD_SCENE,
+    FS_INTERNAL_OP_LOAD_BANK,
     FS_INTERNAL_OP_SAVE_KIT,
+    FS_INTERNAL_OP_SAVE_SCENE,
+    FS_INTERNAL_OP_SAVE_BANK,
     /*
      * Instrument Morph Save writes the root Instrument format with Morph Save
      * value projection. It is intentionally separate from the legacy flat .snd
@@ -116,6 +128,7 @@ typedef enum {
     FS_INTERNAL_OP_SAVE_GLOBALS,
     FS_INTERNAL_OP_SCAN_KITS,
     FS_INTERNAL_OP_SCAN_SCENES,
+    FS_INTERNAL_OP_SCAN_BANKS,
     FS_INTERNAL_OP_SCAN_INSTRUMENTS,
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
     FS_INTERNAL_OP_SAVE_INSTRUMENT,
@@ -142,6 +155,7 @@ typedef struct {
 static const fs_file_desc_t fs_file_descs[] = {
     { FS_FILE_KIT,         ".snd", NULL,      1, 1, 1, 0 },
     { FS_FILE_SCENE,       NULL,   NULL,      1, 0, 1, 0 },
+    { FS_FILE_BANK,        NULL,   NULL,      1, 0, 1, 0 },
     { FS_FILE_MORPH,       ".snd", NULL,      1, 1, 1, 0 },
     { FS_FILE_PATTERN,     ".pat", NULL,      1, 1, 1, 1 },
     { FS_FILE_PERFORMANCE, ".prf", NULL,      1, 1, 1, 1 },
@@ -235,6 +249,20 @@ static char scene_slot_name[STORAGE_SCENE_MAX_SLOTS]
                            [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 static char scene_slot_open_name[STORAGE_SCENE_MAX_SLOTS]
                                 [STORAGE_KIT_FILENAME_MAX];
+/*
+ * Root Bank/ directory scan cache.
+ *
+ * Root Banks are library slots named `NNN <bank name>` just like root Scenes,
+ * but a Bank folder contains bankset.bcg plus Bank-local Scene children named
+ * `00..15`. This cache stores only the root Bank identity used by Load/Save
+ * browsing; child Scene names live in per-operation scratch while a selected
+ * Bank is open.
+ */
+static uint8_t bank_slot_present[STORAGE_BANK_MAX_SLOTS];
+static char bank_slot_name[STORAGE_BANK_MAX_SLOTS]
+                          [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+static char bank_slot_open_name[STORAGE_BANK_MAX_SLOTS]
+                               [STORAGE_KIT_FILENAME_MAX];
 static afatfsFilePtr_t op_kit_root_dir = NULL;
 static afatfsFilePtr_t op_kit_slot_dir = NULL;
 static afatfsFinder_t op_finder;
@@ -283,6 +311,8 @@ static char op_save_kit_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_save_kit_member_display_file[STORAGE_KIT_SLOT_COUNT]
                                             [STORAGE_KIT_MEMBER_FILENAME_MAX];
 static char op_save_kit_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
+static char op_save_scene_kit_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_save_scene_kit_open_name[AFATFS_SHORT_FILENAME_MAX];
 static uint8_t op_kit_save_source_scene = 0u;
 static storage_instrument_save_mode_t op_kit_save_mode =
     STORAGE_INSTRUMENT_SAVE_NORMAL;
@@ -340,6 +370,7 @@ static afatfsFilePtr_t op_delete_tree_dir = NULL;
 static fs_delete_slot_phase_t op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
 static afatfsFilePtr_t op_delete_slot_dir = NULL;
 static char op_delete_slot_target_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static uint8_t op_delete_slot_allow_short_alias = 0u;
 /*
  * Staged Kit payload and target mask for multi-Scene Kit Load.
  *
@@ -360,18 +391,44 @@ static uint16_t op_kit_load_scene_mask = 0u;
  * Scene Load validates every child before writing resident memory: sceneset,
  * embedded Kit, bridge Pattern, and placeholder Effect. The same staging Scene
  * is also reused by save helpers that need a source Scene pointer stable across
- * asynchronous phases. op_scene_display_name is the eight-character name that
- * sceneset.scg writes/reads; it is intentionally separate from any embedded Kit
- * directory name.
+ * asynchronous phases. op_scene_display_name is the eight-character Scene
+ * directory name captured from the root Scene scan cache. sceneset.scg never
+ * stores or overrides it. op_scene_child_display_name captures the text after
+ * "Kit " while scanning children so the embedded Kit's retained name survives
+ * initial boot Scene Load and later seeds Save:[Kit] character entry.
  */
 static scene_t op_staged_scene;
 static uint16_t op_scene_load_scene_mask = 0u;
 static char op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 static char op_scene_child_open_name[STORAGE_KIT_FILENAME_MAX];
+static char op_scene_child_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static char op_scene_pattern_open_name[STORAGE_KIT_FILENAME_MAX];
 static char op_scene_effect_open_name[STORAGE_KIT_FILENAME_MAX];
 static storage_sceneset_t op_sceneset_state;
 static storage_effect_state_t op_effect_state;
+static storage_pattern_stub_state_t op_pattern_stub_state;
+/*
+ * Bank load/save scratch.
+ *
+ * Root Bank identity uses the scan cache above. While one Bank is selected,
+ * op_bank_child_* caches the Bank-local two-digit Scene children discovered
+ * under that folder. op_bank_payload_active lets the Bank state machine hand
+ * control to the existing Scene payload reader/writer after it has positioned
+ * asyncfatfs inside the selected Bank directory.
+ */
+static storage_bankset_t op_bankset_state;
+static char op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+static char op_save_bank_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
+static char op_save_bank_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
+static uint8_t op_bank_child_present[STORAGE_BANK_SCENE_MAX_SLOTS];
+static char op_bank_child_name[STORAGE_BANK_SCENE_MAX_SLOTS]
+                              [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+static char op_bank_child_open_name[STORAGE_BANK_SCENE_MAX_SLOTS]
+                                   [STORAGE_KIT_FILENAME_MAX];
+static uint16_t op_bank_scene_save_mask = 0u;
+static uint8_t op_bank_active_scene = 0u;
+static uint8_t op_bank_loaded_scene = 0u;
+static uint8_t op_bank_payload_active = 0u;
 /*
  * Scene load helper prototypes.
  *
@@ -381,6 +438,7 @@ static storage_effect_state_t op_effect_state;
  * avoids implicit-function warnings when the state machine calls them.
  */
 static void filesystem_initStagedScene(scene_t *scene);
+static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot);
 static uint8_t filesystem_nameStartsWithKitSpace(const char *name);
 static uint8_t filesystem_nameHasExtension(const char *name,
                                            const char *extension);
@@ -388,6 +446,10 @@ static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
                                                     uint16_t morph,
                                                     uint8_t amount);
 static void filesystem_saveKitDirectory_tick(void);
+static void filesystem_saveSceneDirectory_tick(void);
+static void filesystem_loadBankDirectory_tick(void);
+static void filesystem_saveBankDirectory_tick(void);
+static void filesystem_scanBanks_tick(void);
 static void filesystem_deleteTreeStart(const char *display_name);
 static fs_status_t filesystem_deleteTree_tick(void);
 /*
@@ -415,6 +477,18 @@ static uint8_t filesystem_nextInstrumentLine(char *dst, uint16_t cap,
                                              void *raw);
 static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
                                          void *raw);
+static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
+                                           void *raw);
+static uint8_t filesystem_nextEffectPlaceholderLine(char *dst, uint16_t cap,
+                                                    void *raw);
+static uint8_t filesystem_nextPatternStubLine(char *dst, uint16_t cap,
+                                              void *raw);
+static uint8_t filesystem_nextBanksetLine(char *dst, uint16_t cap,
+                                          void *raw);
+static uint8_t filesystem_appendChar(char *dst, uint16_t cap,
+                                     uint16_t *pos, char c);
+static uint8_t filesystem_appendText(char *dst, uint16_t cap,
+                                     uint16_t *pos, const char *text);
 static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
                                                              void *),
                                         void *ctx);
@@ -1238,7 +1312,10 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_LOAD_KIT:              return "KitL";
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:        return "KMrL";
     case FS_INTERNAL_OP_LOAD_SCENE:            return "ScnL";
+    case FS_INTERNAL_OP_LOAD_BANK:             return "BnkL";
     case FS_INTERNAL_OP_SAVE_KIT:              return "KitS";
+    case FS_INTERNAL_OP_SAVE_SCENE:            return "ScnS";
+    case FS_INTERNAL_OP_SAVE_BANK:             return "BnkS";
     case FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH: return "IMrS";
     case FS_INTERNAL_OP_LOAD_MORPH:            return "MrpL";
     case FS_INTERNAL_OP_LOAD_PATTERN:          return "PatL";
@@ -1251,6 +1328,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_SAVE_GLOBALS:          return "GloS";
     case FS_INTERNAL_OP_SCAN_KITS:             return "KitSc";
     case FS_INTERNAL_OP_SCAN_SCENES:           return "ScnSc";
+    case FS_INTERNAL_OP_SCAN_BANKS:            return "BnkSc";
     case FS_INTERNAL_OP_SCAN_INSTRUMENTS:      return "InsSc";
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:       return "InsL";
     case FS_INTERNAL_OP_SAVE_INSTRUMENT:       return "InsS";
@@ -1727,6 +1805,94 @@ static void filesystem_recordSceneDirectory(const char *display_name,
     memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
     scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
     storage_copyFilename(scene_slot_open_name[slot], open_name);
+}
+
+static void filesystem_recordSavedSceneDirectory(const char *display_name,
+                                                 const char *open_name)
+{
+    uint16_t slot;
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+
+    /*
+     * Save is authoritative for one root Scene slot.
+     *
+     * Inputs: the display folder name just written and asyncfatfs' returned
+     * short open alias. Outputs: Scene browser cache for that slot is replaced
+     * with the successful save identity. This mirrors Kit Save's cache update
+     * but deliberately avoids kitBrowser because Scene slots are independent.
+     */
+    if (!storage_parseNumberedFolder(display_name, &slot, display) ||
+        slot >= STORAGE_SCENE_MAX_SLOTS) {
+        return;
+    }
+    display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    scene_slot_present[slot] = 1u;
+    memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
+    scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    storage_copyFilename(scene_slot_open_name[slot], open_name);
+}
+
+static void filesystem_recordBankDirectory(const char *display_name,
+                                           const char *open_name)
+{
+    uint16_t slot;
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+    /*
+     * Record one root Bank/ numbered folder.
+     *
+     * Inputs: FAT display component and the component to use for later
+     * afatfs_opendir_lfn() calls. Output: the root Bank browser cache only.
+     * Bank-local Scene children are intentionally not cached here because
+     * their two-digit namespace belongs to one selected Bank folder, not the
+     * root library.
+     *
+     * Important: the open component must be the display component for LFN-aware
+     * opens. A host-created folder such as `000 Slak` may have a generated SFN
+     * alias, but afatfs_opendir_lfn() resolves read-only opens by comparing the
+     * public display name. Caching the alias lists the Bank but fails at Bank
+     * load phase 6.
+     */
+    if (!storage_parseNumberedFolder(display_name, &slot, display) ||
+        slot >= STORAGE_BANK_MAX_SLOTS) {
+        return;
+    }
+    display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    if (bank_slot_present[slot] &&
+        !filesystem_displayPrecedesCached(display, bank_slot_name[slot])) {
+        return;
+    }
+    bank_slot_present[slot] = 1u;
+    memcpy(bank_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
+    bank_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    storage_copyFilename(bank_slot_open_name[slot], open_name);
+}
+
+static void filesystem_recordSavedBankDirectory(const char *display_name,
+                                                const char *open_name)
+{
+    uint16_t slot;
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+    /*
+     * Save is authoritative for one root Bank slot.
+     *
+     * Inputs: the Bank folder that was successfully created/opened. Output:
+     * root Bank scan cache for that slot. Names still come only from the
+     * directory; bankset.bcg is never queried for identity. The open cache
+     * intentionally keeps display_name, not the returned SFN alias, so the next
+     * Bank Load uses the same LFN-aware matching path as root Bank scan.
+     */
+    (void)open_name;
+    if (!storage_parseNumberedFolder(display_name, &slot, display) ||
+        slot >= STORAGE_BANK_MAX_SLOTS) {
+        return;
+    }
+    display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    bank_slot_present[slot] = 1u;
+    memcpy(bank_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
+    bank_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    storage_copyFilename(bank_slot_open_name[slot], display_name);
 }
 
 static int8_t filesystem_compareInstrumentDisplayName(const char *a,
@@ -2597,6 +2763,8 @@ static void filesystem_loadSceneDirectory_tick(void)
                STORAGE_SCENE_DISPLAY_NAME_LEN);
         op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
         memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
+        memset(op_scene_child_display_name, 0,
+               sizeof(op_scene_child_display_name));
         memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
         memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
         if (!afatfs_chdir(NULL))
@@ -2724,7 +2892,27 @@ static void filesystem_loadSceneDirectory_tick(void)
             if ((entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) != 0u) {
                 if (op_scene_child_open_name[0] == '\0' &&
                     filesystem_nameStartsWithKitSpace(display_name)) {
+                    /*
+                     * Capture both open alias and product identity for the
+                     * embedded Kit directory.
+                     *
+                     * Inputs: display_name is the LFN when available, otherwise
+                     * the case-adjusted SFN; short_name is the asyncfatfs-open
+                     * alias. Output: op_scene_child_open_name lets later
+                     * phases chdir into the directory, while
+                     * op_scene_child_display_name stores the eight display
+                     * bytes after "Kit ". The +4 offset skips "Kit "; any
+                     * missing/truncated text is padded by storage_copyDisplayName().
+                     *
+                     * Why: sceneset.scg cannot store "name", and kitset.kcg
+                     * cannot store its own Kit name. Scene Load must therefore
+                     * retain the embedded Kit name here or Save:[Kit] will boot
+                     * with a blank character editor even though the directory
+                     * was named "Kit Slak".
+                     */
                     storage_copyFilename(op_scene_child_open_name, short_name);
+                    storage_copyDisplayName(op_scene_child_display_name,
+                                            &display_name[4]);
                 }
             } else {
                 if (op_scene_pattern_open_name[0] == '\0' &&
@@ -2914,11 +3102,63 @@ static void filesystem_loadSceneDirectory_tick(void)
         }
         if (eof) {
             st = storage_kitsetFinalize(&op_kitset);
-            op_close_status = (st == STORAGE_STATUS_OK)
-                ? FS_STATUS_DONE
-                : FS_STATUS_ERROR;
-            if (st != STORAGE_STATUS_OK)
+            if (st == STORAGE_STATUS_OK) {
+                /*
+                 * One-way compatibility bridge for old embedded Scene Kits.
+                 *
+                 * What: imports a complete six-value legacy kitset audio_out
+                 * block into the staged Scene only when sceneset.scg did not
+                 * already contain the new Scene-owned audio_out line.
+                 *
+                 * Why: early Scene fixtures stored mixer routing inside the
+                 * embedded Kit. Root Kit Load must preserve current Scene
+                 * routing, so this fallback intentionally lives only in Scene
+                 * Load after both sceneset and embedded kitset parse state are
+                 * available.
+                 *
+                 * Inputs: op_sceneset_state.seen_audio_out, the kitset parser's
+                 * seen_audio_out_mask, and legacy_audio_out[] values. Output:
+                 * op_staged_scene.settings.audio_out[] in persisted route
+                 * domain 0..5. The per-slot loop clamps corrupt route bytes to
+                 * the same defaults used by new-format scenes.
+                 *
+                 * Affiliates/clients: storage_kitsetHasCompleteLegacyAudioOut(),
+                 * storage_kitsetLegacyAudioOut(), SceneData route accessors,
+                 * and preset_applyKitAudioRouting().
+                 */
+                if (!op_sceneset_state.seen_audio_out &&
+                    storage_kitsetHasCompleteLegacyAudioOut(&op_kitset)) {
+                    const uint8_t *legacy =
+                        storage_kitsetLegacyAudioOut(&op_kitset);
+                    uint8_t slot;
+                    for (slot = 0u;
+                         slot < INSTRUMENT_SLOT_COUNT &&
+                             slot < STORAGE_KIT_SLOT_COUNT;
+                         slot++) {
+                        uint8_t route = legacy[slot];
+                        op_staged_scene.settings.audio_out[slot] =
+                            (route <= 5u)
+                                ? route
+                                : filesystem_defaultVoiceAudioOut(slot);
+                    }
+                }
+                /*
+                 * Retain the embedded Kit directory name in staged SceneData.
+                 *
+                 * Inputs: op_scene_child_display_name was captured during the
+                 * selected Scene directory scan, before sceneset.scg or
+                 * kitset.kcg parsing. Output: op_staged_scene.kit.display_name
+                 * is ready before the final resident Scene commit, so boot
+                 * Scene Load and manual Scene Load both seed Save:[Kit] from
+                 * the loaded "Kit <name>" directory.
+                 */
+                scene_setKitDisplayName(&op_staged_scene.kit,
+                                        op_scene_child_display_name);
+                op_close_status = FS_STATUS_DONE;
+            } else {
                 filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+            }
             op_phase = 25;
         }
         return;
@@ -3049,6 +3289,32 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     case 33: /* REENTER selected Scene before pattern/effect files */
+        if (current_op == FS_INTERNAL_OP_LOAD_BANK) {
+            afatfsOperationStatus_e ast = afatfs_chdirParent();
+
+            /*
+             * Bank-local Scene payloads are already inside
+             * `Bank/NNN Name/SS Scene/Kit Name/` after the embedded Kit and
+             * Instrument files load.
+             *
+             * Inputs: current directory is the embedded Kit child. Output:
+             * one parent step returns to the Bank-local Scene folder so the
+             * already-scanned `pattern.pat` and `effects.fx` open relative to
+             * `SS Scene/`. The root Scene path below must not run here,
+             * because it would leave the Bank and reopen `/Scene/NNN`, which is
+             * a different library namespace.
+             */
+            if (ast == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (ast == AFATFS_OPERATION_FAILURE) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 72;
+                return;
+            }
+            op_phase = 44;
+            return;
+        }
         if (!afatfs_chdir(NULL))
             return;
         op_phase = 34;
@@ -3151,9 +3417,46 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 46;
         return;
 
-    case 46: /* READ pattern name/header */
+    case 46: /* PROBE pattern file, then READ legacy binary name/header */
     {
-        uint32_t n = filesystem_readStreamChunk(staging_buf, 8u);
+        uint32_t n;
+
+        /*
+         * Scene patterns now have two accepted wire shapes.
+         *
+         * New Scene/Bank-local Scene Save writes text beginning with "format=".
+         * Version 1 text is the old placeholder and leaves the initialized
+         * PatternSet alone; version 2 carries the draft 128x7 active-step
+         * bitmap plus per-track length/scale. Older fixtures and pattern files
+         * are binary and begin with the legacy eight-byte pattern name/header.
+         * The probe reads seven bytes first: if they match the text prefix,
+         * those bytes become the already-buffered start of the first text line;
+         * otherwise they remain bytes 0..6 of the binary header and the old
+         * reader pulls byte 7 before continuing to the step stream.
+         */
+        if (op_item_offset < 7u) {
+            n = filesystem_readStreamChunk(staging_buf, 7u);
+            if (op_item_offset < 7u) {
+                if (n == 0u && afatfs_feof(op_file)) {
+                    filesystem_setPresetNameInvalid();
+                    op_close_status = FS_STATUS_ERROR;
+                    op_phase = 54;
+                }
+                return;
+            }
+        }
+        if (op_item_offset == 7u &&
+            staging_buf[0] == 'f' && staging_buf[1] == 'o' &&
+            staging_buf[2] == 'r' && staging_buf[3] == 'm' &&
+            staging_buf[4] == 'a' && staging_buf[5] == 't' &&
+            staging_buf[6] == '=') {
+            storage_patternStubStateInit(&op_pattern_stub_state);
+            memcpy(op_line_buf, "format=", 7u);
+            op_line_len = 7u;
+            op_phase = 53;
+            return;
+        }
+        n = filesystem_readStreamChunk(staging_buf, 8u);
         if (op_item_offset >= 8u) {
             op_item_offset = 0u;
             op_stream_index = 0u;
@@ -3369,6 +3672,48 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
     }
 
+    case 53: /* READ text pattern placeholder/draft */
+        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
+                                     sizeof(op_line_buf), &line_ready, &eof);
+        if (st == STORAGE_STATUS_WAIT)
+            return;
+        if (st != STORAGE_STATUS_OK) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 54;
+            return;
+        }
+        if (line_ready) {
+            st = storage_patternStubParseLine(&op_pattern_stub_state,
+                                              op_line_buf,
+                                              &op_staged_scene.pattern);
+            if (st != STORAGE_STATUS_OK) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 54;
+            }
+            return;
+        }
+        if (eof) {
+            /*
+             * Text pattern completion.
+             *
+             * Inputs: parser seen bits plus any v2 track rows already applied
+             * into op_staged_scene.pattern. Output: success accepts either a
+             * guarded v1 placeholder or a complete seven-track draft payload;
+             * failure rejects the whole Scene before resident memory is
+             * touched.
+             */
+            st = storage_patternStubFinalize(&op_pattern_stub_state);
+            op_close_status = (st == STORAGE_STATUS_OK)
+                ? FS_STATUS_DONE
+                : FS_STATUS_ERROR;
+            if (st != STORAGE_STATUS_OK)
+                filesystem_setPresetNameInvalid();
+            op_phase = 54;
+        }
+        return;
+
     case 54: /* CLOSE bridge pattern */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
@@ -3466,7 +3811,20 @@ static void filesystem_loadSceneDirectory_tick(void)
          * settings, pattern, and kit content. The active Scene runtime apply is
          * handled after filesystem completion by Preset/Menu, matching Kit
          * Load's owner boundary.
+         *
+         * Name retention happens immediately before the copy because
+         * sceneset.scg never stores its own name. Inputs: op_scene_display_name
+         * was captured from the selected root Scene directory, and
+         * op_scene_child_display_name was already copied into
+         * op_staged_scene.kit.display_name after embedded kitset validation.
+         * Output: boot Scene Load preserves the resident Scene display name so
+         * Save:[Scene] character entry can seed from "000 Slak" even when the
+         * target save slot currently displays Empty.
          */
+        memcpy(op_staged_scene.display_name,
+               op_scene_display_name,
+               STORAGE_SCENE_DISPLAY_NAME_LEN);
+        op_staged_scene.display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
         for (scene_index = 0u;
              scene_index < SCENE_COUNT && scene_index < 16u;
              scene_index++) {
@@ -3478,6 +3836,22 @@ static void filesystem_loadSceneDirectory_tick(void)
             }
         }
         memcpy(preset_currentName, op_scene_display_name, 8u);
+        if (current_op == FS_INTERNAL_OP_LOAD_BANK) {
+            /*
+             * Commit resident Bank identity at the same atomic point as the
+             * Bank-local Scene payload.
+             *
+             * Inputs: validated Bank directory name and selected child slot.
+             * Output: Save:[Bank] now seeds from the loaded Bank, while the
+             * resident Scene name continues to come from the child `SS Name`
+             * folder. Empty-Bank success commits BankData in the Bank loader
+             * itself because no Scene payload reaches this point.
+             */
+            bank_setDisplayName(op_bank_display_name);
+            bank_setActiveSceneSlot(op_bank_active_scene);
+            bank_setHasResidentBank(1u);
+            op_bank_loaded_scene = 1u;
+        }
         op_close_status = FS_STATUS_DONE;
         op_phase = 72;
         return;
@@ -3493,6 +3867,354 @@ static void filesystem_loadSceneDirectory_tick(void)
         filesystem_setPresetNameInvalid();
         op_close_status = FS_STATUS_ERROR;
         op_phase = 72;
+        return;
+    }
+}
+
+static void filesystem_loadBankDirectory_tick(void)
+{
+    uint8_t line_ready;
+    uint8_t eof;
+    storage_status_t st;
+
+    if (op_bank_payload_active) {
+        filesystem_loadSceneDirectory_tick();
+        return;
+    }
+
+    /*
+     * Load one root Bank, then optionally one Bank-local Scene.
+     *
+     * Phases 0..18 validate and inspect the Bank container. When a child Scene
+     * is selected, the state machine opens that two-digit child and jumps into
+     * filesystem_loadSceneDirectory_tick() at Scene phase 8. From there the
+     * existing Scene payload reader handles sceneset.scg, embedded Kit, pattern,
+     * effect, and atomic resident Scene commit.
+     */
+    switch (op_phase) {
+    case 0:
+        if (op_slot >= STORAGE_BANK_MAX_SLOTS ||
+            !bank_slot_present[op_slot]) {
+            filesystem_setPresetNameEmpty();
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_BANK,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                op_root_open_name,
+                                on_file_opened)) {
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setPresetNameEmpty();
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3u;
+        return;
+
+    case 3:
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 4u;
+        return;
+
+    case 4:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5u;
+        return;
+
+    case 5:
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn(bank_slot_open_name[op_slot],
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                op_root_open_name,
+                                on_file_opened)) {
+            return;
+        }
+        op_phase = 6u;
+        return;
+
+    case 6:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_phase = 7u;
+        return;
+
+    case 7:
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 8u;
+        return;
+
+    case 8:
+        storage_banksetInit(&op_bankset_state);
+        op_line_len = 0u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_BANKSET_FILENAME, "r", on_file_opened))
+            return;
+        op_phase = 9u;
+        return;
+
+    case 9:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 10u;
+        return;
+
+    case 10:
+        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
+                                     sizeof(op_line_buf), &line_ready, &eof);
+        if (st == STORAGE_STATUS_WAIT)
+            return;
+        if (st != STORAGE_STATUS_OK) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 11u;
+            return;
+        }
+        if (line_ready) {
+            st = storage_banksetParseLine(&op_bankset_state, op_line_buf);
+            if (st != STORAGE_STATUS_OK) {
+                filesystem_setPresetNameInvalid();
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 11u;
+            }
+            return;
+        }
+        if (eof) {
+            st = storage_banksetFinalize(&op_bankset_state);
+            op_close_status = (st == STORAGE_STATUS_OK)
+                ? FS_STATUS_DONE
+                : FS_STATUS_ERROR;
+            if (st != STORAGE_STATUS_OK)
+                filesystem_setPresetNameInvalid();
+            op_phase = 11u;
+        }
+        return;
+
+    case 11:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 12u;
+        return;
+
+    case 12:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            op_close_done = false;
+            if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+                op_phase = 19u;
+            return;
+        }
+        op_bank_active_scene = op_bankset_state.active_scene;
+        /*
+         * Scan Bank-local Scene children using the still-open selected Bank
+         * directory handle.
+         *
+         * We are already chdir'd into the selected Bank. Reopening the Bank by
+         * its root alias here would incorrectly look for a child with the same
+         * name inside itself. Keeping op_kit_slot_dir open mirrors Scene Load's
+         * child scan and makes the relative directory context explicit.
+         */
+        afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
+        op_phase = 15u;
+        return;
+
+    case 15:
+    {
+        afatfsOperationStatus_e ast =
+            afatfs_findNextObject(op_kit_slot_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        if (ast == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (ast == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 16u;
+            return;
+        }
+        if (op_object.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 16u;
+            return;
+        }
+        if (op_object.kind == AFATFS_OBJECT_DIRECTORY) {
+            uint8_t child_slot;
+            char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+
+            /*
+             * Bank child discovery uses the two-digit parser only.
+             *
+             * Inputs: public child directory names inside the selected Bank.
+             * Output: operation-local cache for slots 00..15. The duplicate
+             * rule mirrors root scans, but these names never populate the root
+             * Scene library cache because Bank-local Scenes are a different
+             * namespace.
+             */
+            if (storage_parseBankSceneFolder(op_object.displayName,
+                                             &child_slot,
+                                             display)) {
+                display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+                if (!op_bank_child_present[child_slot] ||
+                    filesystem_displayPrecedesCached(
+                        display,
+                        op_bank_child_name[child_slot])) {
+                    op_bank_child_present[child_slot] = 1u;
+                    memcpy(op_bank_child_name[child_slot], display,
+                           STORAGE_SCENE_DISPLAY_NAME_LEN);
+                    op_bank_child_name[child_slot]
+                                      [STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+                    /*
+                     * Cache the child display component for later LFN open.
+                     *
+                     * `00 Slak` is the product identity inside the Bank. The
+                     * SFN alias is still useful for legacy fopen paths, but
+                     * Bank child Scene directories are opened through
+                     * afatfs_opendir_lfn(), which matches the display name
+                     * returned by this same object iterator.
+                     */
+                    storage_copyFilename(
+                        op_bank_child_open_name[child_slot],
+                        op_object.displayName);
+                }
+            }
+        }
+        return;
+    }
+
+    case 16:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 17u;
+        return;
+
+    case 17:
+    {
+        uint8_t child_slot = op_bank_active_scene;
+        uint8_t found = 0u;
+
+        if (!op_close_done)
+            return;
+        op_kit_slot_dir = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            if (!afatfs_chdir(NULL))
+                return;
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (child_slot < STORAGE_BANK_SCENE_MAX_SLOTS &&
+            op_bank_child_present[child_slot]) {
+            found = 1u;
+        } else {
+            for (child_slot = 0u;
+                 child_slot < STORAGE_BANK_SCENE_MAX_SLOTS;
+                 child_slot++) {
+                if (op_bank_child_present[child_slot]) {
+                    found = 1u;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            /*
+             * Empty Banks are valid.
+             *
+             * Output: BankData keeps the loaded Bank identity, but
+             * op_bank_loaded_scene stays zero so Preset/Menu can initialize the
+             * active Scene from root Scene, root Kit, or SRAM defaults.
+             */
+            bank_setDisplayName(op_bank_display_name);
+            bank_setActiveSceneSlot(op_bank_active_scene);
+            bank_setHasResidentBank(1u);
+            memcpy(preset_currentName, op_bank_display_name, 8u);
+            if (!afatfs_chdir(NULL))
+                return;
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_bank_active_scene = child_slot;
+        memcpy(op_scene_display_name, op_bank_child_name[child_slot],
+               STORAGE_SCENE_DISPLAY_NAME_LEN);
+        op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn(op_bank_child_open_name[child_slot],
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                op_root_open_name,
+                                on_file_opened)) {
+            return;
+        }
+        op_phase = 18u;
+        return;
+    }
+
+    case 18:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            if (!afatfs_chdir(NULL))
+                return;
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        op_bank_loaded_scene = 1u;
+        op_bank_payload_active = 1u;
+        op_phase = 8u;
+        return;
+
+    case 19:
+        if (!op_close_done)
+            return;
+        op_kit_slot_dir = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+
+    default:
+        filesystem_setPresetNameInvalid();
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(FS_STATUS_ERROR);
         return;
     }
 }
@@ -4052,6 +4774,17 @@ static void filesystem_initStagedScene(scene_t *scene)
     if (!scene)
         return;
     memset(scene, 0, sizeof(*scene));
+    /*
+     * PatternData owns the default bridge pattern shape.
+     *
+     * Inputs: staged PatternSet pointer plus nextPattern 0 for a neutral Scene
+     * payload. Output: the private staging pattern is valid before the loader
+     * encounters either a thin text placeholder or an older binary pattern
+     * payload. This call must happen after memset() and before child file parse
+     * phases so missing optional pattern details cannot leave zero-length track
+     * settings.
+     */
+    pat_initPatternSet(&scene->pattern, 0u);
     scene->settings.voice_decimation_all = 127u;
     for (track = 0u; track < NUM_TRACKS; track++) {
         scene->settings.midi_channel[track] = (uint8_t)(track + 1u);
@@ -4060,10 +4793,47 @@ static void filesystem_initStagedScene(scene_t *scene)
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
         char fallback[9] = { 'i', 'n', 's', 't', '_', 'v', 'o',
                              (char)('1' + slot), '\0' };
+        /*
+         * Scene-owned voice mix defaults mirror SceneData's resident init.
+         *
+         * Inputs: the zero-based instrument slot. Outputs: staged Scene route,
+         * FX send, and fader mode bytes before any optional sceneset.scg lines
+         * are parsed. The loop is deliberately per-slot, not per-track, because
+         * audio routing is six-voice mixer state while MIDI defaults above are
+         * seven-track sequencer state.
+         */
+        scene->settings.audio_out[slot] = filesystem_defaultVoiceAudioOut(slot);
+        scene->settings.fx_send_amount[slot] = 0u;
+        scene->settings.fader_setting[slot] = 0u;
         instrumentManager_resetSlot(&scene->kit.instruments[slot],
                                     initial_types[slot]);
         scene_setKitInstrumentSourceName(&scene->kit, slot, fallback);
     }
+}
+
+static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot)
+{
+    /*
+     * Local copy of the SceneData route default for filesystem staging.
+     *
+     * What: returns the canonical mixer route for a missing Scene audio_out
+     * value: slot 1/voice 1 uses stereo DAC2, slot 6/voice 6 uses DAC1 right,
+     * and all other voices use stereo DAC1.
+     *
+     * Why: filesystem.c initializes off-scene staging memory and cannot route
+     * through scene_setVoiceAudioOut(), which writes resident SceneData by
+     * index. Keeping the arithmetic here byte-for-byte simple also makes the
+     * legacy kitset import fallback below explicit.
+     *
+     * Inputs: zero-based voice slot. Output: persisted Scene route domain
+     * 0..5. Affiliates: scene_defaultVoiceAudioOut() in SceneData.c and
+     * preset_applyKitAudioRouting().
+     */
+    if (slot == 0u)
+        return 2u;
+    if (slot == 5u)
+        return 1u;
+    return 0u;
 }
 
 static uint8_t filesystem_nameStartsWithKitSpace(const char *name)
@@ -4167,10 +4937,18 @@ static void filesystem_copyLongComponent(char *dst, uint16_t cap,
     dst[i] = '\0';
 }
 
-static void filesystem_makeNumberedKitDir(char *dst,
-                                          uint16_t slot,
-                                          const char display[8])
+static void filesystem_makeNumberedDir(char *dst,
+                                       uint16_t slot,
+                                       const char display[8])
 {
+    /*
+     * Format one root numbered library directory.
+     *
+     * Inputs: direct slot 000..999 and eight display cells. Output:
+     * `NNN <name>`. The hundreds/tens/ones arithmetic is root-library only:
+     * Bank-local Scene children use storage_formatBankSceneDir() and two
+     * digits, so callers should not reuse this helper for `00..15` children.
+     */
     dst[0] = (char)('0' + ((slot / 100u) % 10u));
     dst[1] = (char)('0' + ((slot / 10u) % 10u));
     dst[2] = (char)('0' + (slot % 10u));
@@ -4178,6 +4956,44 @@ static void filesystem_makeNumberedKitDir(char *dst,
     for (uint8_t i = 0u; i < STORAGE_KIT_DISPLAY_NAME_LEN; i++)
         dst[4u + i] = display ? display[i] : ' ';
     dst[4u + STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+}
+
+static void filesystem_makeSceneEmbeddedKitDir(char *dst,
+                                               uint16_t cap,
+                                               const char display[8])
+{
+    uint16_t pos = 0u;
+    int8_t end = (int8_t)(STORAGE_KIT_DISPLAY_NAME_LEN - 1u);
+
+    /*
+     * Build the visible "Kit <name>" child directory for Scene Save.
+     *
+     * Inputs: resident Kit display field, exactly eight cells. Output: a
+     * NUL-terminated FAT display component. The reverse loop trims trailing
+     * spaces because host filesystems often dislike names that visually depend
+     * on suffix blanks. If every display cell is blank, "none" is used because
+     * uninitialized resident object names are product data too; they should
+     * serialize through the same visible default instead of inventing
+     * "Untitled" in the filesystem layer.
+     */
+    if (!dst || cap == 0u)
+        return;
+    dst[0] = '\0';
+    while (end >= 0 && (!display || display[(uint8_t)end] == ' '))
+        end--;
+    if (!filesystem_appendText(dst, cap, &pos, "Kit "))
+        return;
+    if (end < 0) {
+        (void)filesystem_appendText(dst, cap, &pos, "none");
+        return;
+    }
+    for (uint8_t i = 0u; i <= (uint8_t)end; i++) {
+        char c = display[i];
+        if (c < 0x20 || c > 0x7e)
+            c = ' ';
+        if (!filesystem_appendChar(dst, cap, &pos, c))
+            return;
+    }
 }
 
 static uint8_t filesystem_appendChar(char *dst, uint16_t cap,
@@ -4255,6 +5071,41 @@ static uint8_t filesystem_formatAssignmentU16Line(char *dst, uint16_t cap,
     return (uint8_t)pos;
 }
 
+static uint8_t filesystem_formatAssignmentCsvU8Line(char *dst,
+                                                    uint16_t cap,
+                                                    const char *key,
+                                                    const uint8_t *values,
+                                                    uint8_t count)
+{
+    uint16_t pos = 0u;
+    uint8_t i;
+
+    /*
+     * Format "key=a,b,c\n" for fixed-size Scene setting vectors.
+     *
+     * Inputs: schema key, value array, and explicit count. Output: one complete
+     * text line or zero on buffer exhaustion. The loop emits a comma before
+     * every value except index zero; values are promoted to uint16_t only
+     * because filesystem_appendU16() is the shared decimal writer.
+     */
+    if (cap == 0u || !key || !values)
+        return 0u;
+    dst[0] = '\0';
+    if (!filesystem_appendText(dst, cap, &pos, key) ||
+        !filesystem_appendChar(dst, cap, &pos, '=')) {
+        return 0u;
+    }
+    for (i = 0u; i < count; i++) {
+        if (i > 0u && !filesystem_appendChar(dst, cap, &pos, ','))
+            return 0u;
+        if (!filesystem_appendU16(dst, cap, &pos, values[i]))
+            return 0u;
+    }
+    if (!filesystem_appendChar(dst, cap, &pos, '\n'))
+        return 0u;
+    return (uint8_t)pos;
+}
+
 static uint8_t filesystem_formatLiteralLine(char *dst, uint16_t cap,
                                             const char *text)
 {
@@ -4266,6 +5117,112 @@ static uint8_t filesystem_formatLiteralLine(char *dst, uint16_t cap,
     if (!filesystem_appendText(dst, cap, &pos, text))
         return 0u;
     return (uint8_t)pos;
+}
+
+static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
+                                           void *raw)
+{
+    const scene_t *scene = (const scene_t *)raw;
+
+    /*
+     * Stream one sceneset.scg line for Scene Save.
+     *
+     * Inputs: source Scene and op_write_line_index from the generic text
+     * writer. Output: one schema line or zero after the final retained setting.
+     * The switch is intentionally flat so adding future Scene-level fields
+     * requires one explicit line number and parser counterpart.
+     *
+     * Naming rule: no name= line is emitted. Scene identity is the enclosing
+     * Scene directory, and embedded Kit identity is the "Kit <name>" directory.
+     * This writer therefore serializes only Scene-level settings.
+     */
+    if (!scene)
+        return 0u;
+    switch (op_write_line_index) {
+    case 0u:
+        return filesystem_formatLiteralLine(dst, cap,
+                                            "format=helicase.sceneset\n");
+    case 1u:
+        return filesystem_formatLiteralLine(dst, cap, "version=1\n");
+    case 2u:
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "morph_amount", scene->settings.morph_amount);
+    case 3u:
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "voice_morph_amount",
+            scene->settings.voice_morph_amount, INSTRUMENT_SLOT_COUNT);
+    case 4u:
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "voice_decimation_all",
+            scene->settings.voice_decimation_all);
+    case 5u:
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "midi_channel", scene->settings.midi_channel,
+            NUM_TRACKS);
+    case 6u:
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "midi_note", scene->settings.midi_note, NUM_TRACKS);
+    case 7u:
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "audio_out", scene->settings.audio_out,
+            INSTRUMENT_SLOT_COUNT);
+    case 8u:
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "fx_send_amount", scene->settings.fx_send_amount,
+            INSTRUMENT_SLOT_COUNT);
+    case 9u:
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "fader_setting", scene->settings.fader_setting,
+            INSTRUMENT_SLOT_COUNT);
+    default:
+        return 0u;
+    }
+}
+
+static uint8_t filesystem_nextEffectPlaceholderLine(char *dst, uint16_t cap,
+                                                    void *raw)
+{
+    /*
+     * Adapt storageTypes' effect placeholder writer to filesystem_writeTextLine.
+     *
+     * The raw context is unused because effects.fx currently has no runtime
+     * payload. op_write_line_index is the only input, and storageTypes owns the
+     * exact emitted schema.
+     */
+    (void)raw;
+    return storage_formatEffectPlaceholderLine(dst, cap, op_write_line_index);
+}
+
+static uint8_t filesystem_nextPatternStubLine(char *dst, uint16_t cap,
+                                              void *raw)
+{
+    const PatternSet *pattern = (const PatternSet *)raw;
+
+    /*
+     * Adapt storageTypes' draft pattern writer to filesystem_writeTextLine.
+     *
+     * Inputs: raw is the Scene being saved's PatternSet. Output: one v2 draft
+     * pattern.pat row per call. The writer stores only Step active bits plus
+     * length/scale; non-stored fields are recreated from PatternData defaults
+     * by the loader.
+     */
+    return storage_formatPatternStubLine(dst, cap, pattern,
+                                         op_write_line_index);
+}
+
+static uint8_t filesystem_nextBanksetLine(char *dst, uint16_t cap,
+                                          void *raw)
+{
+    /*
+     * Adapt storageTypes' Bank config writer to filesystem_writeTextLine.
+     *
+     * Inputs: op_bankset_state.active_scene and the generic line index.
+     * Output: one bankset.bcg line. The writer intentionally has no Bank name
+     * access because the enclosing Bank directory is the sole identity owner.
+     */
+    (void)raw;
+    return storage_formatBanksetLine(dst, cap, &op_bankset_state,
+                                     op_write_line_index);
 }
 
 static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
@@ -4310,9 +5267,16 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
     if (index == 4u)
         return filesystem_formatLiteralLine(dst, cap, "\n");
 
+    /*
+     * Each slot now serializes four logical lines: header, type, file, and a
+     * blank separator. audio_out used to be a fifth per-slot line, but routing
+     * belongs to sceneset.scg. The integer division maps a monotonically
+     * increasing line index onto the source instrument slot; the modulus picks
+     * the field inside that four-line slot block.
+     */
     index = (uint16_t)(index - 5u);
-    slot = (uint8_t)(index / 5u);
-    field = (uint8_t)(index % 5u);
+    slot = (uint8_t)(index / 4u);
+    field = (uint8_t)(index % 4u);
     if (slot >= STORAGE_KIT_SLOT_COUNT)
         return 0u;
 
@@ -4337,10 +5301,12 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
     case 2u:
         return filesystem_formatAssignmentTextLine(
             dst, cap, "file", op_save_kit_member_display_file[slot]);
-    case 3u:
-        return filesystem_formatAssignmentU16Line(
-            dst, cap, "audio_out", kit->settings.audio_out[slot]);
     default:
+        /*
+         * Blank separator after each slot. New Kit writers intentionally stop
+         * here; legacy audio_out values remain parse-only compatibility data
+         * and are never emitted from a root or embedded Kit Save.
+         */
         return filesystem_formatLiteralLine(dst, cap, "\n");
     }
 }
@@ -4397,13 +5363,31 @@ static void filesystem_deleteTreeStart(const char *display_name)
     op_delete_tree_phase = FS_DELETE_TREE_OPEN_TARGET;
 }
 
-static uint8_t filesystem_directoryObjectMatchesKitSlot(
+static uint8_t filesystem_directoryObjectMatchesSlot(
         const afatfsObjectInfo_t *object,
-        uint16_t slot)
+        uint16_t slot,
+        uint8_t allow_short_alias)
 {
     uint16_t parsed_slot;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 
+    /*
+     * Decide whether one child directory is eligible for slot replacement.
+     *
+     * Inputs: asyncfatfs object info from the current parent directory, the
+     * requested 000..999 slot, and whether old compact 8.3 aliases may match
+     * by their first three short-name digits. Output: nonzero only for
+     * directories that belong to the exact requested numeric slot.
+     *
+     * Why the short-alias flag exists: root Kit Save historically had to clean
+     * host/firmware aliases such as "001SLA~1" whose visible component may not
+     * satisfy the preferred "001 Slak" grammar. Scene Save is newer and more
+     * dangerous because a Scene tree contains nested Kit/Pattern/Effect
+     * directories; it therefore passes allow_short_alias=0 and deletes only
+     * visible names that parse as numbered Scene folders. The safe failure mode
+     * for Scene is leaving an odd alias behind, never recursing into a
+     * directory that was not visibly a same-slot Scene.
+     */
     if (!object || object->kind != AFATFS_OBJECT_DIRECTORY)
         return 0u;
     if (storage_parseNumberedFolder(object->displayName,
@@ -4412,6 +5396,8 @@ static uint8_t filesystem_directoryObjectMatchesKitSlot(
         parsed_slot == slot) {
         return 1u;
     }
+    if (!allow_short_alias)
+        return 0u;
     if (object->shortName[0] >= '0' && object->shortName[0] <= '9' &&
         object->shortName[1] >= '0' && object->shortName[1] <= '9' &&
         object->shortName[2] >= '0' && object->shortName[2] <= '9') {
@@ -4450,12 +5436,54 @@ static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
     return (uint16_t)(numerator / 255);
 }
 
-static void filesystem_deleteKitSlotDirectoriesStart(void)
+static void filesystem_deleteSlotDirectoriesStart(uint8_t allow_short_alias)
 {
+    /*
+     * Start same-slot directory cleanup in the current parent directory.
+     *
+     * Inputs: caller must already be chdir'd into /Kit or /Scene; op_slot is
+     * the direct 000..999 product slot. allow_short_alias controls whether the
+     * scan may match legacy compact 8.3 aliases by short-name digits. Output:
+     * the delete-slot state machine is reset and will repeatedly scan the
+     * current parent, recursively delete one matching child, return to this
+     * parent, and rescan until no same-slot directory remains.
+     *
+     * Safety: this function never receives a path to delete. It only deletes
+     * children discovered by filesystem_directoryObjectMatchesSlot(), so Scene
+     * Save can opt out of short-alias matching and avoid deleting anything
+     * except visibly numbered Scene folders for the target slot.
+     */
     memset(op_delete_slot_target_name, 0,
            sizeof(op_delete_slot_target_name));
     op_delete_slot_dir = NULL;
+    op_delete_slot_allow_short_alias = allow_short_alias;
     op_delete_slot_phase = FS_DELETE_SLOT_OPEN_SCAN;
+}
+
+static void filesystem_deleteKitSlotDirectoriesStart(void)
+{
+    /*
+     * Kit Save cleanup allows short-alias fallback.
+     *
+     * Older Kit cards may contain same-slot directories whose visible name is
+     * only an 8.3 alias such as 001SLA~1. Matching those by their first three
+     * digits is acceptable inside /Kit because the product tree contains only
+     * Kit directories and member files.
+     */
+    filesystem_deleteSlotDirectoriesStart(1u);
+}
+
+static void filesystem_deleteSceneSlotDirectoriesStart(void)
+{
+    /*
+     * Scene Save cleanup forbids short-alias fallback.
+     *
+     * The current parent must be /Scene. Only children whose visible display
+     * name parses as "NNN Name" for op_slot are recursively deleted. This keeps
+     * replacement scoped to the requested Scene slot no matter how many nested
+     * directories exist inside other Scene folders.
+     */
+    filesystem_deleteSlotDirectoriesStart(0u);
 }
 
 static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
@@ -4515,8 +5543,10 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
                 op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
                 break;
             }
-            if (filesystem_directoryObjectMatchesKitSlot(&op_object,
-                                                         op_slot)) {
+            if (filesystem_directoryObjectMatchesSlot(
+                    &op_object,
+                    op_slot,
+                    op_delete_slot_allow_short_alias)) {
                 filesystem_copyLongComponent(
                     op_delete_slot_target_name,
                     sizeof(op_delete_slot_target_name),
@@ -5011,6 +6041,619 @@ static void filesystem_saveKitDirectory_tick(void)
         if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_NORMAL) {
             scene_setResidentKitDisplayName(op_kit_save_source_scene,
                                             preset_currentName);
+        }
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+static void filesystem_saveBankDirectory_tick(void)
+{
+    if (op_bank_payload_active) {
+        filesystem_saveSceneDirectory_tick();
+        return;
+    }
+
+    /*
+     * Save one root Bank in the initial one-Scene bridge form.
+     *
+     * Phases 0..12 create/open root Bank containers and write bankset.bcg.
+     * Then the state jumps into the existing Scene payload writer at phase 8,
+     * while still chdir'd inside `Bank/NNN Name/`. That writer creates the
+     * Bank-local child `00 <scene>/` and writes sceneset, embedded Kit,
+     * pattern, and effects. No phase here deletes root Bank or untoggled child
+     * Scenes.
+     */
+    switch (op_phase) {
+    case 0:
+        if (!scene_getConst(op_kit_save_source_scene) ||
+            op_slot >= STORAGE_BANK_MAX_SLOTS ||
+            op_save_bank_dir_display_name[0] == '\0') {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        if (!afatfs_mkdir_lfn(STORAGE_ROOT_BANK,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 3u;
+        return;
+
+    case 3:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 4u;
+        return;
+
+    case 4:
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_save_bank_dir_open_name, 0,
+               sizeof(op_save_bank_dir_open_name));
+        if (!afatfs_mkdir_lfn(op_save_bank_dir_display_name,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_save_bank_dir_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 5u;
+        return;
+
+    case 5:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 6u;
+        return;
+
+    case 6:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 7u;
+        return;
+
+    case 7:
+        if (!op_close_done)
+            return;
+        op_kit_slot_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(STORAGE_BANKSET_FILENAME,
+                              "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 8u;
+        return;
+
+    case 8:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 9u;
+        return;
+
+    case 9:
+        if (filesystem_writeTextLine(filesystem_nextBanksetLine, NULL))
+            return;
+        op_phase = 10u;
+        return;
+
+    case 10:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 11u;
+        return;
+
+    case 11:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        /*
+         * Only bit 0 is currently supplied by Preset, but this branch already
+         * treats a zero mask as a valid empty-Bank save. Future toggle UI can
+         * pass no bits to write bankset.bcg only, or selected bits to save
+         * specific Bank-local Scenes without replacing untoggled children.
+         */
+        if ((op_bank_scene_save_mask & 1u) == 0u) {
+            if (!afatfs_chdir(NULL))
+                return;
+            filesystem_recordSavedBankDirectory(op_save_bank_dir_display_name,
+                                                op_save_bank_dir_open_name);
+            bank_setDisplayName(op_bank_display_name);
+            bank_setActiveSceneSlot(op_bank_active_scene);
+            bank_setHasResidentBank(1u);
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_bank_payload_active = 1u;
+        op_phase = 8u;
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+static void filesystem_saveSceneDirectory_tick(void)
+{
+    const scene_t *scene = scene_getConst(op_kit_save_source_scene);
+    const kit_t *kit = scene ? &scene->kit : NULL;
+    fs_status_t delete_status;
+
+    /*
+     * Save one complete root Scene directory.
+     *
+     * Inputs were captured by filesystem_requestSaveSceneDirectory(): target
+     * root Scene slot, source resident Scene, display Scene name, embedded Kit
+     * directory name, and six generated member filenames. Outputs are a clean
+     * Scene/<NNN Name>/ tree containing sceneset.scg, Kit <name>/kitset.kcg,
+     * six Instrument files, pattern.pat, and effects.fx.
+     *
+     * The state machine intentionally mirrors Kit Save where possible. The
+     * important extra loop is the child-file sequence after sceneset.scg: write
+     * the embedded Kit while chdir'd into its directory, climb back to the
+     * Scene directory, then write the two placeholder files.
+     */
+    switch (op_phase) {
+    case 0:
+        if (!scene || !kit || op_slot >= STORAGE_SCENE_MAX_SLOTS ||
+            op_save_kit_dir_display_name[0] == '\0' ||
+            op_save_scene_kit_display_name[0] == '\0') {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1:
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        if (!afatfs_mkdir_lfn(STORAGE_ROOT_SCENE,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 3u;
+        return;
+
+    case 3:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 4u;
+        return;
+
+    case 4:
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        /*
+         * Remove every same-number Scene directory in /Scene/.
+         *
+         * The start wrapper is Scene-specific even though the tick worker is
+         * shared with Kit Save. It disables 8.3 short-alias fallback and
+         * accepts only visible child names parsed by storage_parseNumberedFolder()
+         * as the exact requested op_slot. Output: recursive deletion is scoped
+         * to same-slot Scene directories under /Scene/, never to /Scene itself
+         * or to other numbered Scene children, regardless of nested Kit,
+         * pattern, or effect subdirectories inside those other Scenes.
+         */
+        filesystem_deleteSceneSlotDirectoriesStart();
+        op_phase = 5u;
+        return;
+
+    case 5:
+        delete_status = filesystem_deleteKitSlotDirectories_tick();
+        if (delete_status == FS_STATUS_BUSY)
+            return;
+        if (delete_status == FS_STATUS_ERROR) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 8u;
+        return;
+
+    case 8:
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_save_kit_dir_open_name, 0, sizeof(op_save_kit_dir_open_name));
+        if (!afatfs_mkdir_lfn(op_save_kit_dir_display_name,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_save_kit_dir_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 9u;
+        return;
+
+    case 9:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 10u;
+        return;
+
+    case 10:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 11u;
+        return;
+
+    case 11:
+        if (!op_close_done)
+            return;
+        op_kit_slot_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(STORAGE_SCENESET_FILENAME,
+                              "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 12u;
+        return;
+
+    case 12:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 13u;
+        return;
+
+    case 13:
+        if (filesystem_writeTextLine(filesystem_nextScenesetLine,
+                                     (void *)scene))
+            return;
+        op_phase = 14u;
+        return;
+
+    case 14:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 15u;
+        return;
+
+    case 15:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_save_scene_kit_open_name, 0,
+               sizeof(op_save_scene_kit_open_name));
+        if (!afatfs_mkdir_lfn(op_save_scene_kit_display_name,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_save_scene_kit_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 16u;
+        return;
+
+    case 16:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        if (!afatfs_chdir(op_kit_slot_dir))
+            return;
+        op_phase = 17u;
+        return;
+
+    case 17:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 18u;
+        return;
+
+    case 18:
+        if (!op_close_done)
+            return;
+        op_kit_slot_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(STORAGE_KITSET_FILENAME,
+                              "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 19u;
+        return;
+
+    case 19:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 20u;
+        return;
+
+    case 20:
+        if (filesystem_writeTextLine(filesystem_nextKitsetLine, (void *)kit))
+            return;
+        op_phase = 21u;
+        return;
+
+    case 21:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 22u;
+        return;
+
+    case 22:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_instrument_slot = 0u;
+        op_phase = 23u;
+        return;
+
+    case 23:
+        if (op_instrument_slot >= STORAGE_KIT_SLOT_COUNT) {
+            op_phase = 28u;
+            return;
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        if (!afatfs_fopen_lfn(
+                op_save_kit_member_display_file[op_instrument_slot],
+                "w",
+                AFATFS_MATCH_CASE_INSENSITIVE,
+                op_root_open_name,
+                on_file_opened)) {
+            return;
+        }
+        op_phase = 24u;
+        return;
+
+    case 24:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 25u;
+        return;
+
+    case 25:
+    {
+        filesystem_instrument_write_ctx_t ctx = {{
+            &kit->instruments[op_instrument_slot],
+            kit->instruments[op_instrument_slot].type,
+            (uint8_t)(op_instrument_slot + 1u),
+            scene->settings.voice_morph_amount[op_instrument_slot],
+            STORAGE_INSTRUMENT_SAVE_NORMAL
+        }};
+        if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
+            return;
+        op_phase = 26u;
+        return;
+    }
+
+    case 26:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 27u;
+        return;
+
+    case 27:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_instrument_slot++;
+        op_phase = 23u;
+        return;
+
+    case 28:
+    {
+        afatfsOperationStatus_e st = afatfs_chdirParent();
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 29u;
+        return;
+    }
+
+    case 29:
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn("pattern.pat",
+                              "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 30u;
+        return;
+
+    case 30:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 31u;
+        return;
+
+    case 31:
+        if (filesystem_writeTextLine(filesystem_nextPatternStubLine,
+                                     (void *)&scene->pattern))
+            return;
+        op_phase = 32u;
+        return;
+
+    case 32:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 33u;
+        return;
+
+    case 33:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn("effects.fx",
+                              "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 34u;
+        return;
+
+    case 34:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 35u;
+        return;
+
+    case 35:
+        if (filesystem_writeTextLine(filesystem_nextEffectPlaceholderLine, NULL))
+            return;
+        op_phase = 36u;
+        return;
+
+    case 36:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 37u;
+        return;
+
+    case 37:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        if (current_op == FS_INTERNAL_OP_SAVE_BANK) {
+            /*
+             * Complete a Bank-local Scene payload save.
+             *
+             * Inputs: we just wrote `Bank/NNN Name/00 Scene/...`. Output:
+             * root Bank cache and resident Bank identity update only. The root
+             * Scene cache is deliberately untouched because the child `00`
+             * folder is not a root Scene library slot.
+             */
+            filesystem_recordSavedBankDirectory(op_save_bank_dir_display_name,
+                                                op_save_bank_dir_open_name);
+            bank_setDisplayName(op_bank_display_name);
+            bank_setActiveSceneSlot(op_bank_active_scene);
+            bank_setHasResidentBank(1u);
+        } else {
+            filesystem_recordSavedSceneDirectory(op_save_kit_dir_display_name,
+                                                 op_save_kit_dir_open_name);
+            scene_setSceneDisplayName(op_kit_save_source_scene,
+                                      op_scene_display_name);
         }
         filesystem_finish(FS_STATUS_DONE);
         return;
@@ -6668,6 +8311,125 @@ static void filesystem_scanScenes_tick(void)
 
     case 6: /* WAIT_CLOSE */
         if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 7;
+        return;
+
+    case 7: /* CHDIR root + FINISH */
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(op_close_status);
+        return;
+
+    default:
+        op_close_status = FS_STATUS_ERROR;
+        op_phase = 7;
+        return;
+    }
+}
+
+/* -----------------------------------------------------------------------
+** SCAN BANK DIRECTORIES state machine
+**
+** Inputs: filesystem_requestScanBanks() clears the root Bank slot cache and
+** starts this operation. Output: Bank/NNN Name folders populate
+** bank_slot_present/name/open_name. Missing Bank/ is a successful empty scan
+** so boot can continue into the root Scene/Kit fallback chain.
+**
+** Bank-local Scene children are not scanned here. They are two-digit 00..15
+** folders discovered only while a selected Bank is open for load/save.
+** ----------------------------------------------------------------------- */
+static void filesystem_scanBanks_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* CHDIR root */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1;
+        return;
+
+    case 1: /* OPEN Bank/ */
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_BANK,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                op_root_open_name,
+                                on_file_opened)) {
+            return;
+        }
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT_OPEN */
+        if (!op_file_ready)
+            return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3;
+        return;
+
+    case 3: /* CHDIR Bank/ */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
+        op_phase = 4;
+        return;
+
+    case 4: /* FIND_NEXT */
+    {
+        afatfsOperationStatus_e st =
+            afatfs_findNextObject(op_kit_root_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 5;
+            return;
+        }
+        if (op_object.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 5;
+            return;
+        }
+        /*
+         * Record only root Bank folders.
+         *
+         * Inputs: asyncfatfs has already resolved the public display name and
+         * short alias. Output: one root 000..999 Bank cache entry per accepted
+         * directory. Files and dot backers are ignored until future autosave
+         * support gives them product meaning.
+         */
+        if (op_object.kind == AFATFS_OBJECT_DIRECTORY) {
+            /*
+             * Cache displayName as both browser text and future open key.
+             *
+             * afatfs_opendir_lfn() performs display-component matching for
+             * read-only opens. Passing the generated SFN alias here makes
+             * host-created LFN Banks list correctly but fail to open later.
+             */
+            filesystem_recordBankDirectory(op_object.displayName,
+                                           op_object.displayName);
+        }
+        return;
+    }
+
+    case 5: /* CLOSE */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 6;
+        return;
+
+    case 6: /* WAIT_CLOSE */
+        if (!op_close_done)
+            return;
         op_kit_root_dir = NULL;
         op_phase = 7;
         return;
@@ -8454,8 +10216,17 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_LOAD_SCENE:
         filesystem_loadSceneDirectory_tick();
         break;
+    case FS_INTERNAL_OP_LOAD_BANK:
+        filesystem_loadBankDirectory_tick();
+        break;
     case FS_INTERNAL_OP_SAVE_KIT:
         filesystem_saveKitDirectory_tick();
+        break;
+    case FS_INTERNAL_OP_SAVE_SCENE:
+        filesystem_saveSceneDirectory_tick();
+        break;
+    case FS_INTERNAL_OP_SAVE_BANK:
+        filesystem_saveBankDirectory_tick();
         break;
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:
         filesystem_loadInstrument_tick();
@@ -8492,6 +10263,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_SCAN_SCENES:
         filesystem_scanScenes_tick();
+        break;
+    case FS_INTERNAL_OP_SCAN_BANKS:
+        filesystem_scanBanks_tick();
         break;
     case FS_INTERNAL_OP_SCAN_INSTRUMENTS:
         filesystem_scanInstruments_tick();
@@ -8595,8 +10369,13 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(op_save_kit_member_display_file, 0,
            sizeof(op_save_kit_member_display_file));
     memset(op_save_kit_dir_open_name, 0, sizeof(op_save_kit_dir_open_name));
+    memset(op_save_scene_kit_display_name, 0,
+           sizeof(op_save_scene_kit_display_name));
+    memset(op_save_scene_kit_open_name, 0,
+           sizeof(op_save_scene_kit_open_name));
     op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
     op_delete_slot_dir = NULL;
+    op_delete_slot_allow_short_alias = 0u;
     memset(op_delete_slot_target_name, 0,
            sizeof(op_delete_slot_target_name));
     op_delete_tree_phase = FS_DELETE_TREE_IDLE;
@@ -8610,8 +10389,22 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_scene_load_scene_mask = 0u;
     memset(op_scene_display_name, 0, sizeof(op_scene_display_name));
     memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
+    memset(op_scene_child_display_name, 0,
+           sizeof(op_scene_child_display_name));
     memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
     memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
+    memset(&op_bankset_state, 0, sizeof(op_bankset_state));
+    memset(op_bank_display_name, 0, sizeof(op_bank_display_name));
+    memset(op_save_bank_dir_display_name, 0,
+           sizeof(op_save_bank_dir_display_name));
+    memset(op_save_bank_dir_open_name, 0, sizeof(op_save_bank_dir_open_name));
+    memset(op_bank_child_present, 0, sizeof(op_bank_child_present));
+    memset(op_bank_child_name, 0, sizeof(op_bank_child_name));
+    memset(op_bank_child_open_name, 0, sizeof(op_bank_child_open_name));
+    op_bank_scene_save_mask = 0u;
+    op_bank_active_scene = 0u;
+    op_bank_loaded_scene = 0u;
+    op_bank_payload_active = 0u;
     op_kit_root_dir = NULL;
     op_kit_slot_dir = NULL;
     op_lfn_valid = 0;
@@ -8650,6 +10443,9 @@ bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb
             slot, (uint16_t)(1u << scene_getActiveIndex()), cb);
     case FS_FILE_SCENE:
         return filesystem_requestLoadSceneForScenes(
+            slot, (uint16_t)(1u << scene_getActiveIndex()), cb);
+    case FS_FILE_BANK:
+        return filesystem_requestLoadBank(
             slot, (uint16_t)(1u << scene_getActiveIndex()), cb);
     case FS_FILE_MORPH:
         return filesystem_start(FS_INTERNAL_OP_LOAD_MORPH, type, slot, cb);
@@ -8719,9 +10515,60 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
     op_kit_save_source_scene = source_scene;
     op_kit_save_mode = morph_projection ? STORAGE_INSTRUMENT_SAVE_MORPH
                                         : STORAGE_INSTRUMENT_SAVE_NORMAL;
-    filesystem_makeNumberedKitDir(op_save_kit_dir_display_name,
-                                  slot,
-                                  display_name);
+    filesystem_makeNumberedDir(op_save_kit_dir_display_name,
+                               slot,
+                               display_name);
+
+    for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++) {
+        storage_makeSavedInstrumentDisplayFilename(
+            op_save_kit_member_display_file[voice],
+            sizeof(op_save_kit_member_display_file[voice]),
+            scene->kit.instrument_stem[voice],
+            scene->kit.instruments[voice].type,
+            (uint8_t)(voice + 1u),
+            1u);
+    }
+    return true;
+}
+
+bool filesystem_requestSaveSceneDirectory(uint16_t slot,
+                                          uint8_t source_scene,
+                                          const char display_name[8],
+                                          fs_completion_cb_t cb)
+{
+    const scene_t *scene = scene_getConst(source_scene);
+    uint8_t voice;
+
+    /*
+     * Capture all request-time Scene Save coordinates.
+     *
+     * Inputs: root Scene slot, source resident Scene, and edited display name.
+     * Outputs: filesystem operation scratch now contains the target Scene
+     * directory display name, embedded Kit directory display, and per-voice
+     * member filenames. That Scene display name is used for root directory
+     * creation/cache only; sceneset.scg does not write a self-name. Menu
+     * movement after OK cannot retarget an in-flight save.
+     */
+    if (!scene || !display_name || slot >= STORAGE_SCENE_MAX_SLOTS)
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_SAVE_SCENE,
+                          FS_FILE_SCENE,
+                          slot,
+                          cb)) {
+        return false;
+    }
+
+    op_kit_save_source_scene = source_scene;
+    op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
+    filesystem_makeNumberedDir(op_save_kit_dir_display_name,
+                               slot,
+                               display_name);
+    memcpy(op_scene_display_name, display_name, STORAGE_SCENE_DISPLAY_NAME_LEN);
+    op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    filesystem_makeSceneEmbeddedKitDir(
+        op_save_scene_kit_display_name,
+        sizeof(op_save_scene_kit_display_name),
+        scene->kit.display_name);
 
     for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++) {
         storage_makeSavedInstrumentDisplayFilename(
@@ -8830,6 +10677,103 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
     return true;
 }
 
+bool filesystem_requestLoadBank(uint16_t slot,
+                                uint16_t scene_mask,
+                                fs_completion_cb_t cb)
+{
+    uint8_t scene_index;
+    uint16_t valid_mask = 0u;
+
+    /*
+     * Validate and start a root Bank Load.
+     *
+     * Inputs: root Bank slot and resident Scene destination mask. Output:
+     * Bank-level operation state plus a later Scene payload load if a
+     * Bank-local 00..15 child exists. The mask loop matches Kit/Scene request
+     * filtering so future SCENE_COUNT growth remains bounded by the 16 physical
+     * Bank Scene buttons.
+     */
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            valid_mask = (uint16_t)(valid_mask | (uint16_t)(1u << scene_index));
+    }
+    if (valid_mask == 0u || slot >= STORAGE_BANK_MAX_SLOTS ||
+        !bank_slot_present[slot]) {
+        return false;
+    }
+    if (!filesystem_start(FS_INTERNAL_OP_LOAD_BANK, FS_FILE_BANK, slot, cb))
+        return false;
+    op_scene_load_scene_mask = valid_mask;
+    filesystem_initStagedScene(&op_staged_scene);
+    memcpy(op_bank_display_name, bank_slot_name[slot], STORAGE_KIT_DISPLAY_NAME_LEN);
+    op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    memcpy(preset_currentName, op_bank_display_name, 8u);
+    return true;
+}
+
+bool filesystem_requestSaveBank(uint16_t slot,
+                                uint8_t source_scene,
+                                const char display_name[8],
+                                uint16_t bank_scene_save_mask,
+                                fs_completion_cb_t cb)
+{
+    const scene_t *scene = scene_getConst(source_scene);
+    uint8_t voice;
+
+    /*
+     * Capture one Bank Save request.
+     *
+     * Inputs: root Bank slot/name, source resident Scene, and a future 16-bit
+     * Bank-local Scene save mask. Output: asynchronous Bank writer state. This
+     * phase saves only bit 0 from Menu, but the mask is stored as a 16-bit
+     * value so later SEQ-button toggles can select any subset of slots 00..15
+     * without changing the filesystem facade.
+     */
+    if (!scene || !display_name || slot >= STORAGE_BANK_MAX_SLOTS)
+        return false;
+    bank_scene_save_mask =
+        (uint16_t)(bank_scene_save_mask &
+                   (uint16_t)((1u << STORAGE_BANK_SCENE_MAX_SLOTS) - 1u));
+    if (!filesystem_start(FS_INTERNAL_OP_SAVE_BANK, FS_FILE_BANK, slot, cb))
+        return false;
+
+    op_kit_save_source_scene = source_scene;
+    op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
+    op_bank_scene_save_mask = bank_scene_save_mask;
+    op_bank_active_scene = 0u;
+    op_bankset_state.active_scene = op_bank_active_scene;
+    op_bankset_state.seen_format = 1u;
+    op_bankset_state.seen_version = 1u;
+    op_bankset_state.seen_active_scene = 1u;
+    filesystem_makeNumberedDir(op_save_bank_dir_display_name,
+                               slot,
+                               display_name);
+    memcpy(op_bank_display_name, display_name, STORAGE_KIT_DISPLAY_NAME_LEN);
+    op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    storage_formatBankSceneDir(op_save_kit_dir_display_name,
+                               sizeof(op_save_kit_dir_display_name),
+                               0u,
+                               scene->display_name);
+    memcpy(op_scene_display_name, scene->display_name,
+           STORAGE_SCENE_DISPLAY_NAME_LEN);
+    op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    filesystem_makeSceneEmbeddedKitDir(
+        op_save_scene_kit_display_name,
+        sizeof(op_save_scene_kit_display_name),
+        scene->kit.display_name);
+    for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++) {
+        storage_makeSavedInstrumentDisplayFilename(
+            op_save_kit_member_display_file[voice],
+            sizeof(op_save_kit_member_display_file[voice]),
+            scene->kit.instrument_stem[voice],
+            scene->kit.instruments[voice].type,
+            (uint8_t)(voice + 1u),
+            1u);
+    }
+    return true;
+}
+
 bool filesystem_requestScanKits(fs_completion_cb_t cb)
 {
     if (status == FS_STATUS_BUSY) return false;
@@ -8859,6 +10803,23 @@ bool filesystem_requestScanScenes(fs_completion_cb_t cb)
     memset(scene_slot_name, 0, sizeof(scene_slot_name));
     memset(scene_slot_open_name, 0, sizeof(scene_slot_open_name));
     return filesystem_start(FS_INTERNAL_OP_SCAN_SCENES, FS_FILE_SCENE, 0, cb);
+}
+
+bool filesystem_requestScanBanks(fs_completion_cb_t cb)
+{
+    /*
+     * Start a root Bank/ numbered-folder scan.
+     *
+     * Inputs: completion callback. Output: the root Bank browser cache is
+     * cleared immediately and repopulated from actual FAT directory entries.
+     * Missing Bank/ is a successful empty scan so boot can fall back to root
+     * Scene/Kit/defaults without treating a pre-Bank card as corrupt.
+     */
+    if (status == FS_STATUS_BUSY) return false;
+    memset(bank_slot_present, 0, sizeof(bank_slot_present));
+    memset(bank_slot_name, 0, sizeof(bank_slot_name));
+    memset(bank_slot_open_name, 0, sizeof(bank_slot_open_name));
+    return filesystem_start(FS_INTERNAL_OP_SCAN_BANKS, FS_FILE_BANK, 0, cb);
 }
 
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
@@ -9341,6 +11302,102 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
         return "Empty   ";
     }
     return scene_slot_name[zero_based_slot];
+}
+
+uint8_t filesystem_bankSlotExists(uint16_t zero_based_slot)
+{
+    /*
+     * Query the root Bank/ scan cache.
+     *
+     * Input: zero-based root Bank library slot 000..999. Output: nonzero only
+     * when the latest Bank scan found a matching Bank directory. Bank-local
+     * Scene children are intentionally outside this API.
+     */
+    if (zero_based_slot >= STORAGE_BANK_MAX_SLOTS)
+        return 0u;
+    return bank_slot_present[zero_based_slot];
+}
+
+const char *filesystem_bankSlotName(uint16_t zero_based_slot)
+{
+    /*
+     * Return an eight-character root Bank display name.
+     *
+     * Input: root Bank library slot. Output: cached directory-derived display
+     * name or "Empty   ". bankset.bcg is not consulted because files never
+     * store their own object names.
+     */
+    if (zero_based_slot >= STORAGE_BANK_MAX_SLOTS ||
+        !bank_slot_present[zero_based_slot]) {
+        return "Empty   ";
+    }
+    return bank_slot_name[zero_based_slot];
+}
+
+uint16_t filesystem_firstKitSlot(void)
+{
+    uint16_t slot;
+
+    /*
+     * Find the lowest present Kit slot for fallback loading.
+     *
+     * The loop scans direct root slots 000..999 and returns the array count as
+     * the absent sentinel. Callers compare against STORAGE_KIT_MAX_SLOTS rather
+     * than assuming 0 is empty, because slot 000 is a real user slot.
+     */
+    for (slot = 0u; slot < STORAGE_KIT_MAX_SLOTS; slot++) {
+        if (kit_slot_present[slot])
+            return slot;
+    }
+    return STORAGE_KIT_MAX_SLOTS;
+}
+
+uint16_t filesystem_firstSceneSlot(void)
+{
+    uint16_t slot;
+
+    /*
+     * Find the lowest root Scene slot for Bank-empty fallback.
+     *
+     * The loop walks the direct root Scene/ cache only. Bank-local two-digit
+     * child Scenes are deliberately excluded because fallback must initialize
+     * from the public Scene library before trying Kit/defaults.
+     */
+    for (slot = 0u; slot < STORAGE_SCENE_MAX_SLOTS; slot++) {
+        if (scene_slot_present[slot])
+            return slot;
+    }
+    return STORAGE_SCENE_MAX_SLOTS;
+}
+
+uint16_t filesystem_firstBankSlot(void)
+{
+    uint16_t slot;
+
+    /*
+     * Find the lowest root Bank slot for boot.
+     *
+     * The return sentinel is STORAGE_BANK_MAX_SLOTS, not zero, because Bank
+     * slot 000 is the intended default. Boot and Menu callers therefore ask
+     * filesystem_bankSlotExists() or compare against the max before loading.
+     */
+    for (slot = 0u; slot < STORAGE_BANK_MAX_SLOTS; slot++) {
+        if (bank_slot_present[slot])
+            return slot;
+    }
+    return STORAGE_BANK_MAX_SLOTS;
+}
+
+uint8_t filesystem_lastBankLoadLoadedScene(void)
+{
+    /*
+     * Report whether the most recent Bank Load supplied a child Scene payload.
+     *
+     * Empty Banks are successful Bank loads but leave Scene initialization to
+     * the Preset/Menu fallback chain. This bit separates that valid empty-Bank
+     * outcome from a filesystem error.
+     */
+    return op_bank_loaded_scene;
 }
 
 uint8_t filesystem_instrumentTargetExists(instrument_type_t type,

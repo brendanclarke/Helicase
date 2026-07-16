@@ -20,18 +20,9 @@ DEFAULT_KIT_ROOT = ROOT / "SD_CARD" / "Kit"
 DEFAULT_SCENE_ROOT = ROOT / "SD_CARD" / "Scene"
 
 NUM_TRACKS = 7
-NUM_STEPS = 128
-PATTERN_COUNT = 1
-PATTERN_NAME_BYTES = 8
-STEP_RECORD_SIZE = 9
-INSTRUMENT_PARAM_INVALID = 0xFFFF
-PAT_DEFAULT_NOTE = 63
-PAT_DEFAULT_PROB = 127
-PAT_DEFAULT_VOLUME = 100
-PAT_DEFAULT_TRACK_LENGTH = 16
-TRACK_SCALE_OFF = 10
 
 KIT_DIR_RE = re.compile(r"^(\d{3})[ _](.+)$")
+DEFAULT_AUDIO_OUT = [2, 0, 0, 0, 0, 1]
 
 
 def parse_numbered_dir(path: Path) -> tuple[int, str] | None:
@@ -41,65 +32,61 @@ def parse_numbered_dir(path: Path) -> tuple[int, str] | None:
     return int(match.group(1)), match.group(2).strip()
 
 
-def short_display_name(name: str) -> bytes:
-    encoded = name.encode("ascii", "replace")[:PATTERN_NAME_BYTES]
-    return encoded.ljust(PATTERN_NAME_BYTES, b" ")
+def strip_legacy_audio_out(kitset_path: Path) -> list[int]:
+    """Move legacy embedded Kit routing into Scene-owned sceneset data.
+
+    Inputs: copied embedded ``kitset.kcg`` path. Outputs: a six-value route
+    list for ``sceneset.scg``. Side effect: removes ``audio_out=`` lines from
+    the copied kitset so generated Scene fixtures match the new writer.
+    """
+    audio_out: list[int] = []
+    kept: list[str] = []
+    for line in kitset_path.read_text(encoding="ascii").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("audio_out="):
+            try:
+                audio_out.append(int(stripped.split("=", 1)[1]))
+            except ValueError:
+                index = len(audio_out)
+                audio_out.append(DEFAULT_AUDIO_OUT[index]
+                                 if index < len(DEFAULT_AUDIO_OUT) else 0)
+            continue
+        kept.append(line)
+    kitset_path.write_text("\n".join(kept).rstrip() + "\n", encoding="ascii")
+    if len(audio_out) != 6:
+        return DEFAULT_AUDIO_OUT.copy()
+    return [value if 0 <= value <= 5 else DEFAULT_AUDIO_OUT[i]
+            for i, value in enumerate(audio_out)]
 
 
-def empty_step_record() -> bytes:
-    param_lo = INSTRUMENT_PARAM_INVALID & 0xFF
-    param_hi = (INSTRUMENT_PARAM_INVALID >> 8) & 0xFF
-    return bytes(
+def make_thin_pattern_stub() -> str:
+    return "\n".join(
         [
-            PAT_DEFAULT_VOLUME,
-            PAT_DEFAULT_PROB,
-            PAT_DEFAULT_NOTE,
-            param_lo,
-            param_hi,
-            0,
-            param_lo,
-            param_hi,
-            0,
+            "format=helicase.pattern",
+            "version=1",
+            "placeholder=1",
         ]
     )
 
 
-def make_empty_bridge_pattern(scene_name: str) -> bytes:
-    data = bytearray()
-    data += short_display_name(scene_name)
-
-    step = empty_step_record()
-    for _ in range(NUM_TRACKS * PATTERN_COUNT * NUM_STEPS):
-        data += step
-
-    for _ in range(NUM_TRACKS * PATTERN_COUNT):
-        data += (0).to_bytes(2, "little")
-
-    data += bytes([0, 0])
-
-    for _ in range(NUM_TRACKS * PATTERN_COUNT):
-        data += bytes([PAT_DEFAULT_TRACK_LENGTH])
-
-    for _ in range(NUM_TRACKS * PATTERN_COUNT):
-        data += bytes([0, TRACK_SCALE_OFF])
-
-    for _ in range(NUM_TRACKS * PATTERN_COUNT):
-        data += bytes([0])
-
-    return bytes(data)
-
-
-def make_sceneset(scene_name: str) -> str:
+def make_sceneset(scene_name: str, audio_out: list[int]) -> str:
+    # Scene identity is the containing "NNN Name" directory, never a name=
+    # field in sceneset.scg. The scene_name argument is retained so the call
+    # site documents which directory identity this settings payload belongs to,
+    # but the writer serializes only Scene-level values.
+    _ = scene_name
     return "\n".join(
         [
             "format=helicase.sceneset",
             "version=1",
-            f"name={scene_name}",
             "morph_amount=0",
             "voice_morph_amount=0,0,0,0,0,0",
             "voice_decimation_all=127",
             "midi_channel=1,2,3,4,5,6,7",
             "midi_note=63,63,63,63,63,63,63",
+            "audio_out=" + ",".join(str(value) for value in audio_out),
+            "fx_send_amount=0,0,0,0,0,0",
+            "fader_setting=0,0,0,0,0,0",
             "",
         ]
     )
@@ -120,14 +107,23 @@ def convert_kit_to_scene(kit_dir: Path, scene_root: Path, overwrite: bool) -> Pa
         shutil.rmtree(scene_dir)
 
     scene_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(kit_dir, embedded_kit_dir)
+    shutil.copytree(
+        kit_dir,
+        embedded_kit_dir,
+        ignore=shutil.ignore_patterns(".DS_Store"),
+    )
+    audio_out = strip_legacy_audio_out(embedded_kit_dir / "kitset.kcg")
 
     (scene_dir / "sceneset.scg").write_text(
-        make_sceneset(name),
+        make_sceneset(name, audio_out),
         encoding="ascii",
         newline="\n",
     )
-    (scene_dir / "pattern.pat").write_bytes(make_empty_bridge_pattern(name))
+    (scene_dir / "pattern.pat").write_text(
+        make_thin_pattern_stub(),
+        encoding="ascii",
+        newline="\n",
+    )
     (scene_dir / "effects.fx").write_text(
         "\n".join(
             [

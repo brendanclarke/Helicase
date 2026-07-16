@@ -1,3 +1,3 @@
-format=helicase.pattern
+format=helicase.effect
 version=1
 placeholder=1

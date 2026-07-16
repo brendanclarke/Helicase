@@ -50,6 +50,17 @@
 ** ----------------------------------------------------------------------- */
 #define USE_SD_CARD          1
 #define DEBUG_CRASH_MODE     0
+/*
+ * CONFIG_DEV_MODE exposes low-level storage diagnostics in the production UI.
+ *
+ * What: when nonzero, the Load/Save type cycle includes the asyncfatfs test
+ * entries "File", "Dir", and Save-only "sDir". Why: the diagnostic commands
+ * remain compiled and callable for storage work, but ordinary firmware should
+ * present only user-facing objects such as Kit, Scene, and Bank. Clients:
+ * Core/Menu/menu.c gates only menu reachability; filesystem test functions are
+ * left intact.
+ */
+#define CONFIG_DEV_MODE      0
 
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time

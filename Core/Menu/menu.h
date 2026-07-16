@@ -59,7 +59,7 @@ extern uint8_t voiceModeShowMorph;
  * Keeping the count at the first non-kit load type prevents KitMrp from
  * reusing the normal Kit cursor storage by accident.
  */
-#define NUM_PRESET_LOCATIONS 7
+#define NUM_PRESET_LOCATIONS 8
 extern uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 
 enum PageNames {
@@ -225,6 +225,7 @@ enum loadSaveEnum {
      */
     SAVE_TYPE_KIT_MORPH,
     SAVE_TYPE_SCENE,
+    SAVE_TYPE_BANK,
     SAVE_TYPE_GLO,
     SAVE_TYPE_SAMPLES,
     NUM_SAVE_TYPES

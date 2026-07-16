@@ -1,13 +1,14 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware after Session 038. It includes the
+reference for the Helicase/LXR-02 firmware after Session 039. It includes the
 full Session 032 instrument/kit file specification formerly kept in
-`INSTRUMENT_FILE_SPEC.md`, plus the Session 033-038 runtime decisions for LFO,
+`INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
 behavior, Instrument Load, Kit/Instrument Morph Load, Kit/Instrument Morph
-Save, Kit Save, root Instrument Save, and storage-only LFO `self` routing.
-Low-level asyncfatfs API contracts and caller rules now live in
+Save, Kit Save, root Instrument Save, Scene/Bank directory load/save, draft
+Scene/Bank pattern persistence, and storage-only LFO `self` routing. Low-level
+asyncfatfs API contracts and caller rules now live in
 `ASYNCFATFS_REFERENCE.md`.
 
 Use this document to distinguish three things:
@@ -15,12 +16,13 @@ Use this document to distinguish three things:
 - Implemented now: root `Kit/NNN Name/` directory loading/saving, root
   `Instrument/` pool replacement into Scene-owned descriptor-indexed
   instrument parameter images, Kit/Instrument Morph Load, Kit/Instrument Morph
-  Save, normal new-format Kit Save, root Instrument Save, and File/Dir
-  asyncfatfs diagnostics.
+  Save, normal new-format Kit Save, root Instrument Save, root Scene
+  Load/Save, root Bank scan/load/save in the one-resident-Scene bridge shape,
+  and File/Dir/sDir asyncfatfs diagnostics behind Dev Mode.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: redone Scene loads/saves on the Session 036 asyncfatfs
-  foundation, Bank loads/saves, Effect loads/saves, root `settings.cfg`, and
+- Not implemented yet: 16 resident Bank Scenes, Scene/Bank autosave dot-file
+  promotion, real Effect load/save, root `settings.cfg`, and
   descriptor-backed step automation playback.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
@@ -29,7 +31,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented after Session 036:
+Implemented through Session 039:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -107,6 +109,25 @@ Implemented after Session 036:
   and apply temporary LFO-shaped values through the normal descriptor runtime
   writer. Negative polarity matches original LXR value-relative behavior in
   parameter space instead of subtracting a full raw runtime range.
+- Scene settings now own per-voice `audio_out[6]`, `fx_send_amount[6]`, and
+  `fader_setting[6]`. `kitset.kcg` never emits these values; legacy
+  `audio_out=` lines are parse-only side data for old embedded Kits.
+- Root Scene Load/Save is implemented for `Scene/NNN Name/` folders containing
+  `sceneset.scg`, embedded `Kit <name>/`, `pattern.pat`, and `effects.fx`.
+  `sceneset.scg` never stores the Scene name.
+- Resident Scene and embedded Kit names are retained from directory names:
+  root `Scene/NNN Name/` and child `Kit <name>/`.
+- Root Bank scan/load/save is implemented for the current one-resident-Scene
+  bridge. Boot scans Banks and tries the lowest Bank before root Scene/root Kit
+  fallback. Empty Bank folders are valid and complete Bank selection before
+  fallback.
+- Bank-local Scene folders use two digits, `00..15`, not root-library
+  three-digit numbering. The initial writer saves resident Scene 0 as child
+  slot `00` when the bridge mask includes bit 0.
+- Scene/Bank `pattern.pat` text v2 now stores the 128x7 active-step bitmap plus
+  per-track length and scale. Version 1 placeholders remain accepted.
+- `File`, `Dir`, and Save-only `sDir` diagnostics remain compiled but are
+  hidden from the Load/Save type cycle unless `CONFIG_DEV_MODE != 0`.
 
 Current bridges and limitations:
 
@@ -119,8 +140,9 @@ Current bridges and limitations:
 - `FS_FILE_MORPH` load/save still uses the legacy `.SND` morph-kit path.
 - Globals still load/save through legacy `glo.cfg`; root `settings.cfg` is the
   settled future replacement but is not wired yet.
-- Scene, Bank, Effect, Wavetable-pool, and new Pattern-pool load/save operations
-  are not implemented/promoted yet. Root Instrument load/save exists.
+- Effect, Wavetable-pool, and new Pattern-pool load/save operations are not
+  implemented/promoted yet. Root Instrument, root Scene, and bridge root Bank
+  load/save exist.
 - Descriptor-backed LFO and velocity modulation runtime paths are in place for
   direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
   Decimation. LFO direct descriptor overlays now go through descriptor-domain
@@ -128,10 +150,11 @@ Current bridges and limitations:
 - `AutomationNode` and the current step automation storage/playback path still
   use legacy/narrow target IDs and must be rebuilt for descriptor and Scene
   modulation targets.
-- New Scene modulation target IDs are runtime/menu IDs, not a completed file
-  save/load schema for Scene folders.
-- Before Bank work begins, Scene Load/Save must be deliberately redone and
-  hardware-tested on the Session 036 asyncfatfs foundation.
+- New Scene modulation target IDs are runtime/menu IDs; current Scene files
+  persist Scene mix/routing settings but not the future full effect stack.
+- Bank still uses only one resident Scene. The 16-Scene memory workspace,
+  per-Scene toggles, background load, autosave, dot-file promotion, and Scene
+  reload workflows remain future work.
 
 ## Root Layout
 
@@ -202,7 +225,8 @@ remain one-based `1..6` inside instrument text schemas.
 
 ## Bank
 
-Status: settled target, not implemented.
+Status: implemented as the Session 039 one-resident-Scene bridge; future
+16-Scene resident workspace and autosave are not implemented.
 
 `Bank/` contains bank folders:
 
@@ -231,16 +255,41 @@ Each bank folder also contains up to 16 scene folders:
 ```text
 Bank/000 <bank name>/
   bankset.bcg
-  000 <scene name>/
-  001 <scene name>/
+  00 <scene name>/
+  01 <scene name>/
   ...
-  015 <scene name>/
+  15 <scene name>/
 ```
 
-Scene slot numbers inside a bank do not need to be contiguous. The initial
-16-scene bank target uses direct scene folder slots `000..015` for the 16
-resident bank scenes. Missing scene slots are shown as empty in the UI. A user
-may exchange scene folders between banks.
+Scene slot numbers inside a bank do not need to be contiguous. Bank-local
+Scene folders use direct two-digit slots `00..15` for the 16 resident bank
+scenes. This is intentionally different from root `Scene/NNN` library folders.
+Missing scene slots are valid and will be shown as empty in the future UI. A
+user may exchange scene folders between banks.
+
+`bankset.bcg` v1:
+
+```text
+format=helicase.bankset
+version=1
+active_scene=0
+```
+
+`active_scene` is a Bank-local `00..15` slot number and is not zero-padded in
+the file. The Bank name is never stored in `bankset.bcg`; it comes only from
+the `Bank/NNN <bank name>/` directory.
+
+Current bridge behavior:
+
+- Boot scans `Bank/` and loads the lowest valid Bank before root Scene/root Kit
+  fallback.
+- Bank Load chooses `active_scene` if present, otherwise the lowest child Scene.
+- An empty Bank containing only valid `bankset.bcg` is valid; it completes Bank
+  selection and then falls back to root Scene, root Kit, then defaults.
+- Bank Save can save no child Scenes. The current UI/writer saves only child
+  slot `00` when its internal mask bit 0 is set.
+- Safe root Bank folder rename while preserving untoggled child Scenes is not
+  implemented. Future rename/promotion must be explicit and tested.
 
 Future background bank loading uses 17 resident `scene_t` slots: 16 bank scene
 slots plus one landing/staging scene so the currently playing scene can keep
@@ -248,10 +297,9 @@ playing while a new bank streams in.
 
 ## Scene
 
-Status: Scene storage exists in SRAM for the active scene. Earlier Scene
-load/save code exists historically, but Scene Load/Save is not considered
-promoted after the Session 036 asyncfatfs shift and must be deliberately redone
-and retested before Bank work.
+Status: root Scene Load/Save is implemented and promoted after Session 039.
+Only one resident Scene exists today; the API remains indexed for the future
+Bank workspace.
 
 `Scene/` is a root-level pool of user-copyable scene folders:
 
@@ -273,20 +321,55 @@ A scene folder contains:
 sceneset.scg
 Kit <kit name>/
 pattern.pat
-effect.fx
+effects.fx
 ```
 
 `sceneset.scg` stores scene-level metadata/configuration and validates the
-folder as a scene.
+folder as a scene. Current v1 Scene settings include global/per-voice Morph
+values, `voice_decimation_all`, seven MIDI channel/note values, and the
+Scene-owned per-voice mix settings `audio_out[6]`, `fx_send_amount[6]`, and
+`fader_setting[6]`.
 
 `Kit <kit name>/` is the scene's embedded kit directory. It works like a kit
 folder but is named without a numeric slot prefix because it belongs to the
 scene. The word after `Kit` is the kit name. The kit name is not stored in
 `kitset.kcg`, `sceneset.scg`, or any other metadata field.
 
-`pattern.pat` stores the scene's pattern data.
+`pattern.pat` is currently one of three accepted bridge shapes:
 
-`effect.fx` stores the scene's effect settings and effect automation sequence.
+- legacy binary bridge-pattern payload;
+- thin v1 text placeholder;
+- draft v2 text payload emitted by new Scene/Bank saves.
+
+The v1 placeholder:
+
+```text
+format=helicase.pattern
+version=1
+placeholder=1
+```
+
+The thin placeholder means the staged PatternSet uses PatternData's empty
+bridge defaults.
+
+The v2 draft payload:
+
+```text
+format=helicase.pattern
+version=2
+track1=<length>,<scale>,<128 active bits>
+...
+track7=<length>,<scale>,<128 active bits>
+```
+
+Only the step on/off bit (`STEP_ACTIVE_MASK`) is stored for each of 128 steps
+on each of seven tracks. Per-track `length` and `scale` are retained.
+Velocity, note, probability, automation, rotation, shuffle, next-pattern, and
+change-bar use PatternData defaults on load. The loader rebuilds the legacy
+16-bit main-step shadow from the 128-bit rows using `step % 16`.
+
+`effects.fx` currently stores a guarded placeholder until real effect storage
+exists.
 
 Current `scene_t` ownership:
 
@@ -301,11 +384,12 @@ Current `scene_settings_t` fields:
 - `voice_decimation_all`
 - `midi_channel[NUM_TRACKS]`
 - `midi_note[NUM_TRACKS]`
+- `audio_out[INSTRUMENT_SLOT_COUNT]`
+- `fx_send_amount[INSTRUMENT_SLOT_COUNT]`
+- `fader_setting[INSTRUMENT_SLOT_COUNT]`
 
-Future Scene file work should move scene-level metadata and settings into
-`sceneset.scg`, including MIDI note/channel, global/per-voice Morph values,
-and `voice_decimation_all`. These do not belong in `kitset.kcg` or instrument
-files.
+Scene file work stores scene-level metadata and settings in `sceneset.scg`.
+These do not belong in `kitset.kcg` or instrument files.
 
 ## Kit
 
@@ -394,7 +478,6 @@ open paths and `kitset.kcg` references.
 - Slot membership.
 - Per-slot instrument type.
 - Per-slot instrument filename.
-- Per-slot audio output routing.
 
 Example:
 
@@ -405,32 +488,26 @@ version=1
 [slot1]
 type=drm
 file=slakd1.drm
-audio_out=2
 
 [slot2]
 type=drm
 file=slakd2.drm
-audio_out=0
 
 [slot3]
 type=drm
 file=slakd3.drm
-audio_out=0
 
 [slot4]
 type=snr
 file=slaks1.snr
-audio_out=0
 
 [slot5]
 type=cym
 file=slakc1.cym
-audio_out=0
 
 [slot6]
 type=hat
 file=slakh1.hat
-audio_out=1
 ```
 
 Required top-level fields:
@@ -443,14 +520,16 @@ Required per-slot fields:
 - `[slot1]` through `[slot6]`
 - `type=drm|snr|cym|hat`
 - `file=<8.3 instrument filename>`
-- `audio_out=<0..5>`
 
 Validation rules:
 
 - All six slots must be present.
-- Every slot must declare type, file, and audio route.
+- Every slot must declare type and file.
 - File extension must match declared type: `.drm`, `.snr`, `.cym`, or `.hat`.
-- `audio_out` is clamped on apply if it exceeds `MIXER_ROUTING_DAC2_R`.
+- Legacy `audio_out=<0..5>` lines may still be parsed as compatibility side
+  data. Scene Load imports them only when loading an embedded Kit inside an old
+  Scene folder whose `sceneset.scg` lacks an `audio_out` line. Root Kit Load
+  ignores them and preserves current Scene routing.
 
 `kitset.kcg` does not own:
 
@@ -458,6 +537,7 @@ Validation rules:
 - Pattern data.
 - MIDI channel or MIDI note.
 - Scene settings.
+- Per-voice audio routing, FX send amount, or fader mode.
 - `voice_decimation_all`.
 - Instrument parameter values.
 - Instrument morph endpoint values.
@@ -1021,10 +1101,10 @@ Effect/
 ```
 
 Files are browsed alphanumerically. An effect file can be loaded into a scene.
-Users may copy a scene's `effect.fx` into this pool, and may copy a pool effect
-into a scene if they rename it to `effect.fx`.
+Users may copy a scene's `effects.fx` into this pool, and may copy a pool
+effect into a scene if they rename it to `effects.fx`.
 
-Scene `effect.fx` stores the scene's effect settings and effect automation
+Scene `effects.fx` stores the scene's effect settings and effect automation
 sequence. Effects and effect file formats are future DSP work.
 
 ## Instrument
@@ -1069,21 +1149,24 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status after Session 036:
+Status after Session 039:
 
-- `Load:[File    ]` / `Save:[File    ]` remain diagnostic asyncfatfs test
-  entries for exact root file scan/open/create/overwrite.
-- `Load:[Dir     ]` / `Save:[Dir     ]` remain diagnostic asyncfatfs test
-  entries for exact root directory scan/open/create and same-name child file
-  writes.
-- `Load:[Kit     ]` and `Save:[Kit     ]` are the only promoted musical
-  top-level entries.
+- `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
+  `Load:[Bank    ]` are promoted top-level entries.
+- `Save:[Kit     ]`, `Save:[KitMrp  ]`, `Save:[Scene   ]`, and
+  `Save:[Bank    ]` are promoted top-level entries.
+- `Load:[File    ]`, `Save:[File    ]`, `Load:[Dir     ]`,
+  `Save:[Dir     ]`, and Save-only `Save:[sDir    ]` remain compiled
+  diagnostic asyncfatfs test entries, but they appear in the normal type cycle
+  only when `CONFIG_DEV_MODE != 0`.
+- Scene and Bank load/save use explicit OK/OW confirmation. They do not
+  live-load on scroll.
+- Kit and KitMrp keep live-on-scroll load behavior.
 - VOICE press on the Load page enters nested Instrument Load.
-- VOICE press on the Save page enters nested Instrument Save.
+- VOICE press on the Save page enters nested Instrument Save/InstrumentMrp Save.
 
 Still compiled but intentionally gated from the normal type cycler:
 
-- `Scene`
 - `Settings` / Globals
 - `Samples`
 - Pattern
@@ -1112,12 +1195,18 @@ Implemented:
   into both `[params]` and `[morph]`. This is a flattened snapshot of the
   current morph position, not an inverted endpoint pair. Morph Save does not
   rename the resident kit or instruments.
+- Scene Save writes a root `Scene/<NNN Name>/` directory. The writer streams
+  `sceneset.scg`, creates `Kit <kit name>/`, streams embedded `kitset.kcg`
+  without `audio_out`, writes six embedded Instrument files, writes draft text
+  `pattern.pat`, and writes placeholder `effects.fx`. Scene and embedded Kit
+  names are directory-owned.
+- Bank Save writes a root `Bank/<NNN Name>/` directory and `bankset.bcg`.
+  In the current one-resident-Scene bridge it can write child `00 <scene name>/`
+  through the same Scene payload writer. A zero child-scene mask is valid and
+  creates/saves an empty Bank.
 
 Still future:
 
-- Scene save writes `sceneset.scg`, `Kit <kit name>/`, `pattern.pat`, and
-  `effect.fx`.
-- Bank save writes `bankset.bcg` plus up to 16 numbered Scene folders.
 - Pattern save writes the final dynamic-stack pattern format once implemented.
 - Effect save writes the selected effect stack/settings format once effects
   exist.
@@ -1127,6 +1216,27 @@ Still future:
 
 The current legacy non-Kit save paths are implementation leftovers and should
 not be used as the new-format specification.
+
+### Save/Overwrite Safety
+
+Root library replacement must be scoped by parent directory and product parser:
+
+- Enter the correct root directory first, such as `/Kit/`, `/Scene/`, or
+  `/Bank/`.
+- Scan only immediate child objects in that parent.
+- Parse visible display names with the correct parser:
+  - root libraries use three-digit `NNN <name>`;
+  - Bank-local child Scenes use two-digit `SS <name>`.
+- Delete or replace only physical objects whose parsed slot equals the target
+  slot.
+- Never run a recursive delete from the filesystem root using a broad target
+  string.
+
+Kit Save may use short-alias fallback for older/converted Kit folders. Scene
+Save deliberately disables short-alias fallback and deletes only visible names
+that parse as the exact Scene slot, preventing the root `Scene/` wipe class of
+bug. Bank Save must not delete untoggled Bank-local child Scenes; safe root Bank
+folder rename/promotion remains future work.
 
 ### asyncfatfs Boundary
 
@@ -1206,7 +1316,7 @@ disk unless a future feature explicitly introduces linked/shared files.
 Inside the active Bank, autosave applies to dot-file backers for:
 
 - Per-instrument files.
-- Scene `effect.fx`.
+- Scene `effects.fx`.
 - Scene `pattern.pat`.
 - `sceneset.scg`.
 - Embedded kit `kitset.kcg`.
@@ -1215,10 +1325,10 @@ Inside the active Bank, autosave applies to dot-file backers for:
 Committed and autosaved filenames:
 
 - The non-dot filename is the committed save/load file. Examples:
-  `sceneset.scg`, `kitset.kcg`, `slakd1.drm`, `pattern.pat`, `effect.fx`, and
+  `sceneset.scg`, `kitset.kcg`, `slakd1.drm`, `pattern.pat`, `effects.fx`, and
   `bankset.bcg`.
 - The matching dot-file is the autosave working backer. Examples:
-  `.sceneset.scg`, `.kitset.kcg`, `.slakd1.drm`, `.pattern.pat`, `.effect.fx`,
+  `.sceneset.scg`, `.kitset.kcg`, `.slakd1.drm`, `.pattern.pat`, `.effects.fx`,
   and `.bankset.bcg`.
 - Autosave writes dirty retained-memory state to dot-file backers only.
 - Bank SAVE waits for selected autosave writes to finish, then copies/promotes
@@ -1281,7 +1391,7 @@ Bank/
         metal.cym
         tight.hat
       pattern.pat
-      effect.fx
+      effects.fx
 Scene/
   000 Loose Jam/
     sceneset.scg
@@ -1289,7 +1399,7 @@ Scene/
       kitset.kcg
       ...
     pattern.pat
-    effect.fx
+    effects.fx
 Kit/
   000 909ish/
     kitset.kcg

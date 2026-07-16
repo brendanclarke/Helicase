@@ -72,6 +72,7 @@
 #include "screensaver.h"
 #include "ParameterArray.h"
 #include "presetManager.h"
+#include "BankData.h"
 #include "SceneData.h"
 #include "InstrumentManager.h"
 
@@ -253,10 +254,16 @@ int main(void)
     sampleMemory_init();
     dsp_init();
     /*
-     * SceneData now owns every stored Pattern/Kit/parameter image. Initialize
-     * it before Sequencer/Menu/filesystem clients obtain Scene-indexed views.
+     * SceneData owns every stored Pattern/Kit/parameter image, while BankData
+     * owns only the currently loaded Bank container identity.
+     *
+     * Inputs: power-on SRAM. Outputs: resident Scene defaults and a blank
+     * non-Bank container state. Bank init belongs beside Scene init because
+     * boot may later load a Bank, an empty Bank, a root Scene fallback, or a
+     * root Kit fallback, and all of those paths read these identity cells.
      */
     scene_initAll();
+    bank_init();
     seq_init();
     euklid_init();
     som_init();
@@ -309,6 +316,20 @@ int main(void)
             filesystem_ack();
 
             /*
+             * Synchronous Bank/ scan.
+             *
+             * Inputs: mounted SD card and the root Bank directory. Output:
+             * filesystem's root Bank cache is ready before the boot load
+             * chooses the first available Bank. This scan is separate from
+             * Scene/ because Bank-local children use a two-digit namespace and
+             * must not populate the root Scene library browser.
+             */
+            filesystem_requestScanBanks(NULL);
+            while (filesystem_status() == FS_STATUS_BUSY)
+                filesystem_tick();
+            filesystem_ack();
+
+            /*
              * Synchronous Instrument/ scan.
              *
              * Inputs: mounted SD card before audio starts. Output:
@@ -323,16 +344,42 @@ int main(void)
             filesystem_ack();
 
             /*
-             * Load Kit 0 through the same explicit Scene-mask contract used by
-             * the Load page. At boot Scene 0 is the active resident Scene;
-             * keeping this call on the public multi-Scene path verifies that
-             * staged Kit parsing and normal runtime loading share one commit
-             * behavior instead of maintaining a special boot-only loader.
+             * Boot through the current top-level container ladder.
+             *
+             * Inputs: scan caches populated above. Output: Bank slot 000 (or
+             * the lowest available Bank) loads first when present. If that Bank
+             * contains no child Scene, menu_pollPresetStatus() acknowledges the
+             * successful Bank identity load and starts the root Scene/root Kit
+             * fallback. The bounded two-pass loop below exists for that valid
+             * empty-Bank case: first pass completes Bank, second pass completes
+             * the fallback payload if one was posted.
              */
-            preset_loadKitForScenes(0, 1u);
-            while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS)
-                filesystem_tick();
-            menu_pollPresetStatus();  /* apply kit + ack */
+            {
+                uint16_t boot_bank_slot = filesystem_firstBankSlot();
+
+                /*
+                 * boot_bank_slot is a root Bank cache coordinate.
+                 *
+                 * It is read once so the existence check and load request use
+                 * the same value. filesystem_firstBankSlot() returns the max
+                 * sentinel when Bank/ is empty, and filesystem_bankSlotExists()
+                 * rejects that sentinel before any load request is posted.
+                 */
+                if (filesystem_bankSlotExists(boot_bank_slot)) {
+                    preset_loadBank(boot_bank_slot, 1u);
+                } else {
+                    preset_loadFirstAvailableSceneOrKit();
+                }
+            }
+            for (uint8_t boot_load_pass = 0u;
+                 boot_load_pass < 2u;
+                 boot_load_pass++) {
+                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS)
+                    filesystem_tick();
+                menu_pollPresetStatus();  /* apply Bank/Scene/Kit + ack */
+                if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
+                    break;
+            }
 
             /* Load globals via presetManager */
             preset_loadGlobals();

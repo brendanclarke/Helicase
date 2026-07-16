@@ -90,6 +90,18 @@ Rules:
 - Do not display aliases such as `001SLA~1` unless no display name exists.
 - Do not feed a display name back through short-name APIs and expect case/LFN
   behavior.
+- Do not feed a generated short alias into an LFN display-name open and expect
+  it to match host-created long-name objects. Session 039's `ERR BnkL06`
+  failure came from caching `op_object.shortName` for `Bank/000 Slak/` and then
+  calling an LFN display match with that alias. The object listed correctly but
+  read-only open failed. Bank root and Bank-local Scene caches now keep the
+  display component as the later LFN open key.
+
+Practical caller rule:
+
+- If the next API is a short-name API, keep/use the returned short alias.
+- If the next API is an LFN display-name API, keep/use the display component.
+- Do not assume one identity can always substitute for the other.
 
 ## Matching Modes
 
@@ -210,6 +222,19 @@ asyncfatfs does not recursively delete directories. `filesystem.c` owns
 recursive deletion by combining object iteration, file removal, child-directory
 entry, `afatfs_chdirParent()`, and empty-directory removal.
 
+Product-level recursive delete must also scope itself before it deletes:
+
+- chdir into the intended parent directory first;
+- scan only immediate children;
+- parse product-visible names in `filesystem.c`;
+- delete only the exact product slot being replaced.
+
+This prevents the Session 039 Scene Save root-wipe class of bug. Kit Save may
+use short-alias fallback for old Kit folders; Scene Save intentionally disables
+that fallback and deletes only visible names that parse as the selected Scene
+slot. Bank Save must preserve untoggled Bank-local Scene folders until a
+dedicated safe rename/promotion workflow exists.
+
 ## Rename
 
 API:
@@ -269,15 +294,19 @@ Don't:
 - Kit scan/load/save uses object iteration, LFN directory creation, returned
   aliases, recursive directory delete in `filesystem.c`, and text schemas in
   `storageTypes`.
+- Scene scan/load/save uses object iteration, LFN directory creation, scoped
+  same-slot replacement in `filesystem.c`, and text schemas in `storageTypes`.
+- Bank scan/load/save uses object iteration, LFN display-name opens for root
+  Bank and Bank-local Scene folders, and text schemas in `storageTypes`.
 - Root Instrument scan/load/save uses object iteration, LFN root directory
   entry, LFN file writes, per-type browser caches, and descriptor-keyed text
   schemas.
-- File/Dir diagnostic menu entries exercise exact root file/directory scan,
-  open, create, child create, and persistence checks.
+- File/Dir/sDir diagnostic menu entries exercise exact root file/directory
+  scan, open, create, child create, and persistence checks. They remain
+  compiled but normally appear only when `CONFIG_DEV_MODE != 0`.
 
 ## Future Work That Depends On asyncfatfs
 
-- Scene Save/Load directory promotion.
-- Bank Save/Load and autosave dot-file promotion.
+- 16-Scene Bank workspace and autosave dot-file promotion.
 - Effect storage.
 - Safe rename/replace workflows for `.tmp` to committed file promotion.

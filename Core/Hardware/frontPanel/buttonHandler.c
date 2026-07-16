@@ -714,7 +714,7 @@ static void handleModeButtons(uint8_t mode)
          *
          * Old behavior: the menu requested this through frontPanelParser.
          * New behavior: buttonHandler reads EuklidGenerator directly because
-         * Euklid data now lives with Pattern under Core/Scene/Pattern.
+         * Euklid data now lives with Pattern under Core/Bank/Scene/Pattern.
          */
         buttonHandler_applyEuklidParamsToMenu(menu_getActiveVoice());
         menu_switchPage(EUKLID_PAGE);

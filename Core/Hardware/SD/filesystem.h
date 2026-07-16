@@ -51,6 +51,7 @@
 typedef enum {
     FS_FILE_KIT = 0,
     FS_FILE_SCENE,
+    FS_FILE_BANK,
     FS_FILE_PATTERN,
     FS_FILE_MORPH,
     FS_FILE_PERFORMANCE,
@@ -136,6 +137,23 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
                                         uint8_t morph_projection,
                                         fs_completion_cb_t cb);
 /*
+ * Save one root Scene directory from a resident Scene.
+ *
+ * Inputs: direct root Scene slot, source resident Scene, eight-cell display
+ * name, and completion callback. Output: asynchronous replacement scoped to
+ * same-number children under /Scene/: Scene/<NNN Name>/ with sceneset.scg,
+ * embedded Kit directory, six instrument files, a draft text pattern.pat, and
+ * effects.fx placeholder. pattern.pat stores only the 128x7 step-active grid
+ * plus per-track length/scale until the final pattern schema exists. Other
+ * numbered Scene directories must not be removed, regardless of how many nested
+ * children they contain. The resident Scene display name updates only after the
+ * directory save succeeds.
+ */
+bool filesystem_requestSaveSceneDirectory(uint16_t slot,
+                                          uint8_t source_scene,
+                                          const char display_name[8],
+                                          fs_completion_cb_t cb);
+/*
  * Stage one numbered Kit directory for a Preset-owned morph commit.
  *
  * Inputs: direct Kit library slot 000..999, resident Scene mask, and completion
@@ -159,10 +177,38 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
 bool filesystem_requestLoadSceneForScenes(uint16_t slot,
                                           uint16_t scene_mask,
                                           fs_completion_cb_t cb);
+/*
+ * Load one root Bank directory and its selected Bank-local Scene.
+ *
+ * Inputs: root Bank slot 000..999, resident destination Scene mask, and
+ * completion callback. Output: asynchronous Bank validation and, when the Bank
+ * contains a usable child, a staged Scene load from Bank/<NNN>/<SS Name>/.
+ * Empty Banks are successful Bank loads; callers inspect
+ * filesystem_lastBankLoadLoadedScene() and run the fallback chain when no
+ * child Scene was supplied.
+ */
+bool filesystem_requestLoadBank(uint16_t slot,
+                                uint16_t scene_mask,
+                                fs_completion_cb_t cb);
+/*
+ * Save one root Bank directory from resident Scene memory.
+ *
+ * Inputs: root Bank slot, source Scene, eight-cell Bank display name, future
+ * Bank-local Scene save mask, and completion callback. Output: bankset.bcg
+ * plus selected two-digit child Scene folders. This first implementation
+ * passes mask bit 0 only, but the writer loops over the mask boundary so
+ * future 16-Scene toggles do not need a new public contract.
+ */
+bool filesystem_requestSaveBank(uint16_t slot,
+                                uint8_t source_scene,
+                                const char display_name[8],
+                                uint16_t bank_scene_save_mask,
+                                fs_completion_cb_t cb);
 bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
+bool filesystem_requestScanBanks(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
 /*
  * Generic asyncfatfs File/Dir test browser and payload API.
@@ -313,6 +359,19 @@ uint8_t     filesystem_kitSlotExists(uint16_t zero_based_slot);
 const char *filesystem_kitSlotName(uint16_t zero_based_slot);
 uint8_t     filesystem_sceneSlotExists(uint16_t zero_based_slot);
 const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
+/*
+ * Root Bank/ scan-cache queries and fallback helpers.
+ *
+ * Bank slots use root three-digit library numbering 000..999. Bank-local
+ * Scene slots are not exposed here; those are two-digit child folders inside
+ * one selected Bank and are handled only by Bank load/save state machines.
+ */
+uint8_t     filesystem_bankSlotExists(uint16_t zero_based_slot);
+const char *filesystem_bankSlotName(uint16_t zero_based_slot);
+uint16_t    filesystem_firstKitSlot(void);
+uint16_t    filesystem_firstSceneSlot(void);
+uint16_t    filesystem_firstBankSlot(void);
+uint8_t     filesystem_lastBankLoadLoadedScene(void);
 /*
  * Query whether a root Instrument save target already exists.
  *
