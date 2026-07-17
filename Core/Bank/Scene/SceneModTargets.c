@@ -117,6 +117,69 @@ uint8_t sceneModTarget_valid(uint16_t id, scene_mod_target_use_t use)
                      ((descriptor->use_flags & (uint8_t)use) != 0u));
 }
 
+uint16_t sceneModTarget_voiceMorphId(uint8_t voice_slot)
+{
+    uint8_t i;
+
+    /*
+     * Resolve one voice Morph Scene target without exposing table order.
+     *
+     * Inputs: zero-based voice slot. Output: the canonical Scene target ID for
+     * that voice's Morph amount, or INSTRUMENT_PARAM_INVALID when the slot is
+     * outside the current six-voice Scene target set. Velocity target storage
+     * uses this to expand its one retained own-Morph byte token at runtime.
+     */
+    for (i = 0u; i < SCENE_MOD_TARGET_COUNT; i++) {
+        if (scene_mod_targets[i].kind == SCENE_MOD_TARGET_KIND_VOICE_MORPH &&
+            scene_mod_targets[i].voice_slot == voice_slot) {
+            return scene_mod_targets[i].id;
+        }
+    }
+    return INSTRUMENT_PARAM_INVALID;
+}
+
+uint8_t sceneModTarget_indexFromId(uint16_t id, uint8_t *index_out)
+{
+    /*
+     * Convert a canonical Scene target ID to its local byte token.
+     *
+     * Inputs: runtime/display Scene target ID plus optional output pointer.
+     * Output: nonzero only for IDs in the Scene namespace. The local index is
+     * what lfo_target_param stores when lfo_target_voice is the `scn`
+     * namespace, so resident instrument images never carry this wide ID.
+     */
+    if (!sceneModTarget_isSceneTarget(id))
+        return 0u;
+    if (index_out)
+        *index_out = (uint8_t)(id - SCENE_MOD_TARGET_BASE);
+    return 1u;
+}
+
+uint16_t sceneModTarget_idFromIndex(uint8_t index)
+{
+    /*
+     * Convert a retained Scene-namespace token to a canonical target ID.
+     *
+     * Input: local Scene target index from lfo_target_param. Output: the
+     * corresponding runtime target ID, or INSTRUMENT_PARAM_INVALID when the
+     * token is stale for the current Scene target table.
+     */
+    if (index >= SCENE_MOD_TARGET_COUNT)
+        return INSTRUMENT_PARAM_INVALID;
+    return scene_mod_targets[index].id;
+}
+
+uint8_t sceneModTarget_count(void)
+{
+    /*
+     * Return the current Scene target namespace size.
+     *
+     * Output is byte-sized by construction; lfo_target_param stores Scene
+     * namespace entries as local byte tokens, not canonical runtime IDs.
+     */
+    return SCENE_MOD_TARGET_COUNT;
+}
+
 uint16_t sceneModTarget_step(uint16_t current, int8_t direction,
                              scene_mod_target_use_t use)
 {

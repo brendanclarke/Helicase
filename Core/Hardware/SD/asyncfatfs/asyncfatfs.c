@@ -499,10 +499,24 @@ typedef struct afatfsRemoveObjects_t {
     afatfsMatchMode_t matchMode;
     /* Caller-selected object scope; directory deletion is intentionally disabled until recursive support. */
     afatfsRemoveObjectMode_t mode;
+    /*
+     * Nonzero selects exact short-alias matching instead of display-name
+     * matching.
+     *
+     * What/why: overwrite cleanup wants all same-display variants, so it keeps
+     * matchShortName clear and compares displayName. Recursive directory
+     * cleanup sometimes starts from one concrete afatfsObjectInfo_t and must
+     * later retire that exact physical entry, especially on cards that already
+     * contain duplicate LFNs. In that case afatfs_removeObject() sets this flag
+     * and stores the object's printable shortName below.
+     */
+    uint8_t matchShortName;
     /* Completion callback supplied by filesystem.c or diagnostics; it receives no payload. */
     afatfsCallback_t callback;
     /* Sanitized target component copied once so caller-owned menu buffers can change while we scan. */
     char displayName[AFATFS_LONG_FILENAME_MAX + 1u];
+    /* Exact printable 8.3 alias used only when matchShortName is nonzero. */
+    char shortName[AFATFS_SHORT_FILENAME_MAX];
     /* LFN-aware scanner state for the current pass through afatfs.currentDirectory. */
     afatfsObjectFinder_t finder;
     /* Most recently matched object; retained across load/truncate/retire phases. */
@@ -3569,10 +3583,11 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                              * through afatfs_findNextObject(), so open/create
                              * must resolve the same display string here.
                              * Without the SFN-display fallback, existing card
-                             * files such as GLO.CFG, P000.ALL, samples/, and
-                             * Instrument directory files list correctly but fail when OK
-                             * is selected because the generated alias is
-                             * mistaken for an unrelated collision.
+                             * files such as settings.cfg, P000.ALL, samples/,
+                             * and Instrument directory files list correctly
+                             * but fail when OK is selected because the
+                             * generated alias is mistaken for an unrelated
+                             * collision.
                              */
                             if (opState->scanLongNameValid &&
                                 opState->scanLongNameChecksum ==
@@ -3993,8 +4008,8 @@ static afatfsFilePtr_t afatfs_createFileInternal(
              * Preserve display case for ordinary 8.3 callers before converting
              * the raw FAT key to uppercase. This is what lets system files
              * created through afatfs_fopen appear as kitset.kcg,
-             * sceneset.scg, pattern.pat, effects.fx, and glo.cfg while keeping
-             * existing case-insensitive open behavior.
+             * sceneset.scg, pattern.pat, effects.fx, and settings.cfg while
+             * keeping existing case-insensitive open behavior.
              */
             opState->shortNameCaseFlags =
                 fat_calculateFilenameCaseFlags(name);
@@ -4543,6 +4558,8 @@ static uint8_t afatfs_removeObjectMatches(
         const afatfsRemoveObjects_t *op,
         const afatfsObjectInfo_t *object)
 {
+    uint8_t i;
+
     /*
      * Match under the requested policy, not raw byte equality.
      *
@@ -4550,14 +4567,28 @@ static uint8_t afatfs_removeObjectMatches(
      * variant of the same user-facing filename is removed. Exact diagnostics
      * can still pass case-sensitive matching to test a single physical display
      * component.
+     *
+     * Exact short-alias mode exists for recursive directory deletion. Inputs
+     * there come from afatfsObjectInfo_t::shortName, the same alias used to
+     * open/chdir into a child directory. Comparing the printable alias byte for
+     * byte prevents a duplicate visible LFN from causing the final empty-dir
+     * removal to retire a sibling that was not the directory just emptied.
      */
-    return (uint8_t)(
-        object &&
-        object->kind != AFATFS_OBJECT_NONE &&
-        fat_compareDisplayName(object->displayName,
-                               op->displayName,
-                               op->matchMode ==
-                                   AFATFS_MATCH_CASE_SENSITIVE) == 0);
+    if (!object || object->kind == AFATFS_OBJECT_NONE)
+        return 0u;
+    if (op->matchShortName) {
+        for (i = 0u; i < AFATFS_SHORT_FILENAME_MAX; i++) {
+            if (object->shortName[i] != op->shortName[i])
+                return 0u;
+            if (object->shortName[i] == '\0')
+                return 1u;
+        }
+        return 1u;
+    }
+    return (uint8_t)(fat_compareDisplayName(
+        object->displayName,
+        op->displayName,
+        op->matchMode == AFATFS_MATCH_CASE_SENSITIVE) == 0);
 }
 
 static uint8_t afatfs_removeObjectDirectoryAllowed(
@@ -4799,6 +4830,55 @@ bool afatfs_removeObjects_lfn(const char *displayName,
     op->phase = AFATFS_REMOVE_OBJECTS_PHASE_INITIAL;
     op->matchMode = matchMode;
     op->mode = mode;
+    op->callback = complete;
+    afatfs_removeObjectsContinue();
+    return true;
+}
+
+bool afatfs_removeObject(const char *filename,
+                         afatfsRemoveObjectMode_t mode,
+                         afatfsCallback_t complete)
+{
+    afatfsRemoveObjects_t *op = &afatfs.removeObjects;
+    uint8_t i;
+
+    /*
+     * Remove a single object by the printable SFN alias returned by asyncfatfs.
+     *
+     * Inputs: filename is an AFATFS_SHORT_FILENAME_MAX-sized open component
+     * such as afatfsObjectInfo_t::shortName or mkdir_lfn()'s openNameOut.
+     * Output/effects: the same remove state machine scans currentDirectory,
+     * but afatfs_removeObjectMatches() compares object->shortName exactly
+     * instead of comparing display names. That lets filesystem.c delete the
+     * precise empty directory it already opened, even if another directory on
+     * the card has the same long display component.
+     *
+     * The copy loop rejects empty input and guarantees NUL termination. It does
+     * not sanitize or uppercase because callers pass aliases produced by this
+     * module, and preserving case bits keeps the comparison aligned with
+     * afatfs_findNextObject() output.
+     */
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        op->active ||
+        afatfs.renameObject.active ||
+        afatfs_fileIsBusy(&afatfs.currentDirectory)) {
+        return false;
+    }
+    if (!filename || filename[0] == '\0')
+        return false;
+
+    memset(op, 0, sizeof(*op));
+    for (i = 0u; i < AFATFS_SHORT_FILENAME_MAX; i++) {
+        op->shortName[i] = filename[i];
+        if (filename[i] == '\0')
+            break;
+    }
+    op->shortName[AFATFS_SHORT_FILENAME_MAX - 1u] = '\0';
+
+    op->active = 1u;
+    op->phase = AFATFS_REMOVE_OBJECTS_PHASE_INITIAL;
+    op->mode = mode;
+    op->matchShortName = 1u;
     op->callback = complete;
     afatfs_removeObjectsContinue();
     return true;

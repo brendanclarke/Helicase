@@ -71,6 +71,25 @@ const scene_mod_target_descriptor_t *sceneModTarget_descriptor(uint16_t id);
  */
 uint8_t sceneModTarget_valid(uint16_t id, scene_mod_target_use_t use);
 /*
+ * Resolve the Scene target ID for one voice's Morph amount.
+ *
+ * Input: zero-based voice slot. Output: the canonical Scene target ID for that
+ * voice Morph parameter, or INSTRUMENT_PARAM_INVALID for invalid slots. This
+ * keeps velocity's retained own-Morph byte token from depending on the private
+ * ordering of the Scene target table.
+ */
+uint16_t sceneModTarget_voiceMorphId(uint8_t voice_slot);
+/*
+ * Convert Scene target IDs to compact Scene-namespace indices and back.
+ *
+ * LFO target storage uses lfo_target_voice=scn plus a byte index token. These
+ * helpers are the storage-facing adapter for the wider runtime Scene target ID
+ * namespace.
+ */
+uint8_t sceneModTarget_indexFromId(uint16_t id, uint8_t *index_out);
+uint16_t sceneModTarget_idFromIndex(uint8_t index);
+uint8_t sceneModTarget_count(void);
+/*
  * Walk the Scene target list in display order.
  *
  * Inputs: current Scene target or off/stale value, signed direction, and use

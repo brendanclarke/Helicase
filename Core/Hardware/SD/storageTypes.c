@@ -152,6 +152,50 @@ static uint8_t storage_formatAssignmentU16(char *dst, uint16_t capacity,
     return storage_formatAssignmentText(dst, capacity, key, digits);
 }
 
+static uint8_t storage_formatAssignmentHex16(char *dst, uint16_t capacity,
+                                             const char *key,
+                                             uint16_t value)
+{
+    char text[7];
+    uint8_t i;
+
+    /*
+     * Format "key=0xNNNN\n" for fixed-width Scene masks.
+     *
+     * Inputs: a 16-bit Bank Scene mask where bit N addresses resident Scene N.
+     * Output: four lowercase hexadecimal nibbles. The loop extracts the most
+     * significant nibble first by shifting 12, 8, 4, and 0 bits, then masking
+     * with 0x0f; that presentation makes SEQ-button groups visible in files
+     * without converting the mask to a decimal count.
+     */
+    text[0] = '0';
+    text[1] = 'x';
+    for (i = 0u; i < 4u; i++) {
+        uint8_t shift = (uint8_t)((3u - i) * 4u);
+        uint8_t nibble = (uint8_t)((value >> shift) & 0x0fu);
+        text[2u + i] = (nibble < 10u)
+            ? (char)('0' + nibble)
+            : (char)('a' + (nibble - 10u));
+    }
+    text[6] = '\0';
+    return storage_formatAssignmentText(dst, capacity, key, text);
+}
+
+static uint8_t storage_formatAssignmentU8(char *dst, uint16_t capacity,
+                                          const char *key,
+                                          instrument_param_value_t value)
+{
+    /*
+     * Format one byte-domain Instrument value.
+     *
+     * Instrument descriptor rows now serialize exactly the byte retained in
+     * SceneData. Target selector rows are compact tokens, not canonical IDs, so
+     * the writer deliberately uses this byte helper instead of the wider U16
+     * formatter used by non-parameter metadata such as active_scene.
+     */
+    return storage_formatAssignmentU16(dst, capacity, key, value);
+}
+
 /* Exact string comparison helper.
  *
  * Inputs: two NUL-terminated strings. Output: nonzero only for byte-for-byte
@@ -248,21 +292,50 @@ static storage_status_t storage_parseU8(const char *text, uint8_t *out)
     return STORAGE_STATUS_OK;
 }
 
-static storage_status_t storage_parseU16(const char *text, uint16_t *out)
+static storage_status_t storage_parseU16Flexible(const char *text,
+                                                 uint16_t *out)
 {
-    uint32_t value = 0u;
+    uint16_t value = 0u;
     uint8_t digits = 0u;
+    uint8_t base = 10u;
 
-    while (*text >= '0' && *text <= '9') {
-        value = value * 10u + (uint8_t)(*text - '0');
-        if (value > 65535u)
+    /*
+     * Parse decimal or 0x-prefixed unsigned 16-bit text.
+     *
+     * Inputs: bankset/settings value text. Outputs: *out receives 0..65535 on
+     * OK. Decimal is used for ordinary counters such as active_bank, while
+     * bankset Scene masks are written in hex so users can inspect button bits.
+     * Trailing non-space text, empty values, and overflow reject the line.
+     */
+    if (!text || !out)
+        return STORAGE_STATUS_BAD_VALUE;
+    text = storage_trimLeft(text);
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        base = 16u;
+        text += 2;
+    }
+    while (*text != '\0') {
+        uint8_t digit;
+        if (*text >= '0' && *text <= '9') {
+            digit = (uint8_t)(*text - '0');
+        } else if (base == 16u && *text >= 'a' && *text <= 'f') {
+            digit = (uint8_t)(10u + (uint8_t)(*text - 'a'));
+        } else if (base == 16u && *text >= 'A' && *text <= 'F') {
+            digit = (uint8_t)(10u + (uint8_t)(*text - 'A'));
+        } else {
+            break;
+        }
+        if (digit >= base)
             return STORAGE_STATUS_BAD_VALUE;
+        if (value > (uint16_t)((65535u - digit) / base))
+            return STORAGE_STATUS_BAD_VALUE;
+        value = (uint16_t)((value * base) + digit);
         text++;
         digits++;
     }
     if (digits == 0u || *storage_trimLeft(text) != '\0')
         return STORAGE_STATUS_BAD_VALUE;
-    *out = (uint16_t)value;
+    *out = value;
     return STORAGE_STATUS_OK;
 }
 
@@ -775,9 +848,10 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
     dst[pos] = '\0';
 }
 
-static uint16_t storage_interpolateMorphEndpoint(uint16_t normal,
-                                                 uint16_t morph,
-                                                 uint8_t amount)
+static instrument_param_value_t storage_interpolateMorphEndpoint(
+    instrument_param_value_t normal,
+    instrument_param_value_t morph,
+    uint8_t amount)
 {
     int32_t numerator;
 
@@ -794,7 +868,7 @@ static uint16_t storage_interpolateMorphEndpoint(uint16_t normal,
      * self-contained while matching the runtime endpoint contract.
      *
      * Inputs: normal endpoint, morph endpoint, and retained per-voice Morph
-     * amount. Output: rounded descriptor-domain value; exact amount 0 and 255
+     * amount. Output: rounded descriptor byte value; exact amount 0 and 255
      * return exact endpoints.
      *
      * Affiliates/clients: storage_valueForInstrumentSaveSection() and
@@ -810,7 +884,7 @@ static uint16_t storage_interpolateMorphEndpoint(uint16_t normal,
     numerator += 127;
     if (numerator < 0)
         return 0u;
-    return (uint16_t)(numerator / 255);
+    return (instrument_param_value_t)(numerator / 255);
 }
 
 static uint8_t storage_descriptorWritableInSection(
@@ -824,15 +898,15 @@ static uint8_t storage_descriptorWritableInSection(
     return (uint8_t)((descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u);
 }
 
-static uint16_t storage_valueForInstrumentSaveSection(
+static instrument_param_value_t storage_valueForInstrumentSaveSection(
     const storage_instrument_write_view_t *view,
     const ParamDescriptor *descriptor,
     uint8_t descriptor_index,
     uint8_t morph_section)
 {
     const kit_instrument_slot_t *instrument = view ? view->instrument : NULL;
-    uint16_t normal;
-    uint16_t morph;
+    instrument_param_value_t normal;
+    instrument_param_value_t morph;
 
     /*
      * Resolve one descriptor value for the selected save view.
@@ -848,8 +922,10 @@ static uint16_t storage_valueForInstrumentSaveSection(
      * Non-morphable setup cells remain single-ended.
      *
      * Inputs: write view, descriptor metadata, descriptor index, and section
-     * flag. Output: descriptor value to serialize. Section eligibility is still
-     * enforced by storage_descriptorWritableInSection().
+     * flag. Output: byte-domain descriptor value to serialize. Target selector
+     * rows are emitted as compact tokens, never packed runtime target IDs.
+     * Section eligibility is still enforced by
+     * storage_descriptorWritableInSection().
      *
      * Affiliates/clients: storage_formatInstrumentLineView(),
      * InstrumentMrp Save, and normal Instrument Save wrapper.
@@ -944,7 +1020,7 @@ uint8_t storage_formatInstrumentLineView(
                                                 descriptor->file_key,
                                                 "self");
         }
-        return storage_formatAssignmentU16(dst, capacity,
+        return storage_formatAssignmentU8(dst, capacity,
             descriptor->file_key,
             storage_valueForInstrumentSaveSection(view, descriptor, i, 0u));
     }
@@ -970,7 +1046,7 @@ uint8_t storage_formatInstrumentLineView(
          * morph data aligned with the existing parser contract: [morph] changes
          * values that can interpolate, while [params] owns instrument routing.
          */
-        return storage_formatAssignmentU16(dst, capacity,
+        return storage_formatAssignmentU8(dst, capacity,
             descriptor->file_key,
             storage_valueForInstrumentSaveSection(view, descriptor, i, 1u));
     }
@@ -1316,14 +1392,17 @@ static uint8_t storage_appendDecimalU16(char *dst,
 void storage_banksetInit(storage_bankset_t *state)
 {
     /*
-     * Clear Bank config parse state and default active_scene to 0.
+     * Clear Bank config parse state and default active_scene/mask to Scene 0.
      *
      * Inputs/output: caller-owned state before reading bankset.bcg. The
      * default matters for early or hand-authored Bank folders: format/version
-     * still validate the file, while absent active_scene means "try slot 00".
+     * still validate the file, absent active_scene means "try slot 00", and
+     * absent scene_mask_voice_edit means edits target only that same Scene.
      */
-    if (state)
+    if (state) {
         memset(state, 0, sizeof(*state));
+        state->scene_mask_voice_edit = 1u;
+    }
 }
 
 storage_status_t storage_banksetParseLine(storage_bankset_t *state,
@@ -1333,6 +1412,7 @@ storage_status_t storage_banksetParseLine(storage_bankset_t *state,
     const char *value;
     storage_status_t st;
     uint8_t parsed;
+    uint16_t parsed16;
 
     /*
      * Parse one bankset.bcg assignment.
@@ -1358,7 +1438,7 @@ storage_status_t storage_banksetParseLine(storage_bankset_t *state,
         st = storage_parseU8(value, &parsed);
         if (st != STORAGE_STATUS_OK)
             return st;
-        if (parsed != 1u)
+        if (parsed != 1u && parsed != 2u)
             return STORAGE_STATUS_UNSUPPORTED_VERSION;
         state->seen_version = 1u;
     } else if (storage_streq(key, "active_scene")) {
@@ -1369,6 +1449,20 @@ storage_status_t storage_banksetParseLine(storage_bankset_t *state,
             return STORAGE_STATUS_BAD_SLOT;
         state->active_scene = parsed;
         state->seen_active_scene = 1u;
+    } else if (storage_streq(key, "scene_mask_voice_edit")) {
+        st = storage_parseU16Flexible(value, &parsed16);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        /*
+         * Accept the mask exactly in its 16-bit storage domain.
+         *
+         * Higher-level BankData owns the active-Scene invariant because it
+         * knows the finalized active_scene and is shared by UI toggles too.
+         * storageTypes only proves that the line is a syntactically valid
+         * uint16_t assignment and retains it for filesystem.c to apply.
+         */
+        state->scene_mask_voice_edit = parsed16;
+        state->seen_scene_mask_voice_edit = 1u;
     }
     return STORAGE_STATUS_OK;
 }
@@ -1394,14 +1488,18 @@ uint8_t storage_formatBanksetLine(char *dst,
                                   uint16_t line_index)
 {
     uint8_t active_scene = state ? state->active_scene : 0u;
+    uint16_t scene_mask_voice_edit = state
+        ? state->scene_mask_voice_edit
+        : 1u;
 
     /*
-     * Emit the minimal v1 Bank config one line at a time.
+     * Emit the v2 Bank config one line at a time.
      *
      * Inputs: logical line index from filesystem's streaming writer and the
-     * Bank-level active Scene slot. Output: format/version/active_scene text,
-     * or zero after the schema ends. The active_scene value is decimal schema
-     * data, not a directory prefix, so it is intentionally not zero-padded.
+     * Bank-level active Scene slot plus scene_mask_voice_edit. Output:
+     * format/version/active_scene/mask text, or zero after the schema ends.
+     * active_scene is decimal because it is a slot number; the edit mask is
+     * fixed-width hex because every bit is a Scene membership flag.
      */
     if (active_scene >= STORAGE_BANK_SCENE_MAX_SLOTS)
         active_scene = 0u;
@@ -1410,10 +1508,14 @@ uint8_t storage_formatBanksetLine(char *dst,
         return storage_formatLiteral(dst, capacity,
                                      "format=helicase.bankset\n");
     case 1u:
-        return storage_formatLiteral(dst, capacity, "version=1\n");
+        return storage_formatLiteral(dst, capacity, "version=2\n");
     case 2u:
         return storage_formatAssignmentU16(dst, capacity, "active_scene",
                                            active_scene);
+    case 3u:
+        return storage_formatAssignmentHex16(dst, capacity,
+                                             "scene_mask_voice_edit",
+                                             scene_mask_voice_edit);
     default:
         return 0u;
     }
@@ -1933,32 +2035,6 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
          * should interpret it. Non-morphable runtime bindings are ignored in
          * [morph] so routing/target values keep a single endpoint.
          */
-        if (descriptor->runtime.kind == INSTRUMENT_BIND_VELOCITY_TARGET ||
-            descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_PARAM ||
-            descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_PARAM_2) {
-            uint16_t parsed16;
-            /*
-             * Canonical descriptor targets are 16-bit values.
-             *
-             * Inputs: velocity target, LFO destination 1, and LFO destination 2
-             * file keys store either INSTRUMENT_PARAM_INVALID for off or a
-             * packed slot/local descriptor id. Output: only the main endpoint
-             * stores the parsed selector; [morph] ignores these supplemental
-             * routing cells. This must not use the normal u8 parser because
-             * valid target ids can exceed 255, and zero is a valid target id
-             * rather than an off sentinel.
-             */
-            st = storage_parseU16(value, &parsed16);
-            if (st != STORAGE_STATUS_OK)
-                return st;
-            if (state->current_section == STORAGE_SECTION_MORPH) {
-                return STORAGE_STATUS_OK;
-            }
-            slot->parameter_images.instrument_parameters[index] = parsed16;
-            state->seen_param_count++;
-            return STORAGE_STATUS_OK;
-        }
-
         if (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE ||
             descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE_2) {
             /*
@@ -1967,10 +2043,10 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
              * Inputs: lfo_target_voice/lfo_target_voice_2 value text and the
              * parser's one-based destination slot. Output: the ordinary
              * numeric selector stored in SceneData. The self token is not a
-             * Menu value, descriptor sentinel, or DSP runtime state; Preset's
-             * LFO pair normalization intentionally receives only numeric voice
-             * selectors and packed parameter IDs. Numeric parsing keeps the
-             * legacy clamp because old converted files can contain zero here.
+             * Menu value, descriptor sentinel, or DSP runtime state. Numeric
+             * value 7 is retained as the Scene namespace displayed by Menu as
+             * `scn`; values outside the supported namespace clamp to a valid
+             * byte before Preset normalizes the paired target token.
              */
             if (storage_streq(value, "self")) {
                 if (state->expected_slot < 1u ||
@@ -1982,12 +2058,20 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                 st = storage_parseU8(value, &parsed);
                 if (st != STORAGE_STATUS_OK)
                     return st;
-                if (parsed < 1u)
-                    parsed = 1u;
-                else if (parsed > STORAGE_KIT_SLOT_COUNT)
-                    parsed = STORAGE_KIT_SLOT_COUNT;
+                if (parsed < INSTRUMENT_TARGET_VOICE_FIRST)
+                    parsed = INSTRUMENT_TARGET_VOICE_FIRST;
+                else if (parsed > INSTRUMENT_TARGET_VOICE_SCENE)
+                    parsed = INSTRUMENT_TARGET_VOICE_SCENE;
             }
         } else {
+            /*
+             * Parse one retained byte-domain descriptor value.
+             *
+             * Normal sound parameters, velocity target tokens, and LFO target
+             * parameter tokens all share the same file domain: one byte.
+             * Target rows store compact local tokens such as 255 for off; they
+             * never store packed canonical runtime IDs.
+             */
             st = storage_parseU8(value, &parsed);
             if (st != STORAGE_STATUS_OK)
                 return st;

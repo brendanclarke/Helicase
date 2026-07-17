@@ -47,6 +47,7 @@
 #define STORAGE_KITSET_FILENAME       "kitset.kcg"
 #define STORAGE_SCENESET_FILENAME     "sceneset.scg"
 #define STORAGE_BANKSET_FILENAME      "bankset.bcg"
+#define STORAGE_SETTINGS_FILENAME     "settings.cfg"
 #define STORAGE_KIT_SLOT_COUNT        6u
 /*
  * Kit and Scene folders are numbered directory entries, not legacy file slots.
@@ -243,15 +244,18 @@ typedef struct {
  * The Bank display name is owned only by the root Bank directory
  * `Bank/NNN <name>/`. bankset.bcg validates the folder and carries Bank-level
  * control values. active_scene is a Bank-local slot number in 00..15, not a
- * root Scene library slot. The writer always emits active_scene; the parser
- * allows it to be absent and keeps the initialized default 0 so early empty
- * placeholder Banks remain loadable.
+ * root Scene library slot. scene_mask_voice_edit is a 16-bit hex Scene mask
+ * used by VOICE-mode edit fan-out. The writer always emits both fields; the
+ * parser allows them to be absent and keeps initialized defaults so empty or
+ * hand-authored Banks remain loadable.
  */
 typedef struct {
     uint8_t seen_format;
     uint8_t seen_version;
     uint8_t seen_active_scene;
+    uint8_t seen_scene_mask_voice_edit;
     uint8_t active_scene;
+    uint16_t scene_mask_voice_edit;
 } storage_bankset_t;
 
 /* Initialize kitset parse state before the first line of kitset.kcg.
@@ -307,17 +311,17 @@ void storage_instrumentStateInit(storage_instrument_state_t *state,
  *
  * Inputs: state, a NUL-terminated line, and the destination kit instrument
  * slot. Outputs: descriptor-indexed writes to generic main or morph storage,
- * plus validation flags in state. LFO target voices are clamped into the valid
- * 1..6 Scene-domain range while parsing because legacy converted files can
- * carry the old zero placeholder.
+ * plus validation flags in state. Instrument descriptor values are byte-domain:
+ * normal sound rows write their UI byte, target selector rows write compact
+ * tokens, and wider runtime target IDs are not retained in SceneData.
  *
  * The file-only token "self" is accepted only for lfo_target_voice and
  * lfo_target_voice_2. It resolves through state->expected_slot before writing
  * Scene-owned descriptor images, so every caller after storage sees the same
- * numeric 1..6 selector it already handles today. Unknown keys are ignored so
- * future saves can add fields older firmware does not understand. Clients are
- * filesystem_loadKitDirectory_tick() and Preset's later Scene-to-runtime apply
- * bridge.
+ * numeric selector domain as Menu: 1..6 for voices and 7 for `scn`. Unknown
+ * keys are ignored so future saves can add fields older firmware does not
+ * understand. Clients are filesystem_loadKitDirectory_tick() and Preset's
+ * later Scene-to-runtime apply bridge.
  */
 storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                                              const char *line,
@@ -579,8 +583,9 @@ uint8_t storage_formatPatternStubLine(char *dst,
  *
  * bankset.bcg is a guard/config file only. It never stores a Bank name; the
  * directory name owns identity. active_scene is a Bank-local 00..15 Scene
- * slot and is emitted by the writer, while the parser defaults it to 0 if the
- * line is absent.
+ * slot. scene_mask_voice_edit is emitted as hex because each nibble maps
+ * directly onto four SEQ-button Scene bits. The parser defaults missing
+ * active_scene to 0 and missing scene_mask_voice_edit to bit 0.
  */
 void storage_banksetInit(storage_bankset_t *state);
 storage_status_t storage_banksetParseLine(storage_bankset_t *state,

@@ -21,8 +21,38 @@
 void presetMorph_init(void);
 void presetMorph_requestVoice(uint8_t scene_index, uint8_t slot);
 void presetMorph_requestAll(uint8_t scene_index);
+/*
+ * Move one queued voice to the front of the bounded Morph worker.
+ *
+ * Inputs: resident Scene index and zero-based slot. Output: if the Morph worker
+ * is already sweeping that Scene, the current cursor is saved, the requested
+ * slot becomes the next work item, and the saved cursor resumes after that
+ * slot finishes. If the worker is idle, this behaves like requestVoice().
+ *
+ * Client: deferred Scene switching asks for this immediately before a triggered
+ * pending slot is force-applied. The force-apply path still computes the slot
+ * synchronously from retained endpoints before the trigger; this priority API
+ * keeps any concurrent bounded sweep from spending foreground ticks on less
+ * urgent voices first.
+ */
+void presetMorph_prioritizeVoice(uint8_t scene_index, uint8_t slot);
 uint8_t presetMorph_tick(void);
 void presetMorph_rebuildScene(uint8_t scene_index);
+/*
+ * Synchronously rebuild one voice's Morph interpolation.
+ *
+ * Inputs: resident Scene index and zero-based slot. Output: the slot's
+ * morph_interpolation[] image is rebuilt from the stored normal/morph endpoints
+ * and the effective voice Morph amount; if the Scene is active, each rebuilt
+ * descriptor is also written to the current DSP runtime before this function
+ * returns.
+ *
+ * Client: deferred Scene switching. When the new Scene pattern triggers a slot
+ * that has not yet reached the quiet threshold, Preset must swap that slot's
+ * instrument parameters before the trigger is dispatched, so the bounded worker
+ * cannot be used for that one-slot path.
+ */
+void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot);
 /*
  * Set the hidden LFO Morph layer for one target voice.
  *

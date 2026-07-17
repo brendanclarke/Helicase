@@ -135,7 +135,8 @@ void             preset_ackStatus(void);
  * both normal and morph file values.
  */
 uint8_t preset_loadDrumset(uint16_t presetNr, uint8_t isMorph);
-uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph);
+uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph,
+                           uint8_t source_scene);
 /*
  * Load one Kit directory into an explicit set of resident Scenes.
  *
@@ -163,7 +164,7 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
  * preset_loadFirstAvailableSceneOrKit() for the required fallback chain.
  */
 uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask);
-uint8_t preset_saveBank(uint16_t presetNr);
+uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask);
 uint8_t preset_completedBankLoadedScene(void);
 uint8_t preset_loadFirstAvailableSceneOrKit(void);
 /*
@@ -175,7 +176,7 @@ uint8_t preset_loadFirstAvailableSceneOrKit(void);
  * because Scene Save serializes Scene settings, embedded Kit, Pattern stub,
  * and Effect placeholder, not only the Kit payload.
  */
-uint8_t preset_saveScene(uint16_t presetNr);
+uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene);
 /*
  * Load a new-format Kit directory into the selected Scenes' morph endpoints.
  *
@@ -186,7 +187,7 @@ uint8_t preset_saveScene(uint16_t presetNr);
  * deliberately no-change so morph load remains a per-instrument operation.
  */
 uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask);
-/* Globals — single GLO.CFG file. */
+/* Settings — keyed root settings.cfg file. */
 void    preset_loadGlobals(void);
 void    preset_saveGlobals(void);
 
@@ -205,6 +206,10 @@ uint8_t preset_loadInstrument(uint8_t destination_scene,
                               uint8_t destination_slot,
                               instrument_type_t type,
                               uint8_t browser_index);
+uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
+                                       uint8_t destination_slot,
+                                       instrument_type_t type,
+                                       uint8_t browser_index);
 /*
  * Save one resident kit voice into the root Instrument/ pool.
  *
@@ -295,10 +300,11 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
                                       uint8_t value,
                                       uint8_t record_automation);
 uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
-                                        uint8_t descriptor_index, uint16_t value);
+                                        uint8_t descriptor_index,
+                                        instrument_param_value_t value);
 uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
-                                           uint16_t value);
+                                           instrument_param_value_t value);
 uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
 void preset_applySceneSettings(uint8_t scene_index);
 /*
@@ -323,12 +329,23 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
                                               uint8_t value,
                                               uint8_t record_automation);
 
-/* Runtime chunked sound apply. preset_tickDrumsetApply() applies one Scene kit
-** slot's audio routing and non-morph runtime cells per pass, then advances the
-** presetMorphEngine parameter image dump until idle. The menu owns
-** operation-specific UI/global follow-up after the tick function reports idle. */
+/*
+ * Deferred active-Scene sound apply.
+ *
+ * preset_startDrumsetApply() swaps immediate Scene settings and arms one bit per
+ * instrument slot. preset_tickDrumsetApply() commits at most one pending slot
+ * whose old amp envelope is below the quiet threshold. A return value of 1 means
+ * one bounded unit was performed; 0 can mean either fully idle or waiting for
+ * ringing slots, so callers may poll it from the ordinary foreground loop.
+ *
+ * preset_applyDeferredSceneSlotForTrigger() is the trigger-time escape hatch:
+ * when the newly selected Scene pattern fires a pending slot, it synchronously
+ * applies that slot's instrument parameters, LFO slot/targets, audio out, and
+ * future per-instrument mix affiliates before the note trigger is dispatched.
+ */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
+void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
 /*
  * Commit and start bounded runtime application for one staged Instrument slot.
  *
@@ -367,6 +384,9 @@ uint8_t preset_tickInstrumentApply(void);
  */
 void    preset_morph(uint8_t morph);
 void    preset_morphVoice(uint8_t slot, uint8_t morph);
+void    preset_morphScene(uint8_t scene_index, uint8_t morph);
+void    preset_morphVoiceScene(uint8_t scene_index, uint8_t slot,
+                               uint8_t morph);
 void    preset_rebuildMorph(void);
 void    preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
 /*

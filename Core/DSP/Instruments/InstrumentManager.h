@@ -22,6 +22,42 @@
 #define INSTRUMENT_PARAM_INVALID    0xffffu
 
 typedef uint16_t instrument_param_id_t;
+/*
+ * Byte-sized retained instrument parameter values.
+ *
+ * Instrument files, SceneData endpoint images, Morph interpolation, and
+ * descriptor-backed menu edits all store one byte per descriptor cell. Normal
+ * musical parameters use their existing 0..127 or 0..255 UI domain. Target
+ * selector cells store compact local tokens instead of packed canonical target
+ * IDs so the same arrays never need to widen for routing metadata.
+ */
+typedef uint8_t instrument_param_value_t;
+/*
+ * Retained modulation target token.
+ *
+ * Target parameter selector rows store compact byte tokens. 0xff is the sole
+ * off value. Values 0..63 address local descriptor indices in the selected
+ * namespace. The velocity destination row also reserves 0x40 for the source
+ * voice's own Scene Morph target, preserving the LXR-02 velocity-to-Morph
+ * workflow without storing a wide Scene target ID. Runtime code expands the
+ * byte token into a canonical instrument_param_id_t only while installing or
+ * displaying a modulation target.
+ */
+typedef uint8_t instrument_target_token_t;
+#define INSTRUMENT_TARGET_TOKEN_OFF          0xffu
+#define INSTRUMENT_TARGET_TOKEN_MAX_LOCAL    ((uint8_t)(INSTRUMENT_PARAM_COUNT - 1u))
+#define INSTRUMENT_TARGET_TOKEN_VOICE_MORPH  0x40u
+/*
+ * LFO target namespace values stored in lfo_target_voice cells.
+ *
+ * Values 1..6 select instrument voices. Value 7 selects the Scene namespace
+ * shown by Menu as `scn`; future values above the instrument voice range can
+ * select effects or other target tables while lfo_target_param remains a local
+ * byte token.
+ */
+#define INSTRUMENT_TARGET_VOICE_FIRST 1u
+#define INSTRUMENT_TARGET_VOICE_LAST  INSTRUMENT_SLOT_COUNT
+#define INSTRUMENT_TARGET_VOICE_SCENE ((uint8_t)(INSTRUMENT_SLOT_COUNT + 1u))
 
 typedef enum {
     INSTRUMENT_TYPE_DRM = 0,
@@ -77,8 +113,8 @@ typedef struct {
 #define INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX     0x04u
 
 typedef struct {
-    uint16_t min_value;
-    uint16_t max_value;
+    instrument_param_value_t min_value;
+    instrument_param_value_t max_value;
     uint8_t flags;
 } instrument_mod_domain_t;
 
@@ -219,16 +255,55 @@ uint8_t instrumentManager_targetLocalValid(uint8_t scene_index,
                                            uint8_t local,
                                            instrument_target_use_t use);
 /*
- * Validate one target for a velocity source voice.
+ * Convert between retained target tokens and canonical runtime target IDs.
  *
- * Inputs: Scene index, zero-based source slot, and a stored target ID. Output:
- * nonzero only for off, a modulatable descriptor on the source slot, or a
- * Scene mod target. This mixed validator exists because velocity target
- * browsing appends Scene targets after the source voice's descriptor list,
- * while LFO voice-target browsing still uses a selected target voice.
+ * Retained storage keeps only byte-sized target tokens. Runtime modulation,
+ * automation, and display helpers still need canonical IDs because installed
+ * nodes share one target namespace. These helpers are the only place that may
+ * combine a target slot, Scene namespace, or source-voice Morph token with a
+ * local byte token to build a wider id.
  */
+uint8_t instrumentManager_targetTokenValidForSlot(
+    uint8_t scene_index,
+    uint8_t target_slot,
+    instrument_target_token_t token,
+    instrument_target_use_t use);
+instrument_param_id_t instrumentManager_targetIdFromTokenForSlot(
+    uint8_t scene_index,
+    uint8_t target_slot,
+    instrument_target_token_t token,
+    instrument_target_use_t use);
+instrument_target_token_t instrumentManager_targetTokenFromIdForSlot(
+    uint8_t scene_index,
+    uint8_t target_slot,
+    instrument_param_id_t id,
+    instrument_target_use_t use);
+instrument_target_token_t instrumentManager_stepTargetTokenForSlot(
+    uint8_t scene_index,
+    uint8_t target_slot,
+    instrument_target_token_t current,
+    int8_t direction,
+    instrument_target_use_t use);
+uint8_t instrumentManager_lfoTargetVoiceValid(uint8_t voice);
+instrument_param_id_t instrumentManager_lfoTargetIdFromToken(
+    uint8_t scene_index,
+    uint8_t source_slot,
+    uint8_t target_voice,
+    instrument_target_token_t token,
+    instrument_target_use_t use);
+instrument_target_token_t instrumentManager_lfoTargetTokenFromId(
+    uint8_t scene_index,
+    uint8_t target_voice,
+    instrument_param_id_t id,
+    instrument_target_use_t use);
+instrument_target_token_t instrumentManager_stepLfoTargetToken(
+    uint8_t scene_index,
+    uint8_t target_voice,
+    instrument_target_token_t current,
+    int8_t direction,
+    instrument_target_use_t use);
 uint8_t instrumentManager_targetValidForVelocitySource(
-    uint8_t scene_index, uint8_t source_slot, uint16_t target_id);
+    uint8_t scene_index, uint8_t source_slot, instrument_target_token_t token);
 /*
  * Step through valid targets for one target slot.
  *
@@ -255,20 +330,20 @@ instrument_param_id_t instrumentManager_stepTargetForSlot(
 /*
  * Walk the velocity target list for one source voice.
  *
- * Inputs: Scene index, zero-based source slot, current stored target ID or
- * INSTRUMENT_PARAM_INVALID, and signed direction. Output: the next legal
- * target in the velocity picker. The picker order is one off entry, the source
- * slot's current instrument descriptors that are valid modulation targets,
- * then Scene mod targets.
+ * Inputs: Scene index, zero-based source slot, current retained byte token,
+ * and signed direction. Output: the next legal token in the velocity picker.
+ * The picker order is one off entry, the source slot's current instrument
+ * descriptors that are valid modulation targets, then the source voice's own
+ * Scene Morph target.
  *
  * This must stay separate from the generic descriptor stepper because velocity
- * has a mixed namespace: voice-local descriptor IDs plus Scene target IDs.
- * Menu callers need one stable traversal for encoder and knob edits, and load
- * normalization needs the same validity rule without knowing descriptor or
- * Scene-target internals.
+ * has one byte token outside descriptor range for own-voice Morph. Menu callers
+ * need one stable traversal for encoder and knob edits, and load normalization
+ * needs the same validity rule without knowing descriptor or Scene-target
+ * internals.
  */
-uint16_t instrumentManager_stepVelocityTargetForSource(
-    uint8_t scene_index, uint8_t source_slot, uint16_t current,
+instrument_target_token_t instrumentManager_stepVelocityTargetForSource(
+    uint8_t scene_index, uint8_t source_slot, instrument_target_token_t current,
     int8_t direction);
 /*
  * Apply a velocity-triggered supplemental or Scene modulation target.
@@ -331,6 +406,19 @@ void instrumentManager_runtimeInit(void);
  */
 void instrumentManager_clearAllRuntimeModulationTargets(void);
 /*
+ * Quiet test for deferred Scene-slot replacement.
+ *
+ * Inputs: zero-based instrument slot. Output: nonzero when the slot has no
+ * active amp envelope or its envelope value is below the Scene-switch quiet
+ * floor. Preset uses this before committing a newly selected Scene's instrument
+ * runtime into a slot that may still be ringing from the previous Scene.
+ *
+ * The threshold is intentionally based on the runtime envelope value rather
+ * than the envelope phase alone: SlopeEg2 can remain in EG_D after it has
+ * decayed to silence, so a value floor is the stable "basically zero" test.
+ */
+uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot);
+/*
  * Reinitialize one committed slot's incoming DSP runtime instance.
  *
  * Input: zero-based slot whose new type is already resident in active
@@ -357,6 +445,6 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
 void *instrumentManager_runtimeInstance(uint8_t slot);
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,
-                                       uint16_t value);
+                                       instrument_param_value_t value);
 
 #endif

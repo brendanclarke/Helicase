@@ -56,7 +56,7 @@ typedef enum {
     FS_FILE_MORPH,
     FS_FILE_PERFORMANCE,
     FS_FILE_ALL,
-    FS_FILE_GLOBALS,
+    FS_FILE_SETTINGS,
     FS_FILE_SAMPLES,
 } fs_file_type_t;
 
@@ -95,7 +95,6 @@ typedef enum {
 
 typedef enum {
     FS_STALE_WARNING_NONE = 0,
-    FS_STALE_WARNING_GLO,
     FS_STALE_WARNING_ALL,
 } fs_stale_warning_source_t;
 
@@ -190,6 +189,18 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
 bool filesystem_requestLoadBank(uint16_t slot,
                                 uint16_t scene_mask,
                                 fs_completion_cb_t cb);
+/*
+ * Scan one root Bank's Bank-local Scene children.
+ *
+ * Inputs: root Bank slot 000..999 and completion callback. Output:
+ * filesystem_bankChildSceneMask() reports which two-digit 00..15 child Scene
+ * folders are present after the async request completes. This is a preview
+ * operation for Load:[Bank]; it does not read bankset.bcg or mutate resident
+ * Scene/BankData state. Clients must verify they are still browsing the same
+ * slot before applying the returned mask to LEDs.
+ */
+bool filesystem_requestScanBankScenes(uint16_t slot, fs_completion_cb_t cb);
+uint16_t filesystem_bankChildSceneMask(void);
 /*
  * Save one root Bank directory from resident Scene memory.
  *

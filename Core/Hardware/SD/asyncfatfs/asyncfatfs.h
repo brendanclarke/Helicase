@@ -188,6 +188,32 @@ bool afatfs_removeObjects_lfn(const char *displayName,
                               afatfsMatchMode_t matchMode,
                               afatfsRemoveObjectMode_t mode,
                               afatfsCallback_t complete);
+/*
+ * Remove one exact short-alias object from the current directory.
+ *
+ * What: this is the precise-SFN companion to afatfs_removeObjects_lfn().
+ * display-name removal intentionally removes every case-folded LFN variant for
+ * product overwrites, while this function targets only the object whose
+ * printable 8.3 alias equals filename. The mode rules are identical: files may
+ * always be removed in AFATFS_REMOVE_FILES_ONLY, and directories may be retired
+ * only in AFATFS_REMOVE_EMPTY_DIRECTORIES after higher-level code has emptied
+ * them recursively.
+ *
+ * Why: recursive directory deletion first discovers a concrete directory entry
+ * with afatfs_findNextObject(), then opens children by that entry's shortName.
+ * When a damaged FAT card already has duplicate visible long names, removing
+ * the final empty directory by displayName can re-resolve to the wrong sibling.
+ * Passing the same shortName used to open the directory keeps open, recurse,
+ * and retire operations attached to one physical object.
+ *
+ * Inputs/accessors: filename must be the printable shortName returned in
+ * afatfsObjectInfo_t or an openNameOut returned by mkdir/open LFN helpers.
+ * Output/effects: the completion callback fires after the scan either retires
+ * that exact entry or reaches the end as a successful no-op.
+ */
+bool afatfs_removeObject(const char *filename,
+                         afatfsRemoveObjectMode_t mode,
+                         afatfsCallback_t complete);
 
 bool afatfs_feof(afatfsFilePtr_t file);
 void afatfs_fputc(afatfsFilePtr_t file, uint8_t c);

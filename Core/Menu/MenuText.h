@@ -63,8 +63,17 @@ static const char transientNames[][4] = {
     {"Drp"},{"Hat"},{"Clp"},{"Kk2"},{"Snr"},{"Tom"},{"Sp2"},
 };
 static const char nextPatternNames[][4] = {
-    {15},
+    {23},
+    /*
+     * Retired Pattern-next labels.
+     *
+     * The Pattern Settings page no longer exposes next/repeat controls, and the
+     * sequencer ignores Pattern-only switches. Keep the table only so any stale
+     * DTYPE_MENU reference has bounded display strings until Phase 4 rebuilds
+     * Pattern storage/menu ownership.
+     */
     {"p1"},{"p2"},{"p3"},{"p4"},{"p5"},{"p6"},{"p7"},{"p8"},
+    {"p9"},{"p10"},{"p11"},{"p12"},{"p13"},{"p14"},{"p15"},{"p16"},
     {"r2"},{"r3"},{"r4"},{"r5"},{"r6"},{"r7"},{"r8"},
 };
 static const char retriggerNames[][4] = {

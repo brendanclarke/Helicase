@@ -1,5 +1,28 @@
 # 8-bit Instrument Parameter Refactor Plan
 
+## Implementation Notes
+
+Status as of this pass:
+
+- Resident instrument images now use `instrument_param_value_t` byte arrays in
+  `SceneData`.
+- Target selector rows retain `instrument_target_token_t` values, with
+  `0xff` as off.
+- LFO `lfo_target_voice=7` is the retained Scene namespace and still displays
+  as `scn` in Menu.
+- Velocity destinations are self-scoped descriptor tokens plus one explicit
+  source-voice Morph token (`0x40`). Velocity does not browse arbitrary Scene
+  targets.
+- `SceneModTargets` exposes ID/index helpers so LFO Scene namespace storage can
+  keep a byte token while runtime/display code expands to canonical Scene target
+  IDs.
+- Instrument text parser/writer now treats every descriptor row as byte-domain.
+  The checked-in `SD_CARD/` tree was migrated from `65535`/packed target values
+  to byte tokens; broad legacy packed-ID compatibility was intentionally not
+  kept because the project controls all current files.
+- Pattern automation target IDs are unchanged and remain the Phase 4 rewrite's
+  responsibility.
+
 ## Goal
 
 Resident instrument parameter images should store byte values only. No ordinary

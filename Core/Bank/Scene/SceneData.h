@@ -9,12 +9,18 @@
  * Resident Scene ownership.
  *
  * Why: sound endpoints, Pattern data, kit membership/settings, and Scene
- * settings must travel together. One record is allocated now; the same API is
- * intentionally indexed so the Bank implementation can raise SCENE_COUNT to
- * 17 without reintroducing globals. Clients should use bounded accessors rather
+ * settings must travel together. Sixteen records are resident so the Bank
+ * workspace can hold one Scene per physical SEQ button and write inactive
+ * Scenes during edit-mask fan-out. Clients should use bounded accessors rather
  * than indexing scenes[] directly.
+ *
+ * Accessing code: BankData stores 16-bit Scene masks where bit N addresses
+ * scenes[N]. Filesystem Bank Load/Save iterates this count while mapping
+ * Bank-local `SS Name` child folders to matching resident Scene slots. Menu
+ * and ButtonHandler use the same bound when SEQ buttons select, toggle, or
+ * display Scene membership.
  */
-#define SCENE_COUNT 1u
+#define SCENE_COUNT 16u
 /*
  * Fixed-width resident object display names.
  *
@@ -40,16 +46,15 @@ typedef struct {
      *
      * instrument_parameters[] is the main endpoint loaded from `[params]` and
      * edited in normal VOICE mode. morph_instrument_parameters[] is the Morph
-     * endpoint loaded from `[morph]` and edited through SHIFT+VOICE. The Morph
-     * worker writes morph_interpolation[] as runtime-derived state. Inputs to
-     * these arrays are descriptor indices local to the slot's current
-     * instrument type; callers must use InstrumentManager to interpret them.
-     * Output values are 16-bit so supplemental target IDs and future wider
-     * value domains can be stored without narrowing at the Scene boundary.
+     * endpoint loaded from `[morph]` and edited through SHIFT+VOICE.
+     * morph_interpolation[] is the runtime byte image produced by the Morph
+     * worker. Descriptor rows that select modulation destinations store compact
+     * byte tokens; canonical target IDs are expanded only by InstrumentManager
+     * when runtime targets are installed or displayed.
      */
-    uint16_t instrument_parameters[INSTRUMENT_PARAM_COUNT];
-    uint16_t morph_instrument_parameters[INSTRUMENT_PARAM_COUNT];
-    uint16_t morph_interpolation[INSTRUMENT_PARAM_COUNT];
+    instrument_param_value_t instrument_parameters[INSTRUMENT_PARAM_COUNT];
+    instrument_param_value_t morph_instrument_parameters[INSTRUMENT_PARAM_COUNT];
+    instrument_param_value_t morph_interpolation[INSTRUMENT_PARAM_COUNT];
 } instrument_parameter_images_t;
 
 typedef struct kit_instrument_slot {

@@ -12,6 +12,10 @@ typedef struct {
     uint8_t pass_mask;
     uint8_t pass_amount[INSTRUMENT_SLOT_COUNT];
     uint8_t pass_lfo_resolved_mask;
+    uint8_t priority_resume_valid;
+    uint8_t priority_slot;
+    uint8_t resume_slot;
+    uint8_t resume_descriptor_index;
     uint8_t active;
 } preset_morph_worker_t;
 
@@ -33,7 +37,7 @@ static preset_morph_lfo_contribution_t morph_lfo_contributions
  * contract.
  *
  * Inputs: main endpoint, morph endpoint, and user-facing Morph amount where 0
- * is exactly main and 255 is exactly morph. Output: rounded descriptor image
+ * is exactly main and 255 is exactly morph. Output: rounded descriptor byte
  * value to write into morph_interpolation[] and, for the active Scene, into the
  * runtime DSP binding. Exact endpoint checks are deliberately kept outside the
  * arithmetic so descending ranges also land exactly on the stored endpoint.
@@ -46,7 +50,10 @@ static preset_morph_lfo_contribution_t morph_lfo_contributions
  * bounded foreground iterator, while interpolation is the reusable value
  * contract shared by every morphable descriptor cell it visits.
  */
-static uint16_t presetMorph_interpolate(uint16_t a, uint16_t b, uint8_t amount)
+static instrument_param_value_t presetMorph_interpolate(
+    instrument_param_value_t a,
+    instrument_param_value_t b,
+    uint8_t amount)
 {
     int32_t numerator;
 
@@ -60,7 +67,7 @@ static uint16_t presetMorph_interpolate(uint16_t a, uint16_t b, uint8_t amount)
     numerator += 127;
     if (numerator < 0)
         return 0u;
-    return (uint16_t)(numerator / 255);
+    return (instrument_param_value_t)(numerator / 255);
 }
 
 static uint8_t presetMorph_firstQueuedSlot(uint8_t mask)
@@ -190,6 +197,7 @@ static void presetMorph_beginPass(void)
     morph_worker.pass_mask = morph_worker.requested_mask;
     morph_worker.requested_mask = 0u;
     morph_worker.pass_lfo_resolved_mask = 0u;
+    morph_worker.priority_resume_valid = 0u;
     presetMorph_snapshotPassAmounts(scene);
     morph_worker.slot = presetMorph_firstQueuedSlot(morph_worker.pass_mask);
     morph_worker.descriptor_index = 0u;
@@ -204,6 +212,10 @@ void presetMorph_init(void)
     morph_worker.requested_mask = 0u;
     morph_worker.pass_mask = 0u;
     morph_worker.pass_lfo_resolved_mask = 0u;
+    morph_worker.priority_resume_valid = 0u;
+    morph_worker.priority_slot = 0u;
+    morph_worker.resume_slot = 0u;
+    morph_worker.resume_descriptor_index = 0u;
     for (uint8_t slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
         morph_worker.pass_amount[slot] = 0u;
     for (uint8_t target = 0u; target < INSTRUMENT_SLOT_COUNT; target++) {
@@ -235,6 +247,7 @@ void presetMorph_requestVoice(uint8_t scene_index, uint8_t slot)
         morph_worker.scene_index = scene_index;
         morph_worker.requested_mask = 0u;
         morph_worker.pass_mask = 0u;
+        morph_worker.priority_resume_valid = 0u;
         morph_worker.active = 0u;
     }
     morph_worker.requested_mask |= PRESET_MORPH_SLOT_MASK(slot);
@@ -259,11 +272,81 @@ void presetMorph_requestAll(uint8_t scene_index)
         morph_worker.scene_index = scene_index;
         morph_worker.requested_mask = 0u;
         morph_worker.pass_mask = 0u;
+        morph_worker.priority_resume_valid = 0u;
         morph_worker.active = 0u;
     }
     morph_worker.requested_mask |= PRESET_MORPH_ALL_SLOTS_MASK;
     if (!morph_worker.active)
         presetMorph_beginPass();
+}
+
+void presetMorph_prioritizeVoice(uint8_t scene_index, uint8_t slot)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+    uint8_t bit;
+
+    /*
+     * Move one queued voice to the front of the bounded Morph sweep.
+     *
+     * Inputs: Scene/slot that has become urgent, normally because its deferred
+     * Scene-switch slot is about to trigger. Output: the slot is guaranteed to
+     * be in the current pass mask, removed from the later request mask, and the
+     * worker cursor is moved to descriptor zero for that slot. If another slot
+     * was mid-sweep, its slot/descriptor cursor is saved once and restored when
+     * the priority slot completes.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+
+    if (morph_worker.scene_index != scene_index) {
+        /*
+         * A priority request for a different Scene replaces the old worker.
+         *
+         * Input: the active/urgent Scene changed. Output: stale pass/request
+         * masks are discarded because descriptor writes from the old Scene must
+         * never resume after this Scene's trigger-time switch.
+         */
+        morph_worker.scene_index = scene_index;
+        morph_worker.requested_mask = 0u;
+        morph_worker.pass_mask = 0u;
+        morph_worker.priority_resume_valid = 0u;
+        morph_worker.active = 0u;
+    }
+
+    bit = PRESET_MORPH_SLOT_MASK(slot);
+    morph_worker.requested_mask =
+        (uint8_t)(morph_worker.requested_mask & ~bit);
+    morph_worker.pass_mask = (uint8_t)(morph_worker.pass_mask | bit);
+    morph_worker.pass_amount[slot] = scene->settings.voice_morph_amount[slot];
+    morph_worker.pass_lfo_resolved_mask =
+        (uint8_t)(morph_worker.pass_lfo_resolved_mask & ~bit);
+
+    if (!morph_worker.active) {
+        morph_worker.slot = slot;
+        morph_worker.descriptor_index = 0u;
+        morph_worker.active = 1u;
+        return;
+    }
+
+    if (morph_worker.slot != slot &&
+        !morph_worker.priority_resume_valid &&
+        morph_worker.slot < INSTRUMENT_SLOT_COUNT) {
+        /*
+         * Save the interrupted cursor once.
+         *
+         * Inputs: the current worker slot/descriptor index. Output: after the
+         * priority slot finishes, presetMorph_tick() can continue from the same
+         * descriptor position instead of restarting the whole pass or skipping
+         * the old slot's remaining morphable cells.
+         */
+        morph_worker.resume_slot = morph_worker.slot;
+        morph_worker.resume_descriptor_index = morph_worker.descriptor_index;
+        morph_worker.priority_slot = slot;
+        morph_worker.priority_resume_valid = 1u;
+    }
+
+    morph_worker.slot = slot;
+    morph_worker.descriptor_index = 0u;
 }
 
 uint8_t presetMorph_tick(void)
@@ -275,6 +358,7 @@ uint8_t presetMorph_tick(void)
     scene = scene_get(morph_worker.scene_index);
     if (!scene) {
         morph_worker.active = 0u;
+        morph_worker.priority_resume_valid = 0u;
         return 0u;
     }
 
@@ -315,7 +399,7 @@ uint8_t presetMorph_tick(void)
             uint8_t local = morph_worker.descriptor_index++;
             const ParamDescriptor *descriptor =
                 instrumentManager_descriptor(instrument->type, local);
-            uint16_t value;
+            instrument_param_value_t value;
             instrument_param_id_t id;
 
             if (!descriptor ||
@@ -335,6 +419,24 @@ uint8_t presetMorph_tick(void)
         }
         morph_worker.pass_mask &=
             (uint8_t)(~PRESET_MORPH_SLOT_MASK(morph_worker.slot));
+        if (morph_worker.priority_resume_valid &&
+            morph_worker.slot == morph_worker.priority_slot) {
+            /*
+             * Resume the interrupted bounded sweep after a priority slot.
+             *
+             * Inputs: priority_resume_* captured the worker cursor before the
+             * urgent slot jumped ahead. Output: normal Morph processing
+             * continues from the saved descriptor index, while the completed
+             * priority slot stays cleared from pass_mask. If the saved slot was
+             * also cleared by another synchronous apply, the top of the loop will
+             * skip it and advance normally.
+             */
+            morph_worker.slot = morph_worker.resume_slot;
+            morph_worker.descriptor_index =
+                morph_worker.resume_descriptor_index;
+            morph_worker.priority_resume_valid = 0u;
+            continue;
+        }
         morph_worker.slot++;
         morph_worker.descriptor_index = 0u;
     }
@@ -344,6 +446,7 @@ uint8_t presetMorph_tick(void)
     } else {
         morph_worker.active = 0u;
         morph_worker.pass_mask = 0u;
+        morph_worker.priority_resume_valid = 0u;
     }
     return 0u;
 }
@@ -354,10 +457,96 @@ void presetMorph_rebuildScene(uint8_t scene_index)
      * Rebuild all Morph interpolation from retained per-voice Scene settings.
      *
      * Inputs: Scene index. Output: all slots are queued without changing the
-     * Scene global Morph mirror or any per-slot amount. Clients are Scene apply,
-     * Kit load apply, and non-mutating endpoint refresh paths.
+     * Scene global Morph mirror or any per-slot amount. Clients are explicit
+     * Morph rebuild/edit paths; active Scene switching uses
+     * presetMorph_applyVoiceNow() per slot so instrument parameters can wait for
+     * the quiet threshold or the next trigger.
      */
     presetMorph_requestAll(scene_index);
+}
+
+void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
+{
+    scene_t *scene = scene_get(scene_index);
+    kit_instrument_slot_t *instrument;
+    uint8_t local;
+    uint8_t amount;
+
+    /*
+     * Commit one slot's Morph-derived runtime image immediately.
+     *
+     * Inputs: Scene/slot selected by the deferred Scene-switch worker. Outputs:
+     * all morphable descriptor cells in morph_interpolation[] are updated, and
+     * active-Scene runtime writes are complete before the caller returns. This
+     * mirrors presetMorph_tick() but intentionally walks the whole slot so a
+     * trigger-time Scene swap cannot fire with half-old instrument parameters.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    instrument = &scene->kit.instruments[slot];
+    amount = scene->settings.voice_morph_amount[slot];
+    if (presetMorph_voiceHasLfoLayer(slot))
+        amount = presetMorph_resolveLfoAmount(scene, slot);
+
+    for (local = 0u; local < INSTRUMENT_PARAM_COUNT; local++) {
+        const ParamDescriptor *descriptor =
+            instrumentManager_descriptor(instrument->type, local);
+        instrument_param_value_t value;
+        instrument_param_id_t id;
+
+        /*
+         * Walk descriptor indices rather than raw storage cells.
+         *
+         * Input: descriptor flags for the slot's stored type. Output: only
+         * morphable cells are interpolated/applied; supplemental selectors such
+         * as LFO target voice/param stay with Preset's slot supplemental apply.
+         */
+        if (!descriptor ||
+            !(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
+            continue;
+        }
+        value = presetMorph_interpolate(
+            instrument->parameter_images.instrument_parameters[local],
+            instrument->parameter_images.morph_instrument_parameters[local],
+            amount);
+        instrument->parameter_images.morph_interpolation[local] = value;
+        id = instrumentParam_make(slot, local);
+        if (scene_index == scene_getActiveIndex())
+            preset_applyInstrumentRuntimeValue(scene_index, id, value);
+    }
+
+    if (morph_worker.scene_index == scene_index) {
+        /*
+         * Remove the synchronously committed slot from any bounded pass.
+         *
+         * Inputs: the worker may already have queued this slot before a
+         * trigger-time apply. Output: both pending masks drop the slot bit so a
+         * later foreground tick does not replay stale descriptor writes over the
+         * freshly committed runtime.
+         */
+        morph_worker.requested_mask =
+            (uint8_t)(morph_worker.requested_mask &
+                      ~PRESET_MORPH_SLOT_MASK(slot));
+        morph_worker.pass_mask =
+            (uint8_t)(morph_worker.pass_mask &
+                      ~PRESET_MORPH_SLOT_MASK(slot));
+        if (morph_worker.priority_resume_valid &&
+            morph_worker.priority_slot == slot) {
+            /*
+             * A synchronous priority apply completes outside presetMorph_tick().
+             *
+             * Inputs: trigger-time Scene switching may call
+             * presetMorph_prioritizeVoice(), then immediately call this helper
+             * to commit the whole slot before the note fires. Output: the
+             * bounded worker resumes at the saved cursor on its next tick
+             * instead of remaining parked on a slot whose pass bit was removed.
+             */
+            morph_worker.slot = morph_worker.resume_slot;
+            morph_worker.descriptor_index =
+                morph_worker.resume_descriptor_index;
+            morph_worker.priority_resume_valid = 0u;
+        }
+    }
 }
 
 void presetMorph_setVoiceLfoModulation(uint8_t scene_index,

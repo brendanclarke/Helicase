@@ -88,7 +88,7 @@ typedef struct {
     instrument_param_id_t id;
     const ParamDescriptor *descriptor;
     instrument_mod_domain_t domain;
-    uint16_t base_value;
+    instrument_param_value_t base_value;
 } instrument_lfo_target_adapter_t;
 
 /*
@@ -118,6 +118,21 @@ static instrument_lfo_target_adapter_t
     lfo_descriptor_targets[INSTRUMENT_SLOT_COUNT][2u];
 static uint8_t slot6_track7_decay_lfo_active;
 static uint8_t slot6_track7_decay_lfo_value;
+/*
+ * Runtime type shadow for deferred Scene switching.
+ *
+ * Inputs: active Scene changes immediately, while Preset may wait to commit
+ * each instrument slot until the old amp envelope is quiet or until the new
+ * Scene's pattern triggers that slot. Output: InstrumentManager runtime
+ * dispatch follows this shadow instead of SceneData directly, so a ringing slot
+ * keeps rendering with the instrument type whose parameters are actually loaded.
+ *
+ * Access: instrumentManager_resetRuntimeSlot() is the only writer; it copies
+ * the currently active Scene's type into the shadow at the same moment the DSP
+ * runtime is reinitialized and about to receive descriptor values.
+ */
+static instrument_type_t runtime_slot_type[INSTRUMENT_SLOT_COUNT];
+#define INSTRUMENT_AMP_EG_QUIET_THRESHOLD 0.0001f
 
 /*
  * Per-slot runtime pools for loadable instrument types.
@@ -145,7 +160,8 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
 static void instrumentManager_restoreVelocitySupplementalTarget(
     uint8_t source_slot);
 static uint8_t instrumentManager_writeRuntimeInternal(
-    uint8_t slot, const ParamDescriptor *descriptor, uint16_t value,
+    uint8_t slot, const ParamDescriptor *descriptor,
+    instrument_param_value_t value,
     uint8_t notify_base_change);
 
 static DrumVoice *instrumentManager_drumRuntime(uint8_t slot)
@@ -604,11 +620,11 @@ void instrumentManager_resetSlot(struct kit_instrument_slot *raw_slot,
         case INSTRUMENT_BIND_LFO_TARGET_PARAM_2:
         case INSTRUMENT_BIND_VELOCITY_TARGET:
             slot->parameter_images.instrument_parameters[i] =
-                INSTRUMENT_PARAM_INVALID;
+                INSTRUMENT_TARGET_TOKEN_OFF;
             slot->parameter_images.morph_instrument_parameters[i] =
-                INSTRUMENT_PARAM_INVALID;
+                INSTRUMENT_TARGET_TOKEN_OFF;
             slot->parameter_images.morph_interpolation[i] =
-                INSTRUMENT_PARAM_INVALID;
+                INSTRUMENT_TARGET_TOKEN_OFF;
             break;
         default:
             break;
@@ -749,6 +765,209 @@ uint8_t instrumentManager_targetLocalValid(uint8_t scene_index,
     return instrumentManager_targetValid(scene_index, id, use);
 }
 
+uint8_t instrumentManager_targetTokenValidForSlot(
+    uint8_t scene_index,
+    uint8_t target_slot,
+    instrument_target_token_t token,
+    instrument_target_use_t use)
+{
+    /*
+     * Validate a retained descriptor-local target token.
+     *
+     * Inputs: Scene index, zero-based target slot, local byte token, and target
+     * use. Output: nonzero for off or a local descriptor that is valid in that
+     * slot/use namespace. Scene target and velocity own-Morph tokens are
+     * handled by their namespace-specific helpers so plain voice target
+     * browsing cannot accidentally expose Scene routes.
+     */
+    if (token == INSTRUMENT_TARGET_TOKEN_OFF)
+        return 1u;
+    if (token > INSTRUMENT_TARGET_TOKEN_MAX_LOCAL)
+        return 0u;
+    return instrumentManager_targetLocalValid(scene_index, target_slot, token,
+                                              use);
+}
+
+instrument_param_id_t instrumentManager_targetIdFromTokenForSlot(
+    uint8_t scene_index,
+    uint8_t target_slot,
+    instrument_target_token_t token,
+    instrument_target_use_t use)
+{
+    /*
+     * Expand one retained descriptor token to a canonical runtime ID.
+     *
+     * Inputs: target slot namespace plus byte token. Output: a slot/local
+     * instrument_param_id_t when the token is a valid descriptor target, or
+     * INSTRUMENT_PARAM_INVALID for off/stale values. Callers use this for
+     * display and runtime installation only; the wide ID is not written back to
+     * SceneData.
+     */
+    if (token == INSTRUMENT_TARGET_TOKEN_OFF)
+        return INSTRUMENT_PARAM_INVALID;
+    if (!instrumentManager_targetTokenValidForSlot(scene_index, target_slot,
+                                                   token, use)) {
+        return INSTRUMENT_PARAM_INVALID;
+    }
+    return instrumentParam_make(target_slot, token);
+}
+
+instrument_target_token_t instrumentManager_targetTokenFromIdForSlot(
+    uint8_t scene_index,
+    uint8_t target_slot,
+    instrument_param_id_t id,
+    instrument_target_use_t use)
+{
+    uint8_t local;
+
+    /*
+     * Collapse a canonical descriptor target ID to retained token storage.
+     *
+     * Inputs: target slot namespace and runtime/display ID. Output: a local
+     * descriptor token only when the ID belongs to the requested slot and is
+     * valid for the requested use; all other IDs become the byte off token.
+     */
+    if (id == INSTRUMENT_PARAM_INVALID)
+        return INSTRUMENT_TARGET_TOKEN_OFF;
+    if (!instrumentParam_isVoiceParameter(id) ||
+        instrumentParam_slot(id) != target_slot) {
+        return INSTRUMENT_TARGET_TOKEN_OFF;
+    }
+    local = instrumentParam_local(id);
+    return instrumentManager_targetTokenValidForSlot(scene_index, target_slot,
+                                                     local, use)
+        ? (instrument_target_token_t)local
+        : INSTRUMENT_TARGET_TOKEN_OFF;
+}
+
+instrument_target_token_t instrumentManager_stepTargetTokenForSlot(
+    uint8_t scene_index,
+    uint8_t target_slot,
+    instrument_target_token_t current,
+    int8_t direction,
+    instrument_target_use_t use)
+{
+    instrument_param_id_t current_id;
+    instrument_param_id_t next_id;
+
+    /*
+     * Step through valid targets while retaining only byte tokens.
+     *
+     * Inputs mirror the canonical descriptor stepper, but current/output are
+     * retained local tokens. The function expands to a canonical ID only for
+     * the duration of traversal, then collapses back to byte storage.
+     */
+    if (current == INSTRUMENT_TARGET_TOKEN_OFF) {
+        current_id = INSTRUMENT_PARAM_INVALID;
+    } else {
+        current_id = instrumentManager_targetIdFromTokenForSlot(
+            scene_index, target_slot, current, use);
+    }
+    next_id = instrumentManager_stepTargetForSlot(scene_index, target_slot,
+                                                  current_id, direction, use);
+    return instrumentManager_targetTokenFromIdForSlot(scene_index, target_slot,
+                                                      next_id, use);
+}
+
+uint8_t instrumentManager_lfoTargetVoiceValid(uint8_t voice)
+{
+    /*
+     * Validate the retained LFO target namespace byte.
+     *
+     * Values 1..6 address instrument slots and value 7 is the Scene namespace
+     * displayed by Menu as `scn`. Future effect namespaces can be added above
+     * this value without widening lfo_target_param.
+     */
+    return (uint8_t)(voice >= INSTRUMENT_TARGET_VOICE_FIRST &&
+                     voice <= INSTRUMENT_TARGET_VOICE_SCENE);
+}
+
+instrument_param_id_t instrumentManager_lfoTargetIdFromToken(
+    uint8_t scene_index,
+    uint8_t source_slot,
+    uint8_t target_voice,
+    instrument_target_token_t token,
+    instrument_target_use_t use)
+{
+    (void)source_slot;
+
+    /*
+     * Expand an LFO target pair into a canonical runtime target.
+     *
+     * lfo_target_voice chooses the namespace. Voice namespaces interpret the
+     * parameter byte as a local descriptor index; the Scene namespace
+     * interprets it as a Scene target-table index. Off and invalid tokens
+     * always expand to INSTRUMENT_PARAM_INVALID.
+     */
+    if (token == INSTRUMENT_TARGET_TOKEN_OFF ||
+        !instrumentManager_lfoTargetVoiceValid(target_voice)) {
+        return INSTRUMENT_PARAM_INVALID;
+    }
+    if (target_voice == INSTRUMENT_TARGET_VOICE_SCENE) {
+        uint16_t id = sceneModTarget_idFromIndex(token);
+        return sceneModTarget_valid(id, SCENE_MOD_TARGET_USE_LFO)
+            ? id : INSTRUMENT_PARAM_INVALID;
+    }
+    return instrumentManager_targetIdFromTokenForSlot(
+        scene_index, (uint8_t)(target_voice - 1u), token, use);
+}
+
+instrument_target_token_t instrumentManager_lfoTargetTokenFromId(
+    uint8_t scene_index,
+    uint8_t target_voice,
+    instrument_param_id_t id,
+    instrument_target_use_t use)
+{
+    /*
+     * Collapse a canonical LFO target ID into the selected namespace token.
+     *
+     * Scene IDs become Scene target-table indices only when target_voice is
+     * the `scn` namespace. Instrument IDs become local descriptor indices only
+     * when they belong to the selected voice namespace.
+     */
+    if (id == INSTRUMENT_PARAM_INVALID ||
+        !instrumentManager_lfoTargetVoiceValid(target_voice)) {
+        return INSTRUMENT_TARGET_TOKEN_OFF;
+    }
+    if (target_voice == INSTRUMENT_TARGET_VOICE_SCENE) {
+        uint8_t index;
+        return (sceneModTarget_indexFromId(id, &index) &&
+                sceneModTarget_valid(id, SCENE_MOD_TARGET_USE_LFO))
+            ? (instrument_target_token_t)index
+            : INSTRUMENT_TARGET_TOKEN_OFF;
+    }
+    return instrumentManager_targetTokenFromIdForSlot(
+        scene_index, (uint8_t)(target_voice - 1u), id, use);
+}
+
+instrument_target_token_t instrumentManager_stepLfoTargetToken(
+    uint8_t scene_index,
+    uint8_t target_voice,
+    instrument_target_token_t current,
+    int8_t direction,
+    instrument_target_use_t use)
+{
+    /*
+     * Walk an LFO destination list in the selected namespace.
+     *
+     * Voice namespaces reuse descriptor-token stepping. The Scene namespace
+     * walks SceneModTargets and stores only the resulting local Scene index in
+     * lfo_target_param.
+     */
+    if (!instrumentManager_lfoTargetVoiceValid(target_voice) || direction == 0)
+        return current;
+    if (target_voice == INSTRUMENT_TARGET_VOICE_SCENE) {
+        uint16_t current_id = instrumentManager_lfoTargetIdFromToken(
+            scene_index, 0u, target_voice, current, use);
+        uint16_t next_id = sceneModTarget_step(current_id, direction,
+                                               SCENE_MOD_TARGET_USE_LFO);
+        return instrumentManager_lfoTargetTokenFromId(scene_index, target_voice,
+                                                      next_id, use);
+    }
+    return instrumentManager_stepTargetTokenForSlot(
+        scene_index, (uint8_t)(target_voice - 1u), current, direction, use);
+}
+
 instrument_param_id_t instrumentManager_stepTargetForSlot(
     uint8_t scene_index, uint8_t target_slot, instrument_param_id_t current,
     int8_t direction, instrument_target_use_t use)
@@ -827,109 +1046,125 @@ instrument_param_id_t instrumentManager_stepTargetForSlot(
     return INSTRUMENT_PARAM_INVALID;
 }
 
-static uint16_t instrumentManager_lastTargetForSlot(uint8_t scene_index,
-                                                    uint8_t target_slot,
-                                                    instrument_target_use_t use)
+static instrument_target_token_t instrumentManager_lastTargetTokenForSlot(
+    uint8_t scene_index, uint8_t target_slot, instrument_target_use_t use)
 {
-    uint16_t current = INSTRUMENT_PARAM_INVALID;
+    instrument_target_token_t current = INSTRUMENT_TARGET_TOKEN_OFF;
 
     /*
-     * Find the last valid descriptor target for one slot by using the public
-     * descriptor stepper.
+     * Find the last valid retained descriptor token for one slot.
      *
      * Inputs: Scene index, target slot, and target use. Output: the final
-     * valid canonical descriptor target or off when the slot has none. This
-     * helper exists only for mixed-list boundary navigation: moving backward
-     * from the first Scene velocity target should land on the last voice-local
-     * descriptor target without duplicating descriptor scans here.
+     * descriptor-local byte token or off when the slot has no valid targets.
+     * Velocity uses this when stepping backward from the own-Morph Scene token
+     * into the source voice's descriptor portion.
      */
     while (1) {
-        uint16_t next = instrumentManager_stepTargetForSlot(
-            scene_index, target_slot, current, 1, use);
+        instrument_target_token_t next =
+            instrumentManager_stepTargetTokenForSlot(scene_index, target_slot,
+                                                     current, 1, use);
         if (next == current)
             return current;
         current = next;
     }
 }
 
-uint8_t instrumentManager_targetValidForVelocitySource(
-    uint8_t scene_index, uint8_t source_slot, uint16_t target_id)
+static instrument_param_id_t instrumentManager_velocityTargetIdFromToken(
+    uint8_t scene_index, uint8_t source_slot, instrument_target_token_t token)
 {
     /*
-     * Validate a mixed velocity target for one source voice.
+     * Expand one retained velocity token for runtime/display only.
      *
-     * Inputs: Scene index, zero-based source slot, and stored target ID.
-     * Output: nonzero for off, a modulatable descriptor on the same source
-     * slot, or a Scene modulation target. This keeps velocity from browsing
-     * every kit voice while still appending Scene targets after the voice-local
-     * descriptor list.
+     * Velocity destinations are self-scoped. Descriptor tokens target the
+     * source voice's own descriptor table, and the single extra byte token
+     * expands to that same source voice's Scene Morph target. Cross-voice and
+     * arbitrary Scene destinations are intentionally not representable here.
+     */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT ||
+        token == INSTRUMENT_TARGET_TOKEN_OFF) {
+        return INSTRUMENT_PARAM_INVALID;
+    }
+    if (token == INSTRUMENT_TARGET_TOKEN_VOICE_MORPH) {
+        uint16_t id = sceneModTarget_voiceMorphId(source_slot);
+        return sceneModTarget_valid(id, SCENE_MOD_TARGET_USE_VELOCITY)
+            ? id : INSTRUMENT_PARAM_INVALID;
+    }
+    return instrumentManager_targetIdFromTokenForSlot(
+        scene_index, source_slot, token, INSTRUMENT_TARGET_MODULATION);
+}
+
+uint8_t instrumentManager_targetValidForVelocitySource(
+    uint8_t scene_index, uint8_t source_slot, instrument_target_token_t token)
+{
+    /*
+     * Validate a retained velocity destination token for one source voice.
+     *
+     * Velocity is intentionally self-scoped: the source voice's trigger
+     * velocity can modulate descriptor targets on that same instrument slot or
+     * that voice's own Scene Morph target. The retained byte is therefore off,
+     * a local descriptor index, or the explicit own-Morph token.
      */
     if (source_slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
-    if (target_id == INSTRUMENT_PARAM_INVALID)
+    if (token == INSTRUMENT_TARGET_TOKEN_OFF)
         return 1u;
-    if (sceneModTarget_valid(target_id, SCENE_MOD_TARGET_USE_VELOCITY))
-        return 1u;
-    return (uint8_t)(instrumentParam_isVoiceParameter(target_id) &&
-                     instrumentParam_slot(target_id) == source_slot &&
-                     instrumentManager_targetValid(scene_index, target_id,
-                                                   INSTRUMENT_TARGET_MODULATION));
+    if (token == INSTRUMENT_TARGET_TOKEN_VOICE_MORPH) {
+        return sceneModTarget_valid(sceneModTarget_voiceMorphId(source_slot),
+                                    SCENE_MOD_TARGET_USE_VELOCITY);
+    }
+    return instrumentManager_targetTokenValidForSlot(
+        scene_index, source_slot, token, INSTRUMENT_TARGET_MODULATION);
 }
 
-uint16_t instrumentManager_stepVelocityTargetForSource(
-    uint8_t scene_index, uint8_t source_slot, uint16_t current,
+instrument_target_token_t instrumentManager_stepVelocityTargetForSource(
+    uint8_t scene_index, uint8_t source_slot, instrument_target_token_t current,
     int8_t direction)
 {
-    uint16_t normalized = current;
+    instrument_target_token_t normalized = current;
 
     /*
      * Walk the velocity target list for one source voice.
      *
-     * Inputs: Scene index, source slot, current target or off, and signed
-     * direction. Output: one off entry, then this source slot's current
-     * instrument descriptor targets, then Scene mod targets. The descriptor
-     * portion delegates to instrumentManager_stepTargetForSlot(), so
-     * instrument swaps change the list without a hardcoded target table.
+     * Inputs: Scene index, source slot, retained token, and signed direction.
+     * Output: one off entry, then this source slot's valid descriptor targets,
+     * then the source voice's own Morph Scene target. Arbitrary Scene targets
+     * belong to LFO's explicit `scn` namespace, not velocity storage.
      */
     if (source_slot >= INSTRUMENT_SLOT_COUNT || direction == 0)
         return current;
     if (!instrumentManager_targetValidForVelocitySource(scene_index,
                                                         source_slot,
                                                         normalized)) {
-        normalized = INSTRUMENT_PARAM_INVALID;
+        normalized = INSTRUMENT_TARGET_TOKEN_OFF;
     }
 
     if (direction > 0) {
-        if (normalized == INSTRUMENT_PARAM_INVALID ||
-            instrumentParam_isVoiceParameter(normalized)) {
-            uint16_t next = instrumentManager_stepTargetForSlot(
-                scene_index, source_slot, normalized, 1,
-                INSTRUMENT_TARGET_MODULATION);
+        if (normalized == INSTRUMENT_TARGET_TOKEN_OFF ||
+            normalized <= INSTRUMENT_TARGET_TOKEN_MAX_LOCAL) {
+            instrument_target_token_t next =
+                instrumentManager_stepTargetTokenForSlot(
+                    scene_index, source_slot, normalized, 1,
+                    INSTRUMENT_TARGET_MODULATION);
             if (next != normalized)
                 return next;
-            return sceneModTarget_step(INSTRUMENT_PARAM_INVALID, 1,
-                                       SCENE_MOD_TARGET_USE_VELOCITY);
+            return instrumentManager_targetValidForVelocitySource(
+                scene_index, source_slot, INSTRUMENT_TARGET_TOKEN_VOICE_MORPH)
+                ? INSTRUMENT_TARGET_TOKEN_VOICE_MORPH
+                : normalized;
         }
-        if (sceneModTarget_valid(normalized, SCENE_MOD_TARGET_USE_VELOCITY))
-            return sceneModTarget_step(normalized, 1,
-                                       SCENE_MOD_TARGET_USE_VELOCITY);
-        return INSTRUMENT_PARAM_INVALID;
+        return INSTRUMENT_TARGET_TOKEN_OFF;
     }
 
-    if (sceneModTarget_valid(normalized, SCENE_MOD_TARGET_USE_VELOCITY)) {
-        uint16_t next = sceneModTarget_step(normalized, -1,
-                                           SCENE_MOD_TARGET_USE_VELOCITY);
-        if (next != INSTRUMENT_PARAM_INVALID)
-            return next;
-        return instrumentManager_lastTargetForSlot(
+    if (normalized == INSTRUMENT_TARGET_TOKEN_VOICE_MORPH) {
+        return instrumentManager_lastTargetTokenForSlot(
             scene_index, source_slot, INSTRUMENT_TARGET_MODULATION);
     }
-    if (instrumentParam_isVoiceParameter(normalized)) {
-        return instrumentManager_stepTargetForSlot(
+    if (normalized <= INSTRUMENT_TARGET_TOKEN_MAX_LOCAL) {
+        return instrumentManager_stepTargetTokenForSlot(
             scene_index, source_slot, normalized, -1,
             INSTRUMENT_TARGET_MODULATION);
     }
-    return INSTRUMENT_PARAM_INVALID;
+    return INSTRUMENT_TARGET_TOKEN_OFF;
 }
 
 void *instrumentManager_runtimeInstance(uint8_t slot)
@@ -985,8 +1220,19 @@ void instrumentManager_runtimeInit(void)
      * This function is separate from the engine init wrappers because only
      * InstrumentManager knows which legacy globals are preserved for
      * compatibility and which additional per-slot instances exist.
-     */
+    */
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        /*
+         * Seed the runtime type shadow from resident SceneData when available.
+         *
+         * Input: boot-time active Scene slot type. Output: runtime dispatch has
+         * a valid initial type until Preset's boot apply or the first deferred
+         * Scene-slot commit refreshes it through instrumentManager_resetRuntimeSlot().
+         */
+        const kit_instrument_slot_t *instrument =
+            scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+        runtime_slot_type[slot] =
+            instrument ? instrument->type : INSTRUMENT_TYPE_UNKNOWN;
         if (slot >= NUM_VOICES)
             Drum_initVoice(instrumentManager_drumRuntime(slot), slot);
         if (slot != 3u)
@@ -996,6 +1242,28 @@ void instrumentManager_runtimeInit(void)
         if (slot != 5u)
             HiHat_initVoice(&runtime_hihat_slots[slot]);
     }
+}
+
+uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot)
+{
+    SlopeEg2 *ampEg;
+
+    /*
+     * Determine whether a runtime slot is quiet enough to swap.
+     *
+     * Inputs: zero-based slot using the current runtime type shadow. Outputs:
+     * 1 for invalid/no-envelope/stopped/near-zero slots, 0 for slots whose amp
+     * envelope is still meaningfully above silence. Invalid or missing runtime
+     * instances are treated as quiet because there is no old sound to protect.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 1u;
+    ampEg = instrumentManager_ampEg(slot);
+    if (!ampEg)
+        return 1u;
+    if (ampEg->state == EG_STOPPED)
+        return 1u;
+    return (uint8_t)(ampEg->value <= INSTRUMENT_AMP_EG_QUIET_THRESHOLD);
 }
 
 void instrumentManager_clearAllRuntimeModulationTargets(void)
@@ -1035,6 +1303,8 @@ void instrumentManager_clearAllRuntimeModulationTargets(void)
 
 void instrumentManager_resetRuntimeSlot(uint8_t slot)
 {
+    const kit_instrument_slot_t *incoming;
+
     /*
      * Reset only the incoming runtime selected by the committed Scene type.
      *
@@ -1046,6 +1316,9 @@ void instrumentManager_resetRuntimeSlot(uint8_t slot)
      */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return;
+    incoming = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    runtime_slot_type[slot] =
+        incoming ? incoming->type : INSTRUMENT_TYPE_UNKNOWN;
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM:
         Drum_initVoice(instrumentManager_drumRuntime(slot), slot);
@@ -1328,7 +1601,8 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
     }
 }
 
-static void instrumentManager_writeParameter(Parameter parameter, uint16_t value)
+static void instrumentManager_writeParameter(Parameter parameter,
+                                             instrument_param_value_t value)
 {
     ptrValue shaped;
 
@@ -1364,9 +1638,17 @@ static float instrumentManager_pitchModAmount(uint8_t value)
 
 static instrument_type_t instrumentManager_slotType(uint8_t slot)
 {
-    const kit_instrument_slot_t *instrument =
-        scene_instrumentSlotConst(scene_getActiveIndex(), slot);
-    return instrument ? instrument->type : INSTRUMENT_TYPE_UNKNOWN;
+    /*
+     * Resolve the DSP runtime type, not merely the active Scene's stored type.
+     *
+     * Inputs: zero-based slot. Output: the type whose runtime pool currently
+     * owns that slot's sounding state. This indirection is required because
+     * Scene selection now swaps patterns immediately but defers instrument
+     * parameter/type commits until a quiet envelope or the next trigger.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return INSTRUMENT_TYPE_UNKNOWN;
+    return runtime_slot_type[slot];
 }
 
 static OscInfo *instrumentManager_osc(uint8_t slot, const char *key)
@@ -1530,7 +1812,8 @@ static uint8_t instrumentManager_descriptorIndexForPointer(
 }
 
 static void instrumentManager_noteRuntimeValueChanged(
-    uint8_t slot, const ParamDescriptor *descriptor, uint16_t value)
+    uint8_t slot, const ParamDescriptor *descriptor,
+    instrument_param_value_t value)
 {
     uint8_t descriptor_index;
     instrument_param_id_t id;
@@ -1804,7 +2087,7 @@ static uint8_t instrumentManager_applySlotDecimationTarget(uint16_t id,
         return 0u;
     if (value > 127u)
         value = 127u;
-    return instrumentManager_writeRuntime(slot, descriptor, value);
+    return instrumentManager_writeRuntime(slot, descriptor, (uint8_t)value);
 }
 
 static uint8_t instrumentManager_slotDecimationBase(uint16_t id)
@@ -1837,12 +2120,13 @@ static uint8_t instrumentManager_slotDecimationBase(uint16_t id)
     }
 }
 
-static uint16_t instrumentManager_descriptorImageBase(uint8_t slot,
-                                                      uint8_t local,
-                                                      instrument_mod_domain_t domain)
+static instrument_param_value_t instrumentManager_descriptorImageBase(
+    uint8_t slot,
+    uint8_t local,
+    instrument_mod_domain_t domain)
 {
     const scene_t *scene;
-    uint16_t value;
+    instrument_param_value_t value;
 
     /*
      * Read the current descriptor-domain base for an LFO adapter.
@@ -2053,8 +2337,10 @@ static void instrumentManager_applyLfoDescriptorTarget(uint8_t source_slot,
                                        adapter->domain.min_value,
                                        adapter->domain.max_value,
                                        lfo_value_0_1, amount, polarity);
+    if (shaped > 255u)
+        shaped = 255u;
     (void)instrumentManager_writeRuntimeInternal(adapter->slot, descriptor,
-                                                 shaped, 0u);
+                                                 (uint8_t)shaped, 0u);
 }
 
 static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
@@ -2335,7 +2621,8 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
 }
 
 static uint8_t instrumentManager_writeSpecialRuntime(
-    uint8_t slot, const ParamDescriptor *descriptor, uint16_t value)
+    uint8_t slot, const ParamDescriptor *descriptor,
+    instrument_param_value_t value)
 {
     const char *key = descriptor ? descriptor->file_key : 0;
     OscInfo *osc;
@@ -2344,7 +2631,7 @@ static uint8_t instrumentManager_writeSpecialRuntime(
     DecayEg *pitchEg;
     TransientGenerator *transient;
     Distortion *distortion;
-    uint8_t byteValue = (value > 255u) ? 255u : (uint8_t)value;
+    uint8_t byteValue = value;
 
     /*
      * Descriptor-owned shaper bridge.
@@ -2403,7 +2690,7 @@ static uint8_t instrumentManager_writeSpecialRuntime(
                 (Parameter){ (void *)((uint8_t *)instrumentManager_runtimeInstance(slot) +
                                       descriptor->runtime.offset),
                              descriptor->runtime.parameter_type },
-                (uint16_t)(byteValue + 1u));
+                (uint8_t)(byteValue + 1u));
             return 1u;
         }
     }
@@ -2517,7 +2804,8 @@ static uint8_t instrumentManager_writeSpecialRuntime(
 }
 
 static uint8_t instrumentManager_writeRuntimeInternal(
-    uint8_t slot, const ParamDescriptor *descriptor, uint16_t value,
+    uint8_t slot, const ParamDescriptor *descriptor,
+    instrument_param_value_t value,
     uint8_t notify_base_change)
 {
     void *instance;
@@ -2570,11 +2858,17 @@ static uint8_t instrumentManager_writeRuntimeInternal(
 
     case INSTRUMENT_BIND_VELOCITY_TARGET:
         /*
-         * Descriptor velocity targets use the same direct ModulationNode
-         * backend as LFO targets. The stored value is a canonical descriptor id
-         * or INSTRUMENT_PARAM_INVALID, never a legacy parameterArray[] index.
+         * Install a velocity destination from a retained byte token.
+         *
+         * The parameter cell no longer carries a packed destination ID. The
+         * byte is off, a local self-descriptor index, or the source voice's own
+         * Morph token. Runtime installation expands it here only long enough to
+         * use the existing descriptor/Scene modulation backends.
          */
-        return instrumentManager_installVelocityModulationTarget(slot, value);
+        return instrumentManager_installVelocityModulationTarget(
+            slot,
+            instrumentManager_velocityTargetIdFromToken(
+                scene_getActiveIndex(), slot, value));
 
     case INSTRUMENT_BIND_LFO_TARGET_VOICE:
     case INSTRUMENT_BIND_LFO_TARGET_VOICE_2:
@@ -2585,25 +2879,43 @@ static uint8_t instrumentManager_writeRuntimeInternal(
          * pair 2 share this validation but keep separate binding identities so
          * Menu/storage can find the correct sibling descriptor cells.
          */
-        return (uint8_t)(value >= 1u &&
-                         value <= (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u));
+        return instrumentManager_lfoTargetVoiceValid(value);
 
     case INSTRUMENT_BIND_LFO_TARGET_PARAM:
     case INSTRUMENT_BIND_LFO_TARGET_PARAM_2:
         /*
-         * lfo_target_param is the cell that fully identifies one DSP
-         * destination. lfo_target_voice is paired UI/storage context; by the
-         * time this value is written, Menu or file normalization should have
-         * packed the selected target voice into the canonical descriptor id.
-         * Installing goes through the descriptor-aware backend so the id never
-         * masquerades as a legacy parameterArray[] destination. Pair 2 routes
-         * to Lfo::modTarget2 while pair 1 keeps using Lfo::modTarget.
+         * Install an LFO destination from retained byte cells.
+         *
+         * The parameter cell no longer carries a packed destination ID. The
+         * paired target-voice cell supplies the namespace, and this byte
+         * supplies a local descriptor/Scene index or off. Pair 2 routes to
+         * Lfo::modTarget2 while pair 1 keeps using Lfo::modTarget.
          */
-        return instrumentManager_installLfoModulationTarget(
-            slot,
-            (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_PARAM_2)
-                ? 1u : 0u,
-            value);
+        {
+            uint8_t target_voice = 1u;
+            uint8_t target_pair =
+                (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_PARAM_2)
+                    ? 1u : 0u;
+            instrument_binding_kind_t voice_kind = target_pair
+                ? INSTRUMENT_BIND_LFO_TARGET_VOICE_2
+                : INSTRUMENT_BIND_LFO_TARGET_VOICE;
+            const kit_instrument_slot_t *source =
+                scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+            uint8_t voice_index;
+            if (source &&
+                instrumentManager_descriptorIndexForBinding(
+                    source->type, voice_kind, &voice_index)) {
+                target_voice =
+                    source->parameter_images.instrument_parameters[voice_index];
+            }
+            if (!instrumentManager_lfoTargetVoiceValid(target_voice))
+                target_voice = 1u;
+            return instrumentManager_installLfoModulationTarget(
+                slot, target_pair,
+                instrumentManager_lfoTargetIdFromToken(
+                    scene_getActiveIndex(), slot, target_voice, value,
+                    INSTRUMENT_TARGET_MODULATION));
+        }
 
     default:
         return 0u;
@@ -2612,7 +2924,7 @@ static uint8_t instrumentManager_writeRuntimeInternal(
 
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,
-                                       uint16_t value)
+                                       instrument_param_value_t value)
 {
     return instrumentManager_writeRuntimeInternal(slot, descriptor, value, 1u);
 }

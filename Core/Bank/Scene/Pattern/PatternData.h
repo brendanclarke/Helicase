@@ -29,8 +29,8 @@
 #define STEP_ACTIVE_MASK 0x80
 #define STEP_VOLUME_MASK 0x7f
 
-#define PAT_NEXT_RANDOM 		0x08
-#define PAT_NEXT_RANDOM_PREV 	0x09
+#define PAT_NEXT_RANDOM 		0x10
+#define PAT_NEXT_RANDOM_PREV 	0x11
 
 #define TRACK_SCALE_DIV8   0u
 #define TRACK_SCALE_DIV7   1u
@@ -77,8 +77,20 @@ typedef struct StepStruct
 
 typedef struct PatternSettingsStruct
 {
-	uint8_t 	changeBar;		// change on every Nth bar to the next pattern
-	uint8_t  	nextPattern;	// [0:9] (0-7) are the 8 patterns, (8) is random previous, (9) is random all
+	/*
+	 * Retired pattern-chain bytes retained only for binary layout stability.
+	 *
+	 * changeBar and nextPattern are no longer consumed by Sequencer. Future
+	 * repeat/advance behavior must be Scene-level so parameters and Pattern data
+	 * switch together. Storage may still read/write these bytes until Pattern is
+	 * rebuilt, but runtime accessors intentionally treat them as inert.
+	 */
+	uint8_t 	changeBar;
+	/*
+	 * nextPattern is kept beside changeBar for existing serializers only. Do not
+	 * use it to schedule playback; use Scene-level switching instead.
+	 */
+	uint8_t  	nextPattern;
 }PatternSetting;
 
 typedef struct {
@@ -207,6 +219,14 @@ void pat_setStepAutomationValue(uint8_t pattern, uint8_t track,
                                 uint8_t step, uint8_t slot,
                                 uint8_t value);
 
+/*
+ * Retired pattern-chain compatibility hooks.
+ *
+ * Pattern repeat/next switching is disabled because Scene expansion requires
+ * switching Scene parameters and Pattern data together. The setters accept stale
+ * writes without mutating storage; the getters return "no repeat/stay here" so
+ * any remaining legacy caller cannot schedule a Pattern-only switch.
+ */
 void pat_setPatternChangeBar(uint8_t pattern, uint8_t value);
 void pat_setPatternNext(uint8_t pattern, uint8_t value);
 uint8_t pat_getPatternChangeBar(uint8_t pattern);

@@ -346,8 +346,10 @@ int main(void)
             /*
              * Boot through the current top-level container ladder.
              *
-             * Inputs: scan caches populated above. Output: Bank slot 000 (or
-             * the lowest available Bank) loads first when present. If that Bank
+             * Inputs: scan caches populated above and settings.cfg already
+             * loaded. Output: the last successfully loaded/saved Bank slot
+             * loads first, defaulting to Bank 000 when settings are absent. If
+             * that Bank
              * contains no child Scene, menu_pollPresetStatus() acknowledges the
              * successful Bank identity load and starts the root Scene/root Kit
              * fallback. The bounded two-pass loop below exists for that valid
@@ -355,18 +357,20 @@ int main(void)
              * the fallback payload if one was posted.
              */
             {
-                uint16_t boot_bank_slot = filesystem_firstBankSlot();
+                uint16_t boot_bank_slot = bank_restoreBankSlot();
 
                 /*
-                 * boot_bank_slot is a root Bank cache coordinate.
+                 * boot_bank_slot is the root Bank cache coordinate retained in
+                 * BankData.
                  *
                  * It is read once so the existence check and load request use
-                 * the same value. filesystem_firstBankSlot() returns the max
-                 * sentinel when Bank/ is empty, and filesystem_bankSlotExists()
-                 * rejects that sentinel before any load request is posted.
+                 * the same value. The Bank loader receives an all-Scenes mask
+                 * because only the selected Bank folder knows which child
+                 * Scenes actually exist; it intersects this request with the
+                 * discovered child-present mask before loading.
                  */
                 if (filesystem_bankSlotExists(boot_bank_slot)) {
-                    preset_loadBank(boot_bank_slot, 1u);
+                    preset_loadBank(boot_bank_slot, 0xffffu);
                 } else {
                     preset_loadFirstAvailableSceneOrKit();
                 }

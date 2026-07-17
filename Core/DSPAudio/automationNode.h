@@ -42,7 +42,17 @@
 //-------------------------------------------------------------
 typedef struct AutomationStruct
 {
-	uint16_t	destination;	/**< dest param nr */
+	/*
+	 * Legacy automation destination.
+	 *
+	 * Values 1..254 address the MIDI CC/CC2-shaped automation bridge;
+	 * NO_AUTOMATION (0xff) is off, and zero is treated as off by the setter
+	 * because MIDI_CC data1 zero is not a valid parser target. Wider PatternData
+	 * sentinels are accepted by the public setter but normalized before this
+	 * field is used to index MIDI CC history, so callers may safely pass
+	 * stale/off Step values.
+	 */
+	uint16_t	destination;
 } AutomationNode;
 //-------------------------------------------------------------
 void autoNode_init(AutomationNode* node);

@@ -328,6 +328,18 @@ void menu_loadInstrumentExit(void);
  * menu-state tests.
  */
 uint8_t menu_loadSceneButtonPressed(uint8_t scene_index);
+void    menu_perfModeSceneButtonPressed(uint8_t scene_index);
+void    menu_refreshPerfSceneLeds(void);
+/*
+ * Repaint the temporary MODE VOICE held Scene edit-mask view.
+ *
+ * Inputs are BankData's scene_mask_voice_edit and present-Scene mask. Output:
+ * SEQ LEDs show the exact set of Scenes that voice/Scene parameter edits fan
+ * out to while MODE VOICE is held. ButtonHandler calls this on the hold edge;
+ * Menu calls it again after SEQ toggles.
+ */
+void    menu_refreshVoiceHeldSceneLeds(void);
+uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index);
 /*
  * Morph voice view setter.
  *

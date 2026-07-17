@@ -45,7 +45,7 @@
 #include "filesystem.h"
 #include "storageTypes.h"
 #include "presetMorphEngine.h"
-#include "SceneModTargets.h"
+#include "BankData.h"
 #include "mixer.h"
 #include "valueShaper.h"
 #include <string.h>
@@ -84,6 +84,25 @@ static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_U
 static volatile uint8_t          pm_instrument_request_index = 0u;
 static volatile uint16_t         pm_kit_request_scene_mask = 0u;
 
+static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
+{
+    /*
+     * Promote loaded target Scenes into the resident Bank present mask.
+     *
+     * Inputs: pm_kit_request_scene_mask was captured when the load was accepted,
+     * and filesystem_status() still reflects the just-completed async request.
+     * Output: successful Kit, Scene, and Instrument loads mark their destination
+     * Scenes as present so PERF switching and MODE VOICE fan-out can address
+     * them immediately. Failed loads do not change BankData, preserving the last
+     * known resident child map. KitMrp/InstrumentMrp intentionally do not call
+     * this helper because morph-only loads do not assign an empty Scene.
+     */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
+                                           pm_kit_request_scene_mask));
+    }
+}
+
 /* Runtime loaded-kit apply cursor.
  *
  * Why this changed: directory Kit files now parse into Scene-owned
@@ -91,18 +110,20 @@ static volatile uint16_t         pm_kit_request_scene_mask = 0u;
  * modulation routing from parameter_values[]. The cursor therefore owns the
  * bounded post-load bridge from Scene state to current DSP affiliates.
  *
- * Inputs: preset_startDrumsetApply() selects the active Scene and arms the
- * cursor. preset_tickDrumsetApply() advances at most one audio route,
- * non-morph runtime-cell bundle, or Morph/image application per foreground
- * pass.
+ * Inputs: preset_startDrumsetApply() selects the active Scene and arms a bit
+ * per instrument slot. preset_tickDrumsetApply() scans that mask for one slot
+ * whose currently sounding amp envelope is quiet. Trigger dispatch can also
+ * force one pending slot through preset_applyDeferredSceneSlotForTrigger().
  *
- * Outputs: mixer_audioRouting[] and instrument-owned runtime bindings are
- * updated from SceneData. Clients are menu.c load completion and boot-time
- * synchronous apply. Affiliates are SceneData, InstrumentManager descriptors,
- * and presetMorphEngine.
+ * Outputs: mixer_audioRouting[], instrument runtime type/parameters,
+ * supplemental modulation targets, and Morph interpolation are updated from
+ * SceneData only when a slot commits. Immediate Scene-wide settings such as
+ * Morph menu mirrors and global decimation apply at Scene switch time.
  */
 static uint8_t drumset_apply_active = 0;
 static uint8_t drumset_apply_voice = 0;
+static uint8_t drumset_apply_scene = 0u;
+static uint16_t drumset_apply_pending_mask = 0u;
 static uint8_t instrument_apply_active = 0u;
 static uint8_t instrument_apply_scene = 0u;
 static uint8_t instrument_apply_phase = 0u;
@@ -195,6 +216,7 @@ static void preset_completeFilesystemOp(preset_op_type_t completed_op)
 
 static void on_kit_load_complete(void)
 {
+    preset_markRequestedScenesPresentOnSuccessfulLoad();
 	preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
 }
 
@@ -270,6 +292,7 @@ static void on_name_load_complete(void)
 
 static void on_instrument_load_complete(void)
 {
+    preset_markRequestedScenesPresentOnSuccessfulLoad();
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_LOAD);
 }
 
@@ -315,6 +338,7 @@ static void on_instrument_morph_load_complete(void)
 
 static void on_scene_load_complete(void)
 {
+    preset_markRequestedScenesPresentOnSuccessfulLoad();
     preset_completeFilesystemOp(PRESET_OP_SCENE_LOAD);
 }
 
@@ -418,7 +442,7 @@ static fs_file_type_t preset_fileTypeFromSaveType(uint8_t what, uint8_t *hasName
     case SAVE_TYPE_BANK:        return FS_FILE_BANK;
     case SAVE_TYPE_GLO:
         if (hasName) *hasName = 0;
-        return FS_FILE_GLOBALS;
+        return FS_FILE_SETTINGS;
     case SAVE_TYPE_SAMPLES:
     default:
         if (hasName) *hasName = 0;
@@ -553,7 +577,7 @@ void preset_applySoundParameter(uint16_t paramNr, uint8_t value,
 
 static uint8_t preset_applyInstrumentRuntimeValueInternal(uint8_t scene_index,
                                                           instrument_param_id_t id,
-                                                          uint16_t value,
+                                                          instrument_param_value_t value,
                                                           uint8_t recordAutomation)
 {
     const kit_instrument_slot_t *instrument;
@@ -587,7 +611,7 @@ static uint8_t preset_applyInstrumentRuntimeValueInternal(uint8_t scene_index,
 
 uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
-                                           uint16_t value)
+                                           instrument_param_value_t value)
 {
     /*
      * Public runtime apply for one canonical instrument parameter.
@@ -600,11 +624,10 @@ uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
      * instance binding, and presetMorphEngine calls this after building
      * morph_interpolation[].
      *
-     * The public value is uint16_t because Scene descriptor images and
-     * InstrumentManager_writeRuntime() are already uint16_t. Keeping this
-     * boundary wide prevents Morph from baking in today's byte-domain menu
-     * values and avoids a lossy cast before TYPE_SPECIAL_F-style descriptors can
-     * re-establish their own min/max contracts.
+     * The public value is byte-sized because SceneData, files, Menu, and Morph
+     * all retain descriptor values in byte space. Target selector bytes are
+     * expanded by InstrumentManager only while applying runtime modulation
+     * destinations.
      */
     return preset_applyInstrumentRuntimeValueInternal(scene_index, id, value, 0u);
 }
@@ -671,7 +694,8 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
 }
 
 uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
-                                        uint8_t descriptor_index, uint16_t value)
+                                        uint8_t descriptor_index,
+                                        instrument_param_value_t value)
 {
     kit_instrument_slot_t *instrument = scene_instrumentSlot(scene_index, slot);
     const ParamDescriptor *descriptor;
@@ -687,6 +711,15 @@ uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
         return 0u;
     }
 
+    /*
+     * Supplemental target cells are retained as byte tokens.
+     *
+     * Velocity target rows store a self-scoped byte token, and LFO target rows
+     * store a local token interpreted through their paired target-voice row.
+     * Preset retains the byte value unchanged; InstrumentManager expands it to
+     * a canonical target ID only while applying the active Scene's runtime
+     * modulation graph.
+     */
     instrument->parameter_images.instrument_parameters[descriptor_index] = value;
     if (scene_index == scene_getActiveIndex())
         return instrumentManager_writeRuntime(slot, descriptor, value);
@@ -811,25 +844,29 @@ void preset_applySceneSettings(uint8_t scene_index)
         return;
 
     /*
-     * Apply Scene-wide settings that still have legacy mirrors.
+     * Apply immediate Scene-wide settings that still have legacy mirrors.
      *
      * Inputs: active Scene index. Outputs: flat PERF mirrors are synchronized
-     * from retained Scene settings, global decimation is applied, and the Morph
-     * worker is queued from per-voice Morph amounts. This must not call
-     * preset_morph(), because preset_morph() is now the user-facing bulk-set
-     * operation and would overwrite distinct per-voice Morph values loaded from
-     * future sceneset.scg data.
+     * from retained Scene settings and global decimation is applied. Instrument
+     * runtime parameters, voice LFO slots/targets, audio out, future FX sends,
+     * and fader assignments are deliberately excluded; the deferred slot worker
+     * commits those per-instrument affiliates only when the old envelope is quiet
+     * or when the new Scene pattern triggers that slot.
+     *
+     * This must not call preset_morph(), because preset_morph() is now the
+     * user-facing bulk-set operation and would overwrite distinct per-voice Morph
+     * values loaded from future sceneset.scg data.
      */
     preset_ensureMorphInitialized();
     preset_syncSceneMorphMirrors(scene);
     parameter_values[PAR_VOICE_DECIMATION_ALL] =
         scene->settings.voice_decimation_all;
     preset_applyVoiceDecimationAllRuntime(scene->settings.voice_decimation_all);
-    presetMorph_rebuildScene(scene_index);
 }
 
 static void preset_storeSupplementalCell(kit_instrument_slot_t *instrument,
-                                         uint8_t index, uint16_t value)
+                                         uint8_t index,
+                                         instrument_param_value_t value)
 {
     /*
      * Keep all three generic images coherent for a non-morphable selector.
@@ -857,19 +894,17 @@ static void preset_normalizeLfoTargetPair(uint8_t scene_index,
         scene_instrumentSlot(scene_index, source_slot);
     uint8_t voice_index;
     uint8_t param_index;
-    uint16_t voice;
-    uint16_t target;
+    instrument_param_value_t voice;
+    instrument_target_token_t token;
 
     /*
      * Reconcile one retained LFO voice/parameter pair before runtime install.
      *
      * Inputs: Scene/source slot plus pair-specific binding kinds. Output: the
-     * canonical target is rebuilt from the selected one-based target voice and
-     * the stored local descriptor index, or changed to explicit off when that
-     * descriptor is not modulatable on the committed target type. Scene target
-     * voice 7 preserves only registered LFO Scene IDs. All selector images are
-     * repaired together before preset_applyKitVoiceSupplemental() installs the
-     * result.
+     * retained token is checked against the selected one-based target voice.
+     * Voice namespaces store descriptor-local tokens; the Scene namespace
+     * stores Scene target-table indices. Invalid pairs are changed to explicit
+     * byte off before preset_applyKitVoiceSupplemental() installs the result.
      *
      * This cannot be folded into Menu normalization: files and type swaps reach
      * runtime without visiting Menu, and runtime must never follow a canonical
@@ -885,27 +920,20 @@ static void preset_normalizeLfoTargetPair(uint8_t scene_index,
         return;
     }
     voice = instrument->parameter_images.instrument_parameters[voice_index];
-    target = instrument->parameter_images.instrument_parameters[param_index];
-    if (voice < 1u || voice > (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u)) {
+    token = instrument->parameter_images.instrument_parameters[param_index];
+    if (!instrumentManager_lfoTargetVoiceValid(voice)) {
         voice = 1u;
-        target = INSTRUMENT_PARAM_INVALID;
-    } else if (target != INSTRUMENT_PARAM_INVALID) {
-        if (voice == (uint16_t)(INSTRUMENT_SLOT_COUNT + 1u)) {
-            if (!sceneModTarget_valid(target, SCENE_MOD_TARGET_USE_LFO))
-                target = INSTRUMENT_PARAM_INVALID;
-        } else if (instrumentParam_isVoiceParameter(target)) {
-            instrument_param_id_t candidate = instrumentParam_make(
-                (uint8_t)(voice - 1u), instrumentParam_local(target));
-            target = instrumentManager_targetValid(
-                         scene_index, candidate,
-                         INSTRUMENT_TARGET_MODULATION)
-                ? candidate : INSTRUMENT_PARAM_INVALID;
-        } else {
-            target = INSTRUMENT_PARAM_INVALID;
-        }
+        token = INSTRUMENT_TARGET_TOKEN_OFF;
+    } else {
+        instrument_param_id_t id =
+            instrumentManager_lfoTargetIdFromToken(
+                scene_index, source_slot, voice, token,
+                INSTRUMENT_TARGET_MODULATION);
+        token = instrumentManager_lfoTargetTokenFromId(
+            scene_index, voice, id, INSTRUMENT_TARGET_MODULATION);
     }
     preset_storeSupplementalCell(instrument, voice_index, voice);
-    preset_storeSupplementalCell(instrument, param_index, target);
+    preset_storeSupplementalCell(instrument, param_index, token);
 }
 
 static void preset_normalizeSlotModulationTargets(uint8_t scene_index,
@@ -934,11 +962,11 @@ static void preset_normalizeSlotModulationTargets(uint8_t scene_index,
     if (instrumentManager_descriptorIndexForBinding(
             instrument->type, INSTRUMENT_BIND_VELOCITY_TARGET,
             &velocity_index)) {
-        uint16_t target =
+        instrument_target_token_t target =
             instrument->parameter_images.instrument_parameters[velocity_index];
         if (!instrumentManager_targetValidForVelocitySource(
                 scene_index, source_slot, target)) {
-            target = INSTRUMENT_PARAM_INVALID;
+            target = INSTRUMENT_TARGET_TOKEN_OFF;
         }
         preset_storeSupplementalCell(instrument, velocity_index, target);
     }
@@ -995,8 +1023,20 @@ static void preset_applyKitVoice(uint8_t scene_index, uint8_t voice)
         return;
     }
 
+    /*
+     * Rebind the DSP runtime type at the same time as parameter commit.
+     *
+     * Input: active Scene slot selected by the deferred apply worker. Output:
+     * InstrumentManager's runtime type shadow and the concrete DSP voice object
+     * are reset immediately before descriptor/audio/supplemental values are
+     * copied in. Inactive Scene retained writes must not call this path because
+     * the runtime shadow always belongs to the audible Scene.
+     */
+    if (scene_index == scene_getActiveIndex())
+        instrumentManager_resetRuntimeSlot(voice);
     (void)preset_applyKitAudioRouting(scene_index, voice);
     preset_applyKitVoiceSupplemental(scene_index, voice);
+    presetMorph_applyVoiceNow(scene_index, voice);
 }
 
 /* Synchronous loaded-kit apply.
@@ -1024,26 +1064,100 @@ void preset_startDrumsetApply(void)
 {
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
+    drumset_apply_scene = scene_getActiveIndex();
+    drumset_apply_pending_mask =
+        (uint16_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u);
     drumset_apply_active = 1u;
     drumset_apply_voice = 0u;
 }
 
 uint8_t preset_tickDrumsetApply(void)
 {
+    uint8_t checked;
+
     if (!drumset_apply_active)
         return 0u;
 
-    if (drumset_apply_voice < INSTRUMENT_SLOT_COUNT) {
-        preset_applyKitVoice(scene_getActiveIndex(), drumset_apply_voice);
+    if (drumset_apply_scene != scene_getActiveIndex()) {
+        /*
+         * A newer Scene switch supersedes this worker.
+         *
+         * Input: active Scene changed since the pending mask was armed. Output:
+         * stale slot bits are discarded so the old Scene can never apply over
+         * the current Scene. preset_startDrumsetApply() has already armed the
+         * replacement worker for the new active Scene.
+         */
+        drumset_apply_active = 0u;
+        drumset_apply_pending_mask = 0u;
+        return 0u;
+    }
+
+    for (checked = 0u; checked < INSTRUMENT_SLOT_COUNT; checked++) {
+        uint8_t voice = drumset_apply_voice;
+        uint16_t bit = (uint16_t)(1u << voice);
+
+        /*
+         * Scan the pending bitmask round-robin.
+         *
+         * Inputs: drumset_apply_voice is the next slot to test, preserving fair
+         * progress when several envelopes are ringing. Output: at most one quiet
+         * slot is committed per foreground pass; non-quiet slots remain pending
+         * for a later tick or trigger-time force-apply.
+         */
         drumset_apply_voice++;
+        if (drumset_apply_voice >= INSTRUMENT_SLOT_COUNT)
+            drumset_apply_voice = 0u;
+        if ((drumset_apply_pending_mask & bit) == 0u)
+            continue;
+        if (!instrumentManager_ampEnvelopeQuiet(voice))
+            continue;
+
+        preset_applyKitVoice(drumset_apply_scene, voice);
+        drumset_apply_pending_mask =
+            (uint16_t)(drumset_apply_pending_mask & ~bit);
+        if (drumset_apply_pending_mask == 0u)
+            drumset_apply_active = 0u;
         return 1u;
     }
 
-    if (presetMorph_tick())
-        return 1u;
-
-    drumset_apply_active = 0u;
+    if (drumset_apply_pending_mask == 0u)
+        drumset_apply_active = 0u;
     return 0u;
+}
+
+void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
+{
+    uint8_t voice;
+    uint16_t bit;
+
+    /*
+     * Force a pending Scene slot to commit immediately before it triggers.
+     *
+     * Inputs: visible trigger track 0..6 from the sequencer/MIDI trigger queue.
+     * Output: if that track maps to a pending instrument slot for the active
+     * Scene, the slot's runtime type, parameters, LFO slots/targets, audio out,
+     * and future per-instrument mix affiliates are applied synchronously before
+     * InstrumentManager receives the note trigger.
+     */
+    if (!drumset_apply_active ||
+        drumset_apply_scene != scene_getActiveIndex()) {
+        return;
+    }
+    if (trigger_track > INSTRUMENT_SLOT_COUNT)
+        return;
+    voice = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+        ? (INSTRUMENT_SLOT_COUNT - 1u)
+        : trigger_track;
+    bit = (uint16_t)(1u << voice);
+    if ((drumset_apply_pending_mask & bit) == 0u)
+        return;
+
+    presetMorph_prioritizeVoice(drumset_apply_scene, voice);
+    preset_applyKitVoice(drumset_apply_scene, voice);
+    drumset_apply_pending_mask =
+        (uint16_t)(drumset_apply_pending_mask & ~bit);
+    if (drumset_apply_pending_mask == 0u)
+        drumset_apply_active = 0u;
 }
 
 static uint8_t preset_copyInstrumentNormalToMorphIfSameType(
@@ -1204,16 +1318,21 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
 {
     const kit_instrument_slot_t *staged =
         (const kit_instrument_slot_t *)filesystem_loadedInstrumentSlot();
-    scene_t *scene = scene_get(scene_index);
+    uint16_t destination_mask = pm_kit_request_scene_mask
+        ? pm_kit_request_scene_mask
+        : (uint16_t)(1u << scene_index);
+    uint8_t target_scene_index;
+    uint8_t active_scene_touched = 0u;
 
     /*
-     * Commit a staged Instrument and arm its bounded runtime transaction.
+     * Commit a staged Instrument to every selected Scene and arm runtime apply.
      *
-     * Inputs: immutable request Scene/slot plus filesystem's validated staging
-     * image/name. Output: inactive Scenes receive only retained state. For the
-     * active Scene, all outgoing modulation owners are cleared before copying
-     * the new slot; then the incoming runtime is reset, routing is applied, and
-     * a six-slot Morph rebuild is queued before target reinstallation.
+     * Inputs: immutable request slot, Preset's captured destination Scene mask,
+     * and filesystem's validated staging image/name. Output: inactive Scenes
+     * receive retained slot state and source-name metadata. If the active Scene
+     * is in the mask, outgoing modulation owners are cleared once before copy,
+     * then the existing bounded one-slot runtime cursor is armed for that
+     * audible Scene.
      *
      * Clear and reset cannot be one operation: clear must resolve old Scene
      * types, while reset must resolve the newly committed type. Filesystem
@@ -1221,34 +1340,47 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
      * know DSP lifecycle order.
      */
     instrument_apply_active = 0u;
-    if (!scene || !staged || slot >= INSTRUMENT_SLOT_COUNT ||
+    if (!staged || slot >= INSTRUMENT_SLOT_COUNT ||
         staged->type >= INSTRUMENT_TYPE_UNKNOWN ||
         staged->type != (instrument_type_t)pm_instrument_request_type) {
         return;
     }
-    if (scene_index == scene_getActiveIndex())
+    if ((destination_mask & (uint16_t)(1u << scene_getActiveIndex())) != 0u)
         instrumentManager_clearAllRuntimeModulationTargets();
-    scene->kit.instruments[slot] = *staged;
-    /*
-     * Commit Instrument source-name metadata with the staged payload.
-     *
-     * Filesystem captures the selected Instrument filename stem beside the
-     * parsed descriptor image. SceneData derives both the 16-character save stem
-     * and the eight-character LCD field only after this commit succeeds, so
-     * failed loads cannot rename the resident slot.
-     */
-    scene_setInstrumentSourceName(scene_index, slot,
-                                  filesystem_loadedInstrumentStem());
+    for (target_scene_index = 0u;
+         target_scene_index < SCENE_COUNT && target_scene_index < 16u;
+         target_scene_index++) {
+        scene_t *scene;
 
-    if (scene_index != scene_getActiveIndex())
+        if ((destination_mask & (uint16_t)(1u << target_scene_index)) == 0u)
+            continue;
+        scene = scene_get(target_scene_index);
+        if (!scene)
+            continue;
+        scene->kit.instruments[slot] = *staged;
+        /*
+         * Commit Instrument source-name metadata with the staged payload.
+         *
+         * Filesystem captures the selected Instrument filename stem beside the
+         * parsed descriptor image. SceneData derives both the 16-character save
+         * stem and the eight-character LCD field only after this commit
+         * succeeds, so failed loads cannot rename any resident slot.
+         */
+        scene_setInstrumentSourceName(target_scene_index, slot,
+                                      filesystem_loadedInstrumentStem());
+        if (target_scene_index == scene_getActiveIndex())
+            active_scene_touched = 1u;
+    }
+
+    if (!active_scene_touched)
         return;
 
     instrumentManager_resetRuntimeSlot(slot);
-    (void)preset_applyKitAudioRouting(scene_index, slot);
+    (void)preset_applyKitAudioRouting(scene_getActiveIndex(), slot);
     preset_ensureMorphInitialized();
-    presetMorph_requestAll(scene_index);
+    presetMorph_requestAll(scene_getActiveIndex());
     instrument_apply_active = 1u;
-    instrument_apply_scene = scene_index;
+    instrument_apply_scene = scene_getActiveIndex();
     instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
     instrument_apply_rebind_source = 0u;
     instrument_apply_morph_only = 0u;
@@ -1310,6 +1442,7 @@ uint8_t preset_loadDrumset(uint16_t presetNr, uint8_t isMorph)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = isMorph ? PRESET_REQUEST_LEGACY_MORPH : SAVE_TYPE_KIT;
+    pm_kit_request_scene_mask = (uint16_t)(1u << scene_getActiveIndex());
     if ((!isMorph && filesystem_requestLoadKitForScenes(
                          presetNr,
                          (uint16_t)(1u << scene_getActiveIndex()), cb)) ||
@@ -1329,12 +1462,17 @@ uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask)
      * preset_loadDrumset() because that legacy public function still accepts a
      * morph compatibility flag; callers that select Scenes need an explicit,
      * unambiguous mask rather than an overloaded boolean.
+     *
+     * pm_kit_request_scene_mask is captured before the asynchronous request so
+     * on_kit_load_complete() can promote exactly the loaded destination Scenes
+     * into BankData's resident-present mask after filesystem success.
      */
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_KIT;
+    pm_kit_request_scene_mask = scene_mask;
     if (filesystem_requestLoadKitForScenes(presetNr, scene_mask,
                                            on_kit_load_complete))
         return 1u;
@@ -1342,15 +1480,14 @@ uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask)
     return 0u;
 }
 
-uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph)
+uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph,
+                           uint8_t source_scene)
 {
-    uint8_t source_scene = scene_getActiveIndex();
-
     /*
      * Post normal Kit Save or KitMrp Save to the shared directory writer.
      *
      * Inputs are captured here because filesystem work is asynchronous: the
-     * target slot, active source Scene, editable eight-cell display name, and
+     * target slot, selected source Scene, editable eight-cell display name, and
      * Morph projection flag must remain fixed even if the user moves the panel
      * before the SD operation completes. The Morph flag is not a legacy flat
      * .SND request; it selects the new-format snapshot-twice projection inside
@@ -1421,14 +1558,12 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask)
     return 0u;
 }
 
-uint8_t preset_saveScene(uint16_t presetNr)
+uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene)
 {
-    uint8_t source_scene = scene_getActiveIndex();
-
     /*
      * Post a root Scene Save request.
      *
-     * Inputs: target root Scene slot plus active source Scene and edited
+     * Inputs: target root Scene slot plus selected source Scene and edited
      * preset_currentName captured here. Output: filesystem-owned asynchronous
      * directory write. Scene Save is not a runtime mutation, so completion only
      * repaints/clears UI busy state.
@@ -1472,18 +1607,18 @@ uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask)
     return 0u;
 }
 
-uint8_t preset_saveBank(uint16_t presetNr)
+uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
 {
     uint8_t source_scene = scene_getActiveIndex();
 
     /*
-     * Post an initial one-Scene Bank Save.
+     * Post a multi-Scene Bank Save.
      *
      * Inputs: root Bank slot plus edited preset_currentName as the Bank
-     * directory name. Output: filesystem writes bankset.bcg and Bank-local
-     * Scene slot 00 from the active resident Scene. The mask argument is
-     * already shaped as the future 16-Scene toggle surface; this phase always
-     * saves bit 0.
+     * directory name and the caller-selected resident Scene mask. Output:
+     * filesystem writes bankset.bcg and one Bank-local child folder per
+     * selected bit. source_scene remains the active Scene for compatibility
+     * validation, but the mask determines the actual child set.
      */
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
@@ -1493,7 +1628,7 @@ uint8_t preset_saveBank(uint16_t presetNr)
     if (filesystem_requestSaveBank(presetNr,
                                    source_scene,
                                    preset_currentName,
-                                   1u,
+                                   scene_mask,
                                    on_bank_save_complete)) {
         return 1u;
     }
@@ -1536,7 +1671,7 @@ void preset_loadGlobals(void)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_GLO;
-    if (!filesystem_requestLoad(FS_FILE_GLOBALS, 0, on_globals_load_complete))
+    if (!filesystem_requestLoad(FS_FILE_SETTINGS, 0, on_globals_load_complete))
         pm_status = PRESET_IDLE;
 }
 
@@ -1550,7 +1685,7 @@ void preset_saveGlobals(void)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_GLO;
-    if (!filesystem_requestSave(FS_FILE_GLOBALS, 0, on_globals_save_complete))
+    if (!filesystem_requestSave(FS_FILE_SETTINGS, 0, on_globals_save_complete))
         pm_status = PRESET_IDLE;
 }
 
@@ -1589,18 +1724,43 @@ uint8_t preset_loadInstrument(uint8_t destination_scene,
                               instrument_type_t type,
                               uint8_t browser_index)
 {
+    return preset_loadInstrumentForScenes((uint16_t)(1u << destination_scene),
+                                          destination_slot,
+                                          type,
+                                          browser_index);
+}
+
+uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
+                                       uint8_t destination_slot,
+                                       instrument_type_t type,
+                                       uint8_t browser_index)
+{
+    uint8_t scene_index;
+    uint8_t request_scene = 0u;
+    uint16_t valid_mask = 0u;
+
     /*
-     * Post one immutable staged-Instrument request.
+     * Post one immutable staged-Instrument request for one or more Scenes.
      *
-     * Inputs: destination Scene/slot, selected type, and browser cache index.
-     * Output: nonzero only when filesystem accepts the operation; Preset
-     * publishes completion coordinates and busy state after acceptance. A
-     * rejected second request therefore cannot overwrite the Scene/slot used by
-     * an in-flight operation's callback. This remains separate from Kit load,
-     * whose staged payload and completion apply all six slots.
+     * Inputs: destination Scene mask, slot, selected type, and browser cache
+     * index. Output: one filesystem read from Instrument/; after completion
+     * preset_startInstrumentApply() commits the staged slot to every valid
+     * masked Scene. The representative request_scene is only the staging
+     * coordinate needed by the parser and compatibility completion accessors.
      */
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((destination_scene_mask & (uint16_t)(1u << scene_index)) != 0u &&
+            scene_instrumentSlotConst(scene_index, destination_slot)) {
+            valid_mask = (uint16_t)(valid_mask | (uint16_t)(1u << scene_index));
+            if (valid_mask == (uint16_t)(1u << scene_index))
+                request_scene = scene_index;
+        }
+    }
+    if (valid_mask == 0u)
+        return 0u;
     filesystem_ack();
-    if (!filesystem_requestLoadInstrument(destination_scene, destination_slot,
+    if (!filesystem_requestLoadInstrument(request_scene, destination_slot,
                                           type, browser_index,
                                           on_instrument_load_complete)) {
         return 0u;
@@ -1609,10 +1769,11 @@ uint8_t preset_loadInstrument(uint8_t destination_scene,
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = destination_slot;
     pm_request_type = SAVE_TYPE_KIT;
-    pm_instrument_request_scene = destination_scene;
+    pm_instrument_request_scene = request_scene;
     pm_instrument_request_slot = destination_slot;
     pm_instrument_request_type = type;
     pm_instrument_request_index = browser_index;
+    pm_kit_request_scene_mask = valid_mask;
     return 1u;
 }
 
@@ -1896,17 +2057,32 @@ void preset_morph(uint8_t morph)
      * is still per voice; this function is only the bulk-set operation that
      * gives the user one overall control.
      */
-    scene_t *scene;
-    uint8_t scene_index = scene_getActiveIndex();
+    preset_morphScene(scene_getActiveIndex(), morph);
+}
 
+void preset_morphScene(uint8_t scene_index, uint8_t morph)
+{
+    scene_t *scene;
+
+    /*
+     * Set overall Morph for a specific resident Scene.
+     *
+     * Inputs: Scene index from active UI, MIDI, or scene_mask_voice_edit fan-
+     * out and 0..255 Morph amount. Outputs: retained Scene global Morph and
+     * all six per-voice Morph amounts update. Runtime/PERF mirrors are updated
+     * only for the active Scene, because inactive Scenes are stored state until
+     * selected.
+     */
     preset_ensureMorphInitialized();
     scene = scene_get(scene_index);
     if (!scene)
         return;
     scene->settings.morph_amount = morph;
     scene_setAllVoiceMorphAmounts(scene_index, morph);
-    preset_syncSceneMorphMirrors(scene);
-    presetMorph_requestAll(scene_index);
+    if (scene_index == scene_getActiveIndex()) {
+        preset_syncSceneMorphMirrors(scene);
+        presetMorph_requestAll(scene_index);
+    }
 }
 
 void preset_morphVoice(uint8_t slot, uint8_t morph)
@@ -1921,14 +2097,27 @@ void preset_morphVoice(uint8_t slot, uint8_t morph)
      * operation while MIDI CC1 on a voice channel and PERF 1vm..6vm edits must
      * preserve the other five slot amounts.
      */
-    uint8_t scene_index = scene_getActiveIndex();
+    preset_morphVoiceScene(scene_getActiveIndex(), slot, morph);
+}
 
-    if (slot >= INSTRUMENT_SLOT_COUNT)
+void preset_morphVoiceScene(uint8_t scene_index, uint8_t slot, uint8_t morph)
+{
+    /*
+     * Set one Scene/voice Morph amount.
+     *
+     * Inputs: resident Scene index, zero-based instrument slot, and 0..255
+     * Morph amount. Outputs: retained per-voice Morph state updates for any
+     * valid Scene; only the active Scene updates flat PERF mirrors and queues
+     * descriptor interpolation.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT || !scene_get(scene_index))
         return;
     preset_ensureMorphInitialized();
     scene_setVoiceMorphAmount(scene_index, slot, morph);
-    parameter_values[PAR_VOICE1_MORPH + slot] = morph;
-    presetMorph_requestVoice(scene_index, slot);
+    if (scene_index == scene_getActiveIndex()) {
+        parameter_values[PAR_VOICE1_MORPH + slot] = morph;
+        presetMorph_requestVoice(scene_index, slot);
+    }
 }
 
 void preset_rebuildMorph(void)

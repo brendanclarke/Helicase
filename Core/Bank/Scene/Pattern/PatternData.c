@@ -51,9 +51,9 @@ static void pat_resetStep(Step *step)
 	if (!step)
 		return;
 	step->note 		= PAT_DEFAULT_NOTE;
-	step->param1Nr 	= INSTRUMENT_PARAM_INVALID;
+	step->param1Nr 	= NO_AUTOMATION;
 	step->param1Val = 0;
-	step->param2Nr	= INSTRUMENT_PARAM_INVALID;
+	step->param2Nr	= NO_AUTOMATION;
 	step->param2Val	= 0;
 	step->prob		= 127;
 	step->volume	= 100;
@@ -395,14 +395,18 @@ void pat_setStepAutomationDestination(uint8_t pattern, uint8_t track,
 	 * targetParam comes from modTargets[].param. The Step struct stores the old
 	 * automation destination encoding: destinations below 128 are stored as
 	 * CC-number-style param+1 so midiParser_ccHandler can later interpret them
-	 * consistently. Slot 0 writes param1Nr; slot 1 writes param2Nr.
+	 * consistently. Off/stale/wide values become NO_AUTOMATION because playback
+	 * still passes through automationNode's legacy 0..254 CC namespace. Slot 0
+	 * writes param1Nr; slot 1 writes param2Nr.
 	 */
 	Step *s = pat_stepPtr(pattern, track, step);
-	uint8_t packed = (uint8_t)(targetParam & 0xFFu);
+	uint16_t packed = targetParam;
 
 	if (!s)
 		return;
-	if ((packed != 0u) && (packed < 128u))
+	if (packed >= NO_AUTOMATION || packed == PAR_NONE)
+		packed = NO_AUTOMATION;
+	else if (packed < 128u)
 		packed++;
 
 	if (slot == 0)
@@ -430,54 +434,51 @@ void pat_setStepAutomationValue(uint8_t pattern, uint8_t track,
 void pat_setPatternChangeBar(uint8_t pattern, uint8_t value)
 {
 	/*
-	 * Sets the viewed pattern's change-bar rule.
+	 * Retired pattern-repeat setter.
 	 *
-	 * Caller: menu_parseGlobalParam(PAR_PATTERN_BEAT). This replaces the old
-	 * pattern-settings parser opcode. PatternData owns the saved value because
-	 * it is serialized with pattern files and read by Sequencer when deciding
-	 * automatic pattern changes.
-	 *
-	 * Inputs: pattern selects the pattern slot being edited, value is the menu
-	 * value. Output: PatternSetting.changeBar and PAR_PATTERN_BEAT are updated.
-	 * Risk: no playback timing is changed immediately; Sequencer observes this
-	 * value at the next pattern-boundary decision.
+	 * Pattern repeat/next switching has moved out of the sequencer. A future
+	 * feature must switch at the Scene level so Pattern, Scene parameters, and
+	 * edit-mask state remain aligned. Inputs are accepted for compatibility with
+	 * stale menu/storage paths, but no PatternData state changes.
 	 */
-	PatternSetting *p = pat_patternSettingPtr(pattern);
-	if (!p)
-		return;
-	p->changeBar = value;
-	parameter_values[PAR_PATTERN_BEAT] = value;
+	(void)pattern;
+	(void)value;
 }
 
 void pat_setPatternNext(uint8_t pattern, uint8_t value)
 {
 	/*
-	 * Sets the viewed pattern's automatic next-pattern target.
+	 * Retired pattern-next setter.
 	 *
-	 * Caller: menu_parseGlobalParam(PAR_PATTERN_NEXT). This is pattern-level
-	 * saved data, not the same thing as seq_setNextPattern(), which queues an
-	 * immediate performance/playback change.
-	 *
-	 * Inputs: pattern slot and next-pattern enum value. Output: PatternData
-	 * storage plus menu mirror are updated.
+	 * Pattern-only next targets desynchronize Scene parameters from playback in a
+	 * 16-Scene bank. Inputs are ignored; explicit switching now happens through
+	 * menu_perfModeSceneButtonPressed()/seq_selectActivePattern() only.
 	 */
-	PatternSetting *p = pat_patternSettingPtr(pattern);
-	if (!p)
-		return;
-	p->nextPattern = value;
-	parameter_values[PAR_PATTERN_NEXT] = value;
+	(void)pattern;
+	(void)value;
 }
 
 uint8_t pat_getPatternChangeBar(uint8_t pattern)
 {
-	PatternSetting *p = pat_patternSettingPtr(pattern);
-	return p ? p->changeBar : 0;
+	/*
+	 * Retired pattern-repeat accessor.
+	 *
+	 * Output is always zero because the sequencer no longer consumes changeBar.
+	 * The argument is kept so legacy callers compile until Pattern is rebuilt.
+	 */
+	(void)pattern;
+	return 0u;
 }
 
 uint8_t pat_getPatternNext(uint8_t pattern)
 {
-	PatternSetting *p = pat_patternSettingPtr(pattern);
-	return p ? p->nextPattern : 0;
+	/*
+	 * Retired pattern-next accessor.
+	 *
+	 * Output is the input pattern, expressing "stay here" for compatibility with
+	 * any legacy code that still asks PatternData for an automatic target.
+	 */
+	return pattern;
 }
 
 void pat_setTrackLength(uint8_t pattern, uint8_t track, uint8_t length)
@@ -690,10 +691,10 @@ void pat_clearAutomation(uint8_t pattern, uint8_t track, uint8_t automTrack)
 	for (k = 0; k < NUM_STEPS; k++) {
 		Step *step = pat_stepPtr(pattern, track, k);
 		if (automTrack == 0) {
-			step->param1Nr = INSTRUMENT_PARAM_INVALID;
+			step->param1Nr = NO_AUTOMATION;
 			step->param1Val = 0;
 		} else {
-			step->param2Nr = INSTRUMENT_PARAM_INVALID;
+			step->param2Nr = NO_AUTOMATION;
 			step->param2Val = 0;
 		}
 	}
@@ -896,6 +897,17 @@ void pat_recordAutomation(uint8_t pattern, uint8_t track, uint8_t step,
 	 */
 	if (!pat_patternValid(pattern) || !pat_trackValid(track) || !pat_stepValid(step))
 		return;
+	/*
+	 * Keep recorded automation in the legacy automationNode namespace.
+	 *
+	 * Inputs may come from MIDI/armed automation call sites that still pass
+	 * broader parameter ids. Output is either a valid 1..254 automation
+	 * destination or NO_AUTOMATION, matching the playback guard and default Step
+	 * reset value. This prevents live recording from writing a value that would
+	 * later be unsafe on trigger.
+	 */
+	if (dest == 0u || dest >= NO_AUTOMATION || dest == PAR_NONE)
+		dest = NO_AUTOMATION;
 	if (pat_activeAutomationTrack == 0) {
 		Step *target = pat_stepPtr(pattern, track, step);
 		target->param1Nr = dest;
@@ -947,13 +959,17 @@ void pat_applyStepToMenu(uint8_t pattern, uint8_t track, uint8_t step)
 	dest = s->param1Nr;
 	if ((dest < 128u) && (dest != 0u))
 		dest--;
-	if (dest < END_OF_SOUND_PARAMETERS)
+	if (dest == NO_AUTOMATION)
+		parameter_values[PAR_P1_DEST] = 0u;
+	else if (dest < END_OF_SOUND_PARAMETERS)
 		parameter_values[PAR_P1_DEST] = paramToModTarget[dest];
 
 	dest = s->param2Nr;
 	if ((dest < 128u) && (dest != 0u))
 		dest--;
-	if (dest < END_OF_SOUND_PARAMETERS)
+	if (dest == NO_AUTOMATION)
+		parameter_values[PAR_P2_DEST] = 0u;
+	else if (dest < END_OF_SOUND_PARAMETERS)
 		parameter_values[PAR_P2_DEST] = paramToModTarget[dest];
 
 	parameter_values[PAR_P1_VAL] = s->param1Val;
@@ -964,21 +980,19 @@ void pat_applyStepToMenu(uint8_t pattern, uint8_t track, uint8_t step)
 void pat_applyPatternSettingsToMenu(uint8_t pattern)
 {
 	/*
-	 * Copies PatternData pattern-level settings into menu parameter_values.
+	 * Clears retired Pattern chain settings in menu parameter_values.
 	 *
-	 * Replaces SEQ_REQUEST_PATTERN_PARAMS. Callers are Menu/button/load paths
-	 * that need the Pattern Settings page to reflect the currently viewed
-	 * pattern.
+	 * Pattern Settings no longer exposes repeat/next controls. Callers still use
+	 * this helper when entering old pattern-settings paths, so it writes neutral
+	 * values instead of mirroring stale serialized PatternSetting bytes.
 	 *
-	 * Input: pattern slot to display. Output: PAR_PATTERN_BEAT and
-	 * PAR_PATTERN_NEXT mirror PatternData. Risk: this is a menu/UI sync helper,
-	 * not a pattern mutation; do not call it from interrupt context.
+	 * Input: pattern is ignored. Output: PAR_PATTERN_BEAT and PAR_PATTERN_NEXT
+	 * are zeroed. Risk: this is a menu/UI sync helper, not a pattern mutation; do
+	 * not call it from interrupt context.
 	 */
-	PatternSetting *p = pat_patternSettingPtr(pattern);
-	if (!p)
-		return;
-	parameter_values[PAR_PATTERN_BEAT] = p->changeBar;
-	parameter_values[PAR_PATTERN_NEXT] = p->nextPattern;
+	(void)pattern;
+	parameter_values[PAR_PATTERN_BEAT] = 0u;
+	parameter_values[PAR_PATTERN_NEXT] = 0u;
 }
 
 void pat_applyTrackSettingsToMenu(uint8_t pattern, uint8_t track)

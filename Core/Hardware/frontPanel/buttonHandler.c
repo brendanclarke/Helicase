@@ -92,6 +92,28 @@ static uint8_t buttonHandler_mutedVoices = 0;
 static int8_t buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
 static uint8_t buttonHandler_morphVoiceModeActive = 0;
 /*
+ * Foreground MODE VOICE hold overlay state.
+ *
+ * Why: btn_held[] is written immediately by the scan ISR, while press/release
+ * events are consumed later from the foreground ring. A SEQ press that happened
+ * while MODE VOICE was physically held can therefore be processed after the ISR
+ * has already cleared btn_held[BUT_MODE1] for the release edge. This flag is set
+ * and cleared in event order by processPress()/processRelease(), so MODE VOICE
+ * Scene-mask SEQ buttons are always consumed as overlay toggles and cannot leak
+ * into normal step editing.
+ */
+static uint8_t buttonHandler_voiceSceneMaskHoldActive = 0u;
+/*
+ * SEQ presses consumed by the MODE VOICE Scene-mask overlay.
+ *
+ * Why: consuming only the press edge is not enough in VOICE mode. The normal
+ * VOICE SEQ release path toggles a Pattern step when no long-press timer action
+ * occurred, so an overlay press must also suppress its matching release edge.
+ * Inputs are physical SEQ press bits accepted by menu_voiceHeldSceneButtonPressed();
+ * output is release-edge consumption in processRelease().
+ */
+static uint16_t buttonHandler_voiceSceneSeqPressedMask = 0u;
+/*
  * SEQ presses consumed by the Load/Save menu, retained until their release edge.
  *
  * Menu may change page/submode between press and release while asynchronous
@@ -570,10 +592,7 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
             buttonHandler_showStepParameterPage();
             break;
         case SELECT_MODE_PERF:
-            if (seqButtonPressed < 8u) {
-                seq_setRoll(seqButtonPressed, 1);
-                led_setValue(1, ledNr);
-            }
+            menu_perfModeSceneButtonPressed(seqButtonPressed);
             break;
         default:
             break;
@@ -601,10 +620,6 @@ static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
         break;
 
     case SELECT_MODE_PERF:
-        if (seqButtonPressed < 8u) {
-            seq_setRoll(seqButtonPressed, 0);
-            led_setValue(0, ledNr);
-        }
         break;
 
     default:
@@ -681,7 +696,6 @@ static void handleModeButtons(uint8_t mode)
     case SELECT_MODE_PERF:
         led_clearSequencerLeds();
         led_clearSelectLeds();
-        led_initPerformanceLeds();
         lastActiveSubPage = menu_getSubPage();
         menu_switchPage(PERFORMANCE_PAGE);
         menu_switchSubPage(0);
@@ -1031,6 +1045,13 @@ static void processPress(uint8_t buttonNr)
                 (uint16_t)(1u << (uint8_t)seq));
             return;
         }
+        if (buttonHandler_voiceSceneMaskHoldActive &&
+            menu_voiceHeldSceneButtonPressed((uint8_t)seq)) {
+            buttonHandler_voiceSceneSeqPressedMask = (uint16_t)(
+                buttonHandler_voiceSceneSeqPressedMask |
+                (uint16_t)(1u << (uint8_t)seq));
+            return;
+        }
         buttonHandler_seqButtonPressed((uint8_t)seq);
         return;
     }
@@ -1058,6 +1079,25 @@ static void processPress(uint8_t buttonNr)
     case BUT_MODE4:
         /* BUT_MODE1=31, BUT_MODE4=28: mode = 31 - buttonNr */
         handleModeButtons((uint8_t)(BUT_MODE1 - buttonNr));
+        if (buttonNr == BUT_MODE1 &&
+            bh_state.selectButtonMode == SELECT_MODE_VOICE) {
+            /*
+             * MODE VOICE hold overlays the Scene edit-mask on the SEQ row.
+             *
+             * Inputs: the ISR held[] state has already marked MODE1 held, and
+             * handleModeButtons() has ensured VOICE mode is current. Output:
+             * Menu paints scene_mask_voice_edit immediately, before any SEQ
+             * toggle, so the user can see which Scenes will receive voice/Scene
+             * parameter fan-out while holding MODE VOICE.
+             *
+             * buttonHandler_voiceSceneMaskHoldActive is deliberately separate
+             * from btn_held[BUT_MODE1]. It follows foreground event order, so a
+             * queued SEQ press cannot become a Pattern step just because the ISR
+             * has already seen the later MODE1 release.
+             */
+            buttonHandler_voiceSceneMaskHoldActive = 1u;
+            menu_refreshVoiceHeldSceneLeds();
+        }
         break;
 
     case BUT_START_STOP:
@@ -1226,6 +1266,18 @@ static void processRelease(uint8_t buttonNr)
                 buttonHandler_loadSceneSeqPressedMask & (uint16_t)(~bit));
             return;
         }
+        if ((buttonHandler_voiceSceneSeqPressedMask & bit) != 0u) {
+            /*
+             * Suppress the release half of a MODE VOICE Scene-mask SEQ press.
+             *
+             * The press already toggled/consumed the Scene edit-mask overlay.
+             * Returning here prevents buttonHandler_seqButtonReleased() from
+             * interpreting the same physical button as a VOICE-mode step tap.
+             */
+            buttonHandler_voiceSceneSeqPressedMask = (uint16_t)(
+                buttonHandler_voiceSceneSeqPressedMask & (uint16_t)(~bit));
+            return;
+        }
         buttonHandler_seqButtonReleased((uint8_t)seq);
         return;
     }
@@ -1239,6 +1291,33 @@ static void processRelease(uint8_t buttonNr)
     }
 
     switch (buttonNr) {
+    case BUT_MODE1:
+        if (bh_state.selectButtonMode == SELECT_MODE_VOICE) {
+            /*
+             * Release the temporary MODE VOICE Scene edit-mask overlay.
+             *
+             * Output: the SEQ row returns to VOICE-mode neutral state and any
+             * MODE1 morph blink is restored. This pairs with the press-side
+             * menu_refreshVoiceHeldSceneLeds() call so the edit-mask LEDs do
+             * not linger after the hold gesture ends. The pattern-track repaint
+             * is needed because VOICE mode normally owns the SEQ row as a step
+             * view; clearing the overlay without redrawing would leave the row
+             * blank until some unrelated view happened to refresh it.
+             */
+            buttonHandler_voiceSceneMaskHoldActive = 0u;
+            led_clearSequencerLeds();
+            led_clearAllBlinkLeds();
+            led_updatePatternTrackView(menu_getActiveVoice(),
+                                       menu_getViewedPattern(),
+                                       buttonHandler_selectedStep,
+                                       0u);
+            led_setActiveVoice(menu_getActiveVoice());
+            led_setActiveSelectButton(menu_getSubPage());
+            if (buttonHandler_morphVoiceModeActive)
+                led_setBlinkLed(LED_MODE1, 1u);
+        }
+        break;
+
     case BUT_BAR1:
         led_setValue(0, LED_BAR1);
         break;

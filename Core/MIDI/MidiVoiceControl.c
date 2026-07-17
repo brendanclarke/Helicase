@@ -54,6 +54,7 @@
 #include "MidiMessages.h"
 #include "CymbalVoice.h"
 #include "InstrumentManager.h"
+#include "presetManager.h"
 // #include "ledHandler.h"
 // TODO DSP_PORT
 // #include "sequencer.h"
@@ -151,11 +152,13 @@ static void voiceControl_triggerNow(uint8_t voice, uint8_t note, uint8_t vel)
 	 * Trigger through the dynamic instrument runtime dispatcher.
 	 *
 	 * Inputs: queued visible voice/track number, note, and velocity. Output:
-	 * InstrumentManager maps tracks 1..6 to storage slots 1..6 and track 7 to
-	 * slot 6's alternate/choke trigger. This replaces the old fixed
-	 * Drum/Snare/Cymbal/HiHat call table so Instrument Load affects actual
-	 * sound generation, not just menu/storage state.
+	 * Preset first has a chance to force-apply a pending deferred Scene slot for
+	 * this track, then InstrumentManager maps tracks 1..6 to storage slots 1..6
+	 * and track 7 to slot 6's alternate/choke trigger. This keeps Scene changes
+	 * smooth while guaranteeing the new Scene pattern's first trigger uses the
+	 * new Scene's instrument parameters.
 	 */
+	preset_applyDeferredSceneSlotForTrigger(voice);
 	instrumentManager_triggerTrack(voice, note, vel);
 
 	led_pulseLed((uint8_t)(LED_VOICE1 + voice));
