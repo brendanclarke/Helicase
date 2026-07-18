@@ -319,7 +319,3 @@ void sampleMemory_loadSamples(void)
     /* The SD-backed modal installer lives in filesystem.c so asyncfatfs
      * details stay behind the filesystem facade. */
 }
-    install_start_count = 0;
-    install_start_count = sample_count;
-    memset(sample_name_cache, 0, sizeof(sample_name_cache));
-    memset(sample_name_cache, 0, sizeof(sample_name_cache));

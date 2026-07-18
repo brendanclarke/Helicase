@@ -497,7 +497,10 @@ bool afatfs_opendir_lfn(const char *displayName,
  * parents open concurrently. Implicit current-directory mutation cannot safely
  * represent that operation graph.
  * Inputs: parent must be an open, idle directory; displayName is one component
- * and may not be "." or "..". accessMode uses afatfs_fopen() syntax.
+ * and may not be "." or "..". accessMode uses afatfs_fopen() syntax. When a
+ * VFAT long name is present, lookup first compares that visible LFN and then
+ * its physical SFN alias; this permits a one-object browser to reopen the
+ * selected alias without retaining a directory list.
  * Outputs/lifetime: true means the request retained parent and complete will
  * fire exactly once. The caller must not close, seek, scan, or otherwise use
  * parent until completion. On OK, file remains caller-owned and openNameOut

@@ -197,4 +197,3 @@ clean:
 	rm -rf $(BUILD)
 
 .PHONY: all img clean
-  Core/Hardware/SD/kitBrowser.c \

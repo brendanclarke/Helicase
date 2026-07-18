@@ -232,6 +232,22 @@ bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completio
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanBanks(fs_completion_cb_t cb);
+/*
+ * Resolve one Instrument browser coordinate into the current eight-character
+ * name without retaining a directory list.
+ *
+ * Inputs: instrument registry type, zero-based physical-order ordinal, and a
+ * caller generation token. Output: the asynchronous completion callback fires
+ * after the live `/Instrument` iterator has either copied one current display
+ * name or cleared it; the generation is compared by Menu before LCD use so a
+ * late SD result cannot repaint a newer selection. No path, long stem, or SFN
+ * alias crosses this API. Affiliates: filesystem_resolveInstrumentName_tick(),
+ * menu_pollPresetStatus(), and filesystem_instrumentName().
+ */
+bool filesystem_requestResolveInstrumentName(instrument_type_t type,
+                                             uint16_t ordinal,
+                                             uint32_t generation,
+                                             fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
 /*
  * Generic asyncfatfs File/Dir test browser and payload API.
@@ -277,12 +293,14 @@ const char *filesystem_testResultName(void);
 /*
  * Load one root Instrument/ file into an explicit Scene slot.
  *
- * Inputs: resident Scene index, zero-based kit slot, registry type, cache
- * index, and completion callback. Output: one asynchronous parse into
- * filesystem-owned staging; live SceneData and DSP state are unchanged until
- * Preset commits the validated payload. Client: preset_loadInstrument(). The
- * explicit Scene/slot coordinates remain immutable completion context even
- * though parsing itself is off-scene.
+ * Inputs: resident Scene index, zero-based kit slot, registry type,
+ * physical-order ordinal, and completion callback. Output: one asynchronous
+ * parse into filesystem-owned staging; live SceneData and DSP state are
+ * unchanged until Preset commits the validated payload. The loader retains
+ * only one eight-character current source name and request coordinates; it
+ * does not cache an Instrument list, long stem, or alias. Client:
+ * preset_loadInstrument(). The explicit Scene/slot coordinates remain
+ * immutable completion context even though parsing itself is off-scene.
  */
 bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,
@@ -296,8 +314,10 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
  * voice cells in the root `.names` register. Why: payload commit belongs to
  * Preset, so Instrument Load cannot publish resident identity while it is only
  * parsing staging data. Inputs are resident Scene bits, a 0..5 voice slot, and
- * a 1..16 byte stem; no library ordinal/path/location is accepted. Output is an
- * asynchronous atomic register generation and callback after durable sync.
+ * one eight-character stem; no library ordinal/path/location is accepted.
+ * Output is an asynchronous atomic register generation and callback after
+ * durable sync. The caller must close the source Instrument before opening
+ * `.names`; the two handles are never concurrent.
  * Affiliates: preset_tickInstrumentApply(), namesRegister, normal Load only;
  * InstrumentMrp deliberately never calls this API.
  */

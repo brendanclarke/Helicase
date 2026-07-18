@@ -86,6 +86,28 @@ static inline void lockPotentiometerFetch(void){}
 
 static uint8_t menu_TargetVoiceGapIndex = 0xFF;
 static uint8_t menu_storageBusy = 0;
+static uint8_t menu_instrumentLoadResolvePending = 0;
+static uint32_t menu_instrumentLoadResolveGeneration = 0;
+/*
+ * Name-refresh action gate for nested Instrument Load/Save.
+ *
+ * What changed: a background one-name resolver now owns a short-lived gate so
+ * OK cannot post a second Load or Save against an unrefreshed display identity.
+ * Why: Menu may retain only type/slot/ordinal coordinates; it must not fall
+ * back to a prior cached name while asyncfatfs resolves the current object.
+ * Inputs are the resolver request/completion callbacks; output is a boolean
+ * gate consumed by the nested action handler. Affiliate:
+ * filesystem_requestResolveInstrumentName() and menu_pollPresetStatus().
+ */
+static uint8_t menu_instrumentNameRefreshBusy = 0u;
+
+static void menu_onInstrumentResolveComplete(void) {
+    /* The callback is the terminal output of the one-name refresh barrier. */
+    menu_instrumentNameRefreshBusy = 0u;
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+        menu_repaintAll();
+    }
+}
 static uint8_t menu_deferSelectionRequest = 0;
 static uint8_t menu_deferSelectionLoadKit = 0;
 static uint8_t menu_lcdRefreshPending = 0;
@@ -905,6 +927,7 @@ static uint8_t menu_voiceFirstSelectableColumn(uint8_t subPage,
 static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter);
 static void menu_repaintLoadSavePage(void);
 static void menu_repaintGeneric(void);
+static void menu_queueInstrumentNameRefresh(void);
 void sendDisplayBuffer(void);
 static void menu_moveToMenuItem(int8_t inc);
 static void menu_encoderChangeParameter(int8_t inc);
@@ -2873,6 +2896,10 @@ static void menu_instrumentLoadRequestSelection(void)
      * request, and Preset still validates the same-type rule before accepting
      * an InstrumentMrp request.
      */
+    /* Do not allow a second payload transaction before the selected name is fresh. */
+    if (menu_instrumentLoadResolvePending ||
+        menu_instrumentNameRefreshBusy)
+        return;
     menu_instrumentLoadClampIndex();
     count = filesystem_instrumentCount(menu_instrumentLoadType);
     if (count == 0u)
@@ -2894,6 +2921,35 @@ static void menu_instrumentLoadRequestSelection(void)
          * repaints them, which makes rapid pool browsing feel continuous. */
         menu_storageBusy = 1u;
     }
+}
+
+/*
+ * Queue a fresh one-name lookup for the current Instrument encoder position.
+ *
+ * What: publishes the new `(type, ordinal)` to the display facade and marks
+ * the old name invalid before the next filesystem tick. Why: the previous
+ * implementation only queued refreshes from one lower-row branch, so changing
+ * type or entering the nested page could leave the first resolved name on
+ * screen and never request later positions. Inputs are Menu-owned type/index;
+ * outputs are a pending resolver request or an intentionally blank empty-list
+ * state. Affiliates: filesystem_requestResolveInstrumentName(),
+ * filesystem_instrumentName(), and menu_pollPresetStatus().
+ */
+static void menu_queueInstrumentNameRefresh(void)
+{
+    uint8_t count;
+
+    menu_instrumentLoadClampIndex();
+    count = filesystem_instrumentCount(menu_instrumentLoadType);
+    menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_POOL;
+    menu_instrumentLoadShownType = menu_instrumentLoadType;
+    menu_instrumentLoadShownIndex =
+        menu_instrumentLoadIndex[menu_instrumentLoadType];
+    if (count == 0u) {
+        menu_instrumentLoadResolvePending = 0u;
+        return;
+    }
+    menu_instrumentLoadResolvePending = 1u;
 }
 
 static void menu_instrumentLoadRefreshBaseType(uint8_t preserve_selected_type)
@@ -3014,6 +3070,8 @@ static void menu_instrumentLoadStepType(int8_t inc)
                 (uint8_t)(direction < 0 &&
                           entry->type == menu_instrumentLoadBaseType);
             menu_instrumentLoadClampIndex();
+            /* A type encoder move changes the resolver coordinate as well. */
+            menu_queueInstrumentNameRefresh();
             return;
         }
     }
@@ -3540,6 +3598,8 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadBaseType = menu_instrumentLoadType;
     menu_instrumentLoadMorphMode = 0u;
     menu_instrumentLoadClampIndex();
+    if (!menu_instrumentSaveMode)
+        menu_queueInstrumentNameRefresh();
     if (menu_instrumentSaveMode)
         menu_instrumentSaveSeedName();
     menu_setActiveVoice(voiceNr);
@@ -3798,6 +3858,7 @@ static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
         menu_instrumentLoadMorphMode = morph;
     }
     menu_instrumentLoadClampIndex();
+    menu_queueInstrumentNameRefresh();
     menu_setActiveVoice(voice);
     menu_loadSaveSetInstrumentVoiceLed(voice);
     menu_refreshLoadSceneLeds();
@@ -4695,9 +4756,18 @@ static void menu_repaintLoadSavePage(void)
             editDisplayBuffer[1][2] = (display_index >= 10u)
                 ? (char)('0' + ((display_index / 10u) % 10u)) : ' ';
             editDisplayBuffer[1][3] = (char)('0' + (display_index % 10u));
+            /*
+             * Never paint a prior slot's name while this coordinate is being
+             * refreshed. Inputs are the count and one-name resolver gate;
+             * output is either the current eight-character result or a blank
+             * field until its callback publishes the new generation.
+             */
             memcpy(&editDisplayBuffer[1][5],
-                   count ? filesystem_instrumentName(menu_instrumentLoadShownType,
-                                                      index) : "Empty   ",
+                   count && !menu_instrumentLoadResolvePending &&
+                   !menu_instrumentNameRefreshBusy
+                       ? filesystem_instrumentName(menu_instrumentLoadShownType,
+                                                    index)
+                       : (count ? "        " : "Empty   "),
                    8u);
         }
         return;
@@ -5268,6 +5338,16 @@ checkvalid:
 ** ----------------------------------------------------------------------- */
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
+    /*
+     * Block only actions while a name refresh is pending; encoder navigation
+     * remains available so the user can select a different coordinate. Inputs
+     * are the current resolver flags and button edge. Output is an unchanged
+     * menu state until the callback clears the gate, preventing overlapping
+     * Load/Save requests without making the SD operation look globally busy.
+     */
+    if (btnClicked && (menu_instrumentLoadResolvePending ||
+                       menu_instrumentNameRefreshBusy))
+        return;
     if (menu_instrumentLoadActive) {
         if (menu_instrumentSaveMode) {
             /*
@@ -5342,7 +5422,10 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
          * item. The normal Save/Load type bitfield is bypassed because this is
          * a destination-slot submode, not a SAVE_TYPE_*.
          */
-        (void)btnClicked;
+        if (btnClicked && !editModeActive && menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
+            menu_instrumentLoadRequestSelection();
+            return;
+        }
         if (editModeActive) {
             if (menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
                 if (inc != 0)
@@ -5366,12 +5449,15 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT ||
                         menu_instrumentLoadShownType != menu_instrumentLoadType ||
                         (uint8_t)next != menu_instrumentLoadShownIndex) {
-                        menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_POOL;
-                        menu_instrumentLoadShownType = menu_instrumentLoadType;
-                        menu_instrumentLoadShownIndex = (uint8_t)next;
                         menu_instrumentLoadIndex[menu_instrumentLoadType] =
                             (uint8_t)next;
-                        menu_instrumentLoadRequestSelection();
+                        /*
+                         * Flush the prior display identity before every new
+                         * encoder ordinal. The helper copies the updated index
+                         * into the resolver request and schedules exactly one
+                         * live-tree lookup; no payload Load is posted here.
+                         */
+                        menu_queueInstrumentNameRefresh();
                     }
                 }
             }
@@ -5982,6 +6068,18 @@ void menu_pollPresetStatus(void)
      */
     if (!menu_soundApplyActive && preset_tickDrumsetApply())
         return;
+
+    if (menu_instrumentLoadResolvePending && filesystem_status() == FS_STATUS_IDLE) {
+        /* Set the gate before posting so an OK edge cannot race this request. */
+        menu_instrumentNameRefreshBusy = 1u;
+        if (filesystem_requestResolveInstrumentName(menu_instrumentLoadType, menu_instrumentLoadShownIndex, ++menu_instrumentLoadResolveGeneration, menu_onInstrumentResolveComplete)) {
+            menu_instrumentLoadResolvePending = 0;
+            menu_repaintAll();
+        } else {
+            /* A rejected request remains pending; release only this attempt. */
+            menu_instrumentNameRefreshBusy = 0u;
+        }
+    }
 
     if (menu_tickInstrumentApply())
         return;

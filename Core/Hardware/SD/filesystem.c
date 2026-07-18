@@ -112,7 +112,6 @@
  * is removed mechanically. Affiliate: active slot cleanup below retains only
  * one afatfsObjectId_t and on_delete_tree_complete().
  */
-#if 0
 typedef enum {
     FS_INTERNAL_OP_NONE,
     FS_INTERNAL_OP_FLUSH_FINISH,
@@ -150,9 +149,16 @@ typedef enum {
      * operation-local op_bank_child_present_mask/name caches, exposed through
      * filesystem_bankChildSceneMask() after completion. This op never reads
      * bankset.bcg or changes BankData.
-     */
+    */
     FS_INTERNAL_OP_SCAN_BANK_SCENES,
     FS_INTERNAL_OP_SCAN_INSTRUMENTS,
+    /*
+     * Resolve one Instrument type/ordinal into the single current LCD name.
+     * Inputs are Menu coordinates and generation; output is one resolver
+     * completion after live-tree scan. This must remain separate from payload
+     * Load so a browser refresh cannot overwrite load staging state.
+     */
+    FS_INTERNAL_OP_RESOLVE_INSTRUMENT_NAME,
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
     FS_INTERNAL_OP_SAVE_INSTRUMENT,
     /*
@@ -326,6 +332,15 @@ static storage_instrument_state_t op_instrument_state;
 static uint8_t op_instrument_slot = 0;
 static uint8_t op_remove_done = 0u;
 /*
+ * Current Kit folder identity used only while one live load is resolving.
+ * Inputs are the selected numeric slot and the iterator's current display
+ * component; output is one eight-character name for the LCD/commit path. The
+ * field deliberately replaces the old load-time dependence on a cached SFN
+ * alias, and is cleared by filesystem_start(). Affiliates: Kit scan resolver,
+ * preset_currentName, and filesystem_loadKitDirectory_tick().
+ */
+static char op_kit_current_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+/*
  * Shared streaming writer scratch.
  *
  * Kit Save, root Instrument Save, and future text-shaped saves do not allocate
@@ -409,7 +424,6 @@ static char op_delete_tree_child_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_delete_tree_child_open_name[AFATFS_SHORT_FILENAME_MAX];
 static afatfsObjectKind_t op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
 static afatfsFilePtr_t op_delete_tree_dir = NULL;
-#endif
 static fs_delete_slot_phase_t op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
 static afatfsFilePtr_t op_delete_slot_dir = NULL;
 static uint8_t op_delete_slot_allow_short_alias = 0u;
@@ -621,12 +635,28 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
  * Root Instrument/ browser and single-load state.
  *
  * The Instrument pool is list-indexed by instrument type rather than numbered
- * Kit slot. The cache stores an asyncfatfs-openable short filename plus the
- * eight-character display stem for each discovered file. Counts are per
- * instrument type; the UI display number is derived from the sorted index and
- * visually saturates at 999.
+ * Kit slot. Only a count is retained for each type; the resolver re-scans the
+ * live directory and owns the one current eight-character display result.
+ * The UI display number is derived from the numeric ordinal and visually
+ * saturates at 999, so no filename or alias list is needed here.
  */
 static uint8_t instrument_file_count[INSTRUMENT_TYPE_UNKNOWN];
+/*
+ * Instrument browser resolver coordinates.
+ *
+ * What changed: the resolver now retains only the requested type, ordinal,
+ * generation, and one eight-character current-object result. Why: retaining
+ * previous/best long names or aliases is a directory-list cache and violates
+ * the load SRAM contract. Inputs are supplied by the Menu selection; outputs
+ * are one display field and a generation latch consumed by
+ * filesystem_instrumentName(). Affiliates: filesystem_requestResolveInstrumentName(),
+ * filesystem_resolveInstrumentName_tick(), and menu_pollPresetStatus().
+ */
+static instrument_type_t op_instrument_resolve_type = INSTRUMENT_TYPE_UNKNOWN;
+static uint16_t op_instrument_resolve_ordinal;
+static uint32_t op_instrument_resolve_generation;
+static uint16_t op_instrument_resolve_current_idx;
+static uint32_t op_instrument_resolved_generation;
 /*
  * Cacheless Instrument resolver scratch.
  *
@@ -640,16 +670,20 @@ static uint8_t instrument_file_count[INSTRUMENT_TYPE_UNKNOWN];
  * fat_compareDisplayNameCasefoldThenCase(), and `.names` completion updates.
  */
 static afatfsDirHandle_t op_explicit_root_dir = NULL;
-static afatfsObjectInfo_t op_instrument_resolved_object;
-static afatfsObjectInfo_t op_instrument_best_object;
-static char op_instrument_previous_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-static char op_instrument_best_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-static uint8_t op_instrument_best_valid = 0u;
 static uint8_t op_instrument_resolve_pass = 0u;
 static uint8_t op_instrument_load_destination_slot = 0u;
 static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint8_t op_instrument_load_index = 0u;
+/*
+ * One retry flag for Instrument payload reopening.
+ *
+ * The live iterator owns both LFN display and SFN alias. Inputs are the
+ * selected object and the first typed-open result; output permits one alias
+ * retry without storing a filename list. Affiliates: filesystem_loadInstrument_tick()
+ * phase 4/5 and asyncfatfs fopenChild() matching.
+ */
+static uint8_t op_instrument_load_alias_attempted = 0u;
 /*
  * Root Instrument Save request scratch.
  *
@@ -695,7 +729,19 @@ static volatile afatfsResultCode_t op_instrument_copy_result =
  */
 static kit_instrument_slot_t op_staged_instrument;
 static char op_staged_instrument_display_name[9];
-static char op_staged_instrument_stem[SCENE_INSTRUMENT_STEM_LEN + 1u];
+/*
+ * One current Instrument source name, deliberately limited to the LCD width.
+ *
+ * What changed: the former 16-character staged stem is reduced to eight
+ * printable characters. Why: no load needs a long source-name cache; the
+ * selected real-tree object can be re-resolved when the deferred `.names`
+ * update runs. Input is the current asyncfatfs object name; output is the
+ * bounded display/identity name borrowed by Preset after a successful parse.
+ * Affiliates: filesystem_copyInstrumentStemDisplay(),
+ * filesystem_loadedInstrumentStem(), SceneData source-name setters, and the
+ * one-record namesRegister update.
+ */
+static char op_staged_instrument_stem[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static uint32_t op_stream_index = 0;
 static uint8_t op_item_offset = 0;
 static uint8_t op_loaded_active_pattern_running = 0;
@@ -1720,6 +1766,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_SCAN_BANKS:            return "BnkSc";
     case FS_INTERNAL_OP_SCAN_BANK_SCENES:      return "BScn";
     case FS_INTERNAL_OP_SCAN_INSTRUMENTS:      return "InsSc";
+    case FS_INTERNAL_OP_RESOLVE_INSTRUMENT_NAME: return "InsRe";
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:       return "InsL";
     case FS_INTERNAL_OP_SAVE_INSTRUMENT:       return "InsS";
     case FS_INTERNAL_OP_UPDATE_INSTRUMENT_NAMES:return "INam";
@@ -1962,25 +2009,42 @@ static uint8_t filesystem_displayPrecedesCached(const char *candidate,
                                                             cached) < 0);
 }
 
-static void filesystem_noteKitBrowserSlot(uint16_t slot)
+/*
+ * Parse one live Kit directory object into its numeric slot and display name.
+ *
+ * What: uses the normal `NNN Name`/`NNN_Name` parser first, then accepts a
+ * short-alias-only object by reading its literal three-digit prefix. Why: a
+ * Kit Load must resolve the selected folder from the current Kit/ iterator;
+ * relying on the scan cache's alias produced KDir07 on cards whose alias was
+ * not reopenable through the typed child path. Inputs are one current
+ * asyncfatfs display component; outputs are slot 0..999 and one eight-character
+ * display field. Affiliates: filesystem_loadKitDirectory_tick(),
+ * filesystem_recordKitDirectory(), and storage_parseNumberedFolder().
+ */
+static uint8_t filesystem_parseKitObjectSlot(const char *name,
+                                             uint16_t *slot,
+                                             char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u])
 {
-    uint16_t i;
+    uint16_t number;
 
-    /*
-     * Add one Kit slot to the legacy kitBrowser bridge at most once.
-     *
-     * The product scan cache is now slot-addressed, but kitBrowser still uses
-     * a compact map of present slots. Duplicate same-slot folders must not
-     * create duplicate browser rows while we are choosing a canonical cache
-     * representative.
-     */
-    for (i = 0u; i < kb_numKits; i++) {
-        if (kb_map[i] == slot)
-            return;
-    }
-    if (kb_numKits < KITBROWSER_MAX_KITS)
-        kb_map[kb_numKits++] = slot;
+    if (storage_parseNumberedFolder(name, slot, display))
+        return 1u;
+    if (!name || !slot || !display ||
+        name[0] < '0' || name[0] > '9' ||
+        name[1] < '0' || name[1] > '9' ||
+        name[2] < '0' || name[2] > '9')
+        return 0u;
+    number = (uint16_t)((uint16_t)(name[0] - '0') * 100u +
+                        (uint16_t)(name[1] - '0') * 10u +
+                        (uint16_t)(name[2] - '0'));
+    if (number >= STORAGE_KIT_MAX_SLOTS)
+        return 0u;
+    *slot = number;
+    storage_copyDisplayName(display, name + 3u);
+    return 1u;
 }
+
+
 
 /* Record a kit directory when FAT only gives us the generated short alias.
  *
@@ -2028,7 +2092,7 @@ static void filesystem_recordKitShortAlias(const char *open_name)
     memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
     kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     storage_copyFilename(kit_slot_open_name[slot], open_name);
-    filesystem_noteKitBrowserSlot(slot);
+
 }
 
 /* Record one numbered kit directory discovered during a Kit/ scan.
@@ -2080,7 +2144,7 @@ static void filesystem_recordKitDirectory(const char *display_name,
     memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
     kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     storage_copyFilename(kit_slot_open_name[slot], open_name);
-    filesystem_noteKitBrowserSlot(slot);
+
 }
 
 static void filesystem_recordSavedKitDirectory(const char *display_name,
@@ -2107,7 +2171,7 @@ static void filesystem_recordSavedKitDirectory(const char *display_name,
     memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
     kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     storage_copyFilename(kit_slot_open_name[slot], open_name);
-    filesystem_noteKitBrowserSlot(slot);
+
 }
 
 static void filesystem_recordSceneShortAlias(const char *open_name)
@@ -2599,117 +2663,201 @@ static void filesystem_loadKitDirectory_tick(void)
     storage_status_t st;
 
     switch (op_phase) {
-    case 0: /* VALIDATE CACHE + CHDIR ROOT */
+    case 0: /* VALIDATE COORDINATE + ACQUIRE EXPLICIT ROOT */
         if (op_slot >= STORAGE_KIT_MAX_SLOTS || !kit_slot_present[op_slot]) {
             filesystem_setPresetNameEmpty();
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        /*
+         * Preserve the selected eight-character presentation while the live
+         * tree is reopened. Input is the numeric slot's transitional scan
+         * result; output is LCD text only, never a path or location key.
+         */
         memcpy(preset_currentName, kit_slot_name[op_slot], 8);
-        if (!afatfs_chdir(NULL))
+        /*
+         * Keep root as an explicit parent handle. No current-directory
+         * mutation is needed, so Kit/ and its selected child remain anchored to
+         * the same mounted tree throughout the load. Input is mounted FAT
+         * state; output is one caller-owned directory lease released in phase
+         * 32. Affiliate: openDirChild() and ordered cleanup below.
+         */
+        op_explicit_root_dir = afatfs_openRoot();
+        if (!op_explicit_root_dir)
             return;
         op_phase = 1;
         return;
 
-    case 1: /* OPEN Kit/ */
+    case 1: /* OPEN Kit/ RELATIVE TO ROOT */
         op_file_ready = false;
         op_file = NULL;
-        memset(op_root_open_name, 0, sizeof(op_root_open_name));
-        if (!afatfs_opendir_lfn(STORAGE_ROOT_KIT,
-                                AFATFS_MATCH_CASE_INSENSITIVE,
-                                op_root_open_name,
-                                on_file_opened))
+        op_child_open_result = AFATFS_RESULT_INVALID_NAME;
+        if (!afatfs_openDirChild(op_explicit_root_dir,
+                                 STORAGE_ROOT_KIT,
+                                 AFATFS_MATCH_CASE_INSENSITIVE,
+                                 NULL,
+                                 on_child_opened))
             return;
         op_phase = 2;
         return;
 
-    case 2: /* WAIT Kit/ */
+    case 2: /* WAIT Kit/ PARENT */
         if (!op_file_ready) return;
-        if (op_file == NULL) {
+        if (op_child_open_result != AFATFS_RESULT_OK || op_file == NULL) {
             filesystem_setPresetNameEmpty();
-            filesystem_finish(FS_STATUS_ERROR);
+            op_close_status = FS_STATUS_ERROR;
+            /* Result-specific root diagnostics separate absence from type/IO faults. */
+            filesystem_makeNamedErrorCode(
+                "KRoot",
+                (op_child_open_result == AFATFS_RESULT_NOT_FOUND) ? 2u : 7u);
+            op_phase = 28u;
             return;
         }
         op_kit_root_dir = op_file;
+        /* Initialize one live Kit/ object iterator before numeric resolution. */
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
         op_phase = 3;
         return;
 
-    case 3: /* CHDIR Kit/ */
-        if (!afatfs_chdir(op_kit_root_dir))
+    case 3: /* SCAN Kit/ FOR THE REQUESTED NUMERIC SLOT */
+    {
+        afatfsOperationStatus_e find_status;
+        uint16_t candidate_slot;
+        char candidate_display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+        /*
+         * Resolve the slot against the live tree, not the scan cache alias.
+         * Inputs are the retained numeric op_slot and Kit/ parent; output is
+         * one current iterator object plus its eight-character display copy.
+         * The loop advances only after a completed async object result, so a
+         * temporary SD wait cannot skip the requested folder. Affiliates:
+         * filesystem_parseKitObjectSlot(), phase 4 typed open, and the ordered
+         * close phases below.
+         */
+        find_status = afatfs_findNextObject(op_kit_root_dir,
+                                             &op_object_finder,
+                                             &op_object);
+        if (find_status == AFATFS_OPERATION_IN_PROGRESS)
             return;
-        op_phase = 4;
-        return;
-
-    case 4: /* CLOSE Kit/ handle */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 5;
-        return;
-
-    case 5: /* WAIT CLOSE Kit/ */
-        if (!op_close_done) return;
-        op_kit_root_dir = NULL;
-        op_phase = 6;
-        return;
-
-    case 6: /* OPEN selected kit directory */
+        if (find_status == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            filesystem_makeNamedErrorCode("KDir", 9u);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 28u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            filesystem_makeNamedErrorCode("KDir", 7u);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 28u;
+            return;
+        }
+        if (op_object.id.kind != AFATFS_OBJECT_DIRECTORY ||
+            !filesystem_parseKitObjectSlot(op_object.id.displayName,
+                                            &candidate_slot,
+                                            candidate_display) ||
+            candidate_slot != op_slot)
+            return;
+        memcpy(op_kit_current_display_name, candidate_display,
+               sizeof(op_kit_current_display_name));
+        memcpy(preset_currentName, op_kit_current_display_name,
+               STORAGE_KIT_DISPLAY_NAME_LEN);
+        afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(kit_slot_open_name[op_slot], "r", on_file_opened))
+        op_child_open_result = AFATFS_RESULT_INVALID_NAME;
+        op_phase = 4u;
+        return;
+    }
+
+    case 4: /* OPEN CURRENT KIT DIRECTORY BY LIVE DISPLAY COMPONENT */
+        /*
+         * Reopen the exact current iterator display component as a directory.
+         * Inputs are op_object.id.displayName and the retained Kit/ parent;
+         * output is one typed child handle. This avoids the stale
+         * kit_slot_open_name alias that caused every valid Kit to report
+         * KDir07. The object remains the only selected identity until the
+         * callback completes. Affiliate: asyncfatfs openDirChild().
+         */
+        if (!afatfs_openDirChild(op_kit_root_dir,
+                                 op_object.id.displayName,
+                                 AFATFS_MATCH_CASE_INSENSITIVE,
+                                 NULL,
+                                 on_child_opened))
             return;
-        op_phase = 7;
+        op_phase = 5u;
         return;
 
-    case 7: /* WAIT selected kit directory */
+    case 5: /* WAIT SELECTED KIT DIRECTORY */
         if (!op_file_ready) return;
-        if (op_file == NULL) {
+        if (op_child_open_result != AFATFS_RESULT_OK || op_file == NULL) {
             filesystem_setPresetNameEmpty();
-            filesystem_makeNamedErrorCode("KDir", op_phase);
+            /*
+             * Keep KDir07 as the missing-directory diagnostic that existing
+             * panel scripts recognize, but reserve KDir08 for a wrong-kind
+             * object and KDir09 for other typed-open failures. Inputs are the
+             * structured asyncfatfs result; output is a compact actionable
+             * panel code before common parent cleanup.
+             */
+            filesystem_makeNamedErrorCode(
+                "KDir",
+                (op_child_open_result == AFATFS_RESULT_NOT_FOUND) ? 7u :
+                (op_child_open_result == AFATFS_RESULT_NOT_DIRECTORY) ? 8u : 9u);
             op_close_status = FS_STATUS_ERROR;
             op_phase = 28;
             return;
         }
         op_kit_slot_dir = op_file;
-        op_phase = 8;
-        return;
-
-    case 8: /* CHDIR selected kit directory */
-        if (!afatfs_chdir(op_kit_slot_dir))
-            return;
-        op_phase = 9;
-        return;
-
-    case 9: /* CLOSE selected kit directory handle */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_slot_dir, on_file_closed)) {
-            /*
-             * Case 9 only starts the async close. Case 10 must wait for
-             * on_file_closed() to set op_close_done; staying in case 9 repeats
-             * the close request forever and stalls the boot kit load loop.
-             */
-            op_phase = 10;
-        }
-        return;
-
-    case 10: /* WAIT CLOSE selected kit directory */
-        if (!op_close_done) return;
-        op_kit_slot_dir = NULL;
+        /*
+         * Keep both directory parents open while kitset/member files are read.
+         * The selected child owns the member-file namespace; Kit/ owns that
+         * child, and root owns Kit/. This lifetime nesting is what makes each
+         * later fclose order deterministic.
+         */
         op_phase = 11;
         return;
 
-    case 11: /* OPEN kitset.kcg */
+    case 11: /* OPEN kitset.kcg RELATIVE TO SELECTED KIT */
         storage_kitsetInit(&op_kitset);
         op_line_len = 0u;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(STORAGE_KITSET_FILENAME, "r", on_file_opened))
+        op_child_open_result = AFATFS_RESULT_INVALID_NAME;
+        /*
+         * Keep kitset.kcg anchored to the selected Kit directory.
+         *
+         * What: opens the metadata file through the retained directory handle
+         * instead of consulting asyncfatfs' mutable current directory.
+         * Why: the previous fopen() depended on a chdir() that was removed to
+         * prevent parent-handle races; without this child open, Kit Load
+         * silently searched the root and reported KSet errors. Inputs are the
+         * selected Kit parent and fixed metadata filename. Output is one
+         * asynchronous child-file handle in op_file. Affiliates: phases 14/15
+         * close this handle before member files begin; asyncfatfs fopenChild.
+         */
+        if (!afatfs_fopenChild(op_kit_slot_dir,
+                               STORAGE_KITSET_FILENAME,
+                               "r",
+                               AFATFS_OPEN_EXISTING,
+                               AFATFS_MATCH_CASE_INSENSITIVE,
+                               NULL,
+                               on_child_opened))
             return;
         op_phase = 12;
         return;
 
     case 12: /* WAIT kitset.kcg */
         if (!op_file_ready) return;
-        if (op_file == NULL) {
+        if (op_child_open_result != AFATFS_RESULT_OK || op_file == NULL) {
+            /*
+             * Convert the typed child result into the loader's historical
+             * KSet diagnostic while preserving the real failure boundary.
+             * Input is the callback result from phase 11; output is an error
+             * status and a cleanup transition, never a parser call on NULL.
+             * Affiliates: filesystem_readTextLine(), phase 14 close, and the
+             * menu error display.
+             */
             filesystem_setPresetNameInvalid();
             filesystem_makeNamedErrorCode("KSet", op_phase);
             op_close_status = FS_STATUS_ERROR;
@@ -2827,11 +2975,12 @@ static void filesystem_loadKitDirectory_tick(void)
                              * Preset KitMrp completion, Save editor seeding.
                              */
                             scene_setKitDisplayName(&target_scene->kit,
-                                                    kit_slot_name[op_slot]);
+                                                    op_kit_current_display_name);
                         }
                     }
                 }
-                memcpy(preset_currentName, kit_slot_name[op_slot], 8);
+                memcpy(preset_currentName, op_kit_current_display_name,
+                       STORAGE_KIT_DISPLAY_NAME_LEN);
             }
             op_close_status = FS_STATUS_DONE;
             op_phase = 28;
@@ -2847,9 +2996,10 @@ static void filesystem_loadKitDirectory_tick(void)
         op_phase = 17;
         return;
 
-    case 17: /* OPEN INSTRUMENT */
+    case 17: /* OPEN INSTRUMENT RELATIVE TO SELECTED KIT */
         op_file_ready = false;
         op_file = NULL;
+        op_child_open_result = AFATFS_RESULT_INVALID_NAME;
         /*
          * Open Kit member files by the kitset-visible display component.
          *
@@ -2857,22 +3007,24 @@ static void filesystem_loadKitDirectory_tick(void)
          * LFN-aware open path instead of treating it as a short alias.
          *
          * Why: Kit member filenames carry the convention that stem character
-         * eight is the one-based voice number. kitset.kcg now stores that
-         * visible filename, while older 8.3 kitsets still load because
-         * afatfs_fopen_lfn() also matches SFN display names.
+         * eight is the one-based voice number. kitset.kcg stores that visible
+         * filename, while older 8.3 kitsets still load because the child-open
+         * matcher accepts both a valid LFN display and its SFN fallback.
          *
          * Inputs: op_kitset.instrument_file[op_instrument_slot] from the
-         * parsed kitset. Output: op_file receives the matching Instrument file
-         * handle in the selected Kit directory.
+         * parsed kitset plus op_kit_slot_dir. Output: op_file receives the
+         * matching Instrument file handle in the selected Kit directory.
          *
          * Affiliates/clients: storage_kitsetParseLine() and
          * storage_makeSavedInstrumentDisplayFilename().
          */
-        if (!afatfs_fopen_lfn(op_kitset.instrument_file[op_instrument_slot],
-                              "r",
-                              AFATFS_MATCH_CASE_INSENSITIVE,
-                              NULL,
-                              on_file_opened)) {
+        if (!afatfs_fopenChild(op_kit_slot_dir,
+                               op_kitset.instrument_file[op_instrument_slot],
+                               "r",
+                               AFATFS_OPEN_EXISTING,
+                               AFATFS_MATCH_CASE_INSENSITIVE,
+                               NULL,
+                               on_child_opened)) {
             return;
         }
         op_phase = 18;
@@ -2880,7 +3032,13 @@ static void filesystem_loadKitDirectory_tick(void)
 
     case 18: /* WAIT INSTRUMENT */
         if (!op_file_ready) return;
-        if (op_file == NULL) {
+        if (op_child_open_result != AFATFS_RESULT_OK || op_file == NULL) {
+            /*
+             * Reject a missing or wrong-kind member before text parsing.
+             * Inputs are the typed-open callback result and handle; output is
+             * KIns plus the common close/parent cleanup path. Affiliates:
+             * storage_instrumentParseLine(), phases 20/21, and Kit Load UI.
+             */
             filesystem_setPresetNameInvalid();
             filesystem_makeNamedErrorCode("KIns", op_phase);
             op_close_status = FS_STATUS_ERROR;
@@ -2951,7 +3109,66 @@ static void filesystem_loadKitDirectory_tick(void)
         op_phase = 16;
         return;
 
-    case 28: /* RETURN TO ROOT + FINISH */
+    case 28: /* CLOSE SELECTED KIT DIRECTORY */
+        /*
+         * Close the selected Kit before its parent.  This is the ownership
+         * boundary for all member reads: no source object or .names update is
+         * allowed to overlap either directory close. Inputs are the retained
+         * selected handle and pending status; output is a close callback.
+         * Affiliates: phases 29-33 and filesystem_finish().
+         */
+        op_close_done = false;
+        if (op_kit_slot_dir && afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 29u;
+        else if (!op_kit_slot_dir)
+            op_phase = 30u;
+        return;
+
+    case 29: /* WAIT SELECTED KIT DIRECTORY CLOSE */
+        /* The close callback is the only proof that the directory lease ended. */
+        if (!op_close_done) return;
+        op_kit_slot_dir = NULL;
+        op_phase = 30u;
+        return;
+
+    case 30: /* CLOSE Kit/ PARENT */
+        /* Parent close follows child close so asyncfatfs never invalidates a retained parent. */
+        op_close_done = false;
+        if (op_kit_root_dir && afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 31u;
+        else if (!op_kit_root_dir)
+            op_phase = 32u;
+        return;
+
+    case 31: /* WAIT Kit/ PARENT CLOSE */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 32u;
+        return;
+
+    case 32: /* CLOSE EXPLICIT ROOT */
+        /* Root is the final parent lease; release it only after Kit/ is gone. */
+        op_close_done = false;
+        if (op_explicit_root_dir &&
+            afatfs_fclose(op_explicit_root_dir, on_file_closed))
+            op_phase = 33u;
+        else if (!op_explicit_root_dir)
+            op_phase = 34u;
+        return;
+
+    case 33: /* WAIT EXPLICIT ROOT CLOSE */
+        if (!op_close_done) return;
+        op_explicit_root_dir = NULL;
+        op_phase = 34u;
+        return;
+
+    case 34: /* RESTORE LEGACY ROOT VIEW + FINISH */
+        /*
+         * Keep legacy callers' cwd deterministic even though this loader used
+         * explicit parents. Inputs are no handles; output is the final status
+         * after all asyncfatfs leases are closed. Affiliates: subsequent menu
+         * operations and the common filesystem_finish() dispatcher.
+         */
         if (!afatfs_chdir(NULL))
             return;
         filesystem_finish(op_close_status);
@@ -4845,7 +5062,7 @@ static void filesystem_loadInstrument_tick(void)
         op_child_open_result = AFATFS_RESULT_INVALID_NAME;
         if (!afatfs_openDirChild(op_explicit_root_dir,
                                  STORAGE_ROOT_INSTRUMENT,
-                                 AFATFS_MATCH_CASE_SENSITIVE,
+                                 AFATFS_MATCH_CASE_INSENSITIVE,
                                  NULL,
                                  on_child_opened))
             return;
@@ -4861,23 +5078,28 @@ static void filesystem_loadInstrument_tick(void)
             return;
         }
         op_kit_root_dir = op_file;
-        memset(op_instrument_previous_name, 0,
-               sizeof(op_instrument_previous_name));
-        memset(op_instrument_best_name, 0,
-               sizeof(op_instrument_best_name));
-        op_instrument_best_valid = 0u;
+        /*
+         * Start a physical-order ordinal scan with no resident name list.
+         *
+         * Inputs: the request-time Instrument type and browser ordinal.
+         * Output: op_instrument_resolve_pass counts only matching files until
+         * the selected current object is encountered. The iterator owns the
+         * full asyncfatfs object identity; filesystem.c does not copy a long
+         * name or alias into a second cache. Affiliate: case-ordered browser
+         * display was intentionally replaced by this bounded scan to satisfy
+         * the one-current-name SRAM rule.
+         */
         op_instrument_resolve_pass = 0u;
         afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
         op_phase = 3;
         return;
 
-    case 3: /* SCAN ONE PASS AND RETAIN ONLY ITS LOWEST ELIGIBLE OBJECT */
+    case 3: /* SCAN UNTIL THE REQUESTED PHYSICAL-ORDER OBJECT */
     {
         afatfsOperationStatus_e find_status =
             afatfs_findNextObject(op_kit_root_dir,
                                   &op_object_finder,
                                   &op_object);
-        char candidate[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 
         if (find_status == AFATFS_OPERATION_IN_PROGRESS)
             return;
@@ -4889,44 +5111,9 @@ static void filesystem_loadInstrument_tick(void)
         }
         if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
-            if (!op_instrument_best_valid) {
-                /* Fewer real unique objects exist than the requested ordinal. */
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 12u;
-                return;
-            }
-            if (op_instrument_resolve_pass == op_instrument_load_index) {
-                /*
-                 * Preserve the complete validated identity for the immediate
-                 * parent-relative open. The parent stays open and unmodified,
-                 * so displayName still denotes the selected physical entry;
-                 * no alias or multi-row list survives this operation.
-                 */
-                op_instrument_resolved_object = op_instrument_best_object;
-                filesystem_copyInstrumentStemDisplay(
-                    op_staged_instrument_display_name,
-                    op_instrument_resolved_object.id.displayName);
-                filesystem_copyInstrumentStem16(
-                    op_staged_instrument_stem,
-                    op_instrument_resolved_object.id.displayName);
-                op_phase = 4u;
-                return;
-            }
-
-            /*
-             * Advance one ordinal with O(1) name storage.
-             * The previous eight-byte display key excludes every same-folded
-             * duplicate on the next complete pass. Incrementing the pass only
-             * after EOF means one pass selects exactly one product row.
-             */
-            memcpy(op_instrument_previous_name,
-                   op_instrument_best_name,
-                   sizeof(op_instrument_previous_name));
-            op_instrument_resolve_pass++;
-            op_instrument_best_valid = 0u;
-            memset(op_instrument_best_name, 0,
-                   sizeof(op_instrument_best_name));
-            afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
+            /* The requested ordinal was not present in the live tree. */
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 12u;
             return;
         }
 
@@ -4935,38 +5122,25 @@ static void filesystem_loadInstrument_tick(void)
                 op_object.id.displayName) != op_instrument_load_type) {
             return;
         }
-        filesystem_copyInstrumentStemDisplay(candidate,
-                                             op_object.id.displayName);
         /*
-         * Candidate eligibility and minimum selection.
-         * A same-casefold key as `previous` is the duplicate object already
-         * represented by the preceding ordinal. Among eligible candidates,
-         * folded-then-raw ordering retains the deterministic capital-first
-         * representative while storing only one object and one eight-byte key.
+         * Count one matching object and consume it immediately at the selected
+         * ordinal. The arithmetic is deliberately one increment per eligible
+         * file: no sorted list, duplicate-name table, or second comparison key
+         * is needed. The current object remains owned by asyncfatfs while this
+         * call copies its eight-character display stem and queues the typed
+         * child open. The current object is held only until the retry/open
+         * phase accepts it; no directory list survives the request.
          */
-        if (op_instrument_resolve_pass > 0u &&
-            fat_compareDisplayName(candidate,
-                                   op_instrument_previous_name,
-                                   false) == 0) {
+        if (op_instrument_resolve_pass != op_instrument_load_index) {
+            op_instrument_resolve_pass++;
             return;
         }
-        if (op_instrument_resolve_pass > 0u &&
-            filesystem_compareInstrumentDisplayName(
-                candidate, op_instrument_previous_name) <= 0) {
-            return;
-        }
-        if (!op_instrument_best_valid ||
-            filesystem_compareInstrumentDisplayName(
-                candidate, op_instrument_best_name) < 0) {
-            memcpy(op_instrument_best_name, candidate,
-                   sizeof(op_instrument_best_name));
-            op_instrument_best_object = op_object;
-            op_instrument_best_valid = 1u;
-        }
-        return;
-    }
-
-    case 4: /* OPEN SELECTED REAL-TREE OBJECT RELATIVE TO `/Instrument` */
+        filesystem_copyInstrumentStemDisplay(
+            op_staged_instrument_display_name,
+            op_object.id.displayName);
+        filesystem_copyInstrumentStemDisplay(
+            op_staged_instrument_stem,
+            op_object.id.displayName);
         storage_instrumentStateInit(&op_instrument_state,
                                     op_instrument_load_type,
                                     (uint8_t)(op_instrument_load_destination_slot + 1u));
@@ -4977,30 +5151,52 @@ static void filesystem_loadInstrument_tick(void)
         op_file_ready = false;
         op_file = NULL;
         op_child_open_result = AFATFS_RESULT_INVALID_NAME;
+        op_instrument_load_alias_attempted = 0u;
+        op_phase = 4u;
+        return;
+    }
+
+    case 4: /* OPEN SELECTED CURRENT OBJECT RELATIVE TO `/Instrument` */
         /*
-         * Open the selected Instrument file while its scanned parent is stable.
+         * Retry the typed child open without advancing the iterator.
          *
-         * Inputs are the component copied from the winning object and the
-         * still-open explicit parent. OPEN_EXISTING forbids accidental create;
-         * CASE_SENSITIVE prevents a case variant from replacing the selected
-         * representative. Output arrives through the structured result latch.
+         * Inputs are the one current asyncfatfs object and its explicit parent;
+         * a false return means the shared async engine is temporarily busy, so
+         * the object must remain untouched for the next foreground tick.
+         * Outputs are the callback result consumed by phase 5. The first try
+         * uses the display component; phase 5 may request exactly one SFN
+         * fallback for cards whose VFAT display chain cannot be reopened.
+         * This phase is separate from the scan loop so a transient open retry
+         * cannot skip the selected ordinal.
          */
         if (!afatfs_fopenChild(
                 op_kit_root_dir,
-                op_instrument_resolved_object.id.displayName,
+                op_instrument_load_alias_attempted
+                    ? op_object.id.shortName
+                    : op_object.id.displayName,
                 "r",
                 AFATFS_OPEN_EXISTING,
-                AFATFS_MATCH_CASE_SENSITIVE,
+                AFATFS_MATCH_CASE_INSENSITIVE,
                 NULL,
                 on_child_opened)) {
             return;
         }
-        op_phase = 5;
+        op_phase = 5u;
         return;
 
     case 5: /* WAIT SELECTED INSTRUMENT */
         if (!op_file_ready) return;
         if (op_child_open_result != AFATFS_RESULT_OK || !op_file) {
+            if (!op_instrument_load_alias_attempted &&
+                op_object.id.shortName[0] != '\0') {
+                /* Retry the same current object by its physical SFN alias. */
+                op_instrument_load_alias_attempted = 1u;
+                op_file_ready = false;
+                op_file = NULL;
+                op_child_open_result = AFATFS_RESULT_INVALID_NAME;
+                op_phase = 4u;
+                return;
+            }
             op_close_status = FS_STATUS_ERROR;
             op_phase = 12u;
             return;
@@ -5060,6 +5256,18 @@ static void filesystem_loadInstrument_tick(void)
         return;
 
     case 12: /* CLOSE `/Instrument` AFTER ITS SELECTED CHILD */
+        /*
+         * A failed `/Instrument` typed open leaves no child directory handle.
+         * Skip directly to explicit-root cleanup in that case; calling
+         * afatfs_fclose(NULL, ...) would never produce the callback required by
+         * phase 13 and would recreate the load hang. Input is the optional
+         * parent handle from phase 2; output is the next owned close phase.
+         * Affiliate: phase 14 root close and filesystem_finish().
+         */
+        if (!op_kit_root_dir) {
+            op_phase = 14u;
+            return;
+        }
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
             op_phase = 13u;
@@ -10278,6 +10486,115 @@ static void filesystem_scanBanks_tick(void)
 ** Instrument/ is a successful empty scan so the Load Instrument UI can show an
 ** empty list instead of a filesystem error.
 ** ----------------------------------------------------------------------- */
+static void filesystem_resolveInstrumentName_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* RETURN TO ROOT BEFORE THE ONE-OBJECT RESOLUTION */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1;
+        return;
+
+    case 1: /* OPEN `/Instrument` FOR THE CURRENT REQUEST */
+        op_file_ready = false;
+        op_file = NULL;
+        memset(op_root_open_name, 0, sizeof(op_root_open_name));
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_INSTRUMENT,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                op_root_open_name,
+                                on_file_opened))
+            return;
+        op_phase = 2;
+        return;
+
+    case 2: /* WAIT DIRECTORY AND INITIALIZE A PHYSICAL-ORDER COUNTER */
+        if (!op_file_ready)
+            return;
+        if (op_file == NULL) {
+            /* Missing `/Instrument` is an empty browser result, not stale text. */
+            op_staged_instrument_display_name[0] = '\0';
+            op_staged_instrument_stem[0] = '\0';
+            op_close_status = FS_STATUS_DONE;
+            op_kit_root_dir = NULL;
+            op_phase = 8u;
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_instrument_resolve_current_idx = 0u;
+        /* The finder owns one current object; no list or candidate names exist. */
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
+        op_phase = 3;
+        return;
+
+    case 3: /* FIND THE REQUESTED CURRENT OBJECT WITHOUT CACHING A LIST */
+    {
+        afatfsOperationStatus_e st =
+            afatfs_findNextObject(op_kit_root_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE || op_object.id.kind == AFATFS_OBJECT_NONE) {
+            /* Ordinal absent or scan failure: close cleanly and expose spaces. */
+            op_staged_instrument_display_name[0] = '\0';
+            op_staged_instrument_stem[0] = '\0';
+            op_close_status = (st == AFATFS_OPERATION_FAILURE)
+                ? FS_STATUS_ERROR : FS_STATUS_DONE;
+            op_phase = 6u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_FILE) {
+            instrument_type_t t =
+                filesystem_instrumentTypeFromFilename(op_object.id.displayName);
+            if (t == op_instrument_resolve_type) {
+                if (op_instrument_resolve_current_idx ==
+                    op_instrument_resolve_ordinal) {
+                    /* Copy only the eight-character current display identity. */
+                    filesystem_copyInstrumentStemDisplay(
+                        op_staged_instrument_display_name,
+                        op_object.id.displayName);
+                    filesystem_copyInstrumentStemDisplay(
+                        op_staged_instrument_stem,
+                        op_object.id.displayName);
+                    op_instrument_resolved_generation =
+                        op_instrument_resolve_generation;
+                    op_close_status = FS_STATUS_DONE;
+                    op_phase = 6u;
+                    return;
+                }
+                /* Mathematical invariant: one increment equals one matching file. */
+                op_instrument_resolve_current_idx++;
+            }
+        }
+        return;
+    }
+
+    case 6: /* START CLOSE OF THE ONE CURRENT DIRECTORY HANDLE */
+        if (!op_kit_root_dir) {
+            op_phase = 8u;
+            return;
+        }
+        op_close_done = false;
+        if (!afatfs_fclose(op_kit_root_dir, on_file_closed))
+            return;
+        op_phase = 7u;
+        return;
+
+    case 7: /* WAIT CLOSE BEFORE RESTORING ROOT */
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        op_phase = 8u;
+        return;
+
+    case 8: /* RESTORE CURRENT DIRECTORY AND COMPLETE */
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(op_close_status);
+        return;
+    }
+}
+
 static void filesystem_scanInstruments_tick(void)
 {
     switch (op_phase) {
@@ -12212,6 +12529,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_SCAN_INSTRUMENTS:
         filesystem_scanInstruments_tick();
         break;
+    case FS_INTERNAL_OP_RESOLVE_INSTRUMENT_NAME:
+        filesystem_resolveInstrumentName_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_NAME:
         filesystem_loadName_tick();
         break;
@@ -12361,14 +12681,26 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_rename_done = 0u;
     op_kit_root_dir = NULL;
     op_kit_slot_dir = NULL;
+    /*
+     * Clear the explicit-root lease before accepting a new operation.
+     *
+     * Inputs: none beyond the invariant that filesystem_start() runs only
+     * while idle. Output: no new state machine can mistake a prior root handle
+     * for its own parent after a completed close chain. Affiliates: Instrument
+     * Load, Kit Load, staged replace, and all phase-specific fclose callbacks.
+     */
+    op_explicit_root_dir = NULL;
     op_lfn_valid = 0;
     op_line_len = 0;
     op_instrument_slot = 0;
     op_kit_load_scene_mask = 0u;
+    /* Flush the one current Kit display before another live-tree resolution. */
+    memset(op_kit_current_display_name, 0, sizeof(op_kit_current_display_name));
     op_instrument_load_destination_slot = 0u;
     op_instrument_load_destination_scene = 0u;
     op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
     op_instrument_load_index = 0u;
+    op_instrument_load_alias_attempted = 0u;
     op_instrument_save_source_scene = 0u;
     op_instrument_save_source_slot = 0u;
     op_instrument_save_type = INSTRUMENT_TYPE_UNKNOWN;
@@ -12743,10 +13075,8 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb)
     if (status == FS_STATUS_BUSY) return false;
     /* The scan cache is authoritative for directory kits. Clear it before
     ** starting so a failed or missing Kit/ folder cannot leave stale kit names
-    ** visible in the Load page. kb_numKits is cleared for the legacy
-    ** kitBrowser compatibility map populated by filesystem_recordKitDirectory().
+    ** visible in the Load page.
     */
-    kb_numKits = 0;
     memset(kit_slot_present, 0, sizeof(kit_slot_present));
     memset(kit_slot_name, 0, sizeof(kit_slot_name));
     memset(kit_slot_open_name, 0, sizeof(kit_slot_open_name));
@@ -12821,6 +13151,40 @@ uint16_t filesystem_bankChildSceneMask(void)
      * this value.
      */
     return op_bank_child_present_mask;
+}
+
+bool filesystem_requestResolveInstrumentName(instrument_type_t type,
+                                             uint16_t ordinal,
+                                             uint32_t generation,
+                                             fs_completion_cb_t cb)
+{
+    /*
+     * Start a one-name browser lookup with post-start request capture.
+     *
+     * What changed: filesystem_start() runs before resolver fields are
+     * assigned. Why: filesystem_start() resets payload-load scratch, including
+     * the old shared type field; assigning first silently converted every
+     * resolver request to INSTRUMENT_TYPE_UNKNOWN. Inputs are the Menu type,
+     * physical-order ordinal, generation, and completion callback. Outputs are
+     * one eight-character current name and a matching generation latch.
+     * Affiliates: filesystem_resolveInstrumentName_tick(),
+     * filesystem_instrumentName(), and menu_pollPresetStatus().
+     */
+    if (status == FS_STATUS_BUSY || type >= INSTRUMENT_TYPE_UNKNOWN ||
+        ordinal >= instrument_file_count[type])
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_RESOLVE_INSTRUMENT_NAME,
+                          FS_FILE_KIT,
+                          0u,
+                          cb))
+        return false;
+    op_instrument_resolve_type = type;
+    op_instrument_resolve_ordinal = ordinal;
+    op_instrument_resolve_generation = generation;
+    op_instrument_resolved_generation = 0u;
+    op_staged_instrument_display_name[0] = '\0';
+    op_staged_instrument_stem[0] = '\0';
+    return true;
 }
 
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
@@ -13067,7 +13431,17 @@ bool filesystem_requestUpdateInstrumentNames(
     }
     memset(&op_instrument_names_update, 0,
            sizeof(op_instrument_names_update));
-    while (i < SCENE_INSTRUMENT_STEM_LEN && source_stem[i] != '\0') {
+    /*
+     * Copy only one LCD-width identity into the pending register update.
+     *
+     * Inputs are an extension-free source stem from the completed payload
+     * transaction. The eight-byte bound is both the display contract and the
+     * SRAM contract; longer FAT names are re-resolved later if their full
+     * location is needed, never cached here. Output is one sanitized record
+     * value for namesRegister. Affiliate: preset_tickInstrumentApply() and
+     * the resident Instrument `.names` cells.
+     */
+    while (i < STORAGE_KIT_DISPLAY_NAME_LEN && source_stem[i] != '\0') {
         char c = source_stem[i];
         if (c == '/' || c == '\\' || c == '.')
             return false;
@@ -13476,25 +13850,24 @@ uint8_t filesystem_instrumentCount(instrument_type_t type)
 const char *filesystem_instrumentName(instrument_type_t type,
                                       uint8_t browser_index)
 {
-    /*
-     * Return the one most recently real-tree-resolved Instrument display name.
-     *
-     * Inputs: instrument type and zero-based browser index. Output: an
-     * eight-character NUL-terminated stem only when it matches the most recent
-     * successful load coordinate; otherwise "Loading " avoids presenting a
-     * stale row from a different ordinal. This one operation result is bounded
-     * scratch, not a multi-entry name cache. Affiliates: cacheless load resolver
-     * and the forthcoming generation-tagged Menu-only resolver.
-     */
     if (type >= INSTRUMENT_TYPE_UNKNOWN ||
         browser_index >= instrument_file_count[type])
         return "Empty   ";
-    if (type == op_instrument_load_type &&
-        browser_index == op_instrument_load_index &&
+    /*
+     * Publish only the current generation's single eight-character result.
+     *
+     * Inputs: Menu's current type and ordinal. Output: the resolver field only
+     * when both coordinates and generation still match; otherwise a padded
+     * pending field prevents stale payload names from appearing on another row.
+     * Affiliate: menu repaint callbacks may run after a newer encoder tick.
+     */
+    if (type == op_instrument_resolve_type &&
+        browser_index == op_instrument_resolve_ordinal &&
+        op_instrument_resolve_generation == op_instrument_resolved_generation &&
         op_staged_instrument_display_name[0] != '\0') {
         return op_staged_instrument_display_name;
     }
-    return "Loading ";
+    return "        ";
 }
 
 uint16_t filesystem_instrumentDisplayIndex(instrument_type_t type,
@@ -13574,23 +13947,3 @@ uint8_t filesystem_diagRawCmd0(void)
     return resp;
 }
 #endif
-#include "kitBrowser.h"
-/* Compatibility bridge to the existing kitBrowser map.
- *
- * The Phase 2 scan now discovers Kit/ directories, but kitBrowser still expects
- * kb_map/kb_numKits to describe the slots that exist. filesystem_recordKit-
- * Directory() populates both the new scan cache and this legacy map until the
- * browser is rewritten around the new filesystem contract.
- */
-extern uint16_t kb_map[];
-extern uint16_t kb_numKits;
-        memcpy(preset_currentName, scene_slot_name[op_slot], 8u);
-        memcpy(op_scene_display_name, scene_slot_name[op_slot],
-               STORAGE_SCENE_DISPLAY_NAME_LEN);
-        op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-        filesystem_makeNumberedDir(op_root_open_name,
-                                   op_slot,
-                                   scene_slot_name[op_slot]);
-        filesystem_makeNumberedDir(op_root_open_name,
-                                   op_slot,
-                                   scene_slot_name[op_slot]);

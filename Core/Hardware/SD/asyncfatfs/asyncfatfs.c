@@ -4327,6 +4327,33 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                             AFATFS_MATCH_CASE_SENSITIVE) == 0) {
                                     displayMatches = 1u;
                                 }
+                                /*
+                                 * Preserve the one-object browser contract
+                                 * when a caller reopens that object by its
+                                 * cached SFN alias.  The iterator exposes both
+                                 * the validated LFN display and its physical
+                                 * short alias; matching only the LFN would
+                                 * make a selected Kit or Instrument directory
+                                 * appear in the list but fail on OK. Inputs
+                                 * are the current FAT entry and requested
+                                 * alias; output is the same displayMatches
+                                 * decision used by the typed child open.
+                                 * Affiliates: findNextObject(),
+                                 * openDirChild(), and filesystem Kit Load.
+                                 */
+                                if (!displayMatches) {
+                                    afatfs_copyShortAliasText(
+                                        (const uint8_t *)entry->filename,
+                                        entry->ntReserved,
+                                        shortDisplay);
+                                    if (fat_compareDisplayName(
+                                            shortDisplay,
+                                            opState->longName,
+                                            opState->matchMode ==
+                                                AFATFS_MATCH_CASE_SENSITIVE) == 0) {
+                                        displayMatches = 1u;
+                                    }
+                                }
                             } else {
                                 afatfs_copyShortAliasText(
                                     (const uint8_t *)entry->filename,
