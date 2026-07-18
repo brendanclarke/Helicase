@@ -101,6 +101,18 @@ typedef enum {
 typedef void (*fs_completion_cb_t)(void);
 
 uint8_t     filesystem_initCardAndMountBlocking(void);
+/*
+ * Validate or create the SD-root resident source-name register before audio.
+ *
+ * What: pumps the bounded namesRegister mount state machine through the same
+ * single asyncfatfs context used by normal filesystem work. Why: `.names` must
+ * have one committed snapshot before Bank/Scene/Kit boot loading starts
+ * changing resident identities. Input is an already READY mounted filesystem;
+ * output is nonzero only after a valid snapshot or deterministic default file
+ * is synced. Affiliates: namesRegister_startMount(), main.c boot ordering, and
+ * later asynchronous resident-name reads/updates.
+ */
+uint8_t     filesystem_initNamesBlocking(void);
 void        filesystem_initAfterCardReady(void);
 void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
@@ -277,6 +289,23 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       instrument_type_t type,
                                       uint8_t browser_index,
                                       fs_completion_cb_t cb);
+/*
+ * Persist one distinct Instrument source stem after resident payload commit.
+ *
+ * What: writes the extension-free source name to the selected Scene-mask's
+ * voice cells in the root `.names` register. Why: payload commit belongs to
+ * Preset, so Instrument Load cannot publish resident identity while it is only
+ * parsing staging data. Inputs are resident Scene bits, a 0..5 voice slot, and
+ * a 1..16 byte stem; no library ordinal/path/location is accepted. Output is an
+ * asynchronous atomic register generation and callback after durable sync.
+ * Affiliates: preset_tickInstrumentApply(), namesRegister, normal Load only;
+ * InstrumentMrp deliberately never calls this API.
+ */
+bool filesystem_requestUpdateInstrumentNames(
+    uint16_t destination_scene_mask,
+    uint8_t destination_slot,
+    const char *source_stem,
+    fs_completion_cb_t cb);
 /*
  * Save one resident kit voice as a root Instrument/ file.
  *

@@ -85,3 +85,107 @@ card, and confirm that exactly one correctly named `NNN Name/` folder contains
 `kitset.kcg` plus all six current Instrument files. A nested Scene overwrite is
 also recommended because it exercises child-directory descend/ascend rather
 than only the flat Kit tree.
+
+## 6. Phases 5-6 Reduced-RAM Implementation
+
+Work began on 2026-07-18 to add native recursive tree copy and recoverable
+directory replacement without growing the 7,804-byte `afatfs` object toward the
+earlier approximately 12 KB estimate.
+
+The implementation design intentionally accepts slower save-time traversal:
+
+- copy data moves through one 96-byte buffer rather than a full 512-byte
+  sector buffer;
+- only the active directory owns a complete 68-byte LFN finder;
+- each of the eight traversal levels stores a compact resume key (parent
+  clusters plus the copied child's physical SFN key), then rescans the source
+  parent after ascent instead of retaining a full object/finder pair;
+- copy and replace/recovery execution storage share a union because commit or
+  recovery cannot run concurrently with a copy operation;
+- the small transaction descriptor remains separate so callers may populate a
+  staging directory, including by tree copy, between begin and commit;
+- scratch names are regenerated from one nonce and journal records are handled
+  in the shared 96-byte workspace rather than stored in several permanent name
+  arrays.
+
+### Phase 5 tree copy
+
+`afatfs_copyObjectTree()` is now a real global coordinator rather than a
+per-file placeholder. It validates the root's physical SFN fingerprint, creates
+the destination with `CREATE_NEW`, preserves supported attributes/timestamps,
+and streams file bytes without parsing them. Files, empty directories, nested
+directories, zero-byte files, FAT16/FAT32 ordinary directory clusters, depth
+errors, destination collisions, no-space errors, and optional durable-copy sync
+all have explicit state-machine paths.
+
+The active source finder is released before every child operation or directory
+rebind. On descent a 28-byte frame records the two parent clusters and the
+source child's physical SFN resume key. On ascent the source parent is rescanned
+until sector/index/raw-SFN all match that key, then iteration continues after
+the completed child. Partial destinations deliberately survive errors so a
+transaction abort or diagnostic caller—not a generic copy error path—decides
+whether to erase evidence.
+
+The open-file pool is six slots because the maximum nested-file state owns two
+caller parents, two active directory cursors, and the source/destination file
+pair simultaneously. Five slots would make destination-file allocation retry
+forever only after a copy reached a nested file. Reducing the shared stream
+buffer from 128 to 96 bytes offsets part of that required handle.
+
+### Phase 6 recoverable replace
+
+The public async API now exposes begin, commit, abort, and explicit known-parent
+recovery with one opaque transaction descriptor. Begin always creates a fresh
+`.afat-xxxxxxxx-new` directory; it advances the nonce on `CREATE_NEW` collision
+and never adopts stale scratch. Commit rejects an unfinished older journal and
+preflights the corresponding `-old` name before it writes PREPARED.
+
+Two fixed same-parent files, `AFATJ0.SYS` and `AFATJ1.SYS`, alternate packed
+69-byte records containing magic, version, sequence, state, object kind, nonce,
+target component, and reflected CRC-32. The commit order is staged-payload sync,
+PREPARED, old-target rename/sync, OLD_RENAMED, staging promotion/sync, PROMOTED,
+old-tree delete/sync, then CLEAN. Completion waits for CLEAN rather than
+reporting while cleanup is still active.
+
+Recovery selects the highest-sequence valid record, rejects conflicting equal
+sequences and invalid target components, and handles power loss on either side
+of every rename/journal update. PREPARED preserves/restores the old target;
+OLD_RENAMED promotes new or restores old; PROMOTED retains the promoted target
+and removes exact old scratch. With no authoritative record, reserved scratch is
+reported as `RECOVERY_REQUIRED` and is never guessed/deleted. Abort before
+PREPARED deletes only its exact new identity; abort after commit begins uses the
+journal recovery rules.
+
+`afatfs_destroy(false)` now lets a live coordinator release its own handle graph
+and converts an idle begun transaction into an exact abort before closing
+ordinary handles. This prevents shutdown from closing source/destination or
+journal handles underneath their callbacks, and prevents a retained staging
+parent from making clean destroy wait forever.
+
+### RAM and build measurements
+
+- Phase 4 baseline `afatfs`: 7,804 bytes (`0x1e7c`).
+- Final `afatfs`: 8,880 bytes (`0x22b0`), an increase of 1,076 bytes.
+- Shared copy/replace workspace: 640 bytes; copy arm 540 bytes; replace arm
+  340 bytes; transaction descriptor 68 bytes; traversal frame 28 bytes;
+  journal record 69 bytes.
+- Final firmware after the implementation build: text 367,752 bytes, data 408
+  bytes, BSS 364,908 bytes. The exact text value may move slightly with later
+  comment-only/documentation or LTO rebuilds; the static RAM sizes are ABI
+  measurements from the ARM compiler.
+
+The 8,880-byte result is 120 bytes below the 9 KB decimal target and roughly
+3.5 KB below the original approximately 12 KB design estimate.
+
+### Verification status
+
+Both incremental and clean `make -j4` firmware builds link successfully;
+`make img` regenerated `build/LXRV2_lxr02.img` from the 368,160-byte packaged
+payload,
+and `git diff --check` is clean. The implementation adds no compiler diagnostic
+beyond the repository's existing
+unused asyncfatfs `eraseCount`, filesystem dead-code, USB packed-pointer, LTO,
+newlib syscall-stub, and similar pre-existing warnings. A final clean build,
+image packaging, and static ABI measurement have completed. The hardware and
+fault-injection matrix remains required because power-cut behavior cannot be
+proven by the compiler alone.

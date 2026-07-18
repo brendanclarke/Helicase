@@ -6,6 +6,17 @@
 #include "fat_standard.h"
 
 typedef struct afatfsFile_t *afatfsFilePtr_t;
+/*
+ * Explicit directory-parent handle alias.
+ *
+ * What: directory handles use the same opaque storage as file handles. Why:
+ * parent-relative copy/replace APIs need to state directory intent without
+ * exposing afatfsFile_t internals or creating a second handle representation.
+ * Inputs/outputs: callers receive this pointer from directory open/create and
+ * pass it unchanged as a parent; ownership rules remain those of the underlying
+ * file handle. Affiliates: child APIs, recursive copy, and replace recovery.
+ */
+typedef afatfsFilePtr_t afatfsDirHandle_t;
 
 typedef enum {
     AFATFS_FILESYSTEM_STATE_UNKNOWN,
@@ -167,6 +178,48 @@ typedef void (*afatfsObjectResultCallback_t)(afatfsResultCode_t result,
                                              const afatfsObjectId_t *object);
 
 /*
+ * Recursive-copy completion policy.
+ *
+ * What: AFATFS_COPY_DURABLE adds an explicit cache-to-card sync after every
+ * destination handle has closed; AFATFS_COPY_DEFAULT leaves that barrier to a
+ * surrounding replace transaction. Why: standalone diagnostics need a durable
+ * completion, while transaction builders already sync once before promotion
+ * and should not duplicate card traffic. Inputs: bitwise flags supplied to
+ * afatfs_copyObjectTree(). Output: the callback still reports one structured
+ * result. Affiliates: afatfs_sync() and tree-replace PREPARED ordering.
+ */
+typedef enum {
+    AFATFS_COPY_DEFAULT = 0u,
+    AFATFS_COPY_DURABLE = 1u << 0,
+} afatfsCopyFlags_t;
+
+/*
+ * Opaque handle for the one supported staged directory replacement.
+ *
+ * What: callers receive this pointer after asyncfatfs has created a guaranteed
+ * new scratch directory. Why: begin requires card I/O and therefore cannot
+ * return a populated transaction synchronously. Lifetime: the pointer refers
+ * to driver-owned static storage and is valid until commit or abort completes;
+ * callers must not copy or inspect it. Affiliates: begin/commit/abort below,
+ * explicit recovery, and the staging directory returned with begin.
+ */
+typedef struct afatfsReplaceTransaction *afatfsReplaceTransactionPtr_t;
+
+/*
+ * Completion for asynchronous replacement begin.
+ *
+ * Inputs: result is the precise begin outcome. On OK, transaction and
+ * stagingDirectory are non-NULL and stagingDirectory is an ordinary open
+ * directory that may be passed to parent-relative create/copy APIs. Outputs:
+ * errors return both pointers as NULL after all internal ownership is released.
+ * Affiliates: afatfs_beginTreeReplace() and afatfs_commitTreeReplace().
+ */
+typedef void (*afatfsReplaceBeginCallback_t)(
+    afatfsResultCode_t result,
+    afatfsReplaceTransactionPtr_t transaction,
+    afatfsDirHandle_t stagingDirectory);
+
+/*
  * Scope selector for afatfs_removeObjects_lfn().
  *
  * AFATFS_REMOVE_FILES_ONLY is the current production overwrite mode: matching
@@ -232,7 +285,21 @@ typedef enum {
 typedef void (*afatfsFileCallback_t)(afatfsFilePtr_t file);
 typedef void (*afatfsCallback_t)();
 
-typedef afatfsFilePtr_t afatfsDirHandle_t;
+/*
+ * Acquire an independent handle for the mounted filesystem root.
+ *
+ * What: allocates one ordinary directory handle representing FAT16's fixed
+ * root extent or FAT32's root cluster without changing asyncfatfs' legacy
+ * process-wide current directory. Why: parent-relative product operations need
+ * an explicit root from which they can open `.names`, Instrument, Kit, Scene,
+ * and Bank children; bootstrapping those graphs through chdir would reintroduce
+ * global location state. Inputs: the filesystem must be READY and one open-file
+ * pool entry must be free. Output: caller-owned directory handle, or NULL when
+ * acquisition cannot start; close it with afatfs_fclose() after every child is
+ * closed. Affiliates: afatfs_fopenChild(), afatfs_openDirChild(),
+ * afatfs_createDirChild(), tree-replace recovery, and filesystem.c.
+ */
+afatfsDirHandle_t afatfs_openRoot(void);
 
 bool afatfs_fopen(const char *filename, const char *mode, afatfsFileCallback_t complete);
 bool afatfs_fopen_lfn(const char *displayName,
@@ -517,14 +584,86 @@ bool afatfs_deleteTree(const afatfsObjectId_t *root, afatfsResultCallback_t cb);
 uint8_t afatfs_getDeleteTreePhase(void);
 
 /*
- * Multi-parent operation availability boundary.
+ * Copy one exact file or directory tree into an explicit destination parent.
  *
- * Recursive copy and recoverable replace are intentionally not declared until
- * their global coordinators exist. (Cross-parent move is now implemented above
- * through the rename coordinator.) The previous declarations either had no
- * definition or queued an operation whose continuation was empty, so a
- * successful start could never deliver its promised callback. Keeping the
- * boundary visible here makes incomplete features fail during compilation
- * instead of becoming a filesystem timeout on hardware. Affiliates: expansion
- * Phases 5-6 and the coordinator state in asyncfatfs.c.
+ * What: validates source in sourceParent, creates destinationName with
+ * CREATE_NEW semantics, then copies file bytes or recursively recreates a
+ * directory tree. Why: Bank/Scene preservation must not parse and reserialize
+ * unknown files. Inputs: both parents must be open idle directories; source is
+ * copied at start; destinationName is one component; flags selects the final
+ * sync boundary. Outputs/lifetime: false accepts nothing and gives no callback;
+ * true retains both parents until exactly one callback. A failure deliberately
+ * leaves its partial destination for transaction abort or diagnosis.
+ *
+ * RAM/latency: the implementation uses a 96-byte stream buffer, one active LFN
+ * finder, and compact depth frames. Directory ascent therefore rescans the
+ * source parent to its saved physical SFN key. This is slower but keeps the
+ * complete filesystem object under the project's 9 KB target.
+ * Affiliates: afatfs_findNextObject(), child create APIs, afatfs_fread(),
+ * afatfs_fwrite(), AFATFS_TREE_DEPTH_MAX, and replace staging.
  */
+bool afatfs_copyObjectTree(afatfsDirHandle_t sourceParent,
+                           const afatfsObjectId_t *source,
+                           afatfsDirHandle_t destinationParent,
+                           const char *destinationName,
+                           afatfsCopyFlags_t flags,
+                           afatfsResultCallback_t complete);
+
+/*
+ * Begin one crash-recoverable staged directory replacement.
+ *
+ * What: creates a nonce-derived `.afat-...-new` child with CREATE_NEW and
+ * returns it with an opaque transaction. Existing scratch collisions cause a
+ * new nonce attempt; stale scratch is never reopened. Why: product save code
+ * must build a clean tree rather than merge into the live target or an old temp
+ * directory. Inputs: parent is an explicit open directory and targetDisplayName
+ * is copied as one component. Outputs: accepted calls callback exactly once;
+ * on OK the caller owns stagingDirectory until commit/abort is requested.
+ * Affiliates: child creation, tree copy, commit journaling, and recovery.
+ */
+bool afatfs_beginTreeReplace(afatfsDirHandle_t parent,
+                             const char *targetDisplayName,
+                             afatfsReplaceBeginCallback_t complete);
+
+/*
+ * Commit one begun replacement using journaled FAT-realistic ordering.
+ *
+ * What: syncs the staged payload, alternates CRC-protected journal records,
+ * moves the old target aside by identity, promotes staging, removes the old
+ * tree, and records CLEAN. Why: FAT cannot atomically rename two arbitrary LFN
+ * objects, so recovery data must make every power-loss boundary deterministic.
+ * Input transaction must be the active pointer returned by begin and all child
+ * handles beneath staging must be closed. Output true guarantees one result
+ * callback; OK means the promoted target and cleanup state are synced.
+ * Affiliates: afatfs_sync(), afatfs_moveObject(), afatfs_deleteTree(), and
+ * afatfs_recoverTreeReplace().
+ */
+bool afatfs_commitTreeReplace(afatfsReplaceTransactionPtr_t transaction,
+                              afatfsResultCallback_t complete);
+
+/*
+ * Abort one begun replacement without endangering the live target.
+ *
+ * What: before promotion starts, deletes only this transaction's exact staging
+ * tree and records clean completion. If commit has retired the target, abort
+ * switches to the same deterministic recovery rules as remount recovery. Why:
+ * blindly deleting scratch after OLD_RENAMED could discard the only complete
+ * tree. Inputs/outputs follow commit's accepted-operation callback contract.
+ * Affiliates: native tree delete and recovery journal states.
+ */
+bool afatfs_abortTreeReplace(afatfsReplaceTransactionPtr_t transaction,
+                             afatfsResultCallback_t complete);
+
+/*
+ * Recover interrupted replacement work in one known product parent.
+ *
+ * What: reads both fixed journal slots, selects the highest-sequence valid CRC,
+ * and applies PREPARED/OLD_RENAMED/PROMOTED cleanup or promotion rules only to
+ * the nonce and target named by that record. Why: mount cannot safely scan the
+ * whole card or infer product roots. Input parent remains retained until the
+ * callback. Output RECOVERY_REQUIRED leaves unknown scratch untouched when no
+ * valid record authorizes mutation; repeated successful recovery is idempotent.
+ * Affiliates: browser preflight for Bank/Scene/Kit parents and journal commit.
+ */
+bool afatfs_recoverTreeReplace(afatfsDirHandle_t parent,
+                               afatfsResultCallback_t complete);

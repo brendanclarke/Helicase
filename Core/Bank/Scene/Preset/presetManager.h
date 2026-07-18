@@ -1,3 +1,5 @@
+extern char preset_currentName[8];
+
 /*
  * presetManager.h — LXR-02 preset load/save (asyncfatfs version).
  *
@@ -79,8 +81,6 @@ typedef enum {
     PRESET_OP_TEST_FILE_SAVE,
     PRESET_OP_TEST_DIR_SAVE,
 } preset_op_type_t;
-
-extern char preset_currentName[8];
 
 /*
  * Selects one of the two persisted endpoint images.

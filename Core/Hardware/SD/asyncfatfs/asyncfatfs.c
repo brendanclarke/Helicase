@@ -41,14 +41,30 @@
 /*
  * Parent-relative coordinator handle budget.
  *
- * What: five slots cover source parent, destination parent, source file,
- * destination file, and one traversal/private operation. Why: the previous
- * pool of three forced multi-tree operations to reuse live handles or mutate
- * currentDirectory. Inputs/outputs: compile-time RAM allocation only; the map
- * delta is recorded in AFATFS_EXPANSION_PLAN.md after each build. Affiliates:
- * child APIs, recursive copy, replace recovery, and openFiles[] allocation.
+ * What: six slots cover two caller parents, active source/destination directory
+ * cursors, and simultaneous source/destination streaming files. Why: five is
+ * sufficient for a flat/root-file copy but deadlocks a nested file copy when
+ * the sixth destination file allocation retries forever. The earlier pool of
+ * three also forced unsafe handle reuse/global-CWD mutation. Inputs/outputs:
+ * compile-time RAM allocation only; the exact increase remains inside the
+ * enforced 9 KB singleton budget. Affiliates: child APIs, recursive copy,
+ * replace recovery, and openFiles[] allocation.
  */
-#define AFATFS_MAX_OPEN_FILES 5
+#define AFATFS_MAX_OPEN_FILES 6
+
+/*
+ * Shared tree-operation transfer size.
+ *
+ * What: recursive copy moves at most 96 bytes between source and destination
+ * before yielding; replace journaling reuses the same storage for one complete
+ * 69-byte fixed record. Why: these user-initiated save operations may be
+ * slower, while the 32 bytes recovered from the initial 128-byte choice offset
+ * part of the required sixth handle. Inputs/outputs: compile-time byte count
+ * only; fread/fwrite may make still smaller sector-boundary progress.
+ * Affiliates: afatfsTreeWorkspace_t, copy streaming, journal serialization,
+ * and the 9 KB afatfs RAM budget.
+ */
+#define AFATFS_TREE_IO_BUFFER_SIZE 96u
 
 #define AFATFS_DEFAULT_FILE_DATE FAT_MAKE_DATE(2015, 12, 01)
 #define AFATFS_DEFAULT_FILE_TIME FAT_MAKE_TIME(00, 00, 00)
@@ -701,6 +717,261 @@ typedef struct afatfsRemoveObjects_t {
 } afatfsRemoveObjects_t;
 
 typedef enum {
+    AFATFS_COPY_TREE_VALIDATE_SOURCE = 0,
+    AFATFS_COPY_TREE_LOAD_SOURCE_ENTRY,
+    AFATFS_COPY_TREE_CREATE_ROOT,
+    AFATFS_COPY_TREE_WAIT_CREATE_ROOT,
+    AFATFS_COPY_TREE_PREPARE_DIRECTORY,
+    AFATFS_COPY_TREE_SCAN_DIRECTORY,
+    AFATFS_COPY_TREE_LOAD_CHILD_ENTRY,
+    AFATFS_COPY_TREE_CREATE_CHILD,
+    AFATFS_COPY_TREE_WAIT_CREATE_CHILD,
+    AFATFS_COPY_TREE_APPLY_METADATA,
+    AFATFS_COPY_TREE_STREAM_READ,
+    AFATFS_COPY_TREE_STREAM_WRITE,
+    AFATFS_COPY_TREE_CLOSE_SOURCE_FILE,
+    AFATFS_COPY_TREE_CLOSE_DESTINATION_FILE,
+    AFATFS_COPY_TREE_DESCEND_DIRECTORY,
+    AFATFS_COPY_TREE_ASCEND_DIRECTORY,
+    AFATFS_COPY_TREE_RESUME_PARENT,
+    AFATFS_COPY_TREE_SYNC,
+    AFATFS_COPY_TREE_CLEANUP,
+} afatfsCopyTreePhase_e;
+
+/*
+ * Compact resume state for one recursive-copy depth.
+ *
+ * What: source/destination clusters reconstruct the two parent cursors after a
+ * child directory is exhausted; sourceChildEntry plus rawShortName identify
+ * the already-copied child that a source-parent rescan must consume before it
+ * resumes. Why: a full object ID plus finder pair costs 180 bytes per side and
+ * per depth. This 28-byte physical key is sufficient because copy never mutates
+ * the source tree. Inputs are captured immediately before descent; output is
+ * consumed only by ASCEND/RESUME. Affiliates: AFATFS_TREE_DEPTH_MAX and the
+ * source-rescan latency/RAM trade documented in AFATFS_EXPANSION_PLAN.md.
+ */
+typedef struct {
+    uint32_t sourceParentCluster;
+    uint32_t destinationParentCluster;
+    afatfsDirEntryPointer_t sourceChildEntry;
+    uint8_t rawShortName[FAT_FILENAME_LENGTH];
+} afatfsCopyTreeFrame_t;
+
+/*
+ * Reduced-RAM global recursive-copy coordinator.
+ *
+ * What: owns exactly one active finder, current object/metadata, compact depth
+ * frames, four transient handle pointers, and byte-stream offsets. Why: the
+ * operation composes several existing async child/file primitives and cannot
+ * live in any one file handle's operation union. Inputs are copied by the start
+ * function; outputs are a single result callback plus a deliberately preserved
+ * partial destination on failure. Affiliates: afatfs_copyObjectTree(),
+ * afatfs_copyTreeContinue(), and afatfsTreeWorkspace_t.
+ */
+typedef struct {
+    uint8_t active;
+    uint8_t depth;
+    uint8_t finderActive;
+    /* Source/destination hold bits prevent double release when both are one handle. */
+    uint8_t sourceParentHeld;
+    uint8_t destinationParentHeld;
+    /* Nonzero while currentObject/destinationName describe the copied root. */
+    uint8_t creatingRoot;
+    afatfsCopyTreePhase_e phase;
+    afatfsResultCode_t terminalResult;
+    afatfsCopyFlags_t flags;
+    afatfsResultCallback_t callback;
+    afatfsDirHandle_t sourceParent;
+    afatfsDirHandle_t destinationParent;
+    afatfsFilePtr_t sourceDirectory;
+    afatfsFilePtr_t destinationDirectory;
+    afatfsFilePtr_t sourceFile;
+    afatfsFilePtr_t destinationFile;
+    /* Child-create callbacks publish here before metadata is applied/adopted. */
+    afatfsFilePtr_t createdHandle;
+    afatfsObjectInfo_t currentObject;
+    fatDirectoryEntry_t sourceEntry;
+    afatfsObjectFinder_t finder;
+    afatfsCopyTreeFrame_t frames[AFATFS_TREE_DEPTH_MAX];
+    uint16_t bufferedBytes;
+    uint16_t bufferOffset;
+    char destinationName[AFATFS_LONG_FILENAME_MAX + 1u];
+} afatfsCopyTree_t;
+
+/* On-card transaction record constants; both journal slots use this ABI. */
+#define AFATFS_REPLACE_JOURNAL_MAGIC 0x54414641u /* Little-endian "AFAT". */
+#define AFATFS_REPLACE_JOURNAL_VERSION 1u
+#define AFATFS_REPLACE_JOURNAL_SLOT0 "AFATJ0.SYS"
+#define AFATFS_REPLACE_JOURNAL_SLOT1 "AFATJ1.SYS"
+
+typedef enum {
+    AFATFS_REPLACE_JOURNAL_CLEAN = 0,
+    AFATFS_REPLACE_JOURNAL_PREPARED,
+    AFATFS_REPLACE_JOURNAL_OLD_RENAMED,
+    AFATFS_REPLACE_JOURNAL_PROMOTED,
+} afatfsReplaceJournalState_e;
+
+/*
+ * Fixed CRC-protected journal payload stored alternately in two parent files.
+ *
+ * What: magic/version validate the schema, sequence orders slots, state selects
+ * recovery, nonce regenerates exact scratch names, and targetName identifies
+ * the one product component authorized for mutation. Why: a torn newer sector
+ * must not destroy the prior recovery decision. Inputs are serialized before a
+ * sync barrier; crc32 covers every preceding byte. Output fits inside the
+ * shared 96-byte workspace. Affiliates: journal read/write helpers and recovery.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint8_t version;
+    uint8_t state;
+    uint8_t objectKind;
+    uint8_t reserved;
+    uint32_t sequence;
+    uint32_t nonce;
+    char targetName[AFATFS_LONG_FILENAME_MAX + 1u];
+    uint32_t crc32;
+} afatfsReplaceJournalRecord_t;
+
+/* Compile-time guard: one journal record must fit the shared transfer bytes. */
+typedef char afatfsReplaceJournalFitsSharedBuffer[
+    sizeof(afatfsReplaceJournalRecord_t) <= AFATFS_TREE_IO_BUFFER_SIZE ? 1 : -1];
+
+typedef enum {
+    AFATFS_REPLACE_MODE_NONE = 0,
+    AFATFS_REPLACE_MODE_BEGIN,
+    AFATFS_REPLACE_MODE_COMMIT,
+    AFATFS_REPLACE_MODE_ABORT,
+    AFATFS_REPLACE_MODE_RECOVER,
+} afatfsReplaceMode_e;
+
+typedef enum {
+    AFATFS_REPLACE_BEGIN_CREATE_STAGE = 0,
+    AFATFS_REPLACE_BEGIN_WAIT_STAGE,
+    AFATFS_REPLACE_CLOSE_STAGE,
+    AFATFS_REPLACE_WAIT_CLOSE_STAGE,
+    AFATFS_REPLACE_SYNC_STAGE,
+    AFATFS_REPLACE_READ_JOURNAL_OPEN,
+    AFATFS_REPLACE_READ_JOURNAL_WAIT_OPEN,
+    AFATFS_REPLACE_READ_JOURNAL_DATA,
+    AFATFS_REPLACE_READ_JOURNAL_CLOSE,
+    AFATFS_REPLACE_READ_JOURNAL_AFTER_CLOSE,
+    AFATFS_REPLACE_AFTER_JOURNALS,
+    AFATFS_REPLACE_WRITE_JOURNAL_OPEN,
+    AFATFS_REPLACE_WRITE_JOURNAL_WAIT_OPEN,
+    AFATFS_REPLACE_WRITE_JOURNAL_DATA,
+    AFATFS_REPLACE_WRITE_JOURNAL_CLOSE,
+    AFATFS_REPLACE_WRITE_JOURNAL_AFTER_CLOSE,
+    AFATFS_REPLACE_WRITE_JOURNAL_SYNC,
+    AFATFS_REPLACE_SCAN_BEGIN,
+    AFATFS_REPLACE_SCAN_NEXT,
+    AFATFS_REPLACE_MOVE_FOUND,
+    AFATFS_REPLACE_WAIT_MOVE,
+    AFATFS_REPLACE_DELETE_FOUND,
+    AFATFS_REPLACE_WAIT_DELETE,
+    AFATFS_REPLACE_SYNC_NAMESPACE,
+    AFATFS_REPLACE_FINISH,
+} afatfsReplacePhase_e;
+
+typedef enum {
+    AFATFS_REPLACE_ACTION_NONE = 0,
+    AFATFS_REPLACE_ACTION_COMMIT_CHECK_OLD,
+    AFATFS_REPLACE_ACTION_COMMIT_FIND_TARGET,
+    AFATFS_REPLACE_ACTION_COMMIT_PROMOTE_NEW,
+    AFATFS_REPLACE_ACTION_COMMIT_DELETE_OLD,
+    AFATFS_REPLACE_ACTION_ABORT_DELETE_NEW,
+    AFATFS_REPLACE_ACTION_RECOVER_CHECK_TARGET,
+    AFATFS_REPLACE_ACTION_RECOVER_FIND_NEW,
+    AFATFS_REPLACE_ACTION_RECOVER_FIND_OLD,
+    AFATFS_REPLACE_ACTION_RECOVER_DELETE_NEW,
+    AFATFS_REPLACE_ACTION_RECOVER_DELETE_OLD,
+    AFATFS_REPLACE_ACTION_CHECK_UNKNOWN_SCRATCH,
+} afatfsReplaceAction_e;
+
+/*
+ * Small persistent transaction descriptor returned through the opaque API.
+ *
+ * What: retains only the explicit parent, staging handle, target component, and
+ * nonce needed between begin and commit/abort. Why: the large finder/object and
+ * journal execution fields can overlay copy state, but a begun transaction must
+ * coexist with tree copy while the caller populates staging. Inputs are copied
+ * at begin; outputs/lifetime end after successful commit/abort. Affiliates:
+ * afatfsReplaceTransactionPtr_t and afatfsReplaceOperation_t.
+ */
+struct afatfsReplaceTransaction {
+    uint8_t active;
+    uint8_t parentHeld;
+    uint8_t commitStarted;
+    uint8_t reserved;
+    uint32_t nonce;
+    afatfsDirHandle_t parent;
+    afatfsDirHandle_t stagingDirectory;
+    char targetName[AFATFS_LONG_FILENAME_MAX + 1u];
+};
+
+/*
+ * Shared-workspace execution state for begin/commit/abort/recovery.
+ *
+ * What: one finder/object pair services every exact parent scan; bestJournal is
+ * the highest valid slot while the shared byte buffer holds the record being
+ * read or written. action/returnPhase compose scans, moves, deletes, and syncs
+ * without nested blocking calls. Why: this stays smaller than copy state so the
+ * workspace union adds no Phase 6 peak allocation. Affiliates: all public tree
+ * replace APIs and afatfs_replaceContinue().
+ */
+typedef struct {
+    uint8_t active;
+    uint8_t parentHeld;
+    uint8_t finderActive;
+    uint8_t journalSlot;
+    uint8_t journalValid;
+    /* Set when either slot exists, even if torn/CRC-invalid. */
+    uint8_t journalSeen;
+    /* Equal sequence with different valid bytes has no deterministic winner. */
+    uint8_t journalAmbiguous;
+    uint8_t found;
+    uint16_t ioOffset;
+    afatfsReplaceMode_e mode;
+    afatfsReplacePhase_e phase;
+    afatfsReplacePhase_e returnPhase;
+    afatfsReplaceAction_e action;
+    afatfsResultCode_t terminalResult;
+    afatfsDirHandle_t parent;
+    afatfsFilePtr_t journalFile;
+    afatfsReplaceTransactionPtr_t transaction;
+    afatfsReplaceBeginCallback_t beginCallback;
+    afatfsResultCallback_t resultCallback;
+    afatfsObjectFinder_t finder;
+    afatfsObjectInfo_t foundObject;
+    afatfsReplaceJournalRecord_t bestJournal;
+    char scanName[AFATFS_LONG_FILENAME_MAX + 1u];
+} afatfsReplaceOperation_t;
+
+typedef enum {
+    AFATFS_TREE_OPERATION_NONE = 0,
+    AFATFS_TREE_OPERATION_COPY,
+    AFATFS_TREE_OPERATION_REPLACE,
+} afatfsTreeOperationKind_e;
+
+/*
+ * Mutually exclusive large-operation workspace.
+ *
+ * What: copy state overlays the Phase 6 replace/recovery state added below,
+ * while ioBuffer is adjacent shared transfer storage. Why: a commit/recovery
+ * cannot start while tree copy is active, and retaining both complete state
+ * machines would defeat the reduced-RAM design. Output is compile-time global
+ * storage only. Affiliates: afatfs_poll() arbitration and transaction state.
+ */
+typedef struct {
+    afatfsTreeOperationKind_e kind;
+    union {
+        afatfsCopyTree_t copy;
+        afatfsReplaceOperation_t replace;
+    } operation;
+    uint8_t ioBuffer[AFATFS_TREE_IO_BUFFER_SIZE];
+} afatfsTreeWorkspace_t;
+
+typedef enum {
     AFATFS_INITIALIZATION_READ_MBR,
     AFATFS_INITIALIZATION_READ_VOLUME_ID,
 
@@ -761,6 +1032,10 @@ typedef struct afatfs_t {
 
     afatfsRenameObject_t renameObject;
     afatfsRemoveObjects_t removeObjects;
+    /* One shared, bounded coordinator workspace for recursive copy/replace. */
+    afatfsTreeWorkspace_t treeWorkspace;
+    /* Descriptor persists while callers populate a begun staging directory. */
+    struct afatfsReplaceTransaction replaceTransaction;
 
     uint32_t partitionStartSector; // The physical sector that the first partition on the device begins at
 
@@ -788,6 +1063,19 @@ typedef struct afatfs_t {
     uint32_t rootDirectorySectors; // Zero on FAT32, for FAT16 the number of sectors that the root directory occupies
 } afatfs_t;
 
+/*
+ * Compile-time static-RAM budget for the complete filesystem singleton.
+ *
+ * What: makes any later field/array growth beyond 9,000 decimal bytes fail the
+ * ARM build. Why: Phases 5-6 deliberately traded directory rescans and smaller
+ * transfers for RAM, and silently regressing toward the original 12 KB design
+ * would consume stack headroom. Input is sizeof(afatfs_t); output is a valid
+ * one-byte typedef only while the budget holds. Affiliates: the 8,880-byte ABI
+ * measurement and AFATFS_EXPANSION_PLAN.md's reduced-RAM contract.
+ */
+typedef char afatfsStaticRamBudget[
+    sizeof(afatfs_t) <= 9000u ? 1 : -1];
+
 static afatfs_t afatfs;
 
 static void afatfs_fileOperationContinue(afatfsFile_t *file);
@@ -801,6 +1089,8 @@ static bool afatfs_childComponentCanStart(const char *displayName);
 static void afatfs_renameObjectContinue(void);
 static void afatfs_removeObjectsContinue(void);
 static void afatfs_deleteTreeContinue(afatfsFile_t *file);
+static void afatfs_copyTreeContinue(void);
+static void afatfs_replaceContinue(void);
 static uint8_t* afatfs_fileLockCursorSectorForWrite(afatfsFilePtr_t file);
 static uint8_t* afatfs_fileRetainCursorSectorForRead(afatfsFilePtr_t file);
 
@@ -6323,6 +6613,63 @@ static bool afatfs_childComponentCanStart(const char *displayName)
            strcmp(displayName, "..") != 0;
 }
 
+afatfsDirHandle_t afatfs_openRoot(void)
+{
+    afatfsFilePtr_t root;
+    uint32_t rootBytes;
+
+    /*
+     * Materialize the FAT root in a caller-owned open-file slot.
+     *
+     * What: copies only filesystem geometry into a freshly initialized handle;
+     * it does not borrow currentDirectory cursor/cache state. Why: explicit
+     * parent APIs must be able to keep root and a child directory open at the
+     * same time without a global chdir mutation. Input validation is limited to
+     * READY plus pool availability because no SD I/O is required. Output is an
+     * idle read/write directory handle whose cursor begins before entry zero.
+     * Affiliates: afatfs_allocateFileHandle(), afatfs_initFileHandle(),
+     * afatfs_findFirstObject(), child-operation retain counts, and fclose().
+     */
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY)
+        return NULL;
+    root = afatfs_allocateFileHandle();
+    if (!root)
+        return NULL;
+
+    afatfs_initFileHandle(root);
+    root->mode = AFATFS_FILE_MODE_READ | AFATFS_FILE_MODE_WRITE;
+    root->attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
+    root->firstCluster = afatfs.rootDirectoryCluster;
+    root->cursorCluster = afatfs.rootDirectoryCluster;
+    root->cursorPreviousCluster = 0u;
+    root->cursorOffset = 0u;
+    root->directoryEntryPos.sectorNumberPhysical = 0u;
+    root->directoryEntryPos.entryIndex = -1;
+
+    if (afatfs.filesystemType == FAT_FILESYSTEM_TYPE_FAT16) {
+        /*
+         * FAT16 root is a fixed sector extent rather than a cluster chain.
+         * Multiplying the mounted sector count by the invariant 512-byte
+         * asyncfatfs sector size gives both logical and physical scan bounds.
+         */
+        rootBytes = afatfs.rootDirectorySectors * AFATFS_SECTOR_SIZE;
+        root->type = AFATFS_FILE_TYPE_FAT16_ROOT_DIRECTORY;
+        root->logicalSize = rootBytes;
+        root->physicalSize = rootBytes;
+    } else {
+        /*
+         * FAT32 root follows an ordinary directory cluster chain. One cluster
+         * is the known initial allocation; directory iteration follows FAT as
+         * required, while the size fields match other opened directories.
+         */
+        rootBytes = afatfs_clusterSize();
+        root->type = AFATFS_FILE_TYPE_DIRECTORY;
+        root->logicalSize = rootBytes;
+        root->physicalSize = rootBytes;
+    }
+    return root;
+}
+
 bool afatfs_fopenChild(afatfsDirHandle_t parent,
                        const char *displayName,
                        const char *accessMode,
@@ -6947,6 +7294,20 @@ void afatfs_poll()
                 afatfs_fileOperationsPoll();
                 afatfs_renameObjectContinue();
                 afatfs_removeObjectsContinue();
+                /*
+                 * Continue at most one reduced-RAM multi-handle coordinator.
+                 *
+                 * Ordinary handle operations run first so callbacks awaited by
+                 * copy/replace can complete before the coordinator observes
+                 * their phase on the next poll. The continuation itself yields
+                 * after bounded scan/stream work and never waits for the card.
+                 * Affiliates: afatfsTreeWorkspace_t and child-operation callbacks.
+                 */
+                if (afatfs.treeWorkspace.kind == AFATFS_TREE_OPERATION_COPY)
+                    afatfs_copyTreeContinue();
+                else if (afatfs.treeWorkspace.kind ==
+                         AFATFS_TREE_OPERATION_REPLACE)
+                    afatfs_replaceContinue();
             break;
             default:
                 ;
@@ -7029,6 +7390,29 @@ bool afatfs_destroy(bool dirty)
     // Only attempt detailed cleanup if the filesystem is in reasonable looking state
     if (!dirty && afatfs.filesystemState == AFATFS_FILESYSTEM_STATE_READY) {
         int openFileCount = 0;
+
+        /*
+         * Let multi-handle coordinators release their own handle graph first.
+         *
+         * What: active copy/commit/recovery receives another normal poll and
+         * destroy retries later; an idle begun transaction is converted into
+         * its exact abort operation. Why: blindly fclose()ing source,
+         * destination, journal, or staging handles out from under their owner
+         * corrupts callback state, while a begun transaction's retained parent
+         * would otherwise make destroy wait forever. Input dirty=false requests
+         * recoverable shutdown; output false means keep polling destroy.
+         * Affiliates: afatfsTreeWorkspace_t and abort ownership transfer.
+         */
+        if (afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_NONE) {
+            afatfs_poll();
+            return false;
+        }
+        if (afatfs.replaceTransaction.active) {
+            if (!afatfs_abortTreeReplace(&afatfs.replaceTransaction, NULL))
+                return false;
+            afatfs_poll();
+            return false;
+        }
 
         for (int i = 0; i < AFATFS_MAX_OPEN_FILES; i++) {
             if (afatfs.openFiles[i].type != AFATFS_FILE_TYPE_NONE) {
@@ -7588,4 +7972,1776 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
             afatfs_deleteTreeFinish(file, AFATFS_RESULT_IO_ERROR);
             return;
     }
+}
+
+/*
+ * Load the authoritative SFN metadata for a previously validated copy object.
+ *
+ * What: reads the physical SFN sector and copies the packed FAT entry into
+ * operation-owned storage. Why: afatfsObjectId_t intentionally omits timestamps
+ * and creation/access metadata, yet a byte-faithful tree copy should preserve
+ * those supported fields. Inputs: object is the current iterator/root identity;
+ * outputEntry receives a snapshot only on SUCCESS. Outputs: IN_PROGRESS yields,
+ * FAILURE reports media/coordinate errors. Affiliates: object validation,
+ * afatfs_copyApplyMetadata(), and direct read-handle binding.
+ */
+static afatfsOperationStatus_e afatfs_copyLoadSourceEntry(
+        const afatfsObjectId_t *object,
+        fatDirectoryEntry_t *outputEntry)
+{
+    uint8_t *sector;
+    afatfsOperationStatus_e status;
+
+    if (!object || !outputEntry || object->sfnEntry.entryIndex < 0 ||
+        (uint16_t)object->sfnEntry.entryIndex >=
+            AFATFS_FILES_PER_DIRECTORY_SECTOR) {
+        return AFATFS_OPERATION_FAILURE;
+    }
+    status = afatfs_cacheSector(object->sfnEntry.sectorNumberPhysical,
+                                &sector, AFATFS_CACHE_READ, 0);
+    if (status != AFATFS_OPERATION_SUCCESS)
+        return status;
+
+    memcpy(outputEntry,
+           &((fatDirectoryEntry_t *)sector)[object->sfnEntry.entryIndex],
+           sizeof(*outputEntry));
+    if (memcmp(outputEntry->filename, object->rawShortName,
+               FAT_FILENAME_LENGTH) != 0) {
+        /* A source-parent mutation between scan and use invalidates the key. */
+        return AFATFS_OPERATION_FAILURE;
+    }
+    return AFATFS_OPERATION_SUCCESS;
+}
+
+/*
+ * Bind a recycled private handle directly to one just-scanned source object.
+ *
+ * What: initializes cache indices/operation storage, imports the source SFN
+ * metadata, and positions the cursor at byte zero. Why: rescanning the source
+ * by display name would reintroduce duplicate-LFN ambiguity and consume another
+ * asynchronous create/open state. Inputs: object supplies physical entry
+ * coordinates and entry supplies the current metadata snapshot; writable is
+ * false for source objects and true only for reconstructed destination parents.
+ * Output: a ready file/directory cursor. Affiliates: iterator identity,
+ * afatfs_fileLoadDirectoryEntry(), stream read, and compact-frame ascent.
+ */
+static void afatfs_copyBindObjectHandle(afatfsFilePtr_t file,
+                                        const afatfsObjectId_t *object,
+                                        const fatDirectoryEntry_t *entry,
+                                        uint8_t writable)
+{
+    afatfs_initFileHandle(file);
+    file->directoryEntryPos = object->sfnEntry;
+    afatfs_fileLoadDirectoryEntry(file, (fatDirectoryEntry_t *)entry);
+    file->mode = AFATFS_FILE_MODE_READ |
+        (writable ? AFATFS_FILE_MODE_WRITE : 0u);
+    file->cursorOffset = 0u;
+    file->cursorCluster = file->firstCluster;
+    file->cursorPreviousCluster = 0u;
+}
+
+/*
+ * Reconstruct a private directory cursor from a compact traversal frame.
+ *
+ * What: drops all cache ownership and rebinds one openFiles[] slot to a known
+ * directory cluster. Why: parent handles are not retained at every depth; the
+ * frame stores only clusters and source resume identity. Inputs: firstCluster
+ * is a product directory cluster (not an arbitrary path); writable selects
+ * whether child creation may use the reconstructed destination parent. Output:
+ * a clean cursor at entry zero with one-cluster minimum allocated size.
+ * Affiliates: ASCEND_DIRECTORY, RESUME_PARENT, and child creation.
+ */
+static void afatfs_copyBindDirectoryCluster(afatfsFilePtr_t file,
+                                            uint32_t firstCluster,
+                                            uint8_t writable)
+{
+    afatfs_initFileHandle(file);
+    file->firstCluster = firstCluster;
+    file->cursorCluster = firstCluster;
+    file->physicalSize = afatfs_clusterSize();
+    file->attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
+    file->mode = AFATFS_FILE_MODE_READ |
+        (writable ? AFATFS_FILE_MODE_WRITE : 0u);
+    file->type = AFATFS_FILE_TYPE_DIRECTORY;
+    file->directoryEntryPos.entryIndex = -1;
+}
+
+/*
+ * Preserve supported FAT metadata on one newly-created destination object.
+ *
+ * What: copies attributes and FAT creation/access/write timestamps while
+ * deliberately retaining the destination name, cluster, and size fields.
+ * Why: normal create supplies default 2015 timestamps; recursive copy promises
+ * file bytes and supported metadata without aliasing source cluster ownership.
+ * Inputs: destination is the live created handle and sourceEntry is the packed
+ * SFN snapshot. Output: destination directory sector becomes dirty on SUCCESS.
+ * Affiliates: close-time size/cluster update and directory creation.
+ */
+static afatfsOperationStatus_e afatfs_copyApplyMetadata(
+        afatfsFilePtr_t destination,
+        const fatDirectoryEntry_t *sourceEntry)
+{
+    uint8_t *sector;
+    fatDirectoryEntry_t *destinationEntry;
+    afatfsOperationStatus_e status;
+
+    if (!destination || !sourceEntry ||
+        destination->directoryEntryPos.entryIndex < 0) {
+        return AFATFS_OPERATION_FAILURE;
+    }
+    status = afatfs_cacheSector(
+        destination->directoryEntryPos.sectorNumberPhysical,
+        &sector, AFATFS_CACHE_READ | AFATFS_CACHE_WRITE, 0);
+    if (status != AFATFS_OPERATION_SUCCESS)
+        return status;
+
+    destinationEntry = &((fatDirectoryEntry_t *)sector)
+        [destination->directoryEntryPos.entryIndex];
+    destinationEntry->attrib = sourceEntry->attrib;
+    destinationEntry->creationTimeTenths = sourceEntry->creationTimeTenths;
+    destinationEntry->creationTime = sourceEntry->creationTime;
+    destinationEntry->creationDate = sourceEntry->creationDate;
+    destinationEntry->lastAccessDate = sourceEntry->lastAccessDate;
+    destinationEntry->lastWriteTime = sourceEntry->lastWriteTime;
+    destinationEntry->lastWriteDate = sourceEntry->lastWriteDate;
+    destination->attrib = sourceEntry->attrib;
+    afatfs_cacheSectorMarkDirty(
+        afatfs_getCacheDescriptorForBuffer(sector));
+    return AFATFS_OPERATION_SUCCESS;
+}
+
+/* Forward declarations for callbacks invoked by existing async primitives. */
+static void afatfs_copyCreated(afatfsResultCode_t result,
+                               afatfsFilePtr_t file);
+static void afatfs_copySourceClosed(void);
+static void afatfs_copyDestinationClosed(void);
+static void afatfs_copyCreatedClosed(void);
+
+/* Release the long-lived caller-parent holds acquired by copy start. */
+static void afatfs_copyReleaseParents(afatfsCopyTree_t *op)
+{
+    if (op->sourceParentHeld) {
+        afatfs_releaseChildParent(op->sourceParent);
+        op->sourceParentHeld = 0u;
+    }
+    if (op->destinationParentHeld) {
+        afatfs_releaseChildParent(op->destinationParent);
+        op->destinationParentHeld = 0u;
+    }
+}
+
+/*
+ * Temporarily hand the destination parent to CREATE_FILE for root creation.
+ *
+ * What: releases the coordinator's hold immediately before a child start; the
+ * child operation then owns the same retain counter until its callback. Why:
+ * parent-relative APIs correctly reject a parent already retained by another
+ * owner. The same-parent branch clears only one physical counter. Output: both
+ * hold bits describe the released state. Affiliates: afatfs_copyCreated().
+ */
+static void afatfs_copyReleaseRootParentForCreate(afatfsCopyTree_t *op)
+{
+    if (op->destinationParent == op->sourceParent) {
+        if (op->sourceParentHeld) {
+            afatfs_releaseChildParent(op->sourceParent);
+            op->sourceParentHeld = 0u;
+        }
+        op->destinationParentHeld = 0u;
+    } else if (op->destinationParentHeld) {
+        afatfs_releaseChildParent(op->destinationParent);
+        op->destinationParentHeld = 0u;
+    }
+}
+
+/* Reacquire the coordinator hold after root create releases its child hold. */
+static void afatfs_copyReacquireRootParent(afatfsCopyTree_t *op)
+{
+    if (op->destinationParent == op->sourceParent) {
+        afatfs_assert(op->sourceParent->childOperationRetainCount == 0u);
+        op->sourceParent->childOperationRetainCount = 1u;
+        op->sourceParentHeld = 1u;
+    } else {
+        afatfs_assert(op->destinationParent->childOperationRetainCount == 0u);
+        op->destinationParent->childOperationRetainCount = 1u;
+        op->destinationParentHeld = 1u;
+    }
+}
+
+/* Latch an error and enter the asynchronous handle-cleanup phase. */
+static void afatfs_copyFail(afatfsCopyTree_t *op,
+                            afatfsResultCode_t result)
+{
+    if (op->finderActive && op->sourceDirectory) {
+        afatfs_findLastObject(op->sourceDirectory, &op->finder);
+        op->finderActive = 0u;
+    }
+    op->terminalResult = result;
+    op->phase = AFATFS_COPY_TREE_CLEANUP;
+}
+
+static void afatfs_copyCreated(afatfsResultCode_t result,
+                               afatfsFilePtr_t file)
+{
+    afatfsCopyTree_t *op = &afatfs.treeWorkspace.operation.copy;
+
+    /*
+     * Publish child-create completion back to the coordinator.
+     * The existing child terminal helper has already released its parent before
+     * this callback, so root creation can safely restore the caller-parent hold.
+     * No card work occurs here; the next poll applies metadata or cleans up.
+     */
+    if (!op->active)
+        return;
+    if (op->creatingRoot)
+        afatfs_copyReacquireRootParent(op);
+    if (result != AFATFS_RESULT_OK || !file) {
+        afatfs_copyFail(op, result == AFATFS_RESULT_OK
+                           ? AFATFS_RESULT_IO_ERROR : result);
+        return;
+    }
+    op->createdHandle = file;
+    op->phase = AFATFS_COPY_TREE_APPLY_METADATA;
+}
+
+static void afatfs_copySourceClosed(void)
+{
+    afatfsCopyTree_t *op = &afatfs.treeWorkspace.operation.copy;
+
+    op->sourceFile = NULL;
+    if (op->phase != AFATFS_COPY_TREE_CLEANUP)
+        op->phase = AFATFS_COPY_TREE_CLOSE_DESTINATION_FILE;
+}
+
+static void afatfs_copyDestinationClosed(void)
+{
+    afatfsCopyTree_t *op = &afatfs.treeWorkspace.operation.copy;
+
+    op->destinationFile = NULL;
+    if (op->phase != AFATFS_COPY_TREE_CLEANUP) {
+        op->phase = op->creatingRoot
+            ? AFATFS_COPY_TREE_SYNC
+            : AFATFS_COPY_TREE_SCAN_DIRECTORY;
+    }
+}
+
+static void afatfs_copyCreatedClosed(void)
+{
+    /* Error cleanup waits for the created file/directory close to finish. */
+    afatfs.treeWorkspace.operation.copy.createdHandle = NULL;
+}
+
+/*
+ * Complete copy only after every transient handle and parent hold is released.
+ *
+ * Callback is copied before clearing the union arm so callback code may start a
+ * later coordinator immediately. Partial destination objects are intentionally
+ * not deleted here; abort/recovery or a diagnostic caller owns that policy.
+ */
+static void afatfs_copyFinish(afatfsCopyTree_t *op)
+{
+    afatfsResultCallback_t callback = op->callback;
+    afatfsResultCode_t result = op->terminalResult;
+
+    if (op->sourceDirectory)
+        afatfs_initFileHandle(op->sourceDirectory);
+    if (op->destinationDirectory)
+        afatfs_initFileHandle(op->destinationDirectory);
+    op->sourceDirectory = NULL;
+    op->destinationDirectory = NULL;
+    afatfs_copyReleaseParents(op);
+    memset(op, 0, sizeof(*op));
+    afatfs.treeWorkspace.kind = AFATFS_TREE_OPERATION_NONE;
+    if (callback)
+        callback(result);
+}
+
+static void afatfs_copyTreeContinue(void)
+{
+    afatfsCopyTree_t *op = &afatfs.treeWorkspace.operation.copy;
+    afatfsOperationStatus_e status;
+
+    if (afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_COPY || !op->active)
+        return;
+
+    switch (op->phase) {
+        case AFATFS_COPY_TREE_VALIDATE_SOURCE:
+            status = afatfs_validateObjectId(op->sourceParent,
+                                             &op->currentObject.id,
+                                             &op->terminalResult);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE ||
+                op->terminalResult != AFATFS_RESULT_OK) {
+                afatfs_copyFail(op, status == AFATFS_OPERATION_FAILURE
+                    ? AFATFS_RESULT_IO_ERROR : op->terminalResult);
+                return;
+            }
+            op->phase = AFATFS_COPY_TREE_LOAD_SOURCE_ENTRY;
+            return;
+
+        case AFATFS_COPY_TREE_LOAD_SOURCE_ENTRY:
+            status = afatfs_copyLoadSourceEntry(&op->currentObject.id,
+                                                &op->sourceEntry);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                afatfs_copyFail(op, AFATFS_RESULT_STALE_OBJECT);
+                return;
+            }
+            if (op->creatingRoot) {
+                afatfsFilePtr_t sourceHandle = afatfs_allocateFileHandle();
+
+                if (!sourceHandle)
+                    return;
+                afatfs_copyBindObjectHandle(sourceHandle,
+                                            &op->currentObject.id,
+                                            &op->sourceEntry, 0u);
+                if (op->currentObject.id.kind == AFATFS_OBJECT_DIRECTORY)
+                    op->sourceDirectory = sourceHandle;
+                else
+                    op->sourceFile = sourceHandle;
+                op->phase = AFATFS_COPY_TREE_CREATE_ROOT;
+            } else if (op->currentObject.id.kind == AFATFS_OBJECT_FILE) {
+                afatfsFilePtr_t sourceHandle = afatfs_allocateFileHandle();
+
+                if (!sourceHandle)
+                    return;
+                afatfs_copyBindObjectHandle(sourceHandle,
+                                            &op->currentObject.id,
+                                            &op->sourceEntry, 0u);
+                op->sourceFile = sourceHandle;
+                op->phase = AFATFS_COPY_TREE_CREATE_CHILD;
+            } else {
+                op->phase = AFATFS_COPY_TREE_CREATE_CHILD;
+            }
+            return;
+
+        case AFATFS_COPY_TREE_CREATE_ROOT:
+        {
+            bool accepted;
+
+            /* Root create temporarily transfers the caller-parent retain. */
+            afatfs_copyReleaseRootParentForCreate(op);
+            op->phase = AFATFS_COPY_TREE_WAIT_CREATE_ROOT;
+            if (op->currentObject.id.kind == AFATFS_OBJECT_DIRECTORY) {
+                accepted = afatfs_createDirChild(
+                    op->destinationParent, op->destinationName,
+                    AFATFS_CREATE_NEW, AFATFS_MATCH_CASE_SENSITIVE,
+                    NULL, afatfs_copyCreated);
+            } else {
+                accepted = afatfs_fopenChild(
+                    op->destinationParent, op->destinationName, "w",
+                    AFATFS_CREATE_NEW, AFATFS_MATCH_CASE_SENSITIVE,
+                    NULL, afatfs_copyCreated);
+            }
+            if (!accepted) {
+                afatfs_copyReacquireRootParent(op);
+                op->phase = AFATFS_COPY_TREE_CREATE_ROOT;
+            }
+            return;
+        }
+
+        case AFATFS_COPY_TREE_WAIT_CREATE_ROOT:
+        case AFATFS_COPY_TREE_WAIT_CREATE_CHILD:
+            /* Existing child API owns progress and will change phase in callback. */
+            return;
+
+        case AFATFS_COPY_TREE_PREPARE_DIRECTORY:
+            afatfs_findFirstObject(op->sourceDirectory, &op->finder);
+            op->finderActive = 1u;
+            op->phase = AFATFS_COPY_TREE_SCAN_DIRECTORY;
+            return;
+
+        case AFATFS_COPY_TREE_SCAN_DIRECTORY:
+            status = afatfs_findNextObject(op->sourceDirectory,
+                                           &op->finder,
+                                           &op->currentObject);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                afatfs_copyFail(op, AFATFS_RESULT_IO_ERROR);
+                return;
+            }
+            if (op->currentObject.id.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op->sourceDirectory, &op->finder);
+                op->finderActive = 0u;
+                op->phase = op->depth == 0u
+                    ? AFATFS_COPY_TREE_SYNC
+                    : AFATFS_COPY_TREE_ASCEND_DIRECTORY;
+                return;
+            }
+            if (op->currentObject.id.kind == AFATFS_OBJECT_DIRECTORY &&
+                op->depth >= AFATFS_TREE_DEPTH_MAX) {
+                afatfs_copyFail(op, AFATFS_RESULT_DEPTH_LIMIT);
+                return;
+            }
+            /* Release the source cache sector while child I/O uses the cache. */
+            afatfs_findLast(op->sourceDirectory);
+            op->phase = AFATFS_COPY_TREE_LOAD_CHILD_ENTRY;
+            return;
+
+        case AFATFS_COPY_TREE_LOAD_CHILD_ENTRY:
+            op->creatingRoot = 0u;
+            op->phase = AFATFS_COPY_TREE_LOAD_SOURCE_ENTRY;
+            return;
+
+        case AFATFS_COPY_TREE_CREATE_CHILD:
+            op->phase = AFATFS_COPY_TREE_WAIT_CREATE_CHILD;
+            if (op->currentObject.id.kind == AFATFS_OBJECT_DIRECTORY) {
+                if (!afatfs_createDirChild(
+                        op->destinationDirectory,
+                        op->currentObject.id.displayName,
+                        AFATFS_CREATE_NEW, AFATFS_MATCH_CASE_SENSITIVE,
+                        NULL, afatfs_copyCreated)) {
+                    op->phase = AFATFS_COPY_TREE_CREATE_CHILD;
+                }
+            } else if (!afatfs_fopenChild(
+                           op->destinationDirectory,
+                           op->currentObject.id.displayName, "w",
+                           AFATFS_CREATE_NEW, AFATFS_MATCH_CASE_SENSITIVE,
+                           NULL, afatfs_copyCreated)) {
+                op->phase = AFATFS_COPY_TREE_CREATE_CHILD;
+            }
+            return;
+
+        case AFATFS_COPY_TREE_APPLY_METADATA:
+            status = afatfs_copyApplyMetadata(op->createdHandle,
+                                              &op->sourceEntry);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                afatfs_copyFail(op, AFATFS_RESULT_IO_ERROR);
+                return;
+            }
+            if (op->currentObject.id.kind == AFATFS_OBJECT_FILE) {
+                op->destinationFile = op->createdHandle;
+                op->createdHandle = NULL;
+                op->bufferedBytes = 0u;
+                op->bufferOffset = 0u;
+                op->phase = AFATFS_COPY_TREE_STREAM_READ;
+            } else if (op->creatingRoot) {
+                op->destinationDirectory = op->createdHandle;
+                op->createdHandle = NULL;
+                op->phase = AFATFS_COPY_TREE_PREPARE_DIRECTORY;
+            } else {
+                op->phase = AFATFS_COPY_TREE_DESCEND_DIRECTORY;
+            }
+            return;
+
+        case AFATFS_COPY_TREE_STREAM_READ:
+        {
+            uint32_t readBytes = afatfs_fread(
+                op->sourceFile, afatfs.treeWorkspace.ioBuffer,
+                AFATFS_TREE_IO_BUFFER_SIZE);
+
+            if (readBytes != 0u) {
+                op->bufferedBytes = (uint16_t)readBytes;
+                op->bufferOffset = 0u;
+                op->phase = AFATFS_COPY_TREE_STREAM_WRITE;
+                return;
+            }
+            if (afatfs_fileIsBusy(op->sourceFile))
+                return;
+            if (afatfs_feof(op->sourceFile)) {
+                op->phase = AFATFS_COPY_TREE_CLOSE_SOURCE_FILE;
+                return;
+            }
+            /* Zero without EOF is cache backpressure; retry on a later poll. */
+            return;
+        }
+
+        case AFATFS_COPY_TREE_STREAM_WRITE:
+        {
+            uint32_t remaining =
+                (uint32_t)op->bufferedBytes - op->bufferOffset;
+            uint32_t written = afatfs_fwrite(
+                op->destinationFile,
+                afatfs.treeWorkspace.ioBuffer + op->bufferOffset,
+                remaining);
+
+            if (written != 0u) {
+                op->bufferOffset = (uint16_t)(op->bufferOffset + written);
+                if (op->bufferOffset == op->bufferedBytes) {
+                    op->bufferedBytes = 0u;
+                    op->bufferOffset = 0u;
+                    op->phase = AFATFS_COPY_TREE_STREAM_READ;
+                }
+                return;
+            }
+            if (afatfs_isFull()) {
+                afatfs_copyFail(op, AFATFS_RESULT_NO_SPACE);
+                return;
+            }
+            /* Busy handle/cache produces a zero write and is retried. */
+            return;
+        }
+
+        case AFATFS_COPY_TREE_CLOSE_SOURCE_FILE:
+            if (afatfs_fclose(op->sourceFile, afatfs_copySourceClosed))
+                return;
+            return;
+
+        case AFATFS_COPY_TREE_CLOSE_DESTINATION_FILE:
+            if (afatfs_fclose(op->destinationFile,
+                              afatfs_copyDestinationClosed))
+                return;
+            return;
+
+        case AFATFS_COPY_TREE_DESCEND_DIRECTORY:
+        {
+            afatfsCopyTreeFrame_t *frame = &op->frames[op->depth];
+
+            /*
+             * Capture only the physical resume key before replacing both
+             * parent cursors. The 11-byte raw SFN comparison protects against
+             * a reused sector slot even though copy itself never mutates source.
+             */
+            frame->sourceParentCluster = op->sourceDirectory->firstCluster;
+            frame->destinationParentCluster =
+                op->destinationDirectory->firstCluster;
+            frame->sourceChildEntry = op->currentObject.id.sfnEntry;
+            memcpy(frame->rawShortName, op->currentObject.id.rawShortName,
+                   FAT_FILENAME_LENGTH);
+            afatfs_findLastObject(op->sourceDirectory, &op->finder);
+            op->finderActive = 0u;
+
+            afatfs_copyBindObjectHandle(op->sourceDirectory,
+                                        &op->currentObject.id,
+                                        &op->sourceEntry, 0u);
+            afatfs_initFileHandle(op->destinationDirectory);
+            op->destinationDirectory = op->createdHandle;
+            op->createdHandle = NULL;
+            op->depth++;
+            op->phase = AFATFS_COPY_TREE_PREPARE_DIRECTORY;
+            return;
+        }
+
+        case AFATFS_COPY_TREE_ASCEND_DIRECTORY:
+        {
+            afatfsCopyTreeFrame_t *frame;
+
+            if (op->depth == 0u) {
+                afatfs_copyFail(op, AFATFS_RESULT_CORRUPT_DIRECTORY);
+                return;
+            }
+            op->depth--;
+            frame = &op->frames[op->depth];
+            afatfs_copyBindDirectoryCluster(op->sourceDirectory,
+                                            frame->sourceParentCluster, 0u);
+            afatfs_copyBindDirectoryCluster(op->destinationDirectory,
+                                            frame->destinationParentCluster, 1u);
+            afatfs_findFirstObject(op->sourceDirectory, &op->finder);
+            op->finderActive = 1u;
+            op->phase = AFATFS_COPY_TREE_RESUME_PARENT;
+            return;
+        }
+
+        case AFATFS_COPY_TREE_RESUME_PARENT:
+        {
+            afatfsCopyTreeFrame_t *frame = &op->frames[op->depth];
+
+            status = afatfs_findNextObject(op->sourceDirectory,
+                                           &op->finder,
+                                           &op->currentObject);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE ||
+                op->currentObject.id.kind == AFATFS_OBJECT_NONE) {
+                afatfs_copyFail(op, status == AFATFS_OPERATION_FAILURE
+                    ? AFATFS_RESULT_IO_ERROR : AFATFS_RESULT_STALE_OBJECT);
+                return;
+            }
+            if (op->currentObject.id.sfnEntry.sectorNumberPhysical ==
+                    frame->sourceChildEntry.sectorNumberPhysical &&
+                op->currentObject.id.sfnEntry.entryIndex ==
+                    frame->sourceChildEntry.entryIndex &&
+                memcmp(op->currentObject.id.rawShortName,
+                       frame->rawShortName, FAT_FILENAME_LENGTH) == 0) {
+                /* Finder now points immediately after the completed child. */
+                op->phase = AFATFS_COPY_TREE_SCAN_DIRECTORY;
+            }
+            return;
+        }
+
+        case AFATFS_COPY_TREE_SYNC:
+            if ((op->flags & AFATFS_COPY_DURABLE) != 0u && !afatfs_sync())
+                return;
+            op->terminalResult = AFATFS_RESULT_OK;
+            op->phase = AFATFS_COPY_TREE_CLEANUP;
+            return;
+
+        case AFATFS_COPY_TREE_CLEANUP:
+            if (op->createdHandle) {
+                if (!afatfs_fclose(op->createdHandle,
+                                   afatfs_copyCreatedClosed))
+                    return;
+                return;
+            }
+            if (op->sourceFile) {
+                if (!afatfs_fclose(op->sourceFile, afatfs_copySourceClosed))
+                    return;
+                return;
+            }
+            if (op->destinationFile) {
+                if (!afatfs_fclose(op->destinationFile,
+                                   afatfs_copyDestinationClosed))
+                    return;
+                return;
+            }
+            afatfs_copyFinish(op);
+            return;
+
+        default:
+            afatfs_copyFail(op, AFATFS_RESULT_IO_ERROR);
+            return;
+    }
+}
+
+bool afatfs_copyObjectTree(afatfsDirHandle_t sourceParent,
+                           const afatfsObjectId_t *source,
+                           afatfsDirHandle_t destinationParent,
+                           const char *destinationName,
+                           afatfsCopyFlags_t flags,
+                           afatfsResultCallback_t complete)
+{
+    afatfsCopyTree_t *op = &afatfs.treeWorkspace.operation.copy;
+
+    /*
+     * Accept and fully copy one recursive-copy request.
+     *
+     * Validation precedes parent retention, so false has no side effects and no
+     * callback. On acceptance both explicit parents are exclusively held (one
+     * counter when they are identical), source identity/name/flags are copied,
+     * and the poll coordinator owns all later callbacks. Destination text is
+     * sanitized once into operation storage so caller menu buffers may change.
+     */
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_NONE ||
+        afatfs.renameObject.active ||
+        afatfs.removeObjects.active || !source ||
+        source->kind == AFATFS_OBJECT_NONE ||
+        !afatfs_parentCanAcceptChild(sourceParent) ||
+        !afatfs_parentCanAcceptChild(destinationParent) ||
+        !afatfs_childComponentCanStart(destinationName) ||
+        (flags & (afatfsCopyFlags_t)~AFATFS_COPY_DURABLE) != 0u) {
+        return false;
+    }
+
+    memset(op, 0, sizeof(*op));
+    if (afatfs_copySanitizedLongName(op->destinationName,
+                                     destinationName) == 0u) {
+        return false;
+    }
+    op->active = 1u;
+    afatfs.treeWorkspace.kind = AFATFS_TREE_OPERATION_COPY;
+    op->creatingRoot = 1u;
+    op->phase = AFATFS_COPY_TREE_VALIDATE_SOURCE;
+    op->terminalResult = AFATFS_RESULT_IO_ERROR;
+    op->flags = flags;
+    op->callback = complete;
+    op->sourceParent = sourceParent;
+    op->destinationParent = destinationParent;
+    op->currentObject.id = *source;
+    op->currentObject.hasLongName = source->lfnEntryCount != 0u;
+
+    sourceParent->childOperationRetainCount = 1u;
+    op->sourceParentHeld = 1u;
+    if (destinationParent != sourceParent) {
+        destinationParent->childOperationRetainCount = 1u;
+        op->destinationParentHeld = 1u;
+    }
+    return true;
+}
+
+/*
+ * Compute the journal's standard reflected CRC-32 (polynomial 0xEDB88320).
+ *
+ * Each input byte is XORed into the low accumulator byte, then eight reflected
+ * shifts fold one source bit at a time. The mask arithmetic applies the
+ * polynomial only when the discarded low bit was one, avoiding a branch in the
+ * important mathematical loop. Input excludes the crc32 field itself; output
+ * is the complemented 32-bit checksum used by both journal slots.
+ */
+static uint32_t afatfs_replaceCrc32(const uint8_t *bytes, uint32_t length)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+
+    while (length-- != 0u) {
+        uint8_t bit;
+
+        crc ^= *bytes++;
+        for (bit = 0u; bit < 8u; bit++) {
+            uint32_t lowBitMask = 0u - (crc & 1u);
+
+            crc = (crc >> 1u) ^ (0xEDB88320u & lowBitMask);
+        }
+    }
+    return ~crc;
+}
+
+/* Regenerate reserved scratch names from the journal's compact nonce. */
+static void afatfs_replaceScratchName(uint32_t nonce,
+                                      uint8_t oldName,
+                                      char output[AFATFS_LONG_FILENAME_MAX + 1u])
+{
+    static const char hex[] = "0123456789abcdef";
+    uint8_t digit;
+
+    memcpy(output, ".afat-", 6u);
+    /* Write most-significant hexadecimal digit first for stable host display. */
+    for (digit = 0u; digit < 8u; digit++) {
+        uint8_t shift = (uint8_t)((7u - digit) * 4u);
+
+        output[6u + digit] = hex[(nonce >> shift) & 0x0Fu];
+    }
+    memcpy(&output[14], oldName ? "-old" : "-new", 5u);
+}
+
+/* Reserved-name recognizer used only to report unauthorised orphan scratch. */
+static uint8_t afatfs_replaceIsScratchName(const char *name)
+{
+    uint8_t i;
+
+    if (!name || strncmp(name, ".afat-", 6u) != 0)
+        return 0u;
+    for (i = 6u; i < 14u; i++) {
+        char c = name[i];
+
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return 0u;
+    }
+    return (uint8_t)(strcmp(&name[14], "-new") == 0 ||
+                     strcmp(&name[14], "-old") == 0);
+}
+
+/* Validate one complete journal record without trusting any embedded field. */
+static uint8_t afatfs_replaceJournalValid(
+        const afatfsReplaceJournalRecord_t *record)
+{
+    uint32_t expectedCrc;
+    uint8_t nameIndex;
+
+    if (!record || record->magic != AFATFS_REPLACE_JOURNAL_MAGIC ||
+        record->version != AFATFS_REPLACE_JOURNAL_VERSION ||
+        record->objectKind != AFATFS_OBJECT_DIRECTORY ||
+        record->state > AFATFS_REPLACE_JOURNAL_PROMOTED ||
+        record->targetName[0] == '\0' ||
+        record->targetName[AFATFS_LONG_FILENAME_MAX] != '\0') {
+        return 0u;
+    }
+    /*
+     * A CRC-valid but non-component target must not be allowed to redirect a
+     * recovery rename through sanitation. Begin stores canonical FAT LFN text,
+     * so recovery accepts only allowed characters and trimmed endings.
+     */
+    for (nameIndex = 0u;
+         nameIndex < AFATFS_LONG_FILENAME_MAX &&
+         record->targetName[nameIndex] != '\0';
+         nameIndex++) {
+        if (!fat_lfnCharAllowed(record->targetName[nameIndex]))
+            return 0u;
+    }
+    if (nameIndex == 0u ||
+        record->targetName[nameIndex - 1u] == ' ' ||
+        record->targetName[nameIndex - 1u] == '.' ||
+        strcmp(record->targetName, ".") == 0 ||
+        strcmp(record->targetName, "..") == 0 ||
+        afatfs_replaceIsScratchName(record->targetName) ||
+        strcmp(record->targetName, AFATFS_REPLACE_JOURNAL_SLOT0) == 0 ||
+        strcmp(record->targetName, AFATFS_REPLACE_JOURNAL_SLOT1) == 0) {
+        return 0u;
+    }
+    expectedCrc = afatfs_replaceCrc32(
+        (const uint8_t *)record,
+        (uint32_t)(sizeof(*record) - sizeof(record->crc32)));
+    return expectedCrc == record->crc32 ? 1u : 0u;
+}
+
+static void afatfs_replaceReacquireParent(afatfsReplaceOperation_t *op)
+{
+    if (!op->parentHeld) {
+        afatfs_assert(op->parent->childOperationRetainCount == 0u);
+        op->parent->childOperationRetainCount = 1u;
+        op->parentHeld = 1u;
+    }
+}
+
+static void afatfs_replaceReleaseParent(afatfsReplaceOperation_t *op)
+{
+    if (op->parentHeld) {
+        afatfs_releaseChildParent(op->parent);
+        op->parentHeld = 0u;
+    }
+}
+
+/* Copy one component without retaining a caller-owned string across polls. */
+static void afatfs_replaceCopyName(
+        char destination[AFATFS_LONG_FILENAME_MAX + 1u],
+        const char *source)
+{
+    uint8_t i = 0u;
+
+    while (i < AFATFS_LONG_FILENAME_MAX && source && source[i] != '\0') {
+        destination[i] = source[i];
+        i++;
+    }
+    destination[i] = '\0';
+}
+
+static void afatfs_replaceFail(afatfsReplaceOperation_t *op,
+                               afatfsResultCode_t result)
+{
+    if (op->finderActive) {
+        afatfs_findLastObject(op->parent, &op->finder);
+        op->finderActive = 0u;
+    }
+    op->terminalResult = result;
+    op->phase = AFATFS_REPLACE_FINISH;
+}
+
+/*
+ * End one replace operation and transfer or release transaction ownership.
+ *
+ * Commit/abort failures deliberately return the parent hold to the still-live
+ * transaction so the caller can request recovery; success releases the parent
+ * and clears the opaque descriptor. Standalone recovery always releases its
+ * caller parent. Callbacks are copied before the workspace union is cleared so
+ * they may immediately start another operation.
+ */
+static void afatfs_replaceFinish(afatfsReplaceOperation_t *op)
+{
+    afatfsReplaceBeginCallback_t beginCallback = op->beginCallback;
+    afatfsResultCallback_t resultCallback = op->resultCallback;
+    afatfsReplaceTransactionPtr_t transaction = op->transaction;
+    afatfsReplaceMode_e mode = op->mode;
+    afatfsResultCode_t result = op->terminalResult;
+    afatfsDirHandle_t staging = transaction
+        ? transaction->stagingDirectory : NULL;
+
+    if (op->finderActive) {
+        afatfs_findLastObject(op->parent, &op->finder);
+        op->finderActive = 0u;
+    }
+    if (mode == AFATFS_REPLACE_MODE_COMMIT ||
+        mode == AFATFS_REPLACE_MODE_ABORT) {
+        if (transaction && result != AFATFS_RESULT_OK) {
+            transaction->parentHeld = op->parentHeld;
+            op->parentHeld = 0u;
+        } else {
+            afatfs_replaceReleaseParent(op);
+            if (transaction)
+                memset(transaction, 0, sizeof(*transaction));
+        }
+    } else if (mode == AFATFS_REPLACE_MODE_RECOVER) {
+        afatfs_replaceReleaseParent(op);
+    } else if (mode == AFATFS_REPLACE_MODE_BEGIN &&
+               result != AFATFS_RESULT_OK && transaction) {
+        memset(transaction, 0, sizeof(*transaction));
+    }
+
+    memset(op, 0, sizeof(*op));
+    afatfs.treeWorkspace.kind = AFATFS_TREE_OPERATION_NONE;
+    if (mode == AFATFS_REPLACE_MODE_BEGIN && beginCallback) {
+        beginCallback(result,
+                      result == AFATFS_RESULT_OK ? transaction : NULL,
+                      result == AFATFS_RESULT_OK ? staging : NULL);
+    } else if (resultCallback) {
+        resultCallback(result);
+    }
+}
+
+static void afatfs_replaceStartScan(afatfsReplaceOperation_t *op,
+                                    const char *name,
+                                    afatfsReplaceAction_e action)
+{
+    afatfs_replaceCopyName(op->scanName, name ? name : "");
+    op->action = action;
+    op->found = 0u;
+    op->phase = AFATFS_REPLACE_SCAN_BEGIN;
+}
+
+/* Build the next alternating journal record in the shared byte buffer. */
+static void afatfs_replaceQueueJournal(afatfsReplaceOperation_t *op,
+                                       afatfsReplaceJournalState_e state)
+{
+    afatfsReplaceJournalRecord_t *record =
+        (afatfsReplaceJournalRecord_t *)afatfs.treeWorkspace.ioBuffer;
+    const char *targetName = op->transaction
+        ? op->transaction->targetName : op->bestJournal.targetName;
+    uint32_t nonce = op->transaction
+        ? op->transaction->nonce : op->bestJournal.nonce;
+
+    memset(record, 0, sizeof(*record));
+    record->magic = AFATFS_REPLACE_JOURNAL_MAGIC;
+    record->version = AFATFS_REPLACE_JOURNAL_VERSION;
+    record->state = (uint8_t)state;
+    record->objectKind = AFATFS_OBJECT_DIRECTORY;
+    record->sequence = op->journalValid
+        ? op->bestJournal.sequence + 1u : 1u;
+    record->nonce = nonce;
+    afatfs_replaceCopyName(record->targetName, targetName);
+    record->crc32 = afatfs_replaceCrc32(
+        (const uint8_t *)record,
+        (uint32_t)(sizeof(*record) - sizeof(record->crc32)));
+
+    /* Low sequence bit alternates slots; a torn write leaves the other valid. */
+    op->journalSlot = (uint8_t)(record->sequence & 1u);
+    op->ioOffset = 0u;
+    op->phase = AFATFS_REPLACE_WRITE_JOURNAL_OPEN;
+}
+
+static void afatfs_replaceStageCreated(afatfsResultCode_t result,
+                                       afatfsFilePtr_t directory)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+    afatfsReplaceTransactionPtr_t transaction = op->transaction;
+
+    if (afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_REPLACE ||
+        !op->active || op->mode != AFATFS_REPLACE_MODE_BEGIN) {
+        return;
+    }
+    if (result == AFATFS_RESULT_ALREADY_EXISTS) {
+        /* CREATE_NEW collision belongs to an older nonce; never reopen it. */
+        transaction->nonce++;
+        if (transaction->nonce == 0u)
+            transaction->nonce = 1u;
+        op->phase = AFATFS_REPLACE_BEGIN_CREATE_STAGE;
+        return;
+    }
+    if (result != AFATFS_RESULT_OK || !directory) {
+        afatfs_replaceFail(op, result == AFATFS_RESULT_OK
+            ? AFATFS_RESULT_IO_ERROR : result);
+        return;
+    }
+
+    transaction->stagingDirectory = directory;
+    transaction->parent->childOperationRetainCount = 1u;
+    transaction->parentHeld = 1u;
+    op->terminalResult = AFATFS_RESULT_OK;
+    op->phase = AFATFS_REPLACE_FINISH;
+}
+
+static void afatfs_replaceStageClosed(void)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+
+    if (op->transaction)
+        op->transaction->stagingDirectory = NULL;
+    if (op->mode == AFATFS_REPLACE_MODE_COMMIT) {
+        op->phase = AFATFS_REPLACE_SYNC_STAGE;
+    } else if (op->mode == AFATFS_REPLACE_MODE_ABORT &&
+               op->transaction && !op->transaction->commitStarted) {
+        afatfs_replaceScratchName(op->transaction->nonce, 0u, op->scanName);
+        afatfs_replaceStartScan(op, op->scanName,
+                                AFATFS_REPLACE_ACTION_ABORT_DELETE_NEW);
+    } else {
+        op->journalSlot = 0u;
+        op->phase = AFATFS_REPLACE_READ_JOURNAL_OPEN;
+    }
+}
+
+static void afatfs_replaceJournalOpened(afatfsResultCode_t result,
+                                        afatfsFilePtr_t file)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+
+    afatfs_replaceReacquireParent(op);
+    if (op->phase == AFATFS_REPLACE_READ_JOURNAL_WAIT_OPEN) {
+        if (result == AFATFS_RESULT_NOT_FOUND) {
+            op->phase = AFATFS_REPLACE_READ_JOURNAL_AFTER_CLOSE;
+            return;
+        }
+        if (result != AFATFS_RESULT_OK || !file) {
+            afatfs_replaceFail(
+                op, result == AFATFS_RESULT_IO_ERROR
+                    ? AFATFS_RESULT_IO_ERROR
+                    : AFATFS_RESULT_RECOVERY_REQUIRED);
+            return;
+        }
+        /* Existing short/torn records are distinguished from absent journals. */
+        op->journalSeen = 1u;
+        op->journalFile = file;
+        op->ioOffset = 0u;
+        memset(afatfs.treeWorkspace.ioBuffer, 0,
+               sizeof(afatfs.treeWorkspace.ioBuffer));
+        op->phase = AFATFS_REPLACE_READ_JOURNAL_DATA;
+    } else if (op->phase == AFATFS_REPLACE_WRITE_JOURNAL_WAIT_OPEN) {
+        if (result != AFATFS_RESULT_OK || !file) {
+            afatfs_replaceFail(op, result == AFATFS_RESULT_OK
+                ? AFATFS_RESULT_IO_ERROR : result);
+            return;
+        }
+        op->journalFile = file;
+        op->ioOffset = 0u;
+        op->phase = AFATFS_REPLACE_WRITE_JOURNAL_DATA;
+    }
+}
+
+static void afatfs_replaceJournalClosed(void)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+
+    op->journalFile = NULL;
+    if (op->phase == AFATFS_REPLACE_READ_JOURNAL_CLOSE)
+        op->phase = AFATFS_REPLACE_READ_JOURNAL_AFTER_CLOSE;
+    else if (op->phase == AFATFS_REPLACE_WRITE_JOURNAL_CLOSE)
+        op->phase = AFATFS_REPLACE_WRITE_JOURNAL_AFTER_CLOSE;
+}
+
+static void afatfs_replaceMoveDone(afatfsResultCode_t result)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+
+    afatfs_replaceReacquireParent(op);
+    if (result != AFATFS_RESULT_OK) {
+        afatfs_replaceFail(op, result);
+        return;
+    }
+    op->phase = AFATFS_REPLACE_SYNC_NAMESPACE;
+}
+
+static void afatfs_replaceDeleteDone(afatfsResultCode_t result)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+
+    if (result != AFATFS_RESULT_OK) {
+        afatfs_replaceFail(op, result);
+        return;
+    }
+    op->phase = AFATFS_REPLACE_SYNC_NAMESPACE;
+}
+
+/* Apply the selected valid journal state after both slots have been read. */
+static void afatfs_replaceBeginRecovery(afatfsReplaceOperation_t *op)
+{
+    if (!op->journalValid) {
+        if (op->journalSeen) {
+            /* Corrupt slots authorize no cleanup, even if scratch is absent. */
+            op->terminalResult = AFATFS_RESULT_RECOVERY_REQUIRED;
+            op->phase = AFATFS_REPLACE_FINISH;
+            return;
+        }
+        /* No record authorizes mutation; detect but preserve reserved orphans. */
+        afatfs_replaceStartScan(
+            op, NULL, AFATFS_REPLACE_ACTION_CHECK_UNKNOWN_SCRATCH);
+        return;
+    }
+    if (op->bestJournal.state == AFATFS_REPLACE_JOURNAL_CLEAN) {
+        if (op->mode == AFATFS_REPLACE_MODE_ABORT && op->transaction) {
+            char newName[AFATFS_LONG_FILENAME_MAX + 1u];
+
+            /* A torn PREPARED write leaves the prior CLEAN record authoritative. */
+            afatfs_replaceScratchName(op->transaction->nonce, 0u, newName);
+            afatfs_replaceStartScan(
+                op, newName, AFATFS_REPLACE_ACTION_ABORT_DELETE_NEW);
+        } else {
+            /* CLEAN plus any scratch is suspicious but never authorizes deletion. */
+            afatfs_replaceStartScan(
+                op, NULL, AFATFS_REPLACE_ACTION_CHECK_UNKNOWN_SCRATCH);
+        }
+        return;
+    }
+    afatfs_replaceStartScan(
+        op, op->bestJournal.targetName,
+        AFATFS_REPLACE_ACTION_RECOVER_CHECK_TARGET);
+}
+
+/*
+ * Convert one completed parent scan into the next recovery/commit primitive.
+ *
+ * Every branch acts only on foundObject from the explicit parent and on names
+ * derived from the validated journal/active transaction. Missing objects are
+ * interpreted by journal state; unrelated objects are never deleted.
+ */
+static void afatfs_replaceHandleScanResult(afatfsReplaceOperation_t *op)
+{
+    char name[AFATFS_LONG_FILENAME_MAX + 1u];
+
+    switch (op->action) {
+        case AFATFS_REPLACE_ACTION_COMMIT_CHECK_OLD:
+            if (op->found) {
+                /* A stale old scratch must never be adopted by this nonce. */
+                afatfs_replaceFail(op, AFATFS_RESULT_ALREADY_EXISTS);
+            } else {
+                op->transaction->commitStarted = 1u;
+                afatfs_replaceQueueJournal(
+                    op, AFATFS_REPLACE_JOURNAL_PREPARED);
+            }
+            return;
+
+        case AFATFS_REPLACE_ACTION_COMMIT_FIND_TARGET:
+            if (op->found) {
+                if (op->foundObject.id.kind != AFATFS_OBJECT_DIRECTORY) {
+                    afatfs_replaceFail(op, AFATFS_RESULT_NOT_DIRECTORY);
+                    return;
+                }
+                op->phase = AFATFS_REPLACE_MOVE_FOUND;
+            } else {
+                afatfs_replaceQueueJournal(
+                    op, AFATFS_REPLACE_JOURNAL_OLD_RENAMED);
+            }
+            return;
+
+        case AFATFS_REPLACE_ACTION_COMMIT_PROMOTE_NEW:
+            if (!op->found) {
+                afatfs_replaceFail(op, AFATFS_RESULT_RECOVERY_REQUIRED);
+                return;
+            }
+            op->phase = AFATFS_REPLACE_MOVE_FOUND;
+            return;
+
+        case AFATFS_REPLACE_ACTION_COMMIT_DELETE_OLD:
+            if (op->found) {
+                op->phase = AFATFS_REPLACE_DELETE_FOUND;
+            } else {
+                afatfs_replaceQueueJournal(
+                    op, AFATFS_REPLACE_JOURNAL_CLEAN);
+            }
+            return;
+
+        case AFATFS_REPLACE_ACTION_ABORT_DELETE_NEW:
+            if (op->found) {
+                op->phase = AFATFS_REPLACE_DELETE_FOUND;
+            } else {
+                op->terminalResult = AFATFS_RESULT_OK;
+                op->phase = AFATFS_REPLACE_FINISH;
+            }
+            return;
+
+        case AFATFS_REPLACE_ACTION_CHECK_UNKNOWN_SCRATCH:
+            op->terminalResult = op->found
+                ? AFATFS_RESULT_RECOVERY_REQUIRED : AFATFS_RESULT_OK;
+            op->phase = AFATFS_REPLACE_FINISH;
+            return;
+
+        case AFATFS_REPLACE_ACTION_RECOVER_CHECK_TARGET:
+            if (op->found) {
+                if (op->foundObject.id.kind != AFATFS_OBJECT_DIRECTORY) {
+                    afatfs_replaceFail(op, AFATFS_RESULT_NOT_DIRECTORY);
+                    return;
+                }
+                if (op->bestJournal.state ==
+                        AFATFS_REPLACE_JOURNAL_PREPARED) {
+                    afatfs_replaceScratchName(op->bestJournal.nonce, 0u, name);
+                    afatfs_replaceStartScan(
+                        op, name, AFATFS_REPLACE_ACTION_RECOVER_DELETE_NEW);
+                } else if (op->bestJournal.state ==
+                               AFATFS_REPLACE_JOURNAL_OLD_RENAMED) {
+                    /* Promotion may have completed before its journal update. */
+                    afatfs_replaceQueueJournal(
+                        op, AFATFS_REPLACE_JOURNAL_PROMOTED);
+                } else {
+                    afatfs_replaceScratchName(op->bestJournal.nonce, 1u, name);
+                    afatfs_replaceStartScan(
+                        op, name, AFATFS_REPLACE_ACTION_RECOVER_DELETE_OLD);
+                }
+            } else if (op->bestJournal.state ==
+                           AFATFS_REPLACE_JOURNAL_PREPARED) {
+                /* Crash between old rename and OLD_RENAMED write: restore old. */
+                afatfs_replaceScratchName(op->bestJournal.nonce, 1u, name);
+                afatfs_replaceStartScan(
+                    op, name, AFATFS_REPLACE_ACTION_RECOVER_FIND_OLD);
+            } else {
+                afatfs_replaceScratchName(op->bestJournal.nonce, 0u, name);
+                afatfs_replaceStartScan(
+                    op, name, AFATFS_REPLACE_ACTION_RECOVER_FIND_NEW);
+            }
+            return;
+
+        case AFATFS_REPLACE_ACTION_RECOVER_FIND_NEW:
+            if (op->found) {
+                op->phase = AFATFS_REPLACE_MOVE_FOUND;
+            } else {
+                afatfs_replaceScratchName(op->bestJournal.nonce, 1u, name);
+                afatfs_replaceStartScan(
+                    op, name, AFATFS_REPLACE_ACTION_RECOVER_FIND_OLD);
+            }
+            return;
+
+        case AFATFS_REPLACE_ACTION_RECOVER_FIND_OLD:
+            if (!op->found) {
+                afatfs_replaceFail(op, AFATFS_RESULT_RECOVERY_REQUIRED);
+                return;
+            }
+            op->phase = AFATFS_REPLACE_MOVE_FOUND;
+            return;
+
+        case AFATFS_REPLACE_ACTION_RECOVER_DELETE_NEW:
+        case AFATFS_REPLACE_ACTION_RECOVER_DELETE_OLD:
+            if (op->found)
+                op->phase = AFATFS_REPLACE_DELETE_FOUND;
+            else
+                afatfs_replaceQueueJournal(
+                    op, AFATFS_REPLACE_JOURNAL_CLEAN);
+            return;
+
+        default:
+            afatfs_replaceFail(op, AFATFS_RESULT_IO_ERROR);
+            return;
+    }
+}
+
+/* Select the destination component for the current exact-object move. */
+static void afatfs_replaceMoveDestination(afatfsReplaceOperation_t *op,
+                                          char output[AFATFS_LONG_FILENAME_MAX + 1u])
+{
+    if (op->action == AFATFS_REPLACE_ACTION_COMMIT_FIND_TARGET) {
+        afatfs_replaceScratchName(op->transaction->nonce, 1u, output);
+    } else if (op->transaction) {
+        afatfs_replaceCopyName(output, op->transaction->targetName);
+    } else {
+        afatfs_replaceCopyName(output, op->bestJournal.targetName);
+    }
+}
+
+/* Continue after a namespace sync according to the move/delete just completed. */
+static void afatfs_replaceAfterNamespaceSync(afatfsReplaceOperation_t *op)
+{
+    char name[AFATFS_LONG_FILENAME_MAX + 1u];
+
+    switch (op->action) {
+        case AFATFS_REPLACE_ACTION_COMMIT_FIND_TARGET:
+            afatfs_replaceQueueJournal(
+                op, AFATFS_REPLACE_JOURNAL_OLD_RENAMED);
+            return;
+        case AFATFS_REPLACE_ACTION_COMMIT_PROMOTE_NEW:
+        case AFATFS_REPLACE_ACTION_RECOVER_FIND_NEW:
+            afatfs_replaceQueueJournal(
+                op, AFATFS_REPLACE_JOURNAL_PROMOTED);
+            return;
+        case AFATFS_REPLACE_ACTION_COMMIT_DELETE_OLD:
+        case AFATFS_REPLACE_ACTION_RECOVER_DELETE_NEW:
+        case AFATFS_REPLACE_ACTION_RECOVER_DELETE_OLD:
+            afatfs_replaceQueueJournal(op, AFATFS_REPLACE_JOURNAL_CLEAN);
+            return;
+        case AFATFS_REPLACE_ACTION_ABORT_DELETE_NEW:
+            op->terminalResult = AFATFS_RESULT_OK;
+            op->phase = AFATFS_REPLACE_FINISH;
+            return;
+        case AFATFS_REPLACE_ACTION_RECOVER_FIND_OLD:
+            /* Old is authoritative again; remove exact staging before CLEAN. */
+            afatfs_replaceScratchName(op->bestJournal.nonce, 0u, name);
+            afatfs_replaceStartScan(
+                op, name, AFATFS_REPLACE_ACTION_RECOVER_DELETE_NEW);
+            return;
+        default:
+            afatfs_replaceFail(op, AFATFS_RESULT_IO_ERROR);
+            return;
+    }
+}
+
+/* Continue after a durable journal write according to its newly-valid state. */
+static void afatfs_replaceAfterJournalSync(afatfsReplaceOperation_t *op)
+{
+    char name[AFATFS_LONG_FILENAME_MAX + 1u];
+
+    switch ((afatfsReplaceJournalState_e)op->bestJournal.state) {
+        case AFATFS_REPLACE_JOURNAL_PREPARED:
+            afatfs_replaceStartScan(
+                op, op->bestJournal.targetName,
+                AFATFS_REPLACE_ACTION_COMMIT_FIND_TARGET);
+            return;
+        case AFATFS_REPLACE_JOURNAL_OLD_RENAMED:
+            afatfs_replaceScratchName(op->bestJournal.nonce, 0u, name);
+            afatfs_replaceStartScan(
+                op, name, AFATFS_REPLACE_ACTION_COMMIT_PROMOTE_NEW);
+            return;
+        case AFATFS_REPLACE_JOURNAL_PROMOTED:
+            afatfs_replaceScratchName(op->bestJournal.nonce, 1u, name);
+            afatfs_replaceStartScan(
+                op, name,
+                op->mode == AFATFS_REPLACE_MODE_COMMIT
+                    ? AFATFS_REPLACE_ACTION_COMMIT_DELETE_OLD
+                    : AFATFS_REPLACE_ACTION_RECOVER_DELETE_OLD);
+            return;
+        case AFATFS_REPLACE_JOURNAL_CLEAN:
+            op->terminalResult = AFATFS_RESULT_OK;
+            op->phase = AFATFS_REPLACE_FINISH;
+            return;
+        default:
+            afatfs_replaceFail(op, AFATFS_RESULT_IO_ERROR);
+            return;
+    }
+}
+
+static void afatfs_replaceContinue(void)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+    afatfsOperationStatus_e status;
+    const char *journalName;
+
+    if (afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_REPLACE ||
+        !op->active) {
+        return;
+    }
+
+    switch (op->phase) {
+        case AFATFS_REPLACE_BEGIN_CREATE_STAGE:
+            afatfs_replaceScratchName(op->transaction->nonce, 0u,
+                                      op->scanName);
+            op->phase = AFATFS_REPLACE_BEGIN_WAIT_STAGE;
+            if (!afatfs_createDirChild(
+                    op->parent, op->scanName, AFATFS_CREATE_NEW,
+                    AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                    afatfs_replaceStageCreated)) {
+                op->phase = AFATFS_REPLACE_BEGIN_CREATE_STAGE;
+            }
+            return;
+
+        case AFATFS_REPLACE_BEGIN_WAIT_STAGE:
+        case AFATFS_REPLACE_WAIT_CLOSE_STAGE:
+        case AFATFS_REPLACE_READ_JOURNAL_WAIT_OPEN:
+        case AFATFS_REPLACE_WRITE_JOURNAL_WAIT_OPEN:
+        case AFATFS_REPLACE_WAIT_MOVE:
+        case AFATFS_REPLACE_WAIT_DELETE:
+            /* An existing async primitive owns progress until its callback. */
+            return;
+
+        case AFATFS_REPLACE_CLOSE_STAGE:
+            if (!op->transaction || !op->transaction->stagingDirectory) {
+                afatfs_replaceStageClosed();
+                return;
+            }
+            op->phase = AFATFS_REPLACE_WAIT_CLOSE_STAGE;
+            if (!afatfs_fclose(op->transaction->stagingDirectory,
+                               afatfs_replaceStageClosed)) {
+                op->phase = AFATFS_REPLACE_CLOSE_STAGE;
+            }
+            return;
+
+        case AFATFS_REPLACE_SYNC_STAGE:
+            /* PREPARED is never written until every payload sector is durable. */
+            if (!afatfs_sync())
+                return;
+            op->journalSlot = 0u;
+            op->journalValid = 0u;
+            op->phase = AFATFS_REPLACE_READ_JOURNAL_OPEN;
+            return;
+
+        case AFATFS_REPLACE_READ_JOURNAL_OPEN:
+            if (op->journalSlot >= 2u) {
+                op->phase = AFATFS_REPLACE_AFTER_JOURNALS;
+                return;
+            }
+            journalName = op->journalSlot == 0u
+                ? AFATFS_REPLACE_JOURNAL_SLOT0
+                : AFATFS_REPLACE_JOURNAL_SLOT1;
+            afatfs_replaceReleaseParent(op);
+            op->phase = AFATFS_REPLACE_READ_JOURNAL_WAIT_OPEN;
+            if (!afatfs_fopenChild(
+                    op->parent, journalName, "r", AFATFS_OPEN_EXISTING,
+                    AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                    afatfs_replaceJournalOpened)) {
+                afatfs_replaceReacquireParent(op);
+                op->phase = AFATFS_REPLACE_READ_JOURNAL_OPEN;
+            }
+            return;
+
+        case AFATFS_REPLACE_READ_JOURNAL_DATA:
+        {
+            uint32_t remaining = sizeof(afatfsReplaceJournalRecord_t) -
+                                 op->ioOffset;
+            uint32_t read = afatfs_fread(
+                op->journalFile,
+                afatfs.treeWorkspace.ioBuffer + op->ioOffset,
+                remaining);
+
+            if (read != 0u) {
+                op->ioOffset = (uint16_t)(op->ioOffset + read);
+                if (op->ioOffset == sizeof(afatfsReplaceJournalRecord_t)) {
+                    afatfsReplaceJournalRecord_t *record =
+                        (afatfsReplaceJournalRecord_t *)
+                            afatfs.treeWorkspace.ioBuffer;
+
+                    if (afatfs_replaceJournalValid(record) &&
+                        (!op->journalValid ||
+                         record->sequence > op->bestJournal.sequence)) {
+                        op->bestJournal = *record;
+                        op->journalValid = 1u;
+                    } else if (afatfs_replaceJournalValid(record) &&
+                               op->journalValid &&
+                               record->sequence ==
+                                   op->bestJournal.sequence &&
+                               memcmp(record, &op->bestJournal,
+                                      sizeof(*record)) != 0) {
+                        /* Two valid but conflicting equal generations are unsafe. */
+                        op->journalAmbiguous = 1u;
+                    }
+                    op->phase = AFATFS_REPLACE_READ_JOURNAL_CLOSE;
+                }
+                return;
+            }
+            if (afatfs_fileIsBusy(op->journalFile))
+                return;
+            if (afatfs_feof(op->journalFile)) {
+                /* A short/torn slot is ignored; the alternate slot remains. */
+                op->phase = AFATFS_REPLACE_READ_JOURNAL_CLOSE;
+            }
+            return;
+        }
+
+        case AFATFS_REPLACE_READ_JOURNAL_CLOSE:
+            if (!afatfs_fclose(op->journalFile,
+                               afatfs_replaceJournalClosed)) {
+                return;
+            }
+            return;
+
+        case AFATFS_REPLACE_READ_JOURNAL_AFTER_CLOSE:
+            op->journalSlot++;
+            op->phase = op->journalSlot < 2u
+                ? AFATFS_REPLACE_READ_JOURNAL_OPEN
+                : AFATFS_REPLACE_AFTER_JOURNALS;
+            return;
+
+        case AFATFS_REPLACE_AFTER_JOURNALS:
+            if (op->journalAmbiguous) {
+                afatfs_replaceFail(op, AFATFS_RESULT_RECOVERY_REQUIRED);
+                return;
+            }
+            if (op->mode == AFATFS_REPLACE_MODE_COMMIT) {
+                char oldName[AFATFS_LONG_FILENAME_MAX + 1u];
+
+                if ((op->journalValid &&
+                     op->bestJournal.state !=
+                         AFATFS_REPLACE_JOURNAL_CLEAN) ||
+                    (!op->journalValid && op->journalSeen)) {
+                    afatfs_replaceFail(
+                        op, AFATFS_RESULT_RECOVERY_REQUIRED);
+                    return;
+                }
+                afatfs_replaceScratchName(
+                    op->transaction->nonce, 1u, oldName);
+                afatfs_replaceStartScan(
+                    op, oldName, AFATFS_REPLACE_ACTION_COMMIT_CHECK_OLD);
+            } else {
+                afatfs_replaceBeginRecovery(op);
+            }
+            return;
+
+        case AFATFS_REPLACE_WRITE_JOURNAL_OPEN:
+            journalName = op->journalSlot == 0u
+                ? AFATFS_REPLACE_JOURNAL_SLOT0
+                : AFATFS_REPLACE_JOURNAL_SLOT1;
+            afatfs_replaceReleaseParent(op);
+            op->phase = AFATFS_REPLACE_WRITE_JOURNAL_WAIT_OPEN;
+            if (!afatfs_fopenChild(
+                    op->parent, journalName, "w", AFATFS_CREATE_OR_OPEN,
+                    AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                    afatfs_replaceJournalOpened)) {
+                afatfs_replaceReacquireParent(op);
+                op->phase = AFATFS_REPLACE_WRITE_JOURNAL_OPEN;
+            }
+            return;
+
+        case AFATFS_REPLACE_WRITE_JOURNAL_DATA:
+        {
+            uint32_t remaining = sizeof(afatfsReplaceJournalRecord_t) -
+                                 op->ioOffset;
+            uint32_t written = afatfs_fwrite(
+                op->journalFile,
+                afatfs.treeWorkspace.ioBuffer + op->ioOffset,
+                remaining);
+
+            if (written != 0u) {
+                op->ioOffset = (uint16_t)(op->ioOffset + written);
+                if (op->ioOffset == sizeof(afatfsReplaceJournalRecord_t))
+                    op->phase = AFATFS_REPLACE_WRITE_JOURNAL_CLOSE;
+                return;
+            }
+            if (afatfs_isFull())
+                afatfs_replaceFail(op, AFATFS_RESULT_NO_SPACE);
+            return;
+        }
+
+        case AFATFS_REPLACE_WRITE_JOURNAL_CLOSE:
+            if (!afatfs_fclose(op->journalFile,
+                               afatfs_replaceJournalClosed)) {
+                return;
+            }
+            return;
+
+        case AFATFS_REPLACE_WRITE_JOURNAL_AFTER_CLOSE:
+            op->phase = AFATFS_REPLACE_WRITE_JOURNAL_SYNC;
+            return;
+
+        case AFATFS_REPLACE_WRITE_JOURNAL_SYNC:
+            if (!afatfs_sync())
+                return;
+            op->bestJournal = *(afatfsReplaceJournalRecord_t *)
+                afatfs.treeWorkspace.ioBuffer;
+            op->journalValid = 1u;
+            afatfs_replaceAfterJournalSync(op);
+            return;
+
+        case AFATFS_REPLACE_SCAN_BEGIN:
+            afatfs_findFirstObject(op->parent, &op->finder);
+            op->finderActive = 1u;
+            op->phase = AFATFS_REPLACE_SCAN_NEXT;
+            return;
+
+        case AFATFS_REPLACE_SCAN_NEXT:
+        {
+            afatfsObjectInfo_t object;
+            uint8_t matches;
+
+            status = afatfs_findNextObject(op->parent, &op->finder, &object);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                afatfs_replaceFail(op, AFATFS_RESULT_IO_ERROR);
+                return;
+            }
+            if (object.id.kind == AFATFS_OBJECT_NONE) {
+                afatfs_findLastObject(op->parent, &op->finder);
+                op->finderActive = 0u;
+                op->found = 0u;
+                afatfs_replaceHandleScanResult(op);
+                return;
+            }
+
+            if (op->action ==
+                    AFATFS_REPLACE_ACTION_CHECK_UNKNOWN_SCRATCH) {
+                matches = afatfs_replaceIsScratchName(object.id.displayName);
+            } else {
+                uint8_t caseSensitive =
+                    op->action == AFATFS_REPLACE_ACTION_COMMIT_FIND_TARGET ||
+                    op->action == AFATFS_REPLACE_ACTION_RECOVER_CHECK_TARGET
+                        ? 0u : 1u;
+
+                matches = fat_compareDisplayName(
+                    object.id.displayName, op->scanName,
+                    caseSensitive) == 0 ? 1u : 0u;
+            }
+            if (matches) {
+                op->foundObject = object;
+                op->found = 1u;
+                afatfs_findLastObject(op->parent, &op->finder);
+                op->finderActive = 0u;
+                afatfs_replaceHandleScanResult(op);
+            }
+            return; /* At most one concrete directory object per poll. */
+        }
+
+        case AFATFS_REPLACE_MOVE_FOUND:
+        {
+            char destination[AFATFS_LONG_FILENAME_MAX + 1u];
+
+            afatfs_replaceMoveDestination(op, destination);
+            afatfs_replaceReleaseParent(op);
+            op->phase = AFATFS_REPLACE_WAIT_MOVE;
+            if (!afatfs_renameObjectAt(
+                    op->parent, &op->foundObject.id, destination,
+                    AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                    afatfs_replaceMoveDone)) {
+                afatfs_replaceReacquireParent(op);
+                op->phase = AFATFS_REPLACE_MOVE_FOUND;
+            }
+            return;
+        }
+
+        case AFATFS_REPLACE_DELETE_FOUND:
+            op->phase = AFATFS_REPLACE_WAIT_DELETE;
+            if (!afatfs_deleteTree(&op->foundObject.id,
+                                   afatfs_replaceDeleteDone)) {
+                op->phase = AFATFS_REPLACE_DELETE_FOUND;
+            }
+            return;
+
+        case AFATFS_REPLACE_SYNC_NAMESPACE:
+            if (!afatfs_sync())
+                return;
+            afatfs_replaceAfterNamespaceSync(op);
+            return;
+
+        case AFATFS_REPLACE_FINISH:
+            if (op->journalFile) {
+                if (!afatfs_fclose(op->journalFile,
+                                   afatfs_replaceJournalClosed)) {
+                    return;
+                }
+                return;
+            }
+            afatfs_replaceFinish(op);
+            return;
+
+        default:
+            afatfs_replaceFail(op, AFATFS_RESULT_IO_ERROR);
+            return;
+    }
+}
+
+bool afatfs_beginTreeReplace(afatfsDirHandle_t parent,
+                             const char *targetDisplayName,
+                             afatfsReplaceBeginCallback_t complete)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+    afatfsReplaceTransactionPtr_t transaction =
+        &afatfs.replaceTransaction;
+
+    /*
+     * Accept one asynchronous staging-directory creation.
+     *
+     * Inputs are checked before either global structure changes. The sanitized
+     * target component and deterministic nonzero nonce are copied into the small
+     * persistent descriptor; CREATE_NEW collision handling advances that nonce
+     * without ever reopening stale scratch. Output false has no callback;
+     * accepted work is completed by afatfs_replaceStageCreated().
+     */
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_NONE ||
+        transaction->active || afatfs.renameObject.active ||
+        afatfs.removeObjects.active || !afatfs_parentCanAcceptChild(parent) ||
+        !afatfs_childComponentCanStart(targetDisplayName)) {
+        return false;
+    }
+
+    memset(transaction, 0, sizeof(*transaction));
+    if (afatfs_copySanitizedLongName(transaction->targetName,
+                                     targetDisplayName) == 0u) {
+        return false;
+    }
+    transaction->active = 1u;
+    transaction->parent = parent;
+    transaction->nonce = afatfs.cacheTimer ^ afatfs.lastClusterAllocated ^
+                         afatfs.partitionStartSector;
+    if (transaction->nonce == 0u)
+        transaction->nonce = 1u;
+
+    memset(op, 0, sizeof(*op));
+    op->active = 1u;
+    op->mode = AFATFS_REPLACE_MODE_BEGIN;
+    op->phase = AFATFS_REPLACE_BEGIN_CREATE_STAGE;
+    op->terminalResult = AFATFS_RESULT_IO_ERROR;
+    op->parent = parent;
+    op->transaction = transaction;
+    op->beginCallback = complete;
+    afatfs.treeWorkspace.kind = AFATFS_TREE_OPERATION_REPLACE;
+    return true;
+}
+
+bool afatfs_commitTreeReplace(afatfsReplaceTransactionPtr_t transaction,
+                              afatfsResultCallback_t complete)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+
+    /*
+     * Transfer a populated transaction into journaled commit execution.
+     * The staging directory itself must be idle and have no retained child;
+     * commit takes ownership of closing it. The parent retain counter moves
+     * from descriptor to operation without changing its physical value, keeping
+     * unrelated child starts blocked throughout commit except deliberate
+     * journal/move handoffs.
+     */
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        transaction != &afatfs.replaceTransaction || !transaction->active ||
+        !transaction->parentHeld || !transaction->stagingDirectory ||
+        afatfs_fileIsBusy(transaction->stagingDirectory) ||
+        transaction->stagingDirectory->childOperationRetainCount != 0u ||
+        afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_NONE ||
+        afatfs.renameObject.active || afatfs.removeObjects.active) {
+        return false;
+    }
+
+    memset(op, 0, sizeof(*op));
+    op->active = 1u;
+    op->mode = AFATFS_REPLACE_MODE_COMMIT;
+    op->phase = AFATFS_REPLACE_CLOSE_STAGE;
+    op->terminalResult = AFATFS_RESULT_IO_ERROR;
+    op->parent = transaction->parent;
+    op->parentHeld = transaction->parentHeld;
+    op->transaction = transaction;
+    op->resultCallback = complete;
+    transaction->parentHeld = 0u;
+    afatfs.treeWorkspace.kind = AFATFS_TREE_OPERATION_REPLACE;
+    return true;
+}
+
+bool afatfs_abortTreeReplace(afatfsReplaceTransactionPtr_t transaction,
+                             afatfsResultCallback_t complete)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+
+    /*
+     * Abort retains exact transaction identity instead of deleting by prefix.
+     * Before commit it closes/scans/deletes only nonce-new. After any commit
+     * attempt it reads the durable journal and follows recovery, because the
+     * live target may already be under nonce-old. Ownership transfer mirrors
+     * commit so a failed abort can be retried without exposing the parent.
+     */
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        transaction != &afatfs.replaceTransaction || !transaction->active ||
+        !transaction->parentHeld ||
+        (transaction->stagingDirectory &&
+         (afatfs_fileIsBusy(transaction->stagingDirectory) ||
+          transaction->stagingDirectory->childOperationRetainCount != 0u)) ||
+        afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_NONE ||
+        afatfs.renameObject.active || afatfs.removeObjects.active) {
+        return false;
+    }
+
+    memset(op, 0, sizeof(*op));
+    op->active = 1u;
+    op->mode = AFATFS_REPLACE_MODE_ABORT;
+    op->phase = transaction->stagingDirectory
+        ? AFATFS_REPLACE_CLOSE_STAGE
+        : (transaction->commitStarted
+            ? AFATFS_REPLACE_READ_JOURNAL_OPEN
+            : AFATFS_REPLACE_SCAN_BEGIN);
+    op->terminalResult = AFATFS_RESULT_IO_ERROR;
+    op->parent = transaction->parent;
+    op->parentHeld = transaction->parentHeld;
+    op->transaction = transaction;
+    op->resultCallback = complete;
+    op->journalSlot = 0u;
+    transaction->parentHeld = 0u;
+    if (!transaction->stagingDirectory && !transaction->commitStarted) {
+        afatfs_replaceScratchName(transaction->nonce, 0u, op->scanName);
+        op->action = AFATFS_REPLACE_ACTION_ABORT_DELETE_NEW;
+    }
+    afatfs.treeWorkspace.kind = AFATFS_TREE_OPERATION_REPLACE;
+    return true;
+}
+
+bool afatfs_recoverTreeReplace(afatfsDirHandle_t parent,
+                               afatfsResultCallback_t complete)
+{
+    afatfsReplaceOperation_t *op =
+        &afatfs.treeWorkspace.operation.replace;
+
+    /*
+     * Start explicit recovery only for one caller-selected product parent.
+     * A live transaction is rejected because its scratch is intentionally under
+     * construction. On acceptance the parent is exclusively retained, both
+     * journal slots are read, and no scratch mutation occurs unless a valid CRC
+     * record names its exact nonce/target. Output follows the one-callback rule.
+     */
+    if (afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        afatfs.treeWorkspace.kind != AFATFS_TREE_OPERATION_NONE ||
+        afatfs.replaceTransaction.active || afatfs.renameObject.active ||
+        afatfs.removeObjects.active || !afatfs_parentCanAcceptChild(parent)) {
+        return false;
+    }
+
+    memset(op, 0, sizeof(*op));
+    op->active = 1u;
+    op->mode = AFATFS_REPLACE_MODE_RECOVER;
+    op->phase = AFATFS_REPLACE_READ_JOURNAL_OPEN;
+    op->terminalResult = AFATFS_RESULT_IO_ERROR;
+    op->parent = parent;
+    op->resultCallback = complete;
+    parent->childOperationRetainCount = 1u;
+    op->parentHeld = 1u;
+    afatfs.treeWorkspace.kind = AFATFS_TREE_OPERATION_REPLACE;
+    return true;
 }

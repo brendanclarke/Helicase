@@ -2751,18 +2751,6 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         what != SAVE_TYPE_BANK)
         return;
     if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
-        (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) &&
-        !filesystem_kitSlotExists(slot)) {
-        /*
-         * Empty Kit browser slots are normal UI state, not failed filesystem
-         * operations. The Kit/ scan cache already proved there is no numbered
-         * directory here, so do not start a load that would report KitL00.
-         */
-        memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
-        menu_repaintAll();
-        return;
-    }
-    if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
         what == SAVE_TYPE_KIT) {
         if (!preset_loadKitForScenes(slot, menu_kitLoadSceneMask))
             menu_deferSelectionRequest = 1;
@@ -2780,13 +2768,13 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
          * also posts a read-only child scan so the SEQ LEDs represent only
          * Scene folders present inside the highlighted Bank slot.
          */
-        memcpy(preset_currentName,
-               (what == SAVE_TYPE_BANK)
-                   ? filesystem_bankSlotName(slot)
-                   : filesystem_sceneSlotName(slot),
-               8u);
-        if (menu_activePage == LOAD_PAGE && what == SAVE_TYPE_BANK)
+        if (menu_activePage == LOAD_PAGE && what == SAVE_TYPE_BANK) {
             menu_requestBankLoadPreview(slot);
+        } else {
+            preset_loadName(slot, what);
+            if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
+                menu_deferSelectionRequest = 1u;
+        }
     } else {
         preset_loadName(slot, what);
         if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)

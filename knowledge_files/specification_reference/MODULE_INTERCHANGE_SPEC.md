@@ -1,6 +1,7 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 039 for the one-pattern bridge,
+Session 030 baseline, updated through Session 039 for product behavior and
+through 2026-07-18 for the low-level asyncfatfs expansion. It covers the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
@@ -37,9 +38,9 @@ a generic bridge.
   one resident voice to the root Instrument pool. Kit/Instrument Morph Save
   writes the current per-voice interpolated value into both normal and morph
   endpoint fields.
-- Scene and Bank load/save are directory-based in the Session 039 bridge.
-  Root Scene is a library/pool. Root Bank is the current workspace selector,
-  but only one resident Scene is implemented so far.
+- Scene and Bank load/save are directory-based. Root Scene is a library/pool.
+  Root Bank is the current 16-Scene workspace selector: bit N in its load/save
+  and edit masks addresses resident Scene N and Bank-local child `NN`.
 - Numbered library slots are direct `000..999`; slot `000` is real. This does
   not change instrument file voice coordinates, which remain one-based `1..6`.
 - asyncfatfs owns exact-case filename behavior. Product code should use
@@ -88,6 +89,43 @@ a generic bridge.
   preserve the old single/global shuffle byte; per-track shuffle is the only
   live shuffle storage, and final migration/backfill is expected to happen in
   external Python converters once storage settles.
+
+## Core/Bank/BankData
+
+Affiliate modules: SceneData, Menu, Preset, filesystem.
+
+Purpose: owns resident Bank identity and the masks that address the 16 resident
+Scenes. It does not own card browser entries or Scene payloads. Bit N in every
+Bank Scene mask maps to `scenes[N]` and Bank-local child folder `NN`.
+
+| API | Use | Usual callers / clients |
+|---|---|---|
+| `bank_init()` | Initialize no-Bank identity, slot 0 defaults, and active/edit Scene 0. | boot |
+| `bank_setDisplayName()` / `bank_displayName()` | Store/query the directory-derived eight-cell Bank name. | filesystem, Menu Save seed |
+| `bank_setRestoreBankSlot()` / `bank_restoreBankSlot()` | Store/query the direct root Bank slot `000..999`. | filesystem, boot/settings future |
+| `bank_setScenePresentMask()` / `bank_scenePresentMask()` / `bank_scenePresent()` | Own which resident Scene slots currently contain usable Bank payloads. | filesystem Load/Save, Menu LEDs/source guards |
+| `bank_selectActiveSceneForEditMask()` / `bank_activeSceneSlot()` | Select the active resident Scene while enforcing active membership in the VOICE edit mask. | Menu, filesystem Bank commit |
+| `bank_setSceneMaskVoiceEdit()` / `bank_sceneMaskVoiceEdit()` / `bank_toggleSceneMaskVoiceEdit()` | Own and edit the 16-bit multi-Scene VOICE fan-out mask. | Menu VOICE+SEQ, Preset batch edits, bankset parser/writer |
+| `bank_setHasResidentBank()` / `bank_hasResidentBank()` | Distinguish a loaded/saved Bank workspace from root Scene/Kit/default fallback state. | filesystem, Menu/boot |
+
+## Core/Bank/Scene/SceneData
+
+Affiliate modules: BankData, PatternData, InstrumentManager, Preset, filesystem,
+Menu.
+
+Purpose: owns `scenes[16]`. Each `scene_t` contains its retained display name,
+Scene settings, PatternSet, embedded Kit, descriptor endpoint images, and source
+name metadata. Clients use bounded accessors; Bank masks provide indices, not
+pointers.
+
+| API | Use | Usual callers / clients |
+|---|---|---|
+| `scene_initAll()` | Initialize all 16 resident Scene records and select Scene 0. | boot |
+| `scene_indexValid()` / `scene_get()` / `scene_getConst()` | Validate and borrow one resident Scene record. | filesystem, Preset, PatternData, Menu |
+| `scene_getActiveIndex()` / `scene_selectActive()` | Query/change resident active Scene identity; Preset separately applies runtime DSP state. | Bank/Menu/Preset |
+| `scene_setSceneDisplayName()` / `scene_sceneDisplayName()` | Own the directory-derived Scene name without writing a self-name into `sceneset.scg`. | filesystem, Menu Save seed |
+| `scene_setResidentKitDisplayName()` / `scene_kitDisplayName()` | Own embedded Kit identity independently per resident Scene. | filesystem, Menu Save seed |
+| `scene_instrumentSlot()` / `scene_instrumentSlotConst()` and Scene setting accessors | Access bounded descriptor images, routing, Morph, MIDI, and supplemental Scene state. | Preset, InstrumentManager, filesystem, Menu |
 
 ## Core/Bank/Scene/Pattern/PatternData
 
@@ -372,7 +410,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_saveInstrument(scene, slot, display_name)` | Post one root Instrument Save request from a resident Scene/voice slot. The display stem is captured at request acceptance and filesystem writes `Instrument/<stem.ext>`. | Instrument Save nested Save-page OK |
 | `preset_saveInstrumentMorph(scene, slot, display_name)` | Post one root InstrumentMrp Save request. The writer uses the normal Instrument schema but writes the current interpolated values into both endpoint sections and does not rename resident source metadata. | Instrument Save `<Type>Mrp` OK |
 | `preset_loadSceneForScenes(presetNr, scene_mask)` / `preset_saveScene(presetNr)` | Load/save root Scene library folders through the staged Scene payload reader/writer. | Load/Save Scene |
-| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr)` | Load/save root Bank folders. Current bridge loads/saves one resident Scene and uses fallback when a Bank contains no child Scene. | Load/Save Bank, boot |
+| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr, scene_mask)` | Load selected Bank-local `00..15` children into matching resident Scenes, or save the selected resident Scene subset. Empty Banks use the root Scene/Kit/default fallback. | Load/Save Bank, boot |
 | `preset_loadFirstAvailableSceneOrKit()` | Fallback after absent/empty Bank: lowest root Scene, then lowest root Kit, then defaults. | boot, Bank Load completion |
 | `preset_sendDrumsetParameters()` | Synchronous pre-audio Scene kit audio-routing and descriptor runtime apply. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
@@ -564,9 +602,12 @@ parsing/formatting and descriptor-key validation stay in `storageTypes.c/h`.
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is `Kit/NNN Name/kitset.kcg` plus instruments and save routes to the new Kit directory writer. For `FS_FILE_MORPH`, load/save remains legacy `.SND`. | Preset |
 | `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one direct Kit library slot `000..999` into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
 | `filesystem_requestLoadKitMorphForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging only so Preset can copy matching source normal endpoints into resident morph endpoints. | Preset/Menu KitMrp Load |
-| `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
+| `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with those finalized visible member filenames. Returned 8.3 aliases remain reopen details. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
 | `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse a root `Scene/<NNN Name>/` folder into staged Scene memory, including `sceneset.scg`, embedded Kit, pattern bridge/stub, and effect placeholder, then commit to selected resident Scenes after all children validate. | Preset/Menu Scene Load, boot |
 | `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, thin `pattern.pat`, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
+| `filesystem_requestLoadBank(slot, scene_mask, cb)` | Validate v1/v2 `bankset.bcg`, enumerate Bank-local `00..15` children, and load the selected available children into matching resident Scene indices before committing BankData identity/masks. | Preset/Menu Bank Load, boot |
+| `filesystem_requestScanBankScenes(slot, cb)` / `filesystem_bankChildSceneMask()` | Preview the highlighted Bank's immediate child Scene mask without loading BankData or Scene payloads. | Menu Bank Load SEQ selection |
+| `filesystem_requestSaveBank(slot, source_scene, display_name, scene_mask, cb)` | Write v2 `bankset.bcg` and selected resident Scenes into a unique temp Bank, move an occupied target to paired old scratch, and promote temp. This is the current manual workflow, not the new journaled asyncfatfs transaction. | Preset/Menu Bank Save |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the per-type root Instrument browser cache. | main boot, Menu Instrument Load |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Validate one root Instrument file into private staging without mutating live SceneData. | Preset Instrument request |
 | `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` / `filesystem_requestSaveInstrumentMorph(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. The Morph variant writes current interpolated values into both endpoint sections and preserves resident source naming. | Preset Instrument Save |
@@ -601,7 +642,8 @@ Important private Phase 2 kit helpers:
 - `filesystem_saveKitDirectory_tick()` creates/opens root `Kit/`, creates/opens
   the target LFN Kit folder after deleting every physical directory for that
   slot, streams six instrument files first, and streams `kitset.kcg` after
-  member aliases are known. `kitset.kcg` remains authoritative for load, but
+  member display filenames and reopen aliases are known. The schema stores the
+  visible filenames. `kitset.kcg` remains authoritative for load, but
   Session 038 Kit Save no longer relies on leaving stale unreferenced files in
   place.
 - `filesystem_loadSceneDirectory_tick()` validates complete Scene folders in
@@ -610,6 +652,15 @@ Important private Phase 2 kit helpers:
 - `filesystem_saveSceneDirectory_tick()` writes the current Scene folder shape:
   `sceneset.scg`, embedded Kit without `audio_out`, six instruments, thin
   `pattern.pat`, and placeholder `effects.fx`.
+- `filesystem_loadBankDirectory_tick()` parses Bank config, scans two-digit
+  child folders, and delegates each selected child to the staged Scene loader.
+  Only after all selected payloads validate does it commit BankData display,
+  active Scene, present mask, VOICE edit mask, and restore slot.
+- `filesystem_saveBankDirectory_tick()` writes selected resident Scenes into a
+  guaranteed-new `tmpNNN-xxxx` tree, renames an occupied numbered Bank to
+  `oldNNN-xxxx`, and promotes temp. It does not copy untoggled old child Scenes,
+  clean old scratch, journal the two renames, or invoke the new asyncfatfs tree
+  transaction; Phase 7 owns that migration.
 - Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
   fallback for FAT aliases like `000INI~1` or `001SLA~1`.
 
@@ -621,10 +672,16 @@ asyncfatfs boundary:
   component/object primitives instead of creating one-off FAT writers.
 - Dot-prefixed files/directories are ordinary objects. Product scanners filter
   after object iteration.
-- Session 038 provides filesystem-level recursive directory cleanup for
-  replacement-style product saves such as Kit Save. Atomic rename/replace is
-  still missing and must be added before Scene/Bank/autosave code depends on
-  temporary-file promotion.
+- asyncfatfs expansion Phases 1-6 provide explicit-parent child operations,
+  exact object identity, by-identity rename/move/delete, reduced-RAM recursive
+  tree copy, and explicit known-parent journaled directory replacement. The
+  replacement is crash-recoverable after replay, not a strict atomic rename.
+- `filesystem.c` has not completed Phase 7 integration. Current Kit/Scene/Bank
+  save state machines do not yet build and commit through that transaction, and
+  known product parents do not yet run its recovery preflight before browsing.
+- The current transaction accepts directories. File-shaped `.tmp` autosave
+  promotion remains a separate missing primitive and must not be inferred from
+  the directory API.
 
 Private but important pattern serialization helpers:
 

@@ -84,13 +84,50 @@ own tests before the next phase starts.
   entry-run checks compile cleanly. Remaining compiler diagnostics are the
   pre-existing unused `eraseCount`, newlib syscall stubs, and serial-LTO notices.
 
+### 2026-07-18 — Phases 5-6 reduced-RAM implementation
+
+- Added `afatfs_copyObjectTree()` as a global exact-object coordinator. It uses
+  a 96-byte stream buffer, one live LFN finder, and eight 28-byte compact
+  frames; ascent reconstructs/rescans parents to the saved sector/index/raw-SFN
+  key. The destination is always CREATE_NEW, supported FAT metadata is copied,
+  and partial output is retained on failure.
+- Added asynchronous `beginTreeReplace`, `commitTreeReplace`,
+  `abortTreeReplace`, and explicit known-parent recovery. The small opaque
+  transaction coexists with copy while staging is populated; commit/recovery
+  execution overlays copy in the global tree workspace.
+- Added alternating `AFATJ0.SYS`/`AFATJ1.SYS` 69-byte records with magic,
+  version, sequence, state, object kind, nonce, canonical target, and CRC-32.
+  Commit syncs PREPARED, OLD_RENAMED, PROMOTED, and CLEAN in order, using
+  by-identity same-parent rename and exact native delete.
+- Recovery handles torn writes/renames from the highest valid record, rejects
+  equal-sequence ambiguity and invalid targets, reports unauthorised scratch as
+  RECOVERY_REQUIRED, and never recursively guesses at arbitrary names. Commit
+  also blocks an unfinished prior journal and preflights its nonce-old scratch.
+- `afatfs_destroy(false)` now drains a live tree coordinator or aborts an idle
+  begun transaction before closing ordinary handles.
+- The final handle audit raised the pool from five to six: a nested file copy
+  simultaneously owns two caller parents, two directory cursors, and two file
+  streams. The shared transfer buffer was reduced from 128 to 96 bytes to
+  offset part of the required 368-byte handle.
+- ARM ABI measurements: frame 28, journal 69, transaction 68, replace arm 340,
+  copy arm 540, shared workspace 640, final `afatfs` 8,880 (`0x22b0`) bytes.
+  The Phase 4 baseline was 7,804 bytes, so both phases add 1,076 bytes and remain
+  120 bytes below the 9 KB target.
+- Final verification: clean `make -j4` completed, followed by a handle-budget
+  rebuild with text 367,752, data 408, BSS 364,908; `make img` regenerated the
+  368,160-byte packaged payload; and
+  `git diff --check` passed. Hardware and deterministic power-cut injection
+  remain pending and are required before Phase 7 product migration.
+
 ### Next implementation boundary
 
-- Phase 5 recursive tree copy and Phase 6 journaled replacement still require
-  their dedicated global coordinators and fault-injection tests. They must not
-  be re-added as per-file operation states.
-- Product Bank migration remains intentionally blocked on those two features;
-  the existing manual `filesystem.c` staging flow is still the production path.
+- Phase 5 recursive tree copy and Phase 6 journaled replacement now have real
+  reduced-RAM global coordinators and public callback APIs. They were not added
+  to the per-file dispatcher.
+- Product Bank migration is no longer blocked on missing primitives, but Phase
+  7 remains intentionally separate: the existing manual `filesystem.c` staging
+  flow stays production until copy/replace pass hardware and injected-power-loss
+  tests.
 
 ---
 
@@ -135,9 +172,9 @@ own tests before the next phase starts.
 | Exact recursive delete | Implemented with root validation, bounded depth, structural `..` validation, and FAT16-root ascent. | Add dedicated flat/nested/corrupt-media tests before broader product use. |
 | Same-parent rename | Implemented both as legacy name lookup and `afatfs_renameObjectAt()` with explicit parent, stale validation, and structured result. | Migrate promotion callers to by-identity form. |
 | Cross-parent move | Implemented through the global rename coordinator with bounded descendant checks, destination-first durable ordering, and directory `..` update. | Add failure-injection and FAT16/FAT32 hardware coverage. |
-| Tree copy | Not implemented. The header declares `afatfs_copyObjectTree()`, but there is no public definition; the dispatcher continuation is a no-op. | Implement as a multi-handle coordinator with bounded traversal and streaming. |
-| Transactional replace | Not implemented. Header-only begin/commit/abort declarations cannot work as written because begin is asynchronous; dispatcher continuation is a no-op. | Replace the API with an asynchronous transaction object and recovery protocol. |
-| Transaction recovery | Not implemented. `afatfs_init()` performs mount only and has no knowledge of product parent directories. | Add explicit recovery per known parent; do not recursively garbage-collect arbitrary names during mount. |
+| Tree copy | Implemented as a global coordinator with exact-root validation, CREATE_NEW destination semantics, 96-byte streaming, metadata preservation, compact depth frames, source-parent rescans, optional durable sync, and structured completion. | Complete host/mock and hardware byte-comparison/failure tests before product migration. |
+| Transactional replace | Implemented through async begin/commit/abort with a small opaque transaction, nonce scratch names, two alternating CRC journal slots, exact-object rename/delete, and durable PREPARED/OLD_RENAMED/PROMOTED/CLEAN ordering. | Exercise every cut point and collision on FAT16/FAT32 before product migration. |
+| Transaction recovery | Implemented as explicit known-parent recovery. It validates target components/CRC/sequence, never deletes unauthorised scratch, and follows state-specific promote/restore cleanup. Mount remains product-agnostic. | Invoke from Phase 7 product-parent preflight only after fault-injection coverage. |
 | Persistence barrier | Implemented as `afatfs_sync()`. | Use it explicitly in copy/replace promotion phases. |
 | Product-level Bank staging | Partially implemented in `filesystem.c` using `tmp...`/`old...` names and two same-parent renames. It is not journaled and does not yet preserve untoggled Scenes by copying them. | Migrate only after copy and recoverable replace are proven. |
 
@@ -183,12 +220,14 @@ demonstrated why union ownership must be explicit.
 
 ### Handle budget
 
-`AFATFS_MAX_OPEN_FILES` is currently 3. Parent-relative copy can legitimately
-need source parent, destination parent, source file, and destination file
-handles. Raise the pool to 5 when Phase 2 lands, then record the exact
-`sizeof(afatfsFile_t)` and `.bss` increase from the map file. If the measured
-increase is unacceptable, introduce lightweight private directory cursors;
-do not silently reuse or copy a busy `afatfsFile_t`.
+`AFATFS_MAX_OPEN_FILES` is now 6. The final Phase 5 audit proved that nested
+copy can legitimately need source parent, destination parent, active source and
+destination directory cursors, plus source and destination file streams at the
+same time. Five handles passed flat-tree reasoning but would retry forever when
+allocating the nested destination file. Each handle is 368 bytes; the 96-byte
+shared transfer buffer and compact traversal state keep the complete `afatfs`
+singleton at 8,880 bytes despite the sixth slot. Do not silently reuse or copy a
+busy `afatfsFile_t`.
 
 All parent-relative start functions must state that parent handles remain open
 and unmodified until completion. `filesystem.c` already serializes one product
@@ -463,6 +502,8 @@ Cross-volume move is out of scope and returns `UNSUPPORTED_LAYOUT`.
 
 ## Phase 5 — Recursive Tree Copy
 
+**Implementation status: code complete; hardware/fault-injection verification pending.**
+
 Tree copy is a coordinator, not a file-handle operation. Add one
 `afatfsCopyTree_t` to `afatfs_t` and poll it after ordinary file handles, like
 the existing rename/remove coordinators.
@@ -470,12 +511,23 @@ the existing rename/remove coordinators.
 ### 5.1 Bounded state
 
 - `AFATFS_TREE_DEPTH_MAX`: explicit product-supported depth, initially 8;
-- one traversal frame per depth containing source/destination directory
-  identities and finder state;
-- one 512-byte copy buffer (one FAT/SD sector); do not expose or borrow cache
-  memory across poll calls;
+- one compact traversal frame per depth containing only source/destination
+  parent clusters and the physical SFN resume key; after ascent the source
+  parent is rescanned to that key rather than retaining full object/finder
+  records at every level;
+- one 96-byte copy buffer; `afatfs_fread()`/`afatfs_fwrite()` already support
+  partial-sector progress, and slower user-initiated save/copy work is preferred
+  to another 512-byte permanent allocation;
+- one complete LFN finder only for the active directory; it is explicitly
+  released before every rebind or ascent rescan;
 - source and destination file handles opened only while streaming one file;
 - copied destination name and create policy in operation-owned storage.
+
+Copy execution storage shares a union with replace commit/recovery execution
+storage. A small transaction descriptor is separate because callers may use
+tree copy while a begun transaction's staging directory is being populated.
+The implementation target is a final `afatfs` symbol no larger than 9 KB (the
+Phase 4 baseline is 7,804 bytes).
 
 ### 5.2 Copy phases
 
@@ -510,6 +562,8 @@ a transaction can abort it, while a diagnostic caller may need it preserved.
 
 ## Phase 6 — Crash-Recoverable Object Replace
 
+**Implementation status: code complete; hardware/fault-injection verification pending.**
+
 The old synchronous-looking `beginTreeReplace(..., tx_out)` signature is
 invalid: creating a staging directory requires async I/O, so a usable
 transaction cannot be returned synchronously. Replace it with an opaque async
@@ -539,17 +593,20 @@ Only one replace transaction may be active initially, matching
 
 ### 6.1 Scratch namespace
 
-Use reserved, non-product names that product scanners reject, for example
-`.afat-txn-<nonce>-new` and `.afat-txn-<nonce>-old`. Always create scratch
-objects with `CREATE_NEW`; never open an existing scratch directory as though it
-belonged to the new transaction.
+The implemented reserved names are `.afat-xxxxxxxx-new` and
+`.afat-xxxxxxxx-old`, where `xxxxxxxx` is the transaction's eight-digit
+lowercase hexadecimal nonce. Product scanners reject these non-numbered names.
+Always create scratch with `CREATE_NEW`; nonce collisions advance to another
+pair, and an existing scratch directory is never adopted by a new transaction.
 
 ### 6.2 Journal
 
-Two same-parent journal slots store alternating fixed-size records with magic,
-version, sequence, state, object kind, target/new/old display components, and
-CRC. Recovery selects the highest-sequence valid record; a torn newer record
-does not destroy the older valid state.
+Two same-parent journal slots, `AFATJ0.SYS` and `AFATJ1.SYS`, store alternating
+packed 69-byte records with magic, version, sequence, state, object kind, nonce,
+target display component, and CRC. New/old scratch names are regenerated from
+the nonce instead of consuming two more permanent component buffers. Recovery
+selects the highest-sequence valid record; a torn newer record does not destroy
+the older valid state.
 
 Journal states:
 
@@ -568,11 +625,15 @@ Journal states:
 5. sync, write/sync `OLD_RENAMED`;
 6. rename staging by identity to target;
 7. sync, write/sync `PROMOTED`;
-8. report commit success—the target is now durable and visible;
-9. delete old scratch asynchronously, sync, then clear journal.
+8. delete exact old scratch asynchronously and sync;
+9. write/sync `CLEAN`;
+10. report commit success after cleanup and the CLEAN persistence boundary.
 
-Cleanup may continue after the user-visible success callback, but its state
-must remain recoverable after power loss.
+The completed implementation deliberately waits through cleanup instead of
+reporting an early user-visible success. This keeps callback ownership simple
+for the first production integration; a future optimization may split durable
+promotion from background cleanup only if it adds a separate observable state
+and preserves the same recovery rules.
 
 ### 6.4 Recovery rules
 
@@ -623,8 +684,11 @@ round-tripped on hardware.
 6. Remove the existing manual phases 39–50 only after journaled promotion is
    proven.
 
-This is the first production consumer because tree copy is required to preserve
-untoggled Scenes rather than silently dropping them.
+The 16-Scene resident workspace and selected-child Bank load/save now exist,
+but the current manual temp/old writer serializes only the selected mask into
+the new tree. This is the first transaction consumer because tree copy is
+required to preserve untoggled old Bank-local Scenes instead of leaving them
+only in the displaced `oldNNN-xxxx` folder.
 
 ### Scene and Kit Save
 

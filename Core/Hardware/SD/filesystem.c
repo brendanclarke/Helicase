@@ -63,6 +63,7 @@
 #include "asyncfatfs.h"
 #include "fat_standard.h"
 #include "storageTypes.h"
+#include "namesRegister.h"
 #include "SceneData.h"
 #include "BankData.h"
 #include "sd_routines.h"
@@ -71,7 +72,6 @@
 #include "ParameterArray.h"
 #include "menu.h"
 #include "SampleMemory.h"
-#include "kitBrowser.h"
 #include "sequencer.h"
 #include "PatternData.h"
 #include "MidiMessages.h"
@@ -102,6 +102,17 @@
 /* -----------------------------------------------------------------------
 ** Operation types
 ** ----------------------------------------------------------------------- */
+/*
+ * Retired pre-asyncfatfs recursive deleter state.
+ *
+ * What/why: afatfs_deleteTree() now owns bounded recursion, exact object IDs,
+ * and completion results, so the former filesystem-layer name stacks must not
+ * consume product SRAM or compile as unused code. Inputs/outputs are none;
+ * this review-only block remains excluded until its historical implementation
+ * is removed mechanically. Affiliate: active slot cleanup below retains only
+ * one afatfsObjectId_t and on_delete_tree_complete().
+ */
+#if 0
 typedef enum {
     FS_INTERNAL_OP_NONE,
     FS_INTERNAL_OP_FLUSH_FINISH,
@@ -144,6 +155,13 @@ typedef enum {
     FS_INTERNAL_OP_SCAN_INSTRUMENTS,
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
     FS_INTERNAL_OP_SAVE_INSTRUMENT,
+    /*
+     * Persist resident Instrument source identities after Preset commits.
+     * This is separate from file Load because payload/DSP commit belongs to
+     * Preset; the operation copies one stem into every selected resident
+     * Scene/voice record through namesRegister's atomic snapshot engine.
+     */
+    FS_INTERNAL_OP_UPDATE_INSTRUMENT_NAMES,
     FS_INTERNAL_OP_LOAD_NAME,
     FS_INTERNAL_OP_SCAN_TEST_FILES,
     FS_INTERNAL_OP_SCAN_TEST_DIRS,
@@ -205,6 +223,17 @@ static uint16_t         op_slot      = 0;
 static fs_file_type_t   op_file_type = FS_FILE_KIT;
 static afatfsFilePtr_t  op_file      = NULL;
 static volatile bool    op_file_ready = false;
+/*
+ * Structured child-open result shared by explicit-parent product operations.
+ *
+ * What: retains both the precise asyncfatfs result and returned handle until
+ * the owning filesystem phase consumes them. Why: a NULL-only legacy callback
+ * cannot distinguish missing `/Instrument` from media failure or a type
+ * collision. Inputs arrive from afatfs_fopenChild()/afatfs_openDirChild();
+ * outputs are op_file_ready, op_file, and op_child_open_result. Only one facade
+ * operation runs at once, so this single latch cannot be concurrently owned.
+ */
+static afatfsResultCode_t op_child_open_result = AFATFS_RESULT_INVALID_NAME;
 static uint32_t         op_bytes_done = 0;
 static fs_status_t      op_close_status = FS_STATUS_DONE;
 static fs_completion_cb_t completion_callback = NULL;
@@ -380,6 +409,7 @@ static char op_delete_tree_child_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_delete_tree_child_open_name[AFATFS_SHORT_FILENAME_MAX];
 static afatfsObjectKind_t op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
 static afatfsFilePtr_t op_delete_tree_dir = NULL;
+#endif
 static fs_delete_slot_phase_t op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
 static afatfsFilePtr_t op_delete_slot_dir = NULL;
 static uint8_t op_delete_slot_allow_short_alias = 0u;
@@ -389,10 +419,54 @@ static afatfsObjectId_t op_delete_slot_target_id;
 static bool op_delete_tree_done = false;
 static afatfsResultCode_t op_delete_tree_result = AFATFS_RESULT_OK;
 
+/*
+ * Forward storage declarations for the replacement callbacks below.
+ * The initialized definitions and full ownership comment remain beside the
+ * Instrument Save request state. These declarations exist only because generic
+ * callbacks are grouped with the other asyncfatfs completion bridges earlier
+ * in the translation unit.
+ */
+static afatfsDirHandle_t op_instrument_staging_dir;
+static afatfsReplaceTransactionPtr_t op_instrument_replace;
+static volatile uint8_t op_instrument_replace_ready;
+static volatile afatfsResultCode_t op_instrument_replace_result;
+static volatile uint8_t op_instrument_copy_ready;
+static volatile afatfsResultCode_t op_instrument_copy_result;
+
 static void on_delete_tree_complete(afatfsResultCode_t result)
 {
     op_delete_tree_done = true;
     op_delete_tree_result = result;
+}
+
+static void on_instrument_replace_result(afatfsResultCode_t result)
+{
+    /* Publish a recovery/commit/abort terminal result to the Save owner. */
+    op_instrument_replace_result = result;
+    op_instrument_replace_ready = 1u;
+}
+
+static void on_instrument_replace_begin(
+    afatfsResultCode_t result,
+    afatfsReplaceTransactionPtr_t transaction,
+    afatfsDirHandle_t staging_directory)
+{
+    /*
+     * Retain the opaque transaction and its caller-owned staging parent.
+     * Both pointers are valid only on OK; publishing ready last ensures the
+     * foreground phase cannot observe half-updated callback state.
+     */
+    op_instrument_replace_result = result;
+    op_instrument_replace = transaction;
+    op_instrument_staging_dir = staging_directory;
+    op_instrument_replace_ready = 1u;
+}
+
+static void on_instrument_copy_complete(afatfsResultCode_t result)
+{
+    /* One child-copy result releases both explicit parents for the next scan. */
+    op_instrument_copy_result = result;
+    op_instrument_copy_ready = 1u;
 }
 /*
  * Staged Kit payload and target mask for multi-Scene Kit Load.
@@ -483,9 +557,11 @@ static void filesystem_loadBankDirectory_tick(void);
 static void filesystem_saveBankDirectory_tick(void);
 static void filesystem_scanBanks_tick(void);
 static void filesystem_scanBankScenes_tick(void);
+#if 0 /* Retired filesystem-layer recursion; afatfs_deleteTree is the owner. */
 static void filesystem_deleteTreeStartWithOpenName(const char *display_name,
                                                    const char *open_name);
 static fs_status_t filesystem_deleteTree_tick(void);
+#endif
 static void filesystem_makeNumberedDir(char *dst,
                                        uint16_t slot,
                                        const char display[8]);
@@ -499,6 +575,18 @@ static void filesystem_makeNumberedDir(char *dst,
  * above the related parser/serializer context.
  */
 static void filesystem_saveInstrument_tick(void);
+/*
+ * Forward declarations for the `.names` provider shared by normal Instrument
+ * Save and Preset's post-Load facade operation. The implementations live near
+ * register boot/tick integration; these declarations make the earlier writer's
+ * callback ownership and structured terminal result explicit.
+ */
+static uint8_t filesystem_instrumentNamesProvider(
+    uint16_t record_index,
+    const char *current_name,
+    char replacement_out[17],
+    void *raw_context);
+static void filesystem_instrumentNamesComplete(namesRegisterResult_t result);
 typedef struct {
     storage_instrument_write_view_t view;
 } filesystem_instrument_write_ctx_t;
@@ -539,15 +627,25 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
  * visually saturates at 999.
  */
 static uint8_t instrument_file_count[INSTRUMENT_TYPE_UNKNOWN];
-static char instrument_file_name[INSTRUMENT_TYPE_UNKNOWN]
-                                [FS_INSTRUMENT_MAX_PER_TYPE]
-                                [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-static char instrument_file_open_name[INSTRUMENT_TYPE_UNKNOWN]
-                                     [FS_INSTRUMENT_MAX_PER_TYPE]
-                                     [STORAGE_KIT_FILENAME_MAX];
-static char instrument_file_stem[INSTRUMENT_TYPE_UNKNOWN]
-                                [FS_INSTRUMENT_MAX_PER_TYPE]
-                                [SCENE_INSTRUMENT_STEM_LEN + 1u];
+/*
+ * Cacheless Instrument resolver scratch.
+ *
+ * What: replaces the former 19,968-byte arrays of display names, aliases, and
+ * stems with one previous sort key, one best candidate, and one exact object
+ * identity. Why: Menu supplies `(type, ordinal)` location and every Load must
+ * re-resolve it from the real `/Instrument` tree. Inputs are captured request
+ * type/index; outputs are one component used immediately with an explicit open
+ * parent plus one staged source stem. The repeated-pass selection is slower but
+ * bounded. Affiliates: filesystem_loadInstrument_tick(), root Instrument scan,
+ * fat_compareDisplayNameCasefoldThenCase(), and `.names` completion updates.
+ */
+static afatfsDirHandle_t op_explicit_root_dir = NULL;
+static afatfsObjectInfo_t op_instrument_resolved_object;
+static afatfsObjectInfo_t op_instrument_best_object;
+static char op_instrument_previous_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+static char op_instrument_best_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+static uint8_t op_instrument_best_valid = 0u;
+static uint8_t op_instrument_resolve_pass = 0u;
 static uint8_t op_instrument_load_destination_slot = 0u;
 static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
@@ -568,6 +666,26 @@ static char op_instrument_save_open_name[AFATFS_SHORT_FILENAME_MAX];
 static storage_instrument_save_mode_t op_instrument_save_mode =
     STORAGE_INSTRUMENT_SAVE_NORMAL;
 /*
+ * Recoverable `/Instrument` replacement state.
+ *
+ * What: retains the old explicit parent, staging directory, opaque transaction,
+ * one copy/commit result latch, and one current child identity while Save
+ * reconstructs the tree. Why: overwriting the live file in place loses the old
+ * Instrument on power failure; Phase-6 journaling must promote a complete tree.
+ * Inputs are the request-time target and the callback-scoped identities scanned
+ * from the still-open old directory. Outputs are consumed only by
+ * filesystem_saveInstrument_tick(). No array of child names or aliases exists.
+ */
+static afatfsDirHandle_t op_instrument_old_dir = NULL;
+static afatfsDirHandle_t op_instrument_staging_dir = NULL;
+static afatfsReplaceTransactionPtr_t op_instrument_replace = NULL;
+static volatile uint8_t op_instrument_replace_ready = 0u;
+static volatile afatfsResultCode_t op_instrument_replace_result =
+    AFATFS_RESULT_IO_ERROR;
+static volatile uint8_t op_instrument_copy_ready = 0u;
+static volatile afatfsResultCode_t op_instrument_copy_result =
+    AFATFS_RESULT_IO_ERROR;
+/*
  * Validated one-Instrument staging payload.
  *
  * Filesystem owns these buffers from request start through completion. Parsing
@@ -583,6 +701,34 @@ static uint8_t op_item_offset = 0;
 static uint8_t op_loaded_active_pattern_running = 0;
 static uint8_t op_file_version = 0;
 static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
+/*
+ * Blocking pre-audio `.names` mount completion latch.
+ *
+ * The callback writes only this one result byte while
+ * filesystem_initNamesBlocking() owns the namesRegister job. It is not a name
+ * cache; its lifetime ends before boot library resolution begins.
+ */
+static volatile namesRegisterResult_t fs_names_mount_result =
+    NAMES_REGISTER_RESULT_IO_ERROR;
+/*
+ * One pending resident-Instrument `.names` group update.
+ *
+ * What: captures a Scene mask, voice slot, and extension-free stem while the
+ * copy-on-write register walks all 129 records. Why: Preset commits the staged
+ * payload before requesting identity durability, and Menu may move afterward.
+ * Inputs come from filesystem_requestUpdateInstrumentNames(); output is a
+ * terminal register result consumed by filesystem_updateInstrumentNames_tick().
+ * This 21-byte context replaces no location data and never contains a path.
+ */
+typedef struct {
+    uint16_t scene_mask;
+    uint8_t voice_slot;
+    char stem[SCENE_INSTRUMENT_STEM_LEN + 1u];
+} filesystem_instrument_names_update_t;
+static filesystem_instrument_names_update_t op_instrument_names_update;
+static volatile uint8_t op_names_update_ready = 0u;
+static volatile namesRegisterResult_t op_names_update_result =
+    NAMES_REGISTER_RESULT_IO_ERROR;
 static uint8_t fs_boot_detected_unsupported_card = 0;
 static fs_stale_warning_source_t fs_stale_warning_pending = FS_STALE_WARNING_NONE;
 /*
@@ -633,21 +779,19 @@ static uint16_t fs_last_idle_poll_tick = 0;
  */
 extern uint8_t parameters2[END_OF_SOUND_PARAMETERS];
 
-/* Compatibility bridge to the existing kitBrowser map.
- *
- * The Phase 2 scan now discovers Kit/ directories, but kitBrowser still expects
- * kb_map/kb_numKits to describe the slots that exist. filesystem_recordKit-
- * Directory() populates both the new scan cache and this legacy map until the
- * browser is rewritten around the new filesystem contract.
- */
-extern uint16_t kb_map[];
-extern uint16_t kb_numKits;
-
 /* -----------------------------------------------------------------------
 ** fopen callback - asyncfatfs fires this when file open completes
 ** ----------------------------------------------------------------------- */
 static void on_file_opened(afatfsFilePtr_t file)
 {
+    op_file = file;
+    op_file_ready = true;
+}
+
+static void on_child_opened(afatfsResultCode_t result, afatfsFilePtr_t file)
+{
+    /* Publish the result last so the polling state machine sees one complete latch. */
+    op_child_open_result = result;
     op_file = file;
     op_file_ready = true;
 }
@@ -1578,6 +1722,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_SCAN_INSTRUMENTS:      return "InsSc";
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:       return "InsL";
     case FS_INTERNAL_OP_SAVE_INSTRUMENT:       return "InsS";
+    case FS_INTERNAL_OP_UPDATE_INSTRUMENT_NAMES:return "INam";
     case FS_INTERNAL_OP_LOAD_NAME:             return "NameL";
     case FS_INTERNAL_OP_SCAN_TEST_FILES:       return "TFiSc";
     case FS_INTERNAL_OP_SCAN_TEST_DIRS:        return "TDiSc";
@@ -2229,181 +2374,30 @@ static void filesystem_copyInstrumentStem16(
         memcpy(dst, "inst", 5u);
 }
 
-static uint8_t filesystem_instrumentCacheStemMatches(
-        instrument_type_t type,
-        uint8_t index,
-        const char *display_stem)
-{
-    /*
-     * Test whether one cached Instrument row is the same product object.
-     *
-     * Inputs: type/index in the Instrument browser cache plus an eight-character
-     * display stem. Output: nonzero when the cached row has the same folded
-     * stem. Instrument type is part of identity because `.drm` and `.snr`
-     * files with the same stem are different products.
-     */
-    return (uint8_t)(
-        type < INSTRUMENT_TYPE_UNKNOWN &&
-        index < instrument_file_count[type] &&
-        fat_compareDisplayName(instrument_file_name[type][index],
-                               display_stem,
-                               false) == 0);
-}
-
 static void filesystem_recordInstrumentFile(const char *display_name,
                                             const char *open_name)
 {
     instrument_type_t type =
         filesystem_instrumentTypeFromFilename(display_name);
-    uint8_t count;
-    uint8_t pos;
-    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 
     /*
-     * Insert one Instrument/ file into its per-type sorted cache.
+     * Count one classified Instrument without retaining its name or location.
      *
-     * Inputs: display_name from asyncfatfs object metadata and open_name as the
-     * asyncfatfs-openable short filename. Output: the per-type cache stores a
-     * display stem and open name in alphanumeric order. Classification prefers
-     * the visible filename first, because a host-created long file may have a
-     * generated short alias that is less meaningful than its display extension;
-     * the alias fallback keeps legacy alias-only media loadable.
+     * Inputs: callback-scoped display/SFN names from the current real-tree
+     * scan. Output: only a bounded UI count; neither string nor a FAT alias is
+     * copied into persistent SRAM. Classification prefers visible LFN text and
+     * falls back to the SFN for legacy media. The later load ignores this count
+     * as authority and re-resolves `(type, ordinal)` from `/Instrument`.
+     * Affiliates: filesystem_scanInstruments_tick() and the cacheless repeated
+     * selection loop in filesystem_loadInstrument_tick().
      */
     if (type == INSTRUMENT_TYPE_UNKNOWN)
         type = filesystem_instrumentTypeFromFilename(open_name);
     if (type == INSTRUMENT_TYPE_UNKNOWN ||
         type >= INSTRUMENT_TYPE_UNKNOWN)
         return;
-    filesystem_copyInstrumentStemDisplay(display, display_name);
-    /*
-     * Suppress same-casefold Instrument browser duplicates.
-     *
-     * What: Before inserting a scanned Instrument/ object, compare it against
-     * existing cached rows for the same instrument type. If the display stem
-     * matches case-insensitively, keep only the filename that sorts first by
-     * folded text and raw ASCII case.
-     *
-     * Why: Externally edited FAT cards may contain names that differ only by
-     * case. Product policy treats those as one object; later variants must not
-     * appear in the Load UI even though asyncfatfs reports every physical FAT
-     * object.
-     *
-     * Inputs: display_name and open_name come from afatfs_findNextObject().
-     * Outputs: the per-type cache either keeps its existing representative,
-     * replaces it with an earlier-sorting variant, or inserts a new product
-     * object.
-     *
-     * Affiliates/clients: filesystem_requestScanInstruments(), nested
-     * Instrument Load, root Instrument Save cache update,
-     * fat_compareDisplayNameCasefoldThenCase().
-     */
-    for (pos = 0u; pos < instrument_file_count[type]; pos++) {
-        if (!filesystem_instrumentCacheStemMatches(type, pos, display))
-            continue;
-        if (filesystem_compareInstrumentDisplayName(
-                display,
-                instrument_file_name[type][pos]) < 0) {
-            memcpy(instrument_file_name[type][pos], display,
-                   sizeof(instrument_file_name[type][pos]));
-            storage_copyFilename(instrument_file_open_name[type][pos],
-                                 open_name);
-            filesystem_copyInstrumentStem16(instrument_file_stem[type][pos],
-                                            display_name);
-        }
-        return;
-    }
-
-    count = instrument_file_count[type];
-    if (count >= FS_INSTRUMENT_MAX_PER_TYPE)
-        return;
-
-    pos = count;
-    while (pos > 0u &&
-           filesystem_compareInstrumentDisplayName(
-               instrument_file_name[type][pos - 1u], display) > 0) {
-        memcpy(instrument_file_name[type][pos],
-               instrument_file_name[type][pos - 1u],
-               sizeof(instrument_file_name[type][pos]));
-        memcpy(instrument_file_open_name[type][pos],
-               instrument_file_open_name[type][pos - 1u],
-               sizeof(instrument_file_open_name[type][pos]));
-        memcpy(instrument_file_stem[type][pos],
-               instrument_file_stem[type][pos - 1u],
-               sizeof(instrument_file_stem[type][pos]));
-        pos--;
-    }
-    memcpy(instrument_file_name[type][pos], display,
-           sizeof(instrument_file_name[type][pos]));
-    storage_copyFilename(instrument_file_open_name[type][pos], open_name);
-    filesystem_copyInstrumentStem16(instrument_file_stem[type][pos],
-                                    display_name);
-    instrument_file_count[type] = (uint8_t)(count + 1u);
-}
-
-static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
-                                                      const char *open_name)
-{
-    instrument_type_t type =
-        filesystem_instrumentTypeFromFilename(display_name);
-    uint8_t i;
-
-    /*
-     * Refresh browser cache after case-insensitive overwrite.
-     *
-     * What: Removes every cached row whose filename alias or display stem
-     * matches the saved target under case-insensitive comparison, then inserts
-     * the one returned by the completed save.
-     *
-     * Why: The SD card has already collapsed same-casefold physical files into
-     * one visible object. The in-RAM browser cache must mirror that immediately
-     * so the next nested load cannot select a stale duplicate alias.
-     *
-     * Inputs: display_name is the target case just written; open_name is the
-     * short alias returned by asyncfatfs. Outputs: per-type Instrument cache
-     * contains one row for the saved object.
-     *
-     * Affiliates/clients: filesystem_saveInstrument_tick(),
-     * filesystem_recordInstrumentFile(), nested Instrument Load.
-     */
-    if (type == INSTRUMENT_TYPE_UNKNOWN)
-        type = filesystem_instrumentTypeFromFilename(open_name);
-    if (type == INSTRUMENT_TYPE_UNKNOWN || type >= INSTRUMENT_TYPE_UNKNOWN)
-        return;
-
-    for (i = 0u; i < instrument_file_count[type]; ) {
-        char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-        uint8_t remove = 0u;
-
-        filesystem_copyInstrumentStemDisplay(display, display_name);
-        if (fat_compareDisplayName(instrument_file_open_name[type][i],
-                                   open_name,
-                                   false) == 0 ||
-            fat_compareDisplayName(instrument_file_name[type][i],
-                                   display,
-                                   false) == 0) {
-            remove = 1u;
-        }
-
-        if (remove) {
-            uint8_t j;
-            for (j = i; (uint8_t)(j + 1u) < instrument_file_count[type]; j++) {
-                memcpy(instrument_file_name[type][j],
-                       instrument_file_name[type][j + 1u],
-                       sizeof(instrument_file_name[type][j]));
-                memcpy(instrument_file_open_name[type][j],
-                       instrument_file_open_name[type][j + 1u],
-                       sizeof(instrument_file_open_name[type][j]));
-                memcpy(instrument_file_stem[type][j],
-                       instrument_file_stem[type][j + 1u],
-                       sizeof(instrument_file_stem[type][j]));
-            }
-            instrument_file_count[type]--;
-            continue;
-        }
-        i++;
-    }
-
-    filesystem_recordInstrumentFile(display_name, open_name);
+    if (instrument_file_count[type] < FS_INSTRUMENT_MAX_PER_TYPE)
+        instrument_file_count[type]++;
 }
 
 /* Read one text line from an asyncfatfs file without blocking the pump.
@@ -3004,10 +2998,6 @@ static void filesystem_loadSceneDirectory_tick(void)
             return;
         }
         filesystem_initStagedScene(&op_staged_scene);
-        memcpy(preset_currentName, scene_slot_name[op_slot], 8u);
-        memcpy(op_scene_display_name, scene_slot_name[op_slot],
-               STORAGE_SCENE_DISPLAY_NAME_LEN);
-        op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
         memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
         memset(op_scene_child_display_name, 0,
                sizeof(op_scene_child_display_name));
@@ -3058,9 +3048,6 @@ static void filesystem_loadSceneDirectory_tick(void)
     case 6: /* OPEN selected Scene directory */
         op_file_ready = false;
         op_file = NULL;
-        filesystem_makeNumberedDir(op_root_open_name,
-                                   op_slot,
-                                   scene_slot_name[op_slot]);
         /*
          * Open root Scene folders by the visible numbered component.
          *
@@ -3590,9 +3577,6 @@ static void filesystem_loadSceneDirectory_tick(void)
     case 39: /* OPEN selected Scene again */
         op_file_ready = false;
         op_file = NULL;
-        filesystem_makeNumberedDir(op_root_open_name,
-                                   op_slot,
-                                   scene_slot_name[op_slot]);
         /*
          * Reopen the selected Scene by the same visible component used at
          * phase 6.
@@ -4837,60 +4821,152 @@ static void filesystem_loadInstrument_tick(void)
     storage_status_t st;
 
     switch (op_phase) {
-    case 0: /* VALIDATE + CHDIR ROOT */
+    case 0: /* VALIDATE + ACQUIRE EXPLICIT ROOT */
         if (op_instrument_load_destination_slot >= STORAGE_KIT_SLOT_COUNT ||
-            op_instrument_load_type >= INSTRUMENT_TYPE_UNKNOWN ||
-            op_instrument_load_index >=
-                instrument_file_count[op_instrument_load_type]) {
+            op_instrument_load_type >= INSTRUMENT_TYPE_UNKNOWN) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        if (!afatfs_chdir(NULL))
+        /*
+         * Root acquisition is synchronous because mounted FAT geometry is
+         * already resident. A separate caller-owned handle keeps this load
+         * independent of asyncfatfs' compatibility current-directory state.
+         * Output is closed only after the Instrument child and selected file.
+         */
+        op_explicit_root_dir = afatfs_openRoot();
+        if (!op_explicit_root_dir)
             return;
         op_phase = 1;
         return;
 
-    case 1: /* OPEN Instrument/ */
+    case 1: /* OPEN `/Instrument` RELATIVE TO ROOT */
         op_file_ready = false;
         op_file = NULL;
-        memset(op_root_open_name, 0, sizeof(op_root_open_name));
-        if (!afatfs_opendir_lfn(STORAGE_ROOT_INSTRUMENT,
-                                AFATFS_MATCH_CASE_SENSITIVE,
-                                op_root_open_name,
-                                on_file_opened))
+        op_child_open_result = AFATFS_RESULT_INVALID_NAME;
+        if (!afatfs_openDirChild(op_explicit_root_dir,
+                                 STORAGE_ROOT_INSTRUMENT,
+                                 AFATFS_MATCH_CASE_SENSITIVE,
+                                 NULL,
+                                 on_child_opened))
             return;
         op_phase = 2;
         return;
 
-    case 2: /* WAIT Instrument/ */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_ERROR);
+    case 2: /* WAIT `/Instrument`, THEN INITIALIZE ORDINAL SELECTION */
+        if (!op_file_ready)
+            return;
+        if (op_child_open_result != AFATFS_RESULT_OK || !op_file) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 14u;
             return;
         }
         op_kit_root_dir = op_file;
+        memset(op_instrument_previous_name, 0,
+               sizeof(op_instrument_previous_name));
+        memset(op_instrument_best_name, 0,
+               sizeof(op_instrument_best_name));
+        op_instrument_best_valid = 0u;
+        op_instrument_resolve_pass = 0u;
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
         op_phase = 3;
         return;
 
-    case 3: /* CHDIR Instrument/ */
-        if (!afatfs_chdir(op_kit_root_dir))
+    case 3: /* SCAN ONE PASS AND RETAIN ONLY ITS LOWEST ELIGIBLE OBJECT */
+    {
+        afatfsOperationStatus_e find_status =
+            afatfs_findNextObject(op_kit_root_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        char candidate[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+        if (find_status == AFATFS_OPERATION_IN_PROGRESS)
             return;
-        op_phase = 4;
-        return;
+        if (find_status == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 12u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            if (!op_instrument_best_valid) {
+                /* Fewer real unique objects exist than the requested ordinal. */
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 12u;
+                return;
+            }
+            if (op_instrument_resolve_pass == op_instrument_load_index) {
+                /*
+                 * Preserve the complete validated identity for the immediate
+                 * parent-relative open. The parent stays open and unmodified,
+                 * so displayName still denotes the selected physical entry;
+                 * no alias or multi-row list survives this operation.
+                 */
+                op_instrument_resolved_object = op_instrument_best_object;
+                filesystem_copyInstrumentStemDisplay(
+                    op_staged_instrument_display_name,
+                    op_instrument_resolved_object.id.displayName);
+                filesystem_copyInstrumentStem16(
+                    op_staged_instrument_stem,
+                    op_instrument_resolved_object.id.displayName);
+                op_phase = 4u;
+                return;
+            }
 
-    case 4: /* CLOSE Instrument/ handle */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 5;
-        return;
+            /*
+             * Advance one ordinal with O(1) name storage.
+             * The previous eight-byte display key excludes every same-folded
+             * duplicate on the next complete pass. Incrementing the pass only
+             * after EOF means one pass selects exactly one product row.
+             */
+            memcpy(op_instrument_previous_name,
+                   op_instrument_best_name,
+                   sizeof(op_instrument_previous_name));
+            op_instrument_resolve_pass++;
+            op_instrument_best_valid = 0u;
+            memset(op_instrument_best_name, 0,
+                   sizeof(op_instrument_best_name));
+            afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
+            return;
+        }
 
-    case 5: /* WAIT CLOSE Instrument/ */
-        if (!op_close_done) return;
-        op_kit_root_dir = NULL;
-        op_phase = 6;
+        if (op_object.id.kind != AFATFS_OBJECT_FILE ||
+            filesystem_instrumentTypeFromFilename(
+                op_object.id.displayName) != op_instrument_load_type) {
+            return;
+        }
+        filesystem_copyInstrumentStemDisplay(candidate,
+                                             op_object.id.displayName);
+        /*
+         * Candidate eligibility and minimum selection.
+         * A same-casefold key as `previous` is the duplicate object already
+         * represented by the preceding ordinal. Among eligible candidates,
+         * folded-then-raw ordering retains the deterministic capital-first
+         * representative while storing only one object and one eight-byte key.
+         */
+        if (op_instrument_resolve_pass > 0u &&
+            fat_compareDisplayName(candidate,
+                                   op_instrument_previous_name,
+                                   false) == 0) {
+            return;
+        }
+        if (op_instrument_resolve_pass > 0u &&
+            filesystem_compareInstrumentDisplayName(
+                candidate, op_instrument_previous_name) <= 0) {
+            return;
+        }
+        if (!op_instrument_best_valid ||
+            filesystem_compareInstrumentDisplayName(
+                candidate, op_instrument_best_name) < 0) {
+            memcpy(op_instrument_best_name, candidate,
+                   sizeof(op_instrument_best_name));
+            op_instrument_best_object = op_object;
+            op_instrument_best_valid = 1u;
+        }
         return;
+    }
 
-    case 6: /* OPEN selected instrument */
+    case 4: /* OPEN SELECTED REAL-TREE OBJECT RELATIVE TO `/Instrument` */
         storage_instrumentStateInit(&op_instrument_state,
                                     op_instrument_load_type,
                                     (uint8_t)(op_instrument_load_destination_slot + 1u));
@@ -4900,43 +4976,46 @@ static void filesystem_loadInstrument_tick(void)
         op_line_len = 0u;
         op_file_ready = false;
         op_file = NULL;
+        op_child_open_result = AFATFS_RESULT_INVALID_NAME;
         /*
-         * Open the selected Instrument file by scan-cache identity.
+         * Open the selected Instrument file while its scanned parent is stable.
          *
-         * Menu selects a typed cache index, not a freshly-entered filename.
-         * The cached short alias belongs to the exact object returned by the
-         * Instrument/ scan, so the open cannot drift to another same-display
-         * candidate while the load is in flight. Display/stem metadata is
-         * committed only after the parser validates the file.
+         * Inputs are the component copied from the winning object and the
+         * still-open explicit parent. OPEN_EXISTING forbids accidental create;
+         * CASE_SENSITIVE prevents a case variant from replacing the selected
+         * representative. Output arrives through the structured result latch.
          */
-        if (!afatfs_fopen(
-                instrument_file_open_name[op_instrument_load_type]
-                                         [op_instrument_load_index],
+        if (!afatfs_fopenChild(
+                op_kit_root_dir,
+                op_instrument_resolved_object.id.displayName,
                 "r",
-                on_file_opened)) {
+                AFATFS_OPEN_EXISTING,
+                AFATFS_MATCH_CASE_SENSITIVE,
+                NULL,
+                on_child_opened)) {
             return;
         }
-        op_phase = 7;
+        op_phase = 5;
         return;
 
-    case 7: /* WAIT selected instrument */
+    case 5: /* WAIT SELECTED INSTRUMENT */
         if (!op_file_ready) return;
-        if (op_file == NULL) {
+        if (op_child_open_result != AFATFS_RESULT_OK || !op_file) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 11;
+            op_phase = 12u;
             return;
         }
-        op_phase = 8;
+        op_phase = 6;
         return;
 
-    case 8: /* READ selected instrument */
+    case 6: /* READ SELECTED INSTRUMENT */
         st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
                                      sizeof(op_line_buf), &line_ready, &eof);
         if (st == STORAGE_STATUS_WAIT)
             return;
         if (st != STORAGE_STATUS_OK) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 9;
+            op_phase = 7;
             return;
         }
         if (line_ready) {
@@ -4946,7 +5025,7 @@ static void filesystem_loadInstrument_tick(void)
                 &op_staged_instrument);
             if (st != STORAGE_STATUS_OK) {
                 op_close_status = FS_STATUS_ERROR;
-                op_phase = 9;
+                op_phase = 7;
             }
             return;
         }
@@ -4961,49 +5040,54 @@ static void filesystem_loadInstrument_tick(void)
                         (uint8_t)(op_instrument_load_destination_slot + 1u),
                         &op_staged_instrument);
                 }
-                /*
-                 * Stage the browser-normalized file stem beside the payload.
-                 *
-                 * Input: immutable per-type scan-cache entry selected by this
-                 * operation. Output: a nine-byte NUL-terminated name that
-                 * Preset commits with the same slot image. Keeping both staged
-                 * prevents the LCD from claiming a file belongs to a slot when
-                 * parsing or runtime commit has not completed.
-                 */
-                memcpy(op_staged_instrument_display_name,
-                       instrument_file_name[op_instrument_load_type]
-                                           [op_instrument_load_index], 9u);
-                memcpy(op_staged_instrument_stem,
-                       instrument_file_stem[op_instrument_load_type]
-                                           [op_instrument_load_index],
-                       sizeof(op_staged_instrument_stem));
+                /* The real-tree stem was staged before open and becomes valid only now. */
                 op_close_status = FS_STATUS_DONE;
             }
-            op_phase = 9;
+            op_phase = 7;
         }
         return;
 
-    case 9: /* CLOSE selected instrument */
+    case 7: /* CLOSE SELECTED INSTRUMENT */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 10;
+            op_phase = 8;
         return;
 
-    case 10: /* WAIT CLOSE selected instrument */
+    case 8: /* WAIT CLOSE SELECTED INSTRUMENT */
         if (!op_close_done) return;
         op_file = NULL;
-        op_phase = 11;
+        op_phase = 12u;
         return;
 
-    case 11: /* RETURN ROOT + FINISH */
-        if (!afatfs_chdir(NULL))
+    case 12: /* CLOSE `/Instrument` AFTER ITS SELECTED CHILD */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 13u;
+        return;
+
+    case 13: /* WAIT CLOSE `/Instrument` */
+        if (!op_close_done)
             return;
+        op_kit_root_dir = NULL;
+        op_phase = 14u;
+        return;
+
+    case 14: /* CLOSE EXPLICIT ROOT AND FINISH */
+        op_close_done = false;
+        if (afatfs_fclose(op_explicit_root_dir, on_file_closed))
+            op_phase = 15u;
+        return;
+
+    case 15: /* WAIT ROOT CLOSE */
+        if (!op_close_done)
+            return;
+        op_explicit_root_dir = NULL;
         filesystem_finish(op_close_status);
         return;
 
     default:
         op_close_status = FS_STATUS_ERROR;
-        op_phase = 11;
+        op_phase = op_kit_root_dir ? 12u : 14u;
         return;
     }
 }
@@ -5019,6 +5103,392 @@ static void filesystem_loadInstrument_tick(void)
 ** been closed and sync-flushed by filesystem_finish().
 ** ----------------------------------------------------------------------- */
 static void filesystem_saveInstrument_tick(void)
+{
+    const scene_t *scene = scene_getConst(op_instrument_save_source_scene);
+    const kit_instrument_slot_t *instrument =
+        (scene && op_instrument_save_source_slot < STORAGE_KIT_SLOT_COUNT)
+            ? &scene->kit.instruments[op_instrument_save_source_slot]
+            : NULL;
+    uint8_t morph_save =
+        (uint8_t)(op_instrument_save_mode == STORAGE_INSTRUMENT_SAVE_MORPH);
+
+    /*
+     * Rebuild `/Instrument` through the generic crash-recoverable tree API.
+     *
+     * Inputs: immutable source Scene/voice/type/name captured by the public
+     * request. Output: a complete replacement directory that preserves every
+     * unrelated file and subtree, collapses the same-folded target file, and
+     * publishes the new file only through Phase-6 journaled promotion. The
+     * state machine retains one scanned object and delegates recursive copying
+     * to asyncfatfs' bounded 96-byte walker. All explicit handles close in
+     * child-to-parent order on success and failure. Normal Save subsequently
+     * updates one `.names` resident cell; Morph Save does not change identity.
+     */
+    switch (op_phase) {
+    case 0u: /* VALIDATE SOURCE + ACQUIRE EXPLICIT ROOT */
+        if (!instrument || op_instrument_save_type >= INSTRUMENT_TYPE_UNKNOWN ||
+            instrument->type != op_instrument_save_type ||
+            op_instrument_save_display_name[0] == '\0') {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_explicit_root_dir = afatfs_openRoot();
+        if (!op_explicit_root_dir)
+            return;
+        op_instrument_old_dir = NULL;
+        op_instrument_staging_dir = NULL;
+        op_instrument_replace = NULL;
+        op_phase = 1u;
+        return;
+
+    case 1u: /* RECOVER ANY INTERRUPTED REPLACEMENT BEFORE TREE USE */
+        op_instrument_replace_ready = 0u;
+        op_instrument_replace_result = AFATFS_RESULT_IO_ERROR;
+        if (!afatfs_recoverTreeReplace(op_explicit_root_dir,
+                                       on_instrument_replace_result)) {
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2u: /* WAIT RECOVERY */
+        if (!op_instrument_replace_ready)
+            return;
+        if (op_instrument_replace_result != AFATFS_RESULT_OK) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 46u;
+            return;
+        }
+        op_phase = 3u;
+        return;
+
+    case 3u: /* OPEN OPTIONAL LIVE `/Instrument` */
+        op_file_ready = false;
+        op_file = NULL;
+        op_child_open_result = AFATFS_RESULT_INVALID_NAME;
+        if (!afatfs_openDirChild(op_explicit_root_dir,
+                                 STORAGE_ROOT_INSTRUMENT,
+                                 AFATFS_MATCH_CASE_SENSITIVE,
+                                 NULL,
+                                 on_child_opened)) {
+            return;
+        }
+        op_phase = 4u;
+        return;
+
+    case 4u: /* ACCEPT MISSING FIRST-SAVE TREE OR RETAIN LIVE PARENT */
+        if (!op_file_ready)
+            return;
+        if (op_child_open_result == AFATFS_RESULT_OK && op_file) {
+            op_instrument_old_dir = op_file;
+        } else if (op_child_open_result != AFATFS_RESULT_NOT_FOUND) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 46u;
+            return;
+        }
+        op_phase = 5u;
+        return;
+
+    case 5u: /* CREATE GUARANTEED-NEW STAGING DIRECTORY */
+        op_instrument_replace_ready = 0u;
+        op_instrument_replace_result = AFATFS_RESULT_IO_ERROR;
+        if (!afatfs_beginTreeReplace(op_explicit_root_dir,
+                                     STORAGE_ROOT_INSTRUMENT,
+                                     on_instrument_replace_begin)) {
+            return;
+        }
+        op_phase = 6u;
+        return;
+
+    case 6u: /* WAIT STAGING BEGIN */
+        if (!op_instrument_replace_ready)
+            return;
+        if (op_instrument_replace_result != AFATFS_RESULT_OK ||
+            !op_instrument_replace || !op_instrument_staging_dir) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = op_instrument_old_dir ? 44u : 46u;
+            return;
+        }
+        if (op_instrument_old_dir) {
+            afatfs_findFirstObject(op_instrument_old_dir, &op_object_finder);
+            op_phase = 7u;
+        } else {
+            op_phase = 10u;
+        }
+        return;
+
+    case 7u: /* SCAN ONE LIVE CHILD */
+    {
+        afatfsOperationStatus_e find_status =
+            afatfs_findNextObject(op_instrument_old_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        if (find_status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (find_status == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_instrument_old_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 42u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_instrument_old_dir, &op_object_finder);
+            op_phase = 10u;
+            return;
+        }
+        /*
+         * Skip only the overwritten file identity.
+         * The comparison includes the type-owned extension and ignores case,
+         * so all physical casing variants collapse into the requested spelling.
+         * Directories and unrelated/unknown files are copied verbatim; a
+         * directory colliding with the target consequently makes CREATE_NEW
+         * fail safely instead of silently deleting host data.
+         */
+        if (op_object.id.kind == AFATFS_OBJECT_FILE &&
+            fat_compareDisplayName(op_object.id.displayName,
+                                   op_instrument_save_display_name,
+                                   false) == 0) {
+            return;
+        }
+        op_instrument_copy_ready = 0u;
+        op_instrument_copy_result = AFATFS_RESULT_IO_ERROR;
+        if (!afatfs_copyObjectTree(op_instrument_old_dir,
+                                   &op_object.id,
+                                   op_instrument_staging_dir,
+                                   op_object.id.displayName,
+                                   AFATFS_COPY_DEFAULT,
+                                   on_instrument_copy_complete)) {
+            return;
+        }
+        op_phase = 8u;
+        return;
+    }
+
+    case 8u: /* WAIT ONE CHILD COPY, THEN RESUME THE SAME FINDER */
+        if (!op_instrument_copy_ready)
+            return;
+        if (op_instrument_copy_result != AFATFS_RESULT_OK) {
+            afatfs_findLastObject(op_instrument_old_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 42u;
+            return;
+        }
+        op_phase = 7u;
+        return;
+
+    case 10u: /* CREATE NEW TARGET FILE INSIDE STAGING */
+        storage_instrumentStateInit(
+            &op_instrument_state,
+            op_instrument_save_type,
+            (uint8_t)(op_instrument_save_source_slot + 1u));
+        op_file_ready = false;
+        op_file = NULL;
+        op_child_open_result = AFATFS_RESULT_INVALID_NAME;
+        if (!afatfs_fopenChild(op_instrument_staging_dir,
+                               op_instrument_save_display_name,
+                               "w",
+                               AFATFS_CREATE_NEW,
+                               AFATFS_MATCH_CASE_SENSITIVE,
+                               NULL,
+                               on_child_opened)) {
+            return;
+        }
+        op_phase = 11u;
+        return;
+
+    case 11u: /* WAIT TARGET CREATE */
+        if (!op_file_ready)
+            return;
+        if (op_child_open_result != AFATFS_RESULT_OK || !op_file) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 42u;
+            return;
+        }
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 12u;
+        return;
+
+    case 12u: /* STREAM ONE BOUNDED INSTRUMENT TEXT LINE/CHUNK */
+    {
+        filesystem_instrument_write_ctx_t context = {{
+            instrument,
+            op_instrument_save_type,
+            (uint8_t)(op_instrument_save_source_slot + 1u),
+            scene->settings.voice_morph_amount[op_instrument_save_source_slot],
+            op_instrument_save_mode
+        }};
+        if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &context))
+            return;
+        op_phase = 13u;
+        return;
+    }
+
+    case 13u: /* CLOSE NEW TARGET BEFORE PROMOTION */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 14u;
+        return;
+
+    case 14u: /* WAIT TARGET CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_phase = op_instrument_old_dir ? 15u : 18u;
+        return;
+
+    case 15u: /* CLOSE LIVE SOURCE TREE BEFORE COMMIT RENAMES IT */
+        op_close_done = false;
+        if (afatfs_fclose(op_instrument_old_dir, on_file_closed))
+            op_phase = 16u;
+        return;
+
+    case 16u: /* WAIT LIVE TREE CLOSE */
+        if (!op_close_done)
+            return;
+        op_instrument_old_dir = NULL;
+        op_phase = 18u;
+        return;
+
+    case 18u: /* JOURNAL, SYNC, PROMOTE, AND CLEAN OLD TREE */
+        op_instrument_replace_ready = 0u;
+        op_instrument_replace_result = AFATFS_RESULT_IO_ERROR;
+        if (!afatfs_commitTreeReplace(op_instrument_replace,
+                                      on_instrument_replace_result)) {
+            return;
+        }
+        op_phase = 19u;
+        return;
+
+    case 19u: /* WAIT COMPLETE REPLACEMENT DURABILITY */
+        if (!op_instrument_replace_ready)
+            return;
+        if (op_instrument_replace_result != AFATFS_RESULT_OK) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 46u;
+            return;
+        }
+        op_instrument_replace = NULL;
+        op_instrument_staging_dir = NULL;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 20u;
+        return;
+
+    case 20u: /* CLOSE ROOT AFTER TRANSACTION RELEASES IT */
+        op_close_done = false;
+        if (afatfs_fclose(op_explicit_root_dir, on_file_closed))
+            op_phase = 21u;
+        return;
+
+    case 21u: /* WAIT ROOT CLOSE; MORPH SAVE IS COMPLETE */
+        if (!op_close_done)
+            return;
+        op_explicit_root_dir = NULL;
+        if (morph_save) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        /*
+         * Normal Save changes the resident sourced-from identity only after
+         * the new tree is recoverably promoted. The single-bit mask targets
+         * the source Scene/voice, and explicit stem extraction removes the
+         * type extension before the register provider sees the value.
+         */
+        memset(&op_instrument_names_update, 0,
+               sizeof(op_instrument_names_update));
+        op_instrument_names_update.scene_mask =
+            (uint16_t)(1u << op_instrument_save_source_scene);
+        op_instrument_names_update.voice_slot =
+            op_instrument_save_source_slot;
+        filesystem_copyInstrumentStem16(op_instrument_names_update.stem,
+                                        op_instrument_save_display_name);
+        op_names_update_ready = 0u;
+        op_names_update_result = NAMES_REGISTER_RESULT_IO_ERROR;
+        if (!namesRegister_startUpdate(filesystem_instrumentNamesProvider,
+                                       &op_instrument_names_update,
+                                       filesystem_instrumentNamesComplete)) {
+            return;
+        }
+        op_phase = 22u;
+        return;
+
+    case 22u: /* WAIT NORMAL-SAVE SOURCE-NAME SNAPSHOT */
+        if (!op_names_update_ready)
+            return;
+        if (op_names_update_result == NAMES_REGISTER_RESULT_OK) {
+            /* Keep the compatibility Scene mirror coherent until Phase G removes it. */
+            scene_setInstrumentSourceName(op_instrument_save_source_scene,
+                                          op_instrument_save_source_slot,
+                                          op_instrument_names_update.stem);
+            filesystem_finish(FS_STATUS_DONE);
+        } else {
+            filesystem_finish(FS_STATUS_ERROR);
+        }
+        return;
+
+    case 42u: /* ABORT PARTIAL STAGING WITHOUT TOUCHING LIVE TARGET */
+        op_instrument_replace_ready = 0u;
+        op_instrument_replace_result = AFATFS_RESULT_IO_ERROR;
+        if (!afatfs_abortTreeReplace(op_instrument_replace,
+                                     on_instrument_replace_result)) {
+            return;
+        }
+        op_phase = 43u;
+        return;
+
+    case 43u: /* WAIT ABORT, THEN CLOSE OPTIONAL LIVE TREE */
+        if (!op_instrument_replace_ready)
+            return;
+        op_instrument_replace = NULL;
+        op_instrument_staging_dir = NULL;
+        op_phase = op_instrument_old_dir ? 44u : 46u;
+        return;
+
+    case 44u: /* CLOSE LIVE TREE ON FAILURE */
+        op_close_done = false;
+        if (afatfs_fclose(op_instrument_old_dir, on_file_closed))
+            op_phase = 45u;
+        return;
+
+    case 45u: /* WAIT LIVE TREE FAILURE CLOSE */
+        if (!op_close_done)
+            return;
+        op_instrument_old_dir = NULL;
+        op_phase = 46u;
+        return;
+
+    case 46u: /* CLOSE EXPLICIT ROOT ON FAILURE */
+        op_close_done = false;
+        if (afatfs_fclose(op_explicit_root_dir, on_file_closed))
+            op_phase = 47u;
+        return;
+
+    case 47u: /* WAIT ROOT FAILURE CLOSE */
+        if (!op_close_done)
+            return;
+        op_explicit_root_dir = NULL;
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+
+    default:
+        op_close_status = FS_STATUS_ERROR;
+        op_phase = op_instrument_replace ? 42u
+                   : (op_instrument_old_dir ? 44u : 46u);
+        return;
+    }
+}
+
+/*
+ * Retained legacy implementation for review only.
+ *
+ * The new dispatcher never calls this function. Keeping it temporarily beside
+ * the replacement makes the old remove-then-write sequencing auditable while
+ * the real-card Phase-6 fault matrix is run; linker garbage collection removes
+ * it from firmware. It must be deleted after those tests, and no new caller may
+ * use its global-current-directory or in-place overwrite behavior.
+ */
+static void __attribute__((unused)) filesystem_saveInstrument_legacy_tick(void)
 {
     const scene_t *scene = scene_getConst(op_instrument_save_source_scene);
     const kit_instrument_slot_t *instrument =
@@ -5278,20 +5748,9 @@ static void filesystem_saveInstrument_tick(void)
         op_phase = 16;
         return;
 
-    case 16: /* RETURN ROOT + UPDATE CACHE */
+    case 16: /* RETURN ROOT + START RESIDENT SOURCE-IDENTITY UPDATE */
         if (!afatfs_chdir(NULL))
             return;
-        /*
-         * Make the saved file immediately visible to nested Instrument Load.
-         *
-         * Inputs are the exact display filename and returned asyncfatfs short
-         * alias. The helper removes older matching cache entries before adding
-         * this one, so re-saving the same visible Instrument updates selection
-         * identity instead of showing duplicate browser rows.
-         */
-        filesystem_updateInstrumentCacheAfterSave(
-            op_instrument_save_display_name,
-            op_instrument_save_open_name);
         if (!morph_save) {
             /*
              * Retain Instrument source name only for normal Instrument Save.
@@ -5313,8 +5772,48 @@ static void filesystem_saveInstrument_tick(void)
             scene_setInstrumentSourceName(op_instrument_save_source_scene,
                                           op_instrument_save_source_slot,
                                           op_instrument_save_display_name);
+            /*
+             * Publish the saved filename stem only after file close and root
+             * restoration. The same provider used by post-Load fan-out is
+             * restricted here to one source Scene/voice cell. Extension removal
+             * is explicit because `.names` never interprets file types. Output
+             * completion is deferred until the register bank/header sync below.
+             */
+            memset(&op_instrument_names_update, 0,
+                   sizeof(op_instrument_names_update));
+            op_instrument_names_update.scene_mask =
+                (uint16_t)(1u << op_instrument_save_source_scene);
+            op_instrument_names_update.voice_slot =
+                op_instrument_save_source_slot;
+            filesystem_copyInstrumentStem16(
+                op_instrument_names_update.stem,
+                op_instrument_save_display_name);
+            op_names_update_ready = 0u;
+            op_names_update_result = NAMES_REGISTER_RESULT_IO_ERROR;
+            if (!namesRegister_startUpdate(
+                    filesystem_instrumentNamesProvider,
+                    &op_instrument_names_update,
+                    filesystem_instrumentNamesComplete)) {
+                return;
+            }
+            op_phase = 17u;
+            return;
         }
         filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 17: /* WAIT NORMAL-SAVE `.names` DURABILITY */
+        /*
+         * The Instrument file is already durable enough to close, while the
+         * previous `.names` bank remains authoritative until its replacement
+         * header syncs. A register failure therefore reports Save error without
+         * corrupting the older identity snapshot or deleting the new file.
+         */
+        if (!op_names_update_ready)
+            return;
+        filesystem_finish(op_names_update_result == NAMES_REGISTER_RESULT_OK
+                              ? FS_STATUS_DONE
+                              : FS_STATUS_ERROR);
         return;
 
     default:
@@ -6163,6 +6662,12 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
  * save operations, afatfs_findNextObject(), afatfs_removeObjects_lfn(), and
  * asyncfatfs AFATFS_REMOVE_EMPTY_DIRECTORIES.
  */
+#if 0
+/*
+ * Historical name-stack deleter entry, excluded with its SRAM state above.
+ * The active slot deleter passes a discovered object ID to afatfs_deleteTree(),
+ * which removes ambiguity and supplies the same asynchronous terminal result.
+ */
 static void filesystem_deleteTreeStartWithOpenName(const char *display_name,
                                                    const char *open_name)
 {
@@ -6194,6 +6699,7 @@ static void filesystem_deleteTreeStartWithOpenName(const char *display_name,
                                  open_name);
     op_delete_tree_phase = FS_DELETE_TREE_OPEN_TARGET;
 }
+#endif
 
 static uint8_t filesystem_directoryObjectMatchesSlot(
         const afatfsObjectInfo_t *object,
@@ -6487,6 +6993,8 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
     }
 }
 
+#if 0
+/* Retired name-stack recursion body; see the exclusion/ownership block above. */
 static fs_status_t filesystem_deleteTree_tick(void)
 {
     for (;;) {
@@ -6764,6 +7272,7 @@ static fs_status_t filesystem_deleteTree_tick(void)
         }
     }
 }
+#endif
 
 static void filesystem_saveKitDirectory_tick(void)
 {
@@ -11498,6 +12007,111 @@ uint8_t filesystem_initCardAndMountBlocking(void)
     return 0;
 }
 
+static void filesystem_namesMountComplete(namesRegisterResult_t result)
+{
+    /* Publish one terminal register result to the pre-audio blocking owner. */
+    fs_names_mount_result = result;
+}
+
+static uint8_t filesystem_instrumentNamesProvider(
+    uint16_t record_index,
+    const char *current_name,
+    char replacement_out[17],
+    void *raw_context)
+{
+    filesystem_instrument_names_update_t *context =
+        (filesystem_instrument_names_update_t *)raw_context;
+    uint8_t scene_index;
+
+    (void)current_name;
+    /*
+     * Replace exactly the selected resident Scene/voice cells.
+     * The loop tests at most 16 fixed resident coordinates and returns on the
+     * first index match. Its `scene * 6 + slot` mapping is delegated to the
+     * register API so filesystem never duplicates serialized offsets. Output
+     * is the same one distinct stem for each fan-out destination; every other
+     * record is copied unchanged by namesRegister.
+     */
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        uint16_t selected_index;
+        if ((context->scene_mask & (uint16_t)(1u << scene_index)) == 0u)
+            continue;
+        if (namesRegister_recordIndex(NAMES_REGISTER_INSTRUMENT,
+                                      scene_index,
+                                      context->voice_slot,
+                                      &selected_index) &&
+            selected_index == record_index) {
+            memcpy(replacement_out, context->stem,
+                   sizeof(context->stem));
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+static void filesystem_instrumentNamesComplete(namesRegisterResult_t result)
+{
+    /* Publish the result before ready so the facade observes a complete latch. */
+    op_names_update_result = result;
+    op_names_update_ready = 1u;
+}
+
+static void filesystem_updateInstrumentNames_tick(void)
+{
+    /*
+     * Bridge one facade request to the independent register state machine.
+     * Phase 0 starts the 129-record copy using immutable request context;
+     * Phase 1 waits while filesystem_tick() pumps namesRegister_tick(). Output
+     * is DONE only after the inactive bank and alternating header have synced.
+     * Affiliates: Preset's post-Instrument-apply gate and `.names` recovery.
+     */
+    if (op_phase == 0u) {
+        op_names_update_ready = 0u;
+        op_names_update_result = NAMES_REGISTER_RESULT_IO_ERROR;
+        if (!namesRegister_startUpdate(filesystem_instrumentNamesProvider,
+                                       &op_instrument_names_update,
+                                       filesystem_instrumentNamesComplete)) {
+            return;
+        }
+        op_phase = 1u;
+        return;
+    }
+    if (op_phase == 1u) {
+        if (!op_names_update_ready)
+            return;
+        filesystem_finish(op_names_update_result == NAMES_REGISTER_RESULT_OK
+                              ? FS_STATUS_DONE
+                              : FS_STATUS_ERROR);
+        return;
+    }
+    filesystem_finish(FS_STATUS_ERROR);
+}
+
+uint8_t filesystem_initNamesBlocking(void)
+{
+    /*
+     * Create/select one durable resident-name snapshot before payload boot.
+     *
+     * Inputs: asyncfatfs READY after filesystem_initCardAndMountBlocking().
+     * Output: one success byte after the register state machine has closed its
+     * `.names` and explicit-root handles. The loop is permitted only before
+     * audioCodec_init(); every pass pumps afatfs first, then advances one
+     * bounded register phase. Affiliates: main.c, namesRegister_tick(), and the
+     * one-context afatfs_poll() invariant.
+     */
+    if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY)
+        return 0u;
+    fs_names_mount_result = NAMES_REGISTER_RESULT_IO_ERROR;
+    if (!namesRegister_startMount(filesystem_namesMountComplete))
+        return 0u;
+    while (namesRegister_busy()) {
+        afatfs_poll();
+        namesRegister_tick();
+    }
+    return (uint8_t)(fs_names_mount_result == NAMES_REGISTER_RESULT_OK);
+}
+
 void filesystem_tick(void)
 {
     /* Busy operations poll asyncfatfs every pass so reads/writes make progress
@@ -11515,6 +12129,15 @@ void filesystem_tick(void)
             afatfs_poll();
         }
     }
+
+    /*
+     * Advance the register only after the single asyncfatfs poll above.
+     * namesRegister never polls the driver itself, preserving the project's
+     * one-context invariant. This call is bounded to one state-machine phase or
+     * one short record I/O attempt and is active only during mount/read/update.
+     */
+    if (namesRegister_busy())
+        namesRegister_tick();
 
     if (status != FS_STATUS_BUSY) return;
 
@@ -11547,6 +12170,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_SAVE_INSTRUMENT:
     case FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH:
         filesystem_saveInstrument_tick();
+        break;
+    case FS_INTERNAL_OP_UPDATE_INSTRUMENT_NAMES:
+        filesystem_updateInstrumentNames_tick();
         break;
     case FS_INTERNAL_OP_LOAD_MORPH:
         filesystem_loadKit_tick();
@@ -11695,15 +12321,12 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_delete_slot_bank_scene = 0u;
     op_delete_slot_number = 0u;
     op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
-    op_delete_tree_phase = FS_DELETE_TREE_IDLE;
-    op_delete_tree_depth = 0u;
-    op_delete_tree_dir = NULL;
-    memset(op_delete_tree_name_stack, 0, sizeof(op_delete_tree_name_stack));
-    memset(op_delete_tree_open_name_stack, 0,
-           sizeof(op_delete_tree_open_name_stack));
-    memset(op_delete_tree_child_name, 0, sizeof(op_delete_tree_child_name));
-    memset(op_delete_tree_child_open_name, 0,
-           sizeof(op_delete_tree_child_open_name));
+    /*
+     * No filesystem-layer recursion stack is reset here: that retired state is
+     * compiled out, and afatfs_deleteTree() initializes its own bounded walker
+     * for each concrete object-ID request. Active slot cleanup reset above is
+     * the only product-level delete state required.
+     */
     memset(&op_staged_scene, 0, sizeof(op_staged_scene));
     op_scene_load_scene_mask = 0u;
     memset(op_scene_display_name, 0, sizeof(op_scene_display_name));
@@ -12212,9 +12835,6 @@ bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
      */
     if (status == FS_STATUS_BUSY) return false;
     memset(instrument_file_count, 0, sizeof(instrument_file_count));
-    memset(instrument_file_name, 0, sizeof(instrument_file_name));
-    memset(instrument_file_open_name, 0, sizeof(instrument_file_open_name));
-    memset(instrument_file_stem, 0, sizeof(instrument_file_stem));
     return filesystem_start(FS_INTERNAL_OP_SCAN_INSTRUMENTS, FS_FILE_KIT, 0,
                             cb);
 }
@@ -12422,6 +13042,47 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
     op_instrument_load_type = type;
     op_instrument_load_index = browser_index;
     return true;
+}
+
+bool filesystem_requestUpdateInstrumentNames(
+    uint16_t destination_scene_mask,
+    uint8_t destination_slot,
+    const char *source_stem,
+    fs_completion_cb_t cb)
+{
+    uint8_t i = 0u;
+
+    /*
+     * Capture a post-commit resident source-identity update.
+     * Inputs: a nonempty mask of resident Scenes, one 0..5 voice slot, and an
+     * already extension-free Instrument filename stem. Output: an asynchronous
+     * copy-on-write `.names` generation; no library coordinate or FAT location
+     * is retained. Printable bytes are bounded to 16 and path/extension syntax
+     * is rejected here so the generic register never has to infer Instrument
+     * semantics. Affiliate: preset_tickInstrumentApply().
+     */
+    if (status == FS_STATUS_BUSY || destination_scene_mask == 0u ||
+        destination_slot >= STORAGE_KIT_SLOT_COUNT || !source_stem) {
+        return false;
+    }
+    memset(&op_instrument_names_update, 0,
+           sizeof(op_instrument_names_update));
+    while (i < SCENE_INSTRUMENT_STEM_LEN && source_stem[i] != '\0') {
+        char c = source_stem[i];
+        if (c == '/' || c == '\\' || c == '.')
+            return false;
+        op_instrument_names_update.stem[i] =
+            (c >= 0x20 && c <= 0x7e) ? c : '_';
+        i++;
+    }
+    if (i == 0u)
+        return false;
+    op_instrument_names_update.scene_mask = destination_scene_mask;
+    op_instrument_names_update.voice_slot = destination_slot;
+    return filesystem_start(FS_INTERNAL_OP_UPDATE_INSTRUMENT_NAMES,
+                            FS_FILE_KIT,
+                            0u,
+                            cb);
 }
 
 static bool filesystem_requestSaveInstrumentMode(fs_internal_op_t op,
@@ -12781,40 +13442,20 @@ uint8_t filesystem_lastBankLoadLoadedScene(void)
 uint8_t filesystem_instrumentTargetExists(instrument_type_t type,
                                           const char *display_stem)
 {
-    char display_file[AFATFS_LONG_FILENAME_MAX + 1u];
-    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-
     /*
-     * Query whether a root Instrument save target already exists.
+     * Report no synchronous overwrite result after removing the list cache.
      *
-     * What: Builds the same visible `stem.ext` component that root Instrument
-     * Save will write, then checks the current Instrument/ scan cache for a
-     * case-insensitive match of the same instrument type.
-     *
-     * Why: Menu must render persistent `OW` before the user confirms Save.
-     * Numbered slots can answer from occupancy caches, but root Instrument Save
-     * is filename-based and needs the extension/type rule owned by filesystem.
-     *
-     * Inputs: resident instrument type and the eight-character Save editor
-     * stem. Outputs: nonzero when confirming would overwrite at least one
-     * on-card same-casefold Instrument file.
-     *
-     * Affiliates/clients: menu_currentSaveWouldOverwrite(), root Instrument
-     * Save, Instrument browser duplicate suppression.
+     * What/why: the former answer came from deleted filename arrays and could
+     * be stale. The cacheless contract requires an asynchronous real-tree probe
+     * tagged to the editor generation; until that Phase-C Menu probe completes,
+     * the UI must not claim overwrite from old SRAM. Inputs remain accepted for
+     * API compatibility and Save itself still performs its authoritative
+     * case-insensitive collision handling. Output is therefore zero, never a
+     * false positive. Affiliate: menu_currentSaveWouldOverwrite() and the
+     * planned filesystem_requestProbeInstrumentTarget() resolver operation.
      */
-    if (type >= INSTRUMENT_TYPE_UNKNOWN || !display_stem)
-        return 0u;
-    storage_makeSavedInstrumentDisplayFilename(display_file,
-                                               sizeof(display_file),
-                                               display_stem,
-                                               type,
-                                               0u,
-                                               0u);
-    filesystem_copyInstrumentStemDisplay(display, display_file);
-    for (uint8_t i = 0u; i < instrument_file_count[type]; i++) {
-        if (filesystem_instrumentCacheStemMatches(type, i, display))
-            return 1u;
-    }
+    (void)type;
+    (void)display_stem;
     return 0u;
 }
 
@@ -12836,16 +13477,24 @@ const char *filesystem_instrumentName(instrument_type_t type,
                                       uint8_t browser_index)
 {
     /*
-     * Return one cached Instrument/ display name.
+     * Return the one most recently real-tree-resolved Instrument display name.
      *
      * Inputs: instrument type and zero-based browser index. Output: an
-     * eight-character NUL-terminated stem, or "Empty   " for invalid/empty
-     * selections. The returned pointer is filesystem-owned cache storage.
+     * eight-character NUL-terminated stem only when it matches the most recent
+     * successful load coordinate; otherwise "Loading " avoids presenting a
+     * stale row from a different ordinal. This one operation result is bounded
+     * scratch, not a multi-entry name cache. Affiliates: cacheless load resolver
+     * and the forthcoming generation-tagged Menu-only resolver.
      */
     if (type >= INSTRUMENT_TYPE_UNKNOWN ||
         browser_index >= instrument_file_count[type])
         return "Empty   ";
-    return instrument_file_name[type][browser_index];
+    if (type == op_instrument_load_type &&
+        browser_index == op_instrument_load_index &&
+        op_staged_instrument_display_name[0] != '\0') {
+        return op_staged_instrument_display_name;
+    }
+    return "Loading ";
 }
 
 uint16_t filesystem_instrumentDisplayIndex(instrument_type_t type,
@@ -12925,3 +13574,23 @@ uint8_t filesystem_diagRawCmd0(void)
     return resp;
 }
 #endif
+#include "kitBrowser.h"
+/* Compatibility bridge to the existing kitBrowser map.
+ *
+ * The Phase 2 scan now discovers Kit/ directories, but kitBrowser still expects
+ * kb_map/kb_numKits to describe the slots that exist. filesystem_recordKit-
+ * Directory() populates both the new scan cache and this legacy map until the
+ * browser is rewritten around the new filesystem contract.
+ */
+extern uint16_t kb_map[];
+extern uint16_t kb_numKits;
+        memcpy(preset_currentName, scene_slot_name[op_slot], 8u);
+        memcpy(op_scene_display_name, scene_slot_name[op_slot],
+               STORAGE_SCENE_DISPLAY_NAME_LEN);
+        op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+        filesystem_makeNumberedDir(op_root_open_name,
+                                   op_slot,
+                                   scene_slot_name[op_slot]);
+        filesystem_makeNumberedDir(op_root_open_name,
+                                   op_slot,
+                                   scene_slot_name[op_slot]);

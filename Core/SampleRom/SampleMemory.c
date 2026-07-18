@@ -81,7 +81,6 @@ void sampleMemory_refresh(void)
 
     sample_count = 0;
     memset(sample_info_cache, 0, sizeof(sample_info_cache));
-    memset(sample_name_cache, 0, sizeof(sample_name_cache));
     memset(sample_loop_cache, 0, sizeof(sample_loop_cache));
 
     for (uint8_t i = 0; i < SAMPLE_MAX_COUNT; i++) {
@@ -169,7 +168,6 @@ int sampleMemory_installBegin(void)
 
     sample_count = 0;
     memset(sample_info_cache, 0, sizeof(sample_info_cache));
-    memset(sample_name_cache, 0, sizeof(sample_name_cache));
     memset(sample_loop_cache, 0, sizeof(sample_loop_cache));
     memset(install_info, 0, sizeof(install_info));
     memset(install_names, ' ', sizeof(install_names));
@@ -178,7 +176,6 @@ int sampleMemory_installBegin(void)
     install_current_start = 0;
     install_current_size = 0;
     install_current_loop = 0;
-    install_start_count = 0;
     install_append_mode = 0;
     install_sample_open = 0;
 
@@ -214,7 +211,6 @@ int sampleMemory_installAppendBegin(void)
         return -1;
 
     install_count = sample_count;
-    install_start_count = sample_count;
     install_write_addr = (end_addr + 3u) & ~3u;
     install_current_start = 0;
     install_current_size = 0;
@@ -323,3 +319,7 @@ void sampleMemory_loadSamples(void)
     /* The SD-backed modal installer lives in filesystem.c so asyncfatfs
      * details stay behind the filesystem facade. */
 }
+    install_start_count = 0;
+    install_start_count = sample_count;
+    memset(sample_name_cache, 0, sizeof(sample_name_cache));
+    memset(sample_name_cache, 0, sizeof(sample_name_cache));

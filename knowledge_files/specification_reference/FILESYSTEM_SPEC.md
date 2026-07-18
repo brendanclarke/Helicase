@@ -1,7 +1,8 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware after Session 039. It includes the
+reference for the Helicase/LXR-02 firmware after Session 039, with the low-level
+asyncfatfs expansion status updated through 2026-07-18. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
@@ -17,13 +18,16 @@ Use this document to distinguish three things:
   `Instrument/` pool replacement into Scene-owned descriptor-indexed
   instrument parameter images, Kit/Instrument Morph Load, Kit/Instrument Morph
   Save, normal new-format Kit Save, root Instrument Save, root Scene
-  Load/Save, root Bank scan/load/save in the one-resident-Scene bridge shape,
+  Load/Save, a 16-resident-Scene Bank workspace with selected-child
+  scan/load/save,
   and File/Dir/sDir asyncfatfs diagnostics behind Dev Mode.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: 16 resident Bank Scenes, Scene/Bank autosave dot-file
-  promotion, real Effect load/save, root `settings.cfg`, and
-  descriptor-backed step automation playback.
+- Not implemented yet: the 17th landing Scene/background Bank swap, preservation
+  of untoggled old Bank children in the promoted Bank, Phase 7 integration of
+  the journaled asyncfatfs directory transaction, Scene/Bank autosave dot-file
+  promotion, real Effect load/save, root `settings.cfg`, and descriptor-backed
+  step automation playback.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -31,7 +35,8 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented through Session 039:
+Product behavior implemented through Session 039, plus the later low-level
+asyncfatfs foundation noted explicitly below:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -117,13 +122,12 @@ Implemented through Session 039:
   `sceneset.scg` never stores the Scene name.
 - Resident Scene and embedded Kit names are retained from directory names:
   root `Scene/NNN Name/` and child `Kit <name>/`.
-- Root Bank scan/load/save is implemented for the current one-resident-Scene
-  bridge. Boot scans Banks and tries the lowest Bank before root Scene/root Kit
-  fallback. Empty Bank folders are valid and complete Bank selection before
-  fallback.
+- Root Bank scan/load/save operates on the 16 resident Scene records. Boot scans
+  Banks and tries the lowest Bank before root Scene/root Kit fallback. Empty
+  Bank folders are valid and complete Bank selection before fallback.
 - Bank-local Scene folders use two digits, `00..15`, not root-library
-  three-digit numbering. The initial writer saves resident Scene 0 as child
-  slot `00` when the bridge mask includes bit 0.
+  three-digit numbering. Load and Save masks map bit N to resident Scene N and
+  Bank-local child slot N.
 - Scene/Bank `pattern.pat` text v2 now stores the 128x7 active-step bitmap plus
   per-track length and scale. Version 1 placeholders remain accepted.
 - `File`, `Dir`, and Save-only `sDir` diagnostics remain compiled but are
@@ -131,8 +135,10 @@ Implemented through Session 039:
 
 Current bridges and limitations:
 
-- `SCENE_COUNT` is currently `1`; the API is indexed so the Bank implementation
-  can raise it to 17 later.
+- `SCENE_COUNT` is `16`. Each resident Scene owns its settings, PatternSet,
+  embedded Kit, and retained display identity. A future background Bank loader
+  still needs a separate landing/staging strategy if the current active Scene
+  must continue playing while all 16 records are replaced.
 - Pattern/container storage remains a bridge shape and will be replaced by the
   later dynamic stack Pattern implementation.
 - `FS_FILE_KIT` save now routes to the new Kit directory writer. The old flat
@@ -141,7 +147,7 @@ Current bridges and limitations:
 - Globals still load/save through legacy `glo.cfg`; root `settings.cfg` is the
   settled future replacement but is not wired yet.
 - Effect, Wavetable-pool, and new Pattern-pool load/save operations are not
-  implemented/promoted yet. Root Instrument, root Scene, and bridge root Bank
+  implemented/promoted yet. Root Instrument, root Scene, and 16-Scene root Bank
   load/save exist.
 - Descriptor-backed LFO and velocity modulation runtime paths are in place for
   direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
@@ -152,9 +158,11 @@ Current bridges and limitations:
   modulation targets.
 - New Scene modulation target IDs are runtime/menu IDs; current Scene files
   persist Scene mix/routing settings but not the future full effect stack.
-- Bank still uses only one resident Scene. The 16-Scene memory workspace,
-  per-Scene toggles, background load, autosave, dot-file promotion, and Scene
-  reload workflows remain future work.
+- The 16-Scene memory workspace, active/present/edit masks, SEQ-button
+  selection, and selected-child Bank load/save are implemented. Background
+  Bank loading, copy-forward of untoggled children, journaled product
+  promotion/recovery, autosave, dot-file promotion, and Scene reload workflows
+  remain future work.
 
 ## Root Layout
 
@@ -225,8 +233,10 @@ remain one-based `1..6` inside instrument text schemas.
 
 ## Bank
 
-Status: implemented as the Session 039 one-resident-Scene bridge; future
-16-Scene resident workspace and autosave are not implemented.
+Status: the 16-resident-Scene workspace and selected-child Bank scan/load/save
+are implemented. The current Save path uses a manual temp/old rename workflow;
+asyncfatfs journaled directory replacement, preservation of untoggled old
+children, background loading, and autosave are not integrated.
 
 `Bank/` contains bank folders:
 
@@ -267,39 +277,53 @@ scenes. This is intentionally different from root `Scene/NNN` library folders.
 Missing scene slots are valid and will be shown as empty in the future UI. A
 user may exchange scene folders between banks.
 
-`bankset.bcg` v1:
+`bankset.bcg` current writer format (v2):
 
 ```text
 format=helicase.bankset
-version=1
+version=2
 active_scene=0
+scene_mask_voice_edit=0001
 ```
 
 `active_scene` is a Bank-local `00..15` slot number and is not zero-padded in
-the file. The Bank name is never stored in `bankset.bcg`; it comes only from
-the `Bank/NNN <bank name>/` directory.
+the file. `scene_mask_voice_edit` is a four-digit hexadecimal 16-bit mask where
+bit N selects resident Scene N for VOICE edit fan-out; BankData always ensures
+the active Scene is included. The parser still accepts v1 files, defaulting a
+missing mask to Scene 0. The Bank name is never stored in `bankset.bcg`; it
+comes only from the `Bank/NNN <bank name>/` directory.
 
-Current bridge behavior:
+Current behavior:
 
 - Boot scans `Bank/` and loads the lowest valid Bank before root Scene/root Kit
   fallback.
-- Bank Load chooses `active_scene` if present, otherwise the lowest child Scene.
+- Bank Load previews Bank-local children, loads the selected child mask into
+  matching resident Scene indices, and chooses `active_scene` when it is among
+  the loaded children; otherwise it uses the lowest selected child.
 - An empty Bank containing only valid `bankset.bcg` is valid; it completes Bank
   selection and then falls back to root Scene, root Kit, then defaults.
-- Bank Save can save no child Scenes. The current UI/writer saves only child
-  slot `00` when its internal mask bit 0 is set.
-- Safe root Bank folder rename while preserving untoggled child Scenes is not
-  implemented. Future rename/promotion must be explicit and tested.
+- Bank Save defaults its SEQ selection to every resident present Scene and can
+  write any nonempty subset of `00..15`; a zero mask creates a valid empty Bank.
+- The writer builds a complete unique non-numbered `tmpNNN-xxxx` tree, renames
+  an existing numbered target to paired `oldNNN-xxxx`, then promotes the temp
+  tree. It deliberately leaves the old tree for manual inspection/recovery.
+- Untoggled old Bank-local Scenes are not copied into the new temp tree. They
+  therefore remain only in `oldNNN-xxxx`, not in the promoted Bank. Phase 7
+  must use exact tree copy to preserve them when that is the requested product
+  behavior.
+- The manual two-rename flow has no journal replay. Power loss can leave no
+  numbered target even though complete temp/old trees are visible to a desktop
+  filesystem. Do not describe it as automatically crash-recoverable.
 
-Future background bank loading uses 17 resident `scene_t` slots: 16 bank scene
-slots plus one landing/staging scene so the currently playing scene can keep
-playing while a new bank streams in.
+Future background Bank loading needs a landing/staging strategy beyond the 16
+resident slots so the currently playing Scene can remain authoritative while a
+new Bank streams and validates.
 
 ## Scene
 
-Status: root Scene Load/Save is implemented and promoted after Session 039.
-Only one resident Scene exists today; the API remains indexed for the future
-Bank workspace.
+Status: root Scene Load/Save is implemented. Root Scene Load can fan one
+validated library Scene into a selected resident Scene mask; root Scene Save
+writes one selected resident source Scene.
 
 `Scene/` is a root-level pool of user-copyable scene folders:
 
@@ -1183,8 +1207,9 @@ Implemented:
 
 - Kit save writes a `Kit/<NNN Name>/` folder in the same logical shape the
   current loader accepts: `kitset.kcg` plus six instrument files. The folder and
-  member files are created through asyncfatfs LFN primitives, with returned 8.3
-  aliases used for `kitset.kcg` references/open paths.
+  member files are created through asyncfatfs LFN primitives. `kitset.kcg`
+  stores each finalized visible member filename; returned 8.3 aliases remain
+  implementation-only reopen details.
 - Instrument save writes one resident Scene/voice slot to the root
   `Instrument/` pool. It creates/opens the root with LFN/case-sensitive
   asyncfatfs APIs, opens the target display filename with `afatfs_fopen_lfn()`,
@@ -1200,10 +1225,11 @@ Implemented:
   without `audio_out`, writes six embedded Instrument files, writes draft text
   `pattern.pat`, and writes placeholder `effects.fx`. Scene and embedded Kit
   names are directory-owned.
-- Bank Save writes a root `Bank/<NNN Name>/` directory and `bankset.bcg`.
-  In the current one-resident-Scene bridge it can write child `00 <scene name>/`
-  through the same Scene payload writer. A zero child-scene mask is valid and
-  creates/saves an empty Bank.
+- Bank Save writes a root `Bank/<NNN Name>/` directory and v2 `bankset.bcg`.
+  It can write any selected resident Scene subset as matching Bank-local
+  `00..15` child folders through the same Scene payload writer. A zero
+  child-scene mask is valid and creates/saves an empty Bank. Publication still
+  uses the manual `tmpNNN-xxxx`/`oldNNN-xxxx` rename workflow described above.
 
 Still future:
 
@@ -1246,11 +1272,25 @@ filename sanitization, and caller checklist live in
 `filesystem.c` or those documented asyncfatfs primitives instead of rebuilding
 FAT/VFAT traversal locally.
 
-Current production Kit and Instrument saves use the Session 038 recursive
-directory cleanup/file overwrite behavior from `filesystem.c` where the product
-operation requires replacement. Future Scene/Bank/autosave work still needs an
-atomic rename/replace primitive for `.tmp` promotion before it can claim
-power-loss-safe commit semantics.
+asyncfatfs expansion Phases 1-6 are implemented at the low-level boundary:
+explicit-parent child access, exact object identity, structured results,
+by-identity rename/move/delete, bounded recursive tree copy, and an explicitly
+recovered journaled directory replacement transaction. The transaction creates
+a fresh `.afat-xxxxxxxx-new` directory, alternates CRC-protected
+`AFATJ0.SYS`/`AFATJ1.SYS` records, and commits through PREPARED, OLD_RENAMED,
+PROMOTED, cleanup, and CLEAN sync boundaries. This is crash-recoverable FAT
+ordering, not a claim that two LFN renames are atomic.
+
+Phase 7 product integration is not implemented. Current Kit, Scene, Bank, and
+Instrument saves still use their existing `filesystem.c` cleanup/serialization
+state machines; none should be described as using the new staged transaction
+until its production path and browser preflight call
+`afatfs_recoverTreeReplace()` in the known parent. Hardware remount and
+power-cut fault injection are also still release gates.
+
+The implemented transaction is directory-shaped. Autosave `.tmp` promotion is
+file-shaped and still requires a dedicated file transaction variant before it
+can claim the same recovery guarantee.
 
 ## Verification Anchors
 
@@ -1360,18 +1400,21 @@ Mechanism:
 - RELOAD applies to Scene scope. It reads the selected Scene's non-dot committed
   files into resident memory and resets the selected Scene's dot-file backers to
   match those committed files.
-- Dot-file autosave should use a temp-file-then-rename/replace sequence when
-  the asyncfatfs primitive exists. On startup, a leftover `.tmp` means the temp
-  write was incomplete; ignore/delete it, then use the previous dot-file if it
-  validates. Only fall back to non-dot when the dot-file itself is missing or
-  invalid.
+- Dot-file autosave should eventually use a file-shaped temp-write transaction
+  with journal-authorized promotion and recovery. The implemented asyncfatfs
+  tree transaction accepts directories only, so it does not yet authorize
+  `.tmp` file promotion. Until the file variant exists, startup must not infer
+  that every leftover `.tmp` is safe to promote or delete merely from its name;
+  use the previous validated dot-file, then fall back to the committed non-dot
+  file when that backer is missing or invalid.
 - Root `settings.cfg` records the active Bank number and has a `.settings.cfg`
   backer. Closing the global settings menu or loading/saving a Bank rewrites
   both settings files.
 
-Implementation note: confirm or add the required asyncfatfs rename/replace or
-safe copy/replace primitive before relying on dot-file promotion for
-power-loss-safe Bank SAVE.
+Implementation note: asyncfatfs now has the directory copy/replace foundation
+for staged Bank/Scene/Kit trees, but `filesystem.c` Phase 7 integration and
+qualification remain. Add the file-shaped journal variant before relying on
+dot-file `.tmp` promotion for power-loss-safe autosave or Bank SAVE.
 
 ## Example Target Layout
 

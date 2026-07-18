@@ -129,9 +129,25 @@ static uint8_t instrument_apply_scene = 0u;
 static uint8_t instrument_apply_phase = 0u;
 static uint8_t instrument_apply_rebind_source = 0u;
 static uint8_t instrument_apply_morph_only = 0u;
+/*
+ * Post-commit `.names` durability state for normal Instrument Load.
+ *
+ * What: retains the committed voice slot and completion latch while the
+ * register copies its inactive 129-record bank. Why: filesystem parsing ends
+ * before Preset owns the irreversible resident/DSP commit, so source identity
+ * must be requested from this later boundary. Inputs are the existing request
+ * Scene mask and filesystem's staged stem; outputs keep Menu's apply gate busy
+ * until the register callback reports durable success or failure. Morph Load
+ * bypasses these phases because it does not replace source identity.
+ */
+static uint8_t instrument_apply_slot = 0u;
+static volatile uint8_t instrument_names_update_ready = 0u;
+static volatile uint8_t instrument_names_update_ok = 0u;
 enum {
     INSTRUMENT_APPLY_PHASE_MORPH_REBUILD = 0u,
-    INSTRUMENT_APPLY_PHASE_TARGET_REBIND
+    INSTRUMENT_APPLY_PHASE_TARGET_REBIND,
+    INSTRUMENT_APPLY_PHASE_NAMES_START,
+    INSTRUMENT_APPLY_PHASE_NAMES_WAIT
 };
 static uint8_t preset_morph_initialized = 0;
 
@@ -334,6 +350,18 @@ static void on_instrument_morph_load_complete(void)
      * bindings.
      */
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_LOAD);
+}
+
+static void on_instrument_names_update_complete(void)
+{
+    /*
+     * Capture the terminal facade result before Preset acknowledges it.
+     * The callback runs only for the private post-apply update, so consuming
+     * filesystem status here cannot steal a Menu-visible operation completion.
+     */
+    instrument_names_update_ok =
+        (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    instrument_names_update_ready = 1u;
 }
 
 static void on_scene_load_complete(void)
@@ -1340,6 +1368,7 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
      * know DSP lifecycle order.
      */
     instrument_apply_active = 0u;
+    instrument_apply_slot = slot;
     if (!staged || slot >= INSTRUMENT_SLOT_COUNT ||
         staged->type >= INSTRUMENT_TYPE_UNKNOWN ||
         staged->type != (instrument_type_t)pm_instrument_request_type) {
@@ -1372,8 +1401,17 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
             active_scene_touched = 1u;
     }
 
-    if (!active_scene_touched)
+    if (!active_scene_touched) {
+        /*
+         * Inactive Scene commits need no DSP rebuild but still changed resident
+         * source identity. Arm the same durable register phase directly so the
+         * Menu cannot release the load while `.names` still describes the old
+         * Instrument for those selected cells.
+         */
+        instrument_apply_active = 1u;
+        instrument_apply_phase = INSTRUMENT_APPLY_PHASE_NAMES_START;
         return;
+    }
 
     instrumentManager_resetRuntimeSlot(slot);
     (void)preset_applyKitAudioRouting(scene_getActiveIndex(), slot);
@@ -1412,7 +1450,8 @@ uint8_t preset_tickInstrumentApply(void)
         instrument_apply_rebind_source = 0u;
         return 1u;
     }
-    if (instrument_apply_rebind_source < INSTRUMENT_SLOT_COUNT) {
+    if (instrument_apply_phase == INSTRUMENT_APPLY_PHASE_TARGET_REBIND &&
+        instrument_apply_rebind_source < INSTRUMENT_SLOT_COUNT) {
         /*
          * Rebuild every source rather than only the replaced destination.
          *
@@ -1424,6 +1463,47 @@ uint8_t preset_tickInstrumentApply(void)
                                          instrument_apply_rebind_source);
         instrument_apply_rebind_source++;
         return 1u;
+    }
+    if (instrument_apply_phase == INSTRUMENT_APPLY_PHASE_TARGET_REBIND) {
+        /* All audible graph work is complete; source identity is next. */
+        instrument_apply_phase = INSTRUMENT_APPLY_PHASE_NAMES_START;
+        return 1u;
+    }
+    if (instrument_apply_phase == INSTRUMENT_APPLY_PHASE_NAMES_START) {
+        /*
+         * Start one atomic fan-out update after every payload destination has
+         * committed. Inputs are the immutable request Scene mask/slot and the
+         * real-tree stem staged by filesystem Load. The provider writes the
+         * same distinct name to each selected resident cell while copying all
+         * other records unchanged. A busy facade simply retries next tick.
+         */
+        instrument_names_update_ready = 0u;
+        instrument_names_update_ok = 0u;
+        filesystem_ack();
+        if (!filesystem_requestUpdateInstrumentNames(
+                pm_kit_request_scene_mask,
+                instrument_apply_slot,
+                filesystem_loadedInstrumentStem(),
+                on_instrument_names_update_complete)) {
+            return 1u;
+        }
+        instrument_apply_phase = INSTRUMENT_APPLY_PHASE_NAMES_WAIT;
+        return 1u;
+    }
+    if (instrument_apply_phase == INSTRUMENT_APPLY_PHASE_NAMES_WAIT) {
+        if (!instrument_names_update_ready)
+            return 1u;
+        /*
+         * Release the private filesystem completion after recording its result.
+         * A failed update cannot roll back the already-audible payload; keeping
+         * the old valid `.names` snapshot is the recovery-safe outcome. Future
+         * UI warning plumbing can surface `instrument_names_update_ok` without
+         * misreporting the successfully loaded Instrument file as absent.
+         */
+        filesystem_ack();
+        instrument_apply_active = 0u;
+        instrument_apply_morph_only = 0u;
+        return 0u;
     }
     instrument_apply_active = 0u;
     instrument_apply_morph_only = 0u;

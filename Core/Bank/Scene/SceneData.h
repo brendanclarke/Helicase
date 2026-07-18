@@ -277,48 +277,6 @@ uint8_t scene_getActiveIndex(void);
  */
 uint8_t scene_selectActive(uint8_t scene_index);
 /*
- * Retain one Kit display name in Kit-owned storage.
- *
- * What: Copies exactly eight display cells into kit->display_name, sanitizing
- * non-printable bytes to spaces and appending NUL.
- *
- * Why: Kit name is resident data, separate from a root Kit library slot's
- * current folder name. Normal Kit Save updates this field only after the save
- * succeeds; Morph operations leave it alone.
- *
- * Inputs: caller-owned Kit pointer and fixed-width eight-character display
- * field. Outputs: kit->display_name when kit is non-NULL.
- *
- * Affiliates/clients: filesystem normal Kit Load/Save completion, Menu Save
- * editor seeding, Scene embedded Kit naming.
- */
-void scene_setKitDisplayName(kit_t *kit,
-                             const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
-void scene_setResidentKitDisplayName(
-    uint8_t scene_index,
-    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
-/*
- * Retain one resident Scene display name.
- *
- * What: Copies exactly eight display cells into the selected resident Scene,
- * sanitizing non-printable bytes to spaces and appending NUL.
- *
- * Why: the resident Scene needs an internal name independent of the root Scene
- * slot currently highlighted by the browser. This also gives future Bank work
- * a Scene-local name field instead of overloading preset_currentName.
- *
- * Inputs: resident Scene index and fixed-width display field. Outputs:
- * scenes[index].display_name when the index is valid.
- *
- * Affiliates/clients: filesystem Scene Load/Save, Menu Save editor seeding,
- * future Bank Scene lists.
- */
-void scene_setSceneDisplayName(
-    uint8_t scene_index,
-    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
-const char *scene_kitDisplayName(uint8_t scene_index);
-const char *scene_sceneDisplayName(uint8_t scene_index);
-/*
  * Borrow a mutable instrument slot from a Scene's embedded Kit.
  *
  * Inputs: Scene index and zero-based instrument slot. Output: pointer to the
@@ -335,18 +293,6 @@ kit_instrument_slot_t *scene_instrumentSlot(uint8_t scene_index, uint8_t slot);
  */
 const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
                                                        uint8_t slot);
-/*
- * Retain one instrument source stem for later Kit Save.
- *
- * Inputs may be a filename with extension or a raw stem. Output updates both
- * the 16-character save stem and the eight-character LCD display name. Central
- * ownership avoids Kit load, Instrument load, and future Scene/Bank load
- * deriving subtly different names from the same file.
- */
-void scene_setInstrumentSourceName(uint8_t scene_index, uint8_t slot,
-                                   const char *filename_or_stem);
-void scene_setKitInstrumentSourceName(kit_t *kit, uint8_t slot,
-                                      const char *filename_or_stem);
 /*
  * Store one track's MIDI channel setting.
  *
@@ -429,3 +375,57 @@ void scene_setSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index,
 uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index);
 
 #endif
+/*
+ * Retain one Kit display name in Kit-owned storage.
+ *
+ * What: Copies exactly eight display cells into kit->display_name, sanitizing
+ * non-printable bytes to spaces and appending NUL.
+ *
+ * Why: Kit name is resident data, separate from a root Kit library slot's
+ * current folder name. Normal Kit Save updates this field only after the save
+ * succeeds; Morph operations leave it alone.
+ *
+ * Inputs: caller-owned Kit pointer and fixed-width eight-character display
+ * field. Outputs: kit->display_name when kit is non-NULL.
+ *
+ * Affiliates/clients: filesystem normal Kit Load/Save completion, Menu Save
+ * editor seeding, Scene embedded Kit naming.
+ */
+void scene_setKitDisplayName(kit_t *kit,
+                             const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+void scene_setResidentKitDisplayName(
+    uint8_t scene_index,
+    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+/*
+ * Retain one resident Scene display name.
+ *
+ * What: Copies exactly eight display cells into the selected resident Scene,
+ * sanitizing non-printable bytes to spaces and appending NUL.
+ *
+ * Why: the resident Scene needs an internal name independent of the root Scene
+ * slot currently highlighted by the browser. This also gives future Bank work
+ * a Scene-local name field instead of overloading preset_currentName.
+ *
+ * Inputs: resident Scene index and fixed-width display field. Outputs:
+ * scenes[index].display_name when the index is valid.
+ *
+ * Affiliates/clients: filesystem Scene Load/Save, Menu Save editor seeding,
+ * future Bank Scene lists.
+ */
+void scene_setSceneDisplayName(
+    uint8_t scene_index,
+    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
+const char *scene_kitDisplayName(uint8_t scene_index);
+const char *scene_sceneDisplayName(uint8_t scene_index);
+/*
+ * Retain one instrument source stem for later Kit Save.
+ *
+ * Inputs may be a filename with extension or a raw stem. Output updates both
+ * the 16-character save stem and the eight-character LCD display name. Central
+ * ownership avoids Kit load, Instrument load, and future Scene/Bank load
+ * deriving subtly different names from the same file.
+ */
+void scene_setInstrumentSourceName(uint8_t scene_index, uint8_t slot,
+                                   const char *filename_or_stem);
+void scene_setKitInstrumentSourceName(kit_t *kit, uint8_t slot,
+                                      const char *filename_or_stem);

@@ -295,6 +295,17 @@ int main(void)
         menu_setNumSamples(sampleMemory_getNumSamples());
 
         if (sd_ok) {
+            /*
+             * Establish the resident source-name register before library load.
+             *
+             * `.names` contains only the 129 names corresponding to resident
+             * Scene/Kit/Instrument/Bank storage; it is not populated by the
+             * four library scans below. Failure leaves musical boot available
+             * through existing resident defaults, but Save-name identity will
+             * report a register error until the next successful mount.
+             */
+            (void)filesystem_initNamesBlocking();
+
             /* Synchronous kit scan (blocking at boot, OK) */
             filesystem_requestScanKits(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)

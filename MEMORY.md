@@ -36,9 +36,11 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Scene/Bank saves currently persist draft v2 `pattern.pat`: 128x7 active-step
   bits plus per-track length/scale only. This is not the final dynamic Pattern
   format.
-- Bank is implemented only as the one-resident-Scene bridge. Next Bank work is
-  the 16-Scene resident workspace, Bank-local Scene toggles/masks, preservation
-  of untoggled Bank-local Scene folders, and later autosave.
+- Bank owns 16 resident Scenes plus presence, active, and VOICE edit masks.
+  Bank Load/Save can select Bank-local children `00..15`; the current manual
+  Save builds `tmpNNN-xxxx`, moves the occupied target to `oldNNN-xxxx`, and
+  promotes temp. It does not copy untoggled old children into the promoted Bank
+  or journal recovery, so those remain Phase 7 asyncfatfs integration work.
 - Never add object self-name fields to `sceneset.scg`, `bankset.bcg`, or
   instrument files. Object identity comes from directory/file names.
 - For overwrite code, enter the correct parent root first, parse visible child
@@ -47,6 +49,11 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `ASYNCFATFS_REFERENCE.md`.
 - File/Dir/sDir diagnostics are hidden unless `CONFIG_DEV_MODE != 0`, but the
   dispatch code remains compiled.
+- asyncfatfs Phases 5-6 now provide reduced-RAM exact tree copy plus journaled
+  directory begin/commit/abort/recovery. The `afatfs` object is 8,880 bytes;
+  Phase 7 product integration and subsequent hardware/power-cut qualification
+  remain pending. The transaction is directory-shaped; autosave still needs a
+  file-shaped variant.
 
 ---
 
@@ -69,9 +76,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   ├── ENHANCED_FEATURES.md        ← future enhancement notes
 │   ├── OSC_INTERP_AUDIT.md         ← oscillator interpolation audit
 │   ├── specification_reference/
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API boundary map, updated through Session 039
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API boundary map, including 16-Scene Bank and asyncfatfs Phase 1-6 boundaries
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative filesystem, kit/instrument file, Scene storage, and save/load target spec
-│   │   ├── MEMORY_AUDIT.md            ← historical Session 023 memory region audit notes
+│   │   ├── MEMORY_AUDIT.md            ← current 2026-07-18 ARM section/symbol/asyncfatfs RAM audit
 │   │   └── DSP_AUDIT.md               ← historical DSP pipeline audit and hot-path notes
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
@@ -350,7 +357,7 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
   Target root directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`,
   `Wavetable`, `Effect`, and `Instrument`; future system settings live in root
   `settings.cfg`. Current implemented directory work is root `Kit/`,
-  `Instrument/`, `Scene/`, and bridge `Bank/` load/save, plus Kit/Instrument
+  `Instrument/`, `Scene/`, and 16-Scene `Bank/` load/save, plus Kit/Instrument
   Morph Save. Globals still use legacy `glo.cfg`.
 - `storageTypes.c/h` owns text storage schemas, parser/writer helpers, and
   descriptor-keyed parameter maps. Keep it free of `asyncfatfs` calls and keep
@@ -366,8 +373,10 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
   embedded `Kit <name>/`, draft `pattern.pat`, and placeholder `effects.fx`.
   `sceneset.scg` never stores `name`.
 - Bank Load/Save uses root `Bank/NNN Name/` folders with `bankset.bcg` and
-  Bank-local two-digit Scene children `00..15`. The current bridge has one
-  resident Scene and writes/loads Bank-local slot `00`.
+  Bank-local two-digit Scene children `00..15`. Sixteen resident Scenes exist;
+  selected masks map child N to resident Scene N. The current manual Save
+  publishes a new temp tree and leaves the occupied target as paired old
+  scratch, but does not copy untoggled children forward.
 - Session 036 adds asyncfatfs LFN component creation/object iteration through
   `afatfs_mkdir_lfn()`, `afatfs_fopen_lfn()`, `afatfs_opendir_lfn()`, and
   `afatfs_findNextObject()`. These preserve SFN display case, create VFAT LFN
@@ -381,8 +390,10 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
   File/Dir diagnostics must not hide them; product scanners filter only after
   object iteration.
 - Filesystem-level recursive directory cleanup exists for replacement-style
-  saves such as Kit Save. Atomic rename/replace remains missing and is required
-  before Scene/Bank/autosave promotion can claim power-loss-safe commits.
+  saves such as Kit Save. asyncfatfs now also implements exact tree copy and a
+  journaled, explicitly recovered directory transaction. Product Save paths do
+  not use it yet, and autosave still needs a file-shaped transaction, so current
+  Scene/Bank/autosave code cannot claim that recovery guarantee.
 - Root `Instrument/` is a separately scanned, type-filtered source pool.
   Instrument Load initially shows the destination slot's Kit member stem;
   changing type only changes the type selection, and lower-row browsing is the
