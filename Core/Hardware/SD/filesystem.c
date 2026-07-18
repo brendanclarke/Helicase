@@ -382,11 +382,18 @@ static afatfsObjectKind_t op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
 static afatfsFilePtr_t op_delete_tree_dir = NULL;
 static fs_delete_slot_phase_t op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
 static afatfsFilePtr_t op_delete_slot_dir = NULL;
-static char op_delete_slot_target_name[AFATFS_LONG_FILENAME_MAX + 1u];
-static char op_delete_slot_target_open_name[AFATFS_SHORT_FILENAME_MAX];
 static uint8_t op_delete_slot_allow_short_alias = 0u;
 static uint8_t op_delete_slot_bank_scene = 0u;
 static uint16_t op_delete_slot_number = 0u;
+static afatfsObjectId_t op_delete_slot_target_id;
+static bool op_delete_tree_done = false;
+static afatfsResultCode_t op_delete_tree_result = AFATFS_RESULT_OK;
+
+static void on_delete_tree_complete(afatfsResultCode_t result)
+{
+    op_delete_tree_done = true;
+    op_delete_tree_result = result;
+}
 /*
  * Staged Kit payload and target mask for multi-Scene Kit Load.
  *
@@ -3110,7 +3117,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             op_phase = 10;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
             op_close_status = FS_STATUS_DONE;
             op_phase = 10;
@@ -3120,31 +3127,31 @@ static void filesystem_loadSceneDirectory_tick(void)
          * Child discovery follows the user-editable Scene contract using the
          * LFN-aware object iterator.
          *
-         * Inputs: op_object.displayName is checksum-verified VFAT text when
-         * present, otherwise a case-preserved SFN display; op_object.shortName
+         * Inputs: op_object.id.displayName is checksum-verified VFAT text when
+         * present, otherwise a case-preserved SFN display; op_object.id.shortName
          * is the asyncfatfs-openable alias. Outputs: the first `Kit <name>`
          * directory plus the first `.pat` and `.fx` files are staged for later
          * validation. This avoids the older raw-entry/LFN side state and keeps
          * root Scene Load behavior aligned with Bank-local Scene Load.
          */
-        if (op_object.kind == AFATFS_OBJECT_DIRECTORY) {
+        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
             if (op_scene_child_open_name[0] == '\0' &&
-                filesystem_nameStartsWithKitSpace(op_object.displayName)) {
+                filesystem_nameStartsWithKitSpace(op_object.id.displayName)) {
                 storage_copyFilename(op_scene_child_open_name,
-                                     op_object.shortName);
+                                     op_object.id.shortName);
                 storage_copyDisplayName(op_scene_child_display_name,
-                                        &op_object.displayName[4]);
+                                        &op_object.id.displayName[4]);
             }
-        } else if (op_object.kind == AFATFS_OBJECT_FILE) {
+        } else if (op_object.id.kind == AFATFS_OBJECT_FILE) {
             if (op_scene_pattern_open_name[0] == '\0' &&
-                filesystem_nameHasExtension(op_object.displayName, ".pat")) {
+                filesystem_nameHasExtension(op_object.id.displayName, ".pat")) {
                 storage_copyFilename(op_scene_pattern_open_name,
-                                     op_object.shortName);
+                                     op_object.id.shortName);
             } else if (op_scene_effect_open_name[0] == '\0' &&
-                       filesystem_nameHasExtension(op_object.displayName,
+                       filesystem_nameHasExtension(op_object.id.displayName,
                                                    ".fx")) {
                 storage_copyFilename(op_scene_effect_open_name,
-                                     op_object.shortName);
+                                     op_object.id.shortName);
             }
         }
         return;
@@ -4321,13 +4328,13 @@ static void filesystem_loadBankDirectory_tick(void)
             op_phase = 16u;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
             op_close_status = FS_STATUS_DONE;
             op_phase = 16u;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_DIRECTORY) {
+        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
             uint8_t child_slot;
             char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 
@@ -4340,7 +4347,7 @@ static void filesystem_loadBankDirectory_tick(void)
              * Scene library cache because Bank-local Scenes are a different
              * namespace.
              */
-            if (storage_parseBankSceneFolder(op_object.displayName,
+            if (storage_parseBankSceneFolder(op_object.id.displayName,
                                              &child_slot,
                                              display)) {
                 display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
@@ -4367,7 +4374,7 @@ static void filesystem_loadBankDirectory_tick(void)
                      */
                     storage_copyFilename(
                         op_bank_child_open_name[child_slot],
-                        op_object.displayName);
+                        op_object.id.displayName);
                 }
             }
         }
@@ -4748,13 +4755,13 @@ static void filesystem_scanBankScenes_tick(void)
             op_phase = 9u;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
             op_close_status = FS_STATUS_DONE;
             op_phase = 9u;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_DIRECTORY) {
+        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
             uint8_t child_slot;
             char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 
@@ -4767,7 +4774,7 @@ static void filesystem_scanBankScenes_tick(void)
              * entries claim the same two-digit slot, lexical display ordering
              * matches the root browser duplicate policy.
              */
-            if (storage_parseBankSceneFolder(op_object.displayName,
+            if (storage_parseBankSceneFolder(op_object.id.displayName,
                                              &child_slot,
                                              display)) {
                 display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
@@ -4784,7 +4791,7 @@ static void filesystem_scanBankScenes_tick(void)
                     op_bank_child_name[child_slot]
                                       [STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
                     storage_copyFilename(op_bank_child_open_name[child_slot],
-                                         op_object.displayName);
+                                         op_object.id.displayName);
                 }
             }
         }
@@ -5087,16 +5094,16 @@ static void filesystem_saveInstrument_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_phase = 4;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_DIRECTORY &&
-            fat_compareDisplayName(op_object.displayName,
+        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY &&
+            fat_compareDisplayName(op_object.id.displayName,
                                    STORAGE_ROOT_INSTRUMENT,
                                    false) == 0) {
-            storage_copyFilename(op_root_open_name, op_object.shortName);
+            storage_copyFilename(op_root_open_name, op_object.id.shortName);
             afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_phase = 4;
         }
@@ -5635,14 +5642,14 @@ static uint8_t filesystem_bankScratchNameCollides(
      * stale temp tree and can preserve obsolete embedded Kit directories such
      * as the extra `Kit Slak` observed in `000 SlakBad4/01 Slak2/`.
      */
-    if (!object || object->kind == AFATFS_OBJECT_NONE)
+    if (!object || object->id.kind == AFATFS_OBJECT_NONE)
         return 0u;
-    if (fat_compareDisplayName(object->displayName,
+    if (fat_compareDisplayName(object->id.displayName,
                                op_save_bank_tmp_display_name,
                                false) == 0) {
         return 1u;
     }
-    if (fat_compareDisplayName(object->displayName,
+    if (fat_compareDisplayName(object->id.displayName,
                                op_save_bank_old_display_name,
                                false) == 0) {
         return 1u;
@@ -6220,7 +6227,7 @@ static uint8_t filesystem_directoryObjectMatchesSlot(
      * for Scene is leaving an odd alias behind, never recursing into a
      * directory that was not visibly a same-slot Scene.
      */
-    if (!object || object->kind != AFATFS_OBJECT_DIRECTORY)
+    if (!object || object->id.kind != AFATFS_OBJECT_DIRECTORY)
         return 0u;
     if (bank_scene_namespace) {
         uint8_t bank_slot;
@@ -6234,7 +6241,7 @@ static uint8_t filesystem_directoryObjectMatchesSlot(
          * ignored here because a two-digit prefix is too broad for safe deletion
          * in a mixed user-created directory.
          */
-        if (storage_parseBankSceneFolder(object->displayName,
+        if (storage_parseBankSceneFolder(object->id.displayName,
                                          &bank_slot,
                                          display) &&
             bank_slot == (uint8_t)slot) {
@@ -6242,7 +6249,7 @@ static uint8_t filesystem_directoryObjectMatchesSlot(
         }
         return 0u;
     }
-    if (storage_parseNumberedFolder(object->displayName,
+    if (storage_parseNumberedFolder(object->id.displayName,
                                     &parsed_slot,
                                     display) &&
         parsed_slot == slot) {
@@ -6250,13 +6257,13 @@ static uint8_t filesystem_directoryObjectMatchesSlot(
     }
     if (!allow_short_alias)
         return 0u;
-    if (object->shortName[0] >= '0' && object->shortName[0] <= '9' &&
-        object->shortName[1] >= '0' && object->shortName[1] <= '9' &&
-        object->shortName[2] >= '0' && object->shortName[2] <= '9') {
+    if (object->id.shortName[0] >= '0' && object->id.shortName[0] <= '9' &&
+        object->id.shortName[1] >= '0' && object->id.shortName[1] <= '9' &&
+        object->id.shortName[2] >= '0' && object->id.shortName[2] <= '9') {
         parsed_slot = (uint16_t)(
-            (uint16_t)(object->shortName[0] - '0') * 100u +
-            (uint16_t)(object->shortName[1] - '0') * 10u +
-            (uint16_t)(object->shortName[2] - '0'));
+            (uint16_t)(object->id.shortName[0] - '0') * 100u +
+            (uint16_t)(object->id.shortName[1] - '0') * 10u +
+            (uint16_t)(object->id.shortName[2] - '0'));
         return (uint8_t)(parsed_slot == slot);
     }
     return 0u;
@@ -6309,10 +6316,7 @@ static void filesystem_deleteSlotDirectoriesStart(uint16_t slot,
      * Save can opt out of short-alias matching and avoid deleting anything
      * except visibly numbered Scene folders for the target slot.
      */
-    memset(op_delete_slot_target_name, 0,
-           sizeof(op_delete_slot_target_name));
-    memset(op_delete_slot_target_open_name, 0,
-           sizeof(op_delete_slot_target_open_name));
+    op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
     op_delete_slot_dir = NULL;
     op_delete_slot_number = slot;
     op_delete_slot_allow_short_alias = allow_short_alias;
@@ -6346,9 +6350,28 @@ static void filesystem_deleteSceneSlotDirectoriesStart(void)
     filesystem_deleteSlotDirectoriesStart(op_slot, 0u, 0u);
 }
 
+static uint32_t op_delete_slot_timeout_ticks = 0;
+static uint8_t op_delete_slot_last_phase = 0;
+
 static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
 {
     fs_status_t delete_status;
+
+    if (op_delete_slot_phase != op_delete_slot_last_phase) {
+        op_delete_slot_last_phase = op_delete_slot_phase;
+        op_delete_slot_timeout_ticks = 0;
+    }
+    op_delete_slot_timeout_ticks++;
+    if (op_delete_slot_timeout_ticks > 50000) {
+        uint8_t subphase = afatfs_getDeleteTreePhase();
+        if (op_delete_slot_phase == FS_DELETE_SLOT_DELETE_MATCH && subphase != 0xFF) {
+            filesystem_makeNamedErrorCode("TDel", subphase);
+        } else {
+            filesystem_makeNamedErrorCode("TOut", (uint8_t)op_delete_slot_phase);
+        }
+        op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+        return FS_STATUS_ERROR;
+    }
 
     for (;;) {
         switch (op_delete_slot_phase) {
@@ -6396,10 +6419,10 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
                 op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
                 return FS_STATUS_ERROR;
             }
-            if (op_object.kind == AFATFS_OBJECT_NONE) {
+            if (op_object.id.kind == AFATFS_OBJECT_NONE) {
                 afatfs_findLastObject(op_delete_slot_dir,
                                       &op_object_finder);
-                op_delete_slot_target_name[0] = '\0';
+                op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
                 op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
                 break;
             }
@@ -6408,20 +6431,13 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
                     op_delete_slot_number,
                     op_delete_slot_allow_short_alias,
                     op_delete_slot_bank_scene)) {
-                filesystem_copyLongComponent(
-                    op_delete_slot_target_name,
-                    sizeof(op_delete_slot_target_name),
-                    op_object.displayName);
-                filesystem_copyLongComponent(
-                    op_delete_slot_target_open_name,
-                    sizeof(op_delete_slot_target_open_name),
-                    op_object.shortName);
+                op_delete_slot_target_id = op_object.id;
                 afatfs_findLastObject(op_delete_slot_dir,
                                       &op_object_finder);
                 op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
                 break;
             }
-            break;
+            return FS_STATUS_BUSY;
         }
 
         case FS_DELETE_SLOT_CLOSE_SCAN:
@@ -6435,7 +6451,7 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
             if (!op_close_done)
                 return FS_STATUS_BUSY;
             op_delete_slot_dir = NULL;
-            if (op_delete_slot_target_name[0] == '\0') {
+            if (op_delete_slot_target_id.kind == AFATFS_OBJECT_NONE) {
                 op_delete_slot_phase = FS_DELETE_SLOT_DONE;
                 return FS_STATUS_DONE;
             }
@@ -6449,24 +6465,22 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
              * essential when repairing a Bank folder that already has duplicate
              * `SS Name` children from an interrupted or pre-fix save.
              */
-            filesystem_deleteTreeStartWithOpenName(
-                op_delete_slot_target_name,
-                op_delete_slot_target_open_name);
+            op_delete_tree_done = false;
+            if (!afatfs_deleteTree(&op_delete_slot_target_id, on_delete_tree_complete)) {
+                op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+                return FS_STATUS_ERROR;
+            }
             op_delete_slot_phase = FS_DELETE_SLOT_DELETE_MATCH;
             return FS_STATUS_BUSY;
 
         case FS_DELETE_SLOT_DELETE_MATCH:
-            delete_status = filesystem_deleteTree_tick();
-            if (delete_status == FS_STATUS_BUSY)
+            if (!op_delete_tree_done)
                 return FS_STATUS_BUSY;
-            if (delete_status == FS_STATUS_ERROR) {
+            if (op_delete_tree_result != AFATFS_RESULT_OK) {
                 op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
                 return FS_STATUS_ERROR;
             }
-            memset(op_delete_slot_target_name, 0,
-                   sizeof(op_delete_slot_target_name));
-            memset(op_delete_slot_target_open_name, 0,
-                   sizeof(op_delete_slot_target_open_name));
+            op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
             op_delete_slot_phase = FS_DELETE_SLOT_OPEN_SCAN;
             break;
         }
@@ -6490,7 +6504,7 @@ static fs_status_t filesystem_deleteTree_tick(void)
                 /*
                  * Open by the exact SFN alias when the caller supplied one.
                  *
-                 * Input: slot cleanup captured op_object.shortName for the
+                 * Input: slot cleanup captured op_object.id.shortName for the
                  * same directory it matched. Output: the recursive deleter
                  * enters that physical directory instead of asking the LFN
                  * matcher to choose among duplicate visible names.
@@ -6587,18 +6601,18 @@ static fs_status_t filesystem_deleteTree_tick(void)
                 op_delete_tree_phase = FS_DELETE_TREE_ERROR;
                 return FS_STATUS_ERROR;
             }
-            if (op_object.kind == AFATFS_OBJECT_NONE) {
+            if (op_object.id.kind == AFATFS_OBJECT_NONE) {
                 afatfs_findLastObject(op_delete_tree_dir, &op_object_finder);
                 op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
             } else {
                 filesystem_copyLongComponent(op_delete_tree_child_name,
                                              sizeof(op_delete_tree_child_name),
-                                             op_object.displayName);
+                                             op_object.id.displayName);
                 filesystem_copyLongComponent(
                     op_delete_tree_child_open_name,
                     sizeof(op_delete_tree_child_open_name),
-                    op_object.shortName);
-                op_delete_tree_child_kind = op_object.kind;
+                    op_object.id.shortName);
+                op_delete_tree_child_kind = op_object.id.kind;
                 afatfs_findLastObject(op_delete_tree_dir, &op_object_finder);
             }
             op_delete_tree_phase = FS_DELETE_TREE_CLOSE_SCAN_BEFORE_CHILD;
@@ -7096,7 +7110,7 @@ static void filesystem_saveBankDirectory_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_file, &op_object_finder);
             op_save_bank_scratch_collision = 0u;
             op_phase = 48u;
@@ -9464,7 +9478,7 @@ static void filesystem_scanKits_tick(void)
             op_phase = 5;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_close_status = FS_STATUS_DONE;
             op_phase = 5;
@@ -9480,9 +9494,9 @@ static void filesystem_scanKits_tick(void)
          * structural FAT records, and it intentionally does not hide ordinary
          * dot-prefixed names.
          */
-        if (op_object.kind == AFATFS_OBJECT_DIRECTORY) {
-            filesystem_recordKitDirectory(op_object.displayName,
-                                          op_object.shortName);
+        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
+            filesystem_recordKitDirectory(op_object.id.displayName,
+                                          op_object.id.shortName);
         }
         return;
     }
@@ -9692,7 +9706,7 @@ static void filesystem_scanBanks_tick(void)
             op_phase = 5;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_close_status = FS_STATUS_DONE;
             op_phase = 5;
@@ -9706,7 +9720,7 @@ static void filesystem_scanBanks_tick(void)
          * directory. Files and dot backers are ignored until future autosave
          * support gives them product meaning.
          */
-        if (op_object.kind == AFATFS_OBJECT_DIRECTORY) {
+        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
             /*
              * Cache displayName as both browser text and future open key.
              *
@@ -9714,8 +9728,8 @@ static void filesystem_scanBanks_tick(void)
              * read-only opens. Passing the generated SFN alias here makes
              * host-created LFN Banks list correctly but fail to open later.
              */
-            filesystem_recordBankDirectory(op_object.displayName,
-                                           op_object.displayName);
+            filesystem_recordBankDirectory(op_object.id.displayName,
+                                           op_object.id.displayName);
         }
         return;
     }
@@ -9815,7 +9829,7 @@ static void filesystem_scanInstruments_tick(void)
             op_phase = 5;
             return;
         }
-        if (op_object.kind == AFATFS_OBJECT_NONE) {
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_close_status = FS_STATUS_DONE;
             op_phase = 5;
@@ -9830,9 +9844,9 @@ static void filesystem_scanInstruments_tick(void)
          * or case-preserved SFN spelling; shortName is the identity alias used
          * by the current file-open path after selection.
          */
-        if (op_object.kind == AFATFS_OBJECT_FILE) {
-            filesystem_recordInstrumentFile(op_object.displayName,
-                                            op_object.shortName);
+        if (op_object.id.kind == AFATFS_OBJECT_FILE) {
+            filesystem_recordInstrumentFile(op_object.id.displayName,
+                                            op_object.id.shortName);
         }
         return;
     }
@@ -10628,7 +10642,7 @@ static void filesystem_scanTestObjects_tick(uint8_t want_dirs)
                 op_phase = 5u;
                 return;
             }
-            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+            if (op_test_object.id.kind == AFATFS_OBJECT_NONE) {
                 afatfs_findLastObject(op_test_dir, &op_test_object_finder);
                 op_phase = 3u;
                 return;
@@ -10641,15 +10655,15 @@ static void filesystem_scanTestObjects_tick(uint8_t want_dirs)
              * legal FAT objects and the diagnostic browser must reflect the
              * filesystem exactly.
              */
-            if (!want_dirs && op_test_object.kind == AFATFS_OBJECT_FILE) {
+            if (!want_dirs && op_test_object.id.kind == AFATFS_OBJECT_FILE) {
                 filesystem_insertTestName(fs_test_file_name,
                                           &fs_test_file_count,
-                                          op_test_object.displayName);
+                                          op_test_object.id.displayName);
             } else if (want_dirs &&
-                       op_test_object.kind == AFATFS_OBJECT_DIRECTORY) {
+                       op_test_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
                 filesystem_insertTestName(fs_test_dir_name,
                                           &fs_test_dir_count,
-                                          op_test_object.displayName);
+                                          op_test_object.id.displayName);
             }
         }
 
@@ -10778,7 +10792,7 @@ static void filesystem_loadTestDir_tick(void)
                 op_phase = 10u;
                 return;
             }
-            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+            if (op_test_object.id.kind == AFATFS_OBJECT_NONE) {
                 afatfs_findLastObject(op_test_dir, &op_test_object_finder);
                 op_phase = 3u;
                 return;
@@ -10792,12 +10806,12 @@ static void filesystem_loadTestDir_tick(void)
              * asyncfatfs.
              */
             if (op_test_best_kind == AFATFS_OBJECT_NONE ||
-                fat_compareDisplayName(op_test_object.displayName,
+                fat_compareDisplayName(op_test_object.id.displayName,
                                        op_test_child_name,
                                        true) < 0) {
-                op_test_best_kind = op_test_object.kind;
+                op_test_best_kind = op_test_object.id.kind;
                 filesystem_copyTestName(op_test_child_name,
-                                        op_test_object.displayName);
+                                        op_test_object.id.displayName);
             }
         }
 
@@ -11119,19 +11133,19 @@ static void filesystem_saveTestSimpleDir_tick(void)
                 op_phase = 4u;
                 return;
             }
-            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+            if (op_test_object.id.kind == AFATFS_OBJECT_NONE) {
                 afatfs_findLastObject(op_test_dir, &op_test_object_finder);
                 op_test_lookup_result = FS_TEST_LOOKUP_CREATE;
                 op_phase = 4u;
                 return;
             }
-            if (fat_compareDisplayName(op_test_object.displayName,
+            if (fat_compareDisplayName(op_test_object.id.displayName,
                                        op_test_name,
                                        true) == 0) {
                 afatfs_findLastObject(op_test_dir, &op_test_object_finder);
-                if (op_test_object.kind == AFATFS_OBJECT_DIRECTORY) {
+                if (op_test_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
                     memcpy(op_test_parent_alias,
-                           op_test_object.shortName,
+                           op_test_object.id.shortName,
                            sizeof(op_test_parent_alias));
                     op_test_lookup_result = FS_TEST_LOOKUP_OPEN_ALIAS;
                 } else {
@@ -11247,19 +11261,19 @@ static void filesystem_saveTestSimpleDir_tick(void)
                 op_phase = 13u;
                 return;
             }
-            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+            if (op_test_object.id.kind == AFATFS_OBJECT_NONE) {
                 afatfs_findLastObject(op_test_dir, &op_test_object_finder);
                 op_test_lookup_result = FS_TEST_LOOKUP_CREATE;
                 op_phase = 13u;
                 return;
             }
-            if (fat_compareDisplayName(op_test_object.displayName,
+            if (fat_compareDisplayName(op_test_object.id.displayName,
                                        op_test_name,
                                        true) == 0) {
                 afatfs_findLastObject(op_test_dir, &op_test_object_finder);
-                if (op_test_object.kind == AFATFS_OBJECT_DIRECTORY) {
+                if (op_test_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
                     memcpy(op_test_short_alias,
-                           op_test_object.shortName,
+                           op_test_object.id.shortName,
                            sizeof(op_test_short_alias));
                     op_test_lookup_result = FS_TEST_LOOKUP_OPEN_ALIAS;
                 } else {
@@ -11375,7 +11389,7 @@ static void filesystem_saveTestSimpleDir_tick(void)
                 op_phase = 20u;
                 return;
             }
-            if (op_test_object.kind == AFATFS_OBJECT_NONE) {
+            if (op_test_object.id.kind == AFATFS_OBJECT_NONE) {
                 afatfs_findLastObject(op_test_dir, &op_test_object_finder);
                 if (op_test_verify_seen_alias)
                     filesystem_setTestDiag("VerSfn");
@@ -11387,21 +11401,21 @@ static void filesystem_saveTestSimpleDir_tick(void)
                 op_phase = 20u;
                 return;
             }
-            if (fat_compareDisplayName(op_test_object.displayName,
+            if (fat_compareDisplayName(op_test_object.id.displayName,
                                        op_test_name,
                                        false) == 0) {
                 op_test_verify_seen_fold = 1u;
             }
             if (op_test_short_alias[0] != '\0' &&
-                fat_compareDisplayName(op_test_object.shortName,
+                fat_compareDisplayName(op_test_object.id.shortName,
                                        op_test_short_alias,
                                        false) == 0) {
                 op_test_verify_seen_alias = 1u;
             }
-            if (fat_compareDisplayName(op_test_object.displayName,
+            if (fat_compareDisplayName(op_test_object.id.displayName,
                                        op_test_name,
                                        true) == 0) {
-                if (op_test_object.kind == AFATFS_OBJECT_DIRECTORY) {
+                if (op_test_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
                     afatfs_findLastObject(op_test_dir,
                                           &op_test_object_finder);
                     filesystem_copyTestName(op_test_child_name, op_test_name);
@@ -11680,10 +11694,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_delete_slot_allow_short_alias = 0u;
     op_delete_slot_bank_scene = 0u;
     op_delete_slot_number = 0u;
-    memset(op_delete_slot_target_name, 0,
-           sizeof(op_delete_slot_target_name));
-    memset(op_delete_slot_target_open_name, 0,
-           sizeof(op_delete_slot_target_open_name));
+    op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
     op_delete_tree_phase = FS_DELETE_TREE_IDLE;
     op_delete_tree_depth = 0u;
     op_delete_tree_dir = NULL;
