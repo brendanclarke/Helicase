@@ -48,6 +48,7 @@
 | 037 | 2026-07-15 | local working directory, branch `dev-phase2-filesys` | FAILED TESTING: Morph save/load expansion and asyncfatfs rename/replace attempts left Kit Save unable to create/load usable Kit directories; consider rollback to Session 036 boundary or pre-LFN expansion |
 | 038 | 2026-07-15 | local working directory, branch `dev-phase2-filesys` | Save/Load repair: recursive Kit overwrite, root Instrument Save repair, KitMrp/InstrumentMrp Save projection, Load/Save UI polish, asyncfatfs reference |
 | 039 | 2026-07-16 | local working directory, branch `dev-phase2-filesys` | Scene and Bank directory bridge: Scene-owned mix settings, root Scene Save/Load, BankData, Bank boot/load/save, v2 draft pattern.pat, Dev Mode menu gate |
+| 040 | 2026-07-18 | local working directory, branch `dev-ph3-fsfix` | Verified 16-Scene Bank/settings/compact targets, native exact AsyncFATFS cleanup, and hardware-confirmed BnkL14 Bank Load repair |
 
 ---
 
@@ -282,10 +283,14 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | Numbered library slots are direct `000..999`; slot `000` is real for all filetypes. Instrument file voice numbers remain a separate one-based `1..6` schema coordinate | 036 |
 | Normal `Save:[Kit     ]` writes directory Kit format: `Kit/<NNN Name>/kitset.kcg` plus six visible instrument files with `[params]` and `[morph]`; `kitset.kcg` stores asyncfatfs-returned 8.3 aliases for member opens | 035, 036 |
 | asyncfatfs now supports case-preserving SFN display, VFAT LFN create/open for files and directories, case-sensitive LFN matching, object iteration, and returned short aliases; atomic rename/replace and recursive directory replace remain missing primitives | 036 |
+| asyncfatfs native deleteTree accepts a captured afatfsObjectId_t, copies it into foreground operation state, reports a delete phase, releases cache/handle ownership, and calls back once; parent-relative, move, copy, and durable replace remain incomplete/unusable | 040 |
 | Dot-prefixed files/directories are real filesystem objects and must not be hidden by asyncfatfs. Product scanners may filter by product naming/type rules, but the filesystem layer and File/Dir diagnostics do not suppress ordinary `.` names | 036 |
 | Top-level Load/Save cycling promotes Kit, KitMrp, Scene, and Bank; File/Dir/sDir diagnostics remain compiled but appear only when `CONFIG_DEV_MODE != 0` | 039 |
 | Root Instrument Save is implemented from nested Save-page VOICE mode and writes one resident voice to `Instrument/<stem.ext>` using the same descriptor-keyed writer as Kit member files | 036 |
-| Scene Load/Save and the first Bank Load/Save bridge are implemented; future Bank work is the 16-Scene workspace, save/load masks, autosave, and safe rename/promotion | 039 |
+| Bank is a 16-resident-Scene workspace: bankset.bcg v2 persists active_scene and scene_mask_voice_edit, local children are 00..15, and Bank Save writes selected children through a temporary sibling/promotion flow | 040 |
+| Bank Load must reset Scene child-discovery scratch before every delegated local child. BnkL14 is Bank wrapper phase 20 displayed in hex and was fixed/confirmed on hardware in Session 040 | 040 |
+| Resident Instrument parameter values and target selections are bytes; target off is 0xff, wide IDs are resolution-only, Velocity is self-scoped plus Morph token, and LFO supports self/voices/scn | 040 |
+| Current global settings are strict allowlisted keyed settings.cfg version 1 with no legacy glo.cfg fallback; Scene Morph/per-voice Morph/decimation remain Scene-owned | 040 |
 | Pattern step destinations use canonical 16-bit IDs, but `AutomationNode` is still legacy byte CC/CC2; dynamic modulation-node enumeration also remains follow-up runtime work | 034, 035 |
 | ResonantFilter.c double literals (0.5*, 1.0-) on lines 141/167 — software emulation in hot loop | 013 |
 | Kit save writes canonical 236 bytes (8-byte name + END_OF_SOUND_PARAMETERS sound bytes); short kit loads zero-fill missing sound bytes | 013, 017 |
@@ -294,7 +299,7 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | `led_processSeqLedState()` drains Sequencer LED dirty flags in the foreground main loop; do not move it to TIM3 without auditing Menu/button/LED state access | 028 |
 | Pattern API boundary: UI/copy/filesystem/generator code should call `pat_*`; Sequencer no longer exposes `seq_patternSet`/`seq_tmpPattern`/`seq_selectedStep` compatibility names in live code | 028, 029 |
 | `Core/Preset` moved to `Core/Bank/Scene/Preset`; public names remain `preset_*`, `parameterArray_*`, `paramArray_*`, and `parameter_values[]`/`parameters2[]` still live in Menu until the later instrument/file redesign | 029, 039 |
-| Active-pattern load staging buffer (`pat_tmpPattern`) stays for now and should come out with the 17th Scene/background-bank-load design; it should be the only necessary temporary pattern storage | 029 |
+| Active-pattern load staging buffer (pat_tmpPattern) remains current Pattern loader state. The 16-Scene Bank workspace has no separate resident staging Scene; future dynamic Pattern work may revise this boundary | 029, 040 |
 | Future globals direction: replace raw duplicated globals with canonical settings structs split scene-level, bank-level, and system-level; exact membership TBD during Scene/file redesign | 029 |
 | Phase 2 root SD layout and current Kit/instrument file state are documented in `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`: `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, and root `settings.cfg` | 030, 032 |
 | Root `Kit/` load is directory-based for normal Kit and KitMrp workflows: scan `Kit/NNN Name`, load `kitset.kcg` plus six instrument files | 030, 035, 039 |
@@ -425,3 +430,7 @@ Recovered from Session 037 by removing broken Scene/Kit/Morph save remnants, reb
 ### 039 — Scene/Bank Directory Bridge And Draft Pattern Persistence (2026-07-16)
 Implemented Scene-owned per-voice mix settings, root Scene Load/Save, BankData, Bank scan/load/save, Bank-first boot fallback, `Bank/000 Slak/00 Slak` fixture generation, and the source move to `Core/Bank/Scene/`. Hardware retests fixed Save Scene reachability, OK/OW completion cursor reset, per-voice VOICE `mix` Scene setting pages, the no-file-self-name rule, Scene/Kit/Bank retained-name seeding, Scene Save root-wipe prevention, Bank child Scene re-entry, Load Bank OK affordance, universal `none` defaults, `ERR BnkL06` display-name open-key failure, and hidden diagnostic menu entries behind `CONFIG_DEV_MODE`. Scene/Bank saves now emit draft v2 text `pattern.pat` rows with 128x7 step-active bits plus per-track length/scale while still loading v1 placeholders.
 - **Find here**: Scene data ownership, Scene Save/Load, BankData, Bank Load/Save, Bank boot fallback, Scene/Bank deletion safety, `ERR BnkL06`, no `name=` fields, universal `none`, v2 pattern.pat draft, Dev Mode Load/Save diagnostics
+
+### 040 — Sixteen-Scene Bank, Compact Parameters, And Exact Async Cleanup (2026-07-18)
+Verified and documented the current 16-Scene Bank workspace, v2 bankset manifest and strict settings.cfg, compact byte Instrument parameter/target tokens, and native identity-based AsyncFATFS tree deletion. Fixed hardware-confirmed ERR BnkL14: Bank Load now resets Scene child-discovery scratch before every delegated Bank-local Scene, preventing a Kit/pattern/effect name from child 00 being reused for child 01. Captured the remaining AsyncFATFS work as API-truthfulness, parent-relative capability, delete hardening, move/copy, and crash-recoverable replacement recommendations; reconciled active filesystem/API specifications with current code.
+- **Find here**: 16-Scene Bank persistence/UI/apply, byte parameter target contract, settings.cfg scope, afatfsObjectId/deleteTree/removeObject, TOut06 repair, BnkL14 cause/fix, Session 040 AsyncFATFS follow-up, specification reconciliation

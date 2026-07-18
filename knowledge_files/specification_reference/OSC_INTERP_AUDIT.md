@@ -1,9 +1,9 @@
 # OSC_INTERP_AUDIT.md
 
 Session 036 note: this is a historical feature audit for oscillator waveform
-interpolation. The persistence mechanism still depends on the legacy globals
-save/load path, but current filename, case-sensitivity, and future
-`settings.cfg` policy live in `FILESYSTEM_SPEC.md`.
+interpolation. Its persistence note was updated in Session 040: oscillator
+interpolation is an allowlisted root settings.cfg value, not a legacy glo.cfg
+dependency. Current filesystem policy lives in FILESYSTEM_SPEC.md.
 
 ## Goal
 Add simple/fast/dirty oscillator waveform interpolation for modulation-driven waveform automation, with a global ON/OFF setting that persists in global save/load.
@@ -33,15 +33,16 @@ Implemented in code and build-verified.
 9. Build verification:
 - `make -j4` passes.
 
-## Save/Load Persistence (Global Settings)
+## Save/Load Persistence (Current Global Settings)
 This requirement is satisfied.
 
 Why:
-1. `PAR_OSC_WAVE_INTERP` is in the globals enum section (`>= PAR_BEGINNING_OF_GLOBALS`).
-2. Global save/load already serializes:
-- `parameter_values[PAR_BEGINNING_OF_GLOBALS .. NUM_PARAMS-1]`
-- in `filesystem_saveGlobals_tick()` / `filesystem_loadGlobals_tick()`.
-3. On apply, `menu_sendAllGlobals()` calls `menu_parseGlobalParam()` for all globals, so loaded value re-applies runtime toggle state.
+1. `PAR_OSC_WAVE_INTERP` is in the global parameter domain.
+2. The strict keyed settings.cfg schema writes and reads the allowlisted key
+   `osc_wave_interp` in filesystem_saveGlobals_tick() and
+   filesystem_loadGlobals_tick().
+3. On apply, menu global application calls menu_parseGlobalParam() for the
+   loaded value, which re-applies the modulation runtime toggle.
 
 Result:
 - Saving `GLO.CFG` stores the interpolation setting.

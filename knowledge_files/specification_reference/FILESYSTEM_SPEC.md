@@ -1,7 +1,7 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware after Session 039. It includes the
+reference for the Helicase/LXR-02 firmware after Session 040. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
@@ -17,13 +17,13 @@ Use this document to distinguish three things:
   `Instrument/` pool replacement into Scene-owned descriptor-indexed
   instrument parameter images, Kit/Instrument Morph Load, Kit/Instrument Morph
   Save, normal new-format Kit Save, root Instrument Save, root Scene
-  Load/Save, root Bank scan/load/save in the one-resident-Scene bridge shape,
-  and File/Dir/sDir asyncfatfs diagnostics behind Dev Mode.
+  Load/Save, 16-Scene root Bank scan/load/save, keyed settings.cfg, and
+  File/Dir/sDir asyncfatfs diagnostics behind Dev Mode.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: 16 resident Bank Scenes, Scene/Bank autosave dot-file
-  promotion, real Effect load/save, root `settings.cfg`, and
-  descriptor-backed step automation playback.
+- Not implemented yet: crash-recoverable Scene/Bank autosave promotion, real
+  Effect load/save, final dynamic Pattern storage, and descriptor-backed step
+  automation playback.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -117,13 +117,12 @@ Implemented through Session 039:
   `sceneset.scg` never stores the Scene name.
 - Resident Scene and embedded Kit names are retained from directory names:
   root `Scene/NNN Name/` and child `Kit <name>/`.
-- Root Bank scan/load/save is implemented for the current one-resident-Scene
-  bridge. Boot scans Banks and tries the lowest Bank before root Scene/root Kit
-  fallback. Empty Bank folders are valid and complete Bank selection before
-  fallback.
+- Root Bank scan/load/save uses the 16 resident Scene slots. Boot scans Banks
+  and tries the lowest valid Bank before root Scene/root Kit fallback. Empty
+  Bank folders are valid and complete Bank selection before fallback.
 - Bank-local Scene folders use two digits, `00..15`, not root-library
-  three-digit numbering. The initial writer saves resident Scene 0 as child
-  slot `00` when the bridge mask includes bit 0.
+  three-digit numbering. Bank Save writes every child selected by its 16-bit
+  save mask and Bank Load iterates every requested/present local child.
 - Scene/Bank `pattern.pat` text v2 now stores the 128x7 active-step bitmap plus
   per-track length and scale. Version 1 placeholders remain accepted.
 - `File`, `Dir`, and Save-only `sDir` diagnostics remain compiled but are
@@ -131,18 +130,18 @@ Implemented through Session 039:
 
 Current bridges and limitations:
 
-- `SCENE_COUNT` is currently `1`; the API is indexed so the Bank implementation
-  can raise it to 17 later.
+- `SCENE_COUNT` is 16. No separate resident staging Scene is currently
+  defined; asynchronous save/load state is held in filesystem operation state.
 - Pattern/container storage remains a bridge shape and will be replaced by the
   later dynamic stack Pattern implementation.
 - `FS_FILE_KIT` save now routes to the new Kit directory writer. The old flat
   `.snd` Kit writer is no longer the normal Kit Save path.
 - `FS_FILE_MORPH` load/save still uses the legacy `.SND` morph-kit path.
-- Globals still load/save through legacy `glo.cfg`; root `settings.cfg` is the
-  settled future replacement but is not wired yet.
-- Effect, Wavetable-pool, and new Pattern-pool load/save operations are not
-  implemented/promoted yet. Root Instrument, root Scene, and bridge root Bank
-  load/save exist.
+- Globals load/save through root keyed-text `settings.cfg` version 1. Legacy
+  `glo.cfg` is retired and is not a fallback input.
+- Effect, Wavetable-pool, and final dynamic Pattern-pool load/save operations
+  are not implemented/promoted yet. Root Instrument, root Scene, and
+  16-Scene root Bank load/save exist.
 - Descriptor-backed LFO and velocity modulation runtime paths are in place for
   direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
   Decimation. LFO direct descriptor overlays now go through descriptor-domain
@@ -152,9 +151,9 @@ Current bridges and limitations:
   modulation targets.
 - New Scene modulation target IDs are runtime/menu IDs; current Scene files
   persist Scene mix/routing settings but not the future full effect stack.
-- Bank still uses only one resident Scene. The 16-Scene memory workspace,
-  per-Scene toggles, background load, autosave, dot-file promotion, and Scene
-  reload workflows remain future work.
+- The 16-Scene workspace, present/edit masks, and linked Scene/Pattern PERF
+  selection are implemented. Crash-recoverable autosave/dot-file promotion
+  and a separate background staging Scene remain future work.
 
 ## Root Layout
 
@@ -177,18 +176,28 @@ Settled target root file:
 settings.cfg
 ```
 
-`settings.cfg` replaces legacy `GLO.CFG`/`glo.cfg` as the future system-settings
-file. It stores system-level settings and the active Bank number, not the Bank
-display name. At boot, the future firmware should load the numbered Bank
-recorded there.
+`settings.cfg` replaces legacy `GLO.CFG`/`glo.cfg` as the current system-settings
+file. It stores allowlisted system-level settings and the active Bank number,
+not the Bank display name. At boot, the current firmware reads this numbered
+Bank selector; legacy glo.cfg is not attempted.
 
-`settings.cfg` has a root-level dot-file backer named `.settings.cfg`. Closing
-the global settings menu rewrites both files. Loading or saving a Bank also
-rewrites both files so the retained active-bank number and global settings
-snapshot stay synchronized.
+The current file is keyed text with:
 
-Current code note: boot still loads legacy `glo.cfg`. Do not document
-`settings.cfg` as implemented until `FS_FILE_GLOBALS` has moved off `glo.cfg`.
+    format=helicase.settings
+    version=1
+    active_bank=<0..999>
+
+The remaining accepted/written keys are bpm, ext_sync, quantisation,
+midi_chan_global, midi_filt_tx, midi_filt_rx, midi_routing,
+screensaver_on_off, bar_reset_mode, prescaler_clock_in,
+prescaler_clock_out1, prescaler_clock_out2, follow, and osc_wave_interp.
+Unknown or out-of-scope keys are not a way to restore Scene state. In
+particular, Morph, per-voice Morph, and Scene decimation belong to Scene
+payloads, not global settings.
+
+There is no implemented .settings.cfg backer or power-loss transaction for
+settings.cfg. Do not claim dot-file autosave/promotion until the AsyncFATFS
+transaction/recovery primitive exists.
 
 Root-level entries outside the recognized list are ignored by normal
 loader/browser code.
@@ -225,8 +234,9 @@ remain one-based `1..6` inside instrument text schemas.
 
 ## Bank
 
-Status: implemented as the Session 039 one-resident-Scene bridge; future
-16-Scene resident workspace and autosave are not implemented.
+Status: implemented as a 16-resident-Scene Bank workspace. It has selected
+child save/load and a staged root-Bank promotion flow; it is not yet a
+crash-recoverable autosave transaction.
 
 `Bank/` contains bank folders:
 
@@ -237,7 +247,7 @@ Bank/
 ```
 
 A bank represents all non-global data loaded as one performance set. The active
-bank number is recorded in future `settings.cfg`; the bank display name is not
+bank number is recorded in current `settings.cfg`; the bank display name is not
 the persistent selector.
 
 Each bank folder contains exactly one bank-level config file:
@@ -267,39 +277,43 @@ scenes. This is intentionally different from root `Scene/NNN` library folders.
 Missing scene slots are valid and will be shown as empty in the future UI. A
 user may exchange scene folders between banks.
 
-`bankset.bcg` v1:
+`bankset.bcg` v2:
 
 ```text
 format=helicase.bankset
-version=1
+version=2
 active_scene=0
+scene_mask_voice_edit=0x0001
 ```
 
 `active_scene` is a Bank-local `00..15` slot number and is not zero-padded in
 the file. The Bank name is never stored in `bankset.bcg`; it comes only from
 the `Bank/NNN <bank name>/` directory.
 
-Current bridge behavior:
+Current behavior:
 
 - Boot scans `Bank/` and loads the lowest valid Bank before root Scene/root Kit
   fallback.
-- Bank Load chooses `active_scene` if present, otherwise the lowest child Scene.
+- Bank Load applies the v2 active Scene and edit mask, then loads requested
+  present children from the two-digit local namespace.
 - An empty Bank containing only valid `bankset.bcg` is valid; it completes Bank
   selection and then falls back to root Scene, root Kit, then defaults.
-- Bank Save can save no child Scenes. The current UI/writer saves only child
-  slot `00` when its internal mask bit 0 is set.
-- Safe root Bank folder rename while preserving untoggled child Scenes is not
-  implemented. Future rename/promotion must be explicit and tested.
-
-Future background bank loading uses 17 resident `scene_t` slots: 16 bank scene
-slots plus one landing/staging scene so the currently playing scene can keep
-playing while a new bank streams in.
+- Bank Save writes bankset.bcg and every child selected by the 16-bit mask.
+  If the active Scene is outside a nonempty save mask, the saved manifest
+  selects the first saved child so it never points to an absent payload.
+- Save builds a non-numbered temporary sibling, preflights temp/old-name
+  collisions, renames any previous numbered Bank to a non-loadable old
+  sibling, and promotes the completed temp directory to the numbered name.
+  Promotion failure reports BProm. This prevents in-place stale-tree merges
+  but is not a durable journal/recovery transaction.
+- A full Bank Load resets Scene child discovery for every delegated child.
+  Filenames discovered in one local folder must never be reused for another.
 
 ## Scene
 
-Status: root Scene Load/Save is implemented and promoted after Session 039.
-Only one resident Scene exists today; the API remains indexed for the future
-Bank workspace.
+Status: root Scene Load/Save is implemented and promoted. Sixteen resident
+Scenes are allocated for Bank workspace use; root Scene remains an explicit
+numbered library/import-export pool.
 
 `Scene/` is a root-level pool of user-copyable scene folders:
 
@@ -586,21 +600,19 @@ Section rules:
 - Missing `[morph]` is allowed; the loader copies main values into morph values
   for descriptors flagged morphable.
 - Unknown keys are skipped for forward compatibility.
-- Known keys must parse as `uint8_t`, except descriptor target cells
-  `velo_mod_dest`, `lfo_target_param`, and `lfo_target_param_2`, which parse as
-  `uint16_t`.
+- Known parameter and target rows parse as `uint8_t`. Target tokens use the
+  compact byte selector domain; they are not packed 16-bit parameter IDs.
 - `lfo_target_voice` and `lfo_target_voice_2` are menu/runtime destination
   selectors. Voices `1..6` select voice slots and the special display value
-  `scn` selects the Scene modulation target namespace. Each voice/parameter pair
-  is normalized together at runtime commit: the canonical target is rebuilt for
-  the selected target voice and local descriptor, or changed to explicit off.
-  A stored pair must never have a display voice that contradicts its packed
-  canonical target slot.
+  `scn` selects the Scene modulation target namespace. The associated
+  parameter value is a compact token: a local descriptor index, a Scene
+  target index when the voice is scn, or 0xff for off. Runtime code resolves
+  that token to a wide descriptor/Scene identity only at the apply boundary.
 - `self` is accepted only for `lfo_target_voice` and `lfo_target_voice_2`.
   It is a storage-only relocation alias resolved by the parser with
   `storage_instrument_state_t.expected_slot` before writing Scene-owned
   descriptor images. It is never a Menu value, SceneData sentinel, packed
-  `instrument_param_id_t`, or DSP runtime value.
+  wide parameter ID, or DSP runtime value.
 - New save code must emit `self` only when the numeric LFO voice selector
   equals the source instrument's own one-based slot. Explicit cross-slot
   modulation remains a decimal voice number.
@@ -758,7 +770,8 @@ Arrays are indexed by descriptor index for the slot's current instrument type.
 Descriptor index `0` is valid; empty menu cells use `INSTRUMENT_MENU_EMPTY`
 (`0xff`) and skip cells use `INSTRUMENT_MENU_SKIP` (`0xfe`).
 
-Canonical packed instrument parameter IDs:
+Canonical wide instrument parameter IDs, used only for lookup/runtime
+resolution rather than resident target storage:
 
 ```c
 id = slot * INSTRUMENT_PARAM_COUNT + descriptor_index
@@ -775,6 +788,13 @@ Current bounds:
   space.
 
 `morph_interpolation[]` is runtime-derived state and is not serialized.
+
+Resident parameter values are `instrument_param_value_t` bytes. Resident
+target selections are `instrument_target_token_t` bytes, with
+`INSTRUMENT_TARGET_TOKEN_OFF` equal to 0xff. Local target values are compact
+indices, LFO voice selection uses self/voice/Scene values, and storage/menu
+code expands a token only when resolving or displaying it. A saved Scene/Kit
+must not store the wide ID above as a target token.
 
 ## Current Kit Load Path
 
@@ -931,23 +951,23 @@ Current descriptor Morph state after Session 033:
 - Per-voice Morph is the actual Morph-engine control. Global Morph is only a
   convenience set operation.
 
-Target selection uses canonical descriptor IDs and Scene modulation target IDs,
-not legacy `modTargets[]` indices. Target display helpers enumerate active
-Scene descriptors and filter by descriptor flags.
+Target selection stores compact byte tokens, not wide descriptor IDs or legacy
+`modTargets[]` indices. Target display/resolution helpers enumerate active
+Scene descriptors and convert the token to a wide ID only at that boundary.
 
 Current working target state:
 
-- Off targets use `INSTRUMENT_PARAM_INVALID` (`65535`).
-- Target menu display can show descriptor-based and Scene modulation targets.
-- Target cells can store descriptor IDs in Scene storage.
-- `instrumentManager_targetValid()` validates by descriptor flags.
-- The velocity target picker shows exactly one `off`, then modulatable
-  descriptors for the source voice's current instrument, then Scene modulation
-  targets. It does not show parameters from other voice slots.
-- The LFO target picker shows voice destinations `1..6` plus `scn`. For a
-  voice destination, the parameter picker shows only modulatable descriptors
-  for that voice's current instrument. For `scn`, it shows Scene modulation
-  targets.
+- Off targets use `INSTRUMENT_TARGET_TOKEN_OFF` (`0xff`).
+- Target menu display expands compact local or Scene tokens to names only for
+  presentation; SceneData stores the byte token.
+- InstrumentManager validates resolved targets by descriptor/Scene flags.
+- The velocity target picker is self-scoped: it offers one `off`, modulatable
+  descriptors for the source voice's current Instrument, and the source-voice
+  Morph token 0x40 where applicable. It does not browse arbitrary other voices
+  or the general Scene namespace.
+- The LFO target picker shows self, voice destinations `1..6`, and `scn`. For
+  a voice destination, the compact parameter picker shows modulatable local
+  descriptors; for scn it uses the Scene modulation target token domain.
 - The parameter picker skips non-modulatable descriptor rows. It does not show
   repeated `off` placeholders for skipped rows.
 - If the selected target voice changes and the previous target parameter is not
@@ -1200,19 +1220,18 @@ Implemented:
   without `audio_out`, writes six embedded Instrument files, writes draft text
   `pattern.pat`, and writes placeholder `effects.fx`. Scene and embedded Kit
   names are directory-owned.
-- Bank Save writes a root `Bank/<NNN Name>/` directory and `bankset.bcg`.
-  In the current one-resident-Scene bridge it can write child `00 <scene name>/`
-  through the same Scene payload writer. A zero child-scene mask is valid and
-  creates/saves an empty Bank.
+- Bank Save writes bankset.bcg version 2 and one local `SS <scene name>/`
+  payload for every selected Scene bit. A zero child-scene mask is valid and
+  creates an empty Bank. The completed payload is written to a unique
+  non-numbered temporary Bank sibling before promotion to the numbered slot.
 
 Still future:
 
 - Pattern save writes the final dynamic-stack pattern format once implemented.
 - Effect save writes the selected effect stack/settings format once effects
   exist.
-- `settings.cfg` save writes system/global settings and the active bank number.
-  Its `.settings.cfg` backer is rewritten alongside it when closing the global
-  settings menu or loading/saving a Bank.
+- `settings.cfg` save writes the strict allowlisted system/global settings and
+  active Bank number. There is no current .settings.cfg backer.
 
 The current legacy non-Kit save paths are implementation leftovers and should
 not be used as the new-format specification.
@@ -1234,9 +1253,11 @@ Root library replacement must be scoped by parent directory and product parser:
 
 Kit Save may use short-alias fallback for older/converted Kit folders. Scene
 Save deliberately disables short-alias fallback and deletes only visible names
-that parse as the exact Scene slot, preventing the root `Scene/` wipe class of
-bug. Bank Save must not delete untoggled Bank-local child Scenes; safe root Bank
-folder rename/promotion remains future work.
+that parse as the exact Scene slot, preventing the root Scene wipe class of
+bug. Bank-local selection uses storage_parseBankSceneFolder and carries the
+captured afatfsObjectId_t to native deletion, avoiding a second ambiguous LFN
+lookup. Bank Save promotes a complete temporary root tree; it does not claim
+to preserve unselected old children across a replacement.
 
 ### asyncfatfs Boundary
 
@@ -1246,11 +1267,11 @@ filename sanitization, and caller checklist live in
 `filesystem.c` or those documented asyncfatfs primitives instead of rebuilding
 FAT/VFAT traversal locally.
 
-Current production Kit and Instrument saves use the Session 038 recursive
-directory cleanup/file overwrite behavior from `filesystem.c` where the product
-operation requires replacement. Future Scene/Bank/autosave work still needs an
-atomic rename/replace primitive for `.tmp` promotion before it can claim
-power-loss-safe commit semantics.
+Current production replacement captures the selected object from an
+LFN-aware scan and uses native afatfs_deleteTree for same-slot cleanup. Bank
+Save additionally uses temporary/old sibling naming and promotion preflight.
+No current path has an atomic or crash-recoverable replace primitive, so none
+may claim power-loss-safe commit semantics.
 
 ## Verification Anchors
 
@@ -1380,7 +1401,7 @@ settings.cfg
 Bank/
   000 Factory/
     bankset.bcg
-    000 Breakbeat/
+    00 Breakbeat/
       sceneset.scg
       Kit 909ish/
         kitset.kcg

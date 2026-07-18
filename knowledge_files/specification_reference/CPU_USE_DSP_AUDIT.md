@@ -1,7 +1,9 @@
 # LXR-02 DSP Performance Audit
 
 Session 033 note: this audit was moved into `specification_reference/` as a
-historical DSP/performance snapshot. The CPU scheduling advice remains useful,
+historical DSP/performance snapshot. In the remainder of this document,
+references to current code mean the audited snapshot, not a Session 040
+claim. The CPU scheduling advice remains useful,
 but the instrument ownership model changed after this was written:
 descriptor-backed instrument parameters now live under `Core/DSP/Instruments/`,
 are stored in Scene kit images, and are applied to DSP runtime state through

@@ -25,25 +25,43 @@ This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
 
-- Read `knowledge_files/log_archive/039_SESSION_HANDOFF_LOG.md` before
-  continuing Scene/Bank work. It preserves the Scene/Bank audit lessons that
-  may be deleted from root audit files.
+- Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
+  continuing Scene/Bank or filesystem work. It preserves the verified
+  Session 040 implementation, the Bank Load fix, and archived root notes.
 - Current filesystem authority:
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
-  `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`.
+  `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`; read
+  `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS.
 - Source layout is now `Core/Bank/Scene/` and `Core/Bank/BankData.*`, not
   `Core/Scene/`.
 - Scene/Bank saves currently persist draft v2 `pattern.pat`: 128x7 active-step
   bits plus per-track length/scale only. This is not the final dynamic Pattern
   format.
-- Bank is implemented only as the one-resident-Scene bridge. Next Bank work is
-  the 16-Scene resident workspace, Bank-local Scene toggles/masks, preservation
-  of untoggled Bank-local Scene folders, and later autosave.
+- Resident Instrument parameter values and target selectors are compact bytes:
+  instrument_param_value_t and instrument_target_token_t. Target off is 0xff;
+  wide descriptor/Scene IDs exist only for lookup/runtime resolution. Velocity
+  targeting is self-scoped plus its Morph token, while LFO voice selection
+  supports self, voices 1..6, and scn.
+- Bank has a 16-Scene resident workspace. Its v2 manifest carries
+  active_scene and a 16-bit scene_mask_voice_edit; Bank-local Scene folders
+  are 00..15. Bank Load delegates each selected local payload through the
+  shared Scene loader, and Bank Save serializes the selected children through
+  a temporary sibling/promotion flow. This is not a crash-recoverable
+  transaction.
+- Bank Load must reset shared Scene child-discovery scratch before every
+  Bank-local Scene payload. Otherwise a full Bank reuses child 00's embedded
+  Kit/pattern/effect names for child 01, which surfaces as BnkL14 (the Bank
+  wrapper's decimal phase 20 rendered in hexadecimal). The saved Bank tree is
+  valid; this is a loader-state isolation requirement. The reset helper is
+  implemented in filesystem.c, documented in filesystem.h, and was confirmed
+  by the user on hardware in Session 040.
 - Never add object self-name fields to `sceneset.scg`, `bankset.bcg`, or
   instrument files. Object identity comes from directory/file names.
 - For overwrite code, enter the correct parent root first, parse visible child
-  names with the right product parser, and delete only exact same-slot
-  children. This is documented in `FILESYSTEM_SPEC.md` and
+  names with the right product parser, capture the selected afatfsObjectId_t,
+  and delete only that exact same-slot object. Native afatfs_deleteTree copies
+  its identity and completes asynchronously; its false return means no
+  callback. This is documented in `FILESYSTEM_SPEC.md` and
   `ASYNCFATFS_REFERENCE.md`.
 - File/Dir/sDir diagnostics are hidden unless `CONFIG_DEV_MODE != 0`, but the
   dispatch code remains compiled.
@@ -348,10 +366,10 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`. The former
   root `FILESYSTEM_SPEC.md` compatibility pointer was deleted in Session 033.
   Target root directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`,
-  `Wavetable`, `Effect`, and `Instrument`; future system settings live in root
-  `settings.cfg`. Current implemented directory work is root `Kit/`,
-  `Instrument/`, `Scene/`, and bridge `Bank/` load/save, plus Kit/Instrument
-  Morph Save. Globals still use legacy `glo.cfg`.
+  `Wavetable`, `Effect`, `Instrument`, and root `settings.cfg`. Current work
+  includes root `Kit/`, `Instrument/`, `Scene/`, 16-Scene `Bank/` load/save,
+  Kit/Instrument Morph Save, and the strict allowlisted settings.cfg format;
+  current global restore is not legacy glo.cfg.
 - `storageTypes.c/h` owns text storage schemas, parser/writer helpers, and
   descriptor-keyed parameter maps. Keep it free of `asyncfatfs` calls and keep
   function names prefixed `storage_`.
@@ -365,9 +383,10 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
 - Scene Load/Save uses root `Scene/NNN Name/` folders with `sceneset.scg`,
   embedded `Kit <name>/`, draft `pattern.pat`, and placeholder `effects.fx`.
   `sceneset.scg` never stores `name`.
-- Bank Load/Save uses root `Bank/NNN Name/` folders with `bankset.bcg` and
-  Bank-local two-digit Scene children `00..15`. The current bridge has one
-  resident Scene and writes/loads Bank-local slot `00`.
+- Bank Load/Save uses root Bank/NNN Name/ folders with bankset.bcg and
+  Bank-local two-digit Scene children 00..15. It loads/saves the selected set
+  of resident Scenes using the version-2 manifest rather than a one-Scene
+  bridge.
 - Session 036 adds asyncfatfs LFN component creation/object iteration through
   `afatfs_mkdir_lfn()`, `afatfs_fopen_lfn()`, `afatfs_opendir_lfn()`, and
   `afatfs_findNextObject()`. These preserve SFN display case, create VFAT LFN
@@ -412,7 +431,10 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
 - Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
 - `kitBrowser.c/h` intentionally remains kit-only; pattern/performance/all use typed name loading and direct slot handling.
 - Boot path: synchronous polling loop before `audioCodec_init()` (audio not running, blocking OK).
-- Globals compatibility (Session 025): current `glo.cfg`/ALL globals span is 23 bytes (`NUM_PARAMS=275`, `PAR_BEGINNING_OF_GLOBALS=252`). Legacy 22-byte globals load silently, then force `PAR_EXT_SYNC=auto` and `PAR_OSC_WAVE_INTERP=1`. Any other globals length uses safe-prefix/default fallback, sanitizes `PAR_MIDI_CHAN_GLOBAL` to 1 if outside 1..16, and shows `old settings` / `check&save .glo` or `.all`.
+- Historical globals compatibility (Session 025): the former glo.cfg/ALL
+  binary 22/23-byte behavior is retained here only as an archive note.
+  Current filesystem globals use strict keyed settings.cfg version 1 with
+  an allowlisted global scope and no glo.cfg fallback.
 
 **SD_init() from `SPI/sd_routines.c` still needed** at boot to bring card to SPI mode (CMD0/CMD1/CMD8/ACMD41). Called before `afatfs_init()`. The rest of sd_routines.c (SD_readSingleBlock, busy-wait loops) is superseded.
 

@@ -470,6 +470,7 @@ static uint8_t op_rename_done = 0u;
  * avoids implicit-function warnings when the state machine calls them.
  */
 static void filesystem_initStagedScene(scene_t *scene);
+static void filesystem_resetSceneLoadChildDiscovery(void);
 static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot);
 static uint8_t filesystem_nameStartsWithKitSpace(const char *name);
 static uint8_t filesystem_nameHasExtension(const char *name,
@@ -3008,11 +3009,13 @@ static void filesystem_loadSceneDirectory_tick(void)
         memcpy(op_scene_display_name, scene_slot_name[op_slot],
                STORAGE_SCENE_DISPLAY_NAME_LEN);
         op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-        memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
-        memset(op_scene_child_display_name, 0,
-               sizeof(op_scene_child_display_name));
-        memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
-        memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
+        /*
+         * A root Scene request owns exactly one child scan, but it shares the
+         * same scratch fields as Bank Load. Reset them through the common
+         * helper so root and Bank-local Scene payloads have identical discovery
+         * semantics and later additions cannot clear only one of the fields.
+         */
+        filesystem_resetSceneLoadChildDiscovery();
         if (!afatfs_chdir(NULL))
             return;
         op_phase = 1;
@@ -4461,6 +4464,13 @@ static void filesystem_loadBankDirectory_tick(void)
         op_bank_child_cursor = child_slot;
         op_scene_load_scene_mask = (uint16_t)(1u << child_slot);
         filesystem_initStagedScene(&op_staged_scene);
+        /*
+         * The Bank operation is about to delegate the shared Scene loader for
+         * its first selected child. Unlike a root Scene request, one Bank
+         * request repeats this delegation for up to sixteen directories, so no
+         * Kit/pattern/effect name found by an earlier child may be retained.
+         */
+        filesystem_resetSceneLoadChildDiscovery();
         memcpy(op_scene_display_name, op_bank_child_name[child_slot],
                STORAGE_SCENE_DISPLAY_NAME_LEN);
         op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
@@ -4606,6 +4616,13 @@ static void filesystem_loadBankDirectory_tick(void)
         op_kit_slot_dir = NULL;
         op_scene_load_scene_mask = (uint16_t)(1u << child_slot);
         filesystem_initStagedScene(&op_staged_scene);
+        /*
+         * Re-entry for every child after the first must reset discovery state
+         * again. The previous child normally left non-empty names here; phase
+         * 9 records only the first matching Kit/.pat/.fx object, so failing to
+         * clear them makes this child attempt to open the previous child's Kit.
+         */
+        filesystem_resetSceneLoadChildDiscovery();
         memcpy(op_scene_display_name, op_bank_child_name[child_slot],
                STORAGE_SCENE_DISPLAY_NAME_LEN);
         op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
@@ -5411,6 +5428,32 @@ static void filesystem_initStagedScene(scene_t *scene)
                                     initial_types[slot]);
         scene_setKitInstrumentSourceName(&scene->kit, slot, fallback);
     }
+}
+
+static void filesystem_resetSceneLoadChildDiscovery(void)
+{
+    /*
+     * Clear Scene-loader object-discovery scratch before scanning one payload.
+     *
+     * Inputs: none. Outputs: the names used by Scene-load phase 9 to remember
+     * the first embedded `Kit <name>` directory, `.pat` file, and `.fx` file
+     * are all empty. The next scan may therefore populate them only from the
+     * directory it has just entered.
+     *
+     * Root Scene Load calls this once. Bank Load calls it before its first
+     * child and each later child because it reuses the same Scene state machine
+     * within one public request. Without this reset, loading `00 Slak/Kit
+     * Brezel` followed by `01 Slak/Kit Forest` leaves `Kit Brezel` cached;
+     * child 01 skips discovery and fails trying to open that absent directory.
+     * The Bank wrapper later reports that delegated-child failure as BnkL14
+     * (decimal Bank phase 20 represented in hexadecimal), obscuring the real
+     * stale-name cause.
+     */
+    memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
+    memset(op_scene_child_display_name, 0,
+           sizeof(op_scene_child_display_name));
+    memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
+    memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
 }
 
 static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot)

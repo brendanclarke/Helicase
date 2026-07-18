@@ -36,30 +36,16 @@ files from the target folder before writing the six authoritative members.
 InstrumentMrp Save captures its Morph projection mode as request state before
 asynchronous writes begin.
 
-Session 040 note: Empty Kit saves now bypass the occupied-slot stale member
-cleanup scan after creating the target Kit directory. The cleanup remains active
-for slots that already existed, but new empty slots close the just-created
-directory handle and continue directly to the six member writes so the operation
-can reach its final sync without a needless pre-write directory enumeration.
+Session 040 correction: the current Kit Save state machine enters its
+same-slot physical-directory cleanup at phase 4 for every save, then creates
+the fresh target folder and writes its payload. Do not rely on an empty-slot
+cleanup bypass in this checkout.
 
-Session 041 note: Opened FAT subdirectories now reconstruct one cluster of
-allocated physical size from firstCluster instead of deriving physicalSize from
-the on-disk fileSize field. FAT stores directory fileSize as zero, which made
-Kit Save's open `/Kit` -> scan/create child path behave as though `/Kit` had no
-allocated directory cluster even though Save:[Dir] still worked from root.
-
-Session 042 note: Kit Save and KitMrp Save no longer insert optimistic
-kit_slot_present/name/open_name entries from the intended save path. Save
-completion now starts a real `filesystem_requestScanKits()` pass and reports
-the original save completion only after that scan rebuilds the cache from
-enumerated `/Kit` entries. This prevents the Load page from showing a Kit slot
-that the card scanner cannot actually see and later load.
-
-Session 043 note: Fresh empty-slot Kit saves now skip per-member
-case-insensitive remove scans before writing the six member files. Those remove
-passes are needed only when replacing an existing Kit directory; in a newly
-created directory they add asynchronous failure points before final sync and can
-prevent the new folder from becoming durable if member writing is never reached.
+Session 041/042 notes from the prior working sequence are not current-source
+facts in this reverted checkout. Treat the historical claims about directory
+physical-size reconstruction and post-save Kit cache rescanning as unverified
+until a future source audit re-establishes them. The Session 043 empty-slot
+member-scan-bypass claim is likewise not present in the current source.
 
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled

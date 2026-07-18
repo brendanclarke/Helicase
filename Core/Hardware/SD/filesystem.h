@@ -182,7 +182,11 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
  * Inputs: root Bank slot 000..999, resident destination Scene mask, and
  * completion callback. Output: asynchronous Bank validation and, when the Bank
  * contains a usable child, a staged Scene load from Bank/<NNN>/<SS Name>/.
- * Empty Banks are successful Bank loads; callers inspect
+ * Every selected Bank-local Scene is an independent directory payload: its
+ * embedded `Kit <name>` directory and its pattern/effect files are discovered
+ * afresh before that child is read. This matters when a full Bank contains
+ * different Kit names, because child `01` must never inherit child `00`'s
+ * filenames. Empty Banks are successful Bank loads; callers inspect
  * filesystem_lastBankLoadLoadedScene() and run the fallback chain when no
  * child Scene was supplied.
  */

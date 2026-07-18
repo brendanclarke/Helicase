@@ -1,13 +1,13 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 039 for the one-pattern bridge,
+Session 030 baseline, updated through Session 040 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
 descriptor Morph, per-voice Morph, Scene modulation targets, asyncfatfs
 LFN/case expansion, restored Kit load/save, root Instrument Save, and
-Kit/Instrument Morph Save, root Scene Load/Save, and the first Bank
-Load/Save bridge. This spec records the live module API boundaries
+Kit/Instrument Morph Save, root Scene Load/Save, and the 16-Scene Bank
+Load/Save workspace. This spec records the live module API boundaries
 after `frontPanelParser.c/h` removal, the PatternData storage-ownership pass,
 the `Core/Preset` -> `Core/Bank/Scene/Preset` folder move, the first Phase 2
 directory-kit filesystem boundary, and the current bridge pattern behavior. The
@@ -27,8 +27,8 @@ a generic bridge.
   live in `storageTypes.c/h`.
 - Sequencer may read pattern data through narrow PatternData playback helpers;
   it must not index PatternData storage arrays directly.
-- `pat_tmpPattern` is the only active-pattern load staging buffer and is
-  retained until the 17th Scene/background-bank-load design replaces it.
+- `pat_tmpPattern` is the active-pattern load staging buffer. The current
+  16-Scene Bank workspace does not allocate a separate staging Scene.
 - Preset code lives under `Core/Bank/Scene/Preset/`, but public API names remain
   `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
 - Normal root Kit loads and saves are directory-based. Kit Morph Load and
@@ -37,9 +37,10 @@ a generic bridge.
   one resident voice to the root Instrument pool. Kit/Instrument Morph Save
   writes the current per-voice interpolated value into both normal and morph
   endpoint fields.
-- Scene and Bank load/save are directory-based in the Session 039 bridge.
-  Root Scene is a library/pool. Root Bank is the current workspace selector,
-  but only one resident Scene is implemented so far.
+- Scene and Bank load/save are directory-based. Bank is the Session 040
+  16-Scene workspace.
+  Root Scene is a library/pool. Root Bank is the 16-resident-Scene workspace
+  selector; its present/edit masks and active Scene are BankData state.
 - Numbered library slots are direct `000..999`; slot `000` is real. This does
   not change instrument file voice coordinates, which remain one-based `1..6`.
 - asyncfatfs owns exact-case filename behavior. Product code should use
@@ -372,7 +373,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_saveInstrument(scene, slot, display_name)` | Post one root Instrument Save request from a resident Scene/voice slot. The display stem is captured at request acceptance and filesystem writes `Instrument/<stem.ext>`. | Instrument Save nested Save-page OK |
 | `preset_saveInstrumentMorph(scene, slot, display_name)` | Post one root InstrumentMrp Save request. The writer uses the normal Instrument schema but writes the current interpolated values into both endpoint sections and does not rename resident source metadata. | Instrument Save `<Type>Mrp` OK |
 | `preset_loadSceneForScenes(presetNr, scene_mask)` / `preset_saveScene(presetNr)` | Load/save root Scene library folders through the staged Scene payload reader/writer. | Load/Save Scene |
-| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr)` | Load/save root Bank folders. Current bridge loads/saves one resident Scene and uses fallback when a Bank contains no child Scene. | Load/Save Bank, boot |
+| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr)` | Load/save root Bank folders with a 16-bit local-Scene mask. Load validates bankset.bcg v2 and can report a valid empty Bank; Save writes selected child payloads through a temporary sibling then promotes it. | Load/Save Bank, boot |
 | `preset_loadFirstAvailableSceneOrKit()` | Fallback after absent/empty Bank: lowest root Scene, then lowest root Kit, then defaults. | boot, Bank Load completion |
 | `preset_sendDrumsetParameters()` | Synchronous pre-audio Scene kit audio-routing and descriptor runtime apply. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
@@ -425,6 +426,14 @@ slot-to-runtime bridge. Descriptor tables remain beside each instrument type;
 InstrumentManager supplies registry lookup, assignment policy, target
 validation, Choke sibling lookup, current type dispatch, and runtime lifecycle
 operations that callers must not duplicate.
+
+Resident Instrument parameter values use the byte
+`instrument_param_value_t` domain. Target selectors use the byte
+`instrument_target_token_t` domain with `0xff` as off. Wide descriptor and
+Scene IDs are resolved only for validation, display, or runtime dispatch; they
+are not the stored selector representation. Velocity target selection is
+self-scoped plus its source-voice Morph token; LFO selection supports self,
+voices, and the Scene namespace.
 
 | API | Use | Usual callers / clients |
 |---|---|---|

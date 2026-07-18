@@ -158,6 +158,25 @@ After writing:
 - use `afatfs_fclose(file, cb)`;
 - then let `filesystem.c` drain the final flush before reporting save success.
 
+## Declared APIs That Are Not Yet Product Primitives
+
+The public header currently declares parent-relative child lookup/create,
+move, copy-tree, and tree-replace entry points. They are design placeholders,
+not supported production operations in this checkout:
+
+- `afatfs_findFirstObjectInDir`, `afatfs_fopenChild`, and `afatfs_mkdirChild`
+  do not have the required parent-relative implementation.
+- `afatfs_moveObject` does not initialize its recycled handle or copy its
+  destination name, and its dispatcher continuation does not perform a move.
+- `afatfs_copyObjectTree` and the begin/commit/abort tree-replace API do not
+  provide a functioning foreground-pumped implementation.
+- `AFATFS_CREATE_REPLACE_FILE` must not be interpreted as an atomic or
+  crash-recoverable replacement promise.
+
+Use only the implemented component APIs, object iteration, exact removal, and
+`afatfs_deleteTree` described in this reference until those contracts are made
+real. The implementation plan is archived in `SESSION_040_AFATFS_FOLLOWUP.md`.
+
 ## Object Iteration
 
 APIs:
@@ -218,22 +237,25 @@ Removal modes:
 - `AFATFS_REMOVE_EMPTY_DIRECTORIES`: remove matching directories only when they
   are already empty.
 
-asyncfatfs does not recursively delete directories. `filesystem.c` owns
-recursive deletion by combining object iteration, file removal, child-directory
-entry, `afatfs_chdirParent()`, and empty-directory removal.
+`afatfs_deleteTree()` is the native non-blocking recursive-delete primitive
+for one captured directory identity. It copies the supplied `afatfsObjectId_t`,
+walks the target tree, retires complete LFN/SFN entry runs, frees cluster
+chains, releases retained cache state, resets its private handle, and invokes
+its result callback once. A false start means no handle accepted the request
+and no callback will occur.
 
-Product-level recursive delete must also scope itself before it deletes:
+Product code still owns scope selection before it invokes deletion:
 
-- chdir into the intended parent directory first;
+- enter the intended parent directory;
 - scan only immediate children;
-- parse product-visible names in `filesystem.c`;
-- delete only the exact product slot being replaced.
+- parse the product-visible name with the namespace-appropriate parser; and
+- pass the exact captured object identity for the selected slot.
 
-This prevents the Session 039 Scene Save root-wipe class of bug. Kit Save may
-use short-alias fallback for old Kit folders; Scene Save intentionally disables
-that fallback and deletes only visible names that parse as the selected Scene
-slot. Bank Save must preserve untoggled Bank-local Scene folders until a
-dedicated safe rename/promotion workflow exists.
+This prevents root-wipe and duplicate-LFN failures. Bank-local children are
+parsed as two-digit `00..15` folders before their selected identity is supplied
+to native deletion. The legacy `filesystem.c` delete walker remains only as
+compatibility/fallback code and uses `afatfs_removeObject()` with an exact
+short alias when available.
 
 ## Rename
 
@@ -285,19 +307,23 @@ Don't:
 - Treat `fread() == 0` as EOF without `afatfs_feof()`.
 - Optimistically publish browser/cache entries before a real scan/open proves
   the object exists.
-- Expect asyncfatfs to recursively delete directories.
+- Start deletion from a display name after a scan already selected a concrete
+  object; retain and use the captured object identity instead.
 - Hide dot-prefixed objects in asyncfatfs; filtering belongs in product scans.
 - Persist returned short aliases into user-facing schemas.
 
 ## Current Production Users
 
 - Kit scan/load/save uses object iteration, LFN directory creation, returned
-  aliases, recursive directory delete in `filesystem.c`, and text schemas in
-  `storageTypes`.
+  aliases, identity-based native tree deletion for replacement, and text
+  schemas in `storageTypes`.
 - Scene scan/load/save uses object iteration, LFN directory creation, scoped
-  same-slot replacement in `filesystem.c`, and text schemas in `storageTypes`.
-- Bank scan/load/save uses object iteration, LFN display-name opens for root
-  Bank and Bank-local Scene folders, and text schemas in `storageTypes`.
+  same-slot replacement through captured identities, and text schemas in
+  `storageTypes`.
+- Bank scan/load/save uses object iteration, namespace-aware root/two-digit
+  child matching, captured identities for cleanup, staging/promotion
+  preflight, and text schemas in `storageTypes`. Bank Load clears shared
+  Scene child-discovery names before every delegated local child.
 - Root Instrument scan/load/save uses object iteration, LFN root directory
   entry, LFN file writes, per-type browser caches, and descriptor-keyed text
   schemas.
@@ -305,8 +331,13 @@ Don't:
   scan, open, create, child create, and persistence checks. They remain
   compiled but normally appear only when `CONFIG_DEV_MODE != 0`.
 
-## Future Work That Depends On asyncfatfs
+## AsyncFATFS work still required
 
-- 16-Scene Bank workspace and autosave dot-file promotion.
-- Effect storage.
-- Safe rename/replace workflows for `.tmp` to committed file promotion.
+- Parent-relative lookup/open/create with explicit collision policy and copied
+  input lifetime.
+- Hardening native delete against corrupt/cyclic structures and reporting
+  partial progress.
+- Real same-parent rename and cross-parent move, bounded tree copy, and a
+  crash-recoverable staged replace protocol. The current move/copy/replace
+  declarations are not completed APIs.
+- Effect storage and any feature that needs durable replacement/promotion.
