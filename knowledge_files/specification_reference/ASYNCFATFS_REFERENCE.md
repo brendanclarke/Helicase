@@ -190,6 +190,9 @@ APIs:
 - `afatfs_chdir(handle)`
 - `afatfs_chdir(NULL)`
 - `afatfs_chdirParent()`
+- `afatfs_fopenChild(parent, display, access, create_mode, match_mode, alias, cb)`
+- `afatfs_openDirChild(parent, display, match_mode, alias, cb)`
+- `afatfs_createDirChild(parent, display, create_mode, match_mode, alias, cb)`
 
 `afatfs_chdir(NULL)` returns to root.
 
@@ -199,12 +202,18 @@ the normal filename parser is not reliable: the 8.3 converter normalizes it
 like a blank component. Recursive directory deletion uses `afatfs_chdirParent()`
 after emptying a child directory.
 
+The child APIs avoid global CWD mutation. They retain the supplied parent
+exclusively until their structured callback fires; callers must not close,
+scan, seek, or rebind that parent in the meantime. `CREATE_NEW`,
+`OPEN_EXISTING`, and `CREATE_OR_OPEN` make collision/missing behavior explicit.
+
 ## Removal
 
 APIs:
 
 - `afatfs_funlink(file, cb)`
 - `afatfs_removeObjects_lfn(display_name, match_mode, mode, cb)`
+- `afatfs_deleteTree(object_id, result_cb)`
 
 `afatfs_funlink()` removes one opened file handle.
 
@@ -218,9 +227,12 @@ Removal modes:
 - `AFATFS_REMOVE_EMPTY_DIRECTORIES`: remove matching directories only when they
   are already empty.
 
-asyncfatfs does not recursively delete directories. `filesystem.c` owns
-recursive deletion by combining object iteration, file removal, child-directory
-entry, `afatfs_chdirParent()`, and empty-directory removal.
+`afatfs_deleteTree()` recursively removes the exact directory capability emitted
+by object iteration. It validates the root SFN fingerprint before mutation,
+bounds traversal depth, validates structural `..` links, retires names before
+freeing clusters, and reports a structured result. `filesystem.c` still owns
+product scope: it chooses the intended parent and same-slot object before native
+deletion starts.
 
 Product-level recursive delete must also scope itself before it deletes:
 
@@ -240,6 +252,14 @@ dedicated safe rename/promotion workflow exists.
 API:
 
 - `afatfs_renameObject_lfn(old_display, new_display, match_mode, alias_out, cb)`
+- `afatfs_renameObjectAt(parent, object_id, new_display, match_mode, alias_out, cb)`
+- `afatfs_moveObject(source_parent, object_id, destination_parent, destination,
+  match_mode, alias_out, cb)`
+
+Prefer the by-identity form after an object scan. Cross-parent move validates
+the source, rejects directory self/descendant moves through a bounded ancestry
+walk, durably writes the destination before source retirement, and updates a
+moved directory's structural `..` entry.
 
 Rename updates the complete VFAT LFN/SFN entry run while preserving the object's
 first cluster, file size, attributes, timestamps, and directory children.
@@ -285,14 +305,14 @@ Don't:
 - Treat `fread() == 0` as EOF without `afatfs_feof()`.
 - Optimistically publish browser/cache entries before a real scan/open proves
   the object exists.
-- Expect asyncfatfs to recursively delete directories.
+- Ask native deletion to infer product scope or select a slot by display text.
 - Hide dot-prefixed objects in asyncfatfs; filtering belongs in product scans.
 - Persist returned short aliases into user-facing schemas.
 
 ## Current Production Users
 
 - Kit scan/load/save uses object iteration, LFN directory creation, returned
-  aliases, recursive directory delete in `filesystem.c`, and text schemas in
+  aliases, native exact-object recursive deletion, and text schemas in
   `storageTypes`.
 - Scene scan/load/save uses object iteration, LFN directory creation, scoped
   same-slot replacement in `filesystem.c`, and text schemas in `storageTypes`.

@@ -17,6 +17,81 @@ Every implementation change must receive an adjacent contract block in both
 rules, and affiliated operations/callers. Each phase must compile and pass its
 own tests before the next phase starts.
 
+## Implementation Log
+
+### 2026-07-18 — implementation baseline
+
+- Re-audited the declarations, dispatcher, create/open state machine, object
+  iterator, rename/remove coordinators, native delete, and `filesystem.c`
+  staging callers before modifying code.
+- Confirmed that `afatfs_moveObject()` is currently unsafe: it accepts a job
+  into an uninitialized/recycled file slot and dispatches forever to an empty
+  continuation. Copy and replace are also represented by no-op dispatcher
+  states, while their public APIs are either undefined or cannot satisfy their
+  advertised asynchronous contract.
+- Confirmed that parent-relative create/open should reuse
+  `afatfsCreateFile_t`, but the operation must retain and exclusively own the
+  supplied parent handle until completion. The create scanner, directory-entry
+  allocator, directory extension, and `.`/`..` initializer all currently bind
+  directly to `afatfs.currentDirectory`.
+- Implementation order for this pass: make placeholder APIs fail at build time,
+  complete result/object metadata, add retained-parent create modes and child
+  APIs, build and measure, then proceed to by-identity mutators and multi-handle
+  coordinators only on that verified foundation.
+
+### 2026-07-18 — Phases 1-4 implementation progress
+
+- Removed the public declarations, file-operation enum members, union storage,
+  dispatcher cases, start function, and empty continuations that represented
+  move/copy/replace as accepted per-file operations without a callback path.
+  Cross-parent move was subsequently reintroduced only after it had a real
+  global coordinator path; copy and replace remain unavailable at compile time.
+- Extended structured results with no-space, stale-object, depth-limit,
+  recovery-required, and corrupt-directory outcomes. `afatfsObjectId_t` now
+  carries its parent form and raw 11-byte SFN fingerprint, populated by every
+  successful object iteration.
+- Added a media-backed object validator. Native delete now validates its root
+  before mutation, bounds traversal to `AFATFS_TREE_DEPTH_MAX`, validates `..`
+  records and cluster ranges, rejects self-parent links, and correctly rebinds
+  to FAT16's fixed root directory during ascent.
+- Implemented explicit `CREATE_NEW`, `OPEN_EXISTING`, and `CREATE_OR_OPEN`
+  behavior in the shared create state machine. Access mode `w` still controls
+  truncation only after policy resolution; whole-object replacement is not
+  hidden inside create.
+- Implemented `afatfs_fopenChild()`, `afatfs_openDirChild()`, and
+  `afatfs_createDirChild()`. The selected parent is retained exclusively across
+  scans, directory extension, append seek, write truncation, and new-directory
+  `.`/`..` initialization. Close/chdir and other current-directory coordinators
+  now respect that ownership count.
+- Raised `AFATFS_MAX_OPEN_FILES` from 3 to 5. The original audited `afatfs`
+  symbol was `0x1a20` (6688) bytes; after the parent/result/identity/move work it
+  is `0x1e7c` (7804) bytes, an increase of 1116 bytes. Total firmware BSS is
+  363836 bytes in the current build.
+- Added `afatfs_renameObjectAt()` using parent-relative stale validation and
+  structured results. The legacy name-based rename now delegates to the same
+  retained-parent coordinator behavior.
+- Implemented `afatfs_moveObject()` in that global coordinator. It performs a
+  bounded destination-ancestry walk for directory self/descendant rejection,
+  allocates and writes the destination run before retiring the source, updates
+  a moved directory's `..` cluster, and copies all async inputs into state.
+- A clean build was required after the public object-ID size changed because the
+  Makefile does not track header dependencies; an incremental link exposed stale
+  caller objects through LTO `memset` overflow diagnostics. Clean `make -j4`
+  then completed successfully. This build-system limitation must be remembered
+  for every later public-structure change.
+- Final verification for this pass: `make img` completed and regenerated
+  `build/LXRV2_lxr02.img`; `git diff --check` passed. The new signed/unsigned
+  entry-run checks compile cleanly. Remaining compiler diagnostics are the
+  pre-existing unused `eraseCount`, newlib syscall stubs, and serial-LTO notices.
+
+### Next implementation boundary
+
+- Phase 5 recursive tree copy and Phase 6 journaled replacement still require
+  their dedicated global coordinators and fault-injection tests. They must not
+  be re-added as per-file operation states.
+- Product Bank migration remains intentionally blocked on those two features;
+  the existing manual `filesystem.c` staging flow is still the production path.
+
 ---
 
 ## Non-Negotiable Driver Invariants
@@ -51,15 +126,15 @@ own tests before the next phase starts.
 
 | Capability | Current status | Required action |
 |---|---|---|
-| Structured result enum/callback | Partial. `afatfsResultCode_t` exists, but only native tree delete uses it. Open/create/rename/remove still collapse failures into `NULL`, empty aliases, or generic callbacks. | Add structured completion variants without breaking legacy callers. |
-| Object identity | Partial. `afatfsObjectId_t` is returned by object iteration and native delete consumes it. It lacks source-parent identity and a stale-entry validation contract. | Complete identity metadata and add validation/direct-object helpers. |
+| Structured result enum/callback | In progress. Child open/create, by-identity rename/move, and native delete now report structured results; legacy current-directory rename/remove remain callback-compatible. | Add result variants only as new callers migrate; do not break legacy save state machines. |
+| Object identity | Implemented for current mutators. Iteration records parent form/raw SFN and delete/rename/move validate the fingerprint before mutation. | Reuse the validator in copy/recovery; add fault-injection coverage for slot reuse. |
 | LFN object iteration | Implemented. `afatfs_findFirstObject(directory, ...)` is already parent-relative because it receives a directory handle. | Do not add the redundant declared `afatfs_findFirstObjectInDir()`. Document and use the existing API. |
 | Name policy | Implemented. `fat_lfnCharAllowed()`, `fat_lfnSanitizeChar()`, display comparison, whole-component sanitization, trailing-space/period stripping, and alias generation exist. | Keep the current policy. `?` intentionally sanitizes to `_`; do not add it without a product-level policy decision. |
-| Explicit create modes | Enum only. `afatfsCreateMode_t` is not stored or enforced by `afatfsCreateFile_t`. | Implement policy in the shared create/open state machine. |
-| Parent-relative create/open | Header declarations only; no definitions. Current create code scans and extends `afatfs.currentDirectory`. | Implement real child APIs and make legacy current-directory functions wrappers. |
-| Exact recursive delete | Implemented and used by Kit/Scene same-slot cleanup. The `TOut06` callback/finder/cache-lifecycle faults are fixed. | Add identity validation, corruption bounds, and dedicated flat/nested tests before treating it as a general primitive. |
-| Same-parent rename | Implemented by `afatfs_renameObject_lfn()`, but it resolves the source by display name in global `currentDirectory` and returns success indirectly through an alias buffer. | Refactor behind a parent-relative, by-identity structured-result core. |
-| Cross-parent move | Dangerous stub. `afatfs_moveObject()` returns `true`, but its continuation is a no-op and never calls back. | Remove/gate the stub first, then implement after parent-relative identity operations. |
+| Explicit create modes | Implemented in the shared create/open scanner. Access-mode truncation is preserved independently from create policy. | Migrate new callers to explicit policy; retain legacy wrappers. |
+| Parent-relative create/open | Implemented with exclusive parent lifetime across scan, extension, append seek, truncation, and directory initialization. | Exercise with concurrent source/destination handles on hardware. |
+| Exact recursive delete | Implemented with root validation, bounded depth, structural `..` validation, and FAT16-root ascent. | Add dedicated flat/nested/corrupt-media tests before broader product use. |
+| Same-parent rename | Implemented both as legacy name lookup and `afatfs_renameObjectAt()` with explicit parent, stale validation, and structured result. | Migrate promotion callers to by-identity form. |
+| Cross-parent move | Implemented through the global rename coordinator with bounded descendant checks, destination-first durable ordering, and directory `..` update. | Add failure-injection and FAT16/FAT32 hardware coverage. |
 | Tree copy | Not implemented. The header declares `afatfs_copyObjectTree()`, but there is no public definition; the dispatcher continuation is a no-op. | Implement as a multi-handle coordinator with bounded traversal and streaming. |
 | Transactional replace | Not implemented. Header-only begin/commit/abort declarations cannot work as written because begin is asynchronous; dispatcher continuation is a no-op. | Replace the API with an asynchronous transaction object and recovery protocol. |
 | Transaction recovery | Not implemented. `afatfs_init()` performs mount only and has no knowledge of product parent directories. | Add explicit recovery per known parent; do not recursively garbage-collect arbitrary names during mount. |

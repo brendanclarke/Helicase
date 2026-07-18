@@ -45,6 +45,16 @@ typedef enum {
     AFATFS_RESULT_IO_ERROR,
     AFATFS_RESULT_CORRUPT_LFN_RUN,
     AFATFS_RESULT_UNSUPPORTED_LAYOUT,
+    /* Allocation failed after the operation was accepted; affiliates: create/copy. */
+    AFATFS_RESULT_NO_SPACE,
+    /* The physical SFN fingerprint no longer describes the scanned object. */
+    AFATFS_RESULT_STALE_OBJECT,
+    /* A bounded tree walker reached AFATFS_TREE_DEPTH_MAX. */
+    AFATFS_RESULT_DEPTH_LIMIT,
+    /* Scratch state exists but no valid journal record authorizes cleanup. */
+    AFATFS_RESULT_RECOVERY_REQUIRED,
+    /* Structural directory metadata (`.`/`..` or cluster ancestry) is invalid. */
+    AFATFS_RESULT_CORRUPT_DIRECTORY,
 } afatfsResultCode_t;
 
 typedef void (*afatfsResultCallback_t)(afatfsResultCode_t result);
@@ -68,6 +78,18 @@ typedef afatfsDirEntryPointer_t afatfsFinder_t;
 #define AFATFS_SHORT_FILENAME_MAX 13u
 #define AFATFS_LONG_FILENAME_MAX  48u
 
+/*
+ * Maximum product-tree nesting accepted by bounded async walkers.
+ *
+ * What: limits recursive delete/copy/move ancestry to eight child levels.
+ * Why: corrupt `..` links or directory cycles must terminate with a diagnostic
+ * instead of polling forever, and product Kit/Scene/Bank schemas are shallower
+ * than this bound. Input/output: walkers increment on descent and fail before
+ * exceeding the value. Affiliates: afatfs_deleteTree(), recursive copy, and
+ * destination-descendant checks for move.
+ */
+#define AFATFS_TREE_DEPTH_MAX 8u
+
 typedef enum {
     AFATFS_MATCH_CASE_INSENSITIVE = 0,
     AFATFS_MATCH_CASE_SENSITIVE
@@ -85,10 +107,9 @@ typedef enum {
  * to merge into stale folders instead of replacing them.
  */
 typedef enum {
-    AFATFS_CREATE_NEW,       // Fail if object exists
-    AFATFS_OPEN_EXISTING,    // Fail if object absent
-    AFATFS_CREATE_OR_OPEN,   // Legacy fallback behavior
-    AFATFS_REPLACE_FILE      // Delete existing and create new
+    AFATFS_CREATE_NEW,       // Fail if any same-display object exists.
+    AFATFS_OPEN_EXISTING,    // Fail if the requested object is absent.
+    AFATFS_CREATE_OR_OPEN,   // Open a typed match or create it when absent.
 } afatfsCreateMode_t;
 
 /*
@@ -108,7 +129,42 @@ typedef struct {
     uint32_t firstCluster;
     uint32_t logicalSize;
     uint8_t attrib;
+    /*
+     * Parent and raw-SFN validation fingerprint.
+     *
+     * What: parentFirstCluster/parentIsFat16Root identify the directory that
+     * owned sfnEntry when this capability was emitted; rawShortName preserves
+     * the authoritative 11-byte FAT key instead of its printable alias.
+     * Why: sector/entry offsets may be reused after a rename or deletion. A
+     * by-identity mutator must reload the entry and compare parent, raw name,
+     * kind, and first cluster before it changes the card.
+     * Inputs/outputs: populated only by afatfs_findNextObject(); callers copy
+     * the complete afatfsObjectId_t and treat it as invalid after any mutation
+     * of the source parent.
+     * Affiliates: afatfs_validateObject(), native delete, rename/move/copy, and
+     * transaction recovery.
+     */
+    uint32_t parentFirstCluster;
+    uint8_t parentIsFat16Root;
+    uint8_t rawShortName[FAT_FILENAME_LENGTH];
 } afatfsObjectId_t;
+
+/*
+ * Structured open/create completion callbacks.
+ *
+ * What: report the terminal reason independently from the optional returned
+ * file or object. Why: legacy NULL callbacks cannot distinguish not-found,
+ * type collision, invalid input, media failure, and exhausted space.
+ * Inputs: result is one afatfsResultCode_t; file/object is valid only when the
+ * result is OK (the object pointer is callback-scoped).
+ * Outputs/lifetime: accepted operations call exactly once after releasing all
+ * internal iterator/cache ownership. Affiliates: parent-relative child APIs,
+ * by-identity mutators, and legacy callback adapters.
+ */
+typedef void (*afatfsOpenResultCallback_t)(afatfsResultCode_t result,
+                                           afatfsFilePtr_t file);
+typedef void (*afatfsObjectResultCallback_t)(afatfsResultCode_t result,
+                                             const afatfsObjectId_t *object);
 
 /*
  * Scope selector for afatfs_removeObjects_lfn().
@@ -221,6 +277,53 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
                              afatfsCallback_t complete);
 
 /*
+ * Rename one validated object inside its explicit parent.
+ *
+ * What: rewrites the source object's complete LFN/SFN name run without a
+ * display-name source scan. Why: duplicate/stale visible names must not redirect
+ * a save after product code selected a concrete directory entry.
+ * Inputs: parent is the open source directory; source is copied and validated
+ * against its raw SFN fingerprint; newDisplayName is one component; matchMode
+ * controls destination collision folding. parent remains caller-owned but may
+ * not be used until complete.
+ * Outputs: true accepts the operation and guarantees one structured callback;
+ * OK preserves cluster, size, attributes, timestamps, and children while
+ * openNameOut receives the new printable alias. STALE_OBJECT changes nothing.
+ * Affiliates: afatfs_findNextObject(), the legacy name-based rename wrapper,
+ * cross-parent move, and replace promotion.
+ */
+bool afatfs_renameObjectAt(afatfsDirHandle_t parent,
+                           const afatfsObjectId_t *source,
+                           const char *newDisplayName,
+                           afatfsMatchMode_t matchMode,
+                           char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                           afatfsResultCallback_t complete);
+
+/*
+ * Move one validated object between explicit parents.
+ *
+ * What: creates a destination LFN/SFN run that preserves source metadata and
+ * cluster ownership, updates a moved directory's structural `..` entry, then
+ * retires the source name run. Same-parent moves use the rename core.
+ * Why: product staging and recovery need exact-object promotion without global
+ * chdir or data copying. Inputs: both parents must remain open/unused until the
+ * callback; source is copied and validated; destinationName is one component.
+ * Outputs: true guarantees one callback. Destination collision, stale source,
+ * descendant/self move, depth/corruption, and I/O are reported distinctly.
+ * Visibility ordering writes destination before retiring source, so failure can
+ * leave two names but cannot remove the sole live name.
+ * Affiliates: afatfs_renameObjectAt(), replace promotion, object validation,
+ * directory `..` creation, and AFATFS_TREE_DEPTH_MAX.
+ */
+bool afatfs_moveObject(afatfsDirHandle_t sourceParent,
+                       const afatfsObjectId_t *source,
+                       afatfsDirHandle_t destinationParent,
+                       const char *destinationName,
+                       afatfsMatchMode_t matchMode,
+                       char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                       afatfsResultCallback_t complete);
+
+/*
  * Remove all objects whose display name matches one component.
  *
  * What: Scans the current directory and removes every object whose visible
@@ -318,14 +421,41 @@ bool afatfs_opendir_lfn(const char *displayName,
                         afatfsFileCallback_t complete);
 
 /*
- * Parent-relative operations.
- * Why: Prevents asynchronous product state machines from clobbering the global
- * `afatfs.currentDirectory`.
- * Inputs: A valid open directory handle instead of using global state.
+ * Parent-relative file and directory open/create operations.
+ *
+ * What: resolve one display component inside parent without changing the
+ * process-wide current directory. createMode explicitly selects collision and
+ * missing-object behavior; matchMode applies only to display-name lookup.
+ * Why: recursive copy and staged Bank saves must keep source and destination
+ * parents open concurrently. Implicit current-directory mutation cannot safely
+ * represent that operation graph.
+ * Inputs: parent must be an open, idle directory; displayName is one component
+ * and may not be "." or "..". accessMode uses afatfs_fopen() syntax.
+ * Outputs/lifetime: true means the request retained parent and complete will
+ * fire exactly once. The caller must not close, seek, scan, or otherwise use
+ * parent until completion. On OK, file remains caller-owned and openNameOut
+ * contains its printable SFN alias when non-NULL.
+ * Affiliates: afatfsCreateFile_t, directory extension/`.`/`..` initialization,
+ * recursive copy, replace staging, and legacy current-directory wrappers.
  */
-void afatfs_findFirstObjectInDir(afatfsDirHandle_t parent, afatfsObjectFinder_t *finder);
-bool afatfs_fopenChild(afatfsDirHandle_t parent, const char *displayName, afatfsCreateMode_t mode, afatfsFileCallback_t complete);
-bool afatfs_mkdirChild(afatfsDirHandle_t parent, const char *displayName, afatfsCreateMode_t mode, afatfsFileCallback_t complete);
+bool afatfs_fopenChild(afatfsDirHandle_t parent,
+                       const char *displayName,
+                       const char *accessMode,
+                       afatfsCreateMode_t createMode,
+                       afatfsMatchMode_t matchMode,
+                       char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                       afatfsOpenResultCallback_t complete);
+bool afatfs_openDirChild(afatfsDirHandle_t parent,
+                         const char *displayName,
+                         afatfsMatchMode_t matchMode,
+                         char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                         afatfsOpenResultCallback_t complete);
+bool afatfs_createDirChild(afatfsDirHandle_t parent,
+                           const char *displayName,
+                           afatfsCreateMode_t createMode,
+                           afatfsMatchMode_t matchMode,
+                           char openNameOut[AFATFS_SHORT_FILENAME_MAX],
+                           afatfsOpenResultCallback_t complete);
 
 bool afatfs_chdir(afatfsFilePtr_t dirHandle);
 afatfsOperationStatus_e afatfs_chdirParent(void);
@@ -387,31 +517,14 @@ bool afatfs_deleteTree(const afatfsObjectId_t *root, afatfsResultCallback_t cb);
 uint8_t afatfs_getDeleteTreePhase(void);
 
 /*
- * State machine for cross-directory movement.
- * Why: Moves a physical object (and its cluster chain) to a new parent directory.
- * Requires allocating a new directory entry run in the destination, copying the
- * cluster pointer, and marking the old entry run as deleted (0xE5).
+ * Multi-parent operation availability boundary.
+ *
+ * Recursive copy and recoverable replace are intentionally not declared until
+ * their global coordinators exist. (Cross-parent move is now implemented above
+ * through the rename coordinator.) The previous declarations either had no
+ * definition or queued an operation whose continuation was empty, so a
+ * successful start could never deliver its promised callback. Keeping the
+ * boundary visible here makes incomplete features fail during compilation
+ * instead of becoming a filesystem timeout on hardware. Affiliates: expansion
+ * Phases 5-6 and the coordinator state in asyncfatfs.c.
  */
-bool afatfs_moveObject(const afatfsObjectId_t *src, afatfsDirHandle_t dst_parent, const char *dst_name, afatfsResultCallback_t cb);
-
-/*
- * State machine for deep tree copy.
- * Why: Avoids loading product files into RAM just to re-serialize them.
- * Reads source clusters into the 4KB cache and flushes them to newly allocated
- * destination clusters.
- */
-bool afatfs_copyObjectTree(const afatfsObjectId_t *src, afatfsDirHandle_t dst_parent, const char *dst_name, afatfsResultCallback_t cb);
-
-/*
- * Transactional directory replace.
- * Why: Bank Save needs to guarantee that old data is entirely displaced and the
- * new tree is completely synced before becoming visible.
- * Internals:
- * 1. Generates `tmp_XXXX` under the parent.
- * 2. Caller populates `tmp_XXXX` (via explicit handle, not `chdir`).
- * 3. `commitTreeReplace` executes a rename of the old target to `old_XXXX`,
- *    renames `tmp_XXXX` to target, and schedules `old_XXXX` for background deletion.
- */
-bool afatfs_beginTreeReplace(afatfsDirHandle_t parent, const char *target_name, afatfsDirHandle_t *tx_out);
-bool afatfs_commitTreeReplace(afatfsDirHandle_t tx, afatfsResultCallback_t cb);
-bool afatfs_abortTreeReplace(afatfsDirHandle_t tx, afatfsResultCallback_t cb);
