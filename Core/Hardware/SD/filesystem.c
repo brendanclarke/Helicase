@@ -1723,26 +1723,109 @@ static void filesystem_createBootIndex_tick(void)
         op_file_ready = false;
         op_file = NULL;
         op_item_offset = 0u;
-        if (!afatfs_fopen_lfn(".hcindex",
-                              "w",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+        if (!afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
                               NULL,
                               on_file_opened))
             return;
         op_phase = 1u;
         return;
 
-    case 1: /* WAIT OPEN */
+    case 1: /* WAIT Instrument/ */
         if (!op_file_ready)
             return;
         if (op_file == NULL) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        op_kit_root_dir = op_file;
         op_phase = 2u;
         return;
 
-    case 2: /* WRITE FOUR RANDOM BYTES */
+    case 2: /* CHDIR Instrument/ */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 3u;
+        return;
+
+    case 3: /* CLOSE Instrument/ handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 4u;
+        return;
+
+    case 4: /* WAIT CLOSE Instrument/ */
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        op_phase = 5u;
+        return;
+
+    case 5: /* MKDIR Drum/ */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir_lfn("Drum",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 6u;
+        return;
+
+    case 6: /* WAIT Drum/ */
+        if (!op_file_ready)
+            return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 7u;
+        return;
+
+    case 7: /* CHDIR Drum/ */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 8u;
+        return;
+
+    case 8: /* CLOSE Drum/ handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 9u;
+        return;
+
+    case 9: /* WAIT CLOSE Drum/ */
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        op_phase = 10u;
+        return;
+
+    case 10: /* OPEN .hcindex */
+        op_file_ready = false;
+        op_file = NULL;
+        op_item_offset = 0u;
+        if (!afatfs_fopen_lfn(".hcindex",
+                              "w",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 11u;
+        return;
+
+    case 11: /* WAIT OPEN */
+        if (!op_file_ready)
+            return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 12u;
+        return;
+
+    case 12: /* WRITE FOUR RANDOM BYTES */
         if (op_item_offset < FS_BOOT_INDEX_BYTES) {
             uint32_t written = afatfs_fwrite(
                 op_file,
@@ -1754,13 +1837,19 @@ static void filesystem_createBootIndex_tick(void)
         }
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 3u;
+            op_phase = 13u;
         return;
 
-    case 3: /* WAIT CLOSE */
+    case 13: /* WAIT CLOSE */
         if (!op_close_done)
             return;
         op_file = NULL;
+        op_phase = 14u;
+        return;
+
+    case 14: /* RETURN ROOT */
+        if (!afatfs_chdir(NULL))
+            return;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
