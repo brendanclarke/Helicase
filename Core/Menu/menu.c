@@ -2794,6 +2794,20 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
     }
 }
 
+static void menu_drumIndexLoadComplete(void)
+{
+    menu_storageBusy = 0u;
+    menu_instrumentLoadClampIndex();
+    menu_repaintAll();
+}
+
+static void menu_requestDrumIndexLoad(void)
+{
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadBootIndex(menu_drumIndexLoadComplete))
+        menu_deferSelectionRequest = 1u;
+}
+
 static void menu_bankLoadPreviewComplete(void)
 {
     uint16_t slot = menu_currentPresetNr[SAVE_TYPE_BANK];
@@ -3026,6 +3040,8 @@ static void menu_instrumentLoadStepType(int8_t inc)
                 (uint8_t)(direction < 0 &&
                           entry->type == menu_instrumentLoadBaseType);
             menu_instrumentLoadClampIndex();
+            if (menu_instrumentLoadType == INSTRUMENT_TYPE_DRM && !menu_instrumentSaveMode)
+                menu_requestDrumIndexLoad();
             return;
         }
     }
@@ -3554,6 +3570,8 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadClampIndex();
     if (menu_instrumentSaveMode)
         menu_instrumentSaveSeedName();
+    else if (menu_instrumentLoadType == INSTRUMENT_TYPE_DRM)
+        menu_requestDrumIndexLoad();
     menu_setActiveVoice(voiceNr);
     menu_refreshLoadSceneLeds();
     if (!menu_storageBusy)

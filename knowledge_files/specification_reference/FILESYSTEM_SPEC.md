@@ -214,6 +214,18 @@ transaction/recovery primitive exists.
 Root-level entries outside the recognized list are ignored by normal
 loader/browser code.
 
+## AsyncFATFS Directory Navigation
+
+The underlying asyncfatfs layer uses a state-machine approach to navigate directories and open files. When writing filesystem traversal logic, several critical rules apply:
+
+- **Case Sensitivity vs Insensitivity**: FAT filesystems are fundamentally case-insensitive but preserve case in Long File Names (LFN). When opening directories created by a user (e.g., instrument type folders like `Drum` or `Snare`), use `AFATFS_MATCH_CASE_INSENSITIVE` with `afatfs_opendir_lfn()` to tolerate manual lowercasing. Use `AFATFS_MATCH_CASE_SENSITIVE` only when strictly requiring an exact UI string match.
+- **Directory Creation**: `afatfs_mkdir_lfn()` behaves as "open or create". If the directory exists, it resolves the handle; if missing, it creates the LFN fragments and generates an 8.3 alias. `afatfs_opendir_lfn()` strictly searches for an existing directory and will safely fail (return a NULL handle) if it does not exist.
+- **Asynchronous Parent Traversal (`afatfs_chdirParent`)**: 
+  - **WARNING:** `afatfs_chdirParent()` returns an `afatfsOperationStatus_e` enum (`SUCCESS` = 0, `IN_PROGRESS` = 1, `FAILURE` = 2), NOT a boolean.
+  - Do **not** evaluate it as `if (!afatfs_chdirParent())`. Because `SUCCESS` is `0`, `!0` evaluates to true, which can cause state machines to incorrectly early-return upon success and get trapped in infinite traversal loops.
+  - Correct usage must check explicitly: `if (st == AFATFS_OPERATION_IN_PROGRESS) return;`.
+- **Absolute Root**: To jump back to the absolute root of the SD card, use `afatfs_chdir(NULL)`. This synchronously resets the global `afatfs.currentDirectory` to the FAT root directory without requiring an asynchronous block.
+
 ## Numbered Folders
 
 `Bank`, `Scene`, `Kit`, and `Wavetable` contain meaningful numbered

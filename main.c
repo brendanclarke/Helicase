@@ -296,12 +296,9 @@ int main(void)
 
         if (sd_ok) {
             /*
-             * Create a fresh root-level `.hcindex` boot marker before any
-             * library scans. The filesystem helper writes exactly four bytes
-             * from the hardware RNG and waits for the final flush while audio
-             * is still stopped.
+             * (The root-level `.hcindex` boot marker generation has been moved
+             * to run after the Instrument scan so it can write the cache).
              */
-            (void)filesystem_createBootIndexBlocking();
 
             /* Synchronous kit scan (blocking at boot, OK) */
             filesystem_requestScanKits(NULL);
@@ -350,6 +347,12 @@ int main(void)
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
             filesystem_ack();
+
+            /*
+             * Create a fresh `.hcindex` boot marker now that the Instrument/
+             * library scans are complete and the cache is populated.
+             */
+            (void)filesystem_createBootIndexBlocking();
 
             /*
              * Boot through the current top-level container ladder.

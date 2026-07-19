@@ -230,6 +230,7 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanBanks(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
+bool filesystem_requestLoadBootIndex(fs_completion_cb_t cb);
 /*
  * Generic asyncfatfs File/Dir test browser and payload API.
  *

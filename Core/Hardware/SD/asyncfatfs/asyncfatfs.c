@@ -5114,6 +5114,20 @@ bool afatfs_mkdir_lfn(const char *displayName,
     return file != NULL;
 }
 
+/**
+ * @brief Open an existing directory by its VFAT Long File Name (LFN).
+ *
+ * This function will search for the directory using the provided `displayName`.
+ * It strictly opens an existing directory and will not create a new one.
+ * If you need to tolerate creation, use `afatfs_mkdir_lfn` instead.
+ * 
+ * @param displayName The intended long name to search for.
+ * @param matchMode Specifies case folding. Use AFATFS_MATCH_CASE_INSENSITIVE for
+ *                  user-supplied folders, as FAT is fundamentally case-insensitive.
+ * @param openNameOut Buffer to receive the 8.3 short name alias. May be NULL.
+ * @param callback Executed when the handle is ready.
+ * @return true if the open operation was successfully queued.
+ */
 bool afatfs_opendir_lfn(const char *displayName,
                         afatfsMatchMode_t matchMode,
                         char openNameOut[AFATFS_SHORT_FILENAME_MAX],
@@ -5186,6 +5200,21 @@ bool afatfs_chdir(afatfsFilePtr_t directory)
     }
 }
 
+/**
+ * @brief Change the working directory to the parent of the current directory ("..").
+ *
+ * **WARNING: EXTREMELY IMPORTANT RETURN TYPE**
+ * This function returns `afatfsOperationStatus_e`, NOT a boolean!
+ *   0 = AFATFS_OPERATION_SUCCESS
+ *   1 = AFATFS_OPERATION_IN_PROGRESS
+ *   2 = AFATFS_OPERATION_FAILURE
+ * 
+ * NEVER evaluate this as a boolean (e.g., `if (!afatfs_chdirParent())`).
+ * Doing so will evaluate `SUCCESS` (0) as true and `IN_PROGRESS` (1) as false,
+ * which will completely break asynchronous state machines and cause infinite loops.
+ * Always check explicitly against `AFATFS_OPERATION_SUCCESS`, `AFATFS_OPERATION_IN_PROGRESS`,
+ * or `AFATFS_OPERATION_FAILURE`.
+ */
 afatfsOperationStatus_e afatfs_chdirParent(void)
 {
     uint8_t *sector = NULL;

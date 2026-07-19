@@ -147,6 +147,7 @@ typedef enum {
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
     FS_INTERNAL_OP_SAVE_INSTRUMENT,
     FS_INTERNAL_OP_LOAD_NAME,
+    FS_INTERNAL_OP_LOAD_INDEX,
     FS_INTERNAL_OP_SCAN_TEST_FILES,
     FS_INTERNAL_OP_SCAN_TEST_DIRS,
     FS_INTERNAL_OP_LOAD_TEST_FILE,
@@ -485,6 +486,13 @@ static void filesystem_saveSceneDirectory_tick(void);
 static void filesystem_loadBankDirectory_tick(void);
 static void filesystem_saveBankDirectory_tick(void);
 static void filesystem_createBootIndex_tick(void);
+static void filesystem_loadBootIndex_tick(void);
+static storage_status_t filesystem_readTextLine(afatfsFilePtr_t file,
+                                                char *buffer,
+                                                uint8_t *len,
+                                                uint8_t limit,
+                                                uint8_t *line_ready,
+                                                uint8_t *eof);
 static void filesystem_scanBanks_tick(void);
 static void filesystem_scanBankScenes_tick(void);
 static void filesystem_deleteTreeStartWithOpenName(const char *display_name,
@@ -552,10 +560,23 @@ static char instrument_file_open_name[INSTRUMENT_TYPE_UNKNOWN]
 static char instrument_file_stem[INSTRUMENT_TYPE_UNKNOWN]
                                 [FS_INSTRUMENT_MAX_PER_TYPE]
                                 [SCENE_INSTRUMENT_STEM_LEN + 1u];
+
+/*
+ * General list cache
+ *
+ * This 1D cache replaces the per-type 2D arrays incrementally. Currently used
+ * for loading the Drum index (.hcindex) into RAM without requiring a permanent
+ * memory block for it. Any component can request a list load and iterate over
+ * this cache.
+ */
+static uint8_t fs_list_cache_count;
+static char fs_list_cache_name[FS_INSTRUMENT_MAX_PER_TYPE]
+                              [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static uint8_t op_instrument_load_destination_slot = 0u;
 static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint8_t op_instrument_load_index = 0u;
+static instrument_type_t op_instrument_scan_type = INSTRUMENT_TYPE_UNKNOWN;
 /*
  * Root Instrument Save request scratch.
  *
@@ -1806,6 +1827,7 @@ static void filesystem_createBootIndex_tick(void)
         op_file_ready = false;
         op_file = NULL;
         op_item_offset = 0u;
+        op_bytes_done = 0;
         if (!afatfs_fopen_lfn(".hcindex",
                               "w",
                               AFATFS_MATCH_CASE_SENSITIVE,
@@ -1825,14 +1847,25 @@ static void filesystem_createBootIndex_tick(void)
         op_phase = 12u;
         return;
 
-    case 12: /* WRITE FOUR RANDOM BYTES */
-        if (op_item_offset < FS_BOOT_INDEX_BYTES) {
+    case 12: /* WRITE CACHE STRINGS */
+        if (op_item_offset < instrument_file_count[INSTRUMENT_TYPE_DRM]) {
+            if (op_bytes_done == 0) {
+                strcpy(op_line_buf, instrument_file_name[INSTRUMENT_TYPE_DRM][op_item_offset]);
+                strcat(op_line_buf, "\n");
+                op_line_len = (uint8_t)strlen(op_line_buf);
+            }
+            
             uint32_t written = afatfs_fwrite(
                 op_file,
-                op_boot_index_bytes + op_item_offset,
-                FS_BOOT_INDEX_BYTES - op_item_offset);
-
-            op_item_offset = (uint8_t)(op_item_offset + written);
+                (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+            
+            op_bytes_done += written;
+            
+            if (op_bytes_done == op_line_len) {
+                op_item_offset++;
+                op_bytes_done = 0;
+            }
             return;
         }
         op_close_done = false;
@@ -1850,6 +1883,161 @@ static void filesystem_createBootIndex_tick(void)
     case 14: /* RETURN ROOT */
         if (!afatfs_chdir(NULL))
             return;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+/**
+ * @brief Reads the `.hcindex` file from `/Instrument/Drum/` and populates the `INSTRUMENT_TYPE_DRM` cache.
+ *
+ * This operation is asynchronous and uses `FS_INTERNAL_OP_LOAD_INDEX`. It is triggered when the
+ * user enters the "Load:Drum" menu so that the list of Drum files can be populated rapidly from
+ * the previously cached index without requiring a full FAT directory scan.
+ */
+static void filesystem_loadBootIndex_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* CHDIR ROOT */
+        if (!afatfs_chdir(NULL)) return;
+        op_phase = 1u;
+        return;
+
+    case 1: /* OPEN Instrument/ */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn("Instrument", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened))
+            return;
+        op_phase = 2u;
+        return;
+
+    case 2: /* WAIT Instrument/ */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3u;
+        return;
+
+    case 3: /* CHDIR Instrument/ */
+        if (!afatfs_chdir(op_kit_root_dir)) return;
+        op_phase = 4u;
+        return;
+
+    case 4: /* CLOSE Instrument/ handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5u;
+        return;
+
+    case 5: /* WAIT CLOSE Instrument/ */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 6u;
+        return;
+
+    case 6: /* OPEN Drum/ */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn("Drum", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened))
+            return;
+        op_phase = 7u;
+        return;
+
+    case 7: /* WAIT Drum/ */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 8u;
+        return;
+
+    case 8: /* CHDIR Drum/ */
+        if (!afatfs_chdir(op_kit_root_dir)) return;
+        op_phase = 9u;
+        return;
+
+    case 9: /* CLOSE Drum/ handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 10u;
+        return;
+
+    case 10: /* WAIT CLOSE Drum/ */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 11u;
+        return;
+
+    case 11: /* OPEN .hcindex */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(".hcindex", "r", AFATFS_MATCH_CASE_SENSITIVE, NULL, on_file_opened))
+            return;
+        op_phase = 12u;
+        return;
+
+    case 12: /* WAIT OPEN */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        fs_list_cache_count = 0;
+        op_line_len = 0u;
+        op_phase = 13u;
+        return;
+
+    case 13: /* READ LINES */
+    {
+        uint8_t line_ready = 0, eof = 0;
+        storage_status_t st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len, sizeof(op_line_buf), &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 14u;
+            return;
+        }
+
+        if (line_ready) {
+            uint8_t actual_len = (uint8_t)strlen(op_line_buf);
+            if (actual_len > 0 && op_item_offset < FS_INSTRUMENT_MAX_PER_TYPE) {
+                uint8_t copy_len = (actual_len > STORAGE_KIT_DISPLAY_NAME_LEN) ? STORAGE_KIT_DISPLAY_NAME_LEN : actual_len;
+                memcpy(fs_list_cache_name[op_item_offset], op_line_buf, copy_len);
+                fs_list_cache_name[op_item_offset][copy_len] = '\0';
+
+                fs_list_cache_count++;
+                op_item_offset++;
+            }
+            op_line_len = 0u;
+        }
+
+        if (eof) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 14u;
+        }
+        return;
+    }
+
+    case 14: /* WAIT CLOSE */
+        if (!op_close_done) return;
+        op_file = NULL;
+        op_phase = 15u;
+        return;
+
+    case 15: /* RETURN ROOT */
+        if (!afatfs_chdir(NULL)) return;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -2338,6 +2526,17 @@ static int8_t filesystem_compareInstrumentDisplayName(const char *a,
     return fat_compareDisplayNameCasefoldThenCase(a, b);
 }
 
+static const char* filesystem_getInstrumentSubdir(instrument_type_t type)
+{
+    switch (type) {
+    case INSTRUMENT_TYPE_DRM: return "Drum";
+    case INSTRUMENT_TYPE_SNR: return "Snare";
+    case INSTRUMENT_TYPE_CYM: return "Cymbal";
+    case INSTRUMENT_TYPE_HAT: return "HiHat";
+    default: return NULL;
+    }
+}
+
 static instrument_type_t filesystem_instrumentTypeFromFilename(
     const char *filename)
 {
@@ -2513,10 +2712,20 @@ static void filesystem_recordInstrumentFile(const char *display_name,
         memcpy(instrument_file_stem[type][pos],
                instrument_file_stem[type][pos - 1u],
                sizeof(instrument_file_stem[type][pos]));
+        if (type == INSTRUMENT_TYPE_DRM) {
+            memcpy(fs_list_cache_name[pos],
+                   fs_list_cache_name[pos - 1u],
+                   sizeof(fs_list_cache_name[pos]));
+        }
         pos--;
     }
     memcpy(instrument_file_name[type][pos], display,
            sizeof(instrument_file_name[type][pos]));
+    if (type == INSTRUMENT_TYPE_DRM) {
+        memcpy(fs_list_cache_name[pos], display,
+               sizeof(fs_list_cache_name[pos]));
+        fs_list_cache_count++;
+    }
     storage_copyFilename(instrument_file_open_name[type][pos], open_name);
     filesystem_copyInstrumentStem16(instrument_file_stem[type][pos],
                                     display_name);
@@ -2579,6 +2788,14 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
                 memcpy(instrument_file_stem[type][j],
                        instrument_file_stem[type][j + 1u],
                        sizeof(instrument_file_stem[type][j]));
+                if (type == INSTRUMENT_TYPE_DRM) {
+                    memcpy(fs_list_cache_name[j],
+                           fs_list_cache_name[j + 1u],
+                           sizeof(fs_list_cache_name[j]));
+                }
+            }
+            if (type == INSTRUMENT_TYPE_DRM) {
+                fs_list_cache_count--;
             }
             instrument_file_count[type]--;
             continue;
@@ -5089,7 +5306,52 @@ static void filesystem_loadInstrument_tick(void)
         op_phase = 6;
         return;
 
-    case 6: /* OPEN selected instrument */
+    case 6: /* OPEN subdir */
+        op_file_ready = false;
+        op_file = NULL;
+        
+        /*
+         * We use AFATFS_MATCH_CASE_INSENSITIVE here to match user-created directories seamlessly,
+         * ensuring that even if the directory on the card is named "drum" instead of "Drum",
+         * it will be opened successfully.
+         */
+        if (!afatfs_opendir_lfn(filesystem_getInstrumentSubdir(op_instrument_load_type),
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                NULL,
+                                on_file_opened))
+            return;
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT subdir */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 8;
+        return;
+
+    case 8: /* CHDIR subdir */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 9;
+        return;
+
+    case 9: /* CLOSE subdir */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 10;
+        return;
+
+    case 10: /* WAIT CLOSE subdir */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 11;
+        return;
+
+    case 11: /* OPEN selected instrument */
         storage_instrumentStateInit(&op_instrument_state,
                                     op_instrument_load_type,
                                     (uint8_t)(op_instrument_load_destination_slot + 1u));
@@ -5099,43 +5361,45 @@ static void filesystem_loadInstrument_tick(void)
         op_line_len = 0u;
         op_file_ready = false;
         op_file = NULL;
-        /*
-         * Open the selected Instrument file by scan-cache identity.
-         *
-         * Menu selects a typed cache index, not a freshly-entered filename.
-         * The cached short alias belongs to the exact object returned by the
-         * Instrument/ scan, so the open cannot drift to another same-display
-         * candidate while the load is in flight. Display/stem metadata is
-         * committed only after the parser validates the file.
-         */
-        if (!afatfs_fopen(
-                instrument_file_open_name[op_instrument_load_type]
-                                         [op_instrument_load_index],
-                "r",
-                on_file_opened)) {
-            return;
+        
+        if (op_instrument_load_type == INSTRUMENT_TYPE_DRM) {
+            char lfn[STORAGE_KIT_FILENAME_MAX];
+            storage_makeSavedInstrumentDisplayFilename(
+                lfn, sizeof(lfn), fs_list_cache_name[op_instrument_load_index],
+                op_instrument_load_type, 0u, 0u);
+
+            if (!afatfs_fopen_lfn(lfn, "r", AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                                  on_file_opened)) {
+                return;
+            }
+        } else {
+            const char *open_name = instrument_file_open_name[op_instrument_load_type]
+                                                 [op_instrument_load_index];
+            if (!afatfs_fopen(open_name, "r", on_file_opened)) {
+                return;
+            }
         }
-        op_phase = 7;
+        op_phase = 12;
         return;
 
-    case 7: /* WAIT selected instrument */
+    case 12: /* WAIT selected instrument */
         if (!op_file_ready) return;
         if (op_file == NULL) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 11;
+            op_phase = 16;
             return;
         }
-        op_phase = 8;
+        op_phase = 13;
         return;
 
-    case 8: /* READ selected instrument */
+    case 13: /* READ selected instrument */
         st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
                                      sizeof(op_line_buf), &line_ready, &eof);
         if (st == STORAGE_STATUS_WAIT)
             return;
         if (st != STORAGE_STATUS_OK) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 9;
+            op_phase = 14;
             return;
         }
         if (line_ready) {
@@ -5145,7 +5409,7 @@ static void filesystem_loadInstrument_tick(void)
                 &op_staged_instrument);
             if (st != STORAGE_STATUS_OK) {
                 op_close_status = FS_STATUS_ERROR;
-                op_phase = 9;
+                op_phase = 14;
             }
             return;
         }
@@ -5160,15 +5424,6 @@ static void filesystem_loadInstrument_tick(void)
                         (uint8_t)(op_instrument_load_destination_slot + 1u),
                         &op_staged_instrument);
                 }
-                /*
-                 * Stage the browser-normalized file stem beside the payload.
-                 *
-                 * Input: immutable per-type scan-cache entry selected by this
-                 * operation. Output: a nine-byte NUL-terminated name that
-                 * Preset commits with the same slot image. Keeping both staged
-                 * prevents the LCD from claiming a file belongs to a slot when
-                 * parsing or runtime commit has not completed.
-                 */
                 memcpy(op_staged_instrument_display_name,
                        instrument_file_name[op_instrument_load_type]
                                            [op_instrument_load_index], 9u);
@@ -5178,31 +5433,30 @@ static void filesystem_loadInstrument_tick(void)
                        sizeof(op_staged_instrument_stem));
                 op_close_status = FS_STATUS_DONE;
             }
-            op_phase = 9;
+            op_phase = 14;
         }
         return;
 
-    case 9: /* CLOSE selected instrument */
+    case 14: /* CLOSE selected instrument */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 10;
+            op_phase = 15;
         return;
 
-    case 10: /* WAIT CLOSE selected instrument */
+    case 15: /* WAIT CLOSE selected instrument */
         if (!op_close_done) return;
         op_file = NULL;
-        op_phase = 11;
+        op_phase = 16;
         return;
 
-    case 11: /* RETURN ROOT + FINISH */
+    case 16: /* RETURN ROOT + FINISH */
         if (!afatfs_chdir(NULL))
             return;
         filesystem_finish(op_close_status);
         return;
 
     default:
-        op_close_status = FS_STATUS_ERROR;
-        op_phase = 11;
+        filesystem_finish(FS_STATUS_ERROR);
         return;
     }
 }
@@ -5362,29 +5616,47 @@ static void filesystem_saveInstrument_tick(void)
         op_phase = 10;
         return;
 
-    case 10: /* REMOVE target instrument variants */
-        /*
-         * Remove case-variant Instrument files before saving one root
-         * Instrument.
-         *
-         * What: In Instrument/, removes every file whose display component
-         * matches the requested target under case-insensitive comparison.
-         *
-         * Why: The root Instrument pool is user-copyable from desktop
-         * filesystems. If a card contains both `fiRstfile.snr` and
-         * `firStfile.snr`, the browser exposes only the capital-first winner,
-         * and overwrite must collapse all physical variants into the newly
-         * entered case.
-         *
-         * Inputs: op_instrument_save_display_name is the captured target
-         * filename from Menu after extension/type construction. Output: the
-         * following fopen_lfn() writes one replacement file and returns its
-         * short alias for cache update.
-         *
-         * Affiliates/clients: filesystem_updateInstrumentCacheAfterSave(),
-         * afatfs_removeObjects_lfn(), afatfs_fopen_lfn(), nested Instrument
-         * Save UI.
-         */
+    case 10: /* OPEN/CREATE subdir */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir_lfn(filesystem_getInstrumentSubdir(op_instrument_save_type),
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 11;
+        return;
+
+    case 11: /* WAIT subdir */
+        if (!op_file_ready) return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 12;
+        return;
+
+    case 12: /* CHDIR subdir */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 13;
+        return;
+
+    case 13: /* CLOSE subdir handle */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 14;
+        return;
+
+    case 14: /* WAIT CLOSE subdir */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 15;
+        return;
+
+    case 15: /* REMOVE target instrument variants */
         op_remove_done = 0u;
         if (!afatfs_removeObjects_lfn(op_instrument_save_display_name,
                                       AFATFS_MATCH_CASE_INSENSITIVE,
@@ -5392,34 +5664,26 @@ static void filesystem_saveInstrument_tick(void)
                                       on_remove_complete)) {
             return;
         }
-        op_phase = 11;
+        op_phase = 16;
         return;
 
-    case 11: /* WAIT remove + OPEN target instrument file */
+    case 16: /* WAIT remove + OPEN target instrument file */
         if (!op_remove_done)
             return;
         op_file_ready = false;
         op_file = NULL;
         memset(op_instrument_save_open_name, 0,
                sizeof(op_instrument_save_open_name));
-        /*
-         * Open the exact visible Instrument filename with write semantics.
-         *
-         * fopen_lfn() is required here rather than fopen(): the user-facing
-         * Instrument pool may contain mixed case, spaces, and long stems. The
-         * returned short alias is retained so the browser cache can reopen the
-         * same physical object after this save without requiring a rescan.
-         */
         if (!afatfs_fopen_lfn(op_instrument_save_display_name,
                               "w",
                               AFATFS_MATCH_CASE_INSENSITIVE,
                               op_instrument_save_open_name,
                               on_file_opened))
             return;
-        op_phase = 12;
+        op_phase = 17;
         return;
 
-    case 12: /* WAIT target instrument file */
+    case 17: /* WAIT target instrument file */
         if (!op_file_ready) return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
@@ -5428,10 +5692,10 @@ static void filesystem_saveInstrument_tick(void)
         op_write_line_index = 0u;
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
-        op_phase = 13;
+        op_phase = 18;
         return;
 
-    case 13: /* WRITE complete instrument text */
+    case 18: /* WRITE complete instrument text */
     {
         filesystem_instrument_write_ctx_t ctx = {{
             instrument,
@@ -5441,78 +5705,48 @@ static void filesystem_saveInstrument_tick(void)
                         op_instrument_save_source_slot] : 0u,
             op_instrument_save_mode
         }};
-        /*
-         * Build the root Instrument save view.
-         *
-         * What: Captures the source slot image, file voice coordinate,
-         * retained per-slot Morph amount, and normal-vs-Morph save mode for
-         * the formatter.
-         *
-         * Why: normal Instrument Save and InstrumentMrp Save share all
-         * asyncfatfs overwrite behavior. Their only storage difference is the
-         * endpoint projection inside the Instrument text file.
-         *
-         * Inputs: request-time source Scene/slot and captured save projection
-         * mode. Output: one context consumed by
-         * filesystem_nextInstrumentLine().
-         *
-         * Affiliates/clients: storage_formatInstrumentLineView(),
-         * filesystem_requestSaveInstrumentMode(), nested Instrument Save UI.
-         */
         if (filesystem_writeTextLine(filesystem_nextInstrumentLine, &ctx))
             return;
-        op_phase = 14;
+        op_phase = 19;
         return;
     }
 
-    case 14: /* CLOSE target instrument file */
+    case 19: /* CLOSE target instrument file */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 15;
+            op_phase = 20;
         return;
 
-    case 15: /* WAIT CLOSE target instrument file */
+    case 20: /* WAIT CLOSE target instrument file */
         if (!op_close_done) return;
         op_file = NULL;
-        op_phase = 16;
+        op_phase = 21;
         return;
 
-    case 16: /* RETURN ROOT + UPDATE CACHE */
+    case 21: /* RETURN ROOT + UPDATE CACHE */
         if (!afatfs_chdir(NULL))
             return;
-        /*
-         * Make the saved file immediately visible to nested Instrument Load.
-         *
-         * Inputs are the exact display filename and returned asyncfatfs short
-         * alias. The helper removes older matching cache entries before adding
-         * this one, so re-saving the same visible Instrument updates selection
-         * identity instead of showing duplicate browser rows.
-         */
         filesystem_updateInstrumentCacheAfterSave(
             op_instrument_save_display_name,
             op_instrument_save_open_name);
         if (!morph_save) {
-            /*
-             * Retain Instrument source name only for normal Instrument Save.
-             *
-             * What: Skips resident source-name mutation when this writer was
-             * entered for InstrumentMrp Save.
-             *
-             * Why: Morph Save writes a transformed file while preserving the
-             * currently loaded Instrument identity. Updating the retained stem
-             * would make later normal Kit/Instrument Save pretend the
-             * morph-export filename is the loaded source.
-             *
-             * Inputs: morph_save flag plus request-time source Scene/slot.
-             * Outputs: SceneData source-name metadata for normal save only.
-             *
-             * Affiliates/clients: menu_instrumentSaveSeedName(), normal root
-             * Instrument Save, InstrumentMrp Save no-name-change tests.
-             */
             scene_setInstrumentSourceName(op_instrument_save_source_scene,
                                           op_instrument_save_source_slot,
                                           op_instrument_save_display_name);
         }
+        
+        /*
+         * If we just saved a Drum instrument, the cached list of Drum instruments
+         * has been updated by filesystem_updateInstrumentCacheAfterSave. We must
+         * recreate the .hcindex file so that the next boot or menu load will
+         * see the newly added instrument without a full directory scan.
+         */
+        if (op_instrument_save_type == INSTRUMENT_TYPE_DRM) {
+            current_op = FS_INTERNAL_OP_CREATE_BOOT_INDEX;
+            op_phase = 0;
+            return;
+        }
+
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -10000,6 +10234,7 @@ static void filesystem_scanInstruments_tick(void)
     case 0: /* CHDIR root */
         if (!afatfs_chdir(NULL))
             return;
+        op_instrument_scan_type = INSTRUMENT_TYPE_DRM; // Start with first type
         op_phase = 1;
         return;
 
@@ -10023,7 +10258,7 @@ static void filesystem_scanInstruments_tick(void)
         op_phase = 2;
         return;
 
-    case 2: /* WAIT_OPEN */
+    case 2: /* WAIT_OPEN Instrument/ */
         if (!op_file_ready) return;
         if (op_file == NULL) {
             filesystem_finish(FS_STATUS_DONE);
@@ -10036,11 +10271,63 @@ static void filesystem_scanInstruments_tick(void)
     case 3: /* CHDIR Instrument/ */
         if (!afatfs_chdir(op_kit_root_dir))
             return;
-        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
         op_phase = 4;
         return;
 
-    case 4: /* FIND_NEXT */
+    case 4: /* CLOSE Instrument/ */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5;
+        return;
+
+    case 5: /* WAIT_CLOSE Instrument/ */
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_phase = 6;
+        return;
+
+    case 6: /* NEXT SUBDIRECTORY LOOP */
+        if (op_instrument_scan_type >= INSTRUMENT_TYPE_UNKNOWN) {
+            op_phase = 12; // all types scanned
+            return;
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        
+        /*
+         * We use AFATFS_MATCH_CASE_INSENSITIVE here when opening subdirectories because users 
+         * frequently copy/create these folders manually on their computers, which may result
+         * in casing variations like "drum", "Drum", or "DRUM". FAT is fundamentally case-insensitive,
+         * so this prevents user-created folders from becoming "invisible" to the scan.
+         */
+        if (!afatfs_opendir_lfn(filesystem_getInstrumentSubdir(op_instrument_scan_type),
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                NULL,
+                                on_file_opened))
+            return;
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT_OPEN SUBDIRECTORY */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            /* Missing subdir, skip to next type */
+            op_instrument_scan_type = (instrument_type_t)(op_instrument_scan_type + 1);
+            op_phase = 6;
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 8;
+        return;
+
+    case 8: /* CHDIR SUBDIRECTORY */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
+        op_phase = 9;
+        return;
+
+    case 9: /* FIND_NEXT */
     {
         afatfsOperationStatus_e st =
             afatfs_findNextObject(op_kit_root_dir,
@@ -10048,27 +10335,11 @@ static void filesystem_scanInstruments_tick(void)
                                   &op_object);
         if (st == AFATFS_OPERATION_IN_PROGRESS)
             return;
-        if (st == AFATFS_OPERATION_FAILURE) {
+        if (st == AFATFS_OPERATION_FAILURE || op_object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 5;
+            op_phase = 10;
             return;
         }
-        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
-            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 5;
-            return;
-        }
-        /*
-         * Keep all ordinary files visible to the product classifier.
-         *
-         * Dot-prefixed files are not hidden here by filesystem policy. They
-         * simply fail the registered instrument extension/type check unless
-         * they are genuine instrument files. displayName is the user-facing LFN
-         * or case-preserved SFN spelling; shortName is the identity alias used
-         * by the current file-open path after selection.
-         */
         if (op_object.id.kind == AFATFS_OBJECT_FILE) {
             filesystem_recordInstrumentFile(op_object.id.displayName,
                                             op_object.id.shortName);
@@ -10076,22 +10347,46 @@ static void filesystem_scanInstruments_tick(void)
         return;
     }
 
-    case 5: /* CLOSE */
+    case 10: /* CLOSE SUBDIRECTORY */
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 6;
+            op_phase = 11;
         return;
 
-    case 6: /* WAIT_CLOSE */
+    case 11: /* WAIT_CLOSE SUBDIRECTORY + CHDIR PARENT */
+    {
         if (!op_close_done) return;
         op_kit_root_dir = NULL;
-        op_phase = 7;
+        
+        /*
+         * WARNING: afatfs_chdirParent returns an afatfsOperationStatus_e enum, NOT a boolean.
+         * 
+         * AFATFS_OPERATION_SUCCESS (0): The parent directory was successfully resolved and opened.
+         * AFATFS_OPERATION_IN_PROGRESS (1): The sector load is still asynchronous, wait and retry.
+         * AFATFS_OPERATION_FAILURE (2): The parent directory cannot be resolved.
+         * 
+         * Using `if (!afatfs_chdirParent())` is catastrophic because SUCCESS (0) evaluates to true
+         * and IN_PROGRESS (1) evaluates to false. This will trap the state machine in this phase
+         * forever on success!
+         */
+        afatfsOperationStatus_e st = afatfs_chdirParent();
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            op_phase = 12; // Force exit on severe filesystem error
+            return;
+        }
+        
+        // Success: advance to the next subdirectory
+        op_instrument_scan_type = (instrument_type_t)(op_instrument_scan_type + 1);
+        op_phase = 6;
         return;
+    }
 
-    case 7: /* CHDIR root + FINISH */
+    case 12: /* CHDIR root + FINISH */
         if (!afatfs_chdir(NULL))
             return;
-        filesystem_finish(op_close_status);
+        filesystem_finish(FS_STATUS_DONE);
         return;
 
     default:
@@ -11814,6 +12109,10 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_SCAN_INSTRUMENTS:
         filesystem_scanInstruments_tick();
         break;
+
+    case FS_INTERNAL_OP_LOAD_INDEX:
+        filesystem_loadBootIndex_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_NAME:
         filesystem_loadName_tick();
         break;
@@ -12454,6 +12753,18 @@ uint16_t filesystem_bankChildSceneMask(void)
     return op_bank_child_present_mask;
 }
 
+bool filesystem_requestLoadBootIndex(fs_completion_cb_t cb)
+{
+    /*
+     * Start loading the boot instrument index from the SD card.
+     *
+     * Inputs: optional completion callback. Outputs: returns false if the
+     * queue is busy, otherwise posts FS_INTERNAL_OP_LOAD_INDEX.
+     */
+    instrument_file_count[INSTRUMENT_TYPE_DRM] = 0u;
+    return filesystem_start(FS_INTERNAL_OP_LOAD_INDEX, FS_FILE_KIT, 0, cb);
+}
+
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
 {
     /*
@@ -13083,6 +13394,8 @@ uint8_t filesystem_instrumentCount(instrument_type_t type)
      */
     if (type >= INSTRUMENT_TYPE_UNKNOWN)
         return 0u;
+    if (type == INSTRUMENT_TYPE_DRM)
+        return fs_list_cache_count;
     return instrument_file_count[type];
 }
 
@@ -13096,8 +13409,14 @@ const char *filesystem_instrumentName(instrument_type_t type,
      * eight-character NUL-terminated stem, or "Empty   " for invalid/empty
      * selections. The returned pointer is filesystem-owned cache storage.
      */
-    if (type >= INSTRUMENT_TYPE_UNKNOWN ||
-        browser_index >= instrument_file_count[type])
+    if (type >= INSTRUMENT_TYPE_UNKNOWN)
+        return "Empty   ";
+    if (type == INSTRUMENT_TYPE_DRM) {
+        if (browser_index >= fs_list_cache_count)
+            return "Empty   ";
+        return fs_list_cache_name[browser_index];
+    }
+    if (browser_index >= instrument_file_count[type])
         return "Empty   ";
     return instrument_file_name[type][browser_index];
 }
@@ -13115,9 +13434,15 @@ uint16_t filesystem_instrumentDisplayIndex(instrument_type_t type,
      * entries per type, but the saturation lives here so the UI rule stays with
      * the browser data source if the cache grows later.
      */
-    if (type >= INSTRUMENT_TYPE_UNKNOWN ||
-        browser_index >= instrument_file_count[type])
+    if (type >= INSTRUMENT_TYPE_UNKNOWN)
         return 0u;
+    if (type == INSTRUMENT_TYPE_DRM) {
+        if (browser_index >= fs_list_cache_count)
+            return 0u;
+    } else {
+        if (browser_index >= instrument_file_count[type])
+            return 0u;
+    }
     display_index = (uint16_t)browser_index + 1u;
     return (display_index > 999u) ? 999u : display_index;
 }

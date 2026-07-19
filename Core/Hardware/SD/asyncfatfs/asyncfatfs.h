@@ -308,10 +308,36 @@ bool afatfs_ftell(afatfsFilePtr_t file, uint32_t *position);
  */
 bool afatfs_mkdir(const char *filename, afatfsFileCallback_t complete);
 bool afatfs_opendir(const char *filename, afatfsFileCallback_t complete);
+/**
+ * @brief Create a new directory with a VFAT Long File Name (LFN), or open it if it exists.
+ *
+ * Scans the current directory for an exact or case-insensitive match (depending on matchMode)
+ * against `displayName`. If a match is found and it is a directory, it is opened. If not,
+ * a new directory is created using LFN entries for `displayName` and a generated 8.3 alias.
+ *
+ * @param displayName The intended long name (e.g. "My Folder").
+ * @param matchMode AFATFS_MATCH_CASE_SENSITIVE for exact match, AFATFS_MATCH_CASE_INSENSITIVE for folded match.
+ * @param openNameOut Buffer (AFATFS_SHORT_FILENAME_MAX) to receive the 8.3 short name alias generated. May be NULL if not needed.
+ * @param complete Callback executed when the handle is ready. Passed NULL on failure.
+ * @return true if the creation/open operation was successfully queued, false if too many files are open.
+ */
 bool afatfs_mkdir_lfn(const char *displayName,
                       afatfsMatchMode_t matchMode,
                       char openNameOut[AFATFS_SHORT_FILENAME_MAX],
                       afatfsFileCallback_t complete);
+
+/**
+ * @brief Open an existing directory by its VFAT Long File Name (LFN).
+ *
+ * Similar to afatfs_mkdir_lfn, but will strictly fail if the directory does not already exist.
+ * It will not attempt to create a new directory. This is used for navigation where creation is unintended.
+ *
+ * @param displayName The intended long name to search for.
+ * @param matchMode AFATFS_MATCH_CASE_SENSITIVE for exact match, AFATFS_MATCH_CASE_INSENSITIVE for folded match.
+ * @param openNameOut Buffer to receive the 8.3 short name alias. May be NULL if not needed.
+ * @param complete Callback executed when the handle is ready. Passed NULL on failure.
+ * @return true if the open operation was successfully queued, false if too many files are open.
+ */
 bool afatfs_opendir_lfn(const char *displayName,
                         afatfsMatchMode_t matchMode,
                         char openNameOut[AFATFS_SHORT_FILENAME_MAX],
@@ -327,7 +353,29 @@ void afatfs_findFirstObjectInDir(afatfsDirHandle_t parent, afatfsObjectFinder_t 
 bool afatfs_fopenChild(afatfsDirHandle_t parent, const char *displayName, afatfsCreateMode_t mode, afatfsFileCallback_t complete);
 bool afatfs_mkdirChild(afatfsDirHandle_t parent, const char *displayName, afatfsCreateMode_t mode, afatfsFileCallback_t complete);
 
+/**
+ * @brief Change the working directory to the specified directory handle.
+ *
+ * Once this synchronously succeeds, the global `afatfs.currentDirectory` becomes the target.
+ * Passing NULL resets the current directory to the FAT root directory.
+ *
+ * @param dirHandle An open directory handle, or NULL for root.
+ * @return true on immediate success. false if the filesystem or handle is busy (caller should retry).
+ */
 bool afatfs_chdir(afatfsFilePtr_t dirHandle);
+
+/**
+ * @brief Change the working directory to the parent of the current directory ("..").
+ *
+ * **WARNING**: This function executes asynchronously and returns an enum, not a boolean!
+ * Evaluators must check the return against `AFATFS_OPERATION_SUCCESS`, `AFATFS_OPERATION_IN_PROGRESS`,
+ * or `AFATFS_OPERATION_FAILURE`. Using `!afatfs_chdirParent()` will evaluate `SUCCESS` (0) as true
+ * and `IN_PROGRESS` (1) as false, causing catastrophic infinite loops!
+ *
+ * @return AFATFS_OPERATION_SUCCESS (0) when complete.
+ *         AFATFS_OPERATION_IN_PROGRESS (1) if asynchronous sector reads are still pending.
+ *         AFATFS_OPERATION_FAILURE (2) if the parent lookup failed (e.g., at root or corrupt FS).
+ */
 afatfsOperationStatus_e afatfs_chdirParent(void);
 
 void afatfs_findFirst(afatfsFilePtr_t directory, afatfsFinder_t *finder);
