@@ -31,7 +31,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Current filesystem authority:
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`; read
-  `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS.
+  `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
+  reference set is indexed below, including the historical DSP, memory, module,
+  and oscillator-interpolation documents.
 - Source layout is now `Core/Bank/Scene/` and `Core/Bank/BankData.*`, not
   `Core/Scene/`.
 - Scene/Bank saves currently persist draft v2 `pattern.pat`: 128x7 active-step
@@ -87,10 +89,12 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   ├── ENHANCED_FEATURES.md        ← future enhancement notes
 │   ├── OSC_INTERP_AUDIT.md         ← oscillator interpolation audit
 │   ├── specification_reference/
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API boundary map, updated through Session 039
-│   │   ├── FILESYSTEM_SPEC.md         ← authoritative filesystem, kit/instrument file, Scene storage, and save/load target spec
-│   │   ├── MEMORY_AUDIT.md            ← historical Session 023 memory region audit notes
-│   │   └── DSP_AUDIT.md               ← historical DSP pipeline audit and hot-path notes
+│   │   ├── ASYNCFATFS_REFERENCE.md    ← low-level async FAT/VFAT API contracts, pumping, LFN/object identity, deletion, and caller rules
+│   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
+│   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
+│   │   ├── MEMORY_AUDIT.md            ← historical SRAM/flash/ITCM/DTCM/DMA memory measurements and resource watch items
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 040
+│   │   └── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -204,6 +208,23 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 | Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
 | Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
 | Current known issues and reminders? | `MEMORY.md` |
+
+### Specification-reference index
+
+These are the six authoritative/reference documents under
+`knowledge_files/specification_reference/`. `FILESYSTEM_SPEC.md` is the
+product-level source of truth; `ASYNCFATFS_REFERENCE.md` is its low-level
+filesystem implementation companion. The remaining documents are audits or
+API/feature references and may contain historical snapshots as noted below.
+
+| File | What it contains | Use it when |
+|------|------------------|------------|
+| `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, sanitization, LFN/SFN display-vs-alias identity, object iteration, navigation, removal, rename, flush boundaries, production users, and unfinished APIs. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
+| `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
+| `FILESYSTEM_SPEC.md` | Current product storage specification: root layout, numbered Kit/Scene/Bank folders, `kitset.kcg`, instrument schemas/keys, Scene-owned state, Morph/modulation, Pattern/Sample/Wavetable/Effect targets, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
+| `MEMORY_AUDIT.md` | Historical memory snapshot: flash/SRAM/ITCM/DTCM region usage, largest symbols, DMA non-cacheable window usage, and memory watch items. It predates later ownership changes and must be remeasured for new decisions. | Evaluating RAM/flash placement or buffer capacity. |
+| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map for Pattern, UI, sequencer, Preset, ParameterArray, instruments, modulation, MIDI, filesystem, storageTypes, and boot; also records removed front-panel protocol surfaces. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
 
 ---
 
@@ -430,7 +451,7 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
   three-digit slot so the kit remains loadable.
 - Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
 - `kitBrowser.c/h` intentionally remains kit-only; pattern/performance/all use typed name loading and direct slot handling.
-- Boot path: synchronous polling loop before `audioCodec_init()` (audio not running, blocking OK).
+- Boot path: synchronous polling loop before `audioCodec_init()` (audio not running, blocking OK). After a successful mount, boot creates/truncates root `.hcindex`, writes exactly four hardware-RNG bytes, and waits for the final asyncfatfs flush before library scans.
 - Historical globals compatibility (Session 025): the former glo.cfg/ALL
   binary 22/23-byte behavior is retained here only as an archive note.
   Current filesystem globals use strict keyed settings.cfg version 1 with
@@ -542,8 +563,9 @@ initMidiUart(); usb_init();
 filesystem_initCardAndMountBlocking(); // card SPI mode + afatfs mount, pre-audio
 menu_init();           // calls memset on parameter_values — do NOT also memset in main()
 // Synchronous Kit/Scene/Bank/Instrument scans via filesystem_requestScan* + polling
+// After mount and before those scans, create/truncate root .hcindex with 4 RNG bytes + flush
 // Synchronous boot load tries lowest Bank, then lowest Scene, then lowest Kit, then defaults
-// Synchronous globals load (GLO.CFG) via preset_loadGlobals + polling + menu_pollPresetStatus
+// Synchronous globals load (settings.cfg) via preset_loadGlobals + polling + menu_pollPresetStatus
 audioCodec_init();     // single audio entry point — AFTER all SD boot ops
 sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 // main loop: filesystem_tick() + menu_pollPresetStatus() every iteration

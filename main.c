@@ -295,6 +295,14 @@ int main(void)
         menu_setNumSamples(sampleMemory_getNumSamples());
 
         if (sd_ok) {
+            /*
+             * Create a fresh root-level `.hcindex` boot marker before any
+             * library scans. The filesystem helper writes exactly four bytes
+             * from the hardware RNG and waits for the final flush while audio
+             * is still stopped.
+             */
+            (void)filesystem_createBootIndexBlocking();
+
             /* Synchronous kit scan (blocking at boot, OK) */
             filesystem_requestScanKits(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)

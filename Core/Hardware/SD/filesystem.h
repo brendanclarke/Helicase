@@ -102,6 +102,11 @@ typedef void (*fs_completion_cb_t)(void);
 
 uint8_t     filesystem_initCardAndMountBlocking(void);
 void        filesystem_initAfterCardReady(void);
+/* Create/truncate the root `.hcindex` boot marker with four hardware-RNG bytes.
+ * This blocking helper is valid only before audio starts; normal runtime SD
+ * work remains asynchronous through filesystem_tick(). Returns nonzero after
+ * the file and final FAT/data flush have completed. */
+uint8_t     filesystem_createBootIndexBlocking(void);
 void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
 const char *filesystem_errorCode(void);

@@ -87,6 +87,7 @@
 #define FS_CONTAINER_KIT_LEN 512u
 #define FS_CONTAINER_PAD_BYTE 0xffu
 #define FS_KIT_LFN_MAX 80u
+#define FS_BOOT_INDEX_BYTES 4u
 /*
  * Text line buffer for storageTypes schemas.
  *
@@ -105,6 +106,7 @@
 typedef enum {
     FS_INTERNAL_OP_NONE,
     FS_INTERNAL_OP_FLUSH_FINISH,
+    FS_INTERNAL_OP_CREATE_BOOT_INDEX,
     FS_INTERNAL_OP_LOAD_KIT,
     FS_INTERNAL_OP_LOAD_KIT_MORPH,
     FS_INTERNAL_OP_LOAD_SCENE,
@@ -482,6 +484,7 @@ static void filesystem_saveKitDirectory_tick(void);
 static void filesystem_saveSceneDirectory_tick(void);
 static void filesystem_loadBankDirectory_tick(void);
 static void filesystem_saveBankDirectory_tick(void);
+static void filesystem_createBootIndex_tick(void);
 static void filesystem_scanBanks_tick(void);
 static void filesystem_scanBankScenes_tick(void);
 static void filesystem_deleteTreeStartWithOpenName(const char *display_name,
@@ -613,6 +616,19 @@ static afatfsFilePtr_t op_test_dir = NULL;
 static uint8_t op_test_lookup_result = 0u;
 static uint8_t op_test_verify_seen_alias = 0u;
 static uint8_t op_test_verify_seen_fold = 0u;
+
+/*
+ * Boot identity file payload.
+ *
+ * What: Four bytes generated from the STM32F765 hardware RNG and written to
+ * the root-level `.hcindex` file once the SD card is mounted.
+ * Why: The file provides a fresh card-side boot marker for external tools and
+ * future firmware identity/index work without adding a product schema.
+ * Inputs: initRng() has already run during dsp_init() before the SD boot path.
+ * Outputs: filesystem_createBootIndex_tick() streams these bytes through the
+ * normal asyncfatfs file handle and waits for the final filesystem flush.
+ */
+static uint8_t op_boot_index_bytes[FS_BOOT_INDEX_BYTES];
 
 #define FS_TEST_LOOKUP_ERROR 0u
 #define FS_TEST_LOOKUP_OPEN_ALIAS 1u
@@ -1555,6 +1571,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
 {
     switch (op) {
     case FS_INTERNAL_OP_FLUSH_FINISH:          return "Flush";
+    case FS_INTERNAL_OP_CREATE_BOOT_INDEX:     return "HIdx";
     case FS_INTERNAL_OP_LOAD_KIT:              return "KitL";
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:        return "KMrL";
     case FS_INTERNAL_OP_LOAD_SCENE:            return "ScnL";
@@ -1675,6 +1692,82 @@ static void filesystem_flushFinish_tick(void)
         return;
 
     filesystem_complete(op_flush_final_status);
+}
+
+/* -----------------------------------------------------------------------
+** BOOT INDEX CREATE state machine
+**
+** Creates/truncates the root `.hcindex` file and writes exactly four bytes
+** generated at operation start from the hardware RNG. This runs only during
+** the synchronous pre-audio boot sequence, but it still uses the normal
+** foreground-pumped asyncfatfs contract and filesystem_finish() flush gate.
+**
+** Phases: 0=open/prepare, 1=wait open, 2=write/close, 3=wait close
+** ----------------------------------------------------------------------- */
+static void filesystem_createBootIndex_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* RETURN TO ROOT + GENERATE PAYLOAD */
+        if (!afatfs_chdir(NULL))
+            return;
+        {
+            uint16_t random_word;
+
+            random_word = (uint16_t)GetRngValue();
+            op_boot_index_bytes[0] = (uint8_t)(random_word & 0xffu);
+            op_boot_index_bytes[1] = (uint8_t)(random_word >> 8);
+            random_word = (uint16_t)GetRngValue();
+            op_boot_index_bytes[2] = (uint8_t)(random_word & 0xffu);
+            op_boot_index_bytes[3] = (uint8_t)(random_word >> 8);
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        op_item_offset = 0u;
+        if (!afatfs_fopen_lfn(".hcindex",
+                              "w",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1: /* WAIT OPEN */
+        if (!op_file_ready)
+            return;
+        if (op_file == NULL) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2: /* WRITE FOUR RANDOM BYTES */
+        if (op_item_offset < FS_BOOT_INDEX_BYTES) {
+            uint32_t written = afatfs_fwrite(
+                op_file,
+                op_boot_index_bytes + op_item_offset,
+                FS_BOOT_INDEX_BYTES - op_item_offset);
+
+            op_item_offset = (uint8_t)(op_item_offset + written);
+            return;
+        }
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 3u;
+        return;
+
+    case 3: /* WAIT CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
 }
 
 /* Copy display text into an exact eight-character preset/LCD field.
@@ -11565,6 +11658,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_FLUSH_FINISH:
         filesystem_flushFinish_tick();
         break;
+    case FS_INTERNAL_OP_CREATE_BOOT_INDEX:
+        filesystem_createBootIndex_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_KIT:
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:
         filesystem_loadKitDirectory_tick();
@@ -11717,6 +11813,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_item_offset = 0;
     op_loaded_active_pattern_running = 0;
     op_file_version = 0;
+    memset(op_boot_index_bytes, 0, sizeof(op_boot_index_bytes));
     op_write_line_len = 0u;
     op_write_line_offset = 0u;
     op_write_line_index = 0u;
@@ -11803,6 +11900,31 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(op_staged_instrument_stem, 0, sizeof(op_staged_instrument_stem));
     completion_callback = cb;
     return true;
+}
+
+uint8_t filesystem_createBootIndexBlocking(void)
+{
+    /*
+     * Boot-only synchronous wrapper around the async `.hcindex` writer.
+     * Inputs: a mounted, ready asyncfatfs volume and an initialized hardware
+     * RNG. Output: one four-byte root file, or zero if the operation fails.
+     * This is intentionally called before audioCodec_init(); runtime SD work
+     * remains asynchronous through filesystem_tick().
+     */
+    if (!filesystem_start(FS_INTERNAL_OP_CREATE_BOOT_INDEX,
+                          FS_FILE_SETTINGS,
+                          0u,
+                          NULL))
+        return 0u;
+
+    while (status == FS_STATUS_BUSY)
+        filesystem_tick();
+
+    {
+        uint8_t success = (uint8_t)(status == FS_STATUS_DONE);
+        filesystem_ack();
+        return success;
+    }
 }
 
 bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb)

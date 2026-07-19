@@ -18,7 +18,8 @@ Use this document to distinguish three things:
   instrument parameter images, Kit/Instrument Morph Load, Kit/Instrument Morph
   Save, normal new-format Kit Save, root Instrument Save, root Scene
   Load/Save, 16-Scene root Bank scan/load/save, keyed settings.cfg, and
-  File/Dir/sDir asyncfatfs diagnostics behind Dev Mode.
+  File/Dir/sDir asyncfatfs diagnostics behind Dev Mode, and the root `.hcindex`
+  boot marker.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
 - Not implemented yet: crash-recoverable Scene/Bank autosave promotion, real
@@ -175,6 +176,17 @@ Settled target root file:
 ```text
 settings.cfg
 ```
+
+Boot-created root marker:
+
+```text
+.hcindex
+```
+
+After a successful SD mount and before library scans, firmware creates or
+truncates `.hcindex`, writes exactly four bytes from the STM32F765 hardware
+RNG, closes it, and waits for the asyncfatfs flush boundary. It is an opaque
+boot marker, not a settings/schema file; normal product scanners ignore it.
 
 `settings.cfg` replaces legacy `GLO.CFG`/`glo.cfg` as the current system-settings
 file. It stores allowlisted system-level settings and the active Bank number,
