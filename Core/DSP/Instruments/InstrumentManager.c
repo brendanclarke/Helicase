@@ -24,22 +24,25 @@
  *
  * ParameterArray/SceneData allocate the amount of per-slot storage. These
  * descriptors define what each storage cell means for a drum/snare/cymbal/hat
- * slot and how the value reaches that instrument's runtime instance.
+ * slot and how the value reaches that instrument's runtime instance. The
+ * extension and storage_directory fields are intentionally adjacent in every
+ * row: filesystem.c can classify a filename and navigate to its `.hcindex`
+ * folder through one registry record, with no parallel type-folder table.
  */
 static const instrument_registry_entry_t instrument_registry[] = {
-    { INSTRUMENT_TYPE_DRM, "drm", drum_instrument_display_label, ".drm",
+    { INSTRUMENT_TYPE_DRM, "drm", drum_instrument_display_label, ".drm", "Drum",
       DRUM_INSTRUMENT_TYPE_FLAGS,
       drum_param_descriptors, DRUM_PARAM_DESCRIPTOR_COUNT,
       drum_menu_pages, DRUM_MENU_PAGE_COUNT },
-    { INSTRUMENT_TYPE_SNR, "snr", snare_instrument_display_label, ".snr",
+    { INSTRUMENT_TYPE_SNR, "snr", snare_instrument_display_label, ".snr", "Snare",
       SNARE_INSTRUMENT_TYPE_FLAGS,
       snare_param_descriptors, SNARE_PARAM_DESCRIPTOR_COUNT,
       snare_menu_pages, SNARE_MENU_PAGE_COUNT },
-    { INSTRUMENT_TYPE_CYM, "cym", cymbal_instrument_display_label, ".cym",
+    { INSTRUMENT_TYPE_CYM, "cym", cymbal_instrument_display_label, ".cym", "Cymbal",
       CYMBAL_INSTRUMENT_TYPE_FLAGS,
       cymbal_param_descriptors, CYMBAL_PARAM_DESCRIPTOR_COUNT,
       cymbal_menu_pages, CYMBAL_MENU_PAGE_COUNT },
-    { INSTRUMENT_TYPE_HAT, "hat", hihat_instrument_display_label, ".hat",
+    { INSTRUMENT_TYPE_HAT, "hat", hihat_instrument_display_label, ".hat", "HiHat",
       HIHAT_INSTRUMENT_TYPE_FLAGS,
       hihat_param_descriptors, HIHAT_PARAM_DESCRIPTOR_COUNT,
       hihat_menu_pages, HIHAT_MENU_PAGE_COUNT },
@@ -386,6 +389,20 @@ uint8_t instrumentManager_filenameMatchesType(const char *filename,
         }
     }
     return 1u;
+}
+
+const char *instrumentManager_storageDirectory(instrument_type_t type)
+{
+    const instrument_registry_entry_t *entry =
+        instrumentManager_registryEntry(type);
+
+    /*
+     * Borrow the immutable folder component from the same registry row that
+     * owns the type extension. Returning NULL for an unknown type lets every
+     * asynchronous filesystem caller fail before attempting to open a malformed
+     * path, while valid rows share one source of truth for storage navigation.
+     */
+    return entry ? entry->storage_directory : NULL;
 }
 
 const ParamDescriptor *instrumentManager_descriptor(instrument_type_t type,

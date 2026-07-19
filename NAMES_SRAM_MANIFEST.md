@@ -31,8 +31,16 @@ are retained beside these names and determine whether a cache entry is valid.
 | Kit | kit_slot_name[1000][9] | kit_slot_open_name[1000][13] | 1,000 slots |
 | Scene | scene_slot_name[1000][9] | scene_slot_open_name[1000][13] | 1,000 slots |
 | Bank | bank_slot_name[1000][9] | bank_slot_open_name[1000][13] | 1,000 slots |
-| Root Instrument pool | instrument_file_name[type][128][9] | instrument_file_open_name[type][128][13] | 128 entries per Instrument type |
-| Root Instrument pool | instrument_file_stem[type][128][17] | — | 128 entries per Instrument type |
+| Root Instrument pool | `fs_list_cache_name[128][9]` | None retained | 128 entries total; active type tracked separately |
+| Root Instrument pool | `fs_list_cache_type` + count | — | 1 active type and 1 shared entry count |
+
+The root Instrument browser retains only one generalized display-name cache of
+128 entries and one count. The cache is tagged with the currently loaded
+Instrument type; changing type or exiting nested Instrument Load/Save disposes
+it, and entering either nested menu reloads the selected type's `.hcindex`.
+FAT short aliases are operation-local values, and the longer source stem used
+after a successful load is staged metadata; neither is retained as a per-entry
+browser cache.
 
 The Kit and Scene open-key arrays normally retain a FAT short alias suitable
 for the associated low-level open path. The Bank cache deliberately retains

@@ -163,6 +163,17 @@ typedef struct {
     const char *type_text;
     const char *display_label;
     const char *extension;
+    /*
+     * Storage directory owned by this registry row.
+     *
+     * Inputs: none; this is immutable product metadata. Output: the exact
+     * display component used below /Instrument/ for this instrument type.
+     * Filesystem clients use instrumentManager_storageDirectory() instead of
+     * duplicating Drum/Snare/Cymbal/HiHat folder names in storage state
+     * machines. Keeping the directory beside the extension makes type
+     * classification and storage navigation change together.
+     */
+    const char *storage_directory;
     uint8_t type_flags;
     const ParamDescriptor *descriptors;
     uint8_t descriptor_count;
@@ -189,6 +200,17 @@ uint8_t instrumentManager_typeSelectableForSceneSlot(
     uint8_t scene_index, uint8_t destination_slot, instrument_type_t candidate);
 uint8_t instrumentManager_filenameMatchesType(const char *filename,
                                                instrument_type_t type);
+/*
+ * Return the registry-owned Instrument storage directory.
+ *
+ * Inputs: one registered instrument type. Output: the immutable directory
+ * component below /Instrument/, or NULL for INSTRUMENT_TYPE_UNKNOWN. Clients:
+ * filesystem boot index creation, per-type index loading, Instrument scan,
+ * and Instrument Save. This accessor is the only cross-module path to the
+ * registry's folder metadata, so filesystem.c cannot grow a second hardcoded
+ * type-to-directory table.
+ */
+const char *instrumentManager_storageDirectory(instrument_type_t type);
 const ParamDescriptor *instrumentManager_descriptor(instrument_type_t type,
                                                      uint8_t descriptor_index);
 const ParamDescriptor *instrumentManager_descriptorByKey(instrument_type_t type,

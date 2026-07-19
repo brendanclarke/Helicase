@@ -102,10 +102,12 @@ typedef void (*fs_completion_cb_t)(void);
 
 uint8_t     filesystem_initCardAndMountBlocking(void);
 void        filesystem_initAfterCardReady(void);
-/* Create/truncate the root `.hcindex` boot marker with four hardware-RNG bytes.
- * This blocking helper is valid only before audio starts; normal runtime SD
- * work remains asynchronous through filesystem_tick(). Returns nonzero after
- * the file and final FAT/data flush have completed. */
+/*
+ * Create/refresh one `.hcindex` file in every registry-defined Instrument
+ * directory. This boot-only wrapper is valid before audio starts; normal
+ * runtime SD work remains asynchronous through filesystem_tick(). It returns
+ * nonzero only after every index file and the final FAT/data flush complete.
+ */
 uint8_t     filesystem_createBootIndexBlocking(void);
 void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
@@ -230,7 +232,20 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanBanks(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
-bool filesystem_requestLoadBootIndex(fs_completion_cb_t cb);
+/*
+ * Load one registered Instrument type's `.hcindex` asynchronously.
+ *
+ * Inputs: a registered type and optional completion callback. Output: the
+ * single shared Instrument name cache is replaced from that type's own
+ * directory index. Clients call this when either nested Instrument Load or
+ * nested Instrument Save is entered, and whenever its type changes. The
+ * request never performs blocking SD work and returns false when the
+ * filesystem is already busy or the type is not present in the registry.
+ */
+bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
+                                           fs_completion_cb_t cb);
+/* Dispose the single shared Instrument browser name cache. */
+void filesystem_clearInstrumentCache(void);
 /*
  * Generic asyncfatfs File/Dir test browser and payload API.
  *

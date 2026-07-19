@@ -2794,17 +2794,35 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
     }
 }
 
-static void menu_drumIndexLoadComplete(void)
+static void menu_instrumentIndexLoadComplete(void)
 {
+    /*
+     * Finish one typed Instrument index load for either nested Load or Save.
+     * The filesystem has replaced the selected type's general name cache;
+     * clamping now makes a previously selected browser index safe when the
+     * card contains fewer entries than the old cache. The same callback is
+     * deliberately shared by every registry type so Drum has no special
+     * browser contract left.
+     */
     menu_storageBusy = 0u;
     menu_instrumentLoadClampIndex();
     menu_repaintAll();
 }
 
-static void menu_requestDrumIndexLoad(void)
+static void menu_requestInstrumentIndexLoad(instrument_type_t type)
 {
+    /*
+     * Request the selected type's own `.hcindex` whenever nested Instrument
+     * Load or Save enters/selects a type. Inputs: a registry type captured by
+     * Menu. Output: the UI remains locked until the foreground SD state
+     * machine has loaded that type's general-purpose name cache. A rejected
+     * request is deferred through the existing selection retry path, which
+     * handles a still-busy filesystem without inventing a second queue.
+     */
+    filesystem_clearInstrumentCache();
     menu_storageBusy = 1u;
-    if (!filesystem_requestLoadBootIndex(menu_drumIndexLoadComplete))
+    if (!filesystem_requestLoadInstrumentIndex(
+            type, menu_instrumentIndexLoadComplete))
         menu_deferSelectionRequest = 1u;
 }
 
@@ -3040,8 +3058,8 @@ static void menu_instrumentLoadStepType(int8_t inc)
                 (uint8_t)(direction < 0 &&
                           entry->type == menu_instrumentLoadBaseType);
             menu_instrumentLoadClampIndex();
-            if (menu_instrumentLoadType == INSTRUMENT_TYPE_DRM && !menu_instrumentSaveMode)
-                menu_requestDrumIndexLoad();
+            if (!menu_instrumentLoadMorphMode)
+                menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
             return;
         }
     }
@@ -3465,17 +3483,25 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
         return 1u;
     if (menu_instrumentLoadActive) {
         if (menu_instrumentSaveMode) {
+            instrument_type_t previous_type = menu_instrumentLoadType;
             menu_instrumentLoadScene = scene_index;
             menu_loadSaveSourceScene = scene_index;
             menu_kitLoadSceneMask = bit;
             menu_instrumentLoadRefreshBaseType(1u);
             menu_instrumentSaveSeedName();
+            if (menu_instrumentLoadType != previous_type &&
+                !menu_instrumentLoadMorphMode)
+                menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
         } else {
+            instrument_type_t previous_type = menu_instrumentLoadType;
             uint16_t next = (uint16_t)(menu_kitLoadSceneMask ^ bit);
             if (next != 0u)
                 menu_kitLoadSceneMask = next;
             menu_instrumentLoadScene = scene_index;
             menu_instrumentLoadRefreshBaseType(1u);
+            if (menu_instrumentLoadType != previous_type &&
+                !menu_instrumentLoadMorphMode)
+                menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
         }
     } else if (menu_activePage == SAVE_PAGE) {
         if (menu_saveOptions.what == SAVE_TYPE_BANK) {
@@ -3510,6 +3536,7 @@ void menu_loadInstrumentExit(void)
      */
     if (menu_loadInstrumentTransactionBusy())
         return;
+    filesystem_clearInstrumentCache();
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
@@ -3570,8 +3597,12 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadClampIndex();
     if (menu_instrumentSaveMode)
         menu_instrumentSaveSeedName();
-    else if (menu_instrumentLoadType == INSTRUMENT_TYPE_DRM)
-        menu_requestDrumIndexLoad();
+    /*
+     * Load and Save share the same nested Instrument browser. Refreshing the
+     * selected type's index on both entry paths prevents Save from inheriting
+     * a stale list merely because the previous page was Load or another type.
+     */
+    menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
     menu_setActiveVoice(voiceNr);
     menu_refreshLoadSceneLeds();
     if (!menu_storageBusy)
@@ -3778,6 +3809,7 @@ static void menu_loadSaveClearInstrumentVoiceBlinks(void)
 static void menu_loadSaveEnterTop(uint8_t page, uint8_t what)
 {
     menu_activePage = page;
+    filesystem_clearInstrumentCache();
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
@@ -3828,6 +3860,13 @@ static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
         menu_instrumentLoadMorphMode = morph;
     }
     menu_instrumentLoadClampIndex();
+    /*
+     * Pot-1 can enter nested Instrument Load without going through the
+     * VOICE-button entry function. Keep that alternate path equivalent: its
+     * selected registry type must load its own `.hcindex` before the browser
+     * exposes the cached list.
+     */
+    menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
     menu_setActiveVoice(voice);
     menu_loadSaveSetInstrumentVoiceLed(voice);
     menu_refreshLoadSceneLeds();
@@ -3849,6 +3888,12 @@ static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
     menu_instrumentLoadRefreshBaseType(0u);
     menu_instrumentLoadMorphMode = morph ? 1u : 0u;
     menu_instrumentSaveSeedName();
+    /*
+     * Save has a second nested-entry route through Pot 1. Refresh the same
+     * typed index here as in the VOICE-button route so Save never inherits a
+     * stale cache when it is entered directly from the top-level page.
+     */
+    menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
     menu_setActiveVoice(voice);
     menu_loadSaveSetInstrumentVoiceLed(voice);
     menu_refreshLoadSceneLeds();
@@ -6368,6 +6413,7 @@ void menu_pollPresetStatus(void)
              * SaveOptions state is restored immediately so the next repaint
              * gives a visible completion cue on the type row.
              */
+            filesystem_clearInstrumentCache();
             menu_instrumentLoadActive = 0u;
             menu_instrumentSaveMode = 0u;
             editModeActive = 1u;
@@ -6545,6 +6591,12 @@ void menu_switchPage(uint8_t pageNr)
 {
     if (menu_storageBusy) return;
 
+    if (menu_instrumentLoadActive) {
+        filesystem_clearInstrumentCache();
+        menu_instrumentLoadActive = 0u;
+        menu_instrumentSaveMode = 0u;
+    }
+
     led_clearSequencerLeds();
 
     switch (pageNr) {
@@ -6679,6 +6731,7 @@ void menu_resetSaveParameters(void)
     if (!menu_loadSaveTypeIsRestored(menu_saveOptions.what))
         menu_saveOptions.what = SAVE_TYPE_KIT;
 
+    filesystem_clearInstrumentCache();
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();

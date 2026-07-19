@@ -48,9 +48,11 @@ Implemented through Session 039:
 - The kit display name is the folder name after the three-digit slot prefix.
 - `kitset.kcg` is parsed as the six-slot kit manifest.
 - Six descriptor-keyed instrument text files are loaded from the kit folder.
-- Root `Instrument/` is scanned with asyncfatfs object iteration into a per-type
-  alphanumeric browser and a selected file can be loaded into one explicit
-  Scene/voice slot.
+- Root `Instrument/<type>/` is scanned one type at a time with asyncfatfs object
+  iteration into one shared 128-entry alphanumeric browser cache. The cache is
+  disposed between types and on nested Instrument Load/Save exit; entering or
+  changing the nested menu type reloads that type's `.hcindex` before browsing.
+  A selected file can then be loaded into one explicit Scene/voice slot.
 - Loaded instrument values write into the active `scene_t.kit` descriptor
   images, not into the old flat `parameter_values[]` sound buffer.
 - VOICE menu pages resolve through active instrument descriptor layouts in
@@ -1233,7 +1235,7 @@ Implemented:
   `Instrument/` pool. It creates/opens the root with LFN/case-sensitive
   asyncfatfs APIs, opens the target display filename with `afatfs_fopen_lfn()`,
   streams the descriptor-keyed instrument schema, and updates the root
-  Instrument browser cache from the returned display/alias pair.
+  single shared Instrument browser cache from the returned display/alias pair.
 - KitMrp and InstrumentMrp Save use the same text schemas as normal saves, but
   for morphable parameters they write the current per-voice interpolated value
   into both `[params]` and `[morph]`. This is a flattened snapshot of the

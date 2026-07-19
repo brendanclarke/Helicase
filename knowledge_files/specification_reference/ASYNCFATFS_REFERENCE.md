@@ -325,7 +325,7 @@ Don't:
   preflight, and text schemas in `storageTypes`. Bank Load clears shared
   Scene child-discovery names before every delegated local child.
 - Root Instrument scan/load/save uses object iteration, LFN root directory
-  entry, LFN file writes, per-type browser caches, and descriptor-keyed text
+  entry, one shared 128-entry browser cache, LFN file writes, and descriptor-keyed text
   schemas.
 - File/Dir/sDir diagnostic menu entries exercise exact root file/directory
   scan, open, create, child create, and persistence checks. They remain

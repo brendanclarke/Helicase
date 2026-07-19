@@ -1,6 +1,14 @@
 # Instrument Browser: Eliminate Root-Directory Name Cache from SRAM
 
-## Background and Motivation
+> Status: completed. The former per-type `instrument_file_*` browser arrays
+> described below have been removed. This document remains as the design and
+> verification record for that migration; the retained Instrument browser state
+> is one shared `fs_list_cache_name[index]` and `fs_list_cache_count`, tagged
+> with the currently loaded type. The earlier proposal to eliminate all boot
+> scans was superseded: boot now scans and writes one type at a time so this
+> single cache can still regenerate every `.hcindex`.
+
+## Background and Motivation (historical)
 
 The root Instrument browser currently keeps three static arrays in `filesystem.c`:
 

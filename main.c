@@ -335,22 +335,12 @@ int main(void)
             filesystem_ack();
 
             /*
-             * Synchronous Instrument/ scan.
-             *
-             * Inputs: mounted SD card before audio starts. Output:
-             * filesystem's per-type Instrument Load cache is populated so the
-             * Load page can immediately browse root Instrument files. This
-             * mirrors the Kit/ scan timing: blocking is acceptable here because
-             * audio rendering has not started yet.
-             */
-            filesystem_requestScanInstruments(NULL);
-            while (filesystem_status() == FS_STATUS_BUSY)
-                filesystem_tick();
-            filesystem_ack();
-
-            /*
-             * Create a fresh `.hcindex` boot marker now that the Instrument/
-             * library scans are complete and the cache is populated.
+             * Scan and create fresh per-type `.hcindex` files one type at a
+             * time. The filesystem owns one shared Instrument name cache, so
+             * each scan is written before that cache is disposed for the next
+             * registry type. The blocking helper is restricted to boot, before
+             * audio starts; runtime Save refreshes use the same state machine
+             * through filesystem_tick().
              */
             (void)filesystem_createBootIndexBlocking();
 
