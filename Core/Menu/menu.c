@@ -840,7 +840,8 @@ static char menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN + 1u] =
  */
 static instrument_type_t menu_instrumentLoadBaseType = INSTRUMENT_TYPE_DRM;
 static uint8_t menu_instrumentLoadMorphMode = 0u;
-static uint8_t menu_instrumentLoadIndex[INSTRUMENT_TYPE_UNKNOWN];
+/* Each active type keeps a 0..999 selection into the one shared name cache. */
+static uint16_t menu_instrumentLoadIndex[INSTRUMENT_TYPE_UNKNOWN];
 /*
  * Load-menu Scene and Instrument-source state.
  *
@@ -875,7 +876,7 @@ typedef enum {
 static menu_instrument_source_t menu_instrumentLoadSource =
     MENU_INSTRUMENT_SOURCE_KIT;
 static instrument_type_t menu_instrumentLoadShownType = INSTRUMENT_TYPE_DRM;
-static uint8_t menu_instrumentLoadShownIndex = 0u;
+static uint16_t menu_instrumentLoadShownIndex = 0u;
 static uint8_t editModeActive = 0;
 static uint8_t lastEncoderButton = 0;
 
@@ -913,6 +914,7 @@ static void menu_handleLoadSaveKnobDelta(uint8_t knobNr, int8_t delta);
 static void menu_loadSaveClearInstrumentVoiceBlinks(void);
 static void menu_bankLoadPreviewComplete(void);
 static void menu_requestBankLoadPreview(uint16_t slot);
+static void menu_requestLibraryIndexLoad(uint8_t what);
 static void menu_instrumentLoadClampIndex(void);
 static void menu_instrumentLoadRequestSelection(void);
 static void menu_instrumentLoadRefreshBaseType(uint8_t preserve_selected_type);
@@ -2728,6 +2730,21 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         preset_loadName(0, what);
         return;
     }
+    if ((what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) &&
+        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
+        menu_requestLibraryIndexLoad(what);
+        return;
+    }
+    if (what == SAVE_TYPE_SCENE &&
+        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_SCENE)) {
+        menu_requestLibraryIndexLoad(what);
+        return;
+    }
+    if (what == SAVE_TYPE_BANK &&
+        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_BANK)) {
+        menu_requestLibraryIndexLoad(what);
+        return;
+    }
     /*
      * Kit and KitMrp share the same browser slot but have different commit
      * semantics.
@@ -2819,11 +2836,92 @@ static void menu_requestInstrumentIndexLoad(instrument_type_t type)
      * request is deferred through the existing selection retry path, which
      * handles a still-busy filesystem without inventing a second queue.
      */
-    filesystem_clearInstrumentCache();
+    filesystem_clearNameCache();
     menu_storageBusy = 1u;
     if (!filesystem_requestLoadInstrumentIndex(
             type, menu_instrumentIndexLoadComplete))
         menu_deferSelectionRequest = 1u;
+}
+
+static void menu_libraryIndexLoadComplete(void)
+{
+    /*
+     * Publish one completed Kit, root Scene, or root Bank `.hcindex` load.
+     *
+     * The filesystem has already replaced the one shared name cache and its
+     * slot occupancy map. Menu only releases the input lock and repaints; it
+     * deliberately does not start a payload load because entering a top-level
+     * Load row is browsing, while Scene Load remains explicit-OK and Kit
+     * Load's instant-on-scroll policy is handled on later selection moves.
+     */
+    menu_storageBusy = 0u;
+    menu_repaintAll();
+}
+
+static void menu_requestLibraryIndexLoad(uint8_t what)
+{
+    fs_library_index_kind_t kind;
+    bool requested;
+
+    /*
+     * Request the only index that can supply the current top-level row.
+     *
+     * Inputs: SAVE_TYPE_KIT, SAVE_TYPE_KIT_MORPH, SAVE_TYPE_SCENE, or
+     * SAVE_TYPE_BANK.
+     * Output: the shared name cache is disposed before the asynchronous read,
+     * keeping old-library names out of the LCD during the transition. A busy
+     * filesystem is retried through Menu's existing deferred-selection path.
+     */
+    kind = (what == SAVE_TYPE_SCENE)
+        ? FS_LIBRARY_INDEX_SCENE
+        : (what == SAVE_TYPE_BANK)
+            ? FS_LIBRARY_INDEX_BANK : FS_LIBRARY_INDEX_KIT;
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    requested = (kind == FS_LIBRARY_INDEX_SCENE)
+        ? filesystem_requestLoadSceneIndex(menu_libraryIndexLoadComplete)
+        : (kind == FS_LIBRARY_INDEX_BANK)
+            ? filesystem_requestLoadBankIndex(menu_libraryIndexLoadComplete)
+            : filesystem_requestLoadKitIndex(menu_libraryIndexLoadComplete);
+    if (!requested)
+        menu_deferSelectionRequest = 1u;
+}
+
+/* Refresh the Save page's resident display after a Kit/Scene/Bank save.
+ *
+ * What: copies the name from the just-rebuilt shared `.hcindex` cache into
+ * preset_currentName for the slot that remains selected on the Save page.
+ * Why: Save-page rendering uses preset_currentName while the save is being
+ * edited; the filesystem refresh updates the shared cache but does not update
+ * that UI buffer. Clearing the cache here would also make the current slot
+ * appear stale or empty until the user changed type and re-entered it.
+ * Inputs: completed Kit, KitMrp, root Scene, or root Bank save and the unchanged menu
+ * slot. Output: the current Save type/slot stays selected and its visible name
+ * matches the newly durable directory. Instrument and other saves do not use
+ * this path because their name cache/domain has different lifecycle rules.
+ */
+static void menu_refreshSavedLibraryName(uint8_t completed_op)
+{
+    uint8_t what = (completed_op == PRESET_OP_SCENE_SAVE)
+        ? SAVE_TYPE_SCENE
+        : (completed_op == PRESET_OP_BANK_SAVE)
+            ? SAVE_TYPE_BANK
+            : (completed_op == PRESET_OP_KIT_MORPH_SAVE)
+                ? SAVE_TYPE_KIT_MORPH : SAVE_TYPE_KIT;
+    uint16_t slot = menu_currentPresetNr[what];
+    const char *name = NULL;
+
+    if (what == SAVE_TYPE_SCENE) {
+        if (filesystem_sceneSlotExists(slot))
+            name = filesystem_sceneSlotName(slot);
+    } else if (what == SAVE_TYPE_BANK) {
+        if (filesystem_bankSlotExists(slot))
+            name = filesystem_bankSlotName(slot);
+    } else if (filesystem_kitSlotExists(slot)) {
+        name = filesystem_kitSlotName(slot);
+    }
+    if (name)
+        memcpy(preset_currentName, name, 8u);
 }
 
 static void menu_bankLoadPreviewComplete(void)
@@ -2881,7 +2979,7 @@ static void menu_requestBankLoadPreview(uint16_t slot)
 
 static void menu_instrumentLoadClampIndex(void)
 {
-    uint8_t count = filesystem_instrumentCount(menu_instrumentLoadType);
+    uint16_t count = filesystem_instrumentCount(menu_instrumentLoadType);
 
     /*
      * Clamp the per-type Instrument Load browser index.
@@ -2899,13 +2997,13 @@ static void menu_instrumentLoadClampIndex(void)
     }
     if (menu_instrumentLoadIndex[menu_instrumentLoadType] >= count)
         menu_instrumentLoadIndex[menu_instrumentLoadType] =
-            (uint8_t)(count - 1u);
+            count - 1u;
 }
 
 static void menu_instrumentLoadRequestSelection(void)
 {
-    uint8_t count;
-    uint8_t index;
+    uint16_t count;
+    uint16_t index;
 
     /*
      * Immediately load the selected Instrument/ file.
@@ -3536,7 +3634,7 @@ void menu_loadInstrumentExit(void)
      */
     if (menu_loadInstrumentTransactionBusy())
         return;
-    filesystem_clearInstrumentCache();
+    filesystem_clearNameCache();
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
@@ -3809,7 +3907,7 @@ static void menu_loadSaveClearInstrumentVoiceBlinks(void)
 static void menu_loadSaveEnterTop(uint8_t page, uint8_t what)
 {
     menu_activePage = page;
-    filesystem_clearInstrumentCache();
+    filesystem_clearNameCache();
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
@@ -4601,8 +4699,8 @@ static void menu_repaintLoadSavePage(void)
     }
 
     if (menu_instrumentLoadActive) {
-        uint8_t count;
-        uint8_t index;
+        uint16_t count;
+        uint16_t index;
         uint16_t display_index;
         const kit_t *kit;
 
@@ -4712,7 +4810,7 @@ static void menu_repaintLoadSavePage(void)
         count = filesystem_instrumentCount(menu_instrumentLoadShownType);
         index = menu_instrumentLoadShownIndex;
         if (count > 0u && index >= count)
-            index = (uint8_t)(count - 1u);
+            index = count - 1u;
         display_index = filesystem_instrumentDisplayIndex(
             menu_instrumentLoadShownType, index);
 
@@ -5423,29 +5521,29 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 if (inc != 0)
                     menu_instrumentLoadStepType(inc);
             } else {
-                uint8_t count =
+                uint16_t count =
                     filesystem_instrumentCount(menu_instrumentLoadType);
                 if (count > 0u && inc != 0) {
-                    int16_t next;
+                    int32_t next;
                     if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT ||
                         menu_instrumentLoadShownType != menu_instrumentLoadType) {
-                        next = (inc < 0) ? (int16_t)(count - 1u) : 0;
+                        next = (inc < 0) ? (int32_t)(count - 1u) : 0;
                     } else {
-                        next = (int16_t)menu_instrumentLoadShownIndex +
-                               (int16_t)inc;
+                        next = (int32_t)menu_instrumentLoadShownIndex +
+                               (int32_t)inc;
                     }
                     if (next < 0)
                         next = 0;
-                    else if (next >= (int16_t)count)
-                        next = (int16_t)(count - 1u);
+                    else if (next >= (int32_t)count)
+                        next = (int32_t)(count - 1u);
                     if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT ||
                         menu_instrumentLoadShownType != menu_instrumentLoadType ||
-                        (uint8_t)next != menu_instrumentLoadShownIndex) {
+                        (uint16_t)next != menu_instrumentLoadShownIndex) {
                         menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_POOL;
                         menu_instrumentLoadShownType = menu_instrumentLoadType;
-                        menu_instrumentLoadShownIndex = (uint8_t)next;
+                        menu_instrumentLoadShownIndex = (uint16_t)next;
                         menu_instrumentLoadIndex[menu_instrumentLoadType] =
-                            (uint8_t)next;
+                            (uint16_t)next;
                         menu_instrumentLoadRequestSelection();
                     }
                 }
@@ -5507,6 +5605,12 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 if (menu_saveOptions.what != SAVE_TYPE_FILE &&
                     menu_saveOptions.what != SAVE_TYPE_DIR &&
                     menu_saveOptions.what != SAVE_TYPE_SIMPLE_DIR)
+                    /*
+                     * Keep the active Kit/Scene cache alive while the save
+                     * state machine runs. Its completion phase updates the
+                     * saved slot in this cache and regenerates `.hcindex`;
+                     * disposing here would make that refresh silently skip.
+                     */
                     menu_resetSaveParameters();
             } else {
                 switch (menu_saveOptions.what) {
@@ -5552,9 +5656,19 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
     if (editModeActive) {
         switch (menu_saveOptions.state) {
         case SAVE_STATE_EDIT_TYPE:
-            if (inc != 0)
+            if (inc != 0) {
+                uint8_t previous_type = menu_saveOptions.what;
                 menu_saveOptions.what =
                     menu_nextRestoredLoadSaveType(menu_saveOptions.what, inc);
+                /*
+                 * A top-level type change is a cache-domain change even when
+                 * the destination is Bank, File, or another non-index row.
+                 * Dispose before requesting the new row so no prior Kit/Scene
+                 * or Instrument names can survive one encoder detent.
+                 */
+                if (menu_saveOptions.what != previous_type)
+                    filesystem_clearNameCache();
+            }
             if (menu_saveOptions.what == SAVE_TYPE_BANK)
                 menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
             menu_resetLoadSaveSceneSelection();
@@ -6125,8 +6239,10 @@ void menu_pollPresetStatus(void)
          * File/Dir test ops keep their detailed result branch below.
          */
         if (menu_storageBusy &&
-            (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE))
+            (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
+            filesystem_clearNameCache();
             menu_resetSaveParameters();
+        }
         menu_showFilesystemErrorOverlay();
         preset_ackStatus();
         return;
@@ -6413,7 +6529,7 @@ void menu_pollPresetStatus(void)
              * SaveOptions state is restored immediately so the next repaint
              * gives a visible completion cue on the type row.
              */
-            filesystem_clearInstrumentCache();
+            filesystem_clearNameCache();
             menu_instrumentLoadActive = 0u;
             menu_instrumentSaveMode = 0u;
             editModeActive = 1u;
@@ -6443,6 +6559,21 @@ void menu_pollPresetStatus(void)
          * and future result messaging.
         */
         menu_storageBusy = 0u;
+        if (preset_getCompletedOp() == PRESET_OP_KIT_SAVE ||
+            preset_getCompletedOp() == PRESET_OP_KIT_MORPH_SAVE ||
+            preset_getCompletedOp() == PRESET_OP_SCENE_SAVE ||
+            preset_getCompletedOp() == PRESET_OP_BANK_SAVE) {
+            /*
+             * The filesystem callback is intentionally delayed until the
+             * directory rescan and `.hcindex` rewrite are complete. Keep that
+             * fresh cache alive, copy its current slot into the Save editor's
+             * display buffer, and then reset/repaint without changing type or
+             * slot. Other save families still dispose their unrelated cache.
+             */
+            menu_refreshSavedLibraryName(preset_getCompletedOp());
+        } else {
+            filesystem_clearNameCache();
+        }
         menu_resetSaveParameters();
         break;
 
@@ -6591,8 +6722,18 @@ void menu_switchPage(uint8_t pageNr)
 {
     if (menu_storageBusy) return;
 
+    if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+        pageNr != LOAD_PAGE) {
+        /*
+         * Leaving the Load/Save surface disposes the shared browser names.
+         * This covers top-level Kit/Scene/Bank exits as well as nested
+         * Instrument exits; a later entry must reload the appropriate index
+         * rather than inheriting names from the page that was left.
+         */
+        filesystem_clearNameCache();
+    }
     if (menu_instrumentLoadActive) {
-        filesystem_clearInstrumentCache();
+        filesystem_clearNameCache();
         menu_instrumentLoadActive = 0u;
         menu_instrumentSaveMode = 0u;
     }
@@ -6655,6 +6796,8 @@ void menu_switchPage(uint8_t pageNr)
             menu_kitLoadSceneMask =
                 (uint16_t)(1u << scene_getActiveIndex());
         }
+        /* Load/Save page toggles are type transitions, so reload on entry. */
+        filesystem_clearNameCache();
         menu_resetSaveParameters();
         menu_requestCurrentLoadSaveSelection(0);
         menu_refreshLoadSceneLeds();
@@ -6726,12 +6869,16 @@ void menu_resetSaveParameters(void)
      * parked on an unvalidated path. Kit is the fallback because it is a
      * real musical object on both Load and Save when CONFIG_DEV_MODE hides
      * File/Dir/sDir. Every Load/Save entry resets to the selected top-row type
-     * field; slot/name selection is always a deliberate second movement.
+     * field; slot/name selection is always a deliberate second movement. The
+     * shared browser cache is intentionally not disposed here: this helper is
+     * also called immediately after a Save request is posted, and the
+     * filesystem needs the active cache to update and rewrite `.hcindex`.
+     * Callers that actually leave or change the Load/Save type dispose it
+     * explicitly before invoking this cursor reset.
      */
     if (!menu_loadSaveTypeIsRestored(menu_saveOptions.what))
         menu_saveOptions.what = SAVE_TYPE_KIT;
 
-    filesystem_clearInstrumentCache();
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();

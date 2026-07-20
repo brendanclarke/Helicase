@@ -28,6 +28,10 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified
   Session 040 implementation, the Bank Load fix, and archived root notes.
+- Session 041 closed the generalized browser-name migration. Read
+  `knowledge_files/log_archive/041_SESSION_HANDOFF_LOG.md` before changing
+  name indexes, cache ownership, or Bank/Scene/Kit menu lifecycle. The next
+  planned cleanup is recorded in `SESSION_042_PRE_PLAN.md`.
 - Current filesystem authority:
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`; read
@@ -57,6 +61,21 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   valid; this is a loader-state isolation requirement. The reset helper is
   implemented in filesystem.c, documented in filesystem.h, and was confirmed
   by the user on hardware in Session 040.
+- Instrument, Kit, root Scene, and root Bank Load/Save now share exactly one
+  `fs_list_cache_name[1000][9]` display-name cache (9,000 bytes). Instrument
+  rows are sorted; numbered-library rows are direct `000..999` slot rows with
+  blank rows preserved. Menu entry/type changes and exit dispose or reload the
+  same cache; no per-instrument or per-library name cache is allowed.
+- Boot writes `/Kit/.hcindex`, `/Scene/.hcindex`, `/Bank/.hcindex`, and the
+  four registry-owned Instrument indexes one at a time, then reloads
+  `/Bank/.hcindex` before initial Bank selection because Instrument generation
+  disposes the shared cache. Kit/Scene/Bank Save performs a physical parent
+  rescan and complete `.hcindex` rewrite before releasing its callback, then
+  refreshes the current Save slot display.
+- The former Kit/Scene/Bank per-slot presence/display/alias arrays are retired
+  (69,000 bytes combined). The remaining `kitBrowser` compatibility bridge is
+  `kb_map[1000]` plus 13 bytes of related state (2,013 bytes total) and is the
+  next planned SRAM cleanup; it is not a second names cache.
 - Never add object self-name fields to `sceneset.scg`, `bankset.bcg`, or
   instrument files. Object identity comes from directory/file names.
 - For overwrite code, enter the correct parent root first, parse visible child
@@ -93,7 +112,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
 │   │   ├── MEMORY_AUDIT.md            ← historical SRAM/flash/ITCM/DTCM/DMA memory measurements and resource watch items
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 040
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 041
 │   │   └── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
@@ -131,7 +150,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
     │   ├── SD/
     │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations; Kit load/save uses root Kit/ directories; root Instrument load/save exists
     │   │   ├── storageTypes.c/h     ← Kit/instrument text parser+writer, numbered-folder parser, descriptor file schema helpers
-    │   │   ├── kitBrowser.c/h       ← kit-only 1000-slot gap-tolerant compatibility browser; 000 is real
+    │   │   ├── kitBrowser.c/h       ← legacy kit-only browser compatibility bridge; 000 is real
     │   │   ├── SPI/
     │   │   │   ├── spi_sd.c/h       ← bit-bang SPI: PC12/PD2/PC8/PD0
     │   │   │   └── sd_routines.c/h  ← SD_init() only; blocking read/write superseded
@@ -446,12 +465,22 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
   aliases in storage. Non-Choke slot 6 uses generated Scene setting/morph
   endpoint `slot6_track7_amp_envelope_decay` when its descriptor table has the
   base decay; that alternate is Scene-modulatable as `7dc`.
-- Kit scan keeps both display names and FAT short open aliases. If a card only
-  exposes a short alias such as `001SLA~1`, scan falls back to the leading
-  three-digit slot so the kit remains loadable.
+- Kit scan keeps display names in the shared cache and uses FAT short open
+  aliases only as operation-local compatibility state. If a card only exposes
+  a short alias such as `001SLA~1`, scan falls back to the leading three-digit
+  slot so the kit remains loadable.
 - Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
-- `kitBrowser.c/h` intentionally remains kit-only; pattern/performance/all use typed name loading and direct slot handling.
-- Boot path: synchronous polling loop before `audioCodec_init()` (audio not running, blocking OK). After a successful mount, boot creates/truncates root `.hcindex`, writes exactly four hardware-RNG bytes, and waits for the final asyncfatfs flush before library scans.
+- `kitBrowser.c/h` intentionally remains a legacy kit-only compatibility
+  bridge; pattern/performance/all use typed name loading and direct slot
+  handling. Session 042 plans to retire this bridge after its clients are
+  audited.
+- Boot path: synchronous polling loop before `audioCodec_init()` (audio not
+  running, blocking OK). After a successful mount, boot scans the root Kit,
+  Scene, and Bank libraries, writes their slot-ordered `.hcindex` files, then
+  scans and writes each registry-owned Instrument index one type at a time.
+  Because the one shared name cache is disposed between Instrument types, boot
+  reloads `/Bank/.hcindex` before initial Bank selection. There is no opaque
+  root `.hcindex` RNG marker in the current design.
 - Historical globals compatibility (Session 025): the former glo.cfg/ALL
   binary 22/23-byte behavior is retained here only as an archive note.
   Current filesystem globals use strict keyed settings.cfg version 1 with
@@ -562,8 +591,9 @@ som_init();
 initMidiUart(); usb_init();
 filesystem_initCardAndMountBlocking(); // card SPI mode + afatfs mount, pre-audio
 menu_init();           // calls memset on parameter_values — do NOT also memset in main()
-// Synchronous Kit/Scene/Bank/Instrument scans via filesystem_requestScan* + polling
-// After mount and before those scans, create/truncate root .hcindex with 4 RNG bytes + flush
+// Boot scans Kit/Scene/Bank, writes their slot-ordered .hcindex files, then
+// scans/writes each Instrument type index one at a time; reload Bank index
+// after Instrument generation disposes the shared name cache.
 // Synchronous boot load tries lowest Bank, then lowest Scene, then lowest Kit, then defaults
 // Synchronous globals load (settings.cfg) via preset_loadGlobals + polling + menu_pollPresetStatus
 audioCodec_init();     // single audio entry point — AFTER all SD boot ops

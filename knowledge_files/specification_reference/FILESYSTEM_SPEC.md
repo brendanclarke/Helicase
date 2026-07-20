@@ -1,7 +1,7 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware after Session 040. It includes the
+reference for the Helicase/LXR-02 firmware after Session 041. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
@@ -18,13 +18,15 @@ Use this document to distinguish three things:
   instrument parameter images, Kit/Instrument Morph Load, Kit/Instrument Morph
   Save, normal new-format Kit Save, root Instrument Save, root Scene
   Load/Save, 16-Scene root Bank scan/load/save, keyed settings.cfg, and
-  File/Dir/sDir asyncfatfs diagnostics behind Dev Mode, and the root `.hcindex`
-  boot marker.
+  File/Dir/sDir asyncfatfs diagnostics behind Dev Mode, and slot-ordered
+  `.hcindex` name indexes for every Instrument type plus root Kit, Scene, and
+  Bank.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
 - Not implemented yet: crash-recoverable Scene/Bank autosave promotion, real
-  Effect load/save, final dynamic Pattern storage, and descriptor-backed step
-  automation playback.
+  Effect load/save, final dynamic Pattern storage, descriptor-backed step
+  automation playback, and removal of the legacy `kitBrowser` compatibility
+  map after its clients are retired.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -32,7 +34,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented through Session 039:
+Implemented through Session 041:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -42,16 +44,20 @@ Implemented through Session 039:
   `NNN_Name`, are accepted.
 - FAT short-alias fallback accepts aliases beginning with a valid three-digit
   slot prefix, such as `000INI~1` or `001SLA~1`.
-- The Kit scan cache stores both the eight-character display name and the
-  asyncfatfs-returned FAT short alias. Long filenames are display/UI data; the
-  cached short alias is scan-cache identity for reopening the exact object.
+- Kit, root Scene, and root Bank scans store only the eight-character display
+  name in the one generalized cache. A non-blank row is the slot-existence
+  record; no per-slot presence, display-name, or short-alias arrays remain.
+  Load reconstructs `NNN Name` and keeps any asyncfatfs alias only in
+  operation-local scratch.
 - The kit display name is the folder name after the three-digit slot prefix.
 - `kitset.kcg` is parsed as the six-slot kit manifest.
 - Six descriptor-keyed instrument text files are loaded from the kit folder.
 - Root `Instrument/<type>/` is scanned one type at a time with asyncfatfs object
-  iteration into one shared 128-entry alphanumeric browser cache. The cache is
-  disposed between types and on nested Instrument Load/Save exit; entering or
-  changing the nested menu type reloads that type's `.hcindex` before browsing.
+  iteration into the one shared 1,000-row alphanumeric browser cache. The cache
+  is disposed between types and on nested Instrument Load/Save exit; entering
+  or changing the nested menu type reloads that type's `.hcindex` before
+  browsing. Instrument rows use sorted positions; the cache is never multiplied
+  by registry type.
   A selected file can then be loaded into one explicit Scene/voice slot.
 - Loaded instrument values write into the active `scene_t.kit` descriptor
   images, not into the old flat `parameter_values[]` sound buffer.
@@ -92,7 +98,7 @@ Implemented through Session 039:
 - Normal `Save:[Kit     ]` writes the active Scene kit to the directory Kit
   format: a numbered `Kit/` folder, `kitset.kcg`, and six descriptor-keyed
   instrument files containing `[params]` and `[morph]`.
-- Root Kit/Scene-style scan/load/save slot range is now direct `000..999`.
+- Root Kit/Scene/Bank scan/load/save slot range is now direct `000..999`.
   Slot `000` is a real library slot for all numbered filetypes. Firmware
   library slot variables are `uint16_t`; voice slots remain byte-sized `0..5`.
 - Root Instrument Save is implemented from nested Save-page VOICE mode. It
@@ -120,9 +126,11 @@ Implemented through Session 039:
   `sceneset.scg` never stores the Scene name.
 - Resident Scene and embedded Kit names are retained from directory names:
   root `Scene/NNN Name/` and child `Kit <name>/`.
-- Root Bank scan/load/save uses the 16 resident Scene slots. Boot scans Banks
-  and tries the lowest valid Bank before root Scene/root Kit fallback. Empty
-  Bank folders are valid and complete Bank selection before fallback.
+- Root Bank scan/load/save uses the 16 resident Scene slots. Boot generates or
+  refreshes `/Bank/.hcindex`, reloads it after Instrument index generation has
+  disposed the shared cache, and tries the lowest valid Bank before root
+  Scene/root Kit fallback. Empty Bank folders are valid and complete Bank
+  selection before fallback.
 - Bank-local Scene folders use two digits, `00..15`, not root-library
   three-digit numbering. Bank Save writes every child selected by its 16-bit
   save mask and Bank Load iterates every requested/present local child.
@@ -154,7 +162,7 @@ Current bridges and limitations:
   modulation targets.
 - New Scene modulation target IDs are runtime/menu IDs; current Scene files
   persist Scene mix/routing settings but not the future full effect stack.
-- The 16-Scene workspace, present/edit masks, and linked Scene/Pattern PERF
+- The 16-Scene workspace, present/edit masks, linked Scene/Pattern PERF
   selection are implemented. Crash-recoverable autosave/dot-file promotion
   and a separate background staging Scene remain future work.
 
@@ -179,16 +187,42 @@ Settled target root file:
 settings.cfg
 ```
 
-Boot-created root marker:
+### Slot-ordered `.hcindex` name indexes and the single SRAM cache
+
+`.hcindex` is a directory-local name index, not an opaque root boot marker.
+Firmware creates or refreshes these files from physical directory scans:
 
 ```text
-.hcindex
+Instrument/Drum/.hcindex
+Instrument/Snare/.hcindex
+Instrument/Cymbal/.hcindex
+Instrument/HiHat/.hcindex
+Kit/.hcindex
+Scene/.hcindex
+Bank/.hcindex
 ```
 
-After a successful SD mount and before library scans, firmware creates or
-truncates `.hcindex`, writes exactly four bytes from the STM32F765 hardware
-RNG, closes it, and waits for the asyncfatfs flush boundary. It is an opaque
-boot marker, not a settings/schema file; normal product scanners ignore it.
+Instrument indexes contain alphabetically ordered display stems, one per line,
+and can contain up to 1,000 rows. Kit, root Scene, and root Bank indexes are
+slot ordered from 000 through 999; each line contains only the eight-character
+display name, including blank lines for absent slots. The line number supplies
+the three-digit slot prefix when Load/Save reconstructs `NNN Name`.
+
+There is exactly one SRAM display-name array:
+`fs_list_cache_name[1000][9]`, 9,000 bytes. Its active domain tag and count
+are separate small fields. The cache is disposed whenever a Load/Save type is
+changed or exited, and the selected `.hcindex` is loaded when a type is
+entered. No per-instrument-type, per-library, presence, or open-alias name
+cache is permitted. The legacy `kitBrowser` compatibility map is a separate
+2,013-byte bridge and remains only until its clients are retired.
+
+Boot scans and writes Kit, root Scene, and root Bank indexes before audio
+starts. Instrument types are then scanned/written one at a time. Because that
+disposes the shared cache, boot reloads `/Bank/.hcindex` before selecting the
+initial Bank. A successful Kit, Scene, or Bank Save performs the same physical
+directory rescan and complete index rewrite before invoking the original Save
+completion callback, so a newly created or renamed directory is immediately
+visible without restarting.
 
 `settings.cfg` replaces legacy `GLO.CFG`/`glo.cfg` as the current system-settings
 file. It stores allowlisted system-level settings and the active Bank number,
@@ -824,21 +858,28 @@ must not store the wide ID above as a target token.
 
 ## Current Kit Load Path
 
-Boot normal-kit load path:
+Boot library/index and initial-load path:
 
 1. `main.c` initializes DSP objects.
 2. `scene_initAll()` initializes Scene storage.
 3. `filesystem_initCardAndMountBlocking()` mounts the card.
-4. `filesystem_requestScanKits()` scans `Kit/` into the kit-slot cache.
-5. `preset_loadDrumset(0, 0)` requests normal kit slot 0.
-6. `filesystem_loadKitDirectory_tick()` opens the cached kit folder, parses
+4. `filesystem_requestScanKits()`, `filesystem_requestScanScenes()`, and
+   `filesystem_requestScanBanks()` scan the three numbered root libraries.
+5. Boot writes `/Kit/.hcindex`, `/Scene/.hcindex`, and `/Bank/.hcindex` from
+   those scans, preserving all 1,000 slot rows.
+6. `filesystem_createBootIndexBlocking()` scans and writes each registry-owned
+   Instrument `.hcindex` one type at a time, disposing the shared cache between
+   types.
+7. Boot reloads `/Bank/.hcindex` and requests the lowest valid Bank. If no Bank
+   exists, it reloads root Scene or Kit index data before requesting fallback.
+8. `filesystem_loadKitDirectory_tick()` opens the cached kit folder, parses
    `kitset.kcg`, resets slots in a private staged `kit_t`, then parses each
    listed instrument file into that staged descriptor-indexed storage.
-7. After every file validates, filesystem copies the complete staged Kit into
+9. After every file validates, filesystem copies the complete staged Kit into
    each selected Scene. It does not replace PatternData or Scene settings.
-8. Completion callback sets `PRESET_OP_KIT_LOAD`.
-9. `menu_pollPresetStatus()` starts sound apply.
-10. Before audio starts, `menu_startSoundApply()` calls
+10. Completion callback sets `PRESET_OP_KIT_LOAD`.
+11. `menu_pollPresetStatus()` starts sound apply.
+12. Before audio starts, `menu_startSoundApply()` calls
    `preset_sendDrumsetParameters()` synchronously.
 
 Runtime kit loads use the same Scene-owned apply logic, but the post-load apply
@@ -1195,7 +1236,7 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status after Session 039:
+Status after Session 041:
 
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
@@ -1210,6 +1251,10 @@ Status after Session 039:
 - Kit and KitMrp keep live-on-scroll load behavior.
 - VOICE press on the Load page enters nested Instrument Load.
 - VOICE press on the Save page enters nested Instrument Save/InstrumentMrp Save.
+- Root Kit, Scene, and Bank browser names use one shared 1,000-row SRAM cache.
+  Save completion performs a physical rescan and durable `.hcindex` rewrite
+  before returning control to Menu; entry/type changes dispose and reload that
+  cache as described in the name-index section above.
 
 Still compiled but intentionally gated from the normal type cycler:
 
@@ -1250,6 +1295,11 @@ Implemented:
   payload for every selected Scene bit. A zero child-scene mask is valid and
   creates an empty Bank. The completed payload is written to a unique
   non-numbered temporary Bank sibling before promotion to the numbered slot.
+- After Kit, root Scene, or root Bank Save completes its physical directory
+  write and final FAT flush, firmware rescans that parent directory and
+  rewrites the complete slot-ordered `.hcindex`. The original Save completion
+  callback is delayed until this refresh is durable; the Save menu then
+  refreshes the current slot's displayed name from the active shared cache.
 
 Still future:
 
@@ -1333,6 +1383,16 @@ instrument runtime propagation:
   whose numeric value equals the source slot.
 - Confirm Kit slots `000`, above 255, and `999` display and save/load without
   wrapping or off-by-one mapping.
+- Confirm boot creates or refreshes `/Kit/.hcindex`, `/Scene/.hcindex`,
+  `/Bank/.hcindex`, and each registry-owned Instrument `.hcindex`.
+- Confirm entering each top-level Kit, Scene, and Bank Load/Save type reloads
+  only its selected index into the one shared 9,000-byte name cache, and
+  changing type or exiting disposes that cache.
+- Confirm a Kit, Scene, or Bank Save makes a new or renamed directory visible
+  immediately after its directory rescan and `.hcindex` rewrite, without a
+  restart; the current Save slot display must also refresh.
+- Confirm root Bank boot reloads `/Bank/.hcindex` after Instrument index
+  generation and loads the lowest valid Bank when one exists.
 - Confirm LFO negative polarity on envelope decay follows the visible parameter
   direction and amount scale through the descriptor writer.
 - Treat step automation as pending until the descriptor-aware AutomationNode

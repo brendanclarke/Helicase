@@ -85,8 +85,10 @@ Rules:
 
 - Store display names in product schemas when the user should see them.
   Example: `kitset.kcg` stores visible member filenames.
-- Store short aliases only as scan/cache/open implementation details.
-  Example: `filesystem.c` caches returned aliases to re-enter directories.
+- Store short aliases only as operation-local scan/open implementation details.
+  The generalized Kit/Scene/Bank name cache stores display components only;
+  it does not retain one alias per slot. A single alias scratch buffer may be
+  held while a state machine reopens the currently selected directory.
 - Do not display aliases such as `001SLA~1` unless no display name exists.
 - Do not feed a display name back through short-name APIs and expect case/LFN
   behavior.
@@ -325,7 +327,8 @@ Don't:
   preflight, and text schemas in `storageTypes`. Bank Load clears shared
   Scene child-discovery names before every delegated local child.
 - Root Instrument scan/load/save uses object iteration, LFN root directory
-  entry, one shared 128-entry browser cache, LFN file writes, and descriptor-keyed text
+  entry, one shared generalized browser-name cache (128 sorted Instrument rows
+  or 000..999 slot-addressed Kit/Scene rows), LFN file writes, and descriptor-keyed text
   schemas.
 - File/Dir/sDir diagnostic menu entries exercise exact root file/directory
   scan, open, create, child create, and persistence checks. They remain

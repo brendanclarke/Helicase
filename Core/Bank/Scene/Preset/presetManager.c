@@ -81,7 +81,8 @@ enum {
 static volatile uint8_t          pm_instrument_request_slot = 0u;
 static volatile uint8_t          pm_instrument_request_scene = 0u;
 static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_UNKNOWN;
-static volatile uint8_t          pm_instrument_request_index = 0u;
+/* The selected Instrument row can be any of the shared cache's 1,000 entries. */
+static volatile uint16_t         pm_instrument_request_index = 0u;
 static volatile uint16_t         pm_kit_request_scene_mask = 0u;
 
 static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
@@ -1722,7 +1723,7 @@ void preset_applyLoadedName(void)
 uint8_t preset_loadInstrument(uint8_t destination_scene,
                               uint8_t destination_slot,
                               instrument_type_t type,
-                              uint8_t browser_index)
+                              uint16_t browser_index)
 {
     return preset_loadInstrumentForScenes((uint16_t)(1u << destination_scene),
                                           destination_slot,
@@ -1733,7 +1734,7 @@ uint8_t preset_loadInstrument(uint8_t destination_scene,
 uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
                                        uint8_t destination_slot,
                                        instrument_type_t type,
-                                       uint8_t browser_index)
+                                       uint16_t browser_index)
 {
     uint8_t scene_index;
     uint8_t request_scene = 0u;
@@ -1844,7 +1845,7 @@ uint8_t preset_saveInstrumentMorph(uint8_t source_scene,
 uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
                                    uint8_t destination_slot,
                                    instrument_type_t type,
-                                   uint8_t browser_index)
+                                   uint16_t browser_index)
 {
     const kit_instrument_slot_t *destination =
         scene_instrumentSlotConst(destination_scene, destination_slot);

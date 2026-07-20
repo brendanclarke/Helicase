@@ -202,14 +202,20 @@ uint8_t preset_loadAll(uint8_t presetNr, uint8_t isAll);
 /* Read 8-byte preset name from file header (any type). */
 char*   preset_loadName(uint16_t presetNr, uint8_t what);
 void    preset_applyLoadedName(void);
+/*
+ * Load one row from the active Instrument type's shared name cache.
+ *
+ * browser_index is 16-bit because the single cache exposes rows 0..999; using
+ * uint8_t here would wrap selection at row 255 before filesystem validation.
+ */
 uint8_t preset_loadInstrument(uint8_t destination_scene,
                               uint8_t destination_slot,
                               instrument_type_t type,
-                              uint8_t browser_index);
+                              uint16_t browser_index);
 uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
                                        uint8_t destination_slot,
                                        instrument_type_t type,
-                                       uint8_t browser_index);
+                                       uint16_t browser_index);
 /*
  * Save one resident kit voice into the root Instrument/ pool.
  *
@@ -243,7 +249,7 @@ uint8_t preset_saveInstrumentMorph(uint8_t source_scene,
 uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
                                    uint8_t destination_slot,
                                    instrument_type_t type,
-                                   uint8_t browser_index);
+                                   uint16_t browser_index);
 /*
  * Generic File/Dir asyncfatfs expansion test requests.
  *

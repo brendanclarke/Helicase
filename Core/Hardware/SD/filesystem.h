@@ -98,6 +98,20 @@ typedef enum {
     FS_STALE_WARNING_ALL,
 } fs_stale_warning_source_t;
 
+/*
+ * Root numbered-library domains served by the one generalized name cache.
+ * Kit, root Scene, and root Bank indexes preserve slot order, including blank slots, so
+ * callers can reconstruct the visible `NNN Name` folder key. Instrument
+ * indexes remain typed and are requested through their existing API because
+ * their rows are alphabetically sorted files rather than numbered folders.
+ */
+typedef enum {
+    FS_LIBRARY_INDEX_KIT = 0,
+    FS_LIBRARY_INDEX_SCENE,
+    /* Root Bank uses the same slot-preserving cache/index contract. */
+    FS_LIBRARY_INDEX_BANK,
+} fs_library_index_kind_t;
+
 typedef void (*fs_completion_cb_t)(void);
 
 uint8_t     filesystem_initCardAndMountBlocking(void);
@@ -109,6 +123,13 @@ void        filesystem_initAfterCardReady(void);
  * nonzero only after every index file and the final FAT/data flush complete.
  */
 uint8_t     filesystem_createBootIndexBlocking(void);
+/*
+ * Write one slot-ordered Kit, root Scene, or root Bank cache as `.hcindex` at
+ * boot. If the requested domain is not active in the one shared cache, the
+ * implementation first performs the matching physical directory scan so a
+ * missed caller scan cannot silently omit the index.
+ */
+uint8_t     filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind);
 void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
 const char *filesystem_errorCode(void);
@@ -136,6 +157,10 @@ bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
  * slot replacement in /Kit/. morph_projection=0 writes normal Kit endpoints;
  * morph_projection!=0 writes KitMrp's flattened current interpolation into
  * both normal and morph endpoint storage and does not rename the resident kit.
+ * After the directory is durable, the filesystem rescans all of /Kit/ and
+ * rewrites the complete slot-ordered `.hcindex` before invoking cb. This is
+ * necessary for new, renamed, or removed numbered folders; patching only the
+ * previously active cache row would leave stale index rows behind.
  */
 bool filesystem_requestSaveKitDirectory(uint16_t slot,
                                         uint8_t source_scene,
@@ -153,7 +178,10 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
  * plus per-track length/scale until the final pattern schema exists. Other
  * numbered Scene directories must not be removed, regardless of how many nested
  * children they contain. The resident Scene display name updates only after the
- * directory save succeeds.
+ * directory save succeeds. After the directory is durable, the filesystem
+ * rescans all of /Scene/ and rewrites the complete slot-ordered `.hcindex`
+ * before invoking cb, so the index reflects the actual folder set rather than
+ * only the selected save slot.
  */
 bool filesystem_requestSaveSceneDirectory(uint16_t slot,
                                           uint8_t source_scene,
@@ -228,6 +256,17 @@ bool filesystem_requestSaveBank(uint16_t slot,
                                 fs_completion_cb_t cb);
 bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
+/*
+ * Scan the physical Kit/, root Scene/, or root Bank/ directory representation.
+ *
+ * What: clears and repopulates the single slot-ordered generalized name
+ * cache from numbered directory entries. Why: boot/index maintenance still
+ * needs to discover names from the card, while Load/Save browsing normally
+ * enters through the corresponding `.hcindex`; a non-blank cache row is the
+ * sole Kit/Scene/Bank occupancy record. No 1,000-entry presence bitmap or FAT
+ * alias table is retained. Inputs: completion callback. Output: cache rows
+ * and, for Kit, the legacy kb_map compatibility view.
+ */
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanBanks(fs_completion_cb_t cb);
@@ -244,7 +283,21 @@ bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
  */
 bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
                                            fs_completion_cb_t cb);
-/* Dispose the single shared Instrument browser name cache. */
+/*
+ * Load root Kit, root Scene, or root Bank slot-ordered names into the shared cache.
+ * Each asynchronous request disposes the previous domain first, preserves
+ * blank rows, and completes only when the selected `.hcindex` is available.
+ */
+bool filesystem_requestLoadKitIndex(fs_completion_cb_t cb);
+bool filesystem_requestLoadSceneIndex(fs_completion_cb_t cb);
+/* Load `/Bank/.hcindex` into the one shared slot-ordered name cache; this
+ * replaces any Kit or Scene rows because there is only one SRAM cache. */
+bool filesystem_requestLoadBankIndex(fs_completion_cb_t cb);
+/* True when the requested root library currently owns the shared cache. */
+bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind);
+/* Dispose the single shared Instrument/Kit/Scene/Bank browser name cache. */
+void filesystem_clearNameCache(void);
+/* Compatibility spelling retained for existing Instrument menu callers. */
 void filesystem_clearInstrumentCache(void);
 /*
  * Generic asyncfatfs File/Dir test browser and payload API.
@@ -290,8 +343,8 @@ const char *filesystem_testResultName(void);
 /*
  * Load one root Instrument/ file into an explicit Scene slot.
  *
- * Inputs: resident Scene index, zero-based kit slot, registry type, cache
- * index, and completion callback. Output: one asynchronous parse into
+ * Inputs: resident Scene index, zero-based kit slot, registry type, shared-cache
+ * index (0..999), and completion callback. Output: one asynchronous parse into
  * filesystem-owned staging; live SceneData and DSP state are unchanged until
  * Preset commits the validated payload. Client: preset_loadInstrument(). The
  * explicit Scene/slot coordinates remain immutable completion context even
@@ -300,7 +353,7 @@ const char *filesystem_testResultName(void);
 bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,
                                       instrument_type_t type,
-                                      uint8_t browser_index,
+                                      uint16_t browser_index,
                                       fs_completion_cb_t cb);
 /*
  * Save one resident kit voice as a root Instrument/ file.
@@ -374,33 +427,46 @@ uint8_t filesystem_installLoopsBlocking(void);
  */
 const char *filesystem_loadedName(void);
 
-/* Query the Phase 2 Kit/ scan cache for a numbered kit folder.
+/* Query the shared-cache-backed Kit occupancy map for a numbered kit folder.
  *
  * Input: slot is the direct Kit library index used by preset/menu code; SD
  * folder names are 000 Name through 999 Name, with underscore accepted as a
- * compatibility separator. Slot 000 is real. Output: nonzero when
- * filesystem_requestScanKits() has found a matching Kit/NNN Name directory.
- * Clients: menu.c and any future load/save UI that must show explicit Empty
- * slots without trying to open a missing directory.
+ * compatibility separator. Slot 000 is real. Output: nonzero when the active
+ * shared Kit cache row is non-blank, whether it came from a scan or the
+ * slot-ordered `.hcindex`. The row itself is the only occupancy record, so it
+ * cannot disagree with filesystem_kitSlotName(). Clients: menu.c and any
+ * future load/save UI that must show explicit Empty slots without trying to
+ * open a missing directory.
  */
 uint8_t     filesystem_kitSlotExists(uint16_t zero_based_slot);
 
-/* Return the eight-character display name from the Phase 2 Kit/ scan cache.
+/* Return the eight-character name from the shared slot-ordered Kit cache.
  *
  * Input: zero_based_slot as above. Output: filesystem-owned eight printable
  * characters plus NUL for existing kits, or the literal "Empty   " for missing
- * slots. Client: menu_repaintLoadSavePage() displays kit names directly from
- * the directory cache instead of reading legacy .SND headers.
+ * slots. The name is loaded from `/Kit/.hcindex`; the cache row excludes the
+ * `NNN ` folder prefix because the slot number is already the array index.
+ * Client: menu_repaintLoadSavePage().
  */
 const char *filesystem_kitSlotName(uint16_t zero_based_slot);
+/*
+ * Query and read root Scene names from the same shared slot-ordered cache.
+ * Scene is deliberately the standalone `/Scene/` library; Bank-local child
+ * Scenes never enter this API or `/Scene/.hcindex`. A non-blank row is both
+ * the display name and occupancy bit; no per-slot alias or presence storage
+ * exists. A load may use one transient alias internally while reopening a
+ * selected directory, but that alias is not exposed or retained per slot.
+ */
 uint8_t     filesystem_sceneSlotExists(uint16_t zero_based_slot);
 const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
 /*
- * Root Bank/ scan-cache queries and fallback helpers.
+ * Root Bank/ shared-cache queries and fallback helpers.
  *
- * Bank slots use root three-digit library numbering 000..999. Bank-local
- * Scene slots are not exposed here; those are two-digit child folders inside
- * one selected Bank and are handled only by Bank load/save state machines.
+ * Bank slots use root three-digit library numbering 000..999. The display name
+ * and occupancy bit come from the active `FS_LIBRARY_INDEX_BANK` rows; no
+ * per-slot presence or FAT-alias array is retained. Bank-local Scene slots are
+ * not exposed here: they are two-digit child folders inside one selected Bank
+ * and remain operation-local state in the Bank load/save state machines.
  */
 uint8_t     filesystem_bankSlotExists(uint16_t zero_based_slot);
 const char *filesystem_bankSlotName(uint16_t zero_based_slot);
@@ -428,11 +494,19 @@ uint8_t     filesystem_lastBankLoadLoadedScene(void);
  */
 uint8_t     filesystem_instrumentTargetExists(instrument_type_t type,
                                               const char *display_stem);
-uint8_t     filesystem_instrumentCount(instrument_type_t type);
+/*
+ * Query the active typed Instrument view of the one generalized 1,000-entry
+ * name cache. The return value is 0..1000; it is not a per-type SRAM capacity.
+ * Instrument type changes dispose/reload this same cache, so callers must not
+ * retain names or create a second type-specific array.
+ */
+uint16_t    filesystem_instrumentCount(instrument_type_t type);
+/* Return the eight-character name at a zero-based shared-cache row 0..999. */
 const char *filesystem_instrumentName(instrument_type_t type,
-                                      uint8_t browser_index);
+                                      uint16_t browser_index);
+/* Return the one-based LCD position for a shared-cache row; LCD output caps at 999. */
 uint16_t    filesystem_instrumentDisplayIndex(instrument_type_t type,
-                                               uint8_t browser_index);
+                                               uint16_t browser_index);
 uint8_t     filesystem_diagOp(void);
 uint8_t     filesystem_diagPhase(void);
 uint32_t    filesystem_diagBytesDone(void);

@@ -323,27 +323,29 @@ Complete the menu path required for descriptor-backed instruments:
 
 ### 3.5 Scene and Bank Structures
 
-Define the real structures and file ownership before implementing large
-sequencer storage changes:
+The real Scene and Bank structures and their filesystem ownership are now
+implemented. Keep this phase open for verification and cleanup while the
+future dynamic Pattern model is still being designed:
 
-- Raise the Scene model toward 17 resident scenes: 16 bank scenes plus one
-  load/landing slot. Session 039 still has `SCENE_COUNT == 1` and only bridges
-  Bank slot `00` into that one resident Scene.
-- `sceneset.scg` contents and validation are defined and implemented for the
-  current Scene bridge. It stores Scene settings, never object names.
-- `bankset.bcg` contents and validation are defined and implemented for v1:
-  format/version plus `active_scene`.
-- Keep root `Scene/` and `Bank/` folders numbered with gap-tolerant browsing.
+- `SCENE_COUNT == 16` is the resident Bank workspace. There is no separate
+  seventeenth staging Scene in the current product shape; asynchronous load
+  staging remains private filesystem operation state.
+- `sceneset.scg` contents and validation are implemented. It stores Scene
+  settings and never object names.
+- `bankset.bcg` version 2 contents and validation are implemented, including
+  `active_scene`, the 16-bit child-present/edit masks, and the selected child
+  persistence rules.
+- Root `Scene/` and `Bank/` folders are numbered with gap-tolerant browsing;
+  root library slots are direct `000..999`.
 - Root `Scene/` is a user library/pool like root `Kit/` and root
   `Instrument/`: explicit Scene Save writes there, explicit Scene Load imports
   from there, and root Scene files are not autosaved.
 - Scene embedded kits are folders named `Kit <kit name>/`; the second word is
   the kit name, and that name is not stored anywhere else.
 - Store MIDI note/channel and `voice_decimation_all` as Scene settings.
-- Session 039 implements root Scene folders and the first Bank storage bridge.
-  It does not implement sixteen resident Scene payloads, multi-Scene edit
-  masks, Bank-local Scene toggles, or autosave.
-- Bank-local Scene folders are two-digit `00..15`, not root three-digit
+- The 16-Scene Bank workspace, multi-Scene edit masks, Bank-local Scene
+  selection, Bank Save/Load staging, and child re-entry reset are implemented.
+  Bank-local Scene folders are two-digit `00..15`, not root three-digit
   `000..999` library folders.
 - Object names are directory/file names. `sceneset.scg`, `bankset.bcg`, and
   instrument files must not acquire `name=` fields.
@@ -399,6 +401,23 @@ Implement load/save operations for the settled file types in
   selection. `settings.cfg` has a `.settings.cfg` autosave/backer file; both are
   updated/re-written when closing the global settings menu or loading/saving a
   Bank.
+
+Session 041 name-index/cache completion:
+
+- Every Instrument type and each root Kit, Scene, and Bank library now has a
+  directory-local `.hcindex` generated from the physical directory scan.
+- One shared 1,000-row, nine-byte SRAM name cache is reused across all four
+  browser families. Instrument rows are sorted; Kit/Scene/Bank rows are direct
+  slot rows and preserve blanks. No per-type or per-library cache exists.
+- Menu entry, type changes, and exit dispose/reload that one cache. Kit, Scene,
+  and Bank saves rescan the written parent and rewrite its complete `.hcindex`
+  before the save callback is released, then refresh the current Save display.
+- Boot writes the three root library indexes and the four Instrument indexes one
+  at a time, then reloads `/Bank/.hcindex` before initial Bank selection because
+  the shared cache was disposed during Instrument index generation.
+- The old 128-entry Instrument limit and the dedicated Kit/Scene/Bank
+  presence/display/alias arrays are retired. The remaining 2,013-byte
+  `kitBrowser` compatibility bridge is deferred to the next cleanup session.
 
 asyncfatfs note for future save code:
 

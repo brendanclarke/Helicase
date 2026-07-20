@@ -41,16 +41,30 @@ same-slot physical-directory cleanup at phase 4 for every save, then creates
 the fresh target folder and writes its payload. Do not rely on an empty-slot
 cleanup bypass in this checkout.
 
-Session 041/042 notes from the prior working sequence are not current-source
-facts in this reverted checkout. Treat the historical claims about directory
-physical-size reconstruction and post-save Kit cache rescanning as unverified
-until a future source audit re-establishes them. The Session 043 empty-slot
-member-scan-bypass claim is likewise not present in the current source.
+Session 041 note: the current source now has one generalized
+`fs_list_cache_name[1000][9]` name cache (9,000 B) serving Instrument, Kit,
+root Scene, and root Bank. The dedicated Kit/Scene/Bank presence, display-name,
+and alias arrays are retired. The legacy `kitBrowser` compatibility bridge
+remains: `kb_map[1000]` is 2,000 B, with 13 B of related counters/name state.
+The old 128-row Instrument cap is no longer a current constraint.
+
+Session 041 current build measurement, from `arm-none-eabi-size -A
+build/lxr02.elf`, is recorded separately below. The older section sizes and
+largest-symbol table remain historical anchors; do not mix them with this
+current measurement when making SRAM decisions.
+
+Session 041 also confirmed that Kit, root Scene, and root Bank Save refreshes
+rescan the physical parent directory and rewrite the slot-ordered `.hcindex`
+before releasing the Save callback. Boot writes those root indexes, writes the
+per-Instrument indexes one type at a time, and reloads `/Bank/.hcindex` before
+initial Bank selection because the shared cache is disposed during Instrument
+index generation.
 
 Session 023 memory audit after refactor implementation. Current snapshot has
 oscillator ITCM placement enabled and filter/distortion ITCM placement disabled
 for CPU monitor A/B testing.
-Updated: 2026-05-17.
+Updated: 2026-05-17 for the historical baseline; Session 041 current
+measurements are recorded in the section below.
 
 Build and audit commands used:
 
@@ -70,6 +84,31 @@ Build result:
 - Existing warnings remain: nano syscall stubs (`_close`, `_lseek`, `_read`,
   `_write`), LTO serial compilation notice, and clean-build legacy warnings in
   asyncfatfs/USB code. No link failure or memory overflow occurred.
+
+## Session 041 Current Build Measurement
+
+Measured after the shared-name-cache and Bank index work:
+
+| Section | Size | Address | Notes |
+| --- | ---: | ---: | --- |
+| `.isr_vector` | 456 B | `0x08008000` | Vector table in application flash. |
+| `.text` | 322,968 B | `0x080081c8` | Current flash-resident code and rodata. |
+| `.itcm` | 3,768 B | `0x00000000` | Current oscillator INITCM code. |
+| `.dma_nocache` | 3,100 B | `0x20020000` | DMA-visible SRAM1, MPU non-cacheable, 4 KB cap. |
+| `.data` | 408 B | `0x20020c1c` | Initialized SRAM1 data. |
+| `.bss` | 272,932 B | `0x20020db8` | Current zero-init SRAM1 data, including the 9,000 B shared name cache. |
+| `.dtcm` | 35,168 B | `0x20000000` | Initialized DTCM data. |
+| `.dtcmz` | 6,716 B | `0x20008960` | Zero-init DTCM data. |
+
+Current SRAM-related name measurements from the linked image:
+
+- `fs_list_cache_name`: 9,000 B, one physical cache.
+- `kb_map`: 2,000 B, legacy Kit browser compatibility map.
+- Removed dedicated Kit/Scene/Bank arrays: no linked symbols remain; their
+  former combined allocation was 69,000 B.
+- Static name/index operation scratch is documented in
+  `NAMES_SRAM_MANIFEST.md`; the name-like scratch total there is 2,124 B,
+  excluding resident object-name fields and the shared 9,000 B cache.
 
 ## Section Usage
 

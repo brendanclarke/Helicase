@@ -8,6 +8,22 @@
 > scans was superseded: boot now scans and writes one type at a time so this
 > single cache can still regenerate every `.hcindex`.
 
+The current implementation uses all 1,000 rows of that shared cache for the
+active Instrument type. The old 128-row limit in the historical design notes is
+obsolete; changing Instrument type still disposes and reloads the same cache.
+
+The same cache is now the generalized Load/Save browser cache for root Kit and
+root Scene as well. Those two indexes are slot ordered rather than alphabetic:
+each of the 1,000 rows contains only the name (or is blank), and the row
+number supplies the `NNN ` prefix when opening a directory. Bank-local Scene
+children remain outside this root Scene index.
+
+The Kit and root Scene migrations follow the same single-cache rule. Their
+former 1,000-entry presence bitmaps and 1,000-entry FAT-alias tables are not
+resident anymore: the non-blank row in `fs_list_cache_name[1000][9]` is the
+only Kit/Scene slot record. A Scene Load retains at most one alias in
+operation-local scratch for an exact second open.
+
 ## Background and Motivation (historical)
 
 The root Instrument browser currently keeps three static arrays in `filesystem.c`:
@@ -133,7 +149,7 @@ bool filesystem_requestCountInstrumentType(instrument_type_t type,
 | 1 | `afatfs_opendir_lfn(STORAGE_ROOT_INSTRUMENT, ...)` |
 | 2 | Wait open; NULL handle → finish DONE (empty, count stays 0) |
 | 3 | `afatfs_chdir(dir)` + `afatfs_findFirstObject()` |
-| 4 | `afatfs_findNextObject()` loop: for each object, `storage_classifyInstrumentDisplayFile()` to check extension match; if match, increment `instrument_file_count[type]` (cap at `FS_INSTRUMENT_MAX_PER_TYPE`); at end-of-dir, advance to close |
+| 4 | `afatfs_findNextObject()` loop: for each object, `storage_classifyInstrumentDisplayFile()` to check extension match; if match, increment the historical `instrument_file_count[type]` (the old 128-row cap); at end-of-dir, advance to close |
 | 5 | `afatfs_findLastObject()` + close dir |
 | 6 | `afatfs_chdir(NULL)` |
 | 7 | `filesystem_finish(FS_STATUS_DONE)` |

@@ -6,8 +6,9 @@ This document summarizes the architectural changes and bug fixes implemented dur
 To improve organization and loading speeds, the instrument filesystem was refactored:
 - **Subdirectories**: Instruments are no longer grouped entirely into `/Instrument/`. They now reside in `/Instrument/Drum/`, `/Instrument/Snare/`, `/Instrument/Cymbal/`, and `/Instrument/HiHat/`.
 - **Boot Index (`.hcindex`)**: A new mechanism generates an `.hcindex` file at boot time (and after saves), caching the 8-character display names.
-- **Generalized cache**: One shared cache (`fs_list_cache_name[index]` plus one count) holds up to 128 names for the currently selected Instrument type. FAT short aliases and longer source stems are operation-local only.
+- **Generalized cache**: One shared cache (`fs_list_cache_name[index]`) is reused by Instrument, Kit, root Scene, and root Bank. Instrument uses alphabetized rows up to the full cache; numbered libraries use slot-addressed 000..999 rows. FAT short aliases and longer source stems are operation-local only.
 - **Menu Loading**: Nested Instrument Load and Save dispose the shared cache on exit and type changes, then use the selected type's asynchronous `.hcindex` request on entry/type selection. The UI remains locked until that cache is ready.
+- **Kit/Scene/Bank Loading**: Top-level Kit, KitMrp, root Scene, and root Bank Load/Save dispose the same cache on entry/type changes, then reload `/Kit/.hcindex`, `/Scene/.hcindex`, or `/Bank/.hcindex`. Those indexes preserve blank rows and slot order; the displayed `NNN Name` key is reconstructed from the row number plus the cached name. Bank-local Scenes remain outside the root Bank index.
 
 ## 2. Bug Fix: In-Memory Cache Desynchronization
 ### The Issue
@@ -104,7 +105,7 @@ handoff if the repository tracks it.
 The former `instrument_file_name`, `instrument_file_count`,
 `instrument_file_open_name`, and `instrument_file_stem` arrays have been
 removed. Full scans, `.hcindex` loads, post-save refresh, browser accessors,
-and Instrument Load validation now use only one shared 128-entry cache. Boot
+and Instrument Load validation now use only one shared 1,000-entry cache. Boot
 refresh scans and writes one type at a time, disposing the cache between types;
 menu entry/type changes reload the selected `.hcindex`, and menu exit disposes
 it. This recovers approximately 20 KB of permanent SRAM while preserving the

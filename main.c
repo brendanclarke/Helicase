@@ -307,6 +307,16 @@ int main(void)
             filesystem_ack();
 
             /*
+             * Persist the just-scanned Kit names in slot order.
+             *
+             * The filesystem owns one shared name cache, so this write must
+             * happen before the Scene scan reuses that cache. Empty 000..999
+             * rows are retained in `/Kit/.hcindex`; their position, not
+             * alphabetic order, is the library identity used by Load/Save.
+             */
+            (void)filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT);
+
+            /*
              * Synchronous Scene/ scan.
              *
              * Inputs: mounted SD card before audio starts. Output: the root
@@ -321,6 +331,15 @@ int main(void)
             filesystem_ack();
 
             /*
+             * Persist root Scene names before the shared cache is reused by
+             * any later library operation. Scenes intentionally use the root
+             * `/Scene/` directory; Bank-local child Scenes are not included in
+             * this index and remain Bank operation scratch.
+             */
+            (void)filesystem_createLibraryIndexBlocking(
+                FS_LIBRARY_INDEX_SCENE);
+
+            /*
              * Synchronous Bank/ scan.
              *
              * Inputs: mounted SD card and the root Bank directory. Output:
@@ -333,6 +352,15 @@ int main(void)
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
             filesystem_ack();
+
+            /*
+             * Persist the root Bank scan in slot order before the shared name
+             * cache is reused by Instrument boot indexing. Bank-local child
+             * Scenes are intentionally excluded; `/Bank/.hcindex` contains
+             * only the root Bank display name for each 000..999 row.
+             */
+            (void)filesystem_createLibraryIndexBlocking(
+                FS_LIBRARY_INDEX_BANK);
 
             /*
              * Scan and create fresh per-type `.hcindex` files one type at a
@@ -361,19 +389,50 @@ int main(void)
                 uint16_t boot_bank_slot = bank_restoreBankSlot();
 
                 /*
+                 * Instrument index generation above intentionally disposed
+                 * the one shared name cache. Rehydrate the root Bank index
+                 * before selecting the initial container; otherwise the Bank
+                 * directory can exist on the card while the cache reports no
+                 * valid Bank slot and the boot load silently falls through.
+                 */
+                filesystem_requestLoadBankIndex(NULL);
+                while (filesystem_status() == FS_STATUS_BUSY)
+                    filesystem_tick();
+                filesystem_ack();
+
+                /*
                  * boot_bank_slot is the root Bank cache coordinate retained in
-                 * BankData.
-                 *
-                 * It is read once so the existence check and load request use
-                 * the same value. The Bank loader receives an all-Scenes mask
-                 * because only the selected Bank folder knows which child
-                 * Scenes actually exist; it intersects this request with the
-                 * discovered child-present mask before loading.
+                 * BankData. It is read once so the existence check and load
+                 * request use the same value. The Bank loader receives an
+                 * all-Scenes mask because only the selected Bank folder knows
+                 * which child Scenes actually exist; it intersects this
+                 * request with the discovered child-present mask before
+                 * loading.
                  */
                 if (filesystem_bankSlotExists(boot_bank_slot)) {
                     preset_loadBank(boot_bank_slot, 0xffffu);
                 } else {
-                    preset_loadFirstAvailableSceneOrKit();
+                    /* No Bank is available: load the root Scene index before
+                     * asking the existing fallback ladder to choose Scene/Kit.
+                     * This cache transition is safe because no Bank payload is
+                     * being loaded in this branch. */
+                    filesystem_requestLoadSceneIndex(NULL);
+                    while (filesystem_status() == FS_STATUS_BUSY)
+                        filesystem_tick();
+                    filesystem_ack();
+                    if (filesystem_sceneSlotExists(
+                            filesystem_firstSceneSlot())) {
+                        preset_loadFirstAvailableSceneOrKit();
+                    } else {
+                        /* The Scene index is empty, so replace it with the
+                         * Kit index before asking the same fallback helper to
+                         * choose the first available Kit. */
+                        filesystem_requestLoadKitIndex(NULL);
+                        while (filesystem_status() == FS_STATUS_BUSY)
+                            filesystem_tick();
+                        filesystem_ack();
+                        preset_loadFirstAvailableSceneOrKit();
+                    }
                 }
             }
             for (uint8_t boot_load_pass = 0u;

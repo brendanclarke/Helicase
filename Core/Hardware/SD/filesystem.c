@@ -96,8 +96,26 @@
  * while still avoiding whole-file staging.
  */
 #define FS_TEXT_LINE_MAX 160u
-#define FS_INSTRUMENT_MAX_PER_TYPE 128u
+/* The shared cache is the complete Instrument browser capacity. */
+#define FS_LIBRARY_NAME_CACHE_MAX 1000u
 #define FS_TEST_OBJECT_MAX 64u
+
+/*
+ * The generalized browser cache has one physical name array for every
+ * numbered or typed library. Kit, root Scene, and root Bank indexes use the
+ * slot number as the array index, while an Instrument index uses the first N
+ * sorted rows.
+ * Keeping this maximum at the largest numbered library lets the same SRAM
+ * object be disposed and reused instead of allocating one name array per
+ * library or per Instrument type.
+ */
+typedef enum {
+    FS_NAME_CACHE_NONE = 0u,
+    FS_NAME_CACHE_INSTRUMENT,
+    FS_NAME_CACHE_KIT,
+    FS_NAME_CACHE_SCENE,
+    FS_NAME_CACHE_BANK,
+} fs_name_cache_kind_t;
 
 /* -----------------------------------------------------------------------
 ** Operation types
@@ -106,6 +124,8 @@ typedef enum {
     FS_INTERNAL_OP_NONE,
     FS_INTERNAL_OP_FLUSH_FINISH,
     FS_INTERNAL_OP_CREATE_BOOT_INDEX,
+    /* Boot/runtime writer for slot-ordered Kit/Scene/Bank `.hcindex` rows. */
+    FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
     FS_INTERNAL_OP_LOAD_KIT,
     FS_INTERNAL_OP_LOAD_KIT_MORPH,
     FS_INTERNAL_OP_LOAD_SCENE,
@@ -147,6 +167,8 @@ typedef enum {
     FS_INTERNAL_OP_SAVE_INSTRUMENT,
     FS_INTERNAL_OP_LOAD_NAME,
     FS_INTERNAL_OP_LOAD_INDEX,
+    /* Async reader that replaces the shared cache from a root `.hcindex`. */
+    FS_INTERNAL_OP_LOAD_LIBRARY_INDEX,
     FS_INTERNAL_OP_SCAN_TEST_FILES,
     FS_INTERNAL_OP_SCAN_TEST_DIRS,
     FS_INTERNAL_OP_LOAD_TEST_FILE,
@@ -230,11 +252,11 @@ static char loaded_name[9];
  *
  * Why it exists: the new on-card layout stores kits as Kit/NNN Name folders,
  * but existing preset/menu clients still ask for zero-based numeric kit slots.
- * The scan cache bridges those worlds. kit_slot_present says whether a slot
- * was found. kit_slot_name stores the eight-character display name used by the
- * LCD. kit_slot_open_name stores the FAT short alias needed by afatfs_fopen(),
- * because long filenames are useful for display but asyncfatfs opens by short
- * name in the current directory.
+ * The shared cache bridges those worlds. For Kit and root Scene, a non-blank
+ * row in the active slot-ordered cache is both the eight-character display
+ * name and the authoritative occupancy bit. No per-slot presence or FAT
+ * alias arrays are retained: the cache is disposed and repopulated whenever
+ * the active library changes, so a stale library cannot remain usable.
  *
  * op_kit_root_dir/op_kit_slot_dir/op_finder/op_lfn_* are private scratch for
  * the scan and directory-load state machines. op_line_buf/op_line_len stream
@@ -244,38 +266,27 @@ static char loaded_name[9];
  * clients are menu.c, kitBrowser.c via filesystem_requestLoadName(), and
  * filesystem_loadKitDirectory_tick().
  */
-static uint8_t kit_slot_present[STORAGE_KIT_MAX_SLOTS];
-static char kit_slot_name[STORAGE_KIT_MAX_SLOTS][STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-static char kit_slot_open_name[STORAGE_KIT_MAX_SLOTS][STORAGE_KIT_FILENAME_MAX];
 /*
  * Root Scene/ directory scan cache.
  *
  * Scene folders use the same numbered "NNN Name" convention as Kit folders,
- * but their occupancy and display names are independent library state. Keeping
- * a separate cache prevents a Scene slot from borrowing a Kit open alias or
- * showing a Kit name in Load:[Scene]. Each open name is the FAT short alias
- * that asyncfatfs can reopen after the scan; each display name is the actual
- * LFN-derived user label truncated/padded to the LCD field.
+ * but their occupancy is independent while this shared cache is active.
+ * Display names and occupancy are therefore owned entirely by the one
+ * generalized cache tagged FS_NAME_CACHE_SCENE. Any concrete FAT alias needed
+ * by asyncfatfs is kept only in operation-local scratch for that one reopen.
  */
-static uint8_t scene_slot_present[STORAGE_SCENE_MAX_SLOTS];
-static char scene_slot_name[STORAGE_SCENE_MAX_SLOTS]
-                           [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
-static char scene_slot_open_name[STORAGE_SCENE_MAX_SLOTS]
-                                [STORAGE_KIT_FILENAME_MAX];
 /*
- * Root Bank/ directory scan cache.
+ * Root Bank/ directory identity.
  *
  * Root Banks are library slots named `NNN <bank name>` just like root Scenes,
  * but a Bank folder contains bankset.bcg plus Bank-local Scene children named
  * `00..15`. This cache stores only the root Bank identity used by Load/Save
  * browsing; child Scene names live in per-operation scratch while a selected
- * Bank is open.
+ * Bank is open. Root Bank names and occupancy are held by the generalized
+ * slot-ordered cache tagged FS_NAME_CACHE_BANK. Bank-local child names remain
+ * operation scratch because they belong to the selected Bank, not the root
+ * library.
  */
-static uint8_t bank_slot_present[STORAGE_BANK_MAX_SLOTS];
-static char bank_slot_name[STORAGE_BANK_MAX_SLOTS]
-                          [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-static char bank_slot_open_name[STORAGE_BANK_MAX_SLOTS]
-                               [STORAGE_KIT_FILENAME_MAX];
 static afatfsFilePtr_t op_kit_root_dir = NULL;
 static afatfsFilePtr_t op_kit_slot_dir = NULL;
 static afatfsFinder_t op_finder;
@@ -290,6 +301,17 @@ static afatfsFinder_t op_finder;
 static afatfsObjectFinder_t op_object_finder;
 static afatfsObjectInfo_t op_object;
 static char op_root_open_name[AFATFS_SHORT_FILENAME_MAX];
+/*
+ * One-operation Scene directory alias returned by asyncfatfs.
+ *
+ * What: receives the concrete short alias while a root Scene directory is
+ * opened by its visible `NNN Name` key, then remains available for the second
+ * open later in the same Scene load state machine. Why: the asyncfatfs LFN
+ * helper can return an alias needed for an exact reopen, but retaining one
+ * alias array for all 1,000 slots would duplicate the general name cache and
+ * waste SRAM. This scratch is invalid outside the active Scene load.
+ */
+static char op_scene_root_open_name[AFATFS_SHORT_FILENAME_MAX];
 static char op_lfn_name[FS_KIT_LFN_MAX];
 static uint8_t op_lfn_valid = 0;
 static char op_line_buf[FS_TEXT_LINE_MAX];
@@ -485,10 +507,21 @@ static void filesystem_saveSceneDirectory_tick(void);
 static void filesystem_loadBankDirectory_tick(void);
 static void filesystem_saveBankDirectory_tick(void);
 static void filesystem_createBootIndex_tick(void);
+static void filesystem_createLibraryIndex_tick(void);
+static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
+                             uint16_t slot, fs_completion_cb_t cb);
+static void filesystem_saveIndexScanComplete(void);
+static void filesystem_saveIndexWriteComplete(void);
 static void filesystem_loadInstrumentIndex_tick(void);
-static uint8_t filesystem_cachedInstrumentCount(instrument_type_t type);
+static void filesystem_loadLibraryIndex_tick(void);
+static uint16_t filesystem_cachedInstrumentCount(instrument_type_t type);
 static const char *filesystem_cachedInstrumentName(instrument_type_t type,
-                                                   uint8_t index);
+                                                   uint16_t index);
+static const char *filesystem_cachedLibraryName(fs_name_cache_kind_t kind,
+                                                uint16_t slot);
+static uint8_t filesystem_librarySlotExists(fs_name_cache_kind_t kind,
+                                             uint16_t slot);
+static void filesystem_prepareLibraryNameCache(fs_name_cache_kind_t kind);
 static storage_status_t filesystem_readTextLine(afatfsFilePtr_t file,
                                                 char *buffer,
                                                 uint8_t *len,
@@ -544,30 +577,50 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
                                                              void *),
                                         void *ctx);
 /*
- * General typed Instrument name-index cache.
+ * Generalized name-index cache.
  *
- * What: stores the sorted eight-character browser names and count for the one
- * currently loaded Instrument type, indexed only by browser position.
- * Why: the same single cache must serve boot `.hcindex` creation, per-type
- * index loading, Load/Save menu display, Instrument Load filename construction,
- * and post-save index refresh without retaining one cache per type. Open
- * aliases and longer source stems are operation-local values; they are not
- * browser-cache identity and therefore are not retained per entry in SRAM.
+ * What: stores the currently active library's eight-character display names.
+ * Instrument rows occupy the first sorted entries, up to all 1,000 rows;
+ * Kit, root Scene, and root Bank rows occupy their direct 000..999 slot
+ * positions so an index line can be turned back into `NNN ` + name without
+ * sorting.
+ * Why: this is the one SRAM name cache. A type/library transition disposes it
+ * and the newly selected `.hcindex` repopulates it, so no per-Instrument,
+ * per-Kit, per-Scene, or per-Bank display-name arrays can retain stale browser
+ * text.
+ * Open aliases and longer source stems are operation-local values; they are
+ * not browser-cache identity and therefore are not retained in this array.
  * Inputs/outputs: filesystem scan/index/save state machines write these cells;
  * Menu and Preset access them only through filesystem accessors.
  */
+static fs_name_cache_kind_t fs_list_cache_kind = FS_NAME_CACHE_NONE;
 static instrument_type_t fs_list_cache_type = INSTRUMENT_TYPE_UNKNOWN;
-static uint8_t fs_list_cache_count;
-static char fs_list_cache_name[FS_INSTRUMENT_MAX_PER_TYPE]
+static uint16_t fs_list_cache_count;
+static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
                               [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static uint8_t op_instrument_load_destination_slot = 0u;
 static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
-static uint8_t op_instrument_load_index = 0u;
+/* A browser index addresses any row in the shared 1,000-entry cache. */
+static uint16_t op_instrument_load_index = 0u;
 /* Registry indices, rather than enum values, drive folder iteration. */
 static uint8_t op_instrument_scan_registry_index = 0u;
 static instrument_type_t op_instrument_index_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint8_t op_instrument_scan_one_type = 0u;
+static fs_name_cache_kind_t op_library_index_kind = FS_NAME_CACHE_NONE;
+/*
+ * Save-completion index refresh chain.
+ *
+ * What: holds the original save callback while the newly written Kit/Scene/Bank
+ * directory is scanned and its complete slot-ordered `.hcindex` is rewritten.
+ * Why: the save target can be a new or renamed physical directory, so merely
+ * changing the old shared-cache row is not equivalent to the boot scan. The
+ * pending flag is consumed after the save's final FAT flush; the kind remains
+ * available to the scan-complete callback until the index write completes.
+ */
+static uint8_t op_save_index_refresh_pending = 0u;
+static fs_name_cache_kind_t op_save_index_refresh_kind = FS_NAME_CACHE_NONE;
+static fs_completion_cb_t op_save_completion_callback = NULL;
 /*
  * Root Instrument Save request scratch.
  *
@@ -584,11 +637,94 @@ static char op_instrument_save_open_name[AFATFS_SHORT_FILENAME_MAX];
 static storage_instrument_save_mode_t op_instrument_save_mode =
     STORAGE_INSTRUMENT_SAVE_NORMAL;
 
-static void filesystem_clearInstrumentCacheStorage(void)
+/*
+ * Dispose the only physical browser-name array.
+ *
+ * What: clears the active-domain tag, typed Instrument tag, row count, and
+ * all 1,000 fixed-width name cells. Why: a cache transition must invalidate
+ * both names and occupancy together; otherwise a subsequent Kit, Scene, Bank,
+ * or Instrument request could validate a slot against stale SRAM text.
+ * Inputs/outputs: none; callers choose and repopulate the next domain after
+ * this function returns. This is the private storage primitive behind the
+ * public menu lifecycle APIs.
+ */
+static void filesystem_clearNameCacheStorage(void)
 {
+    fs_list_cache_kind = FS_NAME_CACHE_NONE;
     fs_list_cache_type = INSTRUMENT_TYPE_UNKNOWN;
     fs_list_cache_count = 0u;
     memset(fs_list_cache_name, 0, sizeof(fs_list_cache_name));
+}
+
+/*
+ * Keep the old private helper name as a migration shim for Instrument paths.
+ * What: clears the same generalized cache used by Kit and Scene. Why: the
+ * earlier Instrument-only implementation has many carefully audited callers;
+ * routing them through this shim prevents one caller from accidentally
+ * clearing only an obsolete typed sub-cache after the generalization.
+ */
+static void filesystem_clearInstrumentCacheStorage(void)
+{
+    filesystem_clearNameCacheStorage();
+}
+
+/*
+ * Select a numbered root-library view in the shared cache.
+ *
+ * What: disposes the previous domain, tags the requested Kit, root Scene, or
+ * root Bank domain, and exposes its 000..999 row count. Why: numbered library
+ * rows must remain at their physical slot index, including blank slots, so an
+ * index reader or physical scan cannot compact them into a second structure.
+ * Instrument callers use their separate typed preparation path because their
+ * rows are sorted file names rather than direct slot coordinates.
+ */
+static void filesystem_prepareLibraryNameCache(fs_name_cache_kind_t kind)
+{
+    filesystem_clearNameCacheStorage();
+    fs_list_cache_kind = kind;
+    fs_list_cache_count = (kind == FS_NAME_CACHE_KIT)
+        ? STORAGE_KIT_MAX_SLOTS
+        : (kind == FS_NAME_CACHE_SCENE)
+            ? STORAGE_SCENE_MAX_SLOTS
+        : (kind == FS_NAME_CACHE_BANK)
+            ? STORAGE_BANK_MAX_SLOTS
+            : 0u;
+}
+
+/*
+ * Borrow one name from the active numbered-library cache.
+ *
+ * What: returns a direct 000..999 row only when both the requested domain and
+ * slot are active. Why: a name from another library is not a valid open key or
+ * occupancy record, and returning NULL on a domain mismatch prevents callers
+ * from accidentally using stale rows after a menu transition. The returned
+ * pointer remains valid until the next cache disposal or replacement.
+ */
+static const char *filesystem_cachedLibraryName(fs_name_cache_kind_t kind,
+                                                uint16_t slot)
+{
+    if (fs_list_cache_kind != kind || slot >= fs_list_cache_count)
+        return NULL;
+    return fs_list_cache_name[slot];
+}
+
+/* Query occupancy without introducing a second per-slot bitmap.
+ *
+ * What: treats a non-empty row in the active slot-ordered Kit/Scene/Bank index as
+ * the complete existence record for that slot. Why: the shared 1,000-entry
+ * cache already has to retain the display name used to reconstruct `NNN
+ * Name`; a separate presence array would consume SRAM and could disagree with
+ * the name after cache disposal or index reload. Inputs are the active cache
+ * domain and zero-based slot. Output is nonzero only for a valid, non-blank
+ * cached name. Clients: Kit/Scene/Bank scan, load validation, menu accessors, and
+ * first-slot fallback selection.
+ */
+static uint8_t filesystem_librarySlotExists(fs_name_cache_kind_t kind,
+                                             uint16_t slot)
+{
+    const char *name = filesystem_cachedLibraryName(kind, slot);
+
+    return (uint8_t)(name != NULL && name[0] != '\0');
 }
 /*
  * Validated one-Instrument staging payload.
@@ -602,7 +738,8 @@ static kit_instrument_slot_t op_staged_instrument;
 static char op_staged_instrument_display_name[9];
 static char op_staged_instrument_stem[SCENE_INSTRUMENT_STEM_LEN + 1u];
 static uint32_t op_stream_index = 0;
-static uint8_t op_item_offset = 0;
+/* Also indexes 000..999 `.hcindex` rows, so this must not wrap at 255. */
+static uint16_t op_item_offset = 0;
 static uint8_t op_loaded_active_pattern_running = 0;
 static uint8_t op_file_version = 0;
 static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
@@ -1578,6 +1715,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     switch (op) {
     case FS_INTERNAL_OP_FLUSH_FINISH:          return "Flush";
     case FS_INTERNAL_OP_CREATE_BOOT_INDEX:     return "HIdx";
+    case FS_INTERNAL_OP_CREATE_LIBRARY_INDEX:  return "LIdx";
     case FS_INTERNAL_OP_LOAD_KIT:              return "KitL";
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:        return "KMrL";
     case FS_INTERNAL_OP_LOAD_SCENE:            return "ScnL";
@@ -1682,6 +1820,63 @@ static void filesystem_finish(fs_status_t final_status)
     filesystem_complete(final_status);
 }
 
+/* Complete the original save after its scan/index refresh chain.
+ *
+ * What: publishes the final status and invokes the callback captured when the
+ * Kit/Scene save was requested. Why: the save callback must not run between
+ * writing the directory and rewriting `.hcindex`, otherwise Menu can dispose
+ * the cache or allow another operation while the index still describes the
+ * old directory set. Inputs: final chain status. Output: the original Preset
+ * completion callback runs exactly once, after the physical folder and index
+ * have both passed their FAT flush gates.
+ */
+static void filesystem_completeSaveIndexRefresh(fs_status_t final_status)
+{
+    fs_completion_cb_t cb = op_save_completion_callback;
+
+    op_save_completion_callback = NULL;
+    op_save_index_refresh_kind = FS_NAME_CACHE_NONE;
+    op_save_index_refresh_pending = 0u;
+    status = final_status;
+    current_op = FS_INTERNAL_OP_NONE;
+    if (cb)
+        cb();
+}
+
+/* Start the boot-equivalent physical rescan after a successful save flush.
+ *
+ * What: replaces the old cache-row-only save update with a real Kit/Scene/Bank
+ * directory scan. Why: a save can create, rename, or remove a numbered folder;
+ * only scanning the parent directory observes the complete resulting set.
+ * Inputs: op_save_index_refresh_kind and the parked original save callback.
+ * Output: the shared cache is rebuilt and the scan callback starts the full
+ * 1,000-row `.hcindex` writer.
+ */
+static void filesystem_startSaveIndexRefresh(void)
+{
+    fs_name_cache_kind_t kind = op_save_index_refresh_kind;
+    bool started;
+
+    op_save_index_refresh_pending = 0u;
+    op_save_completion_callback = completion_callback;
+    completion_callback = NULL;
+    op_library_index_kind = kind;
+    status = FS_STATUS_IDLE;
+    current_op = FS_INTERNAL_OP_NONE;
+
+    started = (kind == FS_NAME_CACHE_KIT)
+        ? filesystem_requestScanKits(filesystem_saveIndexScanComplete)
+        : (kind == FS_NAME_CACHE_SCENE)
+            ? filesystem_requestScanScenes(filesystem_saveIndexScanComplete)
+            : (kind == FS_NAME_CACHE_BANK)
+                ? filesystem_requestScanBanks(filesystem_saveIndexScanComplete)
+                : false;
+    if (!started) {
+        filesystem_makeNamedErrorCode("Idx", 0u);
+        filesystem_completeSaveIndexRefresh(FS_STATUS_ERROR);
+    }
+}
+
 static void filesystem_flushFinish_tick(void)
 {
     /*
@@ -1696,6 +1891,11 @@ static void filesystem_flushFinish_tick(void)
      */
     if (!afatfs_sync())
         return;
+
+    if (op_save_index_refresh_pending) {
+        filesystem_startSaveIndexRefresh();
+        return;
+    }
 
     filesystem_complete(op_flush_final_status);
 }
@@ -2053,7 +2253,7 @@ static void filesystem_loadInstrumentIndex_tick(void)
             while (field_len < actual_len && op_line_buf[field_len] != ',')
                 field_len++;
             if (field_len > 0u &&
-                op_item_offset < FS_INSTRUMENT_MAX_PER_TYPE) {
+                op_item_offset < FS_LIBRARY_NAME_CACHE_MAX) {
                 op_line_buf[field_len] = '\0';
                 storage_copyDisplayName(
                     fs_list_cache_name[op_item_offset],
@@ -2092,6 +2292,310 @@ static void filesystem_loadInstrumentIndex_tick(void)
     }
 }
 
+/*
+ * Create one slot-ordered root Kit, Scene, or Bank `.hcindex`.
+ *
+ * What: writes exactly one newline-delimited row for every 000..999 slot;
+ * existing rows contain only the eight-character name and empty slots contain
+ * an empty row. Why: the row number is the library slot, so alphabetic sorting
+ * would destroy the identity needed to regenerate `NNN Name` later. The
+ * operation uses the same single name cache that the menu reads, then returns
+ * to root and passes through filesystem_finish() for the normal FAT flush.
+ * Inputs: op_library_index_kind and its already-populated shared cache.
+ * Clients: boot index refresh and successful Kit/Scene/Bank saves.
+ */
+static void filesystem_createLibraryIndex_tick(void)
+{
+    const char *root = (op_library_index_kind == FS_NAME_CACHE_KIT)
+        ? STORAGE_ROOT_KIT
+        : (op_library_index_kind == FS_NAME_CACHE_SCENE)
+            ? STORAGE_ROOT_SCENE
+            : (op_library_index_kind == FS_NAME_CACHE_BANK)
+                ? STORAGE_ROOT_BANK
+            : NULL;
+
+    switch (op_phase) {
+    case 0: /* RETURN ROOT */
+        if (!root || !afatfs_chdir(NULL)) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_mkdir_lfn(root,
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1: /* WAIT ROOT DIRECTORY */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 2u;
+        return;
+
+    case 2: /* ENTER ROOT DIRECTORY */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 3u;
+        return;
+
+    case 3: /* CLOSE ROOT DIRECTORY HANDLE */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 4u;
+        return;
+
+    case 4: /* WAIT ROOT CLOSE + OPEN INDEX */
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        op_item_offset = 0u;
+        op_bytes_done = 0u;
+        if (!afatfs_fopen_lfn(".hcindex",
+                              "w",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 5u;
+        return;
+
+    case 5: /* WAIT INDEX OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 6u;
+        return;
+
+    case 6: /* WRITE SLOT-ORDERED ROWS */
+        if (op_item_offset < fs_list_cache_count) {
+            if (op_bytes_done == 0u) {
+                const char *name = fs_list_cache_name[op_item_offset];
+                strcpy(op_line_buf, name);
+                strcat(op_line_buf, "\n");
+                op_line_len = (uint8_t)strlen(op_line_buf);
+            }
+            op_bytes_done += afatfs_fwrite(
+                op_file,
+                (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+            if (op_bytes_done >= op_line_len) {
+                op_item_offset++;
+                op_bytes_done = 0u;
+            }
+            return;
+        }
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 7u;
+        return;
+
+    case 7: /* WAIT INDEX CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+/* Continue a save's refresh chain after the physical directory scan.
+ *
+ * What: starts the same complete slot-ordered index writer used by boot.
+ * Why: the scan has now rebuilt every cache row from actual FAT directory
+ * entries, so the writer can publish a correct index instead of preserving
+ * stale rows from before the save. Inputs: status from the finished scan and
+ * op_save_index_refresh_kind. Output: the original save callback remains
+ * parked until the index writer and its final flush complete.
+ */
+static void filesystem_saveIndexScanComplete(void)
+{
+    fs_status_t scan_status = status;
+    fs_file_type_t file_type = (op_save_index_refresh_kind == FS_NAME_CACHE_KIT)
+        ? FS_FILE_KIT
+        : (op_save_index_refresh_kind == FS_NAME_CACHE_SCENE)
+            ? FS_FILE_SCENE : FS_FILE_BANK;
+
+    if (scan_status != FS_STATUS_DONE) {
+        filesystem_completeSaveIndexRefresh(scan_status);
+        return;
+    }
+    if (!filesystem_start(FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
+                          file_type,
+                          0u,
+                          filesystem_saveIndexWriteComplete)) {
+        filesystem_makeNamedErrorCode("Idx", 1u);
+        filesystem_completeSaveIndexRefresh(FS_STATUS_ERROR);
+    }
+}
+
+/* Publish the original save result after `.hcindex` is durable. */
+static void filesystem_saveIndexWriteComplete(void)
+{
+    filesystem_completeSaveIndexRefresh(status);
+}
+
+/*
+ * Load one slot-ordered Kit, root Scene, or root Bank `.hcindex` into the
+ * shared cache.
+ *
+ * What: treats each physical line as the matching slot, including blank lines,
+ * and copies only the name portion into fs_list_cache_name[slot]. Why: Kit,
+ * Scene, and Bank names intentionally exclude their three-digit folder prefix;
+ * the loader must preserve empty slots and never compact rows or sort them. The
+ * occupancy arrays are rebuilt from non-empty rows so payload loaders can
+ * validate a selection without retaining another display-name array.
+ * Inputs: op_library_index_kind captured by the public request. Clients: the
+ * top-level Load/Save menu after entering Kit, KitMrp, root Scene, or Bank.
+ */
+static void filesystem_loadLibraryIndex_tick(void)
+{
+    const char *root = (op_library_index_kind == FS_NAME_CACHE_KIT)
+        ? STORAGE_ROOT_KIT
+        : (op_library_index_kind == FS_NAME_CACHE_SCENE)
+            ? STORAGE_ROOT_SCENE
+            : (op_library_index_kind == FS_NAME_CACHE_BANK)
+                ? STORAGE_ROOT_BANK
+                : NULL;
+
+    switch (op_phase) {
+    case 0: /* CHDIR ROOT */
+        if (!root || !afatfs_chdir(NULL)) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 1u;
+        return;
+
+    case 1: /* OPEN ROOT DIRECTORY */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn(root,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                NULL,
+                                on_file_opened))
+            return;
+        op_phase = 2u;
+        return;
+
+    case 2: /* WAIT ROOT DIRECTORY */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3u;
+        return;
+
+    case 3: /* ENTER ROOT DIRECTORY */
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        op_phase = 4u;
+        return;
+
+    case 4: /* CLOSE ROOT HANDLE */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 5u;
+        return;
+
+    case 5: /* WAIT ROOT CLOSE + OPEN INDEX */
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(".hcindex",
+                              "r",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 6u;
+        return;
+
+    case 6: /* WAIT INDEX OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_line_len = 0u;
+        op_phase = 7u;
+        return;
+
+    case 7: /* READ ONE ROW PER SLOT */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t st = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 8u;
+            return;
+        }
+        if (line_ready) {
+            if (op_item_offset < fs_list_cache_count) {
+                memset(fs_list_cache_name[op_item_offset], 0,
+                       sizeof(fs_list_cache_name[op_item_offset]));
+                if (op_line_buf[0] != '\0')
+                    storage_copyDisplayName(fs_list_cache_name[op_item_offset],
+                                            op_line_buf);
+            }
+            if (op_item_offset < FS_LIBRARY_NAME_CACHE_MAX)
+                op_item_offset++;
+            op_line_len = 0u;
+        }
+        if (eof) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 8u;
+        }
+        return;
+    }
+
+    case 8: /* WAIT INDEX CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
 /* Copy display text into an exact eight-character preset/LCD field.
  *
  * Inputs: dst points to an eight-byte field, src is NUL-terminated text.
@@ -2117,8 +2621,13 @@ static void filesystem_copyEightCharName(char dst[8], const char *src)
  */
 static void filesystem_setLoadedNameFromKitSlot(uint16_t slot)
 {
-    if (slot < STORAGE_KIT_MAX_SLOTS && kit_slot_present[slot]) {
-        filesystem_copyEightCharName(loaded_name, kit_slot_name[slot]);
+    const char *name = filesystem_librarySlotExists(FS_NAME_CACHE_KIT, slot)
+        ? filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, slot) : NULL;
+
+    if (name) {
+        filesystem_copyEightCharName(
+            loaded_name,
+            name);
     } else {
         filesystem_copyEightCharName(loaded_name, "Empty   ");
     }
@@ -2291,14 +2800,14 @@ static void filesystem_recordKitShortAlias(const char *open_name)
     slot = number;
     storage_copyDisplayName(display, open_name + 3u);
     display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    if (kit_slot_present[slot] &&
-        !filesystem_displayPrecedesCached(display, kit_slot_name[slot])) {
+    if (filesystem_librarySlotExists(FS_NAME_CACHE_KIT, slot) &&
+        !filesystem_displayPrecedesCached(
+            display,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, slot))) {
         return;
     }
-    kit_slot_present[slot] = 1u;
-    memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
-    kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    storage_copyFilename(kit_slot_open_name[slot], open_name);
+    memcpy(fs_list_cache_name[slot], display,
+           STORAGE_KIT_DISPLAY_NAME_LEN + 1u);
     filesystem_noteKitBrowserSlot(slot);
 }
 
@@ -2343,41 +2852,14 @@ static void filesystem_recordKitDirectory(const char *display_name,
      */
     display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
 
-    if (kit_slot_present[slot] &&
-        !filesystem_displayPrecedesCached(display, kit_slot_name[slot])) {
+    if (filesystem_librarySlotExists(FS_NAME_CACHE_KIT, slot) &&
+        !filesystem_displayPrecedesCached(
+            display,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, slot))) {
         return;
     }
-    kit_slot_present[slot] = 1u;
-    memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
-    kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    storage_copyFilename(kit_slot_open_name[slot], open_name);
-    filesystem_noteKitBrowserSlot(slot);
-}
-
-static void filesystem_recordSavedKitDirectory(const char *display_name,
-                                               const char *open_name)
-{
-    uint16_t slot;
-    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-
-    /*
-     * Save is authoritative for its target slot.
-     *
-     * The scan-cache duplicate rule intentionally keeps the earliest
-     * casefold/case-preserving name when the SD card already contains multiple
-     * physical directories for one numbered slot. That rule is wrong after a
-     * successful Save:[Kit]: the just-written directory is the only intended
-     * resident slot identity and must replace any stale cached name.
-     */
-    if (!storage_parseNumberedFolder(display_name, &slot, display) ||
-        slot >= STORAGE_KIT_MAX_SLOTS) {
-        return;
-    }
-    display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    kit_slot_present[slot] = 1u;
-    memcpy(kit_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
-    kit_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    storage_copyFilename(kit_slot_open_name[slot], open_name);
+    memcpy(fs_list_cache_name[slot], display,
+           STORAGE_KIT_DISPLAY_NAME_LEN + 1u);
     filesystem_noteKitBrowserSlot(slot);
 }
 
@@ -2410,14 +2892,14 @@ static void filesystem_recordSceneShortAlias(const char *open_name)
     slot = number;
     storage_copyDisplayName(display, open_name + 3u);
     display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-    if (scene_slot_present[slot] &&
-        !filesystem_displayPrecedesCached(display, scene_slot_name[slot])) {
+    if (filesystem_librarySlotExists(FS_NAME_CACHE_SCENE, slot) &&
+        !filesystem_displayPrecedesCached(
+            display,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE, slot))) {
         return;
     }
-    scene_slot_present[slot] = 1u;
-    memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
-    scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-    storage_copyFilename(scene_slot_open_name[slot], open_name);
+    memcpy(fs_list_cache_name[slot], display,
+           STORAGE_SCENE_DISPLAY_NAME_LEN + 1u);
 }
 
 static void filesystem_recordSceneDirectory(const char *display_name,
@@ -2459,39 +2941,14 @@ static void filesystem_recordSceneDirectory(const char *display_name,
      * load browsing.
      */
     display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-    if (scene_slot_present[slot] &&
-        !filesystem_displayPrecedesCached(display, scene_slot_name[slot])) {
+    if (filesystem_librarySlotExists(FS_NAME_CACHE_SCENE, slot) &&
+        !filesystem_displayPrecedesCached(
+            display,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE, slot))) {
         return;
     }
-    scene_slot_present[slot] = 1u;
-    memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
-    scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-    storage_copyFilename(scene_slot_open_name[slot], open_name);
-}
-
-static void filesystem_recordSavedSceneDirectory(const char *display_name,
-                                                 const char *open_name)
-{
-    uint16_t slot;
-    char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
-
-    /*
-     * Save is authoritative for one root Scene slot.
-     *
-     * Inputs: the display folder name just written and asyncfatfs' returned
-     * short open alias. Outputs: Scene browser cache for that slot is replaced
-     * with the successful save identity. This mirrors Kit Save's cache update
-     * but deliberately avoids kitBrowser because Scene slots are independent.
-     */
-    if (!storage_parseNumberedFolder(display_name, &slot, display) ||
-        slot >= STORAGE_SCENE_MAX_SLOTS) {
-        return;
-    }
-    display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-    scene_slot_present[slot] = 1u;
-    memcpy(scene_slot_name[slot], display, STORAGE_SCENE_DISPLAY_NAME_LEN);
-    scene_slot_name[slot][STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-    storage_copyFilename(scene_slot_open_name[slot], open_name);
+    memcpy(fs_list_cache_name[slot], display,
+           STORAGE_SCENE_DISPLAY_NAME_LEN + 1u);
 }
 
 static void filesystem_recordBankDirectory(const char *display_name,
@@ -2504,10 +2961,10 @@ static void filesystem_recordBankDirectory(const char *display_name,
      * Record one root Bank/ numbered folder.
      *
      * Inputs: FAT display component and the component to use for later
-     * afatfs_opendir_lfn() calls. Output: the root Bank browser cache only.
+     * afatfs_opendir_lfn() calls. Output: the shared root-Bank cache row only.
      * Bank-local Scene children are intentionally not cached here because
      * their two-digit namespace belongs to one selected Bank folder, not the
-     * root library.
+     * root library. A non-blank shared row is the complete occupancy record.
      *
      * Important: the open component must be the display component for LFN-aware
      * opens. A host-created folder such as `000 Slak` may have a generated SFN
@@ -2520,14 +2977,15 @@ static void filesystem_recordBankDirectory(const char *display_name,
         return;
     }
     display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    if (bank_slot_present[slot] &&
-        !filesystem_displayPrecedesCached(display, bank_slot_name[slot])) {
+    if (filesystem_librarySlotExists(FS_NAME_CACHE_BANK, slot) &&
+        !filesystem_displayPrecedesCached(
+            display,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_BANK, slot))) {
         return;
     }
-    bank_slot_present[slot] = 1u;
-    memcpy(bank_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
-    bank_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    storage_copyFilename(bank_slot_open_name[slot], open_name);
+    memcpy(fs_list_cache_name[slot], display,
+           STORAGE_KIT_DISPLAY_NAME_LEN + 1u);
+    (void)open_name;
 }
 
 static void filesystem_recordSavedBankDirectory(const char *display_name,
@@ -2540,10 +2998,10 @@ static void filesystem_recordSavedBankDirectory(const char *display_name,
      * Save is authoritative for one root Bank slot.
      *
      * Inputs: the Bank folder that was successfully created/opened. Output:
-     * root Bank scan cache for that slot. Names still come only from the
-     * directory; bankset.bcg is never queried for identity. The open cache
-     * intentionally keeps display_name, not the returned SFN alias, so the next
-     * Bank Load uses the same LFN-aware matching path as root Bank scan.
+     * shared root-Bank cache row for that slot. Names still come only from the
+     * directory; bankset.bcg is never queried for identity. The returned alias
+     * is deliberately discarded because the shared cache stores only display
+     * names; Bank Load reconstructs the visible `NNN Name` key when needed.
      */
     (void)open_name;
     if (!storage_parseNumberedFolder(display_name, &slot, display) ||
@@ -2551,10 +3009,9 @@ static void filesystem_recordSavedBankDirectory(const char *display_name,
         return;
     }
     display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    bank_slot_present[slot] = 1u;
-    memcpy(bank_slot_name[slot], display, STORAGE_KIT_DISPLAY_NAME_LEN);
-    bank_slot_name[slot][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-    storage_copyFilename(bank_slot_open_name[slot], display_name);
+    memcpy(fs_list_cache_name[slot], display,
+           STORAGE_KIT_DISPLAY_NAME_LEN + 1u);
+    (void)open_name;
 }
 
 static int8_t filesystem_compareInstrumentDisplayName(const char *a,
@@ -2578,11 +3035,14 @@ static int8_t filesystem_compareInstrumentDisplayName(const char *a,
  * request validation, index creation, and every loader path that must agree
  * with filesystem_instrumentCount().
  */
-static uint8_t filesystem_cachedInstrumentCount(instrument_type_t type)
+static uint16_t filesystem_cachedInstrumentCount(instrument_type_t type)
 {
-    if (type >= INSTRUMENT_TYPE_UNKNOWN || type != fs_list_cache_type)
+    if (fs_list_cache_kind != FS_NAME_CACHE_INSTRUMENT ||
+        type >= INSTRUMENT_TYPE_UNKNOWN || type != fs_list_cache_type)
         return 0u;
-    return fs_list_cache_count;
+    return (fs_list_cache_count > FS_LIBRARY_NAME_CACHE_MAX)
+        ? FS_LIBRARY_NAME_CACHE_MAX
+        : fs_list_cache_count;
 }
 
 /* Return the display name paired with one active browser entry.
@@ -2594,7 +3054,7 @@ static uint8_t filesystem_cachedInstrumentCount(instrument_type_t type)
  * accepting an index from one cache and reading its name from another.
  */
 static const char *filesystem_cachedInstrumentName(instrument_type_t type,
-                                                   uint8_t index)
+                                                   uint16_t index)
 {
     if (index >= filesystem_cachedInstrumentCount(type))
         return NULL;
@@ -2677,7 +3137,7 @@ static void filesystem_copyInstrumentStem16(
 
 static uint8_t filesystem_instrumentCacheStemMatches(
         instrument_type_t type,
-        uint8_t index,
+        uint16_t index,
         const char *display_stem)
 {
     /*
@@ -2689,6 +3149,7 @@ static uint8_t filesystem_instrumentCacheStemMatches(
      * files with the same stem are different products.
      */
     return (uint8_t)(
+        fs_list_cache_kind == FS_NAME_CACHE_INSTRUMENT &&
         type < INSTRUMENT_TYPE_UNKNOWN &&
         type == fs_list_cache_type &&
         index < fs_list_cache_count &&
@@ -2702,8 +3163,8 @@ static void filesystem_recordInstrumentFile(const char *display_name,
 {
     instrument_type_t type =
         filesystem_instrumentTypeFromFilename(display_name);
-    uint8_t count;
-    uint8_t pos;
+    uint16_t count;
+    uint16_t pos;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 
     /*
@@ -2720,8 +3181,10 @@ static void filesystem_recordInstrumentFile(const char *display_name,
     if (type == INSTRUMENT_TYPE_UNKNOWN ||
         type >= INSTRUMENT_TYPE_UNKNOWN)
         return;
-    if (fs_list_cache_type != type)
-        filesystem_clearInstrumentCacheStorage();
+    if (fs_list_cache_kind != FS_NAME_CACHE_INSTRUMENT ||
+        fs_list_cache_type != type)
+        filesystem_clearNameCacheStorage();
+    fs_list_cache_kind = FS_NAME_CACHE_INSTRUMENT;
     fs_list_cache_type = type;
     filesystem_copyInstrumentStemDisplay(display, display_name);
     /*
@@ -2759,7 +3222,7 @@ static void filesystem_recordInstrumentFile(const char *display_name,
     }
 
     count = fs_list_cache_count;
-    if (count >= FS_INSTRUMENT_MAX_PER_TYPE)
+    if (count >= FS_LIBRARY_NAME_CACHE_MAX)
         return;
 
     pos = count;
@@ -2773,7 +3236,7 @@ static void filesystem_recordInstrumentFile(const char *display_name,
     }
     memcpy(fs_list_cache_name[pos], display,
            sizeof(fs_list_cache_name[pos]));
-    fs_list_cache_count = (uint8_t)(count + 1u);
+    fs_list_cache_count = (uint16_t)(count + 1u);
 }
 
 static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
@@ -2781,7 +3244,7 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
 {
     instrument_type_t type =
         filesystem_instrumentTypeFromFilename(display_name);
-    uint8_t i;
+    uint16_t i;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 
     /*
@@ -2806,8 +3269,10 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
         type = filesystem_instrumentTypeFromFilename(open_name);
     if (type == INSTRUMENT_TYPE_UNKNOWN || type >= INSTRUMENT_TYPE_UNKNOWN)
         return;
-    if (fs_list_cache_type != type)
-        filesystem_clearInstrumentCacheStorage();
+    if (fs_list_cache_kind != FS_NAME_CACHE_INSTRUMENT ||
+        fs_list_cache_type != type)
+        filesystem_clearNameCacheStorage();
+    fs_list_cache_kind = FS_NAME_CACHE_INSTRUMENT;
     fs_list_cache_type = type;
 
     filesystem_copyInstrumentStemDisplay(display, display_name);
@@ -2822,8 +3287,8 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
         }
 
         if (remove) {
-            uint8_t j;
-            for (j = i; (uint8_t)(j + 1u) < fs_list_cache_count; j++) {
+            uint16_t j;
+            for (j = i; (uint16_t)(j + 1u) < fs_list_cache_count; j++) {
                 memcpy(fs_list_cache_name[j],
                        fs_list_cache_name[j + 1u],
                        sizeof(fs_list_cache_name[j]));
@@ -3017,8 +3482,8 @@ static void filesystem_loadKit_tick(void)
 ** cached FAT short name, copies the display name from the folder scan, parses
 ** kitset.kcg, then opens each listed instrument file in order.
 **
-** Inputs: op_slot is the zero-based internal kit number; kit_slot_present and
-** kit_slot_open_name must have been populated by filesystem_requestScanKits();
+** Inputs: op_slot is the zero-based internal kit number; the active shared
+** Kit name cache must have been populated by the `.hcindex` load request;
 ** storageTypes owns the text schema and ParameterArray maps. Outputs:
 ** op_staged_kit receives routing, endpoints, and source-name metadata until
 ** all files validate; then selected Scene kits receive that complete payload.
@@ -3037,12 +3502,14 @@ static void filesystem_loadKitDirectory_tick(void)
 
     switch (op_phase) {
     case 0: /* VALIDATE CACHE + CHDIR ROOT */
-        if (op_slot >= STORAGE_KIT_MAX_SLOTS || !kit_slot_present[op_slot]) {
+        if (op_slot >= STORAGE_KIT_MAX_SLOTS ||
+            !filesystem_librarySlotExists(FS_NAME_CACHE_KIT, op_slot)) {
             filesystem_setPresetNameEmpty();
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        memcpy(preset_currentName, kit_slot_name[op_slot], 8);
+        memcpy(preset_currentName,
+               filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, op_slot), 8);
         if (!afatfs_chdir(NULL))
             return;
         op_phase = 1;
@@ -3092,7 +3559,21 @@ static void filesystem_loadKitDirectory_tick(void)
     case 6: /* OPEN selected kit directory */
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(kit_slot_open_name[op_slot], "r", on_file_opened))
+        filesystem_makeNumberedDir(
+            op_root_open_name,
+            op_slot,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, op_slot));
+        /*
+         * The selected Kit identity comes from the slot-ordered `.hcindex`.
+         * Open the generated visible `NNN Name` component so a menu entered
+         * from an index load does not depend on a stale or missing per-slot
+         * short-alias cache. asyncfatfs returns the physical alias internally
+         * if a later phase needs it, but the browser contract is the LFN key.
+         */
+        if (!afatfs_opendir_lfn(op_root_open_name,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                NULL,
+                                on_file_opened))
             return;
         op_phase = 7;
         return;
@@ -3264,11 +3745,15 @@ static void filesystem_loadKitDirectory_tick(void)
                              * Preset KitMrp completion, Save editor seeding.
                              */
                             scene_setKitDisplayName(&target_scene->kit,
-                                                    kit_slot_name[op_slot]);
+                                                    filesystem_cachedLibraryName(
+                                                        FS_NAME_CACHE_KIT,
+                                                        op_slot));
                         }
                     }
                 }
-                memcpy(preset_currentName, kit_slot_name[op_slot], 8);
+                memcpy(preset_currentName,
+                       filesystem_cachedLibraryName(FS_NAME_CACHE_KIT,
+                                                   op_slot), 8);
             }
             op_close_status = FS_STATUS_DONE;
             op_phase = 28;
@@ -3429,14 +3914,17 @@ static void filesystem_loadSceneDirectory_tick(void)
     switch (op_phase) {
     case 0: /* VALIDATE CACHE + INIT STAGING + CHDIR ROOT */
         if (op_slot >= STORAGE_SCENE_MAX_SLOTS ||
-            !scene_slot_present[op_slot]) {
+            !filesystem_librarySlotExists(FS_NAME_CACHE_SCENE, op_slot)) {
             filesystem_setPresetNameEmpty();
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
         filesystem_initStagedScene(&op_staged_scene);
-        memcpy(preset_currentName, scene_slot_name[op_slot], 8u);
-        memcpy(op_scene_display_name, scene_slot_name[op_slot],
+        memcpy(preset_currentName,
+               filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE, op_slot),
+               8u);
+        memcpy(op_scene_display_name,
+               filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE, op_slot),
                STORAGE_SCENE_DISPLAY_NAME_LEN);
         op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
         /*
@@ -3493,11 +3981,12 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_file = NULL;
         filesystem_makeNumberedDir(op_root_open_name,
                                    op_slot,
-                                   scene_slot_name[op_slot]);
+                                   filesystem_cachedLibraryName(
+                                       FS_NAME_CACHE_SCENE, op_slot));
         /*
          * Open root Scene folders by the visible numbered component.
          *
-         * Inputs: op_slot plus scene_slot_name[] from the Scene browser cache.
+         * Inputs: op_slot plus the Scene row in the shared slot-ordered cache.
          * Output: afatfs_opendir_lfn() resolves the same `NNN Name` component
          * that the user selected, and returns a directory handle for phase 8.
          *
@@ -3510,7 +3999,7 @@ static void filesystem_loadSceneDirectory_tick(void)
          */
         if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
-                                scene_slot_open_name[op_slot],
+                                op_scene_root_open_name,
                                 on_file_opened))
             return;
         op_phase = 7;
@@ -4025,7 +4514,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_file = NULL;
         filesystem_makeNumberedDir(op_root_open_name,
                                    op_slot,
-                                   scene_slot_name[op_slot]);
+                                   filesystem_cachedLibraryName(
+                                       FS_NAME_CACHE_SCENE, op_slot));
         /*
          * Reopen the selected Scene by the same visible component used at
          * phase 6.
@@ -4038,7 +4528,7 @@ static void filesystem_loadSceneDirectory_tick(void)
          */
         if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
-                                scene_slot_open_name[op_slot],
+                                op_scene_root_open_name,
                                 on_file_opened))
             return;
         op_phase = 40;
@@ -4586,7 +5076,7 @@ static void filesystem_loadBankDirectory_tick(void)
     switch (op_phase) {
     case 0:
         if (op_slot >= STORAGE_BANK_MAX_SLOTS ||
-            !bank_slot_present[op_slot]) {
+            !filesystem_librarySlotExists(FS_NAME_CACHE_BANK, op_slot)) {
             filesystem_setPresetNameEmpty();
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -4638,7 +5128,12 @@ static void filesystem_loadBankDirectory_tick(void)
         op_kit_root_dir = NULL;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_opendir_lfn(bank_slot_open_name[op_slot],
+        /* Rebuild the visible root key from the shared cache row. */
+        filesystem_makeNumberedDir(
+            op_root_open_name,
+            op_slot,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_BANK, op_slot));
+        if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
                                 op_root_open_name,
                                 on_file_opened)) {
@@ -5009,7 +5504,11 @@ static void filesystem_loadBankDirectory_tick(void)
         op_kit_root_dir = NULL;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_opendir_lfn(bank_slot_open_name[op_slot],
+        filesystem_makeNumberedDir(
+            op_root_open_name,
+            op_slot,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_BANK, op_slot));
+        if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
                                 op_root_open_name,
                                 on_file_opened)) {
@@ -5101,7 +5600,7 @@ static void filesystem_scanBankScenes_tick(void)
     switch (op_phase) {
     case 0:
         if (op_slot >= STORAGE_BANK_MAX_SLOTS ||
-            !bank_slot_present[op_slot]) {
+            !filesystem_librarySlotExists(FS_NAME_CACHE_BANK, op_slot)) {
             filesystem_finish(FS_STATUS_DONE);
             return;
         }
@@ -5151,7 +5650,12 @@ static void filesystem_scanBankScenes_tick(void)
         op_kit_root_dir = NULL;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_opendir_lfn(bank_slot_open_name[op_slot],
+        /* Reconstruct the selected root key from the shared Bank row. */
+        filesystem_makeNumberedDir(
+            op_root_open_name,
+            op_slot,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_BANK, op_slot));
+        if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
                                 op_root_open_name,
                                 on_file_opened)) {
@@ -7494,12 +7998,19 @@ static void filesystem_saveKitDirectory_tick(void)
     case 21:
         if (!afatfs_chdir(NULL))
             return;
-        filesystem_recordSavedKitDirectory(op_save_kit_dir_display_name,
-                                           op_save_kit_dir_open_name);
         if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_NORMAL) {
             scene_setResidentKitDisplayName(op_kit_save_source_scene,
                                             preset_currentName);
         }
+        /*
+         * Defer successful completion until the boot-equivalent Kit refresh
+         * chain has finished. The directory is now written, but the active
+         * cache may still describe the pre-save card contents. The final save
+         * flush starts a physical Kit/ scan; that scan then starts the complete
+         * 000..999 `.hcindex` writer before the original callback is released.
+         */
+        op_save_index_refresh_kind = FS_NAME_CACHE_KIT;
+        op_save_index_refresh_pending = 1u;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -8045,6 +8556,15 @@ static void filesystem_saveBankDirectory_tick(void)
         bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
         bank_setRestoreBankSlot(op_slot);
         bank_setHasResidentBank(1u);
+        /*
+         * Bank Save has now promoted its complete temporary tree. Park the
+         * original callback and run the same boot-equivalent Bank rescan plus
+         * `/Bank/.hcindex` rewrite used by Kit, root Scene, and Bank. This is required
+         * for newly-created, renamed, or removed root Bank folders to become
+         * visible immediately without a restart.
+         */
+        op_save_index_refresh_kind = FS_NAME_CACHE_BANK;
+        op_save_index_refresh_pending = 1u;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -8482,10 +9002,18 @@ static void filesystem_saveSceneDirectory_tick(void)
             op_phase = 12u;
             return;
         } else {
-            filesystem_recordSavedSceneDirectory(op_save_kit_dir_display_name,
-                                                 op_save_kit_dir_open_name);
             scene_setSceneDisplayName(op_kit_save_source_scene,
                                       op_scene_display_name);
+            /*
+             * Defer successful completion until the boot-equivalent root Scene
+             * refresh chain has finished. The final save flush starts a real
+             * `/Scene/` scan, and that fresh cache then drives the complete
+             * slot-ordered `.hcindex` writer. This observes newly created,
+             * renamed, and removed Scene folders rather than patching one old
+             * cache row.
+             */
+            op_save_index_refresh_kind = FS_NAME_CACHE_SCENE;
+            op_save_index_refresh_pending = 1u;
         }
         filesystem_finish(FS_STATUS_DONE);
         return;
@@ -9904,10 +10432,12 @@ static void filesystem_saveGlobals_tick(void)
 ** stores kits as folders named 001 Name, 002 Name, etc. This scanner opens the
 ** root Kit/ directory by exact display name, walks asyncfatfs-resolved objects,
 ** accepts only numbered directories via storage_parseNumberedFolder(), and
-** caches both the user display name and short open name.
+** populates the shared slot-indexed name cache. A non-blank cache row is the
+** complete Kit slot-existence record; no per-slot alias or presence table is
+** retained.
 **
 ** Inputs: no slot input; filesystem_requestScanKits() clears the cache and
-** starts this op. Outputs: kit_slot_present/name/open_name and the legacy
+** starts this op. Outputs: shared slot-indexed names and the legacy
 ** kb_map/kb_numKits compatibility map. Missing Kit/ is treated as a successful
 ** empty scan so boot/menu can show Empty slots instead of a filesystem error.
 **
@@ -10033,10 +10563,10 @@ static void filesystem_scanKits_tick(void)
 /* -----------------------------------------------------------------------
 ** SCAN SCENE DIRECTORIES state machine
 **
-** Inputs: filesystem_requestScanScenes() clears the Scene slot cache and
-** starts this operation. Output: Scene/NNN Name folders populate
-** scene_slot_present/name/open_name. Missing Scene/ is a successful empty
-** scan, matching Kit/ behavior.
+** Inputs: filesystem_requestScanScenes() clears the shared Scene cache and
+** starts this operation. Output: Scene/NNN Name folders populate that cache;
+** a non-blank row is the sole slot-existence record. Missing Scene/ is a
+** successful empty scan, matching Kit/ behavior.
 **
 ** The long-filename loop is intentionally duplicated from Kit scan instead of
 ** reusing Kit recording callbacks: Scene slots and Kit slots are separate root
@@ -10149,9 +10679,9 @@ static void filesystem_scanScenes_tick(void)
 /* -----------------------------------------------------------------------
 ** SCAN BANK DIRECTORIES state machine
 **
-** Inputs: filesystem_requestScanBanks() clears the root Bank slot cache and
-** starts this operation. Output: Bank/NNN Name folders populate
-** bank_slot_present/name/open_name. Missing Bank/ is a successful empty scan
+** Inputs: filesystem_requestScanBanks() clears the shared root-Bank cache and
+** starts this operation. Output: Bank/NNN Name folders populate the
+** FS_NAME_CACHE_BANK rows. Missing Bank/ is a successful empty scan
 ** so boot can continue into the root Scene/Kit fallback chain.
 **
 ** Bank-local Scene children are not scanned here. They are two-digit 00..15
@@ -10343,8 +10873,10 @@ static void filesystem_scanInstruments_tick(void)
             op_phase = 12; // all types scanned
             return;
         }
-        if (fs_list_cache_type != entry->type) {
-            filesystem_clearInstrumentCacheStorage();
+        if (fs_list_cache_kind != FS_NAME_CACHE_INSTRUMENT ||
+            fs_list_cache_type != entry->type) {
+            filesystem_clearNameCacheStorage();
+            fs_list_cache_kind = FS_NAME_CACHE_INSTRUMENT;
             fs_list_cache_type = entry->type;
         }
         op_file_ready = false;
@@ -12113,6 +12645,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_CREATE_BOOT_INDEX:
         filesystem_createBootIndex_tick();
         break;
+    case FS_INTERNAL_OP_CREATE_LIBRARY_INDEX:
+        filesystem_createLibraryIndex_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_KIT:
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:
         filesystem_loadKitDirectory_tick();
@@ -12180,6 +12715,9 @@ void filesystem_tick(void)
 
     case FS_INTERNAL_OP_LOAD_INDEX:
         filesystem_loadInstrumentIndex_tick();
+        break;
+    case FS_INTERNAL_OP_LOAD_LIBRARY_INDEX:
+        filesystem_loadLibraryIndex_tick();
         break;
     case FS_INTERNAL_OP_LOAD_NAME:
         filesystem_loadName_tick();
@@ -12251,7 +12789,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
      * Reset the generic File/Dir test scratch for every filesystem request.
      *
      * The test result is shared by all four new menu operations, so it must be
-     * cleared even when the next request is an old Kit/Scene operation. That
+     * cleared even when the next request is an old Kit/Scene/Bank operation. That
      * prevents a later PRESET_OP_TEST_* completion from displaying bytes or a
      * child-directory label that belonged to an earlier save/load attempt.
      */
@@ -12302,6 +12840,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(&op_staged_scene, 0, sizeof(op_staged_scene));
     op_scene_load_scene_mask = 0u;
     memset(op_scene_display_name, 0, sizeof(op_scene_display_name));
+    memset(op_scene_root_open_name, 0, sizeof(op_scene_root_open_name));
     memset(op_scene_child_open_name, 0, sizeof(op_scene_child_open_name));
     memset(op_scene_child_display_name, 0,
            sizeof(op_scene_child_display_name));
@@ -12429,6 +12968,78 @@ uint8_t filesystem_createBootIndexBlocking(void)
     return 1u;
 }
 
+uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
+{
+    /*
+     * Persist one numbered-library cache during pre-audio boot.
+     *
+     * Inputs: a mounted card and the requested Kit, root Scene, or root Bank
+     * domain. Output: a slot-ordered `.hcindex`, including blank rows for
+     * absent slots, after the normal asyncfatfs flush boundary. The wrapper
+     * normally receives a cache populated by the preceding boot scan, but it
+     * deliberately re-scans when the active shared cache tag does not match.
+     * Why: the cache is intentionally disposable and a missed/failed caller
+     * scan must never silently skip creation of the requested root index.
+     * This wrapper exists only for boot; runtime saves chain the same state
+     * machine without blocking audio.
+     */
+    fs_name_cache_kind_t internal_kind;
+    bool scan_started = false;
+
+    if (kind == FS_LIBRARY_INDEX_KIT)
+        internal_kind = FS_NAME_CACHE_KIT;
+    else if (kind == FS_LIBRARY_INDEX_SCENE)
+        internal_kind = FS_NAME_CACHE_SCENE;
+    else if (kind == FS_LIBRARY_INDEX_BANK)
+        internal_kind = FS_NAME_CACHE_BANK;
+    else
+        return 0u;
+    /* A completed error from an immediately preceding boot step is no longer
+     * actionable; acknowledge it before deciding whether this request can
+     * start. A live operation is still a hard serialization boundary. */
+    if (status == FS_STATUS_DONE || status == FS_STATUS_ERROR)
+        filesystem_ack();
+    if (status == FS_STATUS_BUSY)
+        return 0u;
+
+    if (fs_list_cache_kind != internal_kind) {
+        /* Rebuild the requested domain rather than writing another library's
+         * rows under this root. This keeps the one-cache invariant explicit. */
+        if (internal_kind == FS_NAME_CACHE_KIT)
+            scan_started = filesystem_requestScanKits(NULL);
+        else if (internal_kind == FS_NAME_CACHE_SCENE)
+            scan_started = filesystem_requestScanScenes(NULL);
+        else
+            scan_started = filesystem_requestScanBanks(NULL);
+        if (!scan_started)
+            return 0u;
+        while (status == FS_STATUS_BUSY)
+            filesystem_tick();
+        if (status != FS_STATUS_DONE) {
+            filesystem_ack();
+            return 0u;
+        }
+        filesystem_ack();
+    }
+    op_library_index_kind = internal_kind;
+    if (!filesystem_start(FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
+                          (kind == FS_LIBRARY_INDEX_KIT)
+                              ? FS_FILE_KIT
+                              : (kind == FS_LIBRARY_INDEX_SCENE)
+                                  ? FS_FILE_SCENE : FS_FILE_BANK,
+                          0u,
+                          NULL))
+        return 0u;
+    while (status == FS_STATUS_BUSY)
+        filesystem_tick();
+    if (status != FS_STATUS_DONE) {
+        filesystem_ack();
+        return 0u;
+    }
+    filesystem_ack();
+    return 1u;
+}
+
 bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb)
 {
     const fs_file_desc_t *desc = filesystem_desc(type);
@@ -12483,7 +13094,7 @@ bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
     }
     if (valid_mask == 0u || slot >= STORAGE_KIT_MAX_SLOTS)
         return false;
-    if (!kit_slot_present[slot]) {
+    if (!filesystem_librarySlotExists(FS_NAME_CACHE_KIT, slot)) {
         filesystem_setPresetNameEmpty();
         return false;
     }
@@ -12604,7 +13215,7 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
     }
     if (valid_mask == 0u || slot >= STORAGE_KIT_MAX_SLOTS)
         return false;
-    if (!kit_slot_present[slot]) {
+    if (!filesystem_librarySlotExists(FS_NAME_CACHE_KIT, slot)) {
         filesystem_setPresetNameEmpty();
         return false;
     }
@@ -12666,7 +13277,7 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
             valid_mask = (uint16_t)(valid_mask | (uint16_t)(1u << scene_index));
     }
     if (valid_mask == 0u || slot >= STORAGE_SCENE_MAX_SLOTS ||
-        !scene_slot_present[slot])
+        !filesystem_librarySlotExists(FS_NAME_CACHE_SCENE, slot))
         return false;
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_SCENE, FS_FILE_SCENE, slot, cb))
         return false;
@@ -12697,7 +13308,7 @@ bool filesystem_requestLoadBank(uint16_t slot,
             valid_mask = (uint16_t)(valid_mask | (uint16_t)(1u << scene_index));
     }
     if (valid_mask == 0u || slot >= STORAGE_BANK_MAX_SLOTS ||
-        !bank_slot_present[slot]) {
+        !filesystem_librarySlotExists(FS_NAME_CACHE_BANK, slot)) {
         return false;
     }
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_BANK, FS_FILE_BANK, slot, cb))
@@ -12705,7 +13316,9 @@ bool filesystem_requestLoadBank(uint16_t slot,
     op_bank_scene_load_mask = valid_mask;
     op_scene_load_scene_mask = valid_mask;
     filesystem_initStagedScene(&op_staged_scene);
-    memcpy(op_bank_display_name, bank_slot_name[slot], STORAGE_KIT_DISPLAY_NAME_LEN);
+    memcpy(op_bank_display_name,
+           filesystem_cachedLibraryName(FS_NAME_CACHE_BANK, slot),
+           STORAGE_KIT_DISPLAY_NAME_LEN);
     op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     memcpy(preset_currentName, op_bank_display_name, 8u);
     return true;
@@ -12791,9 +13404,7 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb)
     ** kitBrowser compatibility map populated by filesystem_recordKitDirectory().
     */
     kb_numKits = 0;
-    memset(kit_slot_present, 0, sizeof(kit_slot_present));
-    memset(kit_slot_name, 0, sizeof(kit_slot_name));
-    memset(kit_slot_open_name, 0, sizeof(kit_slot_open_name));
+    filesystem_prepareLibraryNameCache(FS_NAME_CACHE_KIT);
     return filesystem_start(FS_INTERNAL_OP_SCAN_KITS, FS_FILE_KIT, 0, cb);
 }
 
@@ -12807,9 +13418,7 @@ bool filesystem_requestScanScenes(fs_completion_cb_t cb)
      * mirrors Kit scan but intentionally has no kitBrowser compatibility map.
      */
     if (status == FS_STATUS_BUSY) return false;
-    memset(scene_slot_present, 0, sizeof(scene_slot_present));
-    memset(scene_slot_name, 0, sizeof(scene_slot_name));
-    memset(scene_slot_open_name, 0, sizeof(scene_slot_open_name));
+    filesystem_prepareLibraryNameCache(FS_NAME_CACHE_SCENE);
     return filesystem_start(FS_INTERNAL_OP_SCAN_SCENES, FS_FILE_SCENE, 0, cb);
 }
 
@@ -12824,9 +13433,8 @@ bool filesystem_requestScanBanks(fs_completion_cb_t cb)
      * Scene/Kit/defaults without treating a pre-Bank card as corrupt.
      */
     if (status == FS_STATUS_BUSY) return false;
-    memset(bank_slot_present, 0, sizeof(bank_slot_present));
-    memset(bank_slot_name, 0, sizeof(bank_slot_name));
-    memset(bank_slot_open_name, 0, sizeof(bank_slot_open_name));
+    /* Bank names and occupancy now come from the single slot-ordered cache. */
+    filesystem_prepareLibraryNameCache(FS_NAME_CACHE_BANK);
     return filesystem_start(FS_INTERNAL_OP_SCAN_BANKS, FS_FILE_BANK, 0, cb);
 }
 
@@ -12843,7 +13451,7 @@ bool filesystem_requestScanBankScenes(uint16_t slot, fs_completion_cb_t cb)
      * state rather than trust a stale child mask.
      */
     if (status == FS_STATUS_BUSY || slot >= STORAGE_BANK_MAX_SLOTS ||
-        !bank_slot_present[slot]) {
+        !filesystem_librarySlotExists(FS_NAME_CACHE_BANK, slot)) {
         return false;
     }
     return filesystem_start(FS_INTERNAL_OP_SCAN_BANK_SCENES,
@@ -12885,22 +13493,98 @@ bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
         status == FS_STATUS_BUSY)
         return false;
     filesystem_clearInstrumentCacheStorage();
+    fs_list_cache_kind = FS_NAME_CACHE_INSTRUMENT;
     fs_list_cache_type = type;
     op_instrument_index_type = type;
     return filesystem_start(FS_INTERNAL_OP_LOAD_INDEX, FS_FILE_KIT, 0u, cb);
 }
 
+static bool filesystem_requestLoadLibraryIndex(fs_name_cache_kind_t kind,
+                                               fs_completion_cb_t cb)
+{
+    /*
+     * Replace the single browser cache with a numbered library index.
+     *
+     * Inputs: one of the root Kit, root Scene, or root Bank domains. Output: the single
+     * shared cache is disposed immediately, then repopulated by an asynchronous
+     * slot-preserving reader. A non-blank row is the occupancy record, so no
+     * matching per-slot bitmap or alias table exists to clear. Why: entering a
+     * different Load or Save type must never leave the prior library's names
+     * visible while the new `.hcindex` is in flight.
+     */
+    if ((kind != FS_NAME_CACHE_KIT && kind != FS_NAME_CACHE_SCENE &&
+         kind != FS_NAME_CACHE_BANK) ||
+        status == FS_STATUS_BUSY)
+        return false;
+    filesystem_prepareLibraryNameCache(kind);
+    op_library_index_kind = kind;
+    return filesystem_start(FS_INTERNAL_OP_LOAD_LIBRARY_INDEX,
+                            (kind == FS_NAME_CACHE_KIT)
+                                ? FS_FILE_KIT
+                                : (kind == FS_NAME_CACHE_SCENE)
+                                    ? FS_FILE_SCENE : FS_FILE_BANK,
+                            0u,
+                            cb);
+}
+
+bool filesystem_requestLoadKitIndex(fs_completion_cb_t cb)
+{
+    return filesystem_requestLoadLibraryIndex(FS_NAME_CACHE_KIT, cb);
+}
+
+bool filesystem_requestLoadSceneIndex(fs_completion_cb_t cb)
+{
+    return filesystem_requestLoadLibraryIndex(FS_NAME_CACHE_SCENE, cb);
+}
+
+bool filesystem_requestLoadBankIndex(fs_completion_cb_t cb)
+{
+    /* Bank enters the same slot-ordered index loader as Kit and root Scene. */
+    return filesystem_requestLoadLibraryIndex(FS_NAME_CACHE_BANK, cb);
+}
+
+bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind)
+{
+    /*
+     * Report whether the requested root library is the active cache domain.
+     * The cache is slot-sized even when every slot is empty, so readiness is a
+     * domain identity question rather than a nonzero-name-count question.
+     */
+    if (kind == FS_LIBRARY_INDEX_KIT)
+        return fs_list_cache_kind == FS_NAME_CACHE_KIT;
+    if (kind == FS_LIBRARY_INDEX_SCENE)
+        return fs_list_cache_kind == FS_NAME_CACHE_SCENE;
+    if (kind == FS_LIBRARY_INDEX_BANK)
+        return fs_list_cache_kind == FS_NAME_CACHE_BANK;
+    return false;
+}
+
 void filesystem_clearInstrumentCache(void)
 {
     /*
-     * Dispose the one shared Instrument browser cache.
+     * Dispose the one shared browser cache through the legacy Instrument name.
      *
-     * Inputs: none. Outputs: no Instrument type is considered loaded and all
-     * cached browser names are erased. Menu calls this when nested Instrument
-     * Load/Save exits or before a type/index request, so a previous type can
-     * never remain visible while another type is selected.
+     * Inputs: none. Outputs: no Instrument type, Kit library, or root Scene
+     * library is considered loaded and all cached browser names are erased.
+     * Existing Instrument callers retain this spelling for source compatibility;
+     * new cross-library lifecycle code uses filesystem_clearNameCache().
      */
-    filesystem_clearInstrumentCacheStorage();
+    filesystem_clearNameCacheStorage();
+}
+
+void filesystem_clearNameCache(void)
+{
+    /*
+     * Dispose the one shared browser-name cache for every library.
+     *
+     * Inputs: none. Output: no Instrument, Kit, root Scene, or root Bank index remains
+     * readable. Menu calls this on Load/Save exit and type changes; retaining
+     * occupancy/open metadata here would make a later payload operation appear
+     * valid without a corresponding display-name index, so the public clear is
+     * intentionally limited to the shared name cache itself and index loads
+     * clear their matching occupancy maps before repopulating them.
+     */
+    filesystem_clearNameCacheStorage();
 }
 
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
@@ -13098,7 +13782,7 @@ const char *filesystem_testResultName(void)
 bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,
                                       instrument_type_t type,
-                                      uint8_t browser_index,
+                                      uint16_t browser_index,
                                       fs_completion_cb_t cb)
 {
     /*
@@ -13329,46 +14013,57 @@ const char *filesystem_loadedInstrumentStem(void)
     return op_staged_instrument_stem;
 }
 
-/* Query whether the most recent Kit/ scan found a numbered folder.
+/* Query whether the active Kit name cache contains a numbered folder.
  *
- * Input: zero-based slot used by menu/preset code. Output: nonzero if a
- * Kit/NNN Name folder exists. Clients: filesystem_kitSlotName() and future UI
- * code that wants to distinguish absent slots from malformed present kits.
+ * Input: zero-based slot used by menu/preset code. Output: nonzero if the
+ * active shared Kit `.hcindex` cache contains a non-blank row. Clients:
+ * filesystem_kitSlotName() and future UI code that distinguishes absent slots
+ * from malformed present kits. The cache row itself is the only occupancy
+ * record; no parallel Kit bitmap is retained.
  */
 uint8_t filesystem_kitSlotExists(uint16_t zero_based_slot)
 {
     if (zero_based_slot >= STORAGE_KIT_MAX_SLOTS)
         return 0u;
-    return kit_slot_present[zero_based_slot];
+    return filesystem_librarySlotExists(FS_NAME_CACHE_KIT, zero_based_slot);
 }
 
-/* Return a display name from the Kit/ scan cache.
+/* Return a display name from the active slot-ordered Kit cache.
  *
  * Input: zero-based slot. Output: NUL-terminated eight-character cached name,
  * or "Empty   " for absent/out-of-range slots. Client: menu.c's Load page.
  */
 const char *filesystem_kitSlotName(uint16_t zero_based_slot)
 {
+    const char *name;
+
     if (!filesystem_kitSlotExists(zero_based_slot))
         return "Empty   ";
-    return kit_slot_name[zero_based_slot];
+    name = filesystem_cachedLibraryName(FS_NAME_CACHE_KIT,
+                                        zero_based_slot);
+    return name ? name : "Empty   ";
 }
 
 uint8_t filesystem_sceneSlotExists(uint16_t zero_based_slot)
 {
     /*
-     * Query the root Scene/ scan cache.
+     * Query the active root Scene/ name cache.
      *
-     * Input: zero-based library slot. Output: nonzero only when the latest
-     * Scene scan found a numbered Scene folder at that slot.
+     * Input: zero-based library slot. Output: nonzero only when the active
+     * shared Scene `.hcindex` cache contains a non-blank row at that slot.
+     * The cache row is the sole occupancy record, so this accessor cannot
+     * disagree with filesystem_sceneSlotName().
      */
     if (zero_based_slot >= STORAGE_SCENE_MAX_SLOTS)
         return 0u;
-    return scene_slot_present[zero_based_slot];
+    return filesystem_librarySlotExists(FS_NAME_CACHE_SCENE,
+                                        zero_based_slot);
 }
 
 const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
 {
+    const char *name;
+
     /*
      * Return an eight-character root Scene library display name.
      *
@@ -13377,10 +14072,13 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
      * directly for Load:[Scene] and Save overwrite planning.
      */
     if (zero_based_slot >= STORAGE_SCENE_MAX_SLOTS ||
-        !scene_slot_present[zero_based_slot]) {
+        !filesystem_librarySlotExists(FS_NAME_CACHE_SCENE,
+                                       zero_based_slot)) {
         return "Empty   ";
     }
-    return scene_slot_name[zero_based_slot];
+    name = filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE,
+                                        zero_based_slot);
+    return name ? name : "Empty   ";
 }
 
 uint8_t filesystem_bankSlotExists(uint16_t zero_based_slot)
@@ -13394,7 +14092,8 @@ uint8_t filesystem_bankSlotExists(uint16_t zero_based_slot)
      */
     if (zero_based_slot >= STORAGE_BANK_MAX_SLOTS)
         return 0u;
-    return bank_slot_present[zero_based_slot];
+    return filesystem_librarySlotExists(FS_NAME_CACHE_BANK,
+                                        zero_based_slot);
 }
 
 const char *filesystem_bankSlotName(uint16_t zero_based_slot)
@@ -13407,10 +14106,12 @@ const char *filesystem_bankSlotName(uint16_t zero_based_slot)
      * store their own object names.
      */
     if (zero_based_slot >= STORAGE_BANK_MAX_SLOTS ||
-        !bank_slot_present[zero_based_slot]) {
+        !filesystem_librarySlotExists(FS_NAME_CACHE_BANK,
+                                       zero_based_slot)) {
         return "Empty   ";
     }
-    return bank_slot_name[zero_based_slot];
+    return filesystem_cachedLibraryName(FS_NAME_CACHE_BANK,
+                                        zero_based_slot);
 }
 
 uint16_t filesystem_firstKitSlot(void)
@@ -13420,12 +14121,14 @@ uint16_t filesystem_firstKitSlot(void)
     /*
      * Find the lowest present Kit slot for fallback loading.
      *
-     * The loop scans direct root slots 000..999 and returns the array count as
-     * the absent sentinel. Callers compare against STORAGE_KIT_MAX_SLOTS rather
-     * than assuming 0 is empty, because slot 000 is a real user slot.
+     * The loop scans direct root slots 000..999 and returns the configured
+     * maximum as the absent sentinel. Callers compare against
+     * STORAGE_KIT_MAX_SLOTS rather than assuming 0 is empty, because slot 000
+     * is a real user slot. Occupancy comes directly from the active shared
+     * cache row.
      */
     for (slot = 0u; slot < STORAGE_KIT_MAX_SLOTS; slot++) {
-        if (kit_slot_present[slot])
+        if (filesystem_librarySlotExists(FS_NAME_CACHE_KIT, slot))
             return slot;
     }
     return STORAGE_KIT_MAX_SLOTS;
@@ -13443,7 +14146,7 @@ uint16_t filesystem_firstSceneSlot(void)
      * from the public Scene library before trying Kit/defaults.
      */
     for (slot = 0u; slot < STORAGE_SCENE_MAX_SLOTS; slot++) {
-        if (scene_slot_present[slot])
+        if (filesystem_librarySlotExists(FS_NAME_CACHE_SCENE, slot))
             return slot;
     }
     return STORAGE_SCENE_MAX_SLOTS;
@@ -13461,7 +14164,7 @@ uint16_t filesystem_firstBankSlot(void)
      * filesystem_bankSlotExists() or compare against the max before loading.
      */
     for (slot = 0u; slot < STORAGE_BANK_MAX_SLOTS; slot++) {
-        if (bank_slot_present[slot])
+        if (filesystem_librarySlotExists(FS_NAME_CACHE_BANK, slot))
             return slot;
     }
     return STORAGE_BANK_MAX_SLOTS;
@@ -13512,27 +14215,27 @@ uint8_t filesystem_instrumentTargetExists(instrument_type_t type,
                                                0u,
                                                0u);
     filesystem_copyInstrumentStemDisplay(display, display_file);
-    for (uint8_t i = 0u; i < filesystem_cachedInstrumentCount(type); i++) {
+    for (uint16_t i = 0u; i < filesystem_cachedInstrumentCount(type); i++) {
         if (filesystem_instrumentCacheStemMatches(type, i, display))
             return 1u;
     }
     return 0u;
 }
 
-uint8_t filesystem_instrumentCount(instrument_type_t type)
+uint16_t filesystem_instrumentCount(instrument_type_t type)
 {
     /*
      * Return the cached Instrument/ count for the active type.
      *
      * Input: instrument type. Output: number of sorted files found by the most
-     * recent scan, capped by FS_INSTRUMENT_MAX_PER_TYPE. Menu uses this to
-     * bound browser indices without accessing filesystem static arrays.
+     * recent scan, up to the complete 1,000 rows of the shared cache. Menu uses
+     * this to bound browser indices without owning another name array.
      */
     return filesystem_cachedInstrumentCount(type);
 }
 
 const char *filesystem_instrumentName(instrument_type_t type,
-                                      uint8_t browser_index)
+                                      uint16_t browser_index)
 {
     const char *name = filesystem_cachedInstrumentName(type, browser_index);
 
@@ -13547,7 +14250,7 @@ const char *filesystem_instrumentName(instrument_type_t type,
 }
 
 uint16_t filesystem_instrumentDisplayIndex(instrument_type_t type,
-                                           uint8_t browser_index)
+                                           uint16_t browser_index)
 {
     uint16_t display_index;
 
@@ -13555,9 +14258,9 @@ uint16_t filesystem_instrumentDisplayIndex(instrument_type_t type,
      * Convert a cached Instrument/ index into the visible one-based counter.
      *
      * Inputs: type and zero-based browser index. Output: one-based list
-     * position, visually saturated at 999. The current cache cannot exceed 128
-     * entries per type, but the saturation lives here so the UI rule stays with
-     * the browser data source if the cache grows later.
+     * position, visually saturated at 999 because the LCD counter has three
+     * digits. The underlying index still addresses all 1,000 rows, so row 999
+     * remains selectable even though its one-based display is 1000.
      */
     if (filesystem_cachedInstrumentCount(type) == 0u ||
         browser_index >= filesystem_cachedInstrumentCount(type))

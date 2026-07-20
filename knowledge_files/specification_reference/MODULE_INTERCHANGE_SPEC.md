@@ -1,6 +1,6 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 040 for the one-pattern bridge,
+Session 030 baseline, updated through Session 041 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
@@ -43,6 +43,16 @@ a generic bridge.
   selector; its present/edit masks and active Scene are BankData state.
 - Numbered library slots are direct `000..999`; slot `000` is real. This does
   not change instrument file voice coordinates, which remain one-based `1..6`.
+- Instrument, Kit, root Scene, and root Bank browser names use one physical
+  shared SRAM cache of 1,000 nine-byte rows. Kit/Scene/Bank rows are direct
+  slot positions; Instrument rows are sorted browser positions. Type changes
+  and menu exit dispose the cache, and entering a type loads its `.hcindex`.
+- Boot writes `/Kit/.hcindex`, `/Scene/.hcindex`, `/Bank/.hcindex`, and each
+  registry-owned Instrument index. After Instrument index generation disposes
+  the shared cache, boot reloads `/Bank/.hcindex` before initial Bank load.
+- Successful Kit, root Scene, and root Bank saves perform a physical parent
+  rescan and complete `.hcindex` rewrite before the original save callback is
+  released; Menu then refreshes the current Save slot display.
 - asyncfatfs owns exact-case filename behavior. Product code should use
   filesystem/asyncfatfs object/LFN APIs instead of local FAT/LFN reconstruction.
   Dot-prefixed files are ordinary filesystem objects and must not be hidden by
@@ -576,16 +586,21 @@ parsing/formatting and descriptor-key validation stay in `storageTypes.c/h`.
 | `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
 | `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse a root `Scene/<NNN Name>/` folder into staged Scene memory, including `sceneset.scg`, embedded Kit, pattern bridge/stub, and effect placeholder, then commit to selected resident Scenes after all children validate. | Preset/Menu Scene Load, boot |
 | `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, thin `pattern.pat`, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
-| `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the single shared 128-entry root Instrument browser cache for the currently loaded type. | Menu Instrument Load; boot uses one type-at-a-time scan/index passes |
+| `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the single shared 1,000-entry root Instrument browser cache for the currently loaded type. | Menu Instrument Load; boot uses one type-at-a-time scan/index passes |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Validate one root Instrument file into private staging without mutating live SceneData. | Preset Instrument request |
 | `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` / `filesystem_requestSaveInstrumentMorph(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. The Morph variant writes current interpolated values into both endpoint sections and preserves resident source naming. | Preset Instrument Save |
 | `filesystem_loadedInstrumentSlot()` / `filesystem_loadedInstrumentDisplayName()` / `filesystem_loadedInstrumentStem()` | Borrow the validated staged payload/name/stem for Preset's ordered commit and later Kit Save metadata. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
-| `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the new cache and legacy `kitBrowser` map. | main startup, kitBrowser/Menu |
+| `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the shared slot-indexed name cache and legacy `kitBrowser` map; non-blank rows provide occupancy. | main startup, kitBrowser/Menu |
+| `filesystem_requestLoadKitIndex(cb)` / `filesystem_requestLoadSceneIndex(cb)` / `filesystem_requestLoadBankIndex(cb)` | Replace the one shared name cache from slot-ordered `/Kit/.hcindex`, `/Scene/.hcindex`, or `/Bank/.hcindex`; blank rows remain slot positions. | Menu top-level Kit/Scene/Bank Load/Save |
+| `filesystem_createLibraryIndexBlocking(kind)` | Write the active shared Kit, root Scene, or root Bank cache as a slot-ordered `.hcindex`; runtime saves use the same async writer. | boot and filesystem save completion |
+| `filesystem_clearNameCache()` / `filesystem_libraryNameCacheLoaded(kind)` | Dispose/query the one active Instrument/Kit/Scene/Bank browser-name cache. | Menu lifecycle and index gating |
 | `filesystem_installSamplesBlocking()` / `filesystem_installLoopsBlocking()` | Blocking sample/loop install under audio suspend. | Menu |
 | `filesystem_loadedName()` | Read loaded name buffer. | Preset |
 | `filesystem_kitSlotExists(slot)` | Query the Kit scan cache for a direct `000..999` numbered folder. | Menu/future browsers |
-| `filesystem_kitSlotName(slot)` | Return cached eight-character Kit display name or `Empty   `. | Menu Load page |
+| `filesystem_kitSlotName(slot)` | Return the shared-cache-backed eight-character Kit name or `Empty   `. The slot number is not part of the cached row. | Menu Load/Save page |
+| `filesystem_sceneSlotName(slot)` | Return the shared-cache-backed root Scene name or `Empty   `; Bank-local Scenes are excluded. | Menu Load/Save page |
+| `filesystem_bankSlotName(slot)` | Return the shared-cache-backed root Bank name or `Empty   `; Bank-local child Scenes are excluded. | Menu Load/Save page |
 | `filesystem_requestScanTestFiles()` / `filesystem_requestScanTestDirs()` and File/Dir test accessors | Temporary diagnostic exact-case root file/directory scans and four-byte read/write results. Dot-prefixed names are not hidden. | Preset/Menu File/Dir diagnostics |
 | `filesystem_diagOp()` / `filesystem_diagPhase()` / `filesystem_diagBytesDone()` | Diagnostics. | diagnostics/future UI |
 | `filesystem_lastMountResult()` / `filesystem_bootDetectedUnsupportedCard()` | Boot/card status. | main/Menu |
@@ -594,8 +609,9 @@ parsing/formatting and descriptor-key validation stay in `storageTypes.c/h`.
 Important private Phase 2 kit helpers:
 
 - `filesystem_scanKits_tick()` opens root `Kit/` by exact display component,
-  iterates asyncfatfs objects, records display names and FAT short aliases, and
-  populates `kb_map[]`/`kb_numKits` for legacy `kitBrowser` compatibility.
+  iterates asyncfatfs objects, records display names in the shared cache, and
+  populates `kb_map[]`/`kb_numKits` for legacy `kitBrowser` compatibility; no
+  per-slot alias or occupancy arrays are retained.
 - `filesystem_loadKitDirectory_tick()` opens the selected kit folder, parses
   `kitset.kcg`, and loads six listed instrument files into private `kit_t`
   staging. It fans out the complete Kit payload only after every file validates;
@@ -619,6 +635,13 @@ Important private Phase 2 kit helpers:
 - `filesystem_saveSceneDirectory_tick()` writes the current Scene folder shape:
   `sceneset.scg`, embedded Kit without `audio_out`, six instruments, thin
   `pattern.pat`, and placeholder `effects.fx`.
+- `filesystem_saveBankDirectory_tick()` promotes the staged Bank tree, then
+  parks the original callback while the root Bank directory is rescanned and
+  `/Bank/.hcindex` is rewritten. The same refresh chain is used for Kit and
+  root Scene saves.
+- `filesystem_loadLibraryIndex_tick()` reads one slot-preserving Kit, root
+  Scene, or root Bank `.hcindex` into the shared cache. It never compacts blank
+  rows and never retains per-slot aliases.
 - Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
   fallback for FAT aliases like `000INI~1` or `001SLA~1`.
 
@@ -673,7 +696,7 @@ layer use the `storage_` prefix.
 | `storage_makeSavedInstrumentDisplayFilename()` | Generate visible LFN instrument filenames from Scene-retained stems, slot type, and optional duplicate-breaking voice suffix. asyncfatfs returns the final short alias. | filesystem Kit/Instrument Save |
 | `storage_patternStubStateInit()` / `storage_patternStubParseLine()` / `storage_patternStubFinalize()` | Validate thin Scene `pattern.pat` placeholders. | Scene Load |
 | `storage_formatPatternStubLine()` / `storage_formatEffectPlaceholderLine()` | Emit thin Scene placeholder child files one line at a time. | Scene Save |
-| `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into direct `000..999` slot plus eight-character display name. Slot `000` is real. | Kit/Scene scan |
+| `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into direct `000..999` slot plus eight-character display name. Slot `000` is real. | Kit/Scene/Bank scan |
 | `storage_copyDisplayName()` / `storage_copyFilename()` | Fixed-width display-name normalization and short filename copying. | filesystem/parser code |
 
 Current ownership decisions:

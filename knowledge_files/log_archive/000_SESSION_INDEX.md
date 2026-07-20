@@ -48,7 +48,7 @@
 | 037 | 2026-07-15 | local working directory, branch `dev-phase2-filesys` | FAILED TESTING: Morph save/load expansion and asyncfatfs rename/replace attempts left Kit Save unable to create/load usable Kit directories; consider rollback to Session 036 boundary or pre-LFN expansion |
 | 038 | 2026-07-15 | local working directory, branch `dev-phase2-filesys` | Save/Load repair: recursive Kit overwrite, root Instrument Save repair, KitMrp/InstrumentMrp Save projection, Load/Save UI polish, asyncfatfs reference |
 | 039 | 2026-07-16 | local working directory, branch `dev-phase2-filesys` | Scene and Bank directory bridge: Scene-owned mix settings, root Scene Save/Load, BankData, Bank boot/load/save, v2 draft pattern.pat, Dev Mode menu gate |
-| 040 | 2026-07-18 | local working directory, branch `dev-ph3-fsfix` | Verified 16-Scene Bank/settings/compact targets, native exact AsyncFATFS cleanup, and hardware-confirmed BnkL14 Bank Load repair |
+| 040 | 2026-07-18 | local working directory, branch `dev-ph3-fsfix` | Verified 16-Scene Bank/settings/compact targets, native exact AsyncFATFS cleanup, hardware-confirmed BnkL14 Bank Load repair, and 8-bit instrument parameters |
 
 ---
 
@@ -434,3 +434,7 @@ Implemented Scene-owned per-voice mix settings, root Scene Load/Save, BankData, 
 ### 040 — Sixteen-Scene Bank, Compact Parameters, And Exact Async Cleanup (2026-07-18)
 Verified and documented the current 16-Scene Bank workspace, v2 bankset manifest and strict settings.cfg, compact byte Instrument parameter/target tokens, and native identity-based AsyncFATFS tree deletion. Fixed hardware-confirmed ERR BnkL14: Bank Load now resets Scene child-discovery scratch before every delegated Bank-local Scene, preventing a Kit/pattern/effect name from child 00 being reused for child 01. Captured the remaining AsyncFATFS work as API-truthfulness, parent-relative capability, delete hardening, move/copy, and crash-recoverable replacement recommendations; reconciled active filesystem/API specifications with current code.
 - **Find here**: 16-Scene Bank persistence/UI/apply, byte parameter target contract, settings.cfg scope, afatfsObjectId/deleteTree/removeObject, TOut06 repair, BnkL14 cause/fix, Session 040 AsyncFATFS follow-up, specification reconciliation
+
+### 041 — Generalized `.hcindex` Cache, Bank Boot Repair, And SRAM Closeout (2026-07-19)
+Completed the generalized directory-index flow for Instrument, Kit, root Scene, and root Bank using exactly one shared 1,000-row display-name cache; removed the retired per-library arrays and the former Instrument 128-entry limit. Fixed Bank boot/index regeneration and post-save Kit/Scene/Bank index refresh/display invalidation, rebuilt the complete filesystem specification from its restored copy, reconciled memory/module/asyncfatfs references, and prepared the Session 042 KitBrowser/`.hcnames` plan.
+- **Find here**: one-cache invariant, 9,000-byte shared cache, 69,000-byte retired arrays, 2,013-byte KitBrowser bridge, slot-ordered root indexes, Instrument registry indexes, Bank boot reload, post-save rescan/rewrite, SRAM manifest, Session 042 pre-plan, specification restoration
