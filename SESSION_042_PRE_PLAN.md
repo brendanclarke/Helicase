@@ -22,11 +22,27 @@ autosave work and not the future dynamic Pattern implementation.
 - Root library indexes: `/Kit/.hcindex`, `/Scene/.hcindex`, and `/Bank/.hcindex`;
   direct slot rows 000..999, blank rows preserved, row number supplies the
   `NNN ` folder prefix.
-- Remaining legacy bridge: `kb_map[1000]` (2,000 B), two 16-bit controls
-  (4 B), and `kb_kitName[9]` (9 B), 2,013 B total. It exists only because
-  older `kitBrowser.c/h` clients still consume that API.
-- Resident object names and one-operation scratch remain valid and are not
-  targets for deletion merely because the browser cache is removed.
+- Remaining legacy bridge: source declares `kb_map[1000]` (2,000 B), two
+  16-bit controls (4 B), `kb_kitName[9]` (9 B), and two one-byte flags. The
+  fresh ELF links only `kb_map` (2,000 B), `kb_numKits` (2 B), and the two
+  flags (2 B) = 2,004 B; `kb_mapIndex` and `kb_kitName` are currently
+  dead-stripped. It exists only because older `kitBrowser.c/h` clients still
+  consume that API.
+- Resident object names are now the primary adjacent target, not merely an
+  incidental detail of the browser-cache removal. Across the 16 resident
+  Scenes, `scene.display_name` costs 144 B, embedded `kit.display_name` costs
+  144 B, six `instrument_display_name[9]` fields per Kit cost 864 B, and six
+  `instrument_stem[17]` fields per Kit cost 1,632 B: 2,784 B inside `scenes[]`.
+  `bank_display_name` adds 9 B and `preset_currentName` adds 8 B. Audit each
+  field separately before removal: the display names seed Save editors, while
+  the longer instrument stems are used to regenerate Kit member filenames.
+  They are not interchangeable with the root `.hcindex` list rows or FAT
+  short aliases. The goal is to replace resident-name retention with streamed
+  lookup or operation-local state wherever the current file ownership permits,
+  without losing Kit Save member-name generation.
+- One-operation name scratch remains valid only until its owning transaction
+  finishes. It must not become a replacement per-slot cache while resident
+  names are retired.
 
 ## Required investigation before implementation
 
@@ -47,6 +63,12 @@ autosave work and not the future dynamic Pattern implementation.
 4. Define behavior for missing, truncated, malformed, duplicate, or stale
    `.hcnames`. A physical directory scan must be able to rebuild the registry;
    a partial file must never make a nonexistent slot appear loadable.
+5. Trace every read and write of `scene_t.display_name`,
+   `kit_t.display_name`, `instrument_display_name`, `instrument_stem`,
+   `bank_display_name`, and `preset_currentName`. Classify each use as browser
+   display, Save-editor seeding, Kit member filename generation, or transient
+   UI state. Do not remove a field until its replacement has a bounded,
+   asynchronous source of the same value.
 
 ## Proposed architecture to validate
 
@@ -89,7 +111,11 @@ autosave work and not the future dynamic Pattern implementation.
    `rg` proves no clients remain. Update both `.c` and `.h` comments at every
    ownership boundary to state what was removed and why the streamed registry
    is the replacement.
-7. Test boot ordering, missing indexes, malformed registry recovery, and all
+7. Retire the resident name fields after the field-use audit, beginning with
+   names that are duplicates of root `.hcindex` rows. Keep or redesign
+   `instrument_stem` only after proving Kit Save can obtain the member filename
+   source without a resident copy.
+8. Test boot ordering, missing indexes, malformed registry recovery, and all
    Load/Save menu transitions before claiming the SRAM register is retired.
 
 ## Test matrix
@@ -110,6 +136,11 @@ autosave work and not the future dynamic Pattern implementation.
   LFN display names and SFN aliases are never confused.
 - Re-run `make -j2`, `make img`, `git diff --check`, `arm-none-eabi-size -A`,
   and `arm-none-eabi-nm -S --size-sort`; verify the expected SRAM reduction.
+- Build one hardware-test image with a 2,048-entry `slider_lut` and a
+  deadzone-aware raw-code mapping. Compare the full-resolution and half-sized
+  LUT on all six sliders for endpoint behavior, deadzone behavior, visible
+  stepping, and audible gain zippering. Record the actual SRAM reduction and
+  keep the change separate from the `.hcnames` migration.
 - Hardware test all browser paths and Save completion behavior before deleting
   temporary Session 041 root notes.
 
@@ -128,5 +159,8 @@ symbols removed, and any compatibility decision about retaining or deleting
   rename/replace without the required AsyncFATFS primitives.
 - Do not implement final dynamic Pattern storage, step automation, or real FX
   persistence as part of this cache migration.
+- Do not attempt to preserve the current full Step/PatternSet allocation as a
+  Phase 042 design. That bridge is explicitly deferred for complete removal in
+  Phase 4.
 - Do not add a new permanent per-domain cache, alias table, occupancy bitmap,
   or large root registry mirror in SRAM.
