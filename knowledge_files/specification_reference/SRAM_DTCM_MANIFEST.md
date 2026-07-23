@@ -467,11 +467,9 @@ array. Kit/Scene/Bank rows are direct slot rows; Instrument rows are sorted
 rows. The cache is disposed when the active domain changes, so there is no
 per-instrument or per-library duplicate.
 
-The fresh ELF also contains `kb_map[1000]` at 2,000 bytes and `kb_numKits` at
-2 bytes. These are a legacy KitBrowser slot-number map, not a second name
-cache. `kb_kitName` and `kb_mapIndex` exist in source but are dead-stripped from
-the fresh ELF; they are not current SRAM allocations. The linked KitBrowser
-state also has two one-byte flags (`kb_dirty`, `kb_name_pending`).
+Session 042 removed the legacy KitBrowser slot-number map. The fresh ELF no
+longer contains `kb_map[1000]`, `kb_numKits`, or the bridge flags; Kit
+occupancy now comes only from the filesystem-owned slot cache/index accessors.
 
 The source-only sample installer has `install_names[120][8]` (960 bytes), and
 the source-only SD importer has name fields inside each 112-byte
@@ -546,7 +544,6 @@ largest and semantically important allocations within it:
 | `fs_list_cache_name` | 9,000 B | One shared 1,000-row name cache |
 | `afatfs` | 6,688 B | Async FAT filesystem state |
 | `fs_test_file_name` + `fs_test_dir_name` | 6,272 B | Diagnostic file/dir list caches |
-| `kb_map` | 2,000 B | Legacy KitBrowser slot map; not names |
 | `usb_MidiMessages` | 2,048 B | USB MIDI message storage |
 | runtime instrument groups | 10,044 B | Drum, Snare, Cymbal, and HiHat runtime state |
 | sample runtime caches | 2,645 B | Sample info/name/loop/count/generation |
@@ -613,6 +610,6 @@ generic parameter arrays are all in SRAM1. They do not consume DTCM.
 - Halving `slider_lut` frees 8,192 bytes and reduces software transfer-curve
   granularity, with possible stair-stepping and deadzone-mapping changes. It
   does not change ADC hardware resolution or DTCM use.
-- There is one 9,000-byte general name cache. `kb_map` is a 2,000-byte legacy
-  slot map, not another name cache. Resident names, sample names, diagnostics,
+- There is one 9,000-byte general name cache. The former 2,000-byte
+  KitBrowser slot map is removed. Resident names, sample names, diagnostics,
   and one-operation aliases are listed separately above.

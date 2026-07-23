@@ -213,8 +213,8 @@ There is exactly one SRAM display-name array:
 are separate small fields. The cache is disposed whenever a Load/Save type is
 changed or exited, and the selected `.hcindex` is loaded when a type is
 entered. No per-instrument-type, per-library, presence, or open-alias name
-cache is permitted. The legacy `kitBrowser` compatibility map is a separate
-2,013-byte bridge and remains only until its clients are retired.
+cache is permitted. The legacy `kitBrowser` compatibility map was retired in
+Session 042; Kit occupancy is the active slot cache/index row.
 
 Boot scans and writes Kit, root Scene, and root Bank indexes before audio
 starts. Instrument types are then scanned/written one at a time. Because that

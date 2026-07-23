@@ -164,15 +164,30 @@ uint8_t preset_getRequestType(void)
 uint8_t preset_getRequestScene(void)
 {
     /*
-     * Expose the Scene captured when Instrument Load was posted.
+     * Expose the single Scene captured for an Instrument action or Kit Save.
      *
-     * Output: Preset's retained destination Scene index. Client: Menu reads it
-     * at async completion to apply the same Scene/slot that filesystem parsed.
-     * This narrow accessor cannot be folded into preset_getRequestSlot(): slot
-     * and Scene are independent coordinates, and exposing only the slot would
-     * make a later menu Scene selection race the queued load's DSP follow-up.
+     * Output: Preset's retained destination/source Scene index. Menu reads it
+     * at async completion to apply the same Instrument coordinate or refresh
+     * the same Kit Save HCNAMES block that the filesystem request captured.
+     * This cannot be folded into preset_getRequestSlot(): library slot and
+     * resident Scene are independent coordinates, and using later Menu state
+     * would let an asynchronous completion target the wrong resident object.
      */
     return pm_instrument_request_scene;
+}
+
+uint16_t preset_getKitRequestSceneMask(void)
+{
+    /*
+     * Expose the immutable resident Scene mask captured for a Kit-family load.
+     *
+     * Output: the exact mask accepted by preset_loadKitForScenes() or its Morph
+     * counterpart. Menu uses it after normal full Kit Load to update one Kit
+     * row plus six Instrument rows for every committed destination. Returning
+     * the existing field adds no storage and avoids consulting a potentially
+     * changed panel selection after the asynchronous load has completed.
+     */
+    return pm_kit_request_scene_mask;
 }
 
 void preset_ackStatus(void)
@@ -1499,6 +1514,15 @@ uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph,
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = isMorph ? SAVE_TYPE_KIT_MORPH : SAVE_TYPE_KIT;
+    /*
+     * Reuse the existing single-Scene request coordinate for Kit Save.
+     *
+     * Input: source_scene accepted by the Save request. Output: Menu can read
+     * the same immutable source after the physical Kit and `/Kit/.hcindex` are
+     * durable, even though menu_resetSaveParameters() has already reset its UI
+     * Scene selection. No additional request-state byte is introduced.
+     */
+    pm_instrument_request_scene = source_scene;
     if (filesystem_requestSaveKitDirectory(presetNr,
                                            source_scene,
                                            preset_currentName,

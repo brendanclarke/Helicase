@@ -565,7 +565,7 @@ render boundary. Session 028 removed obsolete front-panel dependency.
 
 ## Core/Hardware/SD/filesystem
 
-Affiliate modules: Preset, Menu, kitBrowser, PatternData, SampleMemory,
+Affiliate modules: Preset, Menu, PatternData, SampleMemory,
 storageTypes, SceneData.
 
 Purpose: public typed async filesystem facade. It serializes pattern data
@@ -591,7 +591,7 @@ parsing/formatting and descriptor-key validation stay in `storageTypes.c/h`.
 | `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` / `filesystem_requestSaveInstrumentMorph(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. The Morph variant writes current interpolated values into both endpoint sections and preserves resident source naming. | Preset Instrument Save |
 | `filesystem_loadedInstrumentSlot()` / `filesystem_loadedInstrumentDisplayName()` / `filesystem_loadedInstrumentStem()` | Borrow the validated staged payload/name/stem for Preset's ordered commit and later Kit Save metadata. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
-| `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the shared slot-indexed name cache and legacy `kitBrowser` map; non-blank rows provide occupancy. | main startup, kitBrowser/Menu |
+| `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the shared slot-indexed name cache; non-blank rows provide occupancy. | main startup, Menu |
 | `filesystem_requestLoadKitIndex(cb)` / `filesystem_requestLoadSceneIndex(cb)` / `filesystem_requestLoadBankIndex(cb)` | Replace the one shared name cache from slot-ordered `/Kit/.hcindex`, `/Scene/.hcindex`, or `/Bank/.hcindex`; blank rows remain slot positions. | Menu top-level Kit/Scene/Bank Load/Save |
 | `filesystem_createLibraryIndexBlocking(kind)` | Write the active shared Kit, root Scene, or root Bank cache as a slot-ordered `.hcindex`; runtime saves use the same async writer. | boot and filesystem save completion |
 | `filesystem_clearNameCache()` / `filesystem_libraryNameCacheLoaded(kind)` | Dispose/query the one active Instrument/Kit/Scene/Bank browser-name cache. | Menu lifecycle and index gating |
@@ -609,9 +609,8 @@ parsing/formatting and descriptor-key validation stay in `storageTypes.c/h`.
 Important private Phase 2 kit helpers:
 
 - `filesystem_scanKits_tick()` opens root `Kit/` by exact display component,
-  iterates asyncfatfs objects, records display names in the shared cache, and
-  populates `kb_map[]`/`kb_numKits` for legacy `kitBrowser` compatibility; no
-  per-slot alias or occupancy arrays are retained.
+  iterates asyncfatfs objects, and records display names in the shared cache;
+  no per-slot alias, occupancy array, or compatibility slot map is retained.
 - `filesystem_loadKitDirectory_tick()` opens the selected kit folder, parses
   `kitset.kcg`, and loads six listed instrument files into private `kit_t`
   staging. It fans out the complete Kit payload only after every file validates;

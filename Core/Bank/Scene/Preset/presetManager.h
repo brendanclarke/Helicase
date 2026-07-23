@@ -114,13 +114,22 @@ uint8_t          preset_getCompletedOk(void);
 uint16_t         preset_getRequestSlot(void);
 uint8_t          preset_getRequestType(void);
 /*
- * Read the explicit Scene destination retained for the active Instrument load.
+ * Read the explicit single Scene retained for an Instrument action or Kit Save.
  *
- * Output: a valid Scene index while an Instrument request is pending/completing.
- * Client: Menu completion starts the bounded one-slot DSP apply for that exact
- * Scene instead of assuming the Scene active when encoder movement began.
+ * Output: the request-time destination/source Scene while the asynchronous
+ * operation is pending or completing. Instrument completion uses it for the
+ * exact one-slot DSP apply; Kit Save completion uses it for the matching Kit
+ * plus six-Instrument HCNAMES block after the Save UI has reset its selection.
  */
 uint8_t          preset_getRequestScene(void);
+/*
+ * Read the immutable multi-Scene mask retained for a Kit-family load.
+ *
+ * Menu uses this exact accepted mask after a normal full Kit commit to refresh
+ * HCNAMES for every destination, instead of trusting later panel state. This is
+ * a read-only view of existing Preset request state and adds no SRAM storage.
+ */
+uint16_t         preset_getKitRequestSceneMask(void);
 void             preset_ackStatus(void);
 
 /* -----------------------------------------------------------------------

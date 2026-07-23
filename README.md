@@ -109,7 +109,6 @@ make && make img  → build/LXRV2_lxr02.img
     │   │       └── endlessPots.c/h  ← RV1-4, atan2 delta tracking
     │   ├── SD/
     │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations
-    │   │   ├── kitBrowser.c/h       ← kit-only 128-slot gap-tolerant browser
     │   │   ├── SPI/
     │   │   │   ├── spi_sd.c/h       ← bit-bang SPI: PC12/PD2/PC8/PD0
     │   │   │   └── sd_routines.c/h  ← SD_init() only; blocking read/write superseded

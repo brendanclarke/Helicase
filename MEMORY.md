@@ -73,9 +73,10 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   rescan and complete `.hcindex` rewrite before releasing its callback, then
   refreshes the current Save slot display.
 - The former Kit/Scene/Bank per-slot presence/display/alias arrays are retired
-  (69,000 bytes combined). The remaining `kitBrowser` compatibility bridge is
-  `kb_map[1000]` plus 13 bytes of related state (2,013 bytes total) and is the
-  next planned SRAM cleanup; it is not a second names cache.
+  (69,000 bytes combined). Session 042 also removed the dead `kitBrowser`
+  compatibility bridge and its 1,000-entry `kb_map`, releasing the linked
+  2,004-byte SRAM allocation. Kit browsing now uses only the filesystem-owned
+  slot cache/index accessors.
 - Never add object self-name fields to `sceneset.scg`, `bankset.bcg`, or
   instrument files. Object identity comes from directory/file names.
 - For overwrite code, enter the correct parent root first, parse visible child
@@ -150,7 +151,6 @@ end; durable facts belong in `knowledge_files/log_archive/` or
     │   ├── SD/
     │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations; Kit load/save uses root Kit/ directories; root Instrument load/save exists
     │   │   ├── storageTypes.c/h     ← Kit/instrument text parser+writer, numbered-folder parser, descriptor file schema helpers
-    │   │   ├── kitBrowser.c/h       ← legacy kit-only browser compatibility bridge; 000 is real
     │   │   ├── SPI/
     │   │   │   ├── spi_sd.c/h       ← bit-bang SPI: PC12/PD2/PC8/PD0
     │   │   │   └── sd_routines.c/h  ← SD_init() only; blocking read/write superseded
@@ -387,7 +387,7 @@ The STM32F765 has an internal 12-bit DAC on PA4 (DAC1_OUT) and PA5 (DAC2_OUT). T
 
 **Architecture:**
 ```
-Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
+Core/Bank/Scene/Preset/presetManager.c / Menu
   → filesystem.c (typed operations: Bank/Scene/Kit/Instrument/Morph/legacy globals)
     → asyncfatfs/asyncfatfs.c (afatfs_fopen/fread/fwrite/fclose/mkdir/chdir/poll)
       → asyncfatfs/sdcard_lxr02.c (sector transfer FSM, 16 bytes/burst)
@@ -470,10 +470,9 @@ Core/Bank/Scene/Preset/presetManager.c / kitBrowser.c
   a short alias such as `001SLA~1`, scan falls back to the leading three-digit
   slot so the kit remains loadable.
 - Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
-- `kitBrowser.c/h` intentionally remains a legacy kit-only compatibility
-  bridge; pattern/performance/all use typed name loading and direct slot
-  handling. Session 042 plans to retire this bridge after its clients are
-  audited.
+- The legacy `kitBrowser.c/h` bridge is retired. Kit, pattern, performance,
+  and all-file paths use typed filesystem/Menu accessors and direct slot
+  handling.
 - Boot path: synchronous polling loop before `audioCodec_init()` (audio not
   running, blocking OK). After a successful mount, boot scans the root Kit,
   Scene, and Bank libraries, writes their slot-ordered `.hcindex` files, then

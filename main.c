@@ -224,6 +224,132 @@ static void boot_delayMs(uint16_t ms)
     while ((uint16_t)(time_sysTick - t0) < ms) { /* boot-only hold */ }
 }
 
+/*
+ * Development-only boot-screen instrumentation.
+ *
+ * What: CONFIG_DEV_MODE compiles the durable Boot/FS, FOp/FPhs, FPhs/FSub,
+ * and HPhs/HRow OLED observers used to isolate a blocking storage phase. Why:
+ * each observer may deliberately drain the LCD queue before filesystem work,
+ * which is useful for diagnosis but must not replace the normal splash or add
+ * boot latency in ordinary firmware. With development mode disabled, the
+ * stage/active-operation macros below compile to no-ops and both filesystem
+ * callback arguments become NULL; the underlying boot and `.hcnames` work
+ * therefore runs in exactly the same order without any diagnostic display.
+ */
+#if CONFIG_DEV_MODE
+static void boot_showHcnamesDiagnostic(uint8_t phase, uint16_t row)
+{
+    static uint8_t last_phase = 0xffu;
+    static uint16_t last_update_tick = 0u;
+    uint16_t now = time_sysTick;
+
+    /*
+     * Display the live HCNAMES writer coordinate without flooding the async
+     * LCD queue.
+     *
+     * Inputs: phase/row observations from the blocking filesystem wrapper.
+     * Output: row 1 shows `HPhs` and the phase number; row 2 shows `HRow` and
+     * the next fixed-order SRAM row. Phase changes are displayed immediately,
+     * while a streaming/stalled phase refreshes at 100 ms. Requiring room for
+     * the complete two-row frame prevents a partial diagnostic from obscuring
+     * the coordinate needed after a freeze. This hook observes boot only; it
+     * does not pump, acknowledge, or otherwise alter filesystem state.
+     */
+    if (phase == last_phase &&
+        (uint16_t)(now - last_update_tick) < 100u)
+        return;
+    if (lcd_queueFree() < 34u)
+        return;
+
+    last_phase = phase;
+    last_update_tick = now;
+    lcd_diagDisplayInt("HPhs", (int32_t)phase,
+                       "HRow", (int32_t)row);
+}
+
+static void boot_showFilesystemStage(uint8_t stage)
+{
+    /*
+     * Publish one durable boot milestone before entering a blocking SD step.
+     *
+     * Input: the stage number documented in HCNAMES_IMPLEMENTATION.md. Output:
+     * row 1 displays `Boot` plus that stage; row 2 displays the filesystem
+     * facade status observed before the operation begins. lcd_waitForIdle()
+     * is intentional diagnostic instrumentation: it guarantees the complete
+     * marker has physically reached the OLED before firmware can stall inside
+     * the following filesystem call. This helper does not start, pump,
+     * acknowledge, or reorder any filesystem operation.
+     */
+    lcd_diagDisplayInt("Boot", (int32_t)stage,
+                       "FS", (int32_t)filesystem_status());
+    lcd_waitForIdle();
+}
+
+static void boot_showActiveFilesystemDiagnostic(void)
+{
+    static uint8_t last_op = 0xffu;
+    static uint8_t last_phase = 0xffu;
+    uint8_t op;
+    uint8_t phase;
+
+    /*
+     * Flush each stage-11 filesystem transition before pumping it.
+     *
+     * Inputs: read-only operation/phase coordinates from filesystem.c.
+     * Output: `FOp` identifies repair=1, Bank=2, Scene=3, Kit=4, flush=5,
+     * other=0; `FPhs` is the active private phase. Repeated observations of
+     * the same coordinate do nothing. On a transition, lcd_waitForIdle()
+     * guarantees the marker is physically visible before filesystem_tick()
+     * enters the next phase, including a phase whose first pump never returns.
+     * The helper does not mutate or acknowledge filesystem state.
+     */
+    filesystem_getBootDiagnostic(&op, &phase);
+    if (op == last_op && phase == last_phase)
+        return;
+
+    last_op = op;
+    last_phase = phase;
+    lcd_diagDisplayInt("FOp", (int32_t)op,
+                       "FPhs", (int32_t)phase);
+    lcd_waitForIdle();
+}
+
+static void boot_showFilesystemSubstep(uint8_t substep)
+{
+    static uint8_t last_substep = 0xffu;
+
+    /*
+     * Display the exact blocking component about to run inside repair phase 43.
+     *
+     * Input: stable FSub code reported synchronously by filesystem.c. Output:
+     * row 1 retains the confirmed parent phase (43) and row 2 shows the
+     * component substep. Duplicate reports are suppressed. lcd_waitForIdle()
+     * guarantees the marker reaches the OLED before the component call begins,
+     * so a call that never returns leaves its own number visible. This callback
+     * performs no filesystem operation or acknowledgement.
+     */
+    if (substep == last_substep)
+        return;
+    last_substep = substep;
+    lcd_diagDisplayInt("FPhs", 43,
+                       "FSub", (int32_t)substep);
+    lcd_waitForIdle();
+}
+
+#define BOOT_HCNAMES_DIAGNOSTIC_CALLBACK boot_showHcnamesDiagnostic
+#define BOOT_SUBSTEP_DIAGNOSTIC_CALLBACK boot_showFilesystemSubstep
+#else
+/*
+ * Production substitutions deliberately avoid evaluating filesystem status or
+ * touching the LCD. NULL callbacks also prevent filesystem.c from entering any
+ * observer path while preserving the writer and repair state machines.
+ */
+#define boot_showFilesystemStage(stage) ((void)(stage))
+#define boot_showActiveFilesystemDiagnostic() ((void)0)
+#define BOOT_HCNAMES_DIAGNOSTIC_CALLBACK NULL
+#define BOOT_SUBSTEP_DIAGNOSTIC_CALLBACK NULL
+#endif
+
 int main(void)
 {
     #define EXTI_IMR (*((volatile uint32_t *)0x40013C00UL))
@@ -287,6 +413,7 @@ int main(void)
     ** After audioCodec_init(), all SD operations are non-blocking.
     ** ----------------------------------------------------------------- */
     {
+        boot_showFilesystemStage(1u);  /* card init + asyncfatfs mount */
         uint8_t sd_ok = filesystem_initCardAndMountBlocking();
         show_unsupported_card_warning = filesystem_bootDetectedUnsupportedCard();
 
@@ -301,6 +428,7 @@ int main(void)
              */
 
             /* Synchronous kit scan (blocking at boot, OK) */
+            boot_showFilesystemStage(2u);
             filesystem_requestScanKits(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
@@ -314,6 +442,7 @@ int main(void)
              * rows are retained in `/Kit/.hcindex`; their position, not
              * alphabetic order, is the library identity used by Load/Save.
              */
+            boot_showFilesystemStage(3u);
             (void)filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT);
 
             /*
@@ -325,6 +454,7 @@ int main(void)
              * foreground. This mirrors Kit/ scan timing and is safe here
              * because audio rendering has not started yet.
              */
+            boot_showFilesystemStage(4u);
             filesystem_requestScanScenes(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
@@ -336,6 +466,7 @@ int main(void)
              * `/Scene/` directory; Bank-local child Scenes are not included in
              * this index and remain Bank operation scratch.
              */
+            boot_showFilesystemStage(5u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_SCENE);
 
@@ -348,6 +479,7 @@ int main(void)
              * Scene/ because Bank-local children use a two-digit namespace and
              * must not populate the root Scene library browser.
              */
+            boot_showFilesystemStage(6u);
             filesystem_requestScanBanks(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
@@ -359,6 +491,7 @@ int main(void)
              * Scenes are intentionally excluded; `/Bank/.hcindex` contains
              * only the root Bank display name for each 000..999 row.
              */
+            boot_showFilesystemStage(7u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_BANK);
 
@@ -370,6 +503,7 @@ int main(void)
              * audio starts; runtime Save refreshes use the same state machine
              * through filesystem_tick().
              */
+            boot_showFilesystemStage(8u);
             (void)filesystem_createBootIndexBlocking();
 
             /*
@@ -395,6 +529,7 @@ int main(void)
                  * directory can exist on the card while the cache reports no
                  * valid Bank slot and the boot load silently falls through.
                  */
+                boot_showFilesystemStage(9u);
                 filesystem_requestLoadBankIndex(NULL);
                 while (filesystem_status() == FS_STATUS_BUSY)
                     filesystem_tick();
@@ -409,6 +544,9 @@ int main(void)
                  * request with the discovered child-present mask before
                  * loading.
                  */
+                filesystem_setBootSubstepDiagnostic(
+                    BOOT_SUBSTEP_DIAGNOSTIC_CALLBACK);
+                boot_showFilesystemStage(10u);
                 if (filesystem_bankSlotExists(boot_bank_slot)) {
                     preset_loadBank(boot_bank_slot, 0xffffu);
                 } else {
@@ -435,17 +573,37 @@ int main(void)
                     }
                 }
             }
+            boot_showFilesystemStage(11u);
             for (uint8_t boot_load_pass = 0u;
                  boot_load_pass < 2u;
                  boot_load_pass++) {
-                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS)
+                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS) {
+                    boot_showActiveFilesystemDiagnostic();
                     filesystem_tick();
+                }
                 menu_pollPresetStatus();  /* apply Bank/Scene/Kit + ack */
                 if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
                     break;
             }
+            filesystem_setBootSubstepDiagnostic(NULL);
+
+            /*
+             * Do not regenerate `/.hcnames` from resident SRAM at boot.
+             *
+             * Inputs: the initial Bank/Scene/Kit fallback ladder above has
+             * completed. Output: existing root HCNAMES Scene rows survive
+             * boot unchanged. Scene names are now card-owned metadata and no
+             * longer exist in scene_t, so the old snapshot writer would erase
+             * every unselected Scene row after a mask-selective Bank Load.
+             * Successful root Scene/Bank operations create or update only the
+             * rows they own through the shared cache; no boot-time directory
+             * scan or second SRAM name store is required. Affiliates:
+             * filesystem_loadBankDirectory_tick(), root Scene updates, and
+             * the retained diagnostic stage numbering (stage 12 is skipped).
+             */
 
             /* Load globals via presetManager */
+            boot_showFilesystemStage(13u);
             preset_loadGlobals();
             while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS)
                 filesystem_tick();
@@ -459,6 +617,7 @@ int main(void)
     /* Initialise audio path: PLLI2S, GPIO, DMA circular streams, I2S.
     ** AFTER all blocking SD operations. From this point forward, SD
     ** operations are non-blocking via filesystem_tick() in the main loop. */
+    boot_showFilesystemStage(14u);  /* pre-audio filesystem boot completed */
     audioCodec_init();
     prevBtn = 0;
     last_repaint_tick = 0;

@@ -38,7 +38,23 @@
 #define AFATFS_SECTOR_SIZE  512
 #define AFATFS_NUM_FATS     2
 
-#define AFATFS_MAX_OPEN_FILES 3
+/*
+ * Static application-file handle capacity.
+ *
+ * What: Five independent slots allow a retained source and destination stream
+ * to coexist with directory/payload work that temporarily needs additional
+ * handles. Why: Bank -> Scene -> Kit traversal normally releases each explicit
+ * directory handle after afatfs_chdir() copies it into currentDirectory, but
+ * callers may legitimately retain files at different directory levels while
+ * continuing asynchronous I/O. Five provides that concurrency without making
+ * path depth itself dictate handle lifetime.
+ *
+ * SRAM effect on the STM32F765 build: afatfsFile_t is 328 bytes, so raising
+ * this pool from three to five consumes 656 additional zero-initialized SRAM1
+ * bytes. All allocation, polling, shutdown, and diagnostic loops below use
+ * this constant, so no independent loop bound may be introduced.
+ */
+#define AFATFS_MAX_OPEN_FILES 5
 
 #define AFATFS_DEFAULT_FILE_DATE FAT_MAKE_DATE(2015, 12, 01)
 #define AFATFS_DEFAULT_FILE_TIME FAT_MAKE_TIME(00, 00, 00)

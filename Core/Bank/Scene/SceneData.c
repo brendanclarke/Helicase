@@ -178,24 +178,6 @@ void scene_setResidentKitDisplayName(
     scene_setKitDisplayName(&scene->kit, name);
 }
 
-void scene_setSceneDisplayName(
-    uint8_t scene_index,
-    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN])
-{
-    scene_t *scene = scene_get(scene_index);
-
-    /*
-     * Store one resident Scene identity.
-     *
-     * Inputs: resident Scene index plus eight display bytes. Output:
-     * scene->display_name updates only for valid coordinates. This separates
-     * resident Scene naming from root Scene slot occupancy display.
-     */
-    if (!scene)
-        return;
-    scene_copyDisplayName(scene->display_name, name);
-}
-
 const char *scene_kitDisplayName(uint8_t scene_index)
 {
     const scene_t *scene = scene_getConst(scene_index);
@@ -207,20 +189,6 @@ const char *scene_kitDisplayName(uint8_t scene_index)
      * indices return a blank resident name, not the library-slot word `Empty`.
      */
     return scene ? scene->kit.display_name : "        ";
-}
-
-const char *scene_sceneDisplayName(uint8_t scene_index)
-{
-    const scene_t *scene = scene_getConst(scene_index);
-
-    /*
-     * Borrow the retained Scene name for Save editor seeding.
-     *
-     * Output is always an eight-character NUL-terminated string. Invalid Scene
-     * indices return a blank resident name because absent-slot text belongs to
-     * filesystem scan caches, not SceneData.
-     */
-    return scene ? scene->display_name : "        ";
 }
 
 static void scene_copyInstrumentSourceName(kit_t *kit, uint8_t slot,
@@ -645,14 +613,16 @@ void scene_initAll(void)
             scenes[scene_index].settings.fader_setting[track] = 0u;
         }
         /*
-         * Initialize retained object names to the universal uninitialized name.
+         * Initialize only names belonging to resident playable payload.
          *
-         * "none" is the resident object default. The visible word `Empty`
-         * belongs only to missing library slots reported by filesystem/menu
-         * scan caches, so saving from SRAM defaults produces `Scene none`,
-         * `Kit none`, and `none   N.ext` rather than blank or ad hoc names.
+         * A Scene's own display identity is deliberately not mirrored in this
+         * record: root `/.hcnames` owns it, and Menu borrows one row only while
+         * a Scene Load/Save operation needs it. This releases sixteen
+         * nine-byte fields without changing Kit or Instrument filename defaults.
+         * Inputs: cold-start Scene index. Outputs: embedded Kit identity is
+         * initialized to `none`; Scene identity remains filesystem-owned.
+         * Affiliates: filesystem HCNAMES writer and Menu Scene name scratch.
          */
-        scene_setSceneDisplayName(scene_index, "none    ");
         scene_setResidentKitDisplayName(scene_index, "none    ");
         for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++)
             instrumentManager_resetSlot(

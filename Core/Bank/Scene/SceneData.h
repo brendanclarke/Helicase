@@ -198,27 +198,21 @@ typedef struct {
     /*
      * Resident Scene record.
      *
-     * display_name is the resident Scene's own storage/UI identity. settings
-     * holds Scene-level performance/settings data, pattern holds the current
-     * bridge PatternSet, and kit holds the embedded six-slot Kit. The struct is
-     * the unit that future Bank loading will multiply to sixteen playable
-     * Scenes plus a staging/landing Scene.
+     * settings holds Scene-level performance/settings data, pattern holds the
+     * current bridge PatternSet, and kit holds the embedded six-slot Kit.
+     *
+     * A Scene display name is intentionally absent. It is card-resident
+     * metadata owned by fixed rows 1..16 of root `/.hcnames`, rather than
+     * playable Scene state. The former sixteen nine-byte mirrors wasted
+     * nonvolatile SRAM and could diverge after a mask-selective Bank Load.
+     * Menu now borrows only the one row required by a Scene Load/Save
+     * operation; Bank operations borrow the existing general-purpose cache for
+     * their complete 129-row transaction.
+     *
+     * Inputs: filesystem loaders copy validated settings, PatternSet, and Kit
+     * payload. Outputs: Menu and Bank name writers use filesystem HCNAMES
+     * helpers. Affiliates: filesystem.c and Core/Menu/menu.c.
      */
-    /*
-     * Retained Scene display name.
-     *
-     * What: Eight printable characters plus NUL naming the resident Scene for
-     * Save editor seeding and future Bank/Scene lists. It is never emitted as
-     * a self-name inside sceneset.scg.
-     *
-     * Why: Root Scene slot display is on-card library state. The resident Scene
-     * needs its own name so runtime identity does not derive from the browser
-     * sentinel for an empty or differently named slot.
-     *
-     * Inputs: normal Scene Load. Morph operations must not write this field.
-     * Output clients: resident display and future Bank Scene lists.
-     */
-    char display_name[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u];
     scene_settings_t settings;
     PatternSet pattern;
     kit_t kit;
@@ -289,35 +283,18 @@ uint8_t scene_selectActive(uint8_t scene_index);
  * Inputs: caller-owned Kit pointer and fixed-width eight-character display
  * field. Outputs: kit->display_name when kit is non-NULL.
  *
- * Affiliates/clients: filesystem normal Kit Load/Save completion, Menu Save
- * editor seeding, Scene embedded Kit naming.
+ * Affiliates/clients: filesystem normal Kit Load/Save completion, Menu's
+ * normal-Kit Save durability handoff (which reaffirms the resident identity
+ * from the completed `/Kit/.hcindex` row before HCNAMES serialization), Save
+ * editor seeding, and Scene embedded Kit naming. KitMrp callers deliberately
+ * do not change this identity.
  */
 void scene_setKitDisplayName(kit_t *kit,
                              const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
 void scene_setResidentKitDisplayName(
     uint8_t scene_index,
     const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
-/*
- * Retain one resident Scene display name.
- *
- * What: Copies exactly eight display cells into the selected resident Scene,
- * sanitizing non-printable bytes to spaces and appending NUL.
- *
- * Why: the resident Scene needs an internal name independent of the root Scene
- * slot currently highlighted by the browser. This also gives future Bank work
- * a Scene-local name field instead of overloading preset_currentName.
- *
- * Inputs: resident Scene index and fixed-width display field. Outputs:
- * scenes[index].display_name when the index is valid.
- *
- * Affiliates/clients: filesystem Scene Load/Save, Menu Save editor seeding,
- * future Bank Scene lists.
- */
-void scene_setSceneDisplayName(
-    uint8_t scene_index,
-    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
 const char *scene_kitDisplayName(uint8_t scene_index);
-const char *scene_sceneDisplayName(uint8_t scene_index);
 /*
  * Borrow a mutable instrument slot from a Scene's embedded Kit.
  *

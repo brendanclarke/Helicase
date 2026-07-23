@@ -16,14 +16,18 @@ component and a FAT short alias are not interchangeable identities.
 | Scene, per resident Scene | scene.display_name | 9 bytes each; 144 bytes for 16 Scenes | Eight printable Scene display cells plus NUL. |
 | Bank | bank_display_name | 9 bytes | Eight printable Bank display cells plus NUL. |
 | Save editor | preset_currentName | 8 bytes | Current editable Load/Save UI field. This is UI state, not an object-owned retained name. |
+| Kit/Instrument menu session | menu_residentNameScratch[7][9] | 63 bytes | One Scene's Kit name plus six Instrument names, retained only from family entry through family exit. Replaces the former standalone 9-byte Instrument editor/display buffer. |
+| Kit/Instrument session control | scratch Scene + valid flag + dirty Scene mask | 4 bytes | Binds the seven rows to one Scene and accumulates committed Scenes for one exit rewrite. |
 
 Resident object-name metadata totals 2,801 bytes: 2,784 bytes across the 16
 resident Scene/Kit records, plus 9 bytes for BankData and 8 bytes for the Save
 editor field.
 
-The resident name fields live inside each resident Scene's embedded Kit or
+The resident object fields live inside each resident Scene's embedded Kit or
 Scene record, except BankData's single workspace Bank display name. There are
-16 resident Scene slots.
+16 resident Scene slots. The 67-byte Menu session block is UI scratch, not an
+additional non-volatile resident object copy. Because it replaces the former
+9-byte Instrument scratch, its named static-storage increase is 58 bytes.
 
 ## Root directory browser caches
 
@@ -37,16 +41,15 @@ arrays are retained.
 | Kit | Shared `fs_list_cache_name[1000][9]` when Kit is active; non-blank row means present | None retained | 9,000 bytes, one physical cache |
 | Scene | Shared `fs_list_cache_name[1000][9]` when root Scene is active; non-blank row means present | None retained; one-operation alias scratch only | 9,000 bytes shared, not additional |
 | Bank | Shared `fs_list_cache_name[1000][9]` when Bank is active; non-blank row means present | None retained; one-operation root-key scratch only | 9,000 bytes shared, not additional |
+| HCNAMES runtime Instrument/Kit view | First 129 rows of `fs_list_cache_name[1000][9]` during one family-entry read or dirty family-exit update | None retained; root file is reopened by display name | 0 additional filesystem bytes; temporarily replaces the active `.hcindex` view |
 | Generalized Instrument/Kit/Scene/Bank name pool | `fs_list_cache_name[1000][9]` | None retained in the name cache | 9,000 bytes total; Instrument uses sorted rows, numbered libraries use direct slot rows |
 | Generalized cache tag | `fs_list_cache_kind` 1 + `fs_list_cache_type` 1 + count 2 | — | 4 bytes; one active domain, disposed on menu exit/type change |
 
-The legacy Kit browser compatibility bridge is still allocated and is not a
-second name cache: `kb_map[1000]` is 2,000 bytes of `uint16_t` slot numbers,
-and `kb_numKits` plus `kb_mapIndex` add 4 bytes. Its map/control total is 2,004
-bytes; `kb_kitName[9]` adds 9 bytes and is included in the generic scratch
-section below. The complete bridge is therefore 2,013 bytes. It remains only
-for older `kitBrowser.c` clients; it is the remaining candidate for removal if
-that compatibility API is retired.
+Session 042 retired the legacy Kit browser compatibility bridge. The old
+`kb_map[1000]`, `kb_numKits`, `kb_mapIndex`, flags, and `kb_kitName[9]` no
+longer exist in source or the build. Kit browsing now uses the same
+filesystem-owned slot cache/index accessors as Menu, so no separate Kit slot
+map remains.
 
 There is one generalized display-name cache, not one cache per instrument or
 library type. Instrument uses the same storage as the full 1,000 sorted rows;
@@ -56,6 +59,34 @@ so the line number supplies `NNN` when a full folder key is needed. Changing a
 Load/Save type or exiting the menu disposes the cache; entering Kit, root
 Scene, or Bank reloads `/Kit/.hcindex`, `/Scene/.hcindex`, or `/Bank/.hcindex`,
 while nested Instrument menus reload the selected typed index.
+
+The first Kit or Instrument family entry borrows the generalized allocation as
+the 129-row root `/.hcnames` register. Menu copies the selected Scene's Kit plus
+six Instrument rows into `menu_residentNameScratch[7][9]`, then replaces the
+general cache with `/Kit/.hcindex` or the selected type's `.hcindex`. Voice
+changes and successful loads/saves reuse those seven rows and only accumulate a
+dirty-Scene mask; they do not reopen HCNAMES. When the combined family is
+exited, one updater borrow preserves unrelated file rows, replaces all seven
+rows for every dirty Scene from committed SceneData, and rewrites the file.
+
+Top-level Kit entry uses that same entry sequence and copies the retained Kit
+row into the existing eight-byte `preset_currentName` editor for Save. A normal
+full Kit Load refreshes all seven scratch rows for the displayed destination
+Scene and marks every request-mask Scene dirty; Kit Save does the same for its
+captured source Scene after the physical Kit and `/Kit/.hcindex` are durable.
+The exit updater preserves all other variable-length rows. Multiple dirty
+Scenes do not require a 16-by-7 Menu array because their authoritative names
+remain in their existing committed SceneData until the one exit serialization.
+
+Kit and nested Instrument Load keep number-only encoder traversal responsive.
+The existing Menu slot/index is the newest desired selection and the existing
+`menu_deferSelectionRequest` bit coalesces retries. During ordinary payload and
+apply work the Kit or typed Instrument index stays resident, so a newly selected
+row's name is copied immediately. A name is blank only during the short family
+entry/exit interval when HCNAMES owns the generalized cache. Instrument
+traversal uses a compile-time 1,000-row provisional bound during that interval
+and clamps against the real type count after index restoration. No additional
+pending-number, count, or browser-cache allocation was added.
 
 FAT short aliases are operation-local values, and the longer Instrument source
 stem used after a successful load is staged metadata; neither is retained as a
@@ -74,12 +105,19 @@ contained a 1,000-byte presence array, a 9,000-byte display-name array, and a
 13,000-byte short-alias array: 23,000 bytes per library, 69,000 bytes total.
 Those arrays are crossed off. The replacement generalized name array is 9,000
 bytes, shared by all four library families and never multiplied by instrument
-type. The separate 2,000-byte `kb_map` compatibility bridge remains as noted
-above.
+type. The former 2,000-byte `kb_map` compatibility bridge is removed.
 
 The current Instrument registry has Drum, Snare, Cymbal, and HiHat types. Only
 one type is active at a time, but that active type can occupy all 1,000 rows;
 changing type disposes the shared cache and reloads the selected `.hcindex`.
+
+The clean production link with the seven-row Menu session uses
+`.dma_nocache` 3,100 bytes, `.data` 404 bytes, and `.bss` 271,800 bytes:
+275,304 bytes of SRAM1 static storage. The preceding production image used
+275,232 bytes, so the exact section-level increase is 72 bytes. Named C state
+increased by 58 bytes (67-byte new session state minus the retired 9-byte
+Instrument scratch); the other 14 bytes are LTO/alignment layout. `.dtcm`
+remains 35,168 bytes and `.dtcmz` remains 6,716 bytes.
 
 ## Reconciled implementation checklist
 
@@ -96,9 +134,8 @@ changing type disposes the shared cache and reloads the selected `.hcindex`.
   reloads Bank after Instrument index generation has disposed the shared cache.
 - [x] Dedicated Kit, Scene, and Bank presence/name/alias arrays are removed;
   69,000 bytes of those obsolete arrays are crossed off.
-- [ ] Remove the 2,013-byte legacy `kitBrowser` compatibility bridge. This is
-  intentionally not crossed off because older `kitBrowser.c` clients still
-  consume `kb_map` and `kb_kitName`.
+- [x] Remove the legacy `kitBrowser` compatibility bridge. The linked image no
+  longer carries `kb_map` or its 2,004 bytes of live SRAM state.
 
 ## Load and save operation scratch
 
@@ -108,8 +145,6 @@ operation state, not browser caches or resident object ownership.
 ### Generic and Instrument scratch
 
 - `loaded_name[9]` (9 bytes): result for generic name browsing.
-- `kb_kitName[9]` (9 bytes): legacy Kit browser display copy; this is separate
-  from the 2,013-byte compatibility bridge listed above.
 - `op_staged_instrument_display_name[9]` (9 bytes) and
   `op_staged_instrument_stem[17]` (17 bytes): validated root Instrument Load
   metadata before Preset commits the staged Instrument.

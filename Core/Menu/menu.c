@@ -112,6 +112,12 @@ static uint8_t menu_soundApplyShowStaleWarning = 0;
 static fs_stale_warning_source_t menu_soundApplyStaleWarning = FS_STALE_WARNING_NONE;
 static uint8_t menu_instrumentApplyActive = 0u;
 static uint8_t menu_instrumentApplySlot = 0u;
+/* The bounded post-Instrument apply cursor records name changes into the Menu
+ * session scratch before the later Load/Save helper definitions appear. */
+static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot);
+static void menu_libraryIndexLoadComplete(void);
+static void menu_requestKitEntryNames(void);
+static void menu_requestInstrumentIndexLoad(instrument_type_t type);
 static uint8_t menu_staleWarningActive = 0;
 static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
@@ -119,6 +125,15 @@ static uint8_t menu_pendingAllStaleWarning = 0;
 #define MENU_STALE_WARNING_MS 2000u
 #define MENU_TEST_RESULT_MS 2000u
 #define MENU_INSTRUMENT_SAVE_NAME_LEN 8u
+#define MENU_RESIDENT_NAME_SCRATCH_ROWS 7u
+#define MENU_RESIDENT_NAME_SCRATCH_KIT_ROW 0u
+#define MENU_RESIDENT_NAME_SCRATCH_INSTRUMENT_ROW(slot) ((uint8_t)((slot) + 1u))
+#define MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE 0xffu
+/* The shared typed Instrument index has 1,000 rows. While HCNAMES temporarily
+ * owns that cache, Load scrolling uses this same compile-time bound and clamps
+ * to the real type count as soon as `.hcindex` is restored. This constant is
+ * navigation policy only and creates no counter or SRAM allocation. */
+#define MENU_INSTRUMENT_PROVISIONAL_COUNT 1000u
 
 static char menu_testEditName[FS_TEST_NAME_MAX + 1u] = "test.bin";
 static uint8_t menu_testResultActive = 0u;
@@ -417,15 +432,21 @@ static uint8_t menu_tickInstrumentApply(void)
      * Advance one unit of Instrument Load post-apply work.
      *
      * Output: nonzero while Menu should return to the main loop. When Preset's
-     * one-slot cursor finishes, storage input is unblocked and the current page
-     * is repainted so the loaded descriptor/menu state remains visible in the
-     * browser that launched it.
+     * one-slot cursor finishes after a normal nested Instrument Load, Menu
+     * refreshes the affected row in its seven-name scratch and marks the
+     * destination Scene(s) dirty. The typed `.hcindex` remains resident, so
+     * encoder movement resumes without an HCNAMES rewrite or index reload.
+     * Morph Load and top-level KitMrp preserve identity and therefore add no
+     * dirty name work. The accumulated Scene blocks are serialized once at the
+     * later Kit/Instrument menu exit.
      */
     if (!menu_instrumentApplyActive)
         return 0u;
     if (preset_tickInstrumentApply())
         return 1u;
     menu_instrumentApplyActive = 0u;
+    if (menu_requestAppliedInstrumentNameUpdate(menu_instrumentApplySlot))
+        return 1u;
     menu_storageBusy = 0u;
     (void)menu_instrumentApplySlot;
     menu_repaintAll();
@@ -827,8 +848,43 @@ static uint8_t menu_instrumentLoadActive = 0u;
 static uint8_t menu_instrumentLoadSlot = 0u;
 static instrument_type_t menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
 static uint8_t menu_instrumentSaveMode = 0u;
-static char menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN + 1u] =
-    "Inst    ";
+/*
+ * One menu-session resident-name block: Kit plus all six Instruments.
+ *
+ * HCNAMES is read once when the Kit/Instrument family is entered. These seven
+ * nine-byte cells retain that one Scene's complete resident identity while
+ * `.hcindex` owns the generalized filesystem cache. Instrument editing and
+ * display address their voice's row directly, so the former standalone
+ * nine-byte Instrument buffer is replaced rather than duplicated. Successful
+ * loads/saves refresh the matching cells from committed SceneData and only set
+ * the dirty Scene mask; the complete HCNAMES rewrite is deferred until the
+ * family is exited. The terminating byte in every row permits direct use by
+ * existing fixed-eight-cell render and Save APIs.
+ */
+static char menu_residentNameScratch[MENU_RESIDENT_NAME_SCRATCH_ROWS]
+                                    [MENU_INSTRUMENT_SAVE_NAME_LEN + 1u];
+static uint8_t menu_residentNameScratchScene =
+    MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+static uint8_t menu_residentNameScratchValid = 0u;
+static uint16_t menu_residentNameDirtySceneMask = 0u;
+/*
+ * One operation-scoped Scene identity for top-level Scene Load/Save.
+ *
+ * What: holds exactly one eight-character row copied from `/.hcnames` before
+ * `/Scene/.hcindex` reuses the general filesystem cache. Why: SceneData no
+ * longer duplicates sixteen display names, while Scene Save needs only its
+ * current source name to seed the editor. Inputs: selected source Scene at
+ * Scene-menu entry or a later SEQ source change. Output: Save character entry
+ * copies this cell; no per-Scene Menu cache exists. Affiliates: filesystem
+ * resident-Scene-name API and menu_requestSceneEntryName().
+ */
+static char menu_sceneResidentNameScratch[MENU_INSTRUMENT_SAVE_NAME_LEN + 1u];
+static uint8_t menu_sceneResidentNameScratchScene =
+    MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+/* The active Instrument editor/display row inside the seven-name block. */
+#define menu_instrumentSaveName \
+    (menu_residentNameScratch[ \
+        MENU_RESIDENT_NAME_SCRATCH_INSTRUMENT_ROW(menu_instrumentLoadSlot)])
 /*
  * Instrument Morph browser mode is derived from the destination slot type.
  *
@@ -915,8 +971,10 @@ static void menu_loadSaveClearInstrumentVoiceBlinks(void);
 static void menu_bankLoadPreviewComplete(void);
 static void menu_requestBankLoadPreview(uint16_t slot);
 static void menu_requestLibraryIndexLoad(uint8_t what);
+static void menu_requestSceneEntryName(void);
 static void menu_instrumentLoadClampIndex(void);
 static void menu_instrumentLoadRequestSelection(void);
+static void menu_requestInstrumentEntryNames(void);
 static void menu_instrumentLoadRefreshBaseType(uint8_t preserve_selected_type);
 static void menu_instrumentLoadCopyTypeLabel(char *dest);
 static void menu_instrumentLoadStepType(int8_t inc);
@@ -2716,6 +2774,34 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
 
     menu_deferSelectionRequest = 0;
     menu_deferSelectionLoadKit = loadKitOnLoadPage;
+    if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
+        (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH)) {
+        /*
+         * Keep Kit number traversal responsive while an older selection owns
+         * filesystem/apply work.
+         *
+         * The encoder has already updated menu_currentPresetNr. If storage is
+         * busy, record only one latest-selection retry and leave Preset's
+         * immutable request slot/mask untouched; calling Preset here would fail
+         * but overwrite the completion coordinates needed by the in-flight
+         * deferred exit work. During in-session payload/apply work the Kit
+         * index remains resident, so publish the newly selected row even while
+         * the older immutable request drains. Only the short entry/exit window
+         * where HCNAMES owns the shared cache leaves the name blank.
+         */
+        if (menu_storageBusy) {
+            if (filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
+                memcpy(preset_currentName,
+                       filesystem_kitSlotName(slot), 8u);
+            } else {
+                memset(preset_currentName, ' ', 8u);
+            }
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
+            menu_repaintAll();
+            return;
+        }
+    }
     if (what == SAVE_TYPE_FILE || what == SAVE_TYPE_DIR) {
         /*
          * Temporary asyncfatfs test entries do not use legacy preset-name
@@ -2765,8 +2851,22 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
     if (menu_activePage == LOAD_PAGE && what < SAVE_TYPE_GLO &&
         !loadKitOnLoadPage &&
         what != SAVE_TYPE_SCENE &&
-        what != SAVE_TYPE_BANK)
+        what != SAVE_TYPE_BANK) {
+        /* Entering Kit/KitMrp Load is browsing, not an implicit payload load.
+         * Ensure the seven-name session exists even if `/Kit/.hcindex` happened
+         * to remain resident from an earlier browser. Once entry HCNAMES has
+         * been captured, publish the selected index row without payload I/O. */
+        if (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) {
+            if (!menu_residentNameScratchValid ||
+                menu_residentNameScratchScene != menu_loadSaveSourceScene) {
+                menu_requestKitEntryNames();
+                return;
+            }
+            memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
+            menu_repaintAll();
+        }
         return;
+    }
     if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
         (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) &&
         !filesystem_kitSlotExists(slot)) {
@@ -2781,12 +2881,43 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
     }
     if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
         what == SAVE_TYPE_KIT) {
-        if (!preset_loadKitForScenes(slot, menu_kitLoadSceneMask))
+        /* `/Kit/.hcindex` is the already-loaded browser/open-key authority at
+         * this point. Publish its selected name before Preset starts the much
+         * longer payload and runtime-apply chain. No per-load HCNAMES or index
+         * restoration is required: the seven resident names remain in Menu
+         * scratch and the Kit index remains in the generalized cache. No new
+         * display buffer is needed because Load already owns
+         * preset_currentName as its eight-cell display field. */
+        memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
+        menu_repaintAll();
+        if (preset_loadKitForScenes(slot, menu_kitLoadSceneMask)) {
+            /*
+             * Lock the accepted full-Kit coordinates through payload commit
+             * and runtime apply. Number-only turns may update the separate
+             * desired slot, but they never repost or overwrite this immutable
+             * request's slot/mask. Its changed Scene names are recorded in
+             * scratch after commit and serialized only at menu-family exit.
+            */
+            menu_storageBusy = 1u;
+            /* menu_parseEncoder() intentionally skips its trailing repaint
+             * once storage becomes busy; the pre-request repaint above has
+             * already published the number and `.hcindex` name. */
+        } else {
             menu_deferSelectionRequest = 1;
+        }
     } else if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
                what == SAVE_TYPE_KIT_MORPH) {
-        if (!preset_loadKitMorphForScenes(slot, menu_kitLoadSceneMask))
+        /* KitMrp opens the same physical Kit directory, so it uses the same
+         * pre-payload `.hcindex` name publication as normal Kit Load. */
+        memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
+        menu_repaintAll();
+        if (preset_loadKitMorphForScenes(slot, menu_kitLoadSceneMask)) {
+            /* KitMrp uses the same immutable request boundary even though it
+             * preserves all resident names and therefore skips Kit HCNAMES. */
+            menu_storageBusy = 1u;
+        } else {
             menu_deferSelectionRequest = 1;
+        }
     } else if (what == SAVE_TYPE_SCENE || what == SAVE_TYPE_BANK) {
         /*
          * Scene and Bank folders are explicit-OK operations.
@@ -2817,13 +2948,317 @@ static void menu_instrumentIndexLoadComplete(void)
      * Finish one typed Instrument index load for either nested Load or Save.
      * The filesystem has replaced the selected type's general name cache;
      * clamping now makes a previously selected browser index safe when the
-     * card contains fewer entries than the old cache. The same callback is
-     * deliberately shared by every registry type so Drum has no special
-     * browser contract left.
+     * card contains fewer entries than the old cache. For nested Load, it also
+     * copies the selected typed-index name into the existing display buffer
+     * before any Instrument payload request is posted. Save deliberately keeps
+     * its HCNAMES-derived editable resident name. The same callback is shared
+     * by every registry type so Drum has no special browser contract left.
      */
-    menu_storageBusy = 0u;
     menu_instrumentLoadClampIndex();
+    if (menu_instrumentLoadActive &&
+        !menu_instrumentSaveMode &&
+        menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_POOL) {
+        /* The shared cache is valid again, so reconcile a freely-scrolled
+         * provisional 0..999 position with the real typed index count. */
+        menu_instrumentLoadShownIndex =
+            menu_instrumentLoadIndex[menu_instrumentLoadType];
+        memcpy(menu_instrumentSaveName,
+               filesystem_instrumentName(
+                   menu_instrumentLoadType,
+                   menu_instrumentLoadIndex[menu_instrumentLoadType]),
+               MENU_INSTRUMENT_SAVE_NAME_LEN);
+        menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+    }
+    menu_storageBusy = 0u;
+    if (menu_deferSelectionRequest &&
+        menu_instrumentLoadActive &&
+        !menu_instrumentSaveMode) {
+        /*
+         * Start only the newest Instrument number after restoring `.hcindex`.
+         * Keeping this inside the completion callback ensures the newest
+         * number is paired with its freshly copied `.hcindex` name before
+         * menu_instrumentLoadRequestSelection() posts the payload. That helper
+         * clears the defer flag and reasserts storage busy if Preset accepts
+         * the coalesced request.
+         */
+        menu_instrumentLoadRequestSelection();
+        if (menu_storageBusy)
+            return;
+    }
     menu_repaintAll();
+}
+
+static void menu_copyResidentNameCell(char destination[9], const char *source)
+{
+    uint8_t i;
+
+    /*
+     * Copy one fixed resident name into the seven-row Menu scratch block.
+     *
+     * Input may be a NUL-terminated HCNAMES/cache string or an eight-cell
+     * SceneData field. Output is always eight printable/space cells plus NUL,
+     * so the same row is safe for LCD rendering and Save editing. Keeping this
+     * normalization local prevents a short name from leaving bytes from the
+     * prior Scene in the expanded scratch block.
+     */
+    for (i = 0u; i < MENU_INSTRUMENT_SAVE_NAME_LEN; i++) {
+        char c = source ? source[i] : ' ';
+        if (c == '\0')
+            c = ' ';
+        destination[i] = (c >= 0x20 && c <= 0x7eu) ? c : ' ';
+    }
+    destination[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+}
+
+static void menu_refreshResidentNameScratchKit(uint16_t scene_mask)
+{
+    const scene_t *scene;
+    uint8_t slot;
+
+    /*
+     * Record one committed normal full-Kit change without touching the card.
+     *
+     * Inputs: Preset's immutable destination Scene mask after successful
+     * commit. Output: every destination bit is accumulated for the one exit
+     * rewrite. If the currently displayed scratch Scene was a destination, all
+     * seven rows are refreshed from its committed SceneData immediately. Other
+     * destination Scenes remain distinct in SceneData and are serialized from
+     * their own records at exit, so a multi-Scene session needs no 16x7 cache.
+     */
+    menu_residentNameDirtySceneMask = (uint16_t)(
+        menu_residentNameDirtySceneMask | scene_mask);
+    if (!menu_residentNameScratchValid ||
+        menu_residentNameScratchScene >= 16u ||
+        (scene_mask & (uint16_t)(1u << menu_residentNameScratchScene)) == 0u) {
+        return;
+    }
+    scene = scene_getConst(menu_residentNameScratchScene);
+    if (!scene)
+        return;
+    menu_copyResidentNameCell(
+        menu_residentNameScratch[MENU_RESIDENT_NAME_SCRATCH_KIT_ROW],
+        scene->kit.display_name);
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        menu_copyResidentNameCell(
+            menu_residentNameScratch[
+                MENU_RESIDENT_NAME_SCRATCH_INSTRUMENT_ROW(slot)],
+            scene->kit.instrument_display_name[slot]);
+    }
+}
+
+static void menu_refreshResidentNameScratchInstrument(uint16_t scene_mask,
+                                                      uint8_t slot)
+{
+    const scene_t *scene;
+
+    /*
+     * Record one committed normal Instrument change without HCNAMES I/O.
+     *
+     * Inputs: immutable destination mask and voice slot from the accepted
+     * request. Output: dirty Scenes accumulate for the exit rewrite; only the
+     * matching row of the currently displayed Scene is refreshed in Menu RAM.
+     * The other six scratch rows and every unrelated HCNAMES Scene remain
+     * untouched until the single targeted exit transaction.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    menu_residentNameDirtySceneMask = (uint16_t)(
+        menu_residentNameDirtySceneMask | scene_mask);
+    if (!menu_residentNameScratchValid ||
+        menu_residentNameScratchScene >= 16u ||
+        (scene_mask & (uint16_t)(1u << menu_residentNameScratchScene)) == 0u) {
+        return;
+    }
+    scene = scene_getConst(menu_residentNameScratchScene);
+    if (!scene)
+        return;
+    menu_copyResidentNameCell(
+        menu_residentNameScratch[
+            MENU_RESIDENT_NAME_SCRATCH_INSTRUMENT_ROW(slot)],
+        scene->kit.instrument_display_name[slot]);
+}
+
+static void menu_requestInstrumentEntryNames(void);
+static void menu_requestKitEntryNames(void);
+
+static void menu_residentNameScratchFlushComplete(void)
+{
+    /*
+     * Complete the only HCNAMES write allowed by a Menu name session.
+     *
+     * Inputs: the exit-time full-block update has passed file close and media
+     * flush. Output: dirty/session state is cleared. If the UI transition has
+     * already entered another Kit/Instrument context (including another Scene),
+     * begin that context's one entry read; otherwise load the new non-name
+     * browser or simply release storage after leaving Load/Save altogether.
+     */
+    if (filesystem_status() != FS_STATUS_DONE) {
+        menu_showFilesystemErrorOverlay();
+        return;
+    }
+    menu_residentNameDirtySceneMask = 0u;
+    menu_residentNameScratchValid = 0u;
+    menu_residentNameScratchScene =
+        MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+    filesystem_clearNameCache();
+    menu_storageBusy = 0u;
+
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+        if (menu_instrumentLoadActive) {
+            menu_requestInstrumentEntryNames();
+        } else if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+                   menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+            menu_requestKitEntryNames();
+        } else {
+            menu_requestCurrentLoadSaveSelection(0u);
+        }
+    }
+    if (!menu_storageBusy)
+        menu_repaintAll();
+}
+
+static uint8_t menu_endResidentNameScratchSession(void)
+{
+    /*
+     * End the current Kit/Instrument name session at a UI boundary.
+     *
+     * Output is nonzero when one asynchronous HCNAMES rewrite was started.
+     * Clean sessions discard the seven Menu rows without card I/O. Dirty
+     * sessions call the existing full-Kit-row updater once with the accumulated
+     * Scene mask; that updater preserves all unrelated HCNAMES rows and reads
+     * each changed Scene's own Kit plus six Instrument names from committed
+     * SceneData. Callers update their target UI state before invoking this
+     * helper so the completion callback can enter the new context directly.
+     */
+    if (!menu_residentNameScratchValid &&
+        menu_residentNameDirtySceneMask == 0u) {
+        return 0u;
+    }
+    if (menu_residentNameDirtySceneMask == 0u) {
+        menu_residentNameScratchValid = 0u;
+        menu_residentNameScratchScene =
+            MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+        filesystem_clearNameCache();
+        return 0u;
+    }
+    menu_storageBusy = 1u;
+    if (filesystem_requestUpdateResidentKitNames(
+            menu_residentNameDirtySceneMask,
+            menu_residentNameScratchFlushComplete)) {
+        return 1u;
+    }
+    menu_storageBusy = 0u;
+    menu_showFilesystemErrorOverlay();
+    return 0u;
+}
+
+static void menu_residentNameScratchLoaded(void)
+{
+    uint8_t slot;
+    uint8_t scene = menu_residentNameScratchScene;
+
+    /*
+     * Capture all seven resident rows during the one allowed entry traversal.
+     *
+     * Inputs: a completed root HCNAMES read and the request-time Scene stored
+     * in menu_residentNameScratchScene. Output: Kit plus six Instrument names
+     * are copied out of the generalized cache before `.hcindex` replaces it.
+     * The current Kit or typed Instrument index is then loaded exactly once for
+     * fast in-session browsing and payload opens.
+     */
+    if (filesystem_status() != FS_STATUS_DONE || scene >= 16u) {
+        menu_showFilesystemErrorOverlay();
+        return;
+    }
+    menu_copyResidentNameCell(
+        menu_residentNameScratch[MENU_RESIDENT_NAME_SCRATCH_KIT_ROW],
+        filesystem_residentKitName(scene));
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        menu_copyResidentNameCell(
+            menu_residentNameScratch[
+                MENU_RESIDENT_NAME_SCRATCH_INSTRUMENT_ROW(slot)],
+            filesystem_residentInstrumentName(scene, slot));
+    }
+    menu_residentNameScratchValid = 1u;
+    menu_storageBusy = 0u;
+    if (menu_instrumentLoadActive)
+        menu_requestInstrumentEntryNames();
+    else
+        menu_requestKitEntryNames();
+}
+
+static uint8_t menu_requestResidentNameScratch(uint8_t scene)
+{
+    /*
+     * Start one entry read for the complete seven-name Scene block.
+     *
+     * A Scene change is an exit/entry boundary. If the prior Scene accumulated
+     * changes, its single HCNAMES write starts first and the completion callback
+     * retries this new context. Otherwise the old scratch is discarded and one
+     * root HCNAMES read supplies every Kit/Instrument menu name needed until
+     * the next boundary.
+     */
+    if (scene >= 16u)
+        return 0u;
+    if (menu_residentNameScratchValid &&
+        menu_residentNameScratchScene == scene) {
+        return 1u;
+    }
+    if (menu_residentNameScratchValid &&
+        menu_residentNameScratchScene != scene &&
+        menu_endResidentNameScratchSession()) {
+        return 1u;
+    }
+    menu_residentNameScratchScene = scene;
+    menu_residentNameScratchValid = 0u;
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadResidentKitName(
+            scene, menu_residentNameScratchLoaded)) {
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+        return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot)
+{
+    uint16_t scene_mask;
+
+    /*
+     * Convert a successful normal Instrument Load into deferred Menu state.
+     *
+     * No filesystem request is made here. The committed destination mask and
+     * voice update the seven-name scratch/dirty state, then the existing typed
+     * `.hcindex` remains resident for immediate scrolling. Morph Load preserves
+     * identity and therefore creates no dirty HCNAMES work.
+     */
+    if (!menu_instrumentLoadActive || menu_instrumentLoadMorphMode)
+        return 0u;
+    scene_mask = menu_kitLoadSceneMask;
+    menu_refreshResidentNameScratchInstrument(scene_mask, slot);
+    return 0u;
+}
+
+static void menu_requestInstrumentEntryNames(void)
+{
+    /*
+     * Enter or re-enter nested Instrument mode using the seven-name session.
+     *
+     * The first entry reads HCNAMES once. Later voice/type transitions in the
+     * same Scene reuse the retained Kit plus six Instrument names and only load
+     * the selected typed `.hcindex`. Pool loads then copy names from that index
+     * before payload I/O; Save and the direct `kit` row address the retained
+     * scratch cell for the selected voice.
+     */
+    menu_deferSelectionRequest = 0u;
+    if (!menu_residentNameScratchValid ||
+        menu_residentNameScratchScene != menu_instrumentLoadScene) {
+        (void)menu_requestResidentNameScratch(menu_instrumentLoadScene);
+        return;
+    }
+    menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
 }
 
 static void menu_requestInstrumentIndexLoad(instrument_type_t type)
@@ -2843,6 +3278,49 @@ static void menu_requestInstrumentIndexLoad(instrument_type_t type)
         menu_deferSelectionRequest = 1u;
 }
 
+static void menu_requestKitEntryNames(void)
+{
+    /*
+     * Enter or re-enter top-level Kit/KitMrp using the seven-name session.
+     *
+     * The first entry reads Kit plus all six Instrument HCNAMES rows. Re-entry
+     * in the same Scene reuses that scratch block, so Save name editing and
+     * switching between Kit and nested Instrument menus do not reopen HCNAMES.
+     * `/Kit/.hcindex` is loaded only when it is not already the active browser;
+     * Save copies the resident Kit scratch row into preset_currentName while
+     * Load continues to display the selected library-index row.
+     */
+    if (!menu_residentNameScratchValid ||
+        menu_residentNameScratchScene != menu_loadSaveSourceScene) {
+        (void)menu_requestResidentNameScratch(menu_loadSaveSourceScene);
+        return;
+    }
+    if (menu_activePage == SAVE_PAGE) {
+        memcpy(preset_currentName,
+               menu_residentNameScratch[
+                   MENU_RESIDENT_NAME_SCRATCH_KIT_ROW],
+               8u);
+    }
+    if (filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
+        if (menu_activePage == LOAD_PAGE) {
+            memcpy(preset_currentName,
+                   filesystem_kitSlotName(
+                       menu_currentPresetNr[menu_saveOptions.what]),
+                   8u);
+        }
+        menu_storageBusy = 0u;
+        menu_repaintAll();
+        return;
+    }
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadKitIndex(menu_libraryIndexLoadComplete)) {
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+        menu_repaintAll();
+    }
+}
+
 static void menu_libraryIndexLoadComplete(void)
 {
     /*
@@ -2853,9 +3331,72 @@ static void menu_libraryIndexLoadComplete(void)
      * deliberately does not start a payload load because entering a top-level
      * Load row is browsing, while Scene Load remains explicit-OK and Kit
      * Load's instant-on-scroll policy is handled on later selection moves.
+     * For Kit/KitMrp Load, the selected `.hcindex` row is copied before input
+     * is unlocked. This makes the directory identity visible at the earliest
+     * durable lookup boundary, before any Kit payload or HCNAMES operation.
      */
+    if (filesystem_status() == FS_STATUS_DONE &&
+        menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive &&
+        (menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH)) {
+        memcpy(preset_currentName,
+               filesystem_kitSlotName(
+                   menu_currentPresetNr[menu_saveOptions.what]),
+               8u);
+    }
     menu_storageBusy = 0u;
     menu_repaintAll();
+}
+
+static void menu_sceneResidentNameLoaded(void)
+{
+    /*
+     * Finish the single-name Scene-menu entry read.
+     *
+     * Inputs: completed HCNAMES request and the source Scene captured in
+     * menu_sceneResidentNameScratchScene. Output: one copied eight-cell name,
+     * then the ordinary `/Scene/.hcindex` load begins so number scrolling uses
+     * the normal shared cache. The copy must precede that request because the
+     * index intentionally disposes the HCNAMES cache. Affiliates: Save editor
+     * seeding and filesystem_residentSceneName().
+     */
+    if (filesystem_status() != FS_STATUS_DONE ||
+        menu_sceneResidentNameScratchScene >= 16u) {
+        menu_showFilesystemErrorOverlay();
+        return;
+    }
+    menu_copyResidentNameCell(menu_sceneResidentNameScratch,
+                              filesystem_residentSceneName(
+                                  menu_sceneResidentNameScratchScene));
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadSceneIndex(menu_libraryIndexLoadComplete)) {
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+    }
+}
+
+static void menu_requestSceneEntryName(void)
+{
+    /*
+     * Enter top-level Scene Load/Save with one HCNAMES name, not sixteen.
+     *
+     * Inputs: Menu's current source Scene. Output: a foreground async read of
+     * root `/.hcnames`; its callback copies one row and restores the normal
+     * Scene browser index. This uses nine bytes of Menu scratch in place of
+     * the removed 16-by-9 SceneData mirror, and it deliberately does not
+     * traverse the root Scene directory one row at a time.
+     */
+    menu_sceneResidentNameScratchScene = menu_loadSaveSourceScene;
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadResidentSceneName(
+            menu_sceneResidentNameScratchScene,
+            menu_sceneResidentNameLoaded)) {
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+    }
 }
 
 static void menu_requestLibraryIndexLoad(uint8_t what)
@@ -2867,11 +3408,20 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
      * Request the only index that can supply the current top-level row.
      *
      * Inputs: SAVE_TYPE_KIT, SAVE_TYPE_KIT_MORPH, SAVE_TYPE_SCENE, or
-     * SAVE_TYPE_BANK.
-     * Output: the shared name cache is disposed before the asynchronous read,
-     * keeping old-library names out of the LCD during the transition. A busy
-     * filesystem is retried through Menu's existing deferred-selection path.
+     * SAVE_TYPE_BANK. Output: Kit/KitMrp enters the seven-name session, reading
+     * HCNAMES once and then loading `/Kit/.hcindex`; every later load in that
+     * session uses the retained index without another resident-file traversal.
+     * Scene and Bank directly replace the shared cache with their own index. A
+     * busy filesystem is retried through Menu's existing deferred path.
      */
+    if (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) {
+        menu_requestKitEntryNames();
+        return;
+    }
+    if (what == SAVE_TYPE_SCENE) {
+        menu_requestSceneEntryName();
+        return;
+    }
     kind = (what == SAVE_TYPE_SCENE)
         ? FS_LIBRARY_INDEX_SCENE
         : (what == SAVE_TYPE_BANK)
@@ -3013,13 +3563,21 @@ static void menu_instrumentLoadRequestSelection(void)
      * destination slot; the morph row copies the staged file's normal endpoint
      * into the current slot's morph endpoint. Empty lists do not start a
      * request, and Preset still validates the same-type rule before accepting
-     * an InstrumentMrp request.
+     * an InstrumentMrp request. The selected `.hcindex` name is copied into the
+     * existing display buffer before Preset begins payload I/O; HCNAMES remains
+     * the post-commit resident register and is not on this preview path.
      */
+    menu_deferSelectionRequest = 0u;
     menu_instrumentLoadClampIndex();
     count = filesystem_instrumentCount(menu_instrumentLoadType);
     if (count == 0u)
         return;
     index = menu_instrumentLoadIndex[menu_instrumentLoadType];
+    memcpy(menu_instrumentSaveName,
+           filesystem_instrumentName(menu_instrumentLoadType, index),
+           MENU_INSTRUMENT_SAVE_NAME_LEN);
+    menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+    menu_repaintAll();
     if ((menu_instrumentLoadMorphMode &&
          preset_loadInstrumentMorph(menu_instrumentLoadScene,
                                     menu_instrumentLoadSlot,
@@ -3030,11 +3588,21 @@ static void menu_instrumentLoadRequestSelection(void)
                                         menu_instrumentLoadSlot,
                                         menu_instrumentLoadType,
                                         index))) {
-        /* Keep the asynchronous request exclusive without replacing the
-         * Instrument browser with a transient progress screen. The cursor and
-         * filename remain visible until the bounded completion/apply path
-         * repaints them, which makes rapid pool browsing feel continuous. */
+        /*
+         * Keep storage coordinates immutable but leave plain number turns
+         * available through menu_parseEncoder(). The LCD already shows the
+         * selected typed-index name. During ordinary payload/apply work that
+         * index remains resident and later turns repaint immediately. Only an
+         * entry/exit cache handoff can blank a desired row; the coalesced retry
+         * receives its name when the typed index is restored.
+         */
         menu_storageBusy = 1u;
+        /* The explicit pre-request repaint above already queued the selected
+         * number and `.hcindex` name before storage became busy. */
+    } else {
+        /* A transiently busy filesystem retains the latest desired number for
+         * the existing deferred retry path instead of losing the encoder turn. */
+        menu_deferSelectionRequest = 1u;
     }
 }
 
@@ -3161,39 +3729,6 @@ static void menu_instrumentLoadStepType(int8_t inc)
             return;
         }
     }
-}
-
-static void menu_instrumentSaveSeedName(void)
-{
-    const scene_t *scene = scene_getConst(menu_instrumentLoadScene);
-    const kit_t *kit = scene ? &scene->kit : NULL;
-    const char *source = "Inst    ";
-    uint8_t i;
-    uint8_t non_space = 0u;
-
-    /*
-     * Seed nested Instrument Save from the selected resident kit slot.
-     *
-     * Inputs: source Scene/voice retained by Instrument mode. Output: an
-     * eight-character editable stem. The source is the slot's display name,
-     * not a root Instrument browser entry, because Save exports the currently
-     * loaded resident instrument even when it originally came from a Kit
-     * folder or was edited in place.
-     */
-    if (kit && menu_instrumentLoadSlot < INSTRUMENT_SLOT_COUNT)
-        source = kit->instrument_display_name[menu_instrumentLoadSlot];
-    for (i = 0u; i < MENU_INSTRUMENT_SAVE_NAME_LEN; i++) {
-        char c = source[i];
-        if (c == '\0')
-            c = ' ';
-        menu_instrumentSaveName[i] = c;
-        if (c != ' ')
-            non_space = 1u;
-    }
-    if (!non_space)
-        memcpy(menu_instrumentSaveName, "Inst    ",
-               MENU_INSTRUMENT_SAVE_NAME_LEN);
-    menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
 }
 
 static void menu_instrumentSaveRequestSelection(void)
@@ -3564,15 +4099,20 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
     if (menu_activePage == LOAD_PAGE &&
         !menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
         return 0u;
-    if (menu_instrumentLoadActive && menu_storageBusy) {
+    if (menu_storageBusy &&
+        (menu_instrumentLoadActive ||
+         menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH)) {
         /*
-         * Consume Scene changes during an immutable Instrument transaction.
+         * Consume Scene changes during an immutable Instrument or Kit
+         * transaction.
          *
-         * Input is a physical SEQ press while filesystem/apply owns the captured
-         * Scene/slot. Output is handled-without-mutation, so ButtonHandler does
-         * not reinterpret the press and the completion coordinates cannot drift
-         * from the staged payload. Scene selection becomes available again only
-         * after menu_tickInstrumentApply() clears menu_storageBusy.
+         * Input is a physical SEQ press while filesystem/apply owns captured
+         * Scene coordinates. Output is handled-without-mutation, so
+         * ButtonHandler does not reinterpret the press and neither an
+         * Instrument row nor a full Kit's seven scratch rows can drift from
+         * the accepted payload. Scene selection becomes available again after
+         * the corresponding payload/apply callback releases storage busy.
          */
         return 1u;
     }
@@ -3581,25 +4121,25 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
         return 1u;
     if (menu_instrumentLoadActive) {
         if (menu_instrumentSaveMode) {
-            instrument_type_t previous_type = menu_instrumentLoadType;
             menu_instrumentLoadScene = scene_index;
             menu_loadSaveSourceScene = scene_index;
             menu_kitLoadSceneMask = bit;
             menu_instrumentLoadRefreshBaseType(1u);
-            menu_instrumentSaveSeedName();
-            if (menu_instrumentLoadType != previous_type &&
-                !menu_instrumentLoadMorphMode)
-                menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+            /* The resident Save seed belongs to the newly selected Scene.
+             * Treat the change as the explicit old-session exit/new-session
+             * entry boundary: flush dirty rows once, read the new seven-row
+             * block once, then restore the appropriate typed `.hcindex`. */
+            menu_requestInstrumentEntryNames();
         } else {
-            instrument_type_t previous_type = menu_instrumentLoadType;
             uint16_t next = (uint16_t)(menu_kitLoadSceneMask ^ bit);
             if (next != 0u)
                 menu_kitLoadSceneMask = next;
             menu_instrumentLoadScene = scene_index;
             menu_instrumentLoadRefreshBaseType(1u);
-            if (menu_instrumentLoadType != previous_type &&
-                !menu_instrumentLoadMorphMode)
-                menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+            /* The direct `kit` source row is Scene-specific. Rebind the whole
+             * seven-row scratch at this explicit Scene boundary, then restore
+             * the typed index used for pool browsing. */
+            menu_requestInstrumentEntryNames();
         }
     } else if (menu_activePage == SAVE_PAGE) {
         if (menu_saveOptions.what == SAVE_TYPE_BANK) {
@@ -3609,6 +4149,23 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
         } else {
             menu_loadSaveSourceScene = scene_index;
             menu_kitLoadSceneMask = bit;
+            /* Kit/KitMrp Save changed the resident source Scene. Treat that as
+             * an exit/entry boundary for the seven-name session: flush the old
+             * dirty Scene block once if needed, then read the new Scene's Kit
+             * plus six Instrument rows. Scene/Bank save types have no HCNAMES
+             * session and retain their ordinary source selection behavior. */
+            if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+                menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+                menu_requestKitEntryNames();
+            } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+                /*
+                 * A Scene Save source change needs only the newly selected
+                 * HCNAMES row. Input: one SEQ source selection. Output: the
+                 * sole Scene scratch is replaced before any name editing;
+                 * neither SceneData nor Menu retains the other fifteen names.
+                 */
+                menu_requestSceneEntryName();
+            }
         }
     } else {
         uint16_t next = (uint16_t)(menu_kitLoadSceneMask ^ bit);
@@ -3627,19 +4184,22 @@ void menu_loadInstrumentExit(void)
     /*
      * Exit nested Instrument Load/Save mode.
      *
-     * Inputs: none. Output: normal Load/Save page state becomes active again
-     * while the selected top-level type/kit slot are left untouched.
-     * ButtonHandler calls this when the Load/Save mode button is pressed a
-     * second time.
+     * Inputs: none. Output: normal Kit Load/Save state becomes active again
+     * while the seven-name session is retained. The transition changes only
+     * the browser cache from a typed Instrument index back to `/Kit/.hcindex`;
+     * HCNAMES is not rewritten because Kit and Instrument deliberately share
+     * one session and one exit boundary. ButtonHandler calls this when the
+     * Load/Save mode button is pressed a second time.
      */
     if (menu_loadInstrumentTransactionBusy())
         return;
-    filesystem_clearNameCache();
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
+    menu_requestKitEntryNames();
     menu_refreshLoadSceneLeds();
-    menu_repaintAll();
+    if (!menu_storageBusy)
+        menu_repaintAll();
 }
 
 uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
@@ -3658,6 +4218,20 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
         voiceNr >= INSTRUMENT_SLOT_COUNT)
         return 0u;
+    if (menu_storageBusy && !menu_instrumentLoadActive &&
+        (menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH)) {
+        /*
+         * Consume VOICE entry while a top-level Kit transaction owns storage.
+         *
+         * Entry/exit can temporarily replace `/Kit/.hcindex` with HCNAMES, and
+         * a payload/apply owns immutable Scene coordinates. Entering nested
+         * mode during either interval could replace the shared cache or change
+         * Scene/voice ownership too early. Returning handled keeps the gesture
+         * deferred until the current transaction releases menu_storageBusy.
+         */
+        return 1u;
+    }
     if (menu_loadInstrumentTransactionBusy()) {
         /*
          * Consume destination switches while one Instrument transaction owns
@@ -3693,14 +4267,13 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadBaseType = menu_instrumentLoadType;
     menu_instrumentLoadMorphMode = 0u;
     menu_instrumentLoadClampIndex();
-    if (menu_instrumentSaveMode)
-        menu_instrumentSaveSeedName();
     /*
-     * Load and Save share the same nested Instrument browser. Refreshing the
-     * selected type's index on both entry paths prevents Save from inheriting
-     * a stale list merely because the previous page was Load or another type.
+     * The first Kit/Instrument-family entry obtains all seven resident names
+     * from HCNAMES. Later voice entries in the same Scene select their own
+     * retained scratch row and only ensure the selected type's `.hcindex` is
+     * active; they never reopen or rewrite the root resident-name file.
      */
-    menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+    menu_requestInstrumentEntryNames();
     menu_setActiveVoice(voiceNr);
     menu_refreshLoadSceneLeds();
     if (!menu_storageBusy)
@@ -3907,7 +4480,6 @@ static void menu_loadSaveClearInstrumentVoiceBlinks(void)
 static void menu_loadSaveEnterTop(uint8_t page, uint8_t what)
 {
     menu_activePage = page;
-    filesystem_clearNameCache();
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
@@ -3917,6 +4489,19 @@ static void menu_loadSaveEnterTop(uint8_t page, uint8_t what)
     if (what == SAVE_TYPE_BANK)
         menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
     menu_resetLoadSaveSceneSelection();
+    /*
+     * Pot-1 can leave the combined Kit/Instrument family without leaving the
+     * overall Load/Save page. Update the target UI state first, then perform
+     * the one deferred HCNAMES write. Its completion sees this new non-Kit
+     * context and loads that browser. Kit <-> KitMrp and Kit <-> Instrument
+     * transitions retain the same seven-name session and skip this boundary.
+     */
+    if (what != SAVE_TYPE_KIT && what != SAVE_TYPE_KIT_MORPH &&
+        menu_endResidentNameScratchSession()) {
+        menu_refreshLoadSceneLeds();
+        return;
+    }
+    filesystem_clearNameCache();
     menu_requestCurrentLoadSaveSelection(0);
     menu_refreshLoadSceneLeds();
 }
@@ -3958,13 +4543,10 @@ static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
         menu_instrumentLoadMorphMode = morph;
     }
     menu_instrumentLoadClampIndex();
-    /*
-     * Pot-1 can enter nested Instrument Load without going through the
-     * VOICE-button entry function. Keep that alternate path equivalent: its
-     * selected registry type must load its own `.hcindex` before the browser
-     * exposes the cached list.
-     */
-    menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+    /* Pot-1 follows the same session entry as a VOICE button: read all seven
+     * HCNAMES rows only for a new Scene/session, then activate the typed index.
+     * Re-entry in the same Scene selects the retained voice row directly. */
+    menu_requestInstrumentEntryNames();
     menu_setActiveVoice(voice);
     menu_loadSaveSetInstrumentVoiceLed(voice);
     menu_refreshLoadSceneLeds();
@@ -3985,13 +4567,12 @@ static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
     editModeActive = 1u;
     menu_instrumentLoadRefreshBaseType(0u);
     menu_instrumentLoadMorphMode = morph ? 1u : 0u;
-    menu_instrumentSaveSeedName();
     /*
-     * Save has a second nested-entry route through Pot 1. Refresh the same
-     * typed index here as in the VOICE-button route so Save never inherits a
-     * stale cache when it is entered directly from the top-level page.
+     * Save's Pot-1 entry uses the same seven-row scratch as VOICE-button entry.
+     * HCNAMES is read only if no session exists for this Scene; otherwise the
+     * selected voice's resident seed is already available without card I/O.
      */
-    menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+    menu_requestInstrumentEntryNames();
     menu_setActiveVoice(voice);
     menu_loadSaveSetInstrumentVoiceLed(voice);
     menu_refreshLoadSceneLeds();
@@ -4674,11 +5255,12 @@ void menu_repaint(void)
 ** ----------------------------------------------------------------------- */
 /* Paint the two-line Load/Save page into editDisplayBuffer.
  *
- * Why this needed a Phase 2 change: the Load page now displays Kit/ directory
- * slots using filesystem_kitSlotName() from the scan cache, not the currently
- * loaded preset_currentName or a legacy .SND name header. The visible kit
- * number is the direct 000..999 library slot; 000 is a real folder prefix, not
- * an internal sentinel.
+ * Why this needed a Phase 2 change: Kit existence/open identity and Load names
+ * come from the resident `/Kit/.hcindex` cache, so number turns can publish a
+ * name immediately even while an older payload drains. HCNAMES supplies the
+ * separate seven-row resident-name scratch only at family entry and receives
+ * accumulated committed changes only at family exit. The visible Kit number
+ * is the direct 000..999 library slot; 000 is a real folder prefix.
  *
  * Inputs: menu_activePage, menu_saveOptions, menu_currentPresetNr[],
  * preset_currentName, editModeActive. Outputs: editDisplayBuffer plus optional
@@ -4702,7 +5284,6 @@ static void menu_repaintLoadSavePage(void)
         uint16_t count;
         uint16_t index;
         uint16_t display_index;
-        const kit_t *kit;
 
         /*
          * Paint nested Instrument Load/Save mode.
@@ -4718,8 +5299,9 @@ static void menu_repaintLoadSavePage(void)
          * while defaulting interaction to the top row, which created a confusing and 
          * unusable menu.
          *
-         * Inputs: selected type, destination Scene/slot, retained kit filename
-         * stem, optional Instrument/ pool item, cursor state, and edit state.
+         * Inputs: selected type, destination Scene/slot, the resident name
+         * copied from `/.hcnames`, optional Instrument/ pool item, cursor state,
+         * and edit state.
          * Outputs: top row shows the type label; bottom row begins as
          * "kit  <name>" and changes to numbered pool display only after lower
          * row encoder movement. The two sources stay separate so selecting a
@@ -4806,13 +5388,28 @@ static void menu_repaintLoadSavePage(void)
             return;
         }
 
-        menu_instrumentLoadClampIndex();
+        /*
+         * Do not clamp against a cache currently borrowed by HCNAMES.
+         *
+         * While a load/update is busy, the encoder may hold a provisional
+         * 0..999 desired row even though filesystem_instrumentCount() correctly
+         * reports zero for the temporary HCNAMES cache domain. The restored
+         * typed-index callback performs the real clamp before posting the
+         * coalesced request.
+         */
+        if (!menu_storageBusy)
+            menu_instrumentLoadClampIndex();
         count = filesystem_instrumentCount(menu_instrumentLoadShownType);
+        if (count == 0u && menu_storageBusy)
+            count = MENU_INSTRUMENT_PROVISIONAL_COUNT;
         index = menu_instrumentLoadShownIndex;
         if (count > 0u && index >= count)
             index = count - 1u;
-        display_index = filesystem_instrumentDisplayIndex(
-            menu_instrumentLoadShownType, index);
+        display_index = filesystem_instrumentCount(
+                menu_instrumentLoadShownType) != 0u
+            ? filesystem_instrumentDisplayIndex(
+                menu_instrumentLoadShownType, index)
+            : (uint16_t)(index + 1u);
 
         /* --- Top Row: Load Type --- */
         memcpy(&editDisplayBuffer[0][0], "Load:", 5);
@@ -4846,15 +5443,13 @@ static void menu_repaintLoadSavePage(void)
         }
 
         if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT) {
-            kit = scene_getConst(menu_instrumentLoadScene)
-                ? &scene_getConst(menu_instrumentLoadScene)->kit : NULL;
             /* Preserve the normal `[slot]name` split: `kit` occupies the
-             * three selector cells and the retained filename starts after the
-             * closing bracket/spacing cell as `[kit]name`. */
+             * three selector cells and the resident name used by this direct
+             * Kit-source row starts after the closing bracket/spacing cell.
+             * This row does not browse a typed `.hcindex`. */
             memcpy(&editDisplayBuffer[1][1], "kit", 3u);
             memcpy(&editDisplayBuffer[1][5],
-                   kit ? kit->instrument_display_name[menu_instrumentLoadSlot]
-                       : "Empty   ",
+                   menu_instrumentSaveName,
                    8u);
         } else {
             /* Format the pool position only after lower-row movement selected
@@ -4868,9 +5463,16 @@ static void menu_repaintLoadSavePage(void)
             editDisplayBuffer[1][2] = (display_index >= 10u)
                 ? (char)('0' + ((display_index / 10u) % 10u)) : ' ';
             editDisplayBuffer[1][3] = (char)('0' + (display_index % 10u));
+            /*
+             * Pool number and typed-index identity are published together.
+             * The adjacent name is copied from the selected type's `.hcindex`
+             * before payload I/O starts. Ordinary payload/apply work leaves
+             * that index resident, so later number turns repaint immediately.
+             * Only a family entry/exit cache handoff can leave the row blank;
+             * the latest name appears when the typed index is restored.
+             */
             memcpy(&editDisplayBuffer[1][5],
-                   count ? filesystem_instrumentName(menu_instrumentLoadShownType,
-                                                      index) : "Empty   ",
+                   menu_instrumentSaveName,
                    8u);
         }
         return;
@@ -4964,10 +5566,14 @@ static void menu_repaintLoadSavePage(void)
         /*
          * KitMrp reuses the Kit browser presentation.
          *
-         * Both Kit entries show the same numbered Kit/ scan-cache names. The
-         * top-row type tells selection dispatch whether the staged Kit replaces
-         * the resident kit or copies same-type normal endpoints into morph
-         * storage.
+         * Both Kit entries use the same numbered Kit/ existence/open cache.
+         * On Load, their visible name is the selected `/Kit/.hcindex` row,
+         * published before payload work. HCNAMES is read once at family entry
+         * and rewritten once at family exit when committed names are dirty, so
+         * it is absent from each scroll/load/save operation.
+         * The top-row type tells selection dispatch whether the staged Kit
+         * replaces the resident kit or copies same-type normal endpoints into
+         * morph storage.
          */
         if (menu_activePage == LOAD_PAGE && menu_saveOptions.what < SAVE_TYPE_GLO) {
             if (menu_saveOptions.what == SAVE_TYPE_BANK) {
@@ -4977,8 +5583,16 @@ static void menu_repaintLoadSavePage(void)
                 displayName = filesystem_sceneSlotName(
                     menu_currentPresetNr[SAVE_TYPE_SCENE]);
             } else {
-                displayName = filesystem_kitSlotName(
-                    menu_currentPresetNr[menu_saveOptions.what]);
+                /*
+                 * Kit numbers and names come from the already-loaded index.
+                 *
+                 * preset_currentName receives the selected `/Kit/.hcindex`
+                 * row before the payload request begins. During the short
+                 * family entry/exit cache window a newly scrolled number is
+                 * blank; during ordinary payload/apply work the Kit index stays
+                 * resident and supplies the new name immediately.
+                 */
+                displayName = preset_currentName;
             }
         }
 
@@ -5521,8 +6135,10 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 if (inc != 0)
                     menu_instrumentLoadStepType(inc);
             } else {
-                uint16_t count =
-                    filesystem_instrumentCount(menu_instrumentLoadType);
+                uint16_t cached_count = filesystem_instrumentCount(
+                    menu_instrumentLoadType);
+                uint16_t count = (cached_count == 0u && menu_storageBusy)
+                    ? MENU_INSTRUMENT_PROVISIONAL_COUNT : cached_count;
                 if (count > 0u && inc != 0) {
                     int32_t next;
                     if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT ||
@@ -5544,7 +6160,31 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         menu_instrumentLoadShownIndex = (uint16_t)next;
                         menu_instrumentLoadIndex[menu_instrumentLoadType] =
                             (uint16_t)next;
-                        menu_instrumentLoadRequestSelection();
+                        if (menu_storageBusy) {
+                            /* Preserve only the latest desired pool number.
+                             * Payload/apply work leaves the typed index in
+                             * cache, so publish its selected name immediately.
+                             * During the entry/exit HCNAMES window no typed
+                             * row exists and the provisional name stays blank.
+                             * Preset's active request coordinates remain
+                             * untouched until the old operation completes. */
+                            if (cached_count != 0u) {
+                                memcpy(menu_instrumentSaveName,
+                                       filesystem_instrumentName(
+                                           menu_instrumentLoadType,
+                                           (uint16_t)next),
+                                       MENU_INSTRUMENT_SAVE_NAME_LEN);
+                            } else {
+                                memset(menu_instrumentSaveName, ' ',
+                                       MENU_INSTRUMENT_SAVE_NAME_LEN);
+                            }
+                            menu_instrumentSaveName[
+                                MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+                            menu_deferSelectionRequest = 1u;
+                            menu_repaintAll();
+                        } else {
+                            menu_instrumentLoadRequestSelection();
+                        }
                     }
                 }
             }
@@ -5661,11 +6301,19 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 menu_saveOptions.what =
                     menu_nextRestoredLoadSaveType(menu_saveOptions.what, inc);
                 /*
-                 * A top-level type change is a cache-domain change even when
-                 * the destination is Bank, File, or another non-index row.
-                 * Dispose before requesting the new row so no prior Kit/Scene
-                 * or Instrument names can survive one encoder detent.
+                 * A top-level type change is a name-session boundary only when
+                 * it leaves Kit/KitMrp. The new type is installed first so an
+                 * asynchronous exit flush can continue directly into its
+                 * browser. Kit <-> KitMrp retains the seven-name scratch.
                  */
+                if (menu_saveOptions.what != previous_type &&
+                    menu_saveOptions.what != SAVE_TYPE_KIT &&
+                    menu_saveOptions.what != SAVE_TYPE_KIT_MORPH &&
+                    menu_endResidentNameScratchSession()) {
+                    menu_resetLoadSaveSceneSelection();
+                    menu_refreshLoadSceneLeds();
+                    break;
+                }
                 if (menu_saveOptions.what != previous_type)
                     filesystem_clearNameCache();
             }
@@ -5789,23 +6437,29 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                      * the selected library slot.
                      *
                      * Inputs: the user has just moved from slot number editing
-                     * to character 1 on the Save page. Output: Kit/KitMrp,
-                     * Scene, and Bank each use resident object identity instead
-                     * of the selected target slot cache. This matters for empty
-                     * target slots: the browser row may display `Empty`, but
-                     * the save editor must begin with the currently loaded
-                     * object name, such as Bank/000 Slak -> "Slak".
+                     * to character 1 on the Save page. Output: Scene and Bank
+                     * copy their retained identities; Kit/KitMrp copies the
+                     * already-retained Kit scratch row, loading `.hcindex` only
+                     * if another browser replaced it. This matters for empty
+                     * target slots: the
+                     * browser row may display `Empty`, but the editor must
+                     * begin with the currently loaded object name.
                      */
                     if (menu_saveOptions.what == SAVE_TYPE_BANK) {
                         memcpy(preset_currentName, bank_displayName(), 8u);
                     } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
                         memcpy(preset_currentName,
-                               scene_sceneDisplayName(menu_loadSaveSourceScene),
+                               menu_sceneResidentNameScratch,
                                8u);
                     } else {
-                        memcpy(preset_currentName,
-                               scene_kitDisplayName(menu_loadSaveSourceScene),
-                               8u);
+                        /*
+                         * The selected source Scene may have changed since
+                         * Save-page entry. Ensure that Scene's seven-row entry
+                         * scratch is active, then copy its retained Kit row.
+                         * This performs no HCNAMES traversal when the Scene is
+                         * unchanged.
+                         */
+                        menu_requestKitEntryNames();
                     }
                 }
                 if (menu_activePage == LOAD_PAGE) {
@@ -5834,8 +6488,34 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     uint8_t oldIndex = menuIndex;
 
     if (menu_storageBusy) {
-        lastEncoderButton = button;
-        return;
+        uint8_t allow_load_number_scroll = (uint8_t)(
+            inc != 0 &&
+            button == lastEncoderButton &&
+            menu_activePage == LOAD_PAGE &&
+            editModeActive &&
+            menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR &&
+            ((menu_instrumentLoadActive && !menu_instrumentSaveMode) ||
+             (!menu_instrumentLoadActive &&
+              (menu_saveOptions.what == SAVE_TYPE_KIT ||
+               menu_saveOptions.what == SAVE_TYPE_KIT_MORPH))));
+
+        /*
+         * Storage exclusivity blocks every control except Load-number turns.
+         *
+         * Kit and nested Instrument payloads can take long enough that a hard
+         * encoder lock makes sparse libraries painful to browse. A plain turn
+         * on the already-selected number field may therefore update only the
+         * Menu-owned desired number while the immutable older request drains.
+         * Clicks, type changes, Scene/voice changes, Save editing, and all
+         * non-Load pages remain blocked. The handler leaves one existing defer
+         * flag. The resident typed/Kit index normally stays active, so the
+         * latest number and name repaint immediately; only entry/exit waits for
+         * shared-cache restoration.
+         */
+        if (!allow_load_number_scroll) {
+            lastEncoderButton = button;
+            return;
+        }
     }
 
     if (button != lastEncoderButton) {
@@ -6221,7 +6901,21 @@ void menu_pollPresetStatus(void)
             preset_getStatus() == PRESET_IDLE &&
             !menu_storageBusy &&
             (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
-            menu_requestCurrentLoadSaveSelection(menu_deferSelectionLoadKit);
+            /*
+             * A freely-scrolled nested Instrument number is not a top-level
+             * Kit selection. Dispatch its one coalesced retry back to the typed
+             * Instrument loader after `.hcindex` restoration; all other defer
+             * reasons retain the existing top-level request path.
+             */
+            if (menu_instrumentLoadActive &&
+                !menu_instrumentSaveMode &&
+                menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_POOL &&
+                menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
+                menu_instrumentLoadRequestSelection();
+            } else {
+                menu_requestCurrentLoadSaveSelection(
+                    menu_deferSelectionLoadKit);
+            }
         }
         return;
     }
@@ -6253,22 +6947,35 @@ void menu_pollPresetStatus(void)
     {
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
             !menu_isLoadSaveSelectionCurrent()) {
-            retrySelectionAfterAck = 1;
-            retrySelectionLoadKit = 1;
-            break;
+            /*
+             * The encoder selected a newer Kit number while this immutable
+             * load was running. Still apply and record the Kit that really
+             * committed, while the resident Kit index publishes the newer
+             * desired row immediately and one retry is coalesced after the
+             * bounded runtime apply drains. No per-load HCNAMES transaction
+             * borrows that index.
+             */
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
         }
 
         /*
-         * Directory Kit load completion is Scene-owned now.
+         * Retain the full resident Kit identity for the Menu-exit write.
          *
-         * Why this differs from ALL/performance below: root Kit folders parse
-         * instrument files into scene_t.kit, not parameter_values[]. Preset's
-         * chunked apply cursor applies descriptor-indexed runtime cells and
-         * image values as it works. Running the old
-         * parameter_values[] normalizer here would inspect stale flat data
-         * before the real loaded Scene data has been applied.
+         * Filesystem has atomically committed scene_t.kit for every Scene in
+         * Preset's immutable request mask. That changes one Kit name and all
+         * six Instrument source names per destination. Refresh the matching
+         * Menu scratch block and accumulate the destination mask, but leave
+         * HCNAMES and `/Kit/.hcindex` untouched until the user exits the shared
+         * Kit/Instrument name session. Runtime apply can therefore begin
+         * immediately without a root-file traversal and index reload.
          */
-        menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 0u, 0u,
+        menu_storageBusy = 1u;
+        menu_refreshResidentNameScratchKit(
+            preset_getKitRequestSceneMask());
+        if (!menu_isLoadSaveSelectionCurrent())
+            memset(preset_currentName, ' ', 8u);
+        menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 1u, 0u,
                              FS_STALE_WARNING_NONE);
         break;
     }
@@ -6277,9 +6984,10 @@ void menu_pollPresetStatus(void)
     {
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
             !menu_isLoadSaveSelectionCurrent()) {
-            retrySelectionAfterAck = 1;
-            retrySelectionLoadKit = 1;
-            break;
+            /* KitMrp also finishes the accepted endpoint apply and resident-
+             * name read before the latest freely-scrolled number is posted. */
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
         }
 
         /*
@@ -6541,8 +7249,69 @@ void menu_pollPresetStatus(void)
 
     case PRESET_OP_INSTRUMENT_SAVE:
     case PRESET_OP_INSTRUMENT_MORPH_SAVE:
+    {
+        uint8_t source_scene = preset_getRequestScene();
+        uint8_t source_slot = (uint8_t)preset_getRequestSlot();
+
+        /*
+         * Complete Instrument Save through the deferred name session.
+         *
+         * The normal save has already committed the edited source name into
+         * resident Scene metadata and refreshed the typed `.hcindex`; Morph
+         * Save preserves identity. Normal Save updates the matching scratch row
+         * and dirty Scene bit without opening HCNAMES. Nested Save then returns
+         * to the top-level Kit row; that menu transition may load `/Kit/.hcindex`
+         * but the root resident-name file is written only when the combined
+         * Kit/Instrument session is actually exited.
+         */
+        if (preset_getCompletedOp() == PRESET_OP_INSTRUMENT_SAVE &&
+            source_scene < 16u) {
+            menu_refreshResidentNameScratchInstrument(
+                (uint16_t)(1u << source_scene), source_slot);
+        }
+        menu_resetSaveParameters();
+        menu_storageBusy = 0u;
+        menu_requestCurrentLoadSaveSelection(0u);
+        if (!menu_storageBusy)
+            menu_repaintAll();
+        break;
+    }
+
     case PRESET_OP_KIT_SAVE:
     case PRESET_OP_KIT_MORPH_SAVE:
+    {
+        uint8_t source_scene = preset_getRequestScene();
+
+        /*
+         * Complete Kit Save in the deferred resident-name session.
+         *
+         * filesystem.c has already written the physical Kit directory,
+         * rescanned `/Kit/`, and flushed the complete `/Kit/.hcindex` before
+         * Preset published this completion. Copy the saved library row into
+         * the existing UI buffer. For normal Save, reaffirm the resident Kit
+         * name from that durable index row, then refresh the seven-name scratch
+         * and mark its Scene dirty without opening HCNAMES. Hardware showed
+         * the correct source Scene's six
+         * Instrument rows changing while its Kit row remained blank, proving
+         * the mask/update path was correct and the resident Kit identity was
+         * the missing input. KitMrp Save preserves resident identity and does
+         * not mark the session dirty. The single HCNAMES rewrite happens only
+         * when the Kit/Instrument menu family is exited.
+         */
+        menu_refreshSavedLibraryName(preset_getCompletedOp());
+        if (preset_getCompletedOp() == PRESET_OP_KIT_SAVE &&
+            source_scene < SCENE_COUNT) {
+            scene_setResidentKitDisplayName(source_scene,
+                                            preset_currentName);
+            menu_refreshResidentNameScratchKit(
+                (uint16_t)(1u << source_scene));
+        }
+        menu_resetSaveParameters();
+        menu_storageBusy = 0u;
+        menu_repaintAll();
+        break;
+    }
+
     case PRESET_OP_SCENE_SAVE:
     case PRESET_OP_BANK_SAVE:
     case PRESET_OP_GLOBALS_SAVE:
@@ -6552,16 +7321,13 @@ void menu_pollPresetStatus(void)
         /*
          * Save completion cleanup.
          *
-         * Normal and Morph-projected Kit/Instrument saves mutate only storage,
-         * not resident SceneData or DSP runtime. They can therefore share the
-         * same busy-state and Save UI reset path as the existing save
-         * completions while preserving distinct operation enums for dispatch
-         * and future result messaging.
+         * The remaining save families share the existing busy-state and Save
+         * UI reset path. Instrument and Kit saves are handled above because
+         * their completion must serialize affected resident-name rows before
+         * releasing storage input.
         */
         menu_storageBusy = 0u;
-        if (preset_getCompletedOp() == PRESET_OP_KIT_SAVE ||
-            preset_getCompletedOp() == PRESET_OP_KIT_MORPH_SAVE ||
-            preset_getCompletedOp() == PRESET_OP_SCENE_SAVE ||
+        if (preset_getCompletedOp() == PRESET_OP_SCENE_SAVE ||
             preset_getCompletedOp() == PRESET_OP_BANK_SAVE) {
             /*
              * The filesystem callback is intentionally delayed until the
@@ -6720,7 +7486,20 @@ void menu_resetActiveParameter(void)
 ** ----------------------------------------------------------------------- */
 void menu_switchPage(uint8_t pageNr)
 {
+    uint8_t end_resident_name_session;
+
     if (menu_storageBusy) return;
+
+    /* Capture the old context before page mutation. Pressing the Load/Save
+     * mode button toggles LOAD_PAGE/SAVE_PAGE through pageNr==LOAD_PAGE and
+     * keeps the shared Kit/Instrument session. Any other page target is the
+     * physical exit boundary that must flush accumulated resident names once. */
+    end_resident_name_session = (uint8_t)(
+        (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+        (menu_instrumentLoadActive ||
+         menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) &&
+        pageNr != LOAD_PAGE);
 
     if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
         pageNr != LOAD_PAGE) {
@@ -6853,6 +7632,8 @@ void menu_switchPage(uint8_t pageNr)
 
     menu_resetActiveParameter();
     menu_endlessPotMappingChanged();
+    if (end_resident_name_session)
+        (void)menu_endResidentNameScratchSession();
     menu_repaintAll();
 }
 
@@ -7466,11 +8247,48 @@ uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 ** ----------------------------------------------------------------------- */
 void menu_init(void)
 {
+    uint8_t resident_name_row;
+
     paramToModTargetInit();
 
     memset(menu_currentPresetNr, 0, sizeof(menu_currentPresetNr));
     memset(parameter_values, 0, sizeof(parameter_values));
     memset(parameters2, 0, sizeof(parameters2));
+
+    /*
+     * Initialize every expanded resident-name scratch row as an eight-cell
+     * blank string. Entry HCNAMES will replace all seven rows before the Menu
+     * exposes them, but explicit terminators keep early/error repaints safe and
+     * prevent zero bytes from being sent as LCD glyphs. Session identity and
+     * dirty state are reset here because menu_init() is also the authoritative
+     * cold-start owner for the former single Instrument name buffer.
+     */
+    for (resident_name_row = 0u;
+         resident_name_row < MENU_RESIDENT_NAME_SCRATCH_ROWS;
+         resident_name_row++) {
+        memset(menu_residentNameScratch[resident_name_row], ' ',
+               MENU_INSTRUMENT_SAVE_NAME_LEN);
+        menu_residentNameScratch[resident_name_row]
+                                [MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+    }
+    menu_residentNameScratchScene =
+        MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+    menu_residentNameScratchValid = 0u;
+    menu_residentNameDirtySceneMask = 0u;
+    /*
+     * Initialize the sole Scene-menu HCNAMES scratch to a safe blank field.
+     *
+     * Input: cold Menu initialization. Output: an early Save repaint cannot
+     * expose NUL bytes before the asynchronous Scene-name read completes. The
+     * buffer remains one nine-byte operation scratch, replacing the deleted
+     * sixteen SceneData name mirrors. Affiliates: menu_requestSceneEntryName
+     * and Scene Save character-editor seeding.
+     */
+    memset(menu_sceneResidentNameScratch, ' ',
+           MENU_INSTRUMENT_SAVE_NAME_LEN);
+    menu_sceneResidentNameScratch[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+    menu_sceneResidentNameScratchScene =
+        MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
 
     parameter_values[PAR_EUKLID_LENGTH] = 16;
     parameter_values[PAR_EUKLID_STEPS]  = 16;

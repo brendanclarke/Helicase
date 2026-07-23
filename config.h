@@ -54,11 +54,21 @@
  * CONFIG_DEV_MODE exposes low-level storage diagnostics in the production UI.
  *
  * What: when nonzero, the Load/Save type cycle includes the asyncfatfs test
- * entries "File", "Dir", and Save-only "sDir". Why: the diagnostic commands
- * remain compiled and callable for storage work, but ordinary firmware should
- * present only user-facing objects such as Kit, Scene, and Bank. Clients:
- * Core/Menu/menu.c gates only menu reachability; filesystem test functions are
- * left intact.
+ * entries "File", "Dir", and Save-only "sDir", and main.c compiles the
+ * boot-stage/operation/substep/HCNAMES OLED observers used during storage
+ * diagnosis. Why: ordinary firmware should neither expose test objects nor
+ * replace the splash with durable boot coordinates, while one flag must restore
+ * the complete front-panel diagnostic surface for hardware investigation.
+ * Clients: Core/Menu/menu.c gates menu reachability; main.c compiles boot-screen
+ * callbacks and display drains only in development mode. Filesystem test and
+ * read-only observer functions remain callable so this flag changes visibility,
+ * not storage behavior or on-card format.
+ */
+/*
+ * Returned to production mode after the diagnostic image completed boot on
+ * hardware. The observers remain available for a future reproducible stall,
+ * but ordinary firmware again keeps their LCD drains and diagnostic menu
+ * entries compiled out.
  */
 #define CONFIG_DEV_MODE      0
 

@@ -301,6 +301,23 @@ void menu_start(void);
 void menu_parseEncoder(int8_t inc, uint8_t button);
 void menu_switchPage(uint8_t pageNr);
 void menu_switchSubPage(uint8_t subPageNr);
+/*
+ * Enter nested Instrument Load/Save for one physical voice.
+ *
+ * Inputs: zero-based voice selected while a Load or Save page is active.
+ * Output: the first Kit/Instrument-family entry reads one Scene's complete
+ * seven-row HCNAMES block (Kit plus six Instruments) into a Menu scratch array,
+ * then loads the selected Instrument type's `.hcindex`. Voice/type transitions
+ * in that family reuse the scratch; numbered pool rows copy their index name
+ * before payload I/O. Successful normal loads/saves update scratch plus one
+ * accumulated dirty-Scene mask without reopening HCNAMES, while Morph actions
+ * preserve identity. Plain encoder turns may still coalesce to the newest
+ * request; names remain immediately available whenever the typed index owns
+ * the shared filesystem cache. Leaving the combined family performs one
+ * HCNAMES rewrite for all dirty Scenes, then discards the seven rows. Type,
+ * Scene, voice, click, and Save controls remain locked only across immutable
+ * payload/apply or entry/exit transactions.
+ */
 uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr);
 uint8_t menu_loadInstrumentIsActive(void);
 uint8_t menu_loadSaveBarButtonPressed(uint8_t advance);
@@ -309,9 +326,10 @@ uint8_t menu_loadSaveBarButtonPressed(uint8_t advance);
  *
  * Inputs: Menu's nested-load and storage/apply busy state. Output: nonzero from
  * successful request posting through staged commit, six-slot Morph rebuild,
- * and target rebind completion. Clients: ButtonHandler mode/voice gesture gates
- * and Menu's Scene/exit selectors. This accessor is intentionally narrower than
- * generic storage busy so unrelated load/save operations keep existing policy.
+ * and target rebind completion. This keeps mode/voice/Scene ownership fixed;
+ * it does not prohibit the explicit coalesced number-only encoder path described
+ * above. Clients: ButtonHandler mode/voice gesture gates and Menu's Scene/exit
+ * selectors. This accessor is intentionally narrower than generic storage busy.
  */
 uint8_t menu_loadInstrumentTransactionBusy(void);
 void menu_loadInstrumentExit(void);
@@ -321,11 +339,15 @@ void menu_loadInstrumentExit(void);
  *
  * Inputs: a zero-based SEQ/Scene index. Output: nonzero only when the current
  * context owns the press; Kit/Scene Load toggles the selected-scene mask while
- * Instrument Load/Save changes its one destination Scene. Clients:
- * buttonHandler's foreground press dispatcher. Menu owns this decision because
- * it also owns the mode, LCD cursor, and Scene LED state; ButtonHandler must
- * remain a gesture router rather than duplicate
- * menu-state tests.
+ * Kit Save and Instrument Load/Save select resident source/destination Scenes.
+ * A full Kit request locks later presses only through payload commit/runtime
+ * apply; its seven resident names are held in Menu scratch until the later
+ * family exit. Changing the scratch Scene is itself an exit/entry boundary and
+ * flushes any accumulated dirty Scenes before reading the new seven rows.
+ * Clients: buttonHandler's foreground press dispatcher.
+ * Menu owns this decision because it also owns mode, LCD cursor, and Scene LED
+ * state; ButtonHandler remains a gesture router rather than duplicating those
+ * policy tests.
  */
 uint8_t menu_loadSceneButtonPressed(uint8_t scene_index);
 void    menu_perfModeSceneButtonPressed(uint8_t scene_index);

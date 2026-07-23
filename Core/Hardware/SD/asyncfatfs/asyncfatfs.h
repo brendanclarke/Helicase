@@ -178,6 +178,18 @@ typedef void (*afatfsCallback_t)();
 
 typedef afatfsFilePtr_t afatfsDirHandle_t;
 
+/*
+ * Open-handle pool contract.
+ *
+ * The implementation provisions five afatfsFile_t application slots. The
+ * separate currentDirectory object is not one of those five: after a successful
+ * afatfs_chdir(), callers may close the source directory handle and reuse its
+ * slot. Conversely, already-open regular-file handles remain valid when the
+ * current directory changes, allowing a reader below Bank/Scene/Kit and a
+ * root-level writer to be pumped in an interleaved fashion. Open/create calls
+ * return false when all five application slots are occupied, and the caller
+ * must close a no-longer-needed handle before retrying.
+ */
 bool afatfs_fopen(const char *filename, const char *mode, afatfsFileCallback_t complete);
 bool afatfs_fopen_lfn(const char *displayName,
                       const char *mode,
