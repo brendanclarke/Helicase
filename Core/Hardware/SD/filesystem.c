@@ -1916,13 +1916,13 @@ static Step *filesystem_patternSetStepPtr(PatternSet *pattern_set,
                                           uint8_t step)
 {
     /*
-     * Borrow one Step from the PatternSet explicitly supplied by the caller.
+     * Borrow one Step from a staged Scene PatternSet.
      *
-     * Inputs are one caller-selected PatternSet plus bridge-file coordinates.
-     * Output is its mutable pattern-0 Step or the discard record for legacy
-     * non-live patterns. Scene Load now passes a committed final Scene
-     * PatternSet deliberately; other serializers may pass their own owned
-     * image. The bounds mirror PatternData's current one-pattern bridge shape.
+     * Scene Load must not write through live PatternData while it is still
+     * validating sibling files. Inputs are the bridge file coordinates; output
+     * is a mutable staged Step for pattern 0 or the discard record for legacy
+     * non-live patterns. The bounds mirror PatternData's current one-pattern
+     * bridge shape.
      */
     if (pattern != 0u)
         return &filesystem_discardStep;
@@ -2777,18 +2777,12 @@ static void filesystem_writeResidentNames_tick(void)
     /*
      * Write root `/.hcnames` using the `.hcindex` writer pattern.
      *
-     * Inputs: the one BankData name and current filesystem identity rows.
-     * Output: one root file whose row order is the resident-name register
-     * contract; Scene rows are blank because SceneData deliberately stores no
-     * Scene names. This operation does not scan the card or allocate another
-     * name cache, and finishes through filesystem_finish() so asyncfatfs
-     * flushes the file before its blocking wrapper returns.
-     *
-     * Why normal boot does not call it: after mask-selective Bank Load, only
-     * the selected Scene identities exist in the active 81-byte block. A fresh
-     * snapshot would destroy valid unselected rows already on SD. Runtime
-     * Scene/Bank transactions use filesystem_residentNames_tick() to
-     * read/preserve/overlay the authoritative 129-row file instead.
+     * Inputs: resident BankData/SceneData after the initial load/fallback
+     * chain. Output: one root file whose row order is the resident-name
+     * register contract. This operation deliberately does not scan the card or
+     * allocate another name cache; it serializes only SRAM fields that already
+     * exist, then finishes through filesystem_finish() so asyncfatfs flushes
+     * the file before boot continues.
      */
     switch (op_phase) {
     case 0: /* RETURN ROOT + OPEN .hcnames */
@@ -5385,12 +5379,10 @@ static void filesystem_loadKitDirectory_tick(void)
 ** to any other selected destination after a successful Pattern read.
 **
 ** Inputs: op_slot and op_scene_load_scene_mask are set by
-** filesystem_requestLoadSceneForScenes(). Outputs: settings/Kit commit after
-** their validation; Pattern then mutates the first final destination directly
-** and mirrors only after its successful read. A later Pattern/Effect error is
-** intentionally non-atomic and does not roll back settings/Kit. The displayed
-** Scene name comes from the Scene folder scan, while the embedded Kit name
-** comes only from the "Kit <name>" child directory.
+** filesystem_requestLoadSceneForScenes(). Outputs: selected resident Scenes
+** receive a full Scene image only after all required files validate. The
+** displayed Scene name comes from the Scene folder scan/sceneset, while the
+** embedded Kit name comes only from the "Kit <name>" child directory.
 ** ----------------------------------------------------------------------- */
 static void filesystem_loadSceneDirectory_tick(void)
 {
@@ -6375,12 +6367,10 @@ static void filesystem_loadSceneDirectory_tick(void)
              * Text pattern completion.
              *
              * Inputs: parser seen bits plus any v2 track rows already applied
-             * into the direct final Scene PatternSet. Output: success accepts
-             * either a guarded v1 placeholder or a complete seven-track draft
-             * payload. Failure rejects overall load completion but cannot roll
-             * back settings/Kit already committed in phase 33 or Pattern bytes
-             * already written; that limitation is the explicit non-atomic
-             * Pattern contract pending redesign.
+             * into the direct final Scene PatternSet. Output: success accepts either a
+             * guarded v1 placeholder or a complete seven-track draft payload;
+             * failure rejects the whole Scene before resident memory is
+             * touched.
              */
             st = storage_patternStubFinalize(&op_pattern_stub_state);
             op_close_status = (st == STORAGE_STATUS_OK)
@@ -8360,9 +8350,8 @@ static uint8_t filesystem_nameHasExtension(const char *name,
      * Case-insensitive filename extension check for Scene child discovery.
      *
      * Users may rename/move .pat and .fx files between Scenes. The loader scans
-     * directory entries and accepts the first matching extension. Discovery
-     * records only the filename; the Scene state machine later validates each
-     * file according to its non-Pattern-stage/direct-Pattern ordering.
+     * directory entries and accepts the first matching extension, then validates
+     * the file contents before committing the staged Scene.
      */
     if (!name || !extension)
         return 0u;
@@ -13094,11 +13083,10 @@ static fs_boot_substep_diag_cb_t fs_boot_substep_diagnostic = NULL;
 static void filesystem_reportBootSubstep(uint8_t substep)
 {
     /*
-     * Notify the developer front-panel observer before one blocking phase-43
-     * component call starts. Input is the stable FSub code whose meaning is
-     * documented beside each filesystem_reportBootSubstep() call below.
-     * Output is diagnostic-only; the callback may update the boot OLED but
-     * cannot mutate filesystem ownership or progress.
+     * Notify the temporary front-panel observer before one blocking phase-43
+     * component call starts. Input is the stable FSub code documented in
+     * HCNAMES_IMPLEMENTATION.md. Output is diagnostic-only; the callback may
+     * update the boot OLED but cannot mutate filesystem ownership or progress.
      */
     if (fs_boot_substep_diagnostic)
         fs_boot_substep_diagnostic(substep);

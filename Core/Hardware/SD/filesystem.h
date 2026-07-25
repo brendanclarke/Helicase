@@ -115,26 +115,25 @@ typedef enum {
 typedef void (*fs_completion_cb_t)(void);
 
 /*
- * Developer boot diagnostic callback for the dormant resident-name writer.
+ * Temporary boot diagnostic callback for the resident-name writer.
  *
  * phase identifies the live HCNAMES state: 0=root/open request, 1=open wait,
  * 2=row streaming, 3=close wait, 4=final media flush, 5=done, and 6=error.
  * row is the next fixed-order SRAM row to write (0..129). The callback is
  * observational only and must not start or acknowledge filesystem operations.
- * Production passes NULL. It remains available only for a developer build
- * that explicitly invokes the dormant bootstrap writer.
+ * It exists to locate the current hardware boot freeze and should be removed
+ * after the stalled phase has been confirmed.
  */
 typedef void (*fs_hcnames_diag_cb_t)(uint8_t phase, uint16_t row);
 
 /*
- * Developer operation codes returned by filesystem_getBootDiagnostic().
+ * Temporary operation codes returned by filesystem_getBootDiagnostic().
  *
  * Stage 11 can contain a Bank-name repair followed by Bank, Scene, or Kit
  * payload loading and a final flush. Stable public codes keep the OLED output
  * interpretable without exposing the private fs_internal_op_t enum itself.
  * FS_BOOT_DIAG_OTHER means the active operation is outside that expected boot
- * chain. Production main.c does not render these codes when CONFIG_DEV_MODE is
- * zero.
+ * chain. Remove this diagnostic surface after the hardware stall is located.
  */
 typedef enum {
     FS_BOOT_DIAG_OTHER = 0u,
@@ -166,7 +165,7 @@ void        filesystem_initAfterCardReady(void);
  */
 uint8_t     filesystem_createBootIndexBlocking(void);
 /*
- * Retained blocking bootstrap writer for the root `/.hcnames` register.
+ * Write the first-pass resident name register to `/.hcnames`.
  *
  * Inputs: resident BankData/Kit data after the boot load/fallback chain.
  * Output: a root SD-card text file containing fixed-order newline-delimited
@@ -176,18 +175,11 @@ uint8_t     filesystem_createBootIndexBlocking(void);
  * not a scene_t field; successful root Scene and Bank operations subsequently
  * preserve/update them through the shared register cache. Rows with no loaded
  * object are blank. This is only a bootstrap writer, not a second name store.
- *
- * Current boot deliberately does not call this API: Scene names no longer
- * exist in resident `scene_t`, and a post-load snapshot would therefore erase
- * every unselected Scene block after a mask-selective Bank Load. Runtime
- * root-Scene and Bank transactions instead read the existing 129-row register,
- * overlay only their owned rows, and rewrite it. Affiliates: main.c's skipped
- * HCNAMES boot stage and filesystem's targeted HCNAMES state machine.
  */
 uint8_t filesystem_writeResidentNamesBlocking(
     fs_hcnames_diag_cb_t diagnostic_cb);
 /*
- * Observe the active filesystem operation for the developer boot-screen hook.
+ * Observe the active filesystem operation for the temporary boot-screen hook.
  *
  * Outputs: op receives one fs_boot_diag_op_t code and phase receives the
  * operation's current private state-machine phase. NULL outputs are allowed.
@@ -195,22 +187,14 @@ uint8_t filesystem_writeResidentNamesBlocking(
  * Bank-repair finalization, phase 42 is root return, 43 is embedded-Kit
  * quarantine, and 44 is handoff to the Bank payload reader. Phase 43 releases
  * its top-level Bank-root handle immediately after opening the selected Bank,
- * preserving application slots for selected Bank, Scene, embedded Kit, and
- * leaf files during directory descent. This lifetime rule remains mandatory
- * with the current five-handle pool: after entering the Kit, its explicit
- * handle is released because currentDirectory owns the copied Kit state, and
- * the freed slot is available for kitset.kcg and Instrument member files.
- * Increasing the pool fixed legitimate depth/cross-root concurrency but must
- * not conceal leaked directory handles.
+ * preserving asyncfatfs' three-handle budget for selected Bank, Scene, and
+ * embedded Kit during directory descent. After entering the Kit, its explicit
+ * handle is also released because currentDirectory owns the copied Kit state;
+ * the freed slot is then available for kitset.kcg and Instrument member files.
  */
 void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase);
-/*
- * Register or clear the phase-43 boot substep observer.
- *
- * Passing NULL disables it. Production main.c supplies NULL when
- * CONFIG_DEV_MODE is zero; developer builds may use it to localize a blocking
- * boot component without changing filesystem state or operation order.
- */
+/* Register or clear the temporary phase-43 substep observer. Passing NULL
+ * disables it. Registration changes no filesystem state or operation order. */
 void filesystem_setBootSubstepDiagnostic(fs_boot_substep_diag_cb_t cb);
 /*
  * Repair host-created long or duplicate product names before index generation.
@@ -320,22 +304,13 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
  * Load one numbered root Scene directory into every selected resident Scene.
  *
  * Inputs: direct root Scene library slot 000..999, destination Scene mask, and
- * completion callback. Output: asynchronous Scene load whose `sceneset.scg`
- * and embedded Kit first validate in the independent non-Pattern stage. Those
- * fields then commit to every selected Scene, their PatternSets are initialized,
- * and the Pattern file is read directly into the first final Scene before being
- * mirrored to the other selected destinations. The Effect placeholder
- * validates afterward. Pattern/Effect failure can therefore leave the already
- * committed settings/Kit and a partial/default Pattern; this is intentionally
- * non-atomic until the Pattern redesign.
- *
- * Scene Load is explicit-OK from the UI, unlike Kit Load's instant-on-scroll
- * behavior. Its selected index row is copied into existing operation scratch
- * before separate Scene staging, providing the later directory opens and
- * targeted HCNAMES source. The name cache remains independently available
- * throughout validation. Affiliates: filesystem_commitSceneStage(),
- * filesystem_directPatternTarget(), Preset Scene completion, and HCNAMES
- * publication after overall success.
+ * completion callback. Output: asynchronous staged Scene load; resident Scene
+ * memory changes only after sceneset.scg, one embedded Kit directory, one
+ * pattern file, and one effect file validate. Scene Load is explicit-OK from
+ * the UI, unlike Kit Load's instant-on-scroll behavior. Its selected index row
+ * is copied into existing operation scratch before separate Scene staging,
+ * providing the two later directory opens and targeted HCNAMES source. The
+ * name cache remains independently available throughout validation.
  */
 bool filesystem_requestLoadSceneForScenes(uint16_t slot,
                                           uint16_t scene_mask,
@@ -580,17 +555,10 @@ const char *filesystem_testResultName(void);
  * filesystem-owned staging; live SceneData and DSP state are unchanged until
  * Preset commits the validated payload. Client: preset_loadInstrument(). The
  * explicit Scene/slot coordinates remain immutable completion context even
- * though parsing itself is off-scene. Before the independent typed staging
- * union is reset, the selected filename is copied from the shared `.hcindex`
- * cache into existing operation scratch; that one request-stable key supplies
- * the later open and HCNAMES update without another name cache or retained
- * file-key allocation.
- *
- * Why the copy remains necessary even though cache and staging no longer
- * alias: later phases may rescan or repurpose the one general-purpose name
- * cache, while asyncfatfs still needs an immutable filename for this request.
- * Affiliates: preset_loadInstrument(), filesystem_stagedInstrument(), and the
- * Instrument Load completion path in Core/Menu/menu.c.
+ * though parsing itself is off-scene. Before staging aliases the typed cache,
+ * the selected filename is copied into existing operation scratch; that one
+ * request-stable key supplies the later open and HCNAMES update without an
+ * additional cache or SRAM allocation.
  */
 bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,

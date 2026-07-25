@@ -1373,8 +1373,7 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
      *
      * Affiliates: preset_startInstrumentApply(),
      * preset_loadInstrumentTemp(), filesystem_loadedInstrumentSlot(),
-     * filesystem_requestLoadInstrument(), and
-     * filesystem_requestLoadInstrumentTemp().
+     * and filesystem_instrumentLoadPreviewOriginal().
      */
     instrument_apply_active = 0u;
     if (!staged || slot >= INSTRUMENT_SLOT_COUNT ||

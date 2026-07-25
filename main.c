@@ -272,14 +272,12 @@ static void boot_showFilesystemStage(uint8_t stage)
     /*
      * Publish one durable boot milestone before entering a blocking SD step.
      *
-     * Input: the numeric milestone supplied immediately before each boot call;
-     * the permanent boot sequence is specified in FILESYSTEM_SPEC.md and the
-     * call sites below identify the concrete operation. Output: row 1 displays
-     * `Boot` plus that stage; row 2 displays the filesystem facade status
-     * observed before the operation begins. lcd_waitForIdle() is intentional
-     * diagnostic instrumentation: it guarantees the complete marker has
-     * physically reached the OLED before firmware can stall inside the
-     * following filesystem call. This helper does not start, pump,
+     * Input: the stage number documented in HCNAMES_IMPLEMENTATION.md. Output:
+     * row 1 displays `Boot` plus that stage; row 2 displays the filesystem
+     * facade status observed before the operation begins. lcd_waitForIdle()
+     * is intentional diagnostic instrumentation: it guarantees the complete
+     * marker has physically reached the OLED before firmware can stall inside
+     * the following filesystem call. This helper does not start, pump,
      * acknowledge, or reorder any filesystem operation.
      */
     lcd_diagDisplayInt("Boot", (int32_t)stage,

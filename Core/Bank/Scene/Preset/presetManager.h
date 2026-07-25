@@ -228,23 +228,23 @@ uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
                                        instrument_type_t type,
                                        uint16_t browser_index);
 /*
+ * Restore the original one-voice normal Instrument Load image from the
+ * filesystem staging preview.
+ *
+ * Inputs: the Menu session's unchanged Scene/voice. Output: nonzero when a
+ * valid preview image was committed and the ordinary bounded runtime apply was
+ * armed; no file is opened and no name/key is stored in Preset. The preview is
+ * intentionally available only until Menu changes load mode/type, instrument
+ * type, Scene, voice, or leaves nested Instrument Load.
+ *
+ * Affiliates: filesystem_instrumentLoadPreviewOriginal(),
+ * preset_tickInstrumentApply(), and Core/Menu/menu.c's `kit` browser row.
+ */
+/*
  * Start the hidden reversible `kit` save/load operations for Instrument Load.
- *
- * Inputs: Menu's selected Scene, voice, and registry type. Save writes that
- * resident voice to `Instrument/<type>/.hctmp.<ext>`; load parses the same
- * exact hidden filename into the ordinary one-Instrument staging view and
- * commits through the normal bounded runtime apply path. Outputs are ordinary
- * asynchronous acceptance/completion; neither operation changes HCNAMES nor
- * `.hcindex`.
- *
- * Why this API exists: the reversible `kit` row must survive arbitrary pool
- * previews without retaining a second Instrument image in SRAM. Affiliates:
- * filesystem_requestSaveInstrumentTemp(),
- * filesystem_requestLoadInstrumentTemp(), and Core/Menu/menu.c's single
- * nine-byte `menu_instrumentTempName` session label. Menu invalidates the
- * label on Scene/voice/type/mode/nested-exit boundaries; the dirty hidden file
- * may remain on SD and is deliberately excluded from scans, repair, and index
- * generation.
+ * Inputs: Menu's selected Scene/voice/type. Output: ordinary asynchronous
+ * completion; temporary files do not alter HCNAMES or `.hcindex`. Affiliates:
+ * filesystem temp APIs and Menu's one nine-byte kit-name lifetime.
  */
 uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot);
 uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
