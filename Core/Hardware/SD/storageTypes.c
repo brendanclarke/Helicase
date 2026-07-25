@@ -590,7 +590,7 @@ void storage_scenesetInit(storage_sceneset_t *state)
 storage_status_t storage_scenesetParseLine(
     storage_sceneset_t *state,
     const char *line,
-    scene_t *target_scene,
+    scene_settings_t *target_settings,
     char display[STORAGE_SCENE_DISPLAY_NAME_LEN])
 {
     char key[32];
@@ -604,7 +604,7 @@ storage_status_t storage_scenesetParseLine(
      * Required metadata validates the folder only. Object identity is never
      * owned by this file: the Scene name comes from "Scene/NN Name", and the
      * embedded Kit name comes from "Kit <name>". Optional settings write
-     * directly into the staged Scene. The display argument is retained only so
+     * directly into the staged Scene settings. The display argument is retained only so
      * older call sites keep their signature while name= compatibility below
      * deliberately ignores the value.
      */
@@ -640,45 +640,45 @@ storage_status_t storage_scenesetParseLine(
          */
         return STORAGE_STATUS_OK;
     } else if (storage_streq(key, "morph_amount")) {
-        if (!target_scene)
+        if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         st = storage_parseU8(value, &parsed);
         if (st != STORAGE_STATUS_OK)
             return st;
-        target_scene->settings.morph_amount = parsed;
+        target_settings->morph_amount = parsed;
     } else if (storage_streq(key, "voice_morph_amount")) {
-        if (!target_scene)
+        if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         return storage_parseCsvU8(value,
-                                  target_scene->settings.voice_morph_amount,
+                                  target_settings->voice_morph_amount,
                                   INSTRUMENT_SLOT_COUNT,
                                   255u);
     } else if (storage_streq(key, "voice_decimation_all")) {
-        if (!target_scene)
+        if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         st = storage_parseU8(value, &parsed);
         if (st != STORAGE_STATUS_OK)
             return st;
-        target_scene->settings.voice_decimation_all =
+        target_settings->voice_decimation_all =
             (parsed > 127u) ? 127u : parsed;
     } else if (storage_streq(key, "midi_channel")) {
-        if (!target_scene)
+        if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         st = storage_parseCsvU8(value,
-                                target_scene->settings.midi_channel,
+                                target_settings->midi_channel,
                                 NUM_TRACKS,
                                 16u);
         if (st != STORAGE_STATUS_OK)
             return st;
         for (parsed = 0u; parsed < NUM_TRACKS; parsed++) {
-            if (target_scene->settings.midi_channel[parsed] < 1u)
+            if (target_settings->midi_channel[parsed] < 1u)
                 return STORAGE_STATUS_BAD_VALUE;
         }
     } else if (storage_streq(key, "midi_note")) {
-        if (!target_scene)
+        if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         return storage_parseCsvU8(value,
-                                  target_scene->settings.midi_note,
+                                  target_settings->midi_note,
                                   NUM_TRACKS,
                                   127u);
     } else if (storage_streq(key, "audio_out")) {
@@ -690,10 +690,10 @@ storage_status_t storage_scenesetParseLine(
          * directly and seen_audio_out records that legacy embedded kitset
          * routing should not be imported later.
          */
-        if (!target_scene)
+        if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         st = storage_parseCsvU8(value,
-                                target_scene->settings.audio_out,
+                                target_settings->audio_out,
                                 INSTRUMENT_SLOT_COUNT,
                                 5u);
         if (st != STORAGE_STATUS_OK)
@@ -707,10 +707,10 @@ storage_status_t storage_scenesetParseLine(
          * Output: staged Scene settings update; runtime FX routing is not
          * applied by storage.
          */
-        if (!target_scene)
+        if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         st = storage_parseCsvU8(value,
-                                target_scene->settings.fx_send_amount,
+                                target_settings->fx_send_amount,
                                 INSTRUMENT_SLOT_COUNT,
                                 127u);
         if (st != STORAGE_STATUS_OK)
@@ -724,10 +724,10 @@ storage_status_t storage_scenesetParseLine(
          * Output: staged Scene settings update; runtime behavior is future
          * mixer/FX work.
          */
-        if (!target_scene)
+        if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         st = storage_parseCsvU8(value,
-                                target_scene->settings.fader_setting,
+                                target_settings->fader_setting,
                                 INSTRUMENT_SLOT_COUNT,
                                 2u);
         if (st != STORAGE_STATUS_OK)
@@ -793,7 +793,17 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
     const char *ext = storage_instrumentTypeExtension(type);
     uint8_t pos = 0u;
     uint8_t last_meaningful = 0u;
-    uint8_t stem_limit = force_voice_suffix ? 7u : SCENE_INSTRUMENT_STEM_LEN;
+    /*
+     * Instrument leaves are eight characters or fewer plus extension.
+     *
+     * Why: no loader/save path retains long stems; a forced Kit-member voice
+     * suffix reserves the eighth cell, while a root Instrument leaf may use
+     * all eight authoritative HCNAMES cells. Inputs: save mode and identity
+     * row. Output: bounded component formatting. Affiliates: filesystem.c.
+     */
+    uint8_t stem_limit = force_voice_suffix
+        ? 7u
+        : STORAGE_KIT_DISPLAY_NAME_LEN;
 
     /*
      * Build the visible LFN component for one saved Instrument file.
@@ -1868,9 +1878,18 @@ storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
         kit->seen_type_mask = (uint8_t)(kit->seen_type_mask | (1u << parsed));
     } else if (storage_streq(key, "file")) {
         storage_copyKitMemberFilename(kit->instrument_file[parsed], value);
-        if (!target_kit)
-            return STORAGE_STATUS_BAD_VALUE;
-        scene_setKitInstrumentSourceName(target_kit, parsed, value);
+        /*
+         * Keep `file=` only in the transient kitset parser state.
+         *
+         * Why: the member name is an on-card key, not audio state. Once this
+         * parser finishes, save/open paths derive their leaf from the
+         * authoritative HCNAMES row, slot, and Instrument extension rather
+         * than retaining a second stem inside kit_t.
+         *
+         * Inputs: current kitset member value. Output: parser-local filename
+         * used by the immediately following load only. Affiliates:
+         * filesystem.c Kit/Scene loaders and HCNAMES targeted updates.
+         */
         kit->seen_file_mask = (uint8_t)(kit->seen_file_mask | (1u << parsed));
     } else if (storage_streq(key, "audio_out")) {
         /*

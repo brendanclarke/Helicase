@@ -28,16 +28,19 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified
   Session 040 implementation, the Bank Load fix, and archived root notes.
-- Session 041 closed the generalized browser-name migration. Read
-  `knowledge_files/log_archive/041_SESSION_HANDOFF_LOG.md` before changing
-  name indexes, cache ownership, or Bank/Scene/Kit menu lifecycle. The next
-  planned cleanup is recorded in `SESSION_042_PRE_PLAN.md`.
+- Session 042 completed the HCNAMES/name-SRAM and filesystem-cache refactor.
+  Read `042_SESSION_HANDOFF_LOG.md` before changing identity ownership,
+  `.hcindex`, `.hcnames`, typed staging, canonical-name repair, Bank masks, or
+  Instrument Load's reversible `kit` row. Archive that handoff before deleting
+  the Session 042 working plans/logs.
 - Current filesystem authority:
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
-  `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`; read
+  `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
+  boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
+  `SRAM_DTCM_MANIFEST.md`; read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
-  reference set is indexed below, including the historical DSP, memory, module,
-  and oscillator-interpolation documents.
+  reference set is indexed below, including the historical DSP audit, live
+  memory manifest, module map, and oscillator-interpolation document.
 - Source layout is now `Core/Bank/Scene/` and `Core/Bank/BankData.*`, not
   `Core/Scene/`.
 - Scene/Bank saves currently persist draft v2 `pattern.pat`: 128x7 active-step
@@ -64,8 +67,21 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Instrument, Kit, root Scene, and root Bank Load/Save now share exactly one
   `fs_list_cache_name[1000][9]` display-name cache (9,000 bytes). Instrument
   rows are sorted; numbered-library rows are direct `000..999` slot rows with
-  blank rows preserved. Menu entry/type changes and exit dispose or reload the
-  same cache; no per-instrument or per-library name cache is allowed.
+  blank rows preserved. Root `/.hcnames` temporarily borrows its first 129
+  rows. Menu entry/type changes and exit dispose or reload the same cache; no
+  per-instrument or per-library name cache is allowed.
+- Root `/.hcnames` is the authoritative active identity register: row 0 Bank;
+  rows 1..16 Scene; rows 17..32 Kit; rows 33..128 six Instruments per Scene.
+  Runtime holds exactly 81 bytes of musical identity: one Bank, one Scene, one
+  Kit, and six Instrument names. `scene_t` and `kit_t` contain no display names
+  or retained filename stems. Because text rows have variable length, a
+  targeted update reads all 129 rows into the shared cache, overlays only its
+  owned rows, and rewrites the file.
+- Typed load staging is a separate aligned 2,048-byte union, never the
+  9,000-byte name cache. It holds one Kit, one Instrument candidate, or Scene
+  settings plus one Kit. Scene Pattern data is excluded: after settings and
+  the embedded Kit validate and commit, Pattern loads directly into the final
+  resident Scene slot and is intentionally non-atomic pending Pattern redesign.
 - Boot writes `/Kit/.hcindex`, `/Scene/.hcindex`, `/Bank/.hcindex`, and the
   four registry-owned Instrument indexes one at a time, then reloads
   `/Bank/.hcindex` before initial Bank selection because Instrument generation
@@ -77,6 +93,12 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   compatibility bridge and its 1,000-entry `kb_map`, releasing the linked
   2,004-byte SRAM allocation. Kit browsing now uses only the filesystem-owned
   slot cache/index accessors.
+- The former Bank child name/alias/presence arrays, 64-entry File/Dir list
+  caches, and firmware recursive-delete stacks are also gone. Bank discovery
+  retains only a 16-bit child occupancy mask and rescans one selected child at
+  a time. Two unreachable 49-byte File/Dir Menu editor/result strings plus nine
+  result bytes still link (107 bytes total); do not describe all diagnostic UI
+  state as disposed.
 - Never add object self-name fields to `sceneset.scg`, `bankset.bcg`, or
   instrument files. Object identity comes from directory/file names.
 - For overwrite code, enter the correct parent root first, parse visible child
@@ -85,8 +107,11 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   its identity and completes asynchronously; its false return means no
   callback. This is documented in `FILESYSTEM_SPEC.md` and
   `ASYNCFATFS_REFERENCE.md`.
-- File/Dir/sDir diagnostics are hidden unless `CONFIG_DEV_MODE != 0`, but the
-  dispatch code remains compiled.
+- File/Dir/sDir are no longer in the normal type cycle; their compatibility
+  filesystem/Preset calls do no work, although residual Menu display code and
+  the two 49-byte strings remain linked. Boot filesystem diagnostic observers
+  remain compiled but are selected only when `CONFIG_DEV_MODE != 0`;
+  production uses `CONFIG_DEV_MODE == 0`.
 
 ---
 
@@ -112,9 +137,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   │   ├── ASYNCFATFS_REFERENCE.md    ← low-level async FAT/VFAT API contracts, pumping, LFN/object identity, deletion, and caller rules
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── MEMORY_AUDIT.md            ← historical SRAM/flash/ITCM/DTCM/DMA memory measurements and resource watch items
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 041
-│   │   └── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 042
+│   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
+│   │   └── SRAM_DTCM_MANIFEST.md      ← current linked SRAM1/DTCM, names, caches, staging, and scratch ownership
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -241,9 +266,9 @@ API/feature references and may contain historical snapshots as noted below.
 | `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, sanitization, LFN/SFN display-vs-alias identity, object iteration, navigation, removal, rename, flush boundaries, production users, and unfinished APIs. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
 | `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
 | `FILESYSTEM_SPEC.md` | Current product storage specification: root layout, numbered Kit/Scene/Bank folders, `kitset.kcg`, instrument schemas/keys, Scene-owned state, Morph/modulation, Pattern/Sample/Wavetable/Effect targets, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MEMORY_AUDIT.md` | Historical memory snapshot: flash/SRAM/ITCM/DTCM region usage, largest symbols, DMA non-cacheable window usage, and memory watch items. It predates later ownership changes and must be remeasured for new decisions. | Evaluating RAM/flash placement or buffer capacity. |
 | `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map for Pattern, UI, sequencer, Preset, ParameterArray, instruments, modulation, MIDI, filesystem, storageTypes, and boot; also records removed front-panel protocol surfaces. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
+| `SRAM_DTCM_MANIFEST.md` | Fresh linked-image SRAM1/DTCM totals, Scene/Pattern/Kit structure sizes, musical-name/cache/staging ownership, asyncfatfs capacity, and residual operation/UI scratch. | Changing retained state, adding caches/names, or evaluating SRAM cost. |
 
 ---
 
@@ -401,6 +426,11 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
 - 8-sector LRU cache (4KB) between filesystem logic and SD card. Cache hits are free (no SPI traffic).
 - `sdcard_lxr02.c` implements `sdcard_readBlock`/`sdcard_writeBlock`/`sdcard_poll` on top of `SPI/spi_sd.c`. Each `sdcard_poll()` call clocks a burst of 16 SPI bytes (~9µs). A 512-byte sector completes in 32 polls.
 - `filesystem.c` serializes operations — one SD operation at a time. Request functions return immediately; completion is signalled via callback/status.
+- Asyncfatfs has five 328-byte open-file slots. The increase from three slots
+  costs 656 bytes. `afatfs_chdir()` copies directory state into
+  `currentDirectory`, so callers must close explicit parent/child directory
+  handles after entering them; handle capacity is not a substitute for correct
+  lifetimes.
 - `filesystem.c` owns the filetype registry and add-a-filetype checklist. Non-SD clients include `filesystem.h` only.
 - Authoritative filesystem and instrument-file spec lives in
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`. The former
@@ -426,35 +456,43 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
 - Bank Load/Save uses root Bank/NNN Name/ folders with bankset.bcg and
   Bank-local two-digit Scene children 00..15. It loads/saves the selected set
   of resident Scenes using the version-2 manifest rather than a one-Scene
-  bridge.
+  bridge. Bank Load is always mask-selective: it intersects the requested mask
+  with discovered children and never treats an empty intersection as “all.”
+  Unselected resident Scene payloads, HCNAMES rows, and present-state remain
+  unchanged.
 - Session 036 adds asyncfatfs LFN component creation/object iteration through
   `afatfs_mkdir_lfn()`, `afatfs_fopen_lfn()`, `afatfs_opendir_lfn()`, and
   `afatfs_findNextObject()`. These preserve SFN display case, create VFAT LFN
   entries, support case-sensitive matching for production LFN opens, return
   generated 8.3 aliases for identity opens, and expose file/directory object
-  kind. They are now used by File/Dir diagnostics, Kit scan/load/save, root
-  Instrument scan/load, and root Instrument Save. Future save code should
+  kind. They are now used by product name repair, Kit/Scene/Bank
+  scan/load/save, root Instrument scan/load/save, and the hidden Instrument
+  temporary file. Future save code should
   reuse/extend these filesystem-owned primitives rather than creating local FAT
   writers in callers.
-- Dot-prefixed files/directories are real filesystem objects. asyncfatfs and
-  File/Dir diagnostics must not hide them; product scanners filter only after
-  object iteration.
+- Dot-prefixed files/directories are real filesystem objects. asyncfatfs
+  exposes them; product scanners filter only after object iteration. In
+  particular `.hctmp.<ext>` is excluded from Instrument indexes and repair.
 - Filesystem-level recursive directory cleanup exists for replacement-style
   saves such as Kit Save. Atomic rename/replace remains missing and is required
   before Scene/Bank/autosave promotion can claim power-loss-safe commits.
 - Root `Instrument/` is a separately scanned, type-filtered source pool.
-  Instrument Load initially shows the destination slot's Kit member stem;
-  changing type only changes the type selection, and lower-row browsing is the
-  action that replaces the slot. Pool entries load immediately after their
-  private filesystem staging has validated.
+  Instrument Load shows a `kit` row above numbered row `000`. On menu entry or
+  voice change, the original voice is saved as
+  `Instrument/<type>/.hctmp.<ext>` and its name is retained in one nine-byte
+  Menu label. Returning to `kit` reloads that exact file through the ordinary
+  one-candidate stage. The reversible source is invalidated on Scene, voice,
+  type, load-type, mode, or nested-menu exit; the dirty hidden file may remain
+  on SD. A rapid negative encoder delta at the upper boundary must clamp to
+  `kit` and clear stale deferred pool requests so it can scroll downward again.
 - Root Instrument Save is entered from Save-page VOICE press and writes one
   resident Scene/voice slot to `Instrument/<stem.ext>` using the same
   descriptor-keyed text writer and `self` serialization rule as Kit Save.
-- Instrument Load is not a one-slot write. Preset owns its completion
+- Instrument Load is not merely a raw one-slot memcpy. Preset owns its completion
   transaction: clear every runtime modulation owner referencing the outgoing
   slot before the type/image replacement, reset the incoming runtime, request
   all six Morph/runtime applies, and normalize/rebind all source targets after
-  the images exist. Keep mode, Scene, destination, and preview input locked
+  the images exist. Keep mode, Scene, destination, and source request locked
   through both read and commit phases.
 - Instrument metadata is firmware-owned registry data, not file content.
   Basic types are unrestricted; at most two Advanced types may be present;
@@ -469,6 +507,12 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
   aliases only as operation-local compatibility state. If a card only exposes
   a short alias such as `001SLA~1`, scan falls back to the leading three-digit
   slot so the kit remains loadable.
+- Product name repair canonicalizes root numbered folders as `NNN Name`,
+  Bank-local children as `SS Name`, and Instrument leaf names as at most eight
+  stem cells plus the registry extension. It repairs one rename candidate,
+  flushes, and rescans; decimal suffixes remain within eight cells. This is
+  ordered FAT mutation, not journaled/crash-atomic repair. No `.hcrepair`
+  transaction file exists.
 - Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
 - The legacy `kitBrowser.c/h` bridge is retired. Kit, pattern, performance,
   and all-file paths use typed filesystem/Menu accessors and direct slot
@@ -479,7 +523,9 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
   scans and writes each registry-owned Instrument index one type at a time.
   Because the one shared name cache is disposed between Instrument types, boot
   reloads `/Bank/.hcindex` before initial Bank selection. There is no opaque
-  root `.hcindex` RNG marker in the current design.
+  root `.hcindex` RNG marker in the current design. Boot does not rewrite
+  `/.hcnames` from resident SRAM after the initial load: doing so would erase
+  names for mask-unselected Scenes that no longer exist in `scene_t`.
 - Historical globals compatibility (Session 025): the former glo.cfg/ALL
   binary 22/23-byte behavior is retained here only as an archive note.
   Current filesystem globals use strict keyed settings.cfg version 1 with
@@ -594,6 +640,7 @@ menu_init();           // calls memset on parameter_values — do NOT also memse
 // scans/writes each Instrument type index one at a time; reload Bank index
 // after Instrument generation disposes the shared name cache.
 // Synchronous boot load tries lowest Bank, then lowest Scene, then lowest Kit, then defaults
+// Do NOT snapshot resident names to /.hcnames here; targeted load/save operations own it.
 // Synchronous globals load (settings.cfg) via preset_loadGlobals + polling + menu_pollPresetStatus
 audioCodec_init();     // single audio entry point — AFTER all SD boot ops
 sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
@@ -647,21 +694,42 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Known Issues / Technical Debt
 
+### Resolved / Changed in Session 042
+- `/.hcnames` is the authoritative fixed-row name register. Runtime identity is
+  one Bank + one Scene + one Kit + six Instrument names (81 bytes), never
+  per-Scene arrays or retained keys.
+- `.hcindex` and HCNAMES share one 9,000-byte cache; non-Pattern load validation
+  uses a separate 2,048-byte aligned stage. Do not recombine them: the attempted
+  shared union erased browser rows and produced blank indexes, `KitL00`, and
+  scroll-time load errors.
+- Scene/Kit/Instrument share that stage; Scene Pattern reads directly into the
+  final Scene after settings+Kit commit. Pattern load is intentionally
+  non-atomic for now.
+- Bank Load preserves every unselected Scene and HCNAMES block. Bank
+  child-name/key arrays were replaced by one-child rescans plus a 16-bit mask.
+- Instrument Load's original `kit` source is an on-card `.hctmp.<ext>` plus one
+  nine-byte label, not a second staged Instrument. A prior two-image preview
+  design was removed.
+- Five asyncfatfs handles are linked (+656 bytes versus three), but directory
+  handles must still be closed after `chdir`.
+- Final rapid-backspin boundary handling was build-verified but was not
+  hardware-retested before Session 042 closed.
+
 ### Resolved / Changed in Session 034
 - Instrument Load is complete for current instrument types. The root pool holds
   converted `.drm`, `.snr`, `.cym`, and `.hat` files; browser order is
   per-type alphanumeric with a one-based display number saturated at 999.
   New-format root Instrument Save was added in Session 036.
 - The visible Load/Save menu no longer exposes Pattern, MorphKit, Perform, and
-  All. After Session 036, the promoted top-level type cycler is File/Dir/Kit
-  only; Instrument Load is entered by VOICE press on Load, and Instrument Save
+  All. The promoted top-level type cycler is Kit/Scene/Bank; Instrument Load is
+  entered by VOICE press on Load, and Instrument Save
   is entered by VOICE press on Save. Kit/Instrument Load scenes use
   `pat_sceneHasActiveSteps()` for LED base state. Kit Load permits a
   zero-or-more Scene toggle mask; Instrument Load/Save selects exactly one
   Scene. A selected Scene blinks.
-- `kit_t.instrument_display_name[6][9]` preserves an eight-character Kit
-  member stem only for Instrument Load provenance display; it is not runtime
-  identity or a second file-authority layer.
+- `kit_t` no longer retains Instrument display names or file stems.
+  Provenance/display identity comes from HCNAMES and the one 72-byte
+  filesystem identity block.
 - The direct Instrument loader caused the observed Voice 2 long-decay/locked
   parameter condition: loading any Drum file into that slot stayed bad, while
   loading a Kit repaired it. The new staged transaction prevents live Scene

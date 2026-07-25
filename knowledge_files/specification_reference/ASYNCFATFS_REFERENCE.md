@@ -214,11 +214,46 @@ APIs:
 
 `afatfs_chdir(NULL)` returns to root.
 
+`afatfs_chdir(handle)` copies the selected directory state into
+`afatfs.currentDirectory`. The explicit application handle is not the current
+directory object and does not need to remain open merely because traversal
+entered it. Close directory handles after chdir when no later operation needs
+that concrete handle.
+
 `afatfs_chdirParent()` reads the structural FAT `..` entry from the current
 directory's first sector. It exists because passing the literal string `".."` to
 the normal filename parser is not reliable: the 8.3 converter normalizes it
 like a blank component. Recursive directory deletion uses `afatfs_chdirParent()`
 after emptying a child directory.
+
+## Application handle pool
+
+The current implementation has five application file-handle slots:
+
+```c
+#define AFATFS_MAX_OPEN_FILES 5
+```
+
+The linked `afatfsFile_t` size is 328 bytes. Raising the pool from three to five
+therefore added exactly 656 bytes to the zero-initialized asyncfatfs state; the
+current complete `afatfs` symbol is 7,344 bytes.
+
+Five slots are concurrency headroom, not a reason to retain redundant
+directory handles. Session 042 boot diagnostics proved that retaining Bank
+root, selected Bank, and Scene while opening an embedded Kit exhausted the
+former three-slot pool. Product traversal now closes Bank root after opening
+the selected Bank and closes the explicit Kit handle after chdir, leaving slots
+for `kitset.kcg` and Instrument member files. `currentDirectory` remains usable
+because it is stored outside the application handle pool.
+
+Caller rule:
+
+- calculate the maximum simultaneously live handles for the state, including
+  payload files;
+- release an explicit directory handle after chdir unless a later API
+  specifically requires that handle;
+- treat an unaccepted open as backpressure/failure according to that API;
+- never solve a lifetime leak only by increasing `AFATFS_MAX_OPEN_FILES`.
 
 ## Removal
 
@@ -324,15 +359,21 @@ Don't:
   `storageTypes`.
 - Bank scan/load/save uses object iteration, namespace-aware root/two-digit
   child matching, captured identities for cleanup, staging/promotion
-  preflight, and text schemas in `storageTypes`. Bank Load clears shared
-  Scene child-discovery names before every delegated local child.
-- Root Instrument scan/load/save uses object iteration, LFN root directory
-  entry, one shared generalized browser-name cache (128 sorted Instrument rows
-  or 000..999 slot-addressed Kit/Scene rows), LFN file writes, and descriptor-keyed text
-  schemas.
-- File/Dir/sDir diagnostic menu entries exercise exact root file/directory
-  scan, open, create, child create, and persistence checks. They remain
-  compiled but normally appear only when `CONFIG_DEV_MODE != 0`.
+  preflight, and text schemas in `storageTypes`. Bank Load rescans one selected
+  child at a time and retains no 16-child name/alias table.
+- Root Instrument scan/load/save uses object iteration, registry-owned typed
+  directories, one shared generalized browser-name cache with up to 1,000
+  sorted rows, LFN file writes, and descriptor-keyed text schemas. Product
+  scan/repair policy excludes `.hctmp.<ext>`; asyncfatfs itself still exposes
+  the dot-prefixed object normally.
+- Kit/Scene/Bank `.hcindex` rows and HCNAMES reuse one 1,000-by-9-byte cache in
+  `filesystem.c`; that cache is above the asyncfatfs layer and does not alter
+  object iteration semantics.
+- File/Dir/sDir diagnostic menu entries and their list caches are retired.
+  Compatibility facade calls perform no asyncfatfs operation. A total of 107
+  unreachable Menu bytes (two 49-byte editor/result strings plus nine result
+  bytes) remains above this layer, but no multi-entry diagnostic cache or
+  asyncfatfs traversal remains.
 
 ## AsyncFATFS work still required
 

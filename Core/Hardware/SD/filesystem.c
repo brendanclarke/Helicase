@@ -199,9 +199,10 @@ typedef enum {
      * Why: root Bank scanning only tells the browser which Bank slots exist;
      * Load:[Bank] LEDs also need the child Scene occupancy of the highlighted
      * slot. Inputs are op_slot and the root Bank scan cache. Outputs are the
-     * operation-local op_bank_child_present_mask/name caches, exposed through
+     * operation-local op_bank_child_present_mask, exposed through
      * filesystem_bankChildSceneMask() after completion. This op never reads
-     * bankset.bcg or changes BankData.
+     * bankset.bcg or changes BankData. It deliberately never retains child
+     * names or aliases: a real Bank Load rescans one selected child at a time.
      */
     FS_INTERNAL_OP_SCAN_BANK_SCENES,
     FS_INTERNAL_OP_SCAN_INSTRUMENTS,
@@ -215,17 +216,12 @@ typedef enum {
     FS_INTERNAL_OP_REPAIR_NAMES,
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
     FS_INTERNAL_OP_SAVE_INSTRUMENT,
+    /* Temporary `kit` row file; it never updates HCNAMES or `.hcindex`. */
+    FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP,
     FS_INTERNAL_OP_LOAD_NAME,
     FS_INTERNAL_OP_LOAD_INDEX,
     /* Async reader that replaces the shared cache from a root `.hcindex`. */
     FS_INTERNAL_OP_LOAD_LIBRARY_INDEX,
-    FS_INTERNAL_OP_SCAN_TEST_FILES,
-    FS_INTERNAL_OP_SCAN_TEST_DIRS,
-    FS_INTERNAL_OP_LOAD_TEST_FILE,
-    FS_INTERNAL_OP_LOAD_TEST_DIR,
-    FS_INTERNAL_OP_SAVE_TEST_FILE,
-    FS_INTERNAL_OP_SAVE_TEST_DIR,
-    FS_INTERNAL_OP_SAVE_TEST_SIMPLE_DIR,
 } fs_internal_op_t;
 
 typedef struct {
@@ -393,8 +389,15 @@ static uint16_t op_write_line_index = 0u;
  * newly-created LFN directory.
  */
 static char op_save_kit_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
-static char op_save_kit_member_display_file[STORAGE_KIT_SLOT_COUNT]
-                                            [STORAGE_KIT_MEMBER_FILENAME_MAX];
+/*
+ * One transient derived filename component.
+ *
+ * Why: Kit/Scene writers open and serialize one Instrument file at a time, so
+ * six retained member keys were duplicate SRAM state. Inputs: active source
+ * Scene, voice, identity name, and type. Output: valid until the following
+ * async FAT open has accepted it. Affiliates: kitset writer and member writer.
+ */
+static char op_filename_component[STORAGE_KIT_MEMBER_FILENAME_MAX];
 static char op_save_kit_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
 static char op_save_scene_kit_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_save_scene_kit_open_name[AFATFS_SHORT_FILENAME_MAX];
@@ -402,13 +405,36 @@ static uint8_t op_kit_save_source_scene = 0u;
 static storage_instrument_save_mode_t op_kit_save_mode =
     STORAGE_INSTRUMENT_SAVE_NORMAL;
 
-#define FS_DELETE_DEPTH_MAX 8u
+static const char *filesystem_memberFilename(uint8_t slot)
+{
+    const scene_t *scene = scene_getConst(op_kit_save_source_scene);
+
+    /*
+     * Derive one Kit member leaf immediately before use.
+     *
+     * Why: the HCNAMES row, voice/type, and extension are sufficient; storing
+     * six preformatted keys is neither authoritative nor needed concurrently.
+     * Inputs: zero-based voice and request-stable source Scene. Output: one
+     * 49-byte component for the immediate kitset/open operation, or blank.
+     * Affiliates: filesystem_nextKitsetLine() and Kit/Scene save phases.
+     */
+    if (!scene || slot >= STORAGE_KIT_SLOT_COUNT) {
+        op_filename_component[0] = '\0';
+        return op_filename_component;
+    }
+    storage_makeSavedInstrumentDisplayFilename(
+        op_filename_component, sizeof(op_filename_component),
+        filesystem_identityName((uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 + slot)),
+        scene->kit.instruments[slot].type, (uint8_t)(slot + 1u), 1u);
+    return op_filename_component;
+}
 
 /*
- * Delete helpers are state machines because asyncfatfs exposes only
- * foreground-pumped operations. Slot delete scans /Kit/ for all physical
- * directories matching a numbered slot. Tree delete removes one visible
- * directory component recursively after the caller has entered its parent.
+ * Slot delete is a state machine because asyncfatfs exposes only
+ * foreground-pumped operations. It scans /Kit/ for all physical directories
+ * matching a numbered slot. Recursive generic delete was removed because the
+ * product uses asyncfatfs' maintained tree deletion; keeping a second unused
+ * implementation retained obsolete name and alias stacks in SRAM.
  */
 typedef enum {
     FS_DELETE_SLOT_IDLE = 0u,
@@ -422,44 +448,21 @@ typedef enum {
     FS_DELETE_SLOT_ERROR
 } fs_delete_slot_phase_t;
 
-typedef enum {
-    FS_DELETE_TREE_IDLE = 0u,
-    FS_DELETE_TREE_OPEN_TARGET,
-    FS_DELETE_TREE_WAIT_TARGET,
-    FS_DELETE_TREE_CLOSE_TARGET,
-    FS_DELETE_TREE_OPEN_SCAN,
-    FS_DELETE_TREE_WAIT_SCAN,
-    FS_DELETE_TREE_SCAN_NEXT,
-    FS_DELETE_TREE_CLOSE_SCAN_BEFORE_CHILD,
-    FS_DELETE_TREE_HANDLE_CHILD,
-    FS_DELETE_TREE_WAIT_FILE_REMOVE,
-    FS_DELETE_TREE_WAIT_CHILD_DIR,
-    FS_DELETE_TREE_CLOSE_CHILD_DIR,
-    FS_DELETE_TREE_OPEN_PARENT,
-    FS_DELETE_TREE_WAIT_PARENT,
-    FS_DELETE_TREE_CLOSE_PARENT,
-    FS_DELETE_TREE_REMOVE_EMPTY_DIR,
-    FS_DELETE_TREE_WAIT_REMOVE_EMPTY_DIR,
-    FS_DELETE_TREE_DONE,
-    FS_DELETE_TREE_ERROR
-} fs_delete_tree_phase_t;
-
-static fs_delete_tree_phase_t op_delete_tree_phase = FS_DELETE_TREE_IDLE;
-static uint8_t op_delete_tree_depth = 0u;
-static char op_delete_tree_name_stack[FS_DELETE_DEPTH_MAX]
-                                     [AFATFS_LONG_FILENAME_MAX + 1u];
-static char op_delete_tree_open_name_stack[FS_DELETE_DEPTH_MAX]
-                                           [AFATFS_SHORT_FILENAME_MAX];
-static char op_delete_tree_child_name[AFATFS_LONG_FILENAME_MAX + 1u];
-static char op_delete_tree_child_open_name[AFATFS_SHORT_FILENAME_MAX];
-static afatfsObjectKind_t op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
-static afatfsFilePtr_t op_delete_tree_dir = NULL;
 static fs_delete_slot_phase_t op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
 static afatfsFilePtr_t op_delete_slot_dir = NULL;
 static uint8_t op_delete_slot_allow_short_alias = 0u;
 static uint8_t op_delete_slot_bank_scene = 0u;
 static uint16_t op_delete_slot_number = 0u;
 static afatfsObjectId_t op_delete_slot_target_id;
+/*
+ * Completion latch for asyncfatfs' maintained recursive deleter.
+ *
+ * Inputs: afatfs_deleteTree() invokes the callback for the concrete object
+ * captured by the slot scanner. Output: the slot-delete state machine learns
+ * that the one foreground-pumped delete finished and whether it succeeded.
+ * This is intentionally only a result latch, not the former firmware-owned
+ * recursive name/alias stack; asyncfatfs owns that traversal now.
+ */
 static bool op_delete_tree_done = false;
 static afatfsResultCode_t op_delete_tree_result = AFATFS_RESULT_OK;
 
@@ -480,7 +483,194 @@ static void on_delete_tree_complete(afatfsResultCode_t result)
  * Scene indices as bit positions; its callers are the normal Kit and KitMrp
  * request helpers.
  */
-static kit_t op_staged_kit;
+/*
+ * Non-Pattern Scene stage shape.
+ *
+ * What: one load-time Scene settings image plus its embedded Kit; PatternSet
+ * is deliberately absent. Why: Scene settings/Kit validate atomically before
+ * Pattern streams directly to final Scene SRAM under the agreed non-atomic
+ * Pattern policy. Inputs: sceneset, kitset, and Instrument file parsers.
+ * Outputs: filesystem_commitSceneStage() copies the validated image to the
+ * selected resident Scene(s). Affiliates: Kit/Instrument stage members below,
+ * Pattern loader phases, and the later Effect payload design.
+ */
+typedef struct {
+    scene_settings_t settings;
+    kit_t kit;
+} filesystem_scene_stage_t;
+
+/*
+ * Separate fixed-size non-Pattern payload stage.
+ *
+ * What: 2,048 bytes of aligned SRAM for one Kit, one Instrument, or one
+ * Scene-with-Kit staging image. Why: the 9,000-byte name cache must remain a
+ * cache only; sharing it with parser staging erased active `.hcindex` rows
+ * during Load scrolling. 512 parameter cells require three endpoint images
+ * (main, morph, interpolation), or 1,536 bytes because values are uint8_t.
+ * The remaining budget covers current Scene/Kit metadata and reserves 384
+ * bytes for a future non-Pattern Effect stage. Inputs: mutually exclusive
+ * typed parsers. Outputs: one validated payload for commit; Pattern is never
+ * placed here. Affiliates: filesystem_loadKitDirectory_tick(),
+ * filesystem_loadInstrument_tick(), filesystem_loadSceneDirectory_tick(),
+ * and InstrumentManager's 64-cells-per-voice contract.
+ */
+#define FS_STAGE_PARAMETER_CAPACITY   512u
+#define FS_STAGE_PARAMETER_IMAGE_COUNT 3u
+#define FS_STAGE_EFFECT_RESERVE_BYTES 384u
+#define FS_STAGE_CACHE_BYTES          2048u
+
+typedef union {
+    uint8_t raw[FS_STAGE_CACHE_BYTES];
+    kit_t kit_stage;
+    /* One parsed Instrument candidate; its original `kit` source is now an
+     * on-card `.hctmp.<ext>` file, so staging never owns a second image. */
+    kit_instrument_slot_t instrument_stage;
+    filesystem_scene_stage_t scene_stage;
+} filesystem_stage_workspace_t;
+
+/*
+ * The 1,000-row index/HCNAMES cache is intentionally independent from staging.
+ *
+ * Inputs: scans, index readers, and HCNAMES transactions. Outputs: browser
+ * names and slot occupancy. Why: a staged payload may now be prepared without
+ * invalidating the selected index row used by scrolling and later opens.
+ * Affiliates: filesystem_prepareLibraryNameCache(), filesystem_residentNames,
+ * and the separate filesystem_stage_workspace_t above.
+ */
+static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
+                              [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+static filesystem_stage_workspace_t fs_stage_workspace;
+
+/*
+ * The only operation/menu identity strings retained outside the name cache.
+ *
+ * Why: loading `.hcindex` necessarily reuses the name cache after HCNAMES has
+ * been read. The active Bank is already retained once by BankData, so this
+ * physical array preserves only Scene, Kit, and six Instrument identities;
+ * together those logical nine rows replace SceneData fields and former Menu
+ * scratch allocations without duplicating the Bank name.
+ *
+ * Inputs: Menu copies HCNAMES rows here before index traversal, and completed
+ * loads/saves refresh their affected rows. Outputs: targeted HCNAMES writers
+ * and filename formatters borrow the rows until the menu session ends.
+ * Affiliates: filesystem_identityName(), menu.c, and the HCNAMES state machine.
+ */
+static char fs_identity_name[FS_IDENTITY_ROW_COUNT - 1u]
+                            [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+static uint16_t fs_identity_valid_mask = 0u;
+
+_Static_assert(sizeof(fs_list_cache_name) ==
+                   (FS_LIBRARY_NAME_CACHE_MAX *
+                    (STORAGE_KIT_DISPLAY_NAME_LEN + 1u)),
+               "the index/HCNAMES cache must remain exactly 9000 bytes");
+_Static_assert(sizeof(fs_identity_name) + BANK_DISPLAY_NAME_LEN + 1u == 81u,
+               "one Bank plus one Scene, Kit, and six Instrument names is 81 bytes");
+_Static_assert(INSTRUMENT_SLOT_COUNT * INSTRUMENT_PARAM_COUNT <=
+                   FS_STAGE_PARAMETER_CAPACITY,
+               "stage parameter capacity must cover all current kit voices");
+_Static_assert(FS_STAGE_CACHE_BYTES >=
+                   ((FS_STAGE_PARAMETER_CAPACITY *
+                     FS_STAGE_PARAMETER_IMAGE_COUNT *
+                     sizeof(instrument_param_value_t)) +
+                    sizeof(scene_settings_t) + sizeof(kit_settings_t) +
+                    (INSTRUMENT_SLOT_COUNT * sizeof(instrument_type_t)) +
+                    FS_STAGE_EFFECT_RESERVE_BYTES),
+               "stage cache must cover 512 parameter cells per image plus effect reserve");
+_Static_assert(sizeof(filesystem_stage_workspace_t) <= FS_STAGE_CACHE_BYTES,
+               "typed non-Pattern stage exceeds its fixed SRAM budget");
+_Static_assert(_Alignof(filesystem_stage_workspace_t) >= _Alignof(kit_t),
+               "typed stage must align Kit staging");
+
+#define op_staged_kit        (fs_stage_workspace.kit_stage)
+#define op_staged_instrument (fs_stage_workspace.instrument_stage)
+
+void filesystem_clearIdentityNames(void)
+{
+    /*
+     * Invalidate the one operation-scoped identity block.
+     *
+     * Inputs: none. Output: Scene/Kit/Instrument LCD/name clients observe
+     * blank rows until the next HCNAMES entry fetch. The Bank row is not
+     * cleared because BankData is the one resident Bank-name owner; clearing
+     * it here would either duplicate or lose the current Bank identity.
+     * Affiliates: menu session exit, BankData, and filesystem operation reset.
+     */
+    memset(fs_identity_name, 0, sizeof(fs_identity_name));
+    fs_identity_valid_mask = 0u;
+}
+
+void filesystem_setIdentityName(uint8_t row, const char name[8])
+{
+    uint8_t i;
+
+    /*
+     * Copy exactly one HCNAMES-style display row into the identity block.
+     *
+     * Inputs: logical row selector and fixed eight-cell source. Output: the
+     * Bank row routes to BankData's existing sole name; other rows become
+     * printable, NUL-terminated identity text plus a valid-row bit. Why: never
+     * retain a filename/stem or a duplicate Bank/menu name copy. Affiliates:
+     * menu HCNAMES completion, BankData, and targeted update helpers.
+     */
+    if (row >= FS_IDENTITY_ROW_COUNT)
+        return;
+    if (row == FS_IDENTITY_BANK_ROW) {
+        if (name)
+            bank_setDisplayName(name);
+        return;
+    }
+    row--;
+    memset(fs_identity_name[row], 0, sizeof(fs_identity_name[row]));
+    for (i = 0u; name && i < STORAGE_KIT_DISPLAY_NAME_LEN; i++) {
+        char c = name[i];
+        fs_identity_name[row][i] = (c >= 0x20 && c <= 0x7e) ? c : ' ';
+    }
+    fs_identity_name[row][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    if (name)
+        fs_identity_valid_mask = (uint16_t)(fs_identity_valid_mask |
+                                             (uint16_t)(1u << (row + 1u)));
+    else
+        fs_identity_valid_mask = (uint16_t)(fs_identity_valid_mask &
+                                             (uint16_t)~(1u << (row + 1u)));
+}
+
+const char *filesystem_identityName(uint8_t row)
+{
+    /*
+     * Borrow one active identity row without allocating a second cache.
+     *
+     * Inputs: logical row 0..8. Output: BankData's one Bank row for row zero,
+     * otherwise fixed-width NUL-terminated identity text or blanks. This
+     * mapping keeps the public nine-row interface while physically storing no
+     * duplicate Bank string. Affiliates: menu LCD, HCNAMES writers, BankData,
+     * and on-demand filename construction.
+     */
+    if (row == FS_IDENTITY_BANK_ROW)
+        return bank_displayName();
+    if (row >= FS_IDENTITY_ROW_COUNT ||
+        (fs_identity_valid_mask & (uint16_t)(1u << row)) == 0u) {
+        return "        ";
+    }
+    return fs_identity_name[row - 1u];
+}
+
+char *filesystem_identityNameMutable(uint8_t row)
+{
+    /*
+     * Provide the Menu editor direct access to its one identity row.
+     *
+     * Inputs: logical non-Bank row selected by the Kit/Instrument editor.
+     * Output: the canonical 9-byte operation string, or NULL for Bank/bad
+     * input. Bank is intentionally immutable here because BankData owns its
+     * sole row; a temporary editor string would duplicate that identity.
+     * Affiliates: menu.c Save editing, BankData, and filesystem_setIdentityName.
+     */
+    if (row == FS_IDENTITY_BANK_ROW || row >= FS_IDENTITY_ROW_COUNT)
+        return NULL;
+    fs_identity_valid_mask = (uint16_t)(fs_identity_valid_mask |
+                                         (uint16_t)(1u << row));
+    return fs_identity_name[row - 1u];
+}
 static uint16_t op_kit_load_scene_mask = 0u;
 /*
  * Staged Scene payload and Scene-specific operation scratch.
@@ -494,7 +684,6 @@ static uint16_t op_kit_load_scene_mask = 0u;
  * "Kit " while scanning children so the embedded Kit's retained name survives
  * initial boot Scene Load and later seeds Save:[Kit] character entry.
  */
-static scene_t op_staged_scene;
 static uint16_t op_scene_load_scene_mask = 0u;
 static char op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 static char op_scene_child_open_name[STORAGE_KIT_FILENAME_MAX];
@@ -508,10 +697,12 @@ static storage_pattern_stub_state_t op_pattern_stub_state;
  * Bank load/save scratch.
  *
  * Root Bank identity uses the scan cache above. While one Bank is selected,
- * op_bank_child_* caches the Bank-local two-digit Scene children discovered
- * under that folder. op_bank_payload_active lets the Bank state machine hand
- * control to the existing Scene payload reader/writer after it has positioned
- * asyncfatfs inside the selected Bank directory.
+ * op_bank_child_present_mask records only 00..15 occupancy for LEDs and mask
+ * intersection. A selected child is rescanned from disk immediately before it
+ * is opened, using the existing one-Scene stage and operation name scratch;
+ * no Bank-local name, alias, or per-child key cache exists. The
+ * op_bank_payload_active flag hands control to the shared Scene payload
+ * reader/writer after that single child has been positioned.
  */
 static storage_bankset_t op_bankset_state;
 static char op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
@@ -522,11 +713,6 @@ static char op_save_bank_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
 static char op_save_bank_rename_open_name[AFATFS_SHORT_FILENAME_MAX];
 static uint8_t op_save_bank_scratch_attempts = 0u;
 static uint8_t op_save_bank_scratch_collision = 0u;
-static uint8_t op_bank_child_present[STORAGE_BANK_SCENE_MAX_SLOTS];
-static char op_bank_child_name[STORAGE_BANK_SCENE_MAX_SLOTS]
-                              [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
-static char op_bank_child_open_name[STORAGE_BANK_SCENE_MAX_SLOTS]
-                                   [STORAGE_KIT_FILENAME_MAX];
 static uint16_t op_bank_child_present_mask = 0u;
 static uint16_t op_bank_scene_load_mask = 0u;
 static uint16_t op_bank_scene_save_mask = 0u;
@@ -580,7 +766,9 @@ static uint8_t op_create_dir_retry = 0u;
  * Declaring them here keeps the C translation unit explicit under gnu11 and
  * avoids implicit-function warnings when the state machine calls them.
  */
-static void filesystem_initStagedScene(scene_t *scene);
+static void filesystem_initSceneStage(filesystem_scene_stage_t *stage);
+static void filesystem_commitSceneStage(void);
+static PatternSet *filesystem_directPatternTarget(void);
 static void filesystem_resetSceneLoadChildDiscovery(void);
 static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot);
 static uint8_t filesystem_nameStartsWithKitSpace(const char *name);
@@ -637,9 +825,6 @@ static storage_status_t filesystem_readTextLine(afatfsFilePtr_t file,
                                                 uint8_t *eof);
 static void filesystem_scanBanks_tick(void);
 static void filesystem_scanBankScenes_tick(void);
-static void filesystem_deleteTreeStartWithOpenName(const char *display_name,
-                                                   const char *open_name);
-static fs_status_t filesystem_deleteTree_tick(void);
 static void filesystem_makeNumberedDir(char *dst,
                                        uint16_t slot,
                                        const char display[8]);
@@ -704,11 +889,11 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
 static fs_name_cache_kind_t fs_list_cache_kind = FS_NAME_CACHE_NONE;
 static instrument_type_t fs_list_cache_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint16_t fs_list_cache_count;
-static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
-                              [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static uint8_t op_instrument_load_destination_slot = 0u;
 static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
+/* True only while loading `.hctmp.<ext>` back into the `kit` menu row. */
+static uint8_t op_instrument_load_temporary = 0u;
 /* A browser index addresses any row in the shared 1,000-entry cache. */
 static uint16_t op_instrument_load_index = 0u;
 /* Registry indices, rather than enum values, drive folder iteration. */
@@ -744,6 +929,8 @@ static char op_instrument_save_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_instrument_save_open_name[AFATFS_SHORT_FILENAME_MAX];
 static storage_instrument_save_mode_t op_instrument_save_mode =
     STORAGE_INSTRUMENT_SAVE_NORMAL;
+/* True only for the hidden reversible-load save; skip cache/name publication. */
+static uint8_t op_instrument_save_temporary = 0u;
 
 /*
  * Dispose the only physical browser-name array.
@@ -758,6 +945,13 @@ static storage_instrument_save_mode_t op_instrument_save_mode =
  */
 static void filesystem_clearNameCacheStorage(void)
 {
+    /*
+     * Reset the dedicated name-cache storage for a cache transition.
+     *
+     * Inputs: callers select a new cache domain. Output: index/HCNAMES rows
+     * are cleared without modifying the separate typed stage. Affiliates:
+     * HCNAMES, `.hcindex`, menu browse state machines, and typed load stages.
+     */
     fs_list_cache_kind = FS_NAME_CACHE_NONE;
     fs_list_cache_type = INSTRUMENT_TYPE_UNKNOWN;
     fs_list_cache_count = 0u;
@@ -842,9 +1036,12 @@ static uint8_t filesystem_librarySlotExists(fs_name_cache_kind_t kind,
  * image. Preset reads the immutable result after FS_STATUS_DONE and performs
  * the ordered modulation-clear/Scene-commit/runtime-apply transaction.
  */
-static kit_instrument_slot_t op_staged_instrument;
-static char op_staged_instrument_display_name[9];
-static char op_staged_instrument_stem[SCENE_INSTRUMENT_STEM_LEN + 1u];
+/*
+ * The validated Instrument payload is `op_staged_instrument`, the union alias
+ * above.  Its display/key metadata is intentionally absent: successful
+ * operations publish the authoritative HCNAMES row, and future opens derive
+ * the eight-character leaf plus type extension on demand.
+ */
 static uint32_t op_stream_index = 0;
 /* Also indexes 000..999 `.hcindex` rows, so this must not wrap at 255. */
 static uint16_t op_item_offset = 0;
@@ -854,13 +1051,14 @@ static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
 static uint8_t fs_boot_detected_unsupported_card = 0;
 static fs_stale_warning_source_t fs_stale_warning_pending = FS_STALE_WARNING_NONE;
 /*
- * Root-level File/Dir test caches for the asyncfatfs expansion menu.
+ * Retired File/Dir diagnostics.
  *
- * These are intentionally independent of Kit/Scene/Instrument caches. The
- * expansion tests need to prove generic LFN behavior at the filesystem layer:
- * scan every root file or directory, preserve exact case in displayName, sort
- * by that visible component, and reopen by exact case-sensitive display text.
+ * The generic asyncfatfs test UI is no longer a product surface. Keeping its
+ * 64 x 49-byte file and directory lists would reserve 6,240 bytes outside the
+ * agreed name/staging contract, so the entire diagnostic state machine is
+ * excluded rather than silently sharing or repurposing its cache.
  */
+#if 0
 static char fs_test_file_name[FS_TEST_OBJECT_MAX][FS_TEST_NAME_MAX + 1u];
 static char fs_test_dir_name[FS_TEST_OBJECT_MAX][FS_TEST_NAME_MAX + 1u];
 static uint8_t fs_test_file_count = 0u;
@@ -884,6 +1082,17 @@ static uint8_t op_test_verify_seen_fold = 0u;
 #define FS_TEST_LOOKUP_ERROR 0u
 #define FS_TEST_LOOKUP_OPEN_ALIAS 1u
 #define FS_TEST_LOOKUP_CREATE 2u
+#endif
+
+/*
+ * Bank Save scratch-name nonce counter.
+ *
+ * This is independent of the retired File/Dir diagnostic state above. Inputs:
+ * each Bank Save scratch-directory attempt. Output: one incrementing value
+ * mixed with RNG/tick by filesystem_nextBankScratchNonce(), avoiding stale
+ * temporary-tree collisions without retaining any name cache.
+ */
+static uint16_t fs_bank_scratch_counter = 0u;
 
 #define FS_IDLE_POLL_MS 5u
 /* .all still carries the old raw meta prefix until that container is rebuilt.
@@ -971,6 +1180,8 @@ static uint8_t filesystem_isPowerOfTwoU8(uint8_t value)
     return (uint8_t)(value && ((value & (uint8_t)(value - 1u)) == 0u));
 }
 
+/* Retired File/Dir diagnostic helpers; see the disabled state block above. */
+#if 0
 static void filesystem_copyTestName(char dst[FS_TEST_NAME_MAX + 1u],
                                     const char *src)
 {
@@ -1075,6 +1286,7 @@ static void filesystem_makeTestBytes(void)
     op_test_bytes[3] = (uint8_t)((value >> 24) & 0xffu);
     op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
 }
+#endif
 
 static uint16_t filesystem_nextBankScratchNonce(void)
 {
@@ -1101,6 +1313,8 @@ static uint16_t filesystem_nextBankScratchNonce(void)
     return nonce;
 }
 
+/* Retired File/Dir diagnostic stream helpers; no product operation calls them. */
+#if 0
 static uint8_t filesystem_readTestBytesTick(void)
 {
     /*
@@ -1149,6 +1363,7 @@ static uint8_t filesystem_writeTestBytesTick(void)
     }
     return 1u;
 }
+#endif
 
 static uint8_t filesystem_hasFatBootSignature(const uint8_t *sector)
 {
@@ -1701,13 +1916,13 @@ static Step *filesystem_patternSetStepPtr(PatternSet *pattern_set,
                                           uint8_t step)
 {
     /*
-     * Borrow one Step from a staged Scene PatternSet.
+     * Borrow one Step from the PatternSet explicitly supplied by the caller.
      *
-     * Scene Load must not write through live PatternData while it is still
-     * validating sibling files. Inputs are the bridge file coordinates; output
-     * is a mutable staged Step for pattern 0 or the discard record for legacy
-     * non-live patterns. The bounds mirror PatternData's current one-pattern
-     * bridge shape.
+     * Inputs are one caller-selected PatternSet plus bridge-file coordinates.
+     * Output is its mutable pattern-0 Step or the discard record for legacy
+     * non-live patterns. Scene Load now passes a committed final Scene
+     * PatternSet deliberately; other serializers may pass their own owned
+     * image. The bounds mirror PatternData's current one-pattern bridge shape.
      */
     if (pattern != 0u)
         return &filesystem_discardStep;
@@ -1847,13 +2062,6 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:       return "InsL";
     case FS_INTERNAL_OP_SAVE_INSTRUMENT:       return "InsS";
     case FS_INTERNAL_OP_LOAD_NAME:             return "NameL";
-    case FS_INTERNAL_OP_SCAN_TEST_FILES:       return "TFiSc";
-    case FS_INTERNAL_OP_SCAN_TEST_DIRS:        return "TDiSc";
-    case FS_INTERNAL_OP_LOAD_TEST_FILE:        return "TFiL";
-    case FS_INTERNAL_OP_LOAD_TEST_DIR:         return "TDiL";
-    case FS_INTERNAL_OP_SAVE_TEST_FILE:        return "TFiS";
-    case FS_INTERNAL_OP_SAVE_TEST_DIR:         return "TDiS";
-    case FS_INTERNAL_OP_SAVE_TEST_SIMPLE_DIR:  return "TSdS";
     default:                                   return "Fs";
     }
 }
@@ -2569,12 +2777,18 @@ static void filesystem_writeResidentNames_tick(void)
     /*
      * Write root `/.hcnames` using the `.hcindex` writer pattern.
      *
-     * Inputs: resident BankData/SceneData after the initial load/fallback
-     * chain. Output: one root file whose row order is the resident-name
-     * register contract. This operation deliberately does not scan the card or
-     * allocate another name cache; it serializes only SRAM fields that already
-     * exist, then finishes through filesystem_finish() so asyncfatfs flushes
-     * the file before boot continues.
+     * Inputs: the one BankData name and current filesystem identity rows.
+     * Output: one root file whose row order is the resident-name register
+     * contract; Scene rows are blank because SceneData deliberately stores no
+     * Scene names. This operation does not scan the card or allocate another
+     * name cache, and finishes through filesystem_finish() so asyncfatfs
+     * flushes the file before its blocking wrapper returns.
+     *
+     * Why normal boot does not call it: after mask-selective Bank Load, only
+     * the selected Scene identities exist in the active 81-byte block. A fresh
+     * snapshot would destroy valid unselected rows already on SD. Runtime
+     * Scene/Bank transactions use filesystem_residentNames_tick() to
+     * read/preserve/overlay the authoritative 129-row file instead.
      */
     switch (op_phase) {
     case 0: /* RETURN ROOT + OPEN .hcnames */
@@ -2771,7 +2985,6 @@ static void filesystem_cacheCurrentResidentInstrumentNames(void)
          scene_index < STORAGE_BANK_SCENE_MAX_SLOTS;
          scene_index++) {
         uint16_t row;
-        uint8_t len;
 
         if ((op_kit_load_scene_mask &
              (uint16_t)(1u << scene_index)) == 0u) {
@@ -2781,13 +2994,15 @@ static void filesystem_cacheCurrentResidentInstrumentNames(void)
                                                (uint8_t)op_slot);
         if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
             continue;
-        len = filesystem_nextResidentNameLine(op_line_buf,
-                                              sizeof(op_line_buf), row);
-        if (len == 0u)
-            continue;
-        if (op_line_buf[len - 1u] == '\n')
-            op_line_buf[len - 1u] = '\0';
-        filesystem_cacheResidentName(row, op_line_buf);
+        /*
+         * The committed Instrument payload intentionally has no source name.
+         * Use the one active identity row selected by the Instrument menu for
+         * every destination in this normal multi-Scene operation.
+         */
+        filesystem_cacheResidentName(
+            row,
+            filesystem_identityName((uint8_t)(
+                FS_IDENTITY_INSTRUMENT_ROW_0 + op_slot)));
     }
 }
 
@@ -2815,46 +3030,26 @@ static void filesystem_cacheCurrentResidentKitNames(void)
          scene_index++) {
         uint16_t row;
         uint8_t slot;
-        const scene_t *scene;
-
         if ((op_kit_load_scene_mask &
              (uint16_t)(1u << scene_index)) == 0u) {
             continue;
         }
 
-        scene = scene_getConst(scene_index);
-        if (!scene)
-            continue;
-
         row = filesystem_residentKitRow(scene_index);
         if (row < FS_RESIDENT_NAMES_ROW_COUNT) {
-            uint8_t len = filesystem_formatResidentNameLine(
-                op_line_buf,
-                sizeof(op_line_buf),
-                scene->kit.display_name,
-                1u);
-            if (len != 0u) {
-                if (op_line_buf[len - 1u] == '\n')
-                    op_line_buf[len - 1u] = '\0';
-                filesystem_cacheResidentName(row, op_line_buf);
-            }
+            filesystem_cacheResidentName(row,
+                                         filesystem_identityName(
+                                             FS_IDENTITY_KIT_ROW));
         }
 
         for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
-            uint8_t len;
             row = filesystem_residentInstrumentRow(scene_index, slot);
             if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
                 continue;
-            len = filesystem_formatResidentNameLine(
-                op_line_buf,
-                sizeof(op_line_buf),
-                scene->kit.instrument_display_name[slot],
-                1u);
-            if (len == 0u)
-                continue;
-            if (op_line_buf[len - 1u] == '\n')
-                op_line_buf[len - 1u] = '\0';
-            filesystem_cacheResidentName(row, op_line_buf);
+            filesystem_cacheResidentName(
+                row,
+                filesystem_identityName((uint8_t)(
+                    FS_IDENTITY_INSTRUMENT_ROW_0 + slot)));
         }
     }
 }
@@ -2891,7 +3086,6 @@ static void filesystem_cacheCurrentResidentSceneNames(void)
 
 static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
 {
-    const scene_t *scene = scene_getConst(scene_index);
     uint8_t slot;
 
     /*
@@ -2906,16 +3100,17 @@ static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
      * Affiliates: filesystem_loadSceneDirectory_tick() commit phase and the
      * final Bank HCNAMES writer.
      */
-    if (!scene || scene_index >= STORAGE_BANK_SCENE_MAX_SLOTS)
+    if (scene_index >= STORAGE_BANK_SCENE_MAX_SLOTS)
         return;
     filesystem_cacheResidentName(filesystem_residentSceneRow(scene_index),
                                  op_scene_display_name);
     filesystem_cacheResidentName(filesystem_residentKitRow(scene_index),
-                                 scene->kit.display_name);
+                                 filesystem_identityName(FS_IDENTITY_KIT_ROW));
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
         filesystem_cacheResidentName(
             filesystem_residentInstrumentRow(scene_index, slot),
-            scene->kit.instrument_display_name[slot]);
+            filesystem_identityName((uint8_t)(
+                FS_IDENTITY_INSTRUMENT_ROW_0 + slot)));
     }
 }
 
@@ -4093,31 +4288,33 @@ static void filesystem_copyInstrumentStemDisplay(char dst[9],
     dst[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
 }
 
-static void filesystem_copyInstrumentStem16(
-    char dst[SCENE_INSTRUMENT_STEM_LEN + 1u],
-    const char *filename)
+static void filesystem_makeInstrumentTemporaryFilename(
+    char destination[AFATFS_LONG_FILENAME_MAX + 1u],
+    instrument_type_t type)
 {
-    uint8_t i = 0u;
+    const char *extension = storage_instrumentTypeExtension(type);
+    uint8_t pos = 0u;
 
     /*
-     * Retain the longer source stem used by later Kit Save.
+     * Build the hidden reversible Instrument Load filename.
      *
-     * Input is the LFN display name when available, falling back to the short
-     * open name. Output is the first 16 stem characters before the extension,
-     * NUL-terminated, and paired with the eight-character Instrument browser
-     * display cached beside it.
+     * Inputs: the active typed Instrument family. Output: `.hctmp.<ext>` in
+     * the existing operation filename scratch. Why: this file is the durable
+     * `kit` source while a user browses other files, replacing the former
+     * second Instrument image in staging. The dot-prefixed component is
+     * explicitly excluded from typed `.hcindex` scans below.
+     * Affiliates: temporary save/load requests and filesystem_recordInstrumentFile().
      */
-    memset(dst, 0, SCENE_INSTRUMENT_STEM_LEN + 1u);
-    while (filename &&
-           filename[i] != '\0' &&
-           filename[i] != '.' &&
-           i < SCENE_INSTRUMENT_STEM_LEN) {
-        char c = filename[i];
-        dst[i] = (c >= 32 && c <= 126) ? c : '_';
-        i++;
+    if (!extension)
+        extension = "drm";
+    memset(destination, 0, AFATFS_LONG_FILENAME_MAX + 1u);
+    memcpy(destination, ".hctmp.", 7u);
+    pos = 7u;
+    while (*extension != '\0' &&
+           pos + 1u < AFATFS_LONG_FILENAME_MAX + 1u) {
+        destination[pos++] = *extension++;
     }
-    if (i == 0u)
-        memcpy(dst, "inst", 5u);
+    destination[pos] = '\0';
 }
 
 static uint8_t filesystem_instrumentCacheStemMatches(
@@ -4165,6 +4362,17 @@ static void filesystem_recordInstrumentFile(const char *display_name,
         type = filesystem_instrumentTypeFromFilename(open_name);
     if (type == INSTRUMENT_TYPE_UNKNOWN ||
         type >= INSTRUMENT_TYPE_UNKNOWN)
+        return;
+    /*
+     * Hide the reversible Instrument Load file from every typed browser index.
+     *
+     * Inputs: one on-card Instrument subdirectory entry. Output: a hidden
+     * `.hctmp.<ext>` is ignored before its stem could consume a pool row.
+     * Why: the file is an implementation-owned `kit` restore source, never a
+     * user-selectable Instrument. Affiliates: temporary save/load requests and
+     * Menu's three-digit pool cursor.
+     */
+    if (strncmp(display_name, ".hctmp.", 7u) == 0)
         return;
     if (fs_list_cache_kind != FS_NAME_CACHE_INSTRUMENT ||
         fs_list_cache_type != type)
@@ -4421,6 +4629,20 @@ static uint8_t filesystem_repairBuildCandidate(void)
     op_repair_new_name[0] = '\0';
     if (op_repair_scope == FS_REPAIR_SCOPE_INSTRUMENT) {
         if (op_object.id.kind != AFATFS_OBJECT_FILE)
+            return 0u;
+        /*
+         * Reserve the hidden reversible Load source before filename repair.
+         *
+         * Input: one file discovered in an Instrument type directory during
+         * boot's canonical-name pass. Output: `.hctmp.<ext>` produces no
+         * rename candidate. Why: this product-owned file is deliberately
+         * dot-prefixed and therefore cannot satisfy the normal eight-character
+         * stem policy; repairing it would rename or repeatedly collide with a
+         * user Instrument before boot can proceed. Affiliates: the matching
+         * typed-index exclusion in filesystem_recordInstrumentFile() and Menu
+         * temp save/load requests.
+         */
+        if (strncmp(op_object.id.displayName, ".hctmp.", 7u) == 0)
             return 0u;
         type = filesystem_instrumentTypeFromFilename(op_object.id.displayName);
         if (type == INSTRUMENT_TYPE_UNKNOWN)
@@ -4757,15 +4979,26 @@ static void filesystem_loadKitDirectory_tick(void)
     storage_status_t st;
 
     switch (op_phase) {
-    case 0: /* VALIDATE CACHE + CHDIR ROOT */
+    case 0: /* VALIDATE CAPTURED KEY + CHDIR ROOT */
         if (op_slot >= STORAGE_KIT_MAX_SLOTS ||
-            !filesystem_librarySlotExists(FS_NAME_CACHE_KIT, op_slot)) {
+            op_scene_display_name[0] == '\0') {
             filesystem_setPresetNameEmpty();
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        /*
+         * Use the request-time Kit display key, not the index cache.
+         *
+         * Why: staging is independent from the cache, but the captured key
+         * makes this operation immutable despite later cache transitions.
+         * Inputs: the validated cache row copied into
+         * op_scene_display_name by the request helper. Output: the visible
+         * preset name and later `NNN Name` directory key remain stable through
+         * staging. Affiliates: filesystem_requestLoadKitForScenes(),
+         * filesystem_requestLoadKitMorphForScenes(), and phase 6 below.
+         */
         memcpy(preset_currentName,
-               filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, op_slot), 8);
+               op_scene_display_name, 8u);
         if (!afatfs_chdir(NULL))
             return;
         op_phase = 1;
@@ -4818,13 +5051,14 @@ static void filesystem_loadKitDirectory_tick(void)
         filesystem_makeNumberedDir(
             op_root_open_name,
             op_slot,
-            filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, op_slot));
+            op_scene_display_name);
         /*
-         * The selected Kit identity comes from the slot-ordered `.hcindex`.
-         * Open the generated visible `NNN Name` component so a menu entered
-         * from an index load does not depend on a stale or missing per-slot
-         * short-alias cache. asyncfatfs returns the physical alias internally
-         * if a later phase needs it, but the browser contract is the LFN key.
+         * The selected Kit identity was captured from the slot-ordered
+         * `.hcindex` before its union storage became the Kit stage. Open the
+         * generated visible `NNN Name` component so a menu entered from an
+         * index load does not depend on a stale or missing per-slot short-alias
+         * cache. asyncfatfs returns the physical alias internally if a later
+         * phase needs it, but the browser contract is the LFN key.
          */
         if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
@@ -4970,6 +5204,29 @@ static void filesystem_loadKitDirectory_tick(void)
              * slot identity and copy only same-type morphable endpoint values.
              */
             if (current_op == FS_INTERNAL_OP_LOAD_KIT) {
+                uint8_t identity_slot;
+
+                /*
+                 * Publish the validated Kit directory/member identities into
+                 * the one operation-scoped block before resident audio commit.
+                 *
+                 * Inputs: request-stable captured Kit name and transient
+                 * kitset `file=` fields. Outputs: HCNAMES update rows; no name
+                 * enters kit_t. The index cache cannot be consulted here
+                 * because it was deliberately reused as this Kit stage.
+                 * Affiliates: filesystem_cacheCurrentResidentKitNames() and
+                 * Menu's deferred Kit/Instrument HCNAMES flush.
+                 */
+                filesystem_setIdentityName(
+                    FS_IDENTITY_KIT_ROW,
+                    op_scene_display_name);
+                for (identity_slot = 0u;
+                     identity_slot < STORAGE_KIT_SLOT_COUNT;
+                     identity_slot++) {
+                    filesystem_setIdentityName(
+                        (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 + identity_slot),
+                        op_kitset.instrument_file[identity_slot]);
+                }
                 for (scene_index = 0u;
                      scene_index < SCENE_COUNT && scene_index < 16u;
                      scene_index++) {
@@ -4978,38 +5235,11 @@ static void filesystem_loadKitDirectory_tick(void)
                         scene_t *target_scene = scene_get(scene_index);
                         if (target_scene) {
                             target_scene->kit = op_staged_kit;
-                            /*
-                             * Update retained Kit identity only for normal Kit
-                             * Load.
-                             *
-                             * What: Copies the selected Kit folder display name
-                             * into each destination resident Kit after the
-                             * entire directory validates and commits.
-                             *
-                             * Why: KitMrp uses the same file parser but copies
-                             * endpoint values into morph images only. Morph
-                             * operations must not rename the resident Kit or
-                             * its member Instruments.
-                             *
-                             * Inputs: the scan-cache name for op_slot and the
-                             * destination Scene selected by the Load page.
-                             * Outputs: target_scene->kit.display_name mirrors
-                             * the on-card Kit folder identity now resident in
-                             * RAM.
-                             *
-                             * Affiliates/clients: filesystem_loadKitDirectory_tick(),
-                             * Preset KitMrp completion, Save editor seeding.
-                             */
-                            scene_setKitDisplayName(&target_scene->kit,
-                                                    filesystem_cachedLibraryName(
-                                                        FS_NAME_CACHE_KIT,
-                                                        op_slot));
                         }
                     }
                 }
                 memcpy(preset_currentName,
-                       filesystem_cachedLibraryName(FS_NAME_CACHE_KIT,
-                                                   op_slot), 8);
+                       op_scene_display_name, 8u);
             }
             op_close_status = FS_STATUS_DONE;
             op_phase = 28;
@@ -5149,17 +5379,18 @@ static void filesystem_loadKitDirectory_tick(void)
 ** Scene folders are validated as a unit before resident SceneData changes.
 ** The loader enters Scene/<NNN Name>/ from the root Scene scan cache, discovers
 ** child filenames from actual FAT entries, parses sceneset.scg into
-** op_staged_scene.settings, parses the first Kit* directory into
-** op_staged_scene.kit, parses the first .pat bridge file into
-** op_staged_scene.pattern, validates the first .fx placeholder, then copies
-** the finished staged Scene to every destination bit in
-** op_scene_load_scene_mask.
+** the separate Scene settings/Kit stage, validates that non-Pattern
+** payload, commits it to final Scene SRAM, then parses the `.pat` bridge
+** directly into the final PatternSet. The first direct destination is mirrored
+** to any other selected destination after a successful Pattern read.
 **
 ** Inputs: op_slot and op_scene_load_scene_mask are set by
-** filesystem_requestLoadSceneForScenes(). Outputs: selected resident Scenes
-** receive a full Scene image only after all required files validate. The
-** displayed Scene name comes from the Scene folder scan/sceneset, while the
-** embedded Kit name comes only from the "Kit <name>" child directory.
+** filesystem_requestLoadSceneForScenes(). Outputs: settings/Kit commit after
+** their validation; Pattern then mutates the first final destination directly
+** and mirrors only after its successful read. A later Pattern/Effect error is
+** intentionally non-atomic and does not roll back settings/Kit. The displayed
+** Scene name comes from the Scene folder scan, while the embedded Kit name
+** comes only from the "Kit <name>" child directory.
 ** ----------------------------------------------------------------------- */
 static void filesystem_loadSceneDirectory_tick(void)
 {
@@ -5168,21 +5399,26 @@ static void filesystem_loadSceneDirectory_tick(void)
     storage_status_t st;
 
     switch (op_phase) {
-    case 0: /* VALIDATE CACHE + INIT STAGING + CHDIR ROOT */
+    case 0: /* VALIDATE CAPTURED KEY + INIT STAGING + CHDIR ROOT */
         if (op_slot >= STORAGE_SCENE_MAX_SLOTS ||
-            !filesystem_librarySlotExists(FS_NAME_CACHE_SCENE, op_slot)) {
+            op_scene_display_name[0] == '\0') {
             filesystem_setPresetNameEmpty();
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        filesystem_initStagedScene(&op_staged_scene);
+        filesystem_initSceneStage(&fs_stage_workspace.scene_stage);
         memcpy(preset_currentName,
-               filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE, op_slot),
-               8u);
-        memcpy(op_scene_display_name,
-               filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE, op_slot),
-               STORAGE_SCENE_DISPLAY_NAME_LEN);
-        op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+               op_scene_display_name, 8u);
+        /*
+         * The selected Scene key is retained in existing operation scratch
+         * while the dedicated stage is initialized above. Inputs: request-time
+         * slot/name capture. Output: identity and both visible directory opens
+         * use the same selected row without a second name copy.
+         * Affiliates: filesystem_requestLoadSceneForScenes(), phases 6/39,
+         * and the targeted Scene HCNAMES update after commit.
+         */
+        filesystem_setIdentityName(FS_IDENTITY_SCENE_ROW,
+                                   op_scene_display_name);
         /*
          * A root Scene request owns exactly one child scan, but it shares the
          * same scratch fields as Bank Load. Reset them through the common
@@ -5237,12 +5473,11 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_file = NULL;
         filesystem_makeNumberedDir(op_root_open_name,
                                    op_slot,
-                                   filesystem_cachedLibraryName(
-                                       FS_NAME_CACHE_SCENE, op_slot));
+                                   op_scene_display_name);
         /*
          * Open root Scene folders by the visible numbered component.
          *
-         * Inputs: op_slot plus the Scene row in the shared slot-ordered cache.
+         * Inputs: op_slot plus the request-captured Scene row.
          * Output: afatfs_opendir_lfn() resolves the same `NNN Name` component
          * that the user selected, and returns a directory handle for phase 8.
          *
@@ -5391,7 +5626,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (line_ready) {
             st = storage_scenesetParseLine(&op_sceneset_state,
                                            op_line_buf,
-                                           &op_staged_scene,
+                                           &fs_stage_workspace.scene_stage.settings,
                                            op_scene_display_name);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
@@ -5499,7 +5734,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         }
         if (line_ready) {
             st = storage_kitsetParseLine(&op_kitset, op_line_buf,
-                                          &op_staged_scene.kit);
+                                          &fs_stage_workspace.scene_stage.kit);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
@@ -5525,7 +5760,7 @@ static void filesystem_loadSceneDirectory_tick(void)
                  *
                  * Inputs: op_sceneset_state.seen_audio_out, the kitset parser's
                  * seen_audio_out_mask, and legacy_audio_out[] values. Output:
-                 * op_staged_scene.settings.audio_out[] in persisted route
+                 * shared scene-stage settings.audio_out[] in persisted route
                  * domain 0..5. The per-slot loop clamps corrupt route bytes to
                  * the same defaults used by new-format scenes.
                  *
@@ -5543,24 +5778,35 @@ static void filesystem_loadSceneDirectory_tick(void)
                              slot < STORAGE_KIT_SLOT_COUNT;
                          slot++) {
                         uint8_t route = legacy[slot];
-                        op_staged_scene.settings.audio_out[slot] =
+                        fs_stage_workspace.scene_stage.settings.audio_out[slot] =
                             (route <= 5u)
                                 ? route
                                 : filesystem_defaultVoiceAudioOut(slot);
                     }
                 }
                 /*
-                 * Retain the embedded Kit directory name in staged SceneData.
+                 * Publish embedded Kit/member identities outside the staged
+                 * audio image.
                  *
-                 * Inputs: op_scene_child_display_name was captured during the
-                 * selected Scene directory scan, before sceneset.scg or
-                 * kitset.kcg parsing. Output: op_staged_scene.kit.display_name
-                 * is ready before the final resident Scene commit, so boot
-                 * Scene Load and manual Scene Load both seed Save:[Kit] from
-                 * the loaded "Kit <name>" directory.
+                 * Why: scene_t/kit_t intentionally contain no name or key
+                 * fields. Inputs: discovered `Kit <name>` component and the
+                 * transient kitset file rows. Outputs: one identity block used
+                 * by the later targeted HCNAMES write and save key formatter.
+                 * Affiliates: Scene commit, menu session, HCNAMES writer.
                  */
-                scene_setKitDisplayName(&op_staged_scene.kit,
-                                        op_scene_child_display_name);
+                {
+                    uint8_t identity_slot;
+                    filesystem_setIdentityName(FS_IDENTITY_KIT_ROW,
+                                               op_scene_child_display_name);
+                    for (identity_slot = 0u;
+                         identity_slot < STORAGE_KIT_SLOT_COUNT;
+                         identity_slot++) {
+                        filesystem_setIdentityName(
+                            (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 +
+                                      identity_slot),
+                            op_kitset.instrument_file[identity_slot]);
+                    }
+                }
                 op_close_status = FS_STATUS_DONE;
             } else {
                 filesystem_setPresetNameInvalid();
@@ -5596,7 +5842,7 @@ static void filesystem_loadSceneDirectory_tick(void)
                                     op_kitset.instrument_type[op_instrument_slot],
                                     (uint8_t)(op_instrument_slot + 1u));
         instrumentManager_resetSlot(
-            &op_staged_scene.kit.instruments[op_instrument_slot],
+            &fs_stage_workspace.scene_stage.kit.instruments[op_instrument_slot],
             op_kitset.instrument_type[op_instrument_slot]);
         op_line_len = 0u;
         op_file_ready = false;
@@ -5651,7 +5897,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (line_ready) {
             st = storage_instrumentParseLine(&op_instrument_state,
                                              op_line_buf,
-                                             &op_staged_scene.kit.instruments[
+                                             &fs_stage_workspace.scene_stage.kit.instruments[
                                                  op_instrument_slot]);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
@@ -5670,7 +5916,7 @@ static void filesystem_loadSceneDirectory_tick(void)
                     storage_instrumentCopyMainToMorphFallback(
                         op_kitset.instrument_type[op_instrument_slot],
                         (uint8_t)(op_instrument_slot + 1u),
-                        &op_staged_scene.kit.instruments[op_instrument_slot]);
+                        &fs_stage_workspace.scene_stage.kit.instruments[op_instrument_slot]);
                 }
                 op_close_status = FS_STATUS_DONE;
             }
@@ -5695,7 +5941,14 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 27;
         return;
 
-    case 33: /* REENTER selected Scene before pattern/effect files */
+    case 33: /* COMMIT validated non-Pattern Scene, then reenter for Pattern */
+        /*
+         * The non-Pattern payload has now passed sceneset, Kit, and Instrument
+         * validation. Commit it before Pattern I/O by design: Pattern is the
+         * separately redesigned, non-atomic phase and is read directly into
+         * final Scene SRAM below.
+         */
+        filesystem_commitSceneStage();
         if (current_op == FS_INTERNAL_OP_LOAD_BANK) {
             afatfsOperationStatus_e ast = afatfs_chdirParent();
 
@@ -5770,8 +6023,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_file = NULL;
         filesystem_makeNumberedDir(op_root_open_name,
                                    op_slot,
-                                   filesystem_cachedLibraryName(
-                                       FS_NAME_CACHE_SCENE, op_slot));
+                                   op_scene_display_name);
         /*
          * Reopen the selected Scene by the same visible component used at
          * phase 6.
@@ -5909,7 +6161,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
             filesystem_patternStepAddress(op_stream_index, &pattern, &track,
                                           &step_nr);
-            step = filesystem_patternSetStepPtr(&op_staged_scene.pattern,
+            step = filesystem_patternSetStepPtr(filesystem_directPatternTarget(),
                                                 pattern, track, step_nr);
             if (!step) {
                 filesystem_setPresetNameInvalid();
@@ -5943,7 +6195,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
         if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
             filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            main_steps = filesystem_patternSetMainPtr(&op_staged_scene.pattern,
+            main_steps = filesystem_patternSetMainPtr(filesystem_directPatternTarget(),
                                                       pattern, track);
             if (!main_steps) {
                 filesystem_setPresetNameInvalid();
@@ -5976,7 +6228,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         }
         n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
         if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
-            setting = filesystem_patternSetSettingPtr(&op_staged_scene.pattern,
+            setting = filesystem_patternSetSettingPtr(filesystem_directPatternTarget(),
                                                       (uint8_t)op_stream_index);
             if (!setting) {
                 filesystem_setPresetNameInvalid();
@@ -6011,7 +6263,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         n = filesystem_readStreamChunk(staging_buf, 1u);
         if (op_item_offset >= 1u || (n == 0u && afatfs_feof(op_file))) {
             filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            lr = filesystem_patternSetLengthPtr(&op_staged_scene.pattern,
+            lr = filesystem_patternSetLengthPtr(filesystem_directPatternTarget(),
                                                 pattern, track);
             if (!lr) {
                 filesystem_setPresetNameInvalid();
@@ -6043,7 +6295,7 @@ static void filesystem_loadSceneDirectory_tick(void)
                                        FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
         if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
             filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            lr = filesystem_patternSetLengthPtr(&op_staged_scene.pattern,
+            lr = filesystem_patternSetLengthPtr(filesystem_directPatternTarget(),
                                                 pattern, track);
             if (!lr) {
                 filesystem_setPresetNameInvalid();
@@ -6078,7 +6330,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
         if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
             filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            lr = filesystem_patternSetLengthPtr(&op_staged_scene.pattern,
+            lr = filesystem_patternSetLengthPtr(filesystem_directPatternTarget(),
                                                 pattern, track);
             if (!lr) {
                 filesystem_setPresetNameInvalid();
@@ -6110,7 +6362,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (line_ready) {
             st = storage_patternStubParseLine(&op_pattern_stub_state,
                                               op_line_buf,
-                                              &op_staged_scene.pattern);
+                                              filesystem_directPatternTarget());
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
@@ -6123,10 +6375,12 @@ static void filesystem_loadSceneDirectory_tick(void)
              * Text pattern completion.
              *
              * Inputs: parser seen bits plus any v2 track rows already applied
-             * into op_staged_scene.pattern. Output: success accepts either a
-             * guarded v1 placeholder or a complete seven-track draft payload;
-             * failure rejects the whole Scene before resident memory is
-             * touched.
+             * into the direct final Scene PatternSet. Output: success accepts
+             * either a guarded v1 placeholder or a complete seven-track draft
+             * payload. Failure rejects overall load completion but cannot roll
+             * back settings/Kit already committed in phase 33 or Pattern bytes
+             * already written; that limitation is the explicit non-atomic
+             * Pattern contract pending redesign.
              */
             st = storage_patternStubFinalize(&op_pattern_stub_state);
             op_close_status = (st == STORAGE_STATUS_OK)
@@ -6222,19 +6476,17 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 61;
         return;
 
-    case 61: /* COMMIT staged Scene to selected resident slots */
+    case 61: /* MIRROR direct Pattern to additional selected Scene slots */
     {
         uint8_t scene_index;
 
         /*
-         * Atomic resident apply point.
+         * Complete the direct Pattern fan-out without staging PatternSet.
          *
-         * The loop is the only place this loader mutates SceneData. Inputs are
-         * the validated op_staged_scene image and request-time destination
-         * mask. Output replaces every selected resident Scene with identical
-         * settings, pattern, and kit content. The active Scene runtime apply is
-         * handled after filesystem completion by Preset/Menu, matching Kit
-         * Load's owner boundary.
+         * Inputs are the directly parsed first destination PatternSet and the
+         * request-time destination mask. General settings and Kit were already
+         * committed in phase 33. Output mirrors only Pattern data to additional
+         * destinations; no Pattern payload has occupied the typed stage.
          *
          * Scene identity remains outside the copied payload because sceneset.scg
          * never stores its own name. Inputs: op_scene_display_name was captured
@@ -6245,14 +6497,15 @@ static void filesystem_loadSceneDirectory_tick(void)
          * HCNAMES rows, and Bank Load overlays only its selected child block.
          * This keeps mask-unselected Scene data and names paired and unchanged.
          */
+        PatternSet *direct = filesystem_directPatternTarget();
         for (scene_index = 0u;
              scene_index < SCENE_COUNT && scene_index < 16u;
              scene_index++) {
             if ((op_scene_load_scene_mask &
                  (uint16_t)(1u << scene_index)) != 0u) {
                 scene_t *target = scene_get(scene_index);
-                if (target)
-                    *target = op_staged_scene;
+                if (target && direct && &target->pattern != direct)
+                    target->pattern = *direct;
             }
         }
         memcpy(preset_currentName, op_scene_display_name, 8u);
@@ -6619,43 +6872,22 @@ static void filesystem_loadBankDirectory_tick(void)
             char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 
             /*
-             * Bank child discovery uses the two-digit parser only.
+             * Bank child discovery records occupancy only.
              *
              * Inputs: public child directory names inside the selected Bank.
-             * Output: operation-local cache for slots 00..15. The duplicate
-             * rule mirrors root scans, but these names never populate the root
-             * Scene library cache because Bank-local Scenes are a different
-             * namespace.
+             * Output: one bit in op_bank_child_present_mask for each valid
+             * 00..15 child. Why: retaining all display names and aliases here
+             * consumed a non-authoritative 368-byte Bank-local cache. The
+             * selected child is rescanned below immediately before opening,
+             * so duplicate ordering and an open key need exist for one child
+             * only in existing operation scratch.
              */
             if (storage_parseBankSceneFolder(op_object.id.displayName,
                                              &child_slot,
                                              display)) {
-                display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-                if (!op_bank_child_present[child_slot] ||
-                    filesystem_displayPrecedesCached(
-                        display,
-                        op_bank_child_name[child_slot])) {
-                    op_bank_child_present[child_slot] = 1u;
-                    op_bank_child_present_mask =
-                        (uint16_t)(op_bank_child_present_mask |
-                                   (uint16_t)(1u << child_slot));
-                    memcpy(op_bank_child_name[child_slot], display,
-                           STORAGE_SCENE_DISPLAY_NAME_LEN);
-                    op_bank_child_name[child_slot]
-                                      [STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-                    /*
-                     * Cache the child display component for later LFN open.
-                     *
-                     * `00 Slak` is the product identity inside the Bank. The
-                     * SFN alias is still useful for legacy fopen paths, but
-                     * Bank child Scene directories are opened through
-                     * afatfs_opendir_lfn(), which matches the display name
-                     * returned by this same object iterator.
-                     */
-                    storage_copyFilename(
-                        op_bank_child_open_name[child_slot],
-                        op_object.id.displayName);
-                }
+                op_bank_child_present_mask =
+                    (uint16_t)(op_bank_child_present_mask |
+                               (uint16_t)(1u << child_slot));
             }
         }
         return;
@@ -6756,27 +6988,15 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         }
         op_bank_child_cursor = child_slot;
-        op_scene_load_scene_mask = (uint16_t)(1u << child_slot);
-        filesystem_initStagedScene(&op_staged_scene);
         /*
-         * The Bank operation is about to delegate the shared Scene loader for
-         * its first selected child. Unlike a root Scene request, one Bank
-         * request repeats this delegation for up to sixteen directories, so no
-         * Kit/pattern/effect name found by an earlier child may be retained.
+         * The first selected child can be rediscovered immediately because
+         * the parent Bank directory remains the current directory after phase
+         * 16 closes its scan handle. Inputs: selected slot bit only. Output:
+         * phases 27..31 retain one display name long enough to rebuild/open
+         * that child; the shared Scene stage is initialized only after the
+         * matching on-card directory has been found.
          */
-        filesystem_resetSceneLoadChildDiscovery();
-        memcpy(op_scene_display_name, op_bank_child_name[child_slot],
-               STORAGE_SCENE_DISPLAY_NAME_LEN);
-        op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_opendir_lfn(op_bank_child_open_name[child_slot],
-                                AFATFS_MATCH_CASE_INSENSITIVE,
-                                op_root_open_name,
-                                on_file_opened)) {
-            return;
-        }
-        op_phase = 18u;
+        op_phase = 27u;
         return;
     }
 
@@ -6918,27 +7138,130 @@ static void filesystem_loadBankDirectory_tick(void)
         return;
 
     case 27:
-    {
-        uint8_t child_slot = op_bank_child_cursor;
-
         if (!op_close_done)
             return;
         op_kit_slot_dir = NULL;
-        op_scene_load_scene_mask = (uint16_t)(1u << child_slot);
-        filesystem_initStagedScene(&op_staged_scene);
         /*
-         * Re-entry for every child after the first must reset discovery state
-         * again. The previous child normally left non-empty names here; phase
-         * 9 records only the first matching Kit/.pat/.fx object, so failing to
-         * clear them makes this child attempt to open the previous child's Kit.
+         * Rescan the current selected Bank parent for just one child slot.
+         *
+         * Inputs: op_bank_child_cursor and the parent CWD restored by phases
+         * 21..26 (or retained after phase 16 for the first child). Output:
+         * op_scene_display_name is the sole transient child name. Opening
+         * `.` gives findNextObject() a handle without allocating the former
+         * 16-name/16-alias Bank cache; phase 31 turns that one name into the
+         * exact directory component used by the shared Scene loader.
          */
-        filesystem_resetSceneLoadChildDiscovery();
-        memcpy(op_scene_display_name, op_bank_child_name[child_slot],
-               STORAGE_SCENE_DISPLAY_NAME_LEN);
-        op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+        op_scene_display_name[0] = '\0';
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_opendir_lfn(op_bank_child_open_name[child_slot],
+        if (!afatfs_fopen(".", "r", on_file_opened))
+            return;
+        op_phase = 28u;
+        return;
+
+    case 28:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_setPresetNameInvalid();
+            if (!afatfs_chdir(NULL))
+                return;
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_slot_dir = op_file;
+        afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
+        op_phase = 29u;
+        return;
+
+    case 29:
+    {
+        afatfsOperationStatus_e ast =
+            afatfs_findNextObject(op_kit_slot_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        if (ast == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (ast == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 30u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
+            op_close_status = (op_scene_display_name[0] != '\0')
+                ? FS_STATUS_DONE
+                : FS_STATUS_ERROR;
+            op_phase = 30u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
+            uint8_t child_slot;
+            char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+
+            /*
+             * Retain the lexical winner for this one requested child slot.
+             *
+             * Inputs: one directory object and op_bank_child_cursor. Output:
+             * the pre-existing nine-byte op_scene_display_name scratch. This
+             * preserves the old duplicate policy while replacing the former
+             * sixteen-entry name/alias arrays; no filename key is stored,
+             * because storage_formatBankSceneDir() derives it in phase 31.
+             */
+            if (storage_parseBankSceneFolder(op_object.id.displayName,
+                                             &child_slot,
+                                             display) &&
+                child_slot == op_bank_child_cursor) {
+                display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+                if (op_scene_display_name[0] == '\0' ||
+                    filesystem_displayPrecedesCached(display,
+                                                     op_scene_display_name)) {
+                    memcpy(op_scene_display_name, display,
+                           STORAGE_SCENE_DISPLAY_NAME_LEN + 1u);
+                }
+            }
+        }
+        return;
+    }
+
+    case 30:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
+            op_phase = 31u;
+        return;
+
+    case 31:
+        if (!op_close_done)
+            return;
+        op_kit_slot_dir = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_setPresetNameInvalid();
+            if (!afatfs_chdir(NULL))
+                return;
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_scene_load_scene_mask = (uint16_t)(1u << op_bank_child_cursor);
+        filesystem_initSceneStage(&fs_stage_workspace.scene_stage);
+        /*
+         * Reset payload discovery and derive the selected directory on demand.
+         *
+         * Inputs: one validated `SS Name` display suffix in
+         * op_scene_display_name. Output: op_root_open_name receives the exact
+         * Bank-child component and asyncfatfs returns its short alias only for
+         * this immediate open. Affiliates: filesystem_loadSceneDirectory_tick
+         * consumes the resulting handle at phase 18; its stage remains the
+         * one shared Scene/Kit staging workspace, not a name cache.
+         */
+        filesystem_resetSceneLoadChildDiscovery();
+        storage_formatBankSceneDir(op_root_open_name,
+                                   sizeof(op_root_open_name),
+                                   op_bank_child_cursor,
+                                   op_scene_display_name);
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
                                 op_root_open_name,
                                 on_file_opened)) {
@@ -6946,7 +7269,6 @@ static void filesystem_loadBankDirectory_tick(void)
         }
         op_phase = 18u;
         return;
-    }
 
     case 19:
         if (!op_close_done)
@@ -7042,8 +7364,7 @@ static void filesystem_scanBankScenes_tick(void)
      * Preview-scan the two-digit Scene children inside one root Bank slot.
      *
      * State machine inputs are op_slot and the root Bank scan cache. Outputs
-     * are op_bank_child_present_mask/name/open_name, the same child caches used
-     * by filesystem_loadBankDirectory_tick(). This read-only operation exists
+     * is op_bank_child_present_mask only. This read-only operation exists
      * so Menu can light Load:[Bank] LEDs for the highlighted Bank before the
      * user presses OK; it intentionally does not parse bankset.bcg, load Scene
      * payloads, or write BankData.
@@ -7171,30 +7492,17 @@ static void filesystem_scanBankScenes_tick(void)
              * Convert one directory entry to a child Scene bit.
              *
              * Inputs: FAT display name from the selected Bank folder. Output:
-             * child_slot sets one bit in op_bank_child_present_mask and stores
-             * the display/open name for possible later Bank Load reuse. If two
-             * entries claim the same two-digit slot, lexical display ordering
-             * matches the root browser duplicate policy.
+             * child_slot sets one bit in op_bank_child_present_mask. Why: LED
+             * preview needs occupancy, not child identities; a real Bank Load
+             * rescans its requested child and chooses its lexical winner using
+             * the existing one-name operation scratch.
              */
             if (storage_parseBankSceneFolder(op_object.id.displayName,
                                              &child_slot,
                                              display)) {
-                display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-                if (!op_bank_child_present[child_slot] ||
-                    filesystem_displayPrecedesCached(
-                        display,
-                        op_bank_child_name[child_slot])) {
-                    op_bank_child_present[child_slot] = 1u;
-                    op_bank_child_present_mask =
-                        (uint16_t)(op_bank_child_present_mask |
-                                   (uint16_t)(1u << child_slot));
-                    memcpy(op_bank_child_name[child_slot], display,
-                           STORAGE_SCENE_DISPLAY_NAME_LEN);
-                    op_bank_child_name[child_slot]
-                                      [STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-                    storage_copyFilename(op_bank_child_open_name[child_slot],
-                                         op_object.id.displayName);
-                }
+                op_bank_child_present_mask =
+                    (uint16_t)(op_bank_child_present_mask |
+                               (uint16_t)(1u << child_slot));
             }
         }
         return;
@@ -7241,11 +7549,10 @@ static void filesystem_loadInstrument_tick(void)
         op_instrument_load_type);
 
     switch (op_phase) {
-    case 0: /* VALIDATE + CHDIR ROOT */
+    case 0: /* VALIDATE CAPTURED KEY + CHDIR ROOT */
         if (op_instrument_load_destination_slot >= STORAGE_KIT_SLOT_COUNT ||
             op_instrument_load_type >= INSTRUMENT_TYPE_UNKNOWN ||
-            op_instrument_load_index >=
-                filesystem_cachedInstrumentCount(op_instrument_load_type)) {
+            op_instrument_save_display_name[0] == '\0') {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
@@ -7353,20 +7660,34 @@ static void filesystem_loadInstrument_tick(void)
         
         {
             char lfn[STORAGE_KIT_FILENAME_MAX];
-            const char *display_name = filesystem_cachedInstrumentName(
-                op_instrument_load_type, op_instrument_load_index);
+            const char *display_name = op_instrument_save_display_name;
 
-            /* Every type now uses the same cache-owned display stem and LFN
-             * construction path. The registry supplies the extension through
-             * storageTypes' type mapping, so no per-type open branch remains. */
-            if (!display_name) {
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 16;
-                return;
+            /*
+             * Derive the one immediate LFN open key after staging has claimed
+             * the separate typed stage.
+             *
+             * Normal-input path: a captured pool display stem plus type is
+             * formatted into its `<stem>.<ext>` leaf. Temporary-input path:
+             * the request already contains the complete reserved
+             * `.hctmp.<ext>` component, so it must be copied verbatim. Why:
+             * storage_makeSavedInstrumentDisplayFilename() correctly treats a
+             * leading dot as an empty normal stem and substitutes `none`; using
+             * it for the hidden name therefore attempted to open `none.<ext>`
+             * and made the direct `kit` row fail as `InsL00`. Output: `lfn` is
+             * the exact selected pool leaf or the exact temporary leaf for the
+             * following asyncfatfs open. Affiliates:
+             * filesystem_requestLoadInstrument(),
+             * filesystem_requestLoadInstrumentTemp(), and
+             * filesystem_makeInstrumentTemporaryFilename().
+             */
+            if (op_instrument_load_temporary) {
+                strncpy(lfn, display_name, sizeof(lfn) - 1u);
+                lfn[sizeof(lfn) - 1u] = '\0';
+            } else {
+                storage_makeSavedInstrumentDisplayFilename(
+                    lfn, sizeof(lfn), display_name,
+                    op_instrument_load_type, 0u, 0u);
             }
-            storage_makeSavedInstrumentDisplayFilename(
-                lfn, sizeof(lfn), display_name,
-                op_instrument_load_type, 0u, 0u);
 
             if (!afatfs_fopen_lfn(lfn, "r", AFATFS_MATCH_CASE_INSENSITIVE,
                                   NULL, on_file_opened))
@@ -7417,21 +7738,35 @@ static void filesystem_loadInstrument_tick(void)
                         (uint8_t)(op_instrument_load_destination_slot + 1u),
                         &op_staged_instrument);
                 }
-                const char *display_name = filesystem_cachedInstrumentName(
-                    op_instrument_load_type, op_instrument_load_index);
-
-                if (!display_name) {
-                    op_close_status = FS_STATUS_ERROR;
-                } else {
-                    memcpy(op_staged_instrument_display_name,
-                           display_name, 9u);
-                    /* The general index deliberately stores the visible
-                     * eight-cell stem. Retain that same validated identity for
-                     * later Kit Save operations regardless of Instrument type. */
-                    filesystem_copyInstrumentStem16(
-                        op_staged_instrument_stem, display_name);
-                    op_close_status = FS_STATUS_DONE;
+                /*
+                 * Pair the validated Instrument with its one identity row.
+                 *
+                 * Why: the payload union holds descriptor data only; the
+                 * captured request key remains valid after its typed index was
+                 * reused as staging. Inputs: selected display name and
+                 * destination voice. Output: HCNAMES update source.
+                 * Affiliates: preset completion and Instrument menu exit.
+                 */
+                /*
+                 * Publish a normal pool load name, never the hidden temp name.
+                 *
+                 * Inputs: validated selected filename and request-time hidden
+                 * temporary flag. Output: ordinary pool loads update one
+                 * identity row immediately; `.hctmp.<ext>` restores parameters
+                 * only, leaving Menu's separate nine-byte `kit` label intact.
+                 * Affiliates: filesystem_requestLoadInstrumentTemp(), Menu's
+                 * session invalidation, and the exit-time HCNAMES writer.
+                 */
+                if (!op_instrument_load_temporary) {
+                    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+                    filesystem_copyInstrumentStemDisplay(
+                        display, op_instrument_save_display_name);
+                    filesystem_setIdentityName(
+                        (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 +
+                                  op_instrument_load_destination_slot),
+                        display);
                 }
+                op_close_status = FS_STATUS_DONE;
             }
             op_phase = 14;
         }
@@ -7751,13 +8086,42 @@ static void filesystem_saveInstrument_tick(void)
     case 21: /* RETURN ROOT + UPDATE CACHE */
         if (!afatfs_chdir(NULL))
             return;
+        /*
+         * Finish a hidden `kit` snapshot without publishing library state.
+         *
+         * Inputs: `.hctmp.<ext>` has been written in the current type folder.
+         * Output: normal filesystem completion only. Why: the temporary file
+         * must not rename the live Instrument identity or alter `.hcindex`;
+         * it is excluded from future scans and is read only by the direct
+         * `kit` row. Affiliates: Menu entry sequencing and temp load request.
+         */
+        if (op_instrument_save_temporary) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
         filesystem_updateInstrumentCacheAfterSave(
             op_instrument_save_display_name,
             op_instrument_save_open_name);
         if (!morph_save) {
-            scene_setInstrumentSourceName(op_instrument_save_source_scene,
-                                          op_instrument_save_source_slot,
-                                          op_instrument_save_display_name);
+            char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+            /*
+             * Publish only the saved Instrument stem to the resident identity.
+             *
+             * Inputs: completed `stem.ext` write target and source voice.
+             * Output: the one HCNAMES/LCD identity row receives the eight-cell
+             * stem, never the raw filename whose extension would be visible
+             * whenever the stem is shorter than eight characters. The complete
+             * filename remains operation-local and is still used for cache/open
+             * keys above. Affiliates: nested Instrument Save and Menu's single
+             * HCNAMES session flush.
+             */
+            filesystem_copyInstrumentStemDisplay(
+                display, op_instrument_save_display_name);
+            filesystem_setIdentityName(
+                (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 +
+                          op_instrument_save_source_slot),
+                display);
         }
         
         /*
@@ -7810,7 +8174,7 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
     return 1u;
 }
 
-static void filesystem_initStagedScene(scene_t *scene)
+static void filesystem_initSceneStage(filesystem_scene_stage_t *stage)
 {
     static const instrument_type_t initial_types[INSTRUMENT_SLOT_COUNT] = {
         INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM,
@@ -7820,35 +8184,22 @@ static void filesystem_initStagedScene(scene_t *scene)
     uint8_t track;
 
     /*
-     * Build safe defaults for a filesystem-owned staged Scene.
+     * Build safe defaults for the separate non-Pattern Scene stage.
      *
      * SceneData's scene_initAll() initializes resident scenes[] directly. Scene
-     * Load needs the same style of defaults in private staging memory so
+     * Load needs the same style of defaults in dedicated staging SRAM so
      * optional sceneset keys can be absent without leaving random bytes, and so
      * a failed child file never mutates resident Scene state.
      */
-    if (!scene)
+    if (!stage)
         return;
-    memset(scene, 0, sizeof(*scene));
-    /*
-     * PatternData owns the default bridge pattern shape.
-     *
-     * Inputs: staged PatternSet pointer plus nextPattern 0 for a neutral Scene
-     * payload. Output: the private staging pattern is valid before the loader
-     * encounters either a thin text placeholder or an older binary pattern
-     * payload. This call must happen after memset() and before child file parse
-     * phases so missing optional pattern details cannot leave zero-length track
-     * settings.
-     */
-    pat_initPatternSet(&scene->pattern, 0u);
-    scene->settings.voice_decimation_all = 127u;
+    memset(stage, 0, sizeof(*stage));
+    stage->settings.voice_decimation_all = 127u;
     for (track = 0u; track < NUM_TRACKS; track++) {
-        scene->settings.midi_channel[track] = (uint8_t)(track + 1u);
-        scene->settings.midi_note[track] = PAT_DEFAULT_NOTE;
+        stage->settings.midi_channel[track] = (uint8_t)(track + 1u);
+        stage->settings.midi_note[track] = PAT_DEFAULT_NOTE;
     }
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
-        char fallback[9] = { 'i', 'n', 's', 't', '_', 'v', 'o',
-                             (char)('1' + slot), '\0' };
         /*
          * Scene-owned voice mix defaults mirror SceneData's resident init.
          *
@@ -7858,13 +8209,68 @@ static void filesystem_initStagedScene(scene_t *scene)
          * audio routing is six-voice mixer state while MIDI defaults above are
          * seven-track sequencer state.
          */
-        scene->settings.audio_out[slot] = filesystem_defaultVoiceAudioOut(slot);
-        scene->settings.fx_send_amount[slot] = 0u;
-        scene->settings.fader_setting[slot] = 0u;
-        instrumentManager_resetSlot(&scene->kit.instruments[slot],
+        stage->settings.audio_out[slot] = filesystem_defaultVoiceAudioOut(slot);
+        stage->settings.fx_send_amount[slot] = 0u;
+        stage->settings.fader_setting[slot] = 0u;
+        instrumentManager_resetSlot(&stage->kit.instruments[slot],
                                     initial_types[slot]);
-        scene_setKitInstrumentSourceName(&scene->kit, slot, fallback);
     }
+}
+
+static void filesystem_commitSceneStage(void)
+{
+    uint8_t scene_index;
+
+    /*
+     * Commit validated general Scene settings and embedded Kit before Pattern
+     * I/O starts.
+     *
+     * Why: Pattern is intentionally non-atomic for the current format work;
+     * excluding PatternSet from staging keeps validation inside the separate
+     * typed stage. Inputs: fully parsed stage image and the
+     * immutable destination mask. Outputs: final Scene settings/Kit plus a
+     * default final PatternSet ready for direct streaming.
+     *
+     * Affiliates: filesystem_directPatternTarget(), Scene Pattern phases, and
+     * the later Pattern transactional redesign.
+     */
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        scene_t *target;
+        if ((op_scene_load_scene_mask & (uint16_t)(1u << scene_index)) == 0u)
+            continue;
+        target = scene_get(scene_index);
+        if (!target)
+            continue;
+        target->settings = fs_stage_workspace.scene_stage.settings;
+        target->kit = fs_stage_workspace.scene_stage.kit;
+        pat_initPatternSet(&target->pattern, 0u);
+    }
+}
+
+static PatternSet *filesystem_directPatternTarget(void)
+{
+    uint8_t scene_index;
+
+    /*
+     * Choose the first committed destination as the direct Pattern parse sink.
+     *
+     * Inputs: current Scene destination mask. Output: final Scene PatternSet
+     * or NULL. The final commit phase mirrors this completed PatternSet to any
+     * additional selected destinations without ever allocating a Pattern stage.
+     * Affiliates: every binary/text Pattern parser phase and Scene phase 61.
+     */
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((op_scene_load_scene_mask & (uint16_t)(1u << scene_index)) != 0u) {
+            scene_t *target = scene_get(scene_index);
+            if (target)
+                return &target->pattern;
+        }
+    }
+    return NULL;
 }
 
 static void filesystem_resetSceneLoadChildDiscovery(void)
@@ -7954,8 +8360,9 @@ static uint8_t filesystem_nameHasExtension(const char *name,
      * Case-insensitive filename extension check for Scene child discovery.
      *
      * Users may rename/move .pat and .fx files between Scenes. The loader scans
-     * directory entries and accepts the first matching extension, then validates
-     * the file contents before committing the staged Scene.
+     * directory entries and accepts the first matching extension. Discovery
+     * records only the filename; the Scene state machine later validates each
+     * file according to its non-Pattern-stage/direct-Pattern ordering.
      */
     if (!name || !extension)
         return 0u;
@@ -8212,15 +8619,11 @@ static uint8_t filesystem_prepareBankSceneSaveSource(uint8_t scene_index)
         sizeof(op_save_scene_kit_display_name),
         filesystem_cachedResidentName(
             filesystem_residentKitRow(scene_index)));
-    for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++) {
-        storage_makeSavedInstrumentDisplayFilename(
-            op_save_kit_member_display_file[voice],
-            sizeof(op_save_kit_member_display_file[voice]),
-            scene->kit.instrument_stem[voice],
-            scene->kit.instruments[voice].type,
-            (uint8_t)(voice + 1u),
-            1u);
-    }
+    for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++)
+        filesystem_setIdentityName(
+            (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 + voice),
+            filesystem_cachedResidentName(
+                filesystem_residentInstrumentRow(scene_index, voice)));
     return 1u;
 }
 
@@ -8599,7 +9002,7 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
             storage_instrumentTypeToText(kit->instruments[slot].type));
     case 2u:
         return filesystem_formatAssignmentTextLine(
-            dst, cap, "file", op_save_kit_member_display_file[slot]);
+            dst, cap, "file", filesystem_memberFilename(slot));
     default:
         /*
          * Blank separator after each slot. New Kit writers intentionally stop
@@ -8608,75 +9011,6 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
          */
         return filesystem_formatLiteralLine(dst, cap, "\n");
     }
-}
-
-/*
- * Recursive directory deletion helper for directory-shaped saves.
- *
- * Contract:
- * - The caller must have already chdir'd into the parent directory that owns
- *   display_name.
- * - display_name is one visible LFN component, not a slash-separated path.
- * - Missing targets are treated as successful no-ops, so save paths can call
- *   this unconditionally before recreating a directory.
- * - On success, the asyncfatfs current directory is back at the original
- *   parent directory. On error, the caller must finish the filesystem op and
- *   rely on filesystem_start()/future ops to return to a known root.
- *
- * How it works:
- * - Open the target by LFN, chdir into it, and scan one object at a time.
- * - Files are removed with AFATFS_REMOVE_FILES_ONLY.
- * - Subdirectories are opened by their short alias and processed depth-first.
- * - Once a directory scan is empty, chdir to its parent and remove that now
- *   empty directory with AFATFS_REMOVE_EMPTY_DIRECTORIES.
- *
- * Why this lives in filesystem.c:
- * asyncfatfs exposes single-directory primitives only. It can remove an empty
- * directory entry and free its cluster chain, but it intentionally does not
- * recurse through children. Directory-shaped product saves, including Kit Save
- * today and Scene/Morph-style writers later, need the higher-level overwrite
- * policy: delete the whole old tree, then write one clean replacement tree.
- *
- * Limits:
- * FS_DELETE_DEPTH_MAX bounds recursion so corrupted or host-created deep trees
- * cannot consume unbounded firmware state. Kit saves should only need depth 2
- * (/Kit/NNN Name/member files); deeper user-created contents are deleted up to
- * this bound and otherwise turn into a filesystem error screen.
- *
- * Affiliates/clients: filesystem_saveKitDirectory_tick(), future directory
- * save operations, afatfs_findNextObject(), afatfs_removeObjects_lfn(), and
- * asyncfatfs AFATFS_REMOVE_EMPTY_DIRECTORIES.
- */
-static void filesystem_deleteTreeStartWithOpenName(const char *display_name,
-                                                   const char *open_name)
-{
-    memset(op_delete_tree_name_stack, 0, sizeof(op_delete_tree_name_stack));
-    memset(op_delete_tree_open_name_stack, 0,
-           sizeof(op_delete_tree_open_name_stack));
-    memset(op_delete_tree_child_name, 0, sizeof(op_delete_tree_child_name));
-    memset(op_delete_tree_child_open_name, 0,
-           sizeof(op_delete_tree_child_open_name));
-    op_delete_tree_depth = 0u;
-    op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
-    op_delete_tree_dir = NULL;
-    filesystem_copyLongComponent(op_delete_tree_name_stack[0],
-                                 sizeof(op_delete_tree_name_stack[0]),
-                                 display_name);
-    /*
-     * Preserve the exact top-level SFN alias when the caller discovered one.
-     *
-     * Inputs: display_name is the visible name used for diagnostics and legacy
-     * LFN fallback. open_name is optional; slot cleanup passes the shortName
-     * from the afatfsObjectInfo_t it just matched. Output: depth zero carries
-     * both names, so OPEN_TARGET can enter that physical directory by alias and
-     * REMOVE_EMPTY_DIR can later retire the same alias. This is what prevents a
-     * damaged Bank folder containing duplicate `SS Name` children from being
-     * re-resolved by display name and leaving or deleting the wrong sibling.
-     */
-    filesystem_copyLongComponent(op_delete_tree_open_name_stack[0],
-                                 sizeof(op_delete_tree_open_name_stack[0]),
-                                 open_name);
-    op_delete_tree_phase = FS_DELETE_TREE_OPEN_TARGET;
 }
 
 static uint8_t filesystem_directoryObjectMatchesSlot(
@@ -8839,8 +9173,6 @@ static uint8_t op_delete_slot_last_phase = 0;
 
 static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
 {
-    fs_status_t delete_status;
-
     if (op_delete_slot_phase != op_delete_slot_last_phase) {
         op_delete_slot_last_phase = op_delete_slot_phase;
         op_delete_slot_timeout_ticks = 0;
@@ -8971,6 +9303,16 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
     }
 }
 
+/*
+ * Retired firmware-owned recursive deleter.
+ *
+ * asyncfatfs_deleteTree() now owns recursive traversal for the concrete
+ * object captured by filesystem_deleteKitSlotDirectories_tick(). Keeping this
+ * historical implementation disabled ensures its 558-byte name/alias stack
+ * cannot return to SRAM while preserving the old algorithm only as temporary
+ * source archaeology until the next broad storage cleanup removes it entirely.
+ */
+#if 0
 static fs_status_t filesystem_deleteTree_tick(void)
 {
     for (;;) {
@@ -9249,6 +9591,8 @@ static fs_status_t filesystem_deleteTree_tick(void)
     }
 }
 
+#endif
+
 static void filesystem_saveKitDirectory_tick(void)
 {
     const scene_t *scene = scene_getConst(op_kit_save_source_scene);
@@ -9418,7 +9762,7 @@ static void filesystem_saveKitDirectory_tick(void)
         op_file = NULL;
         memset(op_root_open_name, 0, sizeof(op_root_open_name));
         if (!afatfs_fopen_lfn(
-                op_save_kit_member_display_file[op_instrument_slot],
+                filesystem_memberFilename(op_instrument_slot),
                 "w",
                 AFATFS_MATCH_CASE_INSENSITIVE,
                 op_root_open_name,
@@ -9473,10 +9817,9 @@ static void filesystem_saveKitDirectory_tick(void)
     case 21:
         if (!afatfs_chdir(NULL))
             return;
-        if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_NORMAL) {
-            scene_setResidentKitDisplayName(op_kit_save_source_scene,
-                                            preset_currentName);
-        }
+        if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_NORMAL)
+            filesystem_setIdentityName(FS_IDENTITY_KIT_ROW,
+                                       preset_currentName);
         /*
          * Defer successful completion until the boot-equivalent Kit refresh
          * chain has finished. The directory is now written, but the active
@@ -10454,7 +10797,7 @@ static void filesystem_saveSceneDirectory_tick(void)
         op_file = NULL;
         memset(op_root_open_name, 0, sizeof(op_root_open_name));
         if (!afatfs_fopen_lfn(
-                op_save_kit_member_display_file[op_instrument_slot],
+                filesystem_memberFilename(op_instrument_slot),
                 "w",
                 AFATFS_MATCH_CASE_INSENSITIVE,
                 op_root_open_name,
@@ -12751,10 +13094,11 @@ static fs_boot_substep_diag_cb_t fs_boot_substep_diagnostic = NULL;
 static void filesystem_reportBootSubstep(uint8_t substep)
 {
     /*
-     * Notify the temporary front-panel observer before one blocking phase-43
-     * component call starts. Input is the stable FSub code documented in
-     * HCNAMES_IMPLEMENTATION.md. Output is diagnostic-only; the callback may
-     * update the boot OLED but cannot mutate filesystem ownership or progress.
+     * Notify the developer front-panel observer before one blocking phase-43
+     * component call starts. Input is the stable FSub code whose meaning is
+     * documented beside each filesystem_reportBootSubstep() call below.
+     * Output is diagnostic-only; the callback may update the boot OLED but
+     * cannot mutate filesystem ownership or progress.
      */
     if (fs_boot_substep_diagnostic)
         fs_boot_substep_diagnostic(substep);
@@ -13179,12 +13523,6 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
                                                uint16_t cap,
                                                uint16_t row)
 {
-    uint16_t present_mask = bank_scenePresentMask();
-    uint8_t scene_index;
-    uint8_t slot;
-    uint8_t present;
-    const scene_t *scene;
-    const char *name = NULL;
 
     /*
      * Select one `/.hcnames` row from resident SRAM.
@@ -13214,39 +13552,13 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
          */
         return filesystem_formatResidentNameLine(dst, cap, NULL, 0u);
     }
-    row = (uint16_t)(row - STORAGE_BANK_SCENE_MAX_SLOTS);
-    if (row < STORAGE_BANK_SCENE_MAX_SLOTS) {
-        scene_index = (uint8_t)row;
-        present = (uint8_t)((present_mask &
-                             (uint16_t)(1u << scene_index)) != 0u);
-        return filesystem_formatResidentNameLine(
-            dst, cap, scene_kitDisplayName(scene_index), present);
-    }
-    row = (uint16_t)(row - STORAGE_BANK_SCENE_MAX_SLOTS);
-    if (row < (uint16_t)(STORAGE_BANK_SCENE_MAX_SLOTS *
-                         STORAGE_KIT_SLOT_COUNT)) {
-        scene_index = (uint8_t)(row / STORAGE_KIT_SLOT_COUNT);
-        slot = (uint8_t)(row % STORAGE_KIT_SLOT_COUNT);
-        scene = scene_getConst(scene_index);
-        /*
-         * Instrument provenance belongs to the resident Scene/voice row, not
-         * to the embedded Kit display name.
-         *
-         * A root Instrument Load can populate one voice in an otherwise
-         * unnamed/default Kit. Requiring a nonblank Kit name here would erase
-         * the exact HCNAMES row that the successful Instrument action must
-         * publish. Scene presence and a valid Scene object establish the row;
-         * filesystem_formatResidentNameLine() still emits a blank line when
-         * the Instrument name itself is empty or the `none` placeholder.
-         */
-        present = (uint8_t)(
-            (present_mask & (uint16_t)(1u << scene_index)) != 0u &&
-            scene);
-        if (scene)
-            name = scene->kit.instrument_display_name[slot];
-        return filesystem_formatResidentNameLine(dst, cap, name, present);
-    }
-    return 0u;
+    /*
+     * The generic boot serializer cannot reconstruct Kit/Instrument identity
+     * from audio SRAM any more. Runtime targeted HCNAMES updates preserve and
+     * replace those authoritative rows from the identity block instead.
+     */
+    (void)row;
+    return filesystem_formatResidentNameLine(dst, cap, NULL, 0u);
 }
 
 static uint8_t filesystem_quarantineKitLibraryBlocking(void)
@@ -14060,8 +14372,13 @@ uint8_t filesystem_installLoopsBlocking(void)
 }
 
 /* -----------------------------------------------------------------------
-** Generic asyncfatfs File/Dir test operations
+** Retired generic asyncfatfs File/Dir test operations
+**
+** Kept out of the build with their former cache state. These were diagnostic
+** menu paths only; musical library operations use the dedicated 1,000-row
+** `.hcindex` cache and staging workspace instead.
 ** ----------------------------------------------------------------------- */
+#if 0
 static void filesystem_scanTestObjects_tick(uint8_t want_dirs)
 {
     switch (op_phase) {
@@ -14916,6 +15233,8 @@ static void filesystem_saveTestSimpleDir_tick(void)
     }
 }
 
+#endif
+
 /* =======================================================================
 ** Public API
 ** ======================================================================= */
@@ -15028,6 +15347,7 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_SAVE_INSTRUMENT:
     case FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH:
+    case FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP:
         filesystem_saveInstrument_tick();
         break;
     case FS_INTERNAL_OP_LOAD_MORPH:
@@ -15079,27 +15399,6 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_LOAD_NAME:
         filesystem_loadName_tick();
-        break;
-    case FS_INTERNAL_OP_SCAN_TEST_FILES:
-        filesystem_scanTestObjects_tick(0u);
-        break;
-    case FS_INTERNAL_OP_SCAN_TEST_DIRS:
-        filesystem_scanTestObjects_tick(1u);
-        break;
-    case FS_INTERNAL_OP_LOAD_TEST_FILE:
-        filesystem_loadTestFile_tick();
-        break;
-    case FS_INTERNAL_OP_LOAD_TEST_DIR:
-        filesystem_loadTestDir_tick();
-        break;
-    case FS_INTERNAL_OP_SAVE_TEST_FILE:
-        filesystem_saveTestFile_tick();
-        break;
-    case FS_INTERNAL_OP_SAVE_TEST_DIR:
-        filesystem_saveTestDir_tick();
-        break;
-    case FS_INTERNAL_OP_SAVE_TEST_SIMPLE_DIR:
-        filesystem_saveTestSimpleDir_tick();
         break;
     default: break;
     }
@@ -15192,27 +15491,8 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_file_ready = false;
     op_close_done = false;
     op_close_status = FS_STATUS_DONE;
-    op_test_lookup_result = FS_TEST_LOOKUP_ERROR;
     op_flush_final_status = FS_STATUS_DONE;
     op_bytes_done = 0;
-    /*
-     * Reset the generic File/Dir test scratch for every filesystem request.
-     *
-     * The test result is shared by all four new menu operations, so it must be
-     * cleared even when the next request is an old Kit/Scene/Bank operation. That
-     * prevents a later PRESET_OP_TEST_* completion from displaying bytes or a
-     * child-directory label that belonged to an earlier save/load attempt.
-     */
-    memset(op_test_name, 0, sizeof(op_test_name));
-    memset(op_test_child_name, 0, sizeof(op_test_child_name));
-    memset(op_test_short_alias, 0, sizeof(op_test_short_alias));
-    memset(op_test_parent_alias, 0, sizeof(op_test_parent_alias));
-    memset(op_test_bytes, 0, sizeof(op_test_bytes));
-    op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
-    op_test_best_kind = AFATFS_OBJECT_NONE;
-    op_test_dir = NULL;
-    op_test_verify_seen_alias = 0u;
-    op_test_verify_seen_fold = 0u;
     op_stream_index = 0;
     op_item_offset = 0;
     op_loaded_active_pattern_running = 0;
@@ -15221,12 +15501,13 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_write_line_offset = 0u;
     op_write_line_index = 0u;
     op_remove_done = 0u;
+    /* A new request is ordinary until its dedicated temp request opts in. */
+    op_instrument_load_temporary = 0u;
+    op_instrument_save_temporary = 0u;
     op_kit_save_source_scene = 0u;
     op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
     memset(op_save_kit_dir_display_name, 0,
            sizeof(op_save_kit_dir_display_name));
-    memset(op_save_kit_member_display_file, 0,
-           sizeof(op_save_kit_member_display_file));
     memset(op_save_kit_dir_open_name, 0, sizeof(op_save_kit_dir_open_name));
     memset(op_save_scene_kit_display_name, 0,
            sizeof(op_save_scene_kit_display_name));
@@ -15238,16 +15519,20 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_delete_slot_bank_scene = 0u;
     op_delete_slot_number = 0u;
     op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
-    op_delete_tree_phase = FS_DELETE_TREE_IDLE;
-    op_delete_tree_depth = 0u;
-    op_delete_tree_dir = NULL;
-    memset(op_delete_tree_name_stack, 0, sizeof(op_delete_tree_name_stack));
-    memset(op_delete_tree_open_name_stack, 0,
-           sizeof(op_delete_tree_open_name_stack));
-    memset(op_delete_tree_child_name, 0, sizeof(op_delete_tree_child_name));
-    memset(op_delete_tree_child_open_name, 0,
-           sizeof(op_delete_tree_child_open_name));
-    memset(&op_staged_scene, 0, sizeof(op_staged_scene));
+    /*
+     * Do not clear either dedicated cache or stage in generic request setup.
+     *
+     * Why: scan completion starts the `.hcindex` writer through
+     * filesystem_start() while its dedicated name cache is still required
+     * input. Typed requests likewise initialize their stage only after the
+     * request is accepted. Generic reset must never discard either lifetime.
+     *
+     * Inputs: a new asynchronous request. Output: cache and stage remain
+     * intact until their explicit cache transition or typed initializer.
+     * Affiliates:
+     * filesystem_createLibraryIndex_tick(), HCNAMES transactions, and all
+     * typed load request initializers.
+     */
     op_scene_load_scene_mask = 0u;
     memset(op_scene_display_name, 0, sizeof(op_scene_display_name));
     memset(op_scene_root_open_name, 0, sizeof(op_scene_root_open_name));
@@ -15269,9 +15554,6 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
            sizeof(op_save_bank_rename_open_name));
     op_save_bank_scratch_attempts = 0u;
     op_save_bank_scratch_collision = 0u;
-    memset(op_bank_child_present, 0, sizeof(op_bank_child_present));
-    memset(op_bank_child_name, 0, sizeof(op_bank_child_name));
-    memset(op_bank_child_open_name, 0, sizeof(op_bank_child_open_name));
     op_bank_child_present_mask = 0u;
     op_bank_scene_load_mask = 0u;
     op_bank_scene_save_mask = 0u;
@@ -15311,10 +15593,6 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
            sizeof(op_instrument_save_display_name));
     memset(op_instrument_save_open_name, 0,
            sizeof(op_instrument_save_open_name));
-    memset(&op_staged_instrument, 0, sizeof(op_staged_instrument));
-    memset(op_staged_instrument_display_name, 0,
-           sizeof(op_staged_instrument_display_name));
-    memset(op_staged_instrument_stem, 0, sizeof(op_staged_instrument_stem));
     completion_callback = cb;
     return true;
 }
@@ -15737,10 +16015,22 @@ bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
     }
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_KIT, FS_FILE_KIT, slot, cb))
         return false;
+    /*
+     * Capture the selected Kit key before typed staging begins.
+     *
+     * Why: this keeps the request immutable even though the independent cache
+     * may later be reused. Inputs: already-validated selected
+     * cache row. Output: the existing nine-byte operation scratch is the sole
+     * stable directory key through this request; no SRAM is allocated.
+     * Affiliates: filesystem_loadKitDirectory_tick() phases 0/6/16 and the
+     * Kit HCNAMES publication following a successful normal load.
+     */
+    memcpy(op_scene_display_name,
+           filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, slot),
+           STORAGE_KIT_DISPLAY_NAME_LEN);
+    op_scene_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     op_kit_load_scene_mask = valid_mask;
     memset(&op_staged_kit, 0, sizeof(op_staged_kit));
-    for (scene_index = 0u; scene_index < INSTRUMENT_SLOT_COUNT; scene_index++)
-        memcpy(op_staged_kit.instrument_display_name[scene_index], "Empty   ", 9u);
     return true;
 }
 
@@ -15751,7 +16041,6 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
                                         fs_completion_cb_t cb)
 {
     const scene_t *scene = scene_getConst(source_scene);
-    uint8_t voice;
 
     if (!scene || !display_name || slot >= STORAGE_KIT_MAX_SLOTS)
         return false;
@@ -15765,15 +16054,6 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
                                slot,
                                display_name);
 
-    for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++) {
-        storage_makeSavedInstrumentDisplayFilename(
-            op_save_kit_member_display_file[voice],
-            sizeof(op_save_kit_member_display_file[voice]),
-            scene->kit.instrument_stem[voice],
-            scene->kit.instruments[voice].type,
-            (uint8_t)(voice + 1u),
-            1u);
-    }
     return true;
 }
 
@@ -15783,7 +16063,6 @@ bool filesystem_requestSaveSceneDirectory(uint16_t slot,
                                           fs_completion_cb_t cb)
 {
     const scene_t *scene = scene_getConst(source_scene);
-    uint8_t voice;
 
     /*
      * Capture all request-time Scene Save coordinates.
@@ -15819,20 +16098,18 @@ bool filesystem_requestSaveSceneDirectory(uint16_t slot,
                                display_name);
     memcpy(op_scene_display_name, display_name, STORAGE_SCENE_DISPLAY_NAME_LEN);
     op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    /*
+     * Capture the edited Scene row in the sole identity block before the
+     * asynchronous directory writer starts. Inputs: accepted Save text.
+     * Output: post-save targeted HCNAMES update source; no SceneData mirror.
+     * Affiliates: filesystem_cacheCurrentResidentSceneNames() and Menu exit.
+     */
+    filesystem_setIdentityName(FS_IDENTITY_SCENE_ROW, display_name);
     filesystem_makeSceneEmbeddedKitDir(
         op_save_scene_kit_display_name,
         sizeof(op_save_scene_kit_display_name),
-        scene->kit.display_name);
+        filesystem_identityName(FS_IDENTITY_KIT_ROW));
 
-    for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++) {
-        storage_makeSavedInstrumentDisplayFilename(
-            op_save_kit_member_display_file[voice],
-            sizeof(op_save_kit_member_display_file[voice]),
-            scene->kit.instrument_stem[voice],
-            scene->kit.instruments[voice].type,
-            (uint8_t)(voice + 1u),
-            1u);
-    }
     return true;
 }
 
@@ -15866,10 +16143,22 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
     }
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_KIT_MORPH, FS_FILE_KIT, slot, cb))
         return false;
+    /*
+     * Preserve the selected source key in the existing operation scratch.
+     *
+     * Why: KitMrp uses the same typed stage as normal Kit Load, so its source
+     * key must remain immutable. Inputs: validated selected index
+     * row. Output: one request-stable `NNN Name` formatter input; resident
+     * HCNAMES identity is deliberately unchanged by morph projection.
+     * Affiliates: filesystem_loadKitDirectory_tick() phases 0/6 and Preset's
+     * later morph-only endpoint commit.
+     */
+    memcpy(op_scene_display_name,
+           filesystem_cachedLibraryName(FS_NAME_CACHE_KIT, slot),
+           STORAGE_KIT_DISPLAY_NAME_LEN);
+    op_scene_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     op_kit_load_scene_mask = valid_mask;
     memset(&op_staged_kit, 0, sizeof(op_staged_kit));
-    for (scene_index = 0u; scene_index < INSTRUMENT_SLOT_COUNT; scene_index++)
-        memcpy(op_staged_kit.instrument_display_name[scene_index], "Empty   ", 9u);
     return true;
 }
 
@@ -15911,8 +16200,9 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
      *
      * Inputs mirror Kit Load: root Scene library slot plus destination Scene
      * mask. Output is one asynchronous operation that parses the Scene folder
-     * into op_staged_scene and commits it only if sceneset.scg, the embedded
-     * Kit, the bridge pattern, and placeholder effect all validate. The mask
+     * into the shared non-Pattern workspace and commits settings/Kit after
+     * those inputs validate. Pattern then streams directly into final SRAM and
+     * remains deliberately non-atomic; the mask
      * filtering is deliberately shared with Kit Load so future 16-Scene banks
      * can call this same public boundary.
      */
@@ -15926,8 +16216,22 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
         return false;
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_SCENE, FS_FILE_SCENE, slot, cb))
         return false;
+    /*
+     * Preserve the selected Scene key before Scene parsing starts.
+     *
+     * Why: phases 6 and 39 must reopen the selected root folder after parsing
+     * begins, even if a later name-cache operation occurs.
+     * Inputs: validated Scene cache row. Output: existing operation scratch
+     * supplies both opens and the later HCNAMES row; no extra name cache is
+     * retained. Affiliates: filesystem_loadSceneDirectory_tick() and the
+     * root Scene targeted HCNAMES transaction.
+     */
+    memcpy(op_scene_display_name,
+           filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE, slot),
+           STORAGE_SCENE_DISPLAY_NAME_LEN);
+    op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
     op_scene_load_scene_mask = valid_mask;
-    filesystem_initStagedScene(&op_staged_scene);
+    filesystem_initSceneStage(&fs_stage_workspace.scene_stage);
     return true;
 }
 
@@ -15969,7 +16273,18 @@ bool filesystem_requestLoadBank(uint16_t slot,
         return false;
     op_bank_scene_load_mask = valid_mask;
     op_scene_load_scene_mask = valid_mask;
-    filesystem_initStagedScene(&op_staged_scene);
+    /*
+     * Do not initialize a Scene stage while the Bank-name repair still reads
+     * the selected Bank cache row.
+     *
+     * Why: the Bank repair is the first asynchronous leg of this request and
+     * needs its slot-ordered name cache to rebuild the selected `NNN Name`
+     * component. The delegated child loader initializes its Scene stage only
+     * after Bank validation has consumed that cache. Inputs: validated Bank
+     * slot/mask. Output: repair sees its source row intact; no new staging or
+     * SRAM allocation exists here. Affiliates: filesystem_repairNames_tick(),
+     * filesystem_loadBankDirectory_tick() child phases 18/73.
+     */
     memcpy(op_bank_display_name,
            filesystem_cachedLibraryName(FS_NAME_CACHE_BANK, slot),
            STORAGE_KIT_DISPLAY_NAME_LEN);
@@ -16476,6 +16791,14 @@ bool filesystem_requestScanInstruments(fs_completion_cb_t cb)
                             cb);
 }
 
+/*
+ * Retired public File/Dir diagnostics.
+ *
+ * These request/accessor APIs are excluded with their backing caches. No
+ * musical menu reaches them after the File/Dir types were removed from the
+ * chooser, preventing a dangling public path from rebuilding diagnostic SRAM.
+ */
+#if 0
 bool filesystem_requestScanTestFiles(fs_completion_cb_t cb)
 {
     /*
@@ -16651,6 +16974,49 @@ const char *filesystem_testResultName(void)
     return op_test_child_name;
 }
 
+#endif
+
+/*
+ * Compatibility stubs for retired diagnostic callers.
+ *
+ * The menu no longer offers File/Dir diagnostics, so these return no work and
+ * retain no names, aliases, result bytes, or filesystem state. The symbols
+ * remain temporarily while upper layers are simplified, preventing a stale
+ * developer-only call site from becoming an implicit declaration or from
+ * reintroducing the former 6,240-byte lists.
+ */
+bool filesystem_requestScanTestFiles(fs_completion_cb_t cb)
+{
+    (void)cb;
+    return false;
+}
+
+bool filesystem_requestScanTestDirs(fs_completion_cb_t cb)
+{
+    (void)cb;
+    return false;
+}
+
+uint8_t filesystem_testFileCount(void) { return 0u; }
+uint8_t filesystem_testDirCount(void) { return 0u; }
+const char *filesystem_testFileName(uint8_t index) { (void)index; return ""; }
+const char *filesystem_testDirName(uint8_t index) { (void)index; return ""; }
+bool filesystem_requestLoadTestFile(const char *name, fs_completion_cb_t cb)
+{ (void)name; (void)cb; return false; }
+bool filesystem_requestLoadTestDir(const char *name, fs_completion_cb_t cb)
+{ (void)name; (void)cb; return false; }
+bool filesystem_requestSaveTestFile(const char *name, fs_completion_cb_t cb)
+{ (void)name; (void)cb; return false; }
+bool filesystem_requestSaveTestDir(const char *name, fs_completion_cb_t cb)
+{ (void)name; (void)cb; return false; }
+bool filesystem_requestSaveTestSimpleDir(const char *name, fs_completion_cb_t cb)
+{ (void)name; (void)cb; return false; }
+fs_test_result_kind_t filesystem_testResultKind(void)
+{ return FS_TEST_RESULT_BYTES_READY; }
+const uint8_t *filesystem_testResultBytes(void)
+{ static const uint8_t empty[FS_TEST_RESULT_BYTES] = { 0u }; return empty; }
+const char *filesystem_testResultName(void) { return ""; }
+
 bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,
                                       instrument_type_t type,
@@ -16674,6 +17040,18 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
         return false;
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_INSTRUMENT, FS_FILE_KIT, 0, cb))
         return false;
+    /*
+     * Copy the typed-index selection before Instrument staging reuses its union.
+     *
+     * Why: the stage reset occurs at loader phase 11 and invalidates every
+     * typed cache row, including browser_index. Inputs: validated type/index
+     * name. Output: existing save-name request scratch becomes the one stable
+     * filename/HCNAMES source for this load; it adds no SRAM allocation.
+     * Affiliates: filesystem_loadInstrument_tick() phases 0/11/13 and Menu's
+     * deferred Instrument HCNAMES flush.
+     */
+    storage_copyFilename(op_instrument_save_display_name,
+                         filesystem_cachedInstrumentName(type, browser_index));
     op_instrument_load_destination_slot = destination_slot;
     op_instrument_load_destination_scene = destination_scene;
     op_instrument_load_type = type;
@@ -16714,19 +17092,24 @@ static bool filesystem_requestSaveInstrumentMode(fs_internal_op_t op,
      * filesystem_requestSaveInstrumentMorph(), filesystem_saveInstrument_tick().
      */
     if (op != FS_INTERNAL_OP_SAVE_INSTRUMENT &&
-        op != FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH) {
+        op != FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH &&
+        op != FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP) {
         return false;
     }
     if (!instrument ||
         source_slot >= STORAGE_KIT_SLOT_COUNT ||
         instrument->type >= INSTRUMENT_TYPE_UNKNOWN)
         return false;
-    storage_makeSavedInstrumentDisplayFilename(display,
-                                               sizeof(display),
-                                               display_name,
-                                               instrument->type,
-                                               (uint8_t)(source_slot + 1u),
-                                               0u);
+    if (op == FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP) {
+        filesystem_makeInstrumentTemporaryFilename(display, instrument->type);
+    } else {
+        storage_makeSavedInstrumentDisplayFilename(display,
+                                                   sizeof(display),
+                                                   display_name,
+                                                   instrument->type,
+                                                   (uint8_t)(source_slot + 1u),
+                                                   0u);
+    }
     if (display[0] == '\0')
         return false;
     if (!filesystem_start(op, FS_FILE_KIT, 0u, cb))
@@ -16763,6 +17146,9 @@ static bool filesystem_requestSaveInstrumentMode(fs_internal_op_t op,
         (op == FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH)
             ? STORAGE_INSTRUMENT_SAVE_MORPH
             : STORAGE_INSTRUMENT_SAVE_NORMAL;
+    /* This flag is consumed by save phase 21 to suppress cache/name changes. */
+    op_instrument_save_temporary =
+        (uint8_t)(op == FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP);
     strncpy(op_instrument_save_display_name, display,
             sizeof(op_instrument_save_display_name) - 1u);
     op_instrument_save_display_name[
@@ -16793,6 +17179,50 @@ bool filesystem_requestSaveInstrument(uint8_t source_scene,
                                                 source_slot,
                                                 display_name,
                                                 cb);
+}
+
+bool filesystem_requestSaveInstrumentTemp(uint8_t source_scene,
+                                          uint8_t source_slot,
+                                          fs_completion_cb_t cb)
+{
+    /*
+     * Write one current voice as its hidden reversible Load source.
+     *
+     * Inputs: active Scene/voice and completion callback captured by Preset.
+     * Output: `Instrument/<type>/.hctmp.<ext>` is atomically rewritten through
+     * the normal Instrument serializer, but never enters `.hcindex` or
+     * HCNAMES. Affiliates: Menu's `kit` row and the matching temp-load API.
+     */
+    return filesystem_requestSaveInstrumentMode(
+        FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP, source_scene, source_slot, NULL, cb);
+}
+
+bool filesystem_requestLoadInstrumentTemp(uint8_t destination_scene,
+                                          uint8_t destination_slot,
+                                          instrument_type_t type,
+                                          fs_completion_cb_t cb)
+{
+    /*
+     * Load the hidden `kit` source without touching its display identity.
+     *
+     * Inputs: the same Scene/voice/type that created the temporary file.
+     * Output: the regular Instrument parser populates the one candidate stage;
+     * its normal completion applies parameters, while its temp flag suppresses
+     * HCNAMES publication. Affiliates: Menu lower-row decrement and save API.
+     */
+    if (!scene_indexValid(destination_scene) ||
+        destination_slot >= STORAGE_KIT_SLOT_COUNT ||
+        type >= INSTRUMENT_TYPE_UNKNOWN ||
+        !filesystem_start(FS_INTERNAL_OP_LOAD_INSTRUMENT, FS_FILE_KIT, 0u, cb))
+        return false;
+    filesystem_makeInstrumentTemporaryFilename(op_instrument_save_display_name,
+                                               type);
+    op_instrument_load_destination_scene = destination_scene;
+    op_instrument_load_destination_slot = destination_slot;
+    op_instrument_load_type = type;
+    op_instrument_load_index = 0u;
+    op_instrument_load_temporary = 1u;
+    return true;
 }
 
 bool filesystem_requestSaveInstrumentMorph(uint8_t source_scene,
@@ -16859,30 +17289,6 @@ const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void)
      * targets have been cleared.
      */
     return &op_staged_instrument;
-}
-
-const char *filesystem_loadedInstrumentDisplayName(void)
-{
-    /*
-     * Borrow the display stem paired with the staged Instrument image.
-     *
-     * Output is eight printable cache characters plus NUL. Preset copies this
-     * only when it commits the associated slot, so file identity and parameter
-     * identity cannot diverge on a failed or incomplete load.
-     */
-    return op_staged_instrument_display_name;
-}
-
-const char *filesystem_loadedInstrumentStem(void)
-{
-    /*
-     * Borrow the retained source stem paired with a staged Instrument image.
-     *
-     * Output remains valid until the next filesystem operation starts. Preset
-     * commits this only with the matching staged payload so Kit Save metadata
-     * cannot claim a filename for a slot that failed to load.
-     */
-    return op_staged_instrument_stem;
 }
 
 /* Query whether the active Kit name cache contains a numbered folder.
@@ -17182,10 +17588,37 @@ const char *filesystem_instrumentName(instrument_type_t type,
      * Return one cached Instrument/ display name.
      *
      * Inputs: instrument type and zero-based browser index. Output: an
-     * eight-character NUL-terminated stem, or "Empty   " for invalid/empty
-     * selections. The returned pointer is filesystem-owned cache storage.
+     * exact cached filename, or "Empty   " for invalid/empty selections. The
+     * returned pointer is filesystem-owned cache storage and may include an
+     * extension, so it is only suitable for filesystem key derivation.
      */
     return name ? name : "Empty   ";
+}
+
+void filesystem_copyInstrumentDisplayName(char destination[9],
+                                          instrument_type_t type,
+                                          uint16_t browser_index)
+{
+    const char *filename = filesystem_cachedInstrumentName(type, browser_index);
+
+    /*
+     * Derive a menu-safe Instrument stem from one cached filename.
+     *
+     * Inputs: type/index validated against the active typed `.hcindex` cache
+     * and a caller's nine-byte field. Output: padded eight-cell stem only;
+     * short names never leak `.snr`, `.drm`, or another extension into LCD or
+     * HCNAMES text. No cache row is copied or retained beyond destination.
+     * Affiliates: filesystem_copyInstrumentStemDisplay(), nested Menu Load,
+     * and preview finalization at a session boundary.
+     */
+    if (!destination)
+        return;
+    if (!filename) {
+        memset(destination, ' ', STORAGE_KIT_DISPLAY_NAME_LEN);
+        destination[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        return;
+    }
+    filesystem_copyInstrumentStemDisplay(destination, filename);
 }
 
 uint16_t filesystem_instrumentDisplayIndex(instrument_type_t type,

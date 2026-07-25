@@ -115,25 +115,26 @@ typedef enum {
 typedef void (*fs_completion_cb_t)(void);
 
 /*
- * Temporary boot diagnostic callback for the resident-name writer.
+ * Developer boot diagnostic callback for the dormant resident-name writer.
  *
  * phase identifies the live HCNAMES state: 0=root/open request, 1=open wait,
  * 2=row streaming, 3=close wait, 4=final media flush, 5=done, and 6=error.
  * row is the next fixed-order SRAM row to write (0..129). The callback is
  * observational only and must not start or acknowledge filesystem operations.
- * It exists to locate the current hardware boot freeze and should be removed
- * after the stalled phase has been confirmed.
+ * Production passes NULL. It remains available only for a developer build
+ * that explicitly invokes the dormant bootstrap writer.
  */
 typedef void (*fs_hcnames_diag_cb_t)(uint8_t phase, uint16_t row);
 
 /*
- * Temporary operation codes returned by filesystem_getBootDiagnostic().
+ * Developer operation codes returned by filesystem_getBootDiagnostic().
  *
  * Stage 11 can contain a Bank-name repair followed by Bank, Scene, or Kit
  * payload loading and a final flush. Stable public codes keep the OLED output
  * interpretable without exposing the private fs_internal_op_t enum itself.
  * FS_BOOT_DIAG_OTHER means the active operation is outside that expected boot
- * chain. Remove this diagnostic surface after the hardware stall is located.
+ * chain. Production main.c does not render these codes when CONFIG_DEV_MODE is
+ * zero.
  */
 typedef enum {
     FS_BOOT_DIAG_OTHER = 0u,
@@ -165,7 +166,7 @@ void        filesystem_initAfterCardReady(void);
  */
 uint8_t     filesystem_createBootIndexBlocking(void);
 /*
- * Write the first-pass resident name register to `/.hcnames`.
+ * Retained blocking bootstrap writer for the root `/.hcnames` register.
  *
  * Inputs: resident BankData/Kit data after the boot load/fallback chain.
  * Output: a root SD-card text file containing fixed-order newline-delimited
@@ -175,11 +176,18 @@ uint8_t     filesystem_createBootIndexBlocking(void);
  * not a scene_t field; successful root Scene and Bank operations subsequently
  * preserve/update them through the shared register cache. Rows with no loaded
  * object are blank. This is only a bootstrap writer, not a second name store.
+ *
+ * Current boot deliberately does not call this API: Scene names no longer
+ * exist in resident `scene_t`, and a post-load snapshot would therefore erase
+ * every unselected Scene block after a mask-selective Bank Load. Runtime
+ * root-Scene and Bank transactions instead read the existing 129-row register,
+ * overlay only their owned rows, and rewrite it. Affiliates: main.c's skipped
+ * HCNAMES boot stage and filesystem's targeted HCNAMES state machine.
  */
 uint8_t filesystem_writeResidentNamesBlocking(
     fs_hcnames_diag_cb_t diagnostic_cb);
 /*
- * Observe the active filesystem operation for the temporary boot-screen hook.
+ * Observe the active filesystem operation for the developer boot-screen hook.
  *
  * Outputs: op receives one fs_boot_diag_op_t code and phase receives the
  * operation's current private state-machine phase. NULL outputs are allowed.
@@ -187,14 +195,22 @@ uint8_t filesystem_writeResidentNamesBlocking(
  * Bank-repair finalization, phase 42 is root return, 43 is embedded-Kit
  * quarantine, and 44 is handoff to the Bank payload reader. Phase 43 releases
  * its top-level Bank-root handle immediately after opening the selected Bank,
- * preserving asyncfatfs' three-handle budget for selected Bank, Scene, and
- * embedded Kit during directory descent. After entering the Kit, its explicit
- * handle is also released because currentDirectory owns the copied Kit state;
- * the freed slot is then available for kitset.kcg and Instrument member files.
+ * preserving application slots for selected Bank, Scene, embedded Kit, and
+ * leaf files during directory descent. This lifetime rule remains mandatory
+ * with the current five-handle pool: after entering the Kit, its explicit
+ * handle is released because currentDirectory owns the copied Kit state, and
+ * the freed slot is available for kitset.kcg and Instrument member files.
+ * Increasing the pool fixed legitimate depth/cross-root concurrency but must
+ * not conceal leaked directory handles.
  */
 void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase);
-/* Register or clear the temporary phase-43 substep observer. Passing NULL
- * disables it. Registration changes no filesystem state or operation order. */
+/*
+ * Register or clear the phase-43 boot substep observer.
+ *
+ * Passing NULL disables it. Production main.c supplies NULL when
+ * CONFIG_DEV_MODE is zero; developer builds may use it to localize a blocking
+ * boot component without changing filesystem state or operation order.
+ */
 void filesystem_setBootSubstepDiagnostic(fs_boot_substep_diag_cb_t cb);
 /*
  * Repair host-created long or duplicate product names before index generation.
@@ -236,6 +252,10 @@ bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb
  * Inputs: direct Kit library slot 000..999, a bit per resident Scene, and completion
  * callback. Output: one asynchronous directory read whose staged payload is
  * copied into all selected Scene kits only after every instrument validates.
+ * The selected index row is copied into existing operation scratch before the
+ * separate typed stage begins, keeping the visible directory key stable for
+ * the request. The 9,000-byte index cache remains dedicated to names; typed
+ * staging is separate SRAM and does not alias the browser cache.
  * Clients: preset_loadKitForScenes() and boot through the same Preset API.
  * This cannot be folded into filesystem_requestLoad(): that generic request
  * has no scene-mask coordinate and must keep its historical active-Scene
@@ -286,7 +306,10 @@ bool filesystem_requestSaveSceneDirectory(uint16_t slot,
  *
  * Inputs: direct Kit library slot 000..999, resident Scene mask, and completion
  * callback. Output: one asynchronous directory read into filesystem-owned
- * staging with no live Scene replacement. Preset reads the staged kit after
+ * staging with no live Scene replacement. The selected index row is retained
+ * only in existing operation scratch before the separate typed stage begins;
+ * this keeps the morph source immutable and does not change resident HCNAMES
+ * identity. Preset reads the staged kit after
  * completion and copies only same-type morphable normal endpoints into the
  * currently loaded destination kit morph endpoints.
  */
@@ -297,10 +320,22 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
  * Load one numbered root Scene directory into every selected resident Scene.
  *
  * Inputs: direct root Scene library slot 000..999, destination Scene mask, and
- * completion callback. Output: asynchronous staged Scene load; resident Scene
- * memory changes only after sceneset.scg, one embedded Kit directory, one
- * pattern file, and one effect file validate. Scene Load is explicit-OK from
- * the UI, unlike Kit Load's instant-on-scroll behavior.
+ * completion callback. Output: asynchronous Scene load whose `sceneset.scg`
+ * and embedded Kit first validate in the independent non-Pattern stage. Those
+ * fields then commit to every selected Scene, their PatternSets are initialized,
+ * and the Pattern file is read directly into the first final Scene before being
+ * mirrored to the other selected destinations. The Effect placeholder
+ * validates afterward. Pattern/Effect failure can therefore leave the already
+ * committed settings/Kit and a partial/default Pattern; this is intentionally
+ * non-atomic until the Pattern redesign.
+ *
+ * Scene Load is explicit-OK from the UI, unlike Kit Load's instant-on-scroll
+ * behavior. Its selected index row is copied into existing operation scratch
+ * before separate Scene staging, providing the later directory opens and
+ * targeted HCNAMES source. The name cache remains independently available
+ * throughout validation. Affiliates: filesystem_commitSceneStage(),
+ * filesystem_directPatternTarget(), Preset Scene completion, and HCNAMES
+ * publication after overall success.
  */
 bool filesystem_requestLoadSceneForScenes(uint16_t slot,
                                           uint16_t scene_mask,
@@ -311,6 +346,11 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
  * Inputs: root Bank slot 000..999, resident destination Scene mask, and
  * completion callback. Output: asynchronous Bank validation and, when the Bank
  * contains a usable child, a staged Scene load from Bank/<NNN>/<SS Name>/.
+ * The Bank cache remains intact through the asynchronous name-repair preflight;
+ * the child Scene stage is initialized only after that preflight has consumed
+ * its selected row. The index cache and typed stage are separate SRAM, but
+ * this ordering still keeps the preflight key immutable and avoids starting a
+ * child-stage reset before Bank validation is complete.
  * Every selected Bank-local Scene is an independent directory payload: its
  * embedded `Kit <name>` directory and its pattern/effect files are discovered
  * afresh before that child is read. This matters when a full Bank contains
@@ -365,6 +405,40 @@ bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanBanks(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
+/*
+ * Operation-scoped authoritative identity rows.
+ *
+ * What: exposes logical Bank/Scene/Kit/six-Instrument identity rows shared by
+ * Menu and filesystem completion code. The physical 81-byte total is BankData's
+ * sole 9-byte Bank name plus this module's 72-byte Scene/Kit/Instrument block.
+ * Why: resident Scene payloads deliberately contain no display names or
+ * filename stems, while `.hcindex` owns its dedicated 9,000-byte name cache.
+ *
+ * Inputs: row 0..8 and a fixed-width eight-cell name. Outputs: Bank row zero
+ * aliases BankData; other copied rows remain valid until session invalidation.
+ * Affiliates: HCNAMES read/update, BankData, Kit/Instrument/Scene menus, and
+ * derived filename formatting.
+ */
+enum {
+    FS_IDENTITY_BANK_ROW = 0u,
+    FS_IDENTITY_SCENE_ROW,
+    FS_IDENTITY_KIT_ROW,
+    FS_IDENTITY_INSTRUMENT_ROW_0,
+    FS_IDENTITY_ROW_COUNT = FS_IDENTITY_INSTRUMENT_ROW_0 + 6u,
+};
+void filesystem_setIdentityName(uint8_t row, const char name[8]);
+const char *filesystem_identityName(uint8_t row);
+/*
+ * Borrow one mutable identity row for the Menu character editor.
+ *
+ * Inputs: a valid 0..8 identity row. Output: the sole stored row, marked valid
+ * before return, or NULL for an invalid selector. Why: character editing must
+ * modify the authoritative operation copy directly instead of allocating a
+ * second nine-byte edit buffer. Affiliates: menu_instrumentSaveName and the
+ * deferred HCNAMES update at menu exit.
+ */
+char *filesystem_identityNameMutable(uint8_t row);
+void filesystem_clearIdentityNames(void);
 /*
  * Resident Instrument name-register access.
  *
@@ -477,43 +551,24 @@ void filesystem_clearNameCache(void);
 /* Compatibility spelling retained for existing Instrument menu callers. */
 void filesystem_clearInstrumentCache(void);
 /*
- * Generic asyncfatfs File/Dir test browser and payload API.
+ * Retired File/Dir diagnostic compatibility API.
  *
- * These calls are the only load/save surface expected to work during the
- * asyncfatfs expansion. Inputs are exact single-component display names with
- * preserved case, never slash-separated paths. File operations and Dir scan/load
- * still use the root; Save:[Dir] creates its directory under /Kit/. Outputs are
- * filesystem-owned scan caches and a four-byte result record used by Menu's
- * two-second test display. Affiliates: asyncfatfs LFN object iterator/open/create
- * APIs and presetManager's PRESET_OP_TEST_* completion wrappers.
+ * Inputs are accepted only to keep stale developer-only callers buildable.
+ * Outputs are empty/false and no filesystem transaction or SRAM cache is
+ * created. Affiliates: matching presetManager compatibility stubs; musical
+ * Load/Save code must use its Kit/Scene/Bank/Instrument requests instead.
  */
 bool filesystem_requestScanTestFiles(fs_completion_cb_t cb);
 bool filesystem_requestScanTestDirs(fs_completion_cb_t cb);
-/*
- * Generic asyncfatfs File/Dir diagnostic browser accessors.
- *
- * These temporary test menus list concrete root objects exactly as asyncfatfs
- * reports them after structural FAT filtering: VFAT fragments, deleted
- * entries, volume labels, and structural dot entries are hidden, but ordinary
- * names beginning with '.' remain selectable because they are valid files or
- * directories. Inputs: root scan requests and selected display names. Outputs:
- * case-preserved display names, four read/write test bytes, or a child
- * directory display name.
- */
 uint8_t filesystem_testFileCount(void);
 uint8_t filesystem_testDirCount(void);
 const char *filesystem_testFileName(uint8_t index);
 const char *filesystem_testDirName(uint8_t index);
-bool filesystem_requestLoadTestFile(const char *display_name,
-                                    fs_completion_cb_t cb);
-bool filesystem_requestLoadTestDir(const char *display_name,
-                                   fs_completion_cb_t cb);
-bool filesystem_requestSaveTestFile(const char *display_name,
-                                    fs_completion_cb_t cb);
-bool filesystem_requestSaveTestDir(const char *display_name,
-                                   fs_completion_cb_t cb);
-bool filesystem_requestSaveTestSimpleDir(const char *display_name,
-                                         fs_completion_cb_t cb);
+bool filesystem_requestLoadTestFile(const char *display_name, fs_completion_cb_t cb);
+bool filesystem_requestLoadTestDir(const char *display_name, fs_completion_cb_t cb);
+bool filesystem_requestSaveTestFile(const char *display_name, fs_completion_cb_t cb);
+bool filesystem_requestSaveTestDir(const char *display_name, fs_completion_cb_t cb);
+bool filesystem_requestSaveTestSimpleDir(const char *display_name, fs_completion_cb_t cb);
 fs_test_result_kind_t filesystem_testResultKind(void);
 const uint8_t *filesystem_testResultBytes(void);
 const char *filesystem_testResultName(void);
@@ -525,7 +580,17 @@ const char *filesystem_testResultName(void);
  * filesystem-owned staging; live SceneData and DSP state are unchanged until
  * Preset commits the validated payload. Client: preset_loadInstrument(). The
  * explicit Scene/slot coordinates remain immutable completion context even
- * though parsing itself is off-scene.
+ * though parsing itself is off-scene. Before the independent typed staging
+ * union is reset, the selected filename is copied from the shared `.hcindex`
+ * cache into existing operation scratch; that one request-stable key supplies
+ * the later open and HCNAMES update without another name cache or retained
+ * file-key allocation.
+ *
+ * Why the copy remains necessary even though cache and staging no longer
+ * alias: later phases may rescan or repurpose the one general-purpose name
+ * cache, while asyncfatfs still needs an immutable filename for this request.
+ * Affiliates: preset_loadInstrument(), filesystem_stagedInstrument(), and the
+ * Instrument Load completion path in Core/Menu/menu.c.
  */
 bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,
@@ -577,22 +642,29 @@ const kit_t *filesystem_loadedKit(void);
  * Read the most recently validated staged Instrument payload.
  *
  * Inputs: none; valid use begins after an FS_STATUS_DONE Instrument callback.
- * Outputs: a filesystem-owned immutable slot image and eight-character display
- * name that remain valid until the next filesystem operation starts. Clients:
- * Preset's Instrument transaction copies them only after clearing outgoing DSP
- * owners. These accessors cannot commit SceneData themselves because storage
- * must not choose audio lifecycle order or reset runtime instances.
+ * Outputs: a filesystem-owned immutable slot image that remains valid until
+ * the next filesystem operation starts. The HCNAMES identity is published
+ * separately through the one operation identity block; this accessor cannot
+ * commit SceneData because storage must not choose DSP lifecycle order.
  */
 const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
-const char *filesystem_loadedInstrumentDisplayName(void);
 /*
- * Read the staged Instrument source stem captured during root Instrument load.
+ * Save/load the reversible normal Instrument Load `kit` source.
  *
- * Output is the first retained filename-stem characters from the selected
- * Instrument/ entry. Preset copies it into SceneData only after the staged
- * Instrument commit succeeds, keeping save metadata paired with the payload.
+ * Inputs: one Scene/voice and its typed family. Output: the normal Instrument
+ * serializer/parser writes or reads the hidden `.hctmp.<ext>` inside that
+ * family directory. The temporary operation never updates HCNAMES or the
+ * typed `.hcindex`; Menu owns the one nine-byte original label and invalidates
+ * it on voice/type/mode/exit boundaries. Affiliates: presetManager wrappers,
+ * Menu's direct `kit` row, and filesystem_recordInstrumentFile() exclusion.
  */
-const char *filesystem_loadedInstrumentStem(void);
+bool filesystem_requestSaveInstrumentTemp(uint8_t source_scene,
+                                          uint8_t source_slot,
+                                          fs_completion_cb_t cb);
+bool filesystem_requestLoadInstrumentTemp(uint8_t destination_scene,
+                                          uint8_t destination_slot,
+                                          instrument_type_t type,
+                                          fs_completion_cb_t cb);
 uint8_t filesystem_installSamplesBlocking(void);
 uint8_t filesystem_installLoopsBlocking(void);
 
@@ -678,9 +750,29 @@ uint8_t     filesystem_instrumentTargetExists(instrument_type_t type,
  * retain names or create a second type-specific array.
  */
 uint16_t    filesystem_instrumentCount(instrument_type_t type);
-/* Return the eight-character name at a zero-based shared-cache row 0..999. */
+/*
+ * Return the raw Instrument filename at a zero-based shared-cache row 0..999.
+ *
+ * Input: type/index in the active typed `.hcindex` cache. Output: an exact
+ * filesystem filename used only to derive an open key; callers must not put it
+ * directly in an eight-cell LCD/name field because a short stem would expose
+ * `.ext`.  Use filesystem_copyInstrumentDisplayName() for UI/HCNAMES text.
+ * Affiliates: filesystem_requestLoadInstrument() and Menu pool rendering.
+ */
 const char *filesystem_instrumentName(instrument_type_t type,
                                       uint16_t browser_index);
+/*
+ * Copy the UI/HCNAMES-safe eight-cell stem for one cached Instrument row.
+ *
+ * Inputs: active type/index and caller-owned nine-byte destination. Output:
+ * the filename stem padded and NUL-terminated, never its extension. This
+ * derives presentation text from the one `.hcindex` cache row and stores no
+ * additional filename/key. Affiliates: nested Instrument Load display and
+ * preview finalization before the existing HCNAMES exit-time write.
+ */
+void filesystem_copyInstrumentDisplayName(char destination[9],
+                                          instrument_type_t type,
+                                          uint16_t browser_index);
 /* Return the one-based LCD position for a shared-cache row; LCD output caps at 999. */
 uint16_t    filesystem_instrumentDisplayIndex(instrument_type_t type,
                                                uint16_t browser_index);

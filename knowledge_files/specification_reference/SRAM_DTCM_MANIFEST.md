@@ -7,10 +7,11 @@ used as evidence.
 
 ## Evidence and scope
 
-The image was rebuilt with:
+The current Session 042 image was rebuilt and packaged with:
 
 ```text
-make clean && make -j2 && make img
+make -j1
+make img
 ```
 
 The measurements below come from:
@@ -28,9 +29,9 @@ The measurements below come from:
 sizeof(Step)                 0x000c = 12 B
 sizeof(PatternSet)           0x2a2c = 10,796 B
 sizeof(kit_instrument_slot_t) 0x00c1 = 193 B
-sizeof(kit_t)                0x052d = 1,325 B
+sizeof(kit_t)                0x0488 = 1,160 B
 sizeof(scene_settings_t)     0x0028 = 40 B
-sizeof(scene_t)              0x2f8c = 12,172 B
+sizeof(scene_t)              0x2edc = 11,996 B
 sizeof(SampleInfo)           0x000c = 12 B
 sizeof(Parameter)            0x0008 = 8 B
 ```
@@ -59,23 +60,23 @@ the separate upper 16 KiB region as SRAM1.
 |---|---:|---:|---|---|
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | Two audio/DMA buffers plus ADC DMA state; MPU non-cacheable window |
 | `.data` | `0x20020c1c` | 408 B | SRAM1 | Initialized writable objects |
-| `.bss` | `0x20020db8` | 272,932 B | SRAM1 | Zero-initialized writable objects |
+| `.bss` | `0x20020db8` | 249,552 B | SRAM1 | Zero-initialized writable objects |
 | `.dtcm` | `0x20000000` | 35,168 B | DTCM | Initialized DSP tables/data copied from Flash at boot |
 | `.dtcmz` | `0x20008960` | 6,716 B | DTCM | Zero-initialized DSP runtime data |
 
 Current static allocation is:
 
 ```text
-SRAM1 = 3,100 + 408 + 272,932 = 276,440 B
+SRAM1 = 3,100 + 408 + 249,552 = 253,060 B
 DTCM  = 35,168 + 6,716       = 41,884 B
 ```
 
-That leaves 100,392 bytes of unallocated SRAM1 capacity and 89,188 bytes of
+That leaves 123,772 bytes of unallocated SRAM1 capacity and 89,188 bytes of
 unallocated DTCM capacity. These are static-link figures; stack consumption,
 interrupt nesting, and compiler-generated automatic variables are runtime
 usage and are not included in the section totals.
 
-The ordinary three-column `size` summary reports `bss = 282,748` because it
+The ordinary three-column `size` summary reports `bss = 259,368` because it
 aggregates no-load data from multiple physical sections. The section report
 above is the authoritative SRAM1/DTCM split.
 
@@ -153,10 +154,12 @@ will remove this model completely and replace it with the dynamic Pattern
 implementation; this manifest must not be used as a design endorsement of the
 current 172,736-byte Pattern allocation.
 
-The filesystem also has `op_staged_scene`, a second complete `scene_t` used
-while a Scene load is validated before committing it to resident memory. This
-adds 12,172 B temporarily, including another 10,796-byte PatternSet. It is not
-a seventeenth resident Scene.
+Scene Load does not allocate a second complete `scene_t`. The filesystem's
+2,048-byte aligned staging union holds only `scene_settings_t` plus `kit_t`;
+after those non-Pattern fields validate and commit, the Pattern reader writes
+directly into the final resident Scene slot. Pattern rollback is intentionally
+deferred to the later Pattern-data redesign, so no staged PatternSet and no
+seventeenth Scene image exists in current SRAM.
 
 There is no separate pattern array in SRAM for each Sequencer pattern number.
 The current source routes pattern storage through Scene/PatternData. Remaining
@@ -173,16 +176,14 @@ still contains the full 12-byte Steps.
 
 ### One resident Scene
 
-The current `scene_t` is 12,172 bytes:
+The current `scene_t` is 11,996 bytes:
 
 | Member | Size | Meaning |
 |---|---:|---|
-| `scene.display_name` | 9 B | Eight display characters plus NUL |
 | `scene.settings` | 40 B | Scene performance, mix, and MIDI settings |
 | `scene.pattern` | 10,796 B | One current PatternSet |
-| `scene.kit` | 1,325 B | One embedded six-slot Kit |
-| alignment | 2 B | Struct alignment around the 16-bit-aligned PatternSet |
-| **one `scene_t`** | **12,172 B** | |
+| `scene.kit` | 1,160 B | One embedded six-slot Kit |
+| **one `scene_t`** | **11,996 B** | No resident display-name field |
 
 `scene_settings_t` stores these bytes:
 
@@ -199,16 +200,13 @@ Total: 40 bytes per resident Scene.
 
 ### One embedded Kit
 
-The current `kit_t` is 1,325 bytes:
+The current `kit_t` is 1,160 bytes:
 
 | Member | Size | Meaning |
 |---|---:|---|
 | `kit.settings` | 2 B | Two generated slot-6/track-7 decay endpoint values |
 | `kit.instruments[6]` | 1,158 B | Six slots at 193 B each |
-| `kit.display_name` | 9 B | Kit display name plus NUL |
-| `kit.instrument_display_name[6][9]` | 54 B | Six retained eight-character source names plus NUL |
-| `kit.instrument_stem[6][17]` | 102 B | Six retained 16-character source stems plus NUL |
-| **one `kit_t`** | **1,325 B** | |
+| **one `kit_t`** | **1,160 B** | No display names or file stems |
 
 One `kit_instrument_slot_t` is 193 bytes:
 
@@ -227,8 +225,8 @@ The 16 resident Scenes occupy:
 
 | Resident object | Device-wide size |
 |---|---:|
-| `scenes[16]` complete records | **194,752 B** |
-| embedded Kits, already included above | 21,200 B |
+| `scenes[16]` complete records | **191,936 B** |
+| embedded Kits, already included above | 18,560 B |
 | normal instrument endpoint images, already included | 6,144 B |
 | Morph endpoint images, already included | 6,144 B |
 | runtime interpolation images, already included | 6,144 B |
@@ -236,11 +234,11 @@ The 16 resident Scenes occupy:
 | PatternSets, already included | 172,736 B |
 
 The rows below the first are ownership breakdowns, not additional allocations.
-They must not be added to 194,752 B again.
+They must not be added to 191,936 B again.
 
 A Bank does not allocate another resident 16-Scene array. Bank-local Scene
 payloads are loaded through the same resident Scene workspace and the one
-`op_staged_scene` load buffer.
+2,048-byte non-Pattern stage. There is no full staged `scene_t`.
 
 ## Parameter inventory
 
@@ -276,8 +274,10 @@ These are stored separately from the generic `parameter_values` bridge:
 | Scene | Seven MIDI channels and seven MIDI notes | 14 B |
 | Scene | Pattern fields | 10,796 B |
 
-The 40-byte Scene settings total is 7 + 1 + 18 + 14. The 1,152-byte Kit
-parameter-image total is contained inside the 1,325-byte Kit.
+The 40-byte Scene settings total is 7 + 1 + 18 + 14. The 768 endpoint-image
+bytes are contained inside the current 1,160-byte Kit; the separate 384-byte
+runtime interpolation image belongs to the resident Scene and is not part of a
+serialized/staged Kit.
 
 ### Legacy `ParameterArray` objects
 
@@ -422,33 +422,41 @@ name buffers. It does not count constant UI label tables in Flash.
 
 | Owner | Field | Size |
 |---|---|---:|
-| One Scene | `scene.display_name` | 9 B |
-| One embedded Kit | `kit.display_name` | 9 B |
-| One embedded Kit | `instrument_display_name[6][9]` | 54 B |
-| One embedded Kit | `instrument_stem[6][17]` | 102 B |
-| **Names inside one `scene_t`** | above four fields | **174 B** |
-| **16 resident Scenes** | above four fields | **2,784 B** |
+| Sixteen `scene_t` / embedded `kit_t` records | no display names or file stems | 0 B |
 | Bank workspace | `bank_display_name` | 9 B |
+| Filesystem identity block | `fs_identity_name[8][9]` | 72 B |
+| **Active musical identity** | Bank + Scene + Kit + six Instruments | **81 B** |
+| Instrument Load temporary label | `menu_instrumentTempName[9]` | 9 B |
 | Save editor | `preset_currentName` | 8 B |
 
-Additional linked UI/error text storage is separate from resident object names:
+The Bank identity is not duplicated in `fs_identity_name`; logical row zero
+aliases BankData. The temporary label exists only while `.hctmp.<ext>` is a
+valid reversible Instrument Load source. `preset_currentName` is an eight-byte
+character-editor transaction field, not a retained resident identity row.
+
+Additional linked UI/error/retired-diagnostic text is separate from resident
+object names:
 
 | Owner | Field | Size | Role |
 |---|---|---:|---|
 | Filesystem | `fs_error_code` | 9 B | Current filesystem error display |
-| Menu | `menu_testEditName` | 49 B | Diagnostic test-name editor |
-| Menu | `menu_testResultName` | 49 B | Diagnostic result name |
-| Menu | `menu_instrumentSaveName` | 9 B | Instrument Save editor |
+| Filesystem | `loaded_name` | 9 B | Legacy asynchronous name-load result |
+| Menu | `menu_testEditName` | 49 B | Retained unreachable File/Dir compatibility editor |
+| Menu | `menu_testResultName` | 49 B | Retained unreachable File/Dir compatibility result |
+| Menu | File/Dir result bytes/timer/kind/flags | 9 B | Four result bytes, 16-bit timer, and three one-byte fields |
 | Menu | `currentDisplayBuffer[2][16]` | 32 B | LCD text buffer |
 | Menu | `editDisplayBuffer[2][17]` | 34 B | LCD edit/display buffer |
 
-`op_staged_scene` contains another 174 bytes of resident-style names and
-`op_staged_kit` contains 165 bytes of Kit/instrument names. Those bytes are
-already part of the linked 12,172-byte and 1,325-byte staging symbols,
-respectively; they must not be added a second time.
+`menu_instrumentSaveName` is now a macro borrowing the appropriate mutable
+filesystem identity row and allocates no storage. There is no `op_staged_scene`
+or separate `op_staged_kit` symbol; typed views alias the 2,048-byte
+`fs_stage_workspace`, whose structs contain no resident names.
 
-The 174 bytes per resident Scene are already included in the 12,172-byte
-`scene_t`. The 2,784-byte 16-Scene total is already included in `scenes`.
+The two 49-byte File/Dir Menu strings and nine bytes of result scalars total
+107 linked bytes. They remain even though the type cycler no longer exposes
+those operations and the filesystem/Preset compatibility APIs perform no work.
+They are not multi-entry caches, but they are residual diagnostic UI storage
+and should not be described as removed.
 
 ### The one shared browser/list cache
 
@@ -463,9 +471,9 @@ fs_list_cache_count         = 2 B
 
 Total current linked allocation for this cache and its control fields is 9,004
 bytes. Instrument, Kit, root Scene, and root Bank operations reuse this same
-array. Kit/Scene/Bank rows are direct slot rows; Instrument rows are sorted
-rows. The cache is disposed when the active domain changes, so there is no
-per-instrument or per-library duplicate.
+array. HCNAMES temporarily uses its first 129 rows. Kit/Scene/Bank rows are
+direct slot rows; Instrument rows are sorted rows. The cache domain changes as
+needed, so there is no per-instrument or per-library duplicate.
 
 Session 042 removed the legacy KitBrowser slot-number map. The fresh ELF no
 longer contains `kb_map[1000]`, `kb_numKits`, or the bridge flags; Kit
@@ -486,23 +494,22 @@ below include the terminating byte where the declaration does.
 | `op_root_open_name`, `op_scene_root_open_name` | 26 B | One short FAT alias each |
 | `op_lfn_name` | 80 B | One LFN accumulator |
 | `op_line_buf`, `op_write_line_buf` | 320 B | Streamed text lines |
-| Kit Save display + six member filenames + aliases | 49 + 294 + 13 = 356 B | One in-flight Kit Save |
+| `op_filename_component` | 49 B | One derived Kit/Scene member leaf |
+| `op_kitset` | 312 B | One active manifest, including six parsed LFN `file=` components |
+| Kit Save directory display + alias | 49 + 13 = 62 B | One in-flight Kit Save parent |
 | embedded Scene Kit display + alias | 49 + 13 = 62 B | One Scene payload operation |
-| delete-tree name stacks and child names | 558 B | Fallback recursive delete walker |
 | Scene display, child display, and three aliases | 9 + 9 + 39 = 57 B | One Scene load/save operation |
 | Bank display, save names, aliases | 9 + 147 + 26 = 182 B | One Bank save/load operation |
-| Bank-local child names and aliases | 144 + 208 = 352 B | Up to 16 child Scenes in selected Bank |
 | Instrument Save display + alias | 49 + 13 = 62 B | One Instrument Save |
-| staged Instrument display + stem | 9 + 17 = 26 B | One Instrument Load |
-| `fs_test_file_name[64][49]` | 3,136 B | Diagnostic root-file list cache |
-| `fs_test_dir_name[64][49]` | 3,136 B | Diagnostic root-directory list cache |
-| test operation names and aliases | 49 + 49 + 13 + 13 = 124 B | Diagnostic operation scratch |
+| Repair old/new/base + returned alias | 49 + 49 + 9 + 13 = 120 B | One canonical rename candidate |
+| File/Dir list caches | 0 B | Retired; compatibility calls return no data |
+| Firmware delete name/alias stacks | 0 B | Retired; native asyncfatfs owns tree traversal |
 
-The linked ELF confirms the largest of these directly: `fs_test_file_name` and
-`fs_test_dir_name` are each 3,136 bytes, and the shared name array is 9,000
-bytes. Automatic local arrays used while parsing one line or one directory are
-stack usage, not static SRAM symbols, and are not silently added to the above
-static objects.
+The `op_kitset` filename cells are request-local schema data, not resident file
+keys: they disappear semantically when the active Kit/Scene parse ends and are
+never copied into `scene_t`. Bank child name/alias arrays, File/Dir 64-entry
+lists, and the 558-byte firmware delete walker no longer appear in the ELF.
+Automatic local arrays remain stack usage and are not included in static SRAM.
 
 ## Slider LUT
 
@@ -538,17 +545,15 @@ largest and semantically important allocations within it:
 
 | Linked object | Size | SRAM1 role |
 |---|---:|---|
-| `scenes[16]` | 194,752 B | Sixteen complete resident Scene records |
+| `scenes[16]` | 191,936 B | Sixteen complete resident Scene records |
 | `slider_lut` | 16,384 B | Full 12-bit slider transfer LUT |
-| `op_staged_scene` | 12,172 B | One temporary Scene payload |
 | `fs_list_cache_name` | 9,000 B | One shared 1,000-row name cache |
-| `afatfs` | 6,688 B | Async FAT filesystem state |
-| `fs_test_file_name` + `fs_test_dir_name` | 6,272 B | Diagnostic file/dir list caches |
+| `afatfs` | 7,344 B | Async FAT filesystem state, including five 328-byte file handles |
+| `fs_stage_workspace` | 2,048 B | Aligned non-Pattern Kit/Instrument/Scene payload stage |
 | `usb_MidiMessages` | 2,048 B | USB MIDI message storage |
 | runtime instrument groups | 10,044 B | Drum, Snare, Cymbal, and HiHat runtime state |
 | sample runtime caches | 2,645 B | Sample info/name/loop/count/generation |
 | `USB_OTG_dev` | 1,524 B | USB runtime state |
-| `op_staged_kit` | 1,325 B | One temporary Kit payload |
 | `parameter_values` | 384 B | Legacy generic parameter byte bridge |
 | `staging_buf` | 512 B | Filesystem stream staging |
 
@@ -610,6 +615,10 @@ generic parameter arrays are all in SRAM1. They do not consume DTCM.
 - Halving `slider_lut` frees 8,192 bytes and reduces software transfer-curve
   granularity, with possible stair-stepping and deadzone-mapping changes. It
   does not change ADC hardware resolution or DTCM use.
-- There is one 9,000-byte general name cache. The former 2,000-byte
-  KitBrowser slot map is removed. Resident names, sample names, diagnostics,
-  and one-operation aliases are listed separately above.
+- There is one 9,000-byte general name cache, one independent 2,048-byte
+  non-Pattern payload stage, and exactly 81 bytes of resident musical identity.
+  The former 2,000-byte KitBrowser slot map and both 64-entry diagnostic list
+  caches are removed. The nine-byte temporary Instrument Load label, two
+  residual 49-byte unreachable diagnostic UI strings plus nine result bytes,
+  sample names, and one-operation aliases are listed separately above rather
+  than hidden in those contractual totals.

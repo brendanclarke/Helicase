@@ -368,18 +368,24 @@ uint8_t storage_instrumentFilenameMatchesType(const char *filename,
 /*
  * Initialize, parse, and finalize sceneset.scg.
  *
- * Inputs: parser state, one text line at a time, optional target Scene, and a
- * legacy fixed display-name buffer retained for call-site compatibility.
- * Outputs: required guard bits plus retained Scene settings. The parser never
- * stores a Scene name from file contents; missing optional settings leave the
- * caller's defaults in place, so filesystem should initialize the staged Scene
- * before parsing.
+ * Inputs: parser state, one text line at a time, optional `scene_settings_t`
+ * target, and a legacy fixed display-name buffer retained for call-site
+ * compatibility. Outputs: required guard bits plus retained Scene settings.
+ *
+ * Why the target is settings-only: Pattern data is deliberately direct-loaded
+ * after the general Scene/Kit stage commits, and names are authoritative in
+ * `/.hcnames`; accepting scene_t would imply a full Scene staging image and
+ * reintroduce a Pattern-sized SRAM allocation.
+ *
+ * Affiliates: filesystem_shared_workspace_t.scene_stage, Scene Load phases,
+ * and the later Pattern-data redesign. Missing optional settings leave caller
+ * defaults in place, so filesystem initializes the non-Pattern stage first.
  */
 void storage_scenesetInit(storage_sceneset_t *state);
 storage_status_t storage_scenesetParseLine(
     storage_sceneset_t *state,
     const char *line,
-    scene_t *target_scene,
+    scene_settings_t *target_settings,
     char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
 storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state);
 

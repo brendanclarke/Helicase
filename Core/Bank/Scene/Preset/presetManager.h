@@ -57,6 +57,8 @@ typedef enum {
     PRESET_OP_PERFORMANCE_SAVE,
     PRESET_OP_INSTRUMENT_LOAD,
     PRESET_OP_INSTRUMENT_SAVE,
+    /* Hidden `.hctmp.<ext>` save that prepares Menu's reversible `kit` row. */
+    PRESET_OP_INSTRUMENT_TEMP_SAVE,
     PRESET_OP_KIT_SAVE,
     PRESET_OP_KIT_MORPH_LOAD,
     PRESET_OP_KIT_MORPH_SAVE,
@@ -226,6 +228,29 @@ uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
                                        instrument_type_t type,
                                        uint16_t browser_index);
 /*
+ * Start the hidden reversible `kit` save/load operations for Instrument Load.
+ *
+ * Inputs: Menu's selected Scene, voice, and registry type. Save writes that
+ * resident voice to `Instrument/<type>/.hctmp.<ext>`; load parses the same
+ * exact hidden filename into the ordinary one-Instrument staging view and
+ * commits through the normal bounded runtime apply path. Outputs are ordinary
+ * asynchronous acceptance/completion; neither operation changes HCNAMES nor
+ * `.hcindex`.
+ *
+ * Why this API exists: the reversible `kit` row must survive arbitrary pool
+ * previews without retaining a second Instrument image in SRAM. Affiliates:
+ * filesystem_requestSaveInstrumentTemp(),
+ * filesystem_requestLoadInstrumentTemp(), and Core/Menu/menu.c's single
+ * nine-byte `menu_instrumentTempName` session label. Menu invalidates the
+ * label on Scene/voice/type/mode/nested-exit boundaries; the dirty hidden file
+ * may remain on SD and is deliberately excluded from scans, repair, and index
+ * generation.
+ */
+uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot);
+uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
+                                  uint8_t destination_slot,
+                                  instrument_type_t type);
+/*
  * Save one resident kit voice into the root Instrument/ pool.
  *
  * Inputs: source Scene, zero-based kit voice slot, and the visible stem from
@@ -260,12 +285,12 @@ uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
                                    instrument_type_t type,
                                    uint16_t browser_index);
 /*
- * Generic File/Dir asyncfatfs expansion test requests.
+ * Retired File/Dir diagnostic compatibility requests.
  *
- * These operations deliberately bypass musical preset state. Inputs are exact
- * root-level display names from the temporary Load/Save menus. Outputs are only
- * Preset completion events; Menu reads scan caches and four-byte/Dir results
- * from filesystem.h after PRESET_OP_TEST_* completes.
+ * Inputs are ignored and output is always zero: the Menu no longer lists these
+ * types, and these declarations prevent stale developer-only code from
+ * rebuilding the removed filesystem diagnostic cache. Affiliates: matching
+ * zero-work filesystem compatibility APIs in filesystem.h/.c.
  */
 uint8_t preset_scanTestFiles(void);
 uint8_t preset_scanTestDirs(void);
@@ -274,7 +299,6 @@ uint8_t preset_loadTestDir(const char *display_name);
 uint8_t preset_saveTestFile(const char *display_name);
 uint8_t preset_saveTestDir(const char *display_name);
 uint8_t preset_saveTestSimpleDir(const char *display_name);
-
 /* Send loaded parameters to DSP synchronously. Use this before audio starts;
 ** runtime load completion should use the chunked apply API below so it cannot
 ** monopolize one foreground pass. */

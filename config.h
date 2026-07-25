@@ -51,24 +51,21 @@
 #define USE_SD_CARD          1
 #define DEBUG_CRASH_MODE     0
 /*
- * CONFIG_DEV_MODE exposes low-level storage diagnostics in the production UI.
+ * CONFIG_DEV_MODE enables boot-only storage observers for developer firmware.
  *
- * What: when nonzero, the Load/Save type cycle includes the asyncfatfs test
- * entries "File", "Dir", and Save-only "sDir", and main.c compiles the
- * boot-stage/operation/substep/HCNAMES OLED observers used during storage
- * diagnosis. Why: ordinary firmware should neither expose test objects nor
- * replace the splash with durable boot coordinates, while one flag must restore
- * the complete front-panel diagnostic surface for hardware investigation.
- * Clients: Core/Menu/menu.c gates menu reachability; main.c compiles boot-screen
- * callbacks and display drains only in development mode. Filesystem test and
- * read-only observer functions remain callable so this flag changes visibility,
- * not storage behavior or on-card format.
- */
-/*
- * Returned to production mode after the diagnostic image completed boot on
- * hardware. The observers remain available for a future reproducible stall,
- * but ordinary firmware again keeps their LCD drains and diagnostic menu
- * entries compiled out.
+ * What: value 0 compiles out main.c's pre-operation boot marker and live
+ * filesystem operation/phase/substep observers. Why: the removed Instrument
+ * Load diagnostic frame replaced the normal menu surface and made scrolling
+ * untestable. File/Dir/sDir and their 64-entry caches are retired regardless
+ * of this flag; setting it to 1 must not restore those menu types or allocate
+ * their storage. Input: this compile-time flag is consumed by main.c. Output:
+ * filesystem sequencing, SRAM allocation, musical menu reachability, and
+ * SD-card contents remain unchanged while boot diagnostic OLED frames become
+ * available. Affiliates:
+ * boot_showFilesystemStage(), boot_showActiveFilesystemDiagnostic(),
+ * boot_showFilesystemSubstep(), filesystem_getBootDiagnostic(), and
+ * filesystem_setBootSubstepDiagnostic(). Set to 1 only for a diagnostic that
+ * preserves the UI under test.
  */
 #define CONFIG_DEV_MODE      0
 

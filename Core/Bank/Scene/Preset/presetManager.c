@@ -325,6 +325,19 @@ static void on_instrument_save_complete(void)
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_SAVE);
 }
 
+static void on_instrument_temp_save_complete(void)
+{
+    /*
+     * Report completion of the hidden normal Instrument Load source write.
+     *
+     * Input: filesystem has closed `.hctmp.<ext>` in one type directory.
+     * Output: Menu may now load that type's `.hcindex` and permit the `kit`
+     * row. No Scene/DSP/HCNAMES work occurs here. Affiliates: Menu entry
+     * sequencing and filesystem_requestSaveInstrumentTemp().
+     */
+    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_TEMP_SAVE);
+}
+
 static void on_instrument_morph_save_complete(void)
 {
     /*
@@ -416,6 +429,14 @@ static void on_performance_save_complete(void)
     preset_completeFilesystemOp(PRESET_OP_PERFORMANCE_SAVE);
 }
 
+/*
+ * Retired generic File/Dir diagnostics.
+ *
+ * Their menu types and filesystem caches were removed to keep SRAM within the
+ * musical-name contract. Keep the old completion adapters out of the build so
+ * no Preset path can issue a request for the retired diagnostic API.
+ */
+#if 0
 static void on_test_scan_complete(void)
 {
     /*
@@ -446,6 +467,8 @@ static void on_test_dir_save_complete(void)
 {
     preset_completeFilesystemOp(PRESET_OP_TEST_DIR_SAVE);
 }
+
+#endif
 
 static fs_file_type_t preset_fileTypeFromSaveType(uint8_t what, uint8_t *hasName)
 {
@@ -1330,35 +1353,33 @@ void preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
     }
 }
 
-void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
+static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged,
+                                             uint16_t destination_mask,
+                                             uint8_t slot,
+                                             instrument_type_t expected_type)
 {
-    const kit_instrument_slot_t *staged =
-        (const kit_instrument_slot_t *)filesystem_loadedInstrumentSlot();
-    uint16_t destination_mask = pm_kit_request_scene_mask
-        ? pm_kit_request_scene_mask
-        : (uint16_t)(1u << scene_index);
     uint8_t target_scene_index;
     uint8_t active_scene_touched = 0u;
 
     /*
-     * Commit a staged Instrument to every selected Scene and arm runtime apply.
+     * Commit one validated Instrument image and arm the bounded runtime apply.
      *
-     * Inputs: immutable request slot, Preset's captured destination Scene mask,
-     * and filesystem's validated staging image/name. Output: inactive Scenes
-     * receive retained slot state and source-name metadata. If the active Scene
-     * is in the mask, outgoing modulation owners are cleared once before copy,
-     * then the existing bounded one-slot runtime cursor is armed for that
-     * audible Scene.
+     * Inputs: an immutable typed stage, exact destination Scene mask, voice
+     * slot, and expected type. Output: every selected Scene receives audio
+     * parameters and the active Scene receives the existing ordered
+     * modulation-clear/reset/routing/Morph apply. The public normal loader and
+     * the reversible `kit` restore both use this one lifecycle path, so a
+     * restore cannot leave stale runtime targets or differ from a file load.
      *
-     * Clear and reset cannot be one operation: clear must resolve old Scene
-     * types, while reset must resolve the newly committed type. Filesystem
-     * cannot own either phase because parsing must remain off-scene and cannot
-     * know DSP lifecycle order.
+     * Affiliates: preset_startInstrumentApply(),
+     * preset_loadInstrumentTemp(), filesystem_loadedInstrumentSlot(),
+     * filesystem_requestLoadInstrument(), and
+     * filesystem_requestLoadInstrumentTemp().
      */
     instrument_apply_active = 0u;
     if (!staged || slot >= INSTRUMENT_SLOT_COUNT ||
         staged->type >= INSTRUMENT_TYPE_UNKNOWN ||
-        staged->type != (instrument_type_t)pm_instrument_request_type) {
+        staged->type != expected_type) {
         return;
     }
     if ((destination_mask & (uint16_t)(1u << scene_getActiveIndex())) != 0u)
@@ -1375,15 +1396,15 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
             continue;
         scene->kit.instruments[slot] = *staged;
         /*
-         * Commit Instrument source-name metadata with the staged payload.
+         * Do not attach a filename or display-name copy to the resident slot.
          *
-         * Filesystem captures the selected Instrument filename stem beside the
-         * parsed descriptor image. SceneData derives both the 16-character save
-         * stem and the eight-character LCD field only after this commit
-         * succeeds, so failed loads cannot rename any resident slot.
+         * Why: filesystem has already placed the successful eight-cell name in
+         * the operation identity block for its targeted HCNAMES update. Inputs:
+         * validated staged descriptor and destination coordinates. Output:
+         * audio data only; name authority remains `/.hcnames`.
+         * Affiliates: filesystem_loadedInstrumentSlot(), HCNAMES Instrument
+         * writer, and Menu's Instrument session exit.
          */
-        scene_setInstrumentSourceName(target_scene_index, slot,
-                                      filesystem_loadedInstrumentStem());
         if (target_scene_index == scene_getActiveIndex())
             active_scene_touched = 1u;
     }
@@ -1400,6 +1421,77 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
     instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
     instrument_apply_rebind_source = 0u;
     instrument_apply_morph_only = 0u;
+}
+
+void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
+{
+    const kit_instrument_slot_t *staged =
+        (const kit_instrument_slot_t *)filesystem_loadedInstrumentSlot();
+    uint16_t destination_mask = pm_kit_request_scene_mask
+        ? pm_kit_request_scene_mask
+        : (uint16_t)(1u << scene_index);
+
+    /*
+     * Apply the validated filesystem Instrument candidate through the shared
+     * image commit helper.
+     *
+     * Inputs: callback-captured Scene/slot plus Preset's immutable request
+     * type/mask. Output: the normal Instrument file result commits exactly as
+     * before. Keeping this wrapper preserves the filesystem completion API
+     * while allowing the `kit` preview restore to reuse the same DSP ordering.
+     * Affiliates: on_instrument_load_complete() and Menu completion polling.
+     */
+    preset_startInstrumentApplyImage(staged, destination_mask, slot,
+                                     (instrument_type_t)pm_instrument_request_type);
+}
+
+uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot)
+{
+    /*
+     * Save one voice as the hidden reversible normal-Load source.
+     *
+     * Inputs: Menu's entry Scene/voice. Output: Preset holds the immutable
+     * coordinates until filesystem writes `.hctmp.<ext>`; completion is a
+     * dedicated UI sequencing event, not an Instrument Save or name update.
+     * Affiliates: on_instrument_temp_save_complete() and Menu entry handling.
+     */
+    filesystem_ack();
+    if (!filesystem_requestSaveInstrumentTemp(source_scene, source_slot,
+                                              on_instrument_temp_save_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = source_slot;
+    pm_instrument_request_scene = source_scene;
+    pm_instrument_request_slot = source_slot;
+    return 1u;
+}
+
+uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
+                                  uint8_t destination_slot,
+                                  instrument_type_t type)
+{
+    /*
+     * Route the direct `kit` row through the normal Instrument apply path.
+     *
+     * Inputs: the exact temporary-file Scene/voice/type context retained by
+     * Menu. Output: the regular Instrument completion applies parsed data to
+     * that voice, while filesystem suppresses HCNAMES publication for the
+     * hidden file. Affiliates: on_instrument_load_complete() and Menu cursor.
+     */
+    filesystem_ack();
+    if (!filesystem_requestLoadInstrumentTemp(destination_scene,
+                                              destination_slot,
+                                              type,
+                                              on_instrument_load_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = destination_slot;
+    pm_instrument_request_scene = destination_scene;
+    pm_instrument_request_slot = destination_slot;
+    pm_instrument_request_type = type;
+    return 1u;
 }
 
 uint8_t preset_tickInstrumentApply(void)
@@ -1905,6 +1997,8 @@ uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
     return 1u;
 }
 
+/* Retired File/Dir diagnostic request adapters; see disabled callbacks above. */
+#if 0
 uint8_t preset_scanTestFiles(void)
 {
     /*
@@ -2000,6 +2094,23 @@ uint8_t preset_saveTestSimpleDir(const char *display_name)
     pm_request_slot = 0u;
     return 1u;
 }
+
+#endif
+
+/*
+ * Compatibility stubs for retired File/Dir diagnostics.
+ *
+ * Inputs are intentionally ignored and output is always "not started": the
+ * Load/Save chooser no longer exposes these types, and retaining callers must
+ * not allocate or repopulate the removed filesystem diagnostic caches.
+ */
+uint8_t preset_scanTestFiles(void) { return 0u; }
+uint8_t preset_scanTestDirs(void) { return 0u; }
+uint8_t preset_loadTestFile(const char *name) { (void)name; return 0u; }
+uint8_t preset_loadTestDir(const char *name) { (void)name; return 0u; }
+uint8_t preset_saveTestFile(const char *name) { (void)name; return 0u; }
+uint8_t preset_saveTestDir(const char *name) { (void)name; return 0u; }
+uint8_t preset_saveTestSimpleDir(const char *name) { (void)name; return 0u; }
 
 /* =======================================================================
 ** Pattern / all / performance entry points

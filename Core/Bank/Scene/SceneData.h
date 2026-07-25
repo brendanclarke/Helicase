@@ -30,16 +30,6 @@
  * storage parser's naming constants.
  */
 #define SCENE_OBJECT_DISPLAY_NAME_LEN 8u
-/*
- * Retained instrument source stem length.
- *
- * This is Scene-owned rather than storageTypes-owned so SceneData can retain
- * save metadata without including the SD parser header. The first 16 filename
- * stem characters survive Kit/Instrument load and later drive Kit Save member
- * filename generation; the LCD-facing display name remains eight characters.
- */
-#define SCENE_INSTRUMENT_STEM_LEN 16u
-
 typedef struct {
     /*
      * Descriptor-indexed instrument endpoint images for one kit slot.
@@ -102,31 +92,21 @@ typedef struct {
     kit_settings_t settings;
     kit_instrument_slot_t instruments[INSTRUMENT_SLOT_COUNT];
     /*
-     * Retained Kit display name.
+     * Deliberately no Bank, Scene, Kit, Instrument, filename, or file-stem
+     * metadata is stored in scene_t or kit_t.
      *
-     * What: Eight printable characters plus NUL naming the resident Kit for
-     * Save editor seeding. This is storage/UI metadata, not a DSP parameter and
-     * not a filesystem short alias.
+     * Why: root `/.hcnames` is authoritative and filesystem keys are derived
+     * from its fixed-width rows, slot coordinates, and Instrument extension at
+     * the immediate SD call site. Retaining those strings here would create
+     * sixteen stale copies and let a selective Bank Load overwrite names for
+     * unselected resident Scenes.
      *
-     * Why: Slot browsing displays on-card Kit/NNN names, while the resident
-     * Kit still needs a stable internal identity for display and future
-     * embedded use. Keeping that identity in SceneData prevents an empty slot
-     * display from being mistaken for the Kit's internal name.
+     * Inputs/outputs: kit_t carries playable Kit settings and Instrument
+     * images only. Name clients must use the filesystem identity/cache APIs.
      *
-     * Inputs: normal Kit Load. Morph Load must not write this field. Output
-     * clients: resident display and future Scene embedded Kit naming.
+     * Affiliates: Core/Hardware/SD/filesystem.c HCNAMES helpers and
+     * Core/Menu/menu.c's operation-scoped identity session.
      */
-    char display_name[SCENE_OBJECT_DISPLAY_NAME_LEN + 1u];
-    /*
-     * Instrument source names are retained separately for display and save.
-     *
-     * instrument_display_name is the eight-character LCD field. instrument_stem
-     * keeps the first 16 filename stem characters loaded from Kit/Instrument
-     * files so a later Kit Save can regenerate useful member filenames. Neither
-     * field is a DSP parameter, and neither is editable from the UI yet.
-     */
-    char instrument_display_name[INSTRUMENT_SLOT_COUNT][9];
-    char instrument_stem[INSTRUMENT_SLOT_COUNT][SCENE_INSTRUMENT_STEM_LEN + 1u];
 } kit_t;
 
 typedef struct {
@@ -271,31 +251,6 @@ uint8_t scene_getActiveIndex(void);
  */
 uint8_t scene_selectActive(uint8_t scene_index);
 /*
- * Retain one Kit display name in Kit-owned storage.
- *
- * What: Copies exactly eight display cells into kit->display_name, sanitizing
- * non-printable bytes to spaces and appending NUL.
- *
- * Why: Kit name is resident data, separate from a root Kit library slot's
- * current folder name. Normal Kit Save updates this field only after the save
- * succeeds; Morph operations leave it alone.
- *
- * Inputs: caller-owned Kit pointer and fixed-width eight-character display
- * field. Outputs: kit->display_name when kit is non-NULL.
- *
- * Affiliates/clients: filesystem normal Kit Load/Save completion, Menu's
- * normal-Kit Save durability handoff (which reaffirms the resident identity
- * from the completed `/Kit/.hcindex` row before HCNAMES serialization), Save
- * editor seeding, and Scene embedded Kit naming. KitMrp callers deliberately
- * do not change this identity.
- */
-void scene_setKitDisplayName(kit_t *kit,
-                             const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
-void scene_setResidentKitDisplayName(
-    uint8_t scene_index,
-    const char name[SCENE_OBJECT_DISPLAY_NAME_LEN]);
-const char *scene_kitDisplayName(uint8_t scene_index);
-/*
  * Borrow a mutable instrument slot from a Scene's embedded Kit.
  *
  * Inputs: Scene index and zero-based instrument slot. Output: pointer to the
@@ -312,18 +267,6 @@ kit_instrument_slot_t *scene_instrumentSlot(uint8_t scene_index, uint8_t slot);
  */
 const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
                                                        uint8_t slot);
-/*
- * Retain one instrument source stem for later Kit Save.
- *
- * Inputs may be a filename with extension or a raw stem. Output updates both
- * the 16-character save stem and the eight-character LCD display name. Central
- * ownership avoids Kit load, Instrument load, and future Scene/Bank load
- * deriving subtly different names from the same file.
- */
-void scene_setInstrumentSourceName(uint8_t scene_index, uint8_t slot,
-                                   const char *filename_or_stem);
-void scene_setKitInstrumentSourceName(kit_t *kit, uint8_t slot,
-                                      const char *filename_or_stem);
 /*
  * Store one track's MIDI channel setting.
  *

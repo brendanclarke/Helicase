@@ -10,6 +10,38 @@ single-context asynchronous filesystem contract.
 SESSION STATE: Pre-implementation audit and plan. No production source has
 been changed in this session; this file is the first running-log entry.
 
+## 2026-07-24 — Independent staging, Instrument preview, and exact SRAM audit
+
+Implemented and built successfully:
+
+- Restored strict separation between `fs_list_cache_name[1000][9]` (exactly
+  9,000 bytes, `.hcindex`/`.hcnames` only) and a separate 2,048-byte aligned
+  non-Pattern payload stage after shared-cache staging caused browser failures.
+- Added reversible normal Instrument Load `kit`: the existing stage now carries
+  one original Instrument slot and one parser candidate concurrently. From
+  pool `000`, decrement returns to the entry parameters without SD I/O. The
+  snapshot ends on type/load-mode, Instrument-type, Scene, voice, or nested
+  menu boundary.
+- Kept names within the existing authority model: the original Instrument
+  identity remains during preview; a pool stem is derived only at the session
+  boundary. No additional SRAM name or file key was added.
+- Fixed short Instrument names showing their extension by making Load/Save
+  presentation and identity publication use the filename stem only.
+- Removed the duplicate filesystem Bank identity row. `BankData` owns the one
+  9-byte Bank name; filesystem stores 72 bytes for Scene + Kit + six
+  Instruments, preserving the specified exact 81-byte active-name total.
+
+Validation:
+
+```text
+make -j1: passed
+text 379256, data 400, bss 266880, dec 646536
+```
+
+Known non-final SRAM exceptions are documented in
+`042_NAMES_CACHE_FINAL_DISPOSAL.md`: Bank's 16 child name/open-key arrays and
+File/Dir diagnostic list caches remain and require a separate disposal pass.
+
 ## Evidence reviewed
 
 The session brief was read first from `SESSION_042_PRE_PLAN.md`. The current
@@ -641,3 +673,324 @@ cleanup and add compile-time/source audits before changing browser storage.
   and preserves the prior resident Scene-present mask. A non-empty selective
   load merges only its successfully loaded child bits into that prior mask, so
   unmasked resident Scene data, names, and availability remain in place.
+
+### 2026-07-24 — Shared names/cache/staging implementation in progress
+
+- Removed all Kit- and Instrument-name/stem fields from `kit_t` and removed
+  the SceneData APIs which previously maintained those copies. `kit_t` now
+  carries only playable settings and instrument images. `kitset.kcg` `file=`
+  text is parser-local and is not retained after parsing.
+- Added the aligned `filesystem_shared_workspace_t` union. Its 9,000-byte name
+  array is mutually exclusive with Kit, Instrument, and non-Pattern Scene
+  staging members; static assertions enforce the original cache budget and
+  typed alignment. `op_staged_kit` and `op_staged_instrument` are now aliases
+  into that union.
+- Added the one 81-byte filesystem identity block: one Bank, Scene, Kit, and
+  six Instrument fixed-width rows. Menu's former seven-row Kit/Instrument
+  scratch and separate Scene scratch now borrow/edit those rows directly.
+- Refactored Scene load so Scene settings plus the embedded Kit stage in the
+  union and commit to final Scene SRAM before Pattern I/O. Pattern now parses
+  directly into the first final destination Scene and mirrors to additional
+  selected destinations after successful read. Pattern failures are therefore
+  intentionally non-atomic and report after settings/Kit commit, per the
+  agreed interim policy.
+- Removed the six persistent Kit-member filename buffers. A single 49-byte
+  component buffer derives a leaf immediately before its `kitset.kcg` line or
+  asyncfatfs open from identity name, voice, and Instrument type extension.
+- `make -j1` and `make img` pass. Latest linked footprint: text 379,592;
+  data 416; BSS 264,848. `nm` confirms `fs_workspace` is 0x2328 (9,000) and
+  `fs_identity_name` is 0x51 (81). The former dedicated Scene stage and Menu
+  name arrays no longer appear. Existing delete-tree unused-function warnings
+  and newlib syscall linker warnings remain unrelated.
+- Still pending: Bank's two 16-entry child display/open-name arrays and other
+  persistent directory component strings require a one-child rescan/formatter
+  state-machine pass. They have not been altered in this change because Bank
+  Load's exact mask-selective HCNAMES preservation must remain hardware-safe.
+- Fixed a shared-workspace handoff regression found when all generated
+  `.hcindex` files contained blank rows. The completed directory scan starts
+  its chained writer through `filesystem_start()`, where its `names` union
+  member is still the writer input. Generic full-union clearing—and a smaller
+  Instrument-stage alias clear that overlapped the first rows—therefore erased
+  that input. Those generic clears are removed; explicit cache/stage owners
+  alone initialize their own member. This needs no SRAM. The firmware must
+  boot once to regenerate existing blank indexes; `.hcnames` was not manually
+  rewritten because it remains the card-authoritative register.
+- Follow-up hardware result `KitL00` identified a separate use of the same
+  union: an accepted Kit/Scene/Instrument request cleared its staging alias
+  after validating the index but before loader phase zero re-read that index.
+  The selected key is now copied first into existing request scratch, then all
+  post-stage directory/file opens and successful HCNAMES identity publication
+  use that copy. No SRAM is added. Bank Load's early Scene-stage initialization
+  was also removed because it erased the Bank cache still required by its name
+  repair; child-stage initialization remains at the later Bank delegation
+  point. This directly addresses `KitL00` before payload I/O.
+- Per the subsequent scroll-error report, retired the shared 9,000-byte
+  cache/staging union entirely. `.hcindex` and `.hcnames` now have their own
+  exact 9,000-byte `fs_list_cache_name` allocation at all times. Kit,
+  Instrument, and non-Pattern Scene parsing use a separate aligned 2,048-byte
+  `fs_stage_workspace`; therefore entering a load no longer destroys the
+  active browser cache. Pattern staging remains intentionally absent: after
+  settings/Kit validation and commit, Pattern reads directly into final Scene
+  SRAM as agreed.
+- The stage capacity is checked at compile time for 512 byte parameter cells
+  across six voices and all three endpoint images (1,536 bytes), current
+  Scene/Kit metadata, and a 384-byte future Effect reserve. Assertions also
+  pin the name cache to 9,000 bytes and stage alignment to `kit_t`. `make -j1`,
+  `make img`, and source/doc whitespace checks pass. Final symbols: name cache
+  9,000 bytes; typed stage 2,048; identity block 81; existing stream scratch
+  512. BSS is 266,896 bytes, a deliberate +2,048 bytes from the prior build.
+
+### 2026-07-24 — Final non-contract cache disposal
+
+- Removed Bank Load's `op_bank_child_name[16][9]`,
+  `op_bank_child_open_name[16][13]`, and `op_bank_child_present[16]` arrays.
+  The one retained 16-bit presence mask serves selection and LED occupancy only.
+  For every requested Bank child, the loader now rescans the selected Bank
+  parent, chooses the lexical matching `SS Name` in existing nine-byte scene
+  scratch, derives that one directory component, and opens/stages it. This
+  preserves selective-mask data and HCNAMES overlay behavior without a Bank
+  name or file-key cache.
+- Retired the generic File/Dir diagnostic menus and removed their 6,240-byte
+  file/directory list caches. Developer mode cannot expose the retired entries;
+  compatibility calls are zero-work and retain no diagnostic data.
+- Removed the unused firmware recursive delete-tree implementation and its
+  558-byte stacks/buffers. Actual slot replacement continues through
+  asyncfatfs' tree deleter with only a completion result latch.
+- Verified `make -j1`: BSS 259,352 B (a 7,528 B reduction from 266,880 B).
+  `FINAL_CACHE+NAMES_MANIFEST.md` now records this disposal as complete.
+
+### 2026-07-25 — Instrument Load `kit` temporary-file replacement
+
+- Removed the two-Instrument-image staging preview. The aligned payload stage
+  now contains exactly one parsed Instrument candidate again; no original
+  Instrument parameters are cached in SRAM.
+- On normal Instrument Load entry (and each new voice/session), Menu copies the
+  existing authoritative eight-character Instrument identity into one new
+  nine-byte Menu field and writes the current voice to
+  `Instrument/<type>/.hctmp.<ext>`. The temporary save uses the normal typed
+  serializer but deliberately updates neither HCNAMES nor `.hcindex`.
+- The typed index scanner explicitly ignores `.hctmp.<ext>`, so the temporary
+  source cannot become a selectable pool item. Selecting `kit` rereads that
+  file through the normal parser/apply path; only after a successful parse does
+  Menu restore the retained name and mark its normal exit-time HCNAMES update.
+- Voice, Scene, mode, type, and nested-exit boundaries invalidate the temporary
+  file session and zero the nine-byte label. The on-card temp is dirty scratch
+  and is overwritten on the next same-type entry; it is never indexed or made
+  authoritative. Pool rows now display zero-based `000..999`; decrementing
+  from `000` goes to `kit`, while decrementing at `kit` remains at `kit`.
+- Boot-freeze correction: the boot Instrument name-repair pass runs before
+  `.hcindex` generation and initially classified `.hctmp.<ext>` as a malformed
+  user Instrument. The exact reserved component is now skipped by that repair
+  pass as well as by typed index insertion. It therefore cannot be renamed,
+  collide with a canonical user filename, or delay boot.
+
+### 2026-07-25 — Boot-freeze diagnostic image re-enabled
+
+- The second boot freeze persisted after the exact `.hctmp.<ext>` repair-scan
+  exemption, so no further storage behavior was changed speculatively.
+  `CONFIG_DEV_MODE` is now `1`, activating the pre-existing, development-only
+  OLED observers in `main.c`. They show the last completed `Boot` stage, then
+  the live `FOp`/`FPhs` coordinate during the initial Bank/Scene/Kit operation,
+  and `FPhs: 43` with `FSub` immediately before each blocking repair component.
+  The observers are read-only and compile out when the flag is returned to 0;
+  this change adds no SRAM and does not alter filesystem order, SD contents, or
+  normal load/save logic. Hardware should report the final visible coordinate.
+
+### 2026-07-25 — Instrument Load `kit` restore filename correction
+
+- Hardware now boots with the diagnostic image and reports `InsL00` only when
+  decrementing from Instrument pool `000` to `kit`. The restore request already
+  captured the complete hidden leaf `.hctmp.<ext>`, but loader phase 11 sent it
+  through the ordinary display-stem formatter. A leading dot is deliberately
+  invalid for normal user stems, so that formatter fell back to `none.<ext>`;
+  asyncfatfs consequently could not open the existing temporary file.
+- Loader phase 11 now copies the complete temporary component verbatim only
+  when the dedicated temporary-request flag is set. Ordinary pool loads retain
+  the existing stem formatter. No cache, name, SRAM, directory traversal, or
+  file format changes. `CONFIG_DEV_MODE` is returned to 0, removing the
+  diagnostic screen/menu hooks for this retest.
+
+### 2026-07-25 — Idempotent Instrument Load `kit` decrement
+
+- Large negative encoder spins are allowed while an Instrument request drains
+  so the user can select the next desired pool number. The synthetic `kit` row
+  accidentally treated every negative detent while already on that row as a
+  new `.hctmp.<ext>` restore request. This could contend with the first restore
+  and allow an obsolete temporary operation to surface after a later Load
+  re-entry.
+- The lower-row handler now starts a restore only on the actual pool-`000` to
+  `kit` crossing; further decrements at `kit` are a strict UI no-op. The
+  restore helper additionally accepts only an idle, valid snapshot whose saved
+  type equals the current load type. This uses no new name, key, cache, or SRAM
+  storage and leaves ordinary pool scrolling unchanged.
+
+### 2026-07-25 — Instrument Load completion ownership correction
+
+- Refreshed-card inspection proves `Instrument/Drum/.hctmp.drm` is valid and
+  byte-identical to `brezeld1.drm`, the first Instrument of the active Brezel
+  Kit. The wrong restore was not a corrupt or incorrectly selected temporary
+  file. Instead, `PRESET_OP_INSTRUMENT_LOAD` inferred its completed operation
+  from `menu_instrumentLoadSource`, even though free encoder turns can change
+  that cursor from pool to `kit` before an earlier pool load completes.
+- The pre-existing one-byte temporary-save-pending field now tags either
+  accepted temporary operation; it is renamed accordingly but retains exactly
+  the same SRAM footprint. Completion uses that immutable tag rather than the
+  mutable cursor. When the user reaches `kit` while a pool load is busy, Menu
+  now waits for the immutable pool apply to finish and then posts the one
+  temporary restore. A completed temporary restore clears the tag and cannot
+  repost itself. No new cache, name, file key, or SRAM storage is added.
+
+### 2026-07-25 — Dev-only post-`kit` lock observer
+
+- The corrected temporary restore now loads the expected Brezel Instrument, but
+  hardware can still remain unresponsive after the `kit` return. No further
+  behavioral recovery is inferred. `CONFIG_DEV_MODE` is enabled only for a
+  focused Menu observer. It publishes `IL`, a bit field
+  (1=kit cursor, 2=Menu busy, 4=temp operation pending, 8=Instrument apply,
+  16=temp valid), and `FP`, the packed filesystem operation/phase
+  (`op * 100 + phase`). The frame is flushed before each changed diagnostic
+  state and at the exact `kit` transition, so the final visible coordinate
+  identifies whether the freeze is filesystem or Menu state.
+- The observer is compiled out at `CONFIG_DEV_MODE=0`, mutates no musical or
+  filesystem state, and does not change files, cache ownership, or load
+  ordering. In this diagnostic build its two last-displayed coordinates occupy
+  3 bytes of initialized SRAM (`last_il` 1 B and `last_fp` 2 B); linked BSS is
+  unchanged. The complete dev-only image data segment is 4 bytes above the
+  production build because the enabled observer set also retains boot-display
+  state.
+- Hardware retest showed that this observer replaced the ordinary Menu surface,
+  making the Instrument cursor interaction untestable. The observer and all
+  calls were removed without changing Instrument load/save behavior, and
+  `CONFIG_DEV_MODE` returned to 0.
+
+### 2026-07-25 — Rapid-backspin deferred-selection cancellation
+
+- The remaining failure differed from the working one-detent path only when
+  encoder events arrived while an earlier pool file still owned storage.
+  Pool-to-pool movement deliberately coalesces the latest row by setting
+  `menu_deferSelectionRequest`. The pool-`000` to synthetic-`kit` transition
+  correctly queued the hidden temporary restore, but it did not cancel that
+  now-obsolete pool retry. After the temporary restore completed, the generic
+  idle dispatcher could service the stale flag with the cursor already on
+  `kit`, reasserting storage work and leaving further number input locked.
+- The `next < 0` boundary now clears the deferred pool-selection flag before
+  handling either the first pool-to-`kit` crossing or further negative detents
+  already clamped at `kit`. The current `kit` choice is fulfilled exclusively
+  by the existing temporary-restore completion chain; no request, payload, or
+  name is discarded. Slow scrolling and pool-to-pool request coalescing are
+  unchanged.
+- This is a Menu-state correction only. It adds no SRAM, cache, file key,
+  filesystem traversal, SD write, or file-format change.
+- `make -j1`, `make img`, and scoped `git diff --check` pass. The linked image
+  remains at 408 bytes of initialized data and 259,368 bytes of BSS; the
+  generated payload is 373,736 bytes.
+
+## Session 042 closeout — terse retained record
+
+Session 042 replaced duplicated resident/browser naming state with an SD-backed
+name register and one explicit SRAM ownership model, while preserving the
+directory-local indexes needed for responsive browsing.
+
+Done:
+
+- Retired the dead KitBrowser bridge and its linked 2,004-byte map/control
+  allocation.
+- Kept one `fs_list_cache_name[1000][9]` cache (9,000 bytes) for exactly one
+  `.hcindex` domain or the 129-row `/.hcnames` image at a time. Instrument
+  indexes are typed, sorted rows; Kit/Scene/Bank indexes are direct 000..999
+  rows with blanks preserved.
+- Added fixed-order `/.hcnames` authority: row 0 Bank, rows 1..16 Scenes, rows
+  17..32 Kits, and rows 33..128 six Instruments per Scene. Variable-length
+  rows require read/preserve/full-rewrite for targeted updates.
+- Removed Scene, Kit, and Instrument display names and Instrument filename
+  stems from all sixteen `scene_t`/`kit_t` records. The only active musical
+  identity storage is 81 bytes: BankData's 9-byte Bank row plus filesystem's
+  72-byte Scene/Kit/six-Instrument block.
+- Combined Kit/Instrument menu sessions read one Scene's Kit plus six
+  Instrument rows once, keep the selected `.hcindex` resident while loading,
+  accumulate a dirty Scene mask, and rewrite HCNAMES at the session boundary
+  rather than during every scroll/load. Scene menu work borrows one Scene row.
+- Preserved mask-selective Bank Load. Only selected/present child payloads and
+  their Scene/Kit/six-Instrument HCNAMES rows change; unselected resident
+  Scenes, names, and present bits remain in place. Bank Load/Save borrow the
+  9,000-byte cache for the complete HCNAMES transaction and restore
+  `/Bank/.hcindex` afterward.
+- Added canonical eight-character name repair before root library and typed
+  Instrument index publication and before selected-Bank payload loading.
+  Repair is one-object-at-a-time rename/sync/rescan with bounded scratch.
+  Duplicate canonical targets receive a decimal suffix inside eight cells.
+  `/.hcrepair` roll-forward is not implemented, so this is ordered repair, not
+  a crash-safe journal.
+- Corrected boot handle exhaustion in Bank embedded-Kit quarantine by closing
+  directory handles after `afatfs_chdir()` copied their state. Expanded
+  asyncfatfs from three to five application handles, adding exactly 656 bytes.
+- Separated browser/name storage from payload validation. The rejected shared
+  union was replaced by the permanent 9,000-byte name cache plus an independent
+  aligned 2,048-byte stage for one Kit, one Instrument candidate, or
+  non-Pattern Scene settings plus Kit. Pattern is excluded and streams directly
+  into final Scene SRAM after settings/Kit commit.
+- Removed Bank child name/alias/presence arrays, the File/Dir diagnostic list
+  caches and menu entries, and the unused firmware recursive-delete stacks.
+  Bank child discovery now rescans one child at a time; native
+  `afatfs_deleteTree()` owns recursive deletion.
+- Instrument menu display now strips `.drm`, `.snr`, `.cym`, and `.hat` from
+  short names. Pool numbers are `000..999`; `kit` is the synthetic row above
+  `000`.
+- Replaced the abandoned two-image SRAM Instrument preview with
+  `Instrument/<type>/.hctmp.<ext>`. Entry saves the current voice to that
+  hidden file and retains one 9-byte original label. Returning to `kit` parses
+  the hidden file through the normal one-candidate stage. The file is excluded
+  from repair and `.hcindex`, never updates HCNAMES, and is invalidated
+  logically on voice/type/mode/Scene/exit boundaries.
+- Fixed the temporary restore's exact hidden filename, repeated negative
+  detents at `kit`, completion ownership while the cursor moves, and the final
+  rapid-backspin stale deferred-pool request. The final correction clears the
+  obsolete pool retry when `kit` becomes the newest selection.
+
+Done and then undone or superseded:
+
+- A private blocking HCNAMES writer was replaced by the normal foreground-
+  pumped filesystem operation. The later boot snapshot call was removed
+  entirely after Scene names left SRAM; normal boot now preserves existing
+  HCNAMES instead of regenerating and blanking unselected rows. The public
+  blocking wrapper remains dormant for explicit bootstrap/diagnostic use.
+- The proposed 9,000-byte cache/payload union was implemented, caused blank
+  `.hcindex` files and `KitL00`/scroll failures through alias invalidation, and
+  was removed. Cache and stage are now independent allocations.
+- The proposed two-Instrument-image staging preview was implemented and then
+  removed. The final design stores the original parameters only in
+  `.hctmp.<ext>`, not SRAM.
+- A tri-state Bank quarantine return experiment did not change the phase-43
+  boot freeze and was reverted.
+- A root Scene nested blocking quarantine prototype was removed; root Scene
+  quarantine remains future foreground-pumped work.
+- Boot and Instrument-menu OLED diagnostic hooks were used to isolate failures.
+  The Instrument-menu observer obscured the UI under test and was removed.
+  Production `CONFIG_DEV_MODE` is 0. The older boot-only observer surface
+  remains compiled behind that flag but performs no work in production.
+- File/Dir/sDir were removed from the normal menu type cycle and their
+  multi-entry list storage was retired. Compatibility APIs return
+  empty/failure without starting filesystem work. Two 49-byte Menu
+  editor/result strings and nine bytes of result scalars remain linked as
+  107 bytes of residual UI state; they are not musical-name or browser caches.
+
+Final qualifications:
+
+- `/.hcnames` is fixed-order, unversioned text. Missing files can be created by
+  targeted Scene/Kit/Instrument updates; ordinary boot does not rebuild it.
+- Pattern loading is intentionally non-atomic after the Scene settings/Kit
+  commit and awaits the Pattern redesign. Effect persistence remains a
+  placeholder, although the stage budget reserves 384 bytes for future
+  non-Pattern Effect state.
+- The current `storage_kitset_t` parser still owns six LFN-sized `file=`
+  components during one active Kit/Scene parse. They are operation-local
+  schema state, not resident Scene keys or a browser cache.
+- The hidden `.hctmp.<ext>` file is dirty on-card scratch and can remain after
+  leaving Instrument Load; its SRAM validity/name are disposed.
+- The residual 107 bytes of File/Dir editor/result state disclosed above remain
+  linked and must not be described as disposed with the retired 64-entry
+  caches.
+- The final image built successfully (`text 373,328`, `data 408`,
+  aggregate `bss 259,368`; packaged payload 373,736 bytes). The final
+  rapid-backspin cancellation has compile/package validation but no subsequent
+  hardware result in this session.
