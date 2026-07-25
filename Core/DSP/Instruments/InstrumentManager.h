@@ -67,6 +67,20 @@ typedef enum {
     INSTRUMENT_TYPE_UNKNOWN
 } instrument_type_t;
 
+/*
+ * Runtime LFO-node visitor contract.
+ *
+ * InstrumentManager owns the tagged engine storage while ModulationNode owns
+ * operations on its target records.  Forward declaring the record keeps that
+ * boundary narrow: clients can synchronously visit the two nodes belonging to
+ * each live slot LFO without learning any engine layout or retaining a pointer
+ * across a Scene/type replacement.
+ */
+struct ModulatorStruct;
+typedef void (*instrument_runtime_lfo_node_visitor_t)(
+    struct ModulatorStruct *primary, struct ModulatorStruct *secondary,
+    void *context);
+
 typedef enum {
     INSTRUMENT_TARGET_MODULATION = 0,
     INSTRUMENT_TARGET_AUTOMATION
@@ -424,7 +438,7 @@ void instrumentManager_runtimeInit(void);
  * This cannot be folded into instrumentManager_resetRuntimeSlot(): clearing
  * must resolve source nodes through the outgoing Scene identities, while reset
  * intentionally resolves the incoming identity after commit. Keeping the two
- * phases explicit prevents a type swap from orphaning a dynamic-pool LFO.
+ * phases explicit prevents a type swap from orphaning a tagged-slot LFO.
  */
 void instrumentManager_clearAllRuntimeModulationTargets(void);
 /*
@@ -446,11 +460,12 @@ uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot);
  * Input: zero-based slot whose new type is already resident in active
  * SceneData. Output: exactly that type/slot runtime object is returned to its
  * engine defaults before descriptor images are applied. Client: Preset's
- * staged Instrument transaction. Affiliates are the per-type runtime pools and
- * the preserved native Drum/Snare/Cymbal/HiHat globals.
+ * staged Instrument transaction. The manager clears the complete tagged slot,
+ * installs the incoming runtime type, then initializes its one live engine
+ * member before Preset rebuilds descriptor and modulation state.
  *
  * This remains separate from instrumentManager_runtimeInit(), which initializes
- * every non-native pool once at boot and must not reset unrelated sounding
+ * every boot-resident tagged slot once and must not reset unrelated sounding
  * voices during one Instrument load.
  */
 void instrumentManager_resetRuntimeSlot(uint8_t slot);
@@ -464,6 +479,31 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
 uint8_t instrumentManager_runtimePan(uint8_t slot);
 void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
                                     uint8_t velocity);
+/*
+ * Return the type that currently owns a slot's live tagged runtime member.
+ *
+ * Inputs: zero-based slot. Output: the runtime tag, not merely the selected
+ * Scene's stored type, so callers such as legacy MIDI can reject a type-specific
+ * field write while a deferred Scene replacement is still pending.
+ */
+instrument_type_t instrumentManager_runtimeType(uint8_t slot);
+/*
+ * Visit the two modulation destinations owned by every live runtime LFO.
+ *
+ * Inputs: a synchronous visitor and optional context. Output: one callback per
+ * tagged slot that currently exposes an LFO; pointers are borrowed for the
+ * callback only and must not survive a Scene/type commit. This keeps external
+ * modulation maintenance independent of historical fixed engine globals.
+ */
+void instrumentManager_visitRuntimeLfoNodes(
+    instrument_runtime_lfo_node_visitor_t visitor, void *context);
+/*
+ * Borrow the instance selected by a slot's current runtime tag.
+ *
+ * Inputs: zero-based slot. Output: an immediate-use descriptor/runtime pointer
+ * to that tagged member, or NULL. Callers must not retain it across a Scene or
+ * Instrument replacement because reset clears and reinitializes the slot.
+ */
 void *instrumentManager_runtimeInstance(uint8_t slot);
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,

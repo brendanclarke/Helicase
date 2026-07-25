@@ -38,6 +38,16 @@
 #ifndef MIDINOTENUMBERS_H_
 #define MIDINOTENUMBERS_H_
 
+/*
+ * Default note for fixed-grid trigger steps.
+ *
+ * Inputs: Sequencer, MIDI fallback, SOM, and Scene load defaults use this
+ * MIDI-domain value when no Scene track-note override is set. Output: note 63.
+ * Keeping it here prevents DSP and filesystem users from depending on
+ * PatternData merely to obtain a musical constant.
+ */
+#define MIDI_DEFAULT_TRIGGER_NOTE 63u
+
 
 static const float MidiNoteFrequencies[] =
 {

@@ -40,7 +40,6 @@
 #include "DrumVoice.h"
 #include "Snare.h"
 #include "HiHat.h"
-#include "random.h"
 #include "Uart.h"
 #include "MidiMessages.h"
 #include "MidiVoiceControl.h"
@@ -50,7 +49,7 @@
 #include "usb_manager.h"
 #include "clockSync.h"
 #include "MidiParser.h"
-#include "automationNode.h"
+#include "MidiNoteNumbers.h"
 #include "SomGenerator.h"
 #include "triggerJacks.h"
 #include "timebase.h"
@@ -64,19 +63,17 @@
 #define SEQ_DEFAULT_STEPS_PER_BEAT 4u
 #define SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP (SEQ_INTERNAL_PPQ / SEQ_DEFAULT_STEPS_PER_BEAT)
 #define SEQ_INTERNAL_TICKS_PER_MIDI_CLOCK   (SEQ_INTERNAL_PPQ / SEQ_MIDI_PPQ)
-#define SEQ_MASTER_LOOP_STEPS 128u
 #define SEQ_AUTO_SYNC_HOLD_US	500000UL
 
 uint8_t seq_masterStepCnt=0;				/** compatibility mirror of the low 8 bits of seq_masterStepClock */
-static uint16_t seq_masterStepClock = 0;    /**< 16-bit corrected default-step clock used for track-scale realign */
+static uint16_t seq_masterStepClock = 0;    /**< fixed-grid sixteenth-note clock */
 static uint32_t seq_elapsedPpqTicks = 0;    /**< 96 PPQ ticks elapsed since the current pattern/start reset */
 static uint8_t seq_initialSchedulerTick = 1;/**< nonzero until the immediate step at PPQ tick 0 has been processed */
 static uint8_t seq_internalMidiClockPhase = 0;
-static uint32_t seq_trackEventCount[NUM_TRACKS];
 uint8_t seq_rollRate = 0x08;				//start with roll rate = 1/16
 uint8_t seq_rollState = 0;					/**< each bit represents a voice. if bit is set, roll is active*/
 
-static int16_t seq_stepIndex[NUM_TRACKS]; /**< bridge step counter, -1 before start and 0..127 while running. Each track has its own counter for independent track lengths. */
+static int16_t seq_stepIndex[NUM_TRACKS]; /**< fixed 0..15 track cursors; -1 before the next trigger */
 
 static uint16_t seq_tempo = 120;			/**< seq speed in bpm*/
 
@@ -107,8 +104,6 @@ uint8_t seq_eraseActive=0;					/**RECORD will be 1 if live erasing the active vo
 
 uint8_t seq_quantisation = QUANT_16;
 
-uint8_t seq_rndValue[NUM_TRACKS];			/**< random value for probability function*/
-
 uint8_t seq_barCounter;						/**< counts the absolute position in bars since the seq was started */
 
 static uint8_t seq_loadPendigFlag = 0;
@@ -121,30 +116,7 @@ uint8_t seq_resetBarOnPatternChange=0;
 static uint8_t midi_chan_notes[16];		    /**< what note is playing on each channel */
 static uint16_t midi_notes_on=0;		    /**< which channels have a note currently playing */
 
-const float seq_shuffleTable[16] =
-{
-		0.f,
-		0.015625f,
-		0.0625f,
-		0.140625f,
-		0.25f,
-		0.390625f,
-		0.5625f,
-		0.765625f,
-		1.f,
-		0.984375f,
-		0.9375f,
-		0.859375f,
-		0.75f,
-		0.609375f,
-		0.4375f,
-		0.234375f,
-};
-
 uint8_t seq_newPatternAvailable = 0; //indicate that a new pattern has loaded in the background and we should switch
-
-//for the automation tracks each track needs 2 modNodes
-static AutomationNode seq_automationNodes[NUM_TRACKS][2];
 
 static void seq_sendMidi(MidiMsg msg);
 static void seq_sendRealtime(const uint8_t status);
@@ -154,52 +126,8 @@ static void seq_setStepIndexToStart();
 //------------------------------------------------------------------------------
 void seq_init()
 {
-	int i;
-
-	for(i=0;i<NUM_TRACKS;i++) {
-		autoNode_init(&seq_automationNodes[i][0]);
-		autoNode_init(&seq_automationNodes[i][1]);
-	}
-
 	memset(seq_stepIndex,0,sizeof(seq_stepIndex));
 	memset(seq_lastMasterStep,0,NUM_TRACKS);
-	memset(seq_trackEventCount,0,sizeof(seq_trackEventCount));
-
-
-	/*
-	 * PatternData owns pattern storage after FrontPanelParser removal.
-	 *
-	 * Sequencer still initializes it because Sequencer startup is where the
-	 * playback scheduler, automation nodes, and pattern arrays become usable.
-	 * Later Scene/Pattern work can move this init call higher once Scene exists
-	 * as a full subsystem.
-	 */
-	pat_init();
-
-}
-void seq_offsetTrackStepIndexForRotation(uint8_t trackNr, uint8_t oldRot,
-                                         uint8_t newRot, uint8_t len)
-{
-	int16_t offset;
-	int16_t si;
-
-	/*
-	 * Why: PatternData owns the stored rotation value, but seq_stepIndex[] is
-	 * scheduler runtime state. Inputs are the old/new step rotations and
-	 * effective track length. Output is an adjusted step index preserving
-	 * live-rotation behavior. Risk: track/len must be bounded
-	 * by PatternData before this hook is called.
-	 */
-	if (trackNr >= NUM_TRACKS || len == 0)
-		return;
-
-	offset = (int16_t)((newRot % len) - (oldRot % len));
-	si = seq_stepIndex[trackNr] + offset;
-	if (si < 0)
-		si += len;
-	else if (si >= len)
-		si -= len;
-	seq_stepIndex[trackNr] = si;
 }
 //------------------------------------------------------------------------------
 static void seq_calcDeltaT(uint16_t bpm)
@@ -211,9 +139,7 @@ static void seq_calcDeltaT(uint16_t bpm)
 	seq_deltaT /= (float)SEQ_INTERNAL_PPQ;
 	seq_deltaT *= SYSTICK_TICKS_PER_MS; //systick_ticks is the canonical 0.25ms LXR tick
 
-	/* Per-track shuffle is applied by seq_trackEventDueTick(). The transport
-	 * PPQ tick duration stays uniform so one track's shuffle cannot perturb the
-	 * scheduler clock used by every other track. */
+	/* The transport tick stays uniform: fixed-grid patterns have no shuffle. */
 }
 //------------------------------------------------------------------------------
 void seq_setBpm(uint16_t bpm)
@@ -266,38 +192,21 @@ static void seq_sendMidi(MidiMsg msg)
 
 
 //------------------------------------------------------------------------------
-static void seq_parseAutomationNodes(uint8_t track, Step* stepData)
-{
-	//set new destination
-	autoNode_setDestination(&seq_automationNodes[track][0], stepData->param1Nr);
-	autoNode_setDestination(&seq_automationNodes[track][1], stepData->param2Nr);
-	//set new mod value
-	autoNode_updateValue(&seq_automationNodes[track][0], stepData->param1Val);
-	autoNode_updateValue(&seq_automationNodes[track][1], stepData->param2Val);
-}
-//------------------------------------------------------------------------------
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 {
 	uint8_t midiChan; // which midi channel to send a note on
 	uint8_t midiNote; // which midi note to send
-	uint8_t midiVelocity;
-	Step stepData;
 
 	if(voiceNr > 6) return;
 
 	/*
-	 * PatternData owns the current Step; Sequencer only needs a playback-time
-	 * snapshot for automation-node parsing and the legacy MIDI echo velocity.
-	 * Trigger timing, choke behavior, DSP voice calls, and MIDI output remain
-	 * sequencer runtime work.
+	 * Trigger one fixed-grid event.
+	 *
+	 * Inputs: valid voice plus caller-selected default velocity/note. Outputs:
+	 * synth, trigger jack, and MIDI note-on are driven. PatternData supplies
+	 * only the preceding on-bit decision; no Step snapshot or automation node
+	 * is parsed here, so playback cannot recreate removed pattern storage.
 	 */
-	if (pat_readStep(seq_activePattern, voiceNr, (uint8_t)seq_stepIndex[voiceNr],
-	                 &stepData)) {
-		seq_parseAutomationNodes(voiceNr, &stepData);
-		midiVelocity = (uint8_t)(stepData.volume & STEP_VOLUME_MASK);
-	} else {
-		midiVelocity = vol;
-	}
 
 	//turn the trigger off before sending the next one
 	if(voiceNr>=5)
@@ -327,7 +236,7 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 		midiNote = note;
 
 	//send the new note to midi/usb out
-	seq_sendMidiNoteOn(midiChan, midiNote, midiVelocity);
+	seq_sendMidiNoteOn(midiChan, midiNote, vol);
 }
 void seq_previewVoice(uint8_t voiceNr)
 {
@@ -353,7 +262,7 @@ void seq_previewVoice(uint8_t voiceNr)
 
 	note = scene_getTrackMidiNote(seq_activePattern, voiceNr);
 	if (note == 0u)
-		note = PAT_DEFAULT_NOTE;
+		note = MIDI_DEFAULT_TRIGGER_NOTE;
 
 	if (voiceNr >= 5u) {
 		trigger_triggerVoice(5, TRIGGER_OFF);
@@ -369,39 +278,20 @@ void seq_previewVoice(uint8_t voiceNr)
 	seq_sendMidiNoteOn(midiChan, note, ROLL_VOLUME);
 }
 //------------------------------------------------------------------------------
-static uint8_t seq_determineNextPattern()
+static void seq_resetStepScheduler(void)
 {
 	/*
-	 * Keep playback on the active Scene/Pattern.
+	 * Reset the fixed 16-step scheduler clock.
 	 *
-	 * Automatic pattern repeat/next-pattern chaining has been removed from the
-	 * sequencer. Switching must happen at the Scene level so Scene parameters,
-	 * Pattern data, active Scene bookkeeping, and edit masks stay coherent. Output
-	 * is always seq_activePattern; the function remains only as a narrow shim for
-	 * existing boundary and recording code until Pattern is rebuilt.
-	 */
-	return seq_activePattern;
-}
-
-static void seq_resetScaledScheduler(void)
-{
-	/*
-	 * Reset timing counters for the corrected 4-steps-per-beat grid.
-	 *
-	 * Why: transport start, external reset, and pattern changes need a common
-	 * origin for the 16-bit master step clock and every per-track scale ratio.
-	 * Outputs: elapsed 96-PPQ tick time returns to zero, each track's processed
-	 * event count returns to zero, and the next scheduler pass will emit the
-	 * immediate step at PPQ tick 0. PatternData still owns rotation/length/scale;
-	 * seq_setStepIndexToStart() must be called alongside this when positions
-	 * themselves need resetting.
+	 * Inputs: transport start/stop/reset or Scene selection. Outputs: PPQ and
+	 * master step clocks return to zero and the next scheduler pass advances all
+	 * tracks together. There are no per-track scale/shuffle event counters.
 	 */
 	seq_elapsedPpqTicks = 0u;
 	seq_masterStepClock = 0u;
 	seq_masterStepCnt = 0u;
 	seq_initialSchedulerTick = 1u;
 	seq_internalMidiClockPhase = 0u;
-	memset(seq_trackEventCount, 0, sizeof(seq_trackEventCount));
 }
 
 void seq_selectActivePattern(uint8_t pattern)
@@ -412,12 +302,10 @@ void seq_selectActivePattern(uint8_t pattern)
 	 * Inputs: front-panel PERF supplies the Scene index after Menu has validated
 	 * resident Scene presence. PatternData still gets the final bounds check here
 	 * because Sequencer owns the mutable playback globals. Outputs:
-	 * seq_activePattern and seq_pendingPattern point at the same Pattern, queued
-	 * boundary-load flags are cancelled, and every track's seq_stepIndex[] plus
-	 * seq_trackEventCount[] are recalculated against the existing master
-	 * seq_elapsedPpqTicks position. This deliberately preserves the exact master
-	 * tick/step clock; Scene switching must hot-swap playback data without
-	 * restarting transport.
+	 * seq_activePattern and seq_pendingPattern point at the same Scene, queued
+	 * boundary-load flags are cancelled, and all fixed-grid cursors realign to
+	 * the existing master clock. Scene switching does not allocate or schedule
+	 * any per-track timing metadata.
 	 */
 	if (!pat_patternValid(pattern))
 		return;
@@ -432,104 +320,18 @@ void seq_selectActivePattern(uint8_t pattern)
 	voiceControl_noteOff(0xFF);
 }
 
-static uint32_t seq_trackEventBaseTick(uint8_t track, uint32_t eventIndex)
-{
-	TrackScaleRatio ratio = pat_getTrackScaleRatio(seq_activePattern, track);
-	uint32_t threshold;
-
-	/*
-	 * Convert one per-track event number to its unshuffled absolute PPQ tick.
-	 *
-	 * Why: scale and shuffle both need an absolute, restartable timing origin.
-	 * Inputs are a track and event index since pattern start; event 0 is the
-	 * immediate start event at tick 0. Output is the 96-PPQ tick where that
-	 * event would occur before shuffle. Confederates: PatternData supplies the
-	 * exact scale ratio. Risk: callers use this in scheduler timing, so keep it
-	 * bounded and avoid stateful drift corrections here.
-	 */
-	if (ratio.num == 0u || ratio.den == 0u)
-		ratio.num = ratio.den = 1u;
-	if (eventIndex == 0u)
-		return 0u;
-	threshold = (uint32_t)SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP * (uint32_t)ratio.den;
-	return (uint32_t)(((eventIndex * threshold) + (uint32_t)ratio.num - 1u) /
-	                  (uint32_t)ratio.num);
-}
-
-static uint32_t seq_trackEventShuffleOffset(uint8_t track, uint32_t eventIndex)
-{
-	uint8_t shuffle = pat_getTrackShuffle(seq_activePattern, track);
-	uint32_t baseTick;
-	uint8_t phase;
-	float amount;
-
-	/*
-	 * Calculate one event's absolute per-track shuffle offset in PPQ ticks.
-	 *
-	 * Why: old shuffle altered the global tick delta, which made every track
-	 * share one groove amount. Per-track shuffle must be derived from each
-	 * track's own event timing so different tracks can swing independently.
-	 *
-	 * Inputs: track and event index. Output: a non-negative delay in 96-PPQ
-	 * ticks, scaled from the existing 16-entry shuffle curve. Clients:
-	 * seq_trackEventDueTick() only. Risk: event 0 must remain unshifted so
-	 * transport start and pattern realign still have a stable downbeat.
-	 */
-	if (shuffle == 0u || eventIndex == 0u)
-		return 0u;
-	baseTick = seq_trackEventBaseTick(track, eventIndex);
-	phase = (uint8_t)(baseTick & 0x0fu);
-	amount = seq_shuffleTable[phase] * ((float)shuffle / 127.0f) * 16.0f;
-	return (uint32_t)(amount + 0.5f);
-}
-
-static uint32_t seq_trackEventDueTick(uint8_t track, uint32_t eventIndex)
-{
-	/*
-	 * Return the absolute PPQ tick at which one track event is due.
-	 *
-	 * Why: deriving due time from event count, scale, and shuffle prevents
-	 * fractional scale and per-track shuffle from accumulating drift over
-	 * repeated 128-step loops. Inputs are a track and event count since pattern
-	 * start. Output is an absolute 96-PPQ tick threshold. Confederates:
-	 * seq_dueTrackEvents() compares this threshold to seq_elapsedPpqTicks.
-	 */
-	return seq_trackEventBaseTick(track, eventIndex) +
-	       seq_trackEventShuffleOffset(track, eventIndex);
-}
-
-static uint32_t seq_dueTrackEvents(uint8_t track)
-{
-	uint32_t due = seq_trackEventCount[track];
-
-	/*
-	 * Count unprocessed events whose absolute due tick has arrived.
-	 *
-	 * Input: track index. Output: number of events that should have occurred for
-	 * this track by seq_elapsedPpqTicks. Caller seq_processSchedulerTick() then
-	 * advances until seq_trackEventCount reaches this number. This loop is
-	 * bounded by actual backlog; under normal internal clocking it visits at
-	 * most one event for slow/default tracks and a small burst for fast scales.
-	 */
-	while (seq_trackEventDueTick(track, due) <= seq_elapsedPpqTicks)
-		due++;
-	return due;
-}
-
 static void seq_advanceTrackStep(uint8_t track)
 {
-	uint8_t seqlen;
-
 	/*
-	 * Advance and service exactly one stored step for one track.
+	 * Advance and service one fixed-grid step for one track.
 	 *
-	 * Caller context: seq_processSchedulerTick() may call this more than once
-	 * for a fast scale if multiple step events are due. It deliberately triggers
-	 * every visited step, rather than jumping to the final landed position.
+	 * Input: track index at a sixteenth-note scheduler boundary. Output: its
+	 * cursor advances modulo 16 and an active bitmap bit triggers at velocity 100
+	 * and MIDI_DEFAULT_TRIGGER_NOTE. No probability, note, automation, length,
+	 * scale, shuffle, or rotation data is read from PatternData.
 	 */
 	seq_stepIndex[track]++;
-	seqlen = pat_getEffectiveTrackLength(seq_activePattern, track);
-	if ((seq_stepIndex[track] >= seqlen) || (seq_stepIndex[track] >= NUM_STEPS))
+	if (seq_stepIndex[track] >= (int16_t)NUM_STEPS_PER_BAR)
 		seq_stepIndex[track] = 0;
 
 	if (seq_SomModeActive) {
@@ -545,16 +347,7 @@ static void seq_advanceTrackStep(uint8_t track)
 				              menu_getActiveVoice(),
 				              (uint8_t)seq_stepIndex[track]);
 			} else {
-				seq_rndValue[track] = GetRngValue() & 0x7f;
-				if (seq_rndValue[track] <=
-				    pat_getStepProbability(seq_activePattern, track,
-				                           (uint8_t)seq_stepIndex[track])) {
-					const uint8_t vol = pat_getStepVolume(seq_activePattern, track,
-					                                      (uint8_t)seq_stepIndex[track]);
-					const uint8_t note = pat_getStepNote(seq_activePattern, track,
-					                                      (uint8_t)seq_stepIndex[track]);
-					seq_triggerVoice(track, vol, note);
-				}
+				seq_triggerVoice(track, ROLL_VOLUME, MIDI_DEFAULT_TRIGGER_NOTE);
 			}
 		}
 	}
@@ -562,18 +355,15 @@ static void seq_advanceTrackStep(uint8_t track)
 	if (seq_rollRate != 0xffu && (seq_rollState & (1u << track))) {
 		if ((seq_stepIndex[track] % seq_rollRate) == 0) {
 			const uint8_t vol = ROLL_VOLUME;
-			const uint8_t note = pat_getStepNote(seq_activePattern, track,
-			                                      (uint8_t)seq_stepIndex[track]);
-			seq_triggerVoice(track, vol, note);
-			seq_addNote(track, vol, note);
+			seq_triggerVoice(track, vol, MIDI_DEFAULT_TRIGGER_NOTE);
+			seq_recordTrigger(track);
 		}
 	}
 }
 
 static uint8_t seq_handleMasterBoundary(void)
 {
-	uint8_t len0 = pat_getEffectiveTrackLength(seq_activePattern, 0);
-	uint8_t masterStepPos = (uint8_t)(seq_masterStepClock % len0);
+	uint8_t masterStepPos = (uint8_t)(seq_masterStepClock % NUM_STEPS_PER_BAR);
 
 	/*
 	 * Master boundaries are based on the corrected default grid, not on any one
@@ -582,15 +372,6 @@ static uint8_t seq_handleMasterBoundary(void)
 	 */
 	if (masterStepPos == 0u && seq_masterStepClock != 0u) {
 		seq_barCounter++;
-		if (seq_activePattern == seq_pendingPattern) {
-			seq_pendingPattern = seq_determineNextPattern();
-			if (seq_pendingPattern >= PAT_NEXT_RANDOM) {
-				uint8_t limit = seq_pendingPattern - PAT_NEXT_RANDOM + 2u;
-				uint8_t rnd = GetRngValue() % limit;
-				seq_pendingPattern = rnd;
-			}
-		}
-
 		if ((seq_activePattern != seq_pendingPattern) || seq_loadPendigFlag) {
 			if (seq_resetBarOnPatternChange)
 				seq_barCounter = 0u;
@@ -598,7 +379,7 @@ static uint8_t seq_handleMasterBoundary(void)
 			seq_newPatternAvailable = 0u;
 			seq_activePattern = seq_pendingPattern;
 			seq_setStepIndexToStart();
-			seq_resetScaledScheduler();
+			seq_resetStepScheduler();
 			led_notifyPatternChanged(seq_activePattern);
 			seq_sendProgChg(seq_activePattern);
 			voiceControl_noteOff(0xFF);
@@ -625,27 +406,11 @@ void seq_realignActivePatternToMasterClock(void)
 	/*
 	 * Recalculate runtime track positions from the master clock.
 	 *
-	 * This is a performance action, not a PatternData edit. It derives the
-	 * due-event count from PPQ tick zero for the currently active Pattern, then
-	 * rewrites only sequencer counters: seq_stepIndex[] and
-	 * seq_trackEventCount[]. Starting the due loop at zero is essential for
-	 * Scene hot-swap: a new Scene can have a slower scale than the previous
-	 * Scene, so the correct event count may be lower than the old track's
-	 * seq_trackEventCount[].
+	 * This is a performance action, not a PatternData edit. It derives one shared
+	 * fixed-grid position from the master clock and applies it to every track.
 	 */
 	for (track = 0u; track < NUM_TRACKS; track++) {
-		uint8_t len = pat_getEffectiveTrackLength(seq_activePattern, track);
-		uint8_t rot = pat_getTrackRotation(seq_activePattern, track);
-		uint32_t due = 0u;
-		uint32_t played;
-		while (seq_trackEventDueTick(track, due) <= seq_elapsedPpqTicks)
-			due++;
-		played = (due == 0u) ? 0u : (due - 1u);
-		if (len == 0u)
-			len = NUM_STEPS;
-		rot = (uint8_t)(rot % len);
-		seq_trackEventCount[track] = due;
-		seq_stepIndex[track] = (int16_t)((rot + (played % len)) % len);
+		seq_stepIndex[track] = (int16_t)(seq_masterStepClock % NUM_STEPS_PER_BAR);
 		seq_lastMasterStep[track] = (uint8_t)seq_stepIndex[track];
 	}
 	seq_ledState.chaseStep = seq_stepIndex[menu_getActiveVoice()];
@@ -677,20 +442,11 @@ static void seq_processSchedulerTick(void)
 		}
 	}
 
-	for (track = 0u; track < NUM_TRACKS; track++) {
-		uint32_t due = seq_dueTrackEvents(track);
-		while (seq_trackEventCount[track] < due) {
-			seq_advanceTrackStep(track);
-			seq_trackEventCount[track]++;
-			anyAdvanced = 1u;
-		}
-	}
-
-	if (!seq_initialSchedulerTick &&
-	    seq_masterStepClock != 0u &&
-	    (seq_masterStepClock % SEQ_MASTER_LOOP_STEPS) == 0u &&
+	if (seq_initialSchedulerTick == 0u &&
 	    (seq_elapsedPpqTicks % SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP) == 0u) {
-		seq_realignActivePatternToMasterClock();
+		for (track = 0u; track < NUM_TRACKS; track++)
+			seq_advanceTrackStep(track);
+		anyAdvanced = 1u;
 	}
 
 	if (anyAdvanced) {
@@ -814,7 +570,7 @@ void seq_resetToPatternStart(void)
 	seq_barCounter = 0;
 	seq_delayedSyncStepFlag = 0;
 	seq_setStepIndexToStart();
-	seq_resetScaledScheduler();
+	seq_resetStepScheduler();
 	seq_deltaT = 0;
 	seq_lastTick = systick_ticks;
 }
@@ -864,28 +620,9 @@ void seq_setRunning(uint8_t isRunning)
 	if(!seq_running)
 	{
 
-		// --AS reset all track rotations to 0. We are not saving rotated value. it's a performance tool.
-		/*
-		 * Stop resets performance track rotations for the active Pattern.
-		 *
-		 * Rotation storage now belongs to PatternData, so Sequencer calls
-		 * pat_setTrackRotation() for each track. The separate
-		 * led_notifyTrackRotationReset() call updates only the front-panel menu
-		 * display value; PatternData intentionally does not know about LEDs.
-		 *
-		 * Risk: this preserves current behavior where stop clears rotations
-		 * instead of saving them. The scoping notes expect rotation policy to be
-		 * revisited when Pattern owns more sequencer behavior.
-		 */
-		uint8_t i;
-		for(i=0;i<NUM_TRACKS;i++) {
-			pat_setTrackRotation(seq_activePattern, i, 0);
-		}
-		led_notifyTrackRotationReset(0);
-
 		//reset song position bar counter
 		seq_barCounter = 0;
-		seq_resetScaledScheduler();
+		seq_resetStepScheduler();
 		//so the next seq_tick call will trigger the next step immediately
 		seq_deltaT = 0;
 		seq_sendRealtime(MIDI_STOP);
@@ -900,7 +637,7 @@ void seq_setRunning(uint8_t isRunning)
 		// --AS if mtc was doing it's thing, tell it to stop it.
 		midiParser_checkMtc();
 	} else {
-		seq_resetScaledScheduler();
+		seq_resetStepScheduler();
 		seq_sendRealtime(MIDI_START);
 		trigger_reset(1);
 	}
@@ -947,9 +684,9 @@ void seq_setRoll(uint8_t voice, uint8_t onOff)
 		seq_rollState |= (1<<voice);
 		if(seq_rollRate == 0xff) {
 			//trigger one shot
-			seq_triggerVoice(voice,ROLL_VOLUME,PAT_DEFAULT_NOTE);
+			seq_triggerVoice(voice,ROLL_VOLUME,MIDI_DEFAULT_TRIGGER_NOTE);
 			//record roll notes
-			seq_addNote(voice,ROLL_VOLUME,PAT_DEFAULT_NOTE);
+			seq_recordTrigger(voice);
 		}
 	} else {
 		seq_rollState &= ~(1<<voice);
@@ -1077,60 +814,22 @@ static uint8_t seq_quantize(uint8_t step)
 	return itg*quantisationMultiplier;
 }
 //------------------------------------------------------------------------
-void seq_recordAutomation(uint8_t voice, uint8_t dest, uint8_t value)
-{
-	/*
-	 * Records automation from live parameter changes into PatternData.
-	 *
-	 * Callers: Preset sound-parameter apply and MidiParser global-channel CC
-	 * handling. Sequencer owns the recording gate and quantization because those
-	 * depend on current playback position; PatternData owns the step/lane write.
-	 *
-	 * Inputs: voice is the target track, dest is the automation parameter id or
-	 * legacy CC destination, value is the recorded value. Output: automation is
-	 * written to the active pattern when recording/step-active conditions pass.
-	 *
-	 * Risk: pat_recordArmedAutomation() is called even when seq_recordActive is
-	 * off so long-press armed automation can still capture a parameter edit,
-	 * matching the old ARM_AUTOMATION_STEP opcode behavior.
-	 */
-	if(seq_recordActive)
-	{
-		uint8_t quantizedStep = seq_quantize(seq_stepIndex[voice]);
-
-		//only record to active steps
-		if (pat_isStepActive(voice, quantizedStep, seq_activePattern))
-		{
-			pat_recordAutomation(seq_activePattern, voice, quantizedStep, dest, value);
-		}
-	}
-
-	pat_recordArmedAutomation(seq_activePattern, dest, value);
-}
 //------------------------------------------------------------------------
-void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
+void seq_recordTrigger(uint8_t trackNr)
 {
 	/*
-	 * Records a played note into the active Scene/Pattern when recording.
+	 * Record a live event as one trigger bit when recording is active.
 	 *
-	 * Callers: MIDI note input, roll performance, and internal recording paths.
-	 * Sequencer owns quantization; PatternData owns the actual Step mutation
-	 * through pat_recordNote().
-	 *
-	 * Inputs: trackNr target track, vel recorded velocity, note recorded note.
-	 * Outputs: when recording is active, PatternData updates note/velocity,
-	 * probability and active bit; visible record LEDs
-	 * are marked dirty if the edited track/pattern is currently shown by Menu.
-	 *
-	 * Risk: quantization can push a late note to step 0, but pattern-chain
-	 * switching has been removed. The note still records into seq_activePattern;
-	 * a future Scene-level switch feature must explicitly decide whether and how
-	 * late quantized notes cross Scene boundaries.
+	 * Input: target track from MIDI or roll performance. Output: the quantized
+	 * fixed-grid bit is set and visible STEP feedback is dirtied. MIDI note and
+	 * velocity intentionally have no storage destination in the bitmap model.
+	 * Affiliates: MidiParser, roll handling, PatternData, and LED record state.
 	 */
 	//only record notes when seq is running and recording
-	if(seq_running && seq_recordActive)
+	if(trackNr < NUM_TRACKS && seq_running && seq_recordActive)
 	{
-		const uint8_t quantizedStep = seq_quantize((uint8_t)seq_stepIndex[trackNr]);
+		const uint8_t quantizedStep = (uint8_t)(seq_quantize(
+			(uint8_t)seq_stepIndex[trackNr]) % NUM_STEPS_PER_BAR);
 
 		/*
 		 * Record only into the active Scene/Pattern.
@@ -1140,7 +839,7 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 		 * can reintroduce cross-Scene recording explicitly; the sequencer must
 		 * not infer it from retired PatternSetting.changeBar/nextPattern bytes.
 		 */
-		pat_recordNote(seq_activePattern, trackNr, (uint8_t)quantizedStep, vel, note);
+		pat_setStepActive(seq_activePattern, trackNr, quantizedStep, 1u);
 
 		if( (menu_getViewedPattern() == seq_activePattern) && ( menu_getActiveVoice() == trackNr) )
 		{
@@ -1152,8 +851,6 @@ void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 			 * context. The dirty flags tell led_processSeqLedState() to repaint
 			 * only when the recorded track/pattern is visible.
 			 */
-			seq_ledState.recordSubStep = quantizedStep;
-			seq_ledState.dirty |= SEQ_LED_DIRTY_REC_SUB;
 			seq_ledState.recordMainStep = quantizedStep;
 			seq_ledState.dirty |= SEQ_LED_DIRTY_REC_MAIN;
 		}
@@ -1275,41 +972,19 @@ static void seq_sendProgChg(const uint8_t ptn)
 	seq_sendMidi(msg);
 }
 
-/* **PATROT set the step starting index to the position where the pattern rotation would have it start.
- *  A pattern rotation of 0 means start at the beginning of the track. During the
- *  bridge, rotation is a step offset in the effective 1..128 step length.
- *
- *  This is called when the sequencer starts/stops running, also when a pattern change takes place.
- */
 static void seq_setStepIndexToStart()
 {
 	/*
-	 * Reset runtime track counters to each track's PatternData rotation.
+	 * Reset every runtime cursor to the fixed-grid start position.
 	 *
-	 * PatternData owns stored rotation and effective length; Sequencer owns
-	 * `seq_stepIndex[]`, `seq_lastMasterStep[]`, and seq_trackEventCount[], which
-	 * are scheduler runtime state. Input is implicit seq_activePattern. Output:
-	 * every track starts one step before its rotated start so the immediate PPQ-0
-	 * scheduler event lands on the correct position. Callers: transport
-	 * start/stop, pattern changes, and external reset. Risk: length and rotation
-	 * must stay normalized by PatternData.
+	 * Input: implicit active Scene/transport state. Output: each track is one
+	 * position before step zero, so the immediate scheduler boundary plays step
+	 * zero. There is no PatternData rotation, length, or event-count affiliate.
 	 */
-	uint8_t len, rot, i;
+	uint8_t i;
 	for(i=0;i<NUM_TRACKS;i++) {
-		// adjust rot in case the pattern length is less than the rotated amount
-		// len is 0-15 where a value of 0 means 16
-		rot = pat_getTrackRotation(seq_activePattern, i);
-		len = pat_getEffectiveTrackLength(seq_activePattern, i);
-		if((len != 16u) && (rot > len))
-			rot = rot % len;
-
-		// this is for external clock sync via trigger expansion kit (the ext tick will adjust this -1)
-		seq_lastMasterStep[i] = rot;
-		seq_trackEventCount[i] = 0u;
-
-		// -1 here because we increment it first thing when we start
-		seq_stepIndex[i] = (int16_t)rot - 1;
-
+		seq_lastMasterStep[i] = 0u;
+		seq_stepIndex[i] = -1;
 	}
 
 }

@@ -116,6 +116,26 @@ does not recreate a generic bridge or duplicate resident names.
 
 ## Core/Bank/Scene/Pattern/PatternData
 
+### Session 043 current contract
+
+The API roster below records the retired pre-Session-043 bridge and is not a
+current implementation contract. `PatternData` now owns only one 112-byte
+`PatternSet` bitmap per resident Scene: `step_on[7][16]`, with one bit per
+chronological step. `pat_patternSetGetStep`/`pat_patternSetSetStep` are the
+staged-or-resident representation boundary; `pat_isStepActive`,
+`pat_setStepActive`, `pat_toggleStep`, clear/copy-track/copy-pattern/copy-bar,
+and `pat_sceneHasActiveSteps` are the live Scene-indexed operations.
+
+`pat_initPatternSet` and `pat_initScene` clear only bits. The remaining
+menu-shaped setters are deliberately storage-free compatibility no-ops while
+the menu ID table is compacted. There is no live `Step`, track timing,
+automation, note, velocity, probability, pattern-next, main-step shadow, or
+separate Pattern staging allocation. Filesystem v3 persistence reads/writes
+the same seven sixteen-byte rows through this contract. Affiliates are
+SceneData, Sequencer, UI/LED/copy-clear, Euklid/SOM, and filesystem; none may
+add a parallel Pattern owner. See `SRAM_MANIFEST.md` for the linked 1,792-B
+sixteen-Scene Pattern payload and the SRAM1 Pattern reservation.
+
 Affiliate modules: Menu, buttonHandler, ledHandler, copyClearTools, filesystem,
 Sequencer, EuklidGenerator, Preset/MidiParser indirectly through Sequencer
 automation.

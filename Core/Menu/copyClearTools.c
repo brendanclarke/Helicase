@@ -41,9 +41,8 @@ void copyClear_clearTrackAutom(uint8_t automTrack)
 	 * necessarily the currently playing pattern when follow/performance modes
 	 * diverge.
 	 */
-	uint8_t voice = menu_getActiveVoice();
-	uint8_t pattern = menu_getViewedPattern();
-	pat_clearAutomation(pattern, voice, automTrack);
+	/* Automation lanes no longer exist in PatternSet. */
+	(void)automTrack;
 };
 //-----------------------------------------------------------------------------
 void copyClear_clearCurrentPattern()
@@ -77,13 +76,6 @@ void copyClear_executeClear()
 			copyClear_clearCurrentPattern();
 		break;
 		
-		case CLEAR_AUTOMATION1:
-			copyClear_clearTrackAutom(0);
-		break;
-		
-		case CLEAR_AUTOMATION2:
-			copyClear_clearTrackAutom(1);
-		break;
 	}
 	
 	copyClear_armClearMenu(0);

@@ -14,6 +14,19 @@ the major descriptor-target runtime path that is still legacy/incomplete. Read
 `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` before changing
 instrument file, Scene storage, or instrument parameter propagation.
 
+## Session 043 current-state supersession
+
+This audit's 2026-05 findings are historical. Current source has MPU-isolated
+DMA memory, enabled M7 I/D caches, a mapped 3,768-B ITCM section, `-flto`,
+`-Ofast` DSP compilation, and DTCM-resident CPU audio output buffers. The old
+fixed voice globals are retired in favour of six 1,176-B tagged runtime slots
+in SRAM1. The slider taper is a 1,024-entry native-float LUT (4,096 B, raw
+`>> 2`, no LUT interpolation), and `transientData` is now a 26,460-B internal
+FLASH ROM rather than DTCM data. For actual current memory placement and the
+reservation policy, use `SRAM_MANIFEST.md`; free DTCM is delay-line-reserved
+and free normal SRAM1 is Pattern-reserved. The historical recommendations
+below must not be read as live placement or cache facts.
+
 Audited: 2026-05-08. Firmware: LXR-02 Open Firmware (branch: LXR02Open-prime).
 Problem statement: DSP render does not always complete within the 2.18ms
 budget (96 samples at 44108Hz), causing audible underruns.

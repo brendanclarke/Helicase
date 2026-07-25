@@ -73,6 +73,7 @@
 #include "SampleMemory.h"
 #include "sequencer.h"
 #include "PatternData.h"
+#include "MidiNoteNumbers.h"
 #include "MidiMessages.h"
 #include "timebase.h"
 #include "random.h"
@@ -1782,6 +1783,7 @@ static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint16_t num
  */
 #define FS_CONTAINER_VERSION      2u
 
+#if 0 /* Retired binary Step/Pattern/All/Performance bridge; v3 text is below. */
 static void filesystem_patternStepAddress(uint32_t step_index,
                                           uint8_t *pattern,
                                           uint8_t *track,
@@ -2004,6 +2006,7 @@ static void filesystem_unpackStep(Step *step, const uint8_t *buf)
         : NO_AUTOMATION;
     step->param2Val = buf[8];
 }
+#endif
 
 static uint32_t filesystem_writeStreamChunk(const uint8_t *buf, uint8_t len)
 {
@@ -6085,7 +6088,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 46;
         return;
 
-    case 46: /* PROBE pattern file, then READ legacy binary name/header */
+    case 46: /* PROBE text-only v3/v2/v1 pattern file */
     {
         uint32_t n;
 
@@ -6093,14 +6096,9 @@ static void filesystem_loadSceneDirectory_tick(void)
          * Scene patterns now have two accepted wire shapes.
          *
          * New Scene/Bank-local Scene Save writes text beginning with "format=".
-         * Version 1 text is the old placeholder and leaves the initialized
-         * PatternSet alone; version 2 carries the draft 128x7 active-step
-         * bitmap plus per-track length/scale. Older fixtures and pattern files
-         * are binary and begin with the legacy eight-byte pattern name/header.
-         * The probe reads seven bytes first: if they match the text prefix,
-         * those bytes become the already-buffered start of the first text line;
-         * otherwise they remain bytes 0..6 of the binary header and the old
-         * reader pulls byte 7 before continuing to the step stream.
+         * Version 1 is an empty placeholder, v2 imports active bits only, and
+         * v3 is the emitted hex bitmap. Binary Step streams are rejected:
+         * accepting them would require retired Step/length/automation storage.
          */
         if (op_item_offset < 7u) {
             n = filesystem_readStreamChunk(staging_buf, 7u);
@@ -6124,19 +6122,14 @@ static void filesystem_loadSceneDirectory_tick(void)
             op_phase = 53;
             return;
         }
-        n = filesystem_readStreamChunk(staging_buf, 8u);
-        if (op_item_offset >= 8u) {
-            op_item_offset = 0u;
-            op_stream_index = 0u;
-            op_phase = 47;
-        } else if (n == 0u && afatfs_feof(op_file)) {
-            filesystem_setPresetNameInvalid();
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 54;
-        }
+        (void)n;
+        filesystem_setPresetNameInvalid();
+        op_close_status = FS_STATUS_ERROR;
+        op_phase = 54;
         return;
     }
 
+#if 0 /* Retired binary Step reader phases. */
     case 47: /* READ pattern steps */
     {
         uint8_t pattern, track, step_nr;
@@ -6340,6 +6333,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
     }
 
+#endif
     case 53: /* READ text pattern placeholder/draft */
         st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
                                      sizeof(op_line_buf), &line_ready, &eof);
@@ -8187,7 +8181,7 @@ static void filesystem_initSceneStage(filesystem_scene_stage_t *stage)
     stage->settings.voice_decimation_all = 127u;
     for (track = 0u; track < NUM_TRACKS; track++) {
         stage->settings.midi_channel[track] = (uint8_t)(track + 1u);
-        stage->settings.midi_note[track] = PAT_DEFAULT_NOTE;
+        stage->settings.midi_note[track] = MIDI_DEFAULT_TRIGGER_NOTE;
     }
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
         /*
@@ -8235,7 +8229,7 @@ static void filesystem_commitSceneStage(void)
             continue;
         target->settings = fs_stage_workspace.scene_stage.settings;
         target->kit = fs_stage_workspace.scene_stage.kit;
-        pat_initPatternSet(&target->pattern, 0u);
+        pat_initPatternSet(&target->pattern);
     }
 }
 
@@ -10989,6 +10983,7 @@ static void filesystem_saveSceneDirectory_tick(void)
 **         5=settings, 6=lengths, 7=track settings extension,
 **         8=track shuffle extension, 9=close, 10=wait_close
 ** ----------------------------------------------------------------------- */
+#if 0 /* Retired generic binary pattern/container stream state machines. */
 static void filesystem_savePattern_tick(void)
 {
     switch (op_phase) {
@@ -12242,6 +12237,7 @@ static void filesystem_loadContainer_tick(void)
     }
 }
 
+#endif
 /* -----------------------------------------------------------------------
 ** LOAD SETTINGS state machine
 **
@@ -15342,18 +15338,17 @@ void filesystem_tick(void)
         filesystem_loadKit_tick();
         break;
     case FS_INTERNAL_OP_LOAD_PATTERN:
-        filesystem_loadPattern_tick();
-        break;
     case FS_INTERNAL_OP_SAVE_PATTERN:
-        filesystem_savePattern_tick();
-        break;
     case FS_INTERNAL_OP_LOAD_ALL:
     case FS_INTERNAL_OP_LOAD_PERFORMANCE:
-        filesystem_loadContainer_tick();
-        break;
     case FS_INTERNAL_OP_SAVE_ALL:
     case FS_INTERNAL_OP_SAVE_PERFORMANCE:
-        filesystem_saveContainer_tick();
+        /*
+         * Generic binary pattern containers are retired with Step storage.
+         * Inputs: a stale request operation. Output: explicit error completion;
+         * Scene/Bank directory persistence remains the supported bitmap path.
+         */
+        filesystem_finish(FS_STATUS_ERROR);
         break;
     case FS_INTERNAL_OP_LOAD_GLOBALS:
         filesystem_loadGlobals_tick();

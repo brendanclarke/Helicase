@@ -243,7 +243,6 @@ void led_setBeatPulse(uint8_t on);
 /* Update Menu/LED pattern-follow state after Sequencer changes pattern. */
 void led_notifyPatternChanged(uint8_t playedPattern);
 /* Mirror a Sequencer rotation reset into the visible menu parameter. */
-void led_notifyTrackRotationReset(uint8_t rotation);
 /* Foreground drain for seq_ledState dirty payloads. */
 void led_processSeqLedState(void);
 

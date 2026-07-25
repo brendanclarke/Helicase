@@ -88,18 +88,13 @@ static void dsp_init(void)
     uint8_t i;
 
     initRng();
-    initDrumVoice();
-    Snare_init();
-    Cymbal_init();
-    HiHat_init();
     /*
-     * Initialize InstrumentManager's non-native per-slot runtime pools.
+     * Initialize InstrumentManager's complete tagged runtime ownership.
      *
-     * Inputs: the legacy engine globals have just been initialized above.
-     * Output: additional Drum/Snare/Cymbal/HiHat instances used by loadable
-     * instrument slots receive the same engine defaults before any kit/preset
-     * applies values into them. This boot step lives here because startup owns
-     * DSP lifetime; InstrumentManager owns only the type-to-runtime mapping.
+     * Inputs: RNG plus the boot-resident active Scene type for each slot.
+     * Output: one initialized engine union member per visible slot before any
+     * kit/preset value is applied. No engine module owns a permanent native
+     * voice, so startup delegates all DSP runtime construction to the manager.
      */
     instrumentManager_runtimeInit();
     mixer_init();

@@ -563,7 +563,6 @@ void preset_applySoundParameter(uint16_t paramNr, uint8_t value,
                                 uint8_t recordAutomation)
 {
     MidiMsg msg = {0};
-    uint8_t automationDest;
 
     /*
      * Applies one sound parameter directly to stored preset state and DSP.
@@ -601,17 +600,15 @@ void preset_applySoundParameter(uint16_t paramNr, uint8_t value,
     if (paramNr < 128u) {
         msg.status = MIDI_CC;
         msg.data1 = (uint8_t)((paramNr + 1u) & 0x7fu);
-        automationDest = msg.data1;
     } else {
         msg.status = MIDI_CC2;
         msg.data1 = (uint8_t)(paramNr - 128u);
-        automationDest = (uint8_t)paramNr;
     }
     msg.data2 = value;
     midiParser_ccHandler(msg, 1);
 
-    if (recordAutomation)
-        seq_recordAutomation(menu_getActiveVoice(), automationDest, value);
+    /* Pattern automation was removed with Step storage; retain no edit copy. */
+    (void)recordAutomation;
 }
 
 static uint8_t preset_applyInstrumentRuntimeValueInternal(uint8_t scene_index,
@@ -1101,6 +1098,16 @@ void preset_sendDrumsetParameters(void)
 
 void preset_startDrumsetApply(void)
 {
+    /*
+     * Detach outgoing runtime targets before the deferred Scene worker starts.
+     *
+     * Inputs: the six currently tagged runtime members and their all-source
+     * modulation graph. Output: no LFO or velocity node retains a pointer into
+     * a member that the worker may overwrite after a quiet or trigger-time
+     * handoff. This runs once per worker, not per slot reset, so later slots do
+     * not erase destinations that earlier incoming slots have already rebuilt.
+     */
+    instrumentManager_clearAllRuntimeModulationTargets();
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
     drumset_apply_scene = scene_getActiveIndex();

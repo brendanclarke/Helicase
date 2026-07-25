@@ -55,13 +55,6 @@
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
-INCCMZ HiHatVoice hatVoice;
-
-//---------------------------------------------------
-void HiHat_setPan(const uint8_t pan)
-{
-	HiHat_setPanVoice(&hatVoice, pan);
-}
 //---------------------------------------------------
 void HiHat_setPanVoice(HiHatVoice *voice, const uint8_t pan)
 {
@@ -69,9 +62,8 @@ void HiHat_setPanVoice(HiHatVoice *voice, const uint8_t pan)
 	 * Set pan on one explicit hihat runtime instance.
 	 *
 	 * Inputs: caller-owned HiHatVoice and raw 0..127 pan. Output: the
-	 * instance pan byte changes; mixer performs gain conversion. Instrument
-	 * Load needs this helper because the Choke-capable hihat runtime can be
-	 * hosted by slot 6 without every caller writing the legacy hatVoice global.
+ * instance pan byte changes; mixer performs gain conversion. The manager
+ * supplies the Choke-capable tagged member without a permanent hihat global.
 	 */
 	if(!voice)
 		return;
@@ -86,11 +78,9 @@ void HiHat_initVoice(HiHatVoice *voice)
 	/*
 	 * Initialize one hihat runtime instance.
 	 *
-	 * Inputs: caller-owned HiHatVoice. Output: oscillator, transient, closed
-	 * and choke/open decay caches, envelope, filter, distortion, and LFO
-	 * members receive the same defaults formerly applied only to hatVoice.
-	 * InstrumentManager calls this for dynamic runtime pools while keeping
-	 * hihat-specific defaults inside the hihat module.
+ * Inputs: caller-owned HiHatVoice. Output: oscillator, transient, closed and
+ * choke/open decay caches, envelope, filter, distortion, and LFO members
+ * receive hihat defaults. The manager calls this for one tagged member.
 	 */
 	if(!voice)
 		return;
@@ -139,16 +129,6 @@ void HiHat_initVoice(HiHatVoice *voice)
 	lfo_init(&voice->lfo);
 }
 //---------------------------------------------------
-void HiHat_init()
-{
-	HiHat_initVoice(&hatVoice);
-}
-//---------------------------------------------------
-void HiHat_trigger( uint8_t vel, uint8_t isOpen, const uint8_t note)
-{
-	HiHat_triggerVoice(&hatVoice, 5u, vel, isOpen, note);
-}
-//---------------------------------------------------
 void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
                         uint8_t vel, uint8_t isOpen, const uint8_t note)
 {
@@ -184,7 +164,7 @@ void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
 		offset -= voice->transGen.volume;
 	}
 	if(voice->osc.waveform == SINE)
-		voice->osc.phase = (0x3ff<<20)*offset;//voiceArray[voiceNr].osc.startPhase ;
+		voice->osc.phase = (0x3ff<<20)*offset;
 	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
 		voice->osc.phase = (0xff<<20)*offset;
 	else
@@ -204,20 +184,14 @@ void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
 	SnapEg_trigger(&voice->snapEg);
 }
 //---------------------------------------------------
-void HiHat_calcAsync( )
-{
-	HiHat_calcAsyncVoice(&hatVoice);
-}
-//---------------------------------------------------
 void HiHat_calcAsyncVoice(HiHatVoice *voice)
 {
 	/*
 	 * Calculate one hihat instance's control-rate block.
 	 *
-	 * Inputs: HiHatVoice pointer. Output: amplitude envelope, snap pitch, and
-	 * oscillator frequencies advance for that instance only. InstrumentManager
-	 * uses this so the current slot type determines which hihat object is
-	 * rendered, while the legacy wrapper remains for old fixed-slot callers.
+ * Inputs: HiHatVoice pointer. Output: amplitude envelope, snap pitch, and
+ * oscillator frequencies advance for that tagged instance only. The runtime
+ * tag determines which hihat object renders; no fixed wrapper remains.
 	 */
 	if(!voice)
 		return;
@@ -254,11 +228,6 @@ void HiHat_calcAsyncVoice(HiHatVoice *voice)
 	osc_setFreq(&voice->modOsc2);
 }
 //---------------------------------------------------
-void HiHat_calcSyncBlock(int16_t* buf, const uint8_t size)
-{
-	HiHat_calcSyncBlockVoice(&hatVoice, buf, size);
-}
-//---------------------------------------------------
 void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
                               const uint8_t size)
 {
@@ -266,9 +235,8 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 	 * Render one hihat instance into a mono block.
 	 *
 	 * Inputs: HiHatVoice pointer, destination buffer, and block size. Output:
-	 * buf receives the hihat FM, transient, envelope, and distortion output for
-	 * that instance. This helper is separate from the legacy wrapper because
-	 * InstrumentManager can now host a hihat runtime outside hatVoice.
+ * buf receives the hihat FM, transient, envelope, and distortion output for
+ * that tagged instance selected by InstrumentManager.
 	 */
 	if(!voice || !buf)
 		return;

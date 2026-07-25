@@ -138,19 +138,37 @@ static instrument_type_t runtime_slot_type[INSTRUMENT_SLOT_COUNT];
 #define INSTRUMENT_AMP_EG_QUIET_THRESHOLD 0.0001f
 
 /*
- * Per-slot runtime pools for loadable instrument types.
+ * Sole tagged runtime owner for loadable instrument types.
  *
- * Inputs: SceneData says which instrument type currently lives in each of the
- * six storage slots. Output: InstrumentManager maps that slot/type pair to a
- * concrete DSP object from these pools, while preserving the original globals
- * for their native slots so legacy fixed-slot callers keep working. These
- * pools cannot live in the voice engines because each engine owns only its own
- * state layout; the cross-type slot policy belongs at the registry boundary.
+ * Inputs: SceneData selects one engine type for each visible slot. Output: one
+ * union member per slot supplies that engine's complete DSP state. The 1,176 B
+ * reserve is twice the current largest engine state and is future-engine
+ * capacity, not a second active engine. runtime_slot_type selects the only
+ * member that may be read or rendered; fixed globals and per-engine slot pools
+ * are deliberately absent so adding an engine cannot multiply SRAM by type.
  */
-static DrumVoice runtime_drum_extra[INSTRUMENT_SLOT_COUNT - NUM_VOICES];
-static SnareVoice runtime_snare_slots[INSTRUMENT_SLOT_COUNT];
-static CymbalVoice runtime_cymbal_slots[INSTRUMENT_SLOT_COUNT];
-static HiHatVoice runtime_hihat_slots[INSTRUMENT_SLOT_COUNT];
+#define INSTRUMENT_RUNTIME_CURRENT_MAX_BYTES sizeof(DrumVoice)
+#define INSTRUMENT_RUNTIME_SLOT_BYTES \
+    (2u * INSTRUMENT_RUNTIME_CURRENT_MAX_BYTES)
+typedef union {
+    DrumVoice drum;
+    SnareVoice snare;
+    CymbalVoice cymbal;
+    HiHatVoice hihat;
+    uint8_t reserved[INSTRUMENT_RUNTIME_SLOT_BYTES];
+} InstrumentRuntimeSlot;
+static InstrumentRuntimeSlot runtime_slots[INSTRUMENT_SLOT_COUNT];
+
+_Static_assert(sizeof(DrumVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "DrumVoice exceeds tagged slot reserve");
+_Static_assert(sizeof(SnareVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "SnareVoice exceeds tagged slot reserve");
+_Static_assert(sizeof(CymbalVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "CymbalVoice exceeds tagged slot reserve");
+_Static_assert(sizeof(HiHatVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "HiHatVoice exceeds tagged slot reserve");
+_Static_assert(sizeof(InstrumentRuntimeSlot) == INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "Tagged slot reserve changed through alignment or member size");
 
 static uint8_t instrumentManager_resolveModulationTarget(
     uint8_t scene_index,
@@ -169,32 +187,22 @@ static uint8_t instrumentManager_writeRuntimeInternal(
 
 static DrumVoice *instrumentManager_drumRuntime(uint8_t slot)
 {
-    if (slot < NUM_VOICES)
-        return &voiceArray[slot];
-    if (slot < INSTRUMENT_SLOT_COUNT)
-        return &runtime_drum_extra[slot - NUM_VOICES];
-    return 0;
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].drum : 0;
 }
 
 static SnareVoice *instrumentManager_snareRuntime(uint8_t slot)
 {
-    if (slot >= INSTRUMENT_SLOT_COUNT)
-        return 0;
-    return (slot == 3u) ? &snareVoice : &runtime_snare_slots[slot];
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].snare : 0;
 }
 
 static CymbalVoice *instrumentManager_cymbalRuntime(uint8_t slot)
 {
-    if (slot >= INSTRUMENT_SLOT_COUNT)
-        return 0;
-    return (slot == 4u) ? &cymbalVoice : &runtime_cymbal_slots[slot];
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].cymbal : 0;
 }
 
 static HiHatVoice *instrumentManager_hihatRuntime(uint8_t slot)
 {
-    if (slot >= INSTRUMENT_SLOT_COUNT)
-        return 0;
-    return (slot == 5u) ? &hatVoice : &runtime_hihat_slots[slot];
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].hihat : 0;
 }
 
 static char instrumentManager_lower(char c)
@@ -1224,19 +1232,39 @@ static Lfo *instrumentManager_runtimeLfo(uint8_t slot)
     }
 }
 
+void instrumentManager_visitRuntimeLfoNodes(
+    instrument_runtime_lfo_node_visitor_t visitor, void *context)
+{
+    uint8_t slot;
+
+    /*
+     * Expose current LFO target nodes without exposing runtime storage.
+     *
+     * Inputs: a synchronous visitor and optional opaque context. Output: the
+     * primary and secondary ModulationNode records for each tagged slot LFO.
+     * ModulationNode uses this to refresh or restore all live sources without
+     * walking retired fixed engine globals or caching pointers across a reset.
+     */
+    if (!visitor)
+        return;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (lfo)
+            visitor(&lfo->modTarget, &lfo->modTarget2, context);
+    }
+}
+
 void instrumentManager_runtimeInit(void)
 {
     uint8_t slot;
 
     /*
-     * Initialize all dynamic runtime instances.
+     * Initialize all boot-resident tagged runtime slots.
      *
-     * Inputs: none; legacy engine init functions should already have prepared
-     * voiceArray[0..2], snareVoice, cymbalVoice, and hatVoice. Output: every
-     * non-native runtime pool instance is initialized with its engine defaults.
-     * This function is separate from the engine init wrappers because only
-     * InstrumentManager knows which legacy globals are preserved for
-     * compatibility and which additional per-slot instances exist.
+     * Inputs: active Scene slot types after RNG startup. Output: exactly one
+     * union member per slot is cleared, tagged, and initialized with engine
+     * defaults. This is the sole boot owner because engine modules no longer
+     * allocate permanent native instances outside the tagged slots.
     */
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
         /*
@@ -1250,14 +1278,23 @@ void instrumentManager_runtimeInit(void)
             scene_instrumentSlotConst(scene_getActiveIndex(), slot);
         runtime_slot_type[slot] =
             instrument ? instrument->type : INSTRUMENT_TYPE_UNKNOWN;
-        if (slot >= NUM_VOICES)
+        memset(&runtime_slots[slot], 0, sizeof(runtime_slots[slot]));
+        switch (runtime_slot_type[slot]) {
+        case INSTRUMENT_TYPE_DRM:
             Drum_initVoice(instrumentManager_drumRuntime(slot), slot);
-        if (slot != 3u)
-            Snare_initVoice(&runtime_snare_slots[slot]);
-        if (slot != 4u)
-            Cymbal_initVoice(&runtime_cymbal_slots[slot]);
-        if (slot != 5u)
-            HiHat_initVoice(&runtime_hihat_slots[slot]);
+            break;
+        case INSTRUMENT_TYPE_SNR:
+            Snare_initVoice(instrumentManager_snareRuntime(slot));
+            break;
+        case INSTRUMENT_TYPE_CYM:
+            Cymbal_initVoice(instrumentManager_cymbalRuntime(slot));
+            break;
+        case INSTRUMENT_TYPE_HAT:
+            HiHat_initVoice(instrumentManager_hihatRuntime(slot));
+            break;
+        default:
+            break;
+        }
     }
 }
 
@@ -1325,15 +1362,16 @@ void instrumentManager_resetRuntimeSlot(uint8_t slot)
     /*
      * Reset only the incoming runtime selected by the committed Scene type.
      *
-     * Input is a zero-based slot after staged SceneData commit. Output is one
-     * fully initialized engine object with stopped envelopes, default LFO
-     * nodes, and no state inherited from an earlier use of its runtime pool.
-     * Descriptor/Morph application follows in Preset and replaces these engine
-     * defaults with the loaded values. Other slots are deliberately untouched.
+     * This is the only tagged-member replacement point. Input is a zero-based
+     * slot after staged SceneData commit and outgoing target teardown. Output
+     * is one cleared and fully initialized engine object with stopped envelopes
+     * and default LFO nodes; Preset then applies descriptor/Morph values. Other
+     * slots are deliberately untouched so a Scene worker can rebuild safely.
      */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return;
     incoming = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    memset(&runtime_slots[slot], 0, sizeof(runtime_slots[slot]));
     runtime_slot_type[slot] =
         incoming ? incoming->type : INSTRUMENT_TYPE_UNKNOWN;
     switch (instrumentManager_slotType(slot)) {
@@ -1666,6 +1704,19 @@ static instrument_type_t instrumentManager_slotType(uint8_t slot)
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return INSTRUMENT_TYPE_UNKNOWN;
     return runtime_slot_type[slot];
+}
+
+instrument_type_t instrumentManager_runtimeType(uint8_t slot)
+{
+    /*
+     * Report the type of the currently live tagged runtime member.
+     *
+     * Inputs: zero-based visible slot. Output: runtime_slot_type rather than
+     * active SceneData, so legacy MIDI and other external callers can reject
+     * a type-specific field write while a deferred Scene handoff still renders
+     * the outgoing engine.
+     */
+    return instrumentManager_slotType(slot);
 }
 
 static OscInfo *instrumentManager_osc(uint8_t slot, const char *key)

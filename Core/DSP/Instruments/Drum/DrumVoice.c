@@ -49,14 +49,9 @@
 // #include "TriggerOut.h"
 
 
+#ifdef USE_AMP_FILTER
 INCCM static float ampSmoothValue = 0.1f;
-//---------------------------------------------------
-INCCMZ DrumVoice voiceArray[NUM_VOICES];
-//---------------------------------------------------
-void setPan(const uint8_t voiceNr, const uint8_t pan)
-{
-	Drum_setPanVoice(&voiceArray[voiceNr], pan);
-}
+#endif
 //---------------------------------------------------
 void Drum_setPanVoice(DrumVoice *voice, const uint8_t pan)
 {
@@ -64,18 +59,13 @@ void Drum_setPanVoice(DrumVoice *voice, const uint8_t pan)
 	 * Set pan on an explicit drum runtime instance.
 	 *
 	 * Inputs: caller-owned DrumVoice and raw 0..127 pan. Output: the instance
-	 * pan field changes; mixer owns translating that byte through square-root
-	 * gain tables. This cannot be folded into setPan() because dynamic
-	 * Instrument Load slots are not always addressable through voiceArray[].
+ * pan field changes; mixer owns translating that byte through square-root
+ * gain tables. InstrumentManager supplies the active tagged-slot member, so
+ * this engine module never resolves a slot through hidden global storage.
 	 */
 	if(!voice)
 		return;
 	voice->pan = pan;
-}
-//---------------------------------------------------
-void drum_setPhase(const uint8_t phase, const uint8_t voiceNr)
-{
-	Drum_setPhaseVoice(&voiceArray[voiceNr], phase);
 }
 //---------------------------------------------------
 void Drum_setPhaseVoice(DrumVoice *voice, const uint8_t phase)
@@ -86,9 +76,8 @@ void Drum_setPhaseVoice(DrumVoice *voice, const uint8_t phase)
 	 *
 	 * Inputs: DrumVoice pointer and storage byte. Output: both drum
 	 * oscillators receive the same 32-bit start phase. The helper exists
-	 * because InstrumentManager applies descriptor writes to the selected slot
-	 * instance directly; the old drum_setPhase() wrapper cannot address extra
-	 * dynamic drum slots.
+ * because InstrumentManager applies descriptor writes to the selected tagged
+ * slot instance directly and no fixed drum storage exists in this module.
 	 */
 	if(!voice)
 		return;
@@ -101,11 +90,10 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	/*
 	 * Initialize one drum runtime instance.
 	 *
-	 * Inputs: caller-owned DrumVoice and a small seed index used only for the
-	 * original test waveform spread. Output: all DSP subobjects are placed in
-	 * the same sane state initDrumVoice() previously gave voiceArray entries.
-	 * InstrumentManager calls this for per-slot runtime pools; keeping it here
-	 * avoids duplicating oscillator/envelope/filter defaults outside DrumVoice.
+ * Inputs: caller-owned DrumVoice and a small seed index used only for the
+ * original test waveform spread. Output: all DSP subobjects receive the drum
+ * engine's established defaults. InstrumentManager calls this for one tagged
+ * slot member, keeping oscillator/envelope/filter defaults in DrumVoice.
 	 */
 	if(!voice)
 		return;
@@ -155,22 +143,6 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	voice->decimationRate = 1;
 }
 //---------------------------------------------------
-void initDrumVoice()
-{
-	ampSmoothValue = 0.1f;
-
-	int i;
-	for(i=0;i<NUM_VOICES;i++)
-	{
-		Drum_initVoice(&voiceArray[i], (uint8_t)i);
-	}
-}
-//---------------------------------------------------
-void Drum_trigger(const uint8_t voiceNr, const uint8_t vol, const uint8_t note)
-{
-	Drum_triggerVoice(&voiceArray[voiceNr], voiceNr, vol, note);
-}
-//---------------------------------------------------
 void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
                        const uint8_t vol, const uint8_t note)
 {
@@ -180,8 +152,8 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 	 * Inputs: DrumVoice pointer, logical source slot, velocity byte, and note.
 	 * Output: LFO/velocity modulation uses source_slot while oscillator,
 	 * envelope, transient, and filter state mutate only the supplied instance.
-	 * This separation is required for Instrument Load because a drum can now
-	 * live in any of the six storage slots, not only voiceArray[0..2].
+ * This separation is required because a drum can occupy any tagged storage
+ * slot and no engine-global drum state survives beside that slot.
 	 */
 	if(!voice)
 		return;
@@ -244,11 +216,6 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 	SVF_reset(&voice->filter);
 }
 //---------------------------------------------------
-void calcDrumVoiceAsync(const uint8_t voiceNr)
-{
-	Drum_calcVoiceAsync(&voiceArray[voiceNr], AMP_EG_SYNC);
-}
-//---------------------------------------------------
 void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 {
 	/*
@@ -256,9 +223,8 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 	 *
 	 * Inputs: DrumVoice pointer and the amp-envelope sync mode that belongs to
 	 * the hosting slot. Output: pitch, snap, FM amount, amp envelope smoothing,
-	 * and oscillator frequencies advance on that instance only. Instrument
-	 * Load needs this helper because the hosting slot, not voiceArray index,
-	 * now decides whether a dynamic drum is rendered.
+ * and oscillator frequencies advance on that instance only. The hosting
+ * tagged slot, not a fixed drum index, decides whether this engine renders.
 	 */
 	if(!voice)
 		return;
@@ -315,21 +281,14 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 }
 
 //---------------------------------------------------
-void calcDrumVoiceSyncBlock(const uint8_t voiceNr, int16_t* buf, const uint8_t size)
-{
-	Drum_calcVoiceSyncBlock(&voiceArray[voiceNr], buf, size);
-}
-//---------------------------------------------------
 void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 {
 	/*
 	 * Render one drum runtime instance into a mono block.
 	 *
-	 * Inputs: DrumVoice pointer, destination buffer, and block size. Output:
-	 * buf receives the same synthesized block the legacy wrapper produced for
-	 * voiceArray entries. This helper cannot be folded into
-	 * calcDrumVoiceSyncBlock() because mixer now selects runtime objects by
-	 * current instrument type rather than by hardcoded drum voice index.
+ * Inputs: DrumVoice pointer, destination buffer, and block size. Output: buf
+ * receives one explicit tagged-slot drum block. Mixer selects this object by
+ * current runtime type rather than by a hardcoded drum voice index.
 	 */
 	if(!voice || !buf)
 		return;

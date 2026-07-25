@@ -51,6 +51,7 @@
 | 040 | 2026-07-18 | local working directory, branch `dev-ph3-fsfix` | Verified 16-Scene Bank/settings/compact targets, native exact AsyncFATFS cleanup, hardware-confirmed BnkL14 Bank Load repair, and 8-bit instrument parameters |
 | 041 | 2026-07-19 | local working directory, development branch | Generalized one-cache `.hcindex` flow, Bank boot/index repair, post-save index refresh, SRAM closeout, and Session 042 preparation |
 | 042 | 2026-07-25 | local working directory, development branch | HCNAMES authority, exact 81-byte musical identity, independent 9,000-byte cache/2,048-byte stage, selective Bank preservation, five asyncfatfs handles, Instrument `.hctmp` kit restore, and documentation recovery |
+| 043 | 2026-07-25 | local working directory, development branch | Bitmap-only Pattern storage, 1,024-float slider LUT, tagged instrument runtime slots, transient PCM FLASH relocation, SRAM/DTCM reservation policy, and fresh memory manifest |
 
 ---
 
@@ -444,3 +445,19 @@ Completed the generalized directory-index flow for Instrument, Kit, root Scene, 
 ### 042 — HCNAMES, Cache Disposal, Staging Separation, And Instrument Load Closure (2026-07-25)
 Made root `/.hcnames` the authoritative fixed 129-row resident-name register; reduced active musical identity to one Bank, one Scene, one Kit, and six Instrument names (81 bytes); retained exactly one 9,000-byte shared `.hcindex`/HCNAMES cache; and separated it from the aligned 2,048-byte non-Pattern Kit/Scene/Instrument staging workspace. Removed resident name/stem fields, Bank child name/key arrays, File/Dir list caches, recursive delete stacks, and KitBrowser storage. Corrected the Bank boot freeze by closing redundant asyncfatfs directory handles, then accepted five 328-byte handles (+656 B) as concurrency headroom. Implemented the hidden typed `.hctmp` source above Instrument pool row `000`, extension-free display, index-first scrolling, deferred family-exit HCNAMES writes, and rapid-backspin cancellation; Instrument Load is now confirmed working. Reconciled the recovered Session 042 plans/logs into the archived handoff and permanent specifications.
 - **Find here**: `/.hcnames` row contract and update state machine, `.hcindex` cache ownership, 81-byte identity, 2,048-byte stage/512-cell capacity, Pattern direct-final-SRAM policy, mask-selective Bank Load, five-handle lifetime rules, `.hctmp` Instrument `kit` row, canonical name repair, rejected shared-union/two-image designs, residual 107-byte diagnostic UI, and [042_SESSION_HANDOFF_LOG.md](042_SESSION_HANDOFF_LOG.md)
+
+### 043 — Pattern/Runtime/Transient Storage Closeout (2026-07-25)
+Replaced retained per-step Pattern state with one 112-byte `step_on[7][16]`
+bitmap per Scene and made Scene/Bank `pattern.pat` v3 seven literal hex rows;
+v1 remains empty and v2 imports only bits. Reduced the float slider LUT to
+1,024 entries with raw `>> 2` lookup and no LUT interpolation. Replaced all
+fixed per-engine voice/pool allocation with six 1,176-byte tagged runtime slots
+(7,056 B total), then moved the unchanged 26,460-B transient PCM table from
+DTCM to application FLASH. The final ELF uses 12,280 B DTCM and 66,780 B
+SRAM1; DTCM remainder is delay-line-only and SRAM1 remainder is Pattern-only,
+with user acknowledgement mandatory before any RAM increase. Full transient
+hardware stress remains pending.
+- **Find here**: bitmap Pattern API/v3 persistence/Full Bank conversion,
+  1,024-float slider LUT, tagged union lifecycle and retired globals,
+  transient FLASH address and DTCM release, RAM reservation policy, current
+  manifest, and [043_SESSION_HANDOFF_LOG.md](043_SESSION_HANDOFF_LOG.md)

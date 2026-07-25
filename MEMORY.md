@@ -19,6 +19,19 @@ make && make img   →   build/LXRV2_lxr02.img
 
 **Current working source**: repository root, a development branch.
 
+## RAM Allocation Approval Policy
+
+All presently uncommitted on-chip RAM capacity is reserved, not general feature
+headroom: free DTCM (including capacity released by moving `transientData` to
+FLASH) is reserved exclusively for future delay-line buffers, while free normal
+SRAM1 is reserved exclusively for future Pattern data. Before implementing any
+new or enlarged RAM allocation in this project, explicitly identify its exact
+byte count, memory region, lifetime, and owner, then obtain the user's
+acknowledgement. This applies to globals, static storage, linker sections,
+pools/unions, DMA buffers, and any material stack-budget increase, in this and
+future sessions. A change that releases RAM does not authorise reuse of that
+capacity for another subsystem.
+
 ## Volatile Notes
 
 This section is for short carryover points only. Flush or rewrite it at session
@@ -37,15 +50,22 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_DTCM_MANIFEST.md`; read
+  `SRAM_MANIFEST.md`; read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live
   memory manifest, module map, and oscillator-interpolation document.
 - Source layout is now `Core/Bank/Scene/` and `Core/Bank/BankData.*`, not
   `Core/Scene/`.
-- Scene/Bank saves currently persist draft v2 `pattern.pat`: 128x7 active-step
-  bits plus per-track length/scale only. This is not the final dynamic Pattern
-  format.
+- Scene/Bank saves persist compact v3 `pattern.pat`: seven 32-hex-character
+  rows representing the exact 112-byte 128-step x 7-track on/off bitmap. v1
+  placeholders remain accepted and v2 imports its final bit field only;
+  length/scale and all other former Pattern fields are disposed. This is not
+  the final dynamic Pattern format.
+- Session 043 completed the bitmap Pattern/LUT/tagged-runtime/transient-ROM
+  storage pass. Read `043_SESSION_HANDOFF_LOG.md` before changing PatternData,
+  slider conversion, InstrumentManager runtime ownership, DTCM placement, or
+  the RAM-allocation approval policy. `transientData` is FLASH-resident;
+  target-audio stress validation of that placement remains pending.
 - Resident Instrument parameter values and target selectors are compact bytes:
   instrument_param_value_t and instrument_target_token_t. Target off is 0xff;
   wide descriptor/Scene IDs exist only for lookup/runtime resolution. Velocity
@@ -121,6 +141,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 ./
 ├── MEMORY.md                        ← this file
 ├── README.md                        ← confirmed hardware, known issues, critical reminders
+├── SRAM_MANIFEST.md                 ← current linked root RAM inventory; mirror of specification reference
 ├── main.c
 ├── config.h
 ├── Makefile
@@ -139,7 +160,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
 │   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 042
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
-│   │   └── SRAM_DTCM_MANIFEST.md      ← current linked SRAM1/DTCM, names, caches, staging, and scratch ownership
+│   │   └── SRAM_MANIFEST.md           ← current linked SRAM1/DTCM, Pattern/delay reservations, and major owners
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -268,7 +289,7 @@ API/feature references and may contain historical snapshots as noted below.
 | `FILESYSTEM_SPEC.md` | Current product storage specification: root layout, numbered Kit/Scene/Bank folders, `kitset.kcg`, instrument schemas/keys, Scene-owned state, Morph/modulation, Pattern/Sample/Wavetable/Effect targets, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
 | `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map for Pattern, UI, sequencer, Preset, ParameterArray, instruments, modulation, MIDI, filesystem, storageTypes, and boot; also records removed front-panel protocol surfaces. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `SRAM_DTCM_MANIFEST.md` | Fresh linked-image SRAM1/DTCM totals, Scene/Pattern/Kit structure sizes, musical-name/cache/staging ownership, asyncfatfs capacity, and residual operation/UI scratch. | Changing retained state, adding caches/names, or evaluating SRAM cost. |
+| `SRAM_MANIFEST.md` | Fresh linked-image SRAM1/DTCM totals, Pattern/delay reservation policy, Scene/Pattern/Kit structure sizes, cache/staging ownership, and major runtime owners. | Changing retained state, adding caches/names, or evaluating RAM cost. |
 
 ---
 

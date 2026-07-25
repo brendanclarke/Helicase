@@ -143,8 +143,10 @@ Implemented through Session 042:
 - Bank-local Scene folders use two digits, `00..15`, not root-library
   three-digit numbering. Bank Save writes every child selected by its 16-bit
   save mask and Bank Load iterates every requested/present local child.
-- Scene/Bank `pattern.pat` text v2 now stores the 128x7 active-step bitmap plus
-  per-track length and scale. Version 1 placeholders remain accepted.
+- Scene/Bank `pattern.pat` text v3 stores only the 112-byte 128x7 active-step
+  bitmap as seven 32-hex-character rows. Version 1 placeholders remain
+  accepted; v2 imports only its final 128-bit field and discards its former
+  length/scale prefix.
 - `File`, `Dir`, and Save-only `sDir` menu diagnostics and their two 64-entry
   name caches are retired. Compatibility APIs return empty/failure without
   starting filesystem work.
@@ -514,11 +516,14 @@ folder but is named without a numeric slot prefix because it belongs to the
 scene. The word after `Kit` is the kit name. The kit name is not stored in
 `kitset.kcg`, `sceneset.scg`, or any other metadata field.
 
-`pattern.pat` is currently one of three accepted bridge shapes:
+`pattern.pat` is currently one of two accepted text shapes plus one controlled
+legacy import:
 
-- legacy binary bridge-pattern payload;
 - thin v1 text placeholder;
-- draft v2 text payload emitted by new Scene/Bank saves.
+- v2 text import, from which only the final 128-character on/off field of each
+  track is retained;
+- compact v3 text writer/reader format; legacy binary bridge payloads are
+  rejected rather than decoded.
 
 The v1 placeholder:
 
@@ -531,7 +536,7 @@ placeholder=1
 The thin placeholder means the staged PatternSet uses PatternData's empty
 bridge defaults.
 
-The v2 draft payload:
+The legacy v2 import payload:
 
 ```text
 format=helicase.pattern
@@ -541,11 +546,25 @@ track1=<length>,<scale>,<128 active bits>
 track7=<length>,<scale>,<128 active bits>
 ```
 
-Only the step on/off bit (`STEP_ACTIVE_MASK`) is stored for each of 128 steps
-on each of seven tracks. Per-track `length` and `scale` are retained.
-Velocity, note, probability, automation, rotation, shuffle, next-pattern, and
-change-bar use PatternData defaults on load. The loader rebuilds the legacy
-16-bit main-step shadow from the 128-bit rows using `step % 16`.
+Only the final on/off bit field is imported for each of 128 steps on each of
+seven tracks. The former per-track `length` and `scale` prefixes are discarded.
+Velocity, note, probability, automation, rotation, shuffle, next-pattern,
+change-bar, and the main-step shadow are not retained.
+
+The current v3 writer and reader payload is:
+
+```text
+format=helicase.pattern
+version=3
+track1=<32 hexadecimal characters>
+...
+track7=<32 hexadecimal characters>
+```
+
+Each row is the literal sixteen bytes of one `PatternSet` track bitmap in
+ascending byte order. Bit zero of each byte is the earlier chronological step.
+All seven rows are required. The resulting file represents exactly 112 bytes
+of persistent on/off Pattern state and no timing or per-step metadata.
 
 `effects.fx` currently stores a guarded placeholder until real effect storage
 exists.
@@ -1247,9 +1266,11 @@ pattern into a scene if they rename it to `pattern.pat`.
 Current bridge notes:
 
 - Live `NUM_PATTERN` is 1.
-- Pattern files still serialize a bridge format derived from the old layout.
-- The old single global shuffle byte is ignored/omitted.
-- Per-track shuffle extension data is the only live shuffle storage.
+- Each resident Scene owns exactly one 112-byte `PatternSet` bitmap; no `Step`,
+  automation, length, scale, rotation, shuffle, note, probability, or velocity
+  Pattern storage remains.
+- v3 files serialize the seven literal bitmap rows. The old single global
+  shuffle and per-track timing extensions are ignored/omitted.
 - Final interchange migration/backfill should happen in external converters
   once the final Pattern storage shape settles.
 

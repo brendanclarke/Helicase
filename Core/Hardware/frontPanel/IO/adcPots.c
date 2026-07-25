@@ -56,15 +56,18 @@ static const uint8_t POT_ADC_IDX[ADC_POT_COUNT] = {
 #define SLIDER_RAW_MIN   SLIDER_DEADZONE
 #define SLIDER_RAW_MAX   (4095U - SLIDER_DEADZONE)
 #define SLIDER_RAW_SPAN  ((float)(SLIDER_RAW_MAX - SLIDER_RAW_MIN))
+#define SLIDER_RAW_MASK  0x0fffu
+#define SLIDER_LUT_ENTRIES 1024u
 
 /* Public slider volume cache [0.0, 1.0], RV5..RV10.
 **
 ** Session 023 moved the expensive log/dB taper calculation out of the
-** foreground loop. The LUT is intentionally full-resolution, one float for
-** each 12-bit ADC code, so SLIDER_LOG_TAPER_DB remains a compile-time config
-** knob without spending powf() calls every time adc_checkPots() runs. */
+** foreground loop. The LUT stores native floats at 1,024 four-code ADC nodes;
+** adjacent raw-code quartets share one node and are deliberately not interpolated.
+** SLIDER_LOG_TAPER_DB therefore remains a compile-time knob without powf()
+** calls every time adc_checkPots() runs. */
 float slider_vol[ADC_POT_COUNT];
-static float slider_lut[4096];
+static float slider_lut[SLIDER_LUT_ENTRIES];
 
 static inline float slider_raw_to_float(uint16_t raw)
 {
@@ -87,8 +90,32 @@ static inline float slider_raw_to_float(uint16_t raw)
 
 static void slider_build_lut(void)
 {
-    for (uint32_t raw = 0; raw < 4096u; raw++)
-        slider_lut[raw] = slider_raw_to_float((uint16_t)raw);
+    /*
+     * Build the 4,096-byte native-float slider LUT once at boot.
+     *
+     * Input: LUT index 0..1023 maps to four-code raw index << 2. Output: the
+     * existing deadzone/log transfer result in one float node. adc polling uses
+     * raw >> 2 and intentionally performs no inter-node interpolation, so this
+     * reduces only attenuator step resolution, not float calculation precision.
+     */
+    for (uint32_t index = 0; index < SLIDER_LUT_ENTRIES; index++)
+        slider_lut[index] = slider_raw_to_float((uint16_t)(index << 2u));
+}
+
+static void slider_refreshVolumes(void)
+{
+    /*
+     * Refresh all slider gain caches through the same non-interpolated lookup.
+     *
+     * Input: six 12-bit DMA samples. Output: six full-float slider_vol gains.
+     * adc_init() and adc_checkPots() are affiliates; sharing this loop prevents
+     * their LUT indexing rules from diverging. Mixer block smoothing remains a
+     * separate audio-control concern and does not interpolate this LUT.
+     */
+    for (uint8_t i = 0; i < ADC_POT_COUNT; i++) {
+        uint16_t cur = adc_dma_buf[POT_ADC_IDX[i]];
+        slider_vol[i] = slider_lut[(cur & SLIDER_RAW_MASK) >> 2u];
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -99,18 +126,12 @@ void adc_init(void)
     /* Hardware already started by endlessPots_init().
     ** Seed slider multipliers from current DMA values. */
     slider_build_lut();
-    for (uint8_t i = 0; i < ADC_POT_COUNT; i++) {
-        uint16_t cur = adc_dma_buf[POT_ADC_IDX[i]];
-        slider_vol[i] = slider_lut[cur & 0x0fffu];
-    }
+    slider_refreshVolumes();
 }
 
 void adc_checkPots(void)
 {
-    for (uint8_t i = 0; i < ADC_POT_COUNT; i++) {
-        uint16_t cur = adc_dma_buf[POT_ADC_IDX[i]];
-        slider_vol[i] = slider_lut[cur & 0x0fffu];
-    }
+    slider_refreshVolumes();
 }
 
 uint16_t adc_getPotRaw(uint8_t i)

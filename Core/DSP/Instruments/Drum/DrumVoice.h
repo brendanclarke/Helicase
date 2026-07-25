@@ -109,21 +109,14 @@ typedef struct VoiceStruct
 //------------------------------------------------------------------------
 
 
-//array holding all the voices
-extern DrumVoice voiceArray[NUM_VOICES];
-
-//initialize all the parameters to sane values
-void initDrumVoice();
-
 /*
- * Pointer-based drum runtime entry points for dynamic instrument slots.
+ * Pointer-based drum runtime entry points for tagged instrument slots.
  *
  * Inputs: a DrumVoice instance owned by the caller plus the logical source
  * slot for trigger/LFO/velocity affiliation where needed. Outputs: the same
- * DSP state changes as the legacy voiceArray wrappers below, but without
- * requiring the instrument to live in one of the three original drum slots.
- * Clients are InstrumentManager's six-slot runtime dispatcher; the legacy
- * wrappers remain for old fixed-slot code and call these helpers.
+ * DSP state changes on that explicit instance without requiring a permanent
+ * fixed drum global. InstrumentManager owns the instance as the active member
+ * of one tagged slot; callers must not retain it across a Scene/type reset.
  */
 void Drum_initVoice(DrumVoice *voice, uint8_t seed_index);
 void Drum_setPanVoice(DrumVoice *voice, const uint8_t pan);
@@ -133,19 +126,5 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf,
                              const uint8_t size);
 void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync);
-
-void Drum_trigger(const uint8_t voiceNr, const uint8_t vol, const uint8_t note);
-
-/** block based calculation*/
-void calcDrumVoiceSyncBlock(const uint8_t voiceNr, int16_t* buf, const uint8_t size);
-
-/** calculate envelopes etc (all 16 samples */
-void calcDrumVoiceAsync(const uint8_t voiceNr);
-
-//-0.5 = left 0=both max 0.5=right*/
-void setPan(const uint8_t voiceNr, const uint8_t pan);
-
-/** set the oscillator start phase for all OSCs*/
-void drum_setPhase(const uint8_t phase, const uint8_t voiceNr);
 
 #endif /* DRUMVOICE_H_ */

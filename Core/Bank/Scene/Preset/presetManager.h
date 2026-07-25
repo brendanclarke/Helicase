@@ -371,8 +371,9 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
 /*
  * Deferred active-Scene sound apply.
  *
- * preset_startDrumsetApply() swaps immediate Scene settings and arms one bit per
- * instrument slot. preset_tickDrumsetApply() commits at most one pending slot
+ * preset_startDrumsetApply() first detaches the outgoing all-source modulation
+ * graph, swaps immediate Scene settings, and arms one bit per instrument slot.
+ * preset_tickDrumsetApply() commits at most one pending slot
  * whose old amp envelope is below the quiet threshold. A return value of 1 means
  * one bounded unit was performed; 0 can mean either fully idle or waiting for
  * ringing slots, so callers may poll it from the ordinary foreground loop.
@@ -381,6 +382,8 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
  * when the newly selected Scene pattern fires a pending slot, it synchronously
  * applies that slot's instrument parameters, LFO slot/targets, audio out, and
  * future per-instrument mix affiliates before the note trigger is dispatched.
+ * The one pre-worker teardown is required because a tagged runtime replacement
+ * overwrites the outgoing engine bytes to which old modulation nodes may point.
  */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);

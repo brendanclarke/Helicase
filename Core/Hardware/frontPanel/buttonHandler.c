@@ -257,7 +257,6 @@ static void buttonHandler_selectBar(uint8_t bar)
     selectRowShowsBar = (uint8_t)(bh_state.selectButtonMode != SELECT_MODE_VOICE);
     led_updatePatternTrackView(menu_getActiveVoice(), menu_getViewedPattern(),
                                buttonHandler_selectedStep, selectRowShowsBar);
-    pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice());
     if (!selectRowShowsBar)
         led_setActiveSelectButton(menu_getSubPage());
     led_flashGroup(LED_FLASH_GROUP_SELECT, (uint16_t)(1u << bar));
@@ -292,7 +291,6 @@ static void buttonHandler_updateSubSteps(void)
         uint8_t trackNr = menu_getActiveVoice();
         uint8_t patternNr = menu_getViewedPattern();
         led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-        pat_applyTrackSettingsToMenu(patternNr, trackNr);
     }
 }
 
@@ -352,7 +350,6 @@ static void buttonHandler_armTimerActionStep(int8_t stepNr)
     buttonHandler_armedAutomationStep = stepNr;
     led_setBlinkLed((uint8_t)(LED_STEP1 + ((uint8_t)stepNr % NUM_STEPS_PER_BAR)), 1);
 
-    pat_armAutomationStep((uint8_t)stepNr, menu_getActiveVoice(), 1);
 }
 
 static void buttonHandler_disarmTimerActionStep(void)
@@ -390,7 +387,6 @@ static void buttonHandler_disarmTimerActionStep(void)
         }
 
         buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
-        pat_armAutomationStep(0, 0, 0);
 
         if (buttonHandler_resetLock == 1) {
             buttonHandler_resetLock = 0;
@@ -410,7 +406,6 @@ static void buttonHandler_disarmTimerActionStep(void)
     }
 
     buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
-    pat_armAutomationStep(0, 0, 0);
 }
 
 static uint8_t buttonHandler_TimerActionOccured(void)
@@ -470,28 +465,7 @@ static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPress
 
     led_setBlinkLed(ledNr, 1);
 
-    pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(),
-                        buttonHandler_visibleStep(seqButtonPressed));
     buttonHandler_updateSubSteps();
-}
-
-static void buttonHandler_showStepParameterPage(void)
-{
-    /*
-     * STEP mode starts on a track front page and moves to the per-step editor
-     * only after the user selects a concrete STEP1..16 button.
-     *
-     * Inputs are implicit current Menu state. Output: SEQ_PAGE subpage 1 is
-     * shown when STEP mode owns the SELECT/STEP UI. This keeps the front page
-     * visible on mode entry or track change, then leaves it hidden until STEP
-     * mode is re-entered or another voice changes the active track.
-     */
-    if (bh_state.selectButtonMode == SELECT_MODE_STEP &&
-        menu_activePage == SEQ_PAGE) {
-        if (menu_getSubPage() != 1u)
-            menu_switchSubPage(1u);
-        menu_repaintAll();
-    }
 }
 
 static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
@@ -524,42 +498,11 @@ static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
     parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
     selectedStepLed = ledNr;
 
-    pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), seqButtonPressed);
-
     trackNr = menu_getActiveVoice();
     patternNr = menu_getViewedPattern();
     pat_toggleStep(trackNr, seqButtonPressed, patternNr);
     led_setValue(pat_isStepActive(trackNr, seqButtonPressed, patternNr),
                  ledNr);
-}
-
-static void buttonHandler_setTrackRotation(uint8_t seqButtonPressed)
-{
-    /*
-     * Sets the visible track-rotation edit value from performance mode.
-     *
-     * Caller context: shift + STEP button while in SELECT_MODE_PERF.
-     *
-     * Why this calls PatternData: rotation mutates per-pattern/per-track data,
-     * so it belongs behind the pat_ API. The LED blink is only feedback for the
-     * front-panel performance gesture and therefore stays in buttonHandler/
-     * ledHandler instead of PatternData.
-     *
-     * Inputs: seqButtonPressed is the desired rotation index from the STEP
-     * button row. Current pattern and active voice are read from Menu.
-     *
-     * Outputs: PAR_TRACK_ROTATION is updated for the menu display, PatternData
-     * applies the same mutation timing that seq_setTrackRotation() used before
-     * this removal pass, and the selected rotation LED blinks.
-     *
-     * Risk: the long-term scoping target says this policy will change when
-     * Pattern owns more sequencer state. This function intentionally preserves
-     * current behavior for now.
-     */
-    parameter_values[PAR_TRACK_ROTATION] = seqButtonPressed;
-    pat_setTrackRotation(menu_getViewedPattern(), menu_getActiveVoice(), seqButtonPressed);
-    led_clearAllBlinkLeds();
-    led_setBlinkLed((uint8_t)(LED_STEP1 + seqButtonPressed), 1);
 }
 
 static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
@@ -573,10 +516,6 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
             break;
         case SELECT_MODE_STEP:
             buttonHandler_setRemoveStep(ledNr, seqButtonPressed);
-            buttonHandler_showStepParameterPage();
-            break;
-        case SELECT_MODE_PERF:
-            buttonHandler_setTrackRotation(seqButtonPressed);
             break;
         default:
             break;
@@ -589,7 +528,6 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
         case SELECT_MODE_STEP:
             led_clearAllBlinkLeds();
             buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
-            buttonHandler_showStepParameterPage();
             break;
         case SELECT_MODE_PERF:
             menu_perfModeSceneButtonPressed(seqButtonPressed);
@@ -823,7 +761,6 @@ static void buttonHandler_partButtonPressed(uint8_t partNr)
             trackNr = menu_getActiveVoice();
             patternNr = menu_getViewedPattern();
             led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-            pat_applyTrackSettingsToMenu(patternNr, trackNr);
         } else {
             copyClear_setSrc((int8_t)partNr, MODE_COPY_PATTERN);
             led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + partNr), 1);
@@ -888,7 +825,6 @@ static void handleVoiceButton(uint8_t voiceNr)
             trackNr = menu_getActiveVoice();
             patternNr = menu_getViewedPattern();
             led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-            pat_applyTrackSettingsToMenu(patternNr, trackNr);
         } else {
             copyClear_setSrc((int8_t)voiceNr, MODE_COPY_TRACK);
             led_setBlinkLed((uint8_t)(LED_VOICE1 + voiceNr), 1);
@@ -1232,8 +1168,6 @@ static void processPress(uint8_t buttonNr)
                 trackNr = menu_getActiveVoice();
                 patternNr = menu_getViewedPattern();
                 led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-                pat_applyPatternSettingsToMenu(patternNr);
-                pat_applyTrackSettingsToMenu(patternNr, trackNr);
             }
 
             led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + menu_getViewedPattern()), 1);

@@ -1167,6 +1167,7 @@ storage_status_t storage_effectFinalize(const storage_effect_state_t *state)
     return STORAGE_STATUS_OK;
 }
 
+#if 0 /* Replaced v2 Step/length/scale draft parser and writer. */
 void storage_patternStubStateInit(storage_pattern_stub_state_t *state)
 {
     /*
@@ -1636,6 +1637,184 @@ uint8_t storage_formatPatternStubLine(char *dst,
     dst[pos++] = '\n';
     dst[pos] = '\0';
     return (uint8_t)pos;
+}
+
+#endif
+
+/*
+ * Parse the compact v3 pattern file without exposing PatternSet bytes.
+ *
+ * Inputs: one complete key/value line and the selected final Scene bitmap.
+ * Outputs: format/version/track validation bits and bounded on/off writes.
+ * v1 remains an empty placeholder; v2 imports its final 128 character bitmap
+ * field only; v3 is seven 32-hex-character track byte rows.
+ */
+void storage_patternStubStateInit(storage_pattern_stub_state_t *state)
+{
+    if (state)
+        memset(state, 0, sizeof(*state));
+}
+
+static int8_t storage_patternHex(char c)
+{
+    if (c >= '0' && c <= '9') return (int8_t)(c - '0');
+    if (c >= 'a' && c <= 'f') return (int8_t)(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F') return (int8_t)(c - 'A' + 10);
+    return -1;
+}
+
+storage_status_t storage_patternStubParseLine(storage_pattern_stub_state_t *state,
+                                              const char *line,
+                                              PatternSet *pattern)
+{
+    char key[24];
+    const char *value;
+    storage_status_t st;
+    uint8_t track;
+
+    if (!state || !line || !pattern)
+        return STORAGE_STATUS_BAD_VALUE;
+    st = storage_splitKeyValue(line, key, sizeof(key), &value);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+    if (storage_streq(key, "format")) {
+        if (!storage_streq(value, "helicase.pattern")) return STORAGE_STATUS_INVALID_FORMAT;
+        state->seen_format = 1u;
+        return STORAGE_STATUS_OK;
+    }
+    if (storage_streq(key, "version")) {
+        st = storage_parseU8(value, &state->version);
+        if (st != STORAGE_STATUS_OK) return st;
+        if (state->version < 1u || state->version > 3u) return STORAGE_STATUS_UNSUPPORTED_VERSION;
+        state->seen_version = 1u;
+        return STORAGE_STATUS_OK;
+    }
+    if (storage_streq(key, "placeholder")) {
+        state->seen_placeholder = storage_streq(value, "1") ? 1u : 0u;
+        return state->seen_placeholder ? STORAGE_STATUS_OK : STORAGE_STATUS_BAD_VALUE;
+    }
+    if (key[0] != 't' || key[1] != 'r' || key[2] != 'a' || key[3] != 'c' ||
+        key[4] != 'k' || key[5] < '1' || key[5] > '7' || key[6] != '\0')
+        return STORAGE_STATUS_OK;
+    track = (uint8_t)(key[5] - '1');
+    if (state->version == 3u) {
+        uint8_t byte;
+        for (byte = 0u; byte < PATTERN_TRACK_BYTES; byte++) {
+            int8_t hi = storage_patternHex(value[byte * 2u]);
+            int8_t lo = storage_patternHex(value[byte * 2u + 1u]);
+            uint8_t bit;
+            if (hi < 0 || lo < 0 || value[32] != '\0') return STORAGE_STATUS_BAD_VALUE;
+            for (bit = 0u; bit < 8u; bit++)
+                (void)pat_patternSetSetStep(pattern, track,
+                    (uint8_t)(byte * 8u + bit),
+                    (uint8_t)((((uint8_t)((hi << 4) | lo)) >> bit) & 1u));
+        }
+    } else if (state->version == 2u) {
+        const char *bits = value;
+        uint8_t step;
+        const char *comma = strchr(value, ',');
+        if (comma) { comma = strchr(comma + 1, ','); if (comma) bits = comma + 1; }
+        for (step = 0u; step < NUM_STEPS; step++) {
+            if (bits[step] != '0' && bits[step] != '1') return STORAGE_STATUS_BAD_VALUE;
+            (void)pat_patternSetSetStep(pattern, track, step, (uint8_t)(bits[step] == '1'));
+        }
+        if (bits[NUM_STEPS] != '\0') return STORAGE_STATUS_BAD_VALUE;
+    } else return STORAGE_STATUS_BAD_VALUE;
+    state->seen_track_mask |= (uint8_t)(1u << track);
+    return STORAGE_STATUS_OK;
+}
+
+storage_status_t storage_patternStubFinalize(const storage_pattern_stub_state_t *state)
+{
+    if (!state || !state->seen_format || !state->seen_version)
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    if (state->version == 1u)
+        return state->seen_placeholder ? STORAGE_STATUS_OK : STORAGE_STATUS_MISSING_REQUIRED;
+    return state->seen_track_mask == ((1u << NUM_TRACKS) - 1u)
+        ? STORAGE_STATUS_OK : STORAGE_STATUS_MISSING_REQUIRED;
+}
+
+uint8_t storage_formatPatternStubLine(char *dst, uint16_t capacity,
+                                      const PatternSet *pattern,
+                                      uint16_t line_index)
+{
+    static const char hex[] = "0123456789abcdef";
+    uint16_t pos = 0u;
+    uint8_t track;
+    uint8_t byte;
+
+    /* Emit v3's literal 112-byte bitmap as seven readable hex rows. */
+    if (!dst || !pattern || capacity == 0u) return 0u;
+    if (line_index == 0u) return storage_formatLiteral(dst, capacity, "format=helicase.pattern\n");
+    if (line_index == 1u) return storage_formatLiteral(dst, capacity, "version=3\n");
+    if (line_index < 2u || line_index >= 2u + NUM_TRACKS || capacity < 41u) return 0u;
+    track = (uint8_t)(line_index - 2u);
+    dst[pos++]='t'; dst[pos++]='r'; dst[pos++]='a'; dst[pos++]='c'; dst[pos++]='k';
+    dst[pos++]=(char)('1' + track); dst[pos++]='=';
+    for (byte = 0u; byte < PATTERN_TRACK_BYTES; byte++) {
+        uint8_t v = pattern->step_on[track][byte];
+        dst[pos++] = hex[v >> 4u]; dst[pos++] = hex[v & 0x0fu];
+    }
+    dst[pos++]='\n'; dst[pos]='\0';
+    return (uint8_t)pos;
+}
+
+/* The effect and Bank directory schemas remain independent of Step storage. */
+uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
+                                            uint16_t line_index)
+{
+    if (line_index == 0u) return storage_formatLiteral(dst, capacity, "format=helicase.effect\n");
+    if (line_index == 1u) return storage_formatLiteral(dst, capacity, "version=1\n");
+    if (line_index == 2u) return storage_formatLiteral(dst, capacity, "placeholder=1\n");
+    return 0u;
+}
+
+void storage_banksetInit(storage_bankset_t *state)
+{
+    if (state) memset(state, 0, sizeof(*state));
+}
+storage_status_t storage_banksetParseLine(storage_bankset_t *state, const char *line)
+{
+    char key[32]; const char *value; storage_status_t st;
+    if (!state || !line) return STORAGE_STATUS_BAD_VALUE;
+    st = storage_splitKeyValue(line, key, sizeof(key), &value); if (st != STORAGE_STATUS_OK) return st;
+    if (storage_streq(key,"format")) { if (!storage_streq(value,"helicase.bankset")) return STORAGE_STATUS_INVALID_FORMAT; state->seen_format=1u; }
+    else if (storage_streq(key,"version")) { uint8_t v; st=storage_parseU8(value,&v); if(st!=STORAGE_STATUS_OK||v!=2u) return STORAGE_STATUS_UNSUPPORTED_VERSION; state->seen_version=1u; }
+    else if (storage_streq(key,"active_scene")) { st=storage_parseU8(value,&state->active_scene); if(st!=STORAGE_STATUS_OK) return st; state->seen_active_scene=1u; }
+    else if (storage_streq(key,"scene_mask_voice_edit")) {
+        uint16_t value16 = 0u; uint8_t n = 0u; uint8_t digits = 0u;
+        if (value[0] == '0' && (value[1] == 'x' || value[1] == 'X'))
+            n = 2u;
+        while (value[n] != '\0' && digits < 4u) {
+            int8_t digit = storage_patternHex(value[n++]);
+            if (digit < 0) return STORAGE_STATUS_BAD_VALUE;
+            value16 = (uint16_t)((value16 << 4u) | (uint8_t)digit);
+            digits++;
+        }
+        if (value[n] != '\0' || digits == 0u) return STORAGE_STATUS_BAD_VALUE;
+        state->scene_mask_voice_edit = value16;
+        state->seen_scene_mask_voice_edit = 1u;
+    }
+    return STORAGE_STATUS_OK;
+}
+storage_status_t storage_banksetFinalize(const storage_bankset_t *state)
+{ return (!state || !state->seen_format || !state->seen_version) ? STORAGE_STATUS_MISSING_REQUIRED : STORAGE_STATUS_OK; }
+uint8_t storage_formatBanksetLine(char *dst,uint16_t capacity,const storage_bankset_t *state,uint16_t line_index)
+{
+    if (!state) return 0u;
+    if(line_index==0u) return storage_formatLiteral(dst,capacity,"format=helicase.bankset\n");
+    if(line_index==1u) return storage_formatLiteral(dst,capacity,"version=2\n");
+    if(line_index==2u) return storage_formatAssignmentU16(dst,capacity,"active_scene",state->active_scene);
+    if(line_index==3u) {
+        static const char hex[]="0123456789abcdef";
+        if (capacity < 28u) return 0u;
+        memcpy(dst,"scene_mask_voice_edit=",22u);
+        dst[22]=hex[(state->scene_mask_voice_edit >> 12u)&15u];
+        dst[23]=hex[(state->scene_mask_voice_edit >> 8u)&15u];
+        dst[24]=hex[(state->scene_mask_voice_edit >> 4u)&15u];
+        dst[25]=hex[state->scene_mask_voice_edit&15u]; dst[26]='\n'; dst[27]='\0'; return 27u;
+    }
+    return 0u;
 }
 
 /* See storageTypes.h for the public contract.

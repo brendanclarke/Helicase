@@ -122,6 +122,11 @@ typedef struct ModulatorStruct
 extern ModulationNode velocityModulators[6];
 
 void modNode_init(ModulationNode* vm);
+/*
+ * Restore velocity and every currently tagged slot LFO target at audio-block
+ * start. Inputs: none. Output: temporary overlays return to stored bases via
+ * InstrumentManager's live-node visitor, never via fixed engine storage.
+ */
 void modNode_resetTargets();
 void modNode_reassignVeloMod();
 

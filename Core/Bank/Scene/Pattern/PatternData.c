@@ -1,1029 +1,235 @@
 /*
  * PatternData.c
  *
- * Scene/Pattern-owned storage and edit API.
+ * The only persistent pattern state is one fixed-grid on/off bitmap per Scene.
  */
 
 #include "PatternData.h"
 #include "SceneData.h"
-#include "MidiMessages.h"
-#include "ParameterArray.h"
-#include "menu.h"
-#include "modulationNode.h"
-#include "sequencer.h"
+
 #include <string.h>
-
-/* Held-step automation edit target.
- *
- * buttonHandler.c sets these when a step button is held long enough to arm
- * automation. Preset/MIDI parameter writes then call pat_recordArmedAutomation()
- * to write the destination/value into that held step. -1 means no armed step.
- */
-static int8_t pat_armedAutomationStep = -1;
-static int8_t pat_armedAutomationTrack = -1;
-
-/* Which automation lane receives edits/recording: 0 = param1, nonzero = param2.
- * This used to be set via a sequencer opcode; now menu.c writes it directly. */
-static uint8_t pat_activeAutomationTrack = 0;
-
-/*
- * Track-scale menu values as exact rational timing ratios.
- *
- * Why this table lives in PatternData: track scale is Pattern-owned per-track
- * metadata, while Sequencer only needs a normalized numerator/denominator when
- * it schedules playback. Inputs are TRACK_SCALE_* menu/storage values. Output
- * is a small ratio where 1/1 means the corrected default 4-steps-per-beat grid,
- * 5/2 is x25, and 2/5 is /25. Risk: MenuText.h must keep the display order in
- * sync with this table because the menu value is the table index.
- */
-static const TrackScaleRatio pat_trackScaleRatios[TRACK_SCALE_COUNT] = {
-	{1u, 8u}, {1u, 7u}, {1u, 6u}, {1u, 5u}, {1u, 4u}, {1u, 3u},
-	{2u, 5u}, {1u, 2u}, {3u, 5u}, {3u, 4u}, {1u, 1u},
-	{4u, 3u}, {5u, 3u}, {2u, 1u}, {5u, 2u}, {3u, 1u},
-	{4u, 1u}, {5u, 1u}, {6u, 1u}, {7u, 1u}, {8u, 1u},
-};
-
-static void pat_resetStep(Step *step)
-{
-	/* Reset one bridge step to the default inactive edit state used by clear-pattern
-	 * and clear-track operations. Input/output is a live Step pointer. A null
-	 * guard keeps callers simple when pointer helpers return 0. */
-	if (!step)
-		return;
-	step->note 		= PAT_DEFAULT_NOTE;
-	step->param1Nr 	= NO_AUTOMATION;
-	step->param1Val = 0;
-	step->param2Nr	= NO_AUTOMATION;
-	step->param2Val	= 0;
-	step->prob		= 127;
-	step->volume	= 100;
-}
 
 uint8_t pat_trackValid(uint8_t track)
 {
-	return (uint8_t)(track < NUM_TRACKS);
+    return (uint8_t)(track < NUM_TRACKS);
 }
 
 uint8_t pat_patternValid(uint8_t scene_index)
 {
-	return scene_indexValid(scene_index);
+    return scene_indexValid(scene_index);
 }
 
 uint8_t pat_stepValid(uint8_t step)
 {
-	return (uint8_t)(step < NUM_STEPS);
+    return (uint8_t)(step < NUM_STEPS);
 }
 
-Step *pat_stepPtr(uint8_t scene_index, uint8_t track, uint8_t step)
+uint8_t pat_patternSetGetStep(const PatternSet *pattern, uint8_t track,
+                              uint8_t step)
 {
-	scene_t *scene;
-	/* Central bounded access to one Scene-owned Step. */
-	if (!pat_trackValid(track) || !pat_stepValid(step))
-		return 0;
-	scene = scene_get(scene_index);
-	if (!scene)
-		return 0;
-	return &scene->pattern.pat_subStepPattern[track][step];
+    /*
+     * Return one staged or resident trigger bit.
+     *
+     * Inputs: PatternSet plus track/step coordinates. Output: zero or one;
+     * invalid inputs return zero. StorageTypes uses this boundary so file code
+     * never depends on a public raw-byte layout, while Sequencer/UI use the
+     * Scene-indexed wrapper below.
+     */
+    if (!pattern || !pat_trackValid(track) || !pat_stepValid(step))
+        return 0u;
+    return (uint8_t)((pattern->step_on[track][step >> 3u] >> (step & 7u)) & 1u);
 }
 
-uint16_t *pat_mainStepsPtr(uint8_t scene_index, uint8_t track)
+uint8_t pat_patternSetSetStep(PatternSet *pattern, uint8_t track,
+                              uint8_t step, uint8_t on)
 {
-	scene_t *scene;
-	if (!pat_trackValid(track))
-		return 0;
-	scene = scene_get(scene_index);
-	if (!scene)
-		return 0;
-	return &scene->pattern.pat_mainSteps[track];
+    uint8_t *byte;
+    uint8_t mask;
+
+    /*
+     * Set one staged or resident trigger bit without allocating Step data.
+     *
+     * Inputs: PatternSet, bounded coordinate, and boolean on state. Output:
+     * one bitmap bit is updated and success is returned; invalid input leaves
+     * storage untouched. Filesystem and generators are affiliates because this
+     * is their shared representation boundary.
+     */
+    if (!pattern || !pat_trackValid(track) || !pat_stepValid(step))
+        return 0u;
+    byte = &pattern->step_on[track][step >> 3u];
+    mask = (uint8_t)(1u << (step & 7u));
+    if (on)
+        *byte |= mask;
+    else
+        *byte &= (uint8_t)~mask;
+    return 1u;
 }
 
-PatternSetting *pat_patternSettingPtr(uint8_t scene_index)
+void pat_initPatternSet(PatternSet *pattern)
 {
-	scene_t *scene = scene_get(scene_index);
-	return scene ? &scene->pattern.pat_patternSettings : 0;
-}
-
-LengthRotate *pat_lengthRotatePtr(uint8_t scene_index, uint8_t track)
-{
-	scene_t *scene;
-	/* Per-track Pattern settings live here during the bridge.
-	 *
-	 * LengthRotate keeps its historical name for now, but the record now owns
-	 * the STEP front-page track settings: length, rotation, scale, MIDI channel,
-	 * and MIDI note. The legacy pattern length stream may still supply only the
-	 * length byte; loaders must default the newer fields before reading the
-	 * optional settings extension block.
-	 */
-	if (!pat_trackValid(track))
-		return 0;
-	scene = scene_get(scene_index);
-	if (!scene)
-		return 0;
-	return &scene->pattern.pat_patternLengthRotate[track];
-}
-
-void pat_init(void)
-{
-	pat_initScene(scene_getActiveIndex());
-}
-
-void pat_initPatternSet(PatternSet *pattern, uint8_t next_pattern)
-{
-	uint8_t track;
-	uint8_t step;
-
-	/*
-	 * Reset a complete PatternSet without using resident Scene accessors.
-	 *
-	 * What: writes the same empty bridge pattern that pat_initScene() used to
-	 * build indirectly: no active main-step bits, all 128 steps per track reset
-	 * to default note/probability/automation values, 16-step track length, no
-	 * rotation, scale off, shuffle zero, changeBar zero, and caller-supplied
-	 * nextPattern.
-	 *
-	 * Why: filesystem Scene Load uses private staging memory until every child
-	 * file validates. Passing a staged PatternSet here avoids mutating resident
-	 * scenes[] while still sharing the canonical PatternData defaults.
-	 *
-	 * Loop details: the outer loop walks the seven retained tracks; the inner
-	 * loop walks the 128 real bridge steps per track. pat_resetStep() writes an
-	 * inactive default by leaving STEP_ACTIVE_MASK clear in volume. main-step
-	 * masks are uint16_t because the legacy bridge still has sixteen visible
-	 * main steps even though each main step maps to eight real substeps.
-	 */
-	if (!pattern)
-		return;
-	pattern->pat_patternSettings.changeBar = 0u;
-	pattern->pat_patternSettings.nextPattern = next_pattern;
-	for (track = 0u; track < NUM_TRACKS; track++) {
-		pattern->pat_mainSteps[track] = 0u;
-		pattern->pat_patternLengthRotate[track].length =
-			PAT_DEFAULT_TRACK_LENGTH;
-		pattern->pat_patternLengthRotate[track].rotate = 0u;
-		pattern->pat_patternLengthRotate[track].scale = TRACK_SCALE_OFF;
-		pattern->pat_patternLengthRotate[track].shuffle = 0u;
-		for (step = 0u; step < NUM_STEPS; step++)
-			pat_resetStep(&pattern->pat_subStepPattern[track][step]);
-	}
+    /*
+     * Clear a complete Scene pattern payload.
+     *
+     * Input: caller-owned 112-byte PatternSet. Output: all seven tracks are
+     * silent. SceneData and filesystem call this for resident/final load
+     * targets; no default Step records or timing fields are retained.
+     */
+    if (pattern)
+        memset(pattern, 0, sizeof(*pattern));
 }
 
 void pat_initScene(uint8_t scene_index)
 {
-	scene_t *scene = scene_get(scene_index);
-	/*
-	 * Resident Scene wrapper for the generic PatternSet initializer.
-	 *
-	 * Inputs: Scene index. Output: that Scene's PatternSet is reset in place
-	 * with nextPattern equal to its own index, preserving the old startup
-	 * behavior while making filesystem staging share the same defaults.
-	 */
-	if (!scene)
-		return;
-	pat_initPatternSet(&scene->pattern, scene_index);
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Initialize persistent pattern storage for one validated Scene.
+     *
+     * Input: resident Scene index. Output: that Scene's 112-byte bitmap is
+     * cleared. SceneData owns the lifecycle and invokes this exactly once per
+     * Scene during initialization; Sequencer does not reinitialize it.
+     */
+    if (scene)
+        pat_initPatternSet(&scene->pattern);
 }
 
-uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t pattern)
+uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t scene_index)
 {
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return 0;
-	return (uint8_t)((s->volume & STEP_ACTIVE_MASK) > 0);
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /* Playback-safe Scene wrapper for one bitmap query. */
+    return scene ? pat_patternSetGetStep(&scene->pattern, track, step) : 0u;
+}
+
+void pat_setStepActive(uint8_t scene_index, uint8_t track, uint8_t step,
+                       uint8_t on)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Apply an on/off edit to one resident Scene bit.
+     *
+     * Inputs: Scene/track/step and desired state. Output: only the matching
+     * trigger bit changes. Sequencer recording/live erase, button UI, and
+     * Euclidean transfer share this operation; invalid scenes are ignored.
+     */
+    if (scene)
+        (void)pat_patternSetSetStep(&scene->pattern, track, step, on);
+}
+
+void pat_toggleStep(uint8_t track, uint8_t step, uint8_t scene_index)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Toggle one resident bit while keeping bit ordering private to this API. */
+    if (scene && pat_trackValid(track) && pat_stepValid(step))
+        (void)pat_patternSetSetStep(&scene->pattern, track, step,
+                                    (uint8_t)!pat_patternSetGetStep(
+                                        &scene->pattern, track, step));
+}
+
+void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step)
+{
+    /* Live erase is exactly a clear-bit operation in the reduced model. */
+    pat_setStepActive(scene_index, track, step, 0u);
 }
 
 uint8_t pat_sceneHasActiveSteps(uint8_t scene_index)
 {
-	uint8_t track;
-	uint8_t step;
-	const scene_t *scene;
+    const scene_t *scene = scene_getConst(scene_index);
+    uint8_t track;
+    uint8_t byte;
 
-	/*
-	 * Scan the complete retained PatternSet for Load-menu Scene feedback.
-	 *
-	 * Inputs: a Scene index. Output: returns immediately when any Step's active
-	 * flag is set, otherwise zero after all tracks and steps have been checked.
-	 * Clients: menu_refreshLoadSceneLeds(); affiliates are scene_getConst() and
-	 * STEP_ACTIVE_MASK. The nested loop stays here instead of repeatedly calling
-	 * pat_isStepActive() so this owner-level query validates the Scene once and
-	 * reads its contiguous pattern storage without introducing a thin iterator.
-	 */
-	if (!pat_patternValid(scene_index))
-		return 0u;
-	scene = scene_getConst(scene_index);
-	if (!scene)
-		return 0u;
-	for (track = 0u; track < NUM_TRACKS; track++) {
-		for (step = 0u; step < NUM_STEPS; step++) {
-			if ((scene->pattern.pat_subStepPattern[track][step].volume &
-			     STEP_ACTIVE_MASK) != 0u)
-				return 1u;
-		}
-	}
-	return 0u;
+    /*
+     * Report whether a Scene contains any trigger bit.
+     *
+     * Input: resident Scene index. Output: nonzero at the first nonzero bitmap
+     * byte, otherwise zero. Menu load feedback uses this owner-level scan
+     * rather than learning PatternSet layout.
+     */
+    if (!scene)
+        return 0u;
+    for (track = 0u; track < NUM_TRACKS; track++)
+        for (byte = 0u; byte < PATTERN_TRACK_BYTES; byte++)
+            if (scene->pattern.step_on[track][byte])
+                return 1u;
+    return 0u;
 }
 
-uint8_t pat_isMainStepActive(uint8_t track, uint8_t mainStep, uint8_t pattern)
+void pat_clearTrack(uint8_t scene_index, uint8_t track)
 {
-	uint16_t *mainSteps;
-	if (mainStep >= 16u)
-		return 0;
-	mainSteps = pat_mainStepsPtr(pattern, track);
-	if (!mainSteps)
-		return 0;
-	return (uint8_t)((*mainSteps & (uint16_t)(1u << mainStep)) > 0);
+    scene_t *scene = scene_get(scene_index);
+
+    /* Clear one 16-byte track bitmap; no removed automation lanes are touched. */
+    if (scene && pat_trackValid(track))
+        memset(scene->pattern.step_on[track], 0, PATTERN_TRACK_BYTES);
 }
 
-uint8_t pat_readStep(uint8_t pattern, uint8_t track, uint8_t step, Step *out)
+void pat_clearPattern(uint8_t scene_index)
 {
-	/*
-	 * Copies one Step out of PatternData for playback-side inspection.
-	 *
-	 * Why: sequencer.c still needs to parse automation nodes and trigger note/vol
-	 * data at playback time, but should no longer index PatternData arrays
-	 * directly. Inputs are pattern/track/step and a destination Step pointer.
-	 * Output is 1 plus a copied Step on success, 0 on invalid coordinates or null
-	 * output. Common callers are sequencer playback and roll/MIDI trigger paths.
-	 * Risk: the returned Step is a snapshot, not live storage; callers that need to
-	 * mutate pattern data must use pat_* mutation helpers instead.
-	 */
-	Step *s;
-	if (!out)
-		return 0;
-	s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return 0;
-	*out = *s;
-	return 1;
+    scene_t *scene = scene_get(scene_index);
+
+    /* Clear only the PatternSet of one Scene, preserving its kit and settings. */
+    if (scene)
+        pat_initPatternSet(&scene->pattern);
 }
 
-uint8_t pat_getStepProbability(uint8_t pattern, uint8_t track, uint8_t step)
+void pat_copyTrack(uint8_t scene_index, uint8_t src_track, uint8_t dst_track)
 {
-	/*
-	 * Returns one step probability for sequencer playback.
-	 *
-	 * Inputs: pattern/track/step. Output: stored probability, or 0 for invalid
-	 * coordinates so invalid reads cannot trigger a voice by accident. Caller:
-	 * seq_nextStep() before comparing against its per-track random value.
-	 */
-	Step *s = pat_stepPtr(pattern, track, step);
-	return s ? s->prob : 0u;
+    scene_t *scene = scene_get(scene_index);
+
+    /* Copy precisely one track's 16-byte trigger bitmap within a Scene. */
+    if (scene && pat_trackValid(src_track) && pat_trackValid(dst_track))
+        memcpy(scene->pattern.step_on[dst_track],
+               scene->pattern.step_on[src_track], PATTERN_TRACK_BYTES);
 }
 
-uint8_t pat_getStepNote(uint8_t pattern, uint8_t track, uint8_t step)
+void pat_copyPattern(uint8_t src_scene, uint8_t dst_scene)
 {
-	/*
-	 * Returns one stored note value for playback/roll paths.
-	 *
-	 * Inputs: pattern/track/step. Output: stored MIDI note, or PAT_DEFAULT_NOTE
-	 * on invalid coordinates. Callers/clients: seq_nextStep(), seq_triggerVoice(),
-	 * and roll recording. Risk: this is a read-only helper; note edits must go
-	 * through pat_setStepNote() or pat_recordNote().
-	 */
-	Step *s = pat_stepPtr(pattern, track, step);
-	return s ? s->note : PAT_DEFAULT_NOTE;
+    scene_t *src = scene_get(src_scene);
+    scene_t *dst = scene_get(dst_scene);
+
+    /* Copy the full 112-byte bitmap between Scenes, not Scene settings or kit. */
+    if (src && dst)
+        memcpy(&dst->pattern, &src->pattern, sizeof(dst->pattern));
 }
 
-uint8_t pat_getStepVolume(uint8_t pattern, uint8_t track, uint8_t step)
+void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
+                 uint8_t dst_bar)
 {
-	/*
-	 * Returns the stored 0..127 velocity for one step.
-	 *
-	 * Inputs: pattern/track/step. Output: lower seven bits of volume, or 0 on
-	 * invalid coordinates. Caller/confederates: sequencer voice trigger and MIDI
-	 * note echo paths use this to preserve the legacy behavior where MIDI output
-	 * velocity follows stored step velocity even if an internal roll trigger used a
-	 * fixed roll volume.
-	 */
-	Step *s = pat_stepPtr(pattern, track, step);
-	return s ? (uint8_t)(s->volume & STEP_VOLUME_MASK) : 0u;
+    scene_t *scene = scene_get(scene_index);
+    uint8_t src_byte;
+    uint8_t dst_byte;
+
+    /*
+     * Copy one visible 16-step bar as exactly two bytes.
+     *
+     * Inputs: Scene, track, and source/destination bars 0..7. Output: the two
+     * destination bitmap bytes are overwritten. Copy/Clear UI is the client;
+     * no track-length extension is possible because timing metadata is gone.
+     */
+    if (!scene || !pat_trackValid(track) || src_bar >= NUM_BARS ||
+        dst_bar >= NUM_BARS)
+        return;
+    src_byte = (uint8_t)(src_bar * 2u);
+    dst_byte = (uint8_t)(dst_bar * 2u);
+    memcpy(&scene->pattern.step_on[track][dst_byte],
+           &scene->pattern.step_on[track][src_byte], 2u);
 }
 
-void pat_setMainStep(uint8_t pattern, uint8_t track, uint8_t mainStep, uint8_t onOff)
-{
-	/* Direct compatibility-mask setter used while old pattern file/menu fields
-	 * still exist. Inputs are target pattern/track, a 0..15 mask bit, and a
-	 * boolean onOff. Output is only the mask bit; Step data is not created or
-	 * cleared here, and playback does not consult this mask. */
-	uint16_t *mainSteps;
-	if (mainStep >= 16u)
-		return;
-	mainSteps = pat_mainStepsPtr(pattern, track);
-	if (!mainSteps)
-		return;
-	if (onOff)
-		*mainSteps |= (uint16_t)(1u << mainStep);
-	else
-		*mainSteps &= (uint16_t)~(uint16_t)(1u << mainStep);
-}
-
-void pat_setMainStepsRaw(uint8_t pattern, uint8_t track, uint16_t bits)
-{
-	/* Raw compatibility-mask writer used by legacy file/staging code. It writes
-	 * the whole 16-bit mask in one shot; bridge playback and the Euklid generator
-	 * use Step active bits instead. */
-	uint16_t *mainSteps = pat_mainStepsPtr(pattern, track);
-	if (!mainSteps)
-		return;
-	*mainSteps = bits;
-}
-
-void pat_toggleStep(uint8_t track, uint8_t step, uint8_t pattern)
-{
-	/* Toggle the active bit of one bridge step while preserving the stored velocity
-	 * in the lower seven bits. Used by buttonHandler step toggles. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	if ((s->volume & STEP_ACTIVE_MASK) == 0)
-		s->volume |= STEP_ACTIVE_MASK;
-	else
-		s->volume &= (uint8_t)~STEP_ACTIVE_MASK;
-}
-
-void pat_toggleMainStep(uint8_t track, uint8_t mainStep, uint8_t pattern)
-{
-	/* Toggle one legacy 16-bit compatibility-mask bit. The LED refresh is done by
-	 * callers in ledHandler because PatternData does not own presentation. */
-	uint16_t *mainSteps;
-	if (mainStep >= 16u)
-		return;
-	mainSteps = pat_mainStepsPtr(pattern, track);
-	if (!mainSteps)
-		return;
-	*mainSteps ^= (uint16_t)(1u << mainStep);
-}
-
-void pat_setStepNote(uint8_t pattern, uint8_t track, uint8_t step, uint8_t note)
-{
-	/* Menu edit path for PAR_STEP_NOTE. Writes storage and mirrors the edited
-	 * value into parameter_values so the display remains coherent. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	s->note = note;
-	parameter_values[PAR_STEP_NOTE] = note;
-}
-
-void pat_setStepVolume(uint8_t pattern, uint8_t track, uint8_t step, uint8_t volume)
-{
-	/* Menu edit path for PAR_STEP_VOLUME. Only the lower seven velocity bits are
-	 * replaced; the high active bit must survive a volume edit. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	s->volume &= (uint8_t)~STEP_VOLUME_MASK;
-	s->volume |= (uint8_t)(volume & STEP_VOLUME_MASK);
-	parameter_values[PAR_STEP_VOLUME] = (uint8_t)(volume & STEP_VOLUME_MASK);
-}
-
-void pat_setStepProbability(uint8_t pattern, uint8_t track, uint8_t step, uint8_t prob)
-{
-	/* Menu edit path for PAR_STEP_PROB. Probability is stored per bridge step and
-	 * read by sequencer playback before triggering a voice. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	s->prob = prob;
-	parameter_values[PAR_STEP_PROB] = prob;
-}
-
-void pat_setStepAutomationDestination(uint8_t pattern, uint8_t track,
-                                      uint8_t step, uint8_t slot,
-                                      uint16_t targetParam)
-{
-	/* Menu edit path for PAR_P1_DEST/PAR_P2_DEST.
-	 *
-	 * targetParam comes from modTargets[].param. The Step struct stores the old
-	 * automation destination encoding: destinations below 128 are stored as
-	 * CC-number-style param+1 so midiParser_ccHandler can later interpret them
-	 * consistently. Off/stale/wide values become NO_AUTOMATION because playback
-	 * still passes through automationNode's legacy 0..254 CC namespace. Slot 0
-	 * writes param1Nr; slot 1 writes param2Nr.
-	 */
-	Step *s = pat_stepPtr(pattern, track, step);
-	uint16_t packed = targetParam;
-
-	if (!s)
-		return;
-	if (packed >= NO_AUTOMATION || packed == PAR_NONE)
-		packed = NO_AUTOMATION;
-	else if (packed < 128u)
-		packed++;
-
-	if (slot == 0)
-		s->param1Nr = packed;
-	else
-		s->param2Nr = packed;
-}
-
-void pat_setStepAutomationValue(uint8_t pattern, uint8_t track,
-                                uint8_t step, uint8_t slot,
-                                uint8_t value)
-{
-	/* Menu edit path for PAR_P1_VAL/PAR_P2_VAL. The destination is handled by
-	 * pat_setStepAutomationDestination(); this only writes the automation value
-	 * for the requested slot. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	if (slot == 0)
-		s->param1Val = value;
-	else
-		s->param2Val = value;
-}
-
-void pat_setPatternChangeBar(uint8_t pattern, uint8_t value)
-{
-	/*
-	 * Retired pattern-repeat setter.
-	 *
-	 * Pattern repeat/next switching has moved out of the sequencer. A future
-	 * feature must switch at the Scene level so Pattern, Scene parameters, and
-	 * edit-mask state remain aligned. Inputs are accepted for compatibility with
-	 * stale menu/storage paths, but no PatternData state changes.
-	 */
-	(void)pattern;
-	(void)value;
-}
-
-void pat_setPatternNext(uint8_t pattern, uint8_t value)
-{
-	/*
-	 * Retired pattern-next setter.
-	 *
-	 * Pattern-only next targets desynchronize Scene parameters from playback in a
-	 * 16-Scene bank. Inputs are ignored; explicit switching now happens through
-	 * menu_perfModeSceneButtonPressed()/seq_selectActivePattern() only.
-	 */
-	(void)pattern;
-	(void)value;
-}
-
-uint8_t pat_getPatternChangeBar(uint8_t pattern)
-{
-	/*
-	 * Retired pattern-repeat accessor.
-	 *
-	 * Output is always zero because the sequencer no longer consumes changeBar.
-	 * The argument is kept so legacy callers compile until Pattern is rebuilt.
-	 */
-	(void)pattern;
-	return 0u;
-}
-
-uint8_t pat_getPatternNext(uint8_t pattern)
-{
-	/*
-	 * Retired pattern-next accessor.
-	 *
-	 * Output is the input pattern, expressing "stay here" for compatibility with
-	 * any legacy code that still asks PatternData for an automatic target.
-	 */
-	return pattern;
-}
-
-void pat_setTrackLength(uint8_t pattern, uint8_t track, uint8_t length)
-{
-	/* Menu edit path for PAR_TRACK_LENGTH.
-	 *
-	 * The Phase 2 bridge stores a real 1..128 step count. A zero value can arrive from older files or defensive callers and is normalized to the full 128-step track default. Output updates both PatternData and the currently displayed menu value. */
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	if (!lr)
-		return;
-	if (length == 0u)
-		length = NUM_STEPS;
-	else if (length > NUM_STEPS)
-		length = NUM_STEPS;
-	lr->length = length;
-	parameter_values[PAR_TRACK_LENGTH] = length;
-}
-
-uint8_t pat_getTrackLength(uint8_t pattern, uint8_t track)
-{
-	/* Read storage length in UI form. Invalid indices and missing/zero legacy values return the bridge default of 128 steps. */
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	uint8_t length;
-	if (!lr)
-		return NUM_STEPS;
-	length = lr->length;
-	if (length == 0u)
-		return NUM_STEPS;
-	if (length > NUM_STEPS)
-		return NUM_STEPS;
-	return length;
-}
-
-uint8_t pat_getEffectiveTrackLength(uint8_t pattern, uint8_t track)
-{
-	/*
-	 * Returns a nonzero playback length for one pattern track.
-	 *
-	 * Why: sequencer wrap and external-clock math require a concrete nonzero length. Inputs: pattern/track. Output: 1..128 steps, with invalid coordinates falling back to 128 so playback callers never divide/modulo by zero.
-	 * Callers/clients: seq_nextStep(), seq_triggerNextMasterStep(), and
-	 * seq_setStepIndexToStart().
-	 */
-	return pat_getTrackLength(pattern, track);
-}
-
-void pat_setTrackRotation(uint8_t pattern, uint8_t track, uint8_t rotation)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	uint8_t oldRot;
-	uint8_t len;
-
-	/*
-	 * Why: track rotation is pattern edit state, but the old sequencer also
-	 * compensated the live step index when rotating the currently playing
-	 * pattern. Inputs: pattern/track/new rotation. Outputs: stored rotation,
-	 * menu value, and possibly a sequencer runtime index adjustment. Risk: the
-	 * runtime hook must remain narrow; PatternData must not take over timing.
-	 */
-	if (!lr)
-		return;
-	oldRot = lr->rotate;
-	if (rotation == oldRot)
-		return;
-	len = pat_getEffectiveTrackLength(pattern, track);
-	if (rotation >= len)
-		rotation = (uint8_t)(rotation % len);
-	if (pattern == seq_activePattern && seq_isRunning())
-		seq_offsetTrackStepIndexForRotation(track, oldRot, rotation, len);
-	lr->rotate = rotation;
-	parameter_values[PAR_TRACK_ROTATION] = rotation;
-}
-
-uint8_t pat_getTrackRotation(uint8_t pattern, uint8_t track)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	return lr ? lr->rotate : 0;
-}
-
-void pat_setTrackScale(uint8_t pattern, uint8_t track, uint8_t scale)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-
-	/*
-	 * Stores the per-track timing scale selected from the Pattern STEP front
-	 * page.
-	 *
-	 * Inputs: pattern/track select the PatternData owner and scale is a
-	 * TRACK_SCALE_* menu index. Outputs: storage is clamped to a known scale and
-	 * PAR_TRACK_SCALE mirrors it for the current UI. The sequencer reads this
-	 * through pat_getTrackScaleRatio() when scheduling. If the edited pattern is
-	 * currently running, Sequencer is asked to realign immediately so a mid-run
-	 * change from a slow divide to a fast multiply cannot dump a long backlog of
-	 * "missed" scaled steps into one tick.
-	 */
-	if (!lr)
-		return;
-	if (scale >= TRACK_SCALE_COUNT)
-		scale = TRACK_SCALE_OFF;
-	lr->scale = scale;
-	parameter_values[PAR_TRACK_SCALE] = scale;
-	if (pattern == seq_activePattern && seq_isRunning())
-		seq_realignActivePatternToMasterClock();
-}
-
-uint8_t pat_getTrackScale(uint8_t pattern, uint8_t track)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	if (!lr || lr->scale >= TRACK_SCALE_COUNT)
-		return TRACK_SCALE_OFF;
-	return lr->scale;
-}
-
-TrackScaleRatio pat_getTrackScaleRatio(uint8_t pattern, uint8_t track)
-{
-	uint8_t scale = pat_getTrackScale(pattern, track);
-
-	/*
-	 * Converts PatternData track scale to the exact rational ratio consumed by
-	 * Sequencer timing. Invalid storage falls back to 1/1 so corrupt or legacy
-	 * data cannot create a zero denominator in the timing path.
-	 */
-	if (scale >= TRACK_SCALE_COUNT)
-		scale = TRACK_SCALE_OFF;
-	return pat_trackScaleRatios[scale];
-}
-
-void pat_setTrackShuffle(uint8_t pattern, uint8_t track, uint8_t shuffle)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-
-	/*
-	 * Store one track's shuffle amount.
-	 *
-	 * Why: shuffle affects playback timing and must follow the Pattern track,
-	 * not Sequencer's transport globals. Menu edits the viewed pattern/track;
-	 * Sequencer queries this value when computing that track's due events.
-	 *
-	 * Inputs: pattern/track identify the PatternData owner, shuffle is the
-	 * 0..127 menu amount. Outputs: PatternData storage and PAR_SHUFFLE's visible
-	 * mirror update. Confederates: filesystem writes this from the optional
-	 * per-track shuffle extension. Risk: this must not forward to a
-	 * transport-global shuffle path; playback reads per-track values directly so
-	 * tracks can differ.
-	 */
-	if (!lr)
-		return;
-	if (shuffle > 127u)
-		shuffle = 127u;
-	lr->shuffle = shuffle;
-	parameter_values[PAR_SHUFFLE] = shuffle;
-}
-
-uint8_t pat_getTrackShuffle(uint8_t pattern, uint8_t track)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	if (!lr || lr->shuffle > 127u)
-		return 0u;
-	return lr->shuffle;
-}
-
-void pat_clearTrack(uint8_t pattern, uint8_t track)
-{
-	/* Clear all pattern data for one track.
-	 *
-	 * Outputs:
-	 * - every bridge step resets to default note, velocity, probability, and no automation
-	 * - every step is inactive
-	 * - the legacy main-step mask is cleared for file/UI compatibility
-	 * - length/rotation reset to the boot empty-pattern length/no rotation
-	 * - scale, MIDI defaults, note override, and per-track shuffle reset to
-	 *   their safe empty-pattern defaults
-	 *
-	 * PAT_DEFAULT_TRACK_LENGTH intentionally differs from the legacy/corrupt
-	 * file fallback in pat_getTrackLength(): freshly initialized empty patterns
-	 * should start as a compact 16-step loop, while zero loaded from older files
-	 * still expands defensively to the full 128-step bridge length.
-	 */
-	uint8_t k;
-	LengthRotate *settings;
-	if (!pat_patternValid(pattern) || !pat_trackValid(track))
-		return;
-	for (k = 0; k < NUM_STEPS; k++)
-		pat_resetStep(pat_stepPtr(pattern, track, k));
-	*pat_mainStepsPtr(pattern, track) = 0u;
-	settings = pat_lengthRotatePtr(pattern, track);
-	settings->length = PAT_DEFAULT_TRACK_LENGTH;
-	settings->rotate = 0u;
-	settings->scale = TRACK_SCALE_OFF;
-	settings->shuffle = 0u;
-}
-
-void pat_clearPattern(uint8_t pattern)
-{
-	/* Clear every track in one pattern. Used by initialization and copy/clear
-	 * menu actions. Does not touch other patterns. */
-	uint8_t i;
-	if (!pat_patternValid(pattern))
-		return;
-	for (i = 0; i < NUM_TRACKS; i++)
-		pat_clearTrack(pattern, i);
-}
-
-void pat_clearAutomation(uint8_t pattern, uint8_t track, uint8_t automTrack)
-{
-	/* Clear one automation lane across all bridge steps for a track. automTrack 0
-	 * clears param1Nr/param1Val; any other value clears param2Nr/param2Val. */
-	uint8_t k;
-	if (!pat_patternValid(pattern) || !pat_trackValid(track))
-		return;
-	for (k = 0; k < NUM_STEPS; k++) {
-		Step *step = pat_stepPtr(pattern, track, k);
-		if (automTrack == 0) {
-			step->param1Nr = NO_AUTOMATION;
-			step->param1Val = 0;
-		} else {
-			step->param2Nr = NO_AUTOMATION;
-			step->param2Val = 0;
-		}
-	}
-}
-
-void pat_recordNote(uint8_t pattern, uint8_t track, uint8_t step,
-                    uint8_t velocity, uint8_t note)
-{
-	/*
-	 * Records a quantized note into PatternData.
-	 *
-	 * Why this moved here: seq_addNote() owns recording state, quantization, and
-	 * target-pattern timing, but the Step mutation itself is pattern storage.
-	 * Inputs: pattern/track/step identify the destination, velocity is stored
-	 * in the lower seven volume bits, and note is the MIDI note to store. Outputs:
-	 * the target Step gets note, velocity, 100% probability, and active bit.
-	 * The legacy 16-bit mask is mirrored from step % 16 so old save/load fields
-	 * stay deterministic during the bridge.
-	 *
-	 * Callers/clients/confederates: seq_addNote() calls this after choosing the
-	 * quantized destination. ledHandler still receives dirty-step notifications
-	 * from sequencer because LED presentation is not PatternData ownership.
-	 * Risk: do not clear automation lanes here because recording a note did not
-	 * previously wipe step automation.
-	 */
-	Step *stepPtr;
-	uint8_t mainStep;
-	if (!pat_patternValid(pattern) || !pat_trackValid(track) || !pat_stepValid(step))
-		return;
-	mainStep = (uint8_t)(step & 0x0fu);
-	stepPtr = pat_stepPtr(pattern, track, step);
-	stepPtr->note = note;
-	stepPtr->volume = (uint8_t)(velocity & STEP_VOLUME_MASK);
-	stepPtr->prob = 127;
-	stepPtr->volume |= STEP_ACTIVE_MASK;
-	pat_setMainStep(pattern, track, mainStep, 1);
-}
-
-void pat_eraseMainStepSubSteps(uint8_t pattern, uint8_t track, uint8_t mainStep)
-{
-	/*
-	 * Legacy helper that erases one old main-step group.
-	 *
-	 * Why this moved here: live erase is triggered by sequencer timing, but clearing
-	 * Step records and main-step bits is PatternData mutation. Inputs:
-	 * pattern/track/mainStep select the historical eight-step cluster to reset.
-	 * Outputs: parent main-step bit is cleared, all eight Steps return to default
-	 * note, automation, probability, and velocity, then the first old-group step
-	 * is activated to preserve compatibility for any remaining legacy caller.
-	 *
-	 * Callers/clients/confederates: seq_nextStep() calls this when erase mode is
-	 * active on the visible voice. pat_resetStep() supplies the per-step defaults;
-	 * ledHandler repaint remains sequencer/UI responsibility. Risk: mainStep must
-	 * be 0..15; invalid indices are ignored so live playback cannot write outside
-	 * PatternData storage.
-	 */
-	uint8_t i;
-	uint8_t firstStep;
-	if (!pat_patternValid(pattern) || !pat_trackValid(track) || mainStep >= 16u)
-		return;
-	pat_setMainStep(pattern, track, mainStep, 0);
-	firstStep = (uint8_t)(mainStep * 8u);
-	for (i = firstStep; i < (uint8_t)(firstStep + 8u); i++)
-		pat_resetStep(pat_stepPtr(pattern, track, i));
-	pat_stepPtr(pattern, track, firstStep)->volume |= STEP_ACTIVE_MASK;
-}
-
-
-void pat_eraseStep(uint8_t pattern, uint8_t track, uint8_t step)
-{
-	/* Clear one bridge step without touching neighbouring steps.
-	 *
-	 * Why: the 8-bar bridge treats Step[0..127] as real sequencer steps rather
-	 * than old sub-steps grouped under a main-step mask. Live erase now needs to
-	 * remove only the current step. Inputs identify the PatternData destination;
-	 * output resets that Step to defaults and leaves it inactive. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	pat_resetStep(s);
-}
-void pat_copyTrack(uint8_t pattern, uint8_t srcTrack, uint8_t dstTrack)
-{
-	/* Copy one track inside one pattern. Copies all 128 bridge steps, the legacy
-	 * main-step mask, and length/rotation. Does not copy pattern-level next/change
-	 * settings. */
-	if (!pat_patternValid(pattern) || !pat_trackValid(srcTrack) || !pat_trackValid(dstTrack))
-		return;
-	memcpy(pat_stepPtr(pattern, dstTrack, 0u),
-	       pat_stepPtr(pattern, srcTrack, 0u),
-	       sizeof(Step) * NUM_STEPS);
-	*pat_mainStepsPtr(pattern, dstTrack) = *pat_mainStepsPtr(pattern, srcTrack);
-	*pat_lengthRotatePtr(pattern, dstTrack) =
-		*pat_lengthRotatePtr(pattern, srcTrack);
-}
-
-void pat_copyPattern(uint8_t srcPattern, uint8_t dstPattern)
-{
-	/*
-	 * Whole-pattern copy now means copying between complete Scene owners.
-	 * This compatibility wrapper copies only PatternSet; Scene/Bank copy paths
-	 * should copy the containing scene_t when kit/settings must travel too.
-	 */
-	scene_t *src = scene_get(srcPattern);
-	scene_t *dst = scene_get(dstPattern);
-	if (src && dst)
-		dst->pattern = src->pattern;
-}
-
-
-void pat_copyBar(uint8_t pattern, uint8_t track, uint8_t srcBar, uint8_t dstBar)
-{
-	/* Copy one 16-step bar inside one track.
-	 *
-	 * Caller/client: COPY + SELECT bridge gesture in buttonHandler/copyClearTools.
-	 * Inputs are zero-based bars 0..7 for the current track/pattern. Output: the
-	 * destination 16 Step records are overwritten, and track length is extended to
-	 * include the destination bar when needed. */
-	uint8_t srcStep;
-	uint8_t dstStep;
-	uint8_t neededLength;
-
-	if (!pat_patternValid(pattern) || !pat_trackValid(track) ||
-	    srcBar >= NUM_BARS || dstBar >= NUM_BARS)
-		return;
-
-	srcStep = (uint8_t)(srcBar * NUM_STEPS_PER_BAR);
-	dstStep = (uint8_t)(dstBar * NUM_STEPS_PER_BAR);
-	memcpy(pat_stepPtr(pattern, track, dstStep),
-	       pat_stepPtr(pattern, track, srcStep),
-	       sizeof(Step) * NUM_STEPS_PER_BAR);
-
-	neededLength = (uint8_t)((dstBar + 1u) * NUM_STEPS_PER_BAR);
-	if (pat_getTrackLength(pattern, track) < neededLength)
-		pat_setTrackLength(pattern, track, neededLength);
-}
-void pat_setSelectedStep(uint8_t step)
-{
-	/* Store the current edit step in the menu parameter array.
-	 *
-	 * Why: selected-step state is Pattern/Menu edit context, not sequencer
-	 * transport state. Inputs: absolute bridge step index. Output:
-	 * PAR_ACTIVE_STEP mirrors the selected step for the menu and later
-	 * PatternData edits. Callers/clients: buttonHandler step selection and menu
-	 * active-step changes. Risk: invalid steps are ignored so stale UI state does
-	 * not point later edit calls outside PatternData storage.
-	 */
-	if (!pat_stepValid(step))
-		return;
-	parameter_values[PAR_ACTIVE_STEP] = step;
-}
-
-void pat_setActiveAutomationTrack(uint8_t track)
-{
-	/* Menu path for PAR_AUTOM_TRACK. Values are treated as lane selectors:
-	 * 0 records/edits param1, nonzero records/edits param2. */
-	pat_activeAutomationTrack = track;
-}
-
-uint8_t pat_getActiveAutomationTrack(void)
-{
-	return pat_activeAutomationTrack;
-}
-
-void pat_armAutomationStep(uint8_t step, uint8_t track, uint8_t armed)
-{
-	/*
-	 * Why: long-press automation arming is step-edit state and no longer needs
-	 * a parser status byte. Inputs: step, track, armed flag. Outputs: remembered
-	 * armed target for later CC writes. Risk: invalid disarm values must clear
-	 * both fields so stale held-step recording cannot continue.
-	 */
-	if (armed && pat_stepValid(step) && pat_trackValid(track)) {
-		pat_armedAutomationStep = (int8_t)step;
-		pat_armedAutomationTrack = (int8_t)track;
-	} else {
-		pat_armedAutomationStep = -1;
-		pat_armedAutomationTrack = -1;
-	}
-}
-
-void pat_recordAutomation(uint8_t pattern, uint8_t track, uint8_t step,
-                          instrument_param_id_t dest, uint8_t value)
-{
-	/*
-	 * Writes one automation value into a quantized Pattern step.
-	 *
-	 * Callers: seq_recordAutomation() for live recording and
-	 * pat_recordArmedAutomation() for held-step recording. Sequencer still
-	 * decides whether recording is active and which step is quantized; PatternData
-	 * owns the stored Step mutation.
-	 *
-	 * Inputs: pattern/track/step identify the destination, dest is the
-	 * automation parameter id in the same encoded form used by playback, and
-	 * value is the recorded 0..127 value.
-	 *
-	 * Output: active automation lane param/value fields are written. Risk:
-	 * pat_activeAutomationTrack treats any nonzero value as lane 2 to preserve
-	 * the old menu behavior.
-	 */
-	if (!pat_patternValid(pattern) || !pat_trackValid(track) || !pat_stepValid(step))
-		return;
-	/*
-	 * Keep recorded automation in the legacy automationNode namespace.
-	 *
-	 * Inputs may come from MIDI/armed automation call sites that still pass
-	 * broader parameter ids. Output is either a valid 1..254 automation
-	 * destination or NO_AUTOMATION, matching the playback guard and default Step
-	 * reset value. This prevents live recording from writing a value that would
-	 * later be unsafe on trigger.
-	 */
-	if (dest == 0u || dest >= NO_AUTOMATION || dest == PAR_NONE)
-		dest = NO_AUTOMATION;
-	if (pat_activeAutomationTrack == 0) {
-		Step *target = pat_stepPtr(pattern, track, step);
-		target->param1Nr = dest;
-		target->param1Val = value;
-	} else {
-		Step *target = pat_stepPtr(pattern, track, step);
-		target->param2Nr = dest;
-		target->param2Val = value;
-	}
-}
-
-void pat_recordArmedAutomation(uint8_t pattern, instrument_param_id_t dest,
-                               uint8_t value)
-{
-	/*
-	 * Writes automation to the long-press armed step, if one exists.
-	 *
-	 * Caller: seq_recordAutomation() after the normal record-gated path. This
-	 * preserves the old ARM_AUTOMATION_STEP behavior where holding a step and
-	 * moving a control records that control to the held step even when the
-	 * sequencer is not currently writing a quantized live step.
-	 *
-	 * Inputs: pattern is the active pattern supplied by Sequencer, dest/value
-	 * describe the parameter edit. Output: no-op when nothing is armed, otherwise
-	 * pat_recordAutomation() writes the armed track/step.
-	 */
-	if (pat_armedAutomationStep == -1 || pat_armedAutomationTrack == -1)
-		return;
-	pat_recordAutomation(pattern, (uint8_t)pat_armedAutomationTrack,
-	                     (uint8_t)pat_armedAutomationStep, dest, value);
-}
-
-void pat_applyStepToMenu(uint8_t pattern, uint8_t track, uint8_t step)
-{
-	/* Replaces SEQ_REQUEST_STEP_PARAMS.
-	 *
-	 * Reads one Step from PatternData and mirrors its editable fields into
-	 * parameter_values[] for the menu display. Automation destinations are
-	 * converted from stored param-number encoding back to modTargets[] indices.
-	 * This function mutates menu edit state but does not change pattern data. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	instrument_param_id_t dest;
-	if (!s)
-		return;
-	parameter_values[PAR_STEP_VOLUME] = (uint8_t)(s->volume & STEP_VOLUME_MASK);
-	parameter_values[PAR_STEP_NOTE] = s->note;
-	parameter_values[PAR_STEP_PROB] = s->prob;
-
-	dest = s->param1Nr;
-	if ((dest < 128u) && (dest != 0u))
-		dest--;
-	if (dest == NO_AUTOMATION)
-		parameter_values[PAR_P1_DEST] = 0u;
-	else if (dest < END_OF_SOUND_PARAMETERS)
-		parameter_values[PAR_P1_DEST] = paramToModTarget[dest];
-
-	dest = s->param2Nr;
-	if ((dest < 128u) && (dest != 0u))
-		dest--;
-	if (dest == NO_AUTOMATION)
-		parameter_values[PAR_P2_DEST] = 0u;
-	else if (dest < END_OF_SOUND_PARAMETERS)
-		parameter_values[PAR_P2_DEST] = paramToModTarget[dest];
-
-	parameter_values[PAR_P1_VAL] = s->param1Val;
-	parameter_values[PAR_P2_VAL] = s->param2Val;
-	pat_setSelectedStep(step);
-}
-
-void pat_applyPatternSettingsToMenu(uint8_t pattern)
-{
-	/*
-	 * Clears retired Pattern chain settings in menu parameter_values.
-	 *
-	 * Pattern Settings no longer exposes repeat/next controls. Callers still use
-	 * this helper when entering old pattern-settings paths, so it writes neutral
-	 * values instead of mirroring stale serialized PatternSetting bytes.
-	 *
-	 * Input: pattern is ignored. Output: PAR_PATTERN_BEAT and PAR_PATTERN_NEXT
-	 * are zeroed. Risk: this is a menu/UI sync helper, not a pattern mutation; do
-	 * not call it from interrupt context.
-	 */
-	(void)pattern;
-	parameter_values[PAR_PATTERN_BEAT] = 0u;
-	parameter_values[PAR_PATTERN_NEXT] = 0u;
-}
-
-void pat_applyTrackSettingsToMenu(uint8_t pattern, uint8_t track)
-{
-	/*
-	 * Copies PatternData track-level settings into menu parameter_values.
-	 *
-	 * Completes the non-LED side effect formerly hidden inside
-	 * LED_QUERY_SEQ_TRACK. Callers pair this with led_updatePatternTrack() when
-	 * changing viewed pattern/track so both physical LEDs and editable menu
-	 * params refresh from the same PatternData source.
-	 *
-	 * Inputs: pattern/track to display. Output: PAR_TRACK_LENGTH,
-	 * PAR_TRACK_ROTATION, and PAR_SHUFFLE are refreshed. Risk: shuffle still has
-	 * global playback backing, but the UI-facing API is Pattern-owned so callers
-	 * are ready for per-pattern/per-track shuffle later.
-	 */
-	if (!pat_patternValid(pattern) || !pat_trackValid(track))
-		return;
-	parameter_values[PAR_TRACK_LENGTH] = pat_getTrackLength(pattern, track);
-	parameter_values[PAR_TRACK_ROTATION] = pat_getTrackRotation(pattern, track);
-	parameter_values[PAR_TRACK_SCALE] = pat_getTrackScale(pattern, track);
-	/*
-	 * STEP front-page aliases mirror PatternData-owned track settings. Legacy
-	 * PAR_MIDI_* parameters may still be updated as a compatibility output when
-	 * these aliases are edited, but they are no longer the storage owner for
-	 * this page.
-	 */
-	parameter_values[PAR_TRACK_MIDI_CHAN] =
-		scene_getTrackMidiChannel(pattern, track);
-	parameter_values[PAR_TRACK_MIDI_NOTE] =
-		scene_getTrackMidiNote(pattern, track);
-	parameter_values[PAR_SHUFFLE] = pat_getTrackShuffle(pattern, track);
-}
+/* Legacy menu bridge calls are intentionally storage-free while menus migrate. */
+void pat_applyPatternSettingsToMenu(uint8_t s) { (void)s; }
+void pat_applyTrackSettingsToMenu(uint8_t s, uint8_t t) { (void)s; (void)t; }
+void pat_setTrackLength(uint8_t s, uint8_t t, uint8_t v) { (void)s; (void)t; (void)v; }
+void pat_setTrackScale(uint8_t s, uint8_t t, uint8_t v) { (void)s; (void)t; (void)v; }
+void pat_setTrackShuffle(uint8_t s, uint8_t t, uint8_t v) { (void)s; (void)t; (void)v; }
+void pat_setActiveAutomationTrack(uint8_t v) { (void)v; }
+void pat_setSelectedStep(uint8_t step) { (void)step; }
+void pat_setStepAutomationDestination(uint8_t s,uint8_t t,uint8_t p,uint8_t l,uint16_t v) {(void)s;(void)t;(void)p;(void)l;(void)v;}
+void pat_setStepAutomationValue(uint8_t s,uint8_t t,uint8_t p,uint8_t l,uint8_t v) {(void)s;(void)t;(void)p;(void)l;(void)v;}
+void pat_setPatternChangeBar(uint8_t s,uint8_t v) {(void)s;(void)v;}
+void pat_setPatternNext(uint8_t s,uint8_t v) {(void)s;(void)v;}
+void pat_applyStepToMenu(uint8_t s,uint8_t t,uint8_t p) {(void)s;(void)t;(void)p;}
+void pat_setStepProbability(uint8_t s,uint8_t t,uint8_t p,uint8_t v) {(void)s;(void)t;(void)p;(void)v;}
+void pat_setStepNote(uint8_t s,uint8_t t,uint8_t p,uint8_t v) {(void)s;(void)t;(void)p;(void)v;}
+void pat_setStepVolume(uint8_t s,uint8_t t,uint8_t p,uint8_t v) {(void)s;(void)t;(void)p;(void)v;}

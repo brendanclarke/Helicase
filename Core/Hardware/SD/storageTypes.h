@@ -217,18 +217,16 @@ typedef struct {
  * Version 1 is the older thin placeholder:
  *   format=helicase.pattern, version=1, placeholder=1
  *
- * Version 2 is the current draft Scene/Bank payload:
+ * Version 3 is the emitted Scene/Bank payload:
  *   format=helicase.pattern
- *   version=2
- *   track1=<length>,<scale>,<128 on/off chars>
+ *   version=3
+ *   track1=<32 hex characters for 16 bitmap bytes>
  *   ...
  *   track7=<length>,<scale>,<128 on/off chars>
  *
- * Only step on/off is stored; note, velocity, probability, automation,
- * rotation, shuffle, and pattern-next data remain PatternData defaults. This is
- * deliberately not the final pattern schema. It exists so Scene/Bank saves
- * recall the 128x7 active-step grid and the two required per-track timing
- * values while the real dynamic pattern format is still pending.
+ * Only step on/off is stored. Bytes increase by step number and bit zero is
+ * the lowest-numbered step. v1 remains an empty placeholder; v2 is imported
+ * one-way for its on/off characters only, ignoring retired length/scale data.
  */
 typedef struct {
     uint8_t seen_format;
@@ -556,7 +554,7 @@ storage_status_t storage_effectFinalize(const storage_effect_state_t *state);
  * Initialize/parse/finalize Scene/Bank pattern text.
  *
  * Inputs are complete text lines from filesystem.c. Outputs are validation
- * bits plus PatternSet step-active/length/scale edits for v2 track lines. The
+ * bits plus PatternSet on/off edits for v2/v3 track lines. The
  * caller's PatternSet must already be seeded through pat_initPatternSet() so
  * omitted draft data, old placeholders, and non-stored step fields all keep the
  * same defaults.

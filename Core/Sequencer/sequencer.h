@@ -82,21 +82,15 @@ void seq_setMute(uint8_t trackNr, uint8_t isMuted);
 uint8_t seq_isTrackMuted(uint8_t trackNr);
 void seq_setRoll(uint8_t voice, uint8_t onOff);
 void seq_setRollRate(uint8_t rate);
-void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note);
+/*
+ * Record a live MIDI/roll event as one quantized fixed-grid trigger bit.
+ * Input is the track; output is an on-bit only when recording is active.
+ * Note and velocity are intentionally absent because PatternSet stores neither.
+ */
+void seq_recordTrigger(uint8_t trackNr);
 void seq_setRecordingMode(uint8_t active);
 void seq_setErasingMode(uint8_t active);
-void seq_recordAutomation(uint8_t voice, uint8_t dest, uint8_t value);
 void seq_midiNoteOff(uint8_t chan);
 void seq_sendMidiNoteOn(const uint8_t channel, const uint8_t note, const uint8_t veloc);
-
-/*
- * Runtime hook used by PatternData.
- * Why: PatternData owns rotation storage, but sequencer.c owns seq_stepIndex[].
- * Inputs: track, previous/new rotation, and effective track length. Output:
- * adjusted live step index when the sequencer is running. Risk: this must stay
- * a narrow scheduler hook; UI code should call pat_setTrackRotation() instead.
- */
-void seq_offsetTrackStepIndexForRotation(uint8_t trackNr, uint8_t oldRot,
-                                         uint8_t newRot, uint8_t len);
 
 #endif /* SEQUENCER_H_ */

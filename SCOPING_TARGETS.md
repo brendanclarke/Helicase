@@ -38,6 +38,35 @@ Every phase ends with **Open Engineering Questions** (things that need a decisio
 
 ---
 
+## Session 043 implementation baseline (2026-07-25)
+
+The storage prerequisites for later Pattern and DSP work are complete and must
+be treated as the current baseline, superseding older roadmap estimates:
+
+- Every resident Scene has only a 112-byte `PatternSet` on/off bitmap
+  (`7 x 128` bits); v3 `pattern.pat` writes seven 32-hex-character rows. The
+  former `Step`/automation/timing Pattern allocations and legacy binary stream
+  are retired. This is a deliberately minimal bridge, not the later dynamic
+  event-pool Pattern design.
+- The slider attenuator LUT is 1,024 native `float` entries (4,096 B), indexed
+  with raw ADC `>> 2` and no LUT interpolation. Mixer block smoothing remains
+  a separate behavior.
+- Six 1,176-B tagged InstrumentManager runtime slots (7,056 B total) replace
+  every former per-engine voice/pool allocation. Future instruments must fit
+  the reserve; increasing it expands all six slots and requires explicit user
+  approval of the SRAM allocation.
+- `transientData` is a 26,460-B FLASH ROM at `0x08053264`; DTCM static use is
+  now 12,280 B, leaving 118,792 B reserved exclusively for future delay-line
+  buffers. SRAM1 static use is 66,780 B, leaving 310,052 B reserved exclusively
+  for future Pattern data. Neither reservation is general headroom, and every
+  future RAM increase requires the user's byte/region/owner acknowledgement.
+- The flash transient placement is build/ELF verified; its full hardware audio
+  stress matrix remains pending. The complete measured baseline is in
+  `knowledge_files/specification_reference/SRAM_MANIFEST.md` and the durable
+  decisions are in Session 043's handoff.
+
+---
+
 ## Phase 1 — Foundation Refactors
 
 **Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Bank/Scene/Pattern/`, `Core/Preset/` → `Core/Bank/Scene/Preset/`
@@ -866,6 +895,14 @@ From "notes from others" in `putting it together`: doubling the sequencer's trac
 
 **Location:** `Core/DSPAudio/`
 
+**Session 043 correction:** the DTCM figures and transient-relocation proposal
+in the historical Phase 6 discussion below predate the tagged-slot migration
+and implemented FLASH move. Do not use those numbers for allocation. Current
+DTCM use/free/reservation is the Session 043 baseline above and the linked
+`SRAM_MANIFEST.md`; `transientData` is already in FLASH and `sine_table`
+remains DTCM-resident. Any concrete delay/advanced-buffer allocation requires
+the user's explicit byte/region/owner acknowledgement before code is written.
+
 The heaviest phase computationally, and the one where the earlier drafts did the most guessing. This version tries to separate what's confirmed by the current code, what's confirmed by your answers, and what genuinely needs a measurement or a decision before implementation — rather than asserting specific byte counts that sound precise but aren't backed by anything.
 
 ### 6.1 Voice tiers
@@ -878,7 +915,9 @@ Currently: `DRUM`, `SNARE`, `CYMBAL`, `HIHAT` instrument types, freely swappable
 
 **ITCM is off the table for this buffer, per your call**, and that's the right decision independent of the reasoning that follows: ITCM is only 16KB total and already holds the oscillator hot-path code (`calcSineBlock`, `calcFmBlock`, and the rest of the dozen or so `INITCM`-tagged functions in `Oscillator.c`) — keeping it reserved for code, as you said, avoids a real resource conflict rather than trying to measure exactly how tight a squeeze it'd be.
 
-**Freeing DTCM headroom by moving read-only tables to flash.** You asked specifically about `transientData` and `sine_table` — both are real, and I checked their exact sizes and current placement rather than estimating:
+**Historical pre-Session-043 DTCM analysis (superseded).** The following
+numbers and proposal are retained only to preserve the design rationale; use
+the Session 043 baseline and linked manifest above for every current decision.
 
 - `sine_table` (`Core/DSPAudio/wavetable.c:43`) is `const int16_t[TABLESIZE+1]` with `TABLESIZE = 4096`, so **4,097 × 2 bytes = 8,194 bytes**.
 - `transientData` (`Core/DSPAudio/transientTables.c:62`) is `const int8_t[NUM_TRANSIENTS][TRANSIENT_SAMPLE_LENGTH]` with `NUM_TRANSIENTS = 12` and `TRANSIENT_SAMPLE_LENGTH = 2205`, so **12 × 2,205 = 26,460 bytes**.
