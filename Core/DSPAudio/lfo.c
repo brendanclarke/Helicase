@@ -45,6 +45,7 @@
 #include "Snare.h"
 #include "sequencer.h"
 #include "valueShaper.h"
+#include "InstrumentManager.h"
 //-------------------------------------------------------------
 void lfo_init(Lfo *lfo)
 {
@@ -56,8 +57,10 @@ void lfo_init(Lfo *lfo)
 	lfo->sync			= 0;
 	lfo->freq			= 1;
 	lfo->modNodeValue	= 1;
+	lfo->polarity		= MOD_NODE_POLARITY_NEGATIVE;
 
 	modNode_init(&lfo->modTarget);
+	modNode_init(&lfo->modTarget2);
 }
 //-------------------------------------------------------------
 float lfo_calc(Lfo *lfo)
@@ -128,10 +131,32 @@ float lfo_calc(Lfo *lfo)
 	return 0;
 }
 //-------------------------------------------------------------
-void lfo_dispatchNextValue(Lfo* lfo)
+void lfo_dispatchNextValue(Lfo* lfo, uint8_t source_slot)
 {
 	float val = lfo_calc(lfo);
-	modNode_updateValue(&lfo->modTarget,val);
+	/*
+	 * Fan one raw oscillator value out to both destination nodes.
+	 *
+	 * Inputs: lfo_calc() returns the shared 0..1 waveform for this block, and
+	 * lfo->polarity stores the shared negative/positive/bipolar mode. The
+	 * source slot tells InstrumentManager which descriptor/supplemental/Scene
+	 * target adapters belong to this LFO. Outputs: any remaining legacy direct
+	 * ModulationNode target is updated first, then InstrumentManager applies
+	 * owner-backed adapters for pair 1 and pair 2.
+	 *
+	 * This stays separate from lfo_calc() because only destination owners know
+	 * whether the target is a legacy direct pointer, descriptor-backed runtime
+	 * writer, slot decimation, Scene Decimation, or the hidden per-voice Morph
+	 * layer.
+	 */
+	modNode_updateValuePolarity(&lfo->modTarget,val,lfo->polarity);
+	modNode_updateValuePolarity(&lfo->modTarget2,val,lfo->polarity);
+	instrumentManager_updateLfoAdapters(source_slot, 0u, val,
+										lfo->polarity,
+										lfo->modTarget.amount);
+	instrumentManager_updateLfoAdapters(source_slot, 1u, val,
+										lfo->polarity,
+										lfo->modTarget2.amount);
 }
 //-------------------------------------------------------------
 uint32_t lfo_calcPhaseInc(float freq, uint8_t sync)
@@ -225,50 +250,28 @@ void lfo_setSync(Lfo* lfo, uint8_t sync)
 //-------------------------------------------------------------
 void lfo_recalcSync()
 {
-	Lfo* lfo = &voiceArray[0].lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &voiceArray[1].lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &voiceArray[2].lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &snareVoice.lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &cymbalVoice.lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
-
-	lfo = &hatVoice.lfo;
-	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
+	/*
+	 * Recalculate sync against the active InstrumentManager runtime slots.
+	 *
+	 * Inputs: none; tempo comes from sequencer through lfo_calcPhaseInc().
+	 * Output: every current slot LFO receives a refreshed phase increment.
+	 * This delegates instead of walking voiceArray/snareVoice/cymbalVoice/
+	 * hatVoice directly because Instrument Load can move those engine types
+	 * into different runtime slots.
+	 */
+	instrumentManager_recalcRuntimeLfoSync();
 }
 //-------------------------------------------------------------
 void lfo_retrigger(uint8_t voice)
 {
-	if(voiceArray[0].lfo.retrigger == voice+1)
-	{
-		voiceArray[0].lfo.phase = voiceArray[0].lfo.phaseOffset;
-	}
-	if(voiceArray[1].lfo.retrigger == voice+1)
-	{
-		voiceArray[1].lfo.phase = voiceArray[1].lfo.phaseOffset;
-	}
-	if(voiceArray[2].lfo.retrigger == voice+1)
-	{
-		voiceArray[2].lfo.phase = voiceArray[2].lfo.phaseOffset;
-	}
-	if(snareVoice.lfo.retrigger == voice+1)
-	{
-		snareVoice.lfo.phase = snareVoice.lfo.phaseOffset;
-	}
-	if(cymbalVoice.lfo.retrigger == voice+1)
-	{
-		cymbalVoice.lfo.phase = cymbalVoice.lfo.phaseOffset;
-	}
-	if(hatVoice.lfo.retrigger == voice+1)
-	{
-		hatVoice.lfo.phase = hatVoice.lfo.phaseOffset;
-	}
+	/*
+	 * Retrigger LFOs through the dynamic runtime dispatcher.
+	 *
+	 * Input: zero-based visible trigger track. Output: any current slot LFO
+	 * whose retrigger selector matches that track resets to phaseOffset. The
+	 * old fixed-global scan is no longer correct once instruments can be loaded
+	 * into arbitrary slots.
+	 */
+	instrumentManager_retriggerRuntimeLfos(voice);
 }
 //-------------------------------------------------------------

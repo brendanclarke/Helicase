@@ -56,6 +56,7 @@
 #include "timebase.h"
 #include "ledHandler.h"
 #include "menu.h"
+#include "SceneData.h"
 
 
 #define SEQ_INTERNAL_PPQ	96u
@@ -236,8 +237,16 @@ void seq_sync()
 //------------------------------------------------------------------------------
 void seq_setNextPattern(const uint8_t patNr)
 {
-	seq_pendingPattern = patNr;
-	seq_loadPendigFlag = 1;
+	/*
+	 * Deprecated pattern-chain entry point.
+	 *
+	 * Scene expansion removed standalone Pattern switching: a musical switch must
+	 * select the Scene, its Pattern, and Scene-owned parameters together through
+	 * menu_perfModeSceneButtonPressed()/seq_selectActivePattern(). Inputs from
+	 * legacy MIDI program-change paths are therefore ignored instead of queuing a
+	 * Pattern-only change that would desynchronize playback from the active Scene.
+	 */
+	(void)patNr;
 }
 //------------------------------------------------------------------------------
 void seq_armActivePatternReload(void)
@@ -306,16 +315,14 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 	//Trigger internal synth voice
 	voiceControl_noteOn(voiceNr, note, vol);
 
-	midiChan = (uint8_t)(pat_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
+	midiChan = (uint8_t)(scene_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
 
 	/*
 	 * MIDI output note/channel are PatternData-owned track settings now. A note
 	 * value of 0 preserves the old "use the triggered note" behavior; nonzero
 	 * values override the outgoing MIDI note for this pattern track.
 	 */
-	midiNote = pat_getTrackMidiNote(seq_activePattern, voiceNr);
-	if(midiNote == 0 && midi_NoteOverride[voiceNr] != 0u)
-		midiNote = midi_NoteOverride[voiceNr];
+	midiNote = scene_getTrackMidiNote(seq_activePattern, voiceNr);
 	if(midiNote == 0)
 		midiNote = note;
 
@@ -344,9 +351,7 @@ void seq_previewVoice(uint8_t voiceNr)
 	if (voiceNr > 6u || seq_running)
 		return;
 
-	note = pat_getTrackMidiNote(seq_activePattern, voiceNr);
-	if (note == 0u && midi_NoteOverride[voiceNr] != 0u)
-		note = midi_NoteOverride[voiceNr];
+	note = scene_getTrackMidiNote(seq_activePattern, voiceNr);
 	if (note == 0u)
 		note = PAT_DEFAULT_NOTE;
 
@@ -360,26 +365,22 @@ void seq_previewVoice(uint8_t voiceNr)
 	voiceControl_noteOff(voiceNr);
 	voiceControl_noteOn(voiceNr, note, ROLL_VOLUME);
 
-	midiChan = (uint8_t)(pat_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
+	midiChan = (uint8_t)(scene_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
 	seq_sendMidiNoteOn(midiChan, note, ROLL_VOLUME);
 }
 //------------------------------------------------------------------------------
 static uint8_t seq_determineNextPattern()
 {
 	/*
-	 * Resolve the next automatic pattern target for the active pattern.
+	 * Keep playback on the active Scene/Pattern.
 	 *
-	 * PatternData owns the saved change-bar and next-pattern settings; Sequencer
-	 * owns bar counting, random-target resolution, and the runtime pending-pattern
-	 * state. Input is implicit seq_activePattern/seq_barCounter. Output is the
-	 * pattern enum to keep or queue. Caller/confederate: the corrected master
-	 * boundary scheduler invokes this before handling PAT_NEXT_RANDOM values.
+	 * Automatic pattern repeat/next-pattern chaining has been removed from the
+	 * sequencer. Switching must happen at the Scene level so Scene parameters,
+	 * Pattern data, active Scene bookkeeping, and edit masks stay coherent. Output
+	 * is always seq_activePattern; the function remains only as a narrow shim for
+	 * existing boundary and recording code until Pattern is rebuilt.
 	 */
-	const uint8_t changeBar = pat_getPatternChangeBar(seq_activePattern);
-	if(seq_barCounter % (changeBar + 1u) == 0)
-		return pat_getPatternNext(seq_activePattern);
-	else
-		return seq_activePattern;
+	return seq_activePattern;
 }
 
 static void seq_resetScaledScheduler(void)
@@ -401,6 +402,34 @@ static void seq_resetScaledScheduler(void)
 	seq_initialSchedulerTick = 1u;
 	seq_internalMidiClockPhase = 0u;
 	memset(seq_trackEventCount, 0, sizeof(seq_trackEventCount));
+}
+
+void seq_selectActivePattern(uint8_t pattern)
+{
+	/*
+	 * Immediately align playback to a newly selected Scene/Pattern.
+	 *
+	 * Inputs: front-panel PERF supplies the Scene index after Menu has validated
+	 * resident Scene presence. PatternData still gets the final bounds check here
+	 * because Sequencer owns the mutable playback globals. Outputs:
+	 * seq_activePattern and seq_pendingPattern point at the same Pattern, queued
+	 * boundary-load flags are cancelled, and every track's seq_stepIndex[] plus
+	 * seq_trackEventCount[] are recalculated against the existing master
+	 * seq_elapsedPpqTicks position. This deliberately preserves the exact master
+	 * tick/step clock; Scene switching must hot-swap playback data without
+	 * restarting transport.
+	 */
+	if (!pat_patternValid(pattern))
+		return;
+
+	seq_activePattern = pattern;
+	seq_pendingPattern = pattern;
+	seq_loadPendigFlag = 0u;
+	seq_newPatternAvailable = 0u;
+	seq_realignActivePatternToMasterClock();
+	led_notifyPatternChanged(seq_activePattern);
+	seq_sendProgChg(seq_activePattern);
+	voiceControl_noteOff(0xFF);
 }
 
 static uint32_t seq_trackEventBaseTick(uint8_t track, uint32_t eventIndex)
@@ -566,10 +595,7 @@ static uint8_t seq_handleMasterBoundary(void)
 			if (seq_resetBarOnPatternChange)
 				seq_barCounter = 0u;
 			seq_loadPendigFlag = 0u;
-			if (seq_newPatternAvailable) {
-				seq_newPatternAvailable = 0u;
-				pat_commitStagedPattern(seq_activePattern);
-			}
+			seq_newPatternAvailable = 0u;
 			seq_activePattern = seq_pendingPattern;
 			seq_setStepIndexToStart();
 			seq_resetScaledScheduler();
@@ -599,17 +625,22 @@ void seq_realignActivePatternToMasterClock(void)
 	/*
 	 * Recalculate runtime track positions from the master clock.
 	 *
-	 * This is a performance action, not a PatternData edit. It uses the same
-	 * due-event math as normal playback, then rewrites only sequencer counters:
-	 * seq_stepIndex[] and seq_trackEventCount[]. Fractional scale ratios are
-	 * therefore aligned to the position they would have reached from PPQ tick
-	 * zero, and repeated calls do not accumulate rounding drift.
+	 * This is a performance action, not a PatternData edit. It derives the
+	 * due-event count from PPQ tick zero for the currently active Pattern, then
+	 * rewrites only sequencer counters: seq_stepIndex[] and
+	 * seq_trackEventCount[]. Starting the due loop at zero is essential for
+	 * Scene hot-swap: a new Scene can have a slower scale than the previous
+	 * Scene, so the correct event count may be lower than the old track's
+	 * seq_trackEventCount[].
 	 */
 	for (track = 0u; track < NUM_TRACKS; track++) {
 		uint8_t len = pat_getEffectiveTrackLength(seq_activePattern, track);
 		uint8_t rot = pat_getTrackRotation(seq_activePattern, track);
-		uint32_t due = seq_dueTrackEvents(track);
-		uint32_t played = (due == 0u) ? 0u : (due - 1u);
+		uint32_t due = 0u;
+		uint32_t played;
+		while (seq_trackEventDueTick(track, due) <= seq_elapsedPpqTicks)
+			due++;
+		played = (due == 0u) ? 0u : (due - 1u);
 		if (len == 0u)
 			len = NUM_STEPS;
 		rot = (uint8_t)(rot % len);
@@ -1080,42 +1111,38 @@ void seq_recordAutomation(uint8_t voice, uint8_t dest, uint8_t value)
 void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note)
 {
 	/*
-	 * Records a played note into the active or next Pattern when recording.
+	 * Records a played note into the active Scene/Pattern when recording.
 	 *
 	 * Callers: MIDI note input, roll performance, and internal recording paths.
-	 * Sequencer owns quantization and pattern-boundary timing; PatternData owns
-	 * the actual Step mutation through pat_recordNote().
+	 * Sequencer owns quantization; PatternData owns the actual Step mutation
+	 * through pat_recordNote().
 	 *
 	 * Inputs: trackNr target track, vel recorded velocity, note recorded note.
 	 * Outputs: when recording is active, PatternData updates note/velocity,
 	 * probability and active bit; visible record LEDs
 	 * are marked dirty if the edited track/pattern is currently shown by Menu.
 	 *
-	 * Risk: quantization can push a late note to step 0 of the next pattern, so
-	 * Sequencer must keep the target-pattern decision here even though PatternData
-	 * owns the write.
+	 * Risk: quantization can push a late note to step 0, but pattern-chain
+	 * switching has been removed. The note still records into seq_activePattern;
+	 * a future Scene-level switch feature must explicitly decide whether and how
+	 * late quantized notes cross Scene boundaries.
 	 */
-	uint8_t targetPattern;
 	//only record notes when seq is running and recording
 	if(seq_running && seq_recordActive)
 	{
 		const uint8_t quantizedStep = seq_quantize((uint8_t)seq_stepIndex[trackNr]);
 
+		/*
+		 * Record only into the active Scene/Pattern.
+		 *
+		 * Pattern-next/repeat is removed, so even late-bar quantized notes that
+		 * land on step 0 stay in seq_activePattern. Future Scene-level switching
+		 * can reintroduce cross-Scene recording explicitly; the sequencer must
+		 * not infer it from retired PatternSetting.changeBar/nextPattern bytes.
+		 */
+		pat_recordNote(seq_activePattern, trackNr, (uint8_t)quantizedStep, vel, note);
 
-		// --AS **RECORD fix for recording across patterns
-		if(quantizedStep==0 && seq_stepIndex[trackNr] > (NUM_STEPS/2)) {
-			// this means that we hit a note in 2nd half of the bar and quantization pushed
-			// the note to position 0 of the next bar.
-			// need to see if there is about to be a pattern change so that the note
-			// ends up on 0 of the next pattern
-			targetPattern=seq_determineNextPattern();
-
-		} else
-			targetPattern=seq_activePattern;
-
-		pat_recordNote(targetPattern, trackNr, (uint8_t)quantizedStep, vel, note);
-
-		if( (menu_getViewedPattern() == targetPattern) && ( menu_getActiveVoice() == trackNr) )
+		if( (menu_getViewedPattern() == seq_activePattern) && ( menu_getActiveVoice() == trackNr) )
 		{
 			/*
 			 * Recording LED updates are queued rather than drawn here.
@@ -1166,6 +1193,17 @@ void seq_midiNoteOff(uint8_t chan)
 		midi_notes_on=0;
 		return;
 	}
+	/*
+	 * Mirror the note-on channel guard for the note-off cache.
+	 *
+	 * Inputs: chan is either 0xff for all-notes-off or a zero-based MIDI
+	 * channel. Output: invalid channels are ignored before bit shifts or
+	 * midi_chan_notes[] indexing. This keeps live MIDI recording and sequencer
+	 * playback from touching memory outside the 16-channel cache if stale
+	 * settings or future Scene routing accidentally pass a sentinel value.
+	 */
+	if(chan >= 16u)
+		return;
 	// The proper way to do a note off is with 0x80. 0x90 with velocity 0 is also used, however I think there is still
 	// synth gear out there that doesn't recognize that properly.
 	if((1<<chan) & midi_notes_on) {
@@ -1194,6 +1232,19 @@ void seq_sendMidiNoteOn(const uint8_t channel, const uint8_t note, const uint8_t
 	MidiMsg msg = {0,0,0, {0,0,2}};
 	// --AS FILT filter out note msgs if appropriate
 	if((midiParser_txRxFilter & 0x10)==0)
+		return;
+	/*
+	 * Guard the note-on bookkeeping table before composing/sending MIDI.
+	 *
+	 * Inputs: channel is a zero-based MIDI channel derived from Scene track
+	 * settings. Output: valid 0..15 channels send and update midi_chan_notes[];
+	 * invalid values are ignored instead of indexing past the 16-channel note
+	 * cache. Why this must exist: Scene expansion exposed more paths where a
+	 * stale/corrupt pattern or sentinel value can reach playback during a live
+	 * trigger; a bad channel here can hard-fault on the second note when the
+	 * note-on cache is written.
+	 */
+	if(channel >= 16u)
 		return;
 
 	msg.status=NOTE_ON | channel;

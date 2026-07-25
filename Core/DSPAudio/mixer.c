@@ -53,6 +53,7 @@
 #include "DrumVoice.h"
 #include "Snare.h"
 #include "HiHat.h"
+#include "InstrumentManager.h"
 #include "BufferTools.h"
 #include "squareRootLut.h"
 #include "adcPots.h"
@@ -493,30 +494,19 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	//re assign velocity modulation
 	modNode_reassignVeloMod();
 
-	//calc and dispatch LFO
-	lfo_dispatchNextValue(&voiceArray[0].lfo);
-	lfo_dispatchNextValue(&voiceArray[1].lfo);
-	lfo_dispatchNextValue(&voiceArray[2].lfo);
-	lfo_dispatchNextValue(&snareVoice.lfo);
-	lfo_dispatchNextValue(&cymbalVoice.lfo);
-	lfo_dispatchNextValue(&hatVoice.lfo);
-
-	//update filter frequencies
-	SVF_recalcFreq(&voiceArray[0].filter);
-	SVF_recalcFreq(&voiceArray[1].filter);
-	SVF_recalcFreq(&voiceArray[2].filter);
-	SVF_recalcFreq(&snareVoice.filter);
-	SVF_recalcFreq(&cymbalVoice.filter);
-	SVF_recalcFreq(&hatVoice.filter);
-
-	//--- Calc async -----
-	calcDrumVoiceAsync(0);
-	calcDrumVoiceAsync(1);
-	calcDrumVoiceAsync(2);
-
-	Snare_calcAsync();
-	Cymbal_calcAsync();
-	HiHat_calcAsync();
+	/*
+	 * Dispatch slot-owned DSP runtime work through InstrumentManager.
+	 *
+	 * Inputs: active Scene instrument assignments for slots 1..6. Output:
+	 * LFOs, filters, and async voice state update on whichever engine instance
+	 * is currently loaded into each slot. Mixer keeps output routing and gain;
+	 * InstrumentManager owns the dynamic instrument-to-runtime selection.
+	 */
+	instrumentManager_dispatchRuntimeLfos();
+	for(uint8_t slot=0u; slot<6u; slot++)
+		instrumentManager_recalcSlotFilter(slot);
+	for(uint8_t slot=0u; slot<6u; slot++)
+		instrumentManager_calcSlotAsync(slot);
 
 	//calculate trigger io phase
 	// TODO DSP_PORT
@@ -553,59 +543,27 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	// //----------------------------------------
 
 
-	//calc voice 1
-	calcDrumVoiceSyncBlock(0, sampleData,OUTPUT_DMA_SIZE);
-	//decimate voice
-	
-	mixer_decimateBlock(0,sampleData);
-	mixer_addVoiceInt16ToOutput(effectiveRouting[0], squareRootLut[127-voiceArray[0].pan],
-			squareRootLut[voiceArray[0].pan], sampleData, slider_vol[0], mixer_slider_last_gain[0],
-			&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
-	mixer_slider_last_gain[0] = slider_vol[0];
-
-	//calc voice 2
-	calcDrumVoiceSyncBlock(1, sampleData,OUTPUT_DMA_SIZE);
-	//decimate voice
-	mixer_decimateBlock(1,sampleData);
-	mixer_addVoiceInt16ToOutput(effectiveRouting[1], squareRootLut[127-voiceArray[1].pan],
-			squareRootLut[voiceArray[1].pan], sampleData, slider_vol[1], mixer_slider_last_gain[1],
-			&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
-	mixer_slider_last_gain[1] = slider_vol[1];
-
-	//calc voice 3
-	calcDrumVoiceSyncBlock(2, sampleData,OUTPUT_DMA_SIZE);
-	//decimate voice
-	mixer_decimateBlock(2,sampleData);
-	mixer_addVoiceInt16ToOutput(effectiveRouting[2], squareRootLut[127-voiceArray[2].pan],
-			squareRootLut[voiceArray[2].pan], sampleData, slider_vol[2], mixer_slider_last_gain[2],
-			&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
-	mixer_slider_last_gain[2] = slider_vol[2];
-
-	//calc snare
-	Snare_calcSyncBlock(sampleData,OUTPUT_DMA_SIZE);
-	//decimate voice
-	mixer_decimateBlock(3,sampleData);
-	mixer_addVoiceInt16ToOutput(effectiveRouting[3], squareRootLut[127-snareVoice.pan],
-			squareRootLut[snareVoice.pan], sampleData, slider_vol[3], mixer_slider_last_gain[3],
-			&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
-	mixer_slider_last_gain[3] = slider_vol[3];
-
-	//calc cymbal
-	Cymbal_calcSyncBlock(sampleData,OUTPUT_DMA_SIZE);
-	//decimate voice
-	mixer_decimateBlock(4,sampleData);
-	mixer_addVoiceInt16ToOutput(effectiveRouting[4], squareRootLut[127-cymbalVoice.pan],
-			squareRootLut[cymbalVoice.pan], sampleData, slider_vol[4], mixer_slider_last_gain[4],
-			&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
-	mixer_slider_last_gain[4] = slider_vol[4];
-
-	//calc HiHat
-	HiHat_calcSyncBlock(sampleData,OUTPUT_DMA_SIZE);
-	//decimate voice
-	mixer_decimateBlock(5,sampleData);
-	mixer_addVoiceInt16ToOutput(effectiveRouting[5], squareRootLut[127-hatVoice.pan],
-			squareRootLut[hatVoice.pan], sampleData, slider_vol[5], mixer_slider_last_gain[5],
-			&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
-	mixer_slider_last_gain[5] = slider_vol[5];
+	/*
+	 * Render each storage slot with its loaded instrument type.
+	 *
+	 * Inputs: slot index chooses SceneData/instrument runtime through
+	 * InstrumentManager; mixer state chooses routing, decimation, pan tables,
+	 * and slider interpolation. Output: each slot contributes one mono block to
+	 * the routed stereo output pair. This replaces the fixed sequence of three
+	 * drums, one snare, one cymbal, and one hihat without changing mixer-owned
+	 * output behavior.
+	 */
+	for(uint8_t slot=0u; slot<6u; slot++)
+	{
+		uint8_t pan;
+		instrumentManager_calcSlotSyncBlock(slot, sampleData, OUTPUT_DMA_SIZE);
+		mixer_decimateBlock(slot,sampleData);
+		pan = instrumentManager_runtimePan(slot);
+		mixer_addVoiceInt16ToOutput(effectiveRouting[slot],
+				squareRootLut[127-pan], squareRootLut[pan],
+				sampleData, slider_vol[slot], mixer_slider_last_gain[slot],
+				&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
+		mixer_slider_last_gain[slot] = slider_vol[slot];
+	}
 
 }

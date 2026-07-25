@@ -46,6 +46,10 @@
 #include "SampleMemory.h"
 #include "sequencer.h"
 #include "PatternData.h"
+#include "SceneData.h"
+#include "BankData.h"
+#include "SceneModTargets.h"
+#include "config.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
 #include "triggerJacks.h"
@@ -53,6 +57,27 @@
 #include "modulationNode.h"
 #include <string.h>
 #include <stdint.h>
+
+#define MENU_COMPACT_SCREEN_CELLS 4u
+#define MENU_STATIC_SUBPAGE_CELLS 8u
+#define MENU_VOICE_SUBPAGE_SCREENS \
+    (INSTRUMENT_MENU_PAGE_CELLS / MENU_COMPACT_SCREEN_CELLS)
+#define MENU_VOICE_MIX_SUBPAGE 7u
+/*
+ * One VOICE mix Scene-setting screen is resolved against the currently
+ * selected voice page.
+ *
+ * Inputs/outputs: menu_resolveSceneSettingCell() receives only a column-local
+ * index 0..2 and derives the slot from menu_activePage via
+ * menu_voicePageToSlot(). The math deliberately does not multiply by
+ * INSTRUMENT_SLOT_COUNT: each VOICE page shows that voice's audio route, FX
+ * send, and fader mode only, leaving column 4 blank. Changing this constant
+ * changes the number of appended Scene-owned cells behind each mix sub-page.
+ */
+#define MENU_SCENE_SETTING_COUNT 3u
+#define MENU_SCENE_SETTING_SCREENS \
+    ((MENU_SCENE_SETTING_COUNT + MENU_COMPACT_SCREEN_CELLS - 1u) / \
+     MENU_COMPACT_SCREEN_CELLS)
 
 /* ---- stubs for original calls we haven't ported yet ---- */
 // static inline void screensaver_touch(void){}
@@ -85,11 +110,38 @@ static uint8_t menu_soundApplyApplyPerformanceGlobals = 0;
 static uint8_t menu_soundApplyClearStorageBusy = 0;
 static uint8_t menu_soundApplyShowStaleWarning = 0;
 static fs_stale_warning_source_t menu_soundApplyStaleWarning = FS_STALE_WARNING_NONE;
+static uint8_t menu_instrumentApplyActive = 0u;
+static uint8_t menu_instrumentApplySlot = 0u;
+/* The bounded post-Instrument apply cursor records name changes into the Menu
+ * session scratch before the later Load/Save helper definitions appear. */
+static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot);
+static void menu_libraryIndexLoadComplete(void);
+static void menu_requestKitEntryNames(void);
+static void menu_requestInstrumentIndexLoad(instrument_type_t type);
 static uint8_t menu_staleWarningActive = 0;
 static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
 
 #define MENU_STALE_WARNING_MS 2000u
+#define MENU_TEST_RESULT_MS 2000u
+#define MENU_INSTRUMENT_SAVE_NAME_LEN 8u
+#define MENU_RESIDENT_NAME_SCRATCH_ROWS 7u
+#define MENU_RESIDENT_NAME_SCRATCH_KIT_ROW 0u
+#define MENU_RESIDENT_NAME_SCRATCH_INSTRUMENT_ROW(slot) ((uint8_t)((slot) + 1u))
+#define MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE 0xffu
+/* The shared typed Instrument index has 1,000 rows. While HCNAMES temporarily
+ * owns that cache, Load scrolling uses this same compile-time bound and clamps
+ * to the real type count as soon as `.hcindex` is restored. This constant is
+ * navigation policy only and creates no counter or SRAM allocation. */
+#define MENU_INSTRUMENT_PROVISIONAL_COUNT 1000u
+
+static char menu_testEditName[FS_TEST_NAME_MAX + 1u] = "test.bin";
+static uint8_t menu_testResultActive = 0u;
+static uint8_t menu_testResultError = 0u;
+static uint16_t menu_testResultStart = 0u;
+static fs_test_result_kind_t menu_testResultKind = FS_TEST_RESULT_BYTES_READY;
+static uint8_t menu_testResultBytes[FS_TEST_RESULT_BYTES];
+static char menu_testResultName[FS_TEST_NAME_MAX + 1u];
 
 /* Globals can touch hardware/system settings rather than only DSP voice state.
 ** Before audio starts, applying all globals immediately is harmless. After
@@ -105,15 +157,7 @@ static void menu_beginStorageMessage(const char *message)
 
 static void menu_normalizeSoundModTargets(uint8_t *values)
 {
-    uint8_t nmt = getNumModTargets();
-    uint8_t i;
-
-    for (i = 0; i < 6; i++) {
-        if (values[PAR_VEL_DEST_1 + i] >= nmt)
-            values[PAR_VEL_DEST_1 + i] = 0;
-        if (values[PAR_TARGET_LFO1 + i] >= nmt)
-            values[PAR_TARGET_LFO1 + i] = 0;
-    }
+    (void)values;
 }
 
 static void menu_finishGlobalApply(void)
@@ -205,8 +249,7 @@ static void menu_startSoundApply(uint8_t updateGap,
     if (audioCodec_renderCount == 0u) {
         preset_sendDrumsetParameters();
         if (updateGap) {
-            menu_TargetVoiceGapIndex = getModTargetGapIndex(
-                parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
+            menu_TargetVoiceGapIndex = 0u;
         }
         if (applyPerformanceGlobals) {
             menu_parseGlobalParam(PAR_BPM, parameter_values[PAR_BPM]);
@@ -260,8 +303,7 @@ static void menu_finishSoundApply(void)
     menu_soundApplyActive = 0u;
 
     if (menu_soundApplyUpdateGap) {
-        menu_TargetVoiceGapIndex = getModTargetGapIndex(
-            parameter_values[PAR_TARGET_LFO1 + menu_activeVoice]);
+        menu_TargetVoiceGapIndex = 0u;
     }
 
     if (menu_soundApplyApplyPerformanceGlobals) {
@@ -333,71 +375,112 @@ static uint8_t menu_tickSoundApply(void)
     return 1u;
 }
 
+/* Defined after Menu's Instrument-session state, because it reads the
+ * temporary-operation tag and mutable `kit` cursor after an apply releases
+ * storage. It returns nonzero only when it posted the one deferred restore. */
+static uint8_t menu_finishInstrumentApplySession(void);
+
+static void menu_startInstrumentApply(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Start post-load commit/apply for one staged Instrument slot.
+     *
+     * Inputs: exact destination Scene and slot just loaded from Instrument/.
+     * Output: Preset commits retained state and, for the audible Scene, arms the
+     * six-slot runtime rebuild/target-rebind cursor. Menu holds input through
+     * the completion boundary either way. This stays separate from
+     * menu_startSoundApply() because Instrument browsing must not replace other
+     * retained kit slots, Scene settings, globals, or patterns.
+     */
+    menu_instrumentApplyActive = 1u;
+    menu_instrumentApplySlot = slot;
+    preset_startInstrumentApply(scene_index, slot);
+}
+
+static void menu_startKitMorphApply(void)
+{
+    /*
+     * Start post-load apply for a staged KitMrp operation.
+     *
+     * Output: Preset commits same-type morph endpoints and drains only the
+     * Morph worker. Menu reuses the instrument-apply polling gate because this
+     * is endpoint refresh work, not a normal Kit replacement that should run
+     * Scene settings, routing, or target rebinds. KitMrp Load is live while
+     * browsing Kit slots, so it intentionally does not reset SaveOptions to
+     * the top row on completion.
+     */
+    menu_instrumentApplyActive = 1u;
+    menu_instrumentApplySlot = 0u;
+    menu_storageBusy = 1u;
+    preset_startKitMorphApply();
+}
+
+static void menu_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Start post-load apply for one staged InstrumentMrp operation.
+     *
+     * Output: Preset copies only same-type morphable endpoint values into the
+     * current destination slot and drains the Morph worker for the active
+     * Scene. The browser remains open because slot identity and display name do
+     * not change.
+     */
+    menu_instrumentApplyActive = 1u;
+    menu_instrumentApplySlot = slot;
+    menu_storageBusy = 1u;
+    preset_startInstrumentMorphApply(scene_index, slot);
+}
+
+static uint8_t menu_tickInstrumentApply(void)
+{
+    /*
+     * Advance one unit of Instrument Load post-apply work.
+     *
+     * Output: nonzero while Menu should return to the main loop. When Preset's
+     * one-slot cursor finishes after a normal nested Instrument Load, Menu
+     * refreshes the affected row in its seven-name scratch and marks the
+     * destination Scene(s) dirty. The typed `.hcindex` remains resident, so
+     * encoder movement resumes without an HCNAMES rewrite or index reload.
+     * Morph Load and top-level KitMrp preserve identity and therefore add no
+     * dirty name work. The accumulated Scene blocks are serialized once at the
+     * later Kit/Instrument menu exit.
+     */
+    if (!menu_instrumentApplyActive)
+        return 0u;
+    if (preset_tickInstrumentApply())
+        return 1u;
+    menu_instrumentApplyActive = 0u;
+    if (menu_requestAppliedInstrumentNameUpdate(menu_instrumentApplySlot))
+        return 1u;
+    menu_storageBusy = 0u;
+    if (menu_finishInstrumentApplySession())
+        return 1u;
+    (void)menu_instrumentApplySlot;
+    menu_repaintAll();
+    return 1u;
+}
+
 static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
 {
-    if (paramNr >= PAR_VEL_DEST_1 && paramNr <= PAR_VEL_DEST_6) {
-        /*
-         * Velocity modulation destinations are Preset voice routing state.
-         *
-         * The old front-panel opcode path only converted a menu parameter into
-         * the same per-voice target write. Menu now resolves the mod target
-         * table and calls Preset directly.
-         *
-         * Inputs: paramNr selects voice 0..5, value indexes modTargets[].
-         * Output: Preset updates that voice's velocity modulation target.
-         * Risk: value must already be a valid menu/modTargets index, matching
-         * the historical menu contract.
-         */
-        uint8_t voiceNr = (uint8_t)(paramNr - PAR_VEL_DEST_1);
-        uint16_t target = modTargets[value].param;
-        preset_applyVelocityModTarget(voiceNr, target);
-        return;
-    }
-
-    if (paramNr >= PAR_VOICE_LFO1 && paramNr <= PAR_VOICE_LFO6) {
-        uint8_t lfoNr = (uint8_t)(paramNr - PAR_VOICE_LFO1);
-        uint8_t newTargVal = getModTargetIdxFromGapIdx((uint8_t)(value - 1u),
-                                                       menu_TargetVoiceGapIndex);
-        parameter_values[PAR_TARGET_LFO1 + lfoNr] = newTargVal;
-        value = newTargVal;
-        paramNr = (uint16_t)(PAR_TARGET_LFO1 + lfoNr);
-    }
-
-    if (paramNr >= PAR_TARGET_LFO1 && paramNr <= PAR_TARGET_LFO6) {
-        /*
-         * LFO modulation destinations are Preset modulation routing state.
-         *
-         * Menu keeps the target-gap helper because it is display/menu mapping
-         * logic. Preset receives the resolved parameter id and applies it to
-         * the sound engine directly, replacing the parser CC bridge.
-         *
-         * Inputs: paramNr selects LFO voice index, value indexes modTargets[].
-         * Output: Preset updates the LFO modulation target and Menu updates the
-         * cached target-gap index used by the voice LFO selector.
-         */
-        uint8_t lfoNr = (uint8_t)(paramNr - PAR_TARGET_LFO1);
-        uint16_t target = modTargets[value].param;
-        menu_TargetVoiceGapIndex = getModTargetGapIndex(value);
-        preset_applyLfoModTarget(lfoNr, target);
-        return;
-    }
-
     /*
-     * Sound parameter writes now go straight to Preset.
+     * Route flat menu parameters by ownership, not by MIDI CC packing range.
      *
-     * The front-panel parser previously split SET_P1/SET_P2-style opcodes by
-     * parameter range. With one CPU, Menu can call the Preset API directly for
-     * all sound parameters and leave true global parameters to
-     * menu_parseGlobalParam().
+     * Instrument sound parameters no longer live in ParameterArray's flat
+     * namespace; descriptor-backed voice edits use preset_setInstrumentParameter().
+     * The remaining flat ids include PERF Morph/Roll, Pattern, generator, MIDI,
+     * trigger, and globals. Many of those ids are numerically below 128, so the
+     * old "param < 128 means sound CC" test bypassed menu_parseGlobalParam()
+     * and lost owner-specific side effects such as preset_morph().
      *
-     * Input: paramNr/value are already the canonical menu parameter pair.
-     * Output: Preset updates parameter_values/DSP state when requested by its
-     * API. Risk: callers must keep using menu_parseGlobalParam for globals so
-     * sequencer, MIDI, trigger, Pattern, and SOM side effects still occur.
+     * Inputs: canonical flat ParameterArray id and clamped byte value. Outputs:
+     * only true legacy sound ids use preset_applySoundParameter(); all non-sound
+     * flat ids run their typed owner path in menu_parseGlobalParam(). This stays
+     * as a separate helper because menu_sendEditedParameter() also owns the
+     * morph-endpoint edit overlay; collapsing both decisions would make it too
+     * easy for future clients to route descriptor endpoint edits through the
+     * active runtime parameter path.
      */
-    if (paramNr < 128)
-        preset_applySoundParameter(paramNr, value, 1);
-    else if (paramNr < END_OF_SOUND_PARAMETERS)
+    if (paramNr < END_OF_SOUND_PARAMETERS)
         preset_applySoundParameter(paramNr, value, 1);
     else
         menu_parseGlobalParam(paramNr, value);
@@ -481,15 +564,15 @@ static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value)
      * active kit and morph endpoint into the same value, destroying morph range.
      */
     if (menu_paramUsesMorphView(paramNr)) {
-        if (paramNr >= PAR_VOICE_LFO1 && paramNr <= PAR_VOICE_LFO6) {
-            uint8_t lfoNr = (uint8_t)(paramNr - PAR_VOICE_LFO1);
-            uint8_t newTargVal = getModTargetIdxFromGapIdx((uint8_t)(value - 1u),
-                                                           menu_TargetVoiceGapIndex);
-            parameters2[PAR_TARGET_LFO1 + lfoNr] = newTargVal;
-        } else if (paramNr >= PAR_TARGET_LFO1 && paramNr <= PAR_TARGET_LFO6) {
-            menu_TargetVoiceGapIndex = getModTargetGapIndex(value);
-        }
-        preset_morph(parameter_values[PAR_MORPH]);
+        /*
+         * Refresh descriptor Morph from retained per-voice amounts.
+         *
+         * After per-voice Morph, preset_morph() is the overall bulk-set
+         * operation and would overwrite all six voice amounts. Morph endpoint
+         * edits only need a runtime rebuild, so use Preset's non-mutating
+         * rebuild boundary here.
+         */
+        preset_rebuildMorph();
         return;
     }
 
@@ -577,286 +660,66 @@ uint8_t parameters2[END_OF_SOUND_PARAMETERS];
 uint8_t voiceModeShowMorph = 0;
 
 /* -----------------------------------------------------------------------
-** Dtype table — exact port of original, PROGMEM removed
+** Dtype table
 ** ----------------------------------------------------------------------- */
 const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
-    /*PAR_NONE*/              DTYPE_0B127,
-    /*PAR_OSC_WAVE_DRUM1*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_OSC_WAVE_DRUM2*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_OSC_WAVE_DRUM3*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_OSC_WAVE_SNARE*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*NRPN_DATA_ENTRY_COARSE*/DTYPE_0B127,
-    /*PAR_WAVE1_CYM*/         DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE1_HH*/          DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_COARSE1*/           DTYPE_0B127,
-    /*PAR_FINE1*/             DTYPE_PM63,
-    /*PAR_COARSE2*/           DTYPE_0B127,
-    /*PAR_FINE2*/             DTYPE_PM63,
-    /*PAR_COARSE3*/           DTYPE_0B127,
-    /*PAR_FINE3*/             DTYPE_PM63,
-    /*PAR_COARSE4*/           DTYPE_0B127,
-    /*PAR_FINE4*/             DTYPE_PM63,
-    /*PAR_COARSE5*/           DTYPE_0B127,
-    /*PAR_FINE5*/             DTYPE_PM63,
-    /*PAR_COARSE6*/           DTYPE_0B127,
-    /*PAR_FINE6*/             DTYPE_PM63,
-    /*PAR_MOD_WAVE_DRUM1*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_MOD_WAVE_DRUM2*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_MOD_WAVE_DRUM3*/    DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE2_CYM*/         DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE3_CYM*/         DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE2_HH*/          DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_WAVE3_HH*/          DTYPE_MENU|(MENU_WAVEFORM<<4),
-    /*PAR_NOISE_FREQ1*/       DTYPE_0B127,
-    /*PAR_MIX1*/              DTYPE_0B127,
-    /*PAR_MOD_OSC_F1_CYM*/   DTYPE_0B127,
-    /*PAR_MOD_OSC_F2_CYM*/   DTYPE_0B127,
-    /*PAR_MOD_OSC_GAIN1_CYM*/DTYPE_0B127,
-    /*PAR_MOD_OSC_GAIN2_CYM*/DTYPE_0B127,
-    /*PAR_MOD_OSC_F1*/        DTYPE_0B127,
-    /*PAR_MOD_OSC_F2*/        DTYPE_0B127,
-    /*PAR_MOD_OSC_GAIN1*/     DTYPE_0B127,
-    /*PAR_MOD_OSC_GAIN2*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_1*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_2*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_3*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_4*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_5*/     DTYPE_0B127,
-    /*PAR_FILTER_FREQ_6*/     DTYPE_0B127,
-    /*PAR_RESO_1*/            DTYPE_0B127,
-    /*PAR_RESO_2*/            DTYPE_0B127,
-    /*PAR_RESO_3*/            DTYPE_0B127,
-    /*PAR_RESO_4*/            DTYPE_0B127,
-    /*PAR_RESO_5*/            DTYPE_0B127,
-    /*PAR_RESO_6*/            DTYPE_0B127,
-    /*PAR_VELOA1*/            DTYPE_0B127,
-    /*PAR_VELOD1*/            DTYPE_0B127,
-    /*PAR_VELOA2*/            DTYPE_0B127,
-    /*PAR_VELOD2*/            DTYPE_0B127,
-    /*PAR_VELOA3*/            DTYPE_0B127,
-    /*PAR_VELOD3*/            DTYPE_0B127,
-    /*PAR_VELOA4*/            DTYPE_0B127,
-    /*PAR_VELOD4*/            DTYPE_0B127,
-    /*PAR_VELOA5*/            DTYPE_0B127,
-    /*PAR_VELOD5*/            DTYPE_0B127,
-    /*PAR_VELOA6*/            DTYPE_0B127,
-    /*PAR_VELOD6_CLOSED*/     DTYPE_0B127,
-    /*PAR_VELOD6_OPEN*/       DTYPE_0B127,
-    /*PAR_VOL_SLOPE1*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE2*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE3*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE4*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE5*/        DTYPE_0B127,
-    /*PAR_VOL_SLOPE6*/        DTYPE_0B127,
-    /*PAR_REPEAT4*/           DTYPE_0B127,
-    /*PAR_REPEAT5*/           DTYPE_0B127,
-    /*PAR_MOD_EG1*/           DTYPE_0B127,
-    /*PAR_MOD_EG2*/           DTYPE_0B127,
-    /*PAR_MOD_EG3*/           DTYPE_0B127,
-    /*PAR_MOD_EG4*/           DTYPE_0B127,
-    /*PAR_MODAMNT1*/          DTYPE_0B127,
-    /*PAR_MODAMNT2*/          DTYPE_0B127,
-    /*PAR_MODAMNT3*/          DTYPE_0B127,
-    /*PAR_MODAMNT4*/          DTYPE_0B127,
-    /*PAR_PITCH_SLOPE1*/      DTYPE_0B127,
-    /*PAR_PITCH_SLOPE2*/      DTYPE_0B127,
-    /*PAR_PITCH_SLOPE3*/      DTYPE_0B127,
-    /*PAR_PITCH_SLOPE4*/      DTYPE_0B127,
-    /*PAR_FMAMNT1*/           DTYPE_0B127,
-    /*PAR_FM_FREQ1*/          DTYPE_0B127,
-    /*PAR_FMAMNT2*/           DTYPE_0B127,
-    /*PAR_FM_FREQ2*/          DTYPE_0B127,
-    /*PAR_FMAMNT3*/           DTYPE_0B127,
-    /*PAR_FM_FREQ3*/          DTYPE_0B127,
-    /*PAR_VOL1*/              DTYPE_0B127,
-    /*PAR_VOL2*/              DTYPE_0B127,
-    /*PAR_VOL3*/              DTYPE_0B127,
-    /*PAR_VOL4*/              DTYPE_0B127,
-    /*PAR_VOL5*/              DTYPE_0B127,
-    /*PAR_VOL6*/              DTYPE_0B127,
-    /*PAR_PAN1*/              DTYPE_PM63,
-    /*PAR_PAN2*/              DTYPE_PM63,
-    /*PAR_PAN3*/              DTYPE_PM63,
-    /*NRPN_FINE*/             DTYPE_0B127,
-    /*NRPN_COARSE*/           DTYPE_0B127,
-    /*PAR_PAN4*/              DTYPE_PM63,
-    /*PAR_PAN5*/              DTYPE_PM63,
-    /*PAR_PAN6*/              DTYPE_PM63,
-    /*PAR_DRIVE1*/            DTYPE_0B127,
-    /*PAR_DRIVE2*/            DTYPE_0B127,
-    /*PAR_DRIVE3*/            DTYPE_0B127,
-    /*PAR_SNARE_DISTORTION*/  DTYPE_0B127,
-    /*PAR_CYMBAL_DISTORTION*/ DTYPE_0B127,
-    /*PAR_HAT_DISTORTION*/    DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION1*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION2*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION3*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION4*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION5*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION6*/ DTYPE_0B127,
-    /*PAR_VOICE_DECIMATION_ALL*/DTYPE_0B127,
-    /*PAR_FREQ_LFO1*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO2*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO3*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO4*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO5*/         DTYPE_0B127,
-    /*PAR_FREQ_LFO6*/         DTYPE_0B127,
-    /*PAR_AMOUNT_LFO1*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO2*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO3*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO4*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO5*/       DTYPE_0B127,
-    /*PAR_AMOUNT_LFO6*/       DTYPE_0B127,
-    /*PAR_BANK_CHANGE*/       DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_1*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_2*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_3*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_4*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_5*/    DTYPE_0B127,
-    /*PAR_FILTER_DRIVE_6*/    DTYPE_0B127,
-    /*PAR_MIX_MOD_1*/         DTYPE_MIX_FM,
-    /*PAR_MIX_MOD_2*/         DTYPE_MIX_FM,
-    /*PAR_MIX_MOD_3*/         DTYPE_MIX_FM,
-    /*PAR_VOLUME_MOD_ON_OFF1*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF2*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF3*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF4*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF5*/DTYPE_ON_OFF,
-    /*PAR_VOLUME_MOD_ON_OFF6*/DTYPE_ON_OFF,
-    /*PAR_VELO_MOD_AMT_1*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_2*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_3*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_4*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_5*/    DTYPE_0B127,
-    /*PAR_VELO_MOD_AMT_6*/    DTYPE_0B127,
-    /*PAR_VEL_DEST_1*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_2*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_3*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_4*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_5*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_VEL_DEST_6*/        DTYPE_TARGET_SELECTION_VELO,
-    /*PAR_WAVE_LFO1*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO2*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO3*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO4*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO5*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_WAVE_LFO6*/         DTYPE_MENU|(MENU_LFO_WAVES<<4),
-    /*PAR_VOICE_LFO1*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO2*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO3*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO4*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO5*/        DTYPE_VOICE_LFO,
-    /*PAR_VOICE_LFO6*/        DTYPE_VOICE_LFO,
-    /*PAR_TARGET_LFO1*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO2*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO3*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO4*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO5*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_TARGET_LFO6*/       DTYPE_TARGET_SELECTION_LFO,
-    /*PAR_RETRIGGER_LFO1*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO2*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO3*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO4*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO5*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_RETRIGGER_LFO6*/    DTYPE_MENU|(MENU_RETRIGGER<<4),
-    /*PAR_SYNC_LFO1*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO2*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO3*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO4*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO5*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_SYNC_LFO6*/         DTYPE_MENU|(MENU_SYNC_RATES<<4),
-    /*PAR_OFFSET_LFO1*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO2*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO3*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO4*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO5*/       DTYPE_0B127,
-    /*PAR_OFFSET_LFO6*/       DTYPE_0B127,
-    /*PAR_FILTER_TYPE_1*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_2*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_3*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_4*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_5*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_FILTER_TYPE_6*/     DTYPE_MENU|(MENU_FILTER<<4),
-    /*PAR_TRANS1_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS2_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS3_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS4_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS5_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS6_VOL*/        DTYPE_0B127,
-    /*PAR_TRANS1_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS2_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS3_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS4_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS5_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS6_WAVE*/       DTYPE_MENU|(MENU_TRANS<<4),
-    /*PAR_TRANS1_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS2_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS3_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS4_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS5_FREQ*/       DTYPE_0B127,
-    /*PAR_TRANS6_FREQ*/       DTYPE_0B127,
-    /*PAR_AUDIO_OUT1*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT2*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT3*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT4*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT5*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_AUDIO_OUT6*/        DTYPE_MENU|(MENU_AUDIO_OUT<<4),
-    /*PAR_MIDI_NOTE1*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE2*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE3*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE4*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE5*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE6*/        DTYPE_NOTE_NAME,
-    /*PAR_MIDI_NOTE7*/        DTYPE_NOTE_NAME,
-    /*PAR_ROLL*/              DTYPE_MENU|(MENU_ROLL_RATES<<4),
-    /*PAR_MORPH*/             DTYPE_0B255,
-    /*PAR_ACTIVE_STEP*/       DTYPE_0B127,
-    /*PAR_STEP_VOLUME*/       DTYPE_0B127,
-    /*PAR_STEP_PROB*/         DTYPE_0B127,
-    /*PAR_STEP_NOTE*/         DTYPE_NOTE_NAME,
-    /*PAR_EUKLID_LENGTH*/     DTYPE_1B128,
-    /*PAR_EUKLID_STEPS*/      DTYPE_1B128,
-    /*PAR_EUKLID_ROTATION*/   DTYPE_0B127,
-    /*PAR_AUTOM_TRACK*/       DTYPE_0b1,
-    /*PAR_P1_DEST*/           DTYPE_AUTOM_TARGET,
-    /*PAR_P2_DEST*/           DTYPE_AUTOM_TARGET,
-    /*PAR_P1_VAL*/            DTYPE_0B127,
-    /*PAR_P2_VAL*/            DTYPE_0B127,
-    /*PAR_SHUFFLE*/           DTYPE_0B127,
-    /*PAR_PATTERN_BEAT*/      DTYPE_0B127,
-    /*PAR_PATTERN_NEXT*/      DTYPE_MENU|(MENU_NEXT_PATTERN<<4),
-    /*PAR_TRACK_LENGTH*/      DTYPE_1B128,
-    /*PAR_POS_X*/             DTYPE_0B127,
-    /*PAR_POS_Y*/             DTYPE_0B127,
-    /*PAR_FLUX*/              DTYPE_0B127,
-    /*PAR_SOM_FREQ*/          DTYPE_0B127,
-    /*PAR_TRACK_ROTATION*/    DTYPE_1B16,
-    /*PAR_TRACK_SCALE*/       DTYPE_MENU|(MENU_TRACK_SCALE<<4),
-    /*PAR_TRACK_MIDI_CHAN*/   DTYPE_1B16,
-    /*PAR_TRACK_MIDI_NOTE*/   DTYPE_NOTE_NAME,
-    /*PAR_BPM*/               DTYPE_0B255,
-    /*PAR_MIDI_CHAN_1*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_2*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_3*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_4*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_5*/        DTYPE_1B16,
-    /*PAR_MIDI_CHAN_6*/        DTYPE_1B16,
-    /*PAR_EXT_SYNC*/          DTYPE_MENU|(MENU_EXT_SYNC<<4),
-    /*PAR_FOLLOW*/            DTYPE_ON_OFF,
-    /*PAR_QUANTISATION*/      DTYPE_MENU|(MENU_SEQ_QUANT<<4),
-    /*PAR_SCREENSAVER_ON_OFF*/DTYPE_ON_OFF,
-    /*PAR_MIDI_MODE*/         DTYPE_MENU|(MENU_MIDI<<4),
-    /*PAR_MIDI_CHAN_7*/        DTYPE_1B16,
-    /*PAR_MIDI_ROUTING*/      DTYPE_MENU|(MENU_MIDI_ROUTING<<4),
-    /*PAR_MIDI_FILT_TX*/      DTYPE_MENU|(MENU_MIDI_FILTERING<<4),
-    /*PAR_MIDI_FILT_RX*/      DTYPE_MENU|(MENU_MIDI_FILTERING<<4),
-    /*PAR_PRESCALER_CLOCK_IN*/ DTYPE_MENU|(MENU_PPQ<<4),
-    /*PAR_PRESCALER_CLOCK_OUT1*/DTYPE_MENU|(MENU_PPQ<<4),
-    /*PAR_PRESCALER_CLOCK_OUT2*/DTYPE_MENU|(MENU_PPQ<<4),
-    /*PAR_TRIG_GATE_MODE*/    DTYPE_ON_OFF,
-    /*PAR_BAR_RESET_MODE*/    DTYPE_ON_OFF,
-    /*PAR_MIDI_CHAN_GLOBAL*/   DTYPE_1B16,
-    /*PAR_OSC_WAVE_INTERP*/   DTYPE_ON_OFF,
+    [PAR_NONE] = DTYPE_0B127,
+    [PAR_ROLL] = DTYPE_MENU|(MENU_ROLL_RATES<<4),
+    [PAR_MORPH] = DTYPE_0B255,
+    [PAR_VOICE1_MORPH] = DTYPE_0B255,
+    [PAR_VOICE2_MORPH] = DTYPE_0B255,
+    [PAR_VOICE3_MORPH] = DTYPE_0B255,
+    [PAR_VOICE4_MORPH] = DTYPE_0B255,
+    [PAR_VOICE5_MORPH] = DTYPE_0B255,
+    [PAR_VOICE6_MORPH] = DTYPE_0B255,
+    [PAR_VOICE_DECIMATION_ALL] = DTYPE_0B127,
+    [PAR_ACTIVE_STEP] = DTYPE_0B127,
+    [PAR_STEP_VOLUME] = DTYPE_0B127,
+    [PAR_STEP_PROB] = DTYPE_0B127,
+    [PAR_STEP_NOTE] = DTYPE_NOTE_NAME,
+    [PAR_EUKLID_LENGTH] = DTYPE_1B128,
+    [PAR_EUKLID_STEPS] = DTYPE_1B128,
+    [PAR_EUKLID_ROTATION] = DTYPE_0B127,
+    [PAR_AUTOM_TRACK] = DTYPE_0b1,
+    [PAR_P1_DEST] = DTYPE_AUTOM_TARGET,
+    [PAR_P2_DEST] = DTYPE_AUTOM_TARGET,
+    [PAR_P1_VAL] = DTYPE_0B127,
+    [PAR_P2_VAL] = DTYPE_0B127,
+    [PAR_SHUFFLE] = DTYPE_0B127,
+    [PAR_PATTERN_BEAT] = DTYPE_0B127,
+    [PAR_PATTERN_NEXT] = DTYPE_MENU|(MENU_NEXT_PATTERN<<4),
+    [PAR_TRACK_LENGTH] = DTYPE_1B128,
+    [PAR_POS_X] = DTYPE_0B127,
+    [PAR_POS_Y] = DTYPE_0B127,
+    [PAR_FLUX] = DTYPE_0B127,
+    [PAR_SOM_FREQ] = DTYPE_0B127,
+    [PAR_TRACK_ROTATION] = DTYPE_1B16,
+    [PAR_TRACK_SCALE] = DTYPE_MENU|(MENU_TRACK_SCALE<<4),
+    [PAR_TRACK_MIDI_CHAN] = DTYPE_1B16,
+    [PAR_TRACK_MIDI_NOTE] = DTYPE_NOTE_NAME,
+    [PAR_BPM] = DTYPE_0B255,
+    [PAR_MIDI_CHAN_1] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_2] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_3] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_4] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_5] = DTYPE_1B16,
+    [PAR_MIDI_CHAN_6] = DTYPE_1B16,
+    [PAR_EXT_SYNC] = DTYPE_MENU|(MENU_EXT_SYNC<<4),
+    [PAR_FOLLOW] = DTYPE_ON_OFF,
+    [PAR_QUANTISATION] = DTYPE_MENU|(MENU_SEQ_QUANT<<4),
+    [PAR_SCREENSAVER_ON_OFF] = DTYPE_ON_OFF,
+    [PAR_MIDI_MODE] = DTYPE_MENU|(MENU_MIDI<<4),
+    [PAR_MIDI_CHAN_7] = DTYPE_1B16,
+    [PAR_MIDI_ROUTING] = DTYPE_MENU|(MENU_MIDI_ROUTING<<4),
+    [PAR_MIDI_FILT_TX] = DTYPE_MENU|(MENU_MIDI_FILTERING<<4),
+    [PAR_MIDI_FILT_RX] = DTYPE_MENU|(MENU_MIDI_FILTERING<<4),
+    [PAR_PRESCALER_CLOCK_IN] = DTYPE_MENU|(MENU_PPQ<<4),
+    [PAR_PRESCALER_CLOCK_OUT1] = DTYPE_MENU|(MENU_PPQ<<4),
+    [PAR_PRESCALER_CLOCK_OUT2] = DTYPE_MENU|(MENU_PPQ<<4),
+    [PAR_TRIG_GATE_MODE] = DTYPE_ON_OFF,
+    [PAR_BAR_RESET_MODE] = DTYPE_ON_OFF,
+    [PAR_MIDI_CHAN_GLOBAL] = DTYPE_1B16,
+    [PAR_OSC_WAVE_INTERP] = DTYPE_ON_OFF,
 };
 
 /* -----------------------------------------------------------------------
@@ -950,15 +813,33 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_CPU_USE,CAT_GLOBAL,LONG_CPU_USE_TIME},
     {SHORT_OSC_INTERP,CAT_GLOBAL,LONG_OSC_INTERP},
     {SHORT_SCALE,CAT_PATTERN,LONG_SCALE},
+    {SHORT_VOICE1_MORPH,CAT_VOICE,LONG_VOICE1_MORPH},
+    {SHORT_VOICE2_MORPH,CAT_VOICE,LONG_VOICE2_MORPH},
+    {SHORT_VOICE3_MORPH,CAT_VOICE,LONG_VOICE3_MORPH},
+    {SHORT_VOICE4_MORPH,CAT_VOICE,LONG_VOICE4_MORPH},
+    {SHORT_VOICE5_MORPH,CAT_VOICE,LONG_VOICE5_MORPH},
+    {SHORT_VOICE6_MORPH,CAT_VOICE,LONG_VOICE6_MORPH},
 };
 
 /* -----------------------------------------------------------------------
 ** State — exact match to original
 ** ----------------------------------------------------------------------- */
 static uint8_t menuIndex = 0;
+/*
+ * Current four-parameter screen for each voice SELECT sub-page.
+ *
+ * Static menu pages still use menuIndex parameter bits 0..3 and 4..7 as the
+ * old two-screen model. Voice pages can now expose up to sixteen instrument
+ * descriptor cells per SELECT button, so the selected screen lives outside
+ * menuIndex and is remembered per sub-page. It intentionally survives voice
+ * page and mode changes; pressing a SELECT button while already in VOICE mode
+ * is the only normal action that resets a different sub-page to screen 0 or
+ * advances the same sub-page to the next screen.
+ */
+static uint8_t menu_voiceSubPageScreen[NUM_SUB_PAGES];
 
 uint8_t menu_numSamples = 0;
-uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
+uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 uint8_t menu_shownPattern = 0;
 uint8_t menu_currentBar = 0;
 uint8_t menu_muteModeActive = 0;
@@ -969,6 +850,115 @@ char editDisplayBuffer[2][17];
 uint8_t menu_activePage  = 0;
 uint8_t menu_activeVoice = 0;
 uint8_t menu_playedPattern = 0;
+
+static uint8_t menu_instrumentLoadActive = 0u;
+static uint8_t menu_instrumentLoadSlot = 0u;
+static instrument_type_t menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
+static uint8_t menu_instrumentSaveMode = 0u;
+/*
+ * Menu retains only session coordinates and dirty state; its strings live in
+ * filesystem.c's single 81-byte identity block.
+ *
+ * Why: keeping a seven-row Menu scratch alongside that block would violate the
+ * one-copy name contract after `.hcindex` replaces the shared 9,000-byte cache.
+ * Inputs/outputs: helpers below borrow/set fixed filesystem identity rows.
+ * Affiliates: HCNAMES entry/update and Kit/Instrument/Scene Save rendering.
+ */
+static uint8_t menu_residentNameScratchScene =
+    MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+static uint8_t menu_residentNameScratchValid = 0u;
+static uint16_t menu_residentNameDirtySceneMask = 0u;
+/*
+ * One operation-scoped Scene identity for top-level Scene Load/Save.
+ *
+ * What: holds exactly one eight-character row copied from `/.hcnames` before
+ * `/Scene/.hcindex` reuses the general filesystem cache. Why: SceneData no
+ * longer duplicates sixteen display names, while Scene Save needs only its
+ * current source name to seed the editor. Inputs: selected source Scene at
+ * Scene-menu entry or a later SEQ source change. Output: Save character entry
+ * copies this cell; no per-Scene Menu cache exists. Affiliates: filesystem
+ * resident-Scene-name API and menu_requestSceneEntryName().
+ */
+static uint8_t menu_sceneResidentNameScratchScene =
+    MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+/* The active Instrument editor/display row inside the seven-name block. */
+#define menu_instrumentSaveName \
+    filesystem_identityNameMutable((uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 + \
+                                             menu_instrumentLoadSlot))
+/*
+ * Instrument Morph browser mode is derived from the destination slot type.
+ *
+ * baseType is captured from the currently loaded slot when Instrument Load is
+ * entered or its destination Scene changes. morphMode is only UI/dispatch
+ * state: it inserts the one legal "...Mrp" row after that base type and asks
+ * Preset to copy the selected file into the resident morph endpoint instead of
+ * replacing the slot.
+ */
+static instrument_type_t menu_instrumentLoadBaseType = INSTRUMENT_TYPE_DRM;
+static uint8_t menu_instrumentLoadMorphMode = 0u;
+/* Each active type keeps a 0..999 selection into the one shared name cache. */
+static uint16_t menu_instrumentLoadIndex[INSTRUMENT_TYPE_UNKNOWN];
+/*
+ * Load-menu Scene and Instrument-source state.
+ *
+ * Kit Load retains a bit for every selected Scene so a future 16-Scene bank
+ * can toggle targets before one Kit request. Instrument Load has exactly one
+ * destination Scene and begins with the kit-member source; only lower-row
+ * encoder movement promotes it to an Instrument/ pool item. Keeping the shown
+ * source distinct from the selected type prevents changing type from silently
+ * changing sound or replacing the useful "kit <name>" entry display.
+ */
+static uint16_t menu_kitLoadSceneMask = 0u;
+static uint8_t menu_loadSaveSourceScene = 0u;
+static uint8_t menu_instrumentLoadScene = 0u;
+/*
+ * Load:[Bank] child-Scene preview cache.
+ *
+ * Why: a root Bank slot can exist while containing any subset of Bank-local
+ * Scene child folders 00..15. The root Bank browser scan cannot answer that,
+ * so Menu requests a per-slot filesystem preview scan as the encoder moves.
+ * Inputs are the highlighted Bank slot and filesystem_bankChildSceneMask()
+ * after completion. Outputs are SEQ LEDs and the default Bank Load mask. The
+ * `valid` flag prevents LEDs from showing stale child bits while a different
+ * Bank slot is now selected or still being scanned.
+ */
+static uint16_t menu_bankLoadPreviewMask = 0u;
+static uint16_t menu_bankLoadPreviewSlot = 0u;
+static uint8_t menu_bankLoadPreviewValid = 0u;
+typedef enum {
+    MENU_INSTRUMENT_SOURCE_KIT = 0,
+    MENU_INSTRUMENT_SOURCE_POOL
+} menu_instrument_source_t;
+static menu_instrument_source_t menu_instrumentLoadSource =
+    MENU_INSTRUMENT_SOURCE_KIT;
+static instrument_type_t menu_instrumentLoadShownType = INSTRUMENT_TYPE_DRM;
+static uint16_t menu_instrumentLoadShownIndex = 0u;
+/*
+ * One Menu-owned identity for the hidden reversible `kit` file.
+ *
+ * Inputs: copied once from the existing HCNAMES identity row after Instrument
+ * Load entry succeeds. Output: the `kit` row label remains stable while pool
+ * loads update the normal identity row. Why: `.hctmp.<ext>` carries parameters
+ * on SD, but must never become another name cache or HCNAMES row. Affiliates:
+ * preset_save/loadInstrumentTemp() and all voice/type/exit invalidations.
+ */
+static char menu_instrumentTempName[MENU_INSTRUMENT_SAVE_NAME_LEN + 1u];
+static instrument_type_t menu_instrumentTempType = INSTRUMENT_TYPE_UNKNOWN;
+static uint8_t menu_instrumentTempValid = 0u;
+/*
+ * One operation tag shared by the temporary save and its later temporary load.
+ *
+ * Inputs: Menu posts either the entry `.hctmp.<ext>` save or the direct `kit`
+ * restore. Output: completion/application code can identify that accepted
+ * operation without consulting the mutable encoder cursor. Why: Load-number
+ * turns are deliberately accepted while a pool Instrument operation drains;
+ * `menu_instrumentLoadSource` may therefore say `kit` when that *pool* load
+ * completes. Reusing this existing byte avoids a second session cache or SRAM
+ * allocation. Affiliates: menu_prepareInstrumentLoadTemp(),
+ * menu_restoreInstrumentLoadTemp(), menu_tickInstrumentApply(), and
+ * PRESET_OP_INSTRUMENT_TEMP_SAVE / PRESET_OP_INSTRUMENT_LOAD handling.
+ */
+static uint8_t menu_instrumentTempOperationPending = 0u;
 static uint8_t editModeActive = 0;
 static uint8_t lastEncoderButton = 0;
 
@@ -990,6 +980,11 @@ static volatile struct {
 ** Forward declarations (static)
 ** ----------------------------------------------------------------------- */
 static uint8_t has2ndPage(uint8_t menuPage);
+static uint8_t menu_voiceAbsolutePositionSelectable(uint8_t subPage,
+                                                    uint8_t position);
+static uint8_t menu_voiceSubPageScreenExists(uint8_t subPage, uint8_t screen);
+static uint8_t menu_voiceFirstSelectableColumn(uint8_t subPage,
+                                               uint8_t screen);
 static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter);
 static void menu_repaintLoadSavePage(void);
 static void menu_repaintGeneric(void);
@@ -997,23 +992,1458 @@ void sendDisplayBuffer(void);
 static void menu_moveToMenuItem(int8_t inc);
 static void menu_encoderChangeParameter(int8_t inc);
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked);
-static uint8_t menu_nameIsEmptySlot(void);
+static void menu_handleLoadSaveKnobDelta(uint8_t knobNr, int8_t delta);
+static void menu_loadSaveClearInstrumentVoiceBlinks(void);
+static void menu_bankLoadPreviewComplete(void);
+static void menu_requestBankLoadPreview(uint16_t slot);
+static void menu_requestLibraryIndexLoad(uint8_t what);
+static void menu_requestSceneEntryName(void);
+static void menu_instrumentLoadClampIndex(void);
+static void menu_instrumentLoadRequestSelection(void);
+static void menu_invalidateInstrumentLoadTemp(void);
+static uint8_t menu_prepareInstrumentLoadTemp(void);
+static void menu_restoreInstrumentLoadTemp(void);
+static void menu_requestInstrumentEntryNames(void);
+static void menu_instrumentLoadRefreshBaseType(uint8_t preserve_selected_type);
+static void menu_instrumentLoadCopyTypeLabel(char *dest);
+static void menu_instrumentLoadStepType(int8_t inc);
+static void menu_refreshLoadSceneLeds(void);
+static uint8_t menu_paramIsMorphAmount(uint16_t paramNr);
 static uint8_t menu_isLoadSaveSelectionCurrent(void);
 static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage);
 static void menu_displayModTargetFull(uint8_t curParmVal);
-static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText, char inclVoice);
+static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText);
 static uint8_t getMaxEntriesForMenu(uint8_t menuId);
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf);
+static void menu_getLfoPolarityName(uint8_t value, char *buf);
 static void menu_endlessPotMappingChanged(void);
 static uint8_t menu_cpuUseWidgetVisible(void);
 static void menu_formatCpuUsePercent3(char *buf);
 static void menu_formatCpuUsePercent4(char *buf);
+static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot);
+static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value);
+static void setNoteName(uint8_t num, char *buf);
 
+typedef enum {
+    MENU_CELL_EMPTY = 0,
+    MENU_CELL_STATIC,
+    MENU_CELL_INSTRUMENT,
+    MENU_CELL_KIT_SETTING,
+    MENU_CELL_SCENE_SETTING
+} menu_cell_kind_t;
 
-static uint8_t menu_nameIsEmptySlot(void)
+typedef enum {
+    MENU_KIT_SETTING_NONE = 0,
+    MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY
+} menu_kit_setting_kind_t;
+
+typedef enum {
+    MENU_SCENE_SETTING_AUDIO_OUT = 0,
+    MENU_SCENE_SETTING_FX_SEND_AMOUNT,
+    MENU_SCENE_SETTING_FADER_SETTING
+} menu_scene_setting_kind_t;
+
+typedef struct {
+    menu_cell_kind_t kind;
+    uint8_t text_id;
+    uint16_t static_param;
+    uint8_t kit_setting;
+    uint8_t scene_setting;
+    uint8_t slot;
+    uint8_t descriptor_index;
+    const ParamDescriptor *descriptor;
+} menu_cell_t;
+
+typedef struct {
+    uint8_t scene_index;
+    uint8_t source_slot;
+    uint8_t target_pair;
+    instrument_binding_kind_t target_voice_kind;
+    instrument_binding_kind_t target_param_kind;
+    uint8_t target_voice_index;
+    uint8_t target_param_index;
+    instrument_param_value_t raw_target_voice;
+    uint8_t target_voice;
+    uint8_t target_is_scene;
+    uint8_t target_slot;
+    instrument_target_token_t target_param_token;
+} menu_lfo_target_context_t;
+
+static uint8_t menu_isVoicePage(uint8_t page);
+static uint8_t menu_voicePageToSlot(uint8_t page);
+static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position);
+static menu_cell_t menu_resolveVoiceCellAtScreen(uint8_t subPage,
+                                                 uint8_t screen,
+                                                 uint8_t column);
+static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position);
+static uint8_t menu_voiceSubPageScreenCount(uint8_t subPage);
+static uint8_t menu_cellDtype(const menu_cell_t *cell);
+static uint16_t menu_cellDisplayValue(const menu_cell_t *cell);
+static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value);
+static uint8_t menu_cellIsEmpty(const menu_cell_t *cell);
+static uint8_t menu_lfoTargetPairForKind(instrument_binding_kind_t kind,
+                                         uint8_t *pair_out,
+                                         uint8_t *is_voice_out,
+                                         uint8_t *is_param_out,
+                                         instrument_binding_kind_t *voice_kind_out,
+                                         instrument_binding_kind_t *param_kind_out);
+static uint8_t menu_cellIsLfoTargetVoice(const menu_cell_t *cell);
+static uint8_t menu_cellIsLfoTargetParam(const menu_cell_t *cell);
+static uint8_t menu_cellIsVelocityTargetParam(const menu_cell_t *cell);
+static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
+                                     menu_lfo_target_context_t *ctx);
+static instrument_target_token_t menu_lfoTargetNormalizeToken(
+    const menu_lfo_target_context_t *ctx, instrument_target_token_t token);
+static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
+    const menu_cell_t *cell, const menu_lfo_target_context_t *ctx,
+    uint16_t raw_voice);
+static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta);
+static uint8_t menu_lfoTargetEditParam(const menu_cell_t *cell, int16_t delta);
+static uint16_t menu_lfoTargetDisplayValue(const menu_cell_t *cell,
+                                           uint16_t raw);
+static instrument_target_token_t menu_velocityTargetNormalize(
+    const menu_cell_t *cell, instrument_target_token_t raw);
+static uint8_t menu_velocityTargetEditParam(const menu_cell_t *cell,
+                                            int16_t delta);
+static uint16_t menu_velocityTargetDisplayValue(const menu_cell_t *cell,
+                                                uint16_t raw);
+static void menu_copyPaddedField(char *dst, const char *src, uint8_t width);
+static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText);
+static void menu_displayInstrumentTargetFull(uint16_t target);
+static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText);
+static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value);
+
+static uint8_t menu_isVoicePage(uint8_t page)
 {
-    return (uint8_t)(memcmp(preset_currentName, "Empty   ", 8) == 0);
+    return (uint8_t)(page <= VOICE7_PAGE);
 }
+
+static uint8_t menu_voicePageToSlot(uint8_t page)
+{
+    if (page >= VOICE7_PAGE)
+        return 5u;
+    return page;
+}
+
+static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
+{
+    menu_cell_t cell;
+    const Page *page;
+
+    memset(&cell, 0, sizeof(cell));
+    cell.kind = MENU_CELL_EMPTY;
+    cell.static_param = PAR_NONE;
+    cell.text_id = TEXT_EMPTY;
+    cell.descriptor_index = INSTRUMENT_MENU_EMPTY;
+
+    /*
+     * Resolve one absolute menu cell without assuming one global parameter ID
+     * namespace.
+     *
+     * Static pages still come from menuPages[][] and parameter_values[]. Voice
+     * pages now come from the active Scene slot's instrument descriptors: the
+     * descriptor supplies text/dtype and descriptor_index supplies the storage
+     * cell in SceneData. This keeps old global/Pattern pages stable while
+     * removing the false overlap between flat PAR_* ids and instrument ids.
+     * Voice callers may pass absolute positions 0..15; static callers remain
+     * limited to the old 0..7 Page structure.
+     */
+    if (subPage >= NUM_SUB_PAGES)
+        return cell;
+
+    if (menu_isVoicePage(menu_activePage)) {
+        const kit_instrument_slot_t *slot;
+        uint8_t slot_index = menu_voicePageToSlot(menu_activePage);
+
+        if (position >= INSTRUMENT_MENU_PAGE_CELLS)
+            return cell;
+
+        slot = scene_instrumentSlotConst(scene_getActiveIndex(), slot_index);
+        if (!slot)
+            return cell;
+
+        cell.descriptor =
+            instrumentManager_voicePageDescriptorIndex(slot->type,
+                                                       menu_activePage,
+                                                       subPage,
+                                                       position,
+                                                       &cell.descriptor_index);
+        if (!cell.descriptor &&
+            cell.descriptor_index == INSTRUMENT_MENU_SKIP) {
+            cell.kind = MENU_CELL_STATIC;
+            cell.text_id = TEXT_SKIP;
+            cell.static_param = PAR_NONE;
+            return cell;
+        }
+        if (!cell.descriptor)
+            return cell;
+
+        if (menu_activePage == VOICE7_PAGE &&
+            slot_index == 5u &&
+            (instrumentManager_typeFlags(slot->type) & INSTRUMENT_FLAG_CHOKE)) {
+            uint8_t choke_index;
+
+            /*
+             * Generic VOICE7 choke substitution.
+             *
+             * Inputs: the normal descriptor selected by the instrument's one
+             * menu layout, the visible VOICE page, and the owning slot. Output:
+             * when slot 6 hosts a Choke instrument and the base descriptor has
+             * a `<key>_choke` sibling, this cell displays/edits the sibling
+             * descriptor instead of the base descriptor. Menu owns the VOICE7
+             * and slot-6 context; InstrumentManager owns the descriptor suffix
+             * relationship, so neither layer has to duplicate the other's
+             * rules. Affiliates are hihat_menu_pages[], SceneData descriptor
+             * images, and modulation target lists where `_choke` rows remain
+             * separately visible.
+             */
+            if (instrumentManager_chokeDescriptorIndexForBase(
+                    slot->type, cell.descriptor_index, &choke_index)) {
+                const ParamDescriptor *choke_descriptor =
+                    instrumentManager_descriptor(slot->type, choke_index);
+                if (choke_descriptor) {
+                    cell.descriptor_index = choke_index;
+                    cell.descriptor = choke_descriptor;
+                }
+            }
+        }
+
+        if (menu_activePage == VOICE7_PAGE &&
+            slot_index == 5u &&
+            !(instrumentManager_typeFlags(slot->type) & INSTRUMENT_FLAG_CHOKE) &&
+            cell.descriptor->file_key &&
+            strcmp(cell.descriptor->file_key, "amp_envelope_decay") == 0) {
+            /*
+             * Generated non-Choke track-7 decay cell.
+             *
+             * Inputs: the base amp_envelope_decay descriptor resolved for
+             * slot 6 on VOICE7. Output: the cell borrows that descriptor's
+             * display text/dtype but commits to kit_settings_t instead of the
+             * instrument descriptor image arrays. This generated setting only
+             * exists for non-Choke instruments; Choke instruments use real
+             * `_choke` descriptors, and instruments without amp_envelope_decay
+             * naturally fall through to the normal VOICE6-style cell.
+             */
+            cell.kind = MENU_CELL_KIT_SETTING;
+            cell.kit_setting = MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY;
+            cell.slot = slot_index;
+            return cell;
+        }
+
+        cell.kind = MENU_CELL_INSTRUMENT;
+        cell.slot = slot_index;
+        return cell;
+    }
+
+    if (position >= MENU_STATIC_SUBPAGE_CELLS)
+        return cell;
+    page = &menuPages[menu_activePage][subPage];
+    cell.text_id = (&page->top1)[position];
+    cell.static_param = (&page->bot1)[position];
+    if (cell.text_id == TEXT_EMPTY || cell.static_param == PAR_NONE)
+        return cell;
+
+    cell.kind = MENU_CELL_STATIC;
+    return cell;
+}
+
+static menu_cell_t menu_resolveSceneSettingCell(uint8_t index)
+{
+    menu_cell_t cell;
+
+    /*
+     * Resolve one VOICE mix Scene-setting cell for the active voice.
+     *
+     * Inputs: column-local index in the appended one-screen Scene section.
+     * Output: a MENU_CELL_SCENE_SETTING with scene_setting equal to the index
+     * and slot equal to the current VOICE page's zero-based instrument slot.
+     * This keeps VOICE1/mix on voice 1's audio_out, fx_send_amount, and
+     * fader_setting, while VOICE2/mix edits voice 2's same three fields, and
+     * so on. Column 4 returns MENU_CELL_EMPTY because there are only three
+     * Scene settings per voice.
+     *
+     * Affiliates: menu_voiceSubPageScreenCount() appends exactly one screen;
+     * menu_sceneSettingShortName(), menu_cellDisplayValue(), and
+     * menu_cellCommitValue() consume the resolved slot/setting pair.
+     */
+    memset(&cell, 0, sizeof(cell));
+    cell.kind = MENU_CELL_EMPTY;
+    cell.static_param = PAR_NONE;
+    cell.text_id = TEXT_EMPTY;
+    cell.descriptor_index = INSTRUMENT_MENU_EMPTY;
+    if (index >= MENU_SCENE_SETTING_COUNT)
+        return cell;
+    cell.kind = MENU_CELL_SCENE_SETTING;
+    cell.scene_setting = index;
+    cell.slot = menu_voicePageToSlot(menu_activePage);
+    return cell;
+}
+
+static uint8_t menu_voiceInstrumentScreenExists(uint8_t subPage,
+                                                uint8_t screen)
+{
+    uint8_t i;
+    uint8_t start;
+
+    /*
+     * Test only the instrument-descriptor part of a VOICE sub-page.
+     *
+     * Inputs: SELECT sub-page and descriptor screen 0..3. Output: nonzero when
+     * any instrument or generated Kit setting cell is selectable. Scene-setting
+     * screens are intentionally excluded so menu_voiceSubPageScreenCount() can
+     * append them only for the mix sub-page.
+     */
+    if (subPage >= NUM_SUB_PAGES || screen >= MENU_VOICE_SUBPAGE_SCREENS)
+        return 0u;
+    start = (uint8_t)(screen * MENU_COMPACT_SCREEN_CELLS);
+    for (i = 0u; i < MENU_COMPACT_SCREEN_CELLS; i++) {
+        menu_cell_t cell =
+            menu_resolveCellAbsolute(subPage, (uint8_t)(start + i));
+        if (!menu_cellIsEmpty(&cell) &&
+            !(cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP)) {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+static uint8_t menu_voiceInstrumentScreenCount(uint8_t subPage)
+{
+    uint8_t screen;
+    uint8_t count = 0u;
+
+    /*
+     * Count populated instrument screens for one VOICE sub-page.
+     *
+     * The loop records the highest populated descriptor screen plus one rather
+     * than stopping at the first empty screen, so sparse future descriptor rows
+     * remain navigable. Output is 0..4.
+     */
+    if (subPage >= NUM_SUB_PAGES)
+        return 0u;
+    for (screen = 0u; screen < MENU_VOICE_SUBPAGE_SCREENS; screen++) {
+        if (menu_voiceInstrumentScreenExists(subPage, screen))
+            count = (uint8_t)(screen + 1u);
+    }
+    return count;
+}
+
+static uint8_t menu_voiceSubPageScreenCount(uint8_t subPage)
+{
+    uint8_t count = menu_voiceInstrumentScreenCount(subPage);
+
+    /*
+     * Count total selectable screens behind one VOICE SELECT sub-page.
+     *
+     * Inputs: SELECT sub-page. Output: instrument descriptor screens plus the
+     * appended per-voice Scene-setting screen only for mix. This keeps non-mix
+     * pages on their old 0..4 screen domain while each VOICE/mix page exposes
+     * the selected voice's Scene-owned routing, FX send, and fader settings
+     * after the instrument's own mix cells.
+     */
+    if (subPage == MENU_VOICE_MIX_SUBPAGE)
+        count = (uint8_t)(count + MENU_SCENE_SETTING_SCREENS);
+    return count;
+}
+
+static menu_cell_t menu_resolveVoiceCellAtScreen(uint8_t subPage,
+                                                 uint8_t screen,
+                                                 uint8_t column)
+{
+    uint8_t instrument_screens;
+
+    /*
+     * Resolve a visible VOICE compact cell by explicit screen and column.
+     *
+     * Inputs: SELECT sub-page, remembered screen, and visible column 0..3.
+     * Output: instrument/generated Kit cells for descriptor screens, or the
+     * selected voice's three Scene-setting cells for the appended mix screen.
+     * This helper is the common affiliate for display, encoder navigation,
+     * SELECT cycling, and endless-pot mapping, so all controls see the same
+     * per-voice Scene-setting split.
+     */
+    if (column >= MENU_COMPACT_SCREEN_CELLS)
+        column = (uint8_t)(column % MENU_COMPACT_SCREEN_CELLS);
+    instrument_screens = menu_voiceInstrumentScreenCount(subPage);
+    if (subPage == MENU_VOICE_MIX_SUBPAGE && screen >= instrument_screens) {
+        uint8_t scene_screen = (uint8_t)(screen - instrument_screens);
+        uint8_t scene_index =
+            (uint8_t)(scene_screen * MENU_COMPACT_SCREEN_CELLS + column);
+        return menu_resolveSceneSettingCell(scene_index);
+    }
+    return menu_resolveCellAbsolute(
+        subPage,
+        (uint8_t)(screen * MENU_COMPACT_SCREEN_CELLS + column));
+}
+
+static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
+{
+    if (menu_isVoicePage(menu_activePage)) {
+        uint8_t screen;
+        if (subPage >= NUM_SUB_PAGES)
+            subPage = 0u;
+        screen = menu_voiceSubPageScreen[subPage];
+        if (!menu_voiceSubPageScreenExists(subPage, screen)) {
+            screen = 0u;
+            menu_voiceSubPageScreen[subPage] = 0u;
+        }
+        return menu_resolveVoiceCellAtScreen(
+            subPage, screen, (uint8_t)(position % MENU_COMPACT_SCREEN_CELLS));
+    }
+    return menu_resolveCellAbsolute(subPage, position);
+}
+
+static uint8_t menu_cellIsEmpty(const menu_cell_t *cell)
+{
+    return (uint8_t)(!cell || cell->kind == MENU_CELL_EMPTY);
+}
+
+static uint8_t menu_lfoTargetPairForKind(instrument_binding_kind_t kind,
+                                         uint8_t *pair_out,
+                                         uint8_t *is_voice_out,
+                                         uint8_t *is_param_out,
+                                         instrument_binding_kind_t *voice_kind_out,
+                                         instrument_binding_kind_t *param_kind_out)
+{
+    uint8_t pair = 0xffu;
+    uint8_t is_voice = 0u;
+    uint8_t is_param = 0u;
+    instrument_binding_kind_t voice_kind = INSTRUMENT_BIND_NONE;
+    instrument_binding_kind_t param_kind = INSTRUMENT_BIND_NONE;
+
+    /*
+     * Resolve one LFO target binding into its selector pair.
+     *
+     * Inputs: a descriptor runtime binding kind from the currently edited
+     * menu cell. Outputs: target-pair index, whether the edited cell is the
+     * voice or parameter side, and the sibling binding kinds for that same
+     * pair. This helper exists because pair behavior is shared while storage
+     * cells are not: pair 1 must use lfo_target_voice/lfo_target_param, and
+     * pair 2 must use lfo_target_voice_2/lfo_target_param_2. Keeping the map
+     * here prevents display, encoder, endless-pot, and reconcile paths from
+     * duplicating four enum checks or assuming descriptor indices.
+     */
+    switch (kind) {
+    case INSTRUMENT_BIND_LFO_TARGET_VOICE:
+        pair = 0u;
+        is_voice = 1u;
+        voice_kind = INSTRUMENT_BIND_LFO_TARGET_VOICE;
+        param_kind = INSTRUMENT_BIND_LFO_TARGET_PARAM;
+        break;
+    case INSTRUMENT_BIND_LFO_TARGET_PARAM:
+        pair = 0u;
+        is_param = 1u;
+        voice_kind = INSTRUMENT_BIND_LFO_TARGET_VOICE;
+        param_kind = INSTRUMENT_BIND_LFO_TARGET_PARAM;
+        break;
+    case INSTRUMENT_BIND_LFO_TARGET_VOICE_2:
+        pair = 1u;
+        is_voice = 1u;
+        voice_kind = INSTRUMENT_BIND_LFO_TARGET_VOICE_2;
+        param_kind = INSTRUMENT_BIND_LFO_TARGET_PARAM_2;
+        break;
+    case INSTRUMENT_BIND_LFO_TARGET_PARAM_2:
+        pair = 1u;
+        is_param = 1u;
+        voice_kind = INSTRUMENT_BIND_LFO_TARGET_VOICE_2;
+        param_kind = INSTRUMENT_BIND_LFO_TARGET_PARAM_2;
+        break;
+    default:
+        break;
+    }
+
+    if (pair == 0xffu)
+        return 0u;
+    if (pair_out)
+        *pair_out = pair;
+    if (is_voice_out)
+        *is_voice_out = is_voice;
+    if (is_param_out)
+        *is_param_out = is_param;
+    if (voice_kind_out)
+        *voice_kind_out = voice_kind;
+    if (param_kind_out)
+        *param_kind_out = param_kind;
+    return 1u;
+}
+
+static uint8_t menu_cellIsLfoTargetVoice(const menu_cell_t *cell)
+{
+    uint8_t is_voice = 0u;
+    if (!cell || cell->kind != MENU_CELL_INSTRUMENT || !cell->descriptor)
+        return 0u;
+    (void)menu_lfoTargetPairForKind(cell->descriptor->runtime.kind, 0,
+                                    &is_voice, 0, 0, 0);
+    return is_voice;
+}
+
+static uint8_t menu_cellIsLfoTargetParam(const menu_cell_t *cell)
+{
+    uint8_t is_param = 0u;
+    if (!cell || cell->kind != MENU_CELL_INSTRUMENT || !cell->descriptor)
+        return 0u;
+    (void)menu_lfoTargetPairForKind(cell->descriptor->runtime.kind, 0, 0,
+                                    &is_param, 0, 0);
+    return is_param;
+}
+
+static uint8_t menu_cellIsVelocityTargetParam(const menu_cell_t *cell)
+{
+    /*
+     * Identify the descriptor cell that stores one voice's velocity target.
+     *
+     * Input: resolved menu cell. Output: nonzero only for an instrument-owned
+     * velo_mod_dest binding. This cannot be inferred from dtype alone because
+     * LFO target params share the target-selection dtype but use a paired
+     * DstVoice context, while velocity uses the source slot as its context.
+     */
+    return (uint8_t)(cell &&
+                     cell->kind == MENU_CELL_INSTRUMENT &&
+                     cell->descriptor &&
+                     cell->descriptor->runtime.kind ==
+                        INSTRUMENT_BIND_VELOCITY_TARGET);
+}
+
+static void menu_sceneSettingShortName(const menu_cell_t *cell, char *dst)
+{
+    /*
+     * Build compact three-character labels for VOICE mix Scene settings.
+     *
+     * Inputs: Scene-setting cell and three-byte destination. Output examples:
+     * 1ou..6ou for audio routing, 1fx..6fx for retained FX send, and
+     * 1fd..6fd for retained fader mode. The slot number is one-based so the
+     * compact label identifies which voice the Scene setting edits.
+     */
+    uint8_t voice = (cell && cell->slot < INSTRUMENT_SLOT_COUNT)
+        ? (uint8_t)(cell->slot + 1u) : 1u;
+    dst[0] = (char)('0' + voice);
+    switch (cell ? cell->scene_setting : MENU_SCENE_SETTING_AUDIO_OUT) {
+    case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
+        dst[1] = 'f';
+        dst[2] = 'x';
+        break;
+    case MENU_SCENE_SETTING_FADER_SETTING:
+        dst[1] = 'f';
+        dst[2] = 'd';
+        break;
+    default:
+        dst[1] = 'o';
+        dst[2] = 'u';
+        break;
+    }
+}
+
+static void menu_sceneSettingFaderName(uint8_t value, char *dst)
+{
+    /*
+     * Format the retained fader mode domain.
+     *
+     * Inputs: stored 0..2 fader mode. Output: compact user text. These labels
+     * are storage/UI placeholders until mixer/FX routing implements behavior:
+     * pre = normal/pre-FX, pst = post-FX, fx  = FX-only.
+     */
+    if (value == 1u)
+        memcpy(dst, "pst", 3);
+    else if (value == 2u)
+        memcpy(dst, "fx ", 3);
+    else
+        memcpy(dst, "pre", 3);
+}
+
+static uint8_t menu_cellDtype(const menu_cell_t *cell)
+{
+    if (!cell)
+        return DTYPE_0B127;
+    if (cell->kind == MENU_CELL_SCENE_SETTING) {
+        if (cell->scene_setting == MENU_SCENE_SETTING_AUDIO_OUT)
+            return (uint8_t)((MENU_AUDIO_OUT << 4) | DTYPE_MENU);
+        if (cell->scene_setting == MENU_SCENE_SETTING_FADER_SETTING)
+            return DTYPE_0B15;
+        return DTYPE_0B127;
+    }
+    if (cell->kind == MENU_CELL_INSTRUMENT ||
+        cell->kind == MENU_CELL_KIT_SETTING)
+        return cell->descriptor ? cell->descriptor->dtype : DTYPE_0B127;
+    if (cell->kind == MENU_CELL_STATIC && cell->static_param < NUM_PARAMS)
+        return parameter_dtypes[cell->static_param];
+    return DTYPE_0B127;
+}
+
+static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
+{
+    if (!cell)
+        return 0u;
+    if (cell->kind == MENU_CELL_KIT_SETTING) {
+        /*
+         * Display generated kit-setting cells.
+         *
+         * Inputs: resolved generated cell plus current Morph endpoint mode.
+         * Output: retained kit-setting endpoint value. The cell borrows a
+         * descriptor only for text/dtype; its value is Kit-owned and therefore
+         * read through SceneData accessors rather than descriptor images.
+         */
+        if (cell->kit_setting ==
+            MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY) {
+            return voiceModeShowMorph
+                ? scene_getSlot6Track7MorphAmpEnvelopeDecay(
+                    scene_getActiveIndex())
+                : scene_getSlot6Track7AmpEnvelopeDecay(scene_getActiveIndex());
+        }
+        return 0u;
+    }
+    if (cell->kind == MENU_CELL_INSTRUMENT) {
+        const kit_instrument_slot_t *slot =
+            scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
+        if (!slot || cell->descriptor_index >= INSTRUMENT_PARAM_COUNT)
+            return 0u;
+        return voiceModeShowMorph
+            ? slot->parameter_images.morph_instrument_parameters[cell->descriptor_index]
+            : slot->parameter_images.instrument_parameters[cell->descriptor_index];
+    }
+    if (cell->kind == MENU_CELL_SCENE_SETTING) {
+        /*
+         * Display retained Scene-owned VOICE mix settings.
+         *
+         * Inputs: active resident Scene and zero-based slot from the resolved
+         * cell. Outputs: scalar value in the same domain used by sceneset.scg
+         * and Preset setters. Morph endpoint display never changes these
+         * values because Scene settings are not instrument morph endpoints.
+         */
+        uint8_t scene_index = scene_getActiveIndex();
+        switch (cell->scene_setting) {
+        case MENU_SCENE_SETTING_AUDIO_OUT:
+            return scene_getVoiceAudioOut(scene_index, cell->slot);
+        case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
+            return scene_getVoiceFxSendAmount(scene_index, cell->slot);
+        case MENU_SCENE_SETTING_FADER_SETTING:
+            return scene_getVoiceFaderSetting(scene_index, cell->slot);
+        default:
+            return 0u;
+        }
+    }
+    if (cell->kind == MENU_CELL_STATIC)
+        return menu_getParameterDisplayValue(cell->static_param);
+    return 0u;
+}
+
+static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
+{
+    if (!cell)
+        return 0u;
+    if (cell->kind == MENU_CELL_KIT_SETTING) {
+        uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+        uint8_t scene_index;
+        uint8_t changed = 0u;
+
+        /*
+         * Commit generated kit-setting cells.
+         *
+         * Inputs: generated menu cell, edited value, and BankData's
+         * scene_mask_voice_edit. Output: every masked resident Scene receives
+         * the generated Kit endpoint selected by Morph edit mode. This cannot
+         * use preset_setInstrumentParameter() because there is no descriptor
+         * index or instrument-file storage for generated track-7 decay.
+         */
+        if (cell->kit_setting ==
+            MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY) {
+            for (scene_index = 0u;
+                 scene_index < SCENE_COUNT && scene_index < 16u;
+                 scene_index++) {
+                if ((edit_mask & (uint16_t)(1u << scene_index)) == 0u)
+                    continue;
+                changed |= preset_setSlot6Track7AmpEnvelopeDecay(
+                    scene_index,
+                    voiceModeShowMorph ? INSTRUMENT_IMAGE_MORPH
+                                       : INSTRUMENT_IMAGE_MAIN,
+                    (uint8_t)value,
+                    (uint8_t)(!voiceModeShowMorph &&
+                              scene_index == scene_getActiveIndex()));
+            }
+            return changed;
+        }
+        return 0u;
+    }
+    if (cell->kind == MENU_CELL_INSTRUMENT) {
+        uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+        uint8_t scene_index;
+        uint8_t changed = 0u;
+        if (!cell->descriptor)
+            return 0u;
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((edit_mask & (uint16_t)(1u << scene_index)) == 0u)
+                continue;
+            if (cell->descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) {
+                changed |= preset_setInstrumentParameter(
+                    scene_index, cell->slot, cell->descriptor_index,
+                    voiceModeShowMorph ? INSTRUMENT_IMAGE_MORPH
+                                       : INSTRUMENT_IMAGE_MAIN,
+                    (uint8_t)value,
+                    (uint8_t)(!voiceModeShowMorph &&
+                              scene_index == scene_getActiveIndex()));
+            } else if (!voiceModeShowMorph) {
+                changed |= preset_setSupplementalParameter(
+                    scene_index, cell->slot, cell->descriptor_index, value);
+            }
+        }
+        return changed;
+    }
+    if (cell->kind == MENU_CELL_SCENE_SETTING) {
+        uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+        uint8_t scene_index;
+        uint8_t changed = 0u;
+
+        /*
+         * Commit retained Scene-owned VOICE mix settings through Preset.
+         *
+         * Inputs: scene_mask_voice_edit, zero-based slot, and clamped UI
+         * value. Outputs: each masked Scene retains the setting; active Scene
+         * runtime side effects still occur only when the loop reaches the
+         * active Scene because the Preset setters guard runtime by Scene index.
+         */
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((edit_mask & (uint16_t)(1u << scene_index)) == 0u)
+                continue;
+            switch (cell->scene_setting) {
+            case MENU_SCENE_SETTING_AUDIO_OUT:
+                changed |= preset_setVoiceAudioOut(scene_index, cell->slot,
+                                                   (uint8_t)value);
+                break;
+            case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
+                changed |= preset_setVoiceFxSendAmount(scene_index,
+                                                       cell->slot,
+                                                       (uint8_t)value);
+                break;
+            case MENU_SCENE_SETTING_FADER_SETTING:
+                changed |= preset_setVoiceFaderSetting(scene_index,
+                                                       cell->slot,
+                                                       (uint8_t)value);
+                break;
+            default:
+                break;
+            }
+        }
+        return changed;
+    }
+    if (cell->kind == MENU_CELL_STATIC) {
+        uint8_t *paramValue = menu_getParameterEditPtr(cell->static_param);
+        if (!paramValue)
+            return 0u;
+        *paramValue = (uint8_t)value;
+        menu_sendEditedParameter(cell->static_param, *paramValue);
+        return 1u;
+    }
+    return 0u;
+}
+
+static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
+                                     menu_lfo_target_context_t *ctx)
+{
+    const kit_instrument_slot_t *source;
+    uint8_t voice_index;
+    uint8_t param_index;
+    instrument_param_value_t raw_voice;
+    uint8_t pair;
+    instrument_binding_kind_t voice_kind;
+    instrument_binding_kind_t param_kind;
+
+    /*
+     * Resolve the two-cell LFO target editing context for one source slot/pair.
+     *
+     * Inputs: a resolved instrument menu cell, either lfo_target_voice or
+     * lfo_target_param for pair 1 or pair 2, and an output context. Outputs:
+     * source slot, pair id, sibling descriptor indices, raw/clamped target
+     * voice, target slot, and current stored target parameter. The function
+     * returns 0 when the cell is not an LFO target cell or the current source
+     * instrument type does not expose both target bindings for that pair.
+     *
+     * Why this cannot be folded into the encoder/knob handlers: those handlers
+     * should describe input mechanics, not know how an instrument registry maps
+     * sibling storage cells. The same context is needed by display, encoder,
+     * endless knobs, and later load normalization, so keeping one resolver
+     * prevents each caller from making descriptor-index assumptions.
+     *
+     * Common accessors/affiliates: scene_instrumentSlotConst() reads the
+     * current source slot type and generic SceneData storage;
+     * instrumentManager_descriptorIndexForBinding() finds sibling descriptor
+     * cells by binding kind; InstrumentManager target helpers validate the
+     * selected target slot's current instrument descriptor flags.
+     */
+    if (!ctx || !cell || cell->kind != MENU_CELL_INSTRUMENT ||
+        !cell->descriptor ||
+        !menu_lfoTargetPairForKind(cell->descriptor->runtime.kind, &pair, 0, 0,
+                                   &voice_kind, &param_kind))
+        return 0u;
+
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->scene_index = scene_getActiveIndex();
+    ctx->source_slot = cell->slot;
+    ctx->target_pair = pair;
+    ctx->target_voice_kind = voice_kind;
+    ctx->target_param_kind = param_kind;
+    source = scene_instrumentSlotConst(ctx->scene_index, ctx->source_slot);
+    if (!source)
+        return 0u;
+
+    if (!instrumentManager_descriptorIndexForBinding(
+            source->type, voice_kind, &voice_index) ||
+        !instrumentManager_descriptorIndexForBinding(
+            source->type, param_kind, &param_index)) {
+        return 0u;
+    }
+
+    raw_voice = source->parameter_images.instrument_parameters[voice_index];
+    ctx->target_voice_index = voice_index;
+    ctx->target_param_index = param_index;
+    ctx->raw_target_voice = raw_voice;
+    if (raw_voice < INSTRUMENT_TARGET_VOICE_FIRST)
+        ctx->target_voice = 1u;
+    else if (raw_voice > INSTRUMENT_TARGET_VOICE_SCENE)
+        ctx->target_voice = INSTRUMENT_TARGET_VOICE_SCENE;
+    else
+        ctx->target_voice = raw_voice;
+    ctx->target_is_scene =
+        (uint8_t)(ctx->target_voice == INSTRUMENT_TARGET_VOICE_SCENE);
+    ctx->target_slot = ctx->target_is_scene
+        ? 0xffu
+        : (uint8_t)(ctx->target_voice - 1u);
+    ctx->target_param_token =
+        source->parameter_images.instrument_parameters[param_index];
+    return 1u;
+}
+
+static instrument_target_token_t menu_lfoTargetNormalizeToken(
+    const menu_lfo_target_context_t *ctx, instrument_target_token_t token)
+{
+    instrument_param_id_t display_id;
+
+    /*
+     * Normalize an LFO target token against the selected target voice.
+     *
+     * Inputs: an already resolved LFO target context and a retained byte token.
+     * Output: off or a byte token that is valid in the current namespace. Voice
+     * namespaces store descriptor-local indices; the Scene namespace stores
+     * Scene target-table indices. Display/runtime code expands the token only
+     * long enough to reuse canonical target helpers.
+     *
+     * Why this is separate from the edit functions: voice edits, parameter
+     * edits, display, and load normalization all need the same invariant:
+     * lfo_target_param is either off, belongs to the selected target voice and
+     * is modulatable for that voice slot's current instrument type, or belongs
+     * to the Scene mod target namespace when DstVoice is `scn`.
+     *
+     * Common clients/affiliates: menu_lfoTargetEditVoice() preserves the local
+     * descriptor across voice changes through this helper; display treats stale
+     * values as off; InstrumentManager supplies canonical ID packing and
+     * descriptor-flag validation.
+     */
+    if (!ctx || token == INSTRUMENT_TARGET_TOKEN_OFF) {
+        return INSTRUMENT_TARGET_TOKEN_OFF;
+    }
+
+    display_id = instrumentManager_lfoTargetIdFromToken(
+        ctx->scene_index, ctx->source_slot, ctx->target_voice, token,
+        INSTRUMENT_TARGET_MODULATION);
+    return instrumentManager_lfoTargetTokenFromId(
+        ctx->scene_index, ctx->target_voice, display_id,
+        INSTRUMENT_TARGET_MODULATION);
+}
+
+static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
+    const menu_cell_t *cell, const menu_lfo_target_context_t *ctx,
+    uint16_t raw_voice)
+{
+    uint8_t voice;
+    instrument_target_token_t reconciled;
+    uint8_t ok;
+
+    /*
+     * Commit a target voice and reconcile the sibling target parameter.
+     *
+     * Inputs: the edited lfo_target_voice cell, its context before the voice
+     * change, and the requested raw voice value. Outputs: the clamped voice is
+     * stored in the source slot; lfo_target_param preserves its local byte
+     * token only when that token is valid in the new namespace, otherwise it is
+     * reset to off. Return value is nonzero when the voice commit succeeded.
+     *
+     * Why this cannot be folded into menu_cellCommitValue(): generic cell
+     * commit deliberately knows only one descriptor cell at a time. LFO target
+     * voice is a paired control: changing it must preserve or invalidate its
+     * sibling target parameter. Keeping pair reconciliation here lets the
+     * generic SceneData setter stay single-cell and reusable.
+     *
+     * Common accessors/affiliates: preset_setSupplementalParameter() writes
+     * source slot storage and performs current runtime validation;
+     * menu_lfoTargetNormalizeToken() applies target-slot descriptor rules;
+     * InstrumentManager owns all target capability checks.
+     */
+    if (!cell || !ctx)
+        return 0u;
+    if (raw_voice < INSTRUMENT_TARGET_VOICE_FIRST)
+        voice = INSTRUMENT_TARGET_VOICE_FIRST;
+    else if (raw_voice > INSTRUMENT_TARGET_VOICE_SCENE)
+        voice = INSTRUMENT_TARGET_VOICE_SCENE;
+    else
+        voice = (uint8_t)raw_voice;
+
+    ok = preset_setSupplementalParameter(ctx->scene_index, ctx->source_slot,
+                                         ctx->target_voice_index, voice);
+    {
+        menu_lfo_target_context_t next = *ctx;
+        next.raw_target_voice = voice;
+        next.target_voice = voice;
+        next.target_is_scene =
+            (uint8_t)(voice == INSTRUMENT_TARGET_VOICE_SCENE);
+        next.target_slot = next.target_is_scene
+            ? 0xffu
+            : (uint8_t)(voice - 1u);
+        reconciled =
+            menu_lfoTargetNormalizeToken(&next, ctx->target_param_token);
+        (void)preset_setSupplementalParameter(ctx->scene_index,
+                                              ctx->source_slot,
+                                              ctx->target_param_index,
+                                              reconciled);
+    }
+    return ok;
+}
+
+static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta)
+{
+    menu_lfo_target_context_t ctx;
+    int16_t next;
+
+    /*
+     * Apply encoder/knob movement to lfo_target_voice.
+     *
+     * Inputs: the resolved voice target cell and signed movement delta from
+     * either the main encoder or an endless pot. Outputs: the target voice is
+     * clamped to 1..INSTRUMENT_TARGET_VOICE_SCENE, where the final value is
+     * displayed as `scn`, and the sibling target parameter is reconciled against the new
+     * selected namespace.
+     *
+     * Why this is a separate edit helper: encoder and knob paths previously
+     * edited the field as a generic 0..127 value. Both controls must share the
+     * same clamp/reconcile rule, and that rule depends on sibling descriptor
+     * storage rather than only the edited cell.
+     *
+     * Common clients/affiliates: menu_encoderChangeParameter(),
+     * menu_parseKnobDelta(), preset_setSupplementalParameter(), and
+     * InstrumentManager's registry-driven target validation.
+     */
+    if (!menu_lfoTargetContext(cell, &ctx))
+        return 0u;
+    next = (int16_t)ctx.target_voice + delta;
+    if (next < (int16_t)INSTRUMENT_TARGET_VOICE_FIRST)
+        next = INSTRUMENT_TARGET_VOICE_FIRST;
+    else if (next > (int16_t)INSTRUMENT_TARGET_VOICE_SCENE)
+        next = INSTRUMENT_TARGET_VOICE_SCENE;
+    return menu_lfoTargetCommitVoiceAndReconcile(cell, &ctx, (uint16_t)next);
+}
+
+static uint8_t menu_lfoTargetEditParam(const menu_cell_t *cell, int16_t delta)
+{
+    menu_lfo_target_context_t ctx;
+    instrument_target_token_t token;
+    uint8_t steps;
+    int8_t dir;
+
+    /*
+     * Apply encoder/knob movement to lfo_target_param.
+     *
+     * Inputs: the resolved target-parameter cell and signed movement delta.
+     * Outputs: the source slot stores only off or a byte token in the selected
+     * namespace. Non-modulatable descriptors and unsupported Scene targets are
+     * skipped, so the picker exposes exactly one off position.
+     *
+     * Why this cannot be part of menu_encoderChangeParameter(): the same
+     * filtered traversal is required for endless knobs and future normalization
+     * work. It also depends on sibling lfo_target_voice storage and target
+     * slot registry state, neither of which belongs in the generic numeric
+     * edit path.
+     *
+     * Common clients/affiliates: both physical edit paths, SceneData's generic
+     * per-slot storage, instrumentManager_stepTargetForSlot(), and the future
+     * descriptor-aware DSP modulation adapter.
+     */
+    if (!menu_lfoTargetContext(cell, &ctx))
+        return 0u;
+
+    if (ctx.raw_target_voice != ctx.target_voice) {
+        (void)preset_setSupplementalParameter(ctx.scene_index, ctx.source_slot,
+                                              ctx.target_voice_index,
+                                              ctx.target_voice);
+    }
+
+    token = menu_lfoTargetNormalizeToken(&ctx, ctx.target_param_token);
+    if (delta == 0) {
+        return preset_setSupplementalParameter(ctx.scene_index, ctx.source_slot,
+                                               ctx.target_param_index, token);
+    }
+
+    dir = (delta > 0) ? 1 : -1;
+    steps = (uint8_t)((delta > 0) ? delta : -delta);
+    while (steps--) {
+        instrument_target_token_t next = instrumentManager_stepLfoTargetToken(
+            ctx.scene_index, ctx.target_voice, token, dir,
+            INSTRUMENT_TARGET_MODULATION);
+        if (next == token)
+            break;
+        token = next;
+        if (token == INSTRUMENT_TARGET_TOKEN_OFF && dir < 0)
+            break;
+    }
+
+    return preset_setSupplementalParameter(ctx.scene_index, ctx.source_slot,
+                                           ctx.target_param_index, token);
+}
+
+static uint16_t menu_lfoTargetDisplayValue(const menu_cell_t *cell,
+                                           uint16_t raw)
+{
+    menu_lfo_target_context_t ctx;
+    instrument_target_token_t token;
+
+    /*
+     * Return the display-safe value for lfo_target_param.
+     *
+     * Inputs: a resolved menu cell and the raw stored target token. Output:
+     * off or a temporary canonical target ID that belongs to the currently
+     * selected namespace and is modulatable. This function does not mutate
+     * SceneData.
+     *
+     * Why display normalization is separate from edit normalization: a stale
+     * loaded value or instrument-type swap should not draw a target from the
+     * wrong voice while the user is merely browsing. Edits will commit the
+     * normalized value, but repaint can safely render stale data as off first.
+     *
+     * Common clients/affiliates: compact four-column rendering,
+     * single-parameter target display, menu_lfoTargetNormalizeToken(), and
+     * InstrumentManager descriptor validity.
+     */
+    if (!menu_cellIsLfoTargetParam(cell) ||
+        !menu_lfoTargetContext(cell, &ctx)) {
+        return raw;
+    }
+    token = menu_lfoTargetNormalizeToken(&ctx, (instrument_target_token_t)raw);
+    return instrumentManager_lfoTargetIdFromToken(
+        ctx.scene_index, ctx.source_slot, ctx.target_voice, token,
+        INSTRUMENT_TARGET_MODULATION);
+}
+
+static instrument_target_token_t menu_velocityTargetNormalize(
+    const menu_cell_t *cell, instrument_target_token_t raw)
+{
+    /*
+     * Normalize a velocity destination token against its source voice.
+     *
+     * Inputs: resolved velo_mod_dest cell and raw stored byte. Output: off, a
+     * local descriptor token on the same source slot, or the special token for
+     * that voice's own Scene Morph target. This is separate from LFO
+     * normalization because velocity has no DstVoice cell.
+     */
+    if (!menu_cellIsVelocityTargetParam(cell))
+        return raw;
+    return instrumentManager_targetValidForVelocitySource(
+        scene_getActiveIndex(), cell->slot, raw)
+        ? raw : INSTRUMENT_TARGET_TOKEN_OFF;
+}
+
+static uint8_t menu_velocityTargetEditParam(const menu_cell_t *cell,
+                                            int16_t delta)
+{
+    instrument_target_token_t token;
+    uint8_t steps;
+    int8_t dir;
+
+    /*
+     * Edit one velocity destination cell through the mixed target list.
+     *
+     * Inputs: resolved velo_mod_dest cell and signed encoder/knob delta.
+     * Output: source slot storage receives exactly one byte token: off, a
+     * modulatable descriptor target on the same source slot, or the source
+     * voice's own Morph Scene target. Non-modulatable descriptors are skipped
+     * and there is only one off entry.
+     *
+     * This cannot use the generic DTYPE_TARGET_SELECTION path because velocity
+     * targets are not numeric ranges and are not the old modTargets[] table.
+     * The traversal depends on the source slot's current instrument type and
+     * the shared SceneModTargets list, so it must call the descriptor/Scene
+     * target browsers instead of incrementing raw stored IDs.
+     */
+    if (!menu_cellIsVelocityTargetParam(cell))
+        return 0u;
+    token = menu_velocityTargetNormalize(
+        cell, (instrument_target_token_t)menu_cellDisplayValue(cell));
+    if (delta == 0) {
+        return menu_cellCommitValue(cell, token);
+    }
+    dir = (delta > 0) ? 1 : -1;
+    steps = (uint8_t)((delta > 0) ? delta : -delta);
+    while (steps--) {
+        instrument_target_token_t next =
+            instrumentManager_stepVelocityTargetForSource(
+                scene_getActiveIndex(), cell->slot, token, dir);
+        if (next == token)
+            break;
+        token = next;
+        if (token == INSTRUMENT_TARGET_TOKEN_OFF && dir < 0)
+            break;
+    }
+    return menu_cellCommitValue(cell, token);
+}
+
+static uint16_t menu_velocityTargetDisplayValue(const menu_cell_t *cell,
+                                                uint16_t raw)
+{
+    /*
+     * Return the display-safe velocity target value.
+     *
+     * Inputs: resolved menu cell and raw stored target. Output: stale values
+     * render as off without mutating SceneData. Edits commit the same
+     * normalization through menu_velocityTargetEditParam().
+     */
+    instrument_target_token_t token =
+        menu_velocityTargetNormalize(cell, (instrument_target_token_t)raw);
+    if (token == INSTRUMENT_TARGET_TOKEN_OFF)
+        return INSTRUMENT_PARAM_INVALID;
+    if (token == INSTRUMENT_TARGET_TOKEN_VOICE_MORPH)
+        return sceneModTarget_voiceMorphId(cell ? cell->slot : 0xffu);
+    return instrumentManager_targetIdFromTokenForSlot(
+        scene_getActiveIndex(), cell ? cell->slot : 0xffu, token,
+        INSTRUMENT_TARGET_MODULATION);
+}
+
+static void menu_copyPaddedField(char *dst, const char *src, uint8_t width)
+{
+    uint8_t i = 0u;
+
+    /*
+     * Menu labels are fixed-width LCD fields, but descriptor text is normal C
+     * string data. Copy at most the field width, stop at the first terminator,
+     * and pad the rest. This keeps short labels such as "FM" or "LFO" from
+     * leaking adjacent string-literal bytes into the display.
+     */
+    if (src) {
+        while (i < width && src[i]) {
+            dst[i] = src[i];
+            i++;
+        }
+    }
+    while (i < width) {
+        dst[i] = ' ';
+        i++;
+    }
+}
+
+static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
+{
+    uint8_t slot;
+    uint8_t local;
+    const kit_instrument_slot_t *instrument;
+    const ParamDescriptor *descriptor;
+
+    /*
+     * Compact descriptor-target renderer.
+     *
+     * Descriptor target values are canonical slot*64+descriptor IDs, not
+     * indices into the old modTargets[] table. The compact display therefore
+     * derives its text from the active Scene's slot type at paint time. Storage
+     * remains just the canonical target id in the parameter cell.
+     *
+     * Output is only the target descriptor's own three-character short name.
+     * Earlier code prefixed the voice number (for example "1wa" or "1co"),
+     * but LFO target voice is already shown as its own adjacent parameter and
+     * the old step-automation voice-prefixed display is being retired. Keeping
+     * this renderer descriptor-only prevents redundant voice text from leaking
+     * into any current or future descriptor-target browser.
+     */
+    if (target == INSTRUMENT_PARAM_INVALID ||
+        (!instrumentParam_isVoiceParameter(target) &&
+         !sceneModTarget_isSceneTarget(target))) {
+        memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
+
+    if (sceneModTarget_isSceneTarget(target)) {
+        sceneModTarget_formatShort(target, valueAsText);
+        return;
+    }
+
+    slot = instrumentParam_slot(target);
+    local = instrumentParam_local(target);
+    instrument = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    descriptor = instrument
+        ? instrumentManager_descriptor(instrument->type, local)
+        : 0;
+    if (!descriptor) {
+        memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
+
+    menu_copyPaddedField(valueAsText, descriptor->short_name, 3u);
+}
+
+static void menu_displayInstrumentTargetFull(uint16_t target)
+{
+    uint8_t slot;
+    uint8_t local;
+    const kit_instrument_slot_t *instrument;
+    const ParamDescriptor *descriptor;
+
+    if (target == INSTRUMENT_PARAM_INVALID ||
+        (!instrumentParam_isVoiceParameter(target) &&
+         !sceneModTarget_isSceneTarget(target))) {
+        memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+        return;
+    }
+
+    if (sceneModTarget_isSceneTarget(target)) {
+        sceneModTarget_formatFull(target, &editDisplayBuffer[1][0],
+                                  &editDisplayBuffer[1][8]);
+        return;
+    }
+
+    slot = instrumentParam_slot(target);
+    local = instrumentParam_local(target);
+    instrument = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    descriptor = instrument
+        ? instrumentManager_descriptor(instrument->type, local)
+        : 0;
+    if (!descriptor) {
+        memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+        return;
+    }
+
+    /*
+     * Full descriptor-target renderer.
+     *
+     * Inputs: a canonical target ID. Output: row 2 shows the target
+     * descriptor's category in columns 0-7 and long name in columns 8-15. The
+     * selected target voice is intentionally not repeated here: for LFO target
+     * editing, voice is already a separate menu parameter, and repeating
+     * "VoiceN" hides the category information the user needs to identify the
+     * target. This function stays separate from the compact renderer because
+     * the LCD field widths and user-facing purpose are different.
+     *
+     * Affiliates: SceneData supplies the active target slot type,
+     * InstrumentManager resolves the descriptor for the canonical target, and
+     * menu_copyPaddedField() keeps short category/long-name strings bounded to
+     * their fixed LCD fields.
+     */
+    menu_copyPaddedField(&editDisplayBuffer[1][0], descriptor->category, 8u);
+    menu_copyPaddedField(&editDisplayBuffer[1][8], descriptor->long_name, 8u);
+}
+
+static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
+{
+    uint8_t dtype = (uint8_t)(menu_cellDtype(cell) & 0x0f);
+    uint16_t raw = menu_cellDisplayValue(cell);
+    uint8_t value = (raw > 255u) ? 255u : (uint8_t)raw;
+
+    /*
+     * Format one cell value for the compact four-column view. Instrument cells
+     * share the same dtype vocabulary as static cells, but target cells may
+     * store 16-bit canonical descriptor IDs. Those IDs display as off when the
+     * invalid sentinel is stored; a later target-picker patch can replace the
+     * numeric fallback with descriptor-name rendering.
+     */
+    if (dtype == DTYPE_TARGET_SELECTION_LFO && cell &&
+        cell->kind == MENU_CELL_INSTRUMENT) {
+        raw = menu_lfoTargetDisplayValue(cell, raw);
+        value = (raw > 255u) ? 255u : (uint8_t)raw;
+    } else if (dtype == DTYPE_TARGET_SELECTION_VELO && cell &&
+               cell->kind == MENU_CELL_INSTRUMENT) {
+        raw = menu_velocityTargetDisplayValue(cell, raw);
+        value = (raw > 255u) ? 255u : (uint8_t)raw;
+    } else if (dtype == DTYPE_VOICE_LFO && menu_cellIsLfoTargetVoice(cell)) {
+        if (raw < INSTRUMENT_TARGET_VOICE_FIRST)
+            raw = INSTRUMENT_TARGET_VOICE_FIRST;
+        else if (raw > INSTRUMENT_TARGET_VOICE_SCENE)
+            raw = INSTRUMENT_TARGET_VOICE_SCENE;
+        value = (uint8_t)raw;
+    }
+
+    if (raw == INSTRUMENT_PARAM_INVALID &&
+        (dtype == DTYPE_TARGET_SELECTION_VELO ||
+         dtype == DTYPE_TARGET_SELECTION_LFO ||
+         dtype == DTYPE_AUTOM_TARGET)) {
+        memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
+    if (cell && cell->kind == MENU_CELL_SCENE_SETTING &&
+        cell->scene_setting == MENU_SCENE_SETTING_FADER_SETTING) {
+        menu_sceneSettingFaderName(value, valueAsText);
+        return;
+    }
+
+    switch (dtype) {
+    case DTYPE_TARGET_SELECTION_VELO:
+    case DTYPE_TARGET_SELECTION_LFO:
+        if (cell->kind == MENU_CELL_INSTRUMENT)
+            menu_formatInstrumentTargetShort(raw, valueAsText);
+        else
+            menu_displayModTargetShort(value, valueAsText);
+        break;
+    case DTYPE_AUTOM_TARGET:
+        /*
+         * Do not revive the legacy voice-prefixed compact target text
+         * ("1wa", "1co", ...). Step-automation targeting is scheduled for a
+         * Phase 4 display rewrite, and current target browsers should show the
+         * plain target short name only.
+         */
+        menu_displayModTargetShort(value, valueAsText);
+        break;
+    case DTYPE_PM63:
+        numtostrps(valueAsText, (int8_t)(value - 63));
+        break;
+    case DTYPE_NOTE_NAME:
+        if (cell->kind == MENU_CELL_STATIC &&
+            cell->static_param == PAR_TRACK_MIDI_NOTE && value == 0u) {
+            memcpy(valueAsText, menuText_any, 3);
+        } else {
+            setNoteName(value, valueAsText);
+        }
+        break;
+    case DTYPE_MIX_FM:
+        if (value == 1u) memcpy(valueAsText, menuText_mix, 3);
+        else            memcpy(valueAsText, menuText_fm, 3);
+        break;
+    case DTYPE_ON_OFF:
+        if (value == 1u) memcpy(valueAsText, menuText_on, 3);
+        else            memcpy(valueAsText, menuText_off, 3);
+        break;
+    case DTYPE_LFO_POLARITY:
+        menu_getLfoPolarityName(value, valueAsText);
+        break;
+    case DTYPE_MENU:
+        getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
+                                value, valueAsText);
+        break;
+    case DTYPE_0b1:
+        numtostrpu(valueAsText, (uint8_t)(value + 1u), ' ');
+        break;
+    default:
+    case DTYPE_0B127:
+    case DTYPE_0B255:
+    case DTYPE_1B16:
+    case DTYPE_0B15:
+    case DTYPE_VOICE_LFO:
+        if (menu_cellIsLfoTargetVoice(cell) &&
+            value == INSTRUMENT_TARGET_VOICE_SCENE) {
+            memcpy(valueAsText, "scn", 3);
+        } else {
+            numtostrpu(valueAsText, value, ' ');
+        }
+        break;
+    }
+}
+
+static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
+{
+    uint8_t dtype;
+    if (!cell || !value)
+        return;
+
+    if (cell->kind == MENU_CELL_SCENE_SETTING) {
+        /*
+         * Clamp Scene-setting cells before generic dtype handling.
+         *
+         * audio_out uses the six-entry mixer route menu, FX send uses 0..127,
+         * and fader mode uses 0..2 even though it borrows DTYPE_0B15 for basic
+         * numeric editing/display plumbing.
+         */
+        if (cell->scene_setting == MENU_SCENE_SETTING_AUDIO_OUT) {
+            if (*value > 5u)
+                *value = 5u;
+        } else if (cell->scene_setting == MENU_SCENE_SETTING_FADER_SETTING) {
+            if (*value > 2u)
+                *value = 2u;
+        } else if (*value > 127u) {
+            *value = 127u;
+        }
+        return;
+    }
+
+    dtype = (uint8_t)(menu_cellDtype(cell) & 0x0f);
+    switch (dtype) {
+    case DTYPE_AUTOM_TARGET: {
+        uint8_t nmt = getNumModTargets();
+        if (*value >= nmt)
+            *value = (nmt > 0u) ? (uint16_t)(nmt - 1u) : 0u;
+        break; }
+    case DTYPE_TARGET_SELECTION_VELO:
+    case DTYPE_TARGET_SELECTION_LFO:
+        if (cell && cell->kind == MENU_CELL_INSTRUMENT) {
+            /*
+             * Instrument target selector cells retain byte tokens.
+             *
+             * Display helpers may temporarily expand those tokens to canonical
+             * IDs, but commits to SceneData must stay in the compact storage
+             * domain. Stale generic edits normalize to byte off rather than
+             * leaking a display/runtime ID back into the parameter image.
+             */
+            if (*value > 255u)
+                *value = INSTRUMENT_TARGET_TOKEN_OFF;
+            break;
+        }
+        if (*value == INSTRUMENT_PARAM_INVALID)
+            break;
+        if (*value >= INSTRUMENT_VOICE_ID_COUNT &&
+            !sceneModTarget_isSceneTarget(*value))
+            *value = INSTRUMENT_PARAM_INVALID;
+        break;
+    case DTYPE_0B255:
+        if (*value > 255u) *value = 255u;
+        break;
+    case DTYPE_1B16:
+        if (*value < 1u) *value = 1u;
+        else if (*value > 16u) *value = 16u;
+        break;
+    case DTYPE_1B128:
+        if (*value < 1u) *value = 1u;
+        else if (*value > 128u) *value = 128u;
+        break;
+    case DTYPE_0B15:
+        if (*value > 15u) *value = 15u;
+        break;
+    case DTYPE_MIX_FM:
+    case DTYPE_ON_OFF:
+    case DTYPE_0b1:
+        if (*value > 1u) *value = 1u;
+        break;
+    case DTYPE_LFO_POLARITY: {
+        uint8_t n = (uint8_t)lfoPolarityNames[0][0];
+        if (n == 0u)
+            *value = 0u;
+        else if (*value >= n)
+            *value = (uint16_t)(n - 1u);
+        break; }
+    case DTYPE_MENU: {
+        uint8_t n = getMaxEntriesForMenu((uint8_t)(menu_cellDtype(cell) >> 4));
+        if (n == 0u)
+            *value = 0u;
+        else if (*value >= n)
+            *value = (uint16_t)(n - 1u);
+        break; }
+    default:
+    case DTYPE_0B127:
+    case DTYPE_PM63:
+    case DTYPE_NOTE_NAME:
+    case DTYPE_VOICE_LFO:
+        if (*value > 127u) *value = 127u;
+        break;
+    }
+    if (menu_cellIsLfoTargetVoice(cell)) {
+        if (*value < INSTRUMENT_TARGET_VOICE_FIRST)
+            *value = INSTRUMENT_TARGET_VOICE_FIRST;
+        else if (*value > INSTRUMENT_TARGET_VOICE_SCENE)
+            *value = INSTRUMENT_TARGET_VOICE_SCENE;
+    }
+}
+
 
 static uint8_t menu_isLoadSaveSelectionCurrent(void)
 {
@@ -1027,46 +2457,2415 @@ static uint8_t menu_isLoadSaveSelectionCurrent(void)
                      preset_getRequestSlot() == menu_currentPresetNr[what]);
 }
 
+static uint8_t menu_currentSaveWouldOverwrite(void)
+{
+    /*
+     * Compute persistent overwrite display from product identity.
+     *
+     * What: Returns nonzero whenever the pending Save action targets an
+     * existing product object. For numbered saves, the slot number is the
+     * identity. For root Instrument Save, the target filename plus type
+     * extension is matched case-insensitively inside Instrument/.
+     *
+     * Why: `OW` warns about replacement, not about whether the edited text
+     * differs from the old display name. A save to an occupied slot overwrites
+     * even when the name is unchanged, and a case-only Instrument filename
+     * match overwrites on FAT.
+     *
+     * Inputs: active Save submode, target slot, nested Instrument source type,
+     * and the edited root Instrument stem. Output: nonzero for the `OW` LCD
+     * affordance; no filesystem or menu state is mutated.
+     *
+     * Affiliates/clients: menu_repaintLoadSavePage(), filesystem slot caches,
+     * filesystem_instrumentTargetExists(), Save OK click handlers.
+     */
+    if (menu_activePage != SAVE_PAGE)
+        return 0u;
+    if (menu_instrumentLoadActive && menu_instrumentSaveMode) {
+        const kit_instrument_slot_t *slot =
+            scene_instrumentSlotConst(menu_instrumentLoadScene,
+                                      menu_instrumentLoadSlot);
+        instrument_type_t type = slot ? slot->type : menu_instrumentLoadType;
+        /*
+         * Use the live source slot type for root Instrument overwrite.
+         *
+         * What: Derives the extension/type identity from SceneData at repaint
+         * time, falling back to Menu's cached type only if the source slot is
+         * unavailable.
+         *
+         * Why: the save request itself revalidates the live source slot before
+         * writing. The `OW` indicator should match that accepted request target
+         * if a resident instrument type changed after entering nested Save.
+         *
+         * Inputs: selected source Scene/voice and editable Instrument stem.
+         * Outputs: nonzero when `stem.ext` already exists in the typed root
+         * Instrument cache under case-insensitive comparison.
+         *
+         * Affiliates/clients: menu_instrumentSaveRequestSelection(),
+         * filesystem_requestSaveInstrument(), filesystem_instrumentTargetExists().
+         */
+        return filesystem_instrumentTargetExists(type,
+                                                 menu_instrumentSaveName);
+    }
+    if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+        menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+        return filesystem_kitSlotExists(
+            menu_currentPresetNr[menu_saveOptions.what]);
+    }
+    if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+        /*
+         * Scene Save replaces the numbered root Scene directory for the target
+         * slot. Inputs: the direct 000..999 Scene slot currently shown on the
+         * Save page. Output: nonzero makes the confirmation label `OW` instead
+         * of `ok`, matching the actual recursive replacement that Scene Save
+         * performs before writing sceneset.scg and its child directories.
+         */
+        return filesystem_sceneSlotExists(
+            menu_currentPresetNr[SAVE_TYPE_SCENE]);
+    }
+    if (menu_saveOptions.what == SAVE_TYPE_BANK) {
+        /*
+         * Bank Save replaces/updates one root Bank slot.
+         *
+         * Inputs: direct root Bank slot 000..999. Output: nonzero selects the
+         * `OW` confirmation label. Bank-local child Scenes are not queried here;
+         * overwrite identity at this menu level is the root Bank directory.
+         */
+        return filesystem_bankSlotExists(
+            menu_currentPresetNr[SAVE_TYPE_BANK]);
+    }
+    return 0u;
+}
+
+static uint8_t menu_loadSaveTypeIsRestored(uint8_t what)
+{
+    /*
+     * Gate the promoted Load/Save type list in one place.
+     *
+     * File/Dir/sDir diagnostics were retired with their 6,240-byte filesystem
+     * lists. CONFIG_DEV_MODE now controls screen diagnostics only; it must not
+     * re-expose a menu type whose retired compatibility API deliberately starts
+     * no operation. Inputs are musical SAVE_TYPE values, output is whether the
+     * encoder may reach that type; affiliates are the explicit arrays below.
+     */
+    if (menu_activePage == SAVE_PAGE &&
+        (what == SAVE_TYPE_KIT ||
+         what == SAVE_TYPE_KIT_MORPH ||
+         what == SAVE_TYPE_SCENE ||
+         what == SAVE_TYPE_BANK))
+        return 1u;
+    if (menu_activePage == LOAD_PAGE) {
+        return (uint8_t)(what == SAVE_TYPE_KIT ||
+                         what == SAVE_TYPE_KIT_MORPH ||
+                         what == SAVE_TYPE_SCENE ||
+                         what == SAVE_TYPE_BANK);
+    }
+    return 0u;
+}
+
+/*
+ * Pot-1 and encoder type cycling use explicit lists instead of enum order.
+ *
+ * The enum still contains legacy/future save types so lower layers compile,
+ * but UI reachability is the promotion gate. Adding a type to these arrays is
+ * therefore a deliberate hardware-tested operation, not a side effect of
+ * where a SAVE_TYPE_* value sits numerically.
+ */
+static const uint8_t menu_loadSaveLoadTypes[] = {
+    SAVE_TYPE_KIT,
+    SAVE_TYPE_KIT_MORPH,
+    SAVE_TYPE_SCENE,
+    SAVE_TYPE_BANK
+};
+
+static const uint8_t menu_loadSaveSaveTypes[] = {
+    SAVE_TYPE_KIT,
+    SAVE_TYPE_KIT_MORPH,
+    SAVE_TYPE_SCENE,
+    SAVE_TYPE_BANK
+};
+
+static uint8_t menu_nextRestoredLoadSaveType(uint8_t current, int8_t inc)
+{
+    const uint8_t *restored_types =
+        (menu_activePage == LOAD_PAGE) ? menu_loadSaveLoadTypes
+                                       : menu_loadSaveSaveTypes;
+    uint8_t count = (menu_activePage == LOAD_PAGE)
+        ? (uint8_t)(sizeof(menu_loadSaveLoadTypes) /
+                    sizeof(menu_loadSaveLoadTypes[0]))
+        : (uint8_t)(sizeof(menu_loadSaveSaveTypes) /
+                    sizeof(menu_loadSaveSaveTypes[0]));
+    uint8_t index = 0u;
+    uint8_t i;
+
+    /*
+     * Step through only the currently validated Load/Save entries.
+     *
+     * Inputs: current SAVE_TYPE_* and signed encoder direction. Output: the
+     * next reachable type with wraparound. Keeping this as a small whitelist
+     * prevents stale compiled branches from becoming panel-reachable just
+     * because enum order happens to place them near Kit.
+     */
+    for (i = 0u; i < count; i++) {
+        if (restored_types[i] == current) {
+            index = i;
+            break;
+        }
+    }
+    if (inc < 0)
+        index = (uint8_t)((index + count - 1u) % count);
+    else if (inc > 0)
+        index = (uint8_t)((index + 1u) % count);
+    return restored_types[index];
+}
+
+static uint8_t menu_testObjectCount(uint8_t what)
+{
+    /*
+     * Return the cached root browser count for the temporary File/Dir menus.
+     *
+     * Menu owns only the selected index in menu_currentPresetNr[]; filesystem
+     * owns the immutable exact-case names discovered by asyncfatfs.
+     */
+    return (what == SAVE_TYPE_DIR) ? filesystem_testDirCount()
+                                   : filesystem_testFileCount();
+}
+
+static const char *menu_testObjectName(uint8_t what, uint8_t index)
+{
+    return (what == SAVE_TYPE_DIR) ? filesystem_testDirName(index)
+                                   : filesystem_testFileName(index);
+}
+
+static const char *menu_currentTestName(void)
+{
+    /*
+     * Select the exact display component used by the current test operation.
+     *
+     * Load pages read from the filesystem scan cache; Save pages use the
+     * bounded editor buffer. The storage request copies the returned text again
+     * before it starts, so later encoder movement cannot retarget an in-flight
+     * async operation.
+     */
+    if (menu_activePage == LOAD_PAGE) {
+        uint8_t what = menu_saveOptions.what;
+        uint8_t count = menu_testObjectCount(what);
+        uint16_t index = menu_currentPresetNr[what];
+        if (count == 0u)
+            return "";
+        if (index >= count)
+            index = (uint16_t)(count - 1u);
+        return menu_testObjectName(what, (uint8_t)index);
+    }
+    return menu_testEditName;
+}
+
+static void menu_requestTestScan(uint8_t what)
+{
+    /*
+     * Refresh the root File/Dir test cache for Load pages.
+     *
+     * This is posted through Preset so completion follows the same poll path as
+     * other storage operations. Save pages do not scan before editing because
+     * overwrite behavior is intentionally delegated to the exact "w" open.
+     */
+    if (menu_activePage != LOAD_PAGE)
+        return;
+    if ((what == SAVE_TYPE_FILE && preset_scanTestFiles()) ||
+        (what == SAVE_TYPE_DIR && preset_scanTestDirs())) {
+        menu_storageBusy = 1u;
+    } else {
+        menu_deferSelectionRequest = 1u;
+    }
+}
+
+static void menu_showTestResult(void)
+{
+    /*
+     * Draw the two-second result overlay for File/Dir tests.
+     *
+     * Successful byte results display all four diagnostic bytes exactly once:
+     * the top row shows bytes 0 and 1, and the bottom row shows bytes 2 and 3.
+     * Directory-child results show the first eight characters of the child
+     * directory name. Failed File/Dir test operations show ERR explicitly so
+     * storage bugs do not look like an ordinary browser repaint.
+     */
+    memset(editDisplayBuffer, ' ', 2u * 17u);
+    if (menu_testResultError) {
+        /*
+         * Show File/Dir test failures explicitly.
+         *
+         * Silent fallback to the browser hides the exact failure mode this
+         * temporary storage surface is meant to reveal. A two-second ERR
+         * overlay makes failed SFN/LFN opens visible without blocking the main
+         * loop.
+         */
+        memcpy(&editDisplayBuffer[0][6], "ERR", 3u);
+        if (menu_testResultName[0] != '\0') {
+            for (uint8_t i = 0u; i < 8u; i++) {
+                char c = menu_testResultName[i];
+                editDisplayBuffer[1][4u + i] = c ? c : ' ';
+            }
+        } else {
+            memcpy(&editDisplayBuffer[1][6], "ERR", 3u);
+        }
+        return;
+    }
+    if (menu_testResultKind == FS_TEST_RESULT_DIRECTORY) {
+        memcpy(&editDisplayBuffer[0][0], "Dir:", 4u);
+        for (uint8_t i = 0u; i < 8u; i++) {
+            char c = menu_testResultName[i];
+            editDisplayBuffer[0][5u + i] = c ? c : ' ';
+        }
+        memcpy(&editDisplayBuffer[1][0], "Dir:", 4u);
+        for (uint8_t i = 0u; i < 8u; i++) {
+            char c = menu_testResultName[i];
+            editDisplayBuffer[1][5u + i] = c ? c : ' ';
+        }
+        return;
+    }
+
+    for (uint8_t row = 0u; row < 2u; row++) {
+        for (uint8_t i = 0u; i < 2u; i++) {
+            static const char hex[] = "0123456789ABCDEF";
+            uint8_t col = (uint8_t)(i * 8u);
+            uint8_t b = menu_testResultBytes[(row * 2u) + i];
+            /*
+             * Display all four diagnostic bytes exactly once.
+             *
+             * This layout fits two 0xNN tokens per 16-cell row and makes
+             * byte-order/persistence errors visible. Repeating the top row
+             * would hide short reads and duplicated payload generation.
+             */
+            editDisplayBuffer[row][col + 0u] = '0';
+            editDisplayBuffer[row][col + 1u] = 'x';
+            editDisplayBuffer[row][col + 2u] = hex[(b >> 4u) & 0x0fu];
+            editDisplayBuffer[row][col + 3u] = hex[b & 0x0fu];
+        }
+    }
+}
+
+static uint8_t menu_completedOpIsTest(preset_op_type_t op)
+{
+    return (uint8_t)(op == PRESET_OP_TEST_SCAN ||
+                     op == PRESET_OP_TEST_FILE_LOAD ||
+                     op == PRESET_OP_TEST_DIR_LOAD ||
+                     op == PRESET_OP_TEST_FILE_SAVE ||
+                     op == PRESET_OP_TEST_DIR_SAVE);
+}
+
+static void menu_showFilesystemErrorOverlay(void)
+{
+    const char *code = filesystem_errorCode();
+
+    menu_storageBusy = 0u;
+    menu_testResultError = 1u;
+    menu_testResultKind = FS_TEST_RESULT_BYTES_READY;
+    memset(menu_testResultBytes, 0, sizeof(menu_testResultBytes));
+    memset(menu_testResultName, 0, sizeof(menu_testResultName));
+    if (code && code[0] != '\0')
+        strncpy(menu_testResultName, code, FS_TEST_NAME_MAX);
+    else
+        strncpy(menu_testResultName, "FsErr", FS_TEST_NAME_MAX);
+    menu_testResultActive = 1u;
+    menu_testResultStart = time_sysTick;
+    menu_repaintAll();
+}
+
 /* Request the filesystem action that corresponds to the current Load/Save page
  * selection.
  *
- * Why this exists: the Load/Save UI has two different browsing behaviors. Most
- * types only need an async name read while the encoder moves. Kit and morph kit
- * loading on the Load page historically loaded immediately when the slot
- * changed, and that behavior is preserved.
- *
- * Input: loadKitOnLoadPage is nonzero when an encoder movement on LOAD_PAGE
- * should initiate preset_loadDrumset() instead of just preset_loadName().
- * Outputs: starts a presetManager/filesystem request or sets
- * menu_deferSelectionRequest so menu_pollPresetStatus() can retry after the
- * single filesystem operation slot becomes free.
- *
- * Affiliates/clients: menu_handleLoadSaveMenu() calls this after type/slot
- * changes. preset_loadDrumset(slot, morph=0) is the path that initiates a
- * Phase 2 Kit/ directory load; preset_loadDrumset(slot, morph=1) still uses the
- * legacy morph .SND load path. preset_loadName() is the name-only client.
+ * Inputs: whether a Load-page Kit number movement should load immediately;
+ * selected UI type/slot and the Kit Scene mask are read from Menu state.
+ * Outputs: starts a Preset request or records a retry after the one filesystem
+ * operation slot becomes free. Clients: menu_handleLoadSaveMenu() and Load
+ * page entry. Kit uses preset_loadKitForScenes() because the menu owns Scene
+ * selection, while Settings/Samples retain their existing name/modal paths.
  */
 static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
 {
     uint8_t what = menu_saveOptions.what;
-    uint8_t slot = (what < SAVE_TYPE_GLO) ? menu_currentPresetNr[what] : 0;
+    uint16_t slot = (what < SAVE_TYPE_GLO) ? menu_currentPresetNr[what] : 0u;
 
     menu_deferSelectionRequest = 0;
     menu_deferSelectionLoadKit = loadKitOnLoadPage;
+    if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
+        (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH)) {
+        /*
+         * Keep Kit number traversal responsive while an older selection owns
+         * filesystem/apply work.
+         *
+         * The encoder has already updated menu_currentPresetNr. If storage is
+         * busy, record only one latest-selection retry and leave Preset's
+         * immutable request slot/mask untouched; calling Preset here would fail
+         * but overwrite the completion coordinates needed by the in-flight
+         * deferred exit work. During in-session payload/apply work the Kit
+         * index remains resident, so publish the newly selected row even while
+         * the older immutable request drains. Only the short entry/exit window
+         * where HCNAMES owns the shared cache leaves the name blank.
+         */
+        if (menu_storageBusy) {
+            if (filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
+                memcpy(preset_currentName,
+                       filesystem_kitSlotName(slot), 8u);
+            } else {
+                memset(preset_currentName, ' ', 8u);
+            }
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
+            menu_repaintAll();
+            return;
+        }
+    }
+    if (what == SAVE_TYPE_FILE || what == SAVE_TYPE_DIR) {
+        /*
+         * Temporary asyncfatfs test entries do not use legacy preset-name
+         * readers or numbered Kit/Scene slots. On Load, refresh the root
+         * object cache; on Save, the visible name comes from menu_testEditName
+         * and no filesystem request is needed until OK is clicked.
+         */
+        menu_requestTestScan(what);
+        return;
+    }
     if (what >= SAVE_TYPE_GLO) {
         preset_loadName(0, what);
         return;
     }
-    if (loadKitOnLoadPage &&
-        menu_activePage == LOAD_PAGE &&
-        (what == SAVE_TYPE_KIT || what == SAVE_TYPE_MORPH)) {
-        if (!preset_loadDrumset(slot, (uint8_t)(what == SAVE_TYPE_MORPH)))
+    if ((what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) &&
+        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
+        menu_requestLibraryIndexLoad(what);
+        return;
+    }
+    if (what == SAVE_TYPE_SCENE &&
+        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_SCENE)) {
+        menu_requestLibraryIndexLoad(what);
+        return;
+    }
+    if (what == SAVE_TYPE_BANK &&
+        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_BANK)) {
+        menu_requestLibraryIndexLoad(what);
+        return;
+    }
+    /*
+     * Kit and KitMrp share the same browser slot but have different commit
+     * semantics.
+     *
+     * Normal Kit Load replaces the selected Scene kits. KitMrp stages the same
+     * Kit/ directory, then Preset copies staged normal endpoint values into the
+     * already-loaded kits' morph endpoints. The display-name refresh path must
+     * not call filesystem_requestLoadName() for either entry because new-format
+     * Kit directories do not use the legacy flat name reader.
+     */
+    /*
+     * Only Kit/KitMrp suppress automatic Load-page name/payload requests while
+     * browsing without OK. Scene and Bank are also explicit-OK loads, but they
+     * still need the code below: Scene copies its cached root name to the LCD, and
+     * Bank additionally starts a read-only child-Scene preview so the SEQ LEDs are
+     * correct immediately when entering Load:[Bank].
+     */
+    if (menu_activePage == LOAD_PAGE && what < SAVE_TYPE_GLO &&
+        !loadKitOnLoadPage &&
+        what != SAVE_TYPE_SCENE &&
+        what != SAVE_TYPE_BANK) {
+        /* Entering Kit/KitMrp Load is browsing, not an implicit payload load.
+         * Ensure the seven-name session exists even if `/Kit/.hcindex` happened
+         * to remain resident from an earlier browser. Once entry HCNAMES has
+         * been captured, publish the selected index row without payload I/O. */
+        if (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) {
+            if (!menu_residentNameScratchValid ||
+                menu_residentNameScratchScene != menu_loadSaveSourceScene) {
+                menu_requestKitEntryNames();
+                return;
+            }
+            memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
+            menu_repaintAll();
+        }
+        return;
+    }
+    if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
+        (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) &&
+        !filesystem_kitSlotExists(slot)) {
+        /*
+         * Empty Kit browser slots are normal UI state, not failed filesystem
+         * operations. The Kit/ scan cache already proved there is no numbered
+         * directory here, so do not start a load that would report KitL00.
+         */
+        memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
+        menu_repaintAll();
+        return;
+    }
+    if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
+        what == SAVE_TYPE_KIT) {
+        /* `/Kit/.hcindex` is the already-loaded browser/open-key authority at
+         * this point. Publish its selected name before Preset starts the much
+         * longer payload and runtime-apply chain. No per-load HCNAMES or index
+         * restoration is required: the seven resident names remain in Menu
+         * scratch and the Kit index remains in the generalized cache. No new
+         * display buffer is needed because Load already owns
+         * preset_currentName as its eight-cell display field. */
+        memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
+        menu_repaintAll();
+        if (preset_loadKitForScenes(slot, menu_kitLoadSceneMask)) {
+            /*
+             * Lock the accepted full-Kit coordinates through payload commit
+             * and runtime apply. Number-only turns may update the separate
+             * desired slot, but they never repost or overwrite this immutable
+             * request's slot/mask. Its changed Scene names are recorded in
+             * scratch after commit and serialized only at menu-family exit.
+            */
+            menu_storageBusy = 1u;
+            /* menu_parseEncoder() intentionally skips its trailing repaint
+             * once storage becomes busy; the pre-request repaint above has
+             * already published the number and `.hcindex` name. */
+        } else {
             menu_deferSelectionRequest = 1;
+        }
+    } else if (loadKitOnLoadPage && menu_activePage == LOAD_PAGE &&
+               what == SAVE_TYPE_KIT_MORPH) {
+        /* KitMrp opens the same physical Kit directory, so it uses the same
+         * pre-payload `.hcindex` name publication as normal Kit Load. */
+        memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
+        menu_repaintAll();
+        if (preset_loadKitMorphForScenes(slot, menu_kitLoadSceneMask)) {
+            /* KitMrp uses the same immutable request boundary even though it
+             * preserves all resident names and therefore skips Kit HCNAMES. */
+            menu_storageBusy = 1u;
+        } else {
+            menu_deferSelectionRequest = 1;
+        }
+    } else if (what == SAVE_TYPE_SCENE || what == SAVE_TYPE_BANK) {
+        /*
+         * Scene and Bank folders are explicit-OK operations.
+         *
+         * Encoder movement updates the displayed root library name only.
+         * Unlike Kit Load, it must not start a Scene replacement while the user
+         * scrolls across slots. Bank follows the same load rule, but Load:Bank
+         * also posts a read-only child scan so the SEQ LEDs represent only
+         * Scene folders present inside the highlighted Bank slot.
+         */
+        memcpy(preset_currentName,
+               (what == SAVE_TYPE_BANK)
+                   ? filesystem_bankSlotName(slot)
+                   : filesystem_sceneSlotName(slot),
+               8u);
+        if (menu_activePage == LOAD_PAGE && what == SAVE_TYPE_BANK)
+            menu_requestBankLoadPreview(slot);
     } else {
         preset_loadName(slot, what);
         if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
             menu_deferSelectionRequest = 1;
     }
+}
+
+static void menu_instrumentIndexLoadComplete(void)
+{
+    /*
+     * Finish one typed Instrument index load for either nested Load or Save.
+     * The filesystem has replaced the selected type's general name cache;
+     * clamping now makes a previously selected browser index safe when the
+     * card contains fewer entries than the old cache. For nested Load, it also
+     * copies the selected typed-index name into the existing display buffer
+     * before any Instrument payload request is posted. Save deliberately keeps
+     * its HCNAMES-derived editable resident name. The same callback is shared
+     * by every registry type so Drum has no special browser contract left.
+     */
+    menu_instrumentLoadClampIndex();
+    if (menu_instrumentLoadActive &&
+        !menu_instrumentSaveMode &&
+        menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_POOL) {
+        /* The shared cache is valid again, so reconcile a freely-scrolled
+         * provisional 0..999 position with the real typed index count. The
+         * renderer reads the pool stem directly from that cache: do not copy it
+         * into the identity row, which must remain the reversible `kit` name
+         * until a session boundary finalizes the selected pool file. */
+        menu_instrumentLoadShownIndex =
+            menu_instrumentLoadIndex[menu_instrumentLoadType];
+    }
+    menu_storageBusy = 0u;
+    if (menu_deferSelectionRequest &&
+        menu_instrumentLoadActive &&
+        !menu_instrumentSaveMode) {
+        /*
+         * Start only the newest Instrument number after restoring `.hcindex`.
+         * Keeping this inside the completion callback ensures the newest
+         * number is paired with its freshly copied `.hcindex` name before
+         * menu_instrumentLoadRequestSelection() posts the payload. That helper
+         * clears the defer flag and reasserts storage busy if Preset accepts
+         * the coalesced request.
+         */
+        menu_instrumentLoadRequestSelection();
+        if (menu_storageBusy)
+            return;
+    }
+    menu_repaintAll();
+}
+
+static void menu_refreshResidentNameScratchKit(uint16_t scene_mask)
+{
+    /*
+     * Record one committed normal full-Kit change without touching the card.
+     *
+     * Inputs: Preset's immutable destination Scene mask after successful
+     * commit. Output: every destination bit is accumulated for the one exit
+     * rewrite. If the currently displayed scratch Scene was a destination, all
+     * seven rows are refreshed from its committed SceneData immediately. Other
+     * destination Scenes remain distinct in SceneData and are serialized from
+     * their own records at exit, so a multi-Scene session needs no 16x7 cache.
+     */
+    menu_residentNameDirtySceneMask = (uint16_t)(
+        menu_residentNameDirtySceneMask | scene_mask);
+    if (!menu_residentNameScratchValid ||
+        menu_residentNameScratchScene >= 16u ||
+        (scene_mask & (uint16_t)(1u << menu_residentNameScratchScene)) == 0u) {
+        return;
+    }
+    /* Successful filesystem load/save has already refreshed the one identity
+     * block.  There is intentionally no SceneData or Menu duplicate to copy. */
+}
+
+static void menu_refreshResidentNameScratchInstrument(uint16_t scene_mask,
+                                                      uint8_t slot)
+{
+    /*
+     * Record one committed normal Instrument change without HCNAMES I/O.
+     *
+     * Inputs: immutable destination mask and voice slot from the accepted
+     * request. Output: dirty Scenes accumulate for the exit rewrite; only the
+     * matching row of the currently displayed Scene is refreshed in Menu RAM.
+     * The other six scratch rows and every unrelated HCNAMES Scene remain
+     * untouched until the single targeted exit transaction.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    menu_residentNameDirtySceneMask = (uint16_t)(
+        menu_residentNameDirtySceneMask | scene_mask);
+    if (!menu_residentNameScratchValid ||
+        menu_residentNameScratchScene >= 16u ||
+        (scene_mask & (uint16_t)(1u << menu_residentNameScratchScene)) == 0u) {
+        return;
+    }
+    /* The matching filesystem identity row was updated with the validated
+     * Instrument load; only the dirty-mask durability action remains here. */
+}
+
+static void menu_requestInstrumentEntryNames(void);
+static void menu_requestKitEntryNames(void);
+
+static void menu_residentNameScratchFlushComplete(void)
+{
+    /*
+     * Complete the only HCNAMES write allowed by a Menu name session.
+     *
+     * Inputs: the exit-time full-block update has passed file close and media
+     * flush. Output: dirty/session state is cleared. If the UI transition has
+     * already entered another Kit/Instrument context (including another Scene),
+     * begin that context's one entry read; otherwise load the new non-name
+     * browser or simply release storage after leaving Load/Save altogether.
+     */
+    if (filesystem_status() != FS_STATUS_DONE) {
+        menu_showFilesystemErrorOverlay();
+        return;
+    }
+    menu_residentNameDirtySceneMask = 0u;
+    menu_residentNameScratchValid = 0u;
+    menu_residentNameScratchScene =
+        MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+    filesystem_clearNameCache();
+    menu_storageBusy = 0u;
+
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+        if (menu_instrumentLoadActive) {
+            menu_requestInstrumentEntryNames();
+        } else if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+                   menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+            menu_requestKitEntryNames();
+        } else {
+            menu_requestCurrentLoadSaveSelection(0u);
+        }
+    }
+    if (!menu_storageBusy)
+        menu_repaintAll();
+}
+
+static uint8_t menu_endResidentNameScratchSession(void)
+{
+    /*
+     * End the current Kit/Instrument name session at a UI boundary.
+     *
+     * Output is nonzero when one asynchronous HCNAMES rewrite was started.
+     * Clean sessions discard the seven Menu rows without card I/O. Dirty
+     * sessions call the existing full-Kit-row updater once with the accumulated
+     * Scene mask; that updater preserves all unrelated HCNAMES rows and reads
+     * each changed Scene's own Kit plus six Instrument names from committed
+     * SceneData. Callers update their target UI state before invoking this
+     * helper so the completion callback can enter the new context directly.
+     */
+    if (!menu_residentNameScratchValid &&
+        menu_residentNameDirtySceneMask == 0u) {
+        return 0u;
+    }
+    if (menu_residentNameDirtySceneMask == 0u) {
+        menu_residentNameScratchValid = 0u;
+        menu_residentNameScratchScene =
+            MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+        filesystem_clearNameCache();
+        return 0u;
+    }
+    menu_storageBusy = 1u;
+    if (filesystem_requestUpdateResidentKitNames(
+            menu_residentNameDirtySceneMask,
+            menu_residentNameScratchFlushComplete)) {
+        return 1u;
+    }
+    menu_storageBusy = 0u;
+    menu_showFilesystemErrorOverlay();
+    return 0u;
+}
+
+static void menu_residentNameScratchLoaded(void)
+{
+    uint8_t slot;
+    uint8_t scene = menu_residentNameScratchScene;
+
+    /*
+     * Capture all seven resident rows during the one allowed entry traversal.
+     *
+     * Inputs: a completed root HCNAMES read and the request-time Scene stored
+     * in menu_residentNameScratchScene. Output: Kit plus six Instrument names
+     * are copied out of the generalized cache before `.hcindex` replaces it.
+     * The current Kit or typed Instrument index is then loaded exactly once for
+     * fast in-session browsing and payload opens.
+     */
+    if (filesystem_status() != FS_STATUS_DONE || scene >= 16u) {
+        menu_showFilesystemErrorOverlay();
+        return;
+    }
+    filesystem_setIdentityName(FS_IDENTITY_KIT_ROW,
+                               filesystem_residentKitName(scene));
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        filesystem_setIdentityName(
+            (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 + slot),
+            filesystem_residentInstrumentName(scene, slot));
+    }
+    menu_residentNameScratchValid = 1u;
+    menu_storageBusy = 0u;
+    if (menu_instrumentLoadActive)
+        menu_requestInstrumentEntryNames();
+    else
+        menu_requestKitEntryNames();
+}
+
+static uint8_t menu_requestResidentNameScratch(uint8_t scene)
+{
+    /*
+     * Start one entry read for the complete seven-name Scene block.
+     *
+     * A Scene change is an exit/entry boundary. If the prior Scene accumulated
+     * changes, its single HCNAMES write starts first and the completion callback
+     * retries this new context. Otherwise the old scratch is discarded and one
+     * root HCNAMES read supplies every Kit/Instrument menu name needed until
+     * the next boundary.
+     */
+    if (scene >= 16u)
+        return 0u;
+    if (menu_residentNameScratchValid &&
+        menu_residentNameScratchScene == scene) {
+        return 1u;
+    }
+    if (menu_residentNameScratchValid &&
+        menu_residentNameScratchScene != scene &&
+        menu_endResidentNameScratchSession()) {
+        return 1u;
+    }
+    menu_residentNameScratchScene = scene;
+    menu_residentNameScratchValid = 0u;
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadResidentKitName(
+            scene, menu_residentNameScratchLoaded)) {
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+        return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot)
+{
+    uint16_t scene_mask;
+
+    /*
+     * Convert a successful normal Instrument Load into deferred Menu state.
+     *
+     * No filesystem request is made here. The committed destination mask and
+     * voice update the seven-name scratch/dirty state, then the existing typed
+     * `.hcindex` remains resident for immediate scrolling. Morph Load preserves
+     * identity and therefore creates no dirty HCNAMES work.
+     */
+    if (!menu_instrumentLoadActive || menu_instrumentLoadMorphMode ||
+        menu_instrumentLoadSource != MENU_INSTRUMENT_SOURCE_POOL)
+        return 0u;
+    scene_mask = menu_kitLoadSceneMask;
+    menu_refreshResidentNameScratchInstrument(scene_mask, slot);
+    return 0u;
+}
+
+static void menu_invalidateInstrumentLoadTemp(void)
+{
+    /*
+     * Dispose one Menu-visible temporary `kit` identity.
+     *
+     * Inputs: voice/type/mode/exit boundaries. Output: the nine-byte label and
+     * validity/type state are blanked, so no later cursor move can load a
+     * `.hctmp.<ext>` from a different session. The on-card file is deliberately
+     * treated as dirty scratch and is overwritten on the next same-type entry;
+     * it is excluded from `.hcindex` and never affects HCNAMES.
+     * Affiliates: menu_prepareInstrumentLoadTemp() and all nested boundaries.
+     */
+    memset(menu_instrumentTempName, 0, sizeof(menu_instrumentTempName));
+    menu_instrumentTempType = INSTRUMENT_TYPE_UNKNOWN;
+    menu_instrumentTempValid = 0u;
+    menu_instrumentTempOperationPending = 0u;
+}
+
+static uint8_t menu_prepareInstrumentLoadTemp(void)
+{
+    /*
+     * Persist the entry Instrument before exposing its `kit` row.
+     *
+     * Inputs: completed seven-row HCNAMES entry fetch plus current normal Load
+     * Scene/voice/type. Output: the original name is copied once into the
+     * nine-byte Menu field and Preset writes `.hctmp.<ext>`; caller returns
+     * while storage is busy and resumes typed-index loading after completion.
+     * Affiliates: menu_requestInstrumentEntryNames() and temp-save completion.
+     */
+    if (menu_instrumentSaveMode || menu_instrumentLoadMorphMode)
+        return 1u;
+    if (menu_instrumentTempValid)
+        return 1u;
+    if (menu_instrumentTempOperationPending)
+        return 0u;
+    memcpy(menu_instrumentTempName, menu_instrumentSaveName,
+           MENU_INSTRUMENT_SAVE_NAME_LEN);
+    menu_instrumentTempName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+    menu_instrumentTempType = menu_instrumentLoadType;
+    if (!preset_saveInstrumentTemp(menu_instrumentLoadScene,
+                                   menu_instrumentLoadSlot)) {
+        menu_invalidateInstrumentLoadTemp();
+        return 0u;
+    }
+    menu_instrumentTempOperationPending = 1u;
+    menu_storageBusy = 1u;
+    return 0u;
+}
+
+static void menu_restoreInstrumentLoadTemp(void)
+{
+    /*
+     * Re-read the session-matched hidden source after cursor reaches `kit`.
+     *
+     * Inputs: an idle filesystem plus a valid Menu temporary type/name whose
+     * type still equals the current Load type and whose Scene/voice are
+     * unchanged by the surrounding session boundaries. Output: normal
+     * Instrument parsing/application restores parameters without changing
+     * HCNAMES; the original visible name remains menu-owned. Why: a direct
+     * `kit` row cannot safely repost its file while an earlier restore owns the
+     * one filesystem operation, nor may it read an old type's same-directory
+     * scratch after a type change. Affiliates: preset_loadInstrumentTemp(),
+     * menu_invalidateInstrumentLoadTemp(), and lower-row decrement handling.
+     */
+    if (menu_storageBusy ||
+        !menu_instrumentTempValid ||
+        menu_instrumentTempType >= INSTRUMENT_TYPE_UNKNOWN ||
+        menu_instrumentTempType != menu_instrumentLoadType)
+        return;
+    if (preset_loadInstrumentTemp(menu_instrumentLoadScene,
+                                 menu_instrumentLoadSlot,
+                                 menu_instrumentTempType)) {
+        /*
+         * Preserve the accepted operation's identity through asynchronous
+         * parsing and bounded DSP apply.
+         *
+         * Input: Preset accepted the exact `.hctmp.<ext>` restore request.
+         * Output: completion can restore the retained name, and the apply
+         * finisher knows this request is already the requested `kit` state.
+         * Why: the visible source row can change under free encoder scrolling,
+         * so it is not a safe completion discriminator. Affiliates: the shared
+         * declaration above and PRESET_OP_INSTRUMENT_LOAD below.
+         */
+        menu_instrumentTempOperationPending = 1u;
+        menu_storageBusy = 1u;
+    }
+}
+
+static uint8_t menu_finishInstrumentApplySession(void)
+{
+    uint8_t completed_temp_restore = menu_instrumentTempOperationPending;
+
+    /*
+     * Resolve the precise desired state after an Instrument apply completes.
+     *
+     * Inputs: the immutable temporary-operation tag captured when Preset
+     * accepted the request, plus the mutable current lower-row cursor. Output:
+     * a completed temporary restore clears its tag exactly once; a completed
+     * ordinary pool load whose cursor is now `kit` posts one deferred temporary
+     * restore and returns nonzero. Why: free Load-number scrolling may change
+     * the cursor while an older pool read/apply drains, so the cursor cannot
+     * identify the completed request but does identify the user's final intent.
+     * The generic apply worker calls this only after releasing `menu_storageBusy`,
+     * making the deferred filesystem request safe. Affiliates:
+     * menu_tickInstrumentApply(), menu_restoreInstrumentLoadTemp(), and
+     * PRESET_OP_INSTRUMENT_LOAD completion handling.
+     */
+    if (completed_temp_restore) {
+        menu_instrumentTempOperationPending = 0u;
+        return 0u;
+    }
+    if (menu_instrumentLoadActive &&
+        !menu_instrumentSaveMode &&
+        !menu_instrumentLoadMorphMode &&
+        menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT &&
+        menu_instrumentTempValid) {
+        menu_restoreInstrumentLoadTemp();
+        return menu_storageBusy;
+    }
+    return 0u;
+}
+
+static void menu_requestInstrumentEntryNames(void)
+{
+    /*
+     * Enter or re-enter nested Instrument mode using the seven-name session.
+     *
+     * The first entry reads HCNAMES once. Later voice/type transitions in the
+     * same Scene reuse the retained Kit plus six Instrument names and only load
+     * the selected typed `.hcindex`. Pool loads then copy names from that index
+     * before payload I/O; Save and the direct `kit` row address the retained
+     * scratch cell for the selected voice.
+     */
+    menu_deferSelectionRequest = 0u;
+    if (!menu_residentNameScratchValid ||
+        menu_residentNameScratchScene != menu_instrumentLoadScene) {
+        (void)menu_requestResidentNameScratch(menu_instrumentLoadScene);
+        return;
+    }
+    /*
+     * Normal Instrument Load must finish the durable `kit` snapshot before
+     * `.hcindex` browsing begins. This serializes the SD operations and keeps
+     * the one temporary filename out of the browser cache. Save/Morph paths
+     * bypass it because neither offers the reversible parameter row.
+     */
+    if (!menu_prepareInstrumentLoadTemp())
+        return;
+    menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+}
+
+static void menu_requestInstrumentIndexLoad(instrument_type_t type)
+{
+    /*
+     * Request the selected type's own `.hcindex` whenever nested Instrument
+     * Load or Save enters/selects a type. Inputs: a registry type captured by
+     * Menu. Output: the UI remains locked until the foreground SD state
+     * machine has loaded that type's general-purpose name cache. A rejected
+     * request is deferred through the existing selection retry path, which
+     * handles a still-busy filesystem without inventing a second queue.
+     */
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadInstrumentIndex(
+            type, menu_instrumentIndexLoadComplete))
+        menu_deferSelectionRequest = 1u;
+}
+
+static void menu_requestKitEntryNames(void)
+{
+    /*
+     * Enter or re-enter top-level Kit/KitMrp using the seven-name session.
+     *
+     * The first entry reads Kit plus all six Instrument HCNAMES rows. Re-entry
+     * in the same Scene reuses that scratch block, so Save name editing and
+     * switching between Kit and nested Instrument menus do not reopen HCNAMES.
+     * `/Kit/.hcindex` is loaded only when it is not already the active browser;
+     * Save copies the resident Kit scratch row into preset_currentName while
+     * Load continues to display the selected library-index row.
+     */
+    if (!menu_residentNameScratchValid ||
+        menu_residentNameScratchScene != menu_loadSaveSourceScene) {
+        (void)menu_requestResidentNameScratch(menu_loadSaveSourceScene);
+        return;
+    }
+    if (menu_activePage == SAVE_PAGE) {
+        memcpy(preset_currentName,
+               filesystem_identityName(FS_IDENTITY_KIT_ROW),
+               8u);
+    }
+    if (filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
+        if (menu_activePage == LOAD_PAGE) {
+            memcpy(preset_currentName,
+                   filesystem_kitSlotName(
+                       menu_currentPresetNr[menu_saveOptions.what]),
+                   8u);
+        }
+        menu_storageBusy = 0u;
+        menu_repaintAll();
+        return;
+    }
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadKitIndex(menu_libraryIndexLoadComplete)) {
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+        menu_repaintAll();
+    }
+}
+
+static void menu_libraryIndexLoadComplete(void)
+{
+    /*
+     * Publish one completed Kit, root Scene, or root Bank `.hcindex` load.
+     *
+     * The filesystem has already replaced the one shared name cache and its
+     * slot occupancy map. Menu only releases the input lock and repaints; it
+     * deliberately does not start a payload load because entering a top-level
+     * Load row is browsing, while Scene Load remains explicit-OK and Kit
+     * Load's instant-on-scroll policy is handled on later selection moves.
+     * For Kit/KitMrp Load, the selected `.hcindex` row is copied before input
+     * is unlocked. This makes the directory identity visible at the earliest
+     * durable lookup boundary, before any Kit payload or HCNAMES operation.
+     */
+    if (filesystem_status() == FS_STATUS_DONE &&
+        menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive &&
+        (menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH)) {
+        memcpy(preset_currentName,
+               filesystem_kitSlotName(
+                   menu_currentPresetNr[menu_saveOptions.what]),
+               8u);
+    }
+    menu_storageBusy = 0u;
+    menu_repaintAll();
+}
+
+static void menu_sceneResidentNameLoaded(void)
+{
+    /*
+     * Finish the single-name Scene-menu entry read.
+     *
+     * Inputs: completed HCNAMES request and the source Scene captured in
+     * menu_sceneResidentNameScratchScene. Output: one copied eight-cell name,
+     * then the ordinary `/Scene/.hcindex` load begins so number scrolling uses
+     * the normal shared cache. The copy must precede that request because the
+     * index intentionally disposes the HCNAMES cache. Affiliates: Save editor
+     * seeding and filesystem_residentSceneName().
+     */
+    if (filesystem_status() != FS_STATUS_DONE ||
+        menu_sceneResidentNameScratchScene >= 16u) {
+        menu_showFilesystemErrorOverlay();
+        return;
+    }
+    filesystem_setIdentityName(
+        FS_IDENTITY_SCENE_ROW,
+        filesystem_residentSceneName(menu_sceneResidentNameScratchScene));
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadSceneIndex(menu_libraryIndexLoadComplete)) {
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+    }
+}
+
+static void menu_requestSceneEntryName(void)
+{
+    /*
+     * Enter top-level Scene Load/Save with one HCNAMES name, not sixteen.
+     *
+     * Inputs: Menu's current source Scene. Output: a foreground async read of
+     * root `/.hcnames`; its callback copies one row and restores the normal
+     * Scene browser index. This uses nine bytes of Menu scratch in place of
+     * the removed 16-by-9 SceneData mirror, and it deliberately does not
+     * traverse the root Scene directory one row at a time.
+     */
+    menu_sceneResidentNameScratchScene = menu_loadSaveSourceScene;
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    if (!filesystem_requestLoadResidentSceneName(
+            menu_sceneResidentNameScratchScene,
+            menu_sceneResidentNameLoaded)) {
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+    }
+}
+
+static void menu_requestLibraryIndexLoad(uint8_t what)
+{
+    fs_library_index_kind_t kind;
+    bool requested;
+
+    /*
+     * Request the only index that can supply the current top-level row.
+     *
+     * Inputs: SAVE_TYPE_KIT, SAVE_TYPE_KIT_MORPH, SAVE_TYPE_SCENE, or
+     * SAVE_TYPE_BANK. Output: Kit/KitMrp enters the seven-name session, reading
+     * HCNAMES once and then loading `/Kit/.hcindex`; every later load in that
+     * session uses the retained index without another resident-file traversal.
+     * Scene and Bank directly replace the shared cache with their own index. A
+     * busy filesystem is retried through Menu's existing deferred path.
+     */
+    if (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) {
+        menu_requestKitEntryNames();
+        return;
+    }
+    if (what == SAVE_TYPE_SCENE) {
+        menu_requestSceneEntryName();
+        return;
+    }
+    kind = (what == SAVE_TYPE_SCENE)
+        ? FS_LIBRARY_INDEX_SCENE
+        : (what == SAVE_TYPE_BANK)
+            ? FS_LIBRARY_INDEX_BANK : FS_LIBRARY_INDEX_KIT;
+    filesystem_clearNameCache();
+    menu_storageBusy = 1u;
+    requested = (kind == FS_LIBRARY_INDEX_SCENE)
+        ? filesystem_requestLoadSceneIndex(menu_libraryIndexLoadComplete)
+        : (kind == FS_LIBRARY_INDEX_BANK)
+            ? filesystem_requestLoadBankIndex(menu_libraryIndexLoadComplete)
+            : filesystem_requestLoadKitIndex(menu_libraryIndexLoadComplete);
+    if (!requested)
+        menu_deferSelectionRequest = 1u;
+}
+
+/* Refresh the Save page's resident display after a Kit/Scene/Bank save.
+ *
+ * What: copies the name from the just-rebuilt shared `.hcindex` cache into
+ * preset_currentName for the slot that remains selected on the Save page.
+ * Why: Save-page rendering uses preset_currentName while the save is being
+ * edited; the filesystem refresh updates the shared cache but does not update
+ * that UI buffer. Clearing the cache here would also make the current slot
+ * appear stale or empty until the user changed type and re-entered it.
+ * Inputs: completed Kit, KitMrp, root Scene, or root Bank save and the unchanged menu
+ * slot. Output: the current Save type/slot stays selected and its visible name
+ * matches the newly durable directory. Instrument and other saves do not use
+ * this path because their name cache/domain has different lifecycle rules.
+ */
+static void menu_refreshSavedLibraryName(uint8_t completed_op)
+{
+    uint8_t what = (completed_op == PRESET_OP_SCENE_SAVE)
+        ? SAVE_TYPE_SCENE
+        : (completed_op == PRESET_OP_BANK_SAVE)
+            ? SAVE_TYPE_BANK
+            : (completed_op == PRESET_OP_KIT_MORPH_SAVE)
+                ? SAVE_TYPE_KIT_MORPH : SAVE_TYPE_KIT;
+    uint16_t slot = menu_currentPresetNr[what];
+    const char *name = NULL;
+
+    if (what == SAVE_TYPE_SCENE) {
+        if (filesystem_sceneSlotExists(slot))
+            name = filesystem_sceneSlotName(slot);
+    } else if (what == SAVE_TYPE_BANK) {
+        if (filesystem_bankSlotExists(slot))
+            name = filesystem_bankSlotName(slot);
+    } else if (filesystem_kitSlotExists(slot)) {
+        name = filesystem_kitSlotName(slot);
+    }
+    if (name)
+        memcpy(preset_currentName, name, 8u);
+}
+
+static void menu_bankLoadPreviewComplete(void)
+{
+    uint16_t slot = menu_currentPresetNr[SAVE_TYPE_BANK];
+
+    /*
+     * Apply one completed Load:[Bank] child preview scan.
+     *
+     * Inputs: filesystem_bankChildSceneMask() from the just-finished scan and
+     * the Bank slot Menu requested when it started the scan. Output: if and
+     * only if the user is still on Load:[Bank] for that same slot, the child
+     * mask becomes both the LED selectable mask and the default Bank Load
+     * request mask. This guards the async race where the encoder has already
+     * scrolled to a different Bank before FAT iteration completes.
+     */
+    if (menu_activePage != LOAD_PAGE ||
+        menu_instrumentLoadActive ||
+        menu_saveOptions.what != SAVE_TYPE_BANK ||
+        menu_bankLoadPreviewSlot != slot ||
+        filesystem_status() != FS_STATUS_DONE) {
+        return;
+    }
+    menu_bankLoadPreviewMask = filesystem_bankChildSceneMask();
+    menu_bankLoadPreviewValid = 1u;
+    menu_kitLoadSceneMask = menu_bankLoadPreviewMask;
+    menu_refreshLoadSceneLeds();
+    menu_repaintAll();
+}
+
+static void menu_requestBankLoadPreview(uint16_t slot)
+{
+    /*
+     * Request the child-Scene LED preview for the highlighted Bank slot.
+     *
+     * Inputs: zero-based Bank slot from the preset-number row. Outputs:
+     * preview validity is cleared immediately so stale child LEDs disappear;
+     * missing root Bank slots use an empty mask; present root Bank slots post a
+     * filesystem preview scan and defer if another operation is busy. The
+     * completion callback verifies the slot again before repainting.
+     */
+    menu_bankLoadPreviewSlot = slot;
+    menu_bankLoadPreviewMask = 0u;
+    menu_bankLoadPreviewValid = 0u;
+    menu_kitLoadSceneMask = 0u;
+    if (!filesystem_bankSlotExists(slot)) {
+        menu_bankLoadPreviewValid = 1u;
+        menu_refreshLoadSceneLeds();
+        return;
+    }
+    if (!filesystem_requestScanBankScenes(slot, menu_bankLoadPreviewComplete))
+        menu_deferSelectionRequest = 1u;
+    menu_refreshLoadSceneLeds();
+}
+
+static void menu_instrumentLoadClampIndex(void)
+{
+    uint16_t count = filesystem_instrumentCount(menu_instrumentLoadType);
+
+    /*
+     * Clamp the per-type Instrument Load browser index.
+     *
+     * Inputs: current selected type and cached index for that type. Output:
+     * index is valid for the current filesystem cache, or zero when the list is
+     * empty. This lives in Menu because Menu owns browser state while
+     * filesystem owns only the immutable scan result.
+     */
+    if (menu_instrumentLoadType >= INSTRUMENT_TYPE_UNKNOWN)
+        menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
+    if (count == 0u) {
+        menu_instrumentLoadIndex[menu_instrumentLoadType] = 0u;
+        return;
+    }
+    if (menu_instrumentLoadIndex[menu_instrumentLoadType] >= count)
+        menu_instrumentLoadIndex[menu_instrumentLoadType] =
+            count - 1u;
+}
+
+static void menu_instrumentLoadRequestSelection(void)
+{
+    uint16_t count;
+    uint16_t index;
+
+    /*
+     * Immediately load the selected Instrument/ file.
+     *
+     * Inputs: destination Scene/slot, selected type, morph-row flag, and
+     * per-type browser index from Menu state. Output: normal rows replace the
+     * destination slot; the morph row copies the staged file's normal endpoint
+     * into the current slot's morph endpoint. Empty lists do not start a
+     * request, and Preset still validates the same-type rule before accepting
+     * an InstrumentMrp request. The renderer derives the selected `.hcindex`
+     * name directly during payload I/O; HCNAMES remains the post-commit
+     * resident register and is not overwritten on this preview path.
+     */
+    menu_deferSelectionRequest = 0u;
+    menu_instrumentLoadClampIndex();
+    count = filesystem_instrumentCount(menu_instrumentLoadType);
+    if (count == 0u)
+        return;
+    index = menu_instrumentLoadIndex[menu_instrumentLoadType];
+    menu_repaintAll();
+    if ((menu_instrumentLoadMorphMode &&
+         preset_loadInstrumentMorph(menu_instrumentLoadScene,
+                                    menu_instrumentLoadSlot,
+                                    menu_instrumentLoadType,
+                                    index)) ||
+        (!menu_instrumentLoadMorphMode &&
+         preset_loadInstrumentForScenes(menu_kitLoadSceneMask,
+                                        menu_instrumentLoadSlot,
+                                        menu_instrumentLoadType,
+                                        index))) {
+        /*
+         * Keep storage coordinates immutable but leave plain number turns
+         * available through menu_parseEncoder(). The LCD already shows the
+         * selected typed-index name. During ordinary payload/apply work that
+         * index remains resident and later turns repaint immediately. Only an
+         * entry/exit cache handoff can blank a desired row; the coalesced retry
+         * receives its name when the typed index is restored.
+         */
+        menu_storageBusy = 1u;
+        /* The explicit pre-request repaint above already queued the selected
+         * number and `.hcindex` name before storage became busy. */
+    } else {
+        /* A transiently busy filesystem retains the latest desired number for
+         * the existing deferred retry path instead of losing the encoder turn. */
+        menu_deferSelectionRequest = 1u;
+    }
+}
+
+static void menu_instrumentLoadRefreshBaseType(uint8_t preserve_selected_type)
+{
+    const kit_instrument_slot_t *slot =
+        scene_instrumentSlotConst(menu_instrumentLoadScene,
+                                  menu_instrumentLoadSlot);
+    instrument_type_t previous_type = menu_instrumentLoadType;
+
+    /*
+     * Refresh the InstrumentMrp base type from the destination slot.
+     *
+     * Inputs: current destination Scene/slot and whether a normal selected type
+     * should be preserved when it remains legal. Output: baseType always
+     * follows the resident slot type, because the only morph row allowed is the
+     * currently loaded instrument type. If the selected normal type is no
+     * longer valid for the destination, the browser falls back to baseType and
+     * clears morph mode.
+     */
+    menu_instrumentLoadBaseType = slot ? slot->type : INSTRUMENT_TYPE_DRM;
+    if (!instrumentManager_typeSelectableForSceneSlot(
+            menu_instrumentLoadScene, menu_instrumentLoadSlot,
+            menu_instrumentLoadBaseType)) {
+        menu_instrumentLoadBaseType = INSTRUMENT_TYPE_DRM;
+    }
+    if (preserve_selected_type && !menu_instrumentLoadMorphMode &&
+        instrumentManager_typeSelectableForSceneSlot(
+            menu_instrumentLoadScene, menu_instrumentLoadSlot,
+            previous_type)) {
+        menu_instrumentLoadType = previous_type;
+    } else {
+        menu_instrumentLoadType = menu_instrumentLoadBaseType;
+        menu_instrumentLoadMorphMode = 0u;
+    }
+    menu_instrumentLoadClampIndex();
+}
+
+static void menu_instrumentLoadCopyTypeLabel(char *dest)
+{
+    char label[9];
+    const char *base_label = instrumentManager_typeDisplayLabel(
+        menu_instrumentLoadType);
+
+    /*
+     * Build the fixed eight-character Load label used by the LCD.
+     *
+     * Normal rows show the instrument type label as before. The morph row
+     * appends "Mrp" to the captured base type, producing labels such as
+     * "DrumMrp ". Padding and truncation live here so repaint cannot resize or
+     * corrupt the LCD field.
+     */
+    menu_copyPaddedField(label, base_label, 8u);
+    if (menu_instrumentLoadMorphMode) {
+        uint8_t len = 0u;
+        while (len < 8u && label[len] != ' ')
+            len++;
+        if (len < 8u) label[len++] = 'M';
+        if (len < 8u) label[len++] = 'r';
+        if (len < 8u) label[len++] = 'p';
+        while (len < 8u)
+            label[len++] = ' ';
+        label[8] = '\0';
+    }
+    memcpy(dest, label, 8u);
+}
+
+static void menu_instrumentLoadStepType(int8_t inc)
+{
+    uint8_t registry_count = instrumentManager_registryCount();
+    uint8_t current_index = 0u;
+    uint8_t i;
+    int8_t direction = (inc < 0) ? -1 : 1;
+
+    /*
+     * Step through the logical Instrument Load type list.
+     *
+     * Inputs: signed encoder direction, current destination slot, and captured
+     * base type. Output: selectable normal instrument types still follow the
+     * registry order, but one extra morph row is inserted immediately after the
+     * resident destination type. Other types do not expose "...Mrp" because a
+     * mismatched morph load is explicitly a no-change operation.
+     */
+    if (registry_count == 0u || inc == 0)
+        return;
+    if (inc > 0 && !menu_instrumentLoadMorphMode &&
+        menu_instrumentLoadType == menu_instrumentLoadBaseType) {
+        /* Changing normal Load to the same-type Morph row is a declared
+         * preview boundary: publish a selected pool stem once, then discard
+         * the normal-image restore snapshot before endpoint semantics change. */
+        menu_invalidateInstrumentLoadTemp();
+        menu_instrumentLoadMorphMode = 1u;
+        return;
+    }
+    if (inc < 0 && menu_instrumentLoadMorphMode) {
+        /* Returning from Morph to normal is likewise not a continuation of
+         * the original normal-load preview; a Morph operation may have changed
+         * endpoint data, so the old reversible image must not be reused. */
+        menu_invalidateInstrumentLoadTemp();
+        menu_instrumentLoadMorphMode = 0u;
+        return;
+    }
+    for (i = 0u; i < registry_count; i++) {
+        const instrument_registry_entry_t *entry =
+            instrumentManager_registryEntryAt(i);
+        if (entry && entry->type == menu_instrumentLoadType) {
+            current_index = i;
+            break;
+        }
+    }
+
+    for (i = 0u; i < registry_count; i++) {
+        uint8_t next_index;
+        const instrument_registry_entry_t *entry;
+        if (direction > 0)
+            next_index = (uint8_t)((current_index + 1u + i) % registry_count);
+        else
+            next_index = (uint8_t)((current_index + registry_count - 1u - i) %
+                                   registry_count);
+        entry = instrumentManager_registryEntryAt(next_index);
+        if (entry &&
+            instrumentManager_typeSelectableForSceneSlot(
+                menu_instrumentLoadScene, menu_instrumentLoadSlot,
+                entry->type)) {
+            /* A different Instrument type changes parser/runtime semantics.
+             * End the narrow `kit` preview before disposing its typed index so
+             * a selected pool stem is committed through the one identity row. */
+            menu_invalidateInstrumentLoadTemp();
+            menu_instrumentLoadType = entry->type;
+            menu_instrumentLoadMorphMode =
+                (uint8_t)(direction < 0 &&
+                          entry->type == menu_instrumentLoadBaseType);
+            menu_instrumentLoadClampIndex();
+            if (!menu_instrumentLoadMorphMode)
+                menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+            return;
+        }
+    }
+}
+
+static void menu_instrumentSaveRequestSelection(void)
+{
+    uint8_t accepted;
+
+    /*
+     * Start one root Instrument Save from nested Save mode.
+     *
+     * Inputs are copied by Preset/filesystem at request acceptance time: source
+     * Scene, source voice slot, the Normal/Morph projection selector, and the
+     * editable eight-character stem. Output is menu_storageBusy only when the
+     * async request was accepted, so failed validation leaves the menu
+     * interactive instead of getting stuck.
+     *
+     * Affiliates: preset_saveInstrument() writes the normal endpoint image,
+     * while preset_saveInstrumentMorph() writes the current interpolated Morph
+     * endpoint into both [params] and [morph].
+     */
+    accepted = menu_instrumentLoadMorphMode
+        ? preset_saveInstrumentMorph(menu_instrumentLoadScene,
+                                     menu_instrumentLoadSlot,
+                                     menu_instrumentSaveName)
+        : preset_saveInstrument(menu_instrumentLoadScene,
+                                menu_instrumentLoadSlot,
+                                menu_instrumentSaveName);
+    if (accepted) {
+        menu_storageBusy = 1u;
+    }
+}
+
+static uint8_t menu_instrumentSaveStepSelectionState(uint8_t state,
+                                                     int8_t inc)
+{
+    /*
+     * Move the nested Instrument Save selection cursor over visible fields.
+     *
+     * What: Skips SAVE_STATE_EDIT_PRESET_NR, which is a valid top-level
+     * Load/Save row but has no meaning in root Instrument Save.
+     *
+     * Why: Instrument Save has only three selectable regions: the top
+     * Normal/Mrp projection row, the eight filename characters, and OK/OW.
+     * Letting selection movement pass through the hidden preset-number state
+     * makes the type row feel unreachable and leaves the LCD without a cursor
+     * for one encoder detent.
+     *
+     * Inputs: current save state and signed encoder delta while edit mode is
+     * off. Output: the next visible Instrument Save state, clamped at both
+     * ends. Affiliates/clients: menu_handleLoadSaveMenu(),
+     * menu_repaintLoadSavePage(), menu_loadInstrumentVoicePressed().
+     */
+    if (inc < 0) {
+        if (state == SAVE_STATE_OK)
+            return SAVE_STATE_EDIT_NAME8;
+        if (state > SAVE_STATE_EDIT_NAME1 &&
+            state <= SAVE_STATE_EDIT_NAME8)
+            return (uint8_t)(state - 1u);
+        return SAVE_STATE_EDIT_TYPE;
+    }
+    if (inc > 0) {
+        if (state == SAVE_STATE_EDIT_TYPE)
+            return SAVE_STATE_EDIT_NAME1;
+        if (state >= SAVE_STATE_EDIT_NAME1 &&
+            state < SAVE_STATE_EDIT_NAME8)
+            return (uint8_t)(state + 1u);
+        if (state == SAVE_STATE_EDIT_NAME8)
+            return SAVE_STATE_OK;
+    }
+    return state;
+}
+
+uint8_t menu_loadInstrumentIsActive(void)
+{
+    return menu_instrumentLoadActive;
+}
+
+static uint16_t menu_residentPresentSceneMask(void);
+static uint16_t menu_allPhysicalSceneMask(void);
+static uint16_t menu_loadSaveSelectableSceneMask(void);
+void menu_refreshPerfSceneLeds(void)
+{
+    uint8_t scene_index;
+    uint8_t active_scene = scene_getActiveIndex();
+    uint16_t present_mask = menu_residentPresentSceneMask();
+
+    /*
+     * Repaint PERF-mode Scene selection on the 16 SEQ LEDs.
+     *
+     * Inputs: BankData's resident Scene-present mask, SceneData's active index,
+     * and PatternData step activity per Scene. Outputs: Scenes with any retained
+     * Pattern steps are lit steady, and the active resident Scene blinks even
+     * when its Pattern is empty. PERF selection is still gated by the resident
+     * present mask in menu_perfModeSceneButtonPressed(); the steady LED layer is
+     * deliberately Pattern activity because the row answers "which Scenes have
+     * something to play?" rather than "which child folders exist?".
+     */
+    for (scene_index = 0u; scene_index < 16u; scene_index++) {
+        uint16_t bit = (uint16_t)(1u << scene_index);
+        led_setBlinkLed((uint8_t)(LED_SEQ1 + scene_index), 0u);
+        led_setValue(((present_mask & bit) != 0u) &&
+                         pat_sceneHasActiveSteps(scene_index),
+                     (uint8_t)(LED_SEQ1 + scene_index));
+    }
+    if (active_scene < 16u && (present_mask & (uint16_t)(1u << active_scene)))
+        led_setBlinkLed((uint8_t)(LED_SEQ1 + active_scene), 1u);
+}
+
+void menu_perfModeSceneButtonPressed(uint8_t scene_index)
+{
+    /*
+     * Switch the active resident Scene from PERF mode.
+     *
+     * Input: physical SEQ button index 0..15. Output: SceneData and BankData
+     * active Scene records, viewed Pattern, and Sequencer runtime Pattern are
+     * updated together. BankData drops scene_mask_voice_edit to the new active
+     * Scene only when the new active Scene was not already in the edit set, and
+     * Preset starts the bounded DSP apply for the newly audible Scene.
+     */
+    if (scene_index >= SCENE_COUNT || scene_index >= 16u ||
+        !bank_scenePresent(scene_index)) {
+        return;
+    }
+    scene_selectActive(scene_index);
+    bank_selectActiveSceneForEditMask(scene_index);
+    /*
+     * PERF Scene selection maps one-to-one onto PatternData's Scene slot.
+     *
+     * Inputs: validated Scene button index. Outputs: Menu edits now target that
+     * Scene's Pattern, and Sequencer playback reads the same Pattern immediately.
+     * This keeps step edits single-Scene only; parameter fan-out continues to use
+     * scene_mask_voice_edit and is not consulted by PatternData.
+     */
+    menu_setShownPattern(scene_index);
+    seq_selectActivePattern(scene_index);
+    preset_startDrumsetApply();
+    menu_refreshPerfSceneLeds();
+    menu_repaintAll();
+}
+
+void menu_refreshVoiceHeldSceneLeds(void)
+{
+    uint8_t scene_index;
+    uint8_t active_scene = scene_getActiveIndex();
+    uint16_t present_mask = menu_residentPresentSceneMask();
+    uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+
+    /*
+     * Repaint the temporary MODE VOICE held edit-mask view.
+     *
+     * Inputs: BankData's resident present mask, BankData's
+     * scene_mask_voice_edit, and SceneData's active Scene. Outputs: every Scene
+     * currently in the voice-edit fan-out mask is lit steady, and the active
+     * Scene blinks when present. This is separate from PERF LEDs because PERF
+     * shows selectable/active Scenes, while MODE VOICE held shows the edit
+     * fan-out set that Scene parameter writes will address.
+     */
+    for (scene_index = 0u; scene_index < 16u; scene_index++) {
+        uint16_t bit = (uint16_t)(1u << scene_index);
+        led_setBlinkLed((uint8_t)(LED_SEQ1 + scene_index), 0u);
+        led_setValue((uint8_t)((edit_mask & present_mask & bit) != 0u),
+                     (uint8_t)(LED_SEQ1 + scene_index));
+    }
+    if (active_scene < 16u && (present_mask & (uint16_t)(1u << active_scene)))
+        led_setBlinkLed((uint8_t)(LED_SEQ1 + active_scene), 1u);
+}
+
+uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index)
+{
+    /*
+     * Toggle one Scene in the VOICE edit fan-out mask.
+     *
+     * Input: physical SEQ button index while VOICE is held. Output: BankData's
+     * scene_mask_voice_edit flips that Scene bit when the Scene is present.
+     * The active Scene cannot be removed because BankData normalizes the mask
+     * after every toggle. The function returns nonzero when it consumes the
+     * button so ButtonHandler does not reinterpret the press as step editing.
+     */
+    if (scene_index >= SCENE_COUNT || scene_index >= 16u)
+        return 0u;
+    if (!bank_scenePresent(scene_index))
+        return 1u;
+    bank_toggleSceneMaskVoiceEdit(scene_index);
+    menu_refreshVoiceHeldSceneLeds();
+    led_flashGroup(LED_FLASH_GROUP_SEQ, (uint16_t)(1u << scene_index));
+    menu_repaintAll();
+    return 1u;
+}
+
+static uint16_t menu_residentPresentSceneMask(void)
+{
+    uint16_t mask = bank_scenePresentMask();
+
+    /*
+     * Return the resident Scene availability mask used by Load/Save.
+     *
+     * Inputs: BankData's present mask. Output: a nonzero 16-bit mask when at
+     * least one resident Scene is available. The fallback to the active Scene
+     * keeps root/default boot usable before a Bank has supplied an explicit
+     * child-present map.
+     */
+    if (mask == 0u && scene_getActiveIndex() < 16u)
+        mask = (uint16_t)(1u << scene_getActiveIndex());
+    return mask;
+}
+
+static uint16_t menu_allPhysicalSceneMask(void)
+{
+    uint8_t scene_index;
+    uint16_t mask = 0u;
+
+    /*
+     * Return the mask of physical Scene buttons this build can address.
+     *
+     * Inputs: SCENE_COUNT and the fixed 16-button SEQ row. Output: a bounded
+     * mask used by Load destination selection, where an empty resident Scene is
+     * still a legal destination because loading Scene/Kit/Instrument data can
+     * populate it. The explicit loop avoids undefined shifts if SCENE_COUNT
+     * changes again.
+     */
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        mask = (uint16_t)(mask | (uint16_t)(1u << scene_index));
+    }
+    return mask;
+}
+
+static uint16_t menu_loadSaveSelectableSceneMask(void)
+{
+    /*
+     * Resolve which Scene buttons the current Load/Save context may consume.
+     *
+     * Outputs:
+     * - Load Kit/KitMrp/Scene/Instrument can target any physical Scene slot.
+     * - Save Kit/KitMrp/Scene/Instrument can source only resident filled Scenes.
+     * - Save Bank can include only resident filled Scenes.
+     * - Load Bank can request only child Scene folders found in the highlighted
+     *   Bank slot's preview scan.
+     *
+     * This distinction keeps "filled" as a source/Bank-child constraint, not a
+     * general Load destination constraint.
+     */
+    if (menu_instrumentLoadActive)
+        return menu_instrumentSaveMode
+            ? menu_residentPresentSceneMask()
+            : menu_allPhysicalSceneMask();
+    if (menu_activePage == SAVE_PAGE)
+        return menu_residentPresentSceneMask();
+    if (menu_activePage == LOAD_PAGE &&
+        menu_saveOptions.what == SAVE_TYPE_BANK) {
+        uint16_t slot = menu_currentPresetNr[SAVE_TYPE_BANK];
+        if (menu_bankLoadPreviewValid &&
+            menu_bankLoadPreviewSlot == slot) {
+            return menu_bankLoadPreviewMask;
+        }
+        return 0u;
+    }
+    if (menu_activePage == LOAD_PAGE && menu_saveOptions.what < SAVE_TYPE_GLO)
+        return menu_allPhysicalSceneMask();
+    return 0u;
+}
+
+static void menu_resetLoadSaveSceneSelection(void)
+{
+    uint16_t active_bit = (scene_getActiveIndex() < 16u)
+        ? (uint16_t)(1u << scene_getActiveIndex())
+        : 1u;
+    uint16_t present_mask = menu_residentPresentSceneMask();
+
+    /*
+     * Reset the Scene-selection surface for the current Load/Save context.
+     *
+     * Inputs: active page/type, active Scene, and resident present mask.
+     * Outputs: menu_kitLoadSceneMask becomes the multi-destination or multi-
+     * child mask for operations that toggle Scenes; menu_loadSaveSourceScene
+     * becomes the single source for save operations that write one object. Bank
+     * Save defaults to every resident non-empty Scene, while other musical
+     * operations default to the active Scene.
+     */
+    menu_loadSaveSourceScene = scene_getActiveIndex();
+    if (menu_activePage == SAVE_PAGE && menu_saveOptions.what == SAVE_TYPE_BANK)
+        menu_kitLoadSceneMask = present_mask;
+    else if (menu_activePage == LOAD_PAGE &&
+             menu_saveOptions.what == SAVE_TYPE_BANK)
+        menu_kitLoadSceneMask = 0u;
+    else
+        menu_kitLoadSceneMask = active_bit;
+}
+
+static void menu_refreshLoadSceneLeds(void)
+{
+    uint8_t scene_index;
+    uint16_t selectable_mask = menu_loadSaveSelectableSceneMask();
+    uint8_t bank_load = (uint8_t)(
+        menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive &&
+        menu_saveOptions.what == SAVE_TYPE_BANK);
+
+    /*
+     * Repaint SEQ LEDs as Scene status while Load owns the front panel.
+     *
+     * Inputs: current Load/Save mode, selectable Scene mask, selected
+     * destination/source state, and nested Instrument mode. Outputs: Load
+     * destinations are steady when included; single Save sources blink; Bank
+     * Load shows only scanned child folders, with the active Scene as the only
+     * persistent blink. Short change feedback is handled by led_flashGroup() in
+     * menu_loadSceneButtonPressed(), avoiding the eight-slot blink allocator for
+     * 16-bit Scene masks.
+     */
+    if (menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE)
+        return;
+    for (scene_index = 0u; scene_index < 16u; scene_index++) {
+        led_setBlinkLed((uint8_t)(LED_SEQ1 + scene_index), 0u);
+        led_setValue(0u, (uint8_t)(LED_SEQ1 + scene_index));
+    }
+    if (menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
+        return;
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        uint16_t bit = (uint16_t)(1u << scene_index);
+        uint8_t selected;
+        if (menu_instrumentLoadActive) {
+            selected = menu_instrumentSaveMode
+                ? (uint8_t)(scene_index == menu_instrumentLoadScene)
+                : (uint8_t)((menu_kitLoadSceneMask & bit) != 0u);
+        } else if (menu_activePage == SAVE_PAGE &&
+                   menu_saveOptions.what != SAVE_TYPE_BANK) {
+            selected = (uint8_t)(scene_index == menu_loadSaveSourceScene);
+        } else {
+            selected = (uint8_t)((menu_kitLoadSceneMask & bit) != 0u);
+        }
+        if (menu_activePage == SAVE_PAGE &&
+            menu_saveOptions.what != SAVE_TYPE_BANK) {
+            led_setValue((uint8_t)((selectable_mask & bit) != 0u),
+                         (uint8_t)(LED_SEQ1 + scene_index));
+        } else {
+            led_setValue((uint8_t)(selected && (selectable_mask & bit)),
+                         (uint8_t)(LED_SEQ1 + scene_index));
+        }
+        if (selected &&
+            ((menu_activePage == SAVE_PAGE &&
+              menu_saveOptions.what != SAVE_TYPE_BANK) ||
+             (bank_load && scene_index == scene_getActiveIndex())))
+            led_setBlinkLed((uint8_t)(LED_SEQ1 + scene_index), 1u);
+    }
+}
+
+uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
+{
+    uint16_t bit;
+
+    /*
+     * Interpret a physical SEQ press as a Scene selection in Load contexts.
+     *
+     * Input: zero-based physical Scene index. Output: nonzero only when Load
+     * owns it. Kit mode toggles destination membership, including the active
+     * Scene; Instrument mode selects one destination
+     * without loading a file. This cannot live in ButtonHandler because its
+     * policy depends on Menu's nested Instrument source/cursor state and must
+     * repaint the LCD plus Scene LEDs as one UI transaction.
+     */
+    if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        scene_index >= SCENE_COUNT ||
+        scene_index >= 16u)
+        return 0u;
+    if (menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive && menu_saveOptions.what >= SAVE_TYPE_GLO)
+        return 0u;
+    if (menu_storageBusy &&
+        (menu_instrumentLoadActive ||
+         menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH)) {
+        /*
+         * Consume Scene changes during an immutable Instrument or Kit
+         * transaction.
+         *
+         * Input is a physical SEQ press while filesystem/apply owns captured
+         * Scene coordinates. Output is handled-without-mutation, so
+         * ButtonHandler does not reinterpret the press and neither an
+         * Instrument row nor a full Kit's seven scratch rows can drift from
+         * the accepted payload. Scene selection becomes available again after
+         * the corresponding payload/apply callback releases storage busy.
+         */
+        return 1u;
+    }
+    bit = (uint16_t)(1u << scene_index);
+    if ((menu_loadSaveSelectableSceneMask() & bit) == 0u)
+        return 1u;
+    if (menu_instrumentLoadActive) {
+        /* A Scene-button change alters the destination/mask of later loads.
+         * It is therefore an explicit end to the one Scene/voice preview;
+         * finalize before mutating the mask so a selected pool name is written
+         * only for the Scene(s) that actually received that candidate. */
+        menu_invalidateInstrumentLoadTemp();
+        if (menu_instrumentSaveMode) {
+            menu_instrumentLoadScene = scene_index;
+            menu_loadSaveSourceScene = scene_index;
+            menu_kitLoadSceneMask = bit;
+            menu_instrumentLoadRefreshBaseType(1u);
+            menu_invalidateInstrumentLoadTemp();
+            /* The resident Save seed belongs to the newly selected Scene.
+             * Treat the change as the explicit old-session exit/new-session
+             * entry boundary: flush dirty rows once, read the new seven-row
+             * block once, then restore the appropriate typed `.hcindex`. */
+            menu_requestInstrumentEntryNames();
+        } else {
+            uint16_t next = (uint16_t)(menu_kitLoadSceneMask ^ bit);
+            if (next != 0u)
+                menu_kitLoadSceneMask = next;
+            menu_instrumentLoadScene = scene_index;
+            menu_instrumentLoadRefreshBaseType(1u);
+            menu_invalidateInstrumentLoadTemp();
+            /* The direct `kit` source row is Scene-specific. Rebind the whole
+             * seven-row scratch at this explicit Scene boundary, then restore
+             * the typed index used for pool browsing. */
+            menu_requestInstrumentEntryNames();
+        }
+    } else if (menu_activePage == SAVE_PAGE) {
+        if (menu_saveOptions.what == SAVE_TYPE_BANK) {
+            uint16_t next = (uint16_t)(menu_kitLoadSceneMask ^ bit);
+            if (next != 0u)
+                menu_kitLoadSceneMask = next;
+        } else {
+            menu_loadSaveSourceScene = scene_index;
+            menu_kitLoadSceneMask = bit;
+            /* Kit/KitMrp Save changed the resident source Scene. Treat that as
+             * an exit/entry boundary for the seven-name session: flush the old
+             * dirty Scene block once if needed, then read the new Scene's Kit
+             * plus six Instrument rows. Scene/Bank save types have no HCNAMES
+             * session and retain their ordinary source selection behavior. */
+            if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+                menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+                menu_requestKitEntryNames();
+            } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+                /*
+                 * A Scene Save source change needs only the newly selected
+                 * HCNAMES row. Input: one SEQ source selection. Output: the
+                 * sole Scene scratch is replaced before any name editing;
+                 * neither SceneData nor Menu retains the other fifteen names.
+                 */
+                menu_requestSceneEntryName();
+            }
+        }
+    } else {
+        uint16_t next = (uint16_t)(menu_kitLoadSceneMask ^ bit);
+        if (next != 0u)
+            menu_kitLoadSceneMask = next;
+    }
+    menu_refreshLoadSceneLeds();
+    led_flashGroup(LED_FLASH_GROUP_SEQ, bit);
+    if (!menu_storageBusy)
+        menu_repaintAll();
+    return 1u;
+}
+
+void menu_loadInstrumentExit(void)
+{
+    /*
+     * Exit nested Instrument Load/Save mode.
+     *
+     * Inputs: none. Output: normal Kit Load/Save state becomes active again
+     * while the seven-name session is retained. The transition changes only
+     * the browser cache from a typed Instrument index back to `/Kit/.hcindex`;
+     * HCNAMES is not rewritten because Kit and Instrument deliberately share
+     * one session and one exit boundary. ButtonHandler calls this when the
+     * Load/Save mode button is pressed a second time.
+     */
+    if (menu_loadInstrumentTransactionBusy())
+        return;
+    /* Leaving nested Instrument Load/Save is the final preview boundary.
+     * Complete any selected normal pool identity while its `.hcindex` is still
+     * active, then restore `/Kit/.hcindex` without an extra name allocation. */
+    menu_invalidateInstrumentLoadTemp();
+    menu_instrumentLoadActive = 0u;
+    menu_instrumentSaveMode = 0u;
+    menu_loadSaveClearInstrumentVoiceBlinks();
+    menu_requestKitEntryNames();
+    menu_refreshLoadSceneLeds();
+    if (!menu_storageBusy)
+        menu_repaintAll();
+}
+
+uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
+{
+    const kit_instrument_slot_t *slot;
+
+    /*
+     * Consume a VOICE button as an Instrument Load destination or Save source.
+     *
+     * Inputs: zero-based VOICE button. Output: nonzero when Load/Save consumed
+     * the press. Load mode treats the voice as a destination for Instrument/
+     * browsing. Save mode treats it as the resident source to export into the
+     * root Instrument/ pool. ButtonHandler owns LED blink feedback and skips
+     * normal preview/mute/page behavior when this returns true.
+     */
+    if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        voiceNr >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (menu_storageBusy && !menu_instrumentLoadActive &&
+        (menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH)) {
+        /*
+         * Consume VOICE entry while a top-level Kit transaction owns storage.
+         *
+         * Entry/exit can temporarily replace `/Kit/.hcindex` with HCNAMES, and
+         * a payload/apply owns immutable Scene coordinates. Entering nested
+         * mode during either interval could replace the shared cache or change
+         * Scene/voice ownership too early. Returning handled keeps the gesture
+         * deferred until the current transaction releases menu_storageBusy.
+         */
+        return 1u;
+    }
+    if (menu_loadInstrumentTransactionBusy()) {
+        /*
+         * Consume destination switches while one Instrument transaction owns
+         * immutable Scene/slot coordinates. No browser type/index, active voice,
+         * or LED context changes here; the press is simply deferred by omission
+         * until the current read/apply/rebind finishes.
+         */
+        return 1u;
+    }
+    /* A different VOICE starts a different one-voice preview contract. Finish
+     * the prior voice while its typed cache/name context is still valid. */
+    menu_invalidateInstrumentLoadTemp();
+    menu_instrumentLoadActive = 1u;
+    menu_instrumentSaveMode = (uint8_t)(menu_activePage == SAVE_PAGE);
+    menu_instrumentLoadSlot = voiceNr;
+    menu_instrumentLoadScene = scene_getActiveIndex();
+    menu_loadSaveSourceScene = menu_instrumentLoadScene;
+    menu_kitLoadSceneMask = (uint16_t)(1u << menu_instrumentLoadScene);
+    menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
+    menu_saveOptions.what = SAVE_TYPE_KIT;
+    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+    /*
+     * Instrument Load/Save entry always starts on the selected top type row.
+     *
+     * Inputs: the selected VOICE button and current Save/Load page. Output:
+     * both `Load:[Type]` and `Save:[Type]` enter with brackets on the top row,
+     * matching top-level Load/Save entry and Pot-1 navigation.
+     */
+    editModeActive = 1u;
+    slot = scene_instrumentSlotConst(menu_instrumentLoadScene, voiceNr);
+    menu_instrumentLoadType = slot ? slot->type : INSTRUMENT_TYPE_DRM;
+    if (!instrumentManager_typeSelectableForSceneSlot(
+            menu_instrumentLoadScene, voiceNr, menu_instrumentLoadType)) {
+        menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
+    }
+    menu_instrumentLoadBaseType = menu_instrumentLoadType;
+    menu_instrumentLoadMorphMode = 0u;
+    menu_invalidateInstrumentLoadTemp();
+    menu_instrumentLoadClampIndex();
+    /*
+     * The first Kit/Instrument-family entry obtains all seven resident names
+     * from HCNAMES. Later voice entries in the same Scene select their own
+     * retained scratch row and only ensure the selected type's `.hcindex` is
+     * active; they never reopen or rewrite the root resident-name file.
+     */
+    menu_requestInstrumentEntryNames();
+    menu_setActiveVoice(voiceNr);
+    menu_refreshLoadSceneLeds();
+    if (!menu_storageBusy)
+        menu_repaintAll();
+    return 1u;
+}
+
+uint8_t menu_loadInstrumentTransactionBusy(void)
+{
+    /*
+     * Expose the nested Instrument transaction lock to gesture routing.
+     *
+     * Output is nonzero only when Instrument mode is active and its successful
+     * filesystem request or bounded post-apply still owns menu_storageBusy.
+     * ButtonHandler uses this before preview and mode mutation, which cannot be
+     * protected by the encoder-only guard in menu_parseEncoder().
+     */
+    return (uint8_t)(menu_instrumentLoadActive && menu_storageBusy);
+}
+
+/*
+ * Hardware Load/Save Pot-1 linearization helpers.
+ *
+ * The first endless pot does not merely cycle the current page's type enum.
+ * It walks one logical ring:
+ *
+ *   Load main rows -> Instrument Load rows voice 1..6 -> Save main rows ->
+ *   Instrument Save rows voice 1..6.
+ *
+ * Instrument Load rows expand by selectable instrument type for each voice,
+ * inserting the same-type Morph Load row beside the normal row. Instrument
+ * Save rows are two rows per voice: normal and Mrp. Applying a logical
+ * position re-enters the same UI state a VOICE button would have selected,
+ * including source/destination voice, top-row brackets, Scene LED refresh, and
+ * voice blink feedback. Returning to a main row clears Instrument blink because
+ * non-instrument Load/Save entries never own a blinking VOICE indicator.
+ *
+ * Affiliates/clients: menu_handleLoadSaveKnobDelta(), ButtonHandler's VOICE
+ * Load/Save entry, LED voice feedback, and menu_requestCurrentLoadSaveSelection().
+ */
+static uint8_t menu_loadSaveRestoredTypeIndex(uint8_t page, uint8_t what)
+{
+    const uint8_t *types =
+        (page == LOAD_PAGE) ? menu_loadSaveLoadTypes : menu_loadSaveSaveTypes;
+    uint8_t count = (page == LOAD_PAGE)
+        ? (uint8_t)(sizeof(menu_loadSaveLoadTypes) /
+                    sizeof(menu_loadSaveLoadTypes[0]))
+        : (uint8_t)(sizeof(menu_loadSaveSaveTypes) /
+                    sizeof(menu_loadSaveSaveTypes[0]));
+    uint8_t i;
+
+    for (i = 0u; i < count; i++) {
+        if (types[i] == what)
+            return i;
+    }
+    return 0u;
+}
+
+static uint8_t menu_instrumentLoadOptionCountForVoice(uint8_t voice)
+{
+    const kit_instrument_slot_t *slot =
+        scene_instrumentSlotConst(scene_getActiveIndex(), voice);
+    instrument_type_t base_type = slot ? slot->type : INSTRUMENT_TYPE_DRM;
+    uint8_t count = 0u;
+    uint8_t i;
+
+    for (i = 0u; i < instrumentManager_registryCount(); i++) {
+        const instrument_registry_entry_t *entry =
+            instrumentManager_registryEntryAt(i);
+        if (!entry ||
+            !instrumentManager_typeSelectableForSceneSlot(
+                scene_getActiveIndex(), voice, entry->type))
+            continue;
+        count++;
+        if (entry->type == base_type)
+            count++;
+    }
+    return count;
+}
+
+static uint8_t menu_instrumentLoadOptionAt(uint8_t voice, uint8_t option,
+                                           instrument_type_t *type,
+                                           uint8_t *morph)
+{
+    const kit_instrument_slot_t *slot =
+        scene_instrumentSlotConst(scene_getActiveIndex(), voice);
+    instrument_type_t base_type = slot ? slot->type : INSTRUMENT_TYPE_DRM;
+    uint8_t logical = 0u;
+    uint8_t i;
+
+    for (i = 0u; i < instrumentManager_registryCount(); i++) {
+        const instrument_registry_entry_t *entry =
+            instrumentManager_registryEntryAt(i);
+        if (!entry ||
+            !instrumentManager_typeSelectableForSceneSlot(
+                scene_getActiveIndex(), voice, entry->type))
+            continue;
+        if (logical == option) {
+            *type = entry->type;
+            *morph = 0u;
+            return 1u;
+        }
+        logical++;
+        if (entry->type == base_type) {
+            if (logical == option) {
+                *type = entry->type;
+                *morph = 1u;
+                return 1u;
+            }
+            logical++;
+        }
+    }
+
+    *type = base_type;
+    *morph = 0u;
+    return (uint8_t)(logical > 0u);
+}
+
+static uint8_t menu_instrumentLoadCurrentOptionForVoice(uint8_t voice)
+{
+    uint8_t count = menu_instrumentLoadOptionCountForVoice(voice);
+    uint8_t i;
+
+    for (i = 0u; i < count; i++) {
+        instrument_type_t type;
+        uint8_t morph;
+        if (menu_instrumentLoadOptionAt(voice, i, &type, &morph) &&
+            type == menu_instrumentLoadType &&
+            morph == menu_instrumentLoadMorphMode)
+            return i;
+    }
+    return 0u;
+}
+
+static uint16_t menu_instrumentLoadOptionTotal(void)
+{
+    uint16_t total = 0u;
+    uint8_t voice;
+
+    for (voice = 0u; voice < INSTRUMENT_SLOT_COUNT; voice++)
+        total = (uint16_t)(total +
+                           menu_instrumentLoadOptionCountForVoice(voice));
+    return total;
+}
+
+static uint16_t menu_loadSaveLogicalPosition(void)
+{
+    uint16_t load_type_count =
+        (uint16_t)(sizeof(menu_loadSaveLoadTypes) /
+                   sizeof(menu_loadSaveLoadTypes[0]));
+    uint16_t load_instrument_total = menu_instrumentLoadOptionTotal();
+    uint16_t save_type_count =
+        (uint16_t)(sizeof(menu_loadSaveSaveTypes) /
+                   sizeof(menu_loadSaveSaveTypes[0]));
+
+    if (menu_activePage == LOAD_PAGE && !menu_instrumentLoadActive)
+        return menu_loadSaveRestoredTypeIndex(LOAD_PAGE,
+                                              menu_saveOptions.what);
+    if (menu_activePage == LOAD_PAGE && menu_instrumentLoadActive) {
+        uint16_t index = load_type_count;
+        uint8_t voice;
+        for (voice = 0u; voice < menu_instrumentLoadSlot; voice++)
+            index = (uint16_t)(index +
+                               menu_instrumentLoadOptionCountForVoice(voice));
+        return (uint16_t)(index +
+            menu_instrumentLoadCurrentOptionForVoice(menu_instrumentLoadSlot));
+    }
+    if (menu_activePage == SAVE_PAGE && !menu_instrumentLoadActive)
+        return (uint16_t)(load_type_count + load_instrument_total +
+                          menu_loadSaveRestoredTypeIndex(SAVE_PAGE,
+                                                         menu_saveOptions.what));
+    return (uint16_t)(load_type_count + load_instrument_total +
+                      save_type_count +
+                      ((uint16_t)menu_instrumentLoadSlot * 2u) +
+                      (menu_instrumentLoadMorphMode ? 1u : 0u));
+}
+
+static uint16_t menu_loadSaveLogicalCount(void)
+{
+    return (uint16_t)(
+        (uint16_t)(sizeof(menu_loadSaveLoadTypes) /
+                   sizeof(menu_loadSaveLoadTypes[0])) +
+        menu_instrumentLoadOptionTotal() +
+        (uint16_t)(sizeof(menu_loadSaveSaveTypes) /
+                   sizeof(menu_loadSaveSaveTypes[0])) +
+        ((uint16_t)INSTRUMENT_SLOT_COUNT * 2u));
+}
+
+static void menu_loadSaveClearInstrumentVoiceBlinks(void)
+{
+    uint8_t blink_voice;
+
+    /*
+     * Main Load/Save rows never own a blinking VOICE indicator.
+     *
+     * Nested Instrument rows blink the selected source/destination voice.
+     * Clear only those per-voice blink flags when returning to top-level
+     * File/Dir/Kit/etc. rows so the steady active-voice LED remains intact.
+     */
+    for (blink_voice = 0u; blink_voice < INSTRUMENT_SLOT_COUNT; blink_voice++)
+        led_setBlinkLed((uint8_t)(LED_VOICE1 + blink_voice), 0u);
+}
+
+static void menu_loadSaveEnterTop(uint8_t page, uint8_t what)
+{
+    /* Pot-1 can leave nested Instrument Load without passing the dedicated
+     * exit button. Finalize the one reversible preview before replacing its
+     * type/index browser context or clearing the nested-active flag. */
+    menu_invalidateInstrumentLoadTemp();
+    menu_activePage = page;
+    menu_instrumentLoadActive = 0u;
+    menu_instrumentSaveMode = 0u;
+    menu_loadSaveClearInstrumentVoiceBlinks();
+    menu_saveOptions.what = what;
+    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+    editModeActive = 1u;
+    if (what == SAVE_TYPE_BANK)
+        menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
+    menu_resetLoadSaveSceneSelection();
+    /*
+     * Pot-1 can leave the combined Kit/Instrument family without leaving the
+     * overall Load/Save page. Update the target UI state first, then perform
+     * the one deferred HCNAMES write. Its completion sees this new non-Kit
+     * context and loads that browser. Kit <-> KitMrp and Kit <-> Instrument
+     * transitions retain the same seven-name session and skip this boundary.
+     */
+    if (what != SAVE_TYPE_KIT && what != SAVE_TYPE_KIT_MORPH &&
+        menu_endResidentNameScratchSession()) {
+        menu_refreshLoadSceneLeds();
+        return;
+    }
+    filesystem_clearNameCache();
+    menu_requestCurrentLoadSaveSelection(0);
+    menu_refreshLoadSceneLeds();
+}
+
+static void menu_loadSaveSetInstrumentVoiceLed(uint8_t voice)
+{
+    /*
+     * Mirror the VOICE-button Instrument Load/Save feedback for pot navigation.
+     *
+     * Pot 1 can enter nested Instrument rows without passing through
+     * ButtonHandler's voice-button branch. Menu already owns the selected
+     * source/destination voice in that path, so it must also refresh the
+     * physical voice LED: one active voice, and one blinking Instrument slot.
+     */
+    led_setActiveVoice(voice);
+    menu_loadSaveClearInstrumentVoiceBlinks();
+    led_setBlinkLed((uint8_t)(LED_VOICE1 + voice), 1u);
+}
+
+static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
+{
+    instrument_type_t type;
+    uint8_t morph;
+
+    /* Re-entering via Pot-1 may replace another nested Instrument context.
+     * End that one first so no snapshot/name row crosses voice/type/mode. */
+    menu_invalidateInstrumentLoadTemp();
+    menu_activePage = LOAD_PAGE;
+    menu_instrumentLoadActive = 1u;
+    menu_instrumentSaveMode = 0u;
+    menu_instrumentLoadSlot = voice;
+    menu_instrumentLoadScene = scene_getActiveIndex();
+    menu_loadSaveSourceScene = menu_instrumentLoadScene;
+    menu_kitLoadSceneMask = (uint16_t)(1u << menu_instrumentLoadScene);
+    menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
+    menu_saveOptions.what = SAVE_TYPE_KIT;
+    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+    editModeActive = 1u;
+    menu_instrumentLoadRefreshBaseType(0u);
+    if (menu_instrumentLoadOptionAt(voice, option, &type, &morph)) {
+        menu_instrumentLoadType = type;
+        menu_instrumentLoadMorphMode = morph;
+    }
+    menu_invalidateInstrumentLoadTemp();
+    menu_instrumentLoadClampIndex();
+    /* Pot-1 follows the same session entry as a VOICE button: read all seven
+     * HCNAMES rows only for a new Scene/session, then activate the typed index.
+     * Re-entry in the same Scene selects the retained voice row directly. */
+    menu_requestInstrumentEntryNames();
+    menu_setActiveVoice(voice);
+    menu_loadSaveSetInstrumentVoiceLed(voice);
+    menu_refreshLoadSceneLeds();
+}
+
+static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
+{
+    /* Save has no parameter preview. End any preceding nested normal Load
+     * before changing page/mode so the selected pool identity is not lost. */
+    menu_invalidateInstrumentLoadTemp();
+    menu_activePage = SAVE_PAGE;
+    menu_instrumentLoadActive = 1u;
+    menu_instrumentSaveMode = 1u;
+    menu_instrumentLoadSlot = voice;
+    menu_instrumentLoadScene = scene_getActiveIndex();
+    menu_loadSaveSourceScene = menu_instrumentLoadScene;
+    menu_kitLoadSceneMask = (uint16_t)(1u << menu_instrumentLoadScene);
+    menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
+    menu_saveOptions.what = SAVE_TYPE_KIT;
+    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+    editModeActive = 1u;
+    menu_instrumentLoadRefreshBaseType(0u);
+    menu_instrumentLoadMorphMode = morph ? 1u : 0u;
+    /*
+     * Save's Pot-1 entry uses the same seven-row scratch as VOICE-button entry.
+     * HCNAMES is read only if no session exists for this Scene; otherwise the
+     * selected voice's resident seed is already available without card I/O.
+     */
+    menu_requestInstrumentEntryNames();
+    menu_setActiveVoice(voice);
+    menu_loadSaveSetInstrumentVoiceLed(voice);
+    menu_refreshLoadSceneLeds();
+}
+
+static void menu_loadSaveApplyLogicalPosition(uint16_t target)
+{
+    uint16_t load_type_count =
+        (uint16_t)(sizeof(menu_loadSaveLoadTypes) /
+                   sizeof(menu_loadSaveLoadTypes[0]));
+    uint16_t save_type_count =
+        (uint16_t)(sizeof(menu_loadSaveSaveTypes) /
+                   sizeof(menu_loadSaveSaveTypes[0]));
+    uint16_t load_instrument_total = menu_instrumentLoadOptionTotal();
+    uint16_t cursor = load_type_count;
+    uint8_t voice;
+
+    if (target < load_type_count) {
+        menu_loadSaveEnterTop(LOAD_PAGE, menu_loadSaveLoadTypes[target]);
+        return;
+    }
+    if (target < (uint16_t)(load_type_count + load_instrument_total)) {
+        uint16_t local = (uint16_t)(target - load_type_count);
+        for (voice = 0u; voice < INSTRUMENT_SLOT_COUNT; voice++) {
+            uint8_t count = menu_instrumentLoadOptionCountForVoice(voice);
+            if (local < count) {
+                menu_loadSaveEnterInstrumentLoad(voice, (uint8_t)local);
+                return;
+            }
+            local = (uint16_t)(local - count);
+        }
+    }
+
+    cursor = (uint16_t)(load_type_count + load_instrument_total);
+    if (target < (uint16_t)(cursor + save_type_count)) {
+        menu_loadSaveEnterTop(
+            SAVE_PAGE, menu_loadSaveSaveTypes[target - cursor]);
+        return;
+    }
+
+    target = (uint16_t)(target - cursor - save_type_count);
+    voice = (uint8_t)(target / 2u);
+    if (voice >= INSTRUMENT_SLOT_COUNT)
+        voice = (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u);
+    menu_loadSaveEnterInstrumentSave(voice, (uint8_t)(target & 1u));
+}
+
+static char *menu_loadSaveActiveNameBuffer(void)
+{
+    if (menu_instrumentLoadActive && menu_instrumentSaveMode)
+        return menu_instrumentSaveName;
+    if (menu_activePage == SAVE_PAGE &&
+        (menu_saveOptions.what == SAVE_TYPE_FILE ||
+         menu_saveOptions.what == SAVE_TYPE_DIR ||
+         menu_saveOptions.what == SAVE_TYPE_SIMPLE_DIR))
+        return menu_testEditName;
+    if (menu_activePage == SAVE_PAGE)
+        return preset_currentName;
+    return NULL;
+}
+
+static void menu_handleLoadSaveKnobDelta(uint8_t knobNr, int8_t delta)
+{
+    if (delta == 0)
+        return;
+
+    switch (knobNr) {
+    case 0: {
+        uint16_t count = menu_loadSaveLogicalCount();
+        int32_t target;
+        if (count == 0u)
+            return;
+        target = (int32_t)menu_loadSaveLogicalPosition() + (int32_t)delta;
+        while (target < 0)
+            target += count;
+        while (target >= (int32_t)count)
+            target -= count;
+        menu_loadSaveApplyLogicalPosition((uint16_t)target);
+        break; }
+
+    case 1:
+        if (menu_instrumentLoadActive && menu_instrumentSaveMode) {
+            menu_saveOptions.state = SAVE_STATE_EDIT_NAME1;
+            editModeActive = 1u;
+        } else {
+            menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
+            editModeActive = 1u;
+            menu_handleLoadSaveMenu(delta, 0u);
+        }
+        break;
+
+    case 2:
+        if (editModeActive) {
+            editModeActive = 0u;
+        } else {
+            menu_handleLoadSaveMenu(delta, 0u);
+        }
+        break;
+
+    case 3:
+        if (menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
+            menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
+            editModeActive = 1u;
+            menu_handleLoadSaveMenu(delta, 0u);
+        }
+        break;
+
+    default:
+        return;
+    }
+
+    if (!menu_storageBusy)
+        menu_repaintAll();
+}
+
+uint8_t menu_loadSaveBarButtonPressed(uint8_t advance)
+{
+    char *name;
+    uint8_t ci;
+
+    if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        menu_storageBusy ||
+        menu_saveOptions.state < SAVE_STATE_EDIT_NAME1 ||
+        menu_saveOptions.state > SAVE_STATE_EDIT_NAME8)
+        return 0u;
+    name = menu_loadSaveActiveNameBuffer();
+    if (!name)
+        return 0u;
+
+    ci = (uint8_t)(menu_saveOptions.state - SAVE_STATE_EDIT_NAME1);
+    if (advance) {
+        /*
+         * BAR2 is insert-space-forward.
+         *
+         * It first leaves the current character untouched, moves to the next
+         * editable cell, blanks that one cell, and exits edit brackets. If the
+         * cursor is already at the last character, the press is consumed but
+         * does not mutate the name.
+         */
+        if (ci < 7u) {
+            menu_saveOptions.state++;
+            name[ci + 1u] = ' ';
+        } else {
+            editModeActive = 0u;
+            menu_repaintAll();
+            return 1u;
+        }
+    } else {
+        /*
+         * BAR1 is delete/backspace.
+         *
+         * It blanks exactly the current character, exits edit brackets, then
+         * moves the underline cursor left when there is a previous character.
+         */
+        name[ci] = ' ';
+        if (ci > 0u)
+            menu_saveOptions.state--;
+    }
+    editModeActive = 0u;
+    menu_repaintAll();
+    return 1u;
 }
 
 /* -----------------------------------------------------------------------
@@ -1092,6 +4891,25 @@ void numtostrpu(char *buf, uint8_t num, char pad)
     else if (buf[0]==pad) buf[1]=pad;
     else          buf[1]='0';
     buf[2]=(char)('0'+num);
+}
+
+static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot)
+{
+    uint16_t display = zero_based_slot;
+
+    /*
+     * Format library folder numbers independently from byte-valued parameters.
+     *
+     * Kit/Scene and other library slots now span 000..999, with slot 000 a
+     * real save/load location. numtostrpu() remains a uint8_t helper for menu
+     * parameter values, so this helper keeps Load/Save folder display from
+     * wrapping above 255 and avoids the old slot+1 presentation.
+     */
+    if (display > 999u)
+        display = 999u;
+    dst[0] = (char)('0' + (display / 100u));
+    dst[1] = (char)('0' + ((display / 10u) % 10u));
+    dst[2] = (char)('0' + (display % 10u));
 }
 
 void numtostrps(char *buf, int8_t num)
@@ -1209,6 +5027,34 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     buf[0]=p[0]; buf[1]=p[1]?p[1]:' '; buf[2]=p[2]?p[2]:' ';
 }
 
+static void menu_getLfoPolarityName(uint8_t value, char *buf)
+{
+    const char *p;
+    uint8_t count = (uint8_t)lfoPolarityNames[0][0];
+
+    /*
+     * Format the dedicated LFO polarity dtype.
+     *
+     * Inputs: raw stored polarity value, expected to match mod_node_polarity_t
+     * values 0..2. Output: a three-character LCD field. This cannot use the
+     * packed DTYPE_MENU helper because that helper has only four high-nibble
+     * bits for table ids; the previous id 16 wrapped to id 0 and displayed the
+     * track-scale table. Keeping this helper local lets compact view,
+     * single-parameter edit view, and clamp logic share the same table without
+     * inventing a bogus menu-table id.
+     */
+    if (count == 0u) {
+        memcpy(buf, menuText_dash, 3);
+        return;
+    }
+    if (value >= count)
+        value = (uint8_t)(count - 1u);
+    p = lfoPolarityNames[value + 1u];
+    buf[0] = p[0];
+    buf[1] = p[1] ? p[1] : ' ';
+    buf[2] = p[2] ? p[2] : ' ';
+}
+
 /* -----------------------------------------------------------------------
 ** Mod target display helpers
 ** ----------------------------------------------------------------------- */
@@ -1226,18 +5072,23 @@ static void menu_displayModTargetFull(uint8_t curParmVal)
     for (i=0;i<8&&lng[i];i++) editDisplayBuffer[1][8+i]=lng[i];
 }
 
-static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText, char inclVoice)
+static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText)
 {
     if (modTargets[curParmVal].param == PAR_NONE) {
         memcpy(valueAsText, menuText_off, 3);
     } else {
-        uint8_t off = 0;
-        if (inclVoice)
-            valueAsText[off++] = (char)(voiceFromModTargValue(curParmVal) + '0');
         const uint8_t name = modTargets[curParmVal].nameIdx;
         const char *sn = shortNames[valueNames[name].shortName];
         uint8_t k;
-        for (k=off; k<3; k++) valueAsText[k] = sn[k-off] ? sn[k-off] : ' ';
+        /*
+         * Legacy compact automation target text used to optionally replace the
+         * first short-name column with a voice number, producing labels such as
+         * "1wa" or "1co". That style is not used by the new descriptor target
+         * selectors and should not be reintroduced while the Phase 4 automation
+         * display rewrite is pending. This helper now always renders the plain
+         * target short name only.
+         */
+        for (k=0; k<3; k++) valueAsText[k] = sn[k] ? sn[k] : ' ';
     }
 }
 
@@ -1259,12 +5110,144 @@ static void menu_displayCpuUseEdit(void)
 ** ----------------------------------------------------------------------- */
 static uint8_t has2ndPage(uint8_t menuPage)
 {
-    return (menuPages[menu_activePage][menuPage].top5 != TEXT_EMPTY) ? 1 : 0;
+    menu_cell_t cell = menu_resolveCellAbsolute(menuPage, 4u);
+    return (uint8_t)(!menu_cellIsEmpty(&cell));
+}
+
+static uint8_t menu_voiceAbsolutePositionSelectable(uint8_t subPage,
+                                                    uint8_t position)
+{
+    menu_cell_t cell =
+        menu_resolveVoiceCellAtScreen(
+            subPage,
+            (uint8_t)(position / MENU_COMPACT_SCREEN_CELLS),
+            (uint8_t)(position % MENU_COMPACT_SCREEN_CELLS));
+
+    /*
+     * Decide whether one linear voice sub-page cell can receive focus.
+     *
+     * Inputs: SELECT sub-page and a linear position across all screens returned
+     * by menu_voiceSubPageScreenCount(). Output: nonzero for a real cell, zero
+     * for empty or skip cells. Scene-setting cells are naturally selectable
+     * because menu_resolveVoiceCellAtScreen() returns them as real cells.
+     */
+    if (position >=
+        (uint8_t)(menu_voiceSubPageScreenCount(subPage) *
+                  MENU_COMPACT_SCREEN_CELLS)) {
+        return 0u;
+    }
+    if (menu_cellIsEmpty(&cell))
+        return 0u;
+    if (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP)
+        return 0u;
+    return 1u;
+}
+
+static uint8_t menu_voiceSubPageScreenExists(uint8_t subPage, uint8_t screen)
+{
+    uint8_t i;
+
+    /*
+     * Test whether one four-cell voice screen exists.
+     *
+     * Inputs: subPage is the SELECT button page and screen is 0..3. Output:
+     * nonzero when any cell on that screen is selectable. Earlier code treated
+     * the first cell as a screen sentinel, but sparse future layouts need to
+     * allow screens such as "        pa4 pa5    ". The reader now uses the
+     * same ordinary INSTRUMENT_MENU_EMPTY cells that the layout rows use, so no
+     * additional empty-count flagging system is required.
+     */
+    if (subPage >= NUM_SUB_PAGES ||
+        screen >= menu_voiceSubPageScreenCount(subPage))
+        return 0u;
+    for (i = 0u; i < MENU_COMPACT_SCREEN_CELLS; i++) {
+        if (menu_voiceAbsolutePositionSelectable(
+                subPage,
+                (uint8_t)(screen * MENU_COMPACT_SCREEN_CELLS + i)))
+            return 1u;
+    }
+    return 0u;
+}
+
+static uint8_t menu_voiceFirstSelectableColumn(uint8_t subPage,
+                                               uint8_t screen)
+{
+    uint8_t i;
+    uint8_t start;
+
+    /*
+     * Find the initial focus column for one visible voice screen.
+     *
+     * Inputs: SELECT sub-page and four-cell screen. Output: the first
+     * selectable visible column, or zero when the screen is empty. SELECT uses
+     * this after changing screens so sparse screens do not land the highlight
+     * on a blank cell while the actual parameter sits later in the row.
+     */
+    if (subPage >= NUM_SUB_PAGES ||
+        screen >= menu_voiceSubPageScreenCount(subPage))
+        return 0u;
+    start = (uint8_t)(screen * MENU_COMPACT_SCREEN_CELLS);
+    for (i = 0u; i < MENU_COMPACT_SCREEN_CELLS; i++) {
+        if (menu_voiceAbsolutePositionSelectable(subPage,
+                                                 (uint8_t)(start + i)))
+            return i;
+    }
+    return 0u;
 }
 
 static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
 {
     const uint8_t is2ndPage = (uint8_t)(activeParameter > 3);
+
+    if (menu_isVoicePage(menu_activePage)) {
+        uint8_t screen;
+        uint8_t hasNext;
+        uint8_t total_screens;
+
+        /*
+         * Voice pages use up to four screens behind one SELECT sub-page.
+         *
+         * Screen 0 shows '>' when another screen exists, preserving the old
+         * first-screen affordance. Later screens show '*' when there is still
+         * another screen ahead or '<' when the next SELECT press will loop back
+         * to the first screen. Single-screen sub-pages show no marker.
+         *
+         * menuIndex stores the sub-page in a shared bitfield used by voice,
+         * MIDI, STEP, and other modes. During mode transitions that bitfield
+         * can briefly contain a value outside the voice SELECT range; normalize
+         * before indexing the voice-screen memory so stale mode state cannot
+         * read or write past menu_voiceSubPageScreen[].
+         */
+        if (activePage >= NUM_SUB_PAGES)
+            activePage = 0u;
+        screen = menu_voiceSubPageScreen[activePage];
+        total_screens = menu_voiceSubPageScreenCount(activePage);
+        if (screen >= total_screens ||
+            !menu_voiceSubPageScreenExists(activePage, screen)) {
+            screen = 0u;
+            menu_voiceSubPageScreen[activePage] = 0u;
+        }
+        if (activePage == MENU_VOICE_MIX_SUBPAGE && total_screens > 1u) {
+            uint8_t instrument_screens =
+                menu_voiceInstrumentScreenCount(activePage);
+            /*
+             * VOICE mix has two kinds of extra pages.
+             *
+             * Instrument-owned mix screens use '^' on the first screen and '*'
+             * on later instrument screens. Scene-owned setting screens use '+'
+             * and never '<', because SELECT cycling loops but the marker should
+             * identify ownership instead of suggesting a back action.
+             */
+            if (screen >= instrument_screens)
+                return '+';
+            return (screen == 0u) ? '^' : '*';
+        }
+        hasNext = menu_voiceSubPageScreenExists(activePage,
+                                                (uint8_t)(screen + 1u));
+        if (screen == 0u)
+            return hasNext ? '>' : 0u;
+        return hasNext ? '*' : '<';
+    }
 
     if (menu_activePage == MENU_MIDI_PAGE) {
         if (is2ndPage) {
@@ -1404,11 +5387,12 @@ void menu_repaint(void)
 ** ----------------------------------------------------------------------- */
 /* Paint the two-line Load/Save page into editDisplayBuffer.
  *
- * Why this needed a Phase 2 change: the Load page now displays Kit/ directory
- * slots using filesystem_kitSlotName() from the scan cache, not the currently
- * loaded preset_currentName or a legacy .SND name header. The visible kit
- * number is one-based to match folders like 001 Name, while
- * menu_currentPresetNr[] remains zero-based for presetManager/filesystem calls.
+ * Why this needed a Phase 2 change: Kit existence/open identity and Load names
+ * come from the resident `/Kit/.hcindex` cache, so number turns can publish a
+ * name immediately even while an older payload drains. HCNAMES supplies the
+ * separate seven-row resident-name scratch only at family entry and receives
+ * accumulated committed changes only at family exit. The visible Kit number
+ * is the direct 000..999 library slot; 000 is a real folder prefix.
  *
  * Inputs: menu_activePage, menu_saveOptions, menu_currentPresetNr[],
  * preset_currentName, editModeActive. Outputs: editDisplayBuffer plus optional
@@ -1423,20 +5407,231 @@ static void menu_repaintLoadSavePage(void)
     memset(&editDisplayBuffer[0][0], ' ', 16);
     memset(&editDisplayBuffer[1][0], ' ', 16);
 
+    if (menu_testResultActive) {
+        menu_showTestResult();
+        return;
+    }
+
+    if (menu_instrumentLoadActive) {
+        uint16_t count;
+        uint16_t index;
+        uint16_t display_index;
+
+        /*
+         * Paint nested Instrument Load/Save mode.
+         *
+         * What: This logic re-writes the visual representation of the Instrument Load menu
+         * within the LCD editDisplayBuffer. It respects menu_saveOptions.state and
+         * editModeActive to conditionally paint '[' ']' or '>' (ARROW_SIGN) on either
+         * row 1 (Type) or row 2 (File), mirroring the original Load menu design.
+         *
+         * Why it must exist: Without conditional cursor painting, the user is blind to the 
+         * active navigation state (Type vs File slot) and edit state (navigating rows vs
+         * changing values). The prior UX hardcoded edit brackets '[]' on the bottom row
+         * while defaulting interaction to the top row, which created a confusing and 
+         * unusable menu.
+         *
+         * Inputs: selected type, destination Scene/slot, the resident name
+         * copied from `/.hcnames`, optional Instrument/ pool item, cursor state,
+         * and edit state.
+         * Outputs: top row shows the type label; bottom row begins as
+         * "kit  <name>" and changes to numbered pool display only after lower
+         * row encoder movement. The two sources stay separate so selecting a
+         * new type never performs an implicit file load or destroys the useful
+         * kit-member identity on entry.
+         * Clients: Called by menu_repaint() and menu_repaintAll() whenever menu_activePage
+         * == LOAD_PAGE and a redraw is requested.
+         * Accessors: filesystem_instrumentCount, filesystem_instrumentDisplayIndex, 
+         * filesystem_instrumentName, instrumentManager_typeDisplayLabel.
+         * Affiliates: menu_handleLoadSaveMenu drives the actual state changes this reflects.
+         */
+        if (menu_instrumentSaveMode) {
+            /*
+             * Paint nested Instrument Save mode.
+             *
+             * Inputs: source Scene/voice, source type, editable stem, cursor
+             * state, Normal/Morph projection selector, and OK selection.
+             * Output: a compact Save:[Type] page that uses the normal
+             * eight-character encoder editor before writing a root
+             * Instrument/<stem.ext> file. The source instrument type remains
+             * fixed by the resident slot; the top row toggles only which
+             * endpoint projection the writer uses.
+             */
+            memcpy(&editDisplayBuffer[0][0], "Save:", 5u);
+            if (menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
+                /*
+                 * Render the editable Normal/Morph projection row.
+                 *
+                 * Inputs: editModeActive and menu_instrumentLoadMorphMode.
+                 * Output: brackets mean encoder movement toggles the save
+                 * projection; an arrow means the row is selected but not being
+                 * edited. The label itself is generated by the same helper used
+                 * by Instrument Load so "DrumMrp" and similar rows stay padded
+                 * and truncated identically.
+                 */
+                if (editModeActive) {
+                    editDisplayBuffer[0][5] = '[';
+                    editDisplayBuffer[0][14] = ']';
+                } else {
+                    editDisplayBuffer[0][5] = ARROW_SIGN;
+                }
+            }
+            menu_instrumentLoadCopyTypeLabel(&editDisplayBuffer[0][6]);
+            for (uint8_t i = 0u; i < MENU_INSTRUMENT_SAVE_NAME_LEN; i++) {
+                char c = menu_instrumentSaveName[i];
+                editDisplayBuffer[1][5u + i] = c ? c : ' ';
+            }
+            if (menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
+                menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
+                uint8_t ci =
+                    (uint8_t)(menu_saveOptions.state - SAVE_STATE_EDIT_NAME1);
+                if (editModeActive) {
+                    editDisplayBuffer[1][4u + ci] = '[';
+                    editDisplayBuffer[1][6u + ci] = ']';
+                } else {
+                    cur_want_on = 1u;
+                    cur_want_col = (uint8_t)(5u + ci);
+                    cur_want_row = 2u;
+                }
+            }
+            /*
+             * Show root Instrument overwrite state in the nested Save surface.
+             *
+             * What: Reuses the shared Save identity query even though nested
+             * Instrument Save returns before the generic Save-page renderer.
+             *
+             * Why: root Instrument overwrite is filename/type based rather
+             * than numbered-slot based. The user must see `OW` for
+             * case-insensitive matches such as `fiRstfile.snr` before OK
+             * collapses all variants to the newly entered case.
+             *
+             * Inputs: menu_instrumentSaveName and source instrument type.
+             * Outputs: bottom-right LCD affordance is either OK or OW.
+             *
+             * Affiliates/clients: menu_currentSaveWouldOverwrite(),
+             * filesystem_instrumentTargetExists(), filesystem_saveInstrument_tick().
+             */
+            if (menu_currentSaveWouldOverwrite())
+                memcpy(&editDisplayBuffer[1][14], "OW", 2u);
+            else
+                memcpy(&editDisplayBuffer[1][14], menuText_ok, 2u);
+            if (menu_saveOptions.state == SAVE_STATE_OK)
+                editDisplayBuffer[1][13] = ARROW_SIGN;
+            return;
+        }
+
+        /*
+         * Do not clamp against a cache currently borrowed by HCNAMES.
+         *
+         * While a load/update is busy, the encoder may hold a provisional
+         * 0..999 desired row even though filesystem_instrumentCount() correctly
+         * reports zero for the temporary HCNAMES cache domain. The restored
+         * typed-index callback performs the real clamp before posting the
+         * coalesced request.
+         */
+        if (!menu_storageBusy)
+            menu_instrumentLoadClampIndex();
+        count = filesystem_instrumentCount(menu_instrumentLoadShownType);
+        if (count == 0u && menu_storageBusy)
+            count = MENU_INSTRUMENT_PROVISIONAL_COUNT;
+        index = menu_instrumentLoadShownIndex;
+        if (count > 0u && index >= count)
+            index = count - 1u;
+        /* Pool rows are zero-based to make `kit` visibly precede `000`. */
+        display_index = index;
+
+        /* --- Top Row: Load Type --- */
+        memcpy(&editDisplayBuffer[0][0], "Load:", 5);
+        
+        /* Render cursor/brackets for the top row if the state is editing the type */
+        if (menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
+            if (editModeActive) {
+                /* In edit mode, show brackets around the type name */
+                editDisplayBuffer[0][5] = '[';
+                editDisplayBuffer[0][14] = ']';
+            } else {
+                /* In selection mode, show a pointer arrow */
+                editDisplayBuffer[0][5] = ARROW_SIGN;
+            }
+        }
+        
+        menu_instrumentLoadCopyTypeLabel(&editDisplayBuffer[0][6]);
+
+        /* Render cursor/brackets for the kit-member/pool-source row. */
+        if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
+            if (editModeActive) {
+                /* Bracket only the fixed Kit/list selector field, matching the
+                 * normal `[000]name` Load geometry. The source name remains a
+                 * read-only identity display, never part of the selection. */
+                editDisplayBuffer[1][0] = '[';
+                editDisplayBuffer[1][4] = ']';
+            } else {
+                /* In selection mode, use the same left-edge pointer as Load. */
+                editDisplayBuffer[1][0] = ARROW_SIGN;
+            }
+        }
+
+        if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT) {
+            /* Preserve the normal `[slot]name` split: `kit` occupies the
+             * three selector cells and the resident name used by this direct
+             * Kit-source row starts after the closing bracket/spacing cell.
+             * This row does not browse a typed `.hcindex`. */
+            memcpy(&editDisplayBuffer[1][1], "kit", 3u);
+            memcpy(&editDisplayBuffer[1][5],
+                   menu_instrumentTempName,
+                   8u);
+        } else {
+            char pool_display_name[MENU_INSTRUMENT_SAVE_NAME_LEN + 1u];
+
+            /* Format the pool position only after lower-row movement selected
+             * a concrete file. The decimal math is explicit to preserve the
+             * fixed four-cell LCD field and saturates the non-semantic cursor
+             * number at 999 for large per-type libraries. */
+            if (display_index > 999u)
+                display_index = 999u;
+            /* Pool rows are always three digits: the first is `000`, directly
+             * below the synthetic `kit` source instead of the former `  1`. */
+            editDisplayBuffer[1][1] =
+                (char)('0' + ((display_index / 100u) % 10u));
+            editDisplayBuffer[1][2] =
+                (char)('0' + ((display_index / 10u) % 10u));
+            editDisplayBuffer[1][3] = (char)('0' + (display_index % 10u));
+            /*
+             * Pool number and typed-index identity render together, but the
+             * visible stem is derived into this stack field from `.hcindex`.
+             * Why: Menu must not overwrite the one retained Instrument
+             * identity row while the reversible `kit` preview is active. The
+             * stack field lasts only for this repaint, carries no filename key,
+             * and naturally renders blank during an entry/exit cache handoff.
+             * Affiliates: filesystem_copyInstrumentDisplayName(),
+             * menu_invalidateInstrumentLoadTemp(), and HCNAMES session exit.
+             */
+            filesystem_copyInstrumentDisplayName(pool_display_name,
+                                                  menu_instrumentLoadShownType,
+                                                  index);
+            memcpy(&editDisplayBuffer[1][5],
+                   pool_display_name,
+                   8u);
+        }
+        return;
+    }
+
     /* Top row */
     if (menu_activePage == SAVE_PAGE)
         memcpy(&editDisplayBuffer[0][0], "Save:", 5);
     else
         memcpy(&editDisplayBuffer[0][0], "Load:", 5);
 
-    const char *toptxt = "Kit     ";
+    const char *toptxt = "File    ";
     switch (menu_saveOptions.what) {
+    case SAVE_TYPE_FILE:        toptxt = "File    "; break;
+    case SAVE_TYPE_DIR:         toptxt = "Dir     "; break;
+    case SAVE_TYPE_SIMPLE_DIR:  toptxt = "sDir    "; break;
     case SAVE_TYPE_KIT:         toptxt = "Kit     "; break;
-    case SAVE_TYPE_PATTERN:     toptxt = "Pattern "; break;
-    case SAVE_TYPE_MORPH:       toptxt = "MorphKit"; break;
+    case SAVE_TYPE_KIT_MORPH:   toptxt = "KitMrp  "; break;
+    case SAVE_TYPE_SCENE:       toptxt = "Scene   "; break;
+    case SAVE_TYPE_BANK:        toptxt = "Bank    "; break;
     case SAVE_TYPE_GLO:         toptxt = "Settings"; break;
-    case SAVE_TYPE_PERFORMANCE: toptxt = "Perform "; break;
-    case SAVE_TYPE_ALL:         toptxt = "All     "; break;
     case SAVE_TYPE_SAMPLES:     toptxt = "Samples "; break;
     }
     memcpy(&editDisplayBuffer[0][6], toptxt, 8);
@@ -1450,17 +5645,96 @@ static void menu_repaintLoadSavePage(void)
         }
     }
 
+    if (menu_saveOptions.what == SAVE_TYPE_FILE ||
+        menu_saveOptions.what == SAVE_TYPE_DIR ||
+        menu_saveOptions.what == SAVE_TYPE_SIMPLE_DIR) {
+        const char *name = menu_currentTestName();
+        uint8_t count = menu_testObjectCount(menu_saveOptions.what);
+
+        /*
+         * Temporary File/Dir test presentation.
+         *
+         * Load pages show the selected root object from the exact-case scan
+         * cache; Save pages show the bounded filename editor. Both modes keep
+         * the right-side OK affordance because the selected action is explicit
+         * and no older instant-load behavior should survive this test surface.
+         */
+        if (menu_activePage == LOAD_PAGE) {
+            uint16_t displayPreset = menu_currentPresetNr[menu_saveOptions.what];
+            if (count != 0u && displayPreset >= count)
+                displayPreset = (uint16_t)(count - 1u);
+            menu_formatPresetNumber3(&editDisplayBuffer[1][1], displayPreset);
+            if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
+                if (editModeActive) {
+                    editDisplayBuffer[1][0] = '[';
+                    editDisplayBuffer[1][4] = ']';
+                } else {
+                    editDisplayBuffer[1][0] = ARROW_SIGN;
+                }
+            }
+        }
+        for (uint8_t i = 0u; i < 8u; i++) {
+            char c = name[i];
+            editDisplayBuffer[1][5u + i] = c ? c : ' ';
+        }
+        if (menu_activePage == SAVE_PAGE &&
+            menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
+            menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
+            uint8_t ci = (uint8_t)(menu_saveOptions.state - SAVE_STATE_EDIT_NAME1);
+            if (editModeActive) {
+                editDisplayBuffer[1][4u + ci] = '[';
+                editDisplayBuffer[1][6u + ci] = ']';
+            } else {
+                cur_want_on = 1u;
+                cur_want_col = (uint8_t)(5u + ci);
+                cur_want_row = 2u;
+            }
+        }
+        memcpy(&editDisplayBuffer[1][14], menuText_ok, 2u);
+        if (menu_saveOptions.state == SAVE_STATE_OK)
+            editDisplayBuffer[1][13] = ARROW_SIGN;
+        return;
+    }
+
     /* Bottom row */
     if (menu_saveOptions.what < SAVE_TYPE_GLO) {
-        uint8_t displayPreset = menu_currentPresetNr[menu_saveOptions.what];
+        uint16_t displayPreset = menu_currentPresetNr[menu_saveOptions.what];
         const char *displayName = preset_currentName;
 
-        if (menu_activePage == LOAD_PAGE && menu_saveOptions.what == SAVE_TYPE_KIT) {
-            displayPreset = (uint8_t)(displayPreset + 1u);
-            displayName = filesystem_kitSlotName(menu_currentPresetNr[SAVE_TYPE_KIT]);
+        /*
+         * KitMrp reuses the Kit browser presentation.
+         *
+         * Both Kit entries use the same numbered Kit/ existence/open cache.
+         * On Load, their visible name is the selected `/Kit/.hcindex` row,
+         * published before payload work. HCNAMES is read once at family entry
+         * and rewritten once at family exit when committed names are dirty, so
+         * it is absent from each scroll/load/save operation.
+         * The top-row type tells selection dispatch whether the staged Kit
+         * replaces the resident kit or copies same-type normal endpoints into
+         * morph storage.
+         */
+        if (menu_activePage == LOAD_PAGE && menu_saveOptions.what < SAVE_TYPE_GLO) {
+            if (menu_saveOptions.what == SAVE_TYPE_BANK) {
+                displayName = filesystem_bankSlotName(
+                    menu_currentPresetNr[SAVE_TYPE_BANK]);
+            } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+                displayName = filesystem_sceneSlotName(
+                    menu_currentPresetNr[SAVE_TYPE_SCENE]);
+            } else {
+                /*
+                 * Kit numbers and names come from the already-loaded index.
+                 *
+                 * preset_currentName receives the selected `/Kit/.hcindex`
+                 * row before the payload request begins. During the short
+                 * family entry/exit cache window a newly scrolled number is
+                 * blank; during ordinary payload/apply work the Kit index stays
+                 * resident and supplies the new name immediately.
+                 */
+                displayName = preset_currentName;
+            }
         }
 
-        numtostrpu(&editDisplayBuffer[1][1], displayPreset, ' ');
+        menu_formatPresetNumber3(&editDisplayBuffer[1][1], displayPreset);
         if (menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
             if (editModeActive) {
                 editDisplayBuffer[1][0] = '[';
@@ -1490,14 +5764,26 @@ static void menu_repaintLoadSavePage(void)
                 }
             }
         }
-        memcpy(&editDisplayBuffer[1][14], menuText_ok, 2);
+        if (menu_currentSaveWouldOverwrite())
+            memcpy(&editDisplayBuffer[1][14], "OW", 2);
+        else
+            memcpy(&editDisplayBuffer[1][14], menuText_ok, 2);
         if ((menu_saveOptions.state == SAVE_STATE_OK) ||
             (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
             editDisplayBuffer[1][13] = ARROW_SIGN;
         }
     } else {
         /* Load page */
-        if (menu_saveOptions.what != SAVE_TYPE_KIT && menu_saveOptions.what != SAVE_TYPE_MORPH) {
+        if (menu_saveOptions.what >= SAVE_TYPE_GLO ||
+            menu_saveOptions.what == SAVE_TYPE_SCENE ||
+            menu_saveOptions.what == SAVE_TYPE_BANK) {
+            /*
+             * Explicit Load commands need a visible confirmation affordance.
+             *
+             * Kit/KitMrp still live-load on slot scroll and therefore hide the
+             * OK text. Scene and Bank do not live-load; their row must show OK
+             * so the user can move to it and click to perform the load.
+             */
             memcpy(&editDisplayBuffer[1][14], menuText_ok, 2);
             if ((menu_saveOptions.state == SAVE_STATE_OK) ||
                 (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
@@ -1517,167 +5803,200 @@ static void menu_repaintGeneric(void)
 {
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
-    const Page *ap = &menuPages[menu_activePage][activePage];
-    uint8_t curParmVal;
     char valueAsText[3];
 
     if (editModeActive) {
-        uint8_t parName  = (&ap->top1)[activeParameter];
-        uint16_t parNr   = (&ap->bot1)[activeParameter];
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        uint16_t curParmVal;
+        uint8_t dtype;
 
-        if (parNr == PAR_RUNTIME_CPU_USE) {
+        if (menu_cellIsEmpty(&cell))
+            return;
+        if (cell.kind == MENU_CELL_STATIC &&
+            cell.static_param == PAR_RUNTIME_CPU_USE) {
             menu_displayCpuUseEdit();
             return;
         }
 
-        curParmVal = menu_getParameterDisplayValue(parNr);
+        curParmVal = menu_cellDisplayValue(&cell);
+        dtype = (uint8_t)(menu_cellDtype(&cell) & 0x0f);
+        if (dtype == DTYPE_TARGET_SELECTION_LFO &&
+            cell.kind == MENU_CELL_INSTRUMENT) {
+            curParmVal = menu_lfoTargetDisplayValue(&cell, curParmVal);
+        } else if (dtype == DTYPE_TARGET_SELECTION_VELO &&
+                   cell.kind == MENU_CELL_INSTRUMENT) {
+            curParmVal = menu_velocityTargetDisplayValue(&cell, curParmVal);
+        } else if (dtype == DTYPE_VOICE_LFO &&
+                   menu_cellIsLfoTargetVoice(&cell)) {
+            if (curParmVal < INSTRUMENT_TARGET_VOICE_FIRST)
+                curParmVal = INSTRUMENT_TARGET_VOICE_FIRST;
+            else if (curParmVal > INSTRUMENT_TARGET_VOICE_SCENE)
+                curParmVal = INSTRUMENT_TARGET_VOICE_SCENE;
+        }
 
         memset(&editDisplayBuffer[0][0], ' ', 16);
         memset(&editDisplayBuffer[1][0], ' ', 16);
 
-        if ((parameter_dtypes[parNr] & 0x0F) == DTYPE_AUTOM_TARGET) {
+        if (cell.kind == MENU_CELL_STATIC && dtype == DTYPE_AUTOM_TARGET) {
+            uint8_t value = (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
             memcpy(&editDisplayBuffer[0][0], "AutDst", 6);
-            numtostru(&editDisplayBuffer[0][7], (uint8_t)(parNr - PAR_P1_DEST + 1));
-            if (modTargets[curParmVal].param == PAR_NONE) {
+            numtostru(&editDisplayBuffer[0][7],
+                      (uint8_t)(cell.static_param - PAR_P1_DEST + 1u));
+            if (modTargets[value].param == PAR_NONE) {
                 memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
             } else {
                 memcpy(&editDisplayBuffer[0][9], "Voice", 5);
-                numtostru(&editDisplayBuffer[0][15], voiceFromModTargValue(curParmVal));
-                menu_displayModTargetFull(curParmVal);
+                numtostru(&editDisplayBuffer[0][15], voiceFromModTargValue(value));
+                menu_displayModTargetFull(value);
             }
         } else {
-            /* Top row: category (0-7) + long name (8-15) */
-            const char *cat = catNames[valueNames[parName].category];
-            const char *lng = longNames[valueNames[parName].longName];
-            uint8_t ci;
-            for (ci=0; ci<8 && cat[ci]; ci++) editDisplayBuffer[0][ci] = cat[ci];
-            for (ci=0; ci<8 && lng[ci]; ci++) editDisplayBuffer[0][8+ci] = lng[ci];
+            uint8_t value = (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
 
-            /* Bottom row: value at col 13 */
-            switch (parameter_dtypes[parNr] & 0x0F) {
+            if (cell.kind == MENU_CELL_SCENE_SETTING) {
+                menu_copyPaddedField(&editDisplayBuffer[0][0],
+                                     "Scene", 8u);
+                switch (cell.scene_setting) {
+                case MENU_SCENE_SETTING_AUDIO_OUT:
+                    menu_copyPaddedField(&editDisplayBuffer[0][8],
+                                         "AudioOut", 8u);
+                    break;
+                case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
+                    menu_copyPaddedField(&editDisplayBuffer[0][8],
+                                         "FX Send", 8u);
+                    break;
+                case MENU_SCENE_SETTING_FADER_SETTING:
+                    menu_copyPaddedField(&editDisplayBuffer[0][8],
+                                         "Fader", 8u);
+                    break;
+                default:
+                    break;
+                }
+            } else if (cell.kind == MENU_CELL_INSTRUMENT ||
+                       cell.kind == MENU_CELL_KIT_SETTING) {
+                menu_copyPaddedField(&editDisplayBuffer[0][0],
+                                     cell.descriptor->category, 8u);
+                menu_copyPaddedField(&editDisplayBuffer[0][8],
+                                     cell.descriptor->long_name, 8u);
+            } else {
+                const char *cat = catNames[valueNames[cell.text_id].category];
+                const char *lng = longNames[valueNames[cell.text_id].longName];
+                uint8_t ci;
+                for (ci = 0u; ci < 8u && cat[ci]; ci++)
+                    editDisplayBuffer[0][ci] = cat[ci];
+                for (ci = 0u; ci < 8u && lng[ci]; ci++)
+                    editDisplayBuffer[0][8u + ci] = lng[ci];
+            }
+
+            switch (dtype) {
             case DTYPE_TARGET_SELECTION_VELO:
             case DTYPE_TARGET_SELECTION_LFO:
-                menu_displayModTargetFull(curParmVal);
+                if (cell.kind == MENU_CELL_INSTRUMENT)
+                    menu_displayInstrumentTargetFull(curParmVal);
+                else if (curParmVal == INSTRUMENT_PARAM_INVALID)
+                    memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+                else
+                    menu_displayModTargetFull(value);
                 break;
             case DTYPE_MIX_FM:
-                if (curParmVal==1) memcpy(&editDisplayBuffer[1][13], menuText_mix, 3);
+                if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_mix, 3);
                 else               memcpy(&editDisplayBuffer[1][13], menuText_fm, 3);
                 break;
             case DTYPE_ON_OFF:
-                if (curParmVal==1) memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
+                if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
                 else               memcpy(&editDisplayBuffer[1][13], menuText_off, 3);
                 break;
+            case DTYPE_LFO_POLARITY:
+                menu_getLfoPolarityName(value, &editDisplayBuffer[1][13]);
+                break;
+            case DTYPE_0B15:
+                if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                    cell.scene_setting == MENU_SCENE_SETTING_FADER_SETTING) {
+                    menu_sceneSettingFaderName(value,
+                                               &editDisplayBuffer[1][13]);
+                    break;
+                }
+                numtostrpu(&editDisplayBuffer[1][13], value, ' ');
+                break;
             case DTYPE_MENU: {
-                uint8_t menuId = (uint8_t)(parameter_dtypes[parNr] >> 4);
-                if (menuId == MENU_WAVEFORM &&
-                    curParmVal >= (uint8_t)waveformNames[0][0]) {
+                uint8_t menuId = (uint8_t)(menu_cellDtype(&cell) >> 4);
+                if (menuId == MENU_WAVEFORM && value >= (uint8_t)waveformNames[0][0]) {
                     char sampleName[SAMPLE_DISPLAY_NAME_LEN + 1u];
                     uint8_t sampleIndex =
-                        (uint8_t)(curParmVal - (uint8_t)waveformNames[0][0]);
+                        (uint8_t)(value - (uint8_t)waveformNames[0][0]);
 
                     sampleMemory_getDisplayName(sampleIndex, sampleName);
                     memcpy(&editDisplayBuffer[1][0], sampleName,
                            SAMPLE_DISPLAY_NAME_LEN);
                 }
-                getMenuItemNameForValue(menuId, curParmVal, &editDisplayBuffer[1][13]);
+                getMenuItemNameForValue(menuId, value, &editDisplayBuffer[1][13]);
                 break; }
             case DTYPE_PM63:
-                numtostrps(&editDisplayBuffer[1][13], (int8_t)(curParmVal - 63));
+                numtostrps(&editDisplayBuffer[1][13], (int8_t)(value - 63));
                 break;
             case DTYPE_NOTE_NAME:
-                if (((parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7) ||
-                     parNr == PAR_TRACK_MIDI_NOTE) && curParmVal==0)
+                if (cell.kind == MENU_CELL_STATIC &&
+                    cell.static_param == PAR_TRACK_MIDI_NOTE && value==0)
                     memcpy(&editDisplayBuffer[1][13], menuText_any, 3);
                 else
-                    setNoteName(curParmVal, &editDisplayBuffer[1][13]);
+                    setNoteName(value, &editDisplayBuffer[1][13]);
                 break;
             case DTYPE_0b1:
-                numtostrpu(&editDisplayBuffer[1][13], (uint8_t)(curParmVal+1), ' ');
+                numtostrpu(&editDisplayBuffer[1][13], (uint8_t)(value+1), ' ');
                 break;
             default:
             case DTYPE_0B127:
             case DTYPE_0B255:
             case DTYPE_1B16:
             case DTYPE_1B128:
-            case DTYPE_0B15:
             case DTYPE_VOICE_LFO:
-                numtostrpu(&editDisplayBuffer[1][13], curParmVal, ' ');
+                if (menu_cellIsLfoTargetVoice(&cell) &&
+                    value == INSTRUMENT_TARGET_VOICE_SCENE) {
+                    memcpy(&editDisplayBuffer[1][13], "scn", 3);
+                } else {
+                    numtostrpu(&editDisplayBuffer[1][13], value, ' ');
+                }
                 break;
             }
         }
     } else {
-        /* Normal mode: 4 columns of 3-char short names + values */
-        const uint8_t is2ndPage = (uint8_t)((activeParameter > 3) ? 4 : 0);
+        const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+            ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
-        /* Top row: 4 short names at cols 0,4,8,12 */
-        memcpy(&editDisplayBuffer[0][0],
-            shortNames[valueNames[(&ap->top1)[0+is2ndPage]].shortName], 3);
-        memcpy(&editDisplayBuffer[0][4],
-            shortNames[valueNames[(&ap->top1)[1+is2ndPage]].shortName], 3);
-        memcpy(&editDisplayBuffer[0][8],
-            shortNames[valueNames[(&ap->top1)[2+is2ndPage]].shortName], 3);
-        memcpy(&editDisplayBuffer[0][12],
-            shortNames[valueNames[(&ap->top1)[3+is2ndPage]].shortName], 3);
+        for (i = 0u; i < 4u; i++) {
+            menu_cell_t cell = menu_resolveCell(activePage,
+                                                (uint8_t)(i + is2ndPage));
+            if (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP) {
+                memcpy(&editDisplayBuffer[0][4u * i], menuText_blank, 3);
+            } else if (cell.kind == MENU_CELL_SCENE_SETTING) {
+                menu_sceneSettingShortName(&cell,
+                                           &editDisplayBuffer[0][4u * i]);
+            } else if (cell.kind == MENU_CELL_INSTRUMENT ||
+                       cell.kind == MENU_CELL_KIT_SETTING) {
+                menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
+                                     cell.descriptor->short_name, 3u);
+            } else if (cell.kind == MENU_CELL_STATIC) {
+                memcpy(&editDisplayBuffer[0][4u * i],
+                       shortNames[valueNames[cell.text_id].shortName], 3);
+            } else {
+                memcpy(&editDisplayBuffer[0][4u * i], menuText_blank, 3);
+            }
+        }
 
-        /* Uppercase the active parameter's short name */
         upr_three(&editDisplayBuffer[0][(activeParameter % 4) * 4]);
-
-        /* Scroll sign at col 15 */
         editDisplayBuffer[0][15] = (char)checkScrollSign(activePage, activeParameter);
 
-        /* Bottom row: 4 values at cols 0,4,8,12 */
-        for (i=0; i<4; i++) {
-            const uint16_t parNr = (&ap->bot1)[i + is2ndPage];
-
-            if (parNr == PAR_NONE) {
+        for (i = 0u; i < 4u; i++) {
+            menu_cell_t cell = menu_resolveCell(activePage,
+                                                (uint8_t)(i + is2ndPage));
+            if (menu_cellIsEmpty(&cell) ||
+                (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP)) {
                 memcpy(valueAsText, menuText_blank, 3);
-            } else if (parNr == PAR_RUNTIME_CPU_USE) {
+            } else if (cell.kind == MENU_CELL_STATIC &&
+                       cell.static_param == PAR_RUNTIME_CPU_USE) {
                 menu_formatCpuUsePercent3(valueAsText);
             } else {
-                curParmVal = menu_getParameterDisplayValue(parNr);
-                switch (parameter_dtypes[parNr] & 0x0F) {
-                case DTYPE_TARGET_SELECTION_VELO:
-                case DTYPE_TARGET_SELECTION_LFO:
-                    menu_displayModTargetShort(curParmVal, valueAsText, 0);
-                    break;
-                case DTYPE_AUTOM_TARGET:
-                    menu_displayModTargetShort(curParmVal, valueAsText, 1);
-                    break;
-                case DTYPE_PM63:
-                    numtostrps(valueAsText, (int8_t)(curParmVal - 63));
-                    break;
-                case DTYPE_NOTE_NAME:
-                    if (((parNr >= PAR_MIDI_NOTE1 && parNr <= PAR_MIDI_NOTE7) ||
-                         parNr == PAR_TRACK_MIDI_NOTE) && curParmVal==0)
-                        memcpy(valueAsText, menuText_any, 3);
-                    else
-                        setNoteName(curParmVal, valueAsText);
-                    break;
-                case DTYPE_MIX_FM:
-                    if (curParmVal==1) memcpy(valueAsText, menuText_mix, 3);
-                    else               memcpy(valueAsText, menuText_fm, 3);
-                    break;
-                case DTYPE_ON_OFF:
-                    if (curParmVal==1) memcpy(valueAsText, menuText_on, 3);
-                    else               memcpy(valueAsText, menuText_off, 3);
-                    break;
-                case DTYPE_MENU: {
-                    uint8_t menuId = (uint8_t)(parameter_dtypes[parNr] >> 4);
-                    getMenuItemNameForValue(menuId, curParmVal, valueAsText);
-                    break; }
-                case DTYPE_0b1:
-                    numtostrpu(valueAsText, (uint8_t)(curParmVal+1), ' ');
-                    break;
-                default:
-                case DTYPE_0B127:
-                case DTYPE_0B255:
-                case DTYPE_1B16:
-                case DTYPE_0B15:
-                case DTYPE_VOICE_LFO:
-                    numtostrpu(valueAsText, curParmVal, ' ');
-                    break;
-                }
+                menu_formatCellValue3(&cell, valueAsText);
             }
             memcpy(&editDisplayBuffer[1][4*i], valueAsText, 3);
         }
@@ -1691,109 +6010,60 @@ static void menu_encoderChangeParameter(int8_t inc)
 {
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
-    uint16_t paramNr = (&menuPages[menu_activePage][activePage].bot1)[activeParameter];
+    menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+    uint16_t value;
 
-    if (paramNr == PAR_RUNTIME_CPU_USE || paramNr >= NUM_PARAMS)
+    if (menu_cellIsEmpty(&cell))
+        return;
+    if (cell.kind == MENU_CELL_STATIC &&
+        cell.static_param == PAR_RUNTIME_CPU_USE)
         return;
 
-    uint8_t *paramValue = menu_getParameterEditPtr(paramNr);
+    value = menu_cellDisplayValue(&cell);
 
-    if (!paramValue)
+    if (menu_cellIsLfoTargetVoice(&cell)) {
+        (void)menu_lfoTargetEditVoice(&cell, inc);
         return;
+    }
+    if (menu_cellIsLfoTargetParam(&cell)) {
+        (void)menu_lfoTargetEditParam(&cell, inc);
+        return;
+    }
+    if (menu_cellIsVelocityTargetParam(&cell)) {
+        (void)menu_velocityTargetEditParam(&cell, inc);
+        return;
+    }
 
-    /* Apply inc with proper saturation. The original AVR code only checked
-    ** for the boundary value (255 for CW, >= -inc for CCW), which worked when
-    ** |inc|=1 always. With encoder acceleration, |inc| can be up to 4 (or
-    ** larger if you ever raise ACCEL_MAX_MULT), and the boundary checks must
-    ** work for the full range. The dtype-specific clamps further down would
-    ** catch overflow into the high range, but a uint8_t wrap from e.g. 250+10
-    ** lands at 4, which the clamps don't see as out-of-range. */
-    if (inc > 0) {
-        int16_t sum = (int16_t)*paramValue + (int16_t)inc;
-        *paramValue = (sum > 255) ? 255 : (uint8_t)sum;
+    /*
+     * Apply encoder acceleration in a value-local domain before committing to
+     * the owner. Static cells eventually write parameter_values[]; instrument
+     * cells write SceneData through Preset so active/morph endpoints and DSP
+     * side effects stay paired.
+     */
+    if ((menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_VELO ||
+        (menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_LFO) {
+        if (value == INSTRUMENT_PARAM_INVALID && inc > 0)
+            value = 0u;
+        else if (value == INSTRUMENT_PARAM_INVALID)
+            return;
+        else if (inc > 0)
+            value = (value < 65535u - (uint16_t)inc)
+                ? (uint16_t)(value + (uint16_t)inc) : 65535u;
+        else if (inc < 0) {
+            uint16_t step = (uint16_t)(-inc);
+            value = (value > step) ? (uint16_t)(value - step)
+                                   : INSTRUMENT_PARAM_INVALID;
+        }
+    } else if (inc > 0) {
+        uint32_t sum = (uint32_t)value + (uint32_t)inc;
+        value = (sum > 65535u) ? 65535u : (uint16_t)sum;
     } else if (inc < 0) {
-        int16_t sum = (int16_t)*paramValue + (int16_t)inc;
-        *paramValue = (sum < 0) ? 0 : (uint8_t)sum;
+        uint16_t step = (uint16_t)(-inc);
+        value = (value > step) ? (uint16_t)(value - step) : 0u;
     }
 
-    switch (parameter_dtypes[paramNr] & 0x0F) {
-    case DTYPE_TARGET_SELECTION_VELO: {
-        uint8_t voiceNr = (uint8_t)(paramNr - PAR_VEL_DEST_1);
-        if (*paramValue < modTargetVoiceOffsets[voiceNr].start) {
-            *paramValue = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
-        } else if (*paramValue > modTargetVoiceOffsets[voiceNr].end) {
-            *paramValue = modTargetVoiceOffsets[voiceNr].end;
-        }
-        /* _SEQUENCER_ADD_SPIKE_: target message send is centralized below via
-        ** menu_sendSoundParameter(paramNr, *paramValue). */
-        break; }
-    case DTYPE_VOICE_LFO: {
-        if (*paramValue < 1) *paramValue = 1;
-        else if (*paramValue > 6) *paramValue = 6;
-        /* _SEQUENCER_ADD_SPIKE_: linked TARGET_LFO update/sending is handled in
-        ** menu_sendSoundParameter(), matching the AVR combined behavior. */
-        break; }
-    case DTYPE_TARGET_SELECTION_LFO:
-    {
-        uint8_t linkedVoice = menu_getParameterDisplayValue((uint16_t)(PAR_VOICE_LFO1+(paramNr - PAR_TARGET_LFO1)));
-        uint8_t voiceNr;
-        if (linkedVoice < 1u || linkedVoice > 6u)
-            linkedVoice = 1u;
-        voiceNr = (uint8_t)(linkedVoice - 1u);
-        if(*paramValue < (modTargetVoiceOffsets[voiceNr].start)) {
-            if(inc < 0) // going down, allow 0
-                *paramValue=0;
-            else // going up fix to start
-                *paramValue = (modTargetVoiceOffsets[voiceNr].start);
-        } else if (*paramValue > (modTargetVoiceOffsets[voiceNr].end)) {
-            *paramValue = (modTargetVoiceOffsets[voiceNr].end);
-        }
-        menu_TargetVoiceGapIndex = getModTargetGapIndex(*paramValue);
-        break;
-    }
-        // {
-        // uint8_t voiceNr = (uint8_t)(parameter_values[PAR_VOICE_LFO1 + (paramNr - PAR_TARGET_LFO1)] - 1);
-        // if (*paramValue < modTargetVoiceOffsets[voiceNr].start) {
-        //     *paramValue = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
-        // } else if (*paramValue > modTargetVoiceOffsets[voiceNr].end) {
-        //     *paramValue = modTargetVoiceOffsets[voiceNr].end;
-        // }
-        // menu_TargetVoiceGapIndex = getModTargetGapIndex(*paramValue);
-        // break; 
-        // }
-    case DTYPE_AUTOM_TARGET: {
-        uint8_t nmt = getNumModTargets();
-        if (*paramValue >= nmt) *paramValue = (uint8_t)(nmt - 1);
-        break; }
-    case DTYPE_0B255: break;
-    case DTYPE_1B16:
-        if (*paramValue < 1) *paramValue = 1;
-        else if (*paramValue > 16) *paramValue = 16;
-        break;
-    case DTYPE_1B128:
-        if (*paramValue < 1) *paramValue = 1;
-        else if (*paramValue > 128) *paramValue = 128;
-        break;
-    case DTYPE_0B15:
-        if (*paramValue > 15) *paramValue = 15;
-        break;
-    case DTYPE_MIX_FM:
-    case DTYPE_ON_OFF:
-    case DTYPE_0b1:
-        if (*paramValue > 1) *paramValue = 1;
-        break;
-    case DTYPE_MENU: {
-        uint8_t menuId = (uint8_t)(parameter_dtypes[paramNr] >> 4);
-        uint8_t numEntries = getMaxEntriesForMenu(menuId);
-        if (*paramValue >= numEntries) *paramValue = (uint8_t)(numEntries - 1);
-        break; }
-    default:
-    case DTYPE_0B127:
-        if (*paramValue > 127) *paramValue = 127;
-        break;
-    }
-
-    menu_sendEditedParameter(paramNr, *paramValue);
+    menu_clampCellValue(&cell, &value);
+    (void)menu_cellCommitValue(&cell, value);
 }
 
 /* -----------------------------------------------------------------------
@@ -1804,10 +6074,61 @@ static void menu_moveToMenuItem(int8_t inc)
     int8_t activeParameter = (int8_t)(menuIndex & MASK_PARAMETER);
     int8_t activePage      = (int8_t)(menuIndex >> PAGE_SHIFT);
     uint8_t needLock = 0;
-    uint8_t param;
     uint8_t allowedSkips = 3;
 
     inc = (int8_t)(inc > 0 ? 1 : -1);
+
+    if (menu_isVoicePage(menu_activePage)) {
+        /*
+         * Voice pages navigate real parameters across all populated screens.
+         *
+         * Inputs: encoder movement in compact-view navigation. Output:
+         * activeParameter remains a visible column 0..3, but the remembered
+         * sub-page screen changes when the next selectable cell lives on
+         * another four-cell screen. Empty cells and INSTRUMENT_MENU_SKIP cells
+         * are skipped. Unlike SELECT cycling, encoder navigation does not loop:
+         * decrementing stops at the first selectable cell on screen 0, and
+         * incrementing stops at the final selectable cell on the final populated
+         * screen. On mix, those populated screens include appended Scene-owned
+         * settings after the instrument descriptor screens.
+         */
+        uint8_t subPage = (uint8_t)activePage;
+        uint8_t screen;
+        int16_t candidate;
+
+        if (subPage >= NUM_SUB_PAGES)
+            subPage = 0u;
+        screen = menu_voiceSubPageScreen[subPage];
+        if (screen >= menu_voiceSubPageScreenCount(subPage) ||
+            !menu_voiceSubPageScreenExists(subPage, screen)) {
+            screen = 0u;
+            menu_voiceSubPageScreen[subPage] = 0u;
+        }
+        if (activeParameter < 0 ||
+            activeParameter >= (int8_t)MENU_COMPACT_SCREEN_CELLS) {
+            activeParameter =
+                (int8_t)menu_voiceFirstSelectableColumn(subPage, screen);
+        }
+
+        candidate = (int16_t)(screen * MENU_COMPACT_SCREEN_CELLS +
+                              (uint8_t)activeParameter + inc);
+        while (candidate >= 0 &&
+               candidate < (int16_t)(menu_voiceSubPageScreenCount(subPage) *
+                                      MENU_COMPACT_SCREEN_CELLS)) {
+            if (menu_voiceAbsolutePositionSelectable(subPage,
+                                                     (uint8_t)candidate)) {
+                screen = (uint8_t)(candidate / MENU_COMPACT_SCREEN_CELLS);
+                activeParameter =
+                    (int8_t)(candidate % MENU_COMPACT_SCREEN_CELLS);
+                menu_voiceSubPageScreen[subPage] = screen;
+                menuIndex = (uint8_t)((subPage << PAGE_SHIFT) |
+                                      (uint8_t)activeParameter);
+                return;
+            }
+            candidate = (int16_t)(candidate + inc);
+        }
+        return;
+    }
 
 checkvalid:
     activeParameter = (int8_t)(activeParameter + inc);
@@ -1840,12 +6161,15 @@ checkvalid:
         }
     }
 
-    param = (&menuPages[menu_activePage][(uint8_t)activePage].top1)[(uint8_t)activeParameter];
-    if (param == TEXT_SKIP) {
+    {
+        menu_cell_t cell =
+            menu_resolveCell((uint8_t)activePage, (uint8_t)activeParameter);
+        if (cell.kind == MENU_CELL_STATIC && cell.text_id == TEXT_SKIP) {
         if (allowedSkips--) goto checkvalid;
         else return;
+        }
+        if (menu_cellIsEmpty(&cell)) return;
     }
-    if (param == TEXT_EMPTY) return;
 
     menuIndex = (uint8_t)((activePage << PAGE_SHIFT) | activeParameter);
     (void)needLock; /* lockPotentiometerFetch stubbed */
@@ -1862,49 +6186,290 @@ checkvalid:
 ** requests display/name refreshes through menu_requestCurrentLoadSaveSelection.
 **
 ** Phase 2 kit-load affiliate: when the Load page is editing a kit slot, encoder
-** movement calls menu_requestCurrentLoadSaveSelection(1), which calls
-** preset_loadDrumset(slot, 0). That eventually starts filesystem's directory
-** kit loader for Kit/NNN Name. The Save page still follows the existing save
-** paths until the new save functions are implemented.
+** movement calls menu_requestCurrentLoadSaveSelection(1), which posts a
+** Scene-mask-aware Kit directory request for Kit/NNN Name. KitMrp is adjacent
+** to Kit in the promoted type cycle and reuses the same numbered Kit browser
+** while dispatching to the Morph Save/Load projection.
 ** ----------------------------------------------------------------------- */
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
+    if (menu_instrumentLoadActive) {
+        if (menu_instrumentSaveMode) {
+            /*
+             * Encoder handling for nested Instrument Save.
+             *
+             * Inputs: Save-page encoder delta/click state after the global
+             * edit-mode toggle. Output: the top row toggles Normal vs Morph
+             * Save projection, name characters wrap through printable ASCII,
+             * and OK posts one root Instrument Save. This intentionally
+             * bypasses pool browsing because Save exports the selected resident
+             * source slot, not a file selected from Instrument/.
+             */
+            if (btnClicked && editModeActive &&
+                menu_saveOptions.state == SAVE_STATE_OK) {
+                menu_instrumentSaveRequestSelection();
+                return;
+            }
+            if (editModeActive) {
+                if (inc != 0 &&
+                    menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
+                    /*
+                     * Toggle the nested Instrument Save projection.
+                     *
+                     * Inputs: any encoder delta while the top row is in edit
+                     * mode. Output: zero selects normal Instrument Save; one
+                     * selects InstrumentMrp. The resident source type is not
+                     * changed here, so filename extension and overwrite checks
+                     * remain tied to SceneData's current slot type.
+                     */
+                    menu_instrumentLoadMorphMode =
+                        (uint8_t)!menu_instrumentLoadMorphMode;
+                } else if (inc != 0 &&
+                    menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
+                    menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
+                    uint8_t ci = (uint8_t)(menu_saveOptions.state -
+                                           SAVE_STATE_EDIT_NAME1);
+                    char c = (char)(menu_instrumentSaveName[ci] + inc);
+                    if (c < 0x20)
+                        c = 0x7e;
+                    else if (c > 0x7e)
+                        c = 0x20;
+                    menu_instrumentSaveName[ci] = c;
+                    menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] =
+                        '\0';
+                }
+            } else {
+                if (inc != 0) {
+                    /*
+                     * Move across only the visible Instrument Save fields.
+                     *
+                     * Inputs: signed encoder delta while the nested Save page
+                     * is in selection mode. Output: the selection cursor can
+                     * land on the top projection row, each name character, and
+                     * OK/OW, but never on the hidden preset-number row used by
+                     * top-level Kit/Scene save.
+                     */
+                    menu_saveOptions.state =
+                        menu_instrumentSaveStepSelectionState(
+                            menu_saveOptions.state, inc);
+                }
+            }
+            return;
+        }
+
+        /*
+         * Encoder handling for nested Instrument Load.
+         *
+         * Inputs: normal Load-page encoder delta/click state. Outputs: without
+         * edit mode, the cursor moves between type and file rows; in edit mode,
+         * the encoder steps selectable types without loading, or moves from
+         * kit-member display to a concrete sorted pool item and loads that
+         * item. The normal Save/Load type bitfield is bypassed because this is
+         * a destination-slot submode, not a SAVE_TYPE_*.
+         */
+        (void)btnClicked;
+        if (editModeActive) {
+            if (menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
+                if (inc != 0)
+                    menu_instrumentLoadStepType(inc);
+            } else {
+                uint16_t cached_count = filesystem_instrumentCount(
+                    menu_instrumentLoadType);
+                uint16_t count = (cached_count == 0u && menu_storageBusy)
+                    ? MENU_INSTRUMENT_PROVISIONAL_COUNT : cached_count;
+                if (count > 0u && inc != 0) {
+                    int32_t next;
+                    if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT ||
+                        menu_instrumentLoadShownType != menu_instrumentLoadType) {
+                        /*
+                         * `kit` is a fixed row above pool 000, never a wrap
+                         * sentinel. A negative turn while already on it must
+                         * stay there; only a positive turn enters zero-based
+                         * pool index 0, rendered as the three-digit `000`.
+                         * This prevents the prior count-1 overflow/jump.
+                         */
+                        next = (inc < 0) ? -1 : 0;
+                    } else {
+                        next = (int32_t)menu_instrumentLoadShownIndex +
+                               (int32_t)inc;
+                    }
+                    if (next >= (int32_t)count)
+                        next = (int32_t)(count - 1u);
+                    if (next < 0) {
+                        /*
+                         * Cross from pool row 000 back to the direct `kit` row,
+                         * but make a turn while already on `kit` a no-op.
+                         *
+                         * Inputs: a negative lower-row turn, the current source
+                         * row, and the still-valid one-voice normal-load
+                         * snapshot. Output: only the first pool-to-`kit`
+                         * crossing posts the hidden-file restore; subsequent
+                         * decrements while `kit` is already selected alter
+                         * neither filesystem nor Preset state. Why: Load-number
+                         * turns remain intentionally accepted while an earlier
+                         * request drains. Reposting `.hctmp.<ext>` from every
+                         * detent of a large decrement could repeatedly contend
+                         * with that request and leave a stale restore eligible
+                         * after the user re-entered Instrument Load. The
+                         * existing identity row remains its original HCNAMES
+                         * stem, so no name copy or HCNAMES write is needed.
+                         * Affiliates: menu_restoreInstrumentLoadTemp(), the
+                         * hidden `.hctmp.<ext>` parser request, and the `kit`
+                         * renderer in menu_repaintLoadSavePage().
+                         *
+                         * Rapid turns can reach this boundary while an older
+                         * pool load still owns storage. Pool-to-pool turns
+                         * coalesce their final requested row through
+                         * menu_deferSelectionRequest, but `kit` is not a pool
+                         * row and restores through menu_finishInstrumentApplySession().
+                         * Therefore this boundary consumes/cancels that pool
+                         * retry before either the idempotent `kit` return or
+                         * the first restore request. Without the cancellation,
+                         * the completed temporary restore leaves the obsolete
+                         * retry armed; the generic idle dispatcher then tries
+                         * to service it while the cursor is `kit`, which can
+                         * reassert storage-busy state and lock number input.
+                         * Input: the pending coalesced pool-selection flag.
+                         * Output: no deferred pool request remains once the
+                         * user's newest selection is `kit`. No payload,
+                         * identity, index, or SRAM allocation is modified.
+                         */
+                        menu_deferSelectionRequest = 0u;
+                        if (menu_instrumentLoadSource ==
+                                MENU_INSTRUMENT_SOURCE_KIT &&
+                            menu_instrumentLoadShownType ==
+                                menu_instrumentLoadType) {
+                            if (!menu_storageBusy)
+                                menu_repaintAll();
+                            return;
+                        }
+                        menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
+                        menu_instrumentLoadShownType = menu_instrumentLoadType;
+                        menu_instrumentLoadShownIndex = 0u;
+                        menu_restoreInstrumentLoadTemp();
+                        if (!menu_storageBusy)
+                            menu_repaintAll();
+                        return;
+                    }
+                    if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT ||
+                        menu_instrumentLoadShownType != menu_instrumentLoadType ||
+                        (uint16_t)next != menu_instrumentLoadShownIndex) {
+                        menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_POOL;
+                        menu_instrumentLoadShownType = menu_instrumentLoadType;
+                        menu_instrumentLoadShownIndex = (uint16_t)next;
+                        menu_instrumentLoadIndex[menu_instrumentLoadType] =
+                            (uint16_t)next;
+                        if (menu_storageBusy) {
+                            /* Preserve only the latest desired pool number.
+                             * Payload/apply work leaves the typed index in
+                             * cache, so publish its selected name immediately.
+                             * During the entry/exit HCNAMES window no typed
+                             * row exists and the provisional name stays blank.
+                             * Preset's active request coordinates remain
+                             * untouched until the old operation completes. */
+                            /* The pool label is derived by the renderer from
+                             * the still-valid typed cache. Do not use the
+                             * identity row as temporary UI storage: it is the
+                             * sole retained original `kit` name for a later
+                             * decrement back above row 000. */
+                            menu_deferSelectionRequest = 1u;
+                            menu_repaintAll();
+                        } else {
+                            menu_instrumentLoadRequestSelection();
+                        }
+                    }
+                }
+            }
+        } else {
+            if (inc < 0)
+                menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+            else if (inc > 0)
+                menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
+        }
+        return;
+    }
+
     if (btnClicked) {
         if ((editModeActive && menu_saveOptions.state == SAVE_STATE_OK) ||
             (menu_saveOptions.what >= SAVE_TYPE_GLO && menu_saveOptions.state > SAVE_STATE_EDIT_TYPE)) {
 
             if (menu_activePage == SAVE_PAGE) {
                 switch (menu_saveOptions.what) {
-                case SAVE_TYPE_PATTERN: preset_savePattern(menu_currentPresetNr[SAVE_TYPE_PATTERN]); break;
-                case SAVE_TYPE_KIT:     preset_saveDrumset(menu_currentPresetNr[SAVE_TYPE_KIT], 0); break;
-                case SAVE_TYPE_MORPH:   preset_saveDrumset(menu_currentPresetNr[SAVE_TYPE_MORPH], 1); break;
+                case SAVE_TYPE_FILE:
+                    if (preset_saveTestFile(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_DIR:
+                    if (preset_saveTestDir(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_SIMPLE_DIR:
+                    if (preset_saveTestSimpleDir(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_KIT:
+                    if (preset_saveDrumset(
+                            menu_currentPresetNr[SAVE_TYPE_KIT], 0u,
+                            menu_loadSaveSourceScene))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_KIT_MORPH:
+                    if (preset_saveDrumset(
+                            menu_currentPresetNr[SAVE_TYPE_KIT_MORPH], 1u,
+                            menu_loadSaveSourceScene))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_SCENE:
+                    if (preset_saveScene(
+                            menu_currentPresetNr[SAVE_TYPE_SCENE],
+                            menu_loadSaveSourceScene))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_BANK:
+                    if (preset_saveBank(
+                            menu_currentPresetNr[SAVE_TYPE_BANK],
+                            menu_kitLoadSceneMask))
+                        menu_storageBusy = 1u;
+                    break;
                 case SAVE_TYPE_GLO:     preset_saveGlobals(); break;
-                case SAVE_TYPE_PERFORMANCE: preset_saveAll(menu_currentPresetNr[SAVE_TYPE_PERFORMANCE], 0); break;
-                case SAVE_TYPE_ALL:     preset_saveAll(menu_currentPresetNr[SAVE_TYPE_ALL], 1); break;
                 default: break;
                 }
-                menu_resetSaveParameters();
+                if (menu_saveOptions.what != SAVE_TYPE_FILE &&
+                    menu_saveOptions.what != SAVE_TYPE_DIR &&
+                    menu_saveOptions.what != SAVE_TYPE_SIMPLE_DIR)
+                    /*
+                     * Keep the active Kit/Scene cache alive while the save
+                     * state machine runs. Its completion phase updates the
+                     * saved slot in this cache and regenerates `.hcindex`;
+                     * disposing here would make that refresh silently skip.
+                     */
+                    menu_resetSaveParameters();
             } else {
                 switch (menu_saveOptions.what) {
-                case SAVE_TYPE_PATTERN:
-                    if (menu_nameIsEmptySlot()) {
-                        menu_resetSaveParameters();
-                    } else if (preset_loadPattern(menu_currentPresetNr[SAVE_TYPE_PATTERN])) {
-                        menu_beginStorageMessage("Loading pattern");
+                case SAVE_TYPE_FILE:
+                    if (preset_loadTestFile(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_DIR:
+                    if (preset_loadTestDir(menu_currentTestName()))
+                        menu_storageBusy = 1u;
+                    break;
+                case SAVE_TYPE_SCENE:
+                    if (preset_loadSceneForScenes(
+                            menu_currentPresetNr[SAVE_TYPE_SCENE],
+                            menu_kitLoadSceneMask)) {
+                        menu_storageBusy = 1u;
+                    } else {
+                        menu_storageBusy = 0u;
                     }
                     break;
-                case SAVE_TYPE_PERFORMANCE:
-                    if (menu_nameIsEmptySlot()) {
-                        menu_resetSaveParameters();
-                    } else if (preset_loadAll(menu_currentPresetNr[SAVE_TYPE_PERFORMANCE], 0)) {
-                        menu_beginStorageMessage("Loading pattern");
-                    }
-                    break;
-                case SAVE_TYPE_ALL:
-                    if (menu_nameIsEmptySlot()) {
-                        menu_resetSaveParameters();
-                    } else if (preset_loadAll(menu_currentPresetNr[SAVE_TYPE_ALL], 1)) {
-                        menu_beginStorageMessage("Loading pattern");
+                case SAVE_TYPE_BANK:
+                    if (preset_loadBank(
+                            menu_currentPresetNr[SAVE_TYPE_BANK],
+                            menu_kitLoadSceneMask)) {
+                        menu_storageBusy = 1u;
+                    } else {
+                        menu_storageBusy = 0u;
                     }
                     break;
                 case SAVE_TYPE_GLO:
@@ -1923,23 +6488,82 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
     if (editModeActive) {
         switch (menu_saveOptions.state) {
         case SAVE_STATE_EDIT_TYPE:
-            if (inc < 0) {
-                if (menu_saveOptions.what != 0) menu_saveOptions.what--;
-            } else if (inc > 0) {
-                if (menu_saveOptions.what < SAVE_TYPE_SAMPLES) menu_saveOptions.what++;
+            if (inc != 0) {
+                uint8_t previous_type = menu_saveOptions.what;
+                menu_saveOptions.what =
+                    menu_nextRestoredLoadSaveType(menu_saveOptions.what, inc);
+                /*
+                 * A top-level type change is a name-session boundary only when
+                 * it leaves Kit/KitMrp. The new type is installed first so an
+                 * asynchronous exit flush can continue directly into its
+                 * browser. Kit <-> KitMrp retains the seven-name scratch.
+                 */
+                if (menu_saveOptions.what != previous_type &&
+                    menu_saveOptions.what != SAVE_TYPE_KIT &&
+                    menu_saveOptions.what != SAVE_TYPE_KIT_MORPH &&
+                    menu_endResidentNameScratchSession()) {
+                    menu_resetLoadSaveSceneSelection();
+                    menu_refreshLoadSceneLeds();
+                    break;
+                }
+                if (menu_saveOptions.what != previous_type)
+                    filesystem_clearNameCache();
             }
+            if (menu_saveOptions.what == SAVE_TYPE_BANK)
+                menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
+            menu_resetLoadSaveSceneSelection();
             menu_requestCurrentLoadSaveSelection(0);
+            menu_refreshLoadSceneLeds();
             break;
         case SAVE_STATE_EDIT_PRESET_NR: {
+            if (menu_saveOptions.what == SAVE_TYPE_FILE ||
+                menu_saveOptions.what == SAVE_TYPE_DIR ||
+                menu_saveOptions.what == SAVE_TYPE_SIMPLE_DIR) {
+                uint8_t count = menu_testObjectCount(menu_saveOptions.what);
+                int16_t maxPreset = (count == 0u) ? 0 : (int16_t)(count - 1u);
+                int16_t newPreset =
+                    (int16_t)menu_currentPresetNr[menu_saveOptions.what] +
+                    (int16_t)inc;
+
+                /*
+                 * File/Dir Load browser index.
+                 *
+                 * The exact names live in filesystem's scan cache. This
+                 * saturating index is the only state Menu owns, so scrolling
+                 * cannot synthesize paths or fallback names that asyncfatfs
+                 * has not actually reported.
+                 */
+                if (menu_activePage == SAVE_PAGE) {
+                    menu_saveOptions.state = SAVE_STATE_EDIT_NAME1;
+                    break;
+                }
+                if (newPreset < 0)
+                    newPreset = 0;
+                else if (newPreset > maxPreset)
+                    newPreset = maxPreset;
+                menu_currentPresetNr[menu_saveOptions.what] =
+                    (uint16_t)newPreset;
+                break;
+            }
+            /* Settings and Samples are unnumbered Load/Save choices. Keeping
+             * this guard beside the kit-backed menu_currentPresetNr[] access
+             * prevents their enum values from being treated as numbered preset
+             * coordinates. Kit and KitMrp are the only entries below
+             * SAVE_TYPE_GLO. */
+            if (menu_saveOptions.what >= SAVE_TYPE_GLO) {
+                menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+                break;
+            }
             /* Saturating add - original `kit > 0` and `kit <= 125` checks
-            ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. Kits use
-            ** 0..127 internally so they can display/open 001..128 folders;
-            ** the older numbered file pools remain capped at 0..125 here. */
-            int16_t maxPreset = (menu_saveOptions.what == SAVE_TYPE_KIT) ? 127 : 125;
+            ** assumed |inc|=1 and underflow/overflow on uint8_t wrap. Kit
+            ** slots are now uint16_t because the directory layout exposes
+            ** 000..999 folders, with 000 real, while the guard keeps non-kit
+            ** menu entries away from the numbered-slot path. */
+            int16_t maxPreset = (menu_saveOptions.what < SAVE_TYPE_GLO) ? 999 : 125;
             int16_t newPreset = (int16_t)menu_currentPresetNr[menu_saveOptions.what] + (int16_t)inc;
             if (newPreset < 0)        newPreset = 0;
             else if (newPreset > maxPreset) newPreset = maxPreset;
-            menu_currentPresetNr[menu_saveOptions.what] = (uint8_t)newPreset;
+            menu_currentPresetNr[menu_saveOptions.what] = (uint16_t)newPreset;
             if (inc != 0) {
                 if (menu_activePage == LOAD_PAGE) {
                     /* Kit load reads the name in its own phase 2 -
@@ -1955,8 +6579,30 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
         default:
             if (inc != 0 && menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1 &&
                 menu_saveOptions.state <= SAVE_STATE_EDIT_NAME8) {
-                preset_currentName[menu_saveOptions.state - SAVE_STATE_EDIT_NAME1] =
-                    (char)(preset_currentName[menu_saveOptions.state - SAVE_STATE_EDIT_NAME1] + inc);
+                uint8_t ci = (uint8_t)(menu_saveOptions.state -
+                                       SAVE_STATE_EDIT_NAME1);
+                if (menu_saveOptions.what == SAVE_TYPE_FILE ||
+                    menu_saveOptions.what == SAVE_TYPE_DIR ||
+                    menu_saveOptions.what == SAVE_TYPE_SIMPLE_DIR) {
+                    /*
+                     * Temporary File/Dir save-name editor.
+                     *
+                     * The first eight characters are editable on the LCD. The
+                     * buffer itself is long-name sized so future UI work can
+                     * add horizontal scrolling without touching filesystem or
+                     * asyncfatfs again.
+                     */
+                    char c = (char)(menu_testEditName[ci] + inc);
+                    if (c < 0x20)
+                        c = 0x7e;
+                    else if (c > 0x7e)
+                        c = 0x20;
+                    menu_testEditName[ci] = c;
+                    menu_testEditName[FS_TEST_NAME_MAX] = '\0';
+                } else {
+                    preset_currentName[ci] =
+                        (char)(preset_currentName[ci] + inc);
+                }
             }
             break;
         }
@@ -1969,12 +6615,55 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             }
         } else if (inc > 0) {
             if (menu_saveOptions.state < SAVE_STATE_OK) {
+                uint8_t previous_state = menu_saveOptions.state;
                 menu_saveOptions.state++;
+                if (menu_activePage == SAVE_PAGE &&
+                    (menu_saveOptions.what == SAVE_TYPE_KIT ||
+                     menu_saveOptions.what == SAVE_TYPE_KIT_MORPH ||
+                     menu_saveOptions.what == SAVE_TYPE_SCENE ||
+                     menu_saveOptions.what == SAVE_TYPE_BANK) &&
+                    previous_state == SAVE_STATE_EDIT_PRESET_NR &&
+                    menu_saveOptions.state == SAVE_STATE_EDIT_NAME1) {
+                    /*
+                     * Seed Save name editing from resident identity, not from
+                     * the selected library slot.
+                     *
+                     * Inputs: the user has just moved from slot number editing
+                     * to character 1 on the Save page. Output: Scene and Bank
+                     * copy their retained identities; Kit/KitMrp copies the
+                     * already-retained Kit scratch row, loading `.hcindex` only
+                     * if another browser replaced it. This matters for empty
+                     * target slots: the
+                     * browser row may display `Empty`, but the editor must
+                     * begin with the currently loaded object name.
+                     */
+                    if (menu_saveOptions.what == SAVE_TYPE_BANK) {
+                        memcpy(preset_currentName, bank_displayName(), 8u);
+                    } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+                        memcpy(preset_currentName,
+                               filesystem_identityName(
+                                   FS_IDENTITY_SCENE_ROW),
+                               8u);
+                    } else {
+                        /*
+                         * The selected source Scene may have changed since
+                         * Save-page entry. Ensure that Scene's seven-row entry
+                         * scratch is active, then copy its retained Kit row.
+                         * This performs no HCNAMES traversal when the Scene is
+                         * unchanged.
+                         */
+                        menu_requestKitEntryNames();
+                    }
+                }
                 if (menu_activePage == LOAD_PAGE) {
                     if (menu_saveOptions.state >= SAVE_STATE_EDIT_NAME1)
                         menu_saveOptions.state = SAVE_STATE_OK;
                     if (menu_saveOptions.state == SAVE_STATE_OK &&
-                        (menu_saveOptions.what == SAVE_TYPE_KIT || menu_saveOptions.what == SAVE_TYPE_MORPH))
+                        menu_saveOptions.what < SAVE_TYPE_GLO &&
+                        menu_saveOptions.what != SAVE_TYPE_SCENE &&
+                        menu_saveOptions.what != SAVE_TYPE_BANK &&
+                        menu_saveOptions.what != SAVE_TYPE_FILE &&
+                        menu_saveOptions.what != SAVE_TYPE_DIR)
                         menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
                 }
             }
@@ -1992,8 +6681,34 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     uint8_t oldIndex = menuIndex;
 
     if (menu_storageBusy) {
-        lastEncoderButton = button;
-        return;
+        uint8_t allow_load_number_scroll = (uint8_t)(
+            inc != 0 &&
+            button == lastEncoderButton &&
+            menu_activePage == LOAD_PAGE &&
+            editModeActive &&
+            menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR &&
+            ((menu_instrumentLoadActive && !menu_instrumentSaveMode) ||
+             (!menu_instrumentLoadActive &&
+              (menu_saveOptions.what == SAVE_TYPE_KIT ||
+               menu_saveOptions.what == SAVE_TYPE_KIT_MORPH))));
+
+        /*
+         * Storage exclusivity blocks every control except Load-number turns.
+         *
+         * Kit and nested Instrument payloads can take long enough that a hard
+         * encoder lock makes sparse libraries painful to browse. A plain turn
+         * on the already-selected number field may therefore update only the
+         * Menu-owned desired number while the immutable older request drains.
+         * Clicks, type changes, Scene/voice changes, Save editing, and all
+         * non-Load pages remain blocked. The handler leaves one existing defer
+         * flag. The resident typed/Kit index normally stays active, so the
+         * latest number and name repaint immediately; only entry/exit waits for
+         * shared-cache restoration.
+         */
+        if (!allow_load_number_scroll) {
+            lastEncoderButton = button;
+            return;
+        }
     }
 
     if (button != lastEncoderButton) {
@@ -2093,14 +6808,19 @@ static uint8_t menu_paramVisible(uint16_t paramNr)
         return 0;
 
     if (editModeActive) {
-        return (uint8_t)((&menuPages[menu_activePage][activePage].bot1)
-                         [activeParameter] == paramNr);
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                         cell.static_param == paramNr);
     } else {
-        const uint8_t is2ndPage = (uint8_t)((activeParameter > 3) ? 4 : 0);
+        const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+            ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
         for (i = 0; i < 4; i++) {
-            if ((&menuPages[menu_activePage][activePage].bot1)[i + is2ndPage] == paramNr)
+            menu_cell_t cell =
+                menu_resolveCell(activePage, (uint8_t)(i + is2ndPage));
+            if (cell.kind == MENU_CELL_STATIC &&
+                cell.static_param == paramNr)
                 return 1;
         }
     }
@@ -2118,17 +6838,37 @@ void menu_notifyExternalParamChanged(uint16_t paramNr)
         menu_knobs_dirty = 1;
 }
 
+static uint8_t menu_paramIsMorphAmount(uint16_t paramNr)
+{
+    /*
+     * Identify flat Scene Morph amount controls.
+     *
+     * Inputs: canonical ParameterArray id. Output: nonzero for the overall
+     * Morph bulk-set control and the six per-slot Morph controls. Clients use
+     * this to keep encoder/endless-pot behavior consistent across Morph
+     * controls without teaching Menu about instrument descriptors or slot
+     * parameter lists.
+     */
+    if (paramNr == PAR_MORPH)
+        return 1u;
+    return (uint8_t)(paramNr >= PAR_VOICE1_MORPH &&
+                     paramNr <= PAR_VOICE6_MORPH);
+}
+
 static void menu_updateEndlessPotScales(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
-    uint8_t is2ndPage = (uint8_t)((activeParameter > 3) ? 4 : 0);
+    uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+        ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
 
     for (uint8_t knobNr = 0; knobNr < ENDLESS_POT_COUNT; knobNr++) {
         uint8_t useDouble = 0;
         if (menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) {
-            uint16_t parNr = (&menuPages[menu_activePage][activePage].bot1)[knobNr + is2ndPage];
-            useDouble = (uint8_t)(parNr == PAR_MORPH);
+            menu_cell_t cell =
+                menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
+            useDouble = (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                                  menu_paramIsMorphAmount(cell.static_param));
         }
         endlessPots_setDouble(knobNr, useDouble);
     }
@@ -2145,62 +6885,63 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     if (menu_storageBusy) return;
 
     if (knobNr >= ENDLESS_POT_COUNT) return;
-    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) return;
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+        menu_handleLoadSaveKnobDelta(knobNr, delta);
+        return;
+    }
 
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
-    const uint8_t is2ndPage       = (uint8_t)((activeParameter > 3) ? 4 : 0);
-    const uint16_t parNr          = (&menuPages[menu_activePage][activePage].bot1)[knobNr + is2ndPage];
+    const uint8_t is2ndPage       = menu_isVoicePage(menu_activePage)
+        ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
+    menu_cell_t cell =
+        menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
+    uint16_t value;
+    int32_t next;
 
-    if (parNr == PAR_NONE || parNr >= NUM_PARAMS) return;
+    if (menu_cellIsEmpty(&cell)) return;
+    if (cell.kind == MENU_CELL_STATIC &&
+        cell.static_param == PAR_RUNTIME_CPU_USE) return;
 
-    uint8_t *pv = menu_getParameterEditPtr(parNr);
-    int16_t inc = delta;
-
-    if (!pv) return;
-
-    int16_t next = (int16_t)(*pv) + inc;
-    if (next < 0) next = 0;
-    else if (next > 255) next = 255;
-    *pv = (uint8_t)next;
-
-    /* clamp by dtype */
-    switch (parameter_dtypes[parNr] & 0x0F) {
-    case DTYPE_TARGET_SELECTION_VELO: {
-        uint8_t voiceNr = (uint8_t)(parNr - PAR_VEL_DEST_1);
-        if (*pv < modTargetVoiceOffsets[voiceNr].start) {
-            *pv = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
-        } else if (*pv > modTargetVoiceOffsets[voiceNr].end) {
-            *pv = modTargetVoiceOffsets[voiceNr].end;
-        }
-        break; }
-    case DTYPE_VOICE_LFO:
-        if (*pv < 1) *pv = 1;
-        else if (*pv > 6) *pv = 6;
-        break;
-    case DTYPE_TARGET_SELECTION_LFO: {
-        uint8_t linkedVoice = menu_getParameterDisplayValue((uint16_t)(PAR_VOICE_LFO1 + (parNr - PAR_TARGET_LFO1)));
-        uint8_t voiceNr;
-        if (linkedVoice < 1u || linkedVoice > 6u)
-            linkedVoice = 1u;
-        voiceNr = (uint8_t)(linkedVoice - 1u);
-        if (*pv < modTargetVoiceOffsets[voiceNr].start) {
-            *pv = (inc < 0) ? 0 : modTargetVoiceOffsets[voiceNr].start;
-        } else if (*pv > modTargetVoiceOffsets[voiceNr].end) {
-            *pv = modTargetVoiceOffsets[voiceNr].end;
-        }
-        break; }
-    case DTYPE_0B255: break;
-    case DTYPE_1B16: if (*pv<1)*pv=1; else if(*pv>16)*pv=16; break;
-    case DTYPE_1B128: if (*pv<1)*pv=1; else if(*pv>128)*pv=128; break;
-    case DTYPE_0B15: if (*pv>15)*pv=15; break;
-    case DTYPE_MIX_FM: case DTYPE_ON_OFF: case DTYPE_0b1: if(*pv>1)*pv=1; break;
-    case DTYPE_MENU: { uint8_t n=getMaxEntriesForMenu((uint8_t)(parameter_dtypes[parNr]>>4)); if(*pv>=n)*pv=(uint8_t)(n-1); break; }
-    default: case DTYPE_0B127: if(*pv>127)*pv=127; break;
+    value = menu_cellDisplayValue(&cell);
+    if (menu_cellIsLfoTargetVoice(&cell)) {
+        if (menu_lfoTargetEditVoice(&cell, delta))
+            menu_knobs_dirty = 1;
+        return;
+    }
+    if (menu_cellIsLfoTargetParam(&cell)) {
+        if (menu_lfoTargetEditParam(&cell, delta))
+            menu_knobs_dirty = 1;
+        return;
+    }
+    if (menu_cellIsVelocityTargetParam(&cell)) {
+        if (menu_velocityTargetEditParam(&cell, delta))
+            menu_knobs_dirty = 1;
+        return;
     }
 
-    menu_sendEditedParameter(parNr, *pv);
-    menu_knobs_dirty = 1;
+    if ((menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_VELO ||
+        (menu_cellDtype(&cell) & 0x0f) == DTYPE_TARGET_SELECTION_LFO) {
+        if (value == INSTRUMENT_PARAM_INVALID && delta > 0)
+            value = 0u;
+        else if (value == INSTRUMENT_PARAM_INVALID)
+            return;
+        else {
+            next = (int32_t)value + (int32_t)delta;
+            if (next < 0) value = INSTRUMENT_PARAM_INVALID;
+            else if (next > 65535) value = 65535u;
+            else value = (uint16_t)next;
+        }
+    } else {
+        next = (int32_t)value + (int32_t)delta;
+        if (next < 0) next = 0;
+        else if (next > 65535) next = 65535;
+        value = (uint16_t)next;
+    }
+
+    menu_clampCellValue(&cell, &value);
+    if (menu_cellCommitValue(&cell, value))
+        menu_knobs_dirty = 1;
 }
 
 /* Consume the knobs-dirty flag and repaint if set. Call once per main
@@ -2227,8 +6968,9 @@ static uint8_t menu_cpuUseWidgetVisible(void)
     if (menu_activePage != MENU_MIDI_PAGE)
         return 0;
     if (editModeActive) {
-        uint16_t parNr = (&menuPages[menu_activePage][activePage].bot1)[activeParameter];
-        return (uint8_t)(parNr == PAR_RUNTIME_CPU_USE);
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                         cell.static_param == PAR_RUNTIME_CPU_USE);
     }
     return (uint8_t)(activePage == 1u && activeParameter >= 4u);
 }
@@ -2291,6 +7033,21 @@ void menu_pollPresetStatus(void)
     if (menu_tickSoundApply())
         return;
 
+    /*
+     * Poll deferred Scene-slot commits outside the storage-busy path.
+     *
+     * Inputs: PERF Scene switching and runtime loads may leave instrument slots
+     * pending until their old amp envelopes fall below the quiet threshold.
+     * Output: one quiet slot can be committed per foreground pass even after the
+     * load UI has been released; trigger-time force-apply remains handled in
+     * MidiVoiceControl before individual notes fire.
+     */
+    if (!menu_soundApplyActive && preset_tickDrumsetApply())
+        return;
+
+    if (menu_tickInstrumentApply())
+        return;
+
     if (menu_tickGlobalApply())
         return;
 
@@ -2301,6 +7058,21 @@ void menu_pollPresetStatus(void)
         menu_pendingAllStaleWarning = 0u;
         menu_showStaleSettingsWarning(FS_STALE_WARNING_ALL);
         return;
+    }
+
+    if (menu_testResultActive &&
+        (uint16_t)(time_sysTick - menu_testResultStart) >= MENU_TEST_RESULT_MS) {
+        /*
+         * End the nonblocking File/Dir result overlay.
+         *
+         * The storage operation is already complete; this timer only controls
+         * how long the copied byte/Dir result remains on the LCD before the
+         * ordinary test menu is repainted.
+         */
+        menu_testResultActive = 0u;
+        if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+            menu_repaintAll();
+        menu_testResultError = 0u;
     }
 
     if (menu_staleWarningActive) {
@@ -2322,8 +7094,44 @@ void menu_pollPresetStatus(void)
             preset_getStatus() == PRESET_IDLE &&
             !menu_storageBusy &&
             (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
-            menu_requestCurrentLoadSaveSelection(menu_deferSelectionLoadKit);
+            /*
+             * A freely-scrolled nested Instrument number is not a top-level
+             * Kit selection. Dispatch its one coalesced retry back to the typed
+             * Instrument loader after `.hcindex` restoration; all other defer
+             * reasons retain the existing top-level request path.
+             */
+            if (menu_instrumentLoadActive &&
+                !menu_instrumentSaveMode &&
+                menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_POOL &&
+                menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
+                menu_instrumentLoadRequestSelection();
+            } else {
+                menu_requestCurrentLoadSaveSelection(
+                    menu_deferSelectionLoadKit);
+            }
         }
+        return;
+    }
+
+    if (!preset_getCompletedOk() &&
+        !menu_completedOpIsTest(preset_getCompletedOp())) {
+        /*
+         * Failed OK/OW operations still return to the Load/Save type row.
+         *
+         * Ordinary filesystem failures used to collapse to PRESET_OP_NONE and
+         * silently repaint/reset. Preserve the error from filesystem.c, but
+         * reset the Load/Save cursor first whenever the busy flag proves the
+         * user launched a command from OK/OW. Output after the overlay clears:
+         * the pointer is back on the top row instead of stranded on OK or OW.
+         * File/Dir test ops keep their detailed result branch below.
+         */
+        if (menu_storageBusy &&
+            (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
+            filesystem_clearNameCache();
+            menu_resetSaveParameters();
+        }
+        menu_showFilesystemErrorOverlay();
+        preset_ackStatus();
         return;
     }
 
@@ -2332,14 +7140,134 @@ void menu_pollPresetStatus(void)
     {
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
             !menu_isLoadSaveSelectionCurrent()) {
+            /*
+             * The encoder selected a newer Kit number while this immutable
+             * load was running. Still apply and record the Kit that really
+             * committed, while the resident Kit index publishes the newer
+             * desired row immediately and one retry is coalesced after the
+             * bounded runtime apply drains. No per-load HCNAMES transaction
+             * borrows that index.
+             */
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
+        }
+
+        /*
+         * Retain the full resident Kit identity for the Menu-exit write.
+         *
+         * Filesystem has atomically committed scene_t.kit for every Scene in
+         * Preset's immutable request mask. That changes one Kit name and all
+         * six Instrument source names per destination. Refresh the matching
+         * Menu scratch block and accumulate the destination mask, but leave
+         * HCNAMES and `/Kit/.hcindex` untouched until the user exits the shared
+         * Kit/Instrument name session. Runtime apply can therefore begin
+         * immediately without a root-file traversal and index reload.
+         */
+        menu_storageBusy = 1u;
+        menu_refreshResidentNameScratchKit(
+            preset_getKitRequestSceneMask());
+        if (!menu_isLoadSaveSelectionCurrent())
+            memset(preset_currentName, ' ', 8u);
+        menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 1u, 0u,
+                             FS_STALE_WARNING_NONE);
+        break;
+    }
+
+    case PRESET_OP_KIT_MORPH_LOAD:
+    {
+        if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+            !menu_isLoadSaveSelectionCurrent()) {
+            /* KitMrp also finishes the accepted endpoint apply and resident-
+             * name read before the latest freely-scrolled number is posted. */
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
+        }
+
+        /*
+         * KitMrp completion keeps the resident kit identity.
+         *
+         * The selected Kit/ directory has only been staged by filesystem.
+         * Preset now copies same-type normal endpoint values into current morph
+         * endpoints and drains the Morph worker without applying routing,
+         * replacing types, or rebinding modulation targets.
+         */
+        menu_startKitMorphApply();
+        break;
+    }
+
+    case PRESET_OP_SCENE_LOAD:
+    {
+        if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+            !menu_isLoadSaveSelectionCurrent()) {
             retrySelectionAfterAck = 1;
-            retrySelectionLoadKit = 1;
+            retrySelectionLoadKit = 0;
             break;
         }
 
-        menu_normalizeSoundModTargets(parameter_values);
-        menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 0u, 0u,
-                             FS_STALE_WARNING_NONE);
+        /*
+         * Scene Load completion applies the active Scene's runtime surface.
+         *
+         * filesystem.c already replaced selected resident SceneData atomically.
+         * Menu now starts the same bounded sound-apply cursor used by Kit Load,
+         * but also refreshes pattern/menu/global-facing Scene setting displays.
+         * Inputs are retained SceneData; outputs are mixer routing, instrument
+         * runtime cells, Morph images, and a repaint after the cursor drains.
+         */
+        {
+            /*
+             * Scene Load is an explicit OK/OW operation, unlike live Kit slot
+             * browsing. When launched from Load/Save, resetSave returns the
+             * cursor to the type row after the sound-apply cursor drains; boot
+             * Scene Load passes 0 so early startup does not mutate menu state.
+             */
+            uint8_t reset_save =
+                (uint8_t)(menu_activePage == LOAD_PAGE ||
+                          menu_activePage == SAVE_PAGE);
+            menu_startSoundApply(1u, reset_save, 1u, 0u, 1u, 0u, 1u, 0u,
+                                 FS_STALE_WARNING_NONE);
+        }
+        break;
+    }
+
+    case PRESET_OP_BANK_LOAD:
+    {
+        if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+            !menu_isLoadSaveSelectionCurrent()) {
+            retrySelectionAfterAck = 1;
+            retrySelectionLoadKit = 0;
+            break;
+        }
+
+        /*
+         * Bank Load completion has two valid payload shapes.
+         *
+         * When filesystem_lastBankLoadLoadedScene() is nonzero, filesystem.c
+         * has already committed one Bank-local Scene into the resident Scene
+         * workspace and Menu starts the same runtime apply cursor as explicit
+         * Scene Load. When it is zero, the Bank was intentionally empty:
+         * acknowledge the Bank identity load first, then start the fallback
+         * ladder so Preset's single-operation gate is idle before the new
+         * Scene/Kit request is posted.
+         */
+        if (!preset_completedBankLoadedScene()) {
+            preset_ackStatus();
+            if (preset_loadFirstAvailableSceneOrKit()) {
+                menu_storageBusy = 1u;
+            } else {
+                menu_storageBusy = 0u;
+                menu_resetSaveParameters();
+                menu_repaintAll();
+            }
+            return;
+        }
+
+        {
+            uint8_t reset_save =
+                (uint8_t)(menu_activePage == LOAD_PAGE ||
+                          menu_activePage == SAVE_PAGE);
+            menu_startSoundApply(1u, reset_save, 1u, 0u, 1u, 0u, 1u, 0u,
+                                 FS_STALE_WARNING_NONE);
+        }
         break;
     }
 
@@ -2348,11 +7276,12 @@ void menu_pollPresetStatus(void)
         fs_stale_warning_source_t stale_src = filesystem_takeStaleGlobalsWarning();
         menu_startGlobalApply((uint8_t)(menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE),
                               (uint8_t)(menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE));
-        /* For boot/load glo.cfg, show the warning immediately after starting
-        ** the deferred global apply. The warning is informational: filesystem.c
-        ** already loaded a safe subset/default fallback before we get here. */
-        if (stale_src == FS_STALE_WARNING_GLO)
-            menu_showStaleSettingsWarning(stale_src);
+        /*
+         * settings.cfg has no legacy raw fallback warning. The stale-warning
+         * path remains for .all compatibility, but standalone settings load
+         * either applies keyed text or keeps defaults when the file is absent.
+         */
+        (void)stale_src;
         break;
     }
 
@@ -2364,7 +7293,12 @@ void menu_pollPresetStatus(void)
             break;
         }
         menu_normalizeSoundModTargets(parameters2);
-        preset_morph(parameter_values[PAR_MORPH]);
+        /*
+         * Legacy morph-file load refreshes endpoint data. It must not call the
+         * overall Morph bulk-set path because that would collapse distinct
+         * per-voice Morph amounts. Rebuild from retained Scene values instead.
+         */
+        preset_rebuildMorph();
         menu_repaintAll();
         break;
 
@@ -2404,13 +7338,239 @@ void menu_pollPresetStatus(void)
                              FS_STALE_WARNING_NONE);
         break;
 
+    case PRESET_OP_INSTRUMENT_TEMP_SAVE:
+        /*
+         * Release the `kit` row only after its typed temporary file is closed.
+         *
+         * Inputs: dedicated Preset completion for the entry Scene/voice. Output:
+         * the retained nine-byte name becomes valid, then the ordinary typed
+         * `.hcindex` load starts. A failed temp write leaves `kit` unavailable
+         * rather than allowing a stale file/name from another session.
+         */
+        menu_instrumentTempOperationPending = 0u;
+        menu_instrumentTempValid = preset_getCompletedOk();
+        menu_storageBusy = 0u;
+        if (menu_instrumentTempValid && menu_instrumentLoadActive &&
+            !menu_instrumentSaveMode && !menu_instrumentLoadMorphMode) {
+            menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+        } else if (!menu_instrumentTempValid) {
+            menu_invalidateInstrumentLoadTemp();
+        }
+        if (!menu_storageBusy)
+            menu_repaintAll();
+        break;
+
+    case PRESET_OP_INSTRUMENT_LOAD:
+        /*
+         * Single Instrument load completion.
+         *
+         * Inputs: Preset request slot retained when the Instrument/ file load
+         * was posted. Output: only that slot is applied through Preset's
+         * one-slot cursor. This must not call menu_startSoundApply(), because
+         * that path is intentionally a whole-Kit/Scene apply operation.
+         */
+        /*
+         * A successful hidden-temp restore makes the original visible identity
+         * authoritative again before the normal bounded runtime apply starts.
+         * Inputs: direct `kit` source plus its valid nine-byte session label.
+         * Output: one Instrument HCNAMES row is marked dirty for normal menu
+         * exit; pool loads continue through their existing apply completion.
+         */
+        if (preset_getCompletedOk() &&
+            menu_instrumentTempOperationPending &&
+            menu_instrumentTempValid) {
+            memcpy(menu_instrumentSaveName, menu_instrumentTempName,
+                   MENU_INSTRUMENT_SAVE_NAME_LEN);
+            menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+            menu_refreshResidentNameScratchInstrument(
+                menu_kitLoadSceneMask, menu_instrumentLoadSlot);
+        }
+        menu_startInstrumentApply(preset_getRequestScene(),
+                                  preset_getRequestSlot());
+        menu_refreshLoadSceneLeds();
+        break;
+
+    case PRESET_OP_INSTRUMENT_MORPH_LOAD:
+        /*
+         * Single InstrumentMrp completion.
+         *
+         * Inputs: the destination Scene/slot retained when the Instrument/ file
+         * load was posted. Output: only that slot's morph endpoint is updated,
+         * and only if the staged type still matches the resident slot type.
+         */
+        menu_startInstrumentMorphApply(preset_getRequestScene(),
+                                       preset_getRequestSlot());
+        menu_refreshLoadSceneLeds();
+        break;
+
+    case PRESET_OP_TEST_SCAN:
+        /*
+         * Root File/Dir scan completion.
+         *
+         * Clamp the browser index to the newly scanned cache and repaint the
+         * exact-case display names. No preset state is applied because this is
+         * only the asyncfatfs test browser surface. Failed scans use the same
+         * ERR overlay as failed opens so temporary storage diagnostics never
+         * fail silently.
+         */
+        menu_storageBusy = 0u;
+        if (!preset_getCompletedOk()) {
+            menu_testResultError = 1u;
+            menu_testResultActive = 1u;
+            menu_testResultStart = time_sysTick;
+            menu_repaintAll();
+            break;
+        }
+        if ((menu_saveOptions.what == SAVE_TYPE_FILE ||
+             menu_saveOptions.what == SAVE_TYPE_DIR) &&
+            menu_currentPresetNr[menu_saveOptions.what] >=
+                menu_testObjectCount(menu_saveOptions.what)) {
+            uint8_t count = menu_testObjectCount(menu_saveOptions.what);
+            menu_currentPresetNr[menu_saveOptions.what] =
+                (count == 0u) ? 0u : (uint16_t)(count - 1u);
+        }
+        menu_repaintAll();
+        break;
+
+    case PRESET_OP_TEST_FILE_LOAD:
+    case PRESET_OP_TEST_DIR_LOAD:
+    case PRESET_OP_TEST_FILE_SAVE:
+    case PRESET_OP_TEST_DIR_SAVE:
+    {
+        const uint8_t *bytes = filesystem_testResultBytes();
+        uint8_t completed_ok = preset_getCompletedOk();
+
+        /*
+         * Snapshot the filesystem test result for a timed LCD overlay.
+         *
+         * The result storage in filesystem.c is reused by later requests, so
+         * Menu copies it before acking Preset. The overlay is Menu-owned and
+         * expires by wall-clock tick without blocking audio or filesystem
+         * polling. Failed test operations deliberately keep their op identity
+         * through Preset so this branch can show ERR instead of silently
+         * repainting the browser.
+         */
+        menu_storageBusy = 0u;
+        menu_testResultError = (uint8_t)!completed_ok;
+        menu_testResultKind = completed_ok ? filesystem_testResultKind()
+                                           : FS_TEST_RESULT_BYTES_READY;
+        memcpy(menu_testResultBytes, bytes, FS_TEST_RESULT_BYTES);
+        memset(menu_testResultName, 0, sizeof(menu_testResultName));
+        strncpy(menu_testResultName, filesystem_testResultName(),
+                FS_TEST_NAME_MAX);
+        menu_testResultActive = 1u;
+        menu_testResultStart = time_sysTick;
+        if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+            /*
+             * File/Dir diagnostic load/save commands are launched from the
+             * same OK/OW confirmation row as product loads and saves. The
+             * timed result overlay is preserved, but the underlying
+             * SaveOptions state is restored immediately so the next repaint
+             * gives a visible completion cue on the type row.
+             */
+            filesystem_clearNameCache();
+            menu_instrumentLoadActive = 0u;
+            menu_instrumentSaveMode = 0u;
+            editModeActive = 1u;
+            menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+        }
+        menu_repaintAll();
+        break;
+    }
+
+    case PRESET_OP_INSTRUMENT_SAVE:
+    case PRESET_OP_INSTRUMENT_MORPH_SAVE:
+    {
+        uint8_t source_scene = preset_getRequestScene();
+        uint8_t source_slot = (uint8_t)preset_getRequestSlot();
+
+        /*
+         * Complete Instrument Save through the deferred name session.
+         *
+         * The normal save has already committed the edited source name into
+         * resident Scene metadata and refreshed the typed `.hcindex`; Morph
+         * Save preserves identity. Normal Save updates the matching scratch row
+         * and dirty Scene bit without opening HCNAMES. Nested Save then returns
+         * to the top-level Kit row; that menu transition may load `/Kit/.hcindex`
+         * but the root resident-name file is written only when the combined
+         * Kit/Instrument session is actually exited.
+         */
+        if (preset_getCompletedOp() == PRESET_OP_INSTRUMENT_SAVE &&
+            source_scene < 16u) {
+            menu_refreshResidentNameScratchInstrument(
+                (uint16_t)(1u << source_scene), source_slot);
+        }
+        menu_resetSaveParameters();
+        menu_storageBusy = 0u;
+        menu_requestCurrentLoadSaveSelection(0u);
+        if (!menu_storageBusy)
+            menu_repaintAll();
+        break;
+    }
+
     case PRESET_OP_KIT_SAVE:
-    case PRESET_OP_MORPH_SAVE:
+    case PRESET_OP_KIT_MORPH_SAVE:
+    {
+        uint8_t source_scene = preset_getRequestScene();
+
+        /*
+         * Complete Kit Save in the deferred resident-name session.
+         *
+         * filesystem.c has already written the physical Kit directory,
+         * rescanned `/Kit/`, and flushed the complete `/Kit/.hcindex` before
+         * Preset published this completion. Copy the saved library row into
+         * the existing UI buffer. For normal Save, reaffirm the resident Kit
+         * name from that durable index row, then refresh the seven-name scratch
+         * and mark its Scene dirty without opening HCNAMES. Hardware showed
+         * the correct source Scene's six
+         * Instrument rows changing while its Kit row remained blank, proving
+         * the mask/update path was correct and the resident Kit identity was
+         * the missing input. KitMrp Save preserves resident identity and does
+         * not mark the session dirty. The single HCNAMES rewrite happens only
+         * when the Kit/Instrument menu family is exited.
+         */
+        menu_refreshSavedLibraryName(preset_getCompletedOp());
+        if (preset_getCompletedOp() == PRESET_OP_KIT_SAVE &&
+            source_scene < SCENE_COUNT) {
+            filesystem_setIdentityName(FS_IDENTITY_KIT_ROW,
+                                       preset_currentName);
+            menu_refreshResidentNameScratchKit(
+                (uint16_t)(1u << source_scene));
+        }
+        menu_resetSaveParameters();
+        menu_storageBusy = 0u;
+        menu_repaintAll();
+        break;
+    }
+
+    case PRESET_OP_SCENE_SAVE:
+    case PRESET_OP_BANK_SAVE:
     case PRESET_OP_GLOBALS_SAVE:
     case PRESET_OP_PATTERN_SAVE:
     case PRESET_OP_ALL_SAVE:
     case PRESET_OP_PERFORMANCE_SAVE:
-        /* Save complete - reset save UI */
+        /*
+         * Save completion cleanup.
+         *
+         * The remaining save families share the existing busy-state and Save
+         * UI reset path. Instrument and Kit saves are handled above because
+         * their completion must serialize affected resident-name rows before
+         * releasing storage input.
+        */
+        menu_storageBusy = 0u;
+        if (preset_getCompletedOp() == PRESET_OP_SCENE_SAVE ||
+            preset_getCompletedOp() == PRESET_OP_BANK_SAVE) {
+            /*
+             * The filesystem callback is intentionally delayed until the
+             * directory rescan and `.hcindex` rewrite are complete. Keep that
+             * fresh cache alive, copy its current slot into the Save editor's
+             * display buffer, and then reset/repaint without changing type or
+             * slot. Other save families still dispose their unrelated cache.
+             */
+            menu_refreshSavedLibraryName(preset_getCompletedOp());
+        } else {
+            filesystem_clearNameCache();
+        }
         menu_resetSaveParameters();
         break;
 
@@ -2445,6 +7605,48 @@ void menu_switchSubPage(uint8_t subPageNr)
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
 
+    if (menu_isVoicePage(menu_activePage)) {
+        /*
+         * Voice SELECT buttons choose a sub-page and cycle its four-parameter screens.
+         *
+         * Inputs: subPageNr is the pressed SELECT button in VOICE mode. Output:
+         * pressing a different SELECT button switches to that sub-page and
+         * resets its screen to the first four parameters; pressing the same
+         * SELECT button advances to the next four-parameter screen that
+         * contains any selectable parameter, or loops back to the first when
+         * no later screen contains one. The screen memory is per sub-page and
+         * is not cleared by voice/mode changes.
+         */
+        if (subPageNr >= NUM_SUB_PAGES)
+            subPageNr = 0u;
+        if (activePage >= NUM_SUB_PAGES)
+            activePage = subPageNr;
+        if (subPageNr == activePage) {
+            uint8_t screen = menu_voiceSubPageScreen[activePage];
+            if (screen >= menu_voiceSubPageScreenCount(activePage) ||
+                !menu_voiceSubPageScreenExists(activePage, screen)) {
+                screen = 0u;
+            }
+            if (menu_voiceSubPageScreenExists(activePage,
+                                              (uint8_t)(screen + 1u)))
+                screen++;
+            else
+                screen = 0u;
+            menu_voiceSubPageScreen[activePage] = screen;
+            activeParameter =
+                menu_voiceFirstSelectableColumn(activePage, screen);
+        } else {
+            activePage = subPageNr;
+            menu_voiceSubPageScreen[activePage] = 0u;
+            activeParameter =
+                menu_voiceFirstSelectableColumn(activePage, 0u);
+        }
+
+        menuIndex = (uint8_t)((activePage << PAGE_SHIFT) | activeParameter);
+        menu_endlessPotMappingChanged();
+        return;
+    }
+
     if (subPageNr == activePage) {
         /* toggle between 1st and 2nd half of this sub-page */
         if (activeParameter < 4) {
@@ -2456,8 +7658,10 @@ void menu_switchSubPage(uint8_t subPageNr)
             }
         } else {
             if (menu_activePage == MENU_MIDI_PAGE) {
+                menu_cell_t nextCell =
+                    menu_resolveCell((uint8_t)(activePage + 1u), 0u);
                 if (activePage < NUM_SUB_PAGES-1 &&
-                    menuPages[menu_activePage][activePage+1].top1 != TEXT_EMPTY)
+                    !menu_cellIsEmpty(&nextCell))
                     activePage++;
                 else
                     activePage = 0;
@@ -2482,6 +7686,28 @@ void menu_switchSubPage(uint8_t subPageNr)
 void menu_resetActiveParameter(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    if (menu_isVoicePage(menu_activePage)) {
+        /*
+         * Repair a remembered voice screen after instrument/page changes.
+         *
+         * Inputs: current SELECT sub-page and its remembered screen. Output:
+         * when an instrument swap leaves that screen empty, fall back to the
+         * first screen, which every voice sub-page is expected to define.
+         * The sub-page guard covers cross-mode entry where menuIndex may still
+         * hold a non-voice sub-page value; repairing it here keeps later
+         * display and knob paths on the first valid voice screen.
+         */
+        if (activePage >= NUM_SUB_PAGES)
+            activePage = 0u;
+        if (!menu_voiceSubPageScreenExists(activePage,
+                                           menu_voiceSubPageScreen[activePage]))
+            menu_voiceSubPageScreen[activePage] = 0u;
+        menuIndex = (uint8_t)(
+            (activePage << PAGE_SHIFT) |
+            menu_voiceFirstSelectableColumn(activePage,
+                                            menu_voiceSubPageScreen[activePage]));
+        return;
+    }
     if (!has2ndPage(activePage))
         menuIndex &= (uint8_t)(~MASK_PARAMETER);
 }
@@ -2491,12 +7717,42 @@ void menu_resetActiveParameter(void)
 ** ----------------------------------------------------------------------- */
 void menu_switchPage(uint8_t pageNr)
 {
+    uint8_t end_resident_name_session;
+
     if (menu_storageBusy) return;
+
+    /* Capture the old context before page mutation. Pressing the Load/Save
+     * mode button toggles LOAD_PAGE/SAVE_PAGE through pageNr==LOAD_PAGE and
+     * keeps the shared Kit/Instrument session. Any other page target is the
+     * physical exit boundary that must flush accumulated resident names once. */
+    end_resident_name_session = (uint8_t)(
+        (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+        (menu_instrumentLoadActive ||
+         menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) &&
+        pageNr != LOAD_PAGE);
+
+    if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+        pageNr != LOAD_PAGE) {
+        /*
+         * Leaving the Load/Save surface disposes the shared browser names.
+         * This covers top-level Kit/Scene/Bank exits as well as nested
+         * Instrument exits; a later entry must reload the appropriate index
+         * rather than inheriting names from the page that was left.
+         */
+        filesystem_clearNameCache();
+    }
+    if (menu_instrumentLoadActive) {
+        filesystem_clearNameCache();
+        menu_instrumentLoadActive = 0u;
+        menu_instrumentSaveMode = 0u;
+    }
 
     led_clearSequencerLeds();
 
     switch (pageNr) {
     case MENU_MIDI_PAGE: {
+        menu_instrumentLoadActive = 0u;
         uint8_t toggle = (menu_activePage == MENU_MIDI_PAGE);
         menu_setVoiceModeShowMorph(0u);
         menu_activePage = MENU_MIDI_PAGE;
@@ -2518,6 +7774,7 @@ void menu_switchPage(uint8_t pageNr)
     case PERFORMANCE_PAGE:
     case PATTERN_SETTINGS_PAGE:
     case SEQ_PAGE:
+        menu_instrumentLoadActive = 0u;
         menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;
         editModeActive = 0;
@@ -2538,15 +7795,26 @@ void menu_switchPage(uint8_t pageNr)
 
     case LOAD_PAGE:
         menu_setVoiceModeShowMorph(0u);
-        if (menu_activePage == LOAD_PAGE)
+        if (menu_activePage == LOAD_PAGE) {
             menu_activePage = SAVE_PAGE;
-        else
+            menu_instrumentLoadActive = 0u;
+        } else {
             menu_activePage = LOAD_PAGE;
+            /* Reset Kit targets on each fresh Load entry. The active Scene is
+             * always selected so a current one-Scene build and future banks
+             * share the same non-empty request invariant. */
+            menu_kitLoadSceneMask =
+                (uint16_t)(1u << scene_getActiveIndex());
+        }
+        /* Load/Save page toggles are type transitions, so reload on entry. */
+        filesystem_clearNameCache();
         menu_resetSaveParameters();
         menu_requestCurrentLoadSaveSelection(0);
+        menu_refreshLoadSceneLeds();
         break;
 
     default: /* voice pages */
+        menu_instrumentLoadActive = 0u;
         if (pageNr > VOICE7_PAGE)
             menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;
@@ -2576,8 +7844,18 @@ void menu_switchPage(uint8_t pageNr)
 
     /* LED updates */
     if (pageNr == PERFORMANCE_PAGE) {
-        /* _SEQUENCER_ADD_SPIKE_: PERF page must show mute-state LEDs like AVR. */
+        /*
+         * PERF owns the SEQ row as the 16-Scene selector/status display.
+         *
+         * menu_switchPage() clears sequencer LEDs before changing pages, so the
+         * PERF Scene repaint must happen here, after the clear. Mute LEDs remain
+         * on the VOICE row through buttonHandler_showMuteLEDs(); the SEQ row is
+         * then repainted so steady LEDs show Scenes whose Pattern has active
+         * steps and the active resident Scene blinks immediately on entry instead
+         * of waiting for a later button press or async repaint.
+         */
         buttonHandler_showMuteLEDs();
+        menu_refreshPerfSceneLeds();
     } else {
         led_setActiveVoiceLeds((uint8_t)(1 << menu_getActiveVoice()));
         menu_muteModeActive = 0;
@@ -2585,6 +7863,8 @@ void menu_switchPage(uint8_t pageNr)
 
     menu_resetActiveParameter();
     menu_endlessPotMappingChanged();
+    if (end_resident_name_session)
+        (void)menu_endResidentNameScratchSession();
     menu_repaintAll();
 }
 
@@ -2593,13 +7873,32 @@ void menu_switchPage(uint8_t pageNr)
 ** ----------------------------------------------------------------------- */
 void menu_resetSaveParameters(void)
 {
-    if (menu_saveOptions.what >= SAVE_TYPE_GLO) {
-        menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
-        menu_saveOptions.what  = SAVE_TYPE_KIT;
-    } else {
-        editModeActive = 1;
-        menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
-    }
+    /*
+     * Reset Load/Save cursor state without reopening stale menu entries.
+     *
+     * Diagnostic entries and promoted musical entries are gated in the type
+     * whitelist, so a completion from a legacy helper cannot leave the panel
+     * parked on an unvalidated path. Kit is the fallback because it is a
+     * real musical object on both Load and Save when CONFIG_DEV_MODE hides
+     * File/Dir/sDir. Every Load/Save entry resets to the selected top-row type
+     * field; slot/name selection is always a deliberate second movement. The
+     * shared browser cache is intentionally not disposed here: this helper is
+     * also called immediately after a Save request is posted, and the
+     * filesystem needs the active cache to update and rewrite `.hcindex`.
+     * Callers that actually leave or change the Load/Save type dispose it
+     * explicitly before invoking this cursor reset.
+     */
+    if (!menu_loadSaveTypeIsRestored(menu_saveOptions.what))
+        menu_saveOptions.what = SAVE_TYPE_KIT;
+
+    menu_instrumentLoadActive = 0u;
+    menu_instrumentSaveMode = 0u;
+    menu_loadSaveClearInstrumentVoiceBlinks();
+    editModeActive = 1;
+    menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
+    if (menu_saveOptions.what == SAVE_TYPE_BANK)
+        menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
+    menu_resetLoadSaveSceneSelection();
     menu_repaintAll();
 }
 
@@ -2648,7 +7947,7 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
     case PAR_POS_X:
         /*
          * SOM parameters now call the SOM generator directly. These are
-         * generator controls under Core/Scene/Pattern, not sequencer transport
+         * generator controls under Core/Bank/Scene/Pattern, not sequencer transport
          * messages. Inputs are menu-scaled 0..127 values.
          */
         som_setX(value);
@@ -2710,7 +8009,7 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         uint16_t realParam = (track == 6u)
             ? PAR_MIDI_CHAN_7
             : (uint16_t)(PAR_MIDI_CHAN_1 + track);
-        pat_setTrackMidiChannel(menu_getViewedPattern(), track, value);
+        scene_setTrackMidiChannel(menu_getViewedPattern(), track, value);
         parameter_values[realParam] = value;
         menu_parseGlobalParam(realParam, value);
         break;
@@ -2725,12 +8024,9 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
          * legacy per-voice note override is mirrored through Preset so existing
          * MIDI playback/input code still sees the edited note while the broader
          * Scene/Instrument ownership is pending.
-         */
+        */
         uint8_t track = menu_getActiveVoice();
-        uint16_t realParam = (uint16_t)(PAR_MIDI_NOTE1 + track);
-        pat_setTrackMidiNote(menu_getViewedPattern(), track, value);
-        parameter_values[realParam] = value;
-        preset_applySoundParameter(realParam, value, 1);
+        scene_setTrackMidiNote(menu_getViewedPattern(), track, value);
         break;
     }
 
@@ -2831,25 +8127,77 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         break;
 
     case PAR_MORPH:
-        preset_morph(value);
-        break;
+    {
+        uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+        uint8_t scene_index;
 
-    case PAR_VOICE_DECIMATION1:
-    case PAR_VOICE_DECIMATION2:
-    case PAR_VOICE_DECIMATION3:
-    case PAR_VOICE_DECIMATION4:
-    case PAR_VOICE_DECIMATION5:
-    case PAR_VOICE_DECIMATION6:
+        /*
+         * Overall Morph is Scene performance state and follows the VOICE edit
+         * Scene mask.
+         *
+         * Inputs: PERF Morph value and BankData's scene_mask_voice_edit.
+         * Output: every masked Scene receives the bulk Morph amount; only the
+         * active Scene updates the flat PERF mirrors and runtime Morph worker.
+         */
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((edit_mask & (uint16_t)(1u << scene_index)) != 0u)
+                preset_morphScene(scene_index, value);
+        }
+        break;
+    }
+
+    case PAR_VOICE1_MORPH:
+    case PAR_VOICE2_MORPH:
+    case PAR_VOICE3_MORPH:
+    case PAR_VOICE4_MORPH:
+    case PAR_VOICE5_MORPH:
+    case PAR_VOICE6_MORPH:
+        /*
+         * Per-voice Morph is Scene-level performance state.
+         *
+         * Inputs: flat PERF parameter id and 0..255 value. Output: Preset
+         * updates only the selected slot's retained Morph amount and queues
+         * only that slot in the descriptor-driven Morph worker. This belongs
+         * here, not in descriptor VOICE pages, because the PERF cells are
+         * static Scene controls rather than instrument parameter descriptors.
+         */
+    {
+        uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+        uint8_t scene_index;
+        uint8_t slot = (uint8_t)(paramNr - PAR_VOICE1_MORPH);
+
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((edit_mask & (uint16_t)(1u << scene_index)) != 0u)
+                preset_morphVoiceScene(scene_index, slot, value);
+        }
+        break;
+    }
+
     case PAR_VOICE_DECIMATION_ALL:
         /*
-         * Voice decimation is a sound parameter even though it appears in the
-         * global/performance area. Preset owns sound-engine application, so the
-         * menu dispatches it directly there.
+         * Scene global decimation is retained with other Scene settings.
+         *
+         * Inputs: PERF "srt" value 0..127. Output: Preset stores the setting
+         * and applies mixer_decimation_rate[6] using the same taper as the
+         * legacy VOICE_DECIMATION_ALL MIDI CC. Keeping the write behind Preset
+         * gives future sceneset.scg load/save one owner boundary.
          */
-        preset_applySoundParameter((uint16_t)(PAR_VOICE_DECIMATION1 +
-                                  (paramNr - PAR_VOICE_DECIMATION1)),
-                                  value, 1);
+    {
+        uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+        uint8_t scene_index;
+
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((edit_mask & (uint16_t)(1u << scene_index)) != 0u)
+                preset_setVoiceDecimationAll(scene_index, value);
+        }
         break;
+    }
 
     case PAR_ROLL:
         /*
@@ -2914,16 +8262,23 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
 
     case PAR_PATTERN_BEAT:
         /*
-         * Pattern change bar is pattern-level data. PatternData owns the value;
-         * Menu supplies the viewed pattern because this is an edit operation.
+         * Retired pattern-repeat edit hook.
+         *
+         * The Pattern Settings row no longer exposes this parameter, and
+         * PatternData ignores stale writes. Scene-level switching must own any
+         * future repeat/advance feature so Pattern and Scene parameters remain
+         * aligned.
          */
         pat_setPatternChangeBar(menu_getViewedPattern(), value);
         break;
 
     case PAR_PATTERN_NEXT:
         /*
-         * Next-pattern setting is pattern-level data for the viewed pattern,
-         * not an immediate Sequencer pattern switch.
+         * Retired pattern-next edit hook.
+         *
+         * Pattern-only next targets are disabled. This compatibility branch keeps
+         * old parameter ids harmless until the Phase 4 Pattern rebuild removes or
+         * replaces them.
          */
         pat_setPatternNext(menu_getViewedPattern(), value);
         break;
@@ -3110,11 +8465,11 @@ void    menu_setShownPattern(uint8_t p)
      * target what the user is looking at.
      *
      * Input: p is the viewed pattern index supplied by button/menu navigation.
-     * Output: during the single-pattern bridge, menu_shownPattern is pinned to 0. Risk: this setter does not repaint
-     * LEDs or reload PatternData params; callers must do that explicitly.
+     * Output: the UI Pattern index follows the resident Scene/Pattern slot when
+     * valid, otherwise it falls back to Scene 0. Risk: this setter does not
+     * repaint LEDs or reload PatternData params; callers must do that explicitly.
      */
-    menu_shownPattern = 0;
-    (void)p;
+    menu_shownPattern = pat_patternValid(p) ? p : 0u;
 }
 uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 
@@ -3129,12 +8484,37 @@ void menu_init(void)
     memset(parameter_values, 0, sizeof(parameter_values));
     memset(parameters2, 0, sizeof(parameters2));
 
+    /*
+     * Filesystem owns the sole 81-byte identity block. Clearing it here keeps
+     * early Menu repaints blank without reintroducing Menu-local name storage.
+     * Inputs: cold menu initialization. Output: no identity row is valid until
+     * HCNAMES entry completes. Affiliates: filesystem_clearIdentityNames().
+     */
+    filesystem_clearIdentityNames();
+    menu_residentNameScratchScene =
+        MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+    menu_residentNameScratchValid = 0u;
+    menu_residentNameDirtySceneMask = 0u;
+    menu_sceneResidentNameScratchScene =
+        MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+
     parameter_values[PAR_EUKLID_LENGTH] = 16;
     parameter_values[PAR_EUKLID_STEPS]  = 16;
     parameter_values[PAR_ROLL]          = 8;
     parameter_values[PAR_BPM]           = 120;
     parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_OFF;
     parameter_values[PAR_OSC_WAVE_INTERP] = 0;
+    /*
+     * Scene global sample-rate/decimation must default to full rate.
+     *
+     * SceneData also initializes voice_decimation_all to 127, but Menu's flat
+     * parameter mirror is memset to zero above and can be used by early global
+     * apply paths before a Scene settings apply has mirrored the retained
+     * value. A zero here shapes mixer_decimation_rate[6] to 0, so the decimator
+     * never refreshes voice samples and the unit presents as silent. Keep the
+     * mirror's undefined/startup value aligned with the Scene default.
+     */
+    parameter_values[PAR_VOICE_DECIMATION_ALL] = 127u;
     /*
      * Wave interpolation is a sound-engine global that is applied immediately
      * at boot because there is no parser/global-apply pass between zeroed menu

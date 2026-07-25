@@ -26,9 +26,24 @@
 #define FAT_FILE_ATTRIBUTE_VOLUME_ID 0x08
 #define FAT_FILE_ATTRIBUTE_DIRECTORY 0x10
 #define FAT_FILE_ATTRIBUTE_ARCHIVE   0x20
+#define FAT_FILE_ATTRIBUTE_LFN       0x0fu
 
 #define FAT_FILENAME_LENGTH 11
 #define FAT_DELETED_FILE_MARKER 0xE5
+#define FAT_LFN_LAST_LONG_ENTRY 0x40u
+#define FAT_LFN_CHARS_PER_ENTRY 13u
+
+/*
+ * FAT short-name case preservation bits.
+ *
+ * Raw 8.3 names are stored uppercase in directoryEntry.filename. These bits in
+ * directoryEntry.ntReserved tell FAT-aware readers to display the base and/or
+ * extension as lowercase. They do not make FAT lookups case-sensitive and they
+ * cannot represent mixed-case text; exact mixed-case display must use VFAT LFN
+ * entries.
+ */
+#define FAT_NTRES_LOWERCASE_BASE 0x08u
+#define FAT_NTRES_LOWERCASE_EXT  0x10u
 
 #define FAT_MAKE_DATE(year, month, day)     (day | (month << 5) | ((year - 1980) << 9))
 #define FAT_MAKE_TIME(hour, minute, second) ((second / 2) | (minute << 5) | (hour << 11))
@@ -119,6 +134,49 @@ bool fat_isFreeSpace(uint32_t clusterNumber);
 
 bool fat_isDirectoryEntryTerminator(fatDirectoryEntry_t *entry);
 bool fat_isDirectoryEntryEmpty(fatDirectoryEntry_t *entry);
+/*
+ * VFAT long-name helpers shared by asyncfatfs scanners and writers.
+ *
+ * Why these live beside the FAT directory structs: long filename fragments are
+ * part of the on-disk FAT directory grammar, not a Kit/Scene storage rule.
+ * Inputs are raw 8.3 directory names or ASCII display components. Outputs are
+ * the checksum/comparison decisions used to bind an LFN chain to the following
+ * SFN entry. Callers: asyncfatfs create/open matching, object enumeration, and
+ * any future delete/rename path that must touch the whole VFAT entry chain.
+ */
+bool fat_isLongDirectoryEntry(const fatDirectoryEntry_t *entry);
+uint8_t fat_lfnChecksum(const uint8_t fatFilename[FAT_FILENAME_LENGTH]);
+bool fat_lfnCharAllowed(char c);
+char fat_lfnSanitizeChar(char c);
+int8_t fat_compareDisplayName(const char *a, const char *b,
+                              bool case_sensitive);
+/*
+ * Compare two FAT display components for product browser order.
+ *
+ * What: Sorts by ASCII case-folded text first, then by the original display
+ * bytes when the folded text is identical. The raw-byte tiebreaker makes
+ * uppercase letters sort before lowercase letters for the same character.
+ *
+ * Why: User-facing load/save is case-insensitive but case-preserving. If an
+ * externally edited card contains `fiRstfile.snr` and `firStfile.snr`, both
+ * names match the same product object. The browser must expose exactly one
+ * deterministic winner, and the capital-letter-first tiebreaker chooses
+ * `fiRstfile.snr`.
+ *
+ * Inputs: NUL-terminated ASCII display components returned by asyncfatfs object
+ * iteration or built by storage save-name helpers. These are components, not
+ * paths.
+ *
+ * Output: strcmp-style ordering. Zero means byte-identical display text, not
+ * merely same-casefold text.
+ *
+ * Affiliates/clients: filesystem.c Instrument browser insertion, File/Dir
+ * diagnostics if sorted duplicate hiding is added there, Kit/Scene duplicate
+ * slot arbitration, and overwrite duplicate collection.
+ */
+int8_t fat_compareDisplayNameCasefoldThenCase(const char *a, const char *b);
 
+uint8_t fat_calculateFilenameCaseFlags(const char *filename);
+void fat_applyFilenameCaseFlags(char *filename, uint8_t ntReserved);
 void fat_convertFilenameToFATStyle(const char *filename, uint8_t *fatFilename);
 void fat_convertFATStyleToFilename(const char *fatFilename, char *filename);

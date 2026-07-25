@@ -72,11 +72,48 @@ typedef struct LfoStruct
 	uint8_t 	sync;
 	float 		freq;
 	ModulationNode modTarget;
+	/*
+	 * Second destination for the same LFO oscillator.
+	 *
+	 * modTarget and modTarget2 are not two independent LFOs. They share phase,
+	 * waveform, rate, sync, offset, retrigger, and polarity, but each target
+	 * owns its own amount and any remaining legacy direct backend state.
+	 * Descriptor instrument targets may now be installed in InstrumentManager
+	 * adapters rather than these raw ModulationNode slots; the slots remain the
+	 * per-pair amount owners and still support any intentionally retained direct
+	 * pointer backend.
+	 */
+	ModulationNode modTarget2;
+	/*
+	 * Shared application polarity for both destinations.
+	 *
+	 * Inputs: descriptor/menu writes store a mod_node_polarity_t value here.
+	 * Output: lfo_dispatchNextValue() passes it to ModulationNode for legacy
+	 * direct backends and to InstrumentManager for descriptor/supplemental
+	 * adapters. Polarity belongs to Lfo rather than each destination because
+	 * the requested UI shape is one shared LFO with two destinations and
+	 * independent amounts.
+	 */
+	uint8_t		polarity;
 	float		modNodeValue;
 } Lfo;
 //-------------------------------------------------------------
 void lfo_init(Lfo *lfo);
-void lfo_dispatchNextValue(Lfo* lfo);
+/*
+ * Dispatch one LFO block with explicit source-slot identity.
+ *
+ * Inputs: lfo is the oscillator/modulation state for one voice, and source_slot
+ * identifies which instrument slot owns it. Output: the shared waveform updates
+ * both direct ModulationNode targets and any installed Scene/supplemental
+ * target adapters for the same LFO pair slots.
+ *
+ * The source slot cannot be inferred reliably by Scene target code from the
+ * Lfo pointer without hardcoding voice object addresses. Passing it from
+ * mixer.c keeps LFO math generic while allowing InstrumentManager to route
+ * Scene modulation by the same source slot used when the target was installed.
+ */
+void lfo_dispatchNextValue(Lfo* lfo, uint8_t source_slot);
+uint32_t lfo_calcPhaseInc(float freq, uint8_t sync);
 void lfo_setFreq(Lfo *lfo, float f);
 void lfo_setSync(Lfo* lfo, uint8_t sync);
 void lfo_recalcSync();

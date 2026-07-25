@@ -51,8 +51,16 @@ extern uint8_t menu_muteModeActive;
  */
 extern uint8_t voiceModeShowMorph;
 
-#define NUM_PRESET_LOCATIONS 5
-extern uint8_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
+/*
+ * Numbered Load/Save browser slots retained by Menu.
+ *
+ * Kit and KitMrp are separate UI entries but both browse numbered Kit/
+ * directories. Settings/Samples are unnumbered and never index this array.
+ * Keeping the count at the first non-kit load type prevents KitMrp from
+ * reusing the normal Kit cursor storage by accident.
+ */
+#define NUM_PRESET_LOCATIONS 8
+extern uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 
 enum PageNames {
     VOICE1_PAGE, VOICE2_PAGE, VOICE3_PAGE,
@@ -106,6 +114,15 @@ enum NamesEnum {
     TEXT_CPU_USE,
     TEXT_OSC_INTERP,
     TEXT_TRACK_SCALE,
+    /*
+     * Static PERF labels for Scene-retained per-voice Morph amounts.
+     *
+     * These are menu text ids, not ParamDescriptors, because PERF edits flat
+     * Scene controls. The corresponding parameter ids are contiguous
+     * PAR_VOICE1_MORPH..PAR_VOICE6_MORPH.
+     */
+    TEXT_VOICE1_MORPH, TEXT_VOICE2_MORPH, TEXT_VOICE3_MORPH,
+    TEXT_VOICE4_MORPH, TEXT_VOICE5_MORPH, TEXT_VOICE6_MORPH,
     NUM_NAMES
 };
 
@@ -139,6 +156,9 @@ enum longNamesEnum {
     LONG_CPU_USE_TIME,
     LONG_OSC_INTERP,
     LONG_SCALE,
+    /* Long names used in single-parameter PERF edit view for 1vm..6vm. */
+    LONG_VOICE1_MORPH, LONG_VOICE2_MORPH, LONG_VOICE3_MORPH,
+    LONG_VOICE4_MORPH, LONG_VOICE5_MORPH, LONG_VOICE6_MORPH,
 };
 
 enum shortNamesEnum {
@@ -159,7 +179,10 @@ enum shortNamesEnum {
     SHORT_X, SHORT_Y, SHORT_FLUX, SHORT_MIDI, SHORT_MIDI_ROUTING,
     SHORT_MIDI_FILT_TX, SHORT_MIDI_FILT_RX,
     SHORT_TRIGGER_IN, SHORT_TRIGGER_OUT1, SHORT_TRIGGER_OUT2,
-    SHORT_BAR_RESET_MODE, SHORT_CPU_USE, SHORT_OSC_INTERP, SHORT_SCALE
+    SHORT_BAR_RESET_MODE, SHORT_CPU_USE, SHORT_OSC_INTERP, SHORT_SCALE,
+    /* Compact PERF labels for per-voice Morph columns. */
+    SHORT_VOICE1_MORPH, SHORT_VOICE2_MORPH, SHORT_VOICE3_MORPH,
+    SHORT_VOICE4_MORPH, SHORT_VOICE5_MORPH, SHORT_VOICE6_MORPH
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu
@@ -177,11 +200,32 @@ enum saveStateEnum {
 };
 
 enum loadSaveEnum {
-    SAVE_TYPE_KIT = 0,
-    SAVE_TYPE_PATTERN,
-    SAVE_TYPE_MORPH,
-    SAVE_TYPE_PERFORMANCE,
-    SAVE_TYPE_ALL,
+    SAVE_TYPE_FILE = 0,
+    SAVE_TYPE_DIR,
+    SAVE_TYPE_SIMPLE_DIR,
+    /*
+     * File/Dir remain the exact-case asyncfatfs diagnostics; Kit is the first
+     * musical entry promoted back onto the panel.
+     *
+     * The remaining musical entries stay enumerated so their lower layers can
+     * compile while menu.c gates reachability through its restored-type
+     * whitelist. That avoids accidentally exposing stale save paths before
+     * each format has been retested against the expanded asyncfatfs API.
+     */
+    SAVE_TYPE_KIT,
+    /*
+     * Kit Morph is a load-page mode, not a separate persisted file type.
+     *
+     * It intentionally sits immediately after SAVE_TYPE_KIT because the UI
+     * should scroll from "Kit" to "KitMrp" before Settings/Samples. Both
+     * entries browse the same Kit/ directory cache; the distinction is the
+     * Preset commit endpoint: normal Kit replaces the selected Scene kit,
+     * KitMrp copies source normal values into the selected Scenes' current
+     * morph endpoints.
+     */
+    SAVE_TYPE_KIT_MORPH,
+    SAVE_TYPE_SCENE,
+    SAVE_TYPE_BANK,
     SAVE_TYPE_GLO,
     SAVE_TYPE_SAMPLES,
     NUM_SAVE_TYPES
@@ -190,7 +234,16 @@ enum loadSaveEnum {
 enum Datatypes {
     DTYPE_0B255 = 0,
     DTYPE_0B127,
-    DTYPE_PM100,
+    /*
+     * Dedicated three-state LFO polarity dtype.
+     *
+     * Why this is not DTYPE_MENU: DTYPE_MENU packs the menu-table id into the
+     * high nibble of the same byte, leaving only ids 0..15. Adding polarity as
+     * menu id 16 wrapped back to id 0 and displayed the track-scale table. This
+     * dtype keeps the stored value as the DSP enum 0..2 and gives Menu an
+     * explicit clamp/display branch.
+     */
+    DTYPE_LFO_POLARITY,
     DTYPE_MENU,
     DTYPE_PM63,
     DTYPE_1B16,
@@ -248,6 +301,67 @@ void menu_start(void);
 void menu_parseEncoder(int8_t inc, uint8_t button);
 void menu_switchPage(uint8_t pageNr);
 void menu_switchSubPage(uint8_t subPageNr);
+/*
+ * Enter nested Instrument Load/Save for one physical voice.
+ *
+ * Inputs: zero-based voice selected while a Load or Save page is active.
+ * Output: the first Kit/Instrument-family entry reads one Scene's complete
+ * seven-row HCNAMES block (Kit plus six Instruments) into a Menu scratch array,
+ * then loads the selected Instrument type's `.hcindex`. Voice/type transitions
+ * in that family reuse the scratch; numbered pool rows copy their index name
+ * before payload I/O. Successful normal loads/saves update scratch plus one
+ * accumulated dirty-Scene mask without reopening HCNAMES, while Morph actions
+ * preserve identity. Plain encoder turns may still coalesce to the newest
+ * request; names remain immediately available whenever the typed index owns
+ * the shared filesystem cache. Leaving the combined family performs one
+ * HCNAMES rewrite for all dirty Scenes, then discards the seven rows. Type,
+ * Scene, voice, click, and Save controls remain locked only across immutable
+ * payload/apply or entry/exit transactions.
+ */
+uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr);
+uint8_t menu_loadInstrumentIsActive(void);
+uint8_t menu_loadSaveBarButtonPressed(uint8_t advance);
+/*
+ * Report whether nested Instrument Load owns an immutable in-flight transaction.
+ *
+ * Inputs: Menu's nested-load and storage/apply busy state. Output: nonzero from
+ * successful request posting through staged commit, six-slot Morph rebuild,
+ * and target rebind completion. This keeps mode/voice/Scene ownership fixed;
+ * it does not prohibit the explicit coalesced number-only encoder path described
+ * above. Clients: ButtonHandler mode/voice gesture gates and Menu's Scene/exit
+ * selectors. This accessor is intentionally narrower than generic storage busy.
+ */
+uint8_t menu_loadInstrumentTransactionBusy(void);
+void menu_loadInstrumentExit(void);
+/*
+ * Consume a SEQ button as a Scene selector while Load or nested Instrument Save
+ * owns Scene targets.
+ *
+ * Inputs: a zero-based SEQ/Scene index. Output: nonzero only when the current
+ * context owns the press; Kit/Scene Load toggles the selected-scene mask while
+ * Kit Save and Instrument Load/Save select resident source/destination Scenes.
+ * A full Kit request locks later presses only through payload commit/runtime
+ * apply; its seven resident names are held in Menu scratch until the later
+ * family exit. Changing the scratch Scene is itself an exit/entry boundary and
+ * flushes any accumulated dirty Scenes before reading the new seven rows.
+ * Clients: buttonHandler's foreground press dispatcher.
+ * Menu owns this decision because it also owns mode, LCD cursor, and Scene LED
+ * state; ButtonHandler remains a gesture router rather than duplicating those
+ * policy tests.
+ */
+uint8_t menu_loadSceneButtonPressed(uint8_t scene_index);
+void    menu_perfModeSceneButtonPressed(uint8_t scene_index);
+void    menu_refreshPerfSceneLeds(void);
+/*
+ * Repaint the temporary MODE VOICE held Scene edit-mask view.
+ *
+ * Inputs are BankData's scene_mask_voice_edit and present-Scene mask. Output:
+ * SEQ LEDs show the exact set of Scenes that voice/Scene parameter edits fan
+ * out to while MODE VOICE is held. ButtonHandler calls this on the hold edge;
+ * Menu calls it again after SEQ toggles.
+ */
+void    menu_refreshVoiceHeldSceneLeds(void);
+uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index);
 /*
  * Morph voice view setter.
  *

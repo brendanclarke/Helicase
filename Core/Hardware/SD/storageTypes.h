@@ -11,34 +11,78 @@
  *
  * Inputs are complete, NUL-terminated text lines and names supplied by
  * filesystem.c. Outputs are storage_status_t validation results, sanitized
- * fixed-width names, kit/instrument parse state, and writes into the existing
- * parameter_values[]/parameters2[] arrays. Clients must call the Init(),
- * ParseLine(), and Finalize() functions in that order.
+ * fixed-width names, kit/instrument parse state, and writes into a caller-owned
+ * Scene kit record. Clients must call the Init(), ParseLine(), and Finalize()
+ * functions in that order.
  *
  * Affiliates: Core/Hardware/SD/filesystem.c is the runtime client; the
  * generated SD_CARD/Kit tree and tools/convert_legacy_kits.py must stay in
- * sync with this schema and the parameter maps in storageTypes.c.
+ * sync with this schema and the canonical descriptors in InstrumentManager.
  */
 #ifndef STORAGETYPES_H_
 #define STORAGETYPES_H_
 
 #include <stdint.h>
+#include "InstrumentManager.h"
+#include "SceneData.h"
 
 /* Public storage constants for the Phase 2 kit directory loader.
  *
- * STORAGE_ROOT_KIT and STORAGE_KITSET_FILENAME are the literal on-card names
- * that filesystem.c opens. STORAGE_KIT_SLOT_COUNT is the synth voice count in
- * one kit. STORAGE_KIT_MAX_SLOTS is the number of numbered Kit/ folders the
- * browser exposes. STORAGE_KIT_FILENAME_MAX is 8.3 plus NUL because asyncfatfs
- * opens short names. STORAGE_KIT_DISPLAY_NAME_LEN mirrors the existing LCD and
- * preset name buffers, which are exactly eight printable characters.
+ * Root directory literals are exact display components.
+ *
+ * asyncfatfs now preserves and matches case through SFN case bits and VFAT LFN
+ * entries, so production code asks for "Instrument" rather than the old
+ * compatibility alias "INSTRU~1". Callers that need to open these roots should
+ * use the LFN-aware directory APIs when the operation is part of the new
+ * production storage surface.
+ *
+ * System file literals are written in their intended display case. asyncfatfs
+ * preserves all-lowercase 8.3 names through FAT ntReserved case bits, so
+ * callers should not uppercase these constants to match raw SFN storage.
  */
 #define STORAGE_ROOT_KIT              "Kit"
+#define STORAGE_ROOT_SCENE            "Scene"
+#define STORAGE_ROOT_BANK             "Bank"
+#define STORAGE_ROOT_INSTRUMENT       "Instrument"
 #define STORAGE_KITSET_FILENAME       "kitset.kcg"
+#define STORAGE_SCENESET_FILENAME     "sceneset.scg"
+#define STORAGE_BANKSET_FILENAME      "bankset.bcg"
+#define STORAGE_SETTINGS_FILENAME     "settings.cfg"
 #define STORAGE_KIT_SLOT_COUNT        6u
-#define STORAGE_KIT_MAX_SLOTS         128u
+/*
+ * Kit and Scene folders are numbered directory entries, not legacy file slots.
+ *
+ * The old 128 limit came from P000.SND..P127.SND. New-format Kit/ folders are
+ * now addressed by a three-digit 000..999 prefix, so the storage boundary
+ * exposes 1000 slots and callers that hold library positions must use
+ * uint16_t. Slot 000 is a real save/load slot, not an empty sentinel.
+ */
+#define STORAGE_KIT_MAX_SLOTS         1000u
+#define STORAGE_SCENE_MAX_SLOTS       1000u
+#define STORAGE_BANK_MAX_SLOTS        1000u
+#define STORAGE_BANK_SCENE_MAX_SLOTS  16u
 #define STORAGE_KIT_FILENAME_MAX      13u
+/*
+ * Maximum Kit member filename stored in kitset.kcg.
+ *
+ * What: Allows kitset.kcg to store the user-visible LFN component generated
+ * for member Instrument files, not only the returned 8.3 alias.
+ *
+ * Why: Instruments inside Kits have a product naming convention: the eighth
+ * stem character is forced to the one-based voice number. That convention must
+ * be visible in both the real member filename and the kitset reference. Short
+ * aliases collapse spaces and can turn a convention-preserving display name
+ * into text such as `slakd11.drm`, so the schema field needs LFN-sized storage.
+ *
+ * Inputs/outputs: parser and formatter buffers for `file=` lines. The value
+ * mirrors asyncfatfs' current single-component LFN limit without making this
+ * storage-format layer call asyncfatfs directly.
+ *
+ * Affiliates/clients: storage_kitset_t and filesystem_loadKitDirectory_tick().
+ */
+#define STORAGE_KIT_MEMBER_FILENAME_MAX 49u
 #define STORAGE_KIT_DISPLAY_NAME_LEN  8u
+#define STORAGE_SCENE_DISPLAY_NAME_LEN STORAGE_KIT_DISPLAY_NAME_LEN
 
 /* Result codes returned by every parser/validator in this layer.
  *
@@ -64,16 +108,15 @@ typedef enum {
  *
  * These values are intentionally format-level types, not voice numbers. The
  * parser combines a type with the slot number supplied by kitset.kcg to select
- * the correct ParameterArray enum map. UNKNOWN is used during initialization
- * and for rejecting unsupported future extensions.
+ * the correct descriptor table. UNKNOWN is used during initialization and for
+ * rejecting unsupported future extensions.
  */
-typedef enum {
-    STORAGE_INSTRUMENT_DRM = 0,
-    STORAGE_INSTRUMENT_SNR,
-    STORAGE_INSTRUMENT_CYM,
-    STORAGE_INSTRUMENT_HAT,
-    STORAGE_INSTRUMENT_UNKNOWN,
-} storage_instrument_type_t;
+typedef instrument_type_t storage_instrument_type_t;
+#define STORAGE_INSTRUMENT_DRM     INSTRUMENT_TYPE_DRM
+#define STORAGE_INSTRUMENT_SNR     INSTRUMENT_TYPE_SNR
+#define STORAGE_INSTRUMENT_CYM     INSTRUMENT_TYPE_CYM
+#define STORAGE_INSTRUMENT_HAT     INSTRUMENT_TYPE_HAT
+#define STORAGE_INSTRUMENT_UNKNOWN INSTRUMENT_TYPE_UNKNOWN
 
 /* Incremental parse state for kitset.kcg.
  *
@@ -85,13 +128,16 @@ typedef enum {
  * hand-edited files.
  *
  * Inputs arrive through storage_kitsetParseLine(). Outputs are this struct and
- * writes to kit slot routing parameters such as PAR_AUDIO_OUTn. Clients are
- * filesystem_loadKitDirectory_tick() in filesystem.c and the generated
- * kitset.kcg files.
+ * writes to Kit source names. Legacy audio_out lines are retained in
+ * legacy_audio_out[] only so Scene Load can import old embedded Kits when
+ * sceneset.scg has no audio_out line. New writers must not emit audio_out in
+ * kitset.kcg.
  */
 typedef struct {
-    char instrument_file[STORAGE_KIT_SLOT_COUNT][STORAGE_KIT_FILENAME_MAX];
+    char instrument_file[STORAGE_KIT_SLOT_COUNT]
+                        [STORAGE_KIT_MEMBER_FILENAME_MAX];
     storage_instrument_type_t instrument_type[STORAGE_KIT_SLOT_COUNT];
+    uint8_t legacy_audio_out[STORAGE_KIT_SLOT_COUNT];
     uint8_t current_slot;
     uint8_t seen_format;
     uint8_t seen_version;
@@ -102,16 +148,16 @@ typedef struct {
 
 /* Incremental parse state for one instrument file.
  *
- * expected_type and expected_slot come from the already-validated kitset entry
- * and are checked against the instrument header so a renamed file cannot be
- * loaded into the wrong voice class by accident. current_section tracks top
- * metadata, [params], and [morph]. seen_param_count proves at least one primary
- * parameter landed. seen_morph_count tells filesystem.c whether an explicit
- * morph endpoint was loaded or whether it must copy the main values into
- * parameters2[] as the Phase 2 fallback.
+ * expected_type and expected_slot come from the already-validated kitset entry.
+ * The type is checked against the instrument header, while the slot selects the
+ * instrument record for the file named by kitset.kcg. current_section tracks
+ * top metadata, [params], and [morph]. seen_param_count proves at least one
+ * primary parameter landed. seen_morph_count tells filesystem.c whether an
+ * explicit morph endpoint was loaded or whether it must copy the main image
+ * into the morph image as the Phase 2 fallback.
  *
  * Inputs arrive through storage_instrumentParseLine(). Outputs are validation
- * flags plus writes into parameter_values[] and parameters2[]. Clients are the
+ * flags plus writes into kit_instrument_slot_t. Clients are the
  * directory kit loader and future save code that will emit the same sections.
  */
 typedef struct {
@@ -121,10 +167,96 @@ typedef struct {
     uint8_t seen_format;
     uint8_t seen_version;
     uint8_t seen_type;
-    uint8_t seen_slot;
     uint8_t seen_param_count;
     uint8_t seen_morph_count;
 } storage_instrument_state_t;
+
+/*
+ * Incremental parse state for sceneset.scg.
+ *
+ * The file validates a Scene folder and stores Scene-level settings only. It
+ * deliberately stores no object name: the Scene name is owned by the numbered
+ * Scene directory, and the embedded Kit name is owned by the "Kit <name>"
+ * child directory. Inputs arrive one NUL-terminated line at a time. Outputs
+ * are validation bits and writes into scene_t::settings. Clients are
+ * filesystem Scene load/save state machines and SD_CARD fixture generators.
+ */
+typedef struct {
+    uint8_t seen_format;
+    uint8_t seen_version;
+    /*
+     * Optional v1 Scene setting presence bits.
+     *
+     * Missing fields preserve filesystem_initStagedScene() defaults so old
+     * Scene folders still load. Scene Load uses seen_audio_out to decide
+     * whether legacy embedded kitset audio_out lines should be imported.
+     */
+    uint8_t seen_audio_out;
+    uint8_t seen_fx_send_amount;
+    uint8_t seen_fader_setting;
+} storage_sceneset_t;
+
+/*
+ * Incremental validation state for placeholder effect files.
+ *
+ * Real effect storage is future DSP work. Scene folders still always contain
+ * an effect file, so the first pass accepts a tiny guarded placeholder:
+ * format=helicase.effect, version=1, placeholder=1. Inputs are text lines from
+ * filesystem.c; outputs are validation bits used to accept or reject the first
+ * discovered .fx file.
+ */
+typedef struct {
+    uint8_t seen_format;
+    uint8_t seen_version;
+    uint8_t seen_placeholder;
+} storage_effect_state_t;
+
+/*
+ * Incremental validation state for Scene/Bank draft pattern text files.
+ *
+ * Version 1 is the older thin placeholder:
+ *   format=helicase.pattern, version=1, placeholder=1
+ *
+ * Version 2 is the current draft Scene/Bank payload:
+ *   format=helicase.pattern
+ *   version=2
+ *   track1=<length>,<scale>,<128 on/off chars>
+ *   ...
+ *   track7=<length>,<scale>,<128 on/off chars>
+ *
+ * Only step on/off is stored; note, velocity, probability, automation,
+ * rotation, shuffle, and pattern-next data remain PatternData defaults. This is
+ * deliberately not the final pattern schema. It exists so Scene/Bank saves
+ * recall the 128x7 active-step grid and the two required per-track timing
+ * values while the real dynamic pattern format is still pending.
+ */
+typedef struct {
+    uint8_t seen_format;
+    uint8_t seen_version;
+    uint8_t version;
+    uint8_t seen_placeholder;
+    uint8_t seen_track_mask;
+} storage_pattern_stub_state_t;
+
+/*
+ * Incremental parse state for bankset.bcg.
+ *
+ * The Bank display name is owned only by the root Bank directory
+ * `Bank/NNN <name>/`. bankset.bcg validates the folder and carries Bank-level
+ * control values. active_scene is a Bank-local slot number in 00..15, not a
+ * root Scene library slot. scene_mask_voice_edit is a 16-bit hex Scene mask
+ * used by VOICE-mode edit fan-out. The writer always emits both fields; the
+ * parser allows them to be absent and keeps initialized defaults so empty or
+ * hand-authored Banks remain loadable.
+ */
+typedef struct {
+    uint8_t seen_format;
+    uint8_t seen_version;
+    uint8_t seen_active_scene;
+    uint8_t seen_scene_mask_voice_edit;
+    uint8_t active_scene;
+    uint16_t scene_mask_voice_edit;
+} storage_bankset_t;
 
 /* Initialize kitset parse state before the first line of kitset.kcg.
  *
@@ -137,19 +269,30 @@ void storage_kitsetInit(storage_kitset_t *kit);
 /* Parse one complete line from kitset.kcg.
  *
  * Inputs: kit is the state initialized by storage_kitsetInit(); line is one
- * NUL-terminated line with CR/LF already removed; target_values is the active
- * ParameterArray buffer. Outputs: updated kit state and slot routing parameters
- * such as audio output. Unknown keys are ignored for forward compatibility;
+ * NUL-terminated line with CR/LF already removed; target_kit is the Scene kit
+ * being assembled. Outputs: updated parse state, source-name metadata, and
+ * optional legacy audio routing side data.
+ * Unknown keys are ignored for forward compatibility;
  * malformed required keys return an error status.
  */
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
                                          const char *line,
-                                         uint8_t *target_values);
+                                         kit_t *target_kit);
+/*
+ * Read legacy kitset audio routing side data.
+ *
+ * Inputs: completed kitset parse state. Output: nonzero only when every slot
+ * supplied an old audio_out line; the array accessor returns the retained
+ * six-route compatibility values. New root Kit loads ignore these values,
+ * while Scene Load may use them as a fallback for old sceneset.scg files.
+ */
+uint8_t storage_kitsetHasCompleteLegacyAudioOut(const storage_kitset_t *kit);
+const uint8_t *storage_kitsetLegacyAudioOut(const storage_kitset_t *kit);
 
 /* Validate that all required kitset.kcg fields were present and coherent.
  *
  * Input: kit parse state after EOF. Output: OK or an error status. This checks
- * the file guard/version, all six type/file/audio_out fields, and that listed
+ * the file guard/version, all six type/file fields, and that listed
  * filenames have extensions matching their declared instrument type.
  */
 storage_status_t storage_kitsetFinalize(const storage_kitset_t *kit);
@@ -166,36 +309,42 @@ void storage_instrumentStateInit(storage_instrument_state_t *state,
 
 /* Parse one complete line from an instrument file.
  *
- * Inputs: state, a NUL-terminated line, target_values for [params], and
- * morph_values for [morph]. Outputs: parameter writes to the correct
- * ParameterArray enum indices for the expected type/slot, plus validation flags
- * in state. Unknown parameter keys are ignored so future saves can add fields
- * older firmware does not understand.
+ * Inputs: state, a NUL-terminated line, and the destination kit instrument
+ * slot. Outputs: descriptor-indexed writes to generic main or morph storage,
+ * plus validation flags in state. Instrument descriptor values are byte-domain:
+ * normal sound rows write their UI byte, target selector rows write compact
+ * tokens, and wider runtime target IDs are not retained in SceneData.
+ *
+ * The file-only token "self" is accepted only for lfo_target_voice and
+ * lfo_target_voice_2. It resolves through state->expected_slot before writing
+ * Scene-owned descriptor images, so every caller after storage sees the same
+ * numeric selector domain as Menu: 1..6 for voices and 7 for `scn`. Unknown
+ * keys are ignored so future saves can add fields older firmware does not
+ * understand. Clients are filesystem_loadKitDirectory_tick() and Preset's
+ * later Scene-to-runtime apply bridge.
  */
 storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                                              const char *line,
-                                             uint8_t *target_values,
-                                             uint8_t *morph_values);
+                                             kit_instrument_slot_t *slot);
 
 /* Validate required instrument metadata after EOF.
  *
  * Input: state after all lines were parsed. Output: OK only if the file guard,
- * version, type, slot, and at least one [params] value were seen. Morph data is
+ * version, type, and at least one [params] value were seen. Morph data is
  * optional during this load pass because old converted kits do not carry it.
  */
 storage_status_t storage_instrumentFinalize(const storage_instrument_state_t *state);
 
 /* Phase 2 morph fallback for instrument files without a [morph] section.
  *
- * Inputs: format type, one-based slot, already-loaded main parameter buffer,
- * and morph destination buffer. Output: each mapped main parameter for that
- * instrument is copied into the corresponding morph parameter index. Client:
+ * Inputs: format type, one-based slot, and the already-loaded instrument
+ * record. Output: every descriptor-owned main image value is copied to the
+ * corresponding morph image value. Client:
  * filesystem_loadKitDirectory_tick() calls this when seen_morph_count is zero.
  */
 void storage_instrumentCopyMainToMorphFallback(storage_instrument_type_t type,
                                                uint8_t slot,
-                                               const uint8_t *main_values,
-                                               uint8_t *morph_values);
+                                               kit_instrument_slot_t *instrument);
 
 /* Convert a kitset/instrument type token such as "drm" into the enum above.
  *
@@ -207,27 +356,81 @@ storage_instrument_type_t storage_instrumentTypeFromText(const char *text);
 
 /* Check that an instrument filename extension agrees with its declared type.
  *
- * Inputs: short 8.3 filename from kitset.kcg and expected type. Output: nonzero
- * when extensions match (.drm/.snr/.cym/.hat). Client:
+ * Inputs: member filename from kitset.kcg and expected type. Output: nonzero
+ * when extensions match (.drm/.snr/.cym/.hat), whether the filename is a
+ * convention-preserving LFN display component or an older 8.3 alias. Client:
  * storage_kitsetFinalize(), which prevents an obviously wrong file from being
  * loaded into a slot before filesystem.c opens it.
  */
 uint8_t storage_instrumentFilenameMatchesType(const char *filename,
                                               storage_instrument_type_t type);
 
-/* Parse a numbered folder name like "001 Slak" into internal slot/name data.
+/*
+ * Initialize, parse, and finalize sceneset.scg.
  *
- * Inputs: display/LFN folder name, zero_based_slot output pointer, and an
- * eight-char display buffer. The name must begin with a three-digit 001..128
- * slot ID followed by at least one space or underscore separator; additional
+ * Inputs: parser state, one text line at a time, optional `scene_settings_t`
+ * target, and a legacy fixed display-name buffer retained for call-site
+ * compatibility. Outputs: required guard bits plus retained Scene settings.
+ *
+ * Why the target is settings-only: Pattern data is deliberately direct-loaded
+ * after the general Scene/Kit stage commits, and names are authoritative in
+ * `/.hcnames`; accepting scene_t would imply a full Scene staging image and
+ * reintroduce a Pattern-sized SRAM allocation.
+ *
+ * Affiliates: filesystem_shared_workspace_t.scene_stage, Scene Load phases,
+ * and the later Pattern-data redesign. Missing optional settings leave caller
+ * defaults in place, so filesystem initializes the non-Pattern stage first.
+ */
+void storage_scenesetInit(storage_sceneset_t *state);
+storage_status_t storage_scenesetParseLine(
+    storage_sceneset_t *state,
+    const char *line,
+    scene_settings_t *target_settings,
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
+storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state);
+
+/* Parse a numbered folder name like "000 Slak" into internal slot/name data.
+ *
+ * Inputs: display/LFN folder name, slot output pointer, and an eight-char
+ * display buffer. The name must begin with a three-digit 000..999 slot ID
+ * followed by at least one space or underscore separator; additional
  * spaces/underscores before the visible name are skipped. Spaces inside the
  * visible eight-character name are preserved. Outputs: nonzero on a valid
- * prefix/name, zero-based slot for menu/preset code, and sanitized/padded
- * display text. Client: filesystem_recordKitDirectory() during Kit/ scans.
+ * prefix/name, direct 0..999 slot for menu/preset code, and sanitized/padded
+ * display text. Slot 000 is a real library slot, not a sentinel. Client:
+ * filesystem_recordKitDirectory() during Kit/ scans.
  */
 uint8_t storage_parseNumberedFolder(const char *name,
-                                    uint8_t *zero_based_slot,
+                                    uint16_t *slot,
                                     char display[STORAGE_KIT_DISPLAY_NAME_LEN]);
+
+/*
+ * Parse a Bank-local Scene folder such as "00 Slak".
+ *
+ * Inputs: one child directory display name from inside a Bank. Outputs:
+ * nonzero only for the two-digit Bank workspace namespace 00..15, direct
+ * Bank-local slot, and eight display cells. This must not share the root
+ * three-digit parser: root Scene library slots and Bank-local Scene slots are
+ * different product identities.
+ */
+uint8_t storage_parseBankSceneFolder(
+    const char *name,
+    uint8_t *slot,
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
+
+/*
+ * Format one Bank-local Scene child directory.
+ *
+ * Inputs: Bank-local slot 0..15 and eight Scene display cells. Output:
+ * `SS <name>` where SS is two decimal digits. Slot 0 maps to "00", not
+ * "000", keeping Bank workspace Scene slots visibly distinct from root Scene
+ * library entries.
+ */
+void storage_formatBankSceneDir(
+    char *dst,
+    uint16_t capacity,
+    uint8_t slot,
+    const char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
 
 /* Copy arbitrary text into the firmware's fixed eight-character name format.
  *
@@ -246,5 +449,193 @@ void storage_copyDisplayName(char dst[STORAGE_KIT_DISPLAY_NAME_LEN],
  */
 void storage_copyFilename(char dst[STORAGE_KIT_FILENAME_MAX],
                           const char *src);
+/*
+ * Copy a kitset.kcg member Instrument filename.
+ *
+ * Input: src is a single FAT display component from a `file=` line or a save
+ * generator. Output: dst is NUL-terminated and large enough for the
+ * convention-preserving LFN member name. Clients use this for Kit member
+ * references, while storage_copyFilename() remains the short-alias helper.
+ */
+void storage_copyKitMemberFilename(
+    char dst[STORAGE_KIT_MEMBER_FILENAME_MAX],
+    const char *src);
+
+/*
+ * Convert registry instrument types back into storage schema text.
+ *
+ * Save code needs the inverse of the parser's type lookup for kitset.kcg and
+ * instrument file headers. Unknown types return NULL so filesystem can reject
+ * impossible saves before creating partial Kit folder contents.
+ */
+const char *storage_instrumentTypeToText(storage_instrument_type_t type);
+
+/*
+ * Return the instrument filename extension for a storage type.
+ *
+ * The extension intentionally shares the same lowercase token as the type
+ * field today, keeping saved 8.3 filenames aligned with the loader's extension
+ * validator.
+ */
+const char *storage_instrumentTypeExtension(storage_instrument_type_t type);
+/*
+ * Instrument text save value projection.
+ *
+ * What: Selects whether storage text writers emit the resident endpoint images
+ * as a normal save, or as a Morph Save projection.
+ *
+ * Why: normal Save and Morph Save use the same text schemas, descriptor keys,
+ * section ordering, and asyncfatfs overwrite path. Their difference is only
+ * the value chosen for morphable endpoint cells: Morph Save writes the current
+ * interpolated value into both [params] and [morph]. Keeping the mode in
+ * storageTypes lets filesystem.c sequence SD writes without learning
+ * descriptor counts or morphability flags.
+ *
+ * Affiliates/clients: storage_instrument_write_view_t and root Instrument
+ * save state machines.
+ */
+typedef enum {
+    STORAGE_INSTRUMENT_SAVE_NORMAL = 0u,
+    STORAGE_INSTRUMENT_SAVE_MORPH
+} storage_instrument_save_mode_t;
+
+/*
+ * Instrument text save value view.
+ *
+ * What: Describes how storage_formatInstrumentLineView() should project one
+ * resident instrument slot into an on-card Instrument file.
+ *
+ * Why: normal Save and Morph Save use the same text schema, descriptor keys,
+ * self-token handling, and section ordering, but they choose different values
+ * for morphable cells. In Morph Save, [params] and [morph] receive the same
+ * interpolated value. Keeping the mode in storageTypes lets filesystem.c
+ * sequence SD writes without learning descriptor counts or morphability flags.
+ *
+ * Inputs: instrument points at the Scene-owned slot image; type is the
+ * registry/storage type for descriptor lookup; one_based_voice drives the
+ * file-only `self` token; morph_amount is the retained per-slot Morph amount
+ * used only by STORAGE_INSTRUMENT_SAVE_MORPH.
+ *
+ * Outputs: no state is stored in the view. The formatter reads it line by line
+ * while filesystem.c owns op_write_line_index.
+ *
+ * Affiliates/clients: filesystem_saveInstrument_tick() and InstrumentMrp
+ * Save.
+ */
+typedef struct {
+    const kit_instrument_slot_t *instrument;
+    storage_instrument_type_t type;
+    uint8_t one_based_voice;
+    uint8_t morph_amount;
+    storage_instrument_save_mode_t mode;
+} storage_instrument_write_view_t;
+
+/*
+ * Text save helpers mirror the parser-owned schema.
+ *
+ * Filesystem streams one line at a time, but storageTypes owns which keys are
+ * emitted and how descriptor-indexed images become [params]/[morph] text.
+ * Keeping writers next to parsers prevents save from drifting away from the
+ * accepted load grammar.
+ */
+uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
+                                     const kit_instrument_slot_t *instrument,
+                                     storage_instrument_type_t type,
+                                     uint8_t one_based_voice,
+                                     uint16_t line_index);
+uint8_t storage_formatInstrumentLineView(
+    char *dst,
+    uint16_t capacity,
+    const storage_instrument_write_view_t *view,
+    uint16_t line_index);
+void storage_effectStateInit(storage_effect_state_t *state);
+storage_status_t storage_effectParseLine(storage_effect_state_t *state,
+                                         const char *line);
+storage_status_t storage_effectFinalize(const storage_effect_state_t *state);
+/*
+ * Initialize/parse/finalize Scene/Bank pattern text.
+ *
+ * Inputs are complete text lines from filesystem.c. Outputs are validation
+ * bits plus PatternSet step-active/length/scale edits for v2 track lines. The
+ * caller's PatternSet must already be seeded through pat_initPatternSet() so
+ * omitted draft data, old placeholders, and non-stored step fields all keep the
+ * same defaults.
+ */
+void storage_patternStubStateInit(storage_pattern_stub_state_t *state);
+storage_status_t storage_patternStubParseLine(
+    storage_pattern_stub_state_t *state,
+    const char *line,
+    PatternSet *pattern);
+storage_status_t storage_patternStubFinalize(
+    const storage_pattern_stub_state_t *state);
+/*
+ * Stream placeholder/draft Scene child files one line at a time.
+ *
+ * Inputs: destination buffer, capacity, and logical zero-based line index from
+ * filesystem's generic text writer. Outputs: the number of bytes written,
+ * including the trailing newline, or zero when the tiny schema has ended.
+ * Clients: Scene Save and Bank-local Scene Save for effects.fx and
+ * pattern.pat.
+ */
+uint8_t storage_formatEffectPlaceholderLine(char *dst,
+                                            uint16_t capacity,
+                                            uint16_t line_index);
+uint8_t storage_formatPatternStubLine(char *dst,
+                                      uint16_t capacity,
+                                      const PatternSet *pattern,
+                                      uint16_t line_index);
+/*
+ * Initialize/parse/finalize and stream the Bank-level config file.
+ *
+ * bankset.bcg is a guard/config file only. It never stores a Bank name; the
+ * directory name owns identity. active_scene is a Bank-local 00..15 Scene
+ * slot. scene_mask_voice_edit is emitted as hex because each nibble maps
+ * directly onto four SEQ-button Scene bits. The parser defaults missing
+ * active_scene to 0 and missing scene_mask_voice_edit to bit 0.
+ */
+void storage_banksetInit(storage_bankset_t *state);
+storage_status_t storage_banksetParseLine(storage_bankset_t *state,
+                                          const char *line);
+storage_status_t storage_banksetFinalize(const storage_bankset_t *state);
+uint8_t storage_formatBanksetLine(char *dst,
+                                  uint16_t capacity,
+                                  const storage_bankset_t *state,
+                                  uint16_t line_index);
+/*
+ * Build an 8.3-safe saved instrument filename from Scene-retained metadata.
+ *
+ * The source stem can be longer than a FAT short alias because SceneData
+ * retains the first 16 characters. This compatibility helper still sanitizes
+ * to a short basename and adds a voice suffix when requested; LFN-capable save
+ * paths should use storage_makeSavedInstrumentDisplayFilename() and let
+ * asyncfatfs return the alias actually selected on disk.
+ */
+void storage_makeSavedInstrumentFilename(
+    char dst[STORAGE_KIT_FILENAME_MAX],
+    const char *stem,
+    storage_instrument_type_t type,
+    uint8_t one_based_voice,
+    uint8_t force_voice_suffix);
+
+/*
+ * Build a visible Instrument member filename for LFN-capable saves.
+ *
+ * Inputs mirror storage_makeSavedInstrumentFilename(), but the output is a
+ * user-facing long filename component rather than an 8.3 open alias. Spaces
+ * and upper/lowercase ASCII are preserved where FAT permits them; invalid FAT
+ * display characters are replaced with underscores. When force_voice_suffix is
+ * nonzero, character 8 of the stem is the one-based voice number, padding
+ * shorter stems with spaces and truncating longer stems before that cell.
+ * Filesystem.c passes this display component to asyncfatfs and also writes it
+ * into kitset.kcg. asyncfatfs may still return a generated 8.3 alias for its
+ * own reopen/cache needs, but the schema-visible Kit member identity remains
+ * the convention-preserving display filename.
+ */
+void storage_makeSavedInstrumentDisplayFilename(char *dst,
+                                                uint8_t capacity,
+                                                const char *stem,
+                                                storage_instrument_type_t type,
+                                                uint8_t one_based_voice,
+                                                uint8_t force_voice_suffix);
 
 #endif /* STORAGETYPES_H_ */

@@ -25,10 +25,17 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/Hardware/USB/App \
           -ICore/Hardware/USB/OTG_Driver/src \
           -ICore/Menu \
-          -ICore/Scene/Preset \
+          -ICore/Bank \
+          -ICore/Bank/Scene/Preset \
           -ICore/MIDI \
           -ICore/DSPAudio \
-          -ICore/Scene/Pattern \
+          -ICore/DSP/Instruments \
+          -ICore/DSP/Instruments/Drum \
+          -ICore/DSP/Instruments/Snare \
+          -ICore/DSP/Instruments/Cymbal \
+          -ICore/DSP/Instruments/HiHat \
+          -ICore/Bank/Scene \
+          -ICore/Bank/Scene/Pattern \
           -ICore/Sequencer \
           -ICore/SampleRom \
           -ICore/compat
@@ -64,7 +71,6 @@ SRCS = \
   Core/Hardware/SD/asyncfatfs/sdcard_lxr02.c \
   Core/Hardware/SD/filesystem.c \
   Core/Hardware/SD/storageTypes.c \
-  Core/Hardware/SD/kitBrowser.c \
   Core/Hardware/USB/OTG_Driver/src/usb_core.c \
   Core/Hardware/USB/OTG_Driver/src/usb_dcd.c \
   Core/Hardware/USB/OTG_Driver/src/usb_dcd_int.c \
@@ -81,17 +87,26 @@ SRCS = \
   Core/Menu/Cc2Text.c \
   Core/Menu/copyClearTools.c \
   Core/Menu/screensaver.c \
-  Core/Scene/Preset/presetManager.c \
-  Core/Scene/Preset/ParameterArray.c \
+  Core/Bank/Scene/Preset/presetManager.c \
+  Core/Bank/Scene/Preset/presetMorphEngine.c \
+  Core/Bank/Scene/Preset/ParameterArray.c \
+  Core/Bank/BankData.c \
+  Core/Bank/Scene/SceneData.c \
+  Core/Bank/Scene/SceneModTargets.c \
+  Core/DSP/Instruments/InstrumentManager.c \
+  Core/DSP/Instruments/Drum/DrumParameters.c \
+  Core/DSP/Instruments/Snare/SnareParameters.c \
+  Core/DSP/Instruments/Cymbal/CymbalParameters.c \
+  Core/DSP/Instruments/HiHat/HiHatParameters.c \
   Core/MIDI/FIFO.c \
   Core/MIDI/MidiRealtime.c \
   Core/MIDI/Uart.c \
 	  Core/MIDI/MidiVoiceControl.c \
 	  Core/MIDI/MidiParser.c \
-  Core/Scene/Pattern/PatternData.c \
-  Core/Scene/Pattern/EuklidGenerator.c \
-  Core/Scene/Pattern/SomGenerator.c \
-  Core/Scene/Pattern/SomData.c \
+  Core/Bank/Scene/Pattern/PatternData.c \
+  Core/Bank/Scene/Pattern/EuklidGenerator.c \
+  Core/Bank/Scene/Pattern/SomGenerator.c \
+  Core/Bank/Scene/Pattern/SomData.c \
 	  Core/Sequencer/sequencer.c \
 	  Core/Sequencer/sequencerTimer.c \
 	  Core/Sequencer/clockSync.c \
@@ -103,12 +118,12 @@ DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/automationNode.c \
   Core/DSPAudio/BufferTools.c \
-  Core/DSPAudio/CymbalVoice.c \
+  Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
   Core/DSPAudio/distortion.c \
   Core/DSPAudio/dither.c \
-  Core/DSPAudio/DrumVoice.c \
-  Core/DSPAudio/HiHat.c \
+  Core/DSP/Instruments/Drum/DrumVoice.c \
+  Core/DSP/Instruments/HiHat/HiHat.c \
   Core/DSPAudio/lfo.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
@@ -118,7 +133,7 @@ DSP_SRCS = \
   Core/DSPAudio/Samples.c \
   Core/DSPAudio/SlopeEg2.c \
   Core/DSPAudio/snapEg.c \
-  Core/DSPAudio/Snare.c \
+  Core/DSP/Instruments/Snare/Snare.c \
   Core/DSPAudio/squareRootLut.c \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/transientTables.c \
@@ -142,6 +157,21 @@ $(BUILD)/$(TARGET).elf: $(OBJS)
 
 # DSP sources compiled with -Ofast (more specific rule wins over the generic one below)
 $(BUILD)/Core/DSPAudio/%.o: Core/DSPAudio/%.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# Moved instrument render sources retain the DSP fast-math policy. Descriptor
+# and registry control files remain in SRCS and use ordinary -O2 semantics.
+$(BUILD)/Core/DSP/Instruments/Drum/DrumVoice.o: Core/DSP/Instruments/Drum/DrumVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Snare/Snare.o: Core/DSP/Instruments/Snare/Snare.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Cymbal/CymbalVoice.o: Core/DSP/Instruments/Cymbal/CymbalVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

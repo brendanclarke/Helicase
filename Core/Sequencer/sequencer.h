@@ -63,6 +63,18 @@ void seq_setExtSyncSource(uint8_t source);
 uint8_t seq_getExtSyncSource(void);
 void seq_noteExtSyncActivity(uint8_t source, uint32_t timestampUs);
 void seq_setNextPattern(const uint8_t patNr);
+/*
+ * Immediately select the active Scene/Pattern for front-panel PERF switching.
+ *
+ * Inputs: pattern is a resident Scene/Pattern index validated against
+ * PatternData. Outputs: seq_activePattern and seq_pendingPattern are aligned,
+ * deferred pattern-load flags are cleared, track counters are recalculated from
+ * the existing master tick/step position, UI follow/chase state is notified, and
+ * any sounding notes are released. Clients: menu_perfModeSceneButtonPressed().
+ * Pattern-only queued switching is retired; callers that need a musical switch
+ * must use this Scene-aligned path or a future Scene-level scheduler.
+ */
+void seq_selectActivePattern(uint8_t pattern);
 void seq_setRunning(uint8_t isRunning);
 uint8_t seq_isRunning(void);
 void seq_armActivePatternReload(void);

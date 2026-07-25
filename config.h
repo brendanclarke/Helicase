@@ -50,6 +50,36 @@
 ** ----------------------------------------------------------------------- */
 #define USE_SD_CARD          1
 #define DEBUG_CRASH_MODE     0
+/*
+ * CONFIG_DEV_MODE exposes low-level storage diagnostics in the production UI.
+ *
+ * What: when nonzero, the Load/Save type cycle includes the asyncfatfs test
+ * entries "File", "Dir", and Save-only "sDir", and main.c compiles the
+ * boot-stage/operation/substep/HCNAMES OLED observers used during storage
+ * diagnosis. Why: ordinary firmware should neither expose test objects nor
+ * replace the splash with durable boot coordinates, while one flag must restore
+ * the complete front-panel diagnostic surface for hardware investigation.
+ * Clients: Core/Menu/menu.c gates menu reachability; main.c compiles boot-screen
+ * callbacks and display drains only in development mode. Filesystem test and
+ * read-only observer functions remain callable so this flag changes visibility,
+ * not storage behavior or on-card format.
+ */
+/*
+ * Return the diagnostic-only UI surface to normal production behavior.
+ *
+ * What: value 0 compiles out main.c's pre-operation boot marker and live
+ * filesystem operation/phase/substep observers. Why: the removed Instrument
+ * Load diagnostic frame replaced the normal menu surface and made scrolling
+ * untestable. Input: this compile-time flag is consumed by main.c and
+ * Core/Menu/menu.c. Output: filesystem sequencing, SRAM allocation, and
+ * SD-card contents remain unchanged, while diagnostic OLED frames and
+ * developer-only menu entries are absent. Affiliates:
+ * boot_showFilesystemStage(), boot_showActiveFilesystemDiagnostic(),
+ * boot_showFilesystemSubstep(), filesystem_getBootDiagnostic(), and
+ * filesystem_setBootSubstepDiagnostic(). Set to 1 only for a diagnostic that
+ * preserves the UI under test.
+ */
+#define CONFIG_DEV_MODE      0
 
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time

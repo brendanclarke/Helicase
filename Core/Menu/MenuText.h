@@ -38,7 +38,6 @@
 #define MENU_MIDI_FILTERING 13
 #define MENU_PPQ            14
 #define MENU_EXT_SYNC       15
-
 static const char menuText_ok[]    = "ok ";
 static const char menuText_off[]   = "off";
 static const char menuText_on[]    = "on ";
@@ -64,8 +63,17 @@ static const char transientNames[][4] = {
     {"Drp"},{"Hat"},{"Clp"},{"Kk2"},{"Snr"},{"Tom"},{"Sp2"},
 };
 static const char nextPatternNames[][4] = {
-    {15},
+    {23},
+    /*
+     * Retired Pattern-next labels.
+     *
+     * The Pattern Settings page no longer exposes next/repeat controls, and the
+     * sequencer ignores Pattern-only switches. Keep the table only so any stale
+     * DTYPE_MENU reference has bounded display strings until Phase 4 rebuilds
+     * Pattern storage/menu ownership.
+     */
     {"p1"},{"p2"},{"p3"},{"p4"},{"p5"},{"p6"},{"p7"},{"p8"},
+    {"p9"},{"p10"},{"p11"},{"p12"},{"p13"},{"p14"},{"p15"},{"p16"},
     {"r2"},{"r3"},{"r4"},{"r5"},{"r6"},{"r7"},{"r8"},
 };
 static const char retriggerNames[][4] = {
@@ -73,6 +81,14 @@ static const char retriggerNames[][4] = {
 };
 static const char lfoWaveNames[][4] = {
     {8}, {"sin"},{"tri"},{"sup"},{"sdn"},{"sqr"},{"rnd"},{"xup"},{"xdn"},
+};
+/* Three-character display names for the shared LFO polarity selector.
+** Clients: descriptor ROW("lfo_polarity", ..., DTYPE_LFO_POLARITY), compact
+** value formatting, and single-parameter edit formatting. Outputs: "neg",
+** "pos", and "bi " while the stored numeric value remains aligned with
+** mod_node_polarity_t: 0 negative, 1 positive, 2 bipolar. */
+static const char lfoPolarityNames[][4] = {
+    {3}, {"neg"},{"pos"},{"bi"},
 };
 static const char rollRateNames[][4] = {
     {14},
@@ -120,8 +136,9 @@ static const char shortNames[][4] = {
     {"bpm"},{"ch"},{"out"},{"srt"},{"nxt"},{"mod"},{"vel"},
     {"fch"},{"flw"},{"qnt"},{"trk"},{"val"},{"shu"},{"ssv"},
     {"x"},{"y"},{"flx"},{"mid"},{"mrt"},{"txf"},{"rxf"},
-    {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},
-    {"sca"},
+    {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},{"sca"},
+    /* PERF per-voice Morph compact labels: voice number + "vm". */
+    {"1vm"},{"2vm"},{"3vm"},{"4vm"},{"5vm"},{"6vm"},
 };
 
 static const char catNames[][16] = {
@@ -149,6 +166,8 @@ static const char longNames[][16] = {
     {"Routing"},{"TxFilter"},{"RxFilter"},
     {"In PPQ"},{"Out1 PPQ"},{"Out2 PPQ"},{"Gate Mode"},{"PCReset"},
     {"CPU use time"},{"OscIntrp"},{"Scale"},
+    /* Single-parameter long names for PERF per-voice Morph controls. */
+    {"1 Morph"},{"2 Morph"},{"3 Morph"},{"4 Morph"},{"5 Morph"},{"6 Morph"},
 };
 
 #endif /* MENUTEXT_H_ */

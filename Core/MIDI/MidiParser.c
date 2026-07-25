@@ -53,6 +53,7 @@
 #include "menu.h"
 #include "buttonHandler.h"
 #include "MidiRealtime.h"
+#include "SceneData.h"
 #include "triggerJacks.h"
 #include "timebase.h"
 #include <stdbool.h>
@@ -126,13 +127,69 @@ static inline float calcPitchModAmount(uint8_t data2)
 	return val*val*PITCH_AMOUNT_FACTOR;
 }
 
+static uint8_t midiParser_getVoiceMidiChannel(uint8_t voice);
+
+static uint8_t midiParser_morphAmountFromCc(uint8_t value)
+{
+	/*
+	 * Map incoming 7-bit CC1 to the 8-bit Morph amount.
+	 *
+	 * Inputs: MIDI CC value 0..127. Output: Morph amount 0..255. Values 0..126
+	 * double cleanly; 127 is a special endpoint case so external controllers
+	 * can reach the exact morph endpoint. Keeping this as a helper lets global
+	 * and per-voice Morph CC paths share one endpoint contract.
+	 */
+	return (value == 127u) ? 255u : (uint8_t)(value * 2u);
+}
+
 static void midiParser_setMorphFromModWheel(uint8_t value)
 {
-	const uint8_t morph = (uint8_t)(value << 1);
+	uint8_t slot;
+	const uint8_t morph = midiParser_morphAmountFromCc(value);
+
+	/*
+	 * Apply incoming global-channel CC1 as the overall Morph bulk-set.
+	 *
+	 * Inputs: MIDI CC value 0..127. Outputs: preset_morph() writes the Scene
+	 * global Morph mirror and all six per-voice Morph amounts, then queues the
+	 * per-slot Morph worker. Menu notifications cover both the visible global
+	 * control and any visible per-voice Morph controls.
+	 */
 	parameter_values[PAR_MORPH] = morph;
 	preset_morph(morph);
 	modNode_originalValueChanged(PAR_MORPH);
 	menu_notifyExternalParamChanged(PAR_MORPH);
+	for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+		menu_notifyExternalParamChanged((uint16_t)(PAR_VOICE1_MORPH + slot));
+}
+
+static uint8_t midiParser_setVoiceMorphFromModWheel(uint8_t channel,
+                                                    uint8_t value)
+{
+	uint8_t voice;
+	uint8_t matched = 0u;
+	const uint8_t morph = midiParser_morphAmountFromCc(value);
+
+	/*
+	 * Route incoming CC1 to per-voice Morph after global Morph declines it.
+	 *
+	 * Inputs: zero-based incoming MIDI channel and 7-bit CC value. Output:
+	 * every voice whose Scene MIDI channel matches receives the 8-bit Morph
+	 * amount. The incoming channel dispatcher gives the global channel first
+	 * claim when it is assigned and can process the parameter; this helper is
+	 * the fallback for same-channel voice handling and for non-global voice
+	 * channels. The current channel storage has no explicit unassigned/off
+	 * state, so this provision can be revised when the MIDI system is reworked.
+	 */
+	for (voice = 0u; voice < INSTRUMENT_SLOT_COUNT; voice++) {
+		if (midiParser_getVoiceMidiChannel(voice) != channel)
+			continue;
+		preset_morphVoice(voice, morph);
+		modNode_originalValueChanged((uint16_t)(PAR_VOICE1_MORPH + voice));
+		menu_notifyExternalParamChanged((uint16_t)(PAR_VOICE1_MORPH + voice));
+		matched = 1u;
+	}
+	return matched;
 }
 
 uint8_t midiParser_getVoiceMidiNote(uint8_t voice)
@@ -148,12 +205,9 @@ uint8_t midiParser_getVoiceMidiNote(uint8_t voice)
 	 * flows, but live input should match the active pattern track setting so a
 	 * loaded pattern behaves without requiring a UI edit to mirror values.
 	 */
-	note = pat_getTrackMidiNote(seq_activePattern, voice);
+	note = scene_getTrackMidiNote(scene_getActiveIndex(), voice);
 	if (note != 0u)
 		return note;
-
-	if (midi_NoteOverride[voice] != 0u)
-		return midi_NoteOverride[voice];
 
 	return (uint8_t)(MIDI_DEFAULT_VOICE_NOTE_BASE + voice);
 }
@@ -166,7 +220,7 @@ static uint8_t midiParser_getVoiceMidiChannel(uint8_t voice)
 	 */
 	if (voice >= 7u)
 		return midi_MidiChannels[7];
-	return (uint8_t)(pat_getTrackMidiChannel(seq_activePattern, voice) - 1u);
+	return (uint8_t)(scene_getTrackMidiChannel(scene_getActiveIndex(), voice) - 1u);
 }
 
 static uint8_t midiParser_voiceMatchesNote(uint8_t voice, uint8_t note)
@@ -1550,29 +1604,35 @@ void midiParser_parseMidiMessage(MidiMsg msg)
 				seq_setNextPattern(msg.data1 & 0x07);
 
 		} else if(msgonly==MIDI_CC){
-			// respond to CC message. This responds only when global channel matches the cc message's channel
-			if((midiParser_txRxFilter & 0x04) && (chanonly == midi_MidiChannels[7])) {
-				/*
-				 * Global-channel CC automation records to the currently active
-				 * UI voice. Menu owns that active voice; Sequencer owns the
-				 * recording gate and delegates actual Pattern writes onward.
-				 *
-				 * Risk: physical MIDI CCs and locally generated sound-parameter
-				 * applies share midiParser_ccHandler() below. The explicit
-				 * automation call here preserves the old global-channel MIDI
-				 * recording behavior.
-				 */
-				seq_recordAutomation(menu_getActiveVoice(), msg.data1, msg.data2);
-
-				//handle midi data
+			if(midiParser_txRxFilter & 0x04) {
 				if (msg.data1 == CC_MOD_WHEEL) {
-					/* Session 019: the real MIDI mod wheel is a performance
-					** control for MORPH on the global channel. Keep it out of
-					** midiParser_ccHandler(); that shared helper also receives
-					** local parameter and automation writes where data1==1 is
-					** a parameter index, not necessarily physical CC 1. */
-					midiParser_setMorphFromModWheel(msg.data2);
-				} else {
+					/*
+					 * CC1 Morph routing is global-first.
+					 *
+					 * Inputs: incoming zero-based channel and CC1 value.
+					 * Output: when the assigned global channel matches and can
+					 * process CC1, it performs the overall Morph bulk-set.
+					 * Only otherwise does the event fall through to matching
+					 * voice-channel Morph. This preserves global-channel
+					 * priority for parameters it owns while keeping the
+					 * per-voice provision available for the later MIDI rework.
+					 */
+					if (chanonly == midi_MidiChannels[7]) {
+						seq_recordAutomation(menu_getActiveVoice(),
+						                     msg.data1, msg.data2);
+						midiParser_setMorphFromModWheel(msg.data2);
+					} else {
+						(void)midiParser_setVoiceMorphFromModWheel(chanonly,
+						                                           msg.data2);
+					}
+				} else if(chanonly == midi_MidiChannels[7]) {
+					/*
+					 * Global-channel CC automation records to the currently
+					 * active UI voice. Menu owns that active voice; Sequencer
+					 * owns the recording gate and delegates actual Pattern
+					 * writes onward.
+					 */
+					seq_recordAutomation(menu_getActiveVoice(), msg.data1, msg.data2);
 					midiParser_ccHandler(msg,1);
 				}
 				/* midiParser_ccHandler above already updates parameters locally.

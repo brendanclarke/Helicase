@@ -35,6 +35,24 @@
 
 #include "automationNode.h"
 
+static uint16_t autoNode_sanitizeDestination(uint16_t dest)
+{
+	/*
+	 * Bound one legacy automation destination before it can touch MIDI CC state.
+	 *
+	 * Inputs: dest is the Step-stored automation destination. Historically this
+	 * was a CC/CC2 number where 1..254 are valid and NO_AUTOMATION (0xff) means
+	 * off; zero is not valid because MIDI_CC data1 zero underflows the legacy
+	 * parser's parameter index. Newer PatternData code can also carry wider
+	 * sentinel values such as
+	 * INSTRUMENT_PARAM_INVALID (0xffff). Output: valid legacy destinations pass
+	 * through; every wide/stale/off sentinel collapses to NO_AUTOMATION. This
+	 * must live beside autoNode_setDestination() because this module owns the
+	 * midiParser_originalCcValues[] index and is the last defense before it.
+	 */
+	return (dest > 0u && dest < NO_AUTOMATION) ? dest : NO_AUTOMATION;
+}
+
 //-------------------------------------------------------------
 void autoNode_init(AutomationNode* node)
 {
@@ -43,19 +61,23 @@ void autoNode_init(AutomationNode* node)
 //-------------------------------------------------------------
 void autoNode_setDestination(AutomationNode* node, uint16_t dest)
 {
+	uint16_t oldDest;
+	dest = autoNode_sanitizeDestination(dest);
+	oldDest = autoNode_sanitizeDestination(node->destination);
+
 	//reset lastDest
-	if(node->destination != NO_AUTOMATION)
+	if(oldDest != NO_AUTOMATION)
 	{
 		MidiMsg msg;
 
-		if(node->destination > 127) {
+		if(oldDest > 127) {
 			msg.status = MIDI_CC2;
-			msg.data1 = node->destination - 127 -1;
+			msg.data1 = oldDest - 127 -1;
 		} else {
 			msg.status = MIDI_CC;
-			msg.data1 = node->destination;
+			msg.data1 = oldDest;
 		}
-		msg.data2 = midiParser_originalCcValues[node->destination];
+		msg.data2 = midiParser_originalCcValues[oldDest];
 		midiParser_ccHandler(msg,0);
 	}
 
@@ -65,15 +87,17 @@ void autoNode_setDestination(AutomationNode* node, uint16_t dest)
 //-------------------------------------------------------------
 void autoNode_updateValue(AutomationNode* node, uint8_t val)
 {
-	if(node->destination != NO_AUTOMATION) {
+	uint16_t dest = autoNode_sanitizeDestination(node->destination);
+
+	if(dest != NO_AUTOMATION) {
 		MidiMsg msg;
 
-		if(node->destination > 127) {
+		if(dest > 127) {
 			msg.status = MIDI_CC2;
-			msg.data1 = node->destination - 127 -1; //todo why +1 offset?
+			msg.data1 = dest - 127 -1; //todo why +1 offset?
 		} else {
 			msg.status = MIDI_CC;
-			msg.data1 = node->destination;
+			msg.data1 = dest;
 		}
 		msg.data2 = val;
 		midiParser_ccHandler(msg,0);

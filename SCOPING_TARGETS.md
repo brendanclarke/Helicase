@@ -4,15 +4,34 @@
 
 ## How this document is organized
 
-The work is grouped into six phases, ordered so that each phase either reduces risk for the next one or builds on ground the previous phase just cleared. Phase 1 is a pure refactor — no user-visible behavior changes, just moving code and freeing up headroom so the audio thread has room to breathe before anything new gets bolted on. Phase 2 rebuilds the SD/scene storage model that everything downstream (patterns, kits, FX) will be saved into. Phase 3 rebuilds the sequencer's data model on top of that storage model. Phases 4–6 are additive features that assume the new foundation is in place.
+The work is grouped into six phases, ordered around the trajectory the code is
+actually following after Session 039. Phase 1 is complete foundation cleanup.
+Phase 2 landed the first real filesystem/Scene bridge: root Kit directory
+loading into descriptor-backed instrument images. Phase 3 now finishes the
+directory/text filesystem bridge before the sequencer storage rewrite:
+instrument parameter load/runtime coverage, descriptor modulation and
+automation, Morph, menu/load-save work, Scene and Bank structures, and
+new-format load/save operations. Sessions 033-039 landed the runtime/Morph
+path, Instrument Load, Kit/Instrument Morph Load, descriptor-domain LFO repair,
+LFO `self` storage, normal and Morph new-format Kit Save, root Instrument and
+InstrumentMrp Save, asyncfatfs LFN/case support, direct `000..999` slots,
+recursive Kit/Scene slot replacement rules, Load/Save hardware menu repair,
+Scene-owned mix settings, root Scene Load/Save, the first root Bank
+scan/load/save bridge, Bank-first boot fallback, and draft Scene/Bank
+`pattern.pat` persistence. The next Phase 3 emphasis is the real 16-Scene Bank
+workspace, Bank-local Scene toggle/save/load semantics, and later autosave
+promotion; descriptor-aware automation remains a parallel runtime follow-up.
+Phase 4 is the dynamic stack Pattern implementation that used to be scoped as
+Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup, copy/clear
+helpers, and menu controls. Phase 6 is DSP expansion.
 
 Within each phase, features are grouped by **where they live in the codebase**, per your original request, so a given implementation pass touches a small, coherent set of files.
 
 1. **Phase 1 — Foundation Refactors** (no new features; your four listed refactor/reorg tasks, including burst reduction)
-2. **Phase 2 — SD Card & Scene Architecture** (`Core/Scene/`, new file hierarchy, debounced autosave)
-3. **Phase 3 — Sequencer Paradigm Shift** (`Core/Sequencer/Pattern/`, dynamic event pool)
-4. **Phase 4 — Voice, MIDI & Morph Control** (`Core/MIDI/`, `Core/Scene/` morph engine, `Core/DSPAudio/lfo.c`)
-5. **Phase 5 — UI & Performance Workflow** (`Core/Menu/`, `Core/Hardware/frontPanel/`)
+2. **Phase 2 — Directory Kit Loading & Descriptor Scene Bridge** (`Core/Hardware/SD/`, `Core/Bank/Scene/`, `Core/DSP/Instruments/`)
+3. **Phase 3 — Finish Filesystem, Instrument Runtime, Morph & Menus** (`Core/Bank/Scene/`, `Core/Hardware/SD/`, `Core/Menu/`, `Core/Bank/Scene/Preset/`)
+4. **Phase 4 — Dynamic Stack Pattern Implementation** (`Core/Bank/Scene/Pattern/`, dynamic event pool)
+5. **Phase 5 — MIDI, UI & Performance Workflow Cleanup** (`Core/Menu/`, `Core/MIDI/`, `Core/Hardware/frontPanel/`)
 6. **Phase 6 — DSP Expansion** (`Core/DSPAudio/` — new voices, oscillators, FX bus)
 
 Every phase ends with **Open Engineering Questions** (things that need a decision or a measurement before/during implementation) and **Suggested Complementary Features** (ideas adjacent to what you asked for, flagged clearly as suggestions, not commitments).
@@ -21,7 +40,7 @@ Every phase ends with **Open Engineering Questions** (things that need a decisio
 
 ## Phase 1 — Foundation Refactors
 
-**Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Scene/Pattern/`, `Core/Preset/` → `Core/Scene/Preset/`
+**Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Bank/Scene/Pattern/`, `Core/Preset/` → `Core/Bank/Scene/Preset/`
 
 **Current status:** completed across Sessions 027-029. Burst reduction,
 frontPanelParser removal, PatternData ownership, and the Preset folder move are
@@ -65,14 +84,14 @@ Since Phase 4 is about to replace this entire pattern data model (8 fixed patter
 
 Recommendation: move first, rewrite second, as two separate commits. Move everything pattern-storage-and-servicing-related (the structs above, the `Step`/`PatternSet` types, load/save helpers, step-advance logic, euklid/patgen generators) into `Core/Sequencer/Pattern/`, rename the moved functions with the `pat_*` prefix, and get it compiling and behaving identically to before. Then do the Phase 4 rewrite inside that new location. Two reasons: first, a pure rename-and-move is easy to verify byte-for-byte (same behavior, different file/name), so if something breaks you know it's the move, not new logic; second, `seq_tick()` and the timer wiring stay in `sequencer.c` (they're timing/scheduling, not pattern storage), so the move needs a clean line between "what moves to `Pattern/`" and "what stays in `sequencer.c` as the scheduler that calls into `Pattern/`" — deciding that boundary is easier without simultaneously redesigning the data the boundary is passing around.
 
-### 1.4 Move `Core/Preset/` into `Core/Scene/Preset/`
+### 1.4 Move `Core/Preset/` into Scene/Bank-owned Preset
 
 Completed in Session 029. `presetManager.c/.h` and `ParameterArray.c/.h` now
-live under `Core/Scene/Preset/`; public function prefixes intentionally remain
+live under `Core/Bank/Scene/Preset/`; public function prefixes intentionally remain
 `preset_*`, `parameterArray_*`, and `paramArray_*`.
 
 The include-path knock-on was handled in the same session: `Makefile` uses
-`-ICore/Scene/Preset` and source paths under `Core/Scene/Preset/`.
+`-ICore/Bank/Scene/Preset` and source paths under `Core/Bank/Scene/Preset/`.
 
 **Suggested complementary step:** since 1.2, 1.3, and 1.4 all touch `frontPanelParser.c`'s call sites in overlapping files (`presetManager.c` and `sequencer.c` both `#include "frontPanelParser.h"`), doing 1.2 *before* 1.3/1.4 means the direct-wiring pass only has to happen once, against the pre-move file layout, rather than being redone against new paths. The order above (1.1 → 1.2 → 1.3 → 1.4) reflects that.
 
@@ -82,121 +101,512 @@ The include-path knock-on was handled in the same session: `Makefile` uses
 - **`pat_*` vs `scene_*` naming collision:** `PatternSetting` (the struct) and pattern-settings-adjacent names in `sequencer.h` may collide semantically with "pattern" as used in the *old* 8-pattern-slot sense once Phase 4 removes that concept. Worth deciding up front whether `pat_*` refers to "the per-track step data" (the new sense) or keeps meaning "one of the old 8 slots" during the transition, so Phase 4 doesn't have to rename things a second time.
 
 
-## Phase 2 — SD Card & Scene Architecture
+## Phase 2 — Directory Kit Loading & Descriptor Scene Bridge
 
-**Location:** `Core/Scene/` (post-move), `Core/Hardware/SD/filesystem.c`, `Core/Hardware/SD/asyncfatfs/`
+**Location:** `Core/Bank/Scene/` (post-move), `Core/Hardware/SD/filesystem.c`, `Core/Hardware/SD/asyncfatfs/`
 
-This phase builds the current SD card hierarchy documented in `FILESYSTEM_SPEC.md` — `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, plus root `settings.cfg` — and lands the debounced autosave system. It comes before the sequencer rewrite (Phase 3) because the sequencer rewrite's whole memory design (dynamic pool split 16-ways-plus-one across scenes) only makes sense once "scene" is a real, addressable unit that the file layer understands — right now the SD layer has no concept of a scene at all.
+This phase is now the completed bridge that made the later filesystem work
+possible. It did not implement the full Bank/Scene hierarchy. It settled the
+target filesystem shape, implemented root `Kit/NNN Name/` loading, and moved
+instrument parameter ownership into Scene descriptor images.
 
-**Current bridge status after Session 031:** root `Kit/NNN Name/` loading and
-the one-live-pattern/8-bar bridge are intentionally provisional. Pattern and
-container save/load currently serialize a Phase 2 bridge shape, but final
-interchange compatibility is not promised yet: the old single global shuffle
-byte is ignored/omitted, and external Python converters are expected to handle
-any migration once the final Scene/Pattern storage shape and save operations are
-defined.
+Implemented through Sessions 030-032:
 
-### 2.1 Current SD layer, for grounding
+- `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` defines the
+  authoritative future filesystem layout.
+- Root `Kit/` scanning supports preferred `NNN Name`, compatibility
+  `NNN_Name`, and FAT short-alias fallback such as `001SLA~1`.
+- Normal kit load opens `kitset.kcg` plus six descriptor-keyed instrument files.
+- `kitset.kcg` owns only format/version plus per-slot `type`, `file`, and
+  `audio_out`.
+- Instrument files own descriptor-keyed `[params]` and optional `[morph]`
+  endpoint values.
+- Instrument values load into `scene_t.kit`, indexed by descriptor ID.
+- VOICE pages are populated from descriptor-owned layouts in
+  `Core/DSP/Instruments/*/*Parameters.c`.
+- Preset/InstrumentManager apply descriptor image values into DSP runtime.
+- Pattern and container load/save remain bridge formats and will be ripped out
+  when the final Pattern storage lands.
 
-`filesystem.c` began as an entirely flat file loader: `filesystem_makeFilename()` builds an 8.3 name like `p000.snd` (`p` + 3-digit slot number + extension) directly into a buffer, and file *type* is an enum (`fs_file_type_t`: `FS_FILE_KIT`, `FS_FILE_PATTERN`, `FS_FILE_MORPH`, `FS_FILE_PERFORMANCE`, `FS_FILE_ALL`, `FS_FILE_GLOBALS`, `FS_FILE_SAMPLES`) rather than a path. The new directory hierarchy (`Bank/001 Bank/001 Scene/Kit_<kit>/...`, root `Kit/001 Kit Name/...`, root library pools, and `settings.cfg`) is therefore a genuinely new capability, not an extension of something that half-existed.
+Explicitly not completed in Phase 2:
 
-The good news: the underlying `asyncfatfs` library (the Betaflight-derived async FAT driver already in `Core/Hardware/SD/asyncfatfs/`) already exports `afatfs_mkdir()` and `afatfs_chdir()` — they're just never called from `filesystem.c` today. So this is "teach the existing facade to walk directories," not "write a new filesystem layer."
+- New-format save operations.
+- Scene folder load/save. Implemented later in Session 039.
+- Bank folder load/save. Implemented later in Session 039 as a one-resident-Scene bridge, not the final 16-Scene workspace.
+- Effect load/save.
+- Root `settings.cfg`; globals still use legacy `glo.cfg`.
+- Final new-format Morph load/save was not part of Phase 2; Kit/Instrument
+  Morph Load arrived later, and Kit/Instrument Morph Save was completed in
+  Session 038.
+- Descriptor-aware step automation. Sessions 033-034 completed descriptor
+  Morph, direct descriptor velocity/LFO application, and the Instrument Load
+  runtime transaction; step automation remains Phase 3 work.
 
-### 2.2 SD card hierarchy
+### 2.1 Current Bridge Shape
 
-Implement the directory structure and file types exactly as specced in `FILESYSTEM_SPEC.md`:
+`filesystem.c` began as a flat file loader: `filesystem_makeFilename()` builds
+an 8.3 name like `p000.snd` directly into a buffer, and file type is an enum
+such as `FS_FILE_KIT`, `FS_FILE_PATTERN`, `FS_FILE_MORPH`,
+`FS_FILE_PERFORMANCE`, `FS_FILE_ALL`, `FS_FILE_GLOBALS`, and
+`FS_FILE_SAMPLES`.
 
-```
-settings.cfg
-Bank/
-  001 <bank name>/
-    bankset.bcg
-    001 <scene name>/
-      sceneset.scg
-      Kit <kit name>/
-        kitset.kcg
-        <instrument 1>.<type>
-        ...
-        <instrument 6>.<type>
-      pattern.pat
-      effect.fx
-    ...
-    016 <scene name>/
-Scene/
-  001 <scene name>/
-    sceneset.scg
-    Kit <kit name>/
-      kitset.kcg
-      <instrument files>
-    pattern.pat
-    effect.fx
-Kit/
-  001 <kit name>/
-    kitset.kcg
-    <six instrument files>
-Pattern/
-  <pattern name>.pat
-Sample/
-  <sample name>.wav
-Wavetable/
-  001 <wavetable name>/
-    <wavetable sample>.wav
-Effect/
-  <effect name>.fx
-Instrument/
-  <instrument name>.<type>
-```
+The current exceptions are `FS_FILE_KIT` load/save and the new-format
+Kit/Instrument Morph save paths. Normal kit load no longer opens a flat `.snd`;
+it scans `Kit/`, enters the cached numbered kit folder, parses `kitset.kcg`,
+and loads the six listed instrument files. Normal Kit Save and KitMrp Save
+write the same directory shape through the descriptor text writer. Legacy
+`FS_FILE_MORPH`, Pattern, Performance, All, and Globals remain bridge paths
+internally. The user-visible Load/Save menu no longer offers Pattern, MorphKit,
+Perform, or All, because those choices do not have a valid current workflow.
 
-The only root-level file recognized by the new firmware should be `settings.cfg`, replacing `GLO.CFG`/`glo.cfg`. It stores system-level settings and a reference to the last loaded bank; boot should load that bank. The recognized root directories are exactly `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`, `Wavetable`, `Effect`, and `Instrument`.
+### 2.2 Phase 2 Verification Anchors
 
-`Bank`, `Scene`, `Kit`, and `Wavetable` use numbered folders named `001 <name>`, `002 <name>`, etc. A single underscore after the three-digit slot ID may be accepted for compatibility with older generated folders, but the preferred convention is a space separator and spaces inside the display name are valid. Numbers do not need to be contiguous; browsers should scan slot numbers sequentially and show missing slots as empty (for example `003: Empty`) instead of collapsing gaps. `Bank` scene folders are limited to slots `001` through `016`.
-
-`bankset.bcg` and `sceneset.scg` are guard/version/config files. `kitset.kcg` is slimmer: it identifies the folder type and records which instrument file occupies each of the six voice slots. The kit name comes from the `Kit/NNN Name` folder.
-
-`fs_file_type_t` needs new members for `.drm`, `.snr`, `.cym`, `.hat`, `.fx`, `.bcg`, `.scg`, `.kcg`, `settings.cfg`, and the directory-scoped variants of `.pat`/`.wav`/instrument files where source and destination matter (`Pattern/` pool vs. scene `pattern.pat`, `Sample/` vs. `Wavetable/<slot>/`, root `Instrument/` vs. kit-contained instruments). `filesystem_makeFilename()` becomes path-building rather than name-building, and every call site that currently only handles a flat slot number needs bank/scene/kit context to resolve into a path.
-
-Root-level `Scene`, `Kit`, `Pattern`, `Effect`, and `Instrument` act as shared libraries per the spec: scenes can be loaded into banks, kits into scenes, patterns/effects into scenes, and instruments into kit voice slots. `Sample` and `Wavetable` are loaded during sample-load/flash-write operations rather than per-scene auto-save. A user may copy scene folders between banks, copy `pattern.pat`/`effect.fx` out to the root pools (or back in if renamed correctly), and copy instrument files out of kit folders into `Instrument/`; kit membership itself should remain controlled by `kitset.kcg`.
-
-### 2.3 The 17th scene (background bank loading)
-
-`putting it together` calls for one extra SRAM-resident scene slot beyond the 16 that make up a bank, used as a landing zone: when a new bank starts loading, the currently-playing scene keeps playing from its existing slot while the new bank's scenes stream into slots that aren't the active one; the 17th slot exists so there's always a "safe" landing spot even if the active slot index in the new bank happens to collide with the one currently playing. Concretely, this is 17 identical Scene-in-SRAM structures rather than 16, plus a load-target selection rule ("load into the slot that isn't currently feeding the audio thread"), plus the lockout you already specified: menu load/save/reload is barred until the background load finishes, and any edits made to the cached-but-not-yet-committed scene during the load are discarded on the next scene change (though they can be saved manually once the lock lifts, per the spec).
-
-This also directly answers what "load a kit by MIDI bank change" becomes in the new model, per your note in `putting it together` — a Bank MSB (CC0) message triggers exactly this background-bank-load path rather than a synchronous `.kit`/`.prf` load.
-
-### 2.4 Debounced auto-save to dot-files
-
-Per your answer: this applies specifically to the files that live inside a loaded bank — the per-instrument files (`.drm`, `.snr`, `.cym`, `.hat`, etc.), scene `effect.fx`, scene `pattern.pat`, `sceneset.scg`, kit `kitset.kcg`, and bank `bankset.bcg` as needed. Root-library files and folders (`Scene`, `Kit`, `Pattern`, `Effect`, `Instrument`, `Sample`, `Wavetable`) are explicit load/save/copy/import only, not auto-saved.
-
-Mechanism, exactly as you specified: a parameter edit marks its owning file as stale and (re)starts a 5-second idle timer. Any further edit to a parameter in that same file resets the 5-second timer. If edits keep coming in continuously past 30 seconds without a 5-second gap, force a write anyway rather than letting the timer be reset indefinitely. Each of these files is backed by a `.<name>.<ext>` shadow copy holding the last state committed by an explicit menu **SAVE** — the debounced writes go to the live `.<name>.<ext>` working file, not the dot-shadow, and a new **RELOAD** menu page (alongside LOAD/SAVE) restores the working file from the dot-shadow.
-
-Power-loss safety: write the new content to a `.tmp` file first, then rename it over the live file, so a mid-write power loss leaves the old file intact rather than a half-written one. This needs `afatfs`-level rename support (confirm it's exposed — the header only shows `mkdir`/`chdir` in the directory-ops group; verify a rename/replace primitive exists or needs adding as part of this work).
-
-### 2.5 Reload from snapshot (SHIFT+PLAY)
-
-Per your `putting it together` note and follow-up answer: this reverts the *currently playing scene* to its last-saved (dot-shadow) state, discarding live edits — and because of 2.4's architecture, this needs no separate cache or snapshot mechanism of its own. It's just "reload the working file from the dot-shadow," the same primitive the new RELOAD menu page uses, bound to a shortcut.
+- Boot with `SD_CARD/Kit/001 Slak`.
+- Confirm kit scan shows the folder name from `Kit/001 Slak/`.
+- Confirm `kitset.kcg` slot type/file/audio routing is honored.
+- Confirm canonical Choke descriptor keys such as `amp_envelope_decay` and
+  `amp_envelope_decay_choke` parse, while legacy HiHat spellings remain
+  compatible with converted or older files.
+- Confirm VOICE pages display descriptor layouts rather than static
+  `menuPages.h` voice cells.
+- Confirm editing audible descriptor values changes DSP runtime state.
 
 ### Open Engineering Questions
 
-- **SRAM budget for 17 scenes:** each scene now holds a full kit (6 instrument parts' worth of parameters), a pattern (up to 16,382 bytes — Phase 3's finalized dynamic event pool ceiling), and FX settings. The total SRAM cost of "17 scenes resident simultaneously" needs to be tallied once kit and FX sizes are also known — unlike the pattern pool's earlier draft, this ceiling is now fixed by the event pool's 14-bit address width, not just an SRAM-availability guess, so there's no "shrink it if it doesn't fit" lever on the pattern side anymore; any shortfall has to come out of the kit or FX budget instead, or out of dropping below 17 fully-resident scenes.
-- **Rename/replace primitive in `asyncfatfs`:** needs confirming before 2.4's `.tmp`-then-rename safety mechanism can be built as specified.
-- **Directory-walk cost on `afatfs_chdir`:** the async FAT driver services filesystem ops incrementally across ticks already (per the "flash is fast enough, it already works for samples" answer), but nested directories (`Bank/001 Bank/001 Scene/Kit_<kit>/`) mean more directory-entry lookups per file open than the current flat scheme. Probably fine given samples already stream from flash successfully, but worth a quick timing check once real directory traversal is in.
+- **Kit save target path:** new-format Kit save must write the same folder shape
+  the loader accepts, not the current legacy `.snd` path.
+- **Bridge removal timing:** Pattern/container bridge storage should remain only
+  until Phase 4's dynamic stack Pattern format replaces it.
 
 ### Suggested Complementary Features
 
-- **Scene "undo" sandbox** (from the earlier draft, still a good idea): a `SHIFT+RELOAD`-style shortcut that reverts the *active* scene to its state at the moment it was first selected this session, distinct from the dot-shadow reload — useful for "I've been messing with this scene live for the last ten minutes and want back to where I started this set," which the dot-shadow (last explicit SAVE) doesn't cover if the last save was from a previous session.
-- **Bank-level "safe mode" indicator:** since background bank loads lock menu load/save/reload, a small persistent LED/LCD indicator that a background load is in progress would avoid a "why won't LOAD open" moment during a set.
+- **Focused kit save smoke test:** once new-format Kit save exists, round-trip
+  one hand-edited kit folder and one converted legacy kit before implementing
+  Scene/Bank saves on top of it.
 
-## Phase 3 — Sequencer Paradigm Shift
+## Phase 3 — Finish Filesystem, Instrument Runtime, Morph & Menus
+
+**Location:** `Core/Bank/Scene/`, `Core/Hardware/SD/filesystem.c`,
+`Core/Hardware/SD/storageTypes.c`, `Core/Bank/Scene/Preset/`, `Core/Menu/`,
+`Core/DSP/Instruments/`
+
+This phase finishes the work that Phase 2 intentionally exposed but did not
+complete. The target is to leave the project with descriptor-backed instruments
+fully loadable, morphable, modulatable, automatable, and saveable inside the
+new filesystem hierarchy, with Scene and Bank structures defined before the
+dynamic Pattern rewrite begins.
+
+### 3.1 Instrument Runtime Completion
+
+Finish descriptor-backed instrument load/apply coverage:
+
+- Status after Session 034: the main descriptor runtime path is live for the
+  current Drum/Snare/Cymbal/HiHat rows, including the LFO expansion,
+  voice-local decimation, velocity amount, per-voice Morph, and Scene
+  modulation targets. Instrument registry metadata now classifies each type as
+  Basic, Advanced, and/or Choke; the Instrument Load type browser enforces the
+  two-Advanced limit while allowing any number of Basic voices.
+- HiHat uses one canonical closed-decay descriptor (`amp_envelope_decay`) and
+  an optional Choke sibling (`amp_envelope_decay_choke`). VOICE track 7
+  resolves the sibling dynamically for Choke types. A non-Choke instrument in
+  slot 6 instead receives a generated Scene-owned track-7 decay plus morph
+  endpoint; if its descriptor table has no base decay, track 7 remains the
+  regular slot-6 page.
+- Root Instrument replacement is now a staged Preset-owned transaction. The
+  filesystem validates a private payload first; the active Scene commit clears
+  every outgoing runtime modulation target, replaces the descriptor image and
+  type, resets the slot runtime, reapplies Morph/runtime images for all six
+  slots, and rebinds every modulation source. UI target-changing gestures are
+  locked until it finishes.
+- Continue verifying every loaded descriptor key has a correct runtime binding
+  or explicit special writer as instruments become swappable and new file work
+  starts.
+- Keep `ROW_NOBIND_IMAGE` parameters as morphable/modulatable/automatable image
+  values with explicit runtime handling.
+- Keep target selector rows as `ROW_NOBIND` supplemental values.
+- Confirm menu edits write active Scene descriptor images and apply the audible
+  runtime value immediately.
+- Confirm new loads do not depend on old `parameter_values[]` instrument cells.
+
+### 3.2 Descriptor Modulation and Automation
+
+Replace the remaining legacy target runtime path for descriptor-backed targets:
+
+- Status after Session 034: velocity and LFO destinations are
+  descriptor-aware for direct descriptor targets, supplemental voice-local
+  decimation, per-voice Morph Scene targets, and Scene Decimation.
+- Make `AutomationNode` descriptor-aware instead of emitting legacy MIDI CC/CC2
+  into `midiParser_ccHandler()`.
+- Stop narrowing step automation destinations to `uint8_t`; preserve canonical
+  descriptor IDs.
+- Make `preset_applyInstrumentRuntimeValueInternal()` honor automation
+  recording where appropriate.
+- Keep target display helpers enumerating the active Scene descriptors and
+  filtering by descriptor flags.
+- Session 035 corrected direct descriptor LFO writes by routing them through
+  InstrumentManager descriptor-domain adapters and runtime writers. Keep that
+  adapter path as the model for any future modulation/automation writer.
+- Replace fixed global-node scans in `modNode_resetTargets()` and
+  `modNode_directOriginalValueChanged()` with InstrumentManager's dynamic
+  node ownership. The Instrument Load transaction explicitly clears all
+  owners, but ordinary runtime operations still need the same complete view.
+
+### 3.3 Morph and Per-Voice Morph
+
+Status after Session 033: Morph works against Scene-owned descriptor images and
+has been extended to per-voice Morph. This section remains the contract for
+future file save/load, MIDI cleanup, and automation follow-through.
+
+Current and future Morph values are 0..255 user-facing parameters. Menu storage
+and file storage should preserve 0..255. MIDI CC and step automation remain
+7-bit input paths, so they need explicit conversion:
+
+- Input `0..126` maps to `value * 2`.
+- Input `127` maps to `255`, so the morph endpoint is reachable.
+
+Work items:
+
+- Keep main endpoint writes, morph endpoint writes, `scene->settings`
+  storage, `morph_interpolation[]`, and `instrumentManager_writeRuntime()` in
+  sync as file save/load work lands.
+- Preserve the one-parameter-per-foreground-pass worker model.
+- Add per-voice morph amounts to Scene file save/load.
+- Receiving a global morph message overwrites all per-voice morph values.
+- Velocity modulation can set per-voice morph and update the visible value.
+  Step automation must do the same once descriptor automation lands.
+- LFO-to-voice-morph is a background overlay and does not update the visible
+  PERF-menu morph value.
+
+### 3.4 Menu and Morph UI Completion
+
+Complete the menu path required for descriptor-backed instruments:
+
+- Keep VOICE pages descriptor-generated.
+- Keep `SHIFT+VOICE` morph endpoint edit/view behavior for descriptor cells.
+- Ensure static non-voice pages still resolve through `menuPages.h`.
+- Visible/editable per-voice Morph controls in PERF are implemented.
+- Rebuild load/save/reload menus around the typed filesystem hierarchy instead
+  of the old flat slot list.
+- Status after Sessions 038-039: Kit, KitMrp, Scene, and Bank are promoted on
+  the Load/Save type cycler where applicable. File/Dir/sDir diagnostics remain
+  compiled but normally hidden behind `CONFIG_DEV_MODE`. Kit Load/Save are
+  restored on the asyncfatfs LFN/case foundation, and Kit Save recursively
+  replaces all physical directories for the target slot before writing the new
+  folder. VOICE press on Load enters nested Instrument Load; VOICE press on Save
+  enters root Instrument Save and InstrumentMrp Save. Hardware pots now navigate
+  the Load/Save hierarchy directly: pot 1 walks main Load items, per-voice
+  Instrument Load items, main Save items, and per-voice Instrument Save items;
+  pot 2 changes slot/item; pot 3 moves or deselects the cursor; pot 4 edits
+  characters.
+- Status after Sessions 035-038: Kit Morph, nested Instrument, and same-type
+  Instrument Morph Load are usable in code. KitMrp Save and InstrumentMrp Save
+  are live new-format writers: they snapshot the current interpolated
+  per-voice Morph value and write it into both normal `[params]` and morph
+  `[morph]` endpoint storage, without changing resident kit or instrument
+  names/stems. Root `Instrument/` scans `.drm`, `.snr`, `.cym`, and `.hat`
+  pools per type in alphanumeric order; lower-row browsing loads immediately,
+  while type changes do not replace the current kit-member display/source. The
+  display index is one-based and saturates at 999. `kit_t` preserves an
+  eight-character per-slot display stem plus a 16-character save stem for
+  provenance/save metadata.
+- Load-context SEQ LEDs now use `pat_sceneHasActiveSteps()`: in Kit Load they
+  are multi-Scene toggles and every selected target blinks; in Instrument Load
+  exactly one Scene is selected and blinks. The code is shaped for 16 Scenes
+  even though only Scene 1 is resident today.
+- Status after Session 039: Scene and Bank are promoted top-level Load/Save
+  entries with explicit OK/OW confirmation. File/Dir/sDir diagnostics are
+  compiled but hidden unless `CONFIG_DEV_MODE != 0`. Scene and Bank operations
+  return the cursor to the top-row type field when they complete. Load Bank
+  shows an OK affordance and does not load while scrolling.
+- Keep scene-level MIDI note/channel and `voice_decimation_all` out of
+  `kitset.kcg` and instrument files.
+
+### 3.5 Scene and Bank Structures
+
+The real Scene and Bank structures and their filesystem ownership are now
+implemented. Keep this phase open for verification and cleanup while the
+future dynamic Pattern model is still being designed:
+
+- `SCENE_COUNT == 16` is the resident Bank workspace. There is no separate
+  seventeenth staging Scene in the current product shape; asynchronous load
+  staging remains private filesystem operation state.
+- `sceneset.scg` contents and validation are implemented. It stores Scene
+  settings and never object names.
+- `bankset.bcg` version 2 contents and validation are implemented, including
+  `active_scene`, the 16-bit child-present/edit masks, and the selected child
+  persistence rules.
+- Root `Scene/` and `Bank/` folders are numbered with gap-tolerant browsing;
+  root library slots are direct `000..999`.
+- Root `Scene/` is a user library/pool like root `Kit/` and root
+  `Instrument/`: explicit Scene Save writes there, explicit Scene Load imports
+  from there, and root Scene files are not autosaved.
+- Scene embedded kits are folders named `Kit <kit name>/`; the second word is
+  the kit name, and that name is not stored anywhere else.
+- Store MIDI note/channel and `voice_decimation_all` as Scene settings.
+- The 16-Scene Bank workspace, multi-Scene edit masks, Bank-local Scene
+  selection, Bank Save/Load staging, and child re-entry reset are implemented.
+  Bank-local Scene folders are two-digit `00..15`, not root three-digit
+  `000..999` library folders.
+- Object names are directory/file names. `sceneset.scg`, `bankset.bcg`, and
+  instrument files must not acquire `name=` fields.
+
+### 3.6 Load and Save Operations
+
+Implement load/save operations for the settled file types in
+`knowledge_files/specification_reference/FILESYSTEM_SPEC.md`:
+
+- Session 034 completed voice-6/track-7 Choke storage and dynamic menu/runtime
+  resolution, plus staged arbitrary Instrument replacement without hardcoded
+  parameter lists. Preserve those semantics in every save implementation.
+- Session 035 completed normal Kit Save. Session 036 repaired its filesystem
+  naming path: Kit Save now creates VFAT LFN entries for the visible Kit folder
+  and six instrument files, while retaining returned 8.3 aliases for
+  `kitset.kcg` and open paths.
+- Session 036 corrected numbered library slots to direct `000..999`; slot
+  `000` is real for all filetypes. Kit/Scene library slots use `uint16_t`
+  plumbing through filesystem, presetManager, menu, and kitBrowser. Instrument
+  file voice coordinates remain one-based `1..6`.
+- Session 035 added storage-only LFO `self` routing: load resolves `self` on
+  `lfo_target_voice`/`lfo_target_voice_2` to the destination slot, and Kit Save
+  emits `self` only when an LFO voice selector points at the saved instrument's
+  own slot.
+- Standalone root Instrument Save is implemented. It uses the same
+  descriptor-keyed writer and `self` serialization rule used by Kit Save and is
+  entered from Save-page VOICE press.
+- Instrument pool load copies a descriptor-keyed instrument file into a kit
+  voice slot. Instrument Morph Load copies source normal endpoint values into
+  the current slot's morph endpoint only when the type matches.
+- KitMrp Save and InstrumentMrp Save are implemented. Both use the normal text
+  schemas but write the current interpolated parameter value into both
+  `[params]` and `[morph]` endpoint storage for morphable values; non-morphable
+  values remain normal-only. Morph Save is therefore a flattened current-state
+  snapshot, not an inverted endpoint export.
+- Scene Load/Save is implemented. It writes/reads `sceneset.scg`,
+  `Kit <kit name>/`, `pattern.pat`, and `effects.fx` through the Session
+  036-039 asyncfatfs foundation. Root `Scene/` load/save is library/pool
+  exchange only and is not part of the autosave workspace.
+- Add an FX slot shim so Scene folders can validate/store `effects.fx` before
+  Phase 6 implements full effects.
+- Bank load/save is implemented as the initial one-resident-Scene bridge.
+  Final Bank load/save still needs the 16-Scene workspace, SEQ-button Scene
+  toggles, per-Scene save/load masks, and preservation of untoggled Bank-local
+  child Scene folders.
+- Pattern load/save stays bridge-only until Phase 4 replaces the Pattern file
+  format. Session 039's Scene/Bank `pattern.pat` v2 draft stores only
+  128x7 step-active bits plus per-track length/scale and keeps all other step
+  data at PatternData defaults.
+- Effect load/save may initially validate placeholders; real FX parameters land
+  in Phase 6.
+- `settings.cfg` replaces `glo.cfg` for system settings and active-bank number
+  selection. `settings.cfg` has a `.settings.cfg` autosave/backer file; both are
+  updated/re-written when closing the global settings menu or loading/saving a
+  Bank.
+
+Session 041 name-index/cache completion:
+
+- Every Instrument type and each root Kit, Scene, and Bank library now has a
+  directory-local `.hcindex` generated from the physical directory scan.
+- One shared 1,000-row, nine-byte SRAM name cache is reused across all four
+  browser families. Instrument rows are sorted; Kit/Scene/Bank rows are direct
+  slot rows and preserve blanks. No per-type or per-library cache exists.
+- Menu entry, type changes, and exit dispose/reload that one cache. Kit, Scene,
+  and Bank saves rescan the written parent and rewrite its complete `.hcindex`
+  before the save callback is released, then refresh the current Save display.
+- Boot writes the three root library indexes and the four Instrument indexes one
+  at a time, then reloads `/Bank/.hcindex` before initial Bank selection because
+  the shared cache was disposed during Instrument index generation.
+- The old 128-entry Instrument limit and the dedicated Kit/Scene/Bank
+  presence/display/alias arrays are retired. The remaining 2,013-byte
+  `kitBrowser` compatibility bridge is deferred to the next cleanup session.
+
+asyncfatfs note for future save code:
+
+- Session 036 adds asyncfatfs LFN component creation and object iteration;
+  Session 038 adds documented filename sanitization expectations and
+  filesystem-level recursive directory cleanup used by Kit-slot replacement.
+  Session 039 proves Scene/Bank save must scope recursive deletion by parent
+  directory and visible product-name parser; future save code should
+  reuse/extend that filesystem boundary, not recreate FAT file writers. See
+  `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`.
+- Missing core primitive before autosave/power-loss-safe replacement is atomic
+  rename/replace for temporary-file promotion.
+
+### 3.7 Debounced Autosave and Reload
+
+Implement debounced autosave after explicit Bank save paths exist. The original
+one-file wording is not sufficient once a resident Bank has sixteen editable
+Scenes: menu parameter edits may target any subset of Scenes, and one gesture
+can dirty multiple embedded Kits/Instruments at once.
+
+Architecture decision:
+
+- Bank is the only autosaved workspace. Root `Scene/`, `Kit/`, `Instrument/`,
+  `Pattern/`, and `Effect/` folders are libraries/pools and remain explicit
+  load/save/copy/import/export targets.
+- Treat the active Bank as a working set with per-file dirty records, not as one
+  active file. Resident `scene_t` memory is authoritative; autosave is delayed
+  persistence from that memory into dot-file backers inside the active Bank
+  folder.
+- The currently playing/viewed Scene and the Scene edit target set are separate
+  concepts. Voice mode keeps one active Scene for audition/playback focus, but
+  SEQ buttons may toggle any subset of the 16 Bank Scenes as the target set for
+  Voice/Kit/Instrument parameter edits. A single encoder gesture may therefore
+  mutate one Scene, all 16 Scenes, or any subset such as Scenes 5-8.
+- Multi-Scene Voice/Kit/Instrument edits are binding first-class behavior, not
+  copy-after-edit convenience. They support workflows such as using the Bank as
+  one shared conceptual Kit with 16 Patterns, or reconciling a parameter change
+  across a selected Scene range. On disk these remain Scene-local Kit and
+  Instrument copies unless a later feature explicitly adds shared-file/link
+  semantics.
+- Track dirty state by `(bank_scene_index, file_domain, optional_slot)`.
+  Minimum domains:
+  - `bankset.bcg`
+  - `scene/sceneset.scg`
+  - `scene/kit/kitset.kcg`
+  - `scene/kit/instrument[0..5]`
+  - `scene/effects.fx`
+  - `scene/pattern.pat`
+- Autosave applies only to committed Bank Scene slots 1..16. The future
+  seventeenth landing/staging Scene is excluded until it is committed into a
+  Bank slot.
+- The active Bank is identified by number, not by folder display name. Root
+  `settings.cfg` records that number; `.settings.cfg` is its autosave/backer
+  file. Closing the global settings menu or loading/saving a Bank rewrites both
+  root settings files so the active-bank pointer and settings snapshot agree.
+
+Dirty ownership:
+
+- Add a small Scene/Bank dirty-ledger module rather than scattering filesystem
+  calls through Menu. Mutation owners mark dirty after they successfully change
+  retained Scene/Bank memory.
+- Parameter editing code must pass a Scene edit mask into the mutation owner.
+  The owner applies the same logical edit to every selected resident Scene and
+  marks dirty records for every affected Scene/file. Repeated knob movement
+  updates the same records and refreshes their debounce timers; it must not
+  enqueue one write per encoder tick.
+- Descriptor main endpoint edits dirty only
+  `scene/kit/instrument[slot]`.
+- Descriptor Morph endpoint edits dirty only
+  `scene/kit/instrument[slot]`, because `[morph]` lives in the same instrument
+  file.
+- Supplemental descriptor image values such as LFO target selectors,
+  per-instrument decimation, and velocity amount dirty
+  `scene/kit/instrument[slot]` unless the storage spec later moves a specific
+  value elsewhere.
+- Kit-level settings, slot type/file membership, audio routing, and generated
+  slot-6/track-7 decay values dirty `scene/kit/kitset.kcg`; if the edited value
+  lives inside a specific instrument file, dirty that instrument file instead.
+- Scene settings such as MIDI note/channel, global Morph, per-voice Morph
+  amounts, and `voice_decimation_all` dirty `scene/sceneset.scg`.
+- Effect parameter edits dirty `scene/effects.fx`.
+- Pattern edits dirty `scene/pattern.pat`, but pattern editing is not part of
+  the multi-Scene parameter-toggle behavior. Pattern autosave can therefore stay
+  active/viewed-scene scoped until Phase 4 changes the Pattern model.
+- Bank-level metadata edits dirty `bankset.bcg`.
+- Instrument, Kit, and Scene copy/paste inside the active Bank are batch
+  resident-memory mutations. They mark destination dirty records for dot-file
+  autosave, but they do not update committed non-dot Bank files until explicit
+  Bank SAVE promotes the selected dot-file backers.
+
+Debounce policy:
+
+- Each dirty record stores `first_dirty_tick`, `last_dirty_tick`, and an
+  `in_flight` flag.
+- A write becomes eligible after 5 seconds with no further edits to that record.
+- A continuously edited record is forced eligible after 30 seconds from
+  `first_dirty_tick` even if edits continue.
+- The filesystem writer remains single-operation serialized. When several
+  records are eligible, write oldest forced records first, then oldest idle
+  records. Keep the record dirty if the write fails.
+- A successful autosave clears only the record that was written. Other dirty
+  records in the same Scene remain pending.
+- Autosave must not change live DSP state. It serializes retained Scene/Bank
+  data only.
+
+Committed files, dot-file backers, SAVE, and RELOAD:
+
+- Inside an active Bank, the non-dot filename is the committed save/load file:
+  `sceneset.scg`, `kitset.kcg`, `pattern.pat`, `effects.fx`, instrument files,
+  and `bankset.bcg` are the user's explicit SAVE/LOAD truth.
+- The matching dot-file is the autosave working backer:
+  `.sceneset.scg`, `.kitset.kcg`, `.pattern.pat`, `.effects.fx`, `.slakd1.drm`,
+  `.bankset.bcg`, etc. Autosave writes dirty records to these dot-files, not to
+  the committed non-dot files.
+- Bank SAVE is the commit operation. It waits for the autosave scheduler to
+  finish all selected dirty dot-file writes, then copies/promotes the selected
+  dot-file backers over the matching non-dot committed filenames.
+- Bank LOAD reads from non-dot committed files. Bank load/save operations start
+  with all Scenes selected; SEQ buttons can restrict the operation to a subset.
+- Startup/resume should normally load valid dot-file backers for the active
+  Bank so unsaved autosaved work returns frictionlessly. If a dot-file is
+  missing or fails validation, fall back to the matching committed non-dot file.
+  The committed non-dot file remains the explicit SAVE/LOAD truth, while the
+  dot-file is the resumable working state.
+- RELOAD applies to Scene scope. It reads the selected Scene's non-dot committed
+  files into resident memory and resets that Scene's dot-file backers to match
+  the committed files. It is therefore "discard autosaved working edits for this
+  Scene and return to the committed Scene state."
+- If a RELOAD Scene contains dirty or in-flight autosaves, cancel, drain, or
+  supersede those jobs before replacing memory and dot-file backers from the
+  committed non-dot files.
+- Dot-file autosave should eventually write through a temporary file and
+  rename/replace it over the dot-file after close/flush. On startup, a leftover
+  `.tmp` indicates an incomplete temporary write. Ignore/delete that `.tmp`,
+  then use the previous dot-file if it validates; only fall back to non-dot if
+  the dot-file itself is missing or invalid.
+
+Implementation sequencing:
+
+- First implement explicit Bank file writers and a reusable write-job API per
+  file domain. Root Scene Save/Load can reuse Scene serializers, but it remains
+  a library/pool operation outside the Bank autosave ledger.
+- Then add a dirty-ledger API, for example
+  `sceneDirty_markSceneSettings(scene)`,
+  `sceneDirty_markKitset(scene)`,
+  `sceneDirty_markInstrument(scene, slot)`,
+  `sceneDirty_markPattern(scene)`, and
+  `sceneDirty_markEffect(scene)`.
+- Wire dirty marks into Preset/SceneData/Pattern/Effect mutation owners, not
+  directly into generic Menu paint/edit code.
+- Add the autosave scheduler after explicit writes are proven.
+- Add dot-file promotion/copy and Scene RELOAD after asyncfatfs has atomic
+  rename/replace or an equivalent safe copy/replace primitive. Until then,
+  autosave may write dot-files with current overwrite semantics only behind an
+  explicit "not power-loss safe yet" development gate.
+
+### Open Engineering Questions
+
+- **Rename/replace primitive in `asyncfatfs`:** confirm or add a safe async
+  primitive before implementing `.tmp` replacement.
+- **SRAM budget for 17 scenes:** each resident scene carries settings, kit
+  descriptor images, Pattern storage, and future FX state. Re-measure once the
+  Scene and Bank structs are real.
+- **Descriptor automation/runtime ownership:** migrate `AutomationNode` from
+  legacy byte CC/CC2 targets to canonical descriptor/Scene targets, correct
+  raw float LFO adapter writes, and make modulation-node enumeration dynamic
+  before treating automation as feature-complete.
+- **Effect placeholders:** decide how strict `effects.fx` validation should be
+  before Phase 6 has real FX stacks.
+
+### Suggested Complementary Features
+
+- **Scene reload shortcut:** bind the future Scene RELOAD primitive to a
+  shortcut for reverting the currently playing Scene from its committed
+  non-dot Bank files and resetting that Scene's dot-file backers.
+- **Bank load indicator:** show a small persistent indicator while background
+  bank loading locks load/save/reload.
+
+## Phase 4 — Dynamic Stack Pattern Implementation
 
 **Location:** `Core/Sequencer/Pattern/` (post-1.3 move)
 
 This is the biggest single architectural change in the whole roadmap: replacing the current `seq_subStepPattern[NUM_PATTERN][NUM_TRACKS][NUM_STEPS]` static array (8 fixed pattern slots × 7 tracks × 128 sub-steps × 7-byte `Step` struct) with a per-scene, per-track pointer array into a dynamic, bit-packed event pool. "Patterns" as a selectable, separate concept go away — a scene now just *has* a pattern (one per track), and scene-switching is what pattern-switching used to be.
 
-### 3.1 Step/bar model
+### 4.1 Step/bar model
 
 8 bars, 16 steps per bar, 128 steps max per track, no sub-steps. What used to be sub-step resolution is now handled by **microtiming offset** (a per-step fine-timing value) and **roll modes** at the step level, rather than by subdividing the step grid itself. In step mode, the transport through bars is serviced by the `BAR <>` control and the `SELECT` buttons — `SELECT` no longer addresses sub-steps (there aren't any), it addresses which bar of the 8 is currently shown/edited, matching how you described it.
 
-### 3.2 The dynamic event pool
+### 4.2 The dynamic event pool
 
 **Address array.** Every scene has 7 tracks × 128 steps = 896 possible steps, each represented by a fixed `896 × 2 bytes = 1,792 bytes` per-scene array. Each 16-bit entry is **MSB (bit 15): on/off, next bit (bit 14): has specials, trailing bits 13–0: a 14-bit offset address** — three independent pieces of state, not a single pointer with reserved values doing double duty:
 
@@ -213,15 +623,15 @@ This is the biggest single architectural change in the whole roadmap: replacing 
 
 **The dynamic block itself**, at any real address:
 
-- **First 2 bytes (always present):** 10-bit step-ID — a back-reference to which of the 896 steps owns this block, needed for O(1) defragmentation (3.3), sized for `2⁹ = 512 < 896 ≤ 1,024 = 2¹⁰` — plus a **6-bit automation count, 0–63, always meaningful**. Zero is a legitimate count now (not reserved or avoided): a step can have custom special values and zero automation, which is exactly the case a fixed `count − 1` encoding would have made awkward. The ceiling drops from the earlier design's 64 to 63 as the direct cost of making zero usable — a fair trade for not needing a special case.
+- **First 2 bytes (always present):** 10-bit step-ID — a back-reference to which of the 896 steps owns this block, needed for O(1) defragmentation (4.3), sized for `2⁹ = 512 < 896 ≤ 1,024 = 2¹⁰` — plus a **6-bit automation count, 0–63, always meaningful**. Zero is a legitimate count now (not reserved or avoided): a step can have custom special values and zero automation, which is exactly the case a fixed `count − 1` encoding would have made awkward. The ceiling drops from the earlier design's 64 to 63 as the direct cost of making zero usable — a fair trade for not needing a special case.
 - **If bit 14 (has-special) was set in the static entry**, byte 3 is **always** the special-flags byte, in a fixed position — not conditionally placed depending on the automation count. The rule that matters at this scoping level, and the only one this document needs to commit to: **each set bit in the special-flags byte means one more value byte follows**, immediately after it, in flag order — except for any flag later designated a pure binary condition (`automation hold` is the one named so far), which needs no value byte since the flag bit alone *is* the information. Exactly which fields exist, how many of the 8 bits get used now versus reserved for later, and their order — note, velocity, timing, roll, probability were the working example earlier in this process — is implementation-phase detail, not a scoping decision; what's fixed here is only the structural rule (flag byte → N value bytes → automation entries).
-- **Automation entries follow**, 2 bytes each, unchanged: 9-bit target parameter ID (up to 512 addressable parameters — see 3.4), 7-bit value. The count from the header says how many.
+- **Automation entries follow**, 2 bytes each, unchanged: 9-bit target parameter ID (up to 512 addressable parameters — see 4.4), 7-bit value. The count from the header says how many.
 
-`automation hold` stays defined at the storage layer only as "a flag that exists"; see 3.3a for how it relates to the default playback/record behavior that's now settled for ordinary (non-held) automation.
+`automation hold` stays defined at the storage layer only as "a flag that exists"; see 4.3a for how it relates to the default playback/record behavior that's now settled for ordinary (non-held) automation.
 
 **Worst case, for illustration only** (using the 5-value-flag working example, not a commitment to that exact field list): a step using all 5 example special fields and 4 automations costs `2 header bytes + 1 special-flags byte + 5 override bytes + 4×2 automation bytes = 16 bytes`. If every one of the 896 steps hit that simultaneously, the whole scene costs `896 × 16 = 14,336 bytes` — comfortably inside the 16,383-byte pool, with 2,047 bytes of headroom left over even in that extreme case. In the more realistic "every step has at least one automation, nothing else" case, the pool holds **7,295 total automation entries**, independent of exactly how many special fields end up defined, since that case never touches the special-flags byte at all.
 
-### 3.3 Background defragmentation & real-time-safe live recording
+### 4.3 Background defragmentation & real-time-safe live recording
 
 This has two genuinely different jobs, because there are two different ways a step's dynamic-stack block gets written, with very different timing pressure:
 
@@ -246,7 +656,7 @@ That split drives the design: a fast, allocation-free path for the common case, 
 
 - **Creating or growing a step's data:** the step-writer (menu edit or live-record) sends the stack servicer a request — the content to store, and how much room it needs (one or two 4-byte chunks, typically). The servicer allocates space, writes the full content into place, and *only then* reports the real address back. The step-writer does not touch the static array (offset address, on/off bit, has-specials bit) until it has that confirmed address — there is no intermediate state where the static entry points at a block that isn't fully written yet.
 - **Clearing a step's stored data:** the step-writer atomically writes `0x3FFF` (preserving the current on/off MSB and clearing has-specials) to the static entry first, so the sequencer immediately stops looking up the old dynamic block, and *separately* notifies the servicer that the old address is now free, to be added back to the bitmap whenever convenient. This operation is distinct from turning a step off: an ordinary on/off toggle changes only bit 15 and must preserve the real offset address, automation, has-specials bit, and special values. Nothing reads a freed block again once its static entry no longer points at it, so there is no urgency to that second step.
-- **The invalid combinations flagged in 3.2** (has-specials set together with the reserved address, in either on/off state) should never be producible by construction if the offset address, on/off bit, and has-specials bit are always updated **together, as a single atomic 16-bit write** — never as separate partial updates to the same entry. That single discipline is also what rules out both of the "nasty" half-updated states worth naming explicitly: a special-flags byte being claimed by the static entry while the pool still holds old, differently-shaped content underneath it (avoided because the static entry only ever flips *after* the new pool content is fully in place), and a reader misinterpreting pool bytes because it checked the wrong bit or checked out of order (avoided by the reader always consulting bit 14 before deciding how to interpret byte 2 onward, never inferring shape from content).
+- **The invalid combinations flagged in 4.2** (has-specials set together with the reserved address, in either on/off state) should never be producible by construction if the offset address, on/off bit, and has-specials bit are always updated **together, as a single atomic 16-bit write** — never as separate partial updates to the same entry. That single discipline is also what rules out both of the "nasty" half-updated states worth naming explicitly: a special-flags byte being claimed by the static entry while the pool still holds old, differently-shaped content underneath it (avoided because the static entry only ever flips *after* the new pool content is fully in place), and a reader misinterpreting pool bytes because it checked the wrong bit or checked out of order (avoided by the reader always consulting bit 14 before deciding how to interpret byte 2 onward, never inferring shape from content).
 
 This protocol is sound as described, and worth stating as three explicit invariants for whoever implements it, since they're the kind of thing that's easy to violate accidentally later without them being written down:
 
@@ -260,43 +670,44 @@ This protocol is sound as described, and worth stating as three explicit invaria
 
 **Save format:** because the pool stays defragmented — both by the periodic global sweep and continuously by the micro-relocation slack top-ups — it writes to the `.pat` file close to as-is.
 
-### 3.3a Automation hold and the default record/playback model
+### 4.3a Automation hold and the default record/playback model
 
 This is now settled as the default playback behavior for ordinary automation, not just an open question:
 
-**Playback:** when a step automates a parameter, that value holds through subsequent steps — unchanged — until the next step that is either **active** (triggers) or **carries any automation of its own** (for any parameter, not necessarily the same one). At that next such step, the parameter resets to its default value, *unless* that same step also automates the parameter again, in which case it takes on the new automated value instead of resetting.
+**Playback:** when a step automates a parameter, that value holds through subsequent steps — unchanged — until the next **active** step, meaning a step whose on/off MSB is set and whose note triggers. At that active step, the held parameter resets to its default value, *unless* that same active step also automates the parameter again, in which case it takes on the new automated value instead of resetting. Inactive automation-only steps are not reset boundaries for unrelated parameters: if an inactive step has a valid dynamic-block address and applies automation for another parameter, the previously-held parameter remains untouched. If that inactive step automates the same parameter, the held value is simply replaced by the new automated value and continues holding until the next active step.
 
 **Recording:** the record process has to actively maintain this behavior, not just log raw CC changes as they arrive. Per your spec: while record is active, a parameter change (a "diff") is watched until the user stops recording, changes the selected track/voice, or another voice's CC automation arrives. At the end of each step:
 - If the watched parameter diffed during that step, write (or overwrite) the step's automation entry with the parameter's **final** value at step-end — not every intermediate value, just one write per step regardless of how many CC messages arrived during it.
 - If the step isn't active and nothing diffed during it, the writer does nothing — no automation entry gets created.
-- If the step **is** active, or already carries other automation, the writer stamps the currently-held value onto it **even if nothing diffed during that step**. This is the part that makes the playback rule above actually work as intended: without re-stamping, a value set several steps back would get silently reset to default the next time an unrelated active/automated step passed, even though the user never told it to change. The re-stamping is what keeps a live-recorded hold matching what the user actually heard while recording it.
+- If the step is inactive but has other automation, the writer still does nothing for this watched parameter unless this parameter diffed during the step. Other inactive automation must not force a re-stamp, because it is not a reset boundary for this parameter.
+- If the step **is** active, the writer stamps the currently-held value onto it **even if nothing diffed during that step**. This is the part that makes the playback rule above actually work as intended: without re-stamping, a value set several steps back would reset to default at the next active trigger even though the user never told it to change. The re-stamping is what keeps a live-recorded hold matching what the user actually heard while recording it.
 
-The direct consequence for 3.3's slack/defrag design: live-record's write frequency isn't just "the first time a new parameter touches a given step" — during an active recording pass with a held parameter, potentially **every subsequent active or automated step** gets a fresh stamp, at the sequencer's step rate, until recording stops. That's still comfortably slow relative to a 216MHz core (tens to low-hundreds of milliseconds between steps at musical tempos), so the conclusion in 3.3 doesn't change — the background maintainer still has ample headroom — but it's worth being explicit that this, not occasional first-touches, is the real sizing driver for how often slack gets consumed during a busy recording pass.
+The direct consequence for 4.3's slack/defrag design: live-record's write frequency isn't just "the first time a new parameter touches a given step" — during an active recording pass with a held parameter, potentially **every subsequent active step** gets a fresh stamp, at the sequencer's step rate, until recording stops. Inactive automation-only steps consume slack only for parameters that actually receive new automation on those steps. That's still comfortably slow relative to a 216MHz core (tens to low-hundreds of milliseconds between steps at musical tempos), so the conclusion in 4.3 doesn't change — the background maintainer still has ample headroom — but it's worth being explicit that active-step re-stamping, not unrelated inactive automation, is the real sizing driver for how often slack gets consumed during a busy recording pass.
 
-**One reconciliation this raises, worth flagging rather than resolving here:** 3.2's `automation hold` flag was introduced as a separate, explicit per-entry marker, before this default hold-and-reset behavior existed as a concept. Now that ordinary automation already holds by default until the next active/automated step, it's not yet clear what `automation hold` adds on top of that — whether it means "persist even *through* the next active/automated step, don't reset there either," or something else entirely. Not something to resolve in this document (per your note below), but worth flagging so the two aren't built as quietly-overlapping, half-redundant mechanisms.
+**One reconciliation this raises, worth flagging rather than resolving here:** 4.2's `automation hold` flag was introduced as a separate, explicit per-entry marker, before this default hold-and-reset behavior existed as a concept. Now that ordinary automation already holds by default until the next active step, it's not yet clear what `automation hold` adds on top of that — whether it means "persist even *through* the next active step, don't reset there either," or something else entirely. Not something to resolve in this document (per your note below), but worth flagging so the two aren't built as quietly-overlapping, half-redundant mechanisms.
 
-### 3.3b Risks and cross-feature tradeoffs
+### 4.3b Risks and cross-feature tradeoffs
 
-Per your framing of what this document is actually for — catching features that would otherwise step on each other's toes during implementation, not designing every feature in full — here's what 3.3a's hold/record model touches that's worth having on record now, without resolving any of it:
+Per your framing of what this document is actually for — catching features that would otherwise step on each other's toes during implementation, not designing every feature in full — here's what 4.3a's hold/record model touches that's worth having on record now, without resolving any of it:
 
-- **Storage cost vs. playback simplicity, as an explicit tradeoff, not an accident.** The re-stamping behavior means a value held steady across a long run of active steps costs one automation entry *per active step it crosses*, not one entry for the whole run. Against 3.2's capacity figures (7,295 total automation entries in the realistic case), a single sustained knob-hold recorded across, say, 20 active steps in a busy pattern consumes 20 of those entries, not 1. The alternative — store only the moment of change plus a hold marker, and have playback search backward for "the last time this parameter was set" — would be far cheaper on pool space but adds real search cost and complexity to the per-tick playback read path. Nobody needs to pick between these now, but whoever implements 3.3a should know this fork exists rather than discovering it mid-implementation.
-- **Interaction with per-track step scale and rolls (3.7, 3.8).** "The next active or automated step" is a step-grid concept; a scaled track (where one step might represent a whole bar) or an active roll (many rapid hits inside what's nominally one step) both change what "the next step" means in real time. Whether a roll's individual hits count as separate "active" events for hold-reset purposes, or the whole roll cell counts as one, isn't addressed by either feature's description alone and needs a decision when both are actually implemented together.
-- **Interaction with per-voice morph and its LFO overlay (4.3, 4.4).** Per-voice morph is recordable the same way any parameter is (via step automation), but it can *also* change continuously from an internally-generated LFO overlay that's explicitly meant to be invisible and non-recorded. The record-watcher described above needs to distinguish "an external CC/knob diff" from "the morph value moved because its own LFO overlay is running" — otherwise background LFO wiggle could get recorded as a dense pile of step automations. This should be a straightforward guard (watch the CC/knob input stream, not the resulting parameter value), but it's a real seam between two features built somewhat separately, worth a specific check when both exist.
-- **Interaction with copy operations (3.5).** Because a step's automated value is only meaningful in the context of "whatever was held going into it," copying a *portion* of a pattern (rather than the whole thing) can sound different once pasted somewhere else, if the copied region didn't happen to start right after a reset point. This is a real, if minor, consequence of the hold-based model that a naive "each step is fully self-contained" mental model wouldn't have — worth a note in the eventual copy-operation implementation rather than a surprise bug report.
+- **Storage cost vs. playback simplicity, as an explicit tradeoff, not an accident.** The re-stamping behavior means a value held steady across a long run of active steps costs one automation entry *per active step it crosses*, not one entry for the whole run. Against 4.2's capacity figures (7,295 total automation entries in the realistic case), a single sustained knob-hold recorded across, say, 20 active steps in a busy pattern consumes 20 of those entries, not 1. The alternative — store only the moment of change plus a hold marker, and have playback search backward for "the last time this parameter was set" — would be far cheaper on pool space but adds real search cost and complexity to the per-tick playback read path. Nobody needs to pick between these now, but whoever implements 4.3a should know this fork exists rather than discovering it mid-implementation.
+- **Interaction with per-track step scale and rolls (4.7, 4.8).** "The next active step" is a step-grid concept; a scaled track (where one step might represent a whole bar) or an active roll (many rapid hits inside what's nominally one step) both change what "the next step" means in real time. Whether a roll's individual hits count as separate "active" events for hold-reset purposes, or the whole roll cell counts as one, isn't addressed by either feature's description alone and needs a decision when both are actually implemented together.
+- **Interaction with per-voice morph and its LFO overlay (Phase 3 Morph work).** Per-voice morph is recordable the same way any parameter is (via step automation), but it can *also* change continuously from an internally-generated LFO overlay that's explicitly meant to be invisible and non-recorded. The record-watcher described above needs to distinguish "an external CC/knob diff" from "the morph value moved because its own LFO overlay is running" — otherwise background LFO wiggle could get recorded as a dense pile of step automations. This should be a straightforward guard (watch the CC/knob input stream, not the resulting parameter value), but it's a real seam between two features built somewhat separately, worth a specific check when both exist.
+- **Interaction with copy operations (4.5).** Because a step's automated value is only meaningful in the context of "whatever was held going into it," copying a *portion* of a pattern (rather than the whole thing) can sound different once pasted somewhere else, if the copied region didn't happen to start right after an active-step reset point. This is a real, if minor, consequence of the hold-based model that a naive "each step is fully self-contained" mental model wouldn't have — worth a note in the eventual copy-operation implementation rather than a surprise bug report.
 
-### 3.4 Parameter ID space (shared with the FX sequencer)
+### 4.4 Parameter ID space (shared with the FX sequencer)
 
 The 9-bit target parameter ID in each automation entry addresses up to 512 distinct parameters. Your budget: roughly 32 FX parameters plus up to 80 parameters per voice × 6 voices = 480, for a 512 total. Current drum voices sit around 32 parameters, so this leaves real headroom for the new voice types in Phase 6 (which will have more parameters than the current drum/snare/cymbal/hihat set) without running out of address space. This same 9-bit ID space is reused by the FX sequencer's automation encoding (Phase 6), so it's worth fixing this parameter-ID scheme once, here, rather than each subsystem inventing its own.
 
-### 3.5 Copy operations
+### 4.5 Copy operations
 
 Per your note, the full set: copy scene, copy instrument (single voice part), copy track sequence (one track's step data between patterns/scenes), copy FX (FX stack + its per-scene settings), copy bar, copy step. The existing "copy step, copy sub-step, copy single-voice track between patterns" flow described in `putting it together` becomes the template for all of these — hold COPY, press a source selector, press a destination selector — extended to the new selectable units (scene, instrument, FX) on top of the ones that already exist (step, track).
 
-### 3.6 Automation always runs; trigger is a separate bit
+### 4.6 Automation always runs; trigger is a separate bit
 
-Automation on a step plays back regardless of whether that step has a trigger — this is a change from the old velocity-0-as-automation-only-step model, and 3.2's final storage format makes it a literal, direct consequence of the design rather than a special case to handle: the on/off MSB and the automation offset address are independent fields in the static entry, so a step's trigger state and its automation content were never coupled to begin with. Only steps with bit 15 set light their `SEQ` LED and trigger their note. Pressing a step button in step mode toggles that on/off bit alone — it does **not** touch the step's offset address, automation, has-specials bit, note, velocity, timing, roll, probability, or any other stored data. Automation therefore continues to apply while the step is off, and special assignments persist so they are restored unchanged when the step is turned back on. Additionally: holding `SHIFT+COPY/CLEAR` while the menu is up, then pressing sequence and `SELECT` buttons, clears just a step or just a bar of all automation/settings (distinct from clearing the on/off bit).
+Automation on a step plays back regardless of whether that step has a trigger — this is a change from the old velocity-0-as-automation-only-step model, and 4.2's final storage format makes it a literal, direct consequence of the design rather than a special case to handle: the on/off MSB and the automation offset address are independent fields in the static entry, so a step's trigger state and its automation content were never coupled to begin with. Only steps with bit 15 set light their `SEQ` LED and trigger their note. Pressing a step button in step mode toggles that on/off bit alone — it does **not** touch the step's offset address, automation, has-specials bit, note, velocity, timing, roll, probability, or any other stored data. Automation therefore continues to apply while the step is off, and special assignments persist so they are restored unchanged when the step is turned back on. Additionally: holding `SHIFT+COPY/CLEAR` while the menu is up, then pressing sequence and `SELECT` buttons, clears just a step or just a bar of all automation/settings (distinct from clearing the on/off bit).
 
-### 3.7 Per-track step timing scale
+### 4.7 Per-track step timing scale
 
 Per-track length (up to 128 steps) and per-track scale, accessible from the second page under the transient-voicing ("click") sub-page. Since there are no sub-steps in this paradigm, scale is expressed relative to the base step (1 step = 1/16th note): scaling a track up to ×16 means 1 step on that track = 1 bar, in `/2` increments down to `/16` (1 step = 1/128th note). Dot and triplet subdivisions are flagged by you as open — see below.
 
@@ -304,24 +715,24 @@ Session 031 landed a bridge version of this concept before the dynamic-pool
 rewrite: STEP front-page track settings now expose length, scale, MIDI channel,
 MIDI note, and per-track shuffle, and Sequencer derives scaled/shuffled timing
 from an absolute 96-PPQ master clock. This bridge uses the existing `Step`
-storage and should be treated as behavior/spec discovery for the final Phase 3
+storage and should be treated as behavior/spec discovery for the final Phase 4
 implementation, not as the final storage model.
 
-### 3.8 Roll overhaul
+### 4.8 Roll overhaul
 
 Roll rate becomes independent of pattern length (previously tied to it). Rolls become recordable in three modes — full (pitch + velocity), note-only, or velocity-only — configured from the `SHIFT+RECORD` menu. That same menu's existing "automation lane" selector doesn't make sense anymore (there's no separate automation lane in the dynamic-pool model — automation lives on the step it was recorded on) and is replaced by a **record-to-track** option: `slf` (default — record a voice's live automation onto its own track) or any other track, in which case live parameter automation gets recorded onto the specified track instead of the source voice's own.
 
-### 3.9 Patgen/Euklid reset
+### 4.9 Patgen/Euklid reset
 
 On the Patgen/Euclidean page (`SHIFT+PERF`), pressing `SHIFT+PERF` twice reverts the pattern to its state from before entering the page; exiting normally commits. Flagged caveat from the spec: if the pattern *length* parameter was changed on the page, a revert may leave residual track-offset artifacts even after the revert, since length changes can shift step alignment in ways a simple content-revert doesn't undo — worth a specific test case once this is implemented.
 
-### 3.10 Triplet/ternary scale mode ("notes from others")
+### 4.10 Triplet/ternary scale mode ("notes from others")
 
-A borrowed idea worth folding in here since it's sequencer-scale-adjacent: a pattern-level scale selector with `12a`/`12b` modes that skip specific steps of a 16-step grid on a fixed schedule (`12a` skips steps 2, 6, 10, 14; `12b` skips 3, 7, 11, 15) to convert a 16-step binary grid into a 12-step ternary (triplet) feel and back, without needing a genuinely different step count. This is a cheap way to get triplet feel without touching the 128-step/8-bar architecture — worth doing as a scale/display mode on top of Phase 3 rather than a structural change.
+A borrowed idea worth folding in here since it's sequencer-scale-adjacent: a pattern-level scale selector with `12a`/`12b` modes that skip specific steps of a 16-step grid on a fixed schedule (`12a` skips steps 2, 6, 10, 14; `12b` skips 3, 7, 11, 15) to convert a 16-step binary grid into a 12-step ternary (triplet) feel and back, without needing a genuinely different step count. This is a cheap way to get triplet feel without touching the 128-step/8-bar architecture — worth doing as a scale/display mode on top of Phase 4 rather than a structural change.
 
-### 3.11 Final LED state consolidation pass
+### 4.11 Final LED state consolidation pass
 
-As the last Phase 3 subphase before Phase 4, consolidate the front-panel LED
+As the last Phase 4 subphase before the Phase 5 UI cleanup, consolidate the front-panel LED
 state rules without changing the public LED API. The current UI work has several
 temporary layers that can overlap: base lit/unlit state, persistent blink,
 group flash, one-shot pulse, and sequencer chase/highlight. The intended
@@ -342,89 +753,54 @@ folding it into an existing temporary layer.
 ### Open Engineering Questions
 
 - **Manual roll triggering:** you flagged needing "a smart way of triggering manual rolls" now that rolls are decoupled from pattern length — this needs a concrete UI proposal (which button/hold-gesture initiates a manual roll, and at what rate) before Phase 5's UI work can wire it up.
-- **Dot/triplet subdivisions for per-track scale:** flagged as "maybe" in the source doc — worth a decision before 3.7 is implemented, since it affects the scale-value encoding (a plain `/2..×16` power-of-two range doesn't accommodate dotted/triplet values without extra encoding bits).
-- **`automation hold` vs. the 3.3a default hold-and-reset behavior:** as flagged in 3.3a, it's not yet clear what the dedicated `hold` flag adds on top of the now-default "holds until next active/automated step" behavior for ordinary automation. Left open deliberately (per your note that this can wait for the implementation session), but worth resolving before both are built as potentially-overlapping mechanisms.
+- **Dot/triplet subdivisions for per-track scale:** flagged as "maybe" in the source doc — worth a decision before 4.7 is implemented, since it affects the scale-value encoding (a plain `/2..×16` power-of-two range doesn't accommodate dotted/triplet values without extra encoding bits).
+- **`automation hold` vs. the 4.3a default hold-and-reset behavior:** as flagged in 4.3a, it's not yet clear what the dedicated `hold` flag adds on top of the now-default "holds until next active step" behavior for ordinary automation. Left open deliberately (per your note that this can wait for the implementation session), but worth resolving before both are built as potentially-overlapping mechanisms.
 
 ### Suggested Complementary Features
 
 - **Pool usage meter.** A percentage-used indicator in the global settings, next to the CPU meter, for the active scene's event pool — you specifically asked for this ("0-99% like there is for cpu use") and it's cheap to compute (pool bytes used ÷ pool size) and genuinely useful for knowing when you're approaching the automation ceiling on a dense pattern.
 - **Per-scene pool high-water mark, not just live usage** — showing "peak used this session" alongside live usage would help catch a scene that briefly spiked into heavy automation and then got scaled back, which a live-only meter would hide.
 
-## Phase 4 — Voice, MIDI & Morph Control
+## Phase 5 — MIDI, UI & Performance Workflow Cleanup
 
-**Location:** `Core/MIDI/MidiParser.c`, `Core/Scene/` (morph engine), `Core/DSPAudio/lfo.c`
+**Location:** `Core/Menu/menu.c`, `Core/MIDI/MidiParser.c`,
+`Core/Hardware/frontPanel/buttonHandler.c`,
+`Core/Hardware/frontPanel/ledHandler.c`, `Core/DSPAudio/lfo.c`
 
-### 4.1 Per-voice MIDI, isolation
+This phase gathers the user-facing and control cleanup after the filesystem,
+Morph, and dynamic Pattern foundations are in place. MIDI rework belongs here,
+alongside the rest of the performance workflow, copy/paste, clear helpers,
+automation views, load/save UI polish, and front-panel feedback consolidation.
 
-Less new work than it might look like: `midi_MidiChannels[8]` already exists (`MidiParser.c:157` / `MidiParser.h:83`) — one channel per voice (elements 0–6) plus a global channel (element 7) — and `PAR_MIDI_CHAN_1`…`PAR_MIDI_CHAN_7`/`PAR_MIDI_CHAN_GLOBAL` are already real parameters (`ParameterArray.h`). So per-voice MIDI channel *assignment* is already there; what's missing is:
+### 5.1 MIDI and External Control Cleanup
 
-- A `0` sentinel value meaning "MIDI input disabled for this voice" (or globally, for the global channel slot), checked wherever `midi_MidiChannels[voice]` currently gates channel-match logic (`MidiParser.c:1180`, `1226`, `1234`, `1246`, `1271`, `1492`, `1497`).
-- Chromatic note handling on a voice's own channel (currently voices mostly respond to their channel for CC/trigger purposes — verify note-on with arbitrary pitch is already routed to the voice's oscillator pitch, or needs adding).
-- CC1 (mod wheel) on a voice's individual channel driving that voice's per-voice morph (4.3), rather than only the global channel driving global morph.
-- Bank-change (CC0) on a voice's individual channel loading a different scene into that voice's part slot specifically, per `putting it together`'s "Bank change can load another scene from the SD card, CC1 does the individual voice morph" — this depends on Phase 2's scene/bank plumbing being in place, and on a "swap just this voice's part from a different scene" operation existing (which is a variant of the Phase 3.5 "copy instrument" operation, applied at load time instead of copy time).
+`midi_MidiChannels[8]` already exists: one channel per voice plus one global
+channel. Follow-up work:
 
-### 4.2 Mod wheel → morph
+- Add a `0` sentinel meaning MIDI input disabled for that voice or global slot.
+- Verify chromatic note handling on a voice's own channel.
+- Route CC1 global-channel Morph and per-voice-channel Morph through the
+  0..255 Morph conversion defined in Phase 3.
+- Decide how MIDI CC0/Bank MSB maps onto Bank/Scene/instrument loading once the
+  Phase 3 file operations are implemented.
+- Keep MIDI storage ownership aligned with Scene settings, not `kitset.kcg` or
+  instrument files.
 
-CC1 on the global channel drives global morph; CC1 on an individual voice channel drives that voice's per-voice morph (4.3). Per the spec, the incoming 7-bit MIDI value is doubled to reach the 0–255 morph range, except 127 which maps directly to 255 (so the top of the MIDI range reliably hits the true morph endpoint rather than landing at 254 and never quite reaching the stored morph-target parameters).
+### 5.2 One-shot LFOs
 
-### 4.3 Per-voice morph
+Current `lfo.h`/`lfo.c` already has free-running sine, triangle, saw, rect,
+noise, exp-up, and exp-down waveforms with a phase accumulator and an overflow
+test. One-shot variants can hook that overflow test:
 
-New capability: each voice gets its own morph amount, independent of the global morph value, blending between that voice's kit parameters and its morph-target parameters. Settable from the PERF menu (0–255 full range), by step automation (Phase 3.6/3.2 — per-voice morph is one of the automatable parameters), and by velocity modulation. Receiving a global morph message overwrites all per-voice values (global morph "wins" when it arrives, consistent with the existing single global morph behavior today).
+- Add `si1`, `tr1`, `sq1`, `rmp1`, `rnd1`, and `xt1`.
+- In one-shot mode, `offset` becomes a pre-trigger delay scaled to the LFO rate.
+- One-shot noise holds one random value for the one-shot cycle.
+- One-shot rect is phase-inverted relative to the free-running rect behavior.
+- Add an idle/delayed/running state field to `Lfo` and hook retrigger through
+  `lfo_retrigger()`.
 
-Since scenes now carry their own kit/morph-target pair (Phase 2), per-voice and global morph amounts need to be saved per scene, and per your note there should be a global option controlling scene-switch behavior for morph state: reset to 0 on every scene change, retain each scene's own morph value across changes (so switching back to a scene resumes wherever its morph was left), or always keep one consistent morph value applied uniformly regardless of scene. This is a genuinely new global setting, not implied by anything that currently exists.
+### 5.3 Automation view redesign
 
-**Per-voice morph as an automation target** has two distinct behaviors that need to stay separate in the implementation:
-- **Velocity modulation** sets the per-voice morph value once per trigger — same mechanism as step automation or a PERF-menu edit, and it updates the visible PERF-menu value.
-- **LFO-to-voice-morph** is different: it modulates *between* the voice's current morph amount and the full morph-kit endpoint, continuously, and is explicitly "background" — it does not update or appear as a value on the PERF menu, unlike every other way of setting per-voice morph.
-
-### 4.4 Morph engine implementation
-
-The current LXR-02 morph engine (`Core/Scene/Preset/presetManager.c`) is a
-single global morph: `preset_morph()` sets a target and bumps a generation
-counter; `preset_morphTick()`, called once per main loop, advances a
-`morph_index` cursor across `END_OF_SOUND_PARAMETERS` and applies **exactly
-one** interpolated parameter per call through Preset's direct sound-parameter
-path, skipping a short list of indices that shouldn't be morphed (index 127's
-encoding collision, velocity-destination slots, voice-LFO slots, LFO-target
-slots). This one-parameter-per-tick design is exactly what you described, and
-it's the mechanism Phase 4 needs to extend to per-voice + LFO-overlay morphing
-without breaking its real-time-safety property (bounded work per tick, no
-burst).
-
-There's real prior art for this specific extension: `LXR/mainboard/LxrStm32/src/Preset/MorphEngine.c` in the original LXR-1 codebase already implements per-voice morph amounts plus an LFO-to-morph overlay, as a "background morph worker" (`preset_serviceMorphInterpolation()`) that does "exactly one interpolation unit... per call" — its own doc comment uses almost exactly your phrasing. Its approach: a `preset_morphScanParam` cursor walks parameters (like LXR-02's `morph_index` today), and a `preset_morphDrainPhase` counter interleaves an LFO-overlay check for each of up to 6 source voices *at every parameter*, before advancing to the next parameter — so its actual drain order is "param 1: base value, then check voices 1–6 for an LFO-morph overlay targeting this param; param 2: same; …" rather than "finish all params for every voice, then do LFO overlays at the end."
-
-That's worth flagging because it's a different order than the one you described for LXR-02: *"morph is on voice 1, param 1, next loop param 2… done with voice 1, now voice 2… done with voice 6, last parameter, aha, LFO of voice x targets morph of voice y, go back and do the special LFO morph of voice y, param 1, next loop param 2…"* — i.e., LXR-02's version should fully drain the normal per-voice morph sweep first, then append LFO-morph overlay passes at the end of that same cycle, extending total cycle length only when an LFO-morph assignment is active. Structurally this is the easier of the two orderings to implement (a single cursor that walks through "phase 0: normal sweep" then "phase 1..N: one LFO-overlay pass per assigned source" and wraps back to phase 0), and it's a smaller behavioral change from LXR-02's current single-cursor `morph_index` design than porting LXR-1's interleaved version verbatim would be — so LXR-1's file is useful as a reference for *what a working implementation of this idea looks like* (the free-list of helper concepts: an "is there an LFO-morph assignment for this source voice" predicate, a drain-phase counter, one-parameter-at-a-time application through the existing live-apply path) without needing to port its interleaving order.
-
-### 4.5 One-shot LFOs
-
-Current `lfo.h`/`lfo.c`: 8 waveforms (`LFO_SINE`, `LFO_TRI`, `LFO_SAW_UP`, `LFO_SAW_DOWN`, `LFO_REC`, `LFO_NOISE`, `LFO_EXP_UP`, `LFO_EXP_DOWN`), a 32-bit phase accumulator (`phase`/`phaseInc`), and `lfo_calc()` already detects a phase wraparound every call via `overflow = oldPhase > lfo->phase` (used today to re-roll the noise waveform's held value on each cycle) — that same overflow flag is the natural hook for one-shot behavior: on wraparound, a one-shot waveform latches to idle instead of continuing to free-run.
-
-New waveforms per `putting it together`: `si1`/`tr1`/`sq1`/`rmp1`/`rnd1` (one-shot sine/triangle/square/ramp/noise) and a new `xt1` ("exponential-triangle" — exponential rise immediately followed by exponential fall, effectively `LFO_EXP_UP` and `LFO_EXP_DOWN` concatenated into a single cycle rather than selected as alternatives). Behavior specifics from the spec:
-
-- In one-shot mode, the existing `offset` control (today used generically) becomes a **pre-trigger delay**, scaled to the LFO's rate — i.e., the delay is expressed as a fraction of one cycle at the current rate, not an absolute time, so it scales sensibly as rate changes.
-- One-shot noise (`rnd1`) holds a single random value for the entire one-shot cycle (re-rolled only on retrigger) — this reuses the existing `lfo->rnd`-latch-on-overflow mechanism in `lfo_calc()`'s `LFO_NOISE` case almost directly.
-- One-shot rect (presumably the one-shot variant implied by `LFO_REC`) is phase-inverted relative to the free-running version, so it can go immediately on and then off within the one cycle, with the offset/pre-trigger delay controlling an initial off-portion if wanted.
-
-This needs a small state machine per LFO instance beyond what `Lfo` currently holds (idle / delayed / running, at minimum), since a one-shot LFO needs to know it's *finished* and hold its last value (or a defined rest value) rather than wrapping back to phase 0 and re-triggering itself — `lfo_retrigger()` (`lfo.h:83`) is the existing retrigger entry point this needs to hook into.
-
-### Open Engineering Questions
-
-- **One-shot LFO state field:** the `Lfo` struct doesn't currently have an idle/delayed/running state — needs adding, and needs to be sized/placed consistently with the rest of the struct's DTCM-resident hot-path fields (see `LfoStruct` in `lfo.h`).
-- **Per-voice morph value storage location:** LXR-02's current morph state is two flat parameter arrays (`parameter_values`/`parameters2`, base and morph-target) plus a single global morph amount — no per-voice amount array exists yet. This needs adding (a 6- or 7-element `uint8_t` array is the obvious shape, matching LXR-1's `preset_vMorphAmount[7]`) as part of 4.3, independent of the drain-order question in 4.4.
-- **LFO-to-morph assignment storage:** where does "LFO of voice X targets morph of voice Y" get stored and how is it exposed in the UI (Phase 5)? LXR-1 keeps this as an automation-target selector inside its `PresetKitState`; LXR-02's equivalent needs a home once the Scene/kit data model is finalized in Phase 2.
-
-### Suggested Complementary Features
-
-- **Morph snapshot** (from the earlier draft, still worth keeping): a command to commit the currently-heard interpolated morph state into the base kit parameters, freeing the morph-target slot for a new destination without a save/reload round trip.
-- **Per-voice morph reset-with-global option**, as a natural extension of the "how does per-voice morph behave across scene changes" global setting in 4.3 — worth exposing "reset per-voice morphs to match global on next global morph message" as an explicit sub-option, since it's a one-line addition once the main behavior exists.
-
-## Phase 5 — UI & Performance Workflow
-
-**Location:** `Core/Menu/menu.c`, `Core/Hardware/frontPanel/buttonHandler.c`, `Core/Hardware/frontPanel/ledHandler.c`
-
-This phase is UI-heavy and depends on Phases 3 and 4 already existing (there's no automation view to redesign until the dynamic event pool exists to read automation *from*, and no per-voice morph display until per-voice morph exists). It's also the largest single UI redesign in the roadmap, so it's written up here in more procedural detail than the other phases, since the spec itself is procedural.
-
-### 5.1 Automation view redesign
 
 This replaces the current step-view automation display (parameter assignment/amount shown under step view) with two connected new views.
 
@@ -444,47 +820,47 @@ This replaces the current step-view automation display (parameter assignment/amo
 - **Knob 1:** cycle voice. **Knob 2:** cycle parameter. Sequence buttons light up for any step that currently has automation for the selected parameter.
 - **Multi-step editing:** holding any combination of the 16 sequence buttons switches the bottom-row readout to `avg:` (average value across the held steps, left side) and `mod:+0` (a running modification delta, right side). Turning the encoder while steps are held does two things at once: (1) it adds automation at the currently-shown average value to any held step that doesn't already have automation for this parameter, and (2) it increments/decrements the automation value of *every* held step by ±1 per detent, updating the displayed average live. You can keep adjusting by continuing to turn the encoder, by changing which steps are held, or by switching bar/track via the bar/track buttons — the temporary working array tracks all of it.
 - **Copy:** from this view you can copy steps, bars, or copy the whole automation lane to another track.
-- **No dedicated clear operation inside this view** — the only ways out are the normal exit (commits) or the `SHIFT+COPY/CLEAR` cancel (discards). Clearing automation is a View-A-and-below operation (per 5.1 View A's "remove" functions, or the step-view `SHIFT+COPY/CLEAR`+button wipe from Phase 3.6).
+- **No dedicated clear operation inside this view** — the only ways out are the normal exit (commits) or the `SHIFT+COPY/CLEAR` cancel (discards). Clearing automation is a View-A-and-below operation (per 5.3 View A's "remove" functions, or the step-view `SHIFT+COPY/CLEAR`+button wipe from Phase 4.6).
 
 This is a genuinely large piece of UI state machine — four knobs with context-dependent meaning in View A, a temporary-array-with-commit-on-exit model in View B, and a multi-step "hold N buttons, turn one knob, average updates live" interaction that doesn't have a close analog elsewhere in the current menu code. Worth prototyping the state machine (what's "current view," "held steps," "working array," "dirty" state) as its own small module before wiring it into `menu.c`'s existing page-dispatch structure, rather than growing it inline.
 
-### 5.2 Morph quick access & automation indicator
+### 5.4 Morph quick access & automation indicator
 
 - While viewing a single parameter in the encoder click-in view, holding `SHIFT` toggles between editing that parameter's normal value and its morph-target value, avoiding a save/reload round trip just to set morph endpoints. A further "lock" mode to keep the whole voice interface showing morph-target values for every parameter (rather than needing to hold `SHIFT` per-parameter) is called out as wanted too.
 - The voice page should **only** service voice and scene editing — no step-editing functions belong there (that's step view's job). On the voice page, the 16 sequence buttons become **scene toggles**: each one toggles whether that scene is included in the current voice-parameter edit, so a parameter change can be applied to all 16 scenes, a subset, or just one, depending on which are toggled on. This is a genuinely different meaning for those 16 buttons than they have anywhere else in the UI (scene *selection* elsewhere, scene *inclusion-in-edit* here) — worth a clear visual distinction (different LED color/blink pattern) so it's not confused with PERF-mode scene switching.
 - The LXR-02 hardware has dedicated shift-labeled functions already printed on the sequence buttons — new shift functions should avoid piling onto those buttons where another control is reasonably available, per your explicit note.
 - The LCD's underline indicator should show when the currently-displayed parameter is automated anywhere in the currently playing scene/pattern — a quick "is this being moved by something" signal without needing to open the automation view to check.
 
-### 5.3 PERF mode: scene switching & per-track assignment
+### 5.5 PERF mode: scene switching & per-track assignment
 
 - **Instant scene switching:** a global menu option makes scene switching (via `SEQ` buttons or MIDI program change) take effect at the next step rather than waiting for the end of the bar, preserving sequencer position through the switch. This also carries whatever kit/morph/parameter changes the new scene brings, not just pattern data — it's a full scene swap, not just a pattern swap, which is a bigger behavioral change than the pattern-only version originally described in `putting it together`. Default behavior (end-of-bar) is preserved when the option is off.
 - **Per-track scene assignment:** hold a voice button and press a `SEQ` (scene) button to assign that individual track to play from a different scene than the rest — same gesture as the old "per-track pattern assignment" idea, retargeted at scenes.
-- **Per-voice morph in the PERF page:** each voice gets a direct morph control on the PERF page, full 0–255 range. Step automation and velocity automation update it in real time and it's visible; LFO-to-voice-morph modulation does **not** update the displayed value (per Phase 4.3 — it's background-only). Changing global morph updates every per-voice value shown here.
+- **Per-voice morph in the PERF page:** each voice gets a direct morph control on the PERF page, full 0–255 range. Step automation and velocity automation update it in real time and it's visible; LFO-to-voice-morph modulation does **not** update the displayed value (per Phase 3.3 — it's background-only). Changing global morph updates every per-voice value shown here.
 
-### 5.4 Looper
+### 5.6 Looper
 
 Moves to the `SELECT` buttons (confirmed correction from your round-2 answer — the original `putting it together` draft used `SEQ` 9–16, which conflicts with `SEQ` now meaning scene-select in PERF mode). The original spec describes 8 divisions from a half-bar down to 1/64th note, halving at each button, with holding one additional button ("button 9" in the original 16-button numbering) adding a dotted 50% to whichever other loop button is held, and releasing all loop buttons returning the sequencer to the position it would have reached without looping.
 
-That division range was originally expressed in **sub-step** terms (64 sub-steps = 1/2 bar, down to 1 sub-step = 1/64th), which no longer exists as a unit post-Phase-3. This needs re-deriving in step/bar terms before it can be implemented — flagged below as an open question, since a naive re-mapping (halving from "1/2 bar" down through 8 buttons) lands on 1/256th at the bottom with no sub-steps to represent it, which doesn't match the original "down to 1/64th" intent.
+That division range was originally expressed in **sub-step** terms (64 sub-steps = 1/2 bar, down to 1 sub-step = 1/64th), which no longer exists as a unit after the Phase 4 dynamic Pattern rewrite. This needs re-deriving in step/bar terms before it can be implemented — flagged below as an open question, since a naive re-mapping (halving from "1/2 bar" down through 8 buttons) lands on 1/256th at the bottom with no sub-steps to represent it, which doesn't match the original "down to 1/64th" intent.
 
-### 5.5 Load/save UI rework
+### 5.7 Load/save UI rework
 
-The original `putting it together` draft proposed a specific knob remapping for the load/save menus (knob 1 = type, knob 2 = number/cursor, knobs 3/4 = character entry with capitals/numbers/lowercase split across them). Per your note, this is superseded — "we have bigger file changes in mind" — because the whole load/save menu needs rebuilding around the current Phase 2 file model: banks, scenes, kits, patterns, samples, wavetables, effects, instruments, and root `settings.cfg`. The specific knob assignment idea is worth keeping as a starting point for that rebuild, but the menu structure itself (what "type" even means, what "auto-load" means per type) needs designing fresh against the Phase 2 file model rather than patched onto the current flat slot menu.
+The original `putting it together` draft proposed a specific knob remapping for the load/save menus (knob 1 = type, knob 2 = number/cursor, knobs 3/4 = character entry with capitals/numbers/lowercase split across them). Per your note, this is superseded — "we have bigger file changes in mind" — because the whole load/save menu needs rebuilding around the Phase 3 file model: banks, scenes, kits, patterns, samples, wavetables, effects, instruments, and root `settings.cfg`. The specific knob assignment idea is worth keeping as a starting point for that rebuild, but the menu structure itself (what "type" even means, what "auto-load" means per type) needs designing fresh against the authoritative filesystem spec rather than patched onto the current flat slot menu.
 
-### 5.6 External MIDI sequencing tracks
+### 5.8 External MIDI sequencing tracks
 
-From "notes from others" in `putting it together`: doubling the sequencer's track count (6 or 7 additional tracks) purely for sequencing external MIDI gear via program-change/CC, using the same UI and workflow as the internal voice tracks, reached through a shift function that opens a second page mirroring the internal-voice page layout. This is naturally deferred until after Phases 3–4 land, since it's most straightforward to build as "the same per-track step/automation machinery Phase 3 already built, pointed at a MIDI-out target instead of a DSP voice" rather than a parallel implementation.
+From "notes from others" in `putting it together`: doubling the sequencer's track count (6 or 7 additional tracks) purely for sequencing external MIDI gear via program-change/CC, using the same UI and workflow as the internal voice tracks, reached through a shift function that opens a second page mirroring the internal-voice page layout. This is naturally deferred until after Phase 4 lands, since it's most straightforward to build as "the same per-track step/automation machinery Phase 4 already built, pointed at a MIDI-out target instead of a DSP voice" rather than a parallel implementation.
 
 ### Open Engineering Questions
 
-- **Looper division mapping without sub-steps.** Needs a concrete answer before 5.4 can be built: is 1/64th represented via a track-scale-style subdivision (Phase 3.7's `/2`..`×16` scale applied to a virtual "loop track"), or is the shortest loop division now coarser (e.g., 1/16th, one full step) given sub-steps no longer exist? This changes both the encoding and the UI.
-- **Manual roll trigger gesture** (carried over from Phase 3) needs a home in this UI redesign — likely a `SHIFT`+something on the step buttons or a dedicated control, per the "try not to put shift functions on the SEQ buttons" constraint from 5.2.
-- **Automation view performance:** View B's temporary working array (automation for one parameter, all steps in a track) needs to be read from and written back to the Phase 3 dynamic pool efficiently — worst case, entering the view triggers up to 128 individual pool lookups (one per step) to populate the array, and exiting triggers up to 128 pool writes. Should be fine given the pool is designed for O(1)-ish per-step access, but worth confirming against Phase 3's actual implementation once it exists.
+- **Looper division mapping without sub-steps.** Needs a concrete answer before 5.6 can be built: is 1/64th represented via a track-scale-style subdivision (Phase 4.7's `/2`..`×16` scale applied to a virtual "loop track"), or is the shortest loop division now coarser (e.g., 1/16th, one full step) given sub-steps no longer exist? This changes both the encoding and the UI.
+- **Manual roll trigger gesture** (carried over from Phase 4) needs a home in this UI redesign — likely a `SHIFT`+something on the step buttons or a dedicated control, per the "try not to put shift functions on the SEQ buttons" constraint from 5.4.
+- **Automation view performance:** View B's temporary working array (automation for one parameter, all steps in a track) needs to be read from and written back to the Phase 4 dynamic pool efficiently — worst case, entering the view triggers up to 128 individual pool lookups (one per step) to populate the array, and exiting triggers up to 128 pool writes. Should be fine given the pool is designed for O(1)-ish per-step access, but worth confirming against Phase 4's actual implementation once it exists.
 
 ### Suggested Complementary Features
 
 - **Automation "eraser" mode** (from the earlier draft, still reasonable): a shortcut — e.g., holding `CLEAR` while turning a parameter's knob — that wipes all step automation for that specific parameter across the active track in one gesture, complementing but distinct from View A's per-step "remove" functions.
-- **Scene-inclusion visual on the voice page (5.2):** since toggling scene inclusion for a parameter edit is a new interaction, consider a brief on-screen summary ("editing: 3/16 scenes") when a parameter is touched, so it's obvious at a glance how broad the edit's blast radius is before committing to a knob turn.
+- **Scene-inclusion visual on the voice page (5.4):** since toggling scene inclusion for a parameter edit is a new interaction, consider a brief on-screen summary ("editing: 3/16 scenes") when a parameter is touched, so it's obvious at a glance how broad the edit's blast radius is before committing to a knob turn.
 
 ## Phase 6 — DSP Expansion
 
@@ -564,9 +940,9 @@ Each FX **stack** (a chain of FX types — the 6.7 tech-demo stack is the first 
 
 ### 6.6 FX sequencer
 
-A dedicated 16-step sequencer for FX parameter automation, kept deliberately **static** rather than routed through the Phase 3 dynamic event pool — per your answer, this is small and fixed enough (16 steps × 24 possible automated parameters × 1 byte per automation slot = exactly 384 bytes) that dynamic allocation would be overhead for no benefit. FX parameters are also automatable from the regular track steps, using the same 9-bit parameter ID space from Phase 3.4 (so an FX parameter and a voice parameter are addressed the same way from track-step automation — only the FX sequencer's own dedicated 16-step array is a separate, static structure).
+A dedicated 16-step sequencer for FX parameter automation, kept deliberately **static** rather than routed through the Phase 4 dynamic event pool — per your answer, this is small and fixed enough (16 steps × 24 possible automated parameters × 1 byte per automation slot = exactly 384 bytes) that dynamic allocation would be overhead for no benefit. FX parameters are also automatable from the regular track steps, using the same 9-bit parameter ID space from Phase 4.4 (so an FX parameter and a voice parameter are addressed the same way from track-step automation — only the FX sequencer's own dedicated 16-step array is a separate, static structure).
 
-Run modes, per `putting it together`: **Off** (pressing the FX sequencer's `SEQ` button shows its current settings rather than running it), **Fwd** (steps 1–16 straight through), **Rnd** (a random step per division), **FirstX** (the first X steps play in a fixed random order each cycle, the remaining steps run straight), **LastX** (mirror of FirstX — the last X steps are randomized, the preceding steps run straight). Plus a scale and length setting, matching the track-level scale/length concept from Phase 3.7.
+Run modes, per `putting it together`: **Off** (pressing the FX sequencer's `SEQ` button shows its current settings rather than running it), **Fwd** (steps 1–16 straight through), **Rnd** (a random step per division), **FirstX** (the first X steps play in a fixed random order each cycle, the remaining steps run straight), **LastX** (mirror of FirstX — the last X steps are randomized, the preceding steps run straight). Plus a scale and length setting, matching the track-level scale/length concept from Phase 4.7.
 
 ### 6.7 The 8-bit tech demo stack
 
@@ -586,7 +962,7 @@ So the concrete answer: **the flash move isn't optional headroom, it's the diffe
 
 - **`sine_table`-in-flash, if revisited later** — not part of the current plan (6.1: leaving it in DTCM, moving `transientData` only), but if DTCM pressure from some other future feature ever makes it worth reconsidering, the thing to test first is several simultaneous sine-based voices at widely different, high pitches — the access pattern most likely to pressure the ART cache, unlike `transientData`'s already-proven sequential one.
 - **Convolution chamber CPU budget (6.3)** — needs a decision on maximum affordable IR length before "convolution" is locked in as the literal technique rather than a cheaper structured-reverb approximation of the same target sound.
-- **FX stack file format** — 64 arbitrary parameters per stack, remembered in kit and morph endpoints, with a stack-type tag: this needs the same kind of parameter-ID-space decision Phase 3.4 made for step automation (is FX-stack-parameter-64 the same "9-bit ID" space, or a separate per-stack-type namespace?) before the file format can be finalized.
+- **FX stack file format** — 64 arbitrary parameters per stack, remembered in kit and morph endpoints, with a stack-type tag: this needs the same kind of parameter-ID-space decision Phase 4.4 made for step automation (is FX-stack-parameter-64 the same "9-bit ID" space, or a separate per-stack-type namespace?) before the file format can be finalized.
 
 ### Suggested Complementary Features
 

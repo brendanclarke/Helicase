@@ -992,14 +992,15 @@ void led_updateCurrentStep(uint8_t step)
     if ((shownPattern == playedPattern) &&
         (step >= (uint8_t)(menu_currentBar * NUM_STEPS_PER_BAR)) &&
         (step < (uint8_t)((menu_currentBar + 1u) * NUM_STEPS_PER_BAR))) {
-        /* Show chase on voice, performance, sequencer, and Euklid pages. Do not
-         * show it on global/load/save-style pages where STEP LEDs mean other
-         * UI choices. */
+        /* Show chase on voice, sequencer, and Euklid pages. PERF owns the SEQ
+         * row as a Scene selector/status surface, so current-step feedback is
+         * suppressed there even when the viewed Pattern matches playback. */
         if ((menu_activePage < MENU_MIDI_PAGE) ||
-            (menu_activePage == PERFORMANCE_PAGE) ||
             (menu_activePage == SEQ_PAGE) ||
             (menu_activePage == EUKLID_PAGE)) {
             led_setActive_step(step);
+        } else {
+            led_clearActive_step();
         }
     } else {
         /* If follow mode is off and the user is viewing another pattern, clear
@@ -1157,11 +1158,10 @@ void led_setBeatPulse(uint8_t on)
 /*
  * Notify the front-panel layer that playback has switched patterns.
  *
- * Input: playedPattern is the new sequencer pattern slot; only the low three
- * bits are used by the legacy 0..7 pattern UI. Outputs: menu_playedPattern is
- * updated, follow mode may update menu_shownPattern, sequencer LEDs and track
- * settings may repaint, and performance SELECT LEDs are refreshed when the UI
- * is in performance mode.
+     * Input: playedPattern is the new sequencer pattern slot. Outputs:
+     * menu_playedPattern is updated, follow mode may update menu_shownPattern,
+     * sequencer LEDs and track settings may repaint, and PERF Scene LEDs are
+     * refreshed when the UI is in performance mode.
  *
  * Common caller: sequencer.c after a pattern-boundary switch. Confederates:
  * Menu owns viewed/played pattern state and follow setting; PatternData owns
@@ -1176,7 +1176,7 @@ void led_notifyPatternChanged(uint8_t playedPattern)
      * optional follow-mode viewed pattern update, and visible LEDs. Risk:
      * foreground LED/menu functions must not be called from a high-priority ISR.
      */
-    uint8_t patNr = (uint8_t)(playedPattern & 0x07u);
+    uint8_t patNr = pat_patternValid(playedPattern) ? playedPattern : 0u;
     menu_playedPattern = patNr;
 
     if (parameter_values[PAR_FOLLOW]) {
@@ -1188,7 +1188,7 @@ void led_notifyPatternChanged(uint8_t playedPattern)
 
     if (buttonHandler_getMode() == SELECT_MODE_PERF) {
         led_clearAllBlinkLeds();
-        led_initPerformanceLeds();
+        menu_refreshPerfSceneLeds();
     }
 }
 
