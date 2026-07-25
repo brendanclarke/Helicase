@@ -1,9 +1,11 @@
 # SRAM manifest
 
-Generated from the current `build/lxr02.elf` on 2026-07-25 after moving the
-26,460-B `transientData` table from DTCM to internal FLASH. This is a fresh
-linked-image inventory: sizes come from `arm-none-eabi-size -A` and
-`arm-none-eabi-nm -S --size-sort`, not source estimates.
+Generated from the current `build/lxr02.elf` on 2026-07-25 after the Session
+043 bitmap Pattern-storage minimization, 1,024-entry slider-LUT reduction,
+tagged instrument-runtime migration, and 26,460-B `transientData` move from
+DTCM to internal FLASH. This is a fresh linked-image inventory: sizes come
+from `arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
+estimates.
 
 ## Allocation policy
 

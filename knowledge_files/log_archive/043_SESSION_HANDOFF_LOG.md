@@ -97,4 +97,4 @@ Before any new/enlarged global, static, linker, pool, DMA, or material stack all
 
 ## End-of-session recommendation
 
-Do not reopen disposed storage for stale menus or historical file formats. Future Pattern work must explicitly design inside reserved SRAM1; future delay work must first propose exact DTCM geometry and obtain approval. Keep root and specification SRAM manifests synchronized after every approved memory-changing build.
+Do not reopen disposed storage for stale menus or historical file formats. Future Pattern work must explicitly design inside reserved SRAM1; future delay work must first propose exact DTCM geometry and obtain approval. Keep `knowledge_files/specification_reference/SRAM_MANIFEST.md` current after every approved memory-changing build.

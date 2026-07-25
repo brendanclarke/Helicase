@@ -141,7 +141,6 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 ./
 ├── MEMORY.md                        ← this file
 ├── README.md                        ← confirmed hardware, known issues, critical reminders
-├── SRAM_MANIFEST.md                 ← current linked root RAM inventory; mirror of specification reference
 ├── main.c
 ├── config.h
 ├── Makefile
