@@ -105,3 +105,18 @@ arm-none-eabi-readelf -l -W build/lxr02.elf
 For the current image, conventional `arm-none-eabi-size` reports `text=351,740
 B`, `data=404 B`, and `bss=69,948 B`. The latter is the combined zero-init
 total across memory regions; `size -A` provides the section split above.
+
+## 2026-07-27 Bank Load / command-UI implementation note
+
+`menu_loadSaveCommandActive` is one normal-SRAM1 `.bss` byte owned by Menu for
+the lifetime of an accepted OK/OW command. It controls only `...` rendering,
+cursor suppression, and the one terminal type-row reset; it retains neither a
+payload nor a browser name. The compiler packed this byte into existing layout
+padding in the linked image used for this implementation check.
+
+Bank Load reuses its existing operation scratch and does not add a Bank-child
+cache, Scene stage, Instrument image, or LFO state. The runtime recursive
+Bank-tree quarantine was removed from the active build; selected children are
+validated by the existing shared Scene parser before atomic commit. The linked
+implementation check reported `text=351,788 B`, `data=400 B`, and `bss=69,948
+B`. These linked totals, rather than source-field estimates, are authoritative.

@@ -208,11 +208,13 @@ typedef enum {
     FS_INTERNAL_OP_SCAN_BANK_SCENES,
     FS_INTERNAL_OP_SCAN_INSTRUMENTS,
     /*
-     * Name repair is a physical-card preflight for index generation and Bank
-     * Load. It walks one parent directory at a time, renames one object,
-     * flushes, and then resumes scanning. It must never populate a second
-     * 1,000-entry cache; the normal scan/index pass runs after repair to
-     * publish browser rows.
+     * Name repair is a physical-card maintenance operation for index
+     * generation and the immediate child-name handoff used by Bank Load. It
+     * walks one parent directory at a time, renames one object, flushes, and
+     * then resumes scanning. Bank Load uses only that bounded child-directory
+     * repair; selected Scene payload validation remains in the common reader.
+     * It must never populate a second 1,000-entry cache; normal scan/index
+     * passes publish browser rows after repair.
      */
     FS_INTERNAL_OP_REPAIR_NAMES,
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
@@ -797,7 +799,7 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
 static void filesystem_repairNames_tick(void);
 static uint8_t filesystem_repairBuildCandidate(void);
 static uint8_t filesystem_quarantineKitLibraryBlocking(void);
-static uint8_t filesystem_quarantineBankKitsBlocking(uint16_t slot);
+static uint8_t filesystem_kitMemberNameIsCanonical(const char *name);
 static bool filesystem_startRepairLibraryNames(fs_library_index_kind_t kind,
                                                fs_completion_cb_t cb);
 static bool filesystem_startRepairInstrumentNames(instrument_type_t type,
@@ -806,8 +808,8 @@ static bool filesystem_startRepairBankNames(uint16_t slot,
                                             fs_completion_cb_t cb);
 static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
                              uint16_t slot, fs_completion_cb_t cb);
-static void filesystem_saveIndexScanComplete(void);
-static void filesystem_saveIndexWriteComplete(void);
+static void filesystem_libraryIndexRefreshScanComplete(void);
+static void filesystem_libraryIndexRefreshWriteComplete(void);
 static void filesystem_loadInstrumentIndex_tick(void);
 static void filesystem_loadLibraryIndex_tick(void);
 static uint16_t filesystem_cachedInstrumentCount(instrument_type_t type);
@@ -903,18 +905,19 @@ static instrument_type_t op_instrument_index_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint8_t op_instrument_scan_one_type = 0u;
 static fs_name_cache_kind_t op_library_index_kind = FS_NAME_CACHE_NONE;
 /*
- * Save-completion index refresh chain.
+ * Durable library-index refresh chain.
  *
- * What: holds the original save callback while the newly written Kit/Scene/Bank
- * directory is scanned and its complete slot-ordered `.hcindex` is rewritten.
- * Why: the save target can be a new or renamed physical directory, so merely
- * changing the old shared-cache row is not equivalent to the boot scan. The
- * pending flag is consumed after the save's final FAT flush; the kind remains
- * available to the scan-complete callback until the index write completes.
+ * What: holds the original completion callback while a physical Kit/Scene/Bank
+ * directory scan and its complete slot-ordered `.hcindex` rewrite run after a
+ * flush. Why: both Saves and Bank Load borrow the one name cache and must not
+ * publish completion while it describes the preceding directory view. Inputs:
+ * refresh kind plus the original callback. Output: exactly one original
+ * callback after the scan/index chain is durable. This renames the former
+ * save-only chain; it allocates no new retained storage.
  */
-static uint8_t op_save_index_refresh_pending = 0u;
-static fs_name_cache_kind_t op_save_index_refresh_kind = FS_NAME_CACHE_NONE;
-static fs_completion_cb_t op_save_completion_callback = NULL;
+static uint8_t op_library_index_refresh_pending = 0u;
+static fs_name_cache_kind_t op_library_index_refresh_kind = FS_NAME_CACHE_NONE;
+static fs_completion_cb_t op_library_index_refresh_callback = NULL;
 /*
  * Root Instrument Save request scratch.
  *
@@ -2147,13 +2150,13 @@ static void filesystem_finish(fs_status_t final_status)
  * completion callback runs exactly once, after the physical folder and index
  * have both passed their FAT flush gates.
  */
-static void filesystem_completeSaveIndexRefresh(fs_status_t final_status)
+static void filesystem_completeLibraryIndexRefresh(fs_status_t final_status)
 {
-    fs_completion_cb_t cb = op_save_completion_callback;
+    fs_completion_cb_t cb = op_library_index_refresh_callback;
 
-    op_save_completion_callback = NULL;
-    op_save_index_refresh_kind = FS_NAME_CACHE_NONE;
-    op_save_index_refresh_pending = 0u;
+    op_library_index_refresh_callback = NULL;
+    op_library_index_refresh_kind = FS_NAME_CACHE_NONE;
+    op_library_index_refresh_pending = 0u;
     status = final_status;
     current_op = FS_INTERNAL_OP_NONE;
     if (cb)
@@ -2165,32 +2168,32 @@ static void filesystem_completeSaveIndexRefresh(fs_status_t final_status)
  * What: replaces the old cache-row-only save update with a real Kit/Scene/Bank
  * directory scan. Why: a save can create, rename, or remove a numbered folder;
  * only scanning the parent directory observes the complete resulting set.
- * Inputs: op_save_index_refresh_kind and the parked original save callback.
+ * Inputs: op_library_index_refresh_kind and the parked original callback.
  * Output: the shared cache is rebuilt and the scan callback starts the full
  * 1,000-row `.hcindex` writer.
  */
-static void filesystem_startSaveIndexRefresh(void)
+static void filesystem_startLibraryIndexRefresh(void)
 {
-    fs_name_cache_kind_t kind = op_save_index_refresh_kind;
+    fs_name_cache_kind_t kind = op_library_index_refresh_kind;
     bool started;
 
-    op_save_index_refresh_pending = 0u;
-    op_save_completion_callback = completion_callback;
+    op_library_index_refresh_pending = 0u;
+    op_library_index_refresh_callback = completion_callback;
     completion_callback = NULL;
     op_library_index_kind = kind;
     status = FS_STATUS_IDLE;
     current_op = FS_INTERNAL_OP_NONE;
 
     started = (kind == FS_NAME_CACHE_KIT)
-        ? filesystem_requestScanKits(filesystem_saveIndexScanComplete)
+        ? filesystem_requestScanKits(filesystem_libraryIndexRefreshScanComplete)
         : (kind == FS_NAME_CACHE_SCENE)
-            ? filesystem_requestScanScenes(filesystem_saveIndexScanComplete)
+            ? filesystem_requestScanScenes(filesystem_libraryIndexRefreshScanComplete)
             : (kind == FS_NAME_CACHE_BANK)
-                ? filesystem_requestScanBanks(filesystem_saveIndexScanComplete)
+                ? filesystem_requestScanBanks(filesystem_libraryIndexRefreshScanComplete)
                 : false;
     if (!started) {
         filesystem_makeNamedErrorCode("Idx", 0u);
-        filesystem_completeSaveIndexRefresh(FS_STATUS_ERROR);
+        filesystem_completeLibraryIndexRefresh(FS_STATUS_ERROR);
     }
 }
 
@@ -2209,8 +2212,8 @@ static void filesystem_flushFinish_tick(void)
     if (!afatfs_sync())
         return;
 
-    if (op_save_index_refresh_pending) {
-        filesystem_startSaveIndexRefresh();
+    if (op_library_index_refresh_pending) {
+        filesystem_startLibraryIndexRefresh();
         return;
     }
 
@@ -3306,8 +3309,8 @@ static void filesystem_residentNames_tick(void)
              * the scan/index chain completes. Affiliates: save-index refresh
              * gate and root Scene Load/Save state machines.
              */
-            op_save_index_refresh_kind = FS_NAME_CACHE_SCENE;
-            op_save_index_refresh_pending = 1u;
+            op_library_index_refresh_kind = FS_NAME_CACHE_SCENE;
+            op_library_index_refresh_pending = 1u;
         }
         filesystem_finish(FS_STATUS_DONE);
         return;
@@ -3572,29 +3575,17 @@ static void filesystem_repairNames_tick(void)
         op_phase = 43u;
         return;
 
-    case 43: /* VALIDATE embedded Kits for Bank-load repair */
-        if (op_close_status == FS_STATUS_DONE &&
-            op_repair_scope == FS_REPAIR_SCOPE_BANK_LOAD) {
-            if (!filesystem_quarantineBankKitsBlocking(op_repair_bank_slot)) {
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            op_phase = 44u;
-            return;
-        }
-        filesystem_finish(op_close_status);
-        return;
-
-    case 44: /* HAND OFF successful repair to the Bank payload reader */
+    case 43: /* HAND OFF repaired Bank child names to the Bank payload reader */
         if (op_close_status == FS_STATUS_DONE &&
             op_repair_scope == FS_REPAIR_SCOPE_BANK_LOAD) {
             /*
-             * Bank-load name repair is an internal preflight.
+             * Continue one Bank Load through its original callback.
              *
-             * Preset posts one logical Bank Load and expects one completion.
-             * After the selected Bank tree is canonical, keep the original
-             * callback parked and continue directly into the existing Bank
-             * payload reader under the single filesystem operation contract.
+             * Inputs: a repaired selected Bank directory and request state
+             * captured before the repair. Output: Bank phase zero resumes
+             * without publishing an intermediate completion. The former
+             * blocking embedded-Kit quarantine is intentionally absent: each
+             * selected child validates in the shared Scene reader instead.
              */
             current_op = FS_INTERNAL_OP_LOAD_BANK;
             op_phase = 0u;
@@ -3604,12 +3595,7 @@ static void filesystem_repairNames_tick(void)
             op_close_done = false;
             return;
         }
-        /*
-         * Phase 44 is reachable only after successful Bank-load quarantine.
-         * Keep a defensive error exit so corrupted operation scratch cannot
-         * accidentally publish an unrelated repair result as Bank Load.
-         */
-        filesystem_finish(FS_STATUS_ERROR);
+        filesystem_finish(op_close_status);
         return;
 
     default:
@@ -3624,34 +3610,34 @@ static void filesystem_repairNames_tick(void)
  * Why: the scan has now rebuilt every cache row from actual FAT directory
  * entries, so the writer can publish a correct index instead of preserving
  * stale rows from before the save. Inputs: status from the finished scan and
- * op_save_index_refresh_kind. Output: the original save callback remains
+ * op_library_index_refresh_kind. Output: the original callback remains
  * parked until the index writer and its final flush complete.
  */
-static void filesystem_saveIndexScanComplete(void)
+static void filesystem_libraryIndexRefreshScanComplete(void)
 {
     fs_status_t scan_status = status;
-    fs_file_type_t file_type = (op_save_index_refresh_kind == FS_NAME_CACHE_KIT)
+    fs_file_type_t file_type = (op_library_index_refresh_kind == FS_NAME_CACHE_KIT)
         ? FS_FILE_KIT
-        : (op_save_index_refresh_kind == FS_NAME_CACHE_SCENE)
+        : (op_library_index_refresh_kind == FS_NAME_CACHE_SCENE)
             ? FS_FILE_SCENE : FS_FILE_BANK;
 
     if (scan_status != FS_STATUS_DONE) {
-        filesystem_completeSaveIndexRefresh(scan_status);
+        filesystem_completeLibraryIndexRefresh(scan_status);
         return;
     }
     if (!filesystem_start(FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
                           file_type,
                           0u,
-                          filesystem_saveIndexWriteComplete)) {
+                          filesystem_libraryIndexRefreshWriteComplete)) {
         filesystem_makeNamedErrorCode("Idx", 1u);
-        filesystem_completeSaveIndexRefresh(FS_STATUS_ERROR);
+        filesystem_completeLibraryIndexRefresh(FS_STATUS_ERROR);
     }
 }
 
 /* Publish the original save result after `.hcindex` is durable. */
-static void filesystem_saveIndexWriteComplete(void)
+static void filesystem_libraryIndexRefreshWriteComplete(void)
 {
-    filesystem_completeSaveIndexRefresh(status);
+    filesystem_completeLibraryIndexRefresh(status);
 }
 
 /*
@@ -5739,6 +5725,32 @@ static void filesystem_loadSceneDirectory_tick(void)
         }
         if (eof) {
             st = storage_kitsetFinalize(&op_kitset);
+            if (st == STORAGE_STATUS_OK &&
+                current_op == FS_INTERNAL_OP_LOAD_BANK) {
+                uint8_t member_slot;
+
+                /*
+                 * Validate Bank-member provenance before any child commit.
+                 *
+                 * Inputs: the six declared `file=` names from the shared
+                 * kitset parser. Output: a Bank child with a basename that
+                 * cannot be reconstructed from the eight-cell resident-name
+                 * register fails through the normal foreground state machine.
+                 * Why: this replaces the former blocking all-Bank quarantine;
+                 * only the selected child is examined, declared instrument
+                 * types remain fully flexible, and no runtime load mutates
+                 * unrelated files on the card.
+                 */
+                for (member_slot = 0u;
+                     member_slot < STORAGE_KIT_SLOT_COUNT;
+                     member_slot++) {
+                    if (!filesystem_kitMemberNameIsCanonical(
+                            op_kitset.instrument_file[member_slot])) {
+                        st = STORAGE_STATUS_INVALID_FORMAT;
+                        break;
+                    }
+                }
+            }
             if (st == STORAGE_STATUS_OK) {
                 /*
                  * One-way compatibility bridge for old embedded Scene Kits.
@@ -7328,8 +7340,8 @@ static void filesystem_loadBankDirectory_tick(void)
          * folder assignment. The original Preset callback remains parked until
          * this physical rescan and `.hcindex` write are durable.
          */
-        op_save_index_refresh_kind = FS_NAME_CACHE_BANK;
-        op_save_index_refresh_pending = 1u;
+        op_library_index_refresh_kind = FS_NAME_CACHE_BANK;
+        op_library_index_refresh_pending = 1u;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -9810,8 +9822,8 @@ static void filesystem_saveKitDirectory_tick(void)
          * flush starts a physical Kit/ scan; that scan then starts the complete
          * 000..999 `.hcindex` writer before the original callback is released.
          */
-        op_save_index_refresh_kind = FS_NAME_CACHE_KIT;
-        op_save_index_refresh_pending = 1u;
+        op_library_index_refresh_kind = FS_NAME_CACHE_KIT;
+        op_library_index_refresh_pending = 1u;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -10506,8 +10518,8 @@ static void filesystem_saveBankDirectory_tick(void)
          * for newly-created, renamed, or removed root Bank folders to become
          * visible immediately without a restart.
          */
-        op_save_index_refresh_kind = FS_NAME_CACHE_BANK;
-        op_save_index_refresh_pending = 1u;
+        op_library_index_refresh_kind = FS_NAME_CACHE_BANK;
+        op_library_index_refresh_pending = 1u;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -13640,6 +13652,16 @@ restart:
     return filesystem_blockChdir(NULL);
 }
 
+#if 0
+/*
+ * Retired runtime Bank-tree quarantine implementation.
+ *
+ * It remains here temporarily as an inactive historical reference for the
+ * boot-only Kit quarantine helpers immediately above. Bank Load now validates
+ * only selected children through the foreground-pumped shared Scene reader;
+ * compiling this recursive blocking traversal would reintroduce the UI/audio
+ * stall fixed by the Bank Load operation contract.
+ */
 static uint8_t filesystem_quarantineEmbeddedKitBlocking(
     const char *kit_name,
     const char *scene_name,
@@ -13878,6 +13900,7 @@ static uint8_t filesystem_quarantineBankKitsBlocking(uint16_t slot)
     filesystem_reportBootSubstep(82u); /* final return to root */
     return (uint8_t)(ok && filesystem_blockChdir(NULL));
 }
+#endif
 
 static uint16_t filesystem_le16(const uint8_t *p)
 {
@@ -16244,29 +16267,25 @@ bool filesystem_requestLoadBank(uint16_t slot,
         return false;
     }
     /*
-     * Bank Load repairs names before capturing resident provenance.
+     * Repair selected Bank child names before capturing resident provenance.
      *
-     * A Bank payload can pull in sixteen Scene folders, embedded Kit folders,
-     * and six Instrument member filenames per Kit. Those names are only needed
-     * one at a time, and future resident state should not retain long FAT keys.
-     * Repairing the selected Bank tree before parsing lets load/save
-     * reconstruct keys from slot/type plus bounded display names.
+     * Inputs: selected root Bank slot and callback. Output: the asynchronous
+     * repair handoff retains the root cache row until it has canonicalized the
+     * immediate `00..15` child components, then starts the Bank payload reader
+     * under the same callback. The repair no longer validates every embedded
+     * Kit: selected children are validated by the shared Scene reader.
      */
     if (!filesystem_startRepairBankNames(slot, cb))
         return false;
     op_bank_scene_load_mask = valid_mask;
     op_scene_load_scene_mask = valid_mask;
     /*
-     * Do not initialize a Scene stage while the Bank-name repair still reads
-     * the selected Bank cache row.
+     * Keep the root Bank display key intact while repair reads its cache row.
      *
-     * Why: the Bank repair is the first asynchronous leg of this request and
-     * needs its slot-ordered name cache to rebuild the selected `NNN Name`
-     * component. The delegated child loader initializes its Scene stage only
-     * after Bank validation has consumed that cache. Inputs: validated Bank
-     * slot/mask. Output: repair sees its source row intact; no new staging or
-     * SRAM allocation exists here. Affiliates: filesystem_repairNames_tick(),
-     * filesystem_loadBankDirectory_tick() child phases 18/73.
+     * Inputs: validated root Bank cache row. Output: repair can rebuild the
+     * selected `NNN Name` component, after which the Bank reader reuses this
+     * existing scratch while it opens selected child Scenes. No extra cache or
+     * staging allocation exists here.
      */
     memcpy(op_bank_display_name,
            filesystem_cachedLibraryName(FS_NAME_CACHE_BANK, slot),

@@ -184,13 +184,10 @@ uint8_t filesystem_writeResidentNamesBlocking(
  * Outputs: op receives one fs_boot_diag_op_t code and phase receives the
  * operation's current private state-machine phase. NULL outputs are allowed.
  * This function performs no polling, acknowledgement, or state mutation. For
- * Bank-repair finalization, phase 42 is root return, 43 is embedded-Kit
- * quarantine, and 44 is handoff to the Bank payload reader. Phase 43 releases
- * its top-level Bank-root handle immediately after opening the selected Bank,
- * preserving asyncfatfs' three-handle budget for selected Bank, Scene, and
- * embedded Kit during directory descent. After entering the Kit, its explicit
- * handle is also released because currentDirectory owns the copied Kit state;
- * the freed slot is then available for kitset.kcg and Instrument member files.
+ * Bank-name repair, phase 42 returns to root and phase 43 hands a successful
+ * Bank Load into its payload reader without a second callback. The handoff
+ * retains the original request callback; selected child Scene payloads then
+ * progress through the ordinary foreground reader.
  */
 void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase);
 /* Register or clear the temporary phase-43 substep observer. Passing NULL
@@ -319,20 +316,24 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
  * Load one root Bank directory and its selected Bank-local Scene.
  *
  * Inputs: root Bank slot 000..999, resident destination Scene mask, and
- * completion callback. Output: asynchronous Bank validation and, when the Bank
- * contains a usable child, a staged Scene load from Bank/<NNN>/<SS Name>/.
- * The Bank cache remains intact through the asynchronous name-repair preflight;
- * the child Scene stage is initialized only after that preflight has consumed
- * its selected row. The index cache and typed stage are separate SRAM, but
- * this ordering still keeps the preflight key immutable and avoids starting a
- * child-stage reset before Bank validation is complete.
- * Every selected Bank-local Scene is an independent directory payload: its
+ * completion callback. Output: asynchronous selected-child validation and,
+ * when the Bank contains a usable child, a staged Scene load from
+ * Bank/<NNN>/<SS Name>/.
+ * The Bank cache remains intact through the asynchronous immediate-child name
+ * repair; the child Scene stage is initialized only after that repair consumes
+ * its selected row. The reader then validates only selected payloads, rather
+ * than performing a recursive embedded-Kit preflight.
+ * Every selected Bank-local Scene is an independent foreground-pumped
+ * directory payload: its
  * embedded `Kit <name>` directory and its pattern/effect files are discovered
  * afresh before that child is read. This matters when a full Bank contains
  * different Kit names, because child `01` must never inherit child `00`'s
  * filenames. Empty Banks are successful Bank loads; callers inspect
  * filesystem_lastBankLoadLoadedScene() and run the fallback chain when no
- * child Scene was supplied.
+ * child Scene was supplied. Runtime Bank Load never recursively quarantines
+ * unselected embedded Kits; the shared Scene payload reader validates each
+ * selected child before committing it, preserving the single callback and the
+ * flexible declared Instrument/LFO payload mapping.
  */
 bool filesystem_requestLoadBank(uint16_t slot,
                                 uint16_t scene_mask,

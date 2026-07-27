@@ -199,8 +199,16 @@ uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene);
  */
 uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask);
 /* Settings — keyed root settings.cfg file. */
-void    preset_loadGlobals(void);
-void    preset_saveGlobals(void);
+/*
+ * Post one explicit Settings request.
+ *
+ * Inputs: current settings storage authority. Output: one only when the
+ * filesystem accepted the asynchronous request; zero leaves Preset idle. Menu
+ * uses this accepted/rejected result to enter its `...` confirmation state
+ * only for work that will actually complete.
+ */
+uint8_t preset_loadGlobals(void);
+uint8_t preset_saveGlobals(void);
 
 /* Pattern — async direct serializer in filesystem.c. */
 uint8_t preset_loadPattern(uint8_t presetNr);
@@ -373,17 +381,27 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
  *
  * preset_startDrumsetApply() first detaches the outgoing all-source modulation
  * graph, swaps immediate Scene settings, and arms one bit per instrument slot.
- * preset_tickDrumsetApply() commits at most one pending slot
- * whose old amp envelope is below the quiet threshold. A return value of 1 means
- * one bounded unit was performed; 0 can mean either fully idle or waiting for
- * ringing slots, so callers may poll it from the ordinary foreground loop.
+ * preset_tickDrumsetApply() commits at most one quiet slot's tagged runtime
+ * type, routing, and descriptor image per pass. Once every member is valid,
+ * it reuses the existing Instrument apply cursor to normalize/rebind every
+ * source slot's velocity plus both LFO pairs. The pre-audio boot counterpart
+ * establishes only a safe temporary image; main.c calls
+ * preset_startDrumsetApply() after audio startup so boot uses this entire
+ * worker, including its clear/image/rebind order, rather than a partial
+ * boot-only target-install sequence. Thus target tokens are resolved only
+ * against the complete incoming type layout, not a stale physical-slot
+ * assumption. A return value of 1 means one bounded unit was performed; 0 can
+ * mean either fully idle or waiting for ringing slots, so callers may poll it
+ * from the ordinary foreground loop.
  *
  * preset_applyDeferredSceneSlotForTrigger() is the trigger-time escape hatch:
  * when the newly selected Scene pattern fires a pending slot, it synchronously
- * applies that slot's instrument parameters, LFO slot/targets, audio out, and
- * future per-instrument mix affiliates before the note trigger is dispatched.
- * The one pre-worker teardown is required because a tagged runtime replacement
- * overwrites the outgoing engine bytes to which old modulation nodes may point.
+ * applies that slot's type, descriptor image, and audio out before the note
+ * trigger is dispatched. Cross-slot LFO/velocity bindings remain detached
+ * until all pending members finish, when the common rebind cursor installs
+ * them. The one pre-worker teardown is required because a tagged runtime
+ * replacement overwrites outgoing engine bytes to which old modulation nodes
+ * may point. This lifecycle adds no retained apply state.
  */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);

@@ -373,18 +373,24 @@ int main(void)
 
     triggerJacks_init();
     sampleMemory_init();
-    dsp_init();
     /*
-     * SceneData owns every stored Pattern/Kit/parameter image, while BankData
-     * owns only the currently loaded Bank container identity.
+     * Establish retained Scene type ownership before constructing tagged DSP
+     * runtime members.
      *
-     * Inputs: power-on SRAM. Outputs: resident Scene defaults and a blank
-     * non-Bank container state. Bank init belongs beside Scene init because
-     * boot may later load a Bank, an empty Bank, a root Scene fallback, or a
-     * root Kit fallback, and all of those paths read these identity cells.
+     * Inputs: power-on Scene/Bank SRAM. Outputs: scene_initAll() writes a
+     * valid descriptor type into every resident instrument slot before
+     * dsp_init() calls instrumentManager_runtimeInit(). This order is required
+     * because DRM is enum value zero: initializing runtime first would mistake
+     * raw BSS for six valid Drum assignments and let a loaded Snare/Cymbal/Hat
+     * descriptor write through the wrong tagged member until a later switch.
+     * Bank init remains adjacent because boot may load a Bank, an empty Bank,
+     * a root Scene fallback, or a root Kit fallback from this defined state.
+     * Affiliates: SceneData's default-type construction, BankData container
+     * identity, InstrumentManager tagged slots, and Preset's post-load apply.
      */
     scene_initAll();
     bank_init();
+    dsp_init();
     seq_init();
     euklid_init();
     som_init();
@@ -614,6 +620,24 @@ int main(void)
     ** operations are non-blocking via filesystem_tick() in the main loop. */
     boot_showFilesystemStage(14u);  /* pre-audio filesystem boot completed */
     audioCodec_init();
+    /*
+     * Replay the selected boot Scene through the exact runtime Scene-switch
+     * transaction once DMA audio is live.
+     *
+     * Inputs: the pre-audio loader has selected and image-applied the active
+     * Scene; audioCodec_init() has brought up the DMA/I2S control lifecycle.
+     * Output: the ordinary deferred worker clears the pre-audio modulation
+     * graph, reapplies all six tagged members, and rebinds every LFO/velocity
+     * source in the same order as a manual Scene switch. This must call the
+     * public worker starter rather than reconstructing its pending mask here:
+     * hardware proved pre-audio target installation differs from the live
+     * target-edit path. The existing drumset_apply_* cursor owns the short
+     * post-startup transition; no SRAM or new boot state is allocated.
+     * Affiliates: preset_sendDrumsetParameters(),
+     * preset_startDrumsetApply(), preset_tickDrumsetApply(), and
+     * menu_pollPresetStatus().
+     */
+    preset_startDrumsetApply();
     prevBtn = 0;
     last_repaint_tick = 0;
 

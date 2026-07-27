@@ -1040,19 +1040,24 @@ static void preset_applyKitVoiceSupplemental(uint8_t scene_index, uint8_t voice)
     }
 }
 
-/* Apply one loaded Scene kit slot's non-image affiliates.
+/* Reset and apply one loaded Scene slot's descriptor image, without binding
+ * cross-slot modulation destinations.
  *
- * Why this helper changed: the directory Kit loader now stores audio routing
- * and non-morph runtime cells in SceneData, while morphable image bytes are
- * handled by the Morph worker. A one-slot helper keeps post-load foreground
- * work bounded.
+ * Why this boundary exists: a tagged runtime member must first be reset from
+ * the active Scene's actual type, then receive routing and Morph-derived
+ * descriptor values. LFO/velocity targets are deliberately excluded because
+ * their target can be any other slot; binding them before every target member
+ * has been reset would resolve a valid token through a stale runtime type.
  *
- * Inputs: active Scene index and zero-based slot. Outputs: mixer route,
- * non-morph runtime cells are applied through typed Preset setters. Clients are
- * synchronous boot apply, preset_tickDrumsetApply(), and the one-slot
- * Instrument Load apply cursor.
+ * Inputs: active Scene index and zero-based slot. Outputs: the matching tagged
+ * member, its Scene routing, and its morphable descriptor image are current.
+ * Clients: synchronous boot activation, deferred Scene switching, and the
+ * trigger-time replacement path. Affiliates: preset_applyKitVoiceSupplemental
+ * owns the later all-source graph rebind, while InstrumentManager owns tagged
+ * type construction and PresetMorph owns descriptor interpolation.
  */
-static void preset_applyKitVoice(uint8_t scene_index, uint8_t voice)
+static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
+                                              uint8_t voice)
 {
     if (!scene_instrumentSlotConst(scene_index, voice) ||
         voice >= INSTRUMENT_SLOT_COUNT) {
@@ -1062,38 +1067,74 @@ static void preset_applyKitVoice(uint8_t scene_index, uint8_t voice)
     /*
      * Rebind the DSP runtime type at the same time as parameter commit.
      *
-     * Input: active Scene slot selected by the deferred apply worker. Output:
+     * Input: active Scene slot selected by the activation worker. Output:
      * InstrumentManager's runtime type shadow and the concrete DSP voice object
-     * are reset immediately before descriptor/audio/supplemental values are
-     * copied in. Inactive Scene retained writes must not call this path because
-     * the runtime shadow always belongs to the audible Scene.
+     * are reset immediately before routing/Morph descriptor values are copied.
+     * Inactive Scene retained writes must not call this path because the
+     * runtime shadow always belongs to the audible Scene.
      */
     if (scene_index == scene_getActiveIndex())
         instrumentManager_resetRuntimeSlot(voice);
     (void)preset_applyKitAudioRouting(scene_index, voice);
-    preset_applyKitVoiceSupplemental(scene_index, voice);
     presetMorph_applyVoiceNow(scene_index, voice);
 }
 
-/* Synchronous loaded-kit apply.
+/* Start the existing bounded all-source modulation rebind cursor.
+ *
+ * Inputs: an active Scene whose every slot has already received its incoming
+ * tagged runtime type and descriptor image. Outputs: preset_tickInstrumentApply
+ * will normalize/install one source's velocity plus both LFO target pairs per
+ * foreground pass. Reusing this cursor avoids a new retained allocation and
+ * gives boot, deferred Scene selection, and normal Instrument Load the same
+ * target-resolution ordering. Clients must keep the Scene apply gate active
+ * until the cursor drains so Menu never releases a half-rebound graph.
+ */
+static void preset_startSceneModulationRebind(uint8_t scene_index)
+{
+    instrument_apply_active = 1u;
+    instrument_apply_scene = scene_index;
+    instrument_apply_phase = INSTRUMENT_APPLY_PHASE_TARGET_REBIND;
+    instrument_apply_rebind_source = 0u;
+    instrument_apply_morph_only = 0u;
+}
+
+/* Synchronously activate the complete active Scene before audio starts.
 **
-** Safe before audio starts and retained for boot-time loads. Runtime load
-** completion should prefer preset_startDrumsetApply()/preset_tickDrumsetApply()
-** so the six mod-target updates do not run as one foreground burst. */
+** Inputs: the Bank/Scene loader has committed and selected the active Scene;
+** audioCodec_renderCount is still zero. Outputs: all six tagged runtime types,
+** descriptor images, routing, and all-source LFO/velocity bindings match that
+** one Scene before DMA audio can render. The transaction is deliberately
+** four ordered phases: clear outgoing graph, reset/apply every image, drain
+** pending Morph writes, and returns with a coherent pre-audio image. It does
+** not install LFO/velocity targets: main.c starts the exact
+** preset_startDrumsetApply()/preset_tickDrumsetApply() Scene-switch worker as
+** soon as the audio engine is live. This avoids claiming that a boot-specific
+** pre-audio binding sequence is equivalent to the already-working runtime
+** Scene lifecycle. No retained state is allocated. */
 void preset_sendDrumsetParameters(void)
 {
     uint8_t voice;
 
+    instrumentManager_clearAllRuntimeModulationTargets();
+    preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
     for (voice = 0; voice < 6u; voice++)
-        preset_applyKitVoice(scene_getActiveIndex(), voice);
+        preset_resetAndApplyKitVoiceImage(scene_getActiveIndex(), voice);
 
     while (presetMorph_tick()) {
-        /* Boot-time synchronous path: audio has not started, so drain the
-         * Scene Morph worker immediately after applying routing. Runtime load
-         * completion uses preset_tickDrumsetApply() to perform the same work
-         * one foreground pass at a time. */
+        /*
+         * Resolve every pending descriptor interpolation before target install.
+         *
+         * Inputs: all six reset/image-applied members plus any retained Morph
+         * worker requests from the loaded active Scene. Output: final
+         * descriptor-domain bases are live before an LFO adapter snapshots its
+         * destination. This is pre-audio only; runtime Scene switching keeps
+         * the same ordering through its normal bounded workers. Affiliates:
+         * presetMorph_applyVoiceNow(), preset_tickInstrumentApply(), and
+         * instrumentManager_installLfoModulationTarget().
+         */
     }
+
 }
 
 void preset_startDrumsetApply(void)
@@ -1138,6 +1179,22 @@ uint8_t preset_tickDrumsetApply(void)
         return 0u;
     }
 
+    /*
+     * Complete Scene activation only after every incoming member is live.
+     *
+     * Inputs: the image pass cleared its six pending bits. Outputs: the
+     * existing Instrument apply cursor rebuilds all LFO/velocity sources
+     * against the final tagged type vector, one source per foreground pass.
+     * Keeping drumset_apply_active set until this cursor drains makes Menu's
+     * normal sound-apply gate wait for graph validity without new state.
+     */
+    if (drumset_apply_pending_mask == 0u) {
+        if (instrument_apply_active && preset_tickInstrumentApply())
+            return 1u;
+        drumset_apply_active = 0u;
+        return 0u;
+    }
+
     for (checked = 0u; checked < INSTRUMENT_SLOT_COUNT; checked++) {
         uint8_t voice = drumset_apply_voice;
         uint16_t bit = (uint16_t)(1u << voice);
@@ -1158,16 +1215,14 @@ uint8_t preset_tickDrumsetApply(void)
         if (!instrumentManager_ampEnvelopeQuiet(voice))
             continue;
 
-        preset_applyKitVoice(drumset_apply_scene, voice);
+        preset_resetAndApplyKitVoiceImage(drumset_apply_scene, voice);
         drumset_apply_pending_mask =
             (uint16_t)(drumset_apply_pending_mask & ~bit);
         if (drumset_apply_pending_mask == 0u)
-            drumset_apply_active = 0u;
+            preset_startSceneModulationRebind(drumset_apply_scene);
         return 1u;
     }
 
-    if (drumset_apply_pending_mask == 0u)
-        drumset_apply_active = 0u;
     return 0u;
 }
 
@@ -1181,9 +1236,10 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
      *
      * Inputs: visible trigger track 0..6 from the sequencer/MIDI trigger queue.
      * Output: if that track maps to a pending instrument slot for the active
-     * Scene, the slot's runtime type, parameters, LFO slots/targets, audio out,
-     * and future per-instrument mix affiliates are applied synchronously before
-     * InstrumentManager receives the note trigger.
+     * Scene, its runtime type, descriptor image, and audio route apply before
+     * InstrumentManager receives the note trigger. Cross-slot LFO/velocity
+     * bindings stay detached until every pending member is valid, then the
+     * common all-source rebind cursor installs them without stale pointers.
      */
     if (!drumset_apply_active ||
         drumset_apply_scene != scene_getActiveIndex()) {
@@ -1199,11 +1255,11 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
         return;
 
     presetMorph_prioritizeVoice(drumset_apply_scene, voice);
-    preset_applyKitVoice(drumset_apply_scene, voice);
+    preset_resetAndApplyKitVoiceImage(drumset_apply_scene, voice);
     drumset_apply_pending_mask =
         (uint16_t)(drumset_apply_pending_mask & ~bit);
     if (drumset_apply_pending_mask == 0u)
-        drumset_apply_active = 0u;
+        preset_startSceneModulationRebind(drumset_apply_scene);
 }
 
 static uint8_t preset_copyInstrumentNormalToMorphIfSameType(
@@ -1785,31 +1841,48 @@ uint8_t preset_loadFirstAvailableSceneOrKit(void)
 }
 
 /* -----------------------------------------------------------------------
-** preset_loadGlobals — post async globals load request.
+** preset_loadGlobals — post one accepted async globals load request.
+**
+** Inputs: mounted filesystem and the single Preset operation gate. Output:
+** returns one only after filesystem accepts Settings load and Preset enters
+** PRESET_LOAD_IN_PROGRESS; returns zero with Preset idle on rejection. Menu's
+** explicit OK lifecycle relies on this result so `...` never represents a
+** request that was not posted. Affiliate: presetManager.h declaration.
 ** ----------------------------------------------------------------------- */
-void preset_loadGlobals(void)
+uint8_t preset_loadGlobals(void)
 {
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_GLO;
-    if (!filesystem_requestLoad(FS_FILE_SETTINGS, 0, on_globals_load_complete))
+    if (!filesystem_requestLoad(FS_FILE_SETTINGS, 0, on_globals_load_complete)) {
         pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
 }
 
 /* -----------------------------------------------------------------------
-** preset_saveGlobals — post async globals save request.
+** preset_saveGlobals — post one accepted async globals save request.
+**
+** Inputs/outputs mirror preset_loadGlobals(): a one result owns the later
+** completion callback, while zero leaves the confirmation row selectable.
+** Why: explicit Save:[Settings] needs the same accepted/rejected contract as
+** Kit, Scene, Bank, Instrument, and test commands. Affiliate: header API.
 ** ----------------------------------------------------------------------- */
-void preset_saveGlobals(void)
+uint8_t preset_saveGlobals(void)
 {
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_GLO;
-    if (!filesystem_requestSave(FS_FILE_SETTINGS, 0, on_globals_save_complete))
+    if (!filesystem_requestSave(FS_FILE_SETTINGS, 0, on_globals_save_complete)) {
         pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
 }
 
 /* -----------------------------------------------------------------------

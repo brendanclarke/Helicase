@@ -86,6 +86,17 @@ static inline void lockPotentiometerFetch(void){}
 
 static uint8_t menu_TargetVoiceGapIndex = 0xFF;
 static uint8_t menu_storageBusy = 0;
+/*
+ * Explicit OK/OW command presentation state (+1 B SRAM1).
+ *
+ * Inputs: only an accepted Load/Save confirmation request may set this flag.
+ * Outputs: the renderer shows `...` without selection markers until the one
+ * command reaches its filesystem/apply terminal path, then restores the type
+ * row. Why: menu_storageBusy also covers background browser/index work, so it
+ * cannot decide whether an OK/OW affordance is actively executing. This flag
+ * owns presentation/final-reset only; it retains no payload or cache data.
+ */
+static uint8_t menu_loadSaveCommandActive = 0u;
 static uint8_t menu_deferSelectionRequest = 0;
 static uint8_t menu_deferSelectionLoadKit = 0;
 static uint8_t menu_lcdRefreshPending = 0;
@@ -155,6 +166,68 @@ static void menu_beginStorageMessage(const char *message)
     lcd_string(message);
 }
 
+static uint8_t menu_loadSaveCursorVisible(void)
+{
+    return (uint8_t)!menu_loadSaveCommandActive;
+}
+
+static void menu_beginLoadSaveCommand(void)
+{
+    /*
+     * Begin one accepted OK/OW transaction.
+     *
+     * Inputs: a Preset/filesystem request that has already returned accepted.
+     * Outputs: input remains transport-gated and the next Load/Save paint
+     * replaces the normal confirmation/cursor with `...`. Rejected requests
+     * never reach this helper, so the existing selectable OK/OW remains.
+     */
+    menu_loadSaveCommandActive = 1u;
+    menu_storageBusy = 1u;
+    menu_repaintAll();
+}
+
+static void menu_finishLoadSaveCommand(void)
+{
+    /*
+     * Finish exactly one accepted OK/OW transaction.
+     *
+     * Inputs: terminal filesystem/apply/modal state after all work required by
+     * the command is complete. Outputs: `...` ownership ends, Load/Save
+     * returns to its type selector with brackets, and normal navigation may
+     * resume. Background index/browser work intentionally does not set this
+     * flag and therefore cannot trigger this user-visible reset.
+     */
+    if (!menu_loadSaveCommandActive)
+        return;
+    menu_loadSaveCommandActive = 0u;
+    menu_storageBusy = 0u;
+    menu_resetSaveParameters();
+}
+
+static void menu_paintLoadSaveConfirmation(uint8_t overwrite,
+                                           uint8_t selected)
+{
+    /*
+     * Paint the one bottom-right command affordance.
+     *
+     * Inputs: normal overwrite/selection result. Outputs: `...` occupies the
+     * former arrow plus OK/OW cells while an accepted command is active;
+     * otherwise the ordinary OK/OW label and optional arrow are restored.
+     * This prevents each Load/Save renderer variant from inventing a separate
+     * busy presentation rule.
+     */
+    if (menu_loadSaveCommandActive) {
+        memcpy(&editDisplayBuffer[1][13], "...", 3u);
+        return;
+    }
+    if (overwrite)
+        memcpy(&editDisplayBuffer[1][14], "OW", 2u);
+    else
+        memcpy(&editDisplayBuffer[1][14], menuText_ok, 2u);
+    if (selected)
+        editDisplayBuffer[1][13] = ARROW_SIGN;
+}
+
 static void menu_normalizeSoundModTargets(uint8_t *values)
 {
     (void)values;
@@ -163,7 +236,9 @@ static void menu_normalizeSoundModTargets(uint8_t *values)
 static void menu_finishGlobalApply(void)
 {
     menu_globalApplyActive = 0;
-    if (menu_globalApplyResetSave)
+    if (menu_loadSaveCommandActive)
+        menu_finishLoadSaveCommand();
+    else if (menu_globalApplyResetSave)
         menu_resetSaveParameters();
     if (menu_globalApplyRepaintAll)
         menu_repaintAll();
@@ -175,7 +250,9 @@ static void menu_startGlobalApply(uint8_t resetSave, uint8_t repaintAll)
 {
     if (audioCodec_renderCount == 0u) {
         menu_sendAllGlobals();
-        if (resetSave)
+        if (menu_loadSaveCommandActive)
+            menu_finishLoadSaveCommand();
+        else if (resetSave)
             menu_resetSaveParameters();
         if (repaintAll)
             menu_repaintAll();
@@ -276,7 +353,9 @@ static void menu_startSoundApply(uint8_t updateGap,
             pat_applyPatternSettingsToMenu(menu_getViewedPattern());
         if (clearStorageBusy)
             menu_storageBusy = 0u;
-        if (resetSave && !startGlobals)
+        if (menu_loadSaveCommandActive && !startGlobals)
+            menu_finishLoadSaveCommand();
+        else if (resetSave && !startGlobals)
             menu_resetSaveParameters();
         if (repaintAll && !startGlobals)
             menu_repaintAll();
@@ -332,7 +411,9 @@ static void menu_finishSoundApply(void)
     ** reset/repaint flags. Non-container operations still do those follow-ups
     ** directly after the sound apply completes. */
     if (!menu_soundApplyStartGlobals) {
-        if (menu_soundApplyResetSave)
+        if (menu_loadSaveCommandActive)
+            menu_finishLoadSaveCommand();
+        else if (menu_soundApplyResetSave)
             menu_resetSaveParameters();
         if (menu_soundApplyRepaintAll)
             menu_repaintAll();
@@ -628,8 +709,12 @@ static void menu_loadSamplesModal(void)
     audioCodec_resume();
     menu_setNumSamples(sampleMemory_getNumSamples());
 
-    menu_storageBusy = 0;
-    menu_resetSaveParameters();
+    if (menu_loadSaveCommandActive)
+        menu_finishLoadSaveCommand();
+    else {
+        menu_storageBusy = 0u;
+        menu_resetSaveParameters();
+    }
     if (!samplesOk || !loopsOk) {
         lcd_clear();
         lcd_home();
@@ -987,6 +1072,11 @@ static uint8_t menu_voiceFirstSelectableColumn(uint8_t subPage,
                                                uint8_t screen);
 static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter);
 static void menu_repaintLoadSavePage(void);
+static uint8_t menu_loadSaveCursorVisible(void);
+static void menu_beginLoadSaveCommand(void);
+static void menu_finishLoadSaveCommand(void);
+static void menu_paintLoadSaveConfirmation(uint8_t overwrite,
+                                           uint8_t selected);
 static void menu_repaintGeneric(void);
 void sendDisplayBuffer(void);
 static void menu_moveToMenuItem(int8_t inc);
@@ -3862,7 +3952,7 @@ static void menu_instrumentSaveRequestSelection(void)
                                 menu_instrumentLoadSlot,
                                 menu_instrumentSaveName);
     if (accepted) {
-        menu_storageBusy = 1u;
+        menu_beginLoadSaveCommand();
     }
 }
 
@@ -4199,6 +4289,7 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
      * repaint the LCD plus Scene LEDs as one UI transaction.
      */
     if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        menu_loadSaveCommandActive ||
         scene_index >= SCENE_COUNT ||
         scene_index >= 16u)
         return 0u;
@@ -4768,7 +4859,7 @@ static char *menu_loadSaveActiveNameBuffer(void)
 
 static void menu_handleLoadSaveKnobDelta(uint8_t knobNr, int8_t delta)
 {
-    if (delta == 0)
+    if (delta == 0 || menu_loadSaveCommandActive)
         return;
 
     switch (knobNr) {
@@ -4826,7 +4917,7 @@ uint8_t menu_loadSaveBarButtonPressed(uint8_t advance)
     uint8_t ci;
 
     if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
-        menu_storageBusy ||
+        menu_storageBusy || menu_loadSaveCommandActive ||
         menu_saveOptions.state < SAVE_STATE_EDIT_NAME1 ||
         menu_saveOptions.state > SAVE_STATE_EDIT_NAME8)
         return 0u;
@@ -5379,6 +5470,31 @@ void menu_repaint(void)
         menu_repaintLoadSavePage();
     else
         menu_repaintGeneric();
+    if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+        !menu_loadSaveCursorVisible()) {
+        uint8_t row;
+        uint8_t col;
+
+        /*
+         * Suppress every generated selection mark during an explicit command.
+         *
+         * Inputs: fully rendered Load/Save frame. Outputs: no brackets, arrow,
+         * or hardware underline remains while `...` owns the command surface.
+         * Why: the page has several nested renderers; this final display-only
+         * pass keeps their independent cursor geometry from leaking through a
+         * command without changing the edited name/payload state itself.
+         */
+        for (row = 0u; row < 2u; row++) {
+            for (col = 0u; col < 16u; col++) {
+                if (editDisplayBuffer[row][col] == '[' ||
+                    editDisplayBuffer[row][col] == ']' ||
+                    editDisplayBuffer[row][col] == ARROW_SIGN)
+                    editDisplayBuffer[row][col] = ' ';
+            }
+        }
+        cur_want_on = 0u;
+        menu_paintLoadSaveConfirmation(0u, 0u);
+    }
     sendDisplayBuffer();
 }
 
@@ -6193,6 +6309,11 @@ checkvalid:
 ** ----------------------------------------------------------------------- */
 static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
 {
+    uint8_t commandAccepted = 0u;
+
+    if (menu_loadSaveCommandActive)
+        return;
+
     if (menu_instrumentLoadActive) {
         if (menu_instrumentSaveMode) {
             /*
@@ -6397,91 +6518,79 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 switch (menu_saveOptions.what) {
                 case SAVE_TYPE_FILE:
                     if (preset_saveTestFile(menu_currentTestName()))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_DIR:
                     if (preset_saveTestDir(menu_currentTestName()))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_SIMPLE_DIR:
                     if (preset_saveTestSimpleDir(menu_currentTestName()))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_KIT:
                     if (preset_saveDrumset(
                             menu_currentPresetNr[SAVE_TYPE_KIT], 0u,
                             menu_loadSaveSourceScene))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_KIT_MORPH:
                     if (preset_saveDrumset(
                             menu_currentPresetNr[SAVE_TYPE_KIT_MORPH], 1u,
                             menu_loadSaveSourceScene))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_SCENE:
                     if (preset_saveScene(
                             menu_currentPresetNr[SAVE_TYPE_SCENE],
                             menu_loadSaveSourceScene))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_BANK:
                     if (preset_saveBank(
                             menu_currentPresetNr[SAVE_TYPE_BANK],
                             menu_kitLoadSceneMask))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
-                case SAVE_TYPE_GLO:     preset_saveGlobals(); break;
+                case SAVE_TYPE_GLO:     commandAccepted = preset_saveGlobals(); break;
                 default: break;
                 }
-                if (menu_saveOptions.what != SAVE_TYPE_FILE &&
-                    menu_saveOptions.what != SAVE_TYPE_DIR &&
-                    menu_saveOptions.what != SAVE_TYPE_SIMPLE_DIR)
-                    /*
-                     * Keep the active Kit/Scene cache alive while the save
-                     * state machine runs. Its completion phase updates the
-                     * saved slot in this cache and regenerates `.hcindex`;
-                     * disposing here would make that refresh silently skip.
-                     */
-                    menu_resetSaveParameters();
             } else {
                 switch (menu_saveOptions.what) {
                 case SAVE_TYPE_FILE:
                     if (preset_loadTestFile(menu_currentTestName()))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_DIR:
                     if (preset_loadTestDir(menu_currentTestName()))
-                        menu_storageBusy = 1u;
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_SCENE:
                     if (preset_loadSceneForScenes(
                             menu_currentPresetNr[SAVE_TYPE_SCENE],
                             menu_kitLoadSceneMask)) {
-                        menu_storageBusy = 1u;
-                    } else {
-                        menu_storageBusy = 0u;
+                        commandAccepted = 1u;
                     }
                     break;
                 case SAVE_TYPE_BANK:
                     if (preset_loadBank(
                             menu_currentPresetNr[SAVE_TYPE_BANK],
                             menu_kitLoadSceneMask)) {
-                        menu_storageBusy = 1u;
-                    } else {
-                        menu_storageBusy = 0u;
+                        commandAccepted = 1u;
                     }
                     break;
                 case SAVE_TYPE_GLO:
-                    preset_loadGlobals();
-                    /* menu_resetSaveParameters deferred to menu_pollPresetStatus() */
+                    commandAccepted = preset_loadGlobals();
                     break;
                 case SAVE_TYPE_SAMPLES:
+                    menu_beginLoadSaveCommand();
                     menu_loadSamplesModal();
                     break;
                 default: break;
                 }
             }
+            if (commandAccepted)
+                menu_beginLoadSaveCommand();
         }
     }
 
@@ -7125,7 +7234,10 @@ void menu_pollPresetStatus(void)
          * the pointer is back on the top row instead of stranded on OK or OW.
          * File/Dir test ops keep their detailed result branch below.
          */
-        if (menu_storageBusy &&
+        if (menu_loadSaveCommandActive) {
+            filesystem_clearNameCache();
+            menu_finishLoadSaveCommand();
+        } else if (menu_storageBusy &&
             (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
             filesystem_clearNameCache();
             menu_resetSaveParameters();
@@ -7254,9 +7366,13 @@ void menu_pollPresetStatus(void)
             if (preset_loadFirstAvailableSceneOrKit()) {
                 menu_storageBusy = 1u;
             } else {
-                menu_storageBusy = 0u;
-                menu_resetSaveParameters();
-                menu_repaintAll();
+                if (menu_loadSaveCommandActive)
+                    menu_finishLoadSaveCommand();
+                else {
+                    menu_storageBusy = 0u;
+                    menu_resetSaveParameters();
+                    menu_repaintAll();
+                }
             }
             return;
         }
@@ -7460,6 +7576,8 @@ void menu_pollPresetStatus(void)
                 FS_TEST_NAME_MAX);
         menu_testResultActive = 1u;
         menu_testResultStart = time_sysTick;
+        if (menu_loadSaveCommandActive)
+            menu_finishLoadSaveCommand();
         if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
             /*
              * File/Dir diagnostic load/save commands are launched from the
@@ -7500,8 +7618,12 @@ void menu_pollPresetStatus(void)
             menu_refreshResidentNameScratchInstrument(
                 (uint16_t)(1u << source_scene), source_slot);
         }
-        menu_resetSaveParameters();
-        menu_storageBusy = 0u;
+        if (menu_loadSaveCommandActive)
+            menu_finishLoadSaveCommand();
+        else {
+            menu_resetSaveParameters();
+            menu_storageBusy = 0u;
+        }
         menu_requestCurrentLoadSaveSelection(0u);
         if (!menu_storageBusy)
             menu_repaintAll();
@@ -7537,8 +7659,12 @@ void menu_pollPresetStatus(void)
             menu_refreshResidentNameScratchKit(
                 (uint16_t)(1u << source_scene));
         }
-        menu_resetSaveParameters();
-        menu_storageBusy = 0u;
+        if (menu_loadSaveCommandActive)
+            menu_finishLoadSaveCommand();
+        else {
+            menu_resetSaveParameters();
+            menu_storageBusy = 0u;
+        }
         menu_repaintAll();
         break;
     }
@@ -7571,11 +7697,16 @@ void menu_pollPresetStatus(void)
         } else {
             filesystem_clearNameCache();
         }
-        menu_resetSaveParameters();
+        if (menu_loadSaveCommandActive)
+            menu_finishLoadSaveCommand();
+        else
+            menu_resetSaveParameters();
         break;
 
     default:
-        if (menu_storageBusy) {
+        if (menu_loadSaveCommandActive) {
+            menu_finishLoadSaveCommand();
+        } else if (menu_storageBusy) {
             menu_storageBusy = 0;
             menu_resetSaveParameters();
         } else if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
