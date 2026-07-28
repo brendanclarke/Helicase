@@ -1,6 +1,6 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 042 for the one-pattern bridge,
+Session 030 baseline, updated through Session 044 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
@@ -12,7 +12,9 @@ after `frontPanelParser.c/h` removal, the PatternData storage-ownership pass,
 the `Core/Preset` -> `Core/Bank/Scene/Preset` folder move, the first Phase 2
 directory-kit filesystem boundary, the HCNAMES/identity ownership pass,
 independent filesystem payload staging, and the current bridge pattern
-behavior. The goal is to make the direct-call ownership clear so future work
+behavior, cold-boot tagged-runtime activation, accepted OK/OW command
+ownership, and final Scene/Bank Load index restoration. The goal is to make
+the direct-call ownership clear so future work
 does not recreate a generic bridge or duplicate resident names.
 
 ## Rules
@@ -63,6 +65,13 @@ does not recreate a generic bridge or duplicate resident names.
 - Successful Kit, root Scene, and root Bank saves perform a physical parent
   rescan and complete `.hcindex` rewrite before the original save callback is
   released; Menu then refreshes the current Save slot display.
+- Pure root Scene and Bank Loads never enter that Save-owned physical rebuild.
+  After payload and HCNAMES commit, Preset/Menu applies the loaded active Scene,
+  then Menu reloads the unchanged selected `.hcindex` read-only before ending
+  `...` and releasing input.
+- Load:Bank index completion is only the first browser boundary. Menu continues
+  directly into a physical child preview for the highlighted Bank and holds
+  input until that callback publishes the `00..15` destination mask.
 - Combined Kit/Instrument menu entry reads one Scene's Kit plus six Instrument
   identities once and family exit performs at most one HCNAMES rewrite. Bank
   Load/Save own a full-register transaction; selective Bank Load overlays only
@@ -420,7 +429,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_loadSceneForScenes(presetNr, scene_mask)` / `preset_saveScene(presetNr, source_scene)` | Load/save root Scene library folders through the non-Pattern Scene stage and direct Pattern phase. | Load/Save Scene |
 | `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr, scene_mask)` | Load/save root Bank folders with a 16-bit local-Scene mask. Load validates bankset.bcg v2, preserves unselected resident Scenes/HCNAMES rows, and can report a valid empty Bank; Save writes selected child payloads through a temporary sibling then promotes it. | Load/Save Bank, boot |
 | `preset_loadFirstAvailableSceneOrKit()` | Fallback after absent/empty Bank: lowest root Scene, then lowest root Kit, then defaults. | boot, Bank Load completion |
-| `preset_sendDrumsetParameters()` | Synchronous pre-audio Scene kit audio-routing and descriptor runtime apply. | Menu boot/load path |
+| `preset_sendDrumsetParameters()` | Synchronous pre-audio clear plus six-slot tagged reset/routing/descriptor-image apply. It intentionally leaves target installation to the exact ordinary Scene worker started after audio initialization. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
 | `preset_setInstrumentParameter(scene, slot, descriptor_index, image, value, recordAutomation)` | Store one descriptor-backed instrument main/morph value and apply/record when appropriate. | Menu dynamic VOICE cells, storage |
 | `preset_setSupplementalParameter(scene, slot, descriptor_index, value)` | Store one single-endpoint supplemental descriptor value. | Menu dynamic VOICE cells, storage |
@@ -430,7 +439,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_applyVoiceDecimationAllRuntime(value)` | Apply a transient Scene Decimation value for LFO modulation without changing the retained PERF `srt` setting. | InstrumentManager LFO Scene target path |
 | `preset_applyVelocityModTarget(voice, targetParam)` | Direct velocity mod destination update. | Menu, preset load apply |
 | `preset_applyLfoModTarget(lfo, targetParam)` | Direct LFO mod destination update. | Menu, preset load apply |
-| `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Chunked runtime Scene kit audio-routing, descriptor runtime apply, and legacy mod-target apply. | Menu |
+| `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Clear outgoing modulation, quiet/trigger-time reset and image-apply all six incoming tagged slots, then keep the Scene gate active while the existing Instrument cursor normalizes/rebinds every source's two LFO pairs and velocity against the final type vector. | Menu and `main.c` post-audio boot activation |
 | `preset_startKitMorphApply()` | Drain same-type KitMrp endpoint copies and refresh active-scene Morph runtime images without replacing kit membership or routing. | Menu KitMrp completion |
 | `preset_startInstrumentApply(scene, slot)` / `preset_tickInstrumentApply()` | Commit one validated staged Instrument. Active Scene path clears all outgoing modulation owners, commits/resets the incoming runtime, rebuilds all six Morph images, then normalizes/rebinds all six source target relationships. | Menu Instrument completion |
 | `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
@@ -629,8 +638,8 @@ stay in `storageTypes.c/h`.
 | `filesystem_loadedInstrumentSlot()` | Borrow the validated candidate payload for Preset's ordered commit. Names are exchanged through identity rows, not staged filename/stem accessors. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
 | `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the shared slot-indexed name cache; non-blank rows provide occupancy. | main startup, Menu |
-| `filesystem_requestLoadKitIndex(cb)` / `filesystem_requestLoadSceneIndex(cb)` / `filesystem_requestLoadBankIndex(cb)` | Replace the one shared name cache from slot-ordered `/Kit/.hcindex`, `/Scene/.hcindex`, or `/Bank/.hcindex`; blank rows remain slot positions. | Menu top-level Kit/Scene/Bank Load/Save |
-| `filesystem_createLibraryIndexBlocking(kind)` | Write the active shared Kit, root Scene, or root Bank cache as a slot-ordered `.hcindex`; runtime saves use the same async writer. | boot and filesystem save completion |
+| `filesystem_requestReloadLibraryIndex(kind, cb)` / domain-specific Kit/Scene/Bank wrappers | Read an existing slot-ordered root `.hcindex` into the one shared cache; blank rows remain slot positions. This is read-only cache restoration and never scans or rewrites the namespace. | Menu entry/type changes and post-DSP root Scene/Bank Load terminal work |
+| `filesystem_createLibraryIndexBlocking(kind)` | Boot-only repair/scan and slot-ordered `.hcindex` rebuild for one root library. Runtime numbered-root Saves use the common asynchronous scan/rebuild continuation instead. | boot |
 | `filesystem_clearNameCache()` / `filesystem_libraryNameCacheLoaded(kind)` | Dispose/query the one active Instrument/Kit/Scene/Bank browser-name cache. | Menu lifecycle and index gating |
 | `filesystem_setIdentityName(row, name)` / `filesystem_identityName(row)` / `filesystem_identityNameMutable(row)` / `filesystem_clearIdentityNames()` | Own the logical Bank/Scene/Kit/six-Instrument identity interface. Bank aliases BankData; the other eight rows occupy 72 bytes. | Menu and filesystem HCNAMES/load/save completion |
 | `filesystem_requestLoadResidentKitName()` / `filesystem_requestUpdateResidentKitNames()` | Borrow HCNAMES for one Scene's Kit-plus-six block or preserve/overlay full seven-row blocks for a dirty Scene mask. | combined Kit/Instrument Menu session |
@@ -687,17 +696,22 @@ Important private Phase 2 kit helpers:
   `pattern.pat`, and placeholder `effects.fx`.
 - `filesystem_saveBankDirectory_tick()` promotes the staged Bank tree, then
   parks the original callback while the root Bank directory is rescanned and
-  `/Bank/.hcindex` is rewritten. The same refresh chain is used for Kit and
+  `/Bank/.hcindex` is rewritten. The same Save-owned rebuild chain is used for Kit and
   root Scene saves.
 - `filesystem_loadLibraryIndex_tick()` reads one slot-preserving Kit, root
   Scene, or root Bank `.hcindex` into the shared cache. It never compacts blank
   rows and never retains per-slot aliases.
 - `filesystem_residentNames_tick()` reads the 129-row fixed HCNAMES register,
   optionally overlays exactly the action-owned rows, rewrites the complete
-  variable-length file, and restores the required root index before completion.
+  variable-length file, and finishes only that metadata transaction. It does
+  not infer whether a root namespace changed: Scene Save declares its own
+  rebuild, while Scene/Bank Load defers read-only browser restoration until
+  after DSP apply.
 - Bank Load retains only a child-present mask. It rescans the selected Bank
   parent for each requested child and keeps one display/open component in
-  operation scratch; it never rebuilds a 16-child name or alias cache.
+  operation scratch; it never rebuilds a 16-child name or alias cache. Its
+  completed loaded-Scene result becomes true only after shared Scene validation
+  and commit and is consumed before the later index-reload request.
 - Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
   fallback for FAT aliases like `000INI~1` or `001SLA~1`.
 
@@ -786,11 +800,21 @@ Current ownership decisions:
 
 Purpose: boot ordering and foreground service scheduler.
 
-Relevant Session 028 interchange point:
+Relevant interchange points:
 
 - `led_processSeqLedState()` is called in the foreground loop after audio render
   opportunities and after TIM3-owned sequencer timing can mark LED state dirty.
   Do not move this into TIM3 without auditing Menu/button/LED access.
+- `scene_initAll()` and `bank_init()` run before `dsp_init()` so
+  InstrumentManager constructs each tagged runtime member from a defined
+  retained type rather than zeroed BSS (`DRM == 0`).
+- Pre-audio loading establishes a coherent six-slot image synchronously.
+  Immediately after `audioCodec_init()`, `preset_startDrumsetApply()` starts the
+  same live clear/image/all-source-rebind worker used by a manual Scene switch.
+- `timebase_holdPreAudioMs()` is used only for the current SD pre-init,
+  post-mount, and pre-Bank pacing experiment. It must not be used after audio
+  startup, from an ISR, or as runtime filesystem pacing. The intermittent hang
+  that motivated these holds remains unlocalized.
 
 ## Removed Front-Panel Protocol Surface
 

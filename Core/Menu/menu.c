@@ -129,6 +129,7 @@ static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot);
 static void menu_libraryIndexLoadComplete(void);
 static void menu_requestKitEntryNames(void);
 static void menu_requestInstrumentIndexLoad(instrument_type_t type);
+static uint8_t menu_requestLoadCommandFinalIndexRestore(void);
 static uint8_t menu_staleWarningActive = 0;
 static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
@@ -324,6 +325,8 @@ static void menu_startSoundApply(uint8_t updateGap,
                                  fs_stale_warning_source_t staleWarning)
 {
     if (audioCodec_renderCount == 0u) {
+        uint8_t final_index_pending = 0u;
+
         preset_sendDrumsetParameters();
         if (updateGap) {
             menu_TargetVoiceGapIndex = 0u;
@@ -351,16 +354,29 @@ static void menu_startSoundApply(uint8_t updateGap,
              * chunked path below has the same call in menu_finishSoundApply().
              */
             pat_applyPatternSettingsToMenu(menu_getViewedPattern());
-        if (clearStorageBusy)
-            menu_storageBusy = 0u;
-        if (menu_loadSaveCommandActive && !startGlobals)
-            menu_finishLoadSaveCommand();
-        else if (resetSave && !startGlobals)
-            menu_resetSaveParameters();
-        if (repaintAll && !startGlobals)
-            menu_repaintAll();
-        if (showStaleWarning)
-            menu_showStaleSettingsWarning(staleWarning);
+        /*
+         * Use the same terminal ordering as the foreground apply path.
+         *
+         * Inputs: every requested Scene/Bank state and DSP write above has
+         * completed synchronously. Output: an explicit runtime Load may now
+         * defer cursor reset/unlock to the read-only root-index callback.
+         * Boot has no active OK command, so it performs no browser I/O here.
+         */
+        if (!startGlobals && menu_loadSaveCommandActive)
+            final_index_pending =
+                menu_requestLoadCommandFinalIndexRestore();
+        if (!final_index_pending) {
+            if (clearStorageBusy)
+                menu_storageBusy = 0u;
+            if (menu_loadSaveCommandActive && !startGlobals)
+                menu_finishLoadSaveCommand();
+            else if (resetSave && !startGlobals)
+                menu_resetSaveParameters();
+            if (repaintAll && !startGlobals)
+                menu_repaintAll();
+            if (showStaleWarning)
+                menu_showStaleSettingsWarning(staleWarning);
+        }
         return;
     }
 
@@ -379,6 +395,8 @@ static void menu_startSoundApply(uint8_t updateGap,
 
 static void menu_finishSoundApply(void)
 {
+    uint8_t final_index_pending = 0u;
+
     menu_soundApplyActive = 0u;
 
     if (menu_soundApplyUpdateGap) {
@@ -404,19 +422,32 @@ static void menu_finishSoundApply(void)
          */
         pat_applyPatternSettingsToMenu(menu_getViewedPattern());
 
-    if (menu_soundApplyClearStorageBusy)
-        menu_storageBusy = 0u;
-
     /* When globals are started here, their existing finish path owns the
     ** reset/repaint flags. Non-container operations still do those follow-ups
     ** directly after the sound apply completes. */
     if (!menu_soundApplyStartGlobals) {
+        /*
+         * Scene/Bank OK commands retain `...` and the storage gate while their
+         * unchanged root index is reloaded after DSP apply. Inputs: the shared
+         * drumset worker and every requested pattern/menu side effect above
+         * have drained. Output: either the dedicated index callback owns final
+         * reset/repaint, or the existing immediate terminal path runs below.
+         */
         if (menu_loadSaveCommandActive)
-            menu_finishLoadSaveCommand();
-        else if (menu_soundApplyResetSave)
-            menu_resetSaveParameters();
-        if (menu_soundApplyRepaintAll)
-            menu_repaintAll();
+            final_index_pending =
+                menu_requestLoadCommandFinalIndexRestore();
+        if (!final_index_pending) {
+            if (menu_soundApplyClearStorageBusy)
+                menu_storageBusy = 0u;
+            if (menu_loadSaveCommandActive)
+                menu_finishLoadSaveCommand();
+            else if (menu_soundApplyResetSave)
+                menu_resetSaveParameters();
+            if (menu_soundApplyRepaintAll)
+                menu_repaintAll();
+        }
+    } else if (menu_soundApplyClearStorageBusy) {
+        menu_storageBusy = 0u;
     }
 
     if (menu_soundApplyShowStaleWarning) {
@@ -2862,6 +2893,81 @@ static void menu_showFilesystemErrorOverlay(void)
     menu_repaintAll();
 }
 
+static void menu_loadCommandFinalIndexComplete(void)
+{
+    uint8_t index_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+
+    /*
+     * Publish the terminal result of a post-DSP browser-cache restoration.
+     *
+     * Inputs: the read-only Scene or Bank `.hcindex` request posted only after
+     * the loaded active Scene finished its shared runtime apply. Output: end
+     * `...`, release the input gate, and return to the bracketed type row. On
+     * failure the payload and DSP state remain committed, but the unusable
+     * cache is cleared and the existing filesystem error overlay is shown.
+     *
+     * This callback is intentionally separate from
+     * menu_libraryIndexLoadComplete(): that entry/browse callback starts a
+     * Bank child preview, whereas this callback must terminate the accepted
+     * command without posting any new selection work.
+     */
+    if (!index_ok)
+        filesystem_clearNameCache();
+    menu_finishLoadSaveCommand();
+    if (!index_ok)
+        menu_showFilesystemErrorOverlay();
+    else
+        menu_repaintAll();
+}
+
+static uint8_t menu_requestLoadCommandFinalIndexRestore(void)
+{
+    fs_library_index_kind_t kind;
+
+    /*
+     * Defer one root Scene/Bank Load's UI completion to a read-only index load.
+     *
+     * Inputs: menu_loadSaveCommandActive plus menu_saveOptions.what, both held
+     * immutable by menu_storageBusy while the accepted OK command runs.
+     * Output: Scene maps to `/Scene/.hcindex`, Bank maps to
+     * `/Bank/.hcindex`, and the existing command/busy flags remain set until
+     * menu_loadCommandFinalIndexComplete(). Other workflows return zero so
+     * their established terminal path remains unchanged. No retained kind or
+     * second cache is allocated.
+     *
+     * The helper runs only after all payload, pattern/menu, and DSP application
+     * work is complete. A pure Load therefore reads the unchanged index last;
+     * it never enters the Save-only physical directory rebuild chain.
+     */
+    if (!menu_loadSaveCommandActive || menu_activePage != LOAD_PAGE)
+        return 0u;
+    if (menu_saveOptions.what == SAVE_TYPE_SCENE)
+        kind = FS_LIBRARY_INDEX_SCENE;
+    else if (menu_saveOptions.what == SAVE_TYPE_BANK)
+        kind = FS_LIBRARY_INDEX_BANK;
+    else
+        return 0u;
+
+    menu_storageBusy = 1u;
+    if (filesystem_requestReloadLibraryIndex(
+            kind, menu_loadCommandFinalIndexComplete)) {
+        return 1u;
+    }
+
+    /*
+     * Rejection here violates the expected idle-filesystem terminal boundary.
+     *
+     * Input: Preset has already been acknowledged and sound apply has drained.
+     * Output: never strand `...`; perform the ordinary command reset, then
+     * display the existing generic FsErr overlay. Do not clear cache ownership
+     * on rejection because an unexpected concurrent operation may own it. The
+     * already-applied audio state is deliberately not rolled back.
+     */
+    menu_finishLoadSaveCommand();
+    menu_showFilesystemErrorOverlay();
+    return 1u;
+}
+
 /* Request the filesystem action that corresponds to the current Load/Save page
  * selection.
  *
@@ -3511,18 +3617,37 @@ static void menu_requestKitEntryNames(void)
 
 static void menu_libraryIndexLoadComplete(void)
 {
+    uint8_t continue_bank_preview;
+
     /*
      * Publish one completed Kit, root Scene, or root Bank `.hcindex` load.
      *
      * The filesystem has already replaced the one shared name cache and its
-     * slot occupancy map. Menu only releases the input lock and repaints; it
-     * deliberately does not start a payload load because entering a top-level
-     * Load row is browsing, while Scene Load remains explicit-OK and Kit
-     * Load's instant-on-scroll policy is handled on later selection moves.
+     * slot occupancy map. Menu releases the index input lock and normally
+     * repaints; it deliberately does not start a payload load because entering
+     * a top-level Load row is browsing, while Scene Load remains explicit-OK
+     * and Kit Load's instant-on-scroll policy is handled on later selection
+     * moves.
      * For Kit/KitMrp Load, the selected `.hcindex` row is copied before input
      * is unlocked. This makes the directory identity visible at the earliest
      * durable lookup boundary, before any Kit payload or HCNAMES operation.
+     *
+     * Bank Load has one additional browser prerequisite. Its destination mask
+     * starts empty and becomes valid only after the highlighted Bank's
+     * immediate `00..15` children have been scanned. Inputs: a successful Bank
+     * index completion plus the still-current top-level Load:Bank selection.
+     * Output: continue directly into that selected-Bank preview after releasing
+     * this index request's busy ownership; no Bank payload is started here.
+     * Affiliates: menu_requestBankLoadPreview() publishes the mask through
+     * menu_bankLoadPreviewComplete(), and the later OK handler is the sole
+     * caller of preset_loadBank().
      */
+    continue_bank_preview = (uint8_t)(
+        filesystem_status() == FS_STATUS_DONE &&
+        menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive &&
+        menu_saveOptions.what == SAVE_TYPE_BANK &&
+        filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_BANK));
     if (filesystem_status() == FS_STATUS_DONE &&
         menu_activePage == LOAD_PAGE &&
         !menu_instrumentLoadActive &&
@@ -3534,6 +3659,21 @@ static void menu_libraryIndexLoadComplete(void)
                8u);
     }
     menu_storageBusy = 0u;
+    if (continue_bank_preview) {
+        /*
+         * Serialize root-index readiness into child-mask readiness.
+         *
+         * Input: the newly resident Bank index and unchanged highlighted slot.
+         * Output: the preview request takes the existing Menu input gate until
+         * its callback installs menu_kitLoadSceneMask. Returning while that
+         * gate is owned avoids a misleading intermediate repaint in which OK
+         * appears actionable with the deliberately cleared zero mask.
+         */
+        menu_requestBankLoadPreview(
+            menu_currentPresetNr[SAVE_TYPE_BANK]);
+        if (menu_storageBusy)
+            return;
+    }
     menu_repaintAll();
 }
 
@@ -3616,11 +3756,16 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
             ? FS_LIBRARY_INDEX_BANK : FS_LIBRARY_INDEX_KIT;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
-    requested = (kind == FS_LIBRARY_INDEX_SCENE)
-        ? filesystem_requestLoadSceneIndex(menu_libraryIndexLoadComplete)
-        : (kind == FS_LIBRARY_INDEX_BANK)
-            ? filesystem_requestLoadBankIndex(menu_libraryIndexLoadComplete)
-            : filesystem_requestLoadKitIndex(menu_libraryIndexLoadComplete);
+    /*
+     * All numbered-root browser entries use the same read-only index request.
+     *
+     * Inputs: the kind selected above and the common entry callback. Output:
+     * one slot-preserving cache replacement; no root scan or index rewrite.
+     * Scene's HCNAMES entry branch and Kit's combined name session still
+     * perform their required preparation before reaching this common loader.
+     */
+    requested = filesystem_requestReloadLibraryIndex(
+        kind, menu_libraryIndexLoadComplete);
     if (!requested)
         menu_deferSelectionRequest = 1u;
 }
@@ -3630,9 +3775,11 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
  * What: copies the name from the just-rebuilt shared `.hcindex` cache into
  * preset_currentName for the slot that remains selected on the Save page.
  * Why: Save-page rendering uses preset_currentName while the save is being
- * edited; the filesystem refresh updates the shared cache but does not update
- * that UI buffer. Clearing the cache here would also make the current slot
- * appear stale or empty until the user changed type and re-entered it.
+ * edited; the Save-owned physical rebuild updates the shared cache but does
+ * not update that UI buffer. Clearing the cache here would also make the
+ * current slot appear stale or empty until the user changed type and
+ * re-entered it. Pure Loads never use this helper: they read the unchanged
+ * index only after runtime apply.
  * Inputs: completed Kit, KitMrp, root Scene, or root Bank save and the unchanged menu
  * slot. Output: the current Save type/slot stays selected and its visible name
  * matches the newly durable directory. Instrument and other saves do not use
@@ -3675,12 +3822,20 @@ static void menu_bankLoadPreviewComplete(void)
      * mask becomes both the LED selectable mask and the default Bank Load
      * request mask. This guards the async race where the encoder has already
      * scrolled to a different Bank before FAT iteration completes.
+     *
+     * The preview owns menu_storageBusy, not
+     * menu_loadSaveCommandActive. Input: completion of preparatory browser I/O.
+     * Output: release the input gate before the final mask/LED repaint; the
+     * OK/OW command lifecycle remains inactive until preset_loadBank() later
+     * accepts an explicit click.
      */
+    menu_storageBusy = 0u;
     if (menu_activePage != LOAD_PAGE ||
         menu_instrumentLoadActive ||
         menu_saveOptions.what != SAVE_TYPE_BANK ||
         menu_bankLoadPreviewSlot != slot ||
         filesystem_status() != FS_STATUS_DONE) {
+        menu_repaintAll();
         return;
     }
     menu_bankLoadPreviewMask = filesystem_bankChildSceneMask();
@@ -3698,8 +3853,12 @@ static void menu_requestBankLoadPreview(uint16_t slot)
      * Inputs: zero-based Bank slot from the preset-number row. Outputs:
      * preview validity is cleared immediately so stale child LEDs disappear;
      * missing root Bank slots use an empty mask; present root Bank slots post a
-     * filesystem preview scan and defer if another operation is busy. The
-     * completion callback verifies the slot again before repainting.
+     * filesystem preview scan and take the existing Menu input gate until its
+     * mask is published; a rejected request defers without claiming or clearing
+     * another operation's gate. The completion callback verifies the slot again
+     * before repainting. This preparatory scan never sets
+     * menu_loadSaveCommandActive, so `...` remains reserved for an accepted
+     * explicit OK/OW operation.
      */
     menu_bankLoadPreviewSlot = slot;
     menu_bankLoadPreviewMask = 0u;
@@ -3710,8 +3869,21 @@ static void menu_requestBankLoadPreview(uint16_t slot)
         menu_refreshLoadSceneLeds();
         return;
     }
-    if (!filesystem_requestScanBankScenes(slot, menu_bankLoadPreviewComplete))
+    if (filesystem_requestScanBankScenes(slot,
+                                         menu_bankLoadPreviewComplete)) {
+        /*
+         * Prevent zero-mask command admission while child discovery is active.
+         *
+         * Inputs: an accepted asynchronous scan after the old preview/mask was
+         * cleared above. Output: encoder, button, Scene, and page input remain
+         * gated until menu_bankLoadPreviewComplete() atomically publishes the
+         * physical child mask and releases this same flag. No new state or SRAM
+         * allocation is required.
+         */
+        menu_storageBusy = 1u;
+    } else {
         menu_deferSelectionRequest = 1u;
+    }
     menu_refreshLoadSceneLeds();
 }
 

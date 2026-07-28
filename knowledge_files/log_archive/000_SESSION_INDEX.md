@@ -52,6 +52,7 @@
 | 041 | 2026-07-19 | local working directory, development branch | Generalized one-cache `.hcindex` flow, Bank boot/index repair, post-save index refresh, SRAM closeout, and Session 042 preparation |
 | 042 | 2026-07-25 | local working directory, development branch | HCNAMES authority, exact 81-byte musical identity, independent 9,000-byte cache/2,048-byte stage, selective Bank preservation, five asyncfatfs handles, Instrument `.hctmp` kit restore, and documentation recovery |
 | 043 | 2026-07-25 | local working directory, development branch | Bitmap-only Pattern storage, 1,024-float slider LUT, tagged instrument runtime slots, transient PCM FLASH relocation, SRAM/DTCM reservation policy, and fresh memory manifest |
+| 044 | 2026-07-28 | local working directory, branch `dev-ph3-autosave` with uncommitted load/save and boot-pacing changes | Cold-boot tagged-runtime/LFO repair, working runtime Bank Load and final index ordering, unified OK/OW command UI, and inconclusive intermittent-boot pacing experiment |
 
 ---
 
@@ -405,6 +406,10 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | afatfs_fread() returning n==0 does NOT mean EOF — it means the SD buffer is not ready yet; always use n==0 && afatfs_feof(op_file) for EOF detection | 026 |
 | filesystem_loadName_tick() and filesystem_loadKit_tick() phase 2: malformed/zero-byte files now set name to "-       " and close cleanly; kit loads abort with FS_STATUS_ERROR before touching parameter_values[] | 026 |
 | PAR_EXT_SYNC (midi auto-sync) occupies the parameter slot where PAR_FETCH lived in LXR037 — potential cross-system file interchange mismatch at that offset; TODO before any LXR037 file interchange | 026 |
+| SceneData must initialize before tagged DSP runtime construction; Scene activation image-applies all six final types before the all-source two-LFO-pair/velocity rebind, and boot starts the exact ordinary Scene worker after audio startup | 044 |
+| Load:Bank index residency is not selection readiness: Menu must preview the highlighted Bank's `00..15` children and gate input until the destination mask is published | 044 |
+| Pure root Scene/Bank Load ends with a read-only `.hcindex` reload after DSP apply; only a Save that mutated Kit/Scene/Bank owns physical parent rescan and full index rebuild | 044 |
+| The committed Autosave implementation/drafts were explicitly rejected and are not an accepted Phase 3 baseline; the intermittent boot hang is also unlocalized despite four pre-audio timing holds | 044 |
 
 ---
 
@@ -461,3 +466,28 @@ hardware stress remains pending.
   1,024-float slider LUT, tagged union lifecycle and retired globals,
   transient FLASH address and DTCM release, RAM reservation policy, current
   manifest, and [043_SESSION_HANDOFF_LOG.md](043_SESSION_HANDOFF_LOG.md)
+
+### 044 — Boot Scene Activation And Runtime Bank Load Closure (2026-07-28)
+Made cold boot construct tagged Instrument runtime members from initialized
+Scene types, separated six-slot image application from all-source modulation
+rebinding, and replayed the exact live Scene-switch worker after audio startup;
+hardware confirmed the initial Scene, arbitrary Instrument ownership, and both
+reported LFO destinations now apply correctly. Fixed top-level Load:Bank's
+zero-mask admission defect by chaining Bank-index entry into its child preview,
+then harmonized root Scene/Bank Load completion as payload/HCNAMES, DSP apply,
+and a final read-only `.hcindex` reload while Saves alone retain physical
+scan/index rebuilds. Accepted OK/OW operations now display `...`, suppress all
+cursors, lock input through their true terminal work, and always return to the
+bracketed type row. Four pre-audio SD timing holds were added after one
+intermittent boot report; they did not establish a reproducible fix, and the
+issue is left for non-perturbing localization if it recurs. The pre-existing
+autosave implementation was explicitly rejected and is not a Session 044
+outcome.
+- **Find here**: SceneData-before-DSP ordering, tagged runtime type invariant,
+  reset/image/all-source rebind lifecycle, boot LFO target activation,
+  Load:Bank index-to-preview mask handoff, `menu_storageBusy` preview gate,
+  read-only root-index reload versus Save-only rebuild, HCNAMES neutrality,
+  completed Bank result lifetime, unified `...`/cursor command state, SD
+  pre-init/ACMD41/post-mount/pre-Bank pacing, unresolved intermittent boot,
+  zero retained-SRAM growth, rejected autosave scope, and
+  [044_SESSION_HANDOFF_LOG.md](044_SESSION_HANDOFF_LOG.md)

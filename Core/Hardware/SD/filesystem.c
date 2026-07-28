@@ -82,6 +82,16 @@
 
 #define FS_SECTOR_SIZE_BYTES 512u
 #define FS_NUM_FATS_EXPECTED 2u
+/*
+ * Warm-reset SD power/readiness hold.
+ *
+ * The MCU can restart while the card remains powered or is still completing
+ * an internal operation. After spi_sd_set_slow() has made CS high and all bus
+ * lines idle, hold this long before CMD0. Development LCD diagnostics
+ * previously supplied incidental latency at this boundary. The explicit
+ * constant makes production behavior deterministic without affecting runtime.
+ */
+#define FS_SD_PREINIT_SETTLE_MS 250u
 #define MBR_PARTITION_TYPE_EXFAT 0x07u
 #define FS_CONTAINER_META_LEN 64u
 #define FS_CONTAINER_KIT_LEN 512u
@@ -808,8 +818,8 @@ static bool filesystem_startRepairBankNames(uint16_t slot,
                                             fs_completion_cb_t cb);
 static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
                              uint16_t slot, fs_completion_cb_t cb);
-static void filesystem_libraryIndexRefreshScanComplete(void);
-static void filesystem_libraryIndexRefreshWriteComplete(void);
+static void filesystem_libraryIndexRebuildScanComplete(void);
+static void filesystem_libraryIndexRebuildWriteComplete(void);
 static void filesystem_loadInstrumentIndex_tick(void);
 static void filesystem_loadLibraryIndex_tick(void);
 static uint16_t filesystem_cachedInstrumentCount(instrument_type_t type);
@@ -905,19 +915,20 @@ static instrument_type_t op_instrument_index_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint8_t op_instrument_scan_one_type = 0u;
 static fs_name_cache_kind_t op_library_index_kind = FS_NAME_CACHE_NONE;
 /*
- * Durable library-index refresh chain.
+ * Durable library-index rebuild chain.
  *
  * What: holds the original completion callback while a physical Kit/Scene/Bank
  * directory scan and its complete slot-ordered `.hcindex` rewrite run after a
- * flush. Why: both Saves and Bank Load borrow the one name cache and must not
- * publish completion while it describes the preceding directory view. Inputs:
- * refresh kind plus the original callback. Output: exactly one original
- * callback after the scan/index chain is durable. This renames the former
- * save-only chain; it allocates no new retained storage.
+ * flush. Why: a successful numbered-root Save can create, rename, or remove a
+ * directory and must not publish completion while `.hcindex` still describes
+ * the preceding namespace. Pure Loads never enter this chain: after DSP apply
+ * Menu performs a read-only reload of the unchanged index. Inputs: rebuild
+ * kind plus the original Save callback. Output: exactly one original callback
+ * after the scan/index chain is durable; no new retained storage is allocated.
  */
-static uint8_t op_library_index_refresh_pending = 0u;
-static fs_name_cache_kind_t op_library_index_refresh_kind = FS_NAME_CACHE_NONE;
-static fs_completion_cb_t op_library_index_refresh_callback = NULL;
+static uint8_t op_library_index_rebuild_pending = 0u;
+static fs_name_cache_kind_t op_library_index_rebuild_kind = FS_NAME_CACHE_NONE;
+static fs_completion_cb_t op_library_index_rebuild_callback = NULL;
 /*
  * Root Instrument Save request scratch.
  *
@@ -2120,6 +2131,23 @@ static void filesystem_finish(fs_status_t final_status)
 {
     uint8_t flush_before_complete = (uint8_t)(final_status == FS_STATUS_DONE);
 
+    if (!flush_before_complete && op_library_index_rebuild_pending) {
+        /*
+         * Cancel a Save-owned rebuild when its preceding transaction fails.
+         *
+         * Inputs: Scene Save declares its namespace rebuild before entering the
+         * shared HCNAMES writer, while Kit/Bank Save declare theirs only at
+         * their successful terminal phases. Output: an HCNAMES or other
+         * pre-rebuild error clears the pending kind before publishing the
+         * original failure, so a later unrelated successful operation cannot
+         * inherit and run a stale scan/index rewrite. Once a rebuild has
+         * actually started, pending is already zero and its parked callback
+         * retains ownership of rebuild-error completion.
+         */
+        op_library_index_rebuild_pending = 0u;
+        op_library_index_rebuild_kind = FS_NAME_CACHE_NONE;
+    }
+
     if (flush_before_complete) {
         /*
          * Do not publish a successful filesystem operation until asyncfatfs has
@@ -2140,7 +2168,7 @@ static void filesystem_finish(fs_status_t final_status)
     filesystem_complete(final_status);
 }
 
-/* Complete the original save after its scan/index refresh chain.
+/* Complete the original save after its scan/index rebuild chain.
  *
  * What: publishes the final status and invokes the callback captured when the
  * Kit/Scene save was requested. Why: the save callback must not run between
@@ -2150,13 +2178,13 @@ static void filesystem_finish(fs_status_t final_status)
  * completion callback runs exactly once, after the physical folder and index
  * have both passed their FAT flush gates.
  */
-static void filesystem_completeLibraryIndexRefresh(fs_status_t final_status)
+static void filesystem_completeLibraryIndexRebuild(fs_status_t final_status)
 {
-    fs_completion_cb_t cb = op_library_index_refresh_callback;
+    fs_completion_cb_t cb = op_library_index_rebuild_callback;
 
-    op_library_index_refresh_callback = NULL;
-    op_library_index_refresh_kind = FS_NAME_CACHE_NONE;
-    op_library_index_refresh_pending = 0u;
+    op_library_index_rebuild_callback = NULL;
+    op_library_index_rebuild_kind = FS_NAME_CACHE_NONE;
+    op_library_index_rebuild_pending = 0u;
     status = final_status;
     current_op = FS_INTERNAL_OP_NONE;
     if (cb)
@@ -2168,32 +2196,32 @@ static void filesystem_completeLibraryIndexRefresh(fs_status_t final_status)
  * What: replaces the old cache-row-only save update with a real Kit/Scene/Bank
  * directory scan. Why: a save can create, rename, or remove a numbered folder;
  * only scanning the parent directory observes the complete resulting set.
- * Inputs: op_library_index_refresh_kind and the parked original callback.
+ * Inputs: op_library_index_rebuild_kind and the parked original callback.
  * Output: the shared cache is rebuilt and the scan callback starts the full
  * 1,000-row `.hcindex` writer.
  */
-static void filesystem_startLibraryIndexRefresh(void)
+static void filesystem_startLibraryIndexRebuild(void)
 {
-    fs_name_cache_kind_t kind = op_library_index_refresh_kind;
+    fs_name_cache_kind_t kind = op_library_index_rebuild_kind;
     bool started;
 
-    op_library_index_refresh_pending = 0u;
-    op_library_index_refresh_callback = completion_callback;
+    op_library_index_rebuild_pending = 0u;
+    op_library_index_rebuild_callback = completion_callback;
     completion_callback = NULL;
     op_library_index_kind = kind;
     status = FS_STATUS_IDLE;
     current_op = FS_INTERNAL_OP_NONE;
 
     started = (kind == FS_NAME_CACHE_KIT)
-        ? filesystem_requestScanKits(filesystem_libraryIndexRefreshScanComplete)
+        ? filesystem_requestScanKits(filesystem_libraryIndexRebuildScanComplete)
         : (kind == FS_NAME_CACHE_SCENE)
-            ? filesystem_requestScanScenes(filesystem_libraryIndexRefreshScanComplete)
+            ? filesystem_requestScanScenes(filesystem_libraryIndexRebuildScanComplete)
             : (kind == FS_NAME_CACHE_BANK)
-                ? filesystem_requestScanBanks(filesystem_libraryIndexRefreshScanComplete)
+                ? filesystem_requestScanBanks(filesystem_libraryIndexRebuildScanComplete)
                 : false;
     if (!started) {
         filesystem_makeNamedErrorCode("Idx", 0u);
-        filesystem_completeLibraryIndexRefresh(FS_STATUS_ERROR);
+        filesystem_completeLibraryIndexRebuild(FS_STATUS_ERROR);
     }
 }
 
@@ -2212,8 +2240,8 @@ static void filesystem_flushFinish_tick(void)
     if (!afatfs_sync())
         return;
 
-    if (op_library_index_refresh_pending) {
-        filesystem_startLibraryIndexRefresh();
+    if (op_library_index_rebuild_pending) {
+        filesystem_startLibraryIndexRebuild();
         return;
     }
 
@@ -3296,22 +3324,16 @@ static void filesystem_residentNames_tick(void)
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
-        if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE) {
-            /*
-             * Restore the root Scene browser only after its name row is safe.
-             *
-             * What: chains the existing physical Scene scan and `.hcindex`
-             * rewrite behind a successful Scene-name update. Why: the name
-             * reader borrowed the one general cache, so exposing completion
-             * before the normal index is restored would leave Menu without its
-             * current Scene browser. Inputs: completed Scene HCNAMES update.
-             * Output: filesystem_finish() parks the original callback until
-             * the scan/index chain completes. Affiliates: save-index refresh
-             * gate and root Scene Load/Save state machines.
-             */
-            op_library_index_refresh_kind = FS_NAME_CACHE_SCENE;
-            op_library_index_refresh_pending = 1u;
-        }
+        /*
+         * Finish only the requested resident-name transaction.
+         *
+         * Inputs: the complete HCNAMES cache and a closed root file. Output:
+         * HCNAMES is flushed without inferring whether `/Scene/` changed.
+         * Scene Save explicitly owns the namespace-rebuild flag before it
+         * enters this shared writer; pure Scene Load instead lets Menu reload
+         * the unchanged `.hcindex` after DSP apply. This keeps a metadata
+         * writer from selecting either caller's browser policy.
+         */
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -3604,40 +3626,40 @@ static void filesystem_repairNames_tick(void)
     }
 }
 
-/* Continue a save's refresh chain after the physical directory scan.
+/* Continue a save's rebuild chain after the physical directory scan.
  *
  * What: starts the same complete slot-ordered index writer used by boot.
  * Why: the scan has now rebuilt every cache row from actual FAT directory
  * entries, so the writer can publish a correct index instead of preserving
  * stale rows from before the save. Inputs: status from the finished scan and
- * op_library_index_refresh_kind. Output: the original callback remains
+ * op_library_index_rebuild_kind. Output: the original callback remains
  * parked until the index writer and its final flush complete.
  */
-static void filesystem_libraryIndexRefreshScanComplete(void)
+static void filesystem_libraryIndexRebuildScanComplete(void)
 {
     fs_status_t scan_status = status;
-    fs_file_type_t file_type = (op_library_index_refresh_kind == FS_NAME_CACHE_KIT)
+    fs_file_type_t file_type = (op_library_index_rebuild_kind == FS_NAME_CACHE_KIT)
         ? FS_FILE_KIT
-        : (op_library_index_refresh_kind == FS_NAME_CACHE_SCENE)
+        : (op_library_index_rebuild_kind == FS_NAME_CACHE_SCENE)
             ? FS_FILE_SCENE : FS_FILE_BANK;
 
     if (scan_status != FS_STATUS_DONE) {
-        filesystem_completeLibraryIndexRefresh(scan_status);
+        filesystem_completeLibraryIndexRebuild(scan_status);
         return;
     }
     if (!filesystem_start(FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
                           file_type,
                           0u,
-                          filesystem_libraryIndexRefreshWriteComplete)) {
+                          filesystem_libraryIndexRebuildWriteComplete)) {
         filesystem_makeNamedErrorCode("Idx", 1u);
-        filesystem_completeLibraryIndexRefresh(FS_STATUS_ERROR);
+        filesystem_completeLibraryIndexRebuild(FS_STATUS_ERROR);
     }
 }
 
 /* Publish the original save result after `.hcindex` is durable. */
-static void filesystem_libraryIndexRefreshWriteComplete(void)
+static void filesystem_libraryIndexRebuildWriteComplete(void)
 {
-    filesystem_completeLibraryIndexRefresh(status);
+    filesystem_completeLibraryIndexRebuild(status);
 }
 
 /*
@@ -6551,9 +6573,12 @@ static void filesystem_loadSceneDirectory_tick(void)
              * publication. Inputs: op_scene_load_scene_mask and the parsed
              * root directory display name. Output: the generic register
              * updater preserves every unrelated row, replaces only destination
-             * Scene rows, then restores `/Scene/.hcindex` before the original
-             * Preset callback. Bank delegation deliberately skips this branch:
-             * Bank owns its selected-row overlay and one final register write.
+             * Scene rows, and flushes HCNAMES before the original Preset
+             * callback. It does not scan or rewrite the unchanged Scene
+             * namespace; an explicit runtime command reloads `/Scene/.hcindex`
+             * only after the shared DSP apply. Bank delegation deliberately
+             * skips this branch because Bank owns its selected-row overlay and
+             * one final register write.
              */
             filesystem_prepareResidentNamesCache();
             current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE;
@@ -7007,7 +7032,14 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         }
         op_kit_slot_dir = op_file;
-        op_bank_loaded_scene = 1u;
+        /*
+         * Opening a selected Bank child is not a successful payload result.
+         *
+         * Input: an existing child directory. Output: only the shared Scene
+         * parser is armed. op_bank_loaded_scene remains false until that parser
+         * validates and commits the child, so Menu never applies data merely
+         * because a directory could be opened.
+         */
         op_bank_payload_active = 1u;
         op_phase = 8u;
         return;
@@ -7327,21 +7359,22 @@ static void filesystem_loadBankDirectory_tick(void)
             op_phase = 86u;
         return;
 
-    case 86: /* CLOSE HCNAMES, THEN RESTORE BANK INDEX THROUGH FLUSH GATE */
+    case 86: /* CLOSE AND FLUSH HCNAMES */
         if (!op_close_done)
             return;
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
         /*
-         * The Bank Load borrowed the one browser cache for HCNAMES.  Use the
-         * existing scan/index chain solely to restore the root Bank browser
-         * after the final register write; it also publishes any repaired Bank
-         * folder assignment. The original Preset callback remains parked until
-         * this physical rescan and `.hcindex` write are durable.
+         * Complete Bank Load after its resident identity is durable.
+         *
+         * Inputs: committed Bank/Scene payload and closed HCNAMES file. Output:
+         * the original Preset callback can consume op_bank_loaded_scene before
+         * any new filesystem request resets operation scratch. Load does not
+         * mutate the root Bank namespace, so it neither scans `/Bank/` nor
+         * rewrites `.hcindex`; Menu reloads that existing index only after the
+         * active Scene has passed through the shared DSP apply worker.
          */
-        op_library_index_refresh_kind = FS_NAME_CACHE_BANK;
-        op_library_index_refresh_pending = 1u;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -9816,14 +9849,14 @@ static void filesystem_saveKitDirectory_tick(void)
             filesystem_setIdentityName(FS_IDENTITY_KIT_ROW,
                                        preset_currentName);
         /*
-         * Defer successful completion until the boot-equivalent Kit refresh
+         * Defer successful completion until the boot-equivalent Kit rebuild
          * chain has finished. The directory is now written, but the active
          * cache may still describe the pre-save card contents. The final save
          * flush starts a physical Kit/ scan; that scan then starts the complete
          * 000..999 `.hcindex` writer before the original callback is released.
          */
-        op_library_index_refresh_kind = FS_NAME_CACHE_KIT;
-        op_library_index_refresh_pending = 1u;
+        op_library_index_rebuild_kind = FS_NAME_CACHE_KIT;
+        op_library_index_rebuild_pending = 1u;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -10518,8 +10551,8 @@ static void filesystem_saveBankDirectory_tick(void)
          * for newly-created, renamed, or removed root Bank folders to become
          * visible immediately without a restart.
          */
-        op_library_index_refresh_kind = FS_NAME_CACHE_BANK;
-        op_library_index_refresh_pending = 1u;
+        op_library_index_rebuild_kind = FS_NAME_CACHE_BANK;
+        op_library_index_rebuild_pending = 1u;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -10963,12 +10996,17 @@ static void filesystem_saveSceneDirectory_tick(void)
              *
              * Inputs: source Scene coordinate and op_scene_display_name
              * captured at Save acceptance. Output: the generic register writer
-             * preserves every other name row and, through its Scene-specific
-             * refresh gate, finishes only after the root browser index is
-             * restored. This replaces the removed scene_t display-name mirror.
+             * preserves every other name row. Scene Save owns the rebuild flag
+             * because it alone promoted a possibly created or renamed root
+             * directory; the shared HCNAMES close does not infer that policy.
+             * The original callback remains parked until the physical Scene
+             * scan, complete index rewrite, and final flush are durable. This
+             * replaces the removed scene_t display-name mirror.
              */
             op_scene_load_scene_mask =
                 (uint16_t)(1u << op_kit_save_source_scene);
+            op_library_index_rebuild_kind = FS_NAME_CACHE_SCENE;
+            op_library_index_rebuild_pending = 1u;
             filesystem_prepareResidentNamesCache();
             current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE;
             op_phase = 0u;
@@ -15261,6 +15299,17 @@ uint8_t filesystem_initCardAndMountBlocking(void)
     fs_boot_detected_unsupported_card = 0;
     fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
     spi_sd_set_slow();
+    /*
+     * Let a still-powered SD controller settle with a valid idle bus.
+     *
+     * Inputs: slow SPI GPIO setup has deasserted CS, driven clock low, and
+     * driven MOSI high; TIM6 is already running at 1 kHz. Output: a fixed
+     * 250 ms pre-CMD0 interval before SD_init() supplies the required idle
+     * clocks. This targets intermittent rapid-restart hangs that disappear
+     * when diagnostic LCD drains or a longer power-off adds the same latency.
+     * It is boot-only and occurs before audio initialization.
+     */
+    timebase_holdPreAudioMs(FS_SD_PREINIT_SETTLE_MS);
     sd_init_result = SD_init();
     if (sd_init_result != 0u) {
         fs_last_mount_result = (sd_init_result == 1u) ?
@@ -16687,29 +16736,40 @@ bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
     return filesystem_start(FS_INTERNAL_OP_LOAD_INDEX, FS_FILE_KIT, 0u, cb);
 }
 
-static bool filesystem_requestLoadLibraryIndex(fs_name_cache_kind_t kind,
-                                               fs_completion_cb_t cb)
+bool filesystem_requestReloadLibraryIndex(fs_library_index_kind_t kind,
+                                          fs_completion_cb_t cb)
 {
+    fs_name_cache_kind_t cache_kind;
+
     /*
-     * Replace the single browser cache with a numbered library index.
+     * Read one existing numbered-root index into the shared browser cache.
      *
-     * Inputs: one of the root Kit, root Scene, or root Bank domains. Output: the single
-     * shared cache is disposed immediately, then repopulated by an asynchronous
-     * slot-preserving reader. A non-blank row is the occupancy record, so no
-     * matching per-slot bitmap or alias table exists to clear. Why: entering a
-     * different Load or Save type must never leave the prior library's names
-     * visible while the new `.hcindex` is in flight.
+     * Inputs: public Kit, Scene, or Bank library kind plus an optional
+     * callback. Output: the single shared cache is disposed immediately and
+     * asynchronously repopulated from that domain's slot-preserving
+     * `.hcindex`; a non-blank row is its occupancy record. This operation is
+     * deliberately read-only: it performs no physical directory scan and no
+     * index write. Browser entry and post-DSP Load restoration share it, while
+     * namespace-mutating Saves use the separate rebuild chain.
      */
-    if ((kind != FS_NAME_CACHE_KIT && kind != FS_NAME_CACHE_SCENE &&
-         kind != FS_NAME_CACHE_BANK) ||
-        status == FS_STATUS_BUSY)
+    if (status == FS_STATUS_BUSY)
         return false;
-    filesystem_prepareLibraryNameCache(kind);
-    op_library_index_kind = kind;
+
+    if (kind == FS_LIBRARY_INDEX_KIT)
+        cache_kind = FS_NAME_CACHE_KIT;
+    else if (kind == FS_LIBRARY_INDEX_SCENE)
+        cache_kind = FS_NAME_CACHE_SCENE;
+    else if (kind == FS_LIBRARY_INDEX_BANK)
+        cache_kind = FS_NAME_CACHE_BANK;
+    else
+        return false;
+
+    filesystem_prepareLibraryNameCache(cache_kind);
+    op_library_index_kind = cache_kind;
     return filesystem_start(FS_INTERNAL_OP_LOAD_LIBRARY_INDEX,
-                            (kind == FS_NAME_CACHE_KIT)
+                            (cache_kind == FS_NAME_CACHE_KIT)
                                 ? FS_FILE_KIT
-                                : (kind == FS_NAME_CACHE_SCENE)
+                                : (cache_kind == FS_NAME_CACHE_SCENE)
                                     ? FS_FILE_SCENE : FS_FILE_BANK,
                             0u,
                             cb);
@@ -16717,18 +16777,31 @@ static bool filesystem_requestLoadLibraryIndex(fs_name_cache_kind_t kind,
 
 bool filesystem_requestLoadKitIndex(fs_completion_cb_t cb)
 {
-    return filesystem_requestLoadLibraryIndex(FS_NAME_CACHE_KIT, cb);
+    /*
+     * Preserve the domain-specific Kit entry point for boot/Menu affiliates.
+     * Input/output are exactly the generic read-only reload contract above;
+     * this wrapper adds no scan, write, cache, or retained operation state.
+     */
+    return filesystem_requestReloadLibraryIndex(FS_LIBRARY_INDEX_KIT, cb);
 }
 
 bool filesystem_requestLoadSceneIndex(fs_completion_cb_t cb)
 {
-    return filesystem_requestLoadLibraryIndex(FS_NAME_CACHE_SCENE, cb);
+    /*
+     * Preserve the domain-specific Scene entry point for existing callers.
+     * It delegates only to the slot-ordered reader; Scene Save's physical
+     * namespace rebuild remains on the separate Save-owned chain.
+     */
+    return filesystem_requestReloadLibraryIndex(FS_LIBRARY_INDEX_SCENE, cb);
 }
 
 bool filesystem_requestLoadBankIndex(fs_completion_cb_t cb)
 {
-    /* Bank enters the same slot-ordered index loader as Kit and root Scene. */
-    return filesystem_requestLoadLibraryIndex(FS_NAME_CACHE_BANK, cb);
+    /*
+     * Bank enters the same read-only slot-ordered loader as Kit/root Scene.
+     * Directory scans and index writes remain Save-owned rebuild operations.
+     */
+    return filesystem_requestReloadLibraryIndex(FS_LIBRARY_INDEX_BANK, cb);
 }
 
 bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind)

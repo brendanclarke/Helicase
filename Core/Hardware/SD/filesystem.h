@@ -155,6 +155,16 @@ typedef enum {
  */
 typedef void (*fs_boot_substep_diag_cb_t)(uint8_t substep);
 
+/*
+ * Initialize and mount the SD card during pre-audio boot.
+ *
+ * Inputs: TIM6 millisecond timing is active and no runtime filesystem request
+ * exists. Output: the bus is configured at initialization speed, held idle for
+ * the warm-reset card-settle interval, initialized through the paced SD
+ * command sequence, switched to transfer speed, and synchronously pumped until
+ * asyncfatfs reports ready or fatal. Returns nonzero only for a ready mount.
+ * This blocking API must not be called after audioCodec_init().
+ */
 uint8_t     filesystem_initCardAndMountBlocking(void);
 void        filesystem_initAfterCardReady(void);
 /*
@@ -510,14 +520,24 @@ const char *filesystem_residentSceneName(uint8_t scene_index);
 bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
                                            fs_completion_cb_t cb);
 /*
- * Load root Kit, root Scene, or root Bank slot-ordered names into the shared cache.
- * Each asynchronous request disposes the previous domain first, preserves
- * blank rows, and completes only when the selected `.hcindex` is available.
+ * Reload one existing root-library `.hcindex` into the shared browser cache.
+ *
+ * Inputs: a numbered root-library kind and optional completion callback.
+ * Output: the selected Kit, Scene, or Bank slot-ordered index replaces the
+ * previous cache domain while preserving blank rows. This is a read-only cache
+ * restoration operation: it does not scan a directory or rewrite `.hcindex`.
+ * Pure Loads use it only after their runtime apply has completed; Saves use
+ * the separate filesystem-owned scan/rebuild chain after mutating a namespace.
+ */
+bool filesystem_requestReloadLibraryIndex(fs_library_index_kind_t kind,
+                                          fs_completion_cb_t cb);
+/*
+ * Compatibility wrappers for callers that already name one root domain.
+ * They delegate to filesystem_requestReloadLibraryIndex() and retain the same
+ * read-only, slot-preserving contract.
  */
 bool filesystem_requestLoadKitIndex(fs_completion_cb_t cb);
 bool filesystem_requestLoadSceneIndex(fs_completion_cb_t cb);
-/* Load `/Bank/.hcindex` into the one shared slot-ordered name cache; this
- * replaces any Kit or Scene rows because there is only one SRAM cache. */
 bool filesystem_requestLoadBankIndex(fs_completion_cb_t cb);
 /* True when the requested root library currently owns the shared cache. */
 bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind);
@@ -691,6 +711,15 @@ const char *filesystem_bankSlotName(uint16_t zero_based_slot);
 uint16_t    filesystem_firstKitSlot(void);
 uint16_t    filesystem_firstSceneSlot(void);
 uint16_t    filesystem_firstBankSlot(void);
+/*
+ * Report whether the completed Bank Load committed at least one child Scene.
+ *
+ * The result becomes true only after the shared Scene reader validates and
+ * commits a selected child, and remains available for the immediate Preset/
+ * Menu completion decision. Pure Bank Load does not start an index rebuild
+ * before that decision; Menu consumes this result before its later read-only
+ * post-DSP Bank-index reload.
+ */
 uint8_t     filesystem_lastBankLoadLoadedScene(void);
 /*
  * Query whether a root Instrument save target already exists.

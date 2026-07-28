@@ -1,15 +1,16 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware after Session 042. It includes the
+reference for the Helicase/LXR-02 firmware after Session 044. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
 behavior, Instrument Load, Kit/Instrument Morph Load, Kit/Instrument Morph
 Save, Kit Save, root Instrument Save, Scene/Bank directory load/save, draft
 Scene/Bank pattern persistence, storage-only LFO `self` routing, the
-generalized `.hcindex` cache, root `/.hcnames`, canonical name repair, and the
-hidden Instrument Load temporary source. Low-level asyncfatfs API contracts
+generalized `.hcindex` cache, root `/.hcnames`, canonical name repair, the
+hidden Instrument Load temporary source, and the cold-boot tagged-runtime plus
+final Scene/Bank Load index-ordering contracts. Low-level asyncfatfs API contracts
 and caller rules now live in
 `ASYNCFATFS_REFERENCE.md`.
 
@@ -38,7 +39,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented through Session 042:
+Implemented through Session 044:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -70,6 +71,12 @@ Implemented through Session 042:
   `Core/DSP/Instruments/*/*Parameters.c`.
 - Preset/InstrumentManager applies descriptor image values back into the DSP
   runtime after load and menu edits.
+- SceneData initializes every retained Instrument type before
+  `instrumentManager_runtimeInit()` constructs the six tagged DSP members.
+  Scene activation first clears outgoing targets and image-applies all six
+  incoming types, then performs one all-source LFO/velocity rebind. Cold boot
+  starts that exact ordinary Scene-switch worker after audio startup; no
+  physical slot/type arrangement is assumed.
 - Descriptor-backed Morph works from Scene-owned main/morph endpoint images.
 - PERF Morph has been split into one Scene global setter plus six per-voice
   Morph amounts. The global Morph control bulk-sets the six per-voice values.
@@ -135,11 +142,11 @@ Implemented through Session 042:
 - Root Scene and embedded Kit names originate in directory names but are
   published to their fixed HCNAMES rows. They are not fields of `scene_t` or
   `kit_t`.
-- Root Bank scan/load/save uses the 16 resident Scene slots. Boot generates or
-  refreshes `/Bank/.hcindex`, reloads it after Instrument index generation has
-  disposed the shared cache, and tries the lowest valid Bank before root
-  Scene/root Kit fallback. Empty Bank folders are valid and complete Bank
-  selection before fallback.
+- Root Bank scan/load/save uses the 16 resident Scene slots. Boot repairs,
+  scans, and rebuilds `/Bank/.hcindex`, reloads it after Instrument index
+  generation has disposed the shared cache, and tries BankData's restored slot
+  (default 000) before root Scene/root Kit fallback. Empty Bank folders are
+  valid and complete Bank selection before fallback.
 - Bank-local Scene folders use two digits, `00..15`, not root-library
   three-digit numbering. Bank Save writes every child selected by its 16-bit
   save mask and Bank Load iterates every requested/present local child.
@@ -159,6 +166,16 @@ Implemented through Session 042:
   retains one nine-byte label. The hidden file is excluded from name repair and
   `.hcindex`; returning to `kit` parses it through the ordinary one-candidate
   Instrument stage.
+- Explicit Scene/Bank OK commands keep `...`, cursor suppression, and the
+  Menu input gate active through payload/HCNAMES work, shared runtime apply,
+  and one final read-only reload of the unchanged root `.hcindex`. A pure Load
+  does not physically scan or rewrite that index. Kit/Scene/Bank Saves alone
+  own physical parent rescan plus complete index rebuild after namespace
+  mutation.
+- Entering top-level Load:Bank is not ready when `/Bank/.hcindex` alone has
+  loaded. Menu immediately scans the highlighted Bank's immediate `00..15`
+  children and holds input until that callback publishes the selectable mask.
+  Only an accepted explicit OK request enters `...`.
 
 Current bridges and limitations:
 
@@ -213,7 +230,7 @@ settings.cfg
 ### Slot-ordered `.hcindex` name indexes and the single SRAM cache
 
 `.hcindex` is a directory-local name index, not an opaque root boot marker.
-Firmware creates or refreshes these files from physical directory scans:
+Firmware creates or rebuilds these files from physical directory scans:
 
 ```text
 Instrument/Drum/.hcindex
@@ -286,8 +303,12 @@ BankData's 9-byte Bank name plus filesystem's 72-byte Scene/Kit/six-Instrument
 block. Kit/Instrument menu entry reads one Scene's seven-row block once and
 later loads the needed index. Normal actions edit those rows and accumulate a
 dirty Scene mask; family exit performs at most one HCNAMES update. Scene menu
-entry borrows one Scene row. Bank Load/Save borrow the complete HCNAMES image
-and restore `/Bank/.hcindex` before releasing completion.
+entry borrows one Scene row. Bank Load/Save borrow the complete HCNAMES image.
+Bank Save rebuilds `/Bank/.hcindex` before releasing its filesystem callback
+because Save may mutate the root namespace. Bank Load publishes its completed
+payload result after HCNAMES is durable; Menu applies the selected Scene and
+only then reloads the unchanged `/Bank/.hcindex` read-only as the explicit
+command's final step.
 
 `settings.cfg` replaces legacy `GLO.CFG`/`glo.cfg` as the current system-settings
 file. It stores allowlisted system-level settings and the active Bank number,
@@ -449,8 +470,8 @@ the `Bank/NNN <bank name>/` directory.
 
 Current behavior:
 
-- Boot scans `Bank/` and loads the lowest valid Bank before root Scene/root Kit
-  fallback.
+- Boot scans `Bank/` and loads BankData's restored slot (default 000) before
+  root Scene/root Kit fallback.
 - Bank Load applies the v2 active Scene and edit mask, then loads only children
   selected by the caller and present in the two-digit local namespace. An empty
   requested/present intersection loads no Scene and never falls back to all
@@ -474,7 +495,11 @@ Current behavior:
   child, and discards the component before advancing.
 - Bank Load borrows the HCNAMES image once, overlays exactly eight rows for each
   successfully committed selected child, updates the Bank row on successful
-  metadata commit, writes once, and restores `/Bank/.hcindex`.
+  metadata commit, and writes once. A child counts as loaded only after the
+  shared Scene reader validates and commits it, not when its directory merely
+  opens. The completed result reaches Preset/Menu before any later filesystem
+  request resets operation scratch; after DSP apply, Menu reloads the unchanged
+  `/Bank/.hcindex` read-only.
 
 ## Scene
 
@@ -984,8 +1009,11 @@ must not store the wide ID above as a target token.
 
 Boot library/index and initial-load path:
 
-1. `main.c` initializes DSP objects.
-2. `scene_initAll()` initializes Scene storage.
+1. `scene_initAll()` writes valid default Instrument types into every retained
+   Scene slot; `bank_init()` establishes the empty/default Bank identity.
+2. `dsp_init()` calls `instrumentManager_runtimeInit()` only after those type
+   records exist, so a zero-valued raw BSS slot is never mistaken for a valid
+   Drum assignment.
 3. `filesystem_initCardAndMountBlocking()` mounts the card.
 4. `filesystem_requestScanKits()`, `filesystem_requestScanScenes()`, and
    `filesystem_requestScanBanks()` scan the three numbered root libraries.
@@ -1006,14 +1034,29 @@ Boot library/index and initial-load path:
 10. Completion callback sets `PRESET_OP_KIT_LOAD`.
 11. `menu_pollPresetStatus()` starts sound apply.
 12. Before audio starts, `menu_startSoundApply()` calls
-   `preset_sendDrumsetParameters()` synchronously.
-13. Normal boot does not call the resident-name snapshot writer. Existing
+   `preset_sendDrumsetParameters()` synchronously to clear the outgoing graph
+   and reset/image-apply every active Scene slot.
+13. After `audioCodec_init()`, `main.c` starts the complete ordinary deferred
+   Scene worker. It repeats the live Scene-switch clear/image sequence and
+   performs the all-source LFO/velocity rebind only after every tagged runtime
+   member has its final type.
+14. Normal boot does not call the resident-name snapshot writer. Existing
     HCNAMES rows survive unless a successful load operation owned and updated
     them.
 
 Runtime kit loads use the same Scene-owned apply logic, but the post-load apply
 is chunked through `preset_startDrumsetApply()` /
 `preset_tickDrumsetApply()` to avoid foreground bursts after audio is running.
+The worker remains active through its final all-source rebind; reaching a zero
+slot-pending mask does not by itself mean Scene activation is complete.
+
+Current production boot also contains four pre-audio SD pacing boundaries:
+250 ms before `SD_init()`, 1 ms between ACMD41 attempts with a one-second
+timeout, 50 ms after mount before the first library scan, and 50 ms after index
+generation before Bank reload/load. These were added after one intermittent
+warm-boot report. They are boot-only timing policy, not asyncfatfs/runtime
+pacing, and did not establish a reproducible root cause or verified fix. If a
+hang recurs, localize its blocking stage without adding further blind delays.
 
 ## Current Root Instrument Load Transaction
 
@@ -1378,7 +1421,7 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status after Session 042:
+Status after Session 044:
 
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
@@ -1392,13 +1435,25 @@ Status after Session 042:
   state, not filesystem list caches or musical identity.
 - Scene and Bank load/save use explicit OK/OW confirmation. They do not
   live-load on scroll.
+- An accepted OK/OW request changes the confirmation field to `...`, suppresses
+  every cursor/underline, and locks input until all filesystem, DSP, and
+  operation-specific terminal work completes. Completion always resets to the
+  bracketed top-level type row and restores `ok` or `OW`. Preparatory index and
+  Bank-child preview work may use the storage gate but never displays `...`.
+- Load:Bank entry continues a successful `/Bank/.hcindex` load directly into
+  a child preview of the unchanged highlighted Bank. The preview holds the
+  input gate until its physical `00..15` mask is published, preventing an
+  actionable zero-mask OK state.
 - Kit and KitMrp keep live-on-scroll load behavior.
 - VOICE press on the Load page enters nested Instrument Load.
 - VOICE press on the Save page enters nested Instrument Save/InstrumentMrp Save.
 - Root Kit, Scene, and Bank browser names use one shared 1,000-row SRAM cache.
-  Save completion performs a physical rescan and durable `.hcindex` rewrite
+  Save completion performs a physical rescan and durable `.hcindex` rebuild
   before returning control to Menu; entry/type changes dispose and reload that
   cache as described in the name-index section above.
+- Root Scene and Bank Load do not use that Save rebuild. After payload/HCNAMES
+  completion and shared DSP activation, Menu performs one read-only reload of
+  the unchanged selected root index and only then terminates the command.
 - Combined Kit/Instrument entry first borrows HCNAMES for one Scene's Kit plus
   six Instrument identity rows, then replaces the cache with the requested
   index. Normal actions mark rows dirty; leaving the family performs at most
@@ -1446,7 +1501,7 @@ Implemented:
 - After Kit, root Scene, or root Bank Save completes its physical directory
   write and final FAT flush, firmware rescans that parent directory and
   rewrites the complete slot-ordered `.hcindex`. The original Save completion
-  callback is delayed until this refresh is durable; the Save menu then
+  callback is delayed until this rebuild is durable; the Save menu then
   refreshes the current slot's displayed name from the active shared cache.
 - Normal Kit and Instrument Save also update their active identity row(s) and
   mark the combined name session dirty; HCNAMES is rewritten once at the
@@ -1550,6 +1605,15 @@ instrument runtime propagation:
   combined Kit/Instrument entry borrows one HCNAMES block, payload parsing uses
   the independent 2,048-byte stage, and dirty family exit performs one
   preserve/overlay/rewrite.
+- Confirm entering Load:Bank without turning the initially highlighted number
+  chains index completion into its selected-Bank child preview, gates input
+  until the physical mask is resident, and never submits a zero-mask request.
+- Confirm explicit root Scene/Bank Load ordering is payload -> HCNAMES ->
+  completed Preset result -> shared Scene DSP clear/image/all-source rebind ->
+  read-only root-index reload -> command reset. No root scan or index write may
+  occur in a pure Load.
+- Confirm an accepted OK/OW command displays `...` with no cursor through its
+  complete terminal work and always returns to the bracketed type row.
 - Confirm a Kit, Scene, or Bank Save makes a new or renamed directory visible
   immediately after its directory rescan and `.hcindex` rewrite, without a
   restart; the current Save slot display must also refresh.
@@ -1558,6 +1622,9 @@ instrument runtime propagation:
 - Confirm mask-selective Bank Load changes only the selected/present child
   payload and its eight HCNAMES rows. A mask with no present child must not load
   all children or erase unselected resident names.
+- Confirm the cold-boot selected Scene and a manual Scene return construct the
+  same six runtime types/images and install both LFO target pairs plus velocity
+  only after all incoming tagged members are valid.
 - Confirm LFO negative polarity on envelope decay follows the visible parameter
   direction and amount scale through the descriptor writer.
 - Treat step automation as pending until the descriptor-aware AutomationNode
@@ -1566,6 +1633,12 @@ instrument runtime propagation:
 ## Debounced Autosave and Reload Target
 
 Status: settled target, not implemented.
+
+The currently committed `Core/Bank/Scene/Autosave.c/.h`,
+`AUTOSAVE_IMPLEMENTATION.md`, and draft blob schema are explicitly rejected
+work from before the Session 044 load/save closeout. They are not an implemented
+subset of this target and must not be used as evidence that any autosave,
+resume, promotion, or reload contract below is live.
 
 Bank is the only autosaved workspace. Root-library folders such as `Scene/`,
 `Kit/`, `Instrument/`, `Pattern/`, and `Effect/` are explicit

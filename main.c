@@ -82,6 +82,16 @@
 
 #define SCB_VTOR (*(volatile uint32_t*)0xE000ED08UL)
 #define LCD_LIMIT_TICKS_PER_REFRESH 20 // lazy 20ms rate limit on time_sysTick
+/*
+ * Explicit production boot pacing at storage ownership boundaries.
+ *
+ * Developer boot diagnostics drain roughly one LCD frame before each
+ * filesystem stage and therefore add incidental latency that production lacks.
+ * These two fixed holds reproduce only the boundaries relevant to SD/mount and
+ * initial Bank readiness; they do not slow each filesystem tick or runtime I/O.
+ */
+#define BOOT_SD_POST_MOUNT_SETTLE_MS 50u
+#define BOOT_SD_PRE_BANK_SETTLE_MS 50u
 
 static void dsp_init(void)
 {
@@ -424,6 +434,18 @@ int main(void)
 
         if (sd_ok) {
             /*
+             * Separate a ready mount from the first root-directory scan.
+             *
+             * Inputs: SD SPI initialization and asyncfatfs mount both reported
+             * ready, and Menu initialization has completed. Output: a bounded
+             * 50 ms pre-audio hold before filesystem_requestScanKits() starts
+             * the first product traversal. This tests and covers cards whose
+             * controller needs a short post-mount quiet interval; no cache,
+             * filesystem status, or retained SRAM state changes during it.
+             */
+            timebase_holdPreAudioMs(BOOT_SD_POST_MOUNT_SETTLE_MS);
+
+            /*
              * (The root-level `.hcindex` boot marker generation has been moved
              * to run after the Instrument scan so it can write the cache).
              */
@@ -506,6 +528,18 @@ int main(void)
              */
             boot_showFilesystemStage(8u);
             (void)filesystem_createBootIndexBlocking();
+
+            /*
+             * Settle the final boot index write before reloading/using Bank.
+             *
+             * Inputs: every root and typed Instrument `.hcindex` pass has
+             * completed through its close/flush gate. Output: a fixed 50 ms
+             * pre-audio boundary before `/Bank/.hcindex` is read and the
+             * initial Bank payload begins. This mirrors the useful latency
+             * formerly supplied by diagnostic stages 8/9 without inserting
+             * sleeps into any Save, filesystem tick, or DSP/runtime path.
+             */
+            timebase_holdPreAudioMs(BOOT_SD_PRE_BANK_SETTLE_MS);
 
             /*
              * Boot through the current top-level container ladder.

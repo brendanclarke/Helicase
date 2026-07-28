@@ -51,6 +51,16 @@
 extern volatile unsigned char SDHC_flag;
 extern volatile unsigned char cardType;
 
+/*
+ * Enter the card's SPI initialization state during pre-audio boot.
+ *
+ * Inputs: spi_sd_set_slow() has configured the bus and the shared TIM6
+ * millisecond counter is running. Output: zero after CMD0/CMD8/ACMD41/OCR
+ * establish a ready card, one when CMD0 cannot find a card, or two when card
+ * readiness times out. ACMD41 attempts are paced in real milliseconds rather
+ * than a CPU-speed counter loop so fast and slow cards receive the same
+ * bounded one-second initialization window.
+ */
 unsigned char SD_init(void);
 unsigned char SD_sendCommand(unsigned char cmd, unsigned long arg);
 unsigned char SD_readSingleBlockCustomBuffer(unsigned long startBlock, uint8_t *target);

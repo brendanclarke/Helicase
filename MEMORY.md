@@ -66,6 +66,11 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   slider conversion, InstrumentManager runtime ownership, DTCM placement, or
   the RAM-allocation approval policy. `transientData` is FLASH-resident;
   target-audio stress validation of that placement remains pending.
+- Session 044 completed the cold-boot tagged-runtime/LFO activation and runtime
+  Scene/Bank Load terminal ordering. Read
+  `044_SESSION_HANDOFF_LOG.md` before changing Scene activation,
+  `preset_startDrumsetApply()`, Load:Bank preview masks, HCNAMES/index ordering,
+  or the accepted OK/OW command UI.
 - Resident Instrument parameter values and target selectors are compact bytes:
   instrument_param_value_t and instrument_target_token_t. Target off is 0xff;
   wide descriptor/Scene IDs exist only for lookup/runtime resolution. Velocity
@@ -77,6 +82,12 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   shared Scene loader, and Bank Save serializes the selected children through
   a temporary sibling/promotion flow. This is not a crash-recoverable
   transaction.
+- Instrument membership is fully dynamic at boot and runtime. SceneData must
+  initialize before InstrumentManager constructs tagged members. Scene
+  activation clears outgoing targets, image-applies all six incoming types,
+  then performs one all-source two-LFO-pair/velocity rebind; cold boot starts
+  that exact ordinary Scene worker after audio startup. Never assume a fixed
+  Drum/Snare/Cymbal/HiHat slot arrangement.
 - Bank Load must reset shared Scene child-discovery scratch before every
   Bank-local Scene payload. Otherwise a full Bank reuses child 00's embedded
   Kit/pattern/effect names for child 01, which surfaces as BnkL14 (the Bank
@@ -108,6 +119,26 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   disposes the shared cache. Kit/Scene/Bank Save performs a physical parent
   rescan and complete `.hcindex` rewrite before releasing its callback, then
   refreshes the current Save slot display.
+- A pure root Scene/Bank Load does not use the Save rebuild. It commits
+  payload/HCNAMES, publishes the completed result, applies the active Scene
+  through the shared runtime worker, then reloads the unchanged selected
+  `.hcindex` read-only as the accepted command's final step. Load:Bank entry
+  must also preview the highlighted Bank's children and hold input until its
+  destination mask is valid; a resident Bank index alone is not selection
+  readiness.
+- Accepted OK/OW requests alone own `menu_loadSaveCommandActive`: render `...`,
+  suppress every cursor, and retain input locking until true terminal work
+  finishes. Preparatory index/preview work may use `menu_storageBusy` without
+  showing `...`. Every completion resets to the bracketed type row.
+- The committed Autosave module/plans are explicitly rejected work and are not
+  an accepted Phase 3 baseline. Autosave remains target-only until restarted
+  from the documented ownership/durability requirements.
+- Production currently includes four pre-audio SD timing holds (250 ms before
+  SD init, paced ACMD41 with one-second timeout, 50 ms post-mount, and 50 ms
+  pre-Bank). The intermittent boot hang that motivated them is not reproducible
+  or localized. If it recurs, capture a non-perturbing stage/operation deadline
+  before adding more delays; Dev Mode's `lcd_waitForIdle()` changes timing at
+  many internal transitions.
 - The former Kit/Scene/Bank per-slot presence/display/alias arrays are retired
   (69,000 bytes combined). Session 042 also removed the dead `kitBrowser`
   compatibility bridge and its 1,000-entry `kb_map`, releasing the linked
@@ -157,7 +188,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   │   ├── ASYNCFATFS_REFERENCE.md    ← low-level async FAT/VFAT API contracts, pumping, LFN/object identity, deletion, and caller rules
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 042
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 044
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
 │   │   └── SRAM_MANIFEST.md           ← current linked SRAM1/DTCM, Pattern/delay reservations, and major owners
 │   ├── hardware_archive/
@@ -412,7 +443,13 @@ if (audioCodec_queueFreeSlots() > 0) {
 **24-bit output path (Session 022)**: `audioOutBuffer`/`audioOutBuffer2` are `sample_mx_t` (int32_t, signed-24 value in container). `pack_half()` emits a true 24-bit payload in both halfwords of each I2S frame. Do NOT re-add `LSW = 0` zeroing. Do NOT add a `>> 8` shift in `sampleMix_toS24()` — int16 voice values enter the mixer already scaled as `int16 << 8` via `bufferTool_convertInt16ToSampleMix()`; adding `>>8` at pack time was the loudness regression fixed in session 022.
 
 **Zero startup underruns**: boot SD operations complete before `audioCodec_init()`.
-Runtime kit/all/performance sound-apply completion is chunked after audio starts (Session 027): `menu_tickSoundApply()` drives `preset_tickDrumsetApply()` so only one voice's velocity/LFO modulation routing is applied per foreground pass. Boot-time pre-audio apply remains synchronous.
+Runtime kit/all/performance sound-apply completion is chunked after audio starts
+(Session 027). Session 044 made the worker type-safe: it clears outgoing
+targets, reset/image-applies at most one quiet pending slot per pass, then keeps
+the Scene gate active while the existing Instrument cursor rebinds all sources.
+Boot establishes a synchronous pre-audio image, then starts this exact ordinary
+worker after `audioCodec_init()` so LFO/velocity installation matches a manual
+Scene switch.
 
 ### Internal DAC — Must Never Be Enabled
 
@@ -623,7 +660,11 @@ Important caveat: long samples are not fully solved. `SampleInfo.size` is 32-bit
 - Display stability under rapid button mashing depends on the SPSC LCD ring behavior above.
 - Multi-knob RV1-RV4 repaint collapse is intentional and should remain scoped to that input path.
 - Global `cpu` is a read-only audio queue-free pressure widget, not a general MCU utilization meter.
-- Runtime kit/all/performance load completion should use `menu_startSoundApply()` / `preset_tickDrumsetApply()`; do not reintroduce direct `preset_sendDrumsetParameters()` calls in those post-audio completion paths.
+- Runtime kit/all/performance load completion should use
+  `menu_startSoundApply()` / `preset_tickDrumsetApply()`; do not reintroduce
+  direct `preset_sendDrumsetParameters()` calls in post-audio completion paths.
+  The worker must remain active after the six image bits clear until the
+  all-source LFO/velocity rebind cursor also drains.
 
 ---
 
@@ -713,6 +754,27 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ---
 
 ## Known Issues / Technical Debt
+
+### Resolved / Changed in Session 044
+- Cold boot initializes SceneData before tagged runtime construction. DRM's
+  zero enum value can no longer turn raw Scene BSS into six accidental Drum
+  owners.
+- Boot and deferred Scene activation share the same clear -> all incoming
+  type/image apply -> all-source LFO/velocity rebind lifecycle. Hardware
+  confirmed the initial active Scene's Snare controls and both reported LFO
+  destinations now work without a Scene/target round trip.
+- Top-level Load:Bank chains Bank index completion into its child preview and
+  gates input until the destination mask is resident, fixing unchanged-slot
+  zero-mask rejection.
+- Root Scene/Bank Load finishes HCNAMES, preserves the completed Bank result,
+  applies DSP, and reloads the unchanged root index read-only last. Save alone
+  owns physical numbered-root scan/index rebuild.
+- Accepted OK/OW operations display `...`, suppress cursors, and reset to the
+  bracketed type row only after their real terminal work.
+- Four SD boot-pacing holds are present, but the motivating intermittent hang
+  was seen once and is not reproducible. Do not claim it resolved.
+- Final static allocation is 12,280 B DTCM and 66,776 B SRAM1. No retained
+  Scene/LFO/cache state was added.
 
 ### Resolved / Changed in Session 042
 - `/.hcnames` is the authoritative fixed-row name register. Runtime identity is
@@ -922,7 +984,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - ~~preset_morph() index 127 memory corruption~~ — **RESOLVED**. Index 127 skipped.
 
 ### High Priority
-1. **No hi-hat at startup** — boot kit hi-hat is silent; loading any other kit activates it. DSP init ordering issue. VLA bug that masked this is now fixed.
+1. ~~No hi-hat/wrong tagged Instrument at startup~~ — **RESOLVED in Session
+   044** by SceneData-before-DSP initialization plus the complete post-audio
+   Scene clear/image/rebind lifecycle.
 2. ~~Trigger backend still stubbed~~ — **RESOLVED in Session 019 Phase 5**. PC13 CLK OUT, PD4 CLK IN, PD5 RST IN, and trigger PPQ menu wiring are implemented; hardware bench validation still needed.
 3. ~~BAR1/BAR2 race condition~~ — **RESOLVED in Session 019 Phase 7**. All voice triggers deferred through voiceControl pending ring; drained at audio boundary.
 4. **Long sample playback is not 32-bit clean yet** — `SampleInfo.size` is `uint32_t`, but `Oscillator.c` still derives the address index with the legacy `phase >> 17` path.

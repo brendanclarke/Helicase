@@ -18,9 +18,12 @@ InstrumentMrp Save, asyncfatfs LFN/case support, direct `000..999` slots,
 recursive Kit/Scene slot replacement rules, Load/Save hardware menu repair,
 Scene-owned mix settings, root Scene Load/Save, the first root Bank
 scan/load/save bridge, Bank-first boot fallback, and draft Scene/Bank
-`pattern.pat` persistence. The next Phase 3 emphasis is the real 16-Scene Bank
-workspace, Bank-local Scene toggle/save/load semantics, and later autosave
-promotion; descriptor-aware automation remains a parallel runtime follow-up.
+`pattern.pat` persistence. Sessions 040-044 completed the real 16-Scene Bank
+workspace, compact bitmap Pattern bridge, bounded identity/cache ownership,
+cold-boot tagged-runtime activation, and harmonized root Scene/Bank Load
+completion. The remaining Phase 3 emphasis is descriptor-aware automation,
+Effect placeholders, and a fresh autosave design; the currently committed
+autosave experiment is explicitly rejected and is not a baseline.
 Phase 4 is the dynamic stack Pattern implementation that used to be scoped as
 Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup, copy/clear
 helpers, and menu controls. Phase 6 is DSP expansion.
@@ -64,6 +67,28 @@ be treated as the current baseline, superseding older roadmap estimates:
   stress matrix remains pending. The complete measured baseline is in
   `knowledge_files/specification_reference/SRAM_MANIFEST.md` and the durable
   decisions are in Session 043's handoff.
+
+## Session 044 Phase 3 load/runtime baseline (2026-07-28)
+
+- SceneData initializes all retained Instrument types before tagged DSP runtime
+  construction. Scene activation clears outgoing destinations, image-applies
+  every incoming type, then performs one all-source LFO/velocity rebind. Cold
+  boot starts the exact ordinary Scene-switch worker after audio startup, and
+  hardware confirmed the initially selected Scene and both reported LFO targets.
+- Top-level Load:Bank loads its root index, immediately previews the unchanged
+  highlighted Bank's `00..15` children, and gates input until the destination
+  mask is valid. The explicit OK request alone enters command state.
+- Accepted OK/OW operations display `...`, suppress all cursors, and remain
+  locked through their real terminal work before returning to the bracketed
+  type row.
+- Pure root Scene/Bank Loads commit payload and HCNAMES, apply DSP, then reload
+  their unchanged `.hcindex` read-only as the final command step. Only Saves
+  that mutate Kit/Scene/Bank namespaces physically rescan/rebuild an index.
+- The final linked image uses 12,280 B DTCM and 66,776 B SRAM1. The RAM
+  reservation/approval policy is unchanged.
+- Four pre-audio SD pacing holds remain in the source after an intermittent
+  boot report. The hang is not reproducible or localized; these holds are not
+  evidence of a verified root-cause fix.
 
 ---
 
@@ -229,6 +254,11 @@ dynamic Pattern rewrite begins.
 
 Finish descriptor-backed instrument load/apply coverage:
 
+- Status after Session 044: cold boot and later Scene switching now share the
+  same type-safe activation lifecycle. SceneData exists before
+  InstrumentManager constructs tagged members; every incoming slot type/image
+  is valid before the all-source two-LFO-pair/velocity rebind; no physical
+  Drum/Snare/Cymbal/HiHat arrangement is assumed.
 - Status after Session 034: the main descriptor runtime path is live for the
   current Drum/Snare/Cymbal/HiHat rows, including the LFO expansion,
   voice-local decimation, velocity amount, per-voice Morph, and Scene
@@ -335,18 +365,21 @@ Complete the menu path required for descriptor-backed instruments:
   names/stems. Root `Instrument/` scans `.drm`, `.snr`, `.cym`, and `.hat`
   pools per type in alphanumeric order; lower-row browsing loads immediately,
   while type changes do not replace the current kit-member display/source. The
-  display index is one-based and saturates at 999. `kit_t` preserves an
-  eight-character per-slot display stem plus a 16-character save stem for
-  provenance/save metadata.
+  display index is one-based and saturates at 999. Session 042 later removed
+  retained `kit_t`/Scene name and filename stems; HCNAMES and the one active
+  `.hcindex` cache now own display identity.
 - Load-context SEQ LEDs now use `pat_sceneHasActiveSteps()`: in Kit Load they
   are multi-Scene toggles and every selected target blinks; in Instrument Load
-  exactly one Scene is selected and blinks. The code is shaped for 16 Scenes
-  even though only Scene 1 is resident today.
+  exactly one Scene is selected and blinks. All 16 Scenes are resident.
 - Status after Session 039: Scene and Bank are promoted top-level Load/Save
   entries with explicit OK/OW confirmation. File/Dir/sDir diagnostics are
   compiled but hidden unless `CONFIG_DEV_MODE != 0`. Scene and Bank operations
   return the cursor to the top-row type field when they complete. Load Bank
   shows an OK affordance and does not load while scrolling.
+- Status after Session 044: successful Bank index entry continues into the
+  highlighted Bank's child preview and gates input until its mask is resident.
+  Accepted OK/OW commands show `...` with no cursor through payload, apply, and
+  terminal cache work, then always reset to the bracketed type row.
 - Keep scene-level MIDI note/channel and `voice_decimation_all` out of
   `kitset.kcg` and instrument files.
 
@@ -416,20 +449,20 @@ Implement load/save operations for the settled file types in
   exchange only and is not part of the autosave workspace.
 - Add an FX slot shim so Scene folders can validate/store `effects.fx` before
   Phase 6 implements full effects.
-- Bank load/save is implemented as the initial one-resident-Scene bridge.
-  Final Bank load/save still needs the 16-Scene workspace, SEQ-button Scene
-  toggles, per-Scene save/load masks, and preservation of untoggled Bank-local
-  child Scene folders.
+- Bank load/save is implemented for the 16-Scene workspace with SEQ-button
+  Scene masks, selected/present child intersection, preservation of unselected
+  resident payload/identity, one-child-at-a-time rescan, and shared Scene
+  parsing. Session 044 repaired unchanged-slot Load:Bank admission and made the
+  active loaded Scene apply immediately during playback.
 - Pattern load/save stays bridge-only until Phase 4 replaces the Pattern file
-  format. Session 039's Scene/Bank `pattern.pat` v2 draft stores only
-  128x7 step-active bits plus per-track length/scale and keeps all other step
-  data at PatternData defaults.
+  format. Session 043's Scene/Bank `pattern.pat` v3 stores exactly the 112-byte
+  128x7 on/off bitmap as seven 32-hex-character rows; v1 is accepted empty and
+  v2 imports only its final bit field.
 - Effect load/save may initially validate placeholders; real FX parameters land
   in Phase 6.
 - `settings.cfg` replaces `glo.cfg` for system settings and active-bank number
-  selection. `settings.cfg` has a `.settings.cfg` autosave/backer file; both are
-  updated/re-written when closing the global settings menu or loading/saving a
-  Bank.
+  selection. A `.settings.cfg` backer remains target design only; no accepted
+  autosave/backer implementation currently updates it.
 
 Session 041 name-index/cache completion:
 
@@ -446,7 +479,17 @@ Session 041 name-index/cache completion:
   the shared cache was disposed during Instrument index generation.
 - The old 128-entry Instrument limit and the dedicated Kit/Scene/Bank
   presence/display/alias arrays are retired. The remaining 2,013-byte
-  `kitBrowser` compatibility bridge is deferred to the next cleanup session.
+  `kitBrowser` compatibility bridge was removed in Session 042.
+
+Session 044 Load/index completion:
+
+- HCNAMES completion is metadata-neutral and does not infer that a root
+  namespace needs rebuilding.
+- Kit/Scene/Bank Save owns one physical parent scan plus complete index rebuild
+  because Save may mutate the numbered namespace.
+- Pure Scene/Bank Load instead publishes the completed payload/result, applies
+  the active Scene through the shared clear/image/rebind worker, then reloads
+  the unchanged root index read-only before ending the explicit command.
 
 asyncfatfs note for future save code:
 
@@ -466,6 +509,13 @@ Implement debounced autosave after explicit Bank save paths exist. The original
 one-file wording is not sufficient once a resident Bank has sixteen editable
 Scenes: menu parameter edits may target any subset of Scenes, and one gesture
 can dirty multiple embedded Kits/Instruments at once.
+
+**Current status after Session 044: target only, not implemented.** The
+committed `Core/Bank/Scene/Autosave.c/.h`, `AUTOSAVE_IMPLEMENTATION.md`, and
+draft blob schema were explicitly rejected by the user as incorrectly
+implemented. Do not extend, validate, or describe that code as partial Phase 3
+completion; restart from the ownership and durability requirements below when
+autosave is explicitly resumed.
 
 Architecture decision:
 
@@ -495,9 +545,10 @@ Architecture decision:
   - `scene/kit/instrument[0..5]`
   - `scene/effects.fx`
   - `scene/pattern.pat`
-- Autosave applies only to committed Bank Scene slots 1..16. The future
-  seventeenth landing/staging Scene is excluded until it is committed into a
-  Bank slot.
+- Autosave applies only to the 16 committed resident Bank Scene slots. There is
+  no seventeenth resident landing Scene in the current product shape; any
+  future staging remains private operation storage unless separately designed
+  and approved.
 - The active Bank is identified by number, not by folder display name. Root
   `settings.cfg` records that number; `.settings.cfg` is its autosave/backer
   file. Closing the global settings menu or loading/saving a Bank rewrites both
@@ -607,9 +658,10 @@ Implementation sequencing:
 
 - **Rename/replace primitive in `asyncfatfs`:** confirm or add a safe async
   primitive before implementing `.tmp` replacement.
-- **SRAM budget for 17 scenes:** each resident scene carries settings, kit
-  descriptor images, Pattern storage, and future FX state. Re-measure once the
-  Scene and Bank structs are real.
+- **SRAM budget for any future staging/Scene expansion:** the current product
+  has exactly 16 resident Scenes and a separate 2,048-byte non-Pattern
+  filesystem stage. Any seventeenth Scene or larger stage is a new retained
+  allocation and requires exact measurement plus explicit user approval.
 - **Descriptor automation/runtime ownership:** migrate `AutomationNode` from
   legacy byte CC/CC2 targets to canonical descriptor/Scene targets, correct
   raw float LFO adapter writes, and make modulation-node enumeration dynamic
