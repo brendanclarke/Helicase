@@ -643,6 +643,18 @@ int main(void)
             while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS)
                 filesystem_tick();
             menu_pollPresetStatus();  /* apply globals + ack */
+
+            /*
+             * Establish the two working-Bank delta-register files only after
+             * the complete Bank-or-fallback ladder and globals operation have
+             * released filesystem ownership.  A Scene/Kit/default fallback is
+             * deliberately not an autosave context: no Bank slot was loaded,
+             * so the wrapper returns without card I/O.  This first pass creates
+             * only missing baseline files; it neither reads an overlay nor
+             * marks a record active before audio starts.
+             */
+            if (bank_hasResidentBank())
+                (void)filesystem_ensureAutosaveFilesBlocking();
         } else {
             /* SD card not detected — menu_init already ran above */
         }

@@ -65,6 +65,7 @@
 #include "storageTypes.h"
 #include "SceneData.h"
 #include "BankData.h"
+#include "Autosave.h"
 #include "sd_routines.h"
 #include "spi_sd.h"
 #include "presetManager.h"
@@ -163,8 +164,17 @@ typedef enum {
      * This intentionally uses the same foreground-pumped open/write/close
      * pattern as `.hcindex`: boot may wait for completion, but SD progress is
      * still made by filesystem_tick() and the normal finish/flush gate.
-     */
+    */
     FS_INTERNAL_OP_WRITE_HCNAMES,
+    /*
+     * Boot-only creation of the two fixed-size working-Bank registers.
+     *
+     * The operation reads HCNAMES once, scans each root target before opening
+     * it for write, and creates only proven-missing files.  It never performs
+     * a parameter overlay, dirty mark, record selection, or existing-file
+     * rewrite; those are separate future autosave milestones.
+     */
+    FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES,
     /*
      * Runtime reader/update operations borrow the generalized name cache.
      * Instrument operations address one voice row per selected Scene. Kit
@@ -798,6 +808,7 @@ static void filesystem_createBootIndex_tick(void);
 static void filesystem_createLibraryIndex_tick(void);
 static void filesystem_writeResidentNames_tick(void);
 static void filesystem_residentNames_tick(void);
+static void filesystem_ensureAutosaveFiles_tick(void);
 static uint8_t filesystem_residentNameIsBlank(const char *name);
 static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t cap,
@@ -3335,6 +3346,283 @@ static void filesystem_residentNames_tick(void)
          * writer from selecting either caller's browser policy.
          */
         filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+/*
+ * Return one requested root component without creating a second filename
+ * buffer.  op_stream_index is otherwise idle for this operation and is the
+ * zero-based A/B target selector; its normal request initializer resets it.
+ */
+static const char *filesystem_autosaveTargetName(void)
+{
+    return (op_stream_index == 0u)
+        ? AUTOSAVE_RECORD_A_FILENAME
+        : AUTOSAVE_RECORD_B_FILENAME;
+}
+
+static uint8_t filesystem_autosaveTargetMatches(const char *candidate,
+                                                const char *target)
+{
+    /*
+     * Treat FAT's ASCII case variants as the same existing target.  A
+     * creation-only boot pass must preserve an already-present record even if
+     * a host changed only its display case; it must never turn that case clash
+     * into a write-open that could replace card data.
+     */
+    if (!candidate || !target)
+        return 0u;
+    while (*candidate != '\0' && *target != '\0') {
+        char left = *candidate++;
+        char right = *target++;
+
+        if (left >= 'A' && left <= 'Z')
+            left = (char)(left + ('a' - 'A'));
+        if (right >= 'A' && right <= 'Z')
+            right = (char)(right + ('a' - 'A'));
+        if (left != right)
+            return 0u;
+    }
+    return (uint8_t)(*candidate == '\0' && *target == '\0');
+}
+
+static void filesystem_autosaveAdvanceTarget(void)
+{
+    /*
+     * A target has either been proven existing or its new file has closed.
+     * Both outcomes intentionally take the same next step.  There is no
+     * active-record flag yet: this first pass only ensures two baseline files.
+     */
+    if (op_stream_index + 1u < AUTOSAVE_RECORD_FILE_COUNT) {
+        op_stream_index++;
+        op_phase = 4u;
+        return;
+    }
+    if (!afatfs_chdir(NULL))
+        return;
+    filesystem_finish(FS_STATUS_DONE);
+}
+
+/* -----------------------------------------------------------------------
+** BOOT AUTOSAVE-REGISTER ENSURE state machine
+**
+** Inputs: a successfully loaded Bank, its validated restore slot/BankData
+** name, and root `/.hcnames`. Outputs: only missing `/.hcprms1` and
+** `/hcprms2` files receive one 23,184-byte zero/name baseline. Existing files
+** are first found by the LFN-aware root iterator and then left unopened for
+** write. The state machine owns no new retained memory: it reuses the normal
+** HCNAMES cache, staging_buf, operation cursors, and one normal file handle.
+** ----------------------------------------------------------------------- */
+static void filesystem_ensureAutosaveFiles_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* RETURN ROOT + OPEN AUTHORITATIVE HCNAMES */
+        if (!bank_hasResidentBank()) {
+            /* Defensive duplicate of the public wrapper's no-Bank gate. */
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_prepareResidentNamesCache();
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME, "r",
+                              AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 1u;
+        return;
+
+    case 1: /* WAIT HCNAMES OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            /* Correct complete name population is impossible without HCNAMES. */
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_line_len = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 2u;
+        return;
+
+    case 2: /* STREAM ALL HCNAMES ROWS INTO THE EXISTING SHARED CACHE */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t st = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 3u;
+            return;
+        }
+        if (line_ready) {
+            filesystem_cacheResidentName(op_item_offset, op_line_buf);
+            if (op_item_offset < UINT16_MAX)
+                op_item_offset++;
+            op_line_len = 0u;
+        }
+        if (eof) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 3u;
+        }
+        return;
+    }
+
+    case 3: /* WAIT HCNAMES CLOSE, THEN BEGIN RECORD A ROOT SCAN */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(op_close_status);
+            return;
+        }
+        op_stream_index = 0u;
+        op_phase = 4u;
+        return;
+
+    case 4: /* OPEN ROOT AS A DIRECTORY FOR A NO-OVERWRITE EXISTENCE SCAN */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(".", "r", on_file_opened))
+            return;
+        op_phase = 5u;
+        return;
+
+    case 5: /* WAIT ROOT DIRECTORY OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /* op_file_version is existing generic operation scratch; here 1=absent. */
+        op_file_version = 1u;
+        afatfs_findFirstObject(op_file, &op_object_finder);
+        op_phase = 6u;
+        return;
+
+    case 6: /* FIND TARGET OR ROOT END */
+    {
+        afatfsOperationStatus_e st = afatfs_findNextObject(
+            op_file, &op_object_finder, &op_object);
+
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_file, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 7u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_file, &op_object_finder);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 7u;
+            return;
+        }
+        if (filesystem_autosaveTargetMatches(op_object.id.displayName,
+                                             filesystem_autosaveTargetName())) {
+            /* Any matching object, file or directory, is preserved untouched. */
+            op_file_version = 0u;
+            afatfs_findLastObject(op_file, &op_object_finder);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 7u;
+        }
+        return;
+    }
+
+    case 7: /* CLOSE ROOT SCAN HANDLE BEFORE EITHER ADVANCE OR CREATE */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 8u;
+        return;
+
+    case 8: /* WAIT ROOT SCAN CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(op_close_status);
+            return;
+        }
+        if (op_file_version == 0u) {
+            filesystem_autosaveAdvanceTarget();
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        if (!afatfs_fopen_lfn(filesystem_autosaveTargetName(), "w",
+                              AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 9u;
+        return;
+
+    case 9: /* WAIT NEW TARGET OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_bytes_done = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 10u;
+        return;
+
+    case 10: /* STREAM ONE ZERO/NAME CHUNK AT A TIME */
+        if (op_bytes_done >= AUTOSAVE_RECORD_BYTES) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 11u;
+            return;
+        }
+        if (op_write_line_len == 0u) {
+            uint32_t remaining = AUTOSAVE_RECORD_BYTES - op_bytes_done;
+
+            op_write_line_len = (remaining > sizeof(staging_buf))
+                ? sizeof(staging_buf) : (uint16_t)remaining;
+            op_write_line_offset = 0u;
+            autosave_formatInitialChunk(
+                staging_buf, op_bytes_done, op_write_line_len,
+                bank_restoreBankSlot(), bank_displayName(),
+                (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
+        }
+        op_write_line_offset = (uint16_t)(op_write_line_offset +
+            afatfs_fwrite(op_file, staging_buf + op_write_line_offset,
+                          op_write_line_len - op_write_line_offset));
+        if (op_write_line_offset >= op_write_line_len) {
+            op_bytes_done += op_write_line_len;
+            op_write_line_len = 0u;
+            op_write_line_offset = 0u;
+        }
+        return;
+
+    case 11: /* WAIT NEW TARGET CLOSE, THEN HANDLE THE OTHER TARGET */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_autosaveAdvanceTarget();
         return;
 
     default:
@@ -15371,6 +15659,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_WRITE_HCNAMES:
         filesystem_writeResidentNames_tick();
         break;
+    case FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES:
+        filesystem_ensureAutosaveFiles_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:
     case FS_INTERNAL_OP_LOAD_HCNAMES_KIT:
@@ -15733,6 +16024,35 @@ uint8_t filesystem_createBootIndexBlocking(void)
     op_instrument_scan_one_type = 0u;
     op_instrument_index_type = INSTRUMENT_TYPE_UNKNOWN;
     filesystem_clearInstrumentCacheStorage();
+    return 1u;
+}
+
+uint8_t filesystem_ensureAutosaveFilesBlocking(void)
+{
+    /*
+     * Boot-only wrapper for the fixed-register creation state machine.
+     *
+     * Inputs: normal pre-audio filesystem ownership and BankData's completed
+     * load result. Output: no card operation at all for a fallback with no
+     * resident Bank; otherwise completion only after the normal foreground
+     * pump has closed every created file and filesystem_finish() has passed the
+     * shared asyncfatfs sync gate. This wrapper deliberately has no runtime
+     * scheduling role and is not an autosave writer.
+     */
+    if (!bank_hasResidentBank())
+        return 1u;
+    if (status == FS_STATUS_BUSY ||
+        !filesystem_start(FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES,
+                          FS_FILE_SETTINGS, 0u, NULL)) {
+        return 0u;
+    }
+    while (status == FS_STATUS_BUSY)
+        filesystem_tick();
+    if (status != FS_STATUS_DONE) {
+        filesystem_ack();
+        return 0u;
+    }
+    filesystem_ack();
     return 1u;
 }
 

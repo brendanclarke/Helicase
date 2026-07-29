@@ -168,6 +168,18 @@ typedef void (*fs_boot_substep_diag_cb_t)(uint8_t substep);
 uint8_t     filesystem_initCardAndMountBlocking(void);
 void        filesystem_initAfterCardReady(void);
 /*
+ * Ensure the two root working-Bank autosave register files exist during
+ * pre-audio boot.
+ *
+ * Inputs: a mounted card after the normal Bank-or-fallback ladder. Output:
+ * when no resident Bank exists, return success without card I/O; otherwise
+ * read HCNAMES and create only absent `/.hcprms1` or `/hcprms2` records. An
+ * existing matching object is never opened for write. The initial files hold
+ * only the loaded Bank slot/name and HCNAMES identity cells; no parameter,
+ * mask, overlay, or ping-pong selection behavior is implied by this API.
+ */
+uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
+/*
  * Create/refresh one `.hcindex` file in every registry-defined Instrument
  * directory. This boot-only wrapper is valid before audio starts; normal
  * runtime SD work remains asynchronous through filesystem_tick(). It returns
