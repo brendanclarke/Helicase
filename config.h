@@ -51,35 +51,37 @@
 #define USE_SD_CARD          1
 #define DEBUG_CRASH_MODE     0
 /*
- * CONFIG_DEV_MODE exposes low-level storage diagnostics in the production UI.
+ * Enable the bounded pre-audio filesystem diagnostic.
  *
- * What: when nonzero, the Load/Save type cycle includes the asyncfatfs test
- * entries "File", "Dir", and Save-only "sDir", and main.c compiles the
- * boot-stage/operation/substep/HCNAMES OLED observers used during storage
- * diagnosis. Why: ordinary firmware should neither expose test objects nor
- * replace the splash with durable boot coordinates, while one flag must restore
- * the complete front-panel diagnostic surface for hardware investigation.
- * Clients: Core/Menu/menu.c gates menu reachability; main.c compiles boot-screen
- * callbacks and display drains only in development mode. Filesystem test and
- * read-only observer functions remain callable so this flag changes visibility,
- * not storage behavior or on-card format.
+ * What: value 1 compiles the existing boot OLED coordinates plus an eight-byte
+ * filesystem-operation register, a ten-second cooperative boot deadline, and
+ * the best-effort `/bootlog.bin` timeout writer. Value 0 removes the timeout
+ * and dirty-abandon behavior from ordinary runtime firmware.
+ *
+ * Why: a splash-screen stall otherwise loses the exact operation coordinate
+ * when power is removed. This flag is intentionally separate from
+ * DEBUG_CRASH_MODE: crash handling and removable-media boot diagnosis have
+ * different ownership and persistence rules.
+ *
+ * Inputs: main.c's pre-audio boot window and filesystem.c's foreground polling
+ * paths. Outputs/effects: diagnostic builds may abandon an in-flight boot
+ * transaction after the configured deadline, remount once, and write the
+ * captured code. Affiliates: boot_showFilesystemStage(),
+ * filesystem_bootLoggingBegin(), filesystem_tick(), and the LXR-02 SD shim.
  */
+#define DEV_LOGGING         1
+
 /*
- * Return the diagnostic-only UI surface to normal production behavior.
+ * Maximum duration of one armed boot filesystem operation.
  *
- * What: value 0 compiles out main.c's pre-operation boot marker and live
- * filesystem operation/phase/substep observers. Why: the removed Instrument
- * Load diagnostic frame replaced the normal menu surface and made scrolling
- * untestable. Input: this compile-time flag is consumed by main.c and
- * Core/Menu/menu.c. Output: filesystem sequencing, SRAM allocation, and
- * SD-card contents remain unchanged, while diagnostic OLED frames and
- * developer-only menu entries are absent. Affiliates:
- * boot_showFilesystemStage(), boot_showActiveFilesystemDiagnostic(),
- * boot_showFilesystemSubstep(), filesystem_getBootDiagnostic(), and
- * filesystem_setBootSubstepDiagnostic(). Set to 1 only for a diagnostic that
- * preserves the UI under test.
+ * What: supplies the millisecond deadline used only while DEV_LOGGING is
+ * active before audio startup. Why: time_sysTick is a wrapping uint16_t, so the
+ * interval must stay below 32,768 ms for unsigned elapsed-time comparison.
+ * Inputs: one operation arm. Output: timeout after exactly ten seconds without
+ * terminal completion. Affiliates: filesystem_bootLoggingArm(),
+ * filesystem_tick(), and filesystem_blockPoll().
  */
-#define CONFIG_DEV_MODE      0
+#define BOOT_FILESYSTEM_TIMEOUT_MS 10000u
 
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time

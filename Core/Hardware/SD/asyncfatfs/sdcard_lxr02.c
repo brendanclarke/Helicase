@@ -59,6 +59,7 @@
 #include "sdcard_lxr02.h"
 #include "spi_sd.h"
 #include "sd_routines.h"   /* SDHC_flag, CMD defines */
+#include "config.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -92,6 +93,33 @@ static uint16_t       retry_count;
 static sdcard_operationCompleteCallback_c xfer_callback;
 static uint32_t       xfer_callbackData;
 static sdcardBlockOperation_e xfer_operation;
+
+void sdcard_abortTransferForBootLog(void)
+{
+    /*
+     * Tear down only the transport half of a timed-out boot transaction.
+     *
+     * Inputs: DEV_LOGGING timeout may arrive while CMD17/CMD24 owns CS, a
+     * caller buffer, and an asyncfatfs completion callback. Outputs/effects:
+     * CS is released, idle clocks are supplied, and every retained transfer
+     * coordinate is cleared without invoking the stale callback. Why: the
+     * following dirty afatfs_destroy() invalidates that callback's cache
+     * descriptor. Affiliates: sdcard_poll(), filesystem boot-log recovery, and
+     * the subsequent full SD_init() protocol reset.
+     */
+#if DEV_LOGGING
+    SD_CS_DEASSERT;
+    SPI_transmit(0xFF);
+    state = SDCARD_STATE_IDLE;
+    xfer_buffer = NULL;
+    xfer_block = 0u;
+    xfer_offset = 0u;
+    retry_count = 0u;
+    xfer_callback = NULL;
+    xfer_callbackData = 0u;
+    xfer_operation = SDCARD_BLOCK_OPERATION_READ;
+#endif
+}
 
 /* -----------------------------------------------------------------------
 ** send_cmd_keep_cs — send SD command, keep CS asserted, return R1

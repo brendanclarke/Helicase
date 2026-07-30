@@ -51,4 +51,18 @@
 /* Diagnostic: returns internal state machine state (0=IDLE, 1=SENDING_CMD, etc.) */
 uint8_t sdcard_getState(void);
 
+/*
+ * Abandon one LXR-02 SD block transfer for boot-log recovery.
+ *
+ * What: deasserts chip select and clears the private transfer callback/state
+ * without reporting completion. Why: a DEV_LOGGING timeout discards the
+ * owning asyncfatfs image before it remounts to write `/bootlog.bin`; a delayed
+ * callback into that discarded image would corrupt the recovery mount.
+ * Inputs: the current read/write shim state. Outputs/effects: transport becomes
+ * idle and the interrupted operation is lost. This is not a general runtime
+ * cancellation API. Affiliates: filesystem_writeBootTimeoutLogBlocking(),
+ * afatfs_destroy(true), and SD_init().
+ */
+void sdcard_abortTransferForBootLog(void);
+
 #endif /* SDCARD_LXR02_H_ */

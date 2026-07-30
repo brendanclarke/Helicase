@@ -69,6 +69,7 @@
 #include "Autosave.h"
 #include "sd_routines.h"
 #include "spi_sd.h"
+#include "sdcard_lxr02.h"
 #include "presetManager.h"
 #include "ParameterArray.h"
 #include "menu.h"
@@ -167,6 +168,16 @@ typedef enum {
      * still made by filesystem_tick() and the normal finish/flush gate.
     */
     FS_INTERNAL_OP_WRITE_HCNAMES,
+    /*
+     * Diagnostic recovery writer for the root `/bootlog.bin` file.
+     *
+     * Inputs: the eight-byte operation code preserved outside generic
+     * operation scratch. Output: exactly those eight bytes, closed and passed
+     * through the normal sync gate. Why: main must not issue ad-hoc FAT writes
+     * while the filesystem facade owns all async progress. Affiliates:
+     * filesystem_writeBootTimeoutLogBlocking() and filesystem_tick().
+     */
+    FS_INTERNAL_OP_WRITE_BOOT_LOG,
     /*
      * Boot-only creation of the two fixed-size working-Bank registers.
      *
@@ -294,6 +305,28 @@ static char             fs_error_code[9];
  * filesystem_finish(), filesystem_flushFinish_tick(), and completion_callback.
  */
 static fs_status_t      op_flush_final_status = FS_STATUS_DONE;
+/*
+ * DEV_LOGGING boot watchdog record.
+ *
+ * What: retains one exact eight-byte operation code, a wrapping millisecond
+ * deadline, and separate recovery state outside all generic operation scratch.
+ * Why: the code must survive dirty asyncfatfs destruction after the operation
+ * that owned that scratch has timed out. Inputs are filesystem_start(), mount,
+ * flush, and raw blocking-operation boundaries; outputs are consumed by both
+ * polling paths and the root bootlog writer. `armed` prevents idle gaps between
+ * completed boot operations from expiring. Affiliates: time_sysTick,
+ * filesystem_bootLoggingPollDeadline(), and main.c's pre-audio window.
+ */
+#if DEV_LOGGING
+static uint8_t          fs_boot_logging_active = 0u;
+static uint8_t          fs_boot_logging_armed = 0u;
+static uint8_t          fs_boot_logging_timed_out = 0u;
+static uint8_t          fs_boot_logging_recovery = 0u;
+static uint8_t          fs_boot_logging_recovery_failed = 0u;
+static uint16_t         fs_boot_logging_started_tick = 0u;
+static uint16_t         fs_boot_logging_recovery_started_tick = 0u;
+static uint8_t          fs_boot_logging_code[8];
+#endif
 /*
  * Current numbered operation slot.
  *
@@ -842,6 +875,7 @@ static void filesystem_saveBankDirectory_tick(void);
 static void filesystem_createBootIndex_tick(void);
 static void filesystem_createLibraryIndex_tick(void);
 static void filesystem_writeResidentNames_tick(void);
+static void filesystem_writeBootLog_tick(void);
 static void filesystem_residentNames_tick(void);
 static void filesystem_ensureAutosaveFiles_tick(void);
 static void filesystem_autosaveDummyWrite_tick(void);
@@ -2117,6 +2151,211 @@ static uint32_t filesystem_readStreamChunk(uint8_t *buf, uint8_t len)
     return n;
 }
 
+/*
+ * Convert private filesystem ownership into the stable eight-byte boot codes.
+ *
+ * What: classifies every operation reachable from the current pre-audio
+ * ladder, using file type only where the shared library-index reader needs it.
+ * Why: internal enum values and phase numbers are unstable implementation
+ * details, while bootlog.bin must remain human-readable across builds. Input
+ * is one operation plus its typed file domain; output is an eight-byte literal
+ * or NULL for runtime-only/unclassified work. Affiliates: filesystem_start(),
+ * explicit mount/quarantine/handoff arms, and BOOT_LOGGING.md.
+ */
+static const char *filesystem_bootLogCodeForOperation(
+    fs_internal_op_t op, fs_file_type_t type)
+{
+    switch (op) {
+    case FS_INTERNAL_OP_FLUSH_FINISH:         return "FSFLUSH ";
+    case FS_INTERNAL_OP_CREATE_BOOT_INDEX:    return "INSINDEX";
+    case FS_INTERNAL_OP_CREATE_LIBRARY_INDEX: return "LIBINDEX";
+    case FS_INTERNAL_OP_WRITE_HCNAMES:        return "HCNAMES ";
+    case FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES:return "ASENSURE";
+    case FS_INTERNAL_OP_LOAD_KIT:
+    case FS_INTERNAL_OP_LOAD_KIT_MORPH:       return "KITLOAD ";
+    case FS_INTERNAL_OP_LOAD_SCENE:           return "SCNELOAD";
+    case FS_INTERNAL_OP_LOAD_BANK:            return "BANKLOAD";
+    case FS_INTERNAL_OP_LOAD_GLOBALS:         return "GLOBLOAD";
+    case FS_INTERNAL_OP_SCAN_KITS:            return "KITSCAN ";
+    case FS_INTERNAL_OP_SCAN_SCENES:          return "SCNSCAN ";
+    case FS_INTERNAL_OP_SCAN_BANKS:           return "BNKSCAN ";
+    case FS_INTERNAL_OP_SCAN_INSTRUMENTS:     return "INSSCAN ";
+    case FS_INTERNAL_OP_REPAIR_NAMES:         return "NAMEREPR";
+    case FS_INTERNAL_OP_LOAD_LIBRARY_INDEX:
+        if (type == FS_FILE_BANK)
+            return "BIDXLOAD";
+        if (type == FS_FILE_SCENE)
+            return "SIDXLOAD";
+        if (type == FS_FILE_KIT)
+            return "KIDXLOAD";
+        return NULL;
+    default:
+        return NULL;
+    }
+}
+
+/*
+ * Poll the cooperative boot deadline from either filesystem progress path.
+ *
+ * What: compares the wrapping 16-bit millisecond tick against the currently
+ * armed normal or recovery start time. Why: facade state machines advance via
+ * filesystem_tick(), but validation/quarantine helpers call afatfs_poll()
+ * directly, so both must share one latch. Inputs are logging flags and
+ * time_sysTick; output is nonzero after expiry and FS_STATUS_ERROR is published
+ * to unwind facade-owned busy loops. It deliberately does not finish, close,
+ * flush, or invoke callbacks for the abandoned operation. A C/driver call that
+ * never returns cannot be preempted by this cooperative check; SD command code
+ * retains its own bounded loops. Affiliates: filesystem_tick(),
+ * filesystem_blockPoll(), and the bounded recovery writer.
+ */
+static uint8_t filesystem_bootLoggingPollDeadline(void)
+{
+#if DEV_LOGGING
+    uint16_t started;
+
+    if (!fs_boot_logging_active)
+        return 0u;
+    if (fs_boot_logging_recovery) {
+        if (fs_boot_logging_recovery_failed)
+            return 1u;
+        started = fs_boot_logging_recovery_started_tick;
+        if ((uint16_t)(time_sysTick - started) <
+            BOOT_FILESYSTEM_TIMEOUT_MS)
+            return 0u;
+        fs_boot_logging_recovery_failed = 1u;
+        status = FS_STATUS_ERROR;
+        return 1u;
+    }
+    if (!fs_boot_logging_armed)
+        return fs_boot_logging_timed_out;
+    if ((uint16_t)(time_sysTick - fs_boot_logging_started_tick) <
+        BOOT_FILESYSTEM_TIMEOUT_MS)
+        return 0u;
+    fs_boot_logging_timed_out = 1u;
+    fs_boot_logging_armed = 0u;
+    status = FS_STATUS_ERROR;
+    return 1u;
+#else
+    return 0u;
+#endif
+}
+
+/*
+ * End only the current normal boot-operation deadline.
+ *
+ * What: disarms the timer after an operation/mount reaches a terminal result
+ * without closing the wider logging window. Why: CPU-only boot work between
+ * filesystem requests must not be attributed to the operation that just
+ * completed. Inputs are completion and mount results; output is an unarmed
+ * logger that preserves its last code. Recovery keeps its independent total
+ * deadline. Affiliates: filesystem_complete() and the mount wrapper.
+ */
+static void filesystem_bootLoggingOperationDone(void)
+{
+#if DEV_LOGGING
+    if (!fs_boot_logging_recovery)
+        fs_boot_logging_armed = 0u;
+#endif
+}
+
+void filesystem_bootLoggingBegin(void)
+{
+    /*
+     * Open the diagnostic window immediately before the pre-audio mount.
+     *
+     * Inputs: an idle boot filesystem context and the live millisecond tick.
+     * Outputs: clears old timeout/recovery latches, initializes the retained
+     * code to spaces, and waits for the first explicit Arm. Why: runtime work
+     * must never inherit a prior reset's watchdog state. Affiliates: main.c and
+     * filesystem_bootLoggingEnd().
+     */
+#if DEV_LOGGING
+    fs_boot_logging_active = 1u;
+    fs_boot_logging_armed = 0u;
+    fs_boot_logging_timed_out = 0u;
+    fs_boot_logging_recovery = 0u;
+    fs_boot_logging_recovery_failed = 0u;
+    fs_boot_logging_started_tick = time_sysTick;
+    fs_boot_logging_recovery_started_tick = time_sysTick;
+    memset(fs_boot_logging_code, ' ', sizeof(fs_boot_logging_code));
+#endif
+}
+
+void filesystem_bootLoggingArm(const char code[8])
+{
+    /*
+     * Capture one operation boundary and start its fresh ten-second deadline.
+     *
+     * Input is exactly eight bytes and need not be NUL-terminated. Output is a
+     * byte-for-byte SRAM copy plus the current 1 kHz tick. Why: strlen() would
+     * make trailing spaces unreliable and the recovery remount must preserve
+     * the culprit code. Arms are ignored outside boot and during recovery so
+     * `BOOTLOG ` can never replace the failed operation. Affiliates:
+     * filesystem_start(), mount, flush, Kit quarantine, and internal handoffs.
+     */
+#if DEV_LOGGING
+    if (!fs_boot_logging_active || fs_boot_logging_recovery ||
+        fs_boot_logging_timed_out || !code)
+        return;
+    memcpy(fs_boot_logging_code, code, sizeof(fs_boot_logging_code));
+    fs_boot_logging_started_tick = time_sysTick;
+    fs_boot_logging_armed = 1u;
+#else
+    (void)code;
+#endif
+}
+
+uint8_t filesystem_bootLoggingTimedOut(void)
+{
+    /*
+     * Observe the primary timeout without advancing filesystem state.
+     * Input is the logger latch; output is zero/nonzero. Why: main-owned
+     * Preset waits do not use facade status and need an explicit exit test.
+     * Affiliates: the boot timeout cleanup label in main.c.
+     */
+#if DEV_LOGGING
+    return fs_boot_logging_timed_out;
+#else
+    return 0u;
+#endif
+}
+
+const uint8_t *filesystem_bootLoggingCode(void)
+{
+    /*
+     * Return the retained fixed-width code for diagnostics only.
+     * Output remains valid through dirty teardown and recovery because it is
+     * static logger state, not generic operation scratch. The caller must read
+     * exactly eight bytes. Affiliates: the internal bootlog writer.
+     */
+#if DEV_LOGGING
+    return fs_boot_logging_code;
+#else
+    static const uint8_t disabled_code[8] = { 0u };
+    return disabled_code;
+#endif
+}
+
+void filesystem_bootLoggingEnd(void)
+{
+    /*
+     * Close the diagnostic window before audio/runtime filesystem service.
+     *
+     * Inputs: any normal, no-card, timed-out, or recovery-complete boot path.
+     * Outputs: all watchdog/recovery flags are disabled while the last code is
+     * left untouched. Why: Menu, Preset, and autosave operations must retain
+     * their ordinary non-destructive runtime semantics. Affiliates: main.c's
+     * stage-14 boundary and filesystem_start().
+     */
+#if DEV_LOGGING
+    fs_boot_logging_active = 0u;
+    fs_boot_logging_armed = 0u;
+    fs_boot_logging_timed_out = 0u;
+    fs_boot_logging_recovery = 0u;
+    fs_boot_logging_recovery_failed = 0u;
+#endif
+}
+
 static const char *filesystem_errorPrefix(fs_internal_op_t op)
 {
     switch (op) {
@@ -2124,6 +2363,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_CREATE_BOOT_INDEX:     return "HIdx";
     case FS_INTERNAL_OP_CREATE_LIBRARY_INDEX:  return "LIdx";
     case FS_INTERNAL_OP_WRITE_HCNAMES:         return "HNam";
+    case FS_INTERNAL_OP_WRITE_BOOT_LOG:        return "BLog";
     case FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE:  return "ASv";
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:return "HNrL";
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:return "HNrU";
@@ -2198,6 +2438,7 @@ static void filesystem_complete(fs_status_t final_status)
         filesystem_makeAutoErrorCode(current_op, op_phase);
     status = final_status;
     current_op = FS_INTERNAL_OP_NONE;
+    filesystem_bootLoggingOperationDone();
     if (completion_callback) {
         fs_completion_cb_t cb = completion_callback;
         completion_callback = NULL;
@@ -2238,6 +2479,7 @@ static void filesystem_finish(fs_status_t final_status)
          * sectors for a saved object are visible on a freshly-mounted SD card.
          */
         op_flush_final_status = final_status;
+        filesystem_bootLoggingArm("FSFLUSH ");
         current_op = FS_INTERNAL_OP_FLUSH_FINISH;
         op_phase = 0u;
         return;
@@ -2954,6 +3196,82 @@ static void filesystem_writeResidentNames_tick(void)
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+/*
+ * Stream the captured operation code to root `/bootlog.bin`.
+ *
+ * What: returns to root, opens the file with replacement semantics, writes
+ * exactly eight bytes with partial-write tracking, closes it, and enters the
+ * ordinary sync finish gate. Why: the diagnostic recovery must obey the same
+ * single-owner asyncfatfs rules as every other facade write and must not claim
+ * durability after only updating a cache. Input is fs_boot_logging_code, which
+ * survives dirty recovery; output is an eight-byte file with no NUL/newline.
+ * Affiliates: filesystem_writeBootTimeoutLogBlocking(), on_file_opened(),
+ * on_file_closed(), filesystem_finish(), and the tick dispatcher.
+ */
+static void filesystem_writeBootLog_tick(void)
+{
+    switch (op_phase) {
+    case 0u: /* RETURN ROOT + OPEN/TRUNCATE bootlog.bin */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        op_bytes_done = 0u;
+        if (!afatfs_fopen_lfn("bootlog.bin",
+                              "w",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1u: /* WAIT OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2u: /* WRITE EXACTLY EIGHT BYTES + QUEUE CLOSE */
+#if DEV_LOGGING
+        if (op_bytes_done < 8u) {
+            uint32_t n = afatfs_fwrite(
+                op_file,
+                fs_boot_logging_code + op_bytes_done,
+                8u - op_bytes_done);
+            op_bytes_done += n;
+            if (n == 0u && afatfs_isFull()) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            return;
+        }
+#else
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+#endif
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 3u;
+        return;
+
+    case 3u: /* WAIT CLOSE + SYNC */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -4672,6 +4990,14 @@ static void filesystem_repairNames_tick(void)
              * blocking embedded-Kit quarantine is intentionally absent: each
              * selected child validates in the shared Scene reader instead.
              */
+            /*
+             * Input is the successfully completed Bank-name repair; output is
+             * a fresh BANKLOAD deadline before the payload reader becomes the
+             * private current operation. Why: phase 43 bypasses the generic
+             * filesystem_start() arm. Affiliates: Bank boot load and the
+             * repair-name state machine.
+             */
+            filesystem_bootLoggingArm("BANKLOAD");
             current_op = FS_INTERNAL_OP_LOAD_BANK;
             op_phase = 0u;
             op_close_status = FS_STATUS_DONE;
@@ -7644,6 +7970,16 @@ static void filesystem_loadSceneDirectory_tick(void)
              * one final register write.
              */
             filesystem_prepareResidentNamesCache();
+            /*
+             * This internal handoff bypasses filesystem_start().
+             *
+             * Input is a successfully loaded root Scene; output is a fresh
+             * HCNAMES diagnostic deadline before the register update owns the
+             * facade. Why: otherwise a stall would retain SCNELOAD even though
+             * payload loading had completed. Affiliate: the shared resident
+             * names state machine.
+             */
+            filesystem_bootLoggingArm("HCNAMES ");
             current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE;
             op_phase = 0u;
             return;
@@ -9223,6 +9559,14 @@ static void filesystem_saveInstrument_tick(void)
          * Snare, Cymbal, and HiHat and leaves other type indexes untouched.
          */
         op_instrument_index_type = op_instrument_save_type;
+        /*
+         * Arm the new owner because this save-to-index handoff does not call
+         * filesystem_start(). Input is the completed Instrument save cache;
+         * output is an INSINDEX deadline for its registry index rewrite. This
+         * is harmless at runtime because logging is inactive there. Affiliate:
+         * filesystem_createBootIndex_tick().
+         */
+        filesystem_bootLoggingArm("INSINDEX");
         current_op = FS_INTERNAL_OP_CREATE_BOOT_INDEX;
         op_phase = 0u;
         return;
@@ -12071,6 +12415,14 @@ static void filesystem_saveSceneDirectory_tick(void)
             op_library_index_rebuild_kind = FS_NAME_CACHE_SCENE;
             op_library_index_rebuild_pending = 1u;
             filesystem_prepareResidentNamesCache();
+            /*
+             * Scene Save hands directly to HCNAMES without generic start.
+             * Input is the saved root Scene identity; output is a separately
+             * timed HCNAMES owner. Why: a logging build must report the actual
+             * stalled register update, while runtime behavior is unchanged
+             * after filesystem_bootLoggingEnd(). Affiliate: resident names.
+             */
+            filesystem_bootLoggingArm("HCNAMES ");
             current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE;
             op_phase = 0u;
             return;
@@ -14214,11 +14566,30 @@ static void filesystem_blockCloseCb(void)
 
 static uint8_t filesystem_blockFsOk(void)
 {
+#if DEV_LOGGING
+    /*
+     * Raw blocking helpers must unwind after either primary or recovery
+     * expiry. Input is the shared watchdog latch plus asyncfatfs mount state;
+     * output is false before another open/read/rename loop iteration. Why:
+     * these helpers do not inspect facade status. Affiliates:
+     * filesystem_blockPoll() and Kit quarantine/validation.
+     */
+    if (fs_boot_logging_timed_out || fs_boot_logging_recovery_failed)
+        return 0u;
+#endif
     return (uint8_t)(afatfs_getFilesystemState() == AFATFS_FILESYSTEM_STATE_READY);
 }
 
 static void filesystem_blockPoll(void)
 {
+    /*
+     * Apply the same cooperative deadline before direct asyncfatfs progress.
+     * Input is the currently armed boot operation; output is either one normal
+     * FAT poll or an immediate return after timeout. Why: private blocking
+     * helpers bypass filesystem_tick(). Affiliate: filesystem_blockFsOk().
+     */
+    if (filesystem_bootLoggingPollDeadline())
+        return;
     afatfs_poll();
 }
 
@@ -16347,6 +16718,39 @@ static void filesystem_saveTestSimpleDir_tick(void)
 ** Public API
 ** ======================================================================= */
 
+/*
+ * Discard facade ownership after the diagnostic transport/filesystem reset.
+ *
+ * What: clears the generic owner, callbacks, open-handle coordinates, deferred
+ * rebuild state, and autonomous-writer authorization without touching the
+ * preserved eight-byte logger record. Why: afatfs_destroy(true) invalidates
+ * every handle/callback target owned by the timed-out operation, so none may
+ * leak into the remount or root log write. Inputs are abandoned boot facade
+ * state; output is an idle facade suitable for afatfs_init() and one new
+ * operation. Affiliates: sdcard_abortTransferForBootLog(),
+ * filesystem_writeBootTimeoutLogBlocking(), and filesystem_start().
+ */
+static void filesystem_resetFacadeForBootLogRecovery(void)
+{
+    current_op = FS_INTERNAL_OP_NONE;
+    status = FS_STATUS_IDLE;
+    op_phase = 0u;
+    completion_callback = NULL;
+    op_file = NULL;
+    op_file_ready = false;
+    op_close_done = false;
+    op_kit_root_dir = NULL;
+    op_kit_slot_dir = NULL;
+    op_library_index_rebuild_pending = 0u;
+    op_library_index_rebuild_kind = FS_NAME_CACHE_NONE;
+    op_library_index_rebuild_callback = NULL;
+    op_autosave_writer.target_file = NULL;
+    op_autosave_writer.target_ready = 0u;
+    fs_autosave_writer_armed = 0u;
+    fs_autosave_writer_boot_ready = 0u;
+    memset(fs_error_code, 0, sizeof(fs_error_code));
+}
+
 void filesystem_initAfterCardReady(void)
 {
     current_op = FS_INTERNAL_OP_NONE;
@@ -16359,6 +16763,16 @@ uint8_t filesystem_initCardAndMountBlocking(void)
 {
     uint8_t sd_init_result;
 
+    /*
+     * Mount precedes every facade operation, so it owns an explicit code.
+     *
+     * Inputs: the active pre-audio logging window. Output: MOUNTSD plus a
+     * fresh deadline covering settle, card initialization, and asyncfatfs
+     * mount polling. Why: filesystem_start() cannot arm work before the FAT
+     * facade exists. Affiliates: filesystem_bootLoggingBegin() and the mount
+     * initialization loop below.
+     */
+    filesystem_bootLoggingArm("MOUNTSD ");
     fs_boot_detected_unsupported_card = 0;
     fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
     spi_sd_set_slow();
@@ -16374,19 +16788,35 @@ uint8_t filesystem_initCardAndMountBlocking(void)
      */
     timebase_holdPreAudioMs(FS_SD_PREINIT_SETTLE_MS);
     sd_init_result = SD_init();
+    /*
+     * SD_init() owns bounded command loops rather than cooperative FAT polls.
+     * Input is its returned result plus elapsed boot time; output latches a
+     * timeout before any mount/failure branch continues. Why: the watchdog
+     * cannot preempt a C call, but it must still classify an over-deadline
+     * return as MOUNTSD. Affiliate: filesystem_bootLoggingPollDeadline().
+     */
+    if (filesystem_bootLoggingPollDeadline()) {
+        fs_last_mount_result = FS_MOUNT_RESULT_CARD_INIT_FAILED;
+        filesystem_bootLoggingOperationDone();
+        return 0u;
+    }
     if (sd_init_result != 0u) {
         fs_last_mount_result = (sd_init_result == 1u) ?
             FS_MOUNT_RESULT_NO_CARD : FS_MOUNT_RESULT_CARD_INIT_FAILED;
+        filesystem_bootLoggingOperationDone();
         return 0;
     }
 
     spi_sd_set_fast();
     filesystem_initAfterCardReady();
-    while (afatfs_getFilesystemState() == AFATFS_FILESYSTEM_STATE_INITIALIZATION)
+    while (afatfs_getFilesystemState() ==
+               AFATFS_FILESYSTEM_STATE_INITIALIZATION &&
+           !filesystem_bootLoggingPollDeadline())
         filesystem_tick();
 
     if (afatfs_getFilesystemState() == AFATFS_FILESYSTEM_STATE_READY) {
         fs_last_mount_result = FS_MOUNT_RESULT_READY;
+        filesystem_bootLoggingOperationDone();
         return 1;
     }
 
@@ -16398,7 +16828,106 @@ uint8_t filesystem_initCardAndMountBlocking(void)
         fs_last_mount_result = FS_MOUNT_RESULT_MOUNT_FAILED;
     }
 
+    /*
+     * Unsupported-layout inspection is synchronous but bounded internally.
+     * Input is its returned mount classification plus current elapsed time;
+     * output upgrades an over-deadline return to the same MOUNTSD timeout.
+     * Why: every returned component of mount must honor the operation budget
+     * even when it did not call the cooperative FAT poll. Affiliate:
+     * filesystem_detectUnsupportedCardLayout().
+     */
+    (void)filesystem_bootLoggingPollDeadline();
+    filesystem_bootLoggingOperationDone();
     return 0;
+}
+
+uint8_t filesystem_writeBootTimeoutLogBlocking(void)
+{
+    /*
+     * Make one bounded, best-effort durable report after a boot timeout.
+     *
+     * What: abandons the active SD transfer, destroys dirty asyncfatfs state,
+     * resets invalid facade ownership, reinitializes/remounts the card, and
+     * runs the ordinary eight-byte writer plus sync gate. Why: a second FAT
+     * operation cannot safely coexist with the owner that timed out. Inputs
+     * are the latched timeout and preserved code; output is nonzero only after
+     * bootlog.bin closes and syncs. Dirty abandon can leave the timed-out
+     * operation partially represented on card and is acceptable only in this
+     * DEV_LOGGING diagnostic build. The recovery has one ten-second ceiling,
+     * never retries, never invokes the abandoned callback, and failure must
+     * not prevent main.c from continuing to audio. Affiliates:
+     * sdcard_abortTransferForBootLog(), afatfs_destroy(true), SD_init(),
+     * filesystem_writeBootLog_tick(), and filesystem_bootLoggingEnd().
+     */
+#if DEV_LOGGING
+    uint8_t sd_init_result;
+    uint8_t write_ok = 0u;
+
+    if (!fs_boot_logging_active || !fs_boot_logging_timed_out)
+        return 0u;
+
+    fs_boot_logging_recovery = 1u;
+    fs_boot_logging_recovery_failed = 0u;
+    fs_boot_logging_recovery_started_tick = time_sysTick;
+
+    sdcard_abortTransferForBootLog();
+    (void)afatfs_destroy(true);
+    filesystem_resetFacadeForBootLogRecovery();
+
+    spi_sd_set_slow();
+    timebase_holdPreAudioMs(FS_SD_PREINIT_SETTLE_MS);
+    if (filesystem_bootLoggingPollDeadline())
+        goto recovery_failed;
+    sd_init_result = SD_init();
+    if (sd_init_result != 0u ||
+        filesystem_bootLoggingPollDeadline())
+        goto recovery_failed;
+
+    spi_sd_set_fast();
+    filesystem_initAfterCardReady();
+    while (afatfs_getFilesystemState() ==
+               AFATFS_FILESYSTEM_STATE_INITIALIZATION &&
+           !fs_boot_logging_recovery_failed) {
+        filesystem_tick();
+    }
+    if (fs_boot_logging_recovery_failed ||
+        afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY)
+        goto recovery_failed;
+
+    if (!filesystem_start(FS_INTERNAL_OP_WRITE_BOOT_LOG,
+                          FS_FILE_SETTINGS, 0u, NULL))
+        goto recovery_failed;
+    while (status == FS_STATUS_BUSY &&
+           !fs_boot_logging_recovery_failed) {
+        filesystem_tick();
+    }
+    write_ok = (uint8_t)(
+        !fs_boot_logging_recovery_failed && status == FS_STATUS_DONE);
+    if (write_ok)
+        filesystem_ack();
+    else
+        goto recovery_failed;
+
+    fs_boot_logging_recovery = 0u;
+    fs_boot_logging_recovery_failed = 0u;
+    return 1u;
+
+recovery_failed:
+    /*
+     * Bound failure cleanup without trying to close/flush another stuck owner.
+     * Inputs are any remount/write failure or recovery expiry; output is an
+     * idle, unmounted facade and zero. Why: a retry could reproduce the splash
+     * hang this feature exists to escape. Affiliates: main.c's common timeout
+     * continuation and filesystem_bootLoggingEnd().
+     */
+    sdcard_abortTransferForBootLog();
+    (void)afatfs_destroy(true);
+    filesystem_resetFacadeForBootLogRecovery();
+    fs_boot_logging_recovery = 0u;
+    return 0u;
+#else
+    return 0u;
+#endif
 }
 
 static void filesystem_autosaveWriterCompleted(void)
@@ -16457,6 +16986,17 @@ static void filesystem_autosaveWriterSchedule_tick(void)
 
 void filesystem_tick(void)
 {
+    /*
+     * Timeout is checked before another SD/FAT step can extend the failed
+     * transaction. Input is the armed pre-audio or recovery deadline; output
+     * is immediate cooperative unwind with no callback, close, or flush.
+     * Why: the diagnostic path must abandon the owner that failed to make
+     * progress, not enter its ordinary completion path. Affiliates: all
+     * facade-owned blocking wrappers and bootlog recovery.
+     */
+    if (filesystem_bootLoggingPollDeadline())
+        return;
+
     /* Busy operations poll asyncfatfs every pass so reads/writes make progress
     ** whenever the main loop has slack. When the public filesystem facade is
     ** idle, poll only every FS_IDLE_POLL_MS; that removes steady background SD
@@ -16489,6 +17029,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_WRITE_HCNAMES:
         filesystem_writeResidentNames_tick();
+        break;
+    case FS_INTERNAL_OP_WRITE_BOOT_LOG:
+        filesystem_writeBootLog_tick();
         break;
     case FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES:
         filesystem_ensureAutosaveFiles_tick();
@@ -16660,7 +17203,21 @@ void filesystem_ack(void)
 static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
                              uint16_t slot, fs_completion_cb_t cb)
 {
+    const char *boot_code;
+
     if (status == FS_STATUS_BUSY) return false;
+    /*
+     * Arm before publishing BUSY so the complete operation owns its code.
+     *
+     * Inputs: private operation and typed domain. Output: a fresh diagnostic
+     * deadline only when the pre-audio window is active and the operation has
+     * a stable boot classification. Why: blocking wrappers contain nested
+     * starts that main.c cannot see. Recovery and runtime starts are ignored
+     * by the logger API. Affiliate: filesystem_bootLogCodeForOperation().
+     */
+    boot_code = filesystem_bootLogCodeForOperation(op, type);
+    if (boot_code)
+        filesystem_bootLoggingArm(boot_code);
     status = FS_STATUS_BUSY;
     current_op = op;
     op_phase = 0;
@@ -17137,9 +17694,23 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
      */
     if (!filesystem_repairLibraryNamesBlocking(kind))
         return 0u;
-    if (kind == FS_LIBRARY_INDEX_KIT &&
-        !filesystem_quarantineKitLibraryBlocking())
-        return 0u;
+    if (kind == FS_LIBRARY_INDEX_KIT) {
+        uint8_t quarantine_ok;
+
+        /*
+         * Kit quarantine uses raw blocking FAT helpers after name repair has
+         * completed, so no filesystem_start() boundary exists to classify it.
+         * Input is the mounted `/Kit` namespace; output is a KITQUAR deadline
+         * covering validation/quarantine. Why: without this explicit arm the
+         * completed NAMEREPR code could be blamed for a later raw-loop stall.
+         * Affiliate: filesystem_blockPoll().
+         */
+        filesystem_bootLoggingArm("KITQUAR ");
+        quarantine_ok = filesystem_quarantineKitLibraryBlocking();
+        filesystem_bootLoggingOperationDone();
+        if (!quarantine_ok)
+            return 0u;
+    }
     filesystem_clearNameCacheStorage();
 
     if (fs_list_cache_kind != internal_kind) {

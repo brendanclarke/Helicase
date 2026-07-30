@@ -156,6 +156,29 @@ typedef enum {
 typedef void (*fs_boot_substep_diag_cb_t)(uint8_t substep);
 
 /*
+ * Pre-audio filesystem timeout logger.
+ *
+ * What: Begin opens the diagnostic window, Arm copies exactly eight operation
+ * bytes and restarts its deadline, TimedOut/Code expose the latched result,
+ * the blocking writer abandons a timed-out owner and makes one bounded remount
+ * attempt to replace `/bootlog.bin`, and End disables the policy before
+ * runtime. Why: a splash-screen stall otherwise leaves no durable indication
+ * of the last storage boundary entered. Inputs are fixed-width operation codes
+ * and the existing filesystem/SD state; outputs are a timeout flag and, when
+ * recovery succeeds, an exactly eight-byte root file. These functions are
+ * boot/main-context APIs only, are not ISR-safe, and a failed recovery never
+ * prevents the caller from continuing startup. Affiliates:
+ * filesystem_tick(), the private blocking FAT helpers, main.c's pre-audio
+ * ladder, and sdcard_abortTransferForBootLog().
+ */
+void        filesystem_bootLoggingBegin(void);
+void        filesystem_bootLoggingArm(const char code[8]);
+uint8_t     filesystem_bootLoggingTimedOut(void);
+const uint8_t *filesystem_bootLoggingCode(void);
+uint8_t     filesystem_writeBootTimeoutLogBlocking(void);
+void        filesystem_bootLoggingEnd(void);
+
+/*
  * Initialize and mount the SD card during pre-audio boot.
  *
  * Inputs: TIM6 millisecond timing is active and no runtime filesystem request

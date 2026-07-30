@@ -232,7 +232,7 @@ static void boot_delayMs(uint16_t ms)
 /*
  * Development-only boot-screen instrumentation.
  *
- * What: CONFIG_DEV_MODE compiles the durable Boot/FS, FOp/FPhs, FPhs/FSub,
+ * What: DEV_LOGGING compiles the durable Boot/FS, FOp/FPhs, FPhs/FSub,
  * and HPhs/HRow OLED observers used to isolate a blocking storage phase. Why:
  * each observer may deliberately drain the LCD queue before filesystem work,
  * which is useful for diagnosis but must not replace the normal splash or add
@@ -241,7 +241,7 @@ static void boot_delayMs(uint16_t ms)
  * callback arguments become NULL; the underlying boot and `.hcnames` work
  * therefore runs in exactly the same order without any diagnostic display.
  */
-#if CONFIG_DEV_MODE
+#if DEV_LOGGING
 static void boot_showHcnamesDiagnostic(uint8_t phase, uint16_t row)
 {
     static uint8_t last_phase = 0xffu;
@@ -424,6 +424,16 @@ int main(void)
     ** After audioCodec_init(), all SD operations are non-blocking.
     ** ----------------------------------------------------------------- */
     {
+        /*
+         * Open the timeout-logging window around only pre-audio filesystem work.
+         *
+         * Input is the idle boot storage facade; output enables eight-byte
+         * operation capture and cooperative ten-second deadlines until the
+         * common exit below. Why: runtime Menu/Preset/autosave work must never
+         * inherit diagnostic dirty-abandon behavior. Affiliates:
+         * filesystem_bootLoggingEnd() and audioCodec_init().
+         */
+        filesystem_bootLoggingBegin();
         boot_showFilesystemStage(1u);  /* card init + asyncfatfs mount */
         uint8_t sd_ok = filesystem_initCardAndMountBlocking();
         show_unsupported_card_warning = filesystem_bootDetectedUnsupportedCard();
@@ -431,6 +441,14 @@ int main(void)
         /* Menu init — must be before preset load (memsets parameter_values) */
         menu_init();
         menu_setNumSamples(sampleMemory_getNumSamples());
+        /*
+         * Mount can publish a timeout before Menu initialization, but Menu is
+         * still required by the runtime path reached after recovery. Input is
+         * the latched mount result; output jumps to the one cleanup path only
+         * after that mandatory initialization. Affiliate: MOUNTSD logging.
+         */
+        if (filesystem_bootLoggingTimedOut())
+            goto boot_filesystem_timeout;
 
         if (sd_ok) {
             /*
@@ -455,6 +473,8 @@ int main(void)
             filesystem_requestScanKits(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
             filesystem_ack();
 
             /*
@@ -467,6 +487,8 @@ int main(void)
              */
             boot_showFilesystemStage(3u);
             (void)filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT);
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
 
             /*
              * Synchronous Scene/ scan.
@@ -481,6 +503,8 @@ int main(void)
             filesystem_requestScanScenes(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
             filesystem_ack();
 
             /*
@@ -492,6 +516,8 @@ int main(void)
             boot_showFilesystemStage(5u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_SCENE);
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
 
             /*
              * Synchronous Bank/ scan.
@@ -506,6 +532,8 @@ int main(void)
             filesystem_requestScanBanks(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
             filesystem_ack();
 
             /*
@@ -517,6 +545,8 @@ int main(void)
             boot_showFilesystemStage(7u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_BANK);
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
 
             /*
              * Scan and create fresh per-type `.hcindex` files one type at a
@@ -528,6 +558,8 @@ int main(void)
              */
             boot_showFilesystemStage(8u);
             (void)filesystem_createBootIndexBlocking();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
 
             /*
              * Settle the final boot index write before reloading/using Bank.
@@ -568,6 +600,8 @@ int main(void)
                 filesystem_requestLoadBankIndex(NULL);
                 while (filesystem_status() == FS_STATUS_BUSY)
                     filesystem_tick();
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
                 filesystem_ack();
 
                 /*
@@ -592,6 +626,8 @@ int main(void)
                     filesystem_requestLoadSceneIndex(NULL);
                     while (filesystem_status() == FS_STATUS_BUSY)
                         filesystem_tick();
+                    if (filesystem_bootLoggingTimedOut())
+                        goto boot_filesystem_timeout;
                     filesystem_ack();
                     if (filesystem_sceneSlotExists(
                             filesystem_firstSceneSlot())) {
@@ -603,6 +639,8 @@ int main(void)
                         filesystem_requestLoadKitIndex(NULL);
                         while (filesystem_status() == FS_STATUS_BUSY)
                             filesystem_tick();
+                        if (filesystem_bootLoggingTimedOut())
+                            goto boot_filesystem_timeout;
                         filesystem_ack();
                         preset_loadFirstAvailableSceneOrKit();
                     }
@@ -612,10 +650,20 @@ int main(void)
             for (uint8_t boot_load_pass = 0u;
                  boot_load_pass < 2u;
                  boot_load_pass++) {
-                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS) {
+                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
+                       !filesystem_bootLoggingTimedOut()) {
                     boot_showActiveFilesystemDiagnostic();
                     filesystem_tick();
                 }
+                /*
+                 * Preset retains LOAD_IN_PROGRESS when its filesystem callback
+                 * is deliberately abandoned. Input is the watchdog latch;
+                 * output leaves before menu_pollPresetStatus() can apply an
+                 * incomplete stage or post a fallback request. Affiliates:
+                 * preset_ackStatus() in the common timeout cleanup.
+                 */
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
                 menu_pollPresetStatus();  /* apply Bank/Scene/Kit + ack */
                 if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
                     break;
@@ -640,8 +688,11 @@ int main(void)
             /* Load globals via presetManager */
             boot_showFilesystemStage(13u);
             preset_loadGlobals();
-            while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS)
+            while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
+                   !filesystem_bootLoggingTimedOut())
                 filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
             menu_pollPresetStatus();  /* apply globals + ack */
 
             /*
@@ -653,11 +704,46 @@ int main(void)
              * only missing baseline files; it neither reads an overlay nor
              * marks a record active before audio starts.
              */
-            if (bank_hasResidentBank())
+            if (bank_hasResidentBank()) {
                 (void)filesystem_ensureAutosaveFilesBlocking();
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+            }
         } else {
             /* SD card not detected — menu_init already ran above */
         }
+
+        goto boot_filesystem_done;
+
+boot_filesystem_timeout:
+        /*
+         * Abandon the remaining SD boot ladder and make one bounded log attempt.
+         *
+         * Inputs: a latched filesystem timeout, possibly an installed substep
+         * observer, and possibly PRESET_LOAD_IN_PROGRESS. Outputs: observers
+         * and Preset ownership are cleared, then the filesystem facade
+         * remounts once and attempts the exact eight-byte `/bootlog.bin` write.
+         * Its result never gates startup. Why: applying an abandoned Preset
+         * stage or retrying the storage ladder could recreate the splash hang.
+         * Affiliates: filesystem_writeBootTimeoutLogBlocking() and the common
+         * pre-audio continuation below.
+         */
+        filesystem_setBootSubstepDiagnostic(NULL);
+        if (preset_getStatus() != PRESET_IDLE)
+            preset_ackStatus();
+        (void)filesystem_writeBootTimeoutLogBlocking();
+
+boot_filesystem_done:
+        /*
+         * Disable diagnostic abort semantics on every route to runtime.
+         *
+         * Inputs: normal completion, no-card mount failure, or completed/failed
+         * recovery. Output: the retained code remains observational, but no
+         * runtime operation is armed or timed out. Why: the ten-second dirty
+         * abandon policy is boot-only. Affiliates: stage 14, audio startup,
+         * Menu/Preset requests, and background autosave.
+         */
+        filesystem_bootLoggingEnd();
     }
 
 
