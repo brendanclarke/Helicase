@@ -417,6 +417,12 @@ void afatfs_poll();
 
 uint32_t afatfs_getFreeBufferSpace();
 uint32_t afatfs_getContiguousFreeSpace();
+/*
+ * Report that a complete, wrap-around search of the regular FAT cluster pool
+ * (or the optional contiguous pool) found no space. The result is sticky until
+ * remount, so a caller extending a file must treat a zero-byte fwrite plus
+ * this result as terminal rather than retrying forever.
+ */
 bool afatfs_isFull();
 
 afatfsFilesystemState_e afatfs_getFilesystemState();

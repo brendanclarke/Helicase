@@ -60,6 +60,7 @@
  */
 
 #include "filesystem.h"
+#include "config.h"
 #include "asyncfatfs.h"
 #include "fat_standard.h"
 #include "storageTypes.h"
@@ -175,6 +176,12 @@ typedef enum {
      * rewrite; those are separate future autosave milestones.
      */
     FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES,
+    /*
+     * Runtime, background-only A/B writer. It validates both complete records,
+     * copy-forwards the active-Bank winner to its inactive peer, and commits a
+     * one-byte diagnostic counter without changing any mutation-mask payload.
+     */
+    FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE,
     /*
      * Runtime reader/update operations borrow the generalized name cache.
      * Instrument operations address one voice row per selected Scene. Kit
@@ -523,6 +530,32 @@ typedef struct {
 } filesystem_scene_stage_t;
 
 /*
+ * Runtime autosave writer state borrowed from the existing 2 KB operation
+ * stage. The filesystem facade permits only one operation at a time, so this
+ * state cannot overlap Kit/Scene/Instrument parser staging. It deliberately
+ * stores only scalar progress and the second copy-forward file handle: the
+ * 23,248-byte record always remains streamed through staging_buf.
+ */
+typedef struct {
+    autosave_stream_validation_t validation;
+    afatfsFilePtr_t target_file;
+    uint32_t winner_generation;
+    uint32_t target_crc32c;
+    uint32_t stream_offset;
+    uint32_t seek_position;
+    uint16_t chunk_bytes;
+    uint16_t chunk_written;
+    uint8_t winner_index;
+    uint8_t winner_probe;
+    uint8_t candidate_index;
+    uint8_t have_winner;
+    uint8_t candidate_valid;
+    uint8_t target_ready;
+    uint8_t recovery_target_index;
+    uint8_t recovery_using_names;
+} filesystem_autosave_writer_state_t;
+
+/*
  * Separate fixed-size non-Pattern payload stage.
  *
  * What: 2,048 bytes of aligned SRAM for one Kit, one Instrument, or one
@@ -549,6 +582,7 @@ typedef union {
      * on-card `.hctmp.<ext>` file, so staging never owns a second image. */
     kit_instrument_slot_t instrument_stage;
     filesystem_scene_stage_t scene_stage;
+    filesystem_autosave_writer_state_t autosave_writer;
 } filesystem_stage_workspace_t;
 
 /*
@@ -606,6 +640,7 @@ _Static_assert(_Alignof(filesystem_stage_workspace_t) >= _Alignof(kit_t),
 
 #define op_staged_kit        (fs_stage_workspace.kit_stage)
 #define op_staged_instrument (fs_stage_workspace.instrument_stage)
+#define op_autosave_writer   (fs_stage_workspace.autosave_writer)
 
 void filesystem_clearIdentityNames(void)
 {
@@ -809,6 +844,9 @@ static void filesystem_createLibraryIndex_tick(void);
 static void filesystem_writeResidentNames_tick(void);
 static void filesystem_residentNames_tick(void);
 static void filesystem_ensureAutosaveFiles_tick(void);
+static void filesystem_autosaveDummyWrite_tick(void);
+static void filesystem_autosaveWriterSchedule_tick(void);
+static void filesystem_autosaveWriterCompleted(void);
 static uint8_t filesystem_residentNameIsBlank(const char *name);
 static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t cap,
@@ -1126,6 +1164,22 @@ static uint16_t fs_bank_scratch_counter = 0u;
  * as keyed text and the former raw globals filename is deliberately ignored. */
 #define FS_GLOBALS_LEGACY_LEN_22  22u
 static uint16_t fs_last_idle_poll_tick = 0;
+/*
+ * Background autosave cadence state.
+ *
+ * This is deliberately separate from fs_last_idle_poll_tick: the latter owns
+ * 5 ms idle SD polling, while these fields own the 5 s write schedule. The
+ * one-operation stage cannot retain this information after completion.
+ */
+static uint16_t fs_autosave_next_due_tick = 0u;
+static uint8_t fs_autosave_writer_armed = 0u;
+/*
+ * Pre-audio boot owns first creation of the hidden record pair. This gate
+ * remains clear from reset until that create-only transaction has completed,
+ * preventing the runtime recovery writer from racing the Bank/globals boot
+ * ladder when a card starts with no autosave files.
+ */
+static uint8_t fs_autosave_writer_boot_ready = 0u;
 
 /* Existing morph destination buffer owned by preset/sound code.
  *
@@ -1154,6 +1208,18 @@ static void on_file_closed(void)
     op_close_done = true;
 }
 
+static void on_autosave_target_opened(afatfsFilePtr_t file)
+{
+    /*
+     * The copy-forward phase keeps op_file as its read handle. AsyncFATFS
+     * returns the concurrently opened inactive target through this dedicated
+     * callback into the existing operation stage rather than overwriting the
+     * reader handle or allocating another global file pointer.
+     */
+    op_autosave_writer.target_file = file;
+    op_autosave_writer.target_ready = 1u;
+}
+
 static void on_remove_complete(void)
 {
     /*
@@ -1168,8 +1234,8 @@ static void on_remove_complete(void)
      * user's entered case. The filesystem pump needs this callback bridge
      * between asyncfatfs completion and the next phase.
      *
-     * Affiliates/clients: filesystem_saveInstrument_tick() and
-     * InstrumentMrp Save.
+     * Affiliates/clients: filesystem_saveInstrument_tick(), InstrumentMrp
+     * Save, and the autosave writer's inactive-record deduplication phases.
      */
     op_remove_done = 1u;
 }
@@ -2058,6 +2124,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_CREATE_BOOT_INDEX:     return "HIdx";
     case FS_INTERNAL_OP_CREATE_LIBRARY_INDEX:  return "LIdx";
     case FS_INTERNAL_OP_WRITE_HCNAMES:         return "HNam";
+    case FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE:  return "ASv";
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:return "HNrL";
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:return "HNrU";
     case FS_INTERNAL_OP_LOAD_HCNAMES_KIT:      return "HNkL";
@@ -3366,6 +3433,29 @@ static const char *filesystem_autosaveTargetName(void)
         : AUTOSAVE_RECORD_B_FILENAME;
 }
 
+static const char *filesystem_autosaveFilenameForIndex(uint8_t index)
+{
+    /*
+     * Keep boot creation and runtime writer bound to the same A/B display
+     * names. Every autosave LFN open uses case-insensitive matching: FAT has
+     * one case-folded filename namespace, so exact-case lookup could miss an
+     * existing host-cased entry and create a visible duplicate.
+     */
+    return (index == 0u) ? AUTOSAVE_RECORD_A_FILENAME
+                         : AUTOSAVE_RECORD_B_FILENAME;
+}
+
+static uint32_t filesystem_autosaveCreatedTargetGeneration(void)
+{
+    /*
+     * Once a missing target is open, op_stream_index is borrowed for the
+     * already-calculated CRC32C. op_file_version is no longer needed as the
+     * root-scan absent flag, so it retains that target's A/B index until the
+     * close callback restores normal target selection.
+     */
+    return (op_file_version == 0u) ? 1u : 0u;
+}
+
 static uint8_t filesystem_autosaveTargetMatches(const char *candidate,
                                                 const char *target)
 {
@@ -3411,12 +3501,12 @@ static void filesystem_autosaveAdvanceTarget(void)
 /* -----------------------------------------------------------------------
 ** BOOT AUTOSAVE-REGISTER ENSURE state machine
 **
-** Inputs: a successfully loaded Bank, its validated restore slot/BankData
-** name, and root `/.hcnames`. Outputs: only missing `/.hcprms1` and
-** `/hcprms2` files receive one 23,184-byte zero/name baseline. Existing files
-** are first found by the LFN-aware root iterator and then left unopened for
-** write. The state machine owns no new retained memory: it reuses the normal
-** HCNAMES cache, staging_buf, operation cursors, and one normal file handle.
+** Inputs: a successfully loaded Bank, its BankData name, and root `/.hcnames`.
+** Outputs: only missing `/.hcprms1` and `/.hcprms2` files receive one
+** 23,248-byte zero/name baseline with a valid CRC32C control header. Existing
+** files are first found by the LFN-aware root iterator and then left unopened
+** for write. The state machine owns no new retained memory: it reuses the
+** normal HCNAMES cache, staging_buf, operation cursors, and one file handle.
 ** ----------------------------------------------------------------------- */
 static void filesystem_ensureAutosaveFiles_tick(void)
 {
@@ -3570,7 +3660,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             return;
         op_file_ready = false;
         if (!afatfs_fopen_lfn(filesystem_autosaveTargetName(), "w",
-                              AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                              AFATFS_MATCH_CASE_INSENSITIVE, NULL,
                               on_file_opened)) {
             return;
         }
@@ -3584,13 +3674,25 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        /*
+         * Compute the deterministic whole-record CRC once per newly created
+         * target. The existing fields change roles only after the root scan:
+         * op_file_version retains A/B and op_stream_index now holds CRC32C.
+         */
+        op_file_version = (uint8_t)op_stream_index;
+        op_stream_index = autosave_initialRecordCrc(
+            filesystem_autosaveCreatedTargetGeneration(), bank_displayName(),
+            (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
         op_bytes_done = 0u;
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
         op_phase = 10u;
         return;
 
-    case 10: /* STREAM ONE ZERO/NAME CHUNK AT A TIME */
+    case 10: /* STREAM ONE COMPLETE HEADER/MASK/NAME CHUNK AT A TIME */
+    {
+        uint32_t written;
+
         if (op_bytes_done >= AUTOSAVE_RECORD_BYTES) {
             op_close_done = false;
             if (afatfs_fclose(op_file, on_file_closed))
@@ -3605,28 +3707,701 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             op_write_line_offset = 0u;
             autosave_formatInitialChunk(
                 staging_buf, op_bytes_done, op_write_line_len,
-                bank_restoreBankSlot(), bank_displayName(),
+                filesystem_autosaveCreatedTargetGeneration(), op_stream_index,
+                bank_displayName(),
                 (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
         }
-        op_write_line_offset = (uint16_t)(op_write_line_offset +
-            afatfs_fwrite(op_file, staging_buf + op_write_line_offset,
-                          op_write_line_len - op_write_line_offset));
+        written = afatfs_fwrite(
+            op_file, staging_buf + op_write_line_offset,
+            op_write_line_len - op_write_line_offset);
+        op_write_line_offset =
+            (uint16_t)(op_write_line_offset + written);
+        /*
+         * A zero-byte asynchronous write is normally back-pressure and must be
+         * retried. Once AsyncFATFS has positively declared its regular cluster
+         * pool exhausted, however, retry can never progress: its full flag is
+         * intentionally sticky until remount. Close the partial file and
+         * return an error so this boot-only wrapper cannot strand the device
+         * in its pre-audio polling loop.
+         *
+         * The cluster allocator now searches both sides of its allocation
+         * hint before setting this flag, so this branch represents genuine
+         * exhaustion rather than the former false end-of-volume result.
+         */
+        if (written == 0u && afatfs_isFull()) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 12u;
+            return;
+        }
         if (op_write_line_offset >= op_write_line_len) {
             op_bytes_done += op_write_line_len;
             op_write_line_len = 0u;
             op_write_line_offset = 0u;
         }
         return;
+    }
 
     case 11: /* WAIT NEW TARGET CLOSE, THEN HANDLE THE OTHER TARGET */
         if (!op_close_done)
             return;
         op_file = NULL;
+        /* Restore op_stream_index's ordinary A/B selector before advancing. */
+        op_stream_index = op_file_version;
         filesystem_autosaveAdvanceTarget();
+        return;
+
+    case 12: /* WAIT FAILED PARTIAL-FILE CLOSE, THEN RELEASE BOOT */
+        /*
+         * The caller only authorizes the runtime writer after a DONE result.
+         * Returning ERROR here therefore leaves autosave disabled while still
+         * allowing the rest of boot to reach audio and UI. The partial record
+         * is harmless: a later boot can create the missing peer, after which
+         * normal validation/recovery can replace any invalid record.
+         */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_finish(FS_STATUS_ERROR);
         return;
 
     default:
         filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+static void filesystem_autosaveWriterFinishErrorNow(void)
+{
+    /*
+     * Recovery is the only writer path that borrows HCNAMES. Dispose that
+     * temporary cache domain on every error before publishing the normal
+     * filesystem failure; ordinary copy-forward never touches name rows.
+     */
+    if (op_autosave_writer.recovery_using_names) {
+        filesystem_clearNameCacheStorage();
+        op_autosave_writer.recovery_using_names = 0u;
+    }
+    filesystem_finish(FS_STATUS_ERROR);
+}
+
+static void filesystem_autosaveWriterFinishError(void)
+{
+    /*
+     * Every normal writer close is asynchronous, so an error may arrive while
+     * the source and/or inactive target is still open. Route it through the
+     * dedicated close-down phases instead of handing a live handle back to a
+     * later filesystem operation. The phases retry a close only until it is
+     * accepted, then wait for its callback before publishing ERROR.
+     */
+    if (op_file) {
+        op_phase = 40u;
+        return;
+    }
+    if (op_autosave_writer.target_file) {
+        op_phase = 42u;
+        return;
+    }
+    filesystem_autosaveWriterFinishErrorNow();
+}
+
+static uint32_t filesystem_autosaveRecoveryGeneration(void)
+{
+    /* Recovery writes B=0 first, then A=1, restoring the documented baseline. */
+    return (op_autosave_writer.recovery_target_index == 0u) ? 1u : 0u;
+}
+
+/* -----------------------------------------------------------------------
+** RUNTIME AUTOSAVE DUMMY-WRITER state machine
+**
+** Inputs: a resident Bank, the two root records, and the ordinary foreground
+** filesystem pump. Outputs: one valid winner is copy-forwarded into its
+** inactive peer with only generation/probe header changes; no payload or mask
+** byte changes. If neither record validates for the current Bank name, both
+** are asynchronously regenerated B then A from HCNAMES. No phase blocks on
+** an AsyncFATFS operation or consumes the shared name cache except recovery.
+** ----------------------------------------------------------------------- */
+static void filesystem_autosaveDummyWrite_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* INITIALIZE ONE OPERATION-LOCAL A/B VALIDATION PASS */
+        memset(&op_autosave_writer, 0, sizeof(op_autosave_writer));
+        op_autosave_writer.candidate_index = 0u;
+        op_phase = 1u;
+        return;
+
+    case 1: /* OPEN CURRENT A/B CANDIDATE FOR A STREAMING VALIDATION READ */
+        if (!afatfs_chdir(NULL))
+            return;
+        autosave_streamValidationBegin(&op_autosave_writer.validation);
+        op_autosave_writer.candidate_valid = 0u;
+        op_bytes_done = 0u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    op_autosave_writer.candidate_index),
+                "r", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            /* No handle available/missing candidate is simply invalid. */
+            op_phase = 5u;
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2: /* WAIT CANDIDATE OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            op_phase = 5u;
+            return;
+        }
+        op_phase = 3u;
+        return;
+
+    case 3: /* STREAM ONE CANDIDATE THROUGH CRC/HEADER/BANK-NAME VALIDATION */
+    {
+        uint32_t n = afatfs_fread(op_file, staging_buf, sizeof(staging_buf));
+
+        if (n != 0u) {
+            autosave_streamValidationUpdate(&op_autosave_writer.validation,
+                                            op_bytes_done, staging_buf,
+                                            (uint16_t)n);
+            op_bytes_done += n;
+            return;
+        }
+        if (!afatfs_feof(op_file))
+            return;
+        op_autosave_writer.candidate_valid = (uint8_t)(
+            autosave_streamValidationFinish(&op_autosave_writer.validation) &&
+            autosave_streamValidationMatchesBankName(
+                &op_autosave_writer.validation, bank_displayName()));
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 4u;
+        return;
+    }
+
+    case 4: /* WAIT CANDIDATE CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_phase = 5u;
+        return;
+
+    case 5: /* RECORD BEST VALID CANDIDATE, THEN ADVANCE A -> B */
+        if (op_autosave_writer.candidate_valid &&
+            (!op_autosave_writer.have_winner ||
+             autosave_generationIsNewer(
+                 op_autosave_writer.validation.generation,
+                 op_autosave_writer.winner_generation))) {
+            /* A remains the deterministic winner on equal generations. */
+            op_autosave_writer.have_winner = 1u;
+            op_autosave_writer.winner_index =
+                op_autosave_writer.candidate_index;
+            op_autosave_writer.winner_generation =
+                op_autosave_writer.validation.generation;
+            op_autosave_writer.winner_probe =
+                op_autosave_writer.validation.probe_counter;
+        }
+        if (op_autosave_writer.candidate_index + 1u <
+            AUTOSAVE_RECORD_FILE_COUNT) {
+            op_autosave_writer.candidate_index++;
+            op_phase = 1u;
+            return;
+        }
+        op_phase = op_autosave_writer.have_winner ? 6u : 30u;
+        return;
+
+    case 6: /* OPEN WINNER FOR A PROSPECTIVE-TARGET CRC STREAM */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_bytes_done = 0u;
+        op_autosave_writer.target_crc32c = autosave_recordCrcBegin();
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    op_autosave_writer.winner_index),
+                "r", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 7u;
+        return;
+
+    case 7: /* WAIT WINNER CRC-STREAM OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 8u;
+        return;
+
+    case 8: /* STREAM TRANSFORMED WINNER ONCE TO CALCULATE FINAL CRC32C */
+    {
+        uint32_t remaining = AUTOSAVE_RECORD_BYTES - op_bytes_done;
+        uint32_t n;
+
+        if (remaining == 0u) {
+            op_autosave_writer.target_crc32c = autosave_recordCrcFinish(
+                op_autosave_writer.target_crc32c);
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 9u;
+            return;
+        }
+        n = afatfs_fread(op_file, staging_buf,
+                         (remaining > sizeof(staging_buf))
+                             ? sizeof(staging_buf) : remaining);
+        if (n == 0u) {
+            if (afatfs_feof(op_file))
+                filesystem_autosaveWriterFinishError();
+            return;
+        }
+        autosave_transformChunk(
+            staging_buf, op_bytes_done, (uint16_t)n,
+            op_autosave_writer.winner_generation + 1u,
+            (uint8_t)(op_autosave_writer.winner_probe + 1u), 0u,
+            AUTOSAVE_HEADER_COMMIT_VALID);
+        op_autosave_writer.target_crc32c = autosave_recordCrcUpdate(
+            op_autosave_writer.target_crc32c, op_bytes_done, staging_buf,
+            (uint16_t)n);
+        op_bytes_done += n;
+        return;
+    }
+
+    case 9: /* WAIT CRC-STREAM SOURCE CLOSE, THEN REOPEN FOR COPY */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_phase = 10u;
+        return;
+
+    case 10: /* OPEN WINNER AS COPY SOURCE */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    op_autosave_writer.winner_index),
+                "r", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 11u;
+        return;
+
+    case 11: /* WAIT COPY SOURCE OPEN, THEN REMOVE EVERY INACTIVE VARIANT */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        /*
+         * FAT display names are case-insensitive and a damaged/old card can
+         * already contain multiple LFN entries for one hidden register. The
+         * selected winner remains open and untouched, so retire every file
+         * variant of only the inactive target before creating its one new
+         * canonical entry. This is the duplicate-prevention boundary: a
+         * write-open alone can otherwise select one variant and leave siblings
+         * visible to a desktop filesystem.
+         */
+        op_remove_done = 0u;
+        if (!afatfs_removeObjects_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    (uint8_t)(op_autosave_writer.winner_index ^ 1u)),
+                AFATFS_MATCH_CASE_INSENSITIVE,
+                AFATFS_REMOVE_FILES_ONLY, on_remove_complete)) {
+            return;
+        }
+        op_phase = 24u;
+        return;
+
+    case 24: /* WAIT TARGET-VARIANT RETIREMENT, THEN CREATE ONE TARGET */
+        if (!op_remove_done)
+            return;
+        op_autosave_writer.target_file = NULL;
+        op_autosave_writer.target_ready = 0u;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    (uint8_t)(op_autosave_writer.winner_index ^ 1u)),
+                "w", AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                on_autosave_target_opened)) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 12u;
+        return;
+
+    case 12: /* WAIT INACTIVE TARGET OPEN */
+        if (!op_autosave_writer.target_ready)
+            return;
+        if (!op_autosave_writer.target_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_autosave_writer.stream_offset = 0u;
+        op_autosave_writer.chunk_bytes = 0u;
+        op_autosave_writer.chunk_written = 0u;
+        op_phase = 13u;
+        return;
+
+    case 13: /* COPY ONE TRANSFORMED SOURCE CHUNK, WITH COMMIT MARKER CLEAR */
+    {
+        uint32_t n;
+
+        if (op_autosave_writer.chunk_written <
+            op_autosave_writer.chunk_bytes) {
+            n = afatfs_fwrite(
+                op_autosave_writer.target_file,
+                staging_buf + op_autosave_writer.chunk_written,
+                op_autosave_writer.chunk_bytes -
+                    op_autosave_writer.chunk_written);
+            op_autosave_writer.chunk_written = (uint16_t)(
+                op_autosave_writer.chunk_written + n);
+            /*
+             * Zero normally means asynchronous back-pressure. A sticky full
+             * result is terminal, so enter the existing two-handle close path
+             * rather than occupying the one filesystem operation forever.
+             */
+            if (n == 0u && afatfs_isFull())
+                filesystem_autosaveWriterFinishError();
+            return;
+        }
+        if (op_autosave_writer.stream_offset >= AUTOSAVE_RECORD_BYTES) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 14u;
+            return;
+        }
+        n = afatfs_fread(
+            op_file, staging_buf,
+            ((AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset) >
+             sizeof(staging_buf))
+                ? sizeof(staging_buf)
+                : (AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset));
+        if (n == 0u) {
+            if (afatfs_feof(op_file))
+                filesystem_autosaveWriterFinishError();
+            return;
+        }
+        autosave_transformChunk(
+            staging_buf, op_autosave_writer.stream_offset, (uint16_t)n,
+            op_autosave_writer.winner_generation + 1u,
+            (uint8_t)(op_autosave_writer.winner_probe + 1u),
+            op_autosave_writer.target_crc32c, 0u);
+        op_autosave_writer.stream_offset += n;
+        op_autosave_writer.chunk_bytes = (uint16_t)n;
+        op_autosave_writer.chunk_written = 0u;
+        return;
+    }
+
+    case 14: /* WAIT COPY SOURCE CLOSE, THEN CLOSE INVALID TARGET */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_close_done = false;
+        if (afatfs_fclose(op_autosave_writer.target_file, on_file_closed))
+            op_phase = 15u;
+        return;
+
+    case 15: /* WAIT INVALID TARGET CLOSE, THEN MAKE COPY DURABLE */
+        if (!op_close_done)
+            return;
+        op_autosave_writer.target_file = NULL;
+        op_phase = 16u;
+        return;
+
+    case 16: /* PRIVATE INTERMEDIATE SYNC: NEVER PUBLISH DONE BEFORE COMMIT */
+        if (!afatfs_sync())
+            return;
+        op_phase = 17u;
+        return;
+
+    case 17: /* REOPEN TARGET WITHOUT TRUNCATION FOR THE FINAL COMMIT BYTE */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    (uint8_t)(op_autosave_writer.winner_index ^ 1u)),
+                "r+", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 18u;
+        return;
+
+    case 18: /* WAIT FINAL-COMMIT TARGET OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 19u;
+        return;
+
+    case 19: /* START/RETRY ASYNCHRONOUS SEEK TO HEADER COMMIT OFFSET */
+    {
+        afatfsOperationStatus_e seek = afatfs_fseek(
+            op_file, AUTOSAVE_HEADER_COMMIT_OFFSET, AFATFS_SEEK_SET);
+
+        if (seek == AFATFS_OPERATION_SUCCESS) {
+            op_phase = 21u;
+        } else if (seek == AFATFS_OPERATION_IN_PROGRESS) {
+            op_phase = 20u;
+        }
+        /* FAILURE means the file is still busy; retry this phase next tick. */
+        return;
+    }
+
+    case 20: /* WAIT QUEUED SEEK BY OBSERVING THE FILE CURSOR */
+        if (!afatfs_ftell(op_file, &op_autosave_writer.seek_position))
+            return;
+        if (op_autosave_writer.seek_position != AUTOSAVE_HEADER_COMMIT_OFFSET) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 21u;
+        return;
+
+    case 21: /* WRITE THE ONE VALID MARKER BYTE LAST */
+        staging_buf[0] = AUTOSAVE_HEADER_COMMIT_VALID;
+        if (afatfs_fwrite(op_file, staging_buf, 1u) != 1u)
+            return;
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 22u;
+        return;
+
+    case 22: /* FINAL CLOSE THEN EXISTING filesystem_finish() SYNC GATE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 30: /* RECOVERY: LOAD HCNAMES BEFORE OVERWRITING EITHER INVALID FILE */
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_prepareResidentNamesCache();
+        op_autosave_writer.recovery_using_names = 1u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME, "r",
+                              AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                              on_file_opened)) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 31u;
+        return;
+
+    case 31: /* WAIT RECOVERY HCNAMES OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_item_offset = 0u;
+        op_line_len = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 32u;
+        return;
+
+    case 32: /* STREAM HCNAMES INTO THE EXISTING TEMPORARY CACHE */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t read_status = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (read_status != STORAGE_STATUS_OK &&
+            read_status != STORAGE_STATUS_WAIT) {
+            op_close_status = FS_STATUS_ERROR;
+        }
+        if (line_ready) {
+            filesystem_cacheResidentName(op_item_offset, op_line_buf);
+            if (op_item_offset < UINT16_MAX)
+                op_item_offset++;
+            op_line_len = 0u;
+        }
+        if ((read_status != STORAGE_STATUS_OK &&
+             read_status != STORAGE_STATUS_WAIT) || eof) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 33u;
+        }
+        return;
+    }
+
+    case 33: /* WAIT HCNAMES CLOSE, THEN REGENERATE B BEFORE A */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_autosave_writer.recovery_target_index = 1u;
+        op_phase = 34u;
+        return;
+
+    case 34: /* REMOVE ALL CORRUPT TARGET VARIANTS BEFORE RECOVERY CREATE */
+        if (!afatfs_chdir(NULL))
+            return;
+        /*
+         * Neither record passed validation, so recovery may safely collapse
+         * all file variants for this one A/B target before rebuilding it.
+         * The same case-folded removal used by normal copy-forward guarantees
+         * a repaired card returns with exactly one .hcprms1 and one .hcprms2.
+         */
+        op_remove_done = 0u;
+        if (!afatfs_removeObjects_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    op_autosave_writer.recovery_target_index),
+                AFATFS_MATCH_CASE_INSENSITIVE,
+                AFATFS_REMOVE_FILES_ONLY, on_remove_complete)) {
+            return;
+        }
+        op_phase = 25u;
+        return;
+
+    case 25: /* WAIT RECOVERY TARGET-VARIANT RETIREMENT, THEN OPEN ONE FILE */
+        if (!op_remove_done)
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    op_autosave_writer.recovery_target_index),
+                "w", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 35u;
+        return;
+
+    case 35: /* WAIT RECOVERY TARGET OPEN AND PREPARE ITS FIXED CRC */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_autosave_writer.target_crc32c = autosave_initialRecordCrc(
+            filesystem_autosaveRecoveryGeneration(), bank_displayName(),
+            (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
+        op_autosave_writer.stream_offset = 0u;
+        op_autosave_writer.chunk_bytes = 0u;
+        op_autosave_writer.chunk_written = 0u;
+        op_phase = 36u;
+        return;
+
+    case 36: /* STREAM ONE RECOVERY BASELINE CHUNK WITHOUT A RECORD BUFFER */
+    {
+        uint32_t n;
+
+        if (op_autosave_writer.chunk_written <
+            op_autosave_writer.chunk_bytes) {
+            n = afatfs_fwrite(op_file,
+                              staging_buf + op_autosave_writer.chunk_written,
+                              op_autosave_writer.chunk_bytes -
+                                  op_autosave_writer.chunk_written);
+            op_autosave_writer.chunk_written = (uint16_t)(
+                op_autosave_writer.chunk_written + n);
+            /*
+             * Recovery uses the same cluster-growth path as boot creation.
+             * Preserve ordinary zero-byte retries, but close and release the
+             * background operation after a proven full-volume result.
+             */
+            if (n == 0u && afatfs_isFull())
+                filesystem_autosaveWriterFinishError();
+            return;
+        }
+        if (op_autosave_writer.stream_offset >= AUTOSAVE_RECORD_BYTES) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 37u;
+            return;
+        }
+        op_autosave_writer.chunk_bytes = (uint16_t)(
+            (AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset) >
+            sizeof(staging_buf)
+                ? sizeof(staging_buf)
+                : (AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset));
+        autosave_formatInitialChunk(
+            staging_buf, op_autosave_writer.stream_offset,
+            op_autosave_writer.chunk_bytes,
+            filesystem_autosaveRecoveryGeneration(),
+            op_autosave_writer.target_crc32c, bank_displayName(),
+            (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
+        op_autosave_writer.stream_offset += op_autosave_writer.chunk_bytes;
+        op_autosave_writer.chunk_written = 0u;
+        return;
+    }
+
+    case 37: /* WAIT RECOVERY TARGET CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_phase = 38u;
+        return;
+
+    case 38: /* FLUSH B BEFORE A, THEN USE THE NORMAL FINAL FLUSH FOR A */
+        if (op_autosave_writer.recovery_target_index == 1u) {
+            if (!afatfs_sync())
+                return;
+            op_autosave_writer.recovery_target_index = 0u;
+            op_phase = 34u;
+            return;
+        }
+        filesystem_clearNameCacheStorage();
+        op_autosave_writer.recovery_using_names = 0u;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 40: /* ERROR CLEANUP: QUEUE/RETRY SOURCE-HANDLE CLOSE */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 41u;
+        return;
+
+    case 41: /* WAIT SOURCE CLOSE, THEN DISCARD ANY OPEN INACTIVE TARGET */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_autosave_writer.target_file) {
+            op_phase = 42u;
+            return;
+        }
+        filesystem_autosaveWriterFinishErrorNow();
+        return;
+
+    case 42: /* ERROR CLEANUP: QUEUE/RETRY INACTIVE-TARGET CLOSE */
+        op_close_done = false;
+        if (afatfs_fclose(op_autosave_writer.target_file, on_file_closed))
+            op_phase = 43u;
+        return;
+
+    case 43: /* WAIT INACTIVE TARGET CLOSE, THEN PUBLISH ERROR */
+        if (!op_close_done)
+            return;
+        op_autosave_writer.target_file = NULL;
+        filesystem_autosaveWriterFinishErrorNow();
+        return;
+
+    default:
+        filesystem_autosaveWriterFinishError();
         return;
     }
 }
@@ -15626,6 +16401,60 @@ uint8_t filesystem_initCardAndMountBlocking(void)
     return 0;
 }
 
+static void filesystem_autosaveWriterCompleted(void)
+{
+    /*
+     * This callback belongs only to the autonomous writer. filesystem_complete
+     * has already published its terminal status, so acknowledge it here rather
+     * than leaving DONE/ERROR for a Menu/Preset caller that never requested it.
+     * A failed attempt uses the same deferred cadence as a successful one.
+     */
+    fs_autosave_next_due_tick = (uint16_t)(
+        time_sysTick + AUTOSAVE_WRITER_INTERVAL_MS);
+    fs_autosave_writer_armed = 1u;
+    filesystem_ack();
+}
+
+static void filesystem_autosaveWriterSchedule_tick(void)
+{
+    uint16_t now;
+
+    /*
+     * This check is reached only while the facade is idle. Load/Save pages own
+     * the library-name cache by contract, so they suppress new starts; an
+     * already-running writer is deliberately never preempted mid-commit.
+     */
+    if (!bank_hasResidentBank()) {
+        fs_autosave_writer_armed = 0u;
+        return;
+    }
+    /*
+     * A resident Bank alone is insufficient during boot: the blocking
+     * create-only pass must establish A/B before this runtime state machine
+     * can validate, copy, or recover either record. A failed create keeps the
+     * writer inactive instead of running an autonomous transaction mid-boot.
+     */
+    if (!fs_autosave_writer_boot_ready)
+        return;
+    /* Do not queue an LFN operation until the existing idle poll has mounted. */
+    if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY)
+        return;
+    now = time_sysTick;
+    if (!fs_autosave_writer_armed) {
+        fs_autosave_next_due_tick = (uint16_t)(
+            now + AUTOSAVE_WRITER_INTERVAL_MS);
+        fs_autosave_writer_armed = 1u;
+        return;
+    }
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE ||
+        (uint16_t)(now - fs_autosave_next_due_tick) >= 0x8000u) {
+        return;
+    }
+    (void)filesystem_start(FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE,
+                           FS_FILE_SETTINGS, 0u,
+                           filesystem_autosaveWriterCompleted);
+}
+
 void filesystem_tick(void)
 {
     /* Busy operations poll asyncfatfs every pass so reads/writes make progress
@@ -15644,6 +16473,8 @@ void filesystem_tick(void)
         }
     }
 
+    if (status == FS_STATUS_IDLE)
+        filesystem_autosaveWriterSchedule_tick();
     if (status != FS_STATUS_BUSY) return;
 
     switch (current_op) {
@@ -15661,6 +16492,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES:
         filesystem_ensureAutosaveFiles_tick();
+        break;
+    case FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE:
+        filesystem_autosaveDummyWrite_tick();
         break;
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:
@@ -16041,6 +16875,14 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
      */
     if (!bank_hasResidentBank())
         return 1u;
+    /*
+     * Revoke any stale authorization before a new pre-audio creation pass.
+     * The scheduler cannot begin runtime recovery while this wrapper owns the
+     * foreground pump; it receives authorization only after both files and
+     * their final AsyncFATFS flush have succeeded below.
+     */
+    fs_autosave_writer_boot_ready = 0u;
+    fs_autosave_writer_armed = 0u;
     if (status == FS_STATUS_BUSY ||
         !filesystem_start(FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES,
                           FS_FILE_SETTINGS, 0u, NULL)) {
@@ -16053,6 +16895,14 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
         return 0u;
     }
     filesystem_ack();
+    /*
+     * Enable only after the create-only pair is durable and its terminal
+     * status has been acknowledged. Clearing armed makes the first runtime
+     * attempt a full configured interval after boot rather than inheriting
+     * time spent loading the Bank and globals before autosave existed.
+     */
+    fs_autosave_writer_armed = 0u;
+    fs_autosave_writer_boot_ready = 1u;
     return 1u;
 }
 

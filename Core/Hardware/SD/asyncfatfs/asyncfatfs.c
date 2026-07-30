@@ -334,6 +334,22 @@ typedef enum {
 typedef struct afatfsAppendFreeCluster_t {
     uint32_t previousCluster;
     uint32_t searchCluster;
+    /*
+     * Bound the allocator's second, wrapped search pass.
+     *
+     * `searchStartCluster` records where the first pass began and
+     * `searchWrapped` records whether the search has restarted at FAT cluster
+     * 2. Together they make the last-allocation hint an optimization rather
+     * than an incorrect end-of-volume boundary: every legal cluster is
+     * examined once before the filesystem is declared full.
+     *
+     * Inputs: afatfs.lastClusterAllocated at operation initialization.
+     * Output: the exclusive upper bound for the wrapped pass. Affiliates:
+     * afatfs_appendRegularFreeClusterInitOperationState() and
+     * afatfs_appendRegularFreeClusterContinue().
+     */
+    uint32_t searchStartCluster;
+    uint8_t searchWrapped;
     afatfsAppendFreeClusterPhase_e phase;
 } afatfsAppendFreeCluster_t;
 
@@ -1745,12 +1761,32 @@ static afatfsOperationStatus_e afatfs_appendRegularFreeClusterContinue(afatfsFil
 {
     afatfsAppendFreeCluster_t *opState = &file->operation.state.appendFreeCluster;
     afatfsOperationStatus_e status;
+    uint32_t searchLimit;
 
     doMore:
 
     switch (opState->phase) {
         case AFATFS_APPEND_FREE_CLUSTER_PHASE_FIND_FREESPACE:
-            switch (afatfs_findClusterWithCondition(CLUSTER_SEARCH_FREE, &opState->searchCluster, afatfs.numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER)) {
+            /*
+             * Search the FAT as a ring around the last-allocation hint.
+             *
+             * The old single pass stopped at the physical end of the FAT. If
+             * free clusters existed before the hint, a multi-cluster fwrite()
+             * could allocate its first cluster, fail at the next cluster
+             * boundary, and set filesystemFull forever. The autosave baseline
+             * exposed that as a 16 KiB `.hcprms1` followed by a blocking boot.
+             *
+             * Pass one covers [searchStartCluster, volumeEnd). If it has no
+             * free entry, pass two covers [cluster 2, searchStartCluster).
+             * Only failure of both passes means the regular cluster pool is
+             * actually exhausted.
+             */
+            searchLimit = opState->searchWrapped
+                ? opState->searchStartCluster
+                : afatfs.numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER;
+            switch (afatfs_findClusterWithCondition(
+                        CLUSTER_SEARCH_FREE, &opState->searchCluster,
+                        searchLimit)) {
                 case AFATFS_FIND_CLUSTER_FOUND:
                     afatfs.lastClusterAllocated = opState->searchCluster;
 
@@ -1776,9 +1812,27 @@ static afatfsOperationStatus_e afatfs_appendRegularFreeClusterContinue(afatfsFil
                     goto doMore;
                 break;
                 case AFATFS_FIND_CLUSTER_FATAL:
-                case AFATFS_FIND_CLUSTER_NOT_FOUND:
                     // We couldn't find an empty cluster to append to the file
                     opState->phase = AFATFS_APPEND_FREE_CLUSTER_PHASE_FAILURE;
+                    goto doMore;
+                break;
+                case AFATFS_FIND_CLUSTER_NOT_FOUND:
+                    if (!opState->searchWrapped &&
+                        opState->searchStartCluster >
+                            FAT_SMALLEST_LEGAL_CLUSTER_NUMBER) {
+                        /*
+                         * The hint-to-end range was occupied; resume at the
+                         * first legal FAT cluster and stop just before the
+                         * original hint. This transition is scalar-only and
+                         * remains resumable through afatfs_poll().
+                         */
+                        opState->searchCluster =
+                            FAT_SMALLEST_LEGAL_CLUSTER_NUMBER;
+                        opState->searchWrapped = 1u;
+                        goto doMore;
+                    }
+                    opState->phase =
+                        AFATFS_APPEND_FREE_CLUSTER_PHASE_FAILURE;
                     goto doMore;
                 break;
                 case AFATFS_FIND_CLUSTER_IN_PROGRESS:
@@ -1836,9 +1890,27 @@ static afatfsOperationStatus_e afatfs_appendRegularFreeClusterContinue(afatfsFil
 
 static void afatfs_appendRegularFreeClusterInitOperationState(afatfsAppendFreeCluster_t *state, uint32_t previousCluster)
 {
+    uint32_t volumeEnd =
+        afatfs.numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER;
+
     state->phase = AFATFS_APPEND_FREE_CLUSTER_PHASE_INITIAL;
     state->previousCluster = previousCluster;
-    state->searchCluster = afatfs.lastClusterAllocated;
+    /*
+     * Normalize the allocation hint before beginning the two-pass search.
+     *
+     * A valid hint starts the first pass near recent allocations. A stale or
+     * out-of-range hint falls back to cluster 2, which still searches the
+     * complete volume. `searchStartCluster` must remain unchanged while
+     * searchCluster advances asynchronously because it becomes the wrapped
+     * pass's exclusive bound.
+     */
+    state->searchStartCluster = afatfs.lastClusterAllocated;
+    if (state->searchStartCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+        state->searchStartCluster >= volumeEnd) {
+        state->searchStartCluster = FAT_SMALLEST_LEGAL_CLUSTER_NUMBER;
+    }
+    state->searchCluster = state->searchStartCluster;
+    state->searchWrapped = 0u;
 }
 
 /**
@@ -3209,8 +3281,22 @@ static bool afatfs_generateShortAlias(afatfsCreateFile_t *opState)
     memset(ext, 0, sizeof(ext));
     memset(alias, 0, sizeof(alias));
 
+    /*
+     * A leading dot denotes a hidden display component, not an empty basename
+     * plus extension. Treat only later dots as the 8.3 extension separator.
+     *
+     * Why: `.hcprms1` and `.hcprms2` previously both collapsed to the initial
+     * alias FILE.HCP, forcing the second boot-created autosave record through
+     * an avoidable collision/restart path. Ignoring the leading dot here gives
+     * them the independent HCPRMS1 and HCPRMS2 aliases while their VFAT names
+     * remain exactly `.hcprms1` and `.hcprms2`.
+     *
+     * Inputs: the sanitized LFN component in `name`. Output: `dot` points only
+     * at a true extension separator after the first character. Affiliates:
+     * afatfs_fopen_lfn(), afatfs_mkdir_lfn(), and the autosave boot creator.
+     */
     for (const char *p = name; *p != '\0'; p++) {
-        if (*p == '.')
+        if (*p == '.' && p != name)
             dot = p;
     }
 

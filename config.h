@@ -129,6 +129,16 @@
 #define FRONTPANEL_TICK_HZ   1000
 #define SYSTICK_TICKS_PER_MS (SYSTICK_HZ / 1000)
 
+/*
+ * Minimum pause between autonomous autosave transactions.
+ *
+ * The writer compares this with the wrapping 16-bit `time_sysTick` using
+ * unsigned subtraction, so it must remain below 32,768 ms. This cadence is a
+ * minimum between completed attempts, not a synchronous deadline: Load/Save
+ * pages and ordinary filesystem work may defer the next background start.
+ */
+#define AUTOSAVE_WRITER_INTERVAL_MS 5000u
+
 /* -----------------------------------------------------------------------
 ** Display — WS0010 OLED 16×2, 4-bit parallel
 **   RS  = PE12

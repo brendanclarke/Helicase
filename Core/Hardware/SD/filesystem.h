@@ -173,10 +173,16 @@ void        filesystem_initAfterCardReady(void);
  *
  * Inputs: a mounted card after the normal Bank-or-fallback ladder. Output:
  * when no resident Bank exists, return success without card I/O; otherwise
- * read HCNAMES and create only absent `/.hcprms1` or `/hcprms2` records. An
- * existing matching object is never opened for write. The initial files hold
- * only the loaded Bank slot/name and HCNAMES identity cells; no parameter,
- * mask, overlay, or ping-pong selection behavior is implied by this API.
+ * read HCNAMES and create only absent `/.hcprms1` or `/.hcprms2` records. New
+ * records are 23,248-byte baseline images with a generation/CRC32C control
+ * header; `/.hcprms1` begins as the current valid record. An existing matching
+ * object is never opened for write. No parameter or replacement-mask payload
+ * mutation occurs in this boot-only creation API. A successful return also
+ * authorizes the later runtime writer; an error deliberately leaves it
+ * disabled so a missing pair cannot trigger recovery during the boot ladder.
+ * If a complete FAT free-cluster search reports genuine exhaustion, the
+ * partial output is closed and this function returns zero; it never keeps
+ * boot trapped in a zero-byte fwrite retry.
  */
 uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
 /*
