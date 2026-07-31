@@ -2664,10 +2664,10 @@ static uint8_t menu_loadSaveTypeIsRestored(uint8_t what)
      * Gate the promoted Load/Save type list in one place.
      *
      * File/Dir/sDir diagnostics were retired with their 6,240-byte filesystem
-     * lists. DEV_LOGGING now controls screen diagnostics only; it must not
-     * re-expose a menu type whose retired compatibility API deliberately starts
-     * no operation. Inputs are musical SAVE_TYPE values, output is whether the
-     * encoder may reach that type; affiliates are the explicit arrays below.
+     * lists. Neither DEV_MODE_DIAGNOSTIC nor DEV_MODE_LOGGING re-exposes a menu
+     * type whose retired compatibility API deliberately starts no operation.
+     * Inputs are musical SAVE_TYPE values, output is whether the encoder may
+     * reach that type; affiliates are the explicit arrays below.
      */
     if (menu_activePage == SAVE_PAGE &&
         (what == SAVE_TYPE_KIT ||
@@ -8182,8 +8182,8 @@ void menu_resetSaveParameters(void)
      * Diagnostic entries and promoted musical entries are gated in the type
      * whitelist, so a completion from a legacy helper cannot leave the panel
      * parked on an unvalidated path. Kit is the fallback because it is a
-     * real musical object on both Load and Save when DEV_LOGGING hides
-     * File/Dir/sDir. Every Load/Save entry resets to the selected top-row type
+     * real musical object on both Load and Save while File/Dir/sDir remain
+     * retired. Every Load/Save entry resets to the selected top-row type
      * field; slot/name selection is always a deliberate second movement. The
      * shared browser cache is intentionally not disposed here: this helper is
      * also called immediately after a Save request is posted, and the

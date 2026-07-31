@@ -99,7 +99,12 @@ void sdcard_abortTransferForBootLog(void)
     /*
      * Tear down only the transport half of a timed-out boot transaction.
      *
-     * Inputs: DEV_LOGGING timeout may arrive while CMD17/CMD24 owns CS, a
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
+     *
+     * Inputs: DEV_MODE_LOGGING timeout may arrive while CMD17/CMD24 owns CS, a
      * caller buffer, and an asyncfatfs completion callback. Outputs/effects:
      * CS is released, idle clocks are supplied, and every retained transfer
      * coordinate is cleared without invoking the stale callback. Why: the
@@ -107,7 +112,7 @@ void sdcard_abortTransferForBootLog(void)
      * descriptor. Affiliates: sdcard_poll(), filesystem boot-log recovery, and
      * the subsequent full SD_init() protocol reset.
      */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     SD_CS_DEASSERT;
     SPI_transmit(0xFF);
     state = SDCARD_STATE_IDLE;

@@ -232,16 +232,21 @@ static void boot_delayMs(uint16_t ms)
 /*
  * Development-only boot-screen instrumentation.
  *
- * What: DEV_LOGGING compiles the durable Boot/FS, FOp/FPhs, FPhs/FSub,
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
+ * What: DEV_MODE_DIAGNOSTIC compiles the Boot/FS, FOp/FPhs, FPhs/FSub,
  * and HPhs/HRow OLED observers used to isolate a blocking storage phase. Why:
  * each observer may deliberately drain the LCD queue before filesystem work,
- * which is useful for diagnosis but must not replace the normal splash or add
- * boot latency in ordinary firmware. With development mode disabled, the
+ * which is useful for diagnosis but must never start, stop, or otherwise add
+ * a filesystem operation. With screen diagnostic mode disabled, the
  * stage/active-operation macros below compile to no-ops and both filesystem
  * callback arguments become NULL; the underlying boot and `.hcnames` work
  * therefore runs in exactly the same order without any diagnostic display.
  */
-#if DEV_LOGGING
+#if DEV_MODE_DIAGNOSTIC
 static void boot_showHcnamesDiagnostic(uint8_t phase, uint16_t row)
 {
     static uint8_t last_phase = 0xffu;
@@ -268,6 +273,12 @@ static void boot_showHcnamesDiagnostic(uint8_t phase, uint16_t row)
 
     last_phase = phase;
     last_update_tick = now;
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     lcd_diagDisplayInt("HPhs", (int32_t)phase,
                        "HRow", (int32_t)row);
 }
@@ -284,6 +295,12 @@ static void boot_showFilesystemStage(uint8_t stage)
      * marker has physically reached the OLED before firmware can stall inside
      * the following filesystem call. This helper does not start, pump,
      * acknowledge, or reorder any filesystem operation.
+     */
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
      */
     lcd_diagDisplayInt("Boot", (int32_t)stage,
                        "FS", (int32_t)filesystem_status());
@@ -308,12 +325,24 @@ static void boot_showActiveFilesystemDiagnostic(void)
      * enters the next phase, including a phase whose first pump never returns.
      * The helper does not mutate or acknowledge filesystem state.
      */
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     filesystem_getBootDiagnostic(&op, &phase);
     if (op == last_op && phase == last_phase)
         return;
 
     last_op = op;
     last_phase = phase;
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     lcd_diagDisplayInt("FOp", (int32_t)op,
                        "FPhs", (int32_t)phase);
     lcd_waitForIdle();
@@ -336,6 +365,12 @@ static void boot_showFilesystemSubstep(uint8_t substep)
     if (substep == last_substep)
         return;
     last_substep = substep;
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     lcd_diagDisplayInt("FPhs", 43,
                        "FSub", (int32_t)substep);
     lcd_waitForIdle();
@@ -427,6 +462,12 @@ int main(void)
         /*
          * Open the timeout-logging window around only pre-audio filesystem work.
          *
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
+         *
          * Input is the idle boot storage facade; output enables eight-byte
          * operation capture and cooperative ten-second deadlines until the
          * common exit below. Why: runtime Menu/Preset/autosave work must never
@@ -434,6 +475,12 @@ int main(void)
          * filesystem_bootLoggingEnd() and audioCodec_init().
          */
         filesystem_bootLoggingBegin();
+        /*
+         * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for
+         * the user to assess how operations are proceeding. It does not and
+         * should not ever add additional file interaction steps, since the
+         * diagnostic may be used to assess in-situ file procedures.
+         */
         boot_showFilesystemStage(1u);  /* card init + asyncfatfs mount */
         uint8_t sd_ok = filesystem_initCardAndMountBlocking();
         show_unsupported_card_warning = filesystem_bootDetectedUnsupportedCard();
@@ -469,6 +516,13 @@ int main(void)
              */
 
             /* Synchronous kit scan (blocking at boot, OK) */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
             boot_showFilesystemStage(2u);
             filesystem_requestScanKits(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
@@ -485,6 +539,13 @@ int main(void)
              * rows are retained in `/Kit/.hcindex`; their position, not
              * alphabetic order, is the library identity used by Load/Save.
              */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
             boot_showFilesystemStage(3u);
             (void)filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT);
             if (filesystem_bootLoggingTimedOut())
@@ -499,6 +560,13 @@ int main(void)
              * foreground. This mirrors Kit/ scan timing and is safe here
              * because audio rendering has not started yet.
              */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
             boot_showFilesystemStage(4u);
             filesystem_requestScanScenes(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
@@ -512,6 +580,13 @@ int main(void)
              * any later library operation. Scenes intentionally use the root
              * `/Scene/` directory; Bank-local child Scenes are not included in
              * this index and remain Bank operation scratch.
+             */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
              */
             boot_showFilesystemStage(5u);
             (void)filesystem_createLibraryIndexBlocking(
@@ -528,6 +603,13 @@ int main(void)
              * Scene/ because Bank-local children use a two-digit namespace and
              * must not populate the root Scene library browser.
              */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
             boot_showFilesystemStage(6u);
             filesystem_requestScanBanks(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
@@ -542,6 +624,13 @@ int main(void)
              * Scenes are intentionally excluded; `/Bank/.hcindex` contains
              * only the root Bank display name for each 000..999 row.
              */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
             boot_showFilesystemStage(7u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_BANK);
@@ -555,6 +644,13 @@ int main(void)
              * registry type. The blocking helper is restricted to boot, before
              * audio starts; runtime Save refreshes use the same state machine
              * through filesystem_tick().
+             */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
              */
             boot_showFilesystemStage(8u);
             (void)filesystem_createBootIndexBlocking();
@@ -596,6 +692,13 @@ int main(void)
                  * directory can exist on the card while the cache reports no
                  * valid Bank slot and the boot load silently falls through.
                  */
+                /*
+                 * DEV_MODE_DIAGNOSTIC displays runtime information on the
+                 * screen for the user to assess how operations are proceeding.
+                 * It does not and should not ever add additional file
+                 * interaction steps, since the diagnostic may be used to
+                 * assess in-situ file procedures.
+                 */
                 boot_showFilesystemStage(9u);
                 filesystem_requestLoadBankIndex(NULL);
                 while (filesystem_status() == FS_STATUS_BUSY)
@@ -613,8 +716,22 @@ int main(void)
                  * request with the discovered child-present mask before
                  * loading.
                  */
+                /*
+                 * DEV_MODE_DIAGNOSTIC displays runtime information on the
+                 * screen for the user to assess how operations are proceeding.
+                 * It does not and should not ever add additional file
+                 * interaction steps, since the diagnostic may be used to
+                 * assess in-situ file procedures.
+                 */
                 filesystem_setBootSubstepDiagnostic(
                     BOOT_SUBSTEP_DIAGNOSTIC_CALLBACK);
+                /*
+                 * DEV_MODE_DIAGNOSTIC displays runtime information on the
+                 * screen for the user to assess how operations are proceeding.
+                 * It does not and should not ever add additional file
+                 * interaction steps, since the diagnostic may be used to
+                 * assess in-situ file procedures.
+                 */
                 boot_showFilesystemStage(10u);
                 if (filesystem_bankSlotExists(boot_bank_slot)) {
                     preset_loadBank(boot_bank_slot, 0xffffu);
@@ -646,12 +763,26 @@ int main(void)
                     }
                 }
             }
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
             boot_showFilesystemStage(11u);
             for (uint8_t boot_load_pass = 0u;
                  boot_load_pass < 2u;
                  boot_load_pass++) {
                 while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
                        !filesystem_bootLoggingTimedOut()) {
+                    /*
+                     * DEV_MODE_DIAGNOSTIC displays runtime information on the
+                     * screen for the user to assess how operations are
+                     * proceeding. It does not and should not ever add
+                     * additional file interaction steps, since the diagnostic
+                     * may be used to assess in-situ file procedures.
+                     */
                     boot_showActiveFilesystemDiagnostic();
                     filesystem_tick();
                 }
@@ -686,6 +817,13 @@ int main(void)
              */
 
             /* Load globals via presetManager */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
             boot_showFilesystemStage(13u);
             preset_loadGlobals();
             while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
@@ -719,6 +857,12 @@ boot_filesystem_timeout:
         /*
          * Abandon the remaining SD boot ladder and make one bounded log attempt.
          *
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
+         *
          * Inputs: a latched filesystem timeout, possibly an installed substep
          * observer, and possibly PRESET_LOAD_IN_PROGRESS. Outputs: observers
          * and Preset ownership are cleared, then the filesystem facade
@@ -735,7 +879,13 @@ boot_filesystem_timeout:
 
 boot_filesystem_done:
         /*
-         * Disable diagnostic abort semantics on every route to runtime.
+         * Disable logging abort semantics on every route to runtime.
+         *
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
          *
          * Inputs: normal completion, no-card mount failure, or completed/failed
          * recovery. Output: the retained code remains observational, but no
@@ -750,6 +900,12 @@ boot_filesystem_done:
     /* Initialise audio path: PLLI2S, GPIO, DMA circular streams, I2S.
     ** AFTER all blocking SD operations. From this point forward, SD
     ** operations are non-blocking via filesystem_tick() in the main loop. */
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     boot_showFilesystemStage(14u);  /* pre-audio filesystem boot completed */
     audioCodec_init();
     /*

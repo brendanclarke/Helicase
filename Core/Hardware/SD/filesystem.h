@@ -117,6 +117,11 @@ typedef void (*fs_completion_cb_t)(void);
 /*
  * Temporary boot diagnostic callback for the resident-name writer.
  *
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
  * phase identifies the live HCNAMES state: 0=root/open request, 1=open wait,
  * 2=row streaming, 3=close wait, 4=final media flush, 5=done, and 6=error.
  * row is the next fixed-order SRAM row to write (0..129). The callback is
@@ -128,6 +133,11 @@ typedef void (*fs_hcnames_diag_cb_t)(uint8_t phase, uint16_t row);
 
 /*
  * Temporary operation codes returned by filesystem_getBootDiagnostic().
+ *
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
  *
  * Stage 11 can contain a Bank-name repair followed by Bank, Scene, or Kit
  * payload loading and a final flush. Stable public codes keep the OLED output
@@ -147,6 +157,11 @@ typedef enum {
 /*
  * Temporary phase-43 substep callback used only during hardware diagnosis.
  *
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
  * The Bank embedded-Kit quarantine path contains synchronous component calls
  * inside one filesystem phase, so the ordinary operation/phase accessor cannot
  * identify which call fails to return. The callback receives a documented
@@ -157,6 +172,11 @@ typedef void (*fs_boot_substep_diag_cb_t)(uint8_t substep);
 
 /*
  * Pre-audio filesystem timeout logger.
+ *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
  *
  * What: Begin opens the diagnostic window, Arm copies exactly eight operation
  * bytes and restarts its deadline, TimedOut/Code expose the latched result,
@@ -196,16 +216,20 @@ void        filesystem_initAfterCardReady(void);
  *
  * Inputs: a mounted card after the normal Bank-or-fallback ladder. Output:
  * when no resident Bank exists, return success without card I/O; otherwise
- * read HCNAMES and create only absent `/.hcprms1` or `/.hcprms2` records. New
- * records are 23,248-byte baseline images with a generation/CRC32C control
- * header; `/.hcprms1` begins as the current valid record. An existing matching
- * object is never opened for write. No parameter or replacement-mask payload
- * mutation occurs in this boot-only creation API. A successful return also
- * authorizes the later runtime writer; an error deliberately leaves it
- * disabled so a missing pair cannot trigger recovery during the boot ladder.
- * If a complete FAT free-cluster search reports genuine exhaustion, the
- * partial output is closed and this function returns zero; it never keeps
- * boot trapped in a zero-byte fwrite retry.
+ * read HCNAMES and create only absent `/.hcprms1` or `/.hcprms2` records.
+ *
+ * New records are exact 34,768-byte baselines: a 64-byte validation header,
+ * 3,856-byte mutation mask, 128-byte Bank section, and sixteen 1,920-byte
+ * Scenes. Creation writes the current two-byte Bank restore slot plus names,
+ * with mask/parameters/Effects/padding zero; `/.hcprms1` begins as the current
+ * valid generation. An existing matching object is never opened for write.
+ *
+ * A successful return authorizes filesystem_tick()'s private parameter drain;
+ * that runtime operation uses a separate cache and is not exposed here. An
+ * error leaves it disabled so a missing pair cannot trigger recovery during
+ * the boot ladder. If a complete FAT free-cluster search reports genuine
+ * exhaustion, partial output is closed and this function returns zero rather
+ * than trapping boot in a zero-byte fwrite retry.
  */
 uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
 /*
@@ -232,6 +256,11 @@ uint8_t filesystem_writeResidentNamesBlocking(
 /*
  * Observe the active filesystem operation for the temporary boot-screen hook.
  *
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
  * Outputs: op receives one fs_boot_diag_op_t code and phase receives the
  * operation's current private state-machine phase. NULL outputs are allowed.
  * This function performs no polling, acknowledgement, or state mutation. For
@@ -241,8 +270,15 @@ uint8_t filesystem_writeResidentNamesBlocking(
  * progress through the ordinary foreground reader.
  */
 void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase);
-/* Register or clear the temporary phase-43 substep observer. Passing NULL
- * disables it. Registration changes no filesystem state or operation order. */
+/*
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
+ * Register or clear the temporary phase-43 substep observer. Passing NULL
+ * disables it. Registration changes no filesystem state or operation order.
+ */
 void filesystem_setBootSubstepDiagnostic(fs_boot_substep_diag_cb_t cb);
 /*
  * Repair host-created long or duplicate product names before index generation.

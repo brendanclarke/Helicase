@@ -169,7 +169,12 @@ typedef enum {
     */
     FS_INTERNAL_OP_WRITE_HCNAMES,
     /*
-     * Diagnostic recovery writer for the root `/bootlog.bin` file.
+     * Logging recovery writer for the root `/bootlog.bin` file.
+     *
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
      *
      * Inputs: the eight-byte operation code preserved outside generic
      * operation scratch. Output: exactly those eight bytes, closed and passed
@@ -188,11 +193,15 @@ typedef enum {
      */
     FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES,
     /*
-     * Runtime, background-only A/B writer. It validates both complete records,
-     * copy-forwards the active-Bank winner to its inactive peer, and commits a
-     * one-byte diagnostic counter without changing any mutation-mask payload.
+     * Runtime, background-only A/B parameter drain.
+     *
+     * Inputs: newest valid record, its on-card mutation mask, and the resident
+     * Bank/Scene parameter owners. Output: a bounded set of live bytes and an
+     * updated mask are copy-forwarded into the inactive peer before the normal
+     * CRC/final-commit transaction. Affiliates: Autosave.c's explicit payload
+     * map and the dedicated non-name cache below.
      */
-    FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE,
+    FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN,
     /*
      * Runtime reader/update operations borrow the generalized name cache.
      * Instrument operations address one voice row per selected Scene. Kit
@@ -306,7 +315,12 @@ static char             fs_error_code[9];
  */
 static fs_status_t      op_flush_final_status = FS_STATUS_DONE;
 /*
- * DEV_LOGGING boot watchdog record.
+ * DEV_MODE_LOGGING boot watchdog record.
+ *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
  *
  * What: retains one exact eight-byte operation code, a wrapping millisecond
  * deadline, and separate recovery state outside all generic operation scratch.
@@ -317,7 +331,7 @@ static fs_status_t      op_flush_final_status = FS_STATUS_DONE;
  * completed boot operations from expiring. Affiliates: time_sysTick,
  * filesystem_bootLoggingPollDeadline(), and main.c's pre-audio window.
  */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
 static uint8_t          fs_boot_logging_active = 0u;
 static uint8_t          fs_boot_logging_armed = 0u;
 static uint8_t          fs_boot_logging_timed_out = 0u;
@@ -563,11 +577,13 @@ typedef struct {
 } filesystem_scene_stage_t;
 
 /*
- * Runtime autosave writer state borrowed from the existing 2 KB operation
- * stage. The filesystem facade permits only one operation at a time, so this
- * state cannot overlap Kit/Scene/Instrument parser staging. It deliberately
- * stores only scalar progress and the second copy-forward file handle: the
- * 23,248-byte record always remains streamed through staging_buf.
+ * Runtime autosave parameter-drain state borrowed from the existing 2 KB
+ * operation stage.
+ *
+ * The filesystem facade permits only one operation at a time, so this scalar
+ * state cannot overlap Kit/Scene/Instrument parser staging. The full
+ * 34,768-byte record remains streamed through staging_buf; only mask/patch
+ * data lives in the separate bounded cache below.
  */
 typedef struct {
     autosave_stream_validation_t validation;
@@ -578,6 +594,10 @@ typedef struct {
     uint32_t seek_position;
     uint16_t chunk_bytes;
     uint16_t chunk_written;
+    uint16_t mask_bytes_read;
+    uint16_t payload_scan_offset;
+    uint16_t patch_count;
+    uint16_t patch_cursor;
     uint8_t winner_index;
     uint8_t winner_probe;
     uint8_t candidate_index;
@@ -587,6 +607,26 @@ typedef struct {
     uint8_t recovery_target_index;
     uint8_t recovery_using_names;
 } filesystem_autosave_writer_state_t;
+
+/*
+ * Dedicated first-pass autosave mask and stable live-byte patch cache.
+ *
+ * What: holds the newest record's complete 3,856-byte mask plus at most the
+ * configured number of sorted uint16 payload offsets and sampled byte values.
+ * Why: the CRC and output passes must consume identical captured values while
+ * carrying every unprocessed dirty bit forward. Inputs are the winner mask and
+ * Autosave.c's live-byte getter; outputs are immutable transform inputs for
+ * both record passes. Affiliates: filesystem_autosaveParameterDrain_tick().
+ *
+ * This allocation is intentionally independent from fs_list_cache_name. The
+ * eventual dual-use optimization is deferred until hardware behavior is
+ * confirmed, so Load/Save name-cache ownership cannot alias this test.
+ */
+typedef struct {
+    uint8_t updated_mask[AUTOSAVE_MASK_BYTES];
+    uint16_t payload_offsets[AUTOSAVE_PARAMETER_GETS_PER_WRITE];
+    uint8_t payload_values[AUTOSAVE_PARAMETER_GETS_PER_WRITE];
+} filesystem_autosave_parameter_cache_t;
 
 /*
  * Separate fixed-size non-Pattern payload stage.
@@ -630,6 +670,7 @@ typedef union {
 static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
                               [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static filesystem_stage_workspace_t fs_stage_workspace;
+static filesystem_autosave_parameter_cache_t fs_autosave_parameter_cache;
 
 /*
  * The only operation/menu identity strings retained outside the name cache.
@@ -670,6 +711,21 @@ _Static_assert(sizeof(filesystem_stage_workspace_t) <= FS_STAGE_CACHE_BYTES,
                "typed non-Pattern stage exceeds its fixed SRAM budget");
 _Static_assert(_Alignof(filesystem_stage_workspace_t) >= _Alignof(kit_t),
                "typed stage must align Kit staging");
+_Static_assert(sizeof(fs_autosave_parameter_cache.updated_mask) ==
+                   AUTOSAVE_MASK_BYTES,
+               "autosave cache must retain the complete mutation mask");
+_Static_assert(
+    sizeof(fs_autosave_parameter_cache.payload_offsets) /
+            sizeof(fs_autosave_parameter_cache.payload_offsets[0]) ==
+        AUTOSAVE_PARAMETER_GETS_PER_WRITE,
+    "autosave offset cache must match the configured get cap");
+_Static_assert(
+    sizeof(fs_autosave_parameter_cache.payload_values) /
+            sizeof(fs_autosave_parameter_cache.payload_values[0]) ==
+        AUTOSAVE_PARAMETER_GETS_PER_WRITE,
+    "autosave value cache must match the configured get cap");
+_Static_assert(sizeof(filesystem_autosave_parameter_cache_t) <= 9000u,
+               "dedicated autosave cache must stay within its 9 KB ceiling");
 
 #define op_staged_kit        (fs_stage_workspace.kit_stage)
 #define op_staged_instrument (fs_stage_workspace.instrument_stage)
@@ -878,7 +934,7 @@ static void filesystem_writeResidentNames_tick(void);
 static void filesystem_writeBootLog_tick(void);
 static void filesystem_residentNames_tick(void);
 static void filesystem_ensureAutosaveFiles_tick(void);
-static void filesystem_autosaveDummyWrite_tick(void);
+static void filesystem_autosaveParameterDrain_tick(void);
 static void filesystem_autosaveWriterSchedule_tick(void);
 static void filesystem_autosaveWriterCompleted(void);
 static uint8_t filesystem_residentNameIsBlank(const char *name);
@@ -2154,6 +2210,11 @@ static uint32_t filesystem_readStreamChunk(uint8_t *buf, uint8_t len)
 /*
  * Convert private filesystem ownership into the stable eight-byte boot codes.
  *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
+ *
  * What: classifies every operation reachable from the current pre-audio
  * ladder, using file type only where the shared library-index reader needs it.
  * Why: internal enum values and phase numbers are unstable implementation
@@ -2197,6 +2258,11 @@ static const char *filesystem_bootLogCodeForOperation(
 /*
  * Poll the cooperative boot deadline from either filesystem progress path.
  *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
+ *
  * What: compares the wrapping 16-bit millisecond tick against the currently
  * armed normal or recovery start time. Why: facade state machines advance via
  * filesystem_tick(), but validation/quarantine helpers call afatfs_poll()
@@ -2210,7 +2276,7 @@ static const char *filesystem_bootLogCodeForOperation(
  */
 static uint8_t filesystem_bootLoggingPollDeadline(void)
 {
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     uint16_t started;
 
     if (!fs_boot_logging_active)
@@ -2243,6 +2309,11 @@ static uint8_t filesystem_bootLoggingPollDeadline(void)
 /*
  * End only the current normal boot-operation deadline.
  *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
+ *
  * What: disarms the timer after an operation/mount reaches a terminal result
  * without closing the wider logging window. Why: CPU-only boot work between
  * filesystem requests must not be attributed to the operation that just
@@ -2252,7 +2323,7 @@ static uint8_t filesystem_bootLoggingPollDeadline(void)
  */
 static void filesystem_bootLoggingOperationDone(void)
 {
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     if (!fs_boot_logging_recovery)
         fs_boot_logging_armed = 0u;
 #endif
@@ -2261,7 +2332,12 @@ static void filesystem_bootLoggingOperationDone(void)
 void filesystem_bootLoggingBegin(void)
 {
     /*
-     * Open the diagnostic window immediately before the pre-audio mount.
+     * Open the logging window immediately before the pre-audio mount.
+     *
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
      *
      * Inputs: an idle boot filesystem context and the live millisecond tick.
      * Outputs: clears old timeout/recovery latches, initializes the retained
@@ -2269,7 +2345,7 @@ void filesystem_bootLoggingBegin(void)
      * must never inherit a prior reset's watchdog state. Affiliates: main.c and
      * filesystem_bootLoggingEnd().
      */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     fs_boot_logging_active = 1u;
     fs_boot_logging_armed = 0u;
     fs_boot_logging_timed_out = 0u;
@@ -2286,6 +2362,11 @@ void filesystem_bootLoggingArm(const char code[8])
     /*
      * Capture one operation boundary and start its fresh ten-second deadline.
      *
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
+     *
      * Input is exactly eight bytes and need not be NUL-terminated. Output is a
      * byte-for-byte SRAM copy plus the current 1 kHz tick. Why: strlen() would
      * make trailing spaces unreliable and the recovery remount must preserve
@@ -2293,7 +2374,7 @@ void filesystem_bootLoggingArm(const char code[8])
      * `BOOTLOG ` can never replace the failed operation. Affiliates:
      * filesystem_start(), mount, flush, Kit quarantine, and internal handoffs.
      */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     if (!fs_boot_logging_active || fs_boot_logging_recovery ||
         fs_boot_logging_timed_out || !code)
         return;
@@ -2309,11 +2390,17 @@ uint8_t filesystem_bootLoggingTimedOut(void)
 {
     /*
      * Observe the primary timeout without advancing filesystem state.
+     *
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
+     *
      * Input is the logger latch; output is zero/nonzero. Why: main-owned
      * Preset waits do not use facade status and need an explicit exit test.
      * Affiliates: the boot timeout cleanup label in main.c.
      */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     return fs_boot_logging_timed_out;
 #else
     return 0u;
@@ -2323,12 +2410,18 @@ uint8_t filesystem_bootLoggingTimedOut(void)
 const uint8_t *filesystem_bootLoggingCode(void)
 {
     /*
-     * Return the retained fixed-width code for diagnostics only.
+     * Return the retained fixed-width code for logging only.
+     *
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
+     *
      * Output remains valid through dirty teardown and recovery because it is
      * static logger state, not generic operation scratch. The caller must read
      * exactly eight bytes. Affiliates: the internal bootlog writer.
      */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     return fs_boot_logging_code;
 #else
     static const uint8_t disabled_code[8] = { 0u };
@@ -2339,7 +2432,12 @@ const uint8_t *filesystem_bootLoggingCode(void)
 void filesystem_bootLoggingEnd(void)
 {
     /*
-     * Close the diagnostic window before audio/runtime filesystem service.
+     * Close the logging window before audio/runtime filesystem service.
+     *
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
      *
      * Inputs: any normal, no-card, timed-out, or recovery-complete boot path.
      * Outputs: all watchdog/recovery flags are disabled while the last code is
@@ -2347,7 +2445,7 @@ void filesystem_bootLoggingEnd(void)
      * their ordinary non-destructive runtime semantics. Affiliates: main.c's
      * stage-14 boundary and filesystem_start().
      */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     fs_boot_logging_active = 0u;
     fs_boot_logging_armed = 0u;
     fs_boot_logging_timed_out = 0u;
@@ -2364,7 +2462,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_CREATE_LIBRARY_INDEX:  return "LIdx";
     case FS_INTERNAL_OP_WRITE_HCNAMES:         return "HNam";
     case FS_INTERNAL_OP_WRITE_BOOT_LOG:        return "BLog";
-    case FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE:  return "ASv";
+    case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN: return "ASv";
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:return "HNrL";
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:return "HNrU";
     case FS_INTERNAL_OP_LOAD_HCNAMES_KIT:      return "HNkL";
@@ -2479,6 +2577,13 @@ static void filesystem_finish(fs_status_t final_status)
          * sectors for a saved object are visible on a freshly-mounted SD card.
          */
         op_flush_final_status = final_status;
+        /*
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
+         */
         filesystem_bootLoggingArm("FSFLUSH ");
         current_op = FS_INTERNAL_OP_FLUSH_FINISH;
         op_phase = 0u;
@@ -3208,6 +3313,11 @@ static void filesystem_writeResidentNames_tick(void)
 /*
  * Stream the captured operation code to root `/bootlog.bin`.
  *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
+ *
  * What: returns to root, opens the file with replacement semantics, writes
  * exactly eight bytes with partial-write tracking, closes it, and enters the
  * ordinary sync finish gate. Why: the diagnostic recovery must obey the same
@@ -3246,7 +3356,7 @@ static void filesystem_writeBootLog_tick(void)
         return;
 
     case 2u: /* WRITE EXACTLY EIGHT BYTES + QUEUE CLOSE */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
         if (op_bytes_done < 8u) {
             uint32_t n = afatfs_fwrite(
                 op_file,
@@ -3821,10 +3931,11 @@ static void filesystem_autosaveAdvanceTarget(void)
 **
 ** Inputs: a successfully loaded Bank, its BankData name, and root `/.hcnames`.
 ** Outputs: only missing `/.hcprms1` and `/.hcprms2` files receive one
-** 23,248-byte zero/name baseline with a valid CRC32C control header. Existing
-** files are first found by the LFN-aware root iterator and then left unopened
-** for write. The state machine owns no new retained memory: it reuses the
-** normal HCNAMES cache, staging_buf, operation cursors, and one file handle.
+** 34,768-byte slot/name baseline with zero mask/parameters and a valid CRC32C
+** control header. Existing files are first found by the LFN-aware root iterator
+** and then left unopened for write. The state machine owns no new retained
+** memory: it reuses the normal HCNAMES cache, staging_buf, operation cursors,
+** and one file handle.
 ** ----------------------------------------------------------------------- */
 static void filesystem_ensureAutosaveFiles_tick(void)
 {
@@ -3999,7 +4110,8 @@ static void filesystem_ensureAutosaveFiles_tick(void)
          */
         op_file_version = (uint8_t)op_stream_index;
         op_stream_index = autosave_initialRecordCrc(
-            filesystem_autosaveCreatedTargetGeneration(), bank_displayName(),
+            filesystem_autosaveCreatedTargetGeneration(),
+            bank_restoreBankSlot(), bank_displayName(),
             (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
         op_bytes_done = 0u;
         op_write_line_len = 0u;
@@ -4025,8 +4137,8 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             op_write_line_offset = 0u;
             autosave_formatInitialChunk(
                 staging_buf, op_bytes_done, op_write_line_len,
-                filesystem_autosaveCreatedTargetGeneration(), op_stream_index,
-                bank_displayName(),
+                filesystem_autosaveCreatedTargetGeneration(),
+                bank_restoreBankSlot(), op_stream_index, bank_displayName(),
                 (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
         }
         written = afatfs_fwrite(
@@ -4130,20 +4242,33 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 }
 
 /* -----------------------------------------------------------------------
-** RUNTIME AUTOSAVE DUMMY-WRITER state machine
+** RUNTIME AUTOSAVE PARAMETER-DRAIN state machine
 **
-** Inputs: a resident Bank, the two root records, and the ordinary foreground
-** filesystem pump. Outputs: one valid winner is copy-forwarded into its
-** inactive peer with only generation/probe header changes; no payload or mask
-** byte changes. If neither record validates for the current Bank name, both
-** are asynchronously regenerated B then A from HCNAMES. No phase blocks on
-** an AsyncFATFS operation or consumes the shared name cache except recovery.
+** Inputs: a resident Bank, two root records, the winner's mutation mask, and
+** the ordinary foreground filesystem pump. Outputs: at most the configured
+** number of stable live payload bytes are captured, their bits plus every
+** classified nonexistent bit are cleared, and the updated mask/value image is
+** copy-forwarded into the inactive peer. Remaining dirty bits survive there
+** for the next debounce. If neither record validates for the current Bank
+** identity, both are asynchronously regenerated B then A from HCNAMES with a
+** zero mask. No phase blocks on AsyncFATFS or borrows the shared name cache
+** except that existing recovery path.
 ** ----------------------------------------------------------------------- */
-static void filesystem_autosaveDummyWrite_tick(void)
+static void filesystem_autosaveParameterDrain_tick(void)
 {
     switch (op_phase) {
     case 0: /* INITIALIZE ONE OPERATION-LOCAL A/B VALIDATION PASS */
+        /*
+         * Reset scalar progress and the independent mask/patch cache together.
+         *
+         * Inputs: a newly accepted private filesystem operation. Outputs: no
+         * stale mask bit, patch offset, or captured live value can leak from a
+         * prior generation. The name cache remains untouched by this ordinary
+         * path.
+         */
         memset(&op_autosave_writer, 0, sizeof(op_autosave_writer));
+        memset(&fs_autosave_parameter_cache, 0,
+               sizeof(fs_autosave_parameter_cache));
         op_autosave_writer.candidate_index = 0u;
         op_phase = 1u;
         return;
@@ -4192,8 +4317,9 @@ static void filesystem_autosaveDummyWrite_tick(void)
             return;
         op_autosave_writer.candidate_valid = (uint8_t)(
             autosave_streamValidationFinish(&op_autosave_writer.validation) &&
-            autosave_streamValidationMatchesBankName(
-                &op_autosave_writer.validation, bank_displayName()));
+            autosave_streamValidationMatchesBank(
+                &op_autosave_writer.validation, bank_restoreBankSlot(),
+                bank_displayName()));
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 4u;
@@ -4228,13 +4354,175 @@ static void filesystem_autosaveDummyWrite_tick(void)
             op_phase = 1u;
             return;
         }
-        op_phase = op_autosave_writer.have_winner ? 6u : 30u;
+        op_phase = op_autosave_writer.have_winner ? 50u : 30u;
         return;
+
+    case 50: /* REOPEN WINNER TO LOAD ITS COMPLETE MUTATION MASK */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    op_autosave_writer.winner_index),
+                "r", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 51u;
+        return;
+
+    case 51: /* WAIT WINNER MASK-READER OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 52u;
+        return;
+
+    case 52: /* START/RETRY ASYNCHRONOUS SEEK TO MASK OFFSET */
+    {
+        afatfsOperationStatus_e seek = afatfs_fseek(
+            op_file, AUTOSAVE_MASK_OFFSET, AFATFS_SEEK_SET);
+
+        /*
+         * AsyncFATFS seek may complete immediately or queue cluster traversal.
+         *
+         * Output: an immediate success can read the mask next; queued progress
+         * is verified through ftell before any cache byte is accepted. FAILURE
+         * represents temporary file busy state and is retried next tick, as in
+         * the existing final-commit seek.
+         */
+        if (seek == AFATFS_OPERATION_SUCCESS) {
+            op_phase = 54u;
+        } else if (seek == AFATFS_OPERATION_IN_PROGRESS) {
+            op_phase = 53u;
+        }
+        return;
+    }
+
+    case 53: /* WAIT QUEUED MASK SEEK BY OBSERVING THE FILE CURSOR */
+        if (!afatfs_ftell(op_file, &op_autosave_writer.seek_position))
+            return;
+        if (op_autosave_writer.seek_position != AUTOSAVE_MASK_OFFSET) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 54u;
+        return;
+
+    case 54: /* READ THE WINNER'S 3,856-BYTE MASK INTO DEDICATED SRAM */
+    {
+        uint32_t remaining =
+            AUTOSAVE_MASK_BYTES - op_autosave_writer.mask_bytes_read;
+        uint32_t n;
+
+        if (remaining == 0u) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 55u;
+            return;
+        }
+        n = afatfs_fread(
+            op_file,
+            fs_autosave_parameter_cache.updated_mask +
+                op_autosave_writer.mask_bytes_read,
+            (remaining > sizeof(staging_buf))
+                ? sizeof(staging_buf) : remaining);
+        if (n != 0u) {
+            /*
+             * Advance only by bytes AsyncFATFS accepted, requesting no more
+             * than the existing 512-byte stream chunk per foreground call.
+             *
+             * Output preserves a byte-for-byte winner mask before any bit is
+             * cleared, so unprocessed mutations can be carried to the target.
+             */
+            op_autosave_writer.mask_bytes_read = (uint16_t)(
+                op_autosave_writer.mask_bytes_read + n);
+            return;
+        }
+        if (afatfs_feof(op_file))
+            filesystem_autosaveWriterFinishError();
+        return;
+    }
+
+    case 55: /* WAIT MASK READER CLOSE, THEN BEGIN COOPERATIVE CLASSIFICATION */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_autosave_writer.payload_scan_offset = 0u;
+        op_autosave_writer.patch_count = 0u;
+        op_phase = 56u;
+        return;
+
+    case 56: /* CLASSIFY/CAPTURE A BOUNDED NUMBER OF MASK POSITIONS */
+    {
+        uint16_t examined = 0u;
+
+        /*
+         * Build one stable sorted patch list without monopolizing a main-loop
+         * pass.
+         *
+         * Inputs: cached winner mask and retained payload cursor. Outputs:
+         * available live bytes are captured and cleared, nonexistent cells are
+         * cleared without a get, and later cells remain untouched when either
+         * per-tick scan or per-transaction get budget is reached.
+         */
+        while (op_autosave_writer.payload_scan_offset <
+                   AUTOSAVE_PAYLOAD_BYTES &&
+               examined < AUTOSAVE_MASK_BITS_PER_TICK) {
+            uint16_t payload_offset =
+                op_autosave_writer.payload_scan_offset;
+
+            if (op_autosave_writer.patch_count >=
+                AUTOSAVE_PARAMETER_GETS_PER_WRITE) {
+                op_phase = 6u;
+                return;
+            }
+            op_autosave_writer.payload_scan_offset++;
+            examined++;
+            if (!autosave_maskBitIsSet(
+                    fs_autosave_parameter_cache.updated_mask,
+                    payload_offset)) {
+                continue;
+            }
+            if (autosave_getLivePayloadByte(
+                    payload_offset,
+                    &fs_autosave_parameter_cache.payload_values[
+                        op_autosave_writer.patch_count])) {
+                fs_autosave_parameter_cache.payload_offsets[
+                    op_autosave_writer.patch_count] = payload_offset;
+                op_autosave_writer.patch_count++;
+            }
+            /*
+             * A successful get is now represented by a stable patch. A failed
+             * get proves this format cell has no current owner. Both cases can
+             * close exactly this bit; only successful gets consume the patch
+             * budget.
+             */
+            autosave_maskBitClear(
+                fs_autosave_parameter_cache.updated_mask, payload_offset);
+        }
+        if (op_autosave_writer.payload_scan_offset >=
+            AUTOSAVE_PAYLOAD_BYTES) {
+            op_phase = 6u;
+        }
+        return;
+    }
 
     case 6: /* OPEN WINNER FOR A PROSPECTIVE-TARGET CRC STREAM */
         if (!afatfs_chdir(NULL))
             return;
         op_bytes_done = 0u;
+        /*
+         * Reset the monotonic patch cursor for the CRC image.
+         *
+         * The same captured list is reset again before the copy pass, making
+         * both transformed streams independent of subsequent live edits.
+         */
+        op_autosave_writer.patch_cursor = 0u;
         op_autosave_writer.target_crc32c = autosave_recordCrcBegin();
         op_file_ready = false;
         op_file = NULL;
@@ -4279,11 +4567,16 @@ static void filesystem_autosaveDummyWrite_tick(void)
                 filesystem_autosaveWriterFinishError();
             return;
         }
-        autosave_transformChunk(
+        autosave_transformDrainChunk(
             staging_buf, op_bytes_done, (uint16_t)n,
             op_autosave_writer.winner_generation + 1u,
             (uint8_t)(op_autosave_writer.winner_probe + 1u), 0u,
-            AUTOSAVE_HEADER_COMMIT_VALID);
+            AUTOSAVE_HEADER_COMMIT_VALID,
+            fs_autosave_parameter_cache.updated_mask,
+            fs_autosave_parameter_cache.payload_offsets,
+            fs_autosave_parameter_cache.payload_values,
+            op_autosave_writer.patch_count,
+            &op_autosave_writer.patch_cursor);
         op_autosave_writer.target_crc32c = autosave_recordCrcUpdate(
             op_autosave_writer.target_crc32c, op_bytes_done, staging_buf,
             (uint16_t)n);
@@ -4366,6 +4659,14 @@ static void filesystem_autosaveDummyWrite_tick(void)
         op_autosave_writer.stream_offset = 0u;
         op_autosave_writer.chunk_bytes = 0u;
         op_autosave_writer.chunk_written = 0u;
+        /*
+         * Replay the same sorted captured patch set from its beginning.
+         *
+         * Input is the immutable cache used by the CRC pass. Output ensures
+         * target bytes exactly match that checksum while partial writes may
+         * span later filesystem ticks.
+         */
+        op_autosave_writer.patch_cursor = 0u;
         op_phase = 13u;
         return;
 
@@ -4408,11 +4709,16 @@ static void filesystem_autosaveDummyWrite_tick(void)
                 filesystem_autosaveWriterFinishError();
             return;
         }
-        autosave_transformChunk(
+        autosave_transformDrainChunk(
             staging_buf, op_autosave_writer.stream_offset, (uint16_t)n,
             op_autosave_writer.winner_generation + 1u,
             (uint8_t)(op_autosave_writer.winner_probe + 1u),
-            op_autosave_writer.target_crc32c, 0u);
+            op_autosave_writer.target_crc32c, 0u,
+            fs_autosave_parameter_cache.updated_mask,
+            fs_autosave_parameter_cache.payload_offsets,
+            fs_autosave_parameter_cache.payload_values,
+            op_autosave_writer.patch_count,
+            &op_autosave_writer.patch_cursor);
         op_autosave_writer.stream_offset += n;
         op_autosave_writer.chunk_bytes = (uint16_t)n;
         op_autosave_writer.chunk_written = 0u;
@@ -4617,7 +4923,8 @@ static void filesystem_autosaveDummyWrite_tick(void)
             return;
         }
         op_autosave_writer.target_crc32c = autosave_initialRecordCrc(
-            filesystem_autosaveRecoveryGeneration(), bank_displayName(),
+            filesystem_autosaveRecoveryGeneration(),
+            bank_restoreBankSlot(), bank_displayName(),
             (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
         op_autosave_writer.stream_offset = 0u;
         op_autosave_writer.chunk_bytes = 0u;
@@ -4661,7 +4968,8 @@ static void filesystem_autosaveDummyWrite_tick(void)
             staging_buf, op_autosave_writer.stream_offset,
             op_autosave_writer.chunk_bytes,
             filesystem_autosaveRecoveryGeneration(),
-            op_autosave_writer.target_crc32c, bank_displayName(),
+            bank_restoreBankSlot(), op_autosave_writer.target_crc32c,
+            bank_displayName(),
             (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
         op_autosave_writer.stream_offset += op_autosave_writer.chunk_bytes;
         op_autosave_writer.chunk_written = 0u;
@@ -4996,6 +5304,13 @@ static void filesystem_repairNames_tick(void)
              * private current operation. Why: phase 43 bypasses the generic
              * filesystem_start() arm. Affiliates: Bank boot load and the
              * repair-name state machine.
+             */
+            /*
+             * DEV_MODE_LOGGING writes operation codes to file for use in
+             * debugging. It must never print anything to the screen or
+             * otherwise delay operations unnecessarily since logging may be
+             * used to assess timing failures in other modules that might
+             * otherwise be obscured by screen write delays.
              */
             filesystem_bootLoggingArm("BANKLOAD");
             current_op = FS_INTERNAL_OP_LOAD_BANK;
@@ -7979,6 +8294,13 @@ static void filesystem_loadSceneDirectory_tick(void)
              * payload loading had completed. Affiliate: the shared resident
              * names state machine.
              */
+            /*
+             * DEV_MODE_LOGGING writes operation codes to file for use in
+             * debugging. It must never print anything to the screen or
+             * otherwise delay operations unnecessarily since logging may be
+             * used to assess timing failures in other modules that might
+             * otherwise be obscured by screen write delays.
+             */
             filesystem_bootLoggingArm("HCNAMES ");
             current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE;
             op_phase = 0u;
@@ -9565,6 +9887,13 @@ static void filesystem_saveInstrument_tick(void)
          * output is an INSINDEX deadline for its registry index rewrite. This
          * is harmless at runtime because logging is inactive there. Affiliate:
          * filesystem_createBootIndex_tick().
+         */
+        /*
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
          */
         filesystem_bootLoggingArm("INSINDEX");
         current_op = FS_INTERNAL_OP_CREATE_BOOT_INDEX;
@@ -12422,6 +12751,13 @@ static void filesystem_saveSceneDirectory_tick(void)
              * stalled register update, while runtime behavior is unchanged
              * after filesystem_bootLoggingEnd(). Affiliate: resident names.
              */
+            /*
+             * DEV_MODE_LOGGING writes operation codes to file for use in
+             * debugging. It must never print anything to the screen or
+             * otherwise delay operations unnecessarily since logging may be
+             * used to assess timing failures in other modules that might
+             * otherwise be obscured by screen write delays.
+             */
             filesystem_bootLoggingArm("HCNAMES ");
             current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE;
             op_phase = 0u;
@@ -14548,9 +14884,18 @@ static void filesystem_reportBootSubstep(uint8_t substep)
      * component call starts. Input is the stable FSub code documented in
      * HCNAMES_IMPLEMENTATION.md. Output is diagnostic-only; the callback may
      * update the boot OLED but cannot mutate filesystem ownership or progress.
+     *
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
      */
+#if DEV_MODE_DIAGNOSTIC
     if (fs_boot_substep_diagnostic)
         fs_boot_substep_diagnostic(substep);
+#else
+    (void)substep;
+#endif
 }
 
 static void filesystem_blockOpenCb(afatfsFilePtr_t file)
@@ -14566,8 +14911,13 @@ static void filesystem_blockCloseCb(void)
 
 static uint8_t filesystem_blockFsOk(void)
 {
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     /*
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
+     *
      * Raw blocking helpers must unwind after either primary or recovery
      * expiry. Input is the shared watchdog latch plus asyncfatfs mount state;
      * output is false before another open/read/rename loop iteration. Why:
@@ -16772,6 +17122,12 @@ uint8_t filesystem_initCardAndMountBlocking(void)
      * facade exists. Affiliates: filesystem_bootLoggingBegin() and the mount
      * initialization loop below.
      */
+    /*
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
+     */
     filesystem_bootLoggingArm("MOUNTSD ");
     fs_boot_detected_unsupported_card = 0;
     fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
@@ -16846,6 +17202,11 @@ uint8_t filesystem_writeBootTimeoutLogBlocking(void)
     /*
      * Make one bounded, best-effort durable report after a boot timeout.
      *
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+     * must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
+     *
      * What: abandons the active SD transfer, destroys dirty asyncfatfs state,
      * resets invalid facade ownership, reinitializes/remounts the card, and
      * runs the ordinary eight-byte writer plus sync gate. Why: a second FAT
@@ -16853,13 +17214,13 @@ uint8_t filesystem_writeBootTimeoutLogBlocking(void)
      * are the latched timeout and preserved code; output is nonzero only after
      * bootlog.bin closes and syncs. Dirty abandon can leave the timed-out
      * operation partially represented on card and is acceptable only in this
-     * DEV_LOGGING diagnostic build. The recovery has one ten-second ceiling,
+     * DEV_MODE_LOGGING build. The recovery has one ten-second ceiling,
      * never retries, never invokes the abandoned callback, and failure must
      * not prevent main.c from continuing to audio. Affiliates:
      * sdcard_abortTransferForBootLog(), afatfs_destroy(true), SD_init(),
      * filesystem_writeBootLog_tick(), and filesystem_bootLoggingEnd().
      */
-#if DEV_LOGGING
+#if DEV_MODE_LOGGING
     uint8_t sd_init_result;
     uint8_t write_ok = 0u;
 
@@ -16979,7 +17340,7 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         (uint16_t)(now - fs_autosave_next_due_tick) >= 0x8000u) {
         return;
     }
-    (void)filesystem_start(FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE,
+    (void)filesystem_start(FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN,
                            FS_FILE_SETTINGS, 0u,
                            filesystem_autosaveWriterCompleted);
 }
@@ -17036,8 +17397,8 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES:
         filesystem_ensureAutosaveFiles_tick();
         break;
-    case FS_INTERNAL_OP_AUTOSAVE_DUMMY_WRITE:
-        filesystem_autosaveDummyWrite_tick();
+    case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN:
+        filesystem_autosaveParameterDrain_tick();
         break;
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:
@@ -17139,6 +17500,11 @@ void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase)
     /*
      * Translate only the operations reachable from boot stage 11.
      *
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     *
      * Input: current_op/op_phase owned by the single filesystem facade.
      * Output: stable diagnostic codes suitable for the front-panel display.
      * The mapping deliberately does not expose fs_internal_op_t values because
@@ -17146,6 +17512,7 @@ void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase)
      * private enum. Reading these fields is observational and cannot advance
      * or otherwise perturb the active state machine.
      */
+#if DEV_MODE_DIAGNOSTIC
     switch (current_op) {
     case FS_INTERNAL_OP_REPAIR_NAMES:
         public_op = FS_BOOT_DIAG_REPAIR_NAMES;
@@ -17166,22 +17533,39 @@ void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase)
     default:
         break;
     }
+#endif
 
     if (op)
         *op = public_op;
-    if (phase)
+    if (phase) {
+#if DEV_MODE_DIAGNOSTIC
         *phase = op_phase;
+#else
+        *phase = 0u;
+#endif
+    }
 }
 
 void filesystem_setBootSubstepDiagnostic(fs_boot_substep_diag_cb_t cb)
 {
     /*
      * Register the temporary observer used only around initial payload load.
+     *
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     *
      * Input: callback to invoke before phase-43 blocking component calls, or
      * NULL to disable observation. Output: callback ownership changes only;
      * current_op, op_phase, FAT state, and asyncfatfs pumping are untouched.
      */
+#if DEV_MODE_DIAGNOSTIC
     fs_boot_substep_diagnostic = cb;
+#else
+    (void)cb;
+    fs_boot_substep_diagnostic = NULL;
+#endif
 }
 
 const char *filesystem_errorCode(void)
@@ -17216,8 +17600,16 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
      * by the logger API. Affiliate: filesystem_bootLogCodeForOperation().
      */
     boot_code = filesystem_bootLogCodeForOperation(op, type);
-    if (boot_code)
+    if (boot_code) {
+        /*
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
+         */
         filesystem_bootLoggingArm(boot_code);
+    }
     status = FS_STATUS_BUSY;
     current_op = op;
     op_phase = 0;
@@ -17615,6 +18007,18 @@ uint8_t filesystem_writeResidentNamesBlocking(
      * hook: every blocking pump reports the live phase and next SRAM row so a
      * non-advancing state remains visible on the front-panel display.
      */
+#if !DEV_MODE_DIAGNOSTIC
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     *
+     * Discard callbacks in non-screen builds so this filesystem entry point
+     * cannot expose operations merely because an obsolete caller supplied one.
+     */
+    diagnostic_cb = NULL;
+#endif
     if (status == FS_STATUS_BUSY)
         return 0u;
     if (!filesystem_start(FS_INTERNAL_OP_WRITE_HCNAMES,
@@ -17625,6 +18029,12 @@ uint8_t filesystem_writeResidentNamesBlocking(
     while (status == FS_STATUS_BUSY) {
         if (diagnostic_cb) {
             /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             *
              * filesystem_finish(DONE) changes current_op to the shared flush
              * operation and resets op_phase to zero. Translate that internal
              * handoff to diagnostic phase 4; otherwise the screen would
@@ -17639,11 +18049,23 @@ uint8_t filesystem_writeResidentNamesBlocking(
         filesystem_tick();
     }
     if (status != FS_STATUS_DONE) {
+        /*
+         * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for
+         * the user to assess how operations are proceeding. It does not and
+         * should not ever add additional file interaction steps, since the
+         * diagnostic may be used to assess in-situ file procedures.
+         */
         if (diagnostic_cb)
             diagnostic_cb(6u, op_item_offset);
         filesystem_ack();
         return 0u;
     }
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     if (diagnostic_cb)
         diagnostic_cb(5u, op_item_offset);
     filesystem_ack();
@@ -17704,6 +18126,13 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
          * covering validation/quarantine. Why: without this explicit arm the
          * completed NAMEREPR code could be blamed for a later raw-loop stall.
          * Affiliate: filesystem_blockPoll().
+         */
+        /*
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
          */
         filesystem_bootLoggingArm("KITQUAR ");
         quarantine_ok = filesystem_quarantineKitLibraryBlocking();

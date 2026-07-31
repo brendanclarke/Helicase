@@ -54,8 +54,13 @@ uint8_t sdcard_getState(void);
 /*
  * Abandon one LXR-02 SD block transfer for boot-log recovery.
  *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
+ *
  * What: deasserts chip select and clears the private transfer callback/state
- * without reporting completion. Why: a DEV_LOGGING timeout discards the
+ * without reporting completion. Why: a DEV_MODE_LOGGING timeout discards the
  * owning asyncfatfs image before it remounts to write `/bootlog.bin`; a delayed
  * callback into that discarded image would corrupt the recovery mount.
  * Inputs: the current read/write shim state. Outputs/effects: transport becomes

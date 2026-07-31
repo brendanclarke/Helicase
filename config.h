@@ -49,32 +49,46 @@
 ** Feature flags
 ** ----------------------------------------------------------------------- */
 #define USE_SD_CARD          1
-#define DEBUG_CRASH_MODE     0
 /*
- * Enable the bounded pre-audio filesystem diagnostic.
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
  *
- * What: value 1 compiles the existing boot OLED coordinates plus an eight-byte
- * filesystem-operation register, a ten-second cooperative boot deadline, and
- * the best-effort `/bootlog.bin` timeout writer. Value 0 removes the timeout
- * and dirty-abandon behavior from ordinary runtime firmware.
- *
- * Why: a splash-screen stall otherwise loses the exact operation coordinate
- * when power is removed. This flag is intentionally separate from
- * DEBUG_CRASH_MODE: crash handling and removable-media boot diagnosis have
- * different ownership and persistence rules.
- *
- * Inputs: main.c's pre-audio boot window and filesystem.c's foreground polling
- * paths. Outputs/effects: diagnostic builds may abandon an in-flight boot
- * transaction after the configured deadline, remount once, and write the
- * captured code. Affiliates: boot_showFilesystemStage(),
- * filesystem_bootLoggingBegin(), filesystem_tick(), and the LXR-02 SD shim.
+ * What: value 1 compiles only the existing boot OLED operation/phase
+ * observers. Value 0 makes every boot display hook a no-op and passes NULL for
+ * the filesystem observers. Why: screen instrumentation deliberately waits
+ * for LCD completion so the last operation is visible if boot stalls; keeping
+ * it independent prevents those waits from changing a file-timing diagnosis.
+ * Inputs: main.c's pre-audio boot stages and read-only filesystem coordinates.
+ * Outputs/effects: boot operation/phase information on the LCD only.
+ * Affiliates: boot_showFilesystemStage(),
+ * boot_showActiveFilesystemDiagnostic(), and the boot observer callbacks.
  */
-#define DEV_LOGGING         1
+#define DEV_MODE_DIAGNOSTIC 0
+
+/*
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
+ *
+ * What: value 1 compiles the eight-byte filesystem-operation register,
+ * cooperative boot timeout, and best-effort `/bootlog.bin` timeout writer.
+ * Value 0 removes that logging/timeout behavior. Why: a splash-screen stall
+ * otherwise loses the exact operation coordinate when power is removed.
+ * Inputs: main.c's pre-audio logging window and filesystem.c's foreground
+ * polling paths. Outputs/effects: SRAM code capture during normal progress and
+ * one bounded file write only after timeout recovery begins. This flag owns no
+ * LCD calls or LCD waits. Affiliates: filesystem_bootLoggingBegin(),
+ * filesystem_bootLoggingArm(), filesystem_tick(), and the LXR-02 SD shim.
+ */
+#define DEV_MODE_LOGGING    1
 
 /*
  * Maximum duration of one armed boot filesystem operation.
  *
- * What: supplies the millisecond deadline used only while DEV_LOGGING is
+ * What: supplies the millisecond deadline used only while DEV_MODE_LOGGING is
  * active before audio startup. Why: time_sysTick is a wrapping uint16_t, so the
  * interval must stay below 32,768 ms for unsigned elapsed-time comparison.
  * Inputs: one operation arm. Output: timeout after exactly ten seconds without
@@ -140,6 +154,27 @@
  * pages and ordinary filesystem work may defer the next background start.
  */
 #define AUTOSAVE_WRITER_INTERVAL_MS 5000u
+
+/*
+ * Bound live payload sampling inside one debounced autosave transaction.
+ *
+ * Input is the winner record's on-card mutation mask. Output is at most this
+ * many stable payload offset/value patches captured before the CRC and copy
+ * passes begin. Why: parameter reads and dedicated cache growth remain
+ * predictable even when a whole Scene is marked dirty. Affiliates:
+ * Autosave.c's live-byte projection and filesystem.c's parameter-drain cache.
+ */
+#define AUTOSAVE_PARAMETER_GETS_PER_WRITE 256u
+
+/*
+ * Bound mutation-mask classification work performed by one foreground tick.
+ *
+ * Input is the retained payload scan cursor. Output advances by no more than
+ * this many bit positions before returning to the main loop. This is distinct
+ * from AUTOSAVE_PARAMETER_GETS_PER_WRITE: nonexistent/padding cells consume
+ * scan work but no live get. Affiliates: filesystem_autosaveParameterDrain_tick().
+ */
+#define AUTOSAVE_MASK_BITS_PER_TICK 256u
 
 /* -----------------------------------------------------------------------
 ** Display — WS0010 OLED 16×2, 4-bit parallel
