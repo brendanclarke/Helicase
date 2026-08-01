@@ -469,11 +469,14 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
     const scene_t *scene;
 
     /*
-     * Map Bank-owned scalar bytes before entering the repeated Scene geometry.
+     * Map every currently existing Bank-owned byte before repeated Scenes.
      *
      * Inputs are payload-relative positions 0..127. Outputs use explicit
-     * little-endian BankData getters; Bank/HCNAMES name cells and reserved
-     * padding deliberately report nonexistent to this parameter-only drain.
+     * little-endian BankData getters for the restore/presence/edit masks and
+     * the same zero-padding normalization as creation/validation for the live
+     * BankData display name. Why: a dirty Bank-name cell must capture an
+     * in-system rename without reading HCNAMES, while reserved Bank padding
+     * still reports nonexistent and can be closed by the drain.
      */
     if (!value || payload_offset >= AUTOSAVE_PAYLOAD_BYTES)
         return 0u;
@@ -483,6 +486,12 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
         if (payload_offset < 2u) {
             *value = autosave_u16Byte(
                 bank_restoreBankSlot(), (uint8_t)payload_offset);
+            return 1u;
+        }
+        if (payload_offset >= 2u &&
+            payload_offset < 2u + AUTOSAVE_NAME_BYTES) {
+            *value = autosave_nameByte(
+                bank_displayName(), (uint8_t)(payload_offset - 2u));
             return 1u;
         }
         if (payload_offset >= 10u && payload_offset < 12u) {
@@ -645,6 +654,30 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
                 .morph_instrument_parameters[descriptor_index];
             return 1u;
         }
+    }
+    return 0u;
+}
+
+uint8_t autosave_maskHasDirty(
+    const uint8_t mask[AUTOSAVE_MASK_BYTES])
+{
+    uint16_t byte_index;
+
+    /*
+     * Test the SRAM completeness register without changing drain ownership.
+     *
+     * Input is the complete mask copied from the selected file into the
+     * temporary autosave cache. Output is nonzero on the first dirty byte, or
+     * zero when no cached mutation requires a parameter get or a ping-pong
+     * write. Why: generation/CRC/copy work must not run merely to reproduce an
+     * already-empty mask. Affiliates: filesystem drain phase 55 and the future
+     * persistent in-system mutation register.
+     */
+    if (!mask)
+        return 0u;
+    for (byte_index = 0u; byte_index < AUTOSAVE_MASK_BYTES; byte_index++) {
+        if (mask[byte_index] != 0u)
+            return 1u;
     }
     return 0u;
 }

@@ -263,19 +263,26 @@ uint8_t autosave_streamValidationMatchesBank(
  * Input is payload-relative 0..30,847 plus caller-owned output storage.
  * Output 1 supplies an existing Bank/Scene/Kit/Instrument byte; output 0 means
  * the cell has no live parameter owner in this milestone and its dirty bit may
- * be closed without a get. The helper never reads HCNAMES, Pattern, Effects,
- * or derived Morph interpolation and performs no I/O or mutation.
+ * be closed without a get. Bank identity includes the restore slot and
+ * normalized BankData display name, so an already-dirty Bank-name cell samples
+ * the current in-system name without borrowing HCNAMES. The helper never reads
+ * HCNAMES, Pattern, Effects, or derived Morph interpolation and performs no I/O
+ * or mutation.
  */
 uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value);
 
 /*
- * Read or clear one mutation bit.
+ * Inspect the complete mutation mask, or read/clear one mutation bit.
  *
- * Inputs: caller-owned 3,856-byte mask and a payload-relative offset. Outputs:
- * read returns the least-significant-bit-first state; clear changes exactly
- * that bounded bit. These helpers centralize the on-card bit convention for
- * fixture generation and filesystem drain preparation.
+ * Inputs: caller-owned 3,856-byte SRAM mask and, for bit operations, a
+ * payload-relative offset. Outputs: HasDirty reports whether any cached byte
+ * contains a mutation; read returns the least-significant-bit-first state;
+ * clear changes exactly one bounded bit. The whole-mask test lets the current
+ * temporary file-to-SRAM drain fall through before a needless ping-pong write.
+ * These helpers centralize the file/cache bit convention for fixture
+ * generation and filesystem drain preparation.
  */
+uint8_t autosave_maskHasDirty(const uint8_t mask[AUTOSAVE_MASK_BYTES]);
 uint8_t autosave_maskBitIsSet(const uint8_t mask[AUTOSAVE_MASK_BYTES],
                               uint16_t payload_offset);
 void autosave_maskBitClear(uint8_t mask[AUTOSAVE_MASK_BYTES],

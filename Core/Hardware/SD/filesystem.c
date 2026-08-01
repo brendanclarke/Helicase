@@ -606,6 +606,7 @@ typedef struct {
     uint8_t target_ready;
     uint8_t recovery_target_index;
     uint8_t recovery_using_names;
+    uint8_t continue_pending;
 } filesystem_autosave_writer_state_t;
 
 /*
@@ -616,7 +617,11 @@ typedef struct {
  * Why: the CRC and output passes must consume identical captured values while
  * carrying every unprocessed dirty bit forward. Inputs are the winner mask and
  * Autosave.c's live-byte getter; outputs are immutable transform inputs for
- * both record passes. Affiliates: filesystem_autosaveParameterDrain_tick().
+ * both record passes. After a successful commit, `continue_pending` carries
+ * only the outgoing mask's dirty/non-dirty result across the flush gate to the
+ * completion callback; it does not retain or replace the mask itself.
+ * Affiliates: filesystem_autosaveParameterDrain_tick() and
+ * filesystem_autosaveWriterCompleted().
  *
  * This allocation is intentionally independent from fs_list_cache_name. The
  * eventual dual-use optimization is deferred until hardware behavior is
@@ -726,6 +731,10 @@ _Static_assert(
     "autosave value cache must match the configured get cap");
 _Static_assert(sizeof(filesystem_autosave_parameter_cache_t) <= 9000u,
                "dedicated autosave cache must stay within its 9 KB ceiling");
+_Static_assert(AUTOSAVE_WRITER_INTERVAL_MS < 0x8000u,
+               "autosave debounce must fit the wrapping scheduler comparison");
+_Static_assert(AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS < 0x8000u,
+               "autosave continuation must fit the wrapping scheduler comparison");
 
 #define op_staged_kit        (fs_stage_workspace.kit_stage)
 #define op_staged_instrument (fs_stage_workspace.instrument_stage)
@@ -1258,8 +1267,12 @@ static uint16_t fs_last_idle_poll_tick = 0;
  * Background autosave cadence state.
  *
  * This is deliberately separate from fs_last_idle_poll_tick: the latter owns
- * 5 ms idle SD polling, while these fields own the 5 s write schedule. The
- * one-operation stage cannot retain this information after completion.
+ * 5 ms idle SD polling, while these fields retain the next absolute autosave
+ * deadline selected by the completion callback. Inputs are the ordinary
+ * five-second cadence or the short durable-backlog continuation cadence;
+ * output is one wrapping deadline that survives after the operation stage is
+ * reused. Affiliates: filesystem_autosaveWriterCompleted() and
+ * filesystem_autosaveWriterSchedule_tick().
  */
 static uint16_t fs_autosave_next_due_tick = 0u;
 static uint8_t fs_autosave_writer_armed = 0u;
@@ -4252,7 +4265,9 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 ** for the next debounce. If neither record validates for the current Bank
 ** identity, both are asynchronously regenerated B then A from HCNAMES with a
 ** zero mask. No phase blocks on AsyncFATFS or borrows the shared name cache
-** except that existing recovery path.
+** except that existing recovery path. The file mask is copied into the
+** temporary SRAM cache before classification; an empty cached mask completes
+** read-only and never creates another empty generation.
 ** ----------------------------------------------------------------------- */
 static void filesystem_autosaveParameterDrain_tick(void)
 {
@@ -4448,10 +4463,30 @@ static void filesystem_autosaveParameterDrain_tick(void)
         return;
     }
 
-    case 55: /* WAIT MASK READER CLOSE, THEN BEGIN COOPERATIVE CLASSIFICATION */
+    case 55: /* CLOSE COMPLETE: FALL THROUGH IF THE SRAM MASK IS EMPTY */
         if (!op_close_done)
             return;
         op_file = NULL;
+        /*
+         * Stop at the first safe no-write boundary after loading the mask.
+         *
+         * Inputs: the selected winner has validated, its complete on-file mask
+         * has been copied into the temporary dedicated SRAM cache, and the read
+         * handle is closed. Output: an already-empty cached mask completes the
+         * autonomous operation directly, without CRC streaming, removing the
+         * inactive peer, advancing generation/probe, writing, or flushing.
+         * Why: the file mask records completeness; it is not a request to
+         * manufacture another empty generation. A nonempty cache continues
+         * into the existing bounded parameter drain and is written back after
+         * its captured changes. Affiliates: autosave_maskHasDirty(),
+         * filesystem_autosaveWriterCompleted(), and the future in-system
+         * mutation-mask producer.
+         */
+        if (!autosave_maskHasDirty(
+                fs_autosave_parameter_cache.updated_mask)) {
+            filesystem_complete(FS_STATUS_DONE);
+            return;
+        }
         op_autosave_writer.payload_scan_offset = 0u;
         op_autosave_writer.patch_count = 0u;
         op_phase = 56u;
@@ -4805,10 +4840,24 @@ static void filesystem_autosaveParameterDrain_tick(void)
             op_phase = 22u;
         return;
 
-    case 22: /* FINAL CLOSE THEN EXISTING filesystem_finish() SYNC GATE */
+    case 22: /* RETAIN BACKLOG RESULT, THEN ENTER THE FINAL SYNC GATE */
         if (!op_close_done)
             return;
         op_file = NULL;
+        /*
+         * Hand one post-commit scheduling decision across the flush boundary.
+         *
+         * Input is the exact cached mask already written into the closed target.
+         * Output is one scalar that requests the short continuation cadence only
+         * if that durable generation still carries dirty positions. Why: the
+         * completion callback runs after filesystem_finish() changes operation
+         * ownership to the shared sync state, so it must not infer backlog from
+         * the older peer or rescan mutable live state. Empty-mask, recovery, and
+         * error paths never reach this assignment and retain the ordinary
+         * five-second cadence. Affiliates: filesystem_autosaveWriterCompleted().
+         */
+        op_autosave_writer.continue_pending = autosave_maskHasDirty(
+            fs_autosave_parameter_cache.updated_mask);
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -17293,14 +17342,29 @@ recovery_failed:
 
 static void filesystem_autosaveWriterCompleted(void)
 {
+    uint16_t next_interval = AUTOSAVE_WRITER_INTERVAL_MS;
+
     /*
      * This callback belongs only to the autonomous writer. filesystem_complete
      * has already published its terminal status, so acknowledge it here rather
      * than leaving DONE/ERROR for a Menu/Preset caller that never requested it.
-     * A failed attempt uses the same deferred cadence as a successful one.
+     * Input is the terminal status plus the outgoing-mask result retained just
+     * before a successful written target entered its flush gate. Output uses the
+     * 250 ms continuation only for a successful commit with durable dirty bits;
+     * errors, recovery, a final drained write, and an empty-cache/read-only
+     * attempt all retain the five-second cadence. The decision is consumed here
+     * before acknowledging the operation. Why: this temporary implementation
+     * still reloads the completeness mask from file for each due drain, while
+     * the empty-cache branch guarantees those checks cannot advance generation
+     * or write a peer. Affiliates: drain phase 22, the scheduler below, and the
+     * future in-system retained mutation mask.
      */
+    if (status == FS_STATUS_DONE && op_autosave_writer.continue_pending) {
+        next_interval = AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS;
+    }
+    op_autosave_writer.continue_pending = 0u;
     fs_autosave_next_due_tick = (uint16_t)(
-        time_sysTick + AUTOSAVE_WRITER_INTERVAL_MS);
+        time_sysTick + next_interval);
     fs_autosave_writer_armed = 1u;
     filesystem_ack();
 }

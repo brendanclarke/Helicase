@@ -225,11 +225,17 @@ void        filesystem_initAfterCardReady(void);
  * valid generation. An existing matching object is never opened for write.
  *
  * A successful return authorizes filesystem_tick()'s private parameter drain;
- * that runtime operation uses a separate cache and is not exposed here. An
- * error leaves it disabled so a missing pair cannot trigger recovery during
- * the boot ladder. If a complete FAT free-cluster search reports genuine
- * exhaustion, partial output is closed and this function returns zero rather
- * than trapping boot in a zero-byte fwrite retry.
+ * that runtime operation uses a separate cache and is not exposed here. Each
+ * write captures at most the configured live-byte count. A successful commit
+ * whose outgoing SRAM mask remains dirty schedules a short continuation;
+ * initial work, errors, recovery, and complete masks retain the ordinary
+ * five-second cadence. An already-empty file mask is copied into that SRAM
+ * cache and completes read-only: no inactive peer is replaced, generation/probe
+ * do not advance, and the short continuation is not selected. An error leaves
+ * the writer disabled so a missing pair cannot trigger recovery during the boot
+ * ladder. If a complete FAT free-cluster search reports genuine exhaustion,
+ * partial output is closed and this function returns zero rather than trapping
+ * boot in a zero-byte fwrite retry.
  */
 uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
 /*

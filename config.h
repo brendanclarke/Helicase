@@ -146,14 +146,30 @@
 #define SYSTICK_TICKS_PER_MS (SYSTICK_HZ / 1000)
 
 /*
- * Minimum pause between autonomous autosave transactions.
+ * Ordinary pause between autonomous autosave transactions.
  *
  * The writer compares this with the wrapping 16-bit `time_sysTick` using
- * unsigned subtraction, so it must remain below 32,768 ms. This cadence is a
- * minimum between completed attempts, not a synchronous deadline: Load/Save
- * pages and ordinary filesystem work may defer the next background start.
+ * unsigned subtraction, so it must remain below 32,768 ms. This five-second
+ * cadence applies before the first runtime attempt and after an error,
+ * recovery, read-only empty-mask check, or fully drained write. A successful
+ * write that carries dirty bits forward uses the shorter continuation cadence
+ * below instead. Neither cadence is a synchronous deadline: Load/Save pages
+ * and ordinary filesystem work may defer the next background start.
  */
 #define AUTOSAVE_WRITER_INTERVAL_MS 5000u
+
+/*
+ * Short pause between bounded writes while a durable backlog still exists.
+ *
+ * Input is the outgoing SRAM mask after one target record has committed and
+ * passed the normal filesystem flush gate. Output schedules the next complete
+ * validation/drain transaction 250 ms later only when that mask still has a
+ * dirty bit. Why: a loaded Bank/Scene can drain promptly without changing the
+ * five-second debounce for a new or already-complete autosave. This remains
+ * below the 16-bit scheduler's 32,768 ms comparison limit. Affiliates:
+ * filesystem_autosaveParameterDrain_tick() and its completion callback.
+ */
+#define AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS 250u
 
 /*
  * Bound live payload sampling inside one debounced autosave transaction.
@@ -161,10 +177,13 @@
  * Input is the winner record's on-card mutation mask. Output is at most this
  * many stable payload offset/value patches captured before the CRC and copy
  * passes begin. Why: parameter reads and dedicated cache growth remain
- * predictable even when a whole Scene is marked dirty. Affiliates:
- * Autosave.c's live-byte projection and filesystem.c's parameter-drain cache.
+ * predictable even when a whole Scene is marked dirty. The selected 1,536
+ * entries occupy 4,608 bytes beside the 3,856-byte mask, for an 8,464-byte
+ * dedicated cache below the temporary 9,000-byte ceiling; it can capture about
+ * three current Scenes per generation. Affiliates: Autosave.c's live-byte
+ * projection and filesystem.c's parameter-drain cache.
  */
-#define AUTOSAVE_PARAMETER_GETS_PER_WRITE 256u
+#define AUTOSAVE_PARAMETER_GETS_PER_WRITE 1536u
 
 /*
  * Bound mutation-mask classification work performed by one foreground tick.
