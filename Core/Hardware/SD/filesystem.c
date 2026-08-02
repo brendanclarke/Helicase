@@ -582,8 +582,10 @@ typedef struct {
  *
  * The filesystem facade permits only one operation at a time, so this scalar
  * state cannot overlap Kit/Scene/Instrument parser staging. The full
- * 34,768-byte record remains streamed through staging_buf; only mask/patch
- * data lives in the separate bounded cache below.
+ * 34,768-byte record remains streamed through staging_buf; only stable
+ * transaction-local payload patches live in the separate bounded cache below.
+ * The persistent 3,856-byte dirty record is owned by Autosave.c and therefore
+ * survives reuse of this operation union.
  */
 typedef struct {
     autosave_stream_validation_t validation;
@@ -606,29 +608,24 @@ typedef struct {
     uint8_t target_ready;
     uint8_t recovery_target_index;
     uint8_t recovery_using_names;
-    uint8_t continue_pending;
 } filesystem_autosave_writer_state_t;
 
 /*
- * Dedicated first-pass autosave mask and stable live-byte patch cache.
+ * Dedicated stable live-byte patch cache.
  *
- * What: holds the newest record's complete 3,856-byte mask plus at most the
- * configured number of sorted uint16 payload offsets and sampled byte values.
- * Why: the CRC and output passes must consume identical captured values while
- * carrying every unprocessed dirty bit forward. Inputs are the winner mask and
- * Autosave.c's live-byte getter; outputs are immutable transform inputs for
- * both record passes. After a successful commit, `continue_pending` carries
- * only the outgoing mask's dirty/non-dirty result across the flush gate to the
- * completion callback; it does not retain or replace the mask itself.
- * Affiliates: filesystem_autosaveParameterDrain_tick() and
- * filesystem_autosaveWriterCompleted().
+ * What: holds at most the configured number of sorted uint16 payload offsets
+ * and sampled byte values. Why: captured values must remain stable while the
+ * one transformed source-to-target stream spans foreground ticks; the
+ * canonical dirty record itself remains in Autosave.c. Inputs are bounded live
+ * gets; outputs are immutable payload substitutions and error-rollback offsets.
+ * Affiliates: filesystem_autosaveParameterDrain_tick(), Autosave.c's
+ * transform, and filesystem_autosaveWriterFinishErrorNow().
  *
  * This allocation is intentionally independent from fs_list_cache_name. The
  * eventual dual-use optimization is deferred until hardware behavior is
  * confirmed, so Load/Save name-cache ownership cannot alias this test.
  */
 typedef struct {
-    uint8_t updated_mask[AUTOSAVE_MASK_BYTES];
     uint16_t payload_offsets[AUTOSAVE_PARAMETER_GETS_PER_WRITE];
     uint8_t payload_values[AUTOSAVE_PARAMETER_GETS_PER_WRITE];
 } filesystem_autosave_parameter_cache_t;
@@ -716,9 +713,6 @@ _Static_assert(sizeof(filesystem_stage_workspace_t) <= FS_STAGE_CACHE_BYTES,
                "typed non-Pattern stage exceeds its fixed SRAM budget");
 _Static_assert(_Alignof(filesystem_stage_workspace_t) >= _Alignof(kit_t),
                "typed stage must align Kit staging");
-_Static_assert(sizeof(fs_autosave_parameter_cache.updated_mask) ==
-                   AUTOSAVE_MASK_BYTES,
-               "autosave cache must retain the complete mutation mask");
 _Static_assert(
     sizeof(fs_autosave_parameter_cache.payload_offsets) /
             sizeof(fs_autosave_parameter_cache.payload_offsets[0]) ==
@@ -729,12 +723,17 @@ _Static_assert(
             sizeof(fs_autosave_parameter_cache.payload_values[0]) ==
         AUTOSAVE_PARAMETER_GETS_PER_WRITE,
     "autosave value cache must match the configured get cap");
+_Static_assert(sizeof(filesystem_autosave_parameter_cache_t) == 4608u,
+               "autosave patch cache must remain exactly 4608 bytes");
 _Static_assert(sizeof(filesystem_autosave_parameter_cache_t) <= 9000u,
                "dedicated autosave cache must stay within its 9 KB ceiling");
 _Static_assert(AUTOSAVE_WRITER_INTERVAL_MS < 0x8000u,
                "autosave debounce must fit the wrapping scheduler comparison");
 _Static_assert(AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS < 0x8000u,
                "autosave continuation must fit the wrapping scheduler comparison");
+_Static_assert(SETTINGS_AUTOWRITE_DEBOUNCE_MS > 0u &&
+               SETTINGS_AUTOWRITE_DEBOUNCE_MS < 0x8000u,
+               "settings debounce must fit the wrapping scheduler comparison");
 
 #define op_staged_kit        (fs_stage_workspace.kit_stage)
 #define op_staged_instrument (fs_stage_workspace.instrument_stage)
@@ -944,8 +943,11 @@ static void filesystem_writeBootLog_tick(void);
 static void filesystem_residentNames_tick(void);
 static void filesystem_ensureAutosaveFiles_tick(void);
 static void filesystem_autosaveParameterDrain_tick(void);
+static void filesystem_settingsWriterSchedule_tick(void);
+static void filesystem_settingsWriterCompleted(void);
 static void filesystem_autosaveWriterSchedule_tick(void);
 static void filesystem_autosaveWriterCompleted(void);
+static void filesystem_autosaveSetupCompleted(void);
 static uint8_t filesystem_residentNameIsBlank(const char *name);
 static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t cap,
@@ -1264,6 +1266,23 @@ static uint16_t fs_bank_scratch_counter = 0u;
 #define FS_GLOBALS_LEGACY_LEN_22  22u
 static uint16_t fs_last_idle_poll_tick = 0;
 /*
+ * Debounced settings.cfg persistence state.
+ *
+ * What: retains one pending flag/deadline, a boot/runtime authorization gate,
+ * and live/captured revisions for the streaming writer. Why: Global/source
+ * bursts must coalesce, while a change occurring after its line was emitted
+ * must survive for a complete follow-up file write. Inputs are Menu/Preset
+ * dirty notifications and time_sysTick. Outputs are autonomous reuse of the
+ * existing SAVE_GLOBALS operation only while the facade is idle. Affiliates:
+ * filesystem_saveGlobals_tick(), filesystem_complete(), and the scheduler.
+ */
+static uint16_t fs_settings_next_due_tick = 0u;
+static uint32_t fs_settings_change_revision = 0u;
+static uint32_t op_settings_change_revision = 0u;
+static uint8_t fs_settings_dirty = 0u;
+static uint8_t fs_settings_runtime_ready = 0u;
+static uint8_t op_settings_write_active = 0u;
+/*
  * Background autosave cadence state.
  *
  * This is deliberately separate from fs_last_idle_poll_tick: the latter owns
@@ -1283,6 +1302,34 @@ static uint8_t fs_autosave_writer_armed = 0u;
  * ladder when a card starts with no autosave files.
  */
 static uint8_t fs_autosave_writer_boot_ready = 0u;
+/*
+ * One-time runtime import of the valid winner's file-carried dirty mask.
+ *
+ * What: successful boot pair setup sets this flag even when SRAM is clean;
+ * successful writer validation clears it. Why: file masks recover interrupted
+ * work once, after which an empty canonical mask must cause no filesystem
+ * operation. Inputs/outputs: boot ensure and writer completion own the flag;
+ * the idle scheduler treats it as work independent of current dirty bits.
+ * Affiliate: Autosave's tracking gate and maskMergeChunk().
+ */
+static uint8_t fs_autosave_recovery_pending = 0u;
+/*
+ * User policy and runtime autosave lifecycle state.
+ *
+ * Inputs: settings/menu AutoSave preference, the post-boot runtime gate, and
+ * autonomous operation callbacks. Outputs: setup is queued only for an enabled
+ * resident Bank; OFF suppresses all new hidden-file operations and may defer a
+ * canonical-mask discard until an active transform completes. Why: the
+ * scheduler, ensure wrapper, and completion callbacks all need the same
+ * defense rather than trusting one Menu hook. Affiliates:
+ * filesystem_setAutosaveEnabled(), main.c, and Autosave's producer/mask APIs.
+ */
+static uint8_t fs_autosave_enabled = 1u;
+static uint8_t fs_autosave_runtime_ready = 0u;
+static uint8_t fs_autosave_setup_pending = 0u;
+static uint8_t fs_autosave_setup_failed = 0u;
+static uint8_t fs_autosave_transaction_active = 0u;
+static uint8_t fs_autosave_discard_pending = 0u;
 
 /* Existing morph destination buffer owned by preset/sound code.
  *
@@ -1648,6 +1695,15 @@ static void filesystem_sanitizeLoadedGlobals(void)
     uint8_t ch = parameter_values[PAR_MIDI_CHAN_GLOBAL];
     if (ch == 0u || ch > 16u)
         parameter_values[PAR_MIDI_CHAN_GLOBAL] = 1u;
+    /*
+     * Normalize the persistent AutoSave preference at the common Global-load
+     * boundary. Input is any flat/global compatibility image. Output is one
+     * strict boolean, with nonzero legacy bytes interpreted as ON. Why: keyed
+     * settings parsing is not the only caller of this sanitizer. Affiliates:
+     * menu_sendAllGlobals() and filesystem_setAutosaveEnabled().
+     */
+    parameter_values[PAR_AUTOSAVE_ENABLED] =
+        parameter_values[PAR_AUTOSAVE_ENABLED] ? 1u : 0u;
 }
 
 static void filesystem_applyGlobalsPrefix(const uint8_t *src, uint16_t src_len)
@@ -1739,6 +1795,17 @@ static void filesystem_resetSettingsToDefaults(void)
     parameter_values[PAR_PRESCALER_CLOCK_OUT1] = 0u;
     parameter_values[PAR_FOLLOW] = 0u;
     parameter_values[PAR_OSC_WAVE_INTERP] = 0u;
+    /*
+     * New settings fields retain backward-compatible defaults under version 1.
+     *
+     * Input: every keyed settings load before file overlay. Outputs: AutoSave
+     * starts ON and all sixteen Scene sources become explicitly unknown. Why:
+     * missing files/keys and later manual Settings Loads must not retain stale
+     * provenance. Affiliates: SceneData's exact 32-byte source owner and the
+     * parser/writer below.
+     */
+    parameter_values[PAR_AUTOSAVE_ENABLED] = 1u;
+    scene_resetSources();
     bank_setRestoreBankSlot(0u);
 }
 
@@ -1802,7 +1869,43 @@ static uint8_t filesystem_settingsParamForKey(const char *key,
     else if (strcmp(key, "prescaler_clock_out1") == 0) *param = PAR_PRESCALER_CLOCK_OUT1;
     else if (strcmp(key, "follow") == 0) *param = PAR_FOLLOW;
     else if (strcmp(key, "osc_wave_interp") == 0) *param = PAR_OSC_WAVE_INTERP;
+    else if (strcmp(key, "autosave") == 0) *param = PAR_AUTOSAVE_ENABLED;
     else return 0u;
+    return 1u;
+}
+
+static uint8_t filesystem_settingsSceneSourceIndex(const char *key,
+                                                   uint8_t *scene_index)
+{
+    static const char prefix[] = "scene_source_";
+    uint8_t tens;
+    uint8_t ones;
+    uint8_t parsed_index;
+
+    /*
+     * Recognize one exact scene_source_00..15 key with a tri-state result.
+     *
+     * Inputs: trimmed settings key and output index. Output: zero means an
+     * unrelated forward-compatible key, one means a valid Scene-source key,
+     * and two means the reserved prefix was present but malformed. Why: the
+     * parser must ignore unrelated future keys while failing closed for a
+     * misspelled source assignment. Affiliates: filesystem_parseSettingsLine()
+     * and SceneData's bounded encoded setter.
+     */
+    if (!key || strncmp(key, prefix, sizeof(prefix) - 1u) != 0)
+        return 0u;
+    key += sizeof(prefix) - 1u;
+    if (key[0] < '0' || key[0] > '9' ||
+        key[1] < '0' || key[1] > '9' || key[2] != '\0') {
+        return 2u;
+    }
+    tens = (uint8_t)(key[0] - '0');
+    ones = (uint8_t)(key[1] - '0');
+    parsed_index = (uint8_t)(tens * 10u + ones);
+    if (!scene_indexValid(parsed_index))
+        return 2u;
+    if (scene_index)
+        *scene_index = parsed_index;
     return 1u;
 }
 
@@ -1814,6 +1917,8 @@ static fs_status_t filesystem_parseSettingsLine(const char *line)
     uint8_t len = 0u;
     uint16_t parsed;
     uint16_t param;
+    uint8_t source_key_state;
+    uint8_t source_scene;
 
     /*
      * Parse and apply one settings.cfg assignment.
@@ -1856,9 +1961,30 @@ static fs_status_t filesystem_parseSettingsLine(const char *line)
         bank_setRestoreBankSlot(parsed);
         return FS_STATUS_DONE;
     }
-    if (filesystem_settingsParamForKey(key, &param)) {
-        if (!filesystem_parseSettingsU16(value, &parsed) || parsed > 255u)
+    source_key_state = filesystem_settingsSceneSourceIndex(
+        key, &source_scene);
+    if (source_key_state != 0u) {
+        /*
+         * Restore one two-byte Scene provenance value from keyed text.
+         *
+         * Inputs: exact scene_source_NN key and decimal U16 text. Output: the
+         * retained source receives 0..1999 or UINT16_MAX; malformed reserved
+         * keys/values fail the settings operation. Why: 2000..65534 have no
+         * defined source meaning. Affiliates: SceneData's 32-byte owner and
+         * filesystem_nextSettingsLine().
+         */
+        if (source_key_state != 1u ||
+            !filesystem_parseSettingsU16(value, &parsed) ||
+            !scene_setSourceEncoded(source_scene, parsed)) {
             return FS_STATUS_ERROR;
+        }
+        return FS_STATUS_DONE;
+    }
+    if (filesystem_settingsParamForKey(key, &param)) {
+        if (!filesystem_parseSettingsU16(value, &parsed) || parsed > 255u ||
+            (param == PAR_AUTOSAVE_ENABLED && parsed > 1u)) {
+            return FS_STATUS_ERROR;
+        }
         parameter_values[param] = (uint8_t)parsed;
     }
     filesystem_sanitizeLoadedGlobals();
@@ -2545,6 +2671,23 @@ static void filesystem_makeNamedErrorCode(const char *prefix,
 
 static void filesystem_complete(fs_status_t final_status)
 {
+    /*
+     * Acknowledge a complete settings snapshot only after the shared flush.
+     *
+     * Inputs: terminal status, the retained settings-write marker, and the
+     * revision captured when its text stream opened. Output: dirty clears only
+     * when the durable file contains the latest revision; an edit during
+     * streaming or flush remains queued. Why: current_op becomes the shared
+     * flush-finisher before completion, while the retained marker preserves
+     * SAVE_GLOBALS ownership through that final boundary. Affiliates: explicit
+     * and autonomous settings saves plus filesystem_markSettingsDirty().
+     */
+    if (op_settings_write_active &&
+        final_status == FS_STATUS_DONE &&
+        op_settings_change_revision == fs_settings_change_revision) {
+        fs_settings_dirty = 0u;
+    }
+    op_settings_write_active = 0u;
     if (final_status == FS_STATUS_ERROR && fs_error_code[0] == '\0')
         filesystem_makeAutoErrorCode(current_op, op_phase);
     status = final_status;
@@ -4225,6 +4368,19 @@ static void filesystem_autosaveWriterFinishErrorNow(void)
         filesystem_clearNameCacheStorage();
         op_autosave_writer.recovery_using_names = 0u;
     }
+    /*
+     * Restore every live value captured before an unsuccessful target commit.
+     *
+     * Inputs: the transaction-local sorted offset list and patch_count; before
+     * classification or on recovery errors the count is zero. Output: those
+     * offsets are dirty again in Autosave.c's canonical record. Why: phase 56
+     * clears a bit after capturing its stable value, but a failed SD operation
+     * must not discard work that may exist only in SRAM. Setting is idempotent,
+     * so file-carried or concurrently re-dirtied positions remain correct.
+     */
+    autosave_maskRestoreCaptured(
+        fs_autosave_parameter_cache.payload_offsets,
+        op_autosave_writer.patch_count);
     filesystem_finish(FS_STATUS_ERROR);
 }
 
@@ -4257,29 +4413,34 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 /* -----------------------------------------------------------------------
 ** RUNTIME AUTOSAVE PARAMETER-DRAIN state machine
 **
-** Inputs: a resident Bank, two root records, the winner's mutation mask, and
+** Inputs: a resident Bank, two root records, the canonical SRAM dirty record,
+** the winner's file-carried completeness mask, and
 ** the ordinary foreground filesystem pump. Outputs: at most the configured
 ** number of stable live payload bytes are captured, their bits plus every
-** classified nonexistent bit are cleared, and the updated mask/value image is
-** copy-forwarded into the inactive peer. Remaining dirty bits survive there
-** for the next debounce. If neither record validates for the current Bank
+** classified nonexistent bit are cleared in the canonical record, and the
+** current canonical mask/value image is copy-forwarded into the inactive peer.
+** Remaining dirty bits stay in SRAM and are also carried by any target mask
+** chunk staged after they were set. If neither record validates for the Bank
 ** identity, both are asynchronously regenerated B then A from HCNAMES with a
 ** zero mask. No phase blocks on AsyncFATFS or borrows the shared name cache
-** except that existing recovery path. The file mask is copied into the
-** temporary SRAM cache before classification; an empty cached mask completes
-** read-only and never creates another empty generation.
+** except that existing recovery path. The file mask is ORed into Autosave.c's
+** single persistent record before classification; an empty canonical mask
+** completes read-only and never creates another empty generation. One
+** transformed copy calculates CRC from the exact staged bytes, then publishes
+** durable CRC and the final commit marker in separate post-copy steps.
 ** ----------------------------------------------------------------------- */
 static void filesystem_autosaveParameterDrain_tick(void)
 {
     switch (op_phase) {
     case 0: /* INITIALIZE ONE OPERATION-LOCAL A/B VALIDATION PASS */
         /*
-         * Reset scalar progress and the independent mask/patch cache together.
+         * Reset operation progress and transaction-local patches only.
          *
          * Inputs: a newly accepted private filesystem operation. Outputs: no
-         * stale mask bit, patch offset, or captured live value can leak from a
-         * prior generation. The name cache remains untouched by this ordinary
-         * path.
+         * stale patch offset or captured value can leak from a prior
+         * generation. Autosave.c's canonical mask is deliberately untouched:
+         * starting a filesystem transaction is not a dirty-record reset. The
+         * name cache also remains untouched by this ordinary path.
          */
         memset(&op_autosave_writer, 0, sizeof(op_autosave_writer));
         memset(&fs_autosave_parameter_cache, 0,
@@ -4428,7 +4589,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_phase = 54u;
         return;
 
-    case 54: /* READ THE WINNER'S 3,856-BYTE MASK INTO DEDICATED SRAM */
+    case 54: /* OR THE WINNER'S 3,856-BYTE MASK INTO CANONICAL SRAM */
     {
         uint32_t remaining =
             AUTOSAVE_MASK_BYTES - op_autosave_writer.mask_bytes_read;
@@ -4440,20 +4601,23 @@ static void filesystem_autosaveParameterDrain_tick(void)
                 op_phase = 55u;
             return;
         }
-        n = afatfs_fread(
-            op_file,
-            fs_autosave_parameter_cache.updated_mask +
-                op_autosave_writer.mask_bytes_read,
-            (remaining > sizeof(staging_buf))
-                ? sizeof(staging_buf) : remaining);
+        n = afatfs_fread(op_file, staging_buf,
+                         (remaining > sizeof(staging_buf))
+                             ? sizeof(staging_buf) : remaining);
         if (n != 0u) {
             /*
-             * Advance only by bytes AsyncFATFS accepted, requesting no more
-             * than the existing 512-byte stream chunk per foreground call.
+             * Merge accepted file bits before advancing the stream cursor.
              *
-             * Output preserves a byte-for-byte winner mask before any bit is
-             * cleared, so unprocessed mutations can be carried to the target.
+             * Inputs: one winner-mask interval in the existing 512-byte
+             * staging buffer plus its mask-relative cursor. Output: set file
+             * bits are ORed into Autosave.c's canonical record; pre-existing
+             * SRAM bits can never be overwritten by a file read. Why: the file
+             * carries incomplete work across power loss but is not the live
+             * owner. Affiliates: autosave_maskMergeChunk() and phase 55.
              */
+            autosave_maskMergeChunk(
+                op_autosave_writer.mask_bytes_read,
+                staging_buf, (uint16_t)n);
             op_autosave_writer.mask_bytes_read = (uint16_t)(
                 op_autosave_writer.mask_bytes_read + n);
             return;
@@ -4463,7 +4627,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         return;
     }
 
-    case 55: /* CLOSE COMPLETE: FALL THROUGH IF THE SRAM MASK IS EMPTY */
+    case 55: /* CLOSE COMPLETE: FALL THROUGH IF CANONICAL SRAM IS EMPTY */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -4471,19 +4635,15 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * Stop at the first safe no-write boundary after loading the mask.
          *
          * Inputs: the selected winner has validated, its complete on-file mask
-         * has been copied into the temporary dedicated SRAM cache, and the read
-         * handle is closed. Output: an already-empty cached mask completes the
-         * autonomous operation directly, without CRC streaming, removing the
-         * inactive peer, advancing generation/probe, writing, or flushing.
-         * Why: the file mask records completeness; it is not a request to
-         * manufacture another empty generation. A nonempty cache continues
-         * into the existing bounded parameter drain and is written back after
-         * its captured changes. Affiliates: autosave_maskHasDirty(),
-         * filesystem_autosaveWriterCompleted(), and the future in-system
-         * mutation-mask producer.
+         * has been ORed into Autosave.c's persistent record, and the read
+         * handle is closed. Output: an empty canonical mask completes directly
+         * without removing the peer, advancing generation/probe, writing, or
+         * flushing. Why: the file mask records completeness; it is not the
+         * owner or a request to manufacture another empty generation. A
+         * nonempty record continues into bounded classification. Affiliates:
+         * autosave_maskHasDirty() and filesystem_autosaveWriterCompleted().
          */
-        if (!autosave_maskHasDirty(
-                fs_autosave_parameter_cache.updated_mask)) {
+        if (!autosave_maskHasDirty()) {
             filesystem_complete(FS_STATUS_DONE);
             return;
         }
@@ -4500,10 +4660,12 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * Build one stable sorted patch list without monopolizing a main-loop
          * pass.
          *
-         * Inputs: cached winner mask and retained payload cursor. Outputs:
-         * available live bytes are captured and cleared, nonexistent cells are
-         * cleared without a get, and later cells remain untouched when either
-         * per-tick scan or per-transaction get budget is reached.
+         * Inputs: canonical mask and retained payload cursor. Outputs: an
+         * atomic take claims each available bit before its live get; existing
+         * bytes are captured in the transaction cache, nonexistent cells use no
+         * patch, and later cells remain untouched when either bound is reached.
+         * Why: a timer-side mutation after take re-dirties the bit for the next
+         * pass instead of being erased by a later foreground clear.
          */
         while (op_autosave_writer.payload_scan_offset <
                    AUTOSAVE_PAYLOAD_BYTES &&
@@ -4513,14 +4675,12 @@ static void filesystem_autosaveParameterDrain_tick(void)
 
             if (op_autosave_writer.patch_count >=
                 AUTOSAVE_PARAMETER_GETS_PER_WRITE) {
-                op_phase = 6u;
+                op_phase = 10u;
                 return;
             }
             op_autosave_writer.payload_scan_offset++;
             examined++;
-            if (!autosave_maskBitIsSet(
-                    fs_autosave_parameter_cache.updated_mask,
-                    payload_offset)) {
+            if (!autosave_maskBitTake(payload_offset)) {
                 continue;
             }
             if (autosave_getLivePayloadByte(
@@ -4532,101 +4692,20 @@ static void filesystem_autosaveParameterDrain_tick(void)
                 op_autosave_writer.patch_count++;
             }
             /*
-             * A successful get is now represented by a stable patch. A failed
-             * get proves this format cell has no current owner. Both cases can
-             * close exactly this bit; only successful gets consume the patch
-             * budget.
+             * Take already closed the claimed bit atomically. A successful get
+             * is represented by a stable patch; a failed get proves the format
+             * cell has no current owner. Only successful gets consume budget,
+             * while any later producer remains set for continuation.
              */
-            autosave_maskBitClear(
-                fs_autosave_parameter_cache.updated_mask, payload_offset);
         }
         if (op_autosave_writer.payload_scan_offset >=
             AUTOSAVE_PAYLOAD_BYTES) {
-            op_phase = 6u;
+            op_phase = 10u;
         }
         return;
     }
 
-    case 6: /* OPEN WINNER FOR A PROSPECTIVE-TARGET CRC STREAM */
-        if (!afatfs_chdir(NULL))
-            return;
-        op_bytes_done = 0u;
-        /*
-         * Reset the monotonic patch cursor for the CRC image.
-         *
-         * The same captured list is reset again before the copy pass, making
-         * both transformed streams independent of subsequent live edits.
-         */
-        op_autosave_writer.patch_cursor = 0u;
-        op_autosave_writer.target_crc32c = autosave_recordCrcBegin();
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen_lfn(
-                filesystem_autosaveFilenameForIndex(
-                    op_autosave_writer.winner_index),
-                "r", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
-            filesystem_autosaveWriterFinishError();
-            return;
-        }
-        op_phase = 7u;
-        return;
-
-    case 7: /* WAIT WINNER CRC-STREAM OPEN */
-        if (!op_file_ready)
-            return;
-        if (!op_file) {
-            filesystem_autosaveWriterFinishError();
-            return;
-        }
-        op_phase = 8u;
-        return;
-
-    case 8: /* STREAM TRANSFORMED WINNER ONCE TO CALCULATE FINAL CRC32C */
-    {
-        uint32_t remaining = AUTOSAVE_RECORD_BYTES - op_bytes_done;
-        uint32_t n;
-
-        if (remaining == 0u) {
-            op_autosave_writer.target_crc32c = autosave_recordCrcFinish(
-                op_autosave_writer.target_crc32c);
-            op_close_done = false;
-            if (afatfs_fclose(op_file, on_file_closed))
-                op_phase = 9u;
-            return;
-        }
-        n = afatfs_fread(op_file, staging_buf,
-                         (remaining > sizeof(staging_buf))
-                             ? sizeof(staging_buf) : remaining);
-        if (n == 0u) {
-            if (afatfs_feof(op_file))
-                filesystem_autosaveWriterFinishError();
-            return;
-        }
-        autosave_transformDrainChunk(
-            staging_buf, op_bytes_done, (uint16_t)n,
-            op_autosave_writer.winner_generation + 1u,
-            (uint8_t)(op_autosave_writer.winner_probe + 1u), 0u,
-            AUTOSAVE_HEADER_COMMIT_VALID,
-            fs_autosave_parameter_cache.updated_mask,
-            fs_autosave_parameter_cache.payload_offsets,
-            fs_autosave_parameter_cache.payload_values,
-            op_autosave_writer.patch_count,
-            &op_autosave_writer.patch_cursor);
-        op_autosave_writer.target_crc32c = autosave_recordCrcUpdate(
-            op_autosave_writer.target_crc32c, op_bytes_done, staging_buf,
-            (uint16_t)n);
-        op_bytes_done += n;
-        return;
-    }
-
-    case 9: /* WAIT CRC-STREAM SOURCE CLOSE, THEN REOPEN FOR COPY */
-        if (!op_close_done)
-            return;
-        op_file = NULL;
-        op_phase = 10u;
-        return;
-
-    case 10: /* OPEN WINNER AS COPY SOURCE */
+    case 10: /* OPEN WINNER FOR THE SINGLE COPY/CRC SOURCE STREAM */
         if (!afatfs_chdir(NULL))
             return;
         op_file_ready = false;
@@ -4695,17 +4774,19 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_autosave_writer.chunk_bytes = 0u;
         op_autosave_writer.chunk_written = 0u;
         /*
-         * Replay the same sorted captured patch set from its beginning.
+         * Start one transformed copy and its matching CRC accumulator.
          *
-         * Input is the immutable cache used by the CRC pass. Output ensures
-         * target bytes exactly match that checksum while partial writes may
-         * span later filesystem ticks.
+         * Inputs are the canonical mask and immutable captured patch list.
+         * Output is one monotonic patch cursor plus a fresh CRC32C accumulator;
+         * every transformed chunk is checksummed once and then written, so no
+         * earlier projected record can diverge from the physical copy.
          */
         op_autosave_writer.patch_cursor = 0u;
+        op_autosave_writer.target_crc32c = autosave_recordCrcBegin();
         op_phase = 13u;
         return;
 
-    case 13: /* COPY ONE TRANSFORMED SOURCE CHUNK, WITH COMMIT MARKER CLEAR */
+    case 13: /* TRANSFORM, CRC, AND COPY ONE UNPUBLISHED TARGET CHUNK */
     {
         uint32_t n;
 
@@ -4728,9 +4809,16 @@ static void filesystem_autosaveParameterDrain_tick(void)
             return;
         }
         if (op_autosave_writer.stream_offset >= AUTOSAVE_RECORD_BYTES) {
-            op_close_done = false;
-            if (afatfs_fclose(op_file, on_file_closed))
-                op_phase = 14u;
+            /*
+             * Finalize exactly once after the last checksummed chunk has also
+             * passed the partial-fwrite gate above. Output is the four-byte
+             * value published after the invalid target copy becomes durable;
+             * a separate phase retries source close without complementing the
+             * accumulator again if AsyncFATFS is temporarily busy.
+             */
+            op_autosave_writer.target_crc32c = autosave_recordCrcFinish(
+                op_autosave_writer.target_crc32c);
+            op_phase = 67u;
             return;
         }
         n = afatfs_fread(
@@ -4748,41 +4836,91 @@ static void filesystem_autosaveParameterDrain_tick(void)
             staging_buf, op_autosave_writer.stream_offset, (uint16_t)n,
             op_autosave_writer.winner_generation + 1u,
             (uint8_t)(op_autosave_writer.winner_probe + 1u),
-            op_autosave_writer.target_crc32c, 0u,
-            fs_autosave_parameter_cache.updated_mask,
             fs_autosave_parameter_cache.payload_offsets,
             fs_autosave_parameter_cache.payload_values,
             op_autosave_writer.patch_count,
             &op_autosave_writer.patch_cursor);
+        /*
+         * Checksum the prospective final bytes, then keep the physical target
+         * invalid while it is under construction.
+         *
+         * Input is the transformed chunk containing final generation, probe,
+         * canonical mask, payload patches, zero CRC field, and logical A5
+         * commit. Output advances CRC from those exact bytes. If this interval
+         * contains the commit cell, only its staged disk value is then cleared;
+         * the calculated CRC continues to describe the later committed image.
+         * Affiliates: post-copy CRC phases and final commit publication.
+         */
+        op_autosave_writer.target_crc32c = autosave_recordCrcUpdate(
+            op_autosave_writer.target_crc32c,
+            op_autosave_writer.stream_offset,
+            staging_buf, (uint16_t)n);
+        if (op_autosave_writer.stream_offset <=
+                AUTOSAVE_HEADER_COMMIT_OFFSET &&
+            op_autosave_writer.stream_offset + n >
+                AUTOSAVE_HEADER_COMMIT_OFFSET) {
+            staging_buf[AUTOSAVE_HEADER_COMMIT_OFFSET -
+                        op_autosave_writer.stream_offset] = 0u;
+        }
         op_autosave_writer.stream_offset += n;
         op_autosave_writer.chunk_bytes = (uint16_t)n;
         op_autosave_writer.chunk_written = 0u;
         return;
     }
 
-    case 14: /* WAIT COPY SOURCE CLOSE, THEN CLOSE INVALID TARGET */
+    case 67: /* QUEUE/RETRY SINGLE COPY-SOURCE CLOSE */
+        /*
+         * Close the winner reader after CRC finalization without re-entering
+         * the finalization branch. Input is the exhausted source handle;
+         * output proceeds only when AsyncFATFS accepts the asynchronous close.
+         */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 14u;
+        return;
+
+    case 14: /* WAIT SINGLE COPY-SOURCE CLOSE */
         if (!op_close_done)
             return;
         op_file = NULL;
+        op_phase = 66u;
+        return;
+
+    case 66: /* QUEUE/RETRY CRC/COMMIT-ZERO TARGET CLOSE */
+        /*
+         * Close the concurrently written inactive target in its own retry
+         * phase. Input is target_file after the source close callback. Output
+         * advances only after AsyncFATFS accepts the target close; separating
+         * queue from wait prevents a rejected close from leaving the state
+         * machine waiting for a callback that was never scheduled.
+         */
         op_close_done = false;
         if (afatfs_fclose(op_autosave_writer.target_file, on_file_closed))
             op_phase = 15u;
         return;
 
-    case 15: /* WAIT INVALID TARGET CLOSE, THEN MAKE COPY DURABLE */
+    case 15: /* WAIT INVALID TARGET CLOSE, THEN ADVANCE TO DATA SYNC */
         if (!op_close_done)
             return;
         op_autosave_writer.target_file = NULL;
         op_phase = 16u;
         return;
 
-    case 16: /* PRIVATE INTERMEDIATE SYNC: NEVER PUBLISH DONE BEFORE COMMIT */
+    case 16: /* MAKE THE CRC/COMMIT-ZERO TARGET COPY DURABLE */
+        /*
+         * Persist every checksummed data byte before publishing its checksum.
+         *
+         * Input is the closed full-size target containing transformed payload,
+         * canonical mask bytes, CRC zero, and commit zero. Output advances only
+         * after AsyncFATFS reports those data/FAT sectors durable. Why: the
+         * later CRC must never describe a copy still pending in cache.
+         */
         if (!afatfs_sync())
             return;
         op_phase = 17u;
         return;
 
-    case 17: /* REOPEN TARGET WITHOUT TRUNCATION FOR THE FINAL COMMIT BYTE */
+    case 17: /* REOPEN DURABLE TARGET WITHOUT TRUNCATION FOR CRC */
         if (!afatfs_chdir(NULL))
             return;
         op_file_ready = false;
@@ -4797,20 +4935,21 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_phase = 18u;
         return;
 
-    case 18: /* WAIT FINAL-COMMIT TARGET OPEN */
+    case 18: /* WAIT CRC-PUBLICATION TARGET OPEN */
         if (!op_file_ready)
             return;
         if (!op_file) {
             filesystem_autosaveWriterFinishError();
             return;
         }
+        op_autosave_writer.chunk_written = 0u;
         op_phase = 19u;
         return;
 
-    case 19: /* START/RETRY ASYNCHRONOUS SEEK TO HEADER COMMIT OFFSET */
+    case 19: /* START/RETRY ASYNCHRONOUS SEEK TO HEADER CRC OFFSET */
     {
         afatfsOperationStatus_e seek = afatfs_fseek(
-            op_file, AUTOSAVE_HEADER_COMMIT_OFFSET, AFATFS_SEEK_SET);
+            op_file, AUTOSAVE_HEADER_CRC32C_OFFSET, AFATFS_SEEK_SET);
 
         if (seek == AFATFS_OPERATION_SUCCESS) {
             op_phase = 21u;
@@ -4821,43 +4960,165 @@ static void filesystem_autosaveParameterDrain_tick(void)
         return;
     }
 
-    case 20: /* WAIT QUEUED SEEK BY OBSERVING THE FILE CURSOR */
+    case 20: /* WAIT QUEUED CRC SEEK BY OBSERVING THE FILE CURSOR */
         if (!afatfs_ftell(op_file, &op_autosave_writer.seek_position))
             return;
-        if (op_autosave_writer.seek_position != AUTOSAVE_HEADER_COMMIT_OFFSET) {
+        if (op_autosave_writer.seek_position != AUTOSAVE_HEADER_CRC32C_OFFSET) {
             filesystem_autosaveWriterFinishError();
             return;
         }
         op_phase = 21u;
         return;
 
-    case 21: /* WRITE THE ONE VALID MARKER BYTE LAST */
-        staging_buf[0] = AUTOSAVE_HEADER_COMMIT_VALID;
-        if (afatfs_fwrite(op_file, staging_buf, 1u) != 1u)
+    case 21: /* WRITE THE CALCULATED LITTLE-ENDIAN CRC AFTER THE COPY */
+    {
+        uint32_t n;
+
+        /*
+         * Publish the checksum only after the data it covers is durable.
+         *
+         * Input is target_crc32c finalized at the end of the one copy stream.
+         * Output writes exactly four little-endian bytes at header offset 12,
+         * retaining a byte cursor across AsyncFATFS partial writes. The target
+         * remains invalid because its commit byte is still zero. Affiliates:
+         * phases 16/57-59 and autosave_recordCrcUpdate().
+         */
+        staging_buf[0] = (uint8_t)op_autosave_writer.target_crc32c;
+        staging_buf[1] = (uint8_t)(op_autosave_writer.target_crc32c >> 8u);
+        staging_buf[2] = (uint8_t)(op_autosave_writer.target_crc32c >> 16u);
+        staging_buf[3] = (uint8_t)(op_autosave_writer.target_crc32c >> 24u);
+        n = afatfs_fwrite(op_file,
+                          staging_buf + op_autosave_writer.chunk_written,
+                          4u - op_autosave_writer.chunk_written);
+        op_autosave_writer.chunk_written = (uint16_t)(
+            op_autosave_writer.chunk_written + n);
+        if (n == 0u && afatfs_isFull()) {
+            filesystem_autosaveWriterFinishError();
             return;
+        }
+        if (op_autosave_writer.chunk_written < 4u)
+            return;
+        op_phase = 57u;
+        return;
+    }
+
+    case 57: /* QUEUE/RETRY CRC-PUBLICATION HANDLE CLOSE */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 58u;
+        return;
+
+    case 58: /* WAIT CRC-PUBLICATION HANDLE CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_phase = 59u;
+        return;
+
+    case 59: /* MAKE THE POST-COPY CRC DURABLE BEFORE VALID COMMIT */
+        /*
+         * Persist the CRC independently while commit remains zero.
+         *
+         * Input is a closed target with durable data and a newly written CRC.
+         * Output permits commit publication only after the checksum sector is
+         * durable. Why: combining CRC and commit without this gate could expose
+         * A5 before the checksum it validates has reached the card.
+         */
+        if (!afatfs_sync())
+            return;
+        op_phase = 60u;
+        return;
+
+    case 60: /* REOPEN CRC-COMPLETE TARGET FOR THE FINAL COMMIT BYTE */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    (uint8_t)(op_autosave_writer.winner_index ^ 1u)),
+                "r+", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 61u;
+        return;
+
+    case 61: /* WAIT FINAL-COMMIT TARGET OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 62u;
+        return;
+
+    case 62: /* START/RETRY ASYNCHRONOUS SEEK TO HEADER COMMIT OFFSET */
+    {
+        afatfsOperationStatus_e seek = afatfs_fseek(
+            op_file, AUTOSAVE_HEADER_COMMIT_OFFSET, AFATFS_SEEK_SET);
+
+        if (seek == AFATFS_OPERATION_SUCCESS) {
+            op_phase = 64u;
+        } else if (seek == AFATFS_OPERATION_IN_PROGRESS) {
+            op_phase = 63u;
+        }
+        /* FAILURE means the file is still busy; retry this phase next tick. */
+        return;
+    }
+
+    case 63: /* WAIT QUEUED COMMIT SEEK BY OBSERVING THE FILE CURSOR */
+        if (!afatfs_ftell(op_file, &op_autosave_writer.seek_position))
+            return;
+        if (op_autosave_writer.seek_position != AUTOSAVE_HEADER_COMMIT_OFFSET) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 64u;
+        return;
+
+    case 64: /* WRITE THE ONE VALID MARKER BYTE LAST */
+    {
+        uint32_t n;
+
+        /*
+         * Publish validity only after data and CRC have separate durable gates.
+         * Input is a CRC-complete target with commit zero. Output changes only
+         * header byte 5 to A5, making the new generation eligible after the
+         * existing final filesystem flush. Affiliates: stream validation and
+         * A/B generation selection.
+         */
+        staging_buf[0] = AUTOSAVE_HEADER_COMMIT_VALID;
+        n = afatfs_fwrite(op_file, staging_buf, 1u);
+        if (n == 0u) {
+            if (afatfs_isFull())
+                filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_phase = 65u;
+        return;
+    }
+
+    case 65: /* QUEUE/RETRY FINAL-COMMIT HANDLE CLOSE */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 22u;
         return;
 
-    case 22: /* RETAIN BACKLOG RESULT, THEN ENTER THE FINAL SYNC GATE */
+    case 22: /* WAIT COMMIT CLOSE, THEN ENTER THE EXISTING FINAL SYNC */
         if (!op_close_done)
             return;
         op_file = NULL;
         /*
-         * Hand one post-commit scheduling decision across the flush boundary.
+         * Hand the committed target to the shared success flush unchanged.
          *
-         * Input is the exact cached mask already written into the closed target.
-         * Output is one scalar that requests the short continuation cadence only
-         * if that durable generation still carries dirty positions. Why: the
-         * completion callback runs after filesystem_finish() changes operation
-         * ownership to the shared sync state, so it must not infer backlog from
-         * the older peer or rescan mutable live state. Empty-mask, recovery, and
-         * error paths never reach this assignment and retain the ordinary
-         * five-second cadence. Affiliates: filesystem_autosaveWriterCompleted().
+         * Input is the closed A5 target whose data and CRC were already synced.
+         * Output defers operation completion until the shared final sync makes
+         * the one-byte validity publication durable. Canonical mask ownership
+         * remains in Autosave.c; the completion callback reads it directly and
+         * no transaction-local scalar replaces or clears it.
          */
-        op_autosave_writer.continue_pending = autosave_maskHasDirty(
-            fs_autosave_parameter_cache.updated_mask);
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -10735,7 +10996,34 @@ static uint8_t filesystem_nextSettingsLine(char *dst, uint16_t cap,
         return filesystem_formatAssignmentU16Line(
             dst, cap, "osc_wave_interp",
             parameter_values[PAR_OSC_WAVE_INTERP]);
+    case 16u:
+        /*
+         * Persist the user-facing AutoSave policy independently of hidden-file
+         * activity. Input is the normalized Global byte. Output is one keyed
+         * 0/1 line; writing settings.cfg remains active even while AutoSave is
+         * OFF. Affiliates: PAR_AUTOSAVE_ENABLED and the filesystem policy gate.
+         */
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "autosave", parameter_values[PAR_AUTOSAVE_ENABLED]);
     default:
+        if (op_write_line_index >= 17u && op_write_line_index < 33u) {
+            char key[] = "scene_source_00";
+            uint8_t scene_index = (uint8_t)(op_write_line_index - 17u);
+
+            /*
+             * Stream one resident Scene source without a sixteen-string table.
+             *
+             * Inputs: line index 17..32 and SceneData's encoded uint16_t.
+             * Output: scene_source_00..15 in stable resident order. Why: one
+             * generated key keeps parser/writer numbering visibly paired and
+             * retains the exact 32-byte SRAM design. Affiliates:
+             * filesystem_settingsSceneSourceIndex() and scene_sourceValue().
+             */
+            key[13] = (char)('0' + (scene_index / 10u));
+            key[14] = (char)('0' + (scene_index % 10u));
+            return filesystem_formatAssignmentU16Line(
+                dst, cap, key, scene_sourceValue(scene_index));
+        }
         return 0u;
     }
 }
@@ -14182,6 +14470,15 @@ static void filesystem_saveGlobals_tick(void)
 {
     switch (op_phase) {
     case 0: /* OPEN */
+        /*
+         * Snapshot the settings revision before the first line is emitted.
+         * Input: live dirty revision. Output: the final flush may clear dirty
+         * only if no later Global/provenance event advanced it. Why: line-by-
+         * line serialization is not an atomic SRAM snapshot. Affiliates:
+         * filesystem_complete() and the background settings scheduler.
+         */
+        op_settings_change_revision = fs_settings_change_revision;
+        op_settings_write_active = 1u;
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(STORAGE_SETTINGS_FILENAME, "w", on_file_opened))
@@ -17121,8 +17418,9 @@ static void filesystem_saveTestSimpleDir_tick(void)
  * Discard facade ownership after the diagnostic transport/filesystem reset.
  *
  * What: clears the generic owner, callbacks, open-handle coordinates, deferred
- * rebuild state, and autonomous-writer authorization without touching the
- * preserved eight-byte logger record. Why: afatfs_destroy(true) invalidates
+ * rebuild state, autonomous-writer authorization/recovery, and retained
+ * mutation production without touching the preserved eight-byte logger record.
+ * Why: afatfs_destroy(true) invalidates
  * every handle/callback target owned by the timed-out operation, so none may
  * leak into the remount or root log write. Inputs are abandoned boot facade
  * state; output is an idle facade suitable for afatfs_init() and one new
@@ -17147,6 +17445,26 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
     op_autosave_writer.target_ready = 0u;
     fs_autosave_writer_armed = 0u;
     fs_autosave_writer_boot_ready = 0u;
+    fs_autosave_recovery_pending = 0u;
+    fs_autosave_enabled = 1u;
+    fs_autosave_runtime_ready = 0u;
+    fs_autosave_setup_pending = 0u;
+    fs_autosave_setup_failed = 0u;
+    fs_autosave_transaction_active = 0u;
+    fs_autosave_discard_pending = 0u;
+    autosave_setMutationTrackingEnabled(0u);
+    /*
+     * Abandon autonomous settings scheduling with the destroyed FAT facade.
+     * Input: boot timeout recovery invalidated every outstanding handle.
+     * Output: no stale runtime writer can start on the remount; a later real
+     * settings load reconstructs data. Affiliates: filesystem_initAfterCardReady().
+     */
+    fs_settings_dirty = 0u;
+    fs_settings_runtime_ready = 0u;
+    fs_settings_next_due_tick = 0u;
+    fs_settings_change_revision = 0u;
+    op_settings_change_revision = 0u;
+    op_settings_write_active = 0u;
     memset(fs_error_code, 0, sizeof(fs_error_code));
 }
 
@@ -17155,7 +17473,147 @@ void filesystem_initAfterCardReady(void)
     current_op = FS_INTERNAL_OP_NONE;
     status = FS_STATUS_IDLE;
     memset(fs_error_code, 0, sizeof(fs_error_code));
+    /*
+     * Initialize autonomous settings ownership for this mounted-card session.
+     *
+     * Input: a fresh AsyncFATFS facade before settings load. Output: no dirty
+     * work and no runtime authorization until main.c finishes boot. Why: prior
+     * remount/recovery state must not leak a background write into scans or
+     * initial Bank loading. Affiliates: filesystem_enableRuntimeSettingsWrites().
+     */
+    fs_settings_dirty = 0u;
+    fs_settings_runtime_ready = 0u;
+    fs_settings_next_due_tick = 0u;
+    fs_settings_change_revision = 0u;
+    op_settings_change_revision = 0u;
+    op_settings_write_active = 0u;
+    /*
+     * Reset hidden-writer policy to its documented cold default.
+     *
+     * Input: fresh mounted facade before settings.cfg overlay. Output: ON is
+     * retained as a preference but runtime/setup authorization remains closed.
+     * Why: main.c must apply the loaded preference before any autosave ensure,
+     * and no stale transaction flag may survive a remount. Affiliates:
+     * filesystem_setAutosaveEnabled() and the boot wrapper.
+     */
+    fs_autosave_enabled = 1u;
+    fs_autosave_runtime_ready = 0u;
+    fs_autosave_setup_pending = 0u;
+    fs_autosave_setup_failed = 0u;
+    fs_autosave_transaction_active = 0u;
+    fs_autosave_discard_pending = 0u;
+    fs_autosave_writer_boot_ready = 0u;
+    fs_autosave_writer_armed = 0u;
+    fs_autosave_recovery_pending = 0u;
+    autosave_setMutationTrackingEnabled(0u);
     afatfs_init();
+}
+
+void filesystem_markSettingsDirty(void)
+{
+    /*
+     * Record one settings/provenance change and restart trailing debounce.
+     *
+     * Inputs: live time_sysTick after a changed Global Menu byte or successful
+     * Bank/Scene completion. Outputs: dirty/revision state only; no file is
+     * opened or polled. Why: all runtime SD work must remain asynchronous and
+     * multiple changes inside one second should coalesce. Affiliates:
+     * SETTINGS_AUTOWRITE_DEBOUNCE_MS and the idle scheduler below.
+     */
+    fs_settings_change_revision++;
+    fs_settings_dirty = 1u;
+    fs_settings_next_due_tick = (uint16_t)(
+        time_sysTick + SETTINGS_AUTOWRITE_DEBOUNCE_MS);
+}
+
+void filesystem_enableRuntimeSettingsWrites(void)
+{
+    /*
+     * Open the autonomous settings gate after all pre-audio filesystem work.
+     *
+     * Input: main.c's mounted-card boot completion boundary. Output: pending
+     * boot provenance receives a fresh full debounce; clean state performs no
+     * work. Why: a successful boot Bank Load must eventually update sources,
+     * but it must not inject an invisible writer into scan/load ownership.
+     * Affiliates: filesystem_markSettingsDirty() and main.c.
+     */
+    fs_settings_runtime_ready = 1u;
+    /*
+     * The same boot exit authorizes asynchronous AutoSave setup scheduling.
+     *
+     * Input: all blocking Bank/fallback/optional ensure work has released the
+     * facade. Output: an enabled resident Bank lacking setup may queue ensure
+     * on a later idle tick; OFF remains inert. Why: runtime re-enable and a
+     * later Bank after fallback must never call the blocking boot wrapper.
+     * Affiliates: filesystem_autosaveWriterSchedule_tick().
+     */
+    fs_autosave_runtime_ready = 1u;
+    if (fs_autosave_enabled && bank_hasResidentBank() &&
+        !fs_autosave_writer_boot_ready && !fs_autosave_setup_failed) {
+        fs_autosave_setup_pending = 1u;
+    }
+    if (fs_settings_dirty) {
+        fs_settings_next_due_tick = (uint16_t)(
+            time_sysTick + SETTINGS_AUTOWRITE_DEBOUNCE_MS);
+    }
+}
+
+uint8_t filesystem_autosaveEnabled(void)
+{
+    /*
+     * Report policy state without initiating hidden-record filesystem work.
+     *
+     * Input: none. Output: the normalized OFF/ON in-memory preference. Why:
+     * boot can decide whether its optional ensure is authorized without making
+     * a getter perform validation, creation, or scheduling. Affiliates:
+     * filesystem_setAutosaveEnabled() and main.c's pre-audio setup ladder.
+     */
+    return fs_autosave_enabled;
+}
+
+void filesystem_setAutosaveEnabled(uint8_t enabled)
+{
+    enabled = enabled ? 1u : 0u;
+
+    /*
+     * Apply one AutoSave preference transition without synchronous card I/O.
+     *
+     * Inputs: normalized setting, current autonomous transaction state, and
+     * resident/runtime lifecycle. Outputs: OFF revokes producer/scheduler
+     * authorization and clears SRAM work now or after an active transform;
+     * ON queues runtime setup only when a Bank exists. Hidden files are never
+     * opened/deleted by this call. Why: Menu commits and boot settings need one
+     * defensive policy boundary. Affiliates: idle setup/drain scheduler and
+     * filesystem_autosaveWriterCompleted().
+     */
+    if (enabled == fs_autosave_enabled) {
+        if (enabled && fs_autosave_runtime_ready &&
+            bank_hasResidentBank() && !fs_autosave_writer_boot_ready &&
+            !fs_autosave_setup_failed) {
+            fs_autosave_setup_pending = 1u;
+        }
+        return;
+    }
+    fs_autosave_enabled = enabled;
+    if (!enabled) {
+        autosave_setMutationTrackingEnabled(0u);
+        fs_autosave_setup_pending = 0u;
+        fs_autosave_setup_failed = 0u;
+        fs_autosave_recovery_pending = 0u;
+        fs_autosave_writer_armed = 0u;
+        fs_autosave_writer_boot_ready = 0u;
+        if (fs_autosave_transaction_active) {
+            fs_autosave_discard_pending = 1u;
+        } else {
+            autosave_discardDirtyMask();
+            fs_autosave_discard_pending = 0u;
+        }
+        return;
+    }
+    fs_autosave_discard_pending = 0u;
+    fs_autosave_setup_failed = 0u;
+    if (fs_autosave_runtime_ready && bank_hasResidentBank())
+        fs_autosave_setup_pending = 1u;
 }
 
 uint8_t filesystem_initCardAndMountBlocking(void)
@@ -17340,33 +17798,138 @@ recovery_failed:
 #endif
 }
 
+static void filesystem_settingsWriterCompleted(void)
+{
+    /*
+     * Complete an invisible settings.cfg write without involving Preset/Menu.
+     *
+     * Inputs: terminal SAVE_GLOBALS status after filesystem_complete() has
+     * conditionally acknowledged the captured revision. Outputs: DONE simply
+     * acknowledges; ERROR preserves/creates dirty work and restarts the
+     * one-second retry deadline before acknowledging. Why: an autonomous
+     * callback must not leave DONE/ERROR for an unrelated foreground caller or
+     * tight-loop on media failure. Affiliates: filesystem_settingsWriterSchedule_tick().
+     */
+    if (status != FS_STATUS_DONE) {
+        fs_settings_dirty = 1u;
+        fs_settings_next_due_tick = (uint16_t)(
+            time_sysTick + SETTINGS_AUTOWRITE_DEBOUNCE_MS);
+    }
+    filesystem_ack();
+}
+
+static void filesystem_settingsWriterSchedule_tick(void)
+{
+    uint16_t now;
+
+    /*
+     * Start one debounced settings stream only from an idle mounted facade.
+     *
+     * Inputs: runtime gate, dirty/deadline state, and ready AsyncFATFS volume.
+     * Output: one existing FS_INTERNAL_OP_SAVE_GLOBALS operation with a private
+     * completion callback. Why: settings persistence neither borrows HCNAMES
+     * nor needs a Load/Save-page pause, but it must never steal an accepted
+     * foreground operation. Affiliates: filesystem_tick() and the autosave
+     * scheduler, which receives the remaining idle opportunity afterwards.
+     */
+    if (!fs_settings_runtime_ready || !fs_settings_dirty ||
+        afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY) {
+        return;
+    }
+    now = time_sysTick;
+    if ((uint16_t)(now - fs_settings_next_due_tick) >= 0x8000u)
+        return;
+    (void)filesystem_start(FS_INTERNAL_OP_SAVE_GLOBALS,
+                           FS_FILE_SETTINGS, 0u,
+                           filesystem_settingsWriterCompleted);
+}
+
 static void filesystem_autosaveWriterCompleted(void)
 {
-    uint16_t next_interval = AUTOSAVE_WRITER_INTERVAL_MS;
-
     /*
      * This callback belongs only to the autonomous writer. filesystem_complete
      * has already published its terminal status, so acknowledge it here rather
      * than leaving DONE/ERROR for a Menu/Preset caller that never requested it.
-     * Input is the terminal status plus the outgoing-mask result retained just
-     * before a successful written target entered its flush gate. Output uses the
-     * 250 ms continuation only for a successful commit with durable dirty bits;
-     * errors, recovery, a final drained write, and an empty-cache/read-only
-     * attempt all retain the five-second cadence. The decision is consumed here
-     * before acknowledging the operation. Why: this temporary implementation
-     * still reloads the completeness mask from file for each due drain, while
-     * the empty-cache branch guarantees those checks cannot advance generation
-     * or write a peer. Affiliates: drain phase 22, the scheduler below, and the
-     * future in-system retained mutation mask.
+     * Input is terminal status plus Autosave.c's persistent canonical mask after
+     * the final flush. Output: successful initial validation clears recovery;
+     * remaining dirtiness arms the 250 ms continuation, a successful clean mask
+     * disarms entirely, and errors retry after five seconds while preserving
+     * recovery/rollback work. Why: clean state must perform no periodic file
+     * operations. Affiliates: drain phase 22 and the scheduler below.
      */
-    if (status == FS_STATUS_DONE && op_autosave_writer.continue_pending) {
-        next_interval = AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS;
+    fs_autosave_transaction_active = 0u;
+    /*
+     * OFF takes ownership at the first safe post-transform boundary.
+     *
+     * Inputs: an operation that was already active when policy changed and the
+     * deferred-discard latch. Outputs: canonical SRAM work is cleared only now
+     * that no CRC/copy consumes it; every scheduler flag remains disabled and
+     * terminal status is acknowledged. Why: clearing mid-stream would change
+     * CRC-covered mask bytes. Affiliates: filesystem_setAutosaveEnabled().
+     */
+    if (!fs_autosave_enabled) {
+        if (fs_autosave_discard_pending) {
+            autosave_discardDirtyMask();
+            fs_autosave_discard_pending = 0u;
+        }
+        fs_autosave_writer_armed = 0u;
+        fs_autosave_recovery_pending = 0u;
+        fs_autosave_writer_boot_ready = 0u;
+        filesystem_ack();
+        return;
     }
-    op_autosave_writer.continue_pending = 0u;
-    fs_autosave_next_due_tick = (uint16_t)(
-        time_sysTick + next_interval);
-    fs_autosave_writer_armed = 1u;
+    if (status == FS_STATUS_DONE) {
+        fs_autosave_recovery_pending = 0u;
+        if (autosave_maskHasDirty()) {
+            fs_autosave_next_due_tick = (uint16_t)(
+                time_sysTick + AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS);
+            fs_autosave_writer_armed = 1u;
+        } else {
+            fs_autosave_writer_armed = 0u;
+        }
+    } else {
+        fs_autosave_next_due_tick = (uint16_t)(
+            time_sysTick + AUTOSAVE_WRITER_INTERVAL_MS);
+        fs_autosave_writer_armed = 1u;
+    }
     filesystem_ack();
+}
+
+static void filesystem_autosaveSetupCompleted(void)
+{
+    uint8_t setup_ok = (uint8_t)(status == FS_STATUS_DONE);
+
+    /*
+     * Publish one asynchronous runtime ensure only after its durable flush.
+     *
+     * Inputs: terminal ensure status, current policy, and resident Bank state.
+     * Outputs: success acknowledges then enables recovery/tracking and marks a
+     * complete live Bank snapshot; failure/OFF leaves authorization revoked.
+     * Why: runtime re-enable must use the foreground-pumped ensure state machine
+     * without exposing partially created files to the drain scheduler.
+     * Affiliates: filesystem_setAutosaveEnabled(), Autosave whole-Bank marker,
+     * and filesystem_autosaveWriterSchedule_tick().
+     */
+    filesystem_ack();
+    if (!setup_ok || !fs_autosave_enabled || !bank_hasResidentBank()) {
+        /* A mounted/resident failure waits for an explicit OFF/ON transition
+         * or a later no-Bank/new-Bank lifecycle instead of retrying every idle
+         * tick. Inputs are terminal setup conditions; output is the retry
+         * suppression latch. Affiliate: scheduler condition below. */
+        fs_autosave_setup_failed = (uint8_t)(
+            fs_autosave_enabled && bank_hasResidentBank());
+        fs_autosave_writer_boot_ready = 0u;
+        fs_autosave_recovery_pending = 0u;
+        fs_autosave_writer_armed = 0u;
+        autosave_setMutationTrackingEnabled(0u);
+        return;
+    }
+    fs_autosave_writer_boot_ready = 1u;
+    fs_autosave_setup_failed = 0u;
+    fs_autosave_recovery_pending = 1u;
+    fs_autosave_writer_armed = 0u;
+    autosave_setMutationTrackingEnabled(1u);
+    autosave_markResidentBankDirty();
 }
 
 static void filesystem_autosaveWriterSchedule_tick(void)
@@ -17377,9 +17940,70 @@ static void filesystem_autosaveWriterSchedule_tick(void)
      * This check is reached only while the facade is idle. Load/Save pages own
      * the library-name cache by contract, so they suppress new starts; an
      * already-running writer is deliberately never preempted mid-commit.
-     */
-    if (!bank_hasResidentBank()) {
+    */
+    if (!fs_autosave_enabled) {
+        /*
+         * Defensive policy fall-through before every hidden-file start.
+         * Input: OFF from settings/Menu. Output: no ensure, validation, read,
+         * or write can begin even if stale ready/recovery flags exist. An
+         * active transform is handled by its callback, not this idle path.
+         * Affiliates: filesystem_setAutosaveEnabled().
+         */
+        autosave_setMutationTrackingEnabled(0u);
+        fs_autosave_setup_pending = 0u;
+        fs_autosave_setup_failed = 0u;
         fs_autosave_writer_armed = 0u;
+        fs_autosave_recovery_pending = 0u;
+        fs_autosave_writer_boot_ready = 0u;
+        if (!fs_autosave_transaction_active && fs_autosave_discard_pending) {
+            autosave_discardDirtyMask();
+            fs_autosave_discard_pending = 0u;
+        }
+        return;
+    }
+    if (!bank_hasResidentBank()) {
+        /*
+         * Revoke a formerly authorized producer once on Bank-session loss.
+         *
+         * Input: no resident Bank plus any prior ready/recovery/armed state.
+         * Output: tracking and all scheduler flags clear; subsequent idle ticks
+         * perform no critical section. Why: dirty bits have no valid Bank owner
+         * in fallback state. Affiliates: BankData's lifecycle flag and boot
+         * ensure, which is the only path that can authorize a new session.
+         */
+        if (fs_autosave_writer_boot_ready ||
+            fs_autosave_recovery_pending || fs_autosave_writer_armed) {
+            autosave_setMutationTrackingEnabled(0u);
+        }
+        fs_autosave_writer_armed = 0u;
+        fs_autosave_recovery_pending = 0u;
+        fs_autosave_writer_boot_ready = 0u;
+        fs_autosave_setup_pending = 0u;
+        fs_autosave_setup_failed = 0u;
+        if (!fs_autosave_transaction_active)
+            autosave_discardDirtyMask();
+        return;
+    }
+    /*
+     * Runtime ON with a resident Bank but no authorized pair queues the
+     * existing create-only ensure asynchronously. Inputs: post-boot runtime
+     * gate and lifecycle flags. Output: no blocking call; setup starts below
+     * only when facade/menu/card conditions are safe. Affiliates: runtime
+     * re-enable and later Bank-after-fallback sessions.
+     */
+    if (fs_autosave_runtime_ready && !fs_autosave_writer_boot_ready &&
+        !fs_autosave_setup_failed)
+        fs_autosave_setup_pending = 1u;
+    if (fs_autosave_setup_pending) {
+        if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY ||
+            menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+            return;
+        }
+        if (filesystem_start(FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES,
+                             FS_FILE_SETTINGS, 0u,
+                             filesystem_autosaveSetupCompleted)) {
+            fs_autosave_setup_pending = 0u;
+        }
         return;
     }
     /*
@@ -17393,6 +18017,18 @@ static void filesystem_autosaveWriterSchedule_tick(void)
     /* Do not queue an LFN operation until the existing idle poll has mounted. */
     if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY)
         return;
+    /*
+     * Fall through before arming when neither boot recovery nor SRAM work
+     * exists. Inputs are the one-time recovery flag and canonical mask. Output:
+     * a clean post-recovery writer remains disarmed and never calls
+     * filesystem_start(). Why: periodic generation/CRC/file traffic is not an
+     * autosave operation. A later scalar mutation is observed on a later tick
+     * and receives the normal five-second debounce.
+     */
+    if (!fs_autosave_recovery_pending && !autosave_maskHasDirty()) {
+        fs_autosave_writer_armed = 0u;
+        return;
+    }
     now = time_sysTick;
     if (!fs_autosave_writer_armed) {
         fs_autosave_next_due_tick = (uint16_t)(
@@ -17404,9 +18040,17 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         (uint16_t)(now - fs_autosave_next_due_tick) >= 0x8000u) {
         return;
     }
-    (void)filesystem_start(FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN,
-                           FS_FILE_SETTINGS, 0u,
-                           filesystem_autosaveWriterCompleted);
+    if (filesystem_start(FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN,
+                         FS_FILE_SETTINGS, 0u,
+                         filesystem_autosaveWriterCompleted)) {
+        /*
+         * Retain active transform ownership across the later generic FLUSH op.
+         * Input: accepted drain start. Output: OFF defers mask discard until
+         * the private completion callback, even after current_op becomes
+         * FS_INTERNAL_OP_FLUSH_FINISH. Affiliate: policy transition.
+         */
+        fs_autosave_transaction_active = 1u;
+    }
 }
 
 void filesystem_tick(void)
@@ -17438,6 +18082,16 @@ void filesystem_tick(void)
         }
     }
 
+    /*
+     * Give the one-second metadata writer first use of an idle facade.
+     *
+     * Input: no current filesystem owner. Output: settings may start; autosave
+     * scheduling runs only if the facade remains idle. Why: short source/
+     * Global persistence should not be starved by 250 ms autosave backlog
+     * continuations. Affiliates: both autonomous completion callbacks.
+     */
+    if (status == FS_STATUS_IDLE)
+        filesystem_settingsWriterSchedule_tick();
     if (status == FS_STATUS_IDLE)
         filesystem_autosaveWriterSchedule_tick();
     if (status != FS_STATUS_BUSY) return;
@@ -17562,7 +18216,7 @@ void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase)
     uint8_t public_op = FS_BOOT_DIAG_OTHER;
 
     /*
-     * Translate only the operations reachable from boot stage 11.
+     * Translate only the operations reachable from boot stage 12.
      *
      * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
      * user to assess how operations are proceeding. It does not and should not
@@ -17883,39 +18537,77 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
      * load result. Output: no card operation at all for a fallback with no
      * resident Bank; otherwise completion only after the normal foreground
      * pump has closed every created file and filesystem_finish() has passed the
-     * shared asyncfatfs sync gate. This wrapper deliberately has no runtime
-     * scheduling role and is not an autosave writer.
+     * shared asyncfatfs sync gate. The wrapper performs no autosave write, but
+     * successful completion is the ownership boundary that enables retained
+     * mutation production and one delayed runtime recovery attempt.
      */
+    /*
+     * Begin every boot setup with retained mutation production revoked.
+     *
+     * Inputs: current Bank boot result and any stale facade flags. Output:
+     * tracking, runtime authorization, scheduling, and recovery are all clear
+     * before create-only work or no-Bank fallback. Why: initialization setters
+     * must never become autosave mutations. Affiliates: Autosave producer gate
+     * and the idle scheduler.
+     */
+    autosave_setMutationTrackingEnabled(0u);
+    fs_autosave_writer_boot_ready = 0u;
+    fs_autosave_writer_armed = 0u;
+    fs_autosave_recovery_pending = 0u;
+    fs_autosave_setup_pending = 0u;
+    fs_autosave_setup_failed = 0u;
+    fs_autosave_transaction_active = 0u;
+    fs_autosave_discard_pending = 0u;
+    /*
+     * Honor loaded AutoSave OFF before any HCNAMES/hidden-file access.
+     *
+     * Input: policy applied by main.c immediately after settings load. Output:
+     * successful no-op with producer/scheduler authorization clear and SRAM
+     * work discarded; neither hidden filename is scanned or opened. Why: a
+     * caller-side condition alone is not sufficient defense for this public
+     * wrapper. Affiliates: filesystem_setAutosaveEnabled() and main.c.
+     */
+    if (!fs_autosave_enabled) {
+        autosave_discardDirtyMask();
+        return 1u;
+    }
     if (!bank_hasResidentBank())
         return 1u;
     /*
-     * Revoke any stale authorization before a new pre-audio creation pass.
-     * The scheduler cannot begin runtime recovery while this wrapper owns the
-     * foreground pump; it receives authorization only after both files and
-     * their final AsyncFATFS flush have succeeded below.
+     * Start the create-only operation while runtime authorization remains clear.
+     *
+     * Inputs: idle mounted facade and resident Bank. Output: synchronous
+     * foreground pumping until both files exist durably or setup fails. Why:
+     * the scheduler cannot begin recovery while this wrapper owns the facade;
+     * authorization is published only after acknowledgement below.
      */
-    fs_autosave_writer_boot_ready = 0u;
-    fs_autosave_writer_armed = 0u;
     if (status == FS_STATUS_BUSY ||
         !filesystem_start(FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES,
                           FS_FILE_SETTINGS, 0u, NULL)) {
+        fs_autosave_setup_failed = 1u;
         return 0u;
     }
     while (status == FS_STATUS_BUSY)
         filesystem_tick();
     if (status != FS_STATUS_DONE) {
         filesystem_ack();
+        fs_autosave_setup_failed = 1u;
         return 0u;
     }
     filesystem_ack();
     /*
      * Enable only after the create-only pair is durable and its terminal
-     * status has been acknowledged. Clearing armed makes the first runtime
-     * attempt a full configured interval after boot rather than inheriting
-     * time spent loading the Bank and globals before autosave existed.
+     * status has been acknowledged. Output: owner setters may now produce
+     * mutations, and one recovery-pending attempt is armed lazily by the idle
+     * scheduler after the full configured interval even when SRAM starts clean.
+     * That attempt validates the winner and OR-merges interrupted file work;
+     * successful clean completion then disarms all recurring file activity.
      */
     fs_autosave_writer_armed = 0u;
+    fs_autosave_setup_failed = 0u;
+    fs_autosave_recovery_pending = 1u;
     fs_autosave_writer_boot_ready = 1u;
+    autosave_setMutationTrackingEnabled(1u);
     return 1u;
 }
 
@@ -19767,6 +20459,20 @@ uint8_t filesystem_lastBankLoadLoadedScene(void)
      * outcome from a filesystem error.
      */
     return op_bank_loaded_scene;
+}
+
+uint16_t filesystem_lastBankLoadSceneMask(void)
+{
+    /*
+     * Expose the completed Bank reader's effective child mask.
+     *
+     * Input: op_bank_scene_load_mask after child discovery/intersection and
+     * successful resident commit. Output: the exact mask consumed immediately
+     * by Preset completion provenance. Why: the original all/partial request
+     * can contain children absent from the selected Bank. Affiliates: Bank
+     * load phases 16/17 and filesystem.h's operation-lifetime contract.
+     */
+    return op_bank_scene_load_mask;
 }
 
 uint8_t filesystem_instrumentTargetExists(instrument_type_t type,

@@ -46,6 +46,7 @@
 #include "storageTypes.h"
 #include "presetMorphEngine.h"
 #include "BankData.h"
+#include "Autosave.h"
 #include "mixer.h"
 #include "valueShaper.h"
 #include <string.h>
@@ -84,6 +85,33 @@ static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_U
 /* The selected Instrument row can be any of the shared cache's 1,000 entries. */
 static volatile uint16_t         pm_instrument_request_index = 0u;
 static volatile uint16_t         pm_kit_request_scene_mask = 0u;
+
+static void preset_setSceneSourcesFromMask(uint16_t scene_mask,
+                                           uint16_t source_slot,
+                                           uint8_t source_is_bank)
+{
+    uint8_t scene_index;
+
+    /*
+     * Apply one immutable successful-operation source to selected Scenes.
+     *
+     * Inputs: final resident mask, root 0..999 slot, and Scene/Bank kind.
+     * Output: every bounded set bit receives the compact SceneData encoding;
+     * unset bits retain their prior provenance. Why: root Scene fan-out and
+     * partial Bank operations need one shared, non-filesystem metadata loop.
+     * Affiliates: SceneData's exact 32-byte source owner and the four
+     * completion callbacks below.
+     */
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((scene_mask & (uint16_t)(1u << scene_index)) == 0u)
+            continue;
+        if (source_is_bank)
+            (void)scene_setSourceBankSlot(scene_index, source_slot);
+        else
+            (void)scene_setSourceLibrarySlot(scene_index, source_slot);
+    }
+}
 
 static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
 {
@@ -283,6 +311,21 @@ static void on_morph_load_complete(void)
 
 static void on_globals_load_complete(void)
 {
+    /*
+     * Apply the loaded AutoSave preference at the completed file boundary.
+     *
+     * Inputs: terminal keyed-settings status and normalized flat policy byte.
+     * Output: successful boot or manual Settings Load updates only in-memory
+     * autosave authorization; any runtime setup remains asynchronous until the
+     * facade is acknowledged/idle. Errors preserve the current policy. Why:
+     * menu_sendAllGlobals() intentionally has no file-lifecycle side effects.
+     * Affiliates: main.c's early boot load, Menu Global apply, and
+     * filesystem_setAutosaveEnabled().
+     */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        filesystem_setAutosaveEnabled(
+            parameter_values[PAR_AUTOSAVE_ENABLED]);
+    }
     preset_completeFilesystemOp(PRESET_OP_GLOBALS_LOAD);
 }
 
@@ -367,6 +410,20 @@ static void on_instrument_morph_load_complete(void)
 
 static void on_scene_load_complete(void)
 {
+    /*
+     * Record root Scene provenance only at durable public success.
+     *
+     * Inputs: filesystem terminal status, accepted source slot, and retained
+     * destination mask. Outputs: successful destinations point at /Scene/NNN
+     * and one settings debounce is restarted; errors change neither source nor
+     * settings state. Affiliates: resident-presence promotion and the common
+     * Preset completion below.
+     */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        preset_setSceneSourcesFromMask(
+            pm_kit_request_scene_mask, pm_request_slot, 0u);
+        filesystem_markSettingsDirty();
+    }
     preset_markRequestedScenesPresentOnSuccessfulLoad();
     preset_completeFilesystemOp(PRESET_OP_SCENE_LOAD);
 }
@@ -381,6 +438,18 @@ static void on_scene_save_complete(void)
      * operation identity so Menu can clear Save busy state without starting any
      * runtime sound-apply work.
      */
+    /*
+     * Inputs: durable Scene Save status, retained resident source Scene, and
+     * target root slot. Output: only a successful save assigns /Scene/NNN and
+     * queues settings persistence. Why: request acceptance does not prove the
+     * directory/HCNAMES/index flush completed. Affiliates:
+     * preset_saveScene()'s immutable request capture.
+     */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        (void)scene_setSourceLibrarySlot(
+            pm_instrument_request_scene, pm_request_slot);
+        filesystem_markSettingsDirty();
+    }
     preset_completeFilesystemOp(PRESET_OP_SCENE_SAVE);
 }
 
@@ -394,6 +463,19 @@ static void on_bank_load_complete(void)
      * filesystem_lastBankLoadLoadedScene(). Menu/boot decide whether to run
      * the fallback chain after reading that bit.
      */
+    /*
+     * Inputs: durable Bank Load status, root Bank slot, and filesystem's final
+     * loaded-child mask. Outputs: the BankData restore slot already committed
+     * by the loader is queued for settings, while only actual child bits gain
+     * Bank provenance. Empty Banks still queue active_bank once. Why: the
+     * original request mask may include absent children. Affiliates:
+     * filesystem_lastBankLoadSceneMask() and settings.cfg active_bank.
+     */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        preset_setSceneSourcesFromMask(
+            filesystem_lastBankLoadSceneMask(), pm_request_slot, 1u);
+        filesystem_markSettingsDirty();
+    }
     preset_completeFilesystemOp(PRESET_OP_BANK_LOAD);
 }
 
@@ -406,6 +488,18 @@ static void on_bank_save_complete(void)
      * It does not imply runtime DSP changes, so Menu can share the ordinary
      * Save completion cleanup used by Scene Save.
      */
+    /*
+     * Inputs: durable Bank Save status, promoted root slot, and immutable
+     * selected Scene mask. Outputs: successful saved children point at their
+     * same-number Bank children and active_bank/source metadata queues one
+     * settings rewrite. Errors preserve all prior provenance. Affiliates:
+     * preset_saveBank() and filesystem_requestSaveBank().
+     */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        preset_setSceneSourcesFromMask(
+            pm_kit_request_scene_mask, pm_request_slot, 1u);
+        filesystem_markSettingsDirty();
+    }
     preset_completeFilesystemOp(PRESET_OP_BANK_SAVE);
 }
 
@@ -668,6 +762,49 @@ uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
     return preset_applyInstrumentRuntimeValueInternal(scene_index, id, value, 0u);
 }
 
+/*
+ * Commit one validated Instrument endpoint cell and mark its exact wire cell.
+ *
+ * Inputs: destination Scene/slot, active-type descriptor index, endpoint
+ * selection, and value after the public caller validates descriptor policy.
+ * Output: only a changed retained byte is stored, then the matching normal or
+ * Morph Autosave marker is called; equal values do nothing. Why: generic
+ * descriptor setters cover every current/future instrument type without per-
+ * type dirty switches. Affiliates: InstrumentManager registry validation,
+ * preset_setInstrumentParameter(), supplemental normalization, and Autosave's
+ * descriptor-indexed live getter. Derived interpolation is never marked.
+ */
+static void preset_storeInstrumentEndpoint(uint8_t scene_index,
+                                           uint8_t slot,
+                                           uint8_t descriptor_index,
+                                           instrument_image_select_t image,
+                                           instrument_param_value_t value)
+{
+    kit_instrument_slot_t *instrument =
+        scene_instrumentSlot(scene_index, slot);
+    instrument_param_value_t *storage;
+
+    if (!instrument || descriptor_index >= INSTRUMENT_PARAM_COUNT)
+        return;
+    if (image == INSTRUMENT_IMAGE_MORPH) {
+        storage = &instrument->parameter_images
+            .morph_instrument_parameters[descriptor_index];
+    } else {
+        storage = &instrument->parameter_images
+            .instrument_parameters[descriptor_index];
+    }
+    if (*storage == value)
+        return;
+    *storage = value;
+    if (image == INSTRUMENT_IMAGE_MORPH) {
+        autosave_markInstrumentMorphParameterDirty(
+            scene_index, slot, descriptor_index);
+    } else {
+        autosave_markInstrumentNormalParameterDirty(
+            scene_index, slot, descriptor_index);
+    }
+}
+
 uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
                                       uint8_t descriptor_index,
                                       instrument_image_select_t image,
@@ -690,17 +827,15 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
      *
      * Why this exists: Menu, MIDI translation, tests, and future instrument
      * import should not write the Scene arrays directly. The setter enforces
-     * descriptor ownership/range, chooses the persisted endpoint, and schedules
-     * Morph interpolation so the runtime image and DSP backend follow the
-     * Scene state. Affiliate code: presetMorphEngine owns
+     * descriptor ownership/range, chooses the persisted endpoint, commits only
+     * a changed byte through the generic endpoint/Autosave boundary, and
+     * schedules Morph interpolation so the runtime image and DSP backend follow
+     * the Scene state. Affiliate code: presetMorphEngine owns
      * morph_interpolation[], while preset_applyInstrumentRuntimeValueInternal()
      * owns the temporary legacy DSP mirror.
      */
-    if (image == INSTRUMENT_IMAGE_MORPH) {
-        instrument->parameter_images.morph_instrument_parameters[descriptor_index] = value;
-    } else {
-        instrument->parameter_images.instrument_parameters[descriptor_index] = value;
-    }
+    preset_storeInstrumentEndpoint(
+        scene_index, slot, descriptor_index, image, value);
 
     if (scene_index == scene_getActiveIndex()) {
         scene_t *scene = scene_get(scene_index);
@@ -754,9 +889,12 @@ uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
      * store a local token interpreted through their paired target-voice row.
      * Preset retains the byte value unchanged; InstrumentManager expands it to
      * a canonical target ID only while applying the active Scene's runtime
-     * modulation graph.
+     * modulation graph. A changed normal token is stored and exactly marked by
+     * the generic endpoint helper before runtime apply; equal input creates no
+     * dirty work.
      */
-    instrument->parameter_images.instrument_parameters[descriptor_index] = value;
+    preset_storeInstrumentEndpoint(
+        scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN, value);
     if (scene_index == scene_getActiveIndex())
         return instrumentManager_writeRuntime(slot, descriptor, value);
     return 1u;
@@ -900,15 +1038,20 @@ void preset_applySceneSettings(uint8_t scene_index)
     preset_applyVoiceDecimationAllRuntime(scene->settings.voice_decimation_all);
 }
 
-static void preset_storeSupplementalCell(kit_instrument_slot_t *instrument,
+static void preset_storeSupplementalCell(uint8_t scene_index,
+                                         uint8_t slot,
+                                         kit_instrument_slot_t *instrument,
                                          uint8_t index,
                                          instrument_param_value_t value)
 {
     /*
      * Keep all three generic images coherent for a non-morphable selector.
      *
-     * Inputs: retained slot, descriptor index, and normalized selector value.
-     * Output: main, Morph, and interpolation cells agree. This helper is kept
+     * Inputs: retained Scene/slot, slot pointer, descriptor index, and
+     * normalized selector value. Output: the serialized normal cell uses the
+     * common changed-value endpoint store and dirty marker; the nonserialized
+     * Morph mirror and derived interpolation cell are repaired directly. This
+     * helper is kept
      * separate from preset_setSupplementalParameter() because load-time
      * normalization must repair retained storage before that public setter
      * applies the active runtime binding; calling the setter three times would
@@ -916,7 +1059,8 @@ static void preset_storeSupplementalCell(kit_instrument_slot_t *instrument,
      */
     if (!instrument || index >= INSTRUMENT_PARAM_COUNT)
         return;
-    instrument->parameter_images.instrument_parameters[index] = value;
+    preset_storeInstrumentEndpoint(
+        scene_index, slot, index, INSTRUMENT_IMAGE_MAIN, value);
     instrument->parameter_images.morph_instrument_parameters[index] = value;
     instrument->parameter_images.morph_interpolation[index] = value;
 }
@@ -968,8 +1112,10 @@ static void preset_normalizeLfoTargetPair(uint8_t scene_index,
         token = instrumentManager_lfoTargetTokenFromId(
             scene_index, voice, id, INSTRUMENT_TARGET_MODULATION);
     }
-    preset_storeSupplementalCell(instrument, voice_index, voice);
-    preset_storeSupplementalCell(instrument, param_index, token);
+    preset_storeSupplementalCell(
+        scene_index, source_slot, instrument, voice_index, voice);
+    preset_storeSupplementalCell(
+        scene_index, source_slot, instrument, param_index, token);
 }
 
 static void preset_normalizeSlotModulationTargets(uint8_t scene_index,
@@ -1004,7 +1150,8 @@ static void preset_normalizeSlotModulationTargets(uint8_t scene_index,
                 scene_index, source_slot, target)) {
             target = INSTRUMENT_TARGET_TOKEN_OFF;
         }
-        preset_storeSupplementalCell(instrument, velocity_index, target);
+        preset_storeSupplementalCell(
+            scene_index, source_slot, instrument, velocity_index, target);
     }
 }
 
@@ -1752,6 +1899,15 @@ uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_SCENE;
+    /*
+     * Retain the resident source independently of the root target slot.
+     *
+     * Input: accepted Scene Save coordinate. Output: the asynchronous DONE
+     * callback can update exactly this Scene's provenance without consulting
+     * later Menu selection. Why: pm_request_slot is the library destination,
+     * not a resident index. Affiliates: on_scene_save_complete().
+     */
+    pm_instrument_request_scene = source_scene;
     if (filesystem_requestSaveSceneDirectory(presetNr,
                                              source_scene,
                                              preset_currentName,
@@ -1804,6 +1960,16 @@ uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_BANK;
+    /*
+     * Retain the Bank Save child selection through durable completion.
+     *
+     * Input: caller-selected resident mask already bounded by the 16-bit API.
+     * Output: on_bank_save_complete() can assign provenance only to children
+     * actually included in the successful save. Why: filesystem owns its own
+     * scratch copy, which Preset must not inspect after a later request.
+     * Affiliate: pm_kit_request_scene_mask's existing immutable-mask role.
+     */
+    pm_kit_request_scene_mask = scene_mask;
     if (filesystem_requestSaveBank(presetNr,
                                    source_scene,
                                    preset_currentName,
@@ -2286,13 +2452,15 @@ void preset_morphScene(uint8_t scene_index, uint8_t morph)
      * out and 0..255 Morph amount. Outputs: retained Scene global Morph and
      * all six per-voice Morph amounts update. Runtime/PERF mirrors are updated
      * only for the active Scene, because inactive Scenes are stored state until
-     * selected.
+     * selected. The overall value and each per-voice value use SceneData's
+     * change-aware owner setters, so retained storage precedes exact dirty bits
+     * and identical values do not schedule a write.
      */
     preset_ensureMorphInitialized();
     scene = scene_get(scene_index);
     if (!scene)
         return;
-    scene->settings.morph_amount = morph;
+    scene_setMorphAmount(scene_index, morph);
     scene_setAllVoiceMorphAmounts(scene_index, morph);
     if (scene_index == scene_getActiveIndex()) {
         preset_syncSceneMorphMirrors(scene);
@@ -2364,13 +2532,15 @@ void preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value)
      * parameter_values[] is mirrored for the PERF page, and the active Scene's
      * mixer global decimation multiplier is updated. This function is separate
      * from the MIDI CC handler so future sceneset.scg load/save has one owner
-     * for the retained setting and runtime side effect.
+     * for the retained setting and runtime side effect. The normalized byte is
+     * committed through SceneData's changed-value Autosave boundary before the
+     * runtime mirrors below are updated.
      */
     if (!scene)
         return;
     if (value > 127u)
         value = 127u;
-    scene->settings.voice_decimation_all = value;
+    scene_setVoiceDecimationAll(scene_index, value);
     parameter_values[PAR_VOICE_DECIMATION_ALL] = value;
     if (scene_index == scene_getActiveIndex())
         preset_applyVoiceDecimationAllRuntime(value);

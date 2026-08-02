@@ -123,6 +123,8 @@ enum NamesEnum {
      */
     TEXT_VOICE1_MORPH, TEXT_VOICE2_MORPH, TEXT_VOICE3_MORPH,
     TEXT_VOICE4_MORPH, TEXT_VOICE5_MORPH, TEXT_VOICE6_MORPH,
+    /* Global AutoSave cell; parallel short/long enums below must append too. */
+    TEXT_AUTOSAVE,
     NUM_NAMES
 };
 
@@ -159,6 +161,8 @@ enum longNamesEnum {
     /* Long names used in single-parameter PERF edit view for 1vm..6vm. */
     LONG_VOICE1_MORPH, LONG_VOICE2_MORPH, LONG_VOICE3_MORPH,
     LONG_VOICE4_MORPH, LONG_VOICE5_MORPH, LONG_VOICE6_MORPH,
+    /* Long label for PAR_AUTOSAVE_ENABLED's Global edit view. */
+    LONG_AUTOSAVE,
 };
 
 enum shortNamesEnum {
@@ -182,7 +186,9 @@ enum shortNamesEnum {
     SHORT_BAR_RESET_MODE, SHORT_CPU_USE, SHORT_OSC_INTERP, SHORT_SCALE,
     /* Compact PERF labels for per-voice Morph columns. */
     SHORT_VOICE1_MORPH, SHORT_VOICE2_MORPH, SHORT_VOICE3_MORPH,
-    SHORT_VOICE4_MORPH, SHORT_VOICE5_MORPH, SHORT_VOICE6_MORPH
+    SHORT_VOICE4_MORPH, SHORT_VOICE5_MORPH, SHORT_VOICE6_MORPH,
+    /* Three-cell Global-page label for PAR_AUTOSAVE_ENABLED. */
+    SHORT_AUTOSAVE
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu

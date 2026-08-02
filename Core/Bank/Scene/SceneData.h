@@ -21,6 +21,22 @@
  * display Scene membership.
  */
 #define SCENE_COUNT 16u
+
+/*
+ * Compact source provenance for each resident Scene.
+ *
+ * What: values 0..999 encode a root Scene library slot, values 1000..1999
+ * encode a root Bank slot, and UINT16_MAX means unknown. For Bank provenance,
+ * the child coordinate is the resident Scene index because Bank Load/Save maps
+ * bit N to child N. Why: all 2,000 valid sources fit in one uint16_t per Scene
+ * with no parallel type array. Inputs: successful Scene/Bank completion and
+ * settings.cfg load. Outputs: exactly 32 retained SRAM bytes serialized back
+ * to settings.cfg. Affiliates: presetManager.c and filesystem settings text.
+ */
+#define SCENE_SOURCE_LIBRARY_BASE 0u
+#define SCENE_SOURCE_BANK_BASE    1000u
+#define SCENE_SOURCE_LIMIT        2000u
+#define SCENE_SOURCE_UNKNOWN      UINT16_MAX
 /*
  * Fixed-width resident object display names.
  *
@@ -75,6 +91,12 @@ typedef struct {
      * scene_settings_t. Routing is a performance/mix setting that must survive
      * root Kit swaps, while these generated decay endpoints depend on the
      * current kit voice layout and therefore remain Kit-owned.
+     *
+     * Autosave extension rule: every new serialized Kit setting must append a
+     * named Kit parameter index/getter and write through SceneData's change-
+     * aware Kit store boundary. Direct assignment is reserved for boot
+     * initialization or a validated whole-object commit followed by the named
+     * Kit region marker. Affiliates: Autosave.h and future Kit copy/load code.
      */
     uint8_t slot6_track7_amp_envelope_decay;
     uint8_t slot6_track7_morph_amp_envelope_decay;
@@ -172,6 +194,16 @@ typedef struct {
      */
     uint8_t midi_channel[NUM_TRACKS];
     uint8_t midi_note[NUM_TRACKS];
+    /*
+     * Autosave extension rule for Scene settings.
+     *
+     * A future serialized byte is not complete until it has a named index,
+     * live getter branch, and SceneData setter using the common change-aware
+     * store helper. Direct assignments are limited to initialization or a
+     * validated whole-Scene commit followed by the Scene region marker. Why:
+     * this keeps getter order and dirty-bit order identical. Affiliates:
+     * Autosave's Scene parameter enum and Preset's retained setters.
+     */
 } scene_settings_t;
 
 typedef struct {
@@ -194,6 +226,17 @@ typedef struct {
      * helpers. Affiliates: filesystem.c and Core/Menu/menu.c.
      */
     scene_settings_t settings;
+    /*
+     * Future retained Effect ownership belongs semantically here, between
+     * Scene settings and Kit ownership, but Phase 1 allocates no dummy state.
+     *
+     * When Effects become live, their owner must raise the zero Autosave
+     * parameter count, implement the live getter, and route every scalar setter
+     * through autosave_markEffectParameterDirty(); whole Effect commits use
+     * autosave_markEffectDirty(). Why: Scene copy already contains the Effect
+     * region stub and must not require writer redesign later. Affiliates:
+     * Autosave Effect geometry and the future Effect implementation.
+     */
     PatternSet pattern;
     kit_t kit;
 } scene_t;
@@ -209,6 +252,21 @@ extern scene_t scenes[SCENE_COUNT];
  * This is called at boot before filesystem-loaded Kit data is applied.
  */
 void scene_initAll(void);
+/*
+ * Reset, store, and read resident Scene source provenance.
+ *
+ * Inputs: a bounded resident Scene plus a 0..999 root Scene/Bank slot, or a
+ * validated encoded settings value. Outputs: the one two-byte source changes
+ * or SCENE_SOURCE_UNKNOWN is returned for invalid coordinates. These metadata
+ * APIs never mark the musical autosave mutation mask. Why: provenance belongs
+ * to settings.cfg and must remain independent of Bank payload dirtiness.
+ * Affiliates: Preset successful completion and filesystem settings parsing.
+ */
+void scene_resetSources(void);
+uint8_t scene_setSourceLibrarySlot(uint8_t scene_index, uint16_t slot);
+uint8_t scene_setSourceBankSlot(uint8_t scene_index, uint16_t slot);
+uint8_t scene_setSourceEncoded(uint8_t scene_index, uint16_t source);
+uint16_t scene_sourceValue(uint8_t scene_index);
 /*
  * Validate a resident Scene index.
  *
@@ -301,12 +359,24 @@ void scene_setTrackMidiNote(uint8_t scene_index, uint8_t track, uint8_t note);
  */
 uint8_t scene_getTrackMidiNote(uint8_t scene_index, uint8_t track);
 /*
+ * Store the two Scene-wide scalar settings through their retained owner.
+ *
+ * Inputs: resident Scene plus 0..255 Morph or normalized 0..127 decimation.
+ * Outputs: changed storage is committed before its named Autosave bit; equal
+ * values and invalid Scenes do nothing. Runtime Morph/decimation apply remains
+ * Preset-owned. Why: callers must not directly assign these serialized fields.
+ * Affiliates: preset_morphScene() and preset_setVoiceDecimationAll().
+ */
+void scene_setMorphAmount(uint8_t scene_index, uint8_t amount);
+void scene_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
+/*
  * Scene-retained per-slot Morph accessors.
  *
  * Inputs use resident Scene index and zero-based instrument slot. Outputs are
- * bounded 0..255 values or no-op/0 for invalid coordinates. Preset uses these
- * to keep per-voice Morph amount ownership in SceneData while the Morph worker
- * remains an apply-only engine.
+ * bounded 0..255 values or no-op/0 for invalid coordinates. Changed setter
+ * values also notify their named Autosave cells; identical values do not.
+ * Preset uses these to keep per-voice Morph amount ownership in SceneData while
+ * the Morph worker remains an apply-only engine.
  */
 void scene_setVoiceMorphAmount(uint8_t scene_index, uint8_t slot,
                                uint8_t amount);
@@ -322,6 +392,8 @@ void scene_setAllVoiceMorphAmounts(uint8_t scene_index, uint8_t amount);
  *
  * Clients/affiliates: storageTypes sceneset parsing, Menu VOICE mix Scene
  * setting cells, Preset runtime apply, and future Scene Save/Bank copy code.
+ * All setters commit normalized retained bytes before change-aware Autosave
+ * notification; getters and runtime apply never produce dirty work.
  */
 void scene_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
                             uint8_t route);
@@ -340,7 +412,9 @@ uint8_t scene_getVoiceFaderSetting(uint8_t scene_index, uint8_t slot);
  * rather than a generic kit-setting accessor because the generated parameter
  * has a fixed behavioral contract: slot 6, track 7, amp envelope decay,
  * non-Choke fallback. Menu, Preset, storage, and future Scene mod targets use
- * these helpers instead of reaching into kit_settings_t directly.
+ * these helpers instead of reaching into kit_settings_t directly. Changed
+ * final values mark their named Kit autosave cells after storage; equal values
+ * do not schedule work.
  */
 void scene_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index, uint8_t value);
 uint8_t scene_getSlot6Track7AmpEnvelopeDecay(uint8_t scene_index);

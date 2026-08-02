@@ -4,9 +4,9 @@
  *
  * This module maps explicit BankData/SceneData/InstrumentManager fields into
  * the fixed record without copying C structs or querying DSP runtime state.
- * It also provides pure caller-owned mask/chunk transformations. Filesystem
- * scheduling, SD I/O, the retained mutation mask, and patch cache remain
- * exclusively owned by filesystem.c.
+ * It owns the one retained mutation mask and transforms streamed chunks from
+ * that canonical state. Filesystem scheduling, SD I/O, and transaction-local
+ * captured-value patches remain exclusively owned by filesystem.c.
  */
 #include "Autosave.h"
 
@@ -23,6 +23,130 @@ _Static_assert(INSTRUMENT_SLOT_COUNT == AUTOSAVE_INSTRUMENTS_PER_KIT,
                "autosave Kit geometry must match resident Instrument slots");
 _Static_assert(SCENE_COUNT == AUTOSAVE_SCENE_COUNT,
                "autosave Scene geometry must match resident Scene count");
+/*
+ * Bind every named Scene group width to its retained owner arrays.
+ *
+ * What/why: future parameters must append by extending the shared enum/getter,
+ * not shift an existing group away from SceneData. Inputs are compile-time
+ * Scene/track/slot counts; output is a build failure on ordering drift.
+ * Affiliates: autosave_getSceneParameter() and SceneData scalar setters.
+ */
+_Static_assert(AUTOSAVE_SCENE_PARAM_DECIMATION_ALL -
+                   AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE ==
+                   INSTRUMENT_SLOT_COUNT,
+               "Scene voice Morph group must cover every instrument slot");
+_Static_assert(AUTOSAVE_SCENE_PARAM_AUDIO_OUT_BASE ==
+                   AUTOSAVE_SCENE_PARAM_DECIMATION_ALL + 1u,
+               "Scene audio group must follow decimation");
+_Static_assert(AUTOSAVE_SCENE_PARAM_FX_SEND_BASE -
+                   AUTOSAVE_SCENE_PARAM_AUDIO_OUT_BASE ==
+                   INSTRUMENT_SLOT_COUNT,
+               "Scene audio group must cover every instrument slot");
+_Static_assert(AUTOSAVE_SCENE_PARAM_FADER_BASE -
+                   AUTOSAVE_SCENE_PARAM_FX_SEND_BASE ==
+                   INSTRUMENT_SLOT_COUNT,
+               "Scene FX-send group must cover every instrument slot");
+_Static_assert(AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE -
+                   AUTOSAVE_SCENE_PARAM_FADER_BASE ==
+                   INSTRUMENT_SLOT_COUNT,
+               "Scene fader group must cover every instrument slot");
+_Static_assert(AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE -
+                   AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE == NUM_TRACKS,
+               "Scene MIDI-channel group must cover every track");
+_Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
+                   AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE == NUM_TRACKS,
+               "Scene MIDI-note group must cover every track");
+
+/*
+ * Canonical retained autosave dirty record.
+ *
+ * What: one bit for every byte in the fixed Bank/Scene payload. Why: live SRAM
+ * owns pending work; on-file masks are only recovery copies of incomplete
+ * work, so filesystem transactions must not allocate, reset, or replace this
+ * record. Inputs are OR-merged winner chunks, later retained-parameter change
+ * producers, and rollback of captured offsets after an error. Outputs feed
+ * bounded classification, transformed target chunks, and continuation
+ * scheduling. Static BSS initialization clears it once at processor reset.
+ */
+static volatile uint8_t autosave_dirty_mask[AUTOSAVE_MASK_BYTES];
+static volatile uint8_t autosave_mutation_tracking_enabled;
+
+_Static_assert(sizeof(autosave_dirty_mask) == AUTOSAVE_MASK_BYTES,
+               "autosave canonical dirty record must match the wire mask");
+
+/*
+ * Protect one canonical-mask byte without extending the critical section.
+ *
+ * What: save PRIMASK, disable interrupts, then restore the caller's exact
+ * prior interrupt state. Why: retained setters are reachable from sequencer
+ * timer work while the foreground writer classifies the same mask. Inputs and
+ * outputs: save returns the prior PRIMASK; restore consumes it. Affiliates are
+ * the atomic OR and take helpers below; parameter gets, loops, CRC, and SD I/O
+ * must remain outside this boundary.
+ */
+static uint32_t autosave_irqSave(void)
+{
+    uint32_t primask;
+
+    __asm volatile("mrs %0, primask\ncpsid i"
+                   : "=r"(primask) :: "memory");
+    return primask;
+}
+
+static void autosave_irqRestore(uint32_t primask)
+{
+    __asm volatile("msr primask, %0" :: "r"(primask) : "memory");
+}
+
+/*
+ * Atomically OR one set of bits into one canonical mask byte.
+ *
+ * Inputs: bounded mask-byte index and set-bit pattern. Output: those bits are
+ * retained without losing concurrent foreground/interrupt producers. Why:
+ * every producer, recovery merge, and rollback has identical OR semantics.
+ * The caller performs range checks so this helper stays one-byte and bounded.
+ */
+static void autosave_maskByteOr(uint16_t mask_byte, uint8_t bits)
+{
+    uint32_t primask = autosave_irqSave();
+
+    autosave_dirty_mask[mask_byte] = (uint8_t)(
+        autosave_dirty_mask[mask_byte] | bits);
+    autosave_irqRestore(primask);
+}
+
+/*
+ * Set one payload bit for an ordinary retained mutation when tracking is live.
+ *
+ * Inputs: validated payload-relative offset. Output: its LSB-first bit is
+ * atomically ORed, or nothing changes while boot ownership is disabled. Why:
+ * initialization/load setup must not manufacture mutations, and owner modules
+ * must not know mask geometry. Affiliates: every typed marker below and the
+ * filesystem boot-lifecycle tracking gate.
+ */
+static void autosave_markPayloadOffsetDirty(uint16_t payload_offset)
+{
+    if (!autosave_mutation_tracking_enabled ||
+        payload_offset >= AUTOSAVE_PAYLOAD_BYTES) {
+        return;
+    }
+    autosave_maskByteOr(
+        (uint16_t)(payload_offset >> 3u),
+        (uint8_t)(1u << (payload_offset & 7u)));
+}
+
+/* Return the validated payload-relative base for one resident Scene. */
+static uint8_t autosave_scenePayloadBase(uint8_t scene_index,
+                                         uint16_t *payload_base)
+{
+    if (!payload_base || scene_index >= AUTOSAVE_SCENE_COUNT ||
+        !bank_scenePresent(scene_index)) {
+        return 0u;
+    }
+    *payload_base = (uint16_t)(AUTOSAVE_BANK_SECTION_BYTES +
+        ((uint16_t)scene_index * AUTOSAVE_SCENE_SECTION_BYTES));
+    return 1u;
+}
 
 /* Return one little-endian byte after the owning field selected its width. */
 static uint8_t autosave_u16Byte(uint16_t value, uint8_t byte_index)
@@ -430,7 +554,8 @@ uint8_t autosave_streamValidationMatchesBank(
 /*
  * Project one existing Scene setting into its ordered binary parameter index.
  *
- * Inputs: retained Scene and index 0..39. Output: one byte and success.
+ * Inputs: retained Scene and a named index below AUTOSAVE_SCENE_PARAM_COUNT.
+ * Output: one byte and success.
  * Affiliates: sceneset.scg's identical logical field order and the public live
  * payload getter below. No C struct layout is serialized.
  */
@@ -439,27 +564,54 @@ static uint8_t autosave_getSceneParameter(const scene_t *scene,
                                           uint8_t *value)
 {
     if (!scene || !value ||
-        parameter_index >= AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES) {
+        parameter_index >= AUTOSAVE_SCENE_PARAM_COUNT) {
         return 0u;
     }
-    if (parameter_index == 0u) {
+    if (parameter_index == AUTOSAVE_SCENE_PARAM_MORPH_AMOUNT) {
         *value = scene->settings.morph_amount;
-    } else if (parameter_index < 7u) {
-        *value = scene->settings.voice_morph_amount[parameter_index - 1u];
-    } else if (parameter_index == 7u) {
+    } else if (parameter_index >= AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE &&
+               parameter_index < AUTOSAVE_SCENE_PARAM_DECIMATION_ALL) {
+        *value = scene->settings.voice_morph_amount[
+            parameter_index - AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE];
+    } else if (parameter_index == AUTOSAVE_SCENE_PARAM_DECIMATION_ALL) {
         *value = scene->settings.voice_decimation_all;
-    } else if (parameter_index < 14u) {
-        *value = scene->settings.audio_out[parameter_index - 8u];
-    } else if (parameter_index < 20u) {
-        *value = scene->settings.fx_send_amount[parameter_index - 14u];
-    } else if (parameter_index < 26u) {
-        *value = scene->settings.fader_setting[parameter_index - 20u];
-    } else if (parameter_index < 33u) {
-        *value = scene->settings.midi_channel[parameter_index - 26u];
+    } else if (parameter_index < AUTOSAVE_SCENE_PARAM_FX_SEND_BASE) {
+        *value = scene->settings.audio_out[
+            parameter_index - AUTOSAVE_SCENE_PARAM_AUDIO_OUT_BASE];
+    } else if (parameter_index < AUTOSAVE_SCENE_PARAM_FADER_BASE) {
+        *value = scene->settings.fx_send_amount[
+            parameter_index - AUTOSAVE_SCENE_PARAM_FX_SEND_BASE];
+    } else if (parameter_index < AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE) {
+        *value = scene->settings.fader_setting[
+            parameter_index - AUTOSAVE_SCENE_PARAM_FADER_BASE];
+    } else if (parameter_index < AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE) {
+        *value = scene->settings.midi_channel[
+            parameter_index - AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE];
     } else {
-        *value = scene->settings.midi_note[parameter_index - 33u];
+        *value = scene->settings.midi_note[
+            parameter_index - AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE];
     }
     return 1u;
+}
+
+/*
+ * Future Effect live-byte owner stub.
+ *
+ * Inputs: resident Scene, parameter index, and result cell. Output: zero for
+ * every request because Phase 1 has no retained Effect owner and the live
+ * count is zero. Why: future Effect fields need an explicit getter append
+ * point paired with the Effect marker instead of disappearing into generic
+ * padding. Affiliates: Effect parameter geometry in Autosave.h, scene_t's
+ * future-owner comment, and autosave_markEffectParameterDirty().
+ */
+static uint8_t autosave_getEffectParameter(const scene_t *scene,
+                                           uint16_t parameter_index,
+                                           uint8_t *value)
+{
+    (void)scene;
+    (void)parameter_index;
+    (void)value;
+    return 0u;
 }
 
 uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
@@ -543,12 +695,25 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
     }
 
     /*
-     * Effect bytes and Scene name/padding have no live parameter source in
-     * this milestone.
+     * Route the reserved Effect parameter interval through its explicit stub.
      *
-     * They intentionally return nonexistent. Pattern is outside the wire
-     * layout entirely, so no relative range can reach scene->pattern.
+     * Inputs: Scene-relative bytes 137..639. Output: nonexistent while the
+     * Effect live count is zero. Type/name and Scene name/padding also remain
+     * unavailable because they have no resident owner. Why: adding Effect
+     * ownership later extends one named branch instead of changing writer
+     * classification. Pattern remains outside this wire layout entirely.
      */
+    if (relative >= AUTOSAVE_EFFECT_OFFSET +
+                        AUTOSAVE_EFFECT_PARAMETERS_OFFSET &&
+        relative < AUTOSAVE_EFFECT_OFFSET +
+                       AUTOSAVE_EFFECT_PARAMETERS_OFFSET +
+                       AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES) {
+        return autosave_getEffectParameter(
+            scene,
+            (uint16_t)(relative - AUTOSAVE_EFFECT_OFFSET -
+                       AUTOSAVE_EFFECT_PARAMETERS_OFFSET),
+            value);
+    }
     if (relative < AUTOSAVE_KIT_OFFSET)
         return 0u;
 
@@ -565,11 +730,12 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
          * Inputs: Kit parameter indices 0..119. Output: indices 0/1 sample the
          * retained normal/Morph decay; later reserved indices report absent.
          */
-        if (kit_parameter == 0u) {
+        if (kit_parameter == AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_DECAY) {
             *value = scene->kit.settings.slot6_track7_amp_envelope_decay;
             return 1u;
         }
-        if (kit_parameter == 1u) {
+        if (kit_parameter ==
+            AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY) {
             *value =
                 scene->kit.settings.slot6_track7_morph_amp_envelope_decay;
             return 1u;
@@ -658,60 +824,518 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
     return 0u;
 }
 
-uint8_t autosave_maskHasDirty(
-    const uint8_t mask[AUTOSAVE_MASK_BYTES])
+void autosave_setMutationTrackingEnabled(uint8_t enabled)
+{
+    uint32_t primask;
+
+    /*
+     * Publish the retained-owner producer gate as one atomic lifecycle change.
+     *
+     * Input: nonzero after successful boot autosave setup, zero before setup,
+     * reset, no-Bank fallback, or setup failure. Output: ordinary Bank/Scene/
+     * Preset markers are accepted or ignored; recovery merge and rollback are
+     * deliberately unaffected. Why: boot population must not be mistaken for
+     * user mutation. Affiliate: filesystem_ensureAutosaveFilesBlocking().
+     */
+    primask = autosave_irqSave();
+    autosave_mutation_tracking_enabled = enabled ? 1u : 0u;
+    autosave_irqRestore(primask);
+}
+
+void autosave_discardDirtyMask(void)
+{
+    /*
+     * Clear the sole canonical record after producers and transforms stop.
+     *
+     * Inputs: filesystem lifecycle has disabled tracking and verified that no
+     * autosave operation is consuming mask chunks. Output: every pending bit
+     * is discarded in SRAM; SD records remain untouched. Why: stale work from
+     * an intentionally disabled/retired Bank session must not reappear after
+     * re-enable. Affiliates: filesystem's immediate/deferred OFF transition.
+     */
+    memset((void *)autosave_dirty_mask, 0, sizeof(autosave_dirty_mask));
+}
+
+void autosave_markBankFieldDirty(autosave_bank_field_t field)
+{
+    uint16_t payload_offset;
+    uint8_t width;
+    uint8_t i;
+
+    /*
+     * Convert one logical Bank field to its existing serialized byte range.
+     *
+     * Input: format-owned field identifier. Output: every byte of that field
+     * is atomically marked, or an invalid identifier is ignored. Why: BankData
+     * must not duplicate offsets/widths for the two-byte masks, slot, or
+     * eight-byte name. Affiliates: BankData setters and Bank getter branches.
+     */
+    switch (field) {
+    case AUTOSAVE_BANK_FIELD_RESTORE_SLOT:
+        payload_offset = (uint16_t)(AUTOSAVE_BANK_SLOT_OFFSET -
+                                    AUTOSAVE_PAYLOAD_OFFSET);
+        width = 2u;
+        break;
+    case AUTOSAVE_BANK_FIELD_DISPLAY_NAME:
+        payload_offset = (uint16_t)(AUTOSAVE_BANK_NAME_OFFSET -
+                                    AUTOSAVE_PAYLOAD_OFFSET);
+        width = AUTOSAVE_NAME_BYTES;
+        break;
+    case AUTOSAVE_BANK_FIELD_SCENE_PRESENT_MASK:
+        payload_offset = (uint16_t)(AUTOSAVE_BANK_SCENE_PRESENT_MASK_OFFSET -
+                                    AUTOSAVE_PAYLOAD_OFFSET);
+        width = 2u;
+        break;
+    case AUTOSAVE_BANK_FIELD_ACTIVE_SCENE:
+        payload_offset = (uint16_t)(AUTOSAVE_BANK_ACTIVE_SCENE_OFFSET -
+                                    AUTOSAVE_PAYLOAD_OFFSET);
+        width = 1u;
+        break;
+    case AUTOSAVE_BANK_FIELD_VOICE_EDIT_MASK:
+        payload_offset = (uint16_t)(AUTOSAVE_BANK_VOICE_EDIT_MASK_OFFSET -
+                                    AUTOSAVE_PAYLOAD_OFFSET);
+        width = 2u;
+        break;
+    default:
+        return;
+    }
+    for (i = 0u; i < width; i++)
+        autosave_markPayloadOffsetDirty((uint16_t)(payload_offset + i));
+}
+
+void autosave_markSceneParameterDirty(uint8_t scene_index,
+                                      uint8_t parameter_index)
+{
+    uint16_t scene_base;
+
+    /*
+     * Mark one named Scene-settings byte after validating its resident owner.
+     *
+     * Inputs: present Scene index and parameter index below the shared count.
+     * Output: exactly SceneBase+8+index becomes dirty, otherwise no-op. Why:
+     * the marker and getter must share ordering as future fields are appended.
+     * Affiliates: SceneData's change-aware scalar store helper.
+     */
+    if (parameter_index >= AUTOSAVE_SCENE_PARAM_COUNT ||
+        !autosave_scenePayloadBase(scene_index, &scene_base)) {
+        return;
+    }
+    autosave_markPayloadOffsetDirty((uint16_t)(
+        scene_base + AUTOSAVE_SCENE_PARAMETERS_OFFSET + parameter_index));
+}
+
+void autosave_markKitParameterDirty(uint8_t scene_index,
+                                    uint8_t parameter_index)
+{
+    uint16_t scene_base;
+
+    /*
+     * Mark one named Kit-settings byte inside its owning Scene.
+     *
+     * Inputs: present Scene and Kit index below AUTOSAVE_KIT_PARAM_COUNT.
+     * Output: exactly KitBase+8+index becomes dirty. Why: the two generated
+     * track-7 endpoints and future Kit fields share one append/count contract.
+     * Affiliate: SceneData's Kit scalar store helper.
+     */
+    if (parameter_index >= AUTOSAVE_KIT_PARAM_COUNT ||
+        !autosave_scenePayloadBase(scene_index, &scene_base)) {
+        return;
+    }
+    autosave_markPayloadOffsetDirty((uint16_t)(
+        scene_base + AUTOSAVE_KIT_OFFSET +
+        AUTOSAVE_KIT_PARAMETERS_OFFSET + parameter_index));
+}
+
+/*
+ * Resolve a live Instrument coordinate for both endpoint marker variants.
+ *
+ * Inputs: present Scene, slot, and descriptor index. Outputs: payload base and
+ * registry entry only when the destination type owns that descriptor. Why:
+ * descriptor enums/tables are the canonical per-type order; Autosave must not
+ * add type-specific maps. Affiliates: Preset's validated endpoint setters and
+ * the 64-cell generic image/72-cell wire-capacity assertions.
+ */
+static const instrument_registry_entry_t *autosave_instrumentMarkerBase(
+    uint8_t scene_index,
+    uint8_t slot,
+    uint8_t descriptor_index,
+    uint16_t *instrument_base)
+{
+    uint16_t scene_base;
+    const kit_instrument_slot_t *instrument;
+    const instrument_registry_entry_t *entry;
+
+    if (!instrument_base || slot >= AUTOSAVE_INSTRUMENTS_PER_KIT ||
+        !autosave_scenePayloadBase(scene_index, &scene_base)) {
+        return NULL;
+    }
+    instrument = scene_instrumentSlotConst(scene_index, slot);
+    if (!instrument)
+        return NULL;
+    entry = instrumentManager_registryEntry(instrument->type);
+    if (!entry || descriptor_index >= entry->descriptor_count ||
+        descriptor_index >= INSTRUMENT_PARAM_COUNT)
+        return NULL;
+    *instrument_base = (uint16_t)(
+        scene_base + AUTOSAVE_KIT_OFFSET +
+        AUTOSAVE_KIT_INSTRUMENTS_OFFSET +
+        ((uint16_t)slot * AUTOSAVE_INSTRUMENT_RECORD_BYTES));
+    return entry;
+}
+
+void autosave_markInstrumentNormalParameterDirty(uint8_t scene_index,
+                                                  uint8_t slot,
+                                                  uint8_t descriptor_index)
+{
+    uint16_t instrument_base;
+
+    /*
+     * Mark one active-type normal endpoint descriptor.
+     *
+     * Inputs: Scene/slot/descriptor coordinates validated against the current
+     * registry. Output: its fixed normal-image cell becomes dirty. Why: every
+     * current and future descriptor uses Preset's generic setter and therefore
+     * needs no per-instrument Autosave switch. Affiliate: normal live getter.
+     */
+    if (!autosave_instrumentMarkerBase(
+            scene_index, slot, descriptor_index, &instrument_base)) {
+        return;
+    }
+    autosave_markPayloadOffsetDirty((uint16_t)(
+        instrument_base + AUTOSAVE_INSTRUMENT_NORMAL_OFFSET +
+        descriptor_index));
+}
+
+void autosave_markInstrumentMorphParameterDirty(uint8_t scene_index,
+                                                 uint8_t slot,
+                                                 uint8_t descriptor_index)
+{
+    uint16_t instrument_base;
+    const instrument_registry_entry_t *entry;
+
+    /*
+     * Mark one active-type Morph endpoint descriptor.
+     *
+     * Inputs: Scene/slot/descriptor coordinates. Output: its Morph-image cell
+     * is set only when the registry owns and flags that descriptor Morphable;
+     * selectors and reserve cells are ignored. Why: this exactly mirrors the
+     * live getter/file policy. Affiliate: Preset's Morph endpoint setter.
+     */
+    entry = autosave_instrumentMarkerBase(
+        scene_index, slot, descriptor_index, &instrument_base);
+    if (!entry ||
+        (entry->descriptors[descriptor_index].flags &
+         INSTRUMENT_PARAM_FLAG_MORPHABLE) == 0u) {
+        return;
+    }
+    autosave_markPayloadOffsetDirty((uint16_t)(
+        instrument_base + AUTOSAVE_INSTRUMENT_MORPH_OFFSET +
+        descriptor_index));
+}
+
+void autosave_markEffectParameterDirty(uint8_t scene_index,
+                                       uint16_t parameter_index)
+{
+    uint16_t scene_base;
+    uint16_t live_count = AUTOSAVE_EFFECT_PARAM_COUNT;
+
+    /*
+     * Preserve the exact single-Effect-parameter append point as a no-op.
+     *
+     * Inputs: Scene and future parameter index. Output: no bit in Phase 1
+     * because AUTOSAVE_EFFECT_PARAM_COUNT is zero and no retained owner exists.
+     * Once implemented, a valid parameter maps to SceneBase+128+9+index. Why:
+     * future Effect setters must join the same dirty/get contract immediately.
+     * Affiliates: Effect getter stub and future scene_t Effect ownership.
+     */
+    if (parameter_index >= live_count ||
+        !autosave_scenePayloadBase(scene_index, &scene_base)) {
+        return;
+    }
+    autosave_markPayloadOffsetDirty((uint16_t)(
+        scene_base + AUTOSAVE_EFFECT_OFFSET +
+        AUTOSAVE_EFFECT_PARAMETERS_OFFSET + parameter_index));
+}
+
+void autosave_markInstrumentNormalDirty(uint8_t scene_index, uint8_t slot)
+{
+    const kit_instrument_slot_t *instrument =
+        scene_instrumentSlotConst(scene_index, slot);
+    const instrument_registry_entry_t *entry;
+    uint8_t descriptor_index;
+
+    /*
+     * Mark a future same-type normal-endpoint copy destination.
+     *
+     * Inputs: destination Scene/slot after copy code has verified source and
+     * destination types match. Output: every live normal descriptor is dirty;
+     * type/name/Morph remain untouched. Why: endpoint-only copy is not license
+     * to reinterpret descriptor indices across types. Affiliate: future copy.
+     */
+    if (!instrument)
+        return;
+    entry = instrumentManager_registryEntry(instrument->type);
+    if (!entry)
+        return;
+    for (descriptor_index = 0u;
+         descriptor_index < entry->descriptor_count;
+         descriptor_index++) {
+        autosave_markInstrumentNormalParameterDirty(
+            scene_index, slot, descriptor_index);
+    }
+}
+
+void autosave_markInstrumentMorphDirty(uint8_t scene_index, uint8_t slot)
+{
+    const kit_instrument_slot_t *instrument =
+        scene_instrumentSlotConst(scene_index, slot);
+    const instrument_registry_entry_t *entry;
+    uint8_t descriptor_index;
+
+    /*
+     * Mark a future same-type Morph-endpoint copy destination.
+     *
+     * Inputs: destination Scene/slot after matching-type validation. Output:
+     * every Morphable endpoint becomes dirty; normal/type/name do not. Why:
+     * selectors have no serialized Morph owner. Affiliate: future Morph copy.
+     */
+    if (!instrument)
+        return;
+    entry = instrumentManager_registryEntry(instrument->type);
+    if (!entry)
+        return;
+    for (descriptor_index = 0u;
+         descriptor_index < entry->descriptor_count;
+         descriptor_index++) {
+        autosave_markInstrumentMorphParameterDirty(
+            scene_index, slot, descriptor_index);
+    }
+}
+
+void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot)
+{
+    uint16_t instrument_base;
+    const instrument_registry_entry_t *entry;
+    uint8_t type_byte;
+
+    /*
+     * Mark a future whole-Instrument replacement after its resident commit.
+     *
+     * Inputs: destination Scene/slot. Output: three type-token bytes plus every
+     * live normal and Morphable endpoint are dirty; the HCNAMES-owned name is
+     * deliberately excluded. Why: type is required to interpret endpoints.
+     * Affiliates: future Instrument copy/load commit and endpoint markers.
+     */
+    entry = autosave_instrumentMarkerBase(scene_index, slot, 0u,
+                                           &instrument_base);
+    if (!entry)
+        return;
+    for (type_byte = 0u; type_byte < AUTOSAVE_INSTRUMENT_TYPE_BYTES;
+         type_byte++) {
+        autosave_markPayloadOffsetDirty((uint16_t)(instrument_base +
+                                                   type_byte));
+    }
+    autosave_markInstrumentNormalDirty(scene_index, slot);
+    autosave_markInstrumentMorphDirty(scene_index, slot);
+}
+
+void autosave_markKitDirty(uint8_t scene_index)
+{
+    uint8_t parameter_index;
+    uint8_t slot;
+
+    /*
+     * Mark the implemented payload of one future whole-Kit commit.
+     *
+     * Input: destination Scene. Output: all live Kit settings and six complete
+     * Instrument data regions are dirty; HCNAMES-owned Kit/Instrument names
+     * remain excluded. Why: compound copy/load code needs one post-commit hook.
+     * Affiliates: future Kit copy and Phase 2 successful-load marking.
+     */
+    for (parameter_index = 0u; parameter_index < AUTOSAVE_KIT_PARAM_COUNT;
+         parameter_index++) {
+        autosave_markKitParameterDirty(scene_index, parameter_index);
+    }
+    for (slot = 0u; slot < AUTOSAVE_INSTRUMENTS_PER_KIT; slot++)
+        autosave_markWholeInstrumentDirty(scene_index, slot);
+}
+
+void autosave_markEffectDirty(uint8_t scene_index)
+{
+    uint16_t parameter_index = 0u;
+    uint16_t live_count = AUTOSAVE_EFFECT_PARAM_COUNT;
+
+    /*
+     * Preserve a future whole-Effect post-copy hook without fake state.
+     *
+     * Input: destination Scene. Output: zero parameter bits today because the
+     * live Effect count is zero; future type/name ownership and parameters are
+     * added here. Why: Scene scope must never silently omit Effects once they
+     * exist. Affiliates: future Effect copy and Scene-without-Pattern marker.
+     */
+    while (parameter_index < live_count) {
+        autosave_markEffectParameterDirty(scene_index, parameter_index);
+        parameter_index++;
+    }
+}
+
+void autosave_markSceneWithoutPatternDirty(uint8_t scene_index)
+{
+    uint8_t parameter_index;
+
+    /*
+     * Mark the implemented non-Pattern payload of a future Scene commit.
+     *
+     * Input: destination Scene. Output: all Scene settings, Effect scope, and
+     * Kit scope become dirty; Scene name and Pattern are excluded. Why: this is
+     * the requested first copy/paste Scene boundary. Affiliates: future Scene
+     * copy, Phase 2 load commits, Effect stub, and Kit marker.
+     */
+    for (parameter_index = 0u; parameter_index < AUTOSAVE_SCENE_PARAM_COUNT;
+         parameter_index++) {
+        autosave_markSceneParameterDirty(scene_index, parameter_index);
+    }
+    autosave_markEffectDirty(scene_index);
+    autosave_markKitDirty(scene_index);
+}
+
+void autosave_markSceneWithPatternDirty(uint8_t scene_index)
+{
+    /*
+     * Reserve the later Scene-with-Pattern copy boundary explicitly.
+     *
+     * Input: destination Scene. Output: Phase 1 marks only the implemented
+     * non-Pattern scope. Why: Pattern is not in this autosave wire format, so
+     * callers must not mistake this stub for persistence. Affiliate: future
+     * Pattern autosave/copy work, which must extend this function deliberately.
+     */
+    autosave_markSceneWithoutPatternDirty(scene_index);
+    /* TODO: mark Pattern only after Pattern persistence has a defined owner. */
+}
+
+void autosave_markResidentBankDirty(void)
+{
+    uint8_t field;
+    uint8_t scene_index;
+    uint16_t present_mask = bank_scenePresentMask();
+
+    /*
+     * Seed one complete live resident Bank snapshot into the canonical mask.
+     *
+     * Inputs: enabled mutation tracking, every typed Bank field, and the
+     * current resident Scene-present mask. Outputs: all gettable Bank bytes and
+     * non-Pattern scopes of present Scenes become dirty. Why: AutoSave OFF
+     * intentionally ignores intervening mutations, so runtime re-enable needs
+     * an explicit convergence boundary. Affiliates: BankData, the existing
+     * whole-Scene marker, and filesystem runtime ensure completion.
+     */
+    for (field = 0u; field < AUTOSAVE_BANK_FIELD_COUNT; field++)
+        autosave_markBankFieldDirty((autosave_bank_field_t)field);
+    for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
+         scene_index++) {
+        if ((present_mask & (uint16_t)(1u << scene_index)) != 0u)
+            autosave_markSceneWithoutPatternDirty(scene_index);
+    }
+}
+
+void autosave_maskMergeChunk(uint16_t mask_byte_offset,
+                             const uint8_t *src,
+                             uint16_t byte_count)
+{
+    uint16_t i;
+
+    /*
+     * Recover file-carried incomplete work without replacing live SRAM state.
+     *
+     * Inputs: one mask-relative interval streamed through filesystem.c's
+     * existing 512-byte buffer. Output: set file bits are ORed into the one
+     * canonical record; prior SRAM bits and every byte outside the interval
+     * remain unchanged. Why: either side saying "dirty" must keep the payload
+     * cell pending. Affiliates: drain phase 54 and power-loss recovery.
+     */
+    if (!src || mask_byte_offset >= AUTOSAVE_MASK_BYTES ||
+        byte_count > AUTOSAVE_MASK_BYTES - mask_byte_offset) {
+        return;
+    }
+    for (i = 0u; i < byte_count; i++) {
+        autosave_maskByteOr((uint16_t)(mask_byte_offset + i), src[i]);
+    }
+}
+
+uint8_t autosave_maskHasDirty(void)
 {
     uint16_t byte_index;
 
     /*
-     * Test the SRAM completeness register without changing drain ownership.
+     * Test the canonical SRAM completeness register without changing it.
      *
-     * Input is the complete mask copied from the selected file into the
-     * temporary autosave cache. Output is nonzero on the first dirty byte, or
-     * zero when no cached mutation requires a parameter get or a ping-pong
-     * write. Why: generation/CRC/copy work must not run merely to reproduce an
-     * already-empty mask. Affiliates: filesystem drain phase 55 and the future
-     * persistent in-system mutation register.
+     * Input is the retained Autosave-owned record. Output is nonzero on the
+     * first dirty byte, or zero when no mutation requires a parameter get or
+     * ping-pong write. Why: generation/copy work must not run merely to
+     * reproduce an already-empty record. Affiliates: filesystem drain phase 55
+     * and the autonomous-writer completion callback.
      */
-    if (!mask)
-        return 0u;
     for (byte_index = 0u; byte_index < AUTOSAVE_MASK_BYTES; byte_index++) {
-        if (mask[byte_index] != 0u)
+        if (autosave_dirty_mask[byte_index] != 0u)
             return 1u;
     }
     return 0u;
 }
 
-uint8_t autosave_maskBitIsSet(const uint8_t mask[AUTOSAVE_MASK_BYTES],
-                              uint16_t payload_offset)
+uint8_t autosave_maskBitTake(uint16_t payload_offset)
 {
+    uint16_t mask_byte;
+    uint8_t bit;
+    uint8_t was_set;
+    uint32_t primask;
+
     /*
-     * Decode the fixed least-significant-bit-first mask convention.
+     * Atomically claim one LSB-first dirty cell for foreground classification.
      *
-     * Inputs: caller-owned mask and payload offset. Output: zero for null/out
-     * of range or the one addressed bit. No neighbor or caller state changes.
+     * Input: payload offset. Output: its prior bit state; a set bit is cleared
+     * in the same one-byte critical section. Why: a later interrupt mutation
+     * re-sets the bit and survives for continuation, eliminating the former
+     * test/get/clear loss window. Parameter get remains outside this section.
+     * Affiliate: filesystem autosave phase 56.
      */
-    if (!mask || payload_offset >= AUTOSAVE_PAYLOAD_BYTES)
+    if (payload_offset >= AUTOSAVE_PAYLOAD_BYTES)
         return 0u;
-    return (uint8_t)((mask[payload_offset >> 3u] >>
-                      (payload_offset & 7u)) & 1u);
+    mask_byte = (uint16_t)(payload_offset >> 3u);
+    bit = (uint8_t)(1u << (payload_offset & 7u));
+    primask = autosave_irqSave();
+    was_set = (uint8_t)((autosave_dirty_mask[mask_byte] & bit) != 0u);
+    autosave_dirty_mask[mask_byte] = (uint8_t)(
+        autosave_dirty_mask[mask_byte] & (uint8_t)~bit);
+    autosave_irqRestore(primask);
+    return was_set;
 }
 
-void autosave_maskBitClear(uint8_t mask[AUTOSAVE_MASK_BYTES],
-                           uint16_t payload_offset)
+void autosave_maskRestoreCaptured(const uint16_t *payload_offsets,
+                                  uint16_t patch_count)
 {
+    uint16_t i;
+
     /*
-     * Close exactly one bounded dirty position.
+     * Roll captured work back into the canonical record after writer failure.
      *
-     * Inputs: mutable caller-owned mask and payload offset. Output: the
-     * addressed least-significant-bit-first cell is clear; all neighbors are
-     * preserved. Affiliates: filesystem's capped drain preparation.
+     * Inputs: the transaction's sorted captured offsets and valid count.
+     * Output: every bounded offset is dirty again; duplicate/already-dirty
+     * positions remain harmless. Why: classification atomically takes a bit
+     * before its get, so a failed target must restore every successfully
+     * captured SRAM-only offset. This is writer rollback, not a retained-
+     * parameter mutation hook.
      */
-    if (!mask || payload_offset >= AUTOSAVE_PAYLOAD_BYTES)
+    if (!payload_offsets)
         return;
-    mask[payload_offset >> 3u] = (uint8_t)(
-        mask[payload_offset >> 3u] &
-        (uint8_t)~(uint8_t)(1u << (payload_offset & 7u)));
+    for (i = 0u; i < patch_count; i++) {
+        uint16_t payload_offset = payload_offsets[i];
+
+        if (payload_offset < AUTOSAVE_PAYLOAD_BYTES) {
+            autosave_maskByteOr(
+                (uint16_t)(payload_offset >> 3u),
+                (uint8_t)(1u << (payload_offset & 7u)));
+        }
+    }
 }
 
 uint8_t autosave_generationIsNewer(uint32_t candidate, uint32_t reference)
@@ -723,17 +1347,17 @@ uint8_t autosave_generationIsNewer(uint32_t candidate, uint32_t reference)
 /*
  * Apply only the control-header fields owned by the target transaction.
  *
- * Inputs: one mutable chunk and next generation/probe/CRC/commit. Output:
- * intersecting header cells are replaced; mask and payload remain untouched
- * for the drain-aware wrapper below.
+ * Inputs: one mutable chunk plus next generation/probe. Output: intersecting
+ * header cells describe the prospective valid record with CRC bytes zero;
+ * mask and payload remain untouched for the drain-aware wrapper below. Why:
+ * filesystem.c calculates CRC from this final logical header, then clears the
+ * physical commit byte until data and CRC publication are durable.
  */
 static void autosave_transformHeaderChunk(uint8_t *chunk,
                                           uint32_t absolute_offset,
                                           uint16_t byte_count,
                                           uint32_t generation,
-                                          uint8_t probe_counter,
-                                          uint32_t crc32c,
-                                          uint8_t commit_value)
+                                          uint8_t probe_counter)
 {
     uint16_t i;
 
@@ -745,7 +1369,7 @@ static void autosave_transformHeaderChunk(uint8_t *chunk,
         uint32_t record_offset = absolute_offset + i;
 
         if (record_offset == AUTOSAVE_HEADER_COMMIT_OFFSET) {
-            chunk[i] = commit_value;
+            chunk[i] = AUTOSAVE_HEADER_COMMIT_VALID;
         } else if (record_offset >= AUTOSAVE_HEADER_GENERATION_OFFSET &&
                    record_offset < AUTOSAVE_HEADER_GENERATION_OFFSET + 4u) {
             chunk[i] = autosave_u32Byte(
@@ -753,9 +1377,7 @@ static void autosave_transformHeaderChunk(uint8_t *chunk,
                 (uint8_t)(record_offset - AUTOSAVE_HEADER_GENERATION_OFFSET));
         } else if (record_offset >= AUTOSAVE_HEADER_CRC32C_OFFSET &&
                    record_offset < AUTOSAVE_HEADER_CRC32C_OFFSET + 4u) {
-            chunk[i] = autosave_u32Byte(
-                crc32c,
-                (uint8_t)(record_offset - AUTOSAVE_HEADER_CRC32C_OFFSET));
+            chunk[i] = 0u;
         } else if (record_offset == AUTOSAVE_HEADER_PROBE_COUNTER_OFFSET) {
             chunk[i] = probe_counter;
         }
@@ -768,9 +1390,6 @@ void autosave_transformDrainChunk(
     uint16_t byte_count,
     uint32_t generation,
     uint8_t probe_counter,
-    uint32_t crc32c,
-    uint8_t commit_value,
-    const uint8_t updated_mask[AUTOSAVE_MASK_BYTES],
     const uint16_t *patch_offsets,
     const uint8_t *patch_values,
     uint16_t patch_count,
@@ -784,23 +1403,23 @@ void autosave_transformDrainChunk(
     /*
      * Produce the exact target bytes from a streamed winner interval.
      *
-     * Inputs: immutable cached drain result plus one source chunk. Output:
-     * updated header, complete intersecting mask bytes, and captured live
-     * payload patches. Why: both CRC and output passes call this same function,
-     * so later live edits cannot make the checksummed image differ from disk.
+     * Inputs: one source chunk, canonical mask, and immutable captured patch
+     * list. Output: prospective final header, complete intersecting canonical
+     * mask bytes, and captured live payload patches. Why: filesystem.c updates
+     * CRC from this exact one-pass output before clearing only the physical
+     * commit marker in the unpublished target.
      */
     if (!chunk || byte_count == 0u ||
         absolute_offset >= AUTOSAVE_RECORD_BYTES ||
         byte_count > AUTOSAVE_RECORD_BYTES - absolute_offset ||
-        !updated_mask || !patch_cursor ||
+        !patch_cursor ||
         (patch_count > 0u && (!patch_offsets || !patch_values))) {
         return;
     }
 
     chunk_end = absolute_offset + byte_count;
     autosave_transformHeaderChunk(
-        chunk, absolute_offset, byte_count, generation, probe_counter,
-        crc32c, commit_value);
+        chunk, absolute_offset, byte_count, generation, probe_counter);
 
     mask_begin = (absolute_offset > AUTOSAVE_MASK_OFFSET)
         ? absolute_offset : AUTOSAVE_MASK_OFFSET;
@@ -808,17 +1427,31 @@ void autosave_transformDrainChunk(
                 AUTOSAVE_MASK_OFFSET + AUTOSAVE_MASK_BYTES)
         ? chunk_end : AUTOSAVE_MASK_OFFSET + AUTOSAVE_MASK_BYTES;
     if (mask_begin < mask_end) {
-        memcpy(chunk + (mask_begin - absolute_offset),
-               updated_mask + (mask_begin - AUTOSAVE_MASK_OFFSET),
-               mask_end - mask_begin);
+        uint32_t record_offset;
+
+        /*
+         * Snapshot each volatile canonical byte into the stable write chunk.
+         *
+         * Inputs: this chunk's intersecting mask interval. Output: one ordinary
+         * staging byte per current volatile mask byte. Why: memcpy cannot
+         * express volatile source ownership, and a later producer must remain
+         * in SRAM for continuation without changing bytes already fed to CRC.
+         * Affiliates: atomic producers and filesystem's streamed CRC/write.
+         */
+        for (record_offset = mask_begin; record_offset < mask_end;
+             record_offset++) {
+            chunk[record_offset - absolute_offset] =
+                autosave_dirty_mask[
+                    record_offset - AUTOSAVE_MASK_OFFSET];
+        }
     }
 
     /*
      * Consume the sorted patch list monotonically for this complete pass.
      *
-     * Input cursor is reset by filesystem.c before CRC and copy streams.
-     * Output cursor advances past patches below/inside the current chunk while
-     * patches above it remain for later chunks.
+     * Input cursor is reset once by filesystem.c before the copy stream. Output
+     * cursor advances past patches below/inside the current chunk while patches
+     * above it remain for later chunks.
      */
     cursor = *patch_cursor;
     while (cursor < patch_count) {

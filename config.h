@@ -161,25 +161,40 @@
 /*
  * Short pause between bounded writes while a durable backlog still exists.
  *
- * Input is the outgoing SRAM mask after one target record has committed and
- * passed the normal filesystem flush gate. Output schedules the next complete
- * validation/drain transaction 250 ms later only when that mask still has a
- * dirty bit. Why: a loaded Bank/Scene can drain promptly without changing the
- * five-second debounce for a new or already-complete autosave. This remains
- * below the 16-bit scheduler's 32,768 ms comparison limit. Affiliates:
+ * Input is Autosave.c's persistent canonical dirty record after a successful
+ * target commit and normal filesystem flush. Output schedules the next complete
+ * validation/drain transaction 250 ms later only when that owner still has a
+ * dirty bit. Why: bounded backlog drains promptly without changing the
+ * five-second debounce for new work, a complete record, or an error. This
+ * remains below the 16-bit scheduler's 32,768 ms comparison limit. Affiliates:
  * filesystem_autosaveParameterDrain_tick() and its completion callback.
  */
 #define AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS 250u
 
 /*
+ * Trailing debounce for autonomous settings.cfg persistence.
+ *
+ * What: supplies the one-second delay restarted by every changed Global-menu
+ * value or successful Bank/Scene provenance update. Why: bursts must coalesce
+ * without making a synchronous SD write from Menu or Preset completion code.
+ * Inputs: filesystem_markSettingsDirty() and the wrapping 16-bit time_sysTick.
+ * Output/effects: the idle filesystem scheduler may start one complete keyed
+ * settings write after the last change. Affiliates: filesystem_tick() and the
+ * existing FS_INTERNAL_OP_SAVE_GLOBALS state machine. This interval must stay
+ * nonzero and below the wrapping timer's 32,768 ms half range.
+ */
+#define SETTINGS_AUTOWRITE_DEBOUNCE_MS 1000u
+
+/*
  * Bound live payload sampling inside one debounced autosave transaction.
  *
- * Input is the winner record's on-card mutation mask. Output is at most this
- * many stable payload offset/value patches captured before the CRC and copy
- * passes begin. Why: parameter reads and dedicated cache growth remain
- * predictable even when a whole Scene is marked dirty. The selected 1,536
- * entries occupy 4,608 bytes beside the 3,856-byte mask, for an 8,464-byte
- * dedicated cache below the temporary 9,000-byte ceiling; it can capture about
+ * Input is Autosave.c's canonical mask after OR-merging the valid winner's
+ * file-carried completeness bits. Output is at most this many stable payload
+ * offset/value patches captured before the one transformed copy begins. Why:
+ * parameter reads and patch-cache growth remain predictable even when a whole
+ * Scene is dirty. The selected 1,536 entries occupy 4,608 filesystem-owned
+ * bytes; beside Autosave.c's 3,856-byte canonical mask, combined storage stays
+ * 8,464 bytes below the temporary 9,000-byte ceiling. It can capture about
  * three current Scenes per generation. Affiliates: Autosave.c's live-byte
  * projection and filesystem.c's parameter-drain cache.
  */

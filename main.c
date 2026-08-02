@@ -315,7 +315,7 @@ static void boot_showActiveFilesystemDiagnostic(void)
     uint8_t phase;
 
     /*
-     * Flush each stage-11 filesystem transition before pumping it.
+     * Flush each stage-12 filesystem transition before pumping it.
      *
      * Inputs: read-only operation/phase coordinates from filesystem.c.
      * Output: `FOp` identifies repair=1, Bank=2, Scene=3, Kit=4, flush=5,
@@ -511,6 +511,38 @@ int main(void)
             timebase_holdPreAudioMs(BOOT_SD_POST_MOUNT_SETTLE_MS);
 
             /*
+             * Load keyed settings before any initial Bank choice or autosave
+             * file decision.
+             *
+             * Inputs: mounted card, initialized Menu parameter storage, and
+             * the completed post-mount settle. Outputs: Global runtime values,
+             * active_bank, sixteen Scene source words, and the AutoSave byte
+             * are available before their first consumers. Why: the former late
+             * stage loaded settings only after Bank/fallback selection, making
+             * active_bank and AutoSave OFF ineffective during boot. Preset's
+             * pre-audio completion applies Globals synchronously and a missing
+             * file retains defaults. Affiliates: filesystem settings parser,
+             * BankData restore slot, and the policy call below.
+             */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(2u);
+            preset_loadGlobals();
+            while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
+                   !filesystem_bootLoggingTimedOut())
+                filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
+            menu_pollPresetStatus();  /* apply globals + ack */
+            filesystem_setAutosaveEnabled(
+                parameter_values[PAR_AUTOSAVE_ENABLED]);
+
+            /*
              * (The root-level `.hcindex` boot marker generation has been moved
              * to run after the Instrument scan so it can write the cache).
              */
@@ -523,7 +555,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(2u);
+            boot_showFilesystemStage(3u);
             filesystem_requestScanKits(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
@@ -546,7 +578,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(3u);
+            boot_showFilesystemStage(4u);
             (void)filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT);
             if (filesystem_bootLoggingTimedOut())
                 goto boot_filesystem_timeout;
@@ -567,7 +599,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(4u);
+            boot_showFilesystemStage(5u);
             filesystem_requestScanScenes(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
@@ -588,7 +620,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(5u);
+            boot_showFilesystemStage(6u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_SCENE);
             if (filesystem_bootLoggingTimedOut())
@@ -610,7 +642,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(6u);
+            boot_showFilesystemStage(7u);
             filesystem_requestScanBanks(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
@@ -631,7 +663,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(7u);
+            boot_showFilesystemStage(8u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_BANK);
             if (filesystem_bootLoggingTimedOut())
@@ -652,7 +684,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(8u);
+            boot_showFilesystemStage(9u);
             (void)filesystem_createBootIndexBlocking();
             if (filesystem_bootLoggingTimedOut())
                 goto boot_filesystem_timeout;
@@ -699,7 +731,7 @@ int main(void)
                  * interaction steps, since the diagnostic may be used to
                  * assess in-situ file procedures.
                  */
-                boot_showFilesystemStage(9u);
+                boot_showFilesystemStage(10u);
                 filesystem_requestLoadBankIndex(NULL);
                 while (filesystem_status() == FS_STATUS_BUSY)
                     filesystem_tick();
@@ -732,7 +764,7 @@ int main(void)
                  * interaction steps, since the diagnostic may be used to
                  * assess in-situ file procedures.
                  */
-                boot_showFilesystemStage(10u);
+                boot_showFilesystemStage(11u);
                 if (filesystem_bankSlotExists(boot_bank_slot)) {
                     preset_loadBank(boot_bank_slot, 0xffffu);
                 } else {
@@ -770,7 +802,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(11u);
+            boot_showFilesystemStage(12u);
             for (uint8_t boot_load_pass = 0u;
                  boot_load_pass < 2u;
                  boot_load_pass++) {
@@ -816,23 +848,6 @@ int main(void)
              * the retained diagnostic stage numbering (stage 12 is skipped).
              */
 
-            /* Load globals via presetManager */
-            /*
-             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
-             * for the user to assess how operations are proceeding. It does
-             * not and should not ever add additional file interaction steps,
-             * since the diagnostic may be used to assess in-situ file
-             * procedures.
-             */
-            boot_showFilesystemStage(13u);
-            preset_loadGlobals();
-            while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
-                   !filesystem_bootLoggingTimedOut())
-                filesystem_tick();
-            if (filesystem_bootLoggingTimedOut())
-                goto boot_filesystem_timeout;
-            menu_pollPresetStatus();  /* apply globals + ack */
-
             /*
              * Establish the two working-Bank delta-register files only after
              * the complete Bank-or-fallback ladder and globals operation have
@@ -842,11 +857,24 @@ int main(void)
              * only missing baseline files; it neither reads an overlay nor
              * marks a record active before audio starts.
              */
-            if (bank_hasResidentBank()) {
+            if (bank_hasResidentBank() && filesystem_autosaveEnabled()) {
                 (void)filesystem_ensureAutosaveFilesBlocking();
                 if (filesystem_bootLoggingTimedOut())
                     goto boot_filesystem_timeout;
             }
+            /*
+             * Release both autonomous writer gates only after blocking boot SD
+             * ownership is complete.
+             *
+             * Inputs: successful settings/Bank/fallback and optional AutoSave
+             * ensure. Outputs: boot provenance dirty events receive a fresh
+             * one-second deadline, and runtime AutoSave setup may be queued if
+             * an enabled resident Bank still lacks authorization. No file is
+             * opened by this call. Why: background work must never interleave
+             * with the pre-audio ladder. Affiliates: filesystem_tick()'s
+             * settings and autosave schedulers.
+             */
+            filesystem_enableRuntimeSettingsWrites();
         } else {
             /* SD card not detected — menu_init already ran above */
         }

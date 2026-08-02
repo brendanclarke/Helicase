@@ -250,13 +250,30 @@ static void menu_finishGlobalApply(void)
 static void menu_startGlobalApply(uint8_t resetSave, uint8_t repaintAll)
 {
     if (audioCodec_renderCount == 0u) {
+        /*
+         * Apply boot settings without releasing the splash screen early.
+         *
+         * Inputs: a completed pre-audio settings.cfg load and its ordinary
+         * repaint request. Output: Global runtime values are applied
+         * synchronously, but no Menu LCD frame is emitted here. Why: settings
+         * load now intentionally precedes Bank/Scene/Kit loading; repainting
+         * the default VOICE page at this boundary exposes zero-initialized
+         * Instrument values before the selected Bank or fallback has populated
+         * the resident Scenes. The later pre-audio sound-apply completion is
+         * already ordered after `preset_sendDrumsetParameters()` and performs
+         * the first parameter repaint with loaded data. If no sound source can
+         * load, main.c's final menu_start() remains the fallback release.
+         * Runtime Settings Load is unaffected because audio rendering is then
+         * active and uses the deferred branch below. Affiliates:
+         * menu_pollPresetStatus(), menu_startSoundApply(), and main.c's boot
+         * Bank/fallback ladder.
+         */
         menu_sendAllGlobals();
         if (menu_loadSaveCommandActive)
             menu_finishLoadSaveCommand();
         else if (resetSave)
             menu_resetSaveParameters();
-        if (repaintAll)
-            menu_repaintAll();
+        (void)repaintAll;
         return;
     }
 
@@ -789,6 +806,9 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     [PAR_VOICE5_MORPH] = DTYPE_0B255,
     [PAR_VOICE6_MORPH] = DTYPE_0B255,
     [PAR_VOICE_DECIMATION_ALL] = DTYPE_0B127,
+    /* Global `ats` is a stored boolean; filesystem policy is applied only at
+     * the explicit user/boot lifecycle boundaries documented below. */
+    [PAR_AUTOSAVE_ENABLED] = DTYPE_ON_OFF,
     [PAR_ACTIVE_STEP] = DTYPE_0B127,
     [PAR_STEP_VOLUME] = DTYPE_0B127,
     [PAR_STEP_PROB] = DTYPE_0B127,
@@ -935,6 +955,8 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_VOICE4_MORPH,CAT_VOICE,LONG_VOICE4_MORPH},
     {SHORT_VOICE5_MORPH,CAT_VOICE,LONG_VOICE5_MORPH},
     {SHORT_VOICE6_MORPH,CAT_VOICE,LONG_VOICE6_MORPH},
+    /* Requested `ats` / Global / `AutoSave` metadata triplet. */
+    {SHORT_AUTOSAVE,CAT_GLOBAL,LONG_AUTOSAVE},
 };
 
 /* -----------------------------------------------------------------------
@@ -1851,10 +1873,30 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
     }
     if (cell->kind == MENU_CELL_STATIC) {
         uint8_t *paramValue = menu_getParameterEditPtr(cell->static_param);
+        uint8_t old_value;
         if (!paramValue)
             return 0u;
+        old_value = *paramValue;
         *paramValue = (uint8_t)value;
         menu_sendEditedParameter(cell->static_param, *paramValue);
+        /*
+         * Persist every real Global-page value change through one future-proof
+         * commit boundary.
+         *
+         * Inputs: resolved static parameter, old/final bytes, and active page.
+         * Outputs: changed Global settings restart the one-second settings.cfg
+         * debounce; AutoSave additionally applies its in-memory filesystem
+         * policy immediately. Why: encoder and endless-pot edits converge here,
+         * while menu_parseGlobalParam() is also used by bulk settings apply and
+         * must not manufacture writes. PERF/Pattern static cells are excluded
+         * by the page test. Affiliates: filesystem settings scheduler and
+         * filesystem_setAutosaveEnabled().
+         */
+        if (old_value != *paramValue && menu_activePage == MENU_MIDI_PAGE) {
+            filesystem_markSettingsDirty();
+            if (cell->static_param == PAR_AUTOSAVE_ENABLED)
+                filesystem_setAutosaveEnabled(*paramValue);
+        }
         return 1u;
     }
     return 0u;
@@ -8692,6 +8734,18 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         modNode_setWaveInterpEnabled((uint8_t)(value ? 1u : 0u));
         break;
 
+    case PAR_AUTOSAVE_ENABLED:
+        /*
+         * AutoSave has no DSP/global-apply side effect at this bulk boundary.
+         *
+         * Input: normalized settings/Menu byte. Output: none here. Why:
+         * menu_sendAllGlobals() also runs during boot/manual Settings Load and
+         * must never start hidden file activity while that operation owns the
+         * facade. User commits call filesystem_setAutosaveEnabled() above;
+         * main.c applies the loaded preference at its explicit boot boundary.
+         */
+        break;
+
     default:
         break;
     }
@@ -8807,6 +8861,16 @@ void menu_init(void)
     parameter_values[PAR_BPM]           = 120;
     parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_OFF;
     parameter_values[PAR_OSC_WAVE_INTERP] = 0;
+    /*
+     * Default AutoSave ON even when no settings file/card can be loaded.
+     *
+     * Input: cold Menu initialization after parameter_values[] is cleared.
+     * Output: one normalized logical policy byte. Why: settings.cfg overlays
+     * this value only on mounted-card boots, so Menu must own the universal
+     * default. Affiliates: filesystem_resetSettingsToDefaults() and main.c's
+     * post-settings autosave policy application.
+     */
+    parameter_values[PAR_AUTOSAVE_ENABLED] = 1u;
     /*
      * Scene global sample-rate/decimation must default to full rate.
      *

@@ -174,6 +174,16 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
  * PRESET_OP_BANK_LOAD with no child payload; callers then run
  * preset_loadFirstAvailableSceneOrKit() for the required fallback chain.
  */
+/*
+ * Successful-completion source persistence.
+ *
+ * Inputs remain the root slot and resident mask. Output/effects now also
+ * update SceneData's compact provenance and queue settings.cfg only after the
+ * filesystem reports durable DONE; failed/rejected operations preserve prior
+ * sources. Bank Load uses the filesystem's final child-intersection mask,
+ * while Bank Save retains this submitted mask through completion. Affiliates:
+ * SceneData source APIs and filesystem_markSettingsDirty().
+ */
 uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask);
 uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask);
 uint8_t preset_completedBankLoadedScene(void);
@@ -183,9 +193,12 @@ uint8_t preset_loadFirstAvailableSceneOrKit(void);
  *
  * Inputs: direct root Scene slot and the current eight-cell preset_currentName
  * edited by the Save page. Output: asynchronous Scene directory write and a
- * PRESET_OP_SCENE_SAVE completion. This is separate from preset_saveDrumset()
- * because Scene Save serializes Scene settings, embedded Kit, Pattern stub,
- * and Effect placeholder, not only the Kit payload.
+ * PRESET_OP_SCENE_SAVE completion. After durable DONE, the retained source
+ * Scene receives the encoded root-library source and settings.cfg is queued;
+ * failure preserves its former provenance. This is separate from
+ * preset_saveDrumset() because Scene Save serializes Scene settings, embedded
+ * Kit, Pattern stub, and Effect placeholder, not only the Kit payload.
+ * Affiliates: SceneData's compact source owner and the settings dirty debounce.
  */
 uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene);
 /*
@@ -332,6 +345,14 @@ void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
  * storageTypes, or InstrumentManager. The per-slot storage cell is the
  * descriptor array index for that instrument type.
  *
+ * Retained mutation contract: both public endpoint setters compare and commit
+ * through one generic Preset store boundary, then mark the matching normal or
+ * Morph Autosave descriptor cell only when its final byte changed. A future
+ * registry descriptor automatically follows this path when edited through
+ * these setters; direct endpoint assignments are restricted to validated
+ * whole-object/load paths that must use the appropriate region marker. Derived
+ * morph_interpolation[] never represents autosave data.
+ *
  * Accessors/clients:
  * - storageTypes/filesystem populate Scene slots directly during load.
  * - menu.c load completion calls preset_startDrumsetApply(), which uses these
@@ -441,6 +462,12 @@ uint8_t preset_tickInstrumentApply(void);
  * worker from retained Scene values without changing any Morph amounts, which
  * is required after endpoint loads/edits. preset_setVoiceDecimationAll()
  * retains and applies the Scene-wide decimation multiplier used by PERF "srt".
+ *
+ * Serialized-owner rule: overall Morph and decimation are committed through
+ * SceneData's change-aware setters before runtime mirrors/work are updated.
+ * Inputs and runtime outputs remain unchanged; equal retained values create no
+ * autosave mutation. Affiliates: SceneData's named Scene parameter boundary
+ * and Autosave's scalar marker.
  */
 void    preset_morph(uint8_t morph);
 void    preset_morphVoice(uint8_t slot, uint8_t morph);

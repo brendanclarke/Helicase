@@ -157,8 +157,24 @@ enum ParamEnums
 	PAR_VOICE6_MORPH,
 	PAR_VOICE_DECIMATION_ALL,
 
+	/*
+	 * Persistent Global AutoSave policy byte.
+	 *
+	 * What: appends one on/off id without renumbering any established flat
+	 * parameter. Why: Menu, settings.cfg, and filesystem lifecycle need one
+	 * shared logical value. Inputs: settings default/load and Global-page edits.
+	 * Output/effects: zero disables hidden autosave-record I/O; one enables it.
+	 * Affiliates: menu.c/menuPages.h and filesystem settings/autosave policy.
+	 * NUM_PARAMS remains fixed, so this consumes an existing parameter_values[]
+	 * byte rather than increasing BSS.
+	 */
+	PAR_AUTOSAVE_ENABLED,
+
 	NUM_PARAMS = 384,
 };
+
+_Static_assert(PAR_AUTOSAVE_ENABLED < NUM_PARAMS,
+	"AutoSave parameter must fit the fixed flat parameter allocation");
 
 #include "stm32f4xx.h"
 

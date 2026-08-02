@@ -139,7 +139,7 @@ typedef void (*fs_hcnames_diag_cb_t)(uint8_t phase, uint16_t row);
  * additional file interaction steps, since the diagnostic may be used to
  * assess in-situ file procedures.
  *
- * Stage 11 can contain a Bank-name repair followed by Bank, Scene, or Kit
+ * Stage 12 can contain a Bank-name repair followed by Bank, Scene, or Kit
  * payload loading and a final flush. Stable public codes keep the OLED output
  * interpretable without exposing the private fs_internal_op_t enum itself.
  * FS_BOOT_DIAG_OTHER means the active operation is outside that expected boot
@@ -224,20 +224,52 @@ void        filesystem_initAfterCardReady(void);
  * with mask/parameters/Effects/padding zero; `/.hcprms1` begins as the current
  * valid generation. An existing matching object is never opened for write.
  *
- * A successful return authorizes filesystem_tick()'s private parameter drain;
- * that runtime operation uses a separate cache and is not exposed here. Each
- * write captures at most the configured live-byte count. A successful commit
- * whose outgoing SRAM mask remains dirty schedules a short continuation;
- * initial work, errors, recovery, and complete masks retain the ordinary
- * five-second cadence. An already-empty file mask is copied into that SRAM
- * cache and completes read-only: no inactive peer is replaced, generation/probe
- * do not advance, and the short continuation is not selected. An error leaves
- * the writer disabled so a missing pair cannot trigger recovery during the boot
- * ladder. If a complete FAT free-cluster search reports genuine exhaustion,
- * partial output is closed and this function returns zero rather than trapping
- * boot in a zero-byte fwrite retry.
+ * A successful return enables retained-owner dirty production and authorizes
+ * filesystem_tick()'s private parameter drain. Mutation tracking is disabled
+ * before setup, for no-Bank fallback, and on setup failure so boot population
+ * cannot manufacture dirty work. Autosave.c owns one persistent 3,856-byte SRAM
+ * record; one delayed runtime recovery validates the winner and ORs its carried
+ * bits into that owner even when SRAM initially starts clean.
+ *
+ * Each write captures at most the configured live-byte count, makes one
+ * transformed copy while calculating CRC, syncs that invalid copy, then
+ * publishes/syncs CRC before writing the valid commit marker last. A successful
+ * operation whose canonical mask remains dirty schedules the short 250 ms
+ * continuation. Successful clean recovery/drain disarms the writer completely,
+ * so no later validation, generation, CRC, or file write occurs until a retained
+ * owner sets a bit; the first such bit receives the ordinary five-second
+ * debounce. Errors retry after that ordinary interval. An empty merged mask
+ * completes read-only: no inactive peer is replaced and generation/probe do not
+ * advance.
+ * If a complete FAT free-cluster search reports genuine exhaustion, partial
+ * output is closed and this function returns zero rather than trapping boot in
+ * a zero-byte fwrite retry.
  */
 uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
+/*
+ * Apply/query the persistent AutoSave policy without synchronous runtime I/O.
+ *
+ * Input: a settings/Menu byte normalized to OFF/ON. Output: OFF immediately
+ * disables mutation production and prevents every new ensure, validation,
+ * recovery, or drain start; ON retains the preference and queues asynchronous
+ * setup once runtime has a resident Bank. Neither transition deletes or opens
+ * a hidden file itself. An already-running autosave operation reaches its safe
+ * close/flush boundary; a canonical-mask discard is deferred until an active
+ * transform finishes. Why: aborting AsyncFATFS or changing CRC-covered mask
+ * bytes mid-copy risks corruption. Affiliates: Menu's `ats` commit, main.c's
+ * post-settings boot application, and filesystem_tick().
+ */
+void        filesystem_setAutosaveEnabled(uint8_t enabled);
+/*
+ * Read the normalized in-memory AutoSave policy without touching storage.
+ *
+ * Input: none. Output: zero when hidden-record reads/writes are disabled and
+ * one when they are authorized subject to the resident-Bank/runtime gates.
+ * Why: boot and callers that only need policy state must not accidentally
+ * trigger validation or file creation. Affiliates: main.c's optional blocking
+ * ensure guard and filesystem_setAutosaveEnabled().
+ */
+uint8_t     filesystem_autosaveEnabled(void);
 /*
  * Create/refresh one `.hcindex` file in every registry-defined Instrument
  * directory. This boot-only wrapper is valid before audio starts; normal
@@ -318,6 +350,23 @@ void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
 const char *filesystem_errorCode(void);
 void        filesystem_ack(void);
+
+/*
+ * Queue keyed settings persistence without taking filesystem ownership.
+ *
+ * filesystem_markSettingsDirty() records one changed Global value or durable
+ * Bank/Scene provenance event and restarts the configured trailing debounce.
+ * filesystem_enableRuntimeSettingsWrites() opens the autonomous settings and
+ * AutoSave scheduler gates only after main.c's complete pre-audio filesystem
+ * ladder; boot events remain queued until then. Inputs are current time and
+ * live settings/lifecycle state. Outputs are scheduler flags only; neither
+ * call opens, polls, or waits on a file. The idle filesystem_tick() later
+ * reuses FS_INTERNAL_OP_SAVE_GLOBALS and its final flush gate, or begins an
+ * eligible asynchronous AutoSave setup. Affiliates: Menu static Global
+ * commits, Preset completion, and main.c's mounted-card boot exit.
+ */
+void filesystem_markSettingsDirty(void);
+void filesystem_enableRuntimeSettingsWrites(void);
 
 bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 /*
@@ -804,6 +853,18 @@ uint16_t    filesystem_firstBankSlot(void);
  * post-DSP Bank-index reload.
  */
 uint8_t     filesystem_lastBankLoadLoadedScene(void);
+/*
+ * Report the exact resident Scene mask committed by the completed Bank Load.
+ *
+ * Inputs: the immediately completed Bank operation, after its requested mask
+ * was intersected with actual 00..15 child presence. Output: a 16-bit mask of
+ * successfully loaded resident Scenes, or zero for a valid empty Bank. Why:
+ * Preset provenance must not relabel requested-but-missing children. The value
+ * is operation scratch and must be consumed by the immediate completion
+ * callback before another request starts. Affiliates:
+ * filesystem_lastBankLoadLoadedScene() and on_bank_load_complete().
+ */
+uint16_t    filesystem_lastBankLoadSceneMask(void);
 /*
  * Query whether a root Instrument save target already exists.
  *
