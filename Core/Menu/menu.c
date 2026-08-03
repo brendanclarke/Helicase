@@ -47,6 +47,7 @@
 #include "sequencer.h"
 #include "PatternData.h"
 #include "SceneData.h"
+#include "Autosave.h"
 #include "BankData.h"
 #include "SceneModTargets.h"
 #include "config.h"
@@ -130,6 +131,17 @@ static void menu_libraryIndexLoadComplete(void);
 static void menu_requestKitEntryNames(void);
 static void menu_requestInstrumentIndexLoad(instrument_type_t type);
 static uint8_t menu_requestLoadCommandFinalIndexRestore(void);
+/*
+ * Reset implementation with explicit autosave-publication ownership.
+ *
+ * Input: publish_scene_load_selection is nonzero for ordinary Menu entry/type
+ * resets and zero only for terminal accepted-command cleanup. Output: both
+ * paths reset the visible Load/Save cursor, but the terminal path cannot
+ * replace a successfully completed Scene Load's immutable destination mask
+ * with the active-Scene UI default. Affiliate: menu_finishLoadSaveCommand().
+ */
+static void menu_resetSaveParametersInternal(
+    uint8_t publish_scene_load_selection);
 static uint8_t menu_staleWarningActive = 0;
 static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
@@ -200,9 +212,23 @@ static void menu_finishLoadSaveCommand(void)
      */
     if (!menu_loadSaveCommandActive)
         return;
+    /*
+     * Reset the visible command surface without republishing its default mask.
+     *
+     * Input: one terminal accepted Load/Save command. Output: the UI returns
+     * to its type row, while a successful root Scene completion retains the
+     * exact immutable destination mask reaffirmed by Preset. Why: the former
+     * generic reset called the Scene selection replacement setter and changed
+     * a five-Scene load, for example, into only the current active Scene before
+     * autosave could drain it. Clearing the command flag first lets the one
+     * internal reset repaint the normal cursor instead of producing an extra
+     * intermediate `...` frame; the explicit zero argument, not that UI flag,
+     * owns publication suppression. Affiliates: on_scene_load_complete(),
+     * menu_resetSaveParametersInternal(), and Autosave's two-byte register.
+     */
     menu_loadSaveCommandActive = 0u;
     menu_storageBusy = 0u;
-    menu_resetSaveParameters();
+    menu_resetSaveParametersInternal(0u);
 }
 
 static void menu_paintLoadSaveConfirmation(uint8_t overwrite,
@@ -4227,13 +4253,14 @@ void menu_refreshPerfSceneLeds(void)
     /*
      * Repaint PERF-mode Scene selection on the 16 SEQ LEDs.
      *
-     * Inputs: BankData's resident Scene-present mask, SceneData's active index,
-     * and PatternData step activity per Scene. Outputs: Scenes with any retained
-     * Pattern steps are lit steady, and the active resident Scene blinks even
-     * when its Pattern is empty. PERF selection is still gated by the resident
-     * present mask in menu_perfModeSceneButtonPressed(); the steady LED layer is
-     * deliberately Pattern activity because the row answers "which Scenes have
-     * something to play?" rather than "which child folders exist?".
+     * Inputs: BankData's resident Scene-present mask and authoritative active
+     * index exposed through SceneData's compatibility getter, plus PatternData
+     * step activity per Scene. Outputs: Scenes with retained Pattern steps are
+     * lit steady, and the active resident Scene blinks even when its Pattern is
+     * empty. PERF selection is still gated by the resident present mask in
+     * menu_perfModeSceneButtonPressed(); the steady LED layer deliberately
+     * answers "which Scenes have something to play?" rather than "which child
+     * folders exist?".
      */
     for (scene_index = 0u; scene_index < 16u; scene_index++) {
         uint16_t bit = (uint16_t)(1u << scene_index);
@@ -4251,18 +4278,19 @@ void menu_perfModeSceneButtonPressed(uint8_t scene_index)
     /*
      * Switch the active resident Scene from PERF mode.
      *
-     * Input: physical SEQ button index 0..15. Output: SceneData and BankData
-     * active Scene records, viewed Pattern, and Sequencer runtime Pattern are
-     * updated together. BankData drops scene_mask_voice_edit to the new active
-     * Scene only when the new active Scene was not already in the edit set, and
-     * Preset starts the bounded DSP apply for the newly audible Scene.
+     * Input: physical SEQ button index 0..15. Output: SceneData's compatibility
+     * selection reaches BankData's sole active owner, then viewed Pattern and
+     * Sequencer runtime Pattern are updated in the existing order. Why: one
+     * call preserves the active-in-VOICE-mask invariant without a duplicate
+     * owner write. BankData drops scene_mask_voice_edit only when the new active
+     * Scene was outside the edit set. Affiliates: scene_selectActive(), Pattern
+     * selectors, and Preset's bounded DSP apply.
      */
     if (scene_index >= SCENE_COUNT || scene_index >= 16u ||
         !bank_scenePresent(scene_index)) {
         return;
     }
     scene_selectActive(scene_index);
-    bank_selectActiveSceneForEditMask(scene_index);
     /*
      * PERF Scene selection maps one-to-one onto PatternData's Scene slot.
      *
@@ -4401,7 +4429,30 @@ static uint16_t menu_loadSaveSelectableSceneMask(void)
     return 0u;
 }
 
-static void menu_resetLoadSaveSceneSelection(void)
+static void menu_publishSceneLoadSelection(void)
+{
+    /*
+     * Publish the root Scene Load destination before filesystem ownership.
+     *
+     * Inputs: Menu's current page/type/nested-mode coordinates and the exact
+     * LED-backed menu_kitLoadSceneMask. Output: only top-level Load:[Scene]
+     * mirrors that complete 16-bit selection into Autosave's approved two-byte
+     * register; every Save, Bank, Kit, Global, and nested Instrument context is
+     * a no-op. Why: hardware testing showed the later Scene commit notification
+     * did not survive as pending work, so selection now becomes observable when
+     * the user enters Scene Load and on every accepted SEQ toggle, before the
+     * asynchronous load is requested. This call performs no SD operation;
+     * Autosave remains paused throughout Load/Save UI ownership. Affiliates:
+     * menu_resetLoadSaveSceneSelection(), menu_loadSceneButtonPressed(), and
+     * autosave_setSceneLoadSelectionMask().
+     */
+    if (menu_activePage == LOAD_PAGE && !menu_instrumentLoadActive &&
+        menu_saveOptions.what == SAVE_TYPE_SCENE) {
+        autosave_setSceneLoadSelectionMask(menu_kitLoadSceneMask);
+    }
+}
+
+static void menu_resetLoadSaveSceneSelection(uint8_t publish_autosave)
 {
     uint16_t active_bit = (scene_getActiveIndex() < 16u)
         ? (uint16_t)(1u << scene_getActiveIndex())
@@ -4416,7 +4467,12 @@ static void menu_resetLoadSaveSceneSelection(void)
      * child mask for operations that toggle Scenes; menu_loadSaveSourceScene
      * becomes the single source for save operations that write one object. Bank
      * Save defaults to every resident non-empty Scene, while other musical
-     * operations default to the active Scene.
+     * operations default to the active Scene. When this reset enters top-level
+     * Scene Load, publish_autosave normally initializes Autosave's two-byte
+     * pending register from that default LED selection before any file request
+     * exists. Accepted-command cleanup passes zero: it still resets the LEDs,
+     * but preserves the exact successfully loaded destination mask already
+     * reaffirmed by Preset instead of replacing it with the active Scene.
      */
     menu_loadSaveSourceScene = scene_getActiveIndex();
     if (menu_activePage == SAVE_PAGE && menu_saveOptions.what == SAVE_TYPE_BANK)
@@ -4426,6 +4482,8 @@ static void menu_resetLoadSaveSceneSelection(void)
         menu_kitLoadSceneMask = 0u;
     else
         menu_kitLoadSceneMask = active_bit;
+    if (publish_autosave)
+        menu_publishSceneLoadSelection();
 }
 
 static void menu_refreshLoadSceneLeds(void)
@@ -4590,6 +4648,17 @@ uint8_t menu_loadSceneButtonPressed(uint8_t scene_index)
         if (next != 0u)
             menu_kitLoadSceneMask = next;
     }
+    /*
+     * Keep root Scene Load's early pending register identical to its LEDs.
+     *
+     * Inputs: the accepted toggle result above. Output: top-level Scene Load
+     * atomically replaces the two-byte register before repaint; all other
+     * selector modes are filtered by the helper. Why: the loaded destination
+     * set must be established before the later filesystem request rather than
+     * reconstructed at a resident copy boundary. Affiliates:
+     * menu_publishSceneLoadSelection() and Autosave's drain-side expansion.
+     */
+    menu_publishSceneLoadSelection();
     menu_refreshLoadSceneLeds();
     led_flashGroup(LED_FLASH_GROUP_SEQ, bit);
     if (!menu_storageBusy)
@@ -4918,7 +4987,7 @@ static void menu_loadSaveEnterTop(uint8_t page, uint8_t what)
     editModeActive = 1u;
     if (what == SAVE_TYPE_BANK)
         menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
-    menu_resetLoadSaveSceneSelection();
+    menu_resetLoadSaveSceneSelection(1u);
     /*
      * Pot-1 can leave the combined Kit/Instrument family without leaving the
      * overall Load/Save page. Update the target UI state first, then perform
@@ -6825,7 +6894,7 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     menu_saveOptions.what != SAVE_TYPE_KIT &&
                     menu_saveOptions.what != SAVE_TYPE_KIT_MORPH &&
                     menu_endResidentNameScratchSession()) {
-                    menu_resetLoadSaveSceneSelection();
+                    menu_resetLoadSaveSceneSelection(1u);
                     menu_refreshLoadSceneLeds();
                     break;
                 }
@@ -6834,7 +6903,7 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             }
             if (menu_saveOptions.what == SAVE_TYPE_BANK)
                 menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
-            menu_resetLoadSaveSceneSelection();
+            menu_resetLoadSaveSceneSelection(1u);
             menu_requestCurrentLoadSaveSelection(0);
             menu_refreshLoadSceneLeds();
             break;
@@ -7557,11 +7626,31 @@ void menu_pollPresetStatus(void)
 
     case PRESET_OP_BANK_LOAD:
     {
+        uint8_t resolved_active;
+
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
             !menu_isLoadSaveSelectionCurrent()) {
             retrySelectionAfterAck = 1;
             retrySelectionLoadKit = 0;
             break;
+        }
+
+        resolved_active = bank_activeSceneSlot();
+        if (!seq_isRunning()) {
+            /*
+             * Align stopped Pattern view/runtime state to the resolved owner.
+             *
+             * Inputs: successful Bank Load, stopped transport, and BankData's
+             * final authoritative active Scene. Outputs: Menu's shown Pattern
+             * and Sequencer's selected Pattern follow that byte before the
+             * existing sound apply/fallback decision. Why: these selectors are
+             * separate view/runtime state, not another active identity. While
+             * playing neither selector is called, so Bank Load cannot switch
+             * playback. Affiliates: filesystem's final active resolution and
+             * the existing Bank Load sound-apply lifecycle.
+             */
+            menu_setShownPattern(resolved_active);
+            seq_selectActivePattern(resolved_active);
         }
 
         /*
@@ -8154,6 +8243,19 @@ void menu_switchPage(uint8_t pageNr)
         /* Load/Save page toggles are type transitions, so reload on entry. */
         filesystem_clearNameCache();
         menu_resetSaveParameters();
+        /*
+         * Initialize early Scene Load mutation ownership on physical entry.
+         *
+         * Inputs: the freshly selected LOAD_PAGE, restored load type, and the
+         * active-Scene default mask installed above. Output: when the restored
+         * type is Scene, Autosave's two-byte register immediately mirrors the
+         * visible destination LED before selection browsing or Load acceptance;
+         * every other type is a no-op. Why: menu_resetSaveParameters() decides
+         * the final restored type after the direct mask assignment, so the
+         * synchronization must follow it. Affiliates: type-change resets and
+         * menu_loadSceneButtonPressed().
+         */
+        menu_publishSceneLoadSelection();
         menu_requestCurrentLoadSaveSelection(0);
         menu_refreshLoadSceneLeds();
         break;
@@ -8216,7 +8318,8 @@ void menu_switchPage(uint8_t pageNr)
 /* -----------------------------------------------------------------------
 ** menu_resetSaveParameters
 ** ----------------------------------------------------------------------- */
-void menu_resetSaveParameters(void)
+static void menu_resetSaveParametersInternal(
+    uint8_t publish_scene_load_selection)
 {
     /*
      * Reset Load/Save cursor state without reopening stale menu entries.
@@ -8232,6 +8335,12 @@ void menu_resetSaveParameters(void)
      * filesystem needs the active cache to update and rewrite `.hcindex`.
      * Callers that actually leave or change the Load/Save type dispose it
      * explicitly before invoking this cursor reset.
+     *
+     * publish_scene_load_selection is nonzero for those ordinary callers.
+     * Terminal accepted-command cleanup passes zero so resetting the visible
+     * LED selection cannot overwrite a successful Scene Load's retained
+     * autosave notification. This input affects only the two-byte SRAM
+     * publication; it never starts filesystem work.
      */
     if (!menu_loadSaveTypeIsRestored(menu_saveOptions.what))
         menu_saveOptions.what = SAVE_TYPE_KIT;
@@ -8243,8 +8352,23 @@ void menu_resetSaveParameters(void)
     menu_saveOptions.state = SAVE_STATE_EDIT_TYPE;
     if (menu_saveOptions.what == SAVE_TYPE_BANK)
         menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
-    menu_resetLoadSaveSceneSelection();
+    menu_resetLoadSaveSceneSelection(publish_scene_load_selection);
     menu_repaintAll();
+}
+
+void menu_resetSaveParameters(void)
+{
+    /*
+     * Preserve the public ordinary-reset behavior.
+     *
+     * Input: existing Menu callers entering, changing, or abandoning a
+     * Load/Save selection. Output: cursor and Scene LEDs reset, and top-level
+     * Scene Load continues publishing that default selection to Autosave. Only
+     * menu_finishLoadSaveCommand() uses the private no-publication form after a
+     * completed command. Affiliates: menu_resetSaveParametersInternal() and
+     * the declaration in menu.h.
+     */
+    menu_resetSaveParametersInternal(1u);
 }
 
 /* -----------------------------------------------------------------------

@@ -10,9 +10,12 @@
  * Bank is the workspace/container above Scene. The Bank name, restore slot,
  * resident child mask, active child Scene, and VOICE-mode edit mask need one
  * SRAM owner instead of being stored in sceneset.scg or the root Bank browser
- * cache. Inputs are directory-derived eight-cell display names, settings.cfg
- * restore slot values, and bankset.bcg control fields. Outputs seed Save:[Bank],
- * boot restore, Scene switching, and multi-Scene edit fan-out.
+ * cache. `bank_active_scene_slot` is the sole active-Scene SRAM owner;
+ * SceneData's accessor is a compatibility view, while bankset.bcg and Autosave
+ * are persistence consumers. Inputs are directory-derived eight-cell display
+ * names, settings.cfg restore slot values, and bankset.bcg control fields.
+ * Outputs seed Save:[Bank], boot restore, Scene switching, and multi-Scene edit
+ * fan-out.
  *
  * Serialized-owner rule: after boot Autosave tracking is enabled, each setter
  * below compares its normalized final value with retained storage, stores
@@ -41,12 +44,20 @@
 void bank_init(void);
 void bank_setDisplayName(const char name[BANK_DISPLAY_NAME_LEN]);
 const char *bank_displayName(void);
+
 void bank_setRestoreBankSlot(uint16_t slot);
 uint16_t bank_restoreBankSlot(void);
 void bank_setScenePresentMask(uint16_t mask);
 uint16_t bank_scenePresentMask(void);
 uint8_t bank_scenePresent(uint8_t scene_index);
 void bank_setActiveSceneSlot(uint8_t slot);
+/*
+ * Read the sole authoritative active-Scene SRAM byte.
+ *
+ * Inputs: none. Output: normalized resident Scene index 0..15. SceneData's
+ * compatibility getter, Menu, filesystem Bank Load, and Autosave all consume
+ * this same owner so no parallel active selector can diverge.
+ */
 uint8_t bank_activeSceneSlot(void);
 void bank_selectActiveSceneForEditMask(uint8_t slot);
 void bank_setSceneMaskVoiceEdit(uint16_t mask);

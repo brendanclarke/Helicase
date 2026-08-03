@@ -118,13 +118,15 @@ static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
     /*
      * Promote loaded target Scenes into the resident Bank present mask.
      *
-     * Inputs: pm_kit_request_scene_mask was captured when the load was accepted,
-     * and filesystem_status() still reflects the just-completed async request.
-     * Output: successful Kit, Scene, and Instrument loads mark their destination
-     * Scenes as present so PERF switching and MODE VOICE fan-out can address
-     * them immediately. Failed loads do not change BankData, preserving the last
-     * known resident child map. KitMrp/InstrumentMrp intentionally do not call
-     * this helper because morph-only loads do not assign an empty Scene.
+     * Inputs: pm_kit_request_scene_mask was captured when the Instrument load
+     * was accepted, and filesystem_status() reflects its completed staging
+     * transaction. Output: successful Instrument destinations become present
+     * before Menu commits the staged image into resident SRAM. Why: normal
+     * Scene and Kit loads now promote presence at their earlier direct SRAM
+     * commit sites, while Instrument Load has no resident assignment until the
+     * later Preset apply boundary. Morph-only loads intentionally do not call
+     * this helper because they do not assign an empty Scene. Affiliates:
+     * on_instrument_load_complete() and preset_startInstrumentApplyImage().
      */
     if (filesystem_status() == FS_STATUS_DONE) {
         bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
@@ -260,7 +262,16 @@ static void preset_completeFilesystemOp(preset_op_type_t completed_op)
 
 static void on_kit_load_complete(void)
 {
-    preset_markRequestedScenesPresentOnSuccessfulLoad();
+	/*
+	 * Report the filesystem result after its resident Kit publication.
+	 *
+	 * Inputs: terminal Kit-directory status. Output: Preset/Menu completion
+	 * identity only. The full-scope autosave event is already emitted exactly
+	 * once per destination by preset_storeKitImage() at the earlier resident
+	 * commit boundary; this callback must not duplicate it or depend on later UI
+	 * cleanup. Affiliates: filesystem_loadKitDirectory_tick(),
+	 * preset_storeKitImage(), and autosave_markKitDirty().
+	 */
 	preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
 }
 
@@ -416,15 +427,25 @@ static void on_scene_load_complete(void)
      * Inputs: filesystem terminal status, accepted source slot, and retained
      * destination mask. Outputs: successful destinations point at /Scene/NNN
      * and one settings debounce is restarted; errors change neither source nor
-     * settings state. Affiliates: resident-presence promotion and the common
-     * Preset completion below.
+     * settings state. Resident presence and parameter mutation are deliberately
+     * not owned here: Menu mirrors the root Scene destination LEDs into
+     * Autosave's two-byte register before this filesystem request, and
+     * filesystem copies the validated aggregate Scene at its resident commit
+     * boundary. On success this callback reaffirms the exact immutable request
+     * mask after that copy. Why: Menu's terminal cursor reset must not be the
+     * last writer to the replacement-style register, and an autosave operation
+     * already active when Scene Load was entered may have consumed the earlier
+     * provisional LED selection. The drain later expands this successful
+     * request into complete Scene masks. Affiliates: Menu's Scene Load selector,
+     * filesystem_commitSceneStage(), Autosave's selection notification, and
+     * the common Preset completion below.
      */
     if (filesystem_status() == FS_STATUS_DONE) {
+        autosave_setSceneLoadSelectionMask(pm_kit_request_scene_mask);
         preset_setSceneSourcesFromMask(
             pm_kit_request_scene_mask, pm_request_slot, 0u);
         filesystem_markSettingsDirty();
     }
-    preset_markRequestedScenesPresentOnSuccessfulLoad();
     preset_completeFilesystemOp(PRESET_OP_SCENE_LOAD);
 }
 
@@ -496,6 +517,21 @@ static void on_bank_save_complete(void)
      * preset_saveBank() and filesystem_requestSaveBank().
      */
     if (filesystem_status() == FS_STATUS_DONE) {
+        /*
+         * Adopt only the ordinary Bank identity made durable by this Save.
+         *
+         * Inputs: terminal DONE, immutable requested display name, and root
+         * destination slot. Outputs: change-aware BankData setters store/mark
+         * only actual name and slot differences, saved children gain Bank
+         * provenance, and settings is queued after the final slot is visible.
+         * Why: Save read resident Scene parameters and did not replace active,
+         * presence, VOICE, or Scene payload, so it must publish no whole-Scene
+         * region. Existing canonical bits are neither cleared nor recreated.
+         * Affiliates: filesystem phase 45, BankData scalar setters, settings
+         * writer, and preset_setSceneSourcesFromMask().
+         */
+        bank_setDisplayName(preset_currentName);
+        bank_setRestoreBankSlot(pm_request_slot);
         preset_setSceneSourcesFromMask(
             pm_kit_request_scene_mask, pm_request_slot, 1u);
         filesystem_markSettingsDirty();
@@ -766,19 +802,23 @@ uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
  * Commit one validated Instrument endpoint cell and mark its exact wire cell.
  *
  * Inputs: destination Scene/slot, active-type descriptor index, endpoint
- * selection, and value after the public caller validates descriptor policy.
- * Output: only a changed retained byte is stored, then the matching normal or
- * Morph Autosave marker is called; equal values do nothing. Why: generic
- * descriptor setters cover every current/future instrument type without per-
- * type dirty switches. Affiliates: InstrumentManager registry validation,
- * preset_setInstrumentParameter(), supplemental normalization, and Autosave's
- * descriptor-indexed live getter. Derived interpolation is never marked.
+ * selection, value after validation, and a force flag used only when a type
+ * change makes that descriptor newly meaningful. Output: a changed retained
+ * byte is stored before its exact normal/Morph marker; equal ordinary edits do
+ * nothing, while a forced image transfer stores/marks even an equal raw byte.
+ * Why: generic descriptor setters cover every current/future type without per-
+ * type dirty switches, but an equal stale array cell was not necessarily
+ * represented in the old-type autosave payload. Affiliates: InstrumentManager
+ * registry validation, preset_storeInstrumentImage(), ordinary parameter
+ * setters, supplemental normalization, and Autosave's descriptor getter.
+ * Derived interpolation is never marked.
  */
 static void preset_storeInstrumentEndpoint(uint8_t scene_index,
                                            uint8_t slot,
                                            uint8_t descriptor_index,
                                            instrument_image_select_t image,
-                                           instrument_param_value_t value)
+                                           instrument_param_value_t value,
+                                           uint8_t force_dirty)
 {
     kit_instrument_slot_t *instrument =
         scene_instrumentSlot(scene_index, slot);
@@ -793,7 +833,7 @@ static void preset_storeInstrumentEndpoint(uint8_t scene_index,
         storage = &instrument->parameter_images
             .instrument_parameters[descriptor_index];
     }
-    if (*storage == value)
+    if (*storage == value && !force_dirty)
         return;
     *storage = value;
     if (image == INSTRUMENT_IMAGE_MORPH) {
@@ -835,7 +875,7 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
      * owns the temporary legacy DSP mirror.
      */
     preset_storeInstrumentEndpoint(
-        scene_index, slot, descriptor_index, image, value);
+        scene_index, slot, descriptor_index, image, value, 0u);
 
     if (scene_index == scene_getActiveIndex()) {
         scene_t *scene = scene_get(scene_index);
@@ -894,7 +934,7 @@ uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
      * dirty work.
      */
     preset_storeInstrumentEndpoint(
-        scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN, value);
+        scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN, value, 0u);
     if (scene_index == scene_getActiveIndex())
         return instrumentManager_writeRuntime(slot, descriptor, value);
     return 1u;
@@ -1060,7 +1100,7 @@ static void preset_storeSupplementalCell(uint8_t scene_index,
     if (!instrument || index >= INSTRUMENT_PARAM_COUNT)
         return;
     preset_storeInstrumentEndpoint(
-        scene_index, slot, index, INSTRUMENT_IMAGE_MAIN, value);
+        scene_index, slot, index, INSTRUMENT_IMAGE_MAIN, value, 0u);
     instrument->parameter_images.morph_instrument_parameters[index] = value;
     instrument->parameter_images.morph_interpolation[index] = value;
 }
@@ -1409,10 +1449,128 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
         preset_startSceneModulationRebind(drumset_apply_scene);
 }
 
+uint8_t preset_storeInstrumentImage(uint8_t scene_index,
+                                    uint8_t slot,
+                                    const kit_instrument_slot_t *source)
+{
+    kit_instrument_slot_t *destination =
+        scene_instrumentSlot(scene_index, slot);
+    const instrument_registry_entry_t *entry;
+    uint8_t descriptor_index;
+    uint8_t type_changed;
+
+    /*
+     * Install one complete Instrument image at its parameter-owner boundary.
+     *
+     * Inputs: validated staged slot plus resident Scene/slot coordinates.
+     * Outputs: type is stored and marks its three token cells when changed;
+     * each live normal and Morphable descriptor is then stored through the
+     * same exact-cell helper used by individual edits. If type changed, every
+     * newly meaningful descriptor is force-marked even when its raw old-array
+     * byte happens to compare equal, because that cell was not necessarily
+     * represented under the former type. Nonserialized Morph mirrors,
+     * interpolation, and inactive array tails are copied without mutation
+     * bits. Why: individual Instrument Load, Kit Load, and later endpoint
+     * copy/paste still require exact descriptor ownership. A whole Scene/Bank-
+     * child load deliberately uses its separate aggregate Scene notification
+     * around direct copy—root Scene selection before request, Bank child after
+     * commit—and does not call this transfer. Affiliates:
+     * preset_storeInstrumentEndpoint(), InstrumentManager's registry,
+     * autosave_markInstrumentTypeDirty(), and preset_storeKitImage().
+     */
+    if (!destination || !source || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    entry = instrumentManager_registryEntry(source->type);
+    if (!entry || entry->descriptor_count > INSTRUMENT_PARAM_COUNT)
+        return 0u;
+
+    type_changed = (uint8_t)(destination->type != source->type);
+    if (type_changed) {
+        destination->type = source->type;
+        autosave_markInstrumentTypeDirty(scene_index, slot);
+    }
+    for (descriptor_index = 0u;
+         descriptor_index < entry->descriptor_count;
+         descriptor_index++) {
+        const ParamDescriptor *descriptor =
+            &entry->descriptors[descriptor_index];
+        preset_storeInstrumentEndpoint(
+            scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN,
+            source->parameter_images.instrument_parameters[descriptor_index],
+            type_changed);
+        if ((descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
+            preset_storeInstrumentEndpoint(
+                scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MORPH,
+                source->parameter_images
+                    .morph_instrument_parameters[descriptor_index],
+                type_changed);
+        } else {
+            destination->parameter_images
+                .morph_instrument_parameters[descriptor_index] =
+                source->parameter_images
+                    .morph_instrument_parameters[descriptor_index];
+        }
+        destination->parameter_images.morph_interpolation[descriptor_index] =
+            source->parameter_images.morph_interpolation[descriptor_index];
+    }
+    for (; descriptor_index < INSTRUMENT_PARAM_COUNT; descriptor_index++) {
+        destination->parameter_images.instrument_parameters[descriptor_index] =
+            source->parameter_images.instrument_parameters[descriptor_index];
+        destination->parameter_images
+            .morph_instrument_parameters[descriptor_index] =
+            source->parameter_images
+                .morph_instrument_parameters[descriptor_index];
+        destination->parameter_images.morph_interpolation[descriptor_index] =
+            source->parameter_images.morph_interpolation[descriptor_index];
+    }
+    return 1u;
+}
+
+uint8_t preset_storeKitImage(uint8_t scene_index, const kit_t *source)
+{
+    uint8_t slot;
+
+    /*
+     * Install one complete Kit image through its retained scalar owners and
+     * publish one complete-Kit load scope.
+     *
+     * Inputs: a validated staged Kit and destination Scene. Output: current
+     * Kit settings pass through SceneData's two parameter setters and all six
+     * Instrument images pass through the generic type/descriptor transfer
+     * above. Why: root Kit Load retains exact parameter ownership for changed
+     * cells, then adds one aggregate marker so equal incoming cells are also
+     * represented. Whole Scene/Bank-child replacement no longer
+     * calls this helper; it copies the aggregate and uses Autosave's two-byte
+     * loaded-Scene register before root Scene request or after Bank-child
+     * commit. Future Kit scalars and Instrument descriptors join their
+     * respective owner transfer here. After all six transfers succeed, one
+     * complete-Kit marker re-dirties the same canonical mask so equal incoming
+     * values are still represented as part of this load object. The marker is
+     * deliberately outside the slot loop: one Kit Load produces one aggregate
+     * event per destination, not six Instrument-load events. Affiliates:
+     * scene_storeKitSettingsImage(), preset_storeInstrumentImage(), and the
+     * root Kit final staged commit, and autosave_markKitDirty().
+     */
+    if (!scene_get(scene_index) || !source)
+        return 0u;
+    scene_storeKitSettingsImage(scene_index, &source->settings);
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        if (!preset_storeInstrumentImage(
+                scene_index, slot, &source->instruments[slot])) {
+            return 0u;
+        }
+    }
+    autosave_markKitDirty(scene_index);
+    return 1u;
+}
+
 static uint8_t preset_copyInstrumentNormalToMorphIfSameType(
-    kit_instrument_slot_t *destination,
+    uint8_t scene_index,
+    uint8_t slot,
     const kit_instrument_slot_t *source)
 {
+    kit_instrument_slot_t *destination =
+        scene_instrumentSlot(scene_index, slot);
     const instrument_registry_entry_t *entry;
     uint8_t index;
     uint8_t copied = 0u;
@@ -1420,11 +1578,13 @@ static uint8_t preset_copyInstrumentNormalToMorphIfSameType(
     /*
      * Copy one staged source normal endpoint into a resident morph endpoint.
      *
-     * Inputs: destination resident slot and staged source slot. Output:
-     * morphable descriptor values are copied by descriptor index only when the
-     * instrument types match. A mismatch is a complete no-change for that slot,
-     * which keeps KitMrp/InstrumentMrp per-instrument and avoids inventing
-     * cross-type parameter mapping in the loader.
+     * Inputs: destination coordinates and staged source slot. Output: each
+     * morphable descriptor value is copied by index through the same exact-cell
+     * owner used by individual Morph edits, only when the types match. A
+     * mismatch is a complete no-change. Why: KitMrp/InstrumentMrp remain
+     * endpoint transformations, but they must not assign arrays and compensate
+     * with a whole-Morph Load marker. Affiliates: the two Morph committers and
+     * preset_storeInstrumentEndpoint().
      */
     if (!destination || !source || destination->type != source->type)
         return 0u;
@@ -1435,8 +1595,9 @@ static uint8_t preset_copyInstrumentNormalToMorphIfSameType(
         const ParamDescriptor *descriptor = &entry->descriptors[index];
         if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
             continue;
-        destination->parameter_images.morph_instrument_parameters[index] =
-            source->parameter_images.instrument_parameters[index];
+        preset_storeInstrumentEndpoint(
+            scene_index, slot, index, INSTRUMENT_IMAGE_MORPH,
+            source->parameter_images.instrument_parameters[index], 0u);
         copied = 1u;
     }
     return copied;
@@ -1464,7 +1625,10 @@ static uint8_t preset_commitStagedInstrumentNormalToMorph(
         staged->type != (instrument_type_t)pm_instrument_request_type) {
         return 0u;
     }
-    return preset_copyInstrumentNormalToMorphIfSameType(destination, staged);
+    if (!preset_copyInstrumentNormalToMorphIfSameType(
+            scene_index, slot, staged))
+        return 0u;
+    return 1u;
 }
 
 static uint8_t preset_commitStagedKitNormalToMorph(void)
@@ -1499,17 +1663,38 @@ static uint8_t preset_commitStagedKitNormalToMorph(void)
             continue;
         for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
             if (preset_copyInstrumentNormalToMorphIfSameType(
-                    &scene->kit.instruments[slot],
-                    &source->instruments[slot]) &&
-                scene_index == scene_getActiveIndex()) {
-                presetMorph_requestVoice(scene_index, slot);
-                active_queued = 1u;
+                    scene_index, slot, &source->instruments[slot])) {
+                /*
+                 * Queue active runtime rebuild after a same-type Morph copy.
+                 *
+                 * Inputs: a compatible destination whose endpoint cells have
+                 * already passed through their individual owners. Output: only
+                 * the active Scene requests interpolation; inactive retained
+                 * cells need no DSP work. Why: persistence is now complete at
+                 * the parameter boundary and must not depend on this active-
+                 * only branch. Affiliate: the InstrumentMrp path above.
+                 */
+                if (scene_index == scene_getActiveIndex()) {
+                    presetMorph_requestVoice(scene_index, slot);
+                    active_queued = 1u;
+                }
             }
         }
         if (INSTRUMENT_SLOT_COUNT > 5u &&
             scene->kit.instruments[5].type == source->instruments[5].type) {
-            scene->kit.settings.slot6_track7_morph_amp_envelope_decay =
-                source->settings.slot6_track7_amp_envelope_decay;
+            /*
+             * Store KitMrp's generated slot-6/track-7 Morph decay byte.
+             *
+             * Inputs: compatible slot-6 type and staged normal decay. Output:
+             * the ordinary Kit scalar setter commits and marks an actual
+             * changed value for every selected Scene. Why: this generated
+             * setting lives outside Instrument descriptors but still has a
+             * parameter owner; Morph Load needs no direct assignment/marker
+             * pair. Affiliates: SceneData's Morph decay owner and live getter.
+             */
+            scene_setSlot6Track7MorphAmpEnvelopeDecay(
+                scene_index,
+                source->settings.slot6_track7_amp_envelope_decay);
             if (scene_index == scene_getActiveIndex()) {
                 presetMorph_requestVoice(scene_index, 5u);
                 active_queued = 1u;
@@ -1596,26 +1781,28 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
     for (target_scene_index = 0u;
          target_scene_index < SCENE_COUNT && target_scene_index < 16u;
          target_scene_index++) {
-        scene_t *scene;
-
         if ((destination_mask & (uint16_t)(1u << target_scene_index)) == 0u)
             continue;
-        scene = scene_get(target_scene_index);
-        if (!scene)
+        if (!scene_get(target_scene_index))
             continue;
-        scene->kit.instruments[slot] = *staged;
         /*
-         * Do not attach a filename or display-name copy to the resident slot.
+         * Commit one complete Instrument through its retained owners.
          *
-         * Why: filesystem has already placed the successful eight-cell name in
-         * the operation identity block for its targeted HCNAMES update. Inputs:
-         * validated staged descriptor and destination coordinates. Output:
-         * audio data only; name authority remains `/.hcnames`.
-         * Affiliates: filesystem_loadedInstrumentSlot(), HCNAMES Instrument
-         * writer, and Menu's Instrument session exit.
+         * Inputs: validated staged slot and one selected destination. Outputs:
+         * changed type/normal/Morph cells use the generic parameter boundary,
+         * then one complete-Instrument marker publishes the accepted Load
+         * object before any active-Scene-only DSP branch. Why: inactive
+         * destinations require persistence too, and equal incoming descriptor
+         * values still belong to the loaded Instrument transaction. The
+         * filesystem-owned display name remains outside this SRAM image.
+         * Affiliates: filesystem staging, reversible `kit` restore,
+         * preset_storeInstrumentImage(), and autosave_markWholeInstrumentDirty().
          */
-        if (target_scene_index == scene_getActiveIndex())
-            active_scene_touched = 1u;
+        if (preset_storeInstrumentImage(target_scene_index, slot, staged)) {
+            autosave_markWholeInstrumentDirty(target_scene_index, slot);
+            if (target_scene_index == scene_getActiveIndex())
+                active_scene_touched = 1u;
+        }
     }
 
     if (!active_scene_touched)

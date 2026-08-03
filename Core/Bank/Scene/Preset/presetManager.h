@@ -156,6 +156,10 @@ uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph,
  * each selected Scene. Clients: Load menu and boot. This dedicated entry point
  * keeps scene routing at the Preset boundary instead of making Menu call the
  * filesystem directly or overloading the legacy morph compatibility API.
+ * Filesystem promotes every destination Scene and transfers the staged Kit
+ * through the shared scalar/type/descriptor owners before later root-return/
+ * flush work. Preset's callback reports only terminal operation status.
+ * Future whole-Kit copy/paste must reuse that same parameter-boundary transfer.
  */
 uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask);
 /*
@@ -163,7 +167,15 @@ uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask);
  *
  * Load inputs mirror Kit Load: root Scene library slot and destination Scene
  * bitmask. Output is an asynchronous Preset operation completed through
- * PRESET_OP_SCENE_LOAD.
+ * PRESET_OP_SCENE_LOAD. Filesystem promotes Scene presence and publishes each
+ * complete Scene-without-Pattern scope beside the direct retained assignment;
+ * the later successful callback reaffirms that immutable destination mask in
+ * Autosave and records source provenance/settings work. Reaffirmation prevents
+ * terminal Menu cursor cleanup or a pre-existing writer from consuming the
+ * earlier LED selection before the resident Scene is ready to be sampled.
+ * Pattern remains deliberately outside that scope; a later Scene-with-Pattern
+ * copy/paste feature must extend the explicit Pattern boundary rather than
+ * silently treating the current marker as complete.
  */
 uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
 /*
@@ -173,6 +185,16 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
  * child into the selected resident Scene mask. Empty Banks complete as
  * PRESET_OP_BANK_LOAD with no child payload; callers then run
  * preset_loadFirstAvailableSceneOrKit() for the required fallback chain.
+ * Bank Load stages related BankData metadata without scalar dirty notices;
+ * each selected child publishes its non-Pattern region beside its retained
+ * commit, and filesystem merges the Bank fields into the sole autosave record
+ * immediately after the final metadata commit. Its successful callback retains
+ * provenance/settings ownership only.
+ * Bank Save leaves resident active,
+ * presence, VOICE, and Scene parameters unchanged; after durable success it
+ * publishes only change-aware name/slot setters and saved-child provenance.
+ * Both paths preserve prior dirty bits. Boot Load commit is quiet while
+ * mutation tracking is disabled.
  */
 /*
  * Successful-completion source persistence.
@@ -209,6 +231,10 @@ uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene);
  * then copies source normal endpoints into resident morph endpoints for slots
  * whose instrument types match. Mismatched source/destination slot types are
  * deliberately no-change so morph load remains a per-instrument operation.
+ * Every successful same-type slot copy publishes the whole Instrument Morph
+ * region, including inactive Scenes; the generated slot-6 decay separately
+ * publishes its Kit parameter. Future Kit Morph copy/paste must keep these two
+ * stored regions together.
  */
 uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask);
 /* Settings — keyed root settings.cfg file. */
@@ -300,6 +326,9 @@ uint8_t preset_saveInstrumentMorph(uint8_t source_scene,
  * slot's currently loaded type. Output: the file is parsed through the normal
  * Instrument loader, then only same-type morphable normal endpoint values are
  * copied into the resident morph image. Type mismatches are rejected/no-change.
+ * Each changed Morph cell uses the same generic owner as an individual edit.
+ * Future Instrument Normal/Morph copy-paste must require the same type and
+ * commit through that descriptor-indexed boundary.
  */
 uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
                                    uint8_t destination_slot,
@@ -349,12 +378,12 @@ void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
  * through one generic Preset store boundary, then mark the matching normal or
  * Morph Autosave descriptor cell only when its final byte changed. A future
  * registry descriptor automatically follows this path when edited through
- * these setters; direct endpoint assignments are restricted to validated
- * whole-object/load paths that must use the appropriate region marker. Derived
+ * these setters; aggregate load/copy paths use preset_storeInstrumentImage()
+ * to transfer those same cells through the owner. Derived
  * morph_interpolation[] never represents autosave data.
  *
  * Accessors/clients:
- * - storageTypes/filesystem populate Scene slots directly during load.
+ * - storageTypes/filesystem populate staging images during load.
  * - menu.c load completion calls preset_startDrumsetApply(), which uses these
  *   functions in bounded foreground chunks.
  * - presetMorphEngine calls preset_applyInstrumentRuntimeValue() after it
@@ -434,7 +463,10 @@ void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
  * payload. Output: inactive Scenes receive retained state only. Active Scene
  * commits clear all outgoing modulation owners, replace/reset the incoming
  * runtime, rebuild all six Morph images, and rebind one normalized source per
- * tick. Client: Menu's Instrument Load completion handler.
+ * tick. Every retained type/Normal/Morph cell passes through its individual
+ * owner before the active-only runtime branch; no Load-only region marker is
+ * involved. HCNAMES remains the sole display-name owner.
+ * Client: Menu's Instrument Load completion handler.
  *
  * This remains separate from the Kit cursor because Instrument commit must
  * preserve the outgoing slot identity until targets are cleared, whereas Kit
@@ -442,12 +474,41 @@ void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
  */
 void    preset_startInstrumentApply(uint8_t scene_index, uint8_t slot);
 /*
+ * Transfer validated Instrument and root-Kit aggregates through parameter owners.
+ *
+ * Inputs: a bounded resident destination plus immutable staged images.
+ * Outputs: Instrument type and descriptor endpoints, and Kit scalar settings,
+ * are installed through their ordinary exact-field change/dirty boundaries;
+ * invalid types or coordinates report failure. A normal Instrument Load then
+ * adds one complete-Instrument marker per destination, while a normal Kit Load
+ * adds one complete-Kit marker per destination after all six slot transfers.
+ * Why: equal incoming bytes still belong to the aggregate object load without
+ * changing efficient scalar-edit behavior. Complete Scene/Bank-
+ * child replacement instead uses the explicit loaded-Scene register before a
+ * root Scene request or after each Bank child commit and does not call these
+ * helpers. Future serialized Kit/Instrument fields join these
+ * transfers beside their owner setter/descriptor. Morph-only loads retain
+ * endpoint-only marking because they do not replace either complete object.
+ * Affiliates: filesystem's
+ * staged Kit commit, normal Instrument apply, SceneData's Kit scalar transfer,
+ * and Autosave's type/cell getters.
+ * These functions change retained data only; active runtime apply remains in
+ * the existing start/tick workers.
+ */
+uint8_t preset_storeInstrumentImage(uint8_t scene_index,
+                                    uint8_t slot,
+                                    const kit_instrument_slot_t *source);
+uint8_t preset_storeKitImage(uint8_t scene_index, const kit_t *source);
+/*
  * Commit staged morph-load endpoints and drain the Morph worker.
  *
  * KitMrp and InstrumentMrp change endpoint values only. They must not clear
  * modulation, reset instrument runtime objects, replace display names, or
  * apply routing. These starters preserve slot identity and reuse the bounded
- * Morph worker so active-scene interpolation is refreshed safely.
+ * Morph worker so active-scene interpolation is refreshed safely. Successful
+ * same-type retained copies store each changed Morph endpoint through its
+ * ordinary parameter owner for all destinations; type mismatches change and
+ * publish nothing.
  */
 void    preset_startKitMorphApply(void);
 void    preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot);

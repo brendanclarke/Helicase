@@ -600,6 +600,10 @@ typedef struct {
     uint16_t payload_scan_offset;
     uint16_t patch_count;
     uint16_t patch_cursor;
+    /* Snapshot of the sole two-byte loaded-Scene register for this operation.
+     * It lives inside the already allocated 2 KB stage union, so the approved
+     * persistent SRAM increase remains exactly two bytes in Autosave.c. */
+    uint16_t loaded_scene_mask;
     uint8_t winner_index;
     uint8_t winner_probe;
     uint8_t candidate_index;
@@ -608,6 +612,9 @@ typedef struct {
     uint8_t target_ready;
     uint8_t recovery_target_index;
     uint8_t recovery_using_names;
+    /* Zero is ordinary drain; one/two identify the two mask-only A/B commits
+     * that must precede classification of a loaded Scene. */
+    uint8_t scene_mask_publish_pass;
 } filesystem_autosave_writer_state_t;
 
 /*
@@ -876,6 +883,67 @@ static uint8_t op_bank_child_cursor = 0u;
 static uint8_t op_bank_loaded_scene = 0u;
 static uint8_t op_bank_payload_active = 0u;
 static uint8_t op_rename_done = 0u;
+
+static uint8_t filesystem_lowestSceneInMask(uint16_t mask,
+                                            uint8_t *scene_index)
+{
+    uint8_t candidate;
+
+    /*
+     * Resolve the lowest resident Scene represented by one Bank mask.
+     *
+     * Inputs: a bounded 16-bit presence/save mask and caller-owned result
+     * byte. Output: nonzero plus the first set index, or zero for an empty mask
+     * or NULL result without inventing Scene 0. Why: final Bank Load active
+     * resolution and file-only Bank Save formatting need the same deterministic
+     * fallback without retaining another selector. Affiliates: Bank Load phases
+     * 17/20 and filesystem_requestSaveBank().
+     */
+    if (!scene_index)
+        return 0u;
+    for (candidate = 0u; candidate < STORAGE_BANK_SCENE_MAX_SLOTS;
+         candidate++) {
+        if ((mask & (uint16_t)(1u << candidate)) != 0u) {
+            *scene_index = candidate;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+static void filesystem_storeLoadedBankMetadata(
+    const char name[BANK_DISPLAY_NAME_LEN],
+    uint16_t slot,
+    uint16_t present_mask,
+    uint8_t active_scene,
+    uint16_t voice_edit_mask)
+{
+    /*
+     * Install final Bank Load metadata through the ordinary field owners.
+     *
+     * Inputs: the validated source identity plus final resolved resident
+     * presence, active Scene, and VOICE edit mask. Outputs: each serialized
+     * field first passes through its existing normalized/change-aware BankData
+     * setter; the nonserialized resident flag is set next; one BankData-only
+     * aggregate marker then publishes every live field even when a loaded value
+     * compared equal. Why: scalar edits should remain change-aware, but Bank
+     * Load replaces one complete BankData object. Scene children are separate
+     * retained objects and continue through autosave_noteSceneLoaded() only
+     * after each child lands. The values are final at both call sites, so no
+     * provisional state is exposed. Affiliates: Bank Load phases 17/20,
+     * BankData's five payload setters, autosave_markBankDataDirty(), and
+     * Autosave's Bank live getter. Save continues to update only the name/slot
+     * fields after durable completion.
+     */
+    bank_setDisplayName(name);
+    bank_setRestoreBankSlot(slot);
+    bank_setScenePresentMask(present_mask);
+    bank_setActiveSceneSlot(active_scene);
+    bank_setSceneMaskVoiceEdit(voice_edit_mask);
+    bank_setHasResidentBank(1u);
+    autosave_markBankDataDirty();
+}
+
 typedef enum {
     FS_REPAIR_SCOPE_NONE = 0u,
     FS_REPAIR_SCOPE_LIBRARY,
@@ -4419,10 +4487,15 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 ** number of stable live payload bytes are captured, their bits plus every
 ** classified nonexistent bit are cleared in the canonical record, and the
 ** current canonical mask/value image is copy-forwarded into the inactive peer.
+** A pending aggregate Scene-load notification first expands to all 1,920 bits
+** of each selected Scene and performs two mask-only copy-forward commits, so
+** both CRC-valid files contain the complete request before classification can
+** clear any bit. Those transaction fields reuse this operation's existing 2 KB
+** stage union; only Autosave.c's two-byte notification register is persistent.
 ** Remaining dirty bits stay in SRAM and are also carried by any target mask
-** chunk staged after they were set. If neither record validates for the Bank
-** identity, both are asynchronously regenerated B then A from HCNAMES with a
-** zero mask. No phase blocks on AsyncFATFS or borrows the shared name cache
+** chunk staged after they were set. If neither record passes structural and
+** integrity validation, both are asynchronously regenerated B then A from
+** HCNAMES with a zero mask. No phase blocks on AsyncFATFS or borrows the shared name cache
 ** except that existing recovery path. The file mask is ORed into Autosave.c's
 ** single persistent record before classification; an empty canonical mask
 ** completes read-only and never creates another empty generation. One
@@ -4445,6 +4518,20 @@ static void filesystem_autosaveParameterDrain_tick(void)
         memset(&op_autosave_writer, 0, sizeof(op_autosave_writer));
         memset(&fs_autosave_parameter_cache, 0,
                sizeof(fs_autosave_parameter_cache));
+        /*
+         * Snapshot and expand complete Scene-load events before file access.
+         *
+         * Inputs: Autosave.c's two-byte coalescing register. Outputs: the
+         * operation retains exactly the Scene bits it must publish, while all
+         * 1,920 bits per Scene are ORed into the canonical mask. The producer
+         * register remains armed until two valid target commits have synced;
+         * a failed operation therefore retries without losing the aggregate
+         * request. Affiliates: phases 55/22/68 and the scheduler pending test.
+         */
+        op_autosave_writer.loaded_scene_mask =
+            autosave_loadedScenePendingMask();
+        autosave_markLoadedSceneRegionsDirty(
+            op_autosave_writer.loaded_scene_mask);
         op_autosave_writer.candidate_index = 0u;
         op_phase = 1u;
         return;
@@ -4478,7 +4565,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_phase = 3u;
         return;
 
-    case 3: /* STREAM ONE CANDIDATE THROUGH CRC/HEADER/BANK-NAME VALIDATION */
+    case 3: /* STREAM ONE CANDIDATE THROUGH HEADER/COMMIT/CRC VALIDATION */
     {
         uint32_t n = afatfs_fread(op_file, staging_buf, sizeof(staging_buf));
 
@@ -4491,11 +4578,18 @@ static void filesystem_autosaveParameterDrain_tick(void)
         }
         if (!afatfs_feof(op_file))
             return;
-        op_autosave_writer.candidate_valid = (uint8_t)(
-            autosave_streamValidationFinish(&op_autosave_writer.validation) &&
-            autosave_streamValidationMatchesBank(
-                &op_autosave_writer.validation, bank_restoreBankSlot(),
-                bank_displayName()));
+        /*
+         * Accept a candidate solely from its completed integrity result.
+         *
+         * Input: exact streamed header/commit/CRC validation. Output: the
+         * candidate-valid flag consumed by unchanged generation selection.
+         * Why: Bank name and slot are ordinary payload bytes that copy-forward
+         * must retain and later drain; comparing them to live SRAM would reject
+         * the very record needed as the mutation source. Affiliates: winner
+         * phase 5, recovery phase 30, and the payload transform.
+         */
+        op_autosave_writer.candidate_valid =
+            autosave_streamValidationFinish(&op_autosave_writer.validation);
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 4u;
@@ -4627,7 +4721,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         return;
     }
 
-    case 55: /* CLOSE COMPLETE: FALL THROUGH IF CANONICAL SRAM IS EMPTY */
+    case 55: /* CLOSE COMPLETE: PUBLISH WHOLE-SCENE MASK OR CLASSIFY */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -4645,6 +4739,24 @@ static void filesystem_autosaveParameterDrain_tick(void)
          */
         if (!autosave_maskHasDirty()) {
             filesystem_complete(FS_STATUS_DONE);
+            return;
+        }
+        /*
+         * Publish the complete aggregate Scene mask before taking any bits.
+         *
+         * Inputs: a valid winner, its merged recovery mask, and the Scene-load
+         * snapshot expanded in phase zero. Output: pass one enters the normal
+         * transformed-copy path with zero payload patches and without calling
+         * autosave_maskBitTake(). The transformed mask therefore contains the
+         * complete canonical Scene regions. Phase 68 repeats against the other
+         * peer before returning here conceptually as an ordinary drain. Why:
+         * classification must not create a partially drained newest record
+         * before both recovery files have recorded the bulk-load request.
+         */
+        if (op_autosave_writer.loaded_scene_mask != 0u) {
+            op_autosave_writer.scene_mask_publish_pass = 1u;
+            op_autosave_writer.patch_count = 0u;
+            op_phase = 10u;
             return;
         }
         op_autosave_writer.payload_scan_offset = 0u;
@@ -5106,7 +5218,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
             op_phase = 22u;
         return;
 
-    case 22: /* WAIT COMMIT CLOSE, THEN ENTER THE EXISTING FINAL SYNC */
+    case 22: /* WAIT COMMIT CLOSE, THEN SYNC OR FINISH */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -5119,7 +5231,48 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * remains in Autosave.c; the completion callback reads it directly and
          * no transaction-local scalar replaces or clears it.
          */
+        if (op_autosave_writer.scene_mask_publish_pass != 0u) {
+            /* A mask-only target must become durable before it is selected as
+             * the second pass's source or before Scene notification is
+             * acknowledged. The ordinary drain still uses filesystem_finish()
+             * below and therefore retains its existing final flush behavior. */
+            op_phase = 68u;
+            return;
+        }
         filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 68: /* SYNC EACH MASK-ONLY COMMIT; AFTER TWO, BEGIN NORMAL DRAIN */
+        /*
+         * Complete the two-record loaded-Scene publication transaction.
+         *
+         * Inputs: a closed CRC/commit-valid target from pass one or two.
+         * Output: sync makes that target durable, promotes it to the next
+         * winner coordinate, and either copies the same untouched canonical
+         * mask into the opposite peer or acknowledges the Scene snapshot and
+         * begins bounded classification. Why: both files must independently
+         * carry the full Scene mask before the SRAM event bit is cleared. No
+         * parameter value is captured during either publication pass.
+         */
+        if (!afatfs_sync())
+            return;
+        op_autosave_writer.winner_index = (uint8_t)(
+            op_autosave_writer.winner_index ^ 1u);
+        op_autosave_writer.winner_generation++;
+        op_autosave_writer.winner_probe++;
+        if (op_autosave_writer.scene_mask_publish_pass == 1u) {
+            op_autosave_writer.scene_mask_publish_pass = 2u;
+            op_autosave_writer.patch_count = 0u;
+            op_phase = 10u;
+            return;
+        }
+        autosave_acknowledgeLoadedScenes(
+            op_autosave_writer.loaded_scene_mask);
+        op_autosave_writer.loaded_scene_mask = 0u;
+        op_autosave_writer.scene_mask_publish_pass = 0u;
+        op_autosave_writer.payload_scan_offset = 0u;
+        op_autosave_writer.patch_count = 0u;
+        op_phase = 56u;
         return;
 
     case 30: /* RECOVERY: LOAD HCNAMES BEFORE OVERWRITING EITHER INVALID FILE */
@@ -7246,14 +7399,42 @@ static void filesystem_loadKitDirectory_tick(void)
                         (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 + identity_slot),
                         op_kitset.instrument_file[identity_slot]);
                 }
+                /*
+                 * Promote Kit destinations before publishing their data.
+                 *
+                 * Inputs: the validated request-time Scene mask and current
+                 * resident presence. Output: every Kit destination is a valid
+                 * Autosave owner before its parameter transfers below. Why: a
+                 * Kit may populate a previously absent Scene, and exact-cell
+                 * markers reject absent owners. This metadata change belongs
+                 * at the retained commit boundary, not final filesystem
+                 * completion. Affiliates: bank_scenePresentMask(), BankData's
+                 * change-aware setter, and preset_storeKitImage().
+                 */
+                bank_setScenePresentMask((uint16_t)(
+                    bank_scenePresentMask() | op_kit_load_scene_mask));
                 for (scene_index = 0u;
                      scene_index < SCENE_COUNT && scene_index < 16u;
                      scene_index++) {
                     if ((op_kit_load_scene_mask &
                          (uint16_t)(1u << scene_index)) != 0u) {
-                        scene_t *target_scene = scene_get(scene_index);
-                        if (target_scene) {
-                            target_scene->kit = op_staged_kit;
+                        if (scene_get(scene_index)) {
+                            /*
+                             * Commit one staged Kit through parameter owners.
+                             *
+                             * Inputs: fully validated staged Kit plus one
+                             * selected resident Scene. Output: Kit scalars and
+                             * every Instrument type/endpoint land through the
+                             * same change-aware boundaries as individual edits.
+                             * Why: later root return, close, or flush work must
+                             * not suppress a real SRAM mutation, and the Load
+                             * menu must not own a compensating whole-Kit dirty
+                             * special case. Names remain HCNAMES-owned.
+                             * Affiliates: SceneData, Preset's generic Kit image
+                             * transfer, and its completion-only callback.
+                             */
+                            (void)preset_storeKitImage(
+                                scene_index, &op_staged_kit);
                         }
                     }
                 }
@@ -8644,8 +8825,14 @@ static void filesystem_loadBankDirectory_tick(void)
      * Phases 0..18 validate and inspect the Bank container. When a child Scene
      * is selected, the state machine opens that two-digit child and jumps into
      * filesystem_loadSceneDirectory_tick() at Scene phase 8. From there the
-     * existing Scene payload reader handles sceneset.scg, embedded Kit, pattern,
-     * effect, and atomic resident Scene commit.
+     * existing Scene payload reader validates sceneset.scg and the embedded
+     * Kit, commits that non-Pattern resident image, then completes the later
+     * Pattern/effect work. After all selected children are resident, the final
+     * BankData commit stores final fields through their individual owners
+     * before HCNAMES/flush and public completion. Child Scene values have
+     * already passed through their parameter owners at the shared staged-Scene
+     * commit. Affiliates: filesystem_storeLoadedBankMetadata() and
+     * filesystem_commitSceneStage().
      */
     switch (op_phase) {
     case 0:
@@ -8955,7 +9142,12 @@ static void filesystem_loadBankDirectory_tick(void)
     {
         uint8_t child_slot = 0u;
         uint8_t found = 0u;
-        uint16_t active_bit;
+        uint8_t current_active;
+        uint8_t resolved_active;
+        uint8_t lowest_present;
+        uint16_t stored_active_bit;
+        uint16_t current_active_bit;
+        uint16_t final_present_mask;
 
         if (!op_close_done)
             return;
@@ -8979,44 +9171,59 @@ static void filesystem_loadBankDirectory_tick(void)
          * Affiliates: the selected-child HCNAMES overlay and final BankData
          * presence merge below; neither may expand this request implicitly.
          */
-        active_bit = (op_bank_active_scene < STORAGE_BANK_SCENE_MAX_SLOTS)
-            ? (uint16_t)(1u << op_bank_active_scene)
-            : 0u;
-        if ((op_bank_scene_load_mask & active_bit) == 0u) {
-            for (child_slot = 0u;
-                 child_slot < STORAGE_BANK_SCENE_MAX_SLOTS;
-                 child_slot++) {
-                if ((op_bank_scene_load_mask &
-                     (uint16_t)(1u << child_slot)) != 0u) {
-                    op_bank_active_scene = child_slot;
-                    active_bit = (uint16_t)(1u << child_slot);
-                    break;
-                }
-            }
-        }
         if (op_bank_scene_load_mask == 0u) {
             /*
-             * Empty Banks are valid.
+             * Treat a zero effective child mask as a valid selective result.
              *
-             * Output: BankData keeps the loaded Bank identity and child
-             * presence map, but op_bank_loaded_scene stays zero so Preset/Menu
-             * can initialize audible Scene data from root Scene, root Kit, or
-             * SRAM defaults. The restore slot is still updated because the
-             * Bank itself was successfully loaded.
+             * Inputs: an empty Bank or a requested mask with no matching child.
+             * Outputs: Bank identity/control fields may commit, but existing
+             * resident Scene presence, payload, and unselected HCNAMES rows are
+             * retained; op_bank_loaded_scene stays zero so Preset/Menu runs its
+             * existing fallback decision. Why: no requested child authorizes a
+             * Bank identity load, not erasure of every playable Scene. The
+             * restore slot still updates because the Bank load succeeded.
              */
-            bank_setDisplayName(op_bank_display_name);
+            current_active = bank_activeSceneSlot();
+            resolved_active = current_active;
+            final_present_mask = bank_scenePresentMask();
+            stored_active_bit =
+                (op_bank_active_scene < STORAGE_BANK_SCENE_MAX_SLOTS)
+                    ? (uint16_t)(1u << op_bank_active_scene)
+                    : 0u;
+            current_active_bit =
+                (current_active < STORAGE_BANK_SCENE_MAX_SLOTS)
+                    ? (uint16_t)(1u << current_active)
+                    : 0u;
+            if (!seq_isRunning()) {
+                if ((final_present_mask & stored_active_bit) != 0u) {
+                    resolved_active = op_bank_active_scene;
+                } else if ((final_present_mask & current_active_bit) != 0u) {
+                    resolved_active = current_active;
+                } else if (filesystem_lowestSceneInMask(
+                               final_present_mask, &lowest_present)) {
+                    resolved_active = lowest_present;
+                }
+            }
             /*
-             * No requested child exists in this Bank. Preserve the existing
-             * resident Scene availability rather than clearing it: the caller
-             * asked for a selective Bank identity/load operation, not a reset
-             * of every unselected playable Scene. HCNAMES rows remain the
-             * preloaded register values for the same reason.
+             * Commit validated Bank metadata without replacing Scene payload.
+             *
+             * Inputs: parsed Bank identity/control data, preserved resident
+             * presence, current active Scene, and final transport state.
+             * Output: BankData's individual field owners store the preference
+             * when stopped and present, otherwise the present current/lowest
+             * fallback; playback always retains current active. Why: an empty
+             * request intersection does not authorize erasing existing Scenes
+             * or switching playback, and changed metadata must publish at its
+             * own scalar boundary before later HCNAMES/flush work. Affiliates:
+             * filesystem_storeLoadedBankMetadata(), phase 83 HCNAMES
+             * publication, and the Preset provenance callback.
              */
-            bank_setScenePresentMask(bank_scenePresentMask());
-            bank_selectActiveSceneForEditMask(op_bank_active_scene);
-            bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
-            bank_setRestoreBankSlot(op_slot);
-            bank_setHasResidentBank(1u);
+            filesystem_storeLoadedBankMetadata(
+                op_bank_display_name,
+                op_slot,
+                final_present_mask,
+                resolved_active,
+                op_bankset_state.scene_mask_voice_edit);
             memcpy(preset_currentName, op_bank_display_name, 8u);
             if (!afatfs_chdir(NULL))
                 return;
@@ -9078,6 +9285,12 @@ static void filesystem_loadBankDirectory_tick(void)
     case 20:
     {
         uint8_t child_slot;
+        uint8_t current_active;
+        uint8_t resolved_active;
+        uint8_t lowest_present;
+        uint16_t stored_active_bit;
+        uint16_t current_active_bit;
+        uint16_t final_present_mask;
 
         if (op_close_status != FS_STATUS_DONE) {
             filesystem_finish(FS_STATUS_ERROR);
@@ -9094,17 +9307,6 @@ static void filesystem_loadBankDirectory_tick(void)
             }
         }
         /*
-         * Commit resident Bank metadata after every selected child has loaded.
-         *
-         * Inputs: validated Bank directory name, parsed bankset.bcg values,
-         * discovered child-present mask, and the selected child loop result.
-         * Outputs: BankData becomes authoritative for Save:[Bank], boot
-         * restore, active Scene, edit fan-out, and Scene availability LEDs.
-         * The active Scene was chosen from the loaded mask above, so it is
-         * always one of the resident payloads just committed.
-         */
-        bank_setDisplayName(op_bank_display_name);
-        /*
          * Retain availability for resident Scenes outside this Bank request.
          *
          * Inputs: the effective selected-child mask and the pre-commit Bank
@@ -9114,13 +9316,47 @@ static void filesystem_loadBankDirectory_tick(void)
          * preservation rules. This is a metadata merge only; the payload loop
          * above remains the sole writer of selected SceneData.
          */
-        bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
-                                            op_bank_scene_load_mask));
-        bank_selectActiveSceneForEditMask(op_bank_active_scene);
-        bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
-        bank_setRestoreBankSlot(op_slot);
-        bank_setHasResidentBank(1u);
-        scene_selectActive(op_bank_active_scene);
+        current_active = bank_activeSceneSlot();
+        resolved_active = current_active;
+        final_present_mask = (uint16_t)(bank_scenePresentMask() |
+                                        op_bank_scene_load_mask);
+        stored_active_bit =
+            (op_bank_active_scene < STORAGE_BANK_SCENE_MAX_SLOTS)
+                ? (uint16_t)(1u << op_bank_active_scene)
+                : 0u;
+        current_active_bit =
+            (current_active < STORAGE_BANK_SCENE_MAX_SLOTS)
+                ? (uint16_t)(1u << current_active)
+                : 0u;
+        if (!seq_isRunning()) {
+            if ((final_present_mask & stored_active_bit) != 0u) {
+                resolved_active = op_bank_active_scene;
+            } else if ((final_present_mask & current_active_bit) != 0u) {
+                resolved_active = current_active;
+            } else if (filesystem_lowestSceneInMask(
+                           final_present_mask, &lowest_present)) {
+                resolved_active = lowest_present;
+            }
+        }
+        /*
+         * Commit final mixed resident Bank metadata through the sole owner.
+         *
+         * Inputs: parsed Bank preference, current active Scene, merged final
+         * presence, final transport state, exact loaded mask, and VOICE mask.
+         * Output: playing retains current active; stopped chooses stored,
+         * current, then lowest-present, while BankData's scalar owners store
+         * the normalized final image. Why: partial Load may preserve an unselected current
+         * Scene and must never switch playback. No separate SceneData selection
+         * remains because BankData is authoritative. Affiliates: child payload
+         * loop, filesystem_storeLoadedBankMetadata(), Menu's stopped Pattern
+         * alignment, and Preset's exact Load publication.
+         */
+        filesystem_storeLoadedBankMetadata(
+            op_bank_display_name,
+            op_slot,
+            final_present_mask,
+            resolved_active,
+            op_bankset_state.scene_mask_voice_edit);
         memcpy(preset_currentName, op_bank_display_name, 8u);
         filesystem_cacheResidentName(0u, op_bank_display_name);
         op_phase = 83u;
@@ -10306,9 +10542,33 @@ static void filesystem_commitSceneStage(void)
      * immutable destination mask. Outputs: final Scene settings/Kit plus a
      * default final PatternSet ready for direct streaming.
      *
-     * Affiliates: filesystem_directPatternTarget(), Scene Pattern phases, and
+     * Root Scene Load and each individually validated Bank child additionally
+     * promote destination presence and copy the two validated aggregate images.
+     * Root Scene destinations are mirrored into Autosave's two-byte register
+     * by Menu entry/LED selection and reaffirmed by Preset after this operation
+     * succeeds; only a Bank child arms directly here after that individual
+     * child lands. Bank Load stores its final metadata through BankData's field
+     * setters later. Affiliates: Menu's Scene Load selector,
+     * filesystem_directPatternTarget(), Autosave's loaded-Scene register, and
      * the later Pattern transactional redesign.
      */
+    if (current_op == FS_INTERNAL_OP_LOAD_SCENE ||
+        current_op == FS_INTERNAL_OP_LOAD_BANK) {
+        /*
+         * Establish every root Scene destination as a retained owner first.
+         *
+         * Inputs: the immutable validated destination mask and current Bank
+         * presence. Output: exact parameter markers below can address newly
+         * populated slots. Why: presence and payload become resident together;
+         * waiting for final Pattern/HCNAMES/flush success must not leave an
+         * unowned SRAM image. A Bank child uses the one-bit mask installed by
+         * its traversal cursor, so an earlier committed child remains resident
+         * even if a later child fails. Affiliates: BankData's change-aware
+         * presence setter and Autosave's presence validation.
+         */
+        bank_setScenePresentMask((uint16_t)(
+            bank_scenePresentMask() | op_scene_load_scene_mask));
+    }
     for (scene_index = 0u;
          scene_index < SCENE_COUNT && scene_index < 16u;
          scene_index++) {
@@ -10318,8 +10578,27 @@ static void filesystem_commitSceneStage(void)
         target = scene_get(scene_index);
         if (!target)
             continue;
+        /*
+         * Commit one validated Scene as one aggregate ownership event.
+         *
+         * Inputs: the fully parsed settings/Kit stage and one selected resident
+         * destination. Outputs: both structures are copied directly; Pattern
+         * remains separately reset/streamed because it is outside the autosave
+         * payload. For root Scene Load, Menu already wrote the complete LED
+         * destination mask before this filesystem operation began and Preset
+         * will reaffirm the immutable accepted mask on terminal success. For
+         * Bank Load only, the individual child bit is ORed after its copy
+         * lands. Why: root Scene selection remains visible throughout Menu
+         * editing but must survive later command cleanup, while Bank traversal
+         * still must not publish an uncommitted child.
+         * Ordinary Menu/MIDI scalar setters retain their exact parameter hooks.
+         * Affiliates: autosave_setSceneLoadSelectionMask(),
+         * autosave_noteSceneLoaded(), and the writer's mask-publication passes.
+         */
         target->settings = fs_stage_workspace.scene_stage.settings;
         target->kit = fs_stage_workspace.scene_stage.kit;
+        if (current_op == FS_INTERNAL_OP_LOAD_BANK)
+            autosave_noteSceneLoaded(scene_index);
         pat_initPatternSet(&target->pattern);
     }
 }
@@ -12543,17 +12822,18 @@ static void filesystem_saveBankDirectory_tick(void)
             return;
         filesystem_recordSavedBankDirectory(op_save_bank_dir_display_name,
                                             op_save_bank_dir_open_name);
-        bank_setDisplayName(op_bank_display_name);
-        bank_setScenePresentMask(op_bank_scene_save_mask);
-        bank_selectActiveSceneForEditMask(op_bank_active_scene);
-        bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
-        bank_setRestoreBankSlot(op_slot);
-        bank_setHasResidentBank(1u);
         /*
-         * The promoted root folder is the authoritative new Bank identity.
-         * Update only row zero in the already-read register; selected Scene,
-         * Kit, and Instrument rows were copied from HCNAMES into the just
-         * written Bank tree and remain unchanged in resident memory.
+         * Continue filesystem/cache publication without replacing live state.
+         *
+         * Inputs: promoted folder/open name and saved display name. Outputs:
+         * row zero advances toward the existing HCNAMES, index-rebuild, and
+         * final-flush publication only. Why: promotion is not yet durable
+         * public success, and Save serializes resident Scenes without changing
+         * their active/presence/VOICE metadata. Ordinary name/slot adoption is
+         * deferred to Preset's successful callback. Selected Scene, Kit, and
+         * Instrument rows remain unchanged in resident memory. Affiliates:
+         * phases 83+, Bank index rebuild, final flush, and
+         * on_bank_save_complete().
          */
         filesystem_cacheResidentName(0u, op_bank_display_name);
         op_phase = 83u;
@@ -18018,14 +18298,16 @@ static void filesystem_autosaveWriterSchedule_tick(void)
     if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY)
         return;
     /*
-     * Fall through before arming when neither boot recovery nor SRAM work
-     * exists. Inputs are the one-time recovery flag and canonical mask. Output:
-     * a clean post-recovery writer remains disarmed and never calls
-     * filesystem_start(). Why: periodic generation/CRC/file traffic is not an
-     * autosave operation. A later scalar mutation is observed on a later tick
-     * and receives the normal five-second debounce.
+     * Fall through before arming when neither boot recovery, scalar SRAM work,
+     * nor a complete-Scene notification exists. Inputs are the one-time
+     * recovery flag, canonical mask, and Autosave's two-byte Scene-load
+     * register. Output: a clean post-recovery writer remains disarmed and never
+     * calls filesystem_start(). Why: periodic generation/CRC/file traffic is
+     * not an autosave operation. A later scalar mutation or Scene load is
+     * observed on a later tick and receives the normal five-second debounce.
      */
-    if (!fs_autosave_recovery_pending && !autosave_maskHasDirty()) {
+    if (!fs_autosave_recovery_pending && !autosave_maskHasDirty() &&
+        autosave_loadedScenePendingMask() == 0u) {
         fs_autosave_writer_armed = 0u;
         return;
     }
@@ -19305,25 +19587,19 @@ bool filesystem_requestSaveBank(uint16_t slot,
     if (op_bank_scene_save_mask != 0u &&
         (op_bank_scene_save_mask &
          (uint16_t)(1u << op_bank_active_scene)) == 0u) {
-        uint8_t scene_index;
-
         /*
-         * Keep saved Bank metadata internally reachable.
+         * Choose a valid file-only active child for this saved Bank.
          *
-         * Inputs: Save:[Bank] may intentionally save only a subset of resident
-         * Scenes. Output: active_scene is moved to the first saved child when
-         * the current active Scene is outside that subset. Without this guard,
-         * bankset.bcg could point boot/load at an unsaved child directory.
+         * Inputs: authoritative live active Scene and the selected nonempty
+         * save mask. Output: operation-local op_bank_active_scene becomes the
+         * lowest saved child only when live active is excluded. Why:
+         * bankset.bcg must reference one of its serialized children, but a
+         * partial Save must not change resident BankData or create an Autosave
+         * mutation. Affiliates: op_bankset_state.active_scene and
+         * filesystem_nextBanksetLine().
          */
-        for (scene_index = 0u;
-             scene_index < STORAGE_BANK_SCENE_MAX_SLOTS;
-             scene_index++) {
-            if ((op_bank_scene_save_mask &
-                 (uint16_t)(1u << scene_index)) != 0u) {
-                op_bank_active_scene = scene_index;
-                break;
-            }
-        }
+        (void)filesystem_lowestSceneInMask(op_bank_scene_save_mask,
+                                           &op_bank_active_scene);
     }
     op_bankset_state.active_scene = op_bank_active_scene;
     op_bankset_state.scene_mask_voice_edit = bank_sceneMaskVoiceEdit();

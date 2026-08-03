@@ -6,6 +6,15 @@ static char bank_display_name[BANK_DISPLAY_NAME_LEN + 1u];
 static uint16_t bank_restore_bank_slot;
 static uint16_t bank_scene_mask_present;
 static uint16_t bank_scene_mask_voice_edit;
+/*
+ * Sole retained active-Scene identity for the resident Bank workspace.
+ *
+ * Inputs: cold initialization, ordinary Scene selection, or a final Bank Load
+ * metadata commit. Output: one normalized byte consumed directly here and
+ * through SceneData's compatibility accessor. Why: retaining another SceneData
+ * byte let runtime selection and Autosave observe different active Scenes.
+ * Affiliates: bank_init(), bank_activeSceneSlot(), and SceneData.c.
+ */
 static uint8_t bank_active_scene_slot;
 static uint8_t bank_has_resident_bank;
 
@@ -101,9 +110,10 @@ void bank_init(void)
     /*
      * Initialize resident Bank metadata to the product default non-Bank state.
      *
-     * SceneData already initializes the actual sound defaults. BankData only
-     * owns container identity, so a card with no valid Bank can fall back to
-     * root Scene, root Kit, or defaults without pretending a Bank is resident.
+     * SceneData already initializes the actual sound defaults. BankData owns
+     * container identity including the sole active-Scene byte, so a card with
+     * no valid Bank can fall back to root Scene, root Kit, or defaults without
+     * pretending a Bank is resident.
      * The visible identity is still `none`: Save:[Bank] must never seed from
      * `Empty`, which is reserved for absent library slots.
      */
@@ -224,6 +234,13 @@ void bank_setActiveSceneSlot(uint8_t slot)
 
 uint8_t bank_activeSceneSlot(void)
 {
+    /*
+     * Return the sole active-Scene SRAM owner.
+     *
+     * Input: retained normalized BankData state. Output: the same bounded byte
+     * observed by SceneData, Menu, filesystem, and Autosave. Keeping this read
+     * side trivial prevents accessors from repairing or dirtying state.
+     */
     return bank_active_scene_slot;
 }
 
@@ -235,7 +252,8 @@ void bank_selectActiveSceneForEditMask(uint8_t slot)
     /*
      * Select a new active Scene while preserving the edit-mask invariant.
      *
-     * Inputs: PERF-mode Scene switch or Bank Load active_scene field. Output:
+     * Inputs: ordinary Scene selection through the SceneData compatibility API.
+     * Output:
      * bank_active_scene_slot changes to the bounded Scene index. If the new
      * active Scene was already inside scene_mask_voice_edit, the multi-Scene
      * edit set is preserved; if not, the previous mask is dropped and replaced

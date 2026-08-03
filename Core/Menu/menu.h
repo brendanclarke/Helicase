@@ -301,6 +301,16 @@ extern uint8_t paramToModTarget[END_OF_SOUND_PARAMETERS];
 void menu_repaintAll(void);
 void menu_repaint(void);
 void menu_setNumSamples(uint8_t num);
+/*
+ * Reset the ordinary Load/Save selection surface.
+ *
+ * Inputs: current Menu page/type and active Scene. Outputs: the visible cursor
+ * and LED-backed selection return to their normal defaults; top-level Scene
+ * Load also publishes that default into Autosave. Accepted command completion
+ * uses a private no-publication variant so a successfully loaded immutable
+ * Scene mask cannot be overwritten during UI cleanup. Affiliates: menu.c's
+ * menu_finishLoadSaveCommand() and menu_resetSaveParametersInternal().
+ */
 void menu_resetSaveParameters(void);
 void menu_init(void);
 void menu_start(void);
@@ -346,6 +356,9 @@ void menu_loadInstrumentExit(void);
  * Inputs: a zero-based SEQ/Scene index. Output: nonzero only when the current
  * context owns the press; Kit/Scene Load toggles the selected-scene mask while
  * Kit Save and Instrument Load/Save select resident source/destination Scenes.
+ * Top-level Scene Load additionally mirrors its complete LED selection into
+ * Autosave's two-byte pending register after each accepted toggle, before any
+ * filesystem Load request. This is SRAM-only and performs no SD operation.
  * A full Kit request locks later presses only through payload commit/runtime
  * apply; its seven resident names are held in Menu scratch until the later
  * family exit. Changing the scratch Scene is itself an exit/entry boundary and

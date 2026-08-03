@@ -95,8 +95,9 @@ typedef struct {
      * Autosave extension rule: every new serialized Kit setting must append a
      * named Kit parameter index/getter and write through SceneData's change-
      * aware Kit store boundary. Direct assignment is reserved for boot
-     * initialization or a validated whole-object commit followed by the named
-     * Kit region marker. Affiliates: Autosave.h and future Kit copy/load code.
+     * initialization; validated aggregate commits call
+     * scene_storeKitSettingsImage() so each scalar retains ownership.
+     * Affiliates: Autosave.h and future Kit copy/load code.
      */
     uint8_t slot6_track7_amp_envelope_decay;
     uint8_t slot6_track7_morph_amp_envelope_decay;
@@ -199,10 +200,14 @@ typedef struct {
      *
      * A future serialized byte is not complete until it has a named index,
      * live getter branch, and SceneData setter using the common change-aware
-     * store helper. Direct assignments are limited to initialization or a
-     * validated whole-Scene commit followed by the Scene region marker. Why:
-     * this keeps getter order and dirty-bit order identical. Affiliates:
-     * Autosave's Scene parameter enum and Preset's retained setters.
+     * store helper. Ordinary parameter edits therefore retain exact-cell
+     * ownership, while a validated whole-Scene load uses Autosave's separate
+     * two-byte aggregate path around its direct resident copy: root Scene Load
+     * is selected before its request and Bank children are armed as they land.
+     * Why: scalar edits and complete replacements have different publication
+     * granularity and must not masquerade as one another. Affiliates:
+     * Autosave's Scene parameter enum/register, Menu's Scene selector, and
+     * Preset's retained setters.
      */
 } scene_settings_t;
 
@@ -295,17 +300,20 @@ const scene_t *scene_getConst(uint8_t scene_index);
 /*
  * Read the active Scene index.
  *
- * Inputs: none. Output: current resident Scene index selected for menu/runtime
- * apply. With SCENE_COUNT=1 this returns 0, but keeping the accessor preserves
- * the future Bank scene-switch boundary.
+ * Input: BankData's authoritative active-Scene owner. Output: current resident
+ * Scene index selected for menu/runtime apply. Why: this compatibility API
+ * preserves existing callers without retaining an active byte in SceneData.
+ * Affiliates: BankData's active getter and DSP/Menu/MIDI/Pattern clients.
  */
 uint8_t scene_getActiveIndex(void);
 /*
  * Select the active resident Scene record.
  *
- * Input: resident Scene index. Output: nonzero on success. This changes the
- * identity only; Preset owns any runtime DSP apply so selecting a record cannot
- * unexpectedly perform a large foreground update.
+ * Input: resident Scene index. Output: nonzero on valid bounds, after delegating
+ * to BankData's sole owner and its active-in-VOICE-mask invariant. This changes
+ * identity only; Preset owns runtime DSP apply so selecting a record cannot
+ * unexpectedly perform a large foreground update. No active byte is retained
+ * in SceneData. Affiliates: PERF selection and BankData's selection boundary.
  */
 uint8_t scene_selectActive(uint8_t scene_index);
 /*
@@ -421,5 +429,19 @@ uint8_t scene_getSlot6Track7AmpEnvelopeDecay(uint8_t scene_index);
 void scene_setSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index,
                                                uint8_t value);
 uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index);
+
+/*
+ * Transfer one staged Kit-settings image through individual retained owners.
+ *
+ * Inputs: a bounded resident Scene plus a validated immutable Kit-settings
+ * image. Outputs: every current Kit scalar is installed through its ordinary
+ * change-aware setter. Why: Kit Load still uses exact parameter ownership;
+ * whole Scene/Bank-child replacement instead copies its complete aggregate and
+ * arms Autosave's loaded-Scene register. New serialized Kit fields must extend
+ * this transfer beside their setter and Autosave index. Affiliates: Preset Kit
+ * commit and Autosave's Kit getter ordering. Instruments are separate inputs.
+ */
+void scene_storeKitSettingsImage(uint8_t scene_index,
+                                 const kit_settings_t *source);
 
 #endif

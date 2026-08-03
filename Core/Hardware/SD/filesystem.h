@@ -375,6 +375,12 @@ bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb
  * Inputs: direct Kit library slot 000..999, a bit per resident Scene, and completion
  * callback. Output: one asynchronous directory read whose staged payload is
  * copied into all selected Scene kits only after every instrument validates.
+ * Filesystem owns that retained copy boundary: it first promotes selected
+ * Scene presence, then transfers each Kit scalar, Instrument type, and
+ * descriptor endpoint through its ordinary parameter owner. Why: later root-
+ * return/flush failure cannot make an SRAM replacement invisible to Autosave,
+ * and Load needs no compensating whole-region special case. Preset's callback
+ * reports only terminal status because it does not own the retained transfer.
  * The selected index row is copied into existing operation scratch before the
  * separate typed stage begins, keeping the visible directory key stable for
  * the request. The 9,000-byte index cache remains dedicated to names; typed
@@ -398,6 +404,8 @@ bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
  * rewrites the complete slot-ordered `.hcindex` before invoking cb. This is
  * necessary for new, renamed, or removed numbered folders; patching only the
  * previously active cache row would leave stale index rows behind.
+ * Saving card data does not replace retained Kit parameters and therefore
+ * publishes no autosave mutation region.
  */
 bool filesystem_requestSaveKitDirectory(uint16_t slot,
                                         uint8_t source_scene,
@@ -443,10 +451,16 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
  * Load one numbered root Scene directory into every selected resident Scene.
  *
  * Inputs: direct root Scene library slot 000..999, destination Scene mask, and
- * completion callback. Output: asynchronous staged Scene load; resident Scene
- * memory changes only after sceneset.scg, one embedded Kit directory, one
- * pattern file, and one effect file validate. Scene Load is explicit-OK from
- * the UI, unlike Kit Load's instant-on-scroll behavior. Its selected index row
+ * completion callback. Output: asynchronous staged Scene load. The non-Pattern
+ * Scene settings and Kit enter resident storage after sceneset.scg plus the
+ * embedded Kit validate. At that assignment boundary filesystem first promotes
+ * destination presence and then marks each selected Scene-without-Pattern
+ * autosave region; Pattern/effect processing follows, and public success is
+ * still withheld until the whole request completes. Why: once retained SRAM
+ * changes, later Pattern/HCNAMES/flush failure must not suppress its mutation
+ * record. The completion callback separately owns durable source provenance.
+ * Scene Load is explicit-OK from the UI, unlike Kit Load's instant-on-scroll
+ * behavior. Its selected index row
  * is copied into existing operation scratch before separate Scene staging,
  * providing the two later directory opens and targeted HCNAMES source. The
  * name cache remains independently available throughout validation.
@@ -476,6 +490,16 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
  * unselected embedded Kits; the shared Scene payload reader validates each
  * selected child before committing it, preserving the single callback and the
  * flexible declared Instrument/LFO payload mapping.
+ * Final presence is the union of prior resident Scenes and the exact loaded
+ * child mask. Each validated child publishes its own non-Pattern region beside
+ * its direct retained assignment. Final Bank metadata is committed through
+ * the ordinary BankData setters followed by one BankData-only full-scope dirty
+ * marker before HCNAMES/flush work continues. Thus a Bank Load produces Bank
+ * Data plus only its actually committed Scene children, while playing,
+ * current active Scene is retained; while stopped, active resolves in stored,
+ * current, then lowest-present order. Unselected resident Scenes and prior bits
+ * remain untouched. The completion callback separately records provenance only
+ * after durable public success; it no longer owns mutation publication.
  */
 bool filesystem_requestLoadBank(uint16_t slot,
                                 uint16_t scene_mask,
@@ -495,11 +519,15 @@ uint16_t filesystem_bankChildSceneMask(void);
 /*
  * Save one root Bank directory from resident Scene memory.
  *
- * Inputs: root Bank slot, source Scene, eight-cell Bank display name, future
- * Bank-local Scene save mask, and completion callback. Output: bankset.bcg
- * plus selected two-digit child Scene folders. This first implementation
- * passes mask bit 0 only, but the writer loops over the mask boundary so
- * future 16-Scene toggles do not need a new public contract.
+ * Inputs: root Bank slot, source Scene, eight-cell Bank display name, selected
+ * Bank-local Scene save mask, and completion callback. Output: bankset.bcg plus
+ * every selected two-digit child Scene folder, followed by promotion, HCNAMES,
+ * index rebuild, and flush. If live active is excluded, only bankset.bcg's
+ * file-active value falls back to the lowest saved child. Live active,
+ * presence, VOICE state, and all Scene parameter regions remain unchanged.
+ * After durable success, Preset adopts ordinary Bank name/slot fields and
+ * saved-child provenance through their normal boundaries; Save publishes no
+ * whole-Scene dirty region. A failed Save publishes none of these changes.
  */
 bool filesystem_requestSaveBank(uint16_t slot,
                                 uint8_t source_scene,
@@ -706,12 +734,16 @@ const char *filesystem_testResultName(void);
  * Inputs: resident Scene index, zero-based kit slot, registry type, shared-cache
  * index (0..999), and completion callback. Output: one asynchronous parse into
  * filesystem-owned staging; live SceneData and DSP state are unchanged until
- * Preset commits the validated payload. Client: preset_loadInstrument(). The
+ * Preset commits the validated payload through its type/descriptor owners.
+ * Client: preset_loadInstrument(). The
  * explicit Scene/slot coordinates remain immutable completion context even
  * though parsing itself is off-scene. Before staging aliases the typed cache,
  * the selected filename is copied into existing operation scratch; that one
  * request-stable key supplies the later open and HCNAMES update without an
- * additional cache or SRAM allocation.
+ * additional cache or SRAM allocation. Filesystem only stages the object;
+ * Preset's later retained commit marks only changed type/endpoint cells (and
+ * all newly meaningful cells after a type change). A failed load commits no
+ * resident parameter.
  */
 bool filesystem_requestLoadInstrument(uint8_t destination_scene,
                                       uint8_t destination_slot,
@@ -727,6 +759,8 @@ bool filesystem_requestLoadInstrument(uint8_t destination_scene,
  * storageTypes instrument serializer. The source slot is a six-voice kit
  * coordinate; it is unrelated to the 000..999 library-slot numbering used by
  * Kit and Scene folders. Client: preset_saveInstrument().
+ * This serializer does not change retained Instrument parameter storage and
+ * therefore publishes no autosave mutation region.
  */
 bool filesystem_requestSaveInstrument(uint8_t source_scene,
                                       uint8_t source_slot,

@@ -2,10 +2,11 @@
 
 ## Status
 
-General architecture, the implemented Phase 1 single-parameter work, and the
-complete Phase 2 successful-load/Bank-session code-change plan are documented
-below. Phase 2 has not been implemented; this revision authorizes no source or
-SD-card fixture changes.
+General architecture, the implemented Phase 1 single-parameter work, the
+implemented Phase 2 successful-load work, and its narrow active-owner/Bank
+Load-Save correction are documented below. Corrected Phase 2 is complete in
+source and awaits the targeted hardware test matrix. It did not change any
+SD-card fixture, Pattern/Effect format, or copy/paste path.
 
 This plan is based on the current mutation and load paths in:
 
@@ -1736,3 +1737,109 @@ invented, and no file under `SD_CARD/` was changed for this implementation.
 
 Hardware behavior remains to be verified with the definitive fully drained
 `.hcprms1`/`.hcprms2` start pair using the Pass 1 matrix above.
+
+## Phase 2 implementation notes — 2026-08-02
+
+Phase 2 was implemented exactly within the eight source files listed by the
+detailed plan. No code was changed in Menu, SceneData, config, main,
+storageTypes, Instrument parameter tables, Pattern/DSP/MIDI modules, or under
+`SD_CARD/`. No copy/paste command, Pattern persistence, live Effect owner, or
+additional filesystem transaction was introduced.
+
+### Completed single-record Bank-session ownership
+
+- `Autosave` now exposes `autosave_replaceResidentBankSession()`. With mutation
+  tracking enabled it clears the sole canonical mask in place, one byte per
+  short PRIMASK critical section, then marks every Bank field and every final
+  present Scene's complete currently gettable non-Pattern scope. With boot
+  tracking disabled it is a no-op.
+- The replacement uses no second mask and does no SD, display, scheduling, or
+  scalar-setter work. The existing scheduler sees the resulting canonical mask
+  on a later tick.
+- `BankData` now has one filesystem-only staged metadata commit. It normalizes
+  the eight-byte name, 0..999 slot, present mask, active Scene, VOICE edit mask,
+  and active-in-edit-mask invariant together, sets resident-Bank presence, and
+  deliberately emits no individual dirty bits.
+- Both Bank Load metadata branches and Bank Save's post-promotion metadata
+  boundary use that staged API. Existing partial-load presence merge,
+  active-Scene selection, HCNAMES publication, Bank index rebuild, flush, and
+  error flow remain in place.
+- Successful Bank Load and Bank Save callbacks perform exactly one session
+  replacement after provenance/settings publication. Failed callbacks do not
+  replace the canonical mask. This pass intentionally retains the documented
+  pre-existing non-transactional payload/metadata behavior if a later
+  filesystem phase fails.
+
+### Completed successful object-region publication
+
+- Normal Kit Load success first promotes every requested destination Scene to
+  the Bank present mask, then a shared bounded mask walker marks each whole-Kit
+  region. Failure publishes neither the presence promotion nor Kit scope.
+- Root Scene Load success uses the same ordering and marks each complete
+  Scene-without-Pattern region. Pattern and the zero-live Effect owner remain
+  unchanged. Filesystem comments now accurately state that the current loader
+  commits its non-Pattern image before its later Pattern/effect/public-success
+  work.
+- Normal Instrument and reversible `kit` image commits mark the whole
+  Instrument immediately after each retained destination assignment and before
+  the active-Scene-only DSP branch. The scope includes type, Normal, and Morph
+  payload but not the HCNAMES-owned display name.
+- InstrumentMrp marks the whole Morph region only after a successful same-type
+  descriptor copy. KitMrp does the same for every successful same-type slot in
+  every selected resident Scene, independent of active DSP status, and marks
+  the separate generated slot-6/track-7 Morph decay Kit parameter.
+- Save-only Kit, Scene, and Instrument serializers remain unmarked because they
+  do not replace retained parameter storage. Public `.h` contracts now name all
+  commit/dirty boundaries and preserve the future Whole Instrument,
+  same-type Normal, same-type Morph, Kit, Scene-without-Pattern, later
+  Scene-with-Pattern, and future Effect extension points.
+
+### Verification performed
+
+- `make -j4` completed successfully with the existing Cortex-M7 hard-float,
+  LTO, `-Wall`, and `-Wextra` flags. The only compiler warnings were the five
+  pre-existing unused static helpers in `filesystem.c`; linker output retained
+  the existing newlib `_close`, `_lseek`, `_read`, and `_write` warnings.
+- `git diff --check` passed.
+- `arm-none-eabi-nm -S --size-sort build/lxr02.elf` reports exactly one
+  `autosave_dirty_mask` at `0x0f10` bytes (3,856), the one-byte mutation gate,
+  and `fs_autosave_parameter_cache` unchanged at `0x1200` bytes (4,608). No
+  second dirty mask or new persistent object cache was allocated.
+- `arm-none-eabi-size build/lxr02.elf` reports text 367,732 bytes, data 400
+  bytes, and BSS 78,468 bytes for this build.
+- A source search confirms the three filesystem Bank Load/Save metadata commit
+  sequences no longer call the public autosave-notifying Bank setters. The
+  remaining filesystem Bank setter calls are unrelated boot/settings/name
+  scalar paths and retain their Phase 1 behavior.
+
+The Pass 2 hardware matrix above remains outstanding. Begin from a fully
+drained valid pair so each successful region/session publication and each
+failure no-publication case can be distinguished unambiguously.
+
+## Phase 2 narrow ownership correction — 2026-08-02
+
+This section supersedes the earlier Phase 2 Bank-session interpretation while
+preserving that implementation record as history. The canonical mutation mask
+is not discarded when Bank name/slot changes: those fields are ordinary
+CRC-covered payload, and retained mutations continue to coalesce in the same
+single SRAM record.
+
+- Streamed record validity is now exact size, magic/version, final commit, and
+  CRC only. Bank name/slot equality is no longer a validation key.
+- `bank_active_scene_slot` is now the only retained active-Scene owner;
+  SceneData exposes compatibility get/select calls without retaining a second
+  byte.
+- Bank Load retains the current active Scene while playing. While stopped it
+  resolves parsed stored active, retained current active, then lowest final-
+  present Scene. Only successfully loaded Scene regions are ORed dirty after
+  public success.
+- Bank Save's active fallback is file-only `bankset.bcg` scratch. Save leaves
+  live active/presence/VOICE and Scene parameter regions unchanged, then adopts
+  only durable name/slot through normal setters plus existing provenance.
+- The mutation record, writer cache, format geometry, CRC/commit transaction,
+  Pattern/Effect scope, and `SD_CARD/` fixtures were not expanded or changed.
+
+`make -j4` and `git diff --check` pass. The ELF retains exactly one 3,856-byte
+dirty mask, one authoritative active byte, and the unchanged 4,608-byte writer
+transaction cache. Targeted hardware testing of the corrected Bank Load/Save
+behavior remains outstanding.

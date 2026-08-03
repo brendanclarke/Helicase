@@ -70,9 +70,26 @@ _Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
  */
 static volatile uint8_t autosave_dirty_mask[AUTOSAVE_MASK_BYTES];
 static volatile uint8_t autosave_mutation_tracking_enabled;
+/*
+ * Coalesced notification that one or more complete resident Scenes landed.
+ *
+ * Inputs: root Scene Load's Menu selector mirrors its destination LEDs here
+ * before the filesystem request, while each Bank-child commit ORs its resident
+ * destination after copying staged data. Output: the filesystem drain snapshots
+ * these exact two bytes, expands every selected 1,920-byte Scene region into
+ * the canonical mutation mask, publishes that full mask into both CRC-valid
+ * ping-pong records, and acknowledges the bits only after both commits are
+ * durable. Why: the root Scene request must exist before its failing commit
+ * boundary, while a Bank can still publish only children that actually land.
+ * Affiliates: Menu's Scene Load LED selector,
+ * filesystem_commitSceneStage(), and the drain's mask-publication mode.
+ */
+static volatile uint16_t autosave_loaded_scene_pending_mask;
 
 _Static_assert(sizeof(autosave_dirty_mask) == AUTOSAVE_MASK_BYTES,
                "autosave canonical dirty record must match the wire mask");
+_Static_assert(sizeof(autosave_loaded_scene_pending_mask) == 2u,
+               "loaded-Scene register must consume exactly two SRAM bytes");
 
 /*
  * Protect one canonical-mask byte without extending the critical section.
@@ -165,8 +182,8 @@ static uint8_t autosave_u32Byte(uint32_t value, uint8_t byte_index)
  *
  * Inputs: an eight-cell HCNAMES/BankData display field and byte index. Output:
  * embedded printable characters are retained while trailing spaces/NULs and
- * non-printable cells become zero. Affiliates: initial formatting and runtime
- * Bank-identity validation, which must normalize names identically.
+ * non-printable cells become zero. Affiliates: initial record formatting and
+ * the live Bank-name payload getter, which must serialize names identically.
  */
 static uint8_t autosave_nameByte(const char name[AUTOSAVE_NAME_BYTES],
                                  uint8_t byte_index)
@@ -438,8 +455,12 @@ void autosave_streamValidationUpdate(autosave_stream_validation_t *state,
      * Parse one strictly sequential candidate interval.
      *
      * Inputs must begin exactly at bytes_seen and remain within the fixed
-     * record. Output accumulates header/Bank identity and CRC. Discontinuity
-     * fails closed rather than accepting a reordered or partially sought file.
+     * record. Output parses control-header fields and accumulates CRC across
+     * every record byte. Bank name/slot remain payload and are not candidate
+     * keys, so changing either cannot reject an otherwise sound record.
+     * Discontinuity fails closed rather than accepting a reordered or partially
+     * sought file. Affiliates: autosave_recordCrcUpdate() and filesystem's
+     * candidate phase 3.
      */
     if (!state || !src || absolute_offset != state->bytes_seen ||
         absolute_offset > AUTOSAVE_RECORD_BYTES ||
@@ -494,17 +515,6 @@ void autosave_streamValidationUpdate(autosave_stream_validation_t *state,
         default:
             break;
         }
-
-        if (record_offset >= AUTOSAVE_BANK_SLOT_OFFSET &&
-            record_offset < AUTOSAVE_BANK_SLOT_OFFSET + 2u) {
-            state->bank_slot |= (uint16_t)value <<
-                ((record_offset - AUTOSAVE_BANK_SLOT_OFFSET) * 8u);
-        } else if (record_offset >= AUTOSAVE_BANK_NAME_OFFSET &&
-                   record_offset <
-                       AUTOSAVE_BANK_NAME_OFFSET + AUTOSAVE_NAME_BYTES) {
-            state->bank_name[record_offset - AUTOSAVE_BANK_NAME_OFFSET] =
-                (char)value;
-        }
     }
     state->crc32c = autosave_recordCrcUpdate(
         state->crc32c, absolute_offset, src, byte_count);
@@ -526,29 +536,6 @@ uint8_t autosave_streamValidationFinish(
     }
     return (uint8_t)(autosave_recordCrcFinish(state->crc32c) ==
                      state->stored_crc32c);
-}
-
-uint8_t autosave_streamValidationMatchesBank(
-    const autosave_stream_validation_t *state,
-    uint16_t bank_slot,
-    const char bank_name[AUTOSAVE_NAME_BYTES])
-{
-    uint8_t i;
-
-    /*
-     * Bind one validated candidate to the current resident Bank.
-     *
-     * Inputs are the parsed little-endian slot/name and BankData identity.
-     * Output rejects either mismatch before copy-forward. Name normalization is
-     * shared with baseline creation so display-space padding cannot disagree.
-     */
-    if (!state || state->bank_slot != bank_slot)
-        return 0u;
-    for (i = 0u; i < AUTOSAVE_NAME_BYTES; i++) {
-        if ((uint8_t)state->bank_name[i] != autosave_nameByte(bank_name, i))
-            return 0u;
-    }
-    return 1u;
 }
 
 /*
@@ -849,11 +836,143 @@ void autosave_discardDirtyMask(void)
      *
      * Inputs: filesystem lifecycle has disabled tracking and verified that no
      * autosave operation is consuming mask chunks. Output: every pending bit
-     * is discarded in SRAM; SD records remain untouched. Why: stale work from
-     * an intentionally disabled/retired Bank session must not reappear after
-     * re-enable. Affiliates: filesystem's immediate/deferred OFF transition.
+     * and every not-yet-published loaded-Scene notification is discarded in
+     * SRAM; SD records remain untouched. Why: stale work from an intentionally
+     * disabled/retired Bank session must not reappear after re-enable.
+     * Affiliates: filesystem's immediate/deferred OFF transition.
      */
     memset((void *)autosave_dirty_mask, 0, sizeof(autosave_dirty_mask));
+    autosave_loaded_scene_pending_mask = 0u;
+}
+
+void autosave_noteSceneLoaded(uint8_t scene_index)
+{
+    uint32_t primask;
+
+    /*
+     * Arm one complete-Scene publication after resident storage changes.
+     *
+     * Inputs: a valid Bank-child destination whose staged Scene image has
+     * already been copied, plus the normal mutation-tracking lifecycle gate.
+     * Output: its bit is atomically ORed into the sole two-byte loaded-Scene
+     * register; no mask byte and no file is touched here. Why: Bank Load lands
+     * children one at a time and must retain every successful child even if a
+     * later child fails. OR coalesces those commits without cancellation. Root
+     * Scene Load instead mirrors its complete LED-selected destination mask
+     * before starting the filesystem request. Affiliates:
+     * filesystem_commitSceneStage(), autosave_setSceneLoadSelectionMask(), and
+     * autosave_loadedScenePendingMask().
+     */
+    if (scene_index >= AUTOSAVE_SCENE_COUNT ||
+        !autosave_mutation_tracking_enabled) {
+        return;
+    }
+    primask = autosave_irqSave();
+    autosave_loaded_scene_pending_mask = (uint16_t)(
+        autosave_loaded_scene_pending_mask |
+        (uint16_t)(1u << scene_index));
+    autosave_irqRestore(primask);
+}
+
+void autosave_setSceneLoadSelectionMask(uint16_t scene_mask)
+{
+    uint32_t primask;
+
+    /*
+     * Mirror the root Scene Load destination LEDs into the aggregate register.
+     *
+     * Inputs: Menu's complete 16-bit Scene selection after entry or one SEQ
+     * toggle, plus the normal mutation-tracking lifecycle gate. Output: the
+     * sole two-byte register atomically becomes exactly that mask; this call
+     * performs no canonical-mask expansion and no file I/O. Why: the pending
+     * request is observable while the user edits destination LEDs, and
+     * toggling a destination off removes it before Load is accepted. A
+     * successful Preset completion replaces the register once more with the
+     * immutable accepted mask after the resident copy; Menu command cleanup
+     * deliberately does not publish its reset default. This second publication
+     * also closes the case where a writer already active on Menu entry consumed
+     * the provisional selection. Affiliates: menu's Scene selector,
+     * on_scene_load_complete(), and the drain's phase-zero snapshot.
+     */
+    if (!autosave_mutation_tracking_enabled)
+        return;
+    primask = autosave_irqSave();
+    autosave_loaded_scene_pending_mask = scene_mask;
+    autosave_irqRestore(primask);
+}
+
+uint16_t autosave_loadedScenePendingMask(void)
+{
+    uint16_t pending;
+    uint32_t primask;
+
+    /*
+     * Snapshot the coalesced Scene-load register without consuming it.
+     *
+     * Input: the two-byte producer record. Output: one stable 16-bit mask for
+     * a drain transaction. Why: the same Scene bits must remain armed until
+     * both ping-pong records contain their complete Scene mutation regions;
+     * request observation alone is not acknowledgement. Affiliates: drain
+     * initialization and autosave_acknowledgeLoadedScenes().
+     */
+    primask = autosave_irqSave();
+    pending = autosave_loaded_scene_pending_mask;
+    autosave_irqRestore(primask);
+    return pending;
+}
+
+void autosave_markLoadedSceneRegionsDirty(uint16_t scene_mask)
+{
+    uint8_t scene_index;
+
+    /*
+     * Expand aggregate Scene-load requests into the complete wire regions.
+     *
+     * Inputs: a snapshot of the two-byte loaded-Scene register. Output: all
+     * 1,920 payload bits for every selected Scene are atomically ORed into the
+     * canonical 3,856-byte mask, including currently reserved/name cells. Why:
+     * a whole Scene load replaces the complete non-Pattern Scene record; the
+     * existing live getter will capture implemented parameters and close bits
+     * that still have no SRAM owner. The aligned 128-byte Bank and 1,920-byte
+     * Scene sizes make each region exactly 240 complete mask bytes. Affiliates:
+     * drain phase zero, live-byte classification, and file-mask publication.
+     */
+    for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
+         scene_index++) {
+        uint16_t mask_byte;
+        uint16_t end_byte;
+
+        if ((scene_mask & (uint16_t)(1u << scene_index)) == 0u)
+            continue;
+        mask_byte = (uint16_t)((AUTOSAVE_BANK_SECTION_BYTES +
+            ((uint16_t)scene_index * AUTOSAVE_SCENE_SECTION_BYTES)) >> 3u);
+        end_byte = (uint16_t)(mask_byte +
+            (AUTOSAVE_SCENE_SECTION_BYTES >> 3u));
+        while (mask_byte < end_byte) {
+            autosave_maskByteOr(mask_byte, 0xffu);
+            mask_byte++;
+        }
+    }
+}
+
+void autosave_acknowledgeLoadedScenes(uint16_t scene_mask)
+{
+    uint32_t primask;
+
+    /*
+     * Clear only the Scene requests durably published by one drain.
+     *
+     * Inputs: the operation-local snapshot whose complete regions now exist in
+     * both valid ping-pong files. Output: those bits are atomically removed;
+     * unrelated loads that arrived before this boundary remain armed. Why:
+     * acknowledgement before the second CRC/commit would allow power loss to
+     * erase the only aggregate request. Affiliates: the drain's second
+     * mask-publication sync and the scheduler's pending-work test.
+     */
+    primask = autosave_irqSave();
+    autosave_loaded_scene_pending_mask = (uint16_t)(
+        autosave_loaded_scene_pending_mask & (uint16_t)~scene_mask);
+    autosave_irqRestore(primask);
 }
 
 void autosave_markBankFieldDirty(autosave_bank_field_t field)
@@ -981,6 +1100,43 @@ static const instrument_registry_entry_t *autosave_instrumentMarkerBase(
         AUTOSAVE_KIT_INSTRUMENTS_OFFSET +
         ((uint16_t)slot * AUTOSAVE_INSTRUMENT_RECORD_BYTES));
     return entry;
+}
+
+void autosave_markInstrumentTypeDirty(uint8_t scene_index, uint8_t slot)
+{
+    uint16_t scene_base;
+    uint16_t instrument_base;
+    const kit_instrument_slot_t *instrument;
+    uint8_t type_byte;
+
+    /*
+     * Mark the three-byte type token at the Instrument type owner boundary.
+     *
+     * Inputs: a present resident Scene/slot whose new type has already been
+     * stored and resolves in InstrumentManager. Output: exactly the three
+     * lowercase extension bytes become dirty. Why: type changes are scalar
+     * semantic changes that determine how every descriptor index is decoded;
+     * load/copy committers must not invoke a whole-Instrument marker merely to
+     * publish this field. Affiliates: preset_storeInstrumentImage(), the type
+     * branch in autosave_getLivePayloadByte(), and the normal/Morph cell
+     * markers below. The HCNAMES-owned display name is not part of this owner.
+     */
+    if (slot >= AUTOSAVE_INSTRUMENTS_PER_KIT ||
+        !autosave_scenePayloadBase(scene_index, &scene_base)) {
+        return;
+    }
+    instrument = scene_instrumentSlotConst(scene_index, slot);
+    if (!instrument || !instrumentManager_registryEntry(instrument->type))
+        return;
+    instrument_base = (uint16_t)(
+        scene_base + AUTOSAVE_KIT_OFFSET +
+        AUTOSAVE_KIT_INSTRUMENTS_OFFSET +
+        ((uint16_t)slot * AUTOSAVE_INSTRUMENT_RECORD_BYTES));
+    for (type_byte = 0u; type_byte < AUTOSAVE_INSTRUMENT_TYPE_BYTES;
+         type_byte++) {
+        autosave_markPayloadOffsetDirty((uint16_t)(instrument_base +
+                                                   type_byte));
+    }
 }
 
 void autosave_markInstrumentNormalParameterDirty(uint8_t scene_index,
@@ -1119,12 +1275,14 @@ void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot)
     uint8_t type_byte;
 
     /*
-     * Mark a future whole-Instrument replacement after its resident commit.
+     * Mark one whole-Instrument replacement after its resident commit.
      *
      * Inputs: destination Scene/slot. Output: three type-token bytes plus every
      * live normal and Morphable endpoint are dirty; the HCNAMES-owned name is
-     * deliberately excluded. Why: type is required to interpret endpoints.
-     * Affiliates: future Instrument copy/load commit and endpoint markers.
+     * deliberately excluded. Why: type is required to interpret endpoints,
+     * and an aggregate normal Instrument Load must represent equal incoming
+     * cells as well as changed ones. Affiliates: Preset's normal Instrument
+     * apply, future Instrument copy commit, and endpoint markers.
      */
     entry = autosave_instrumentMarkerBase(scene_index, slot, 0u,
                                            &instrument_base);
@@ -1145,12 +1303,13 @@ void autosave_markKitDirty(uint8_t scene_index)
     uint8_t slot;
 
     /*
-     * Mark the implemented payload of one future whole-Kit commit.
+     * Mark the implemented payload of one whole-Kit commit.
      *
      * Input: destination Scene. Output: all live Kit settings and six complete
      * Instrument data regions are dirty; HCNAMES-owned Kit/Instrument names
-     * remain excluded. Why: compound copy/load code needs one post-commit hook.
-     * Affiliates: future Kit copy and Phase 2 successful-load marking.
+     * remain excluded. Why: normal Kit Load and future compound copy code need
+     * one post-commit hook that also covers equal incoming values. Affiliates:
+     * preset_storeKitImage(), future Kit copy, and successful-load marking.
      */
     for (parameter_index = 0u; parameter_index < AUTOSAVE_KIT_PARAM_COUNT;
          parameter_index++) {
@@ -1188,8 +1347,8 @@ void autosave_markSceneWithoutPatternDirty(uint8_t scene_index)
      *
      * Input: destination Scene. Output: all Scene settings, Effect scope, and
      * Kit scope become dirty; Scene name and Pattern are excluded. Why: this is
-     * the requested first copy/paste Scene boundary. Affiliates: future Scene
-     * copy, Phase 2 load commits, Effect stub, and Kit marker.
+     * the requested first copy/paste Scene boundary. Affiliates: future
+     * explicit Scene copy, Effect stub, and Kit marker.
      */
     for (parameter_index = 0u; parameter_index < AUTOSAVE_SCENE_PARAM_COUNT;
          parameter_index++) {
@@ -1213,9 +1372,29 @@ void autosave_markSceneWithPatternDirty(uint8_t scene_index)
     /* TODO: mark Pattern only after Pattern persistence has a defined owner. */
 }
 
-void autosave_markResidentBankDirty(void)
+void autosave_markBankDataDirty(void)
 {
     uint8_t field;
+
+    /*
+     * Mark one complete currently implemented BankData image.
+     *
+     * Inputs: the five live BankData field groups after a successful aggregate
+     * Bank metadata commit. Output: slot, display name, Scene-present mask,
+     * authoritative active Scene, and VOICE edit mask are all dirty even when
+     * an incoming byte equals its prior resident value; padding remains
+     * nonexistent and will not be manufactured. Why: a Bank Load is one object
+     * replacement boundary, whereas the ordinary BankData setters intentionally
+     * suppress equal-value scalar edits. Affiliates:
+     * filesystem_storeLoadedBankMetadata(), autosave_markBankFieldDirty(), and
+     * autosave_markResidentBankDirty().
+     */
+    for (field = 0u; field < AUTOSAVE_BANK_FIELD_COUNT; field++)
+        autosave_markBankFieldDirty((autosave_bank_field_t)field);
+}
+
+void autosave_markResidentBankDirty(void)
+{
     uint8_t scene_index;
     uint16_t present_mask = bank_scenePresentMask();
 
@@ -1229,8 +1408,7 @@ void autosave_markResidentBankDirty(void)
      * an explicit convergence boundary. Affiliates: BankData, the existing
      * whole-Scene marker, and filesystem runtime ensure completion.
      */
-    for (field = 0u; field < AUTOSAVE_BANK_FIELD_COUNT; field++)
-        autosave_markBankFieldDirty((autosave_bank_field_t)field);
+    autosave_markBankDataDirty();
     for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
          scene_index++) {
         if ((present_mask & (uint16_t)(1u << scene_index)) != 0u)

@@ -279,17 +279,18 @@ uint32_t autosave_initialRecordCrc(
 /*
  * Caller-owned state for validating one sequential record stream.
  *
- * It retains only parsed header/Bank identity and a CRC accumulator. The
- * filesystem writer places it in its operation stage, so validating either
- * 34,768-byte candidate never requires a record-sized SRAM image.
+ * It retains only parsed control-header fields and a CRC accumulator. Inputs
+ * are the sequential A/B record chunks; output is bounded integrity and
+ * generation state, still far smaller than a 34,768-byte record. Bank payload
+ * equality is deliberately absent from validity: name and slot are ordinary
+ * CRC-covered data. Affiliates: the three streamed validator calls and the
+ * filesystem writer's operation-stage validator.
  */
 typedef struct {
     uint32_t crc32c;
     uint32_t stored_crc32c;
     uint32_t generation;
     uint32_t bytes_seen;
-    char bank_name[AUTOSAVE_NAME_BYTES];
-    uint16_t bank_slot;
     uint8_t probe_counter;
     uint8_t header_valid;
 } autosave_stream_validation_t;
@@ -297,10 +298,11 @@ typedef struct {
 /*
  * Begin/update/finish a contiguous record validation stream.
  *
- * update() accepts one bounded sequential chunk, parses intersecting control
- * and Bank identity cells, and updates CRC32C with stored CRC bytes 12..15
- * treated as zero. finish() accepts only one exact-size, magic/version/commit
- * valid record with a matching checksum. No helper owns I/O or persistent RAM.
+ * update() accepts one bounded sequential chunk, parses intersecting control-
+ * header cells, and includes every payload byte (including Bank fields) in
+ * CRC32C with stored CRC bytes 12..15 treated as zero. finish() accepts only
+ * one exact-size, magic/version/commit-valid record with a matching checksum.
+ * No helper owns I/O or persistent RAM.
  */
 void autosave_streamValidationBegin(autosave_stream_validation_t *state);
 void autosave_streamValidationUpdate(autosave_stream_validation_t *state,
@@ -311,25 +313,12 @@ uint8_t autosave_streamValidationFinish(
     const autosave_stream_validation_t *state);
 
 /*
- * Match a finished record to the current resident Bank identity.
- *
- * Inputs: parsed record, live restore slot, and BankData's display name.
- * Output: nonzero only when both the little-endian slot and normalized
- * zero-padded name match. Affiliates: background winner selection and initial
- * creation's identical normalization.
- */
-uint8_t autosave_streamValidationMatchesBank(
-    const autosave_stream_validation_t *state,
-    uint16_t bank_slot,
-    const char bank_name[AUTOSAVE_NAME_BYTES]);
-
-/*
  * Read one logical live payload byte by its wire offset.
  *
  * Input is payload-relative 0..30,847 plus caller-owned output storage.
  * Output 1 supplies an existing Bank/Scene/Kit/Instrument byte; output 0 means
  * the cell has no live parameter owner in this milestone and its dirty bit may
- * be closed without a get. Bank identity includes the restore slot and
+ * be closed without a get. Bank payload includes the restore slot and
  * normalized BankData display name, so an already-dirty Bank-name cell samples
  * the current in-system name without borrowing HCNAMES. The helper never reads
  * HCNAMES, Pattern, Effects, or derived Morph interpolation and performs no I/O
@@ -355,11 +344,12 @@ void autosave_setMutationTrackingEnabled(uint8_t enabled);
  * Discard pending SRAM work only at a safe autosave transaction boundary.
  *
  * Input: mutation tracking already disabled and no transform consuming the
- * canonical mask. Output: all 3,856 bytes become clean; neither hidden file is
- * opened or changed. Why: OFF/new-session transitions must not carry stale
- * owner bits into a later enable, but clearing beneath an active CRC/copy is
- * forbidden. Affiliates: filesystem_setAutosaveEnabled() and its deferred
- * active-transaction completion path.
+ * canonical mask. Output: all 3,856 mask bytes and the two-byte loaded-Scene
+ * notification become clean; neither hidden file is opened or changed. Why:
+ * OFF/new-session transitions must not carry stale scalar or aggregate work
+ * into a later enable, but clearing beneath an active CRC/copy is forbidden.
+ * Affiliates: filesystem_setAutosaveEnabled() and its deferred active-
+ * transaction completion path.
  */
 void autosave_discardDirtyMask(void);
 void autosave_maskMergeChunk(uint16_t mask_byte_offset,
@@ -367,6 +357,30 @@ void autosave_maskMergeChunk(uint16_t mask_byte_offset,
                              uint16_t byte_count);
 uint8_t autosave_maskHasDirty(void);
 uint8_t autosave_maskBitTake(uint16_t payload_offset);
+
+/*
+ * Publish one complete Scene-load event through a two-byte coalescing register.
+ *
+ * setSceneLoadSelectionMask() accepts Menu's complete root Scene destination
+ * selection on entry and after every LED toggle, then Preset reaffirms the
+ * immutable accepted mask after successful resident commit. Terminal Menu UI
+ * reset does not replace that committed value. noteSceneLoaded() ORs a
+ * successfully committed Bank child into the same register. PendingMask
+ * snapshots without clearing;
+ * MarkRegions expands a snapshot into every bit of each selected 1,920-byte
+ * Scene wire region; Acknowledge clears only the snapshot after both CRC-valid
+ * ping-pong records have received that full mask. Why: root Scene selection
+ * must remain armed across the asynchronous load and UI-reset boundaries,
+ * while Bank traversal must retain only children that land. None of these APIs
+ * performs file I/O. Affiliates: Menu's Scene Load LED selector, Preset's root
+ * Scene completion, filesystem Bank-child commit, and the drain's two-record
+ * mask-publication mode.
+ */
+void autosave_noteSceneLoaded(uint8_t scene_index);
+void autosave_setSceneLoadSelectionMask(uint16_t scene_mask);
+uint16_t autosave_loadedScenePendingMask(void);
+void autosave_markLoadedSceneRegionsDirty(uint16_t scene_mask);
+void autosave_acknowledgeLoadedScenes(uint16_t scene_mask);
 
 /*
  * Mark one logical retained parameter dirty without exposing wire arithmetic.
@@ -384,6 +398,17 @@ void autosave_markSceneParameterDirty(uint8_t scene_index,
                                       uint8_t parameter_index);
 void autosave_markKitParameterDirty(uint8_t scene_index,
                                     uint8_t parameter_index);
+/*
+ * Mark one retained Instrument type field after its owner changes.
+ *
+ * Inputs: present Scene/slot with a valid newly stored Instrument type.
+ * Output: the exact three type-token bytes become dirty; endpoint and name
+ * cells are untouched. Why: final aggregate commits need an individual type
+ * boundary matching the existing descriptor-cell boundaries instead of a
+ * load-only whole-Instrument marker. Affiliates: Preset's generic Instrument
+ * image store and Autosave's registry-backed type getter.
+ */
+void autosave_markInstrumentTypeDirty(uint8_t scene_index, uint8_t slot);
 void autosave_markInstrumentNormalParameterDirty(uint8_t scene_index,
                                                   uint8_t slot,
                                                   uint8_t descriptor_index);
@@ -394,16 +419,18 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
                                        uint16_t parameter_index);
 
 /*
- * Preserve named dirty scopes for future validated copy/paste and Phase 2
- * whole-object commits; these functions mark data but never copy it.
+ * Preserve named dirty scopes for validated whole-object loads and future
+ * copy/paste commits; these functions mark data but never copy it.
  *
- * Inputs: destination Scene/slot after a successful future commit. Outputs:
- * currently gettable cells in that scope become dirty. Whole Instrument adds
+ * Inputs: destination Scene/slot after a successful commit. Outputs: currently
+ * gettable cells in that scope become dirty. Normal Instrument and Kit Loads
+ * use their matching complete scopes after resident commit. Whole Instrument adds
  * type plus normal/Morph endpoints but not its HCNAMES-owned name; endpoint-
  * only copies require matching types before calling their marker. Kit includes
  * all six Instruments; Scene includes settings, the Effect stub, and Kit.
  * SceneWithPattern is intentionally only the non-Pattern alias until Pattern
- * persistence exists. Affiliates: future copy/paste and load-region hooks.
+ * persistence exists. Affiliates: Preset's normal Kit/Instrument load commit,
+ * future copy/paste, and load-region hooks.
  */
 void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot);
 void autosave_markInstrumentNormalDirty(uint8_t scene_index, uint8_t slot);
@@ -413,11 +440,23 @@ void autosave_markEffectDirty(uint8_t scene_index);
 void autosave_markSceneWithoutPatternDirty(uint8_t scene_index);
 void autosave_markSceneWithPatternDirty(uint8_t scene_index);
 /*
+ * Mark one complete live BankData object without marking any Scene payload.
+ *
+ * Input: BankData after an aggregate Bank Load metadata commit. Output: every
+ * gettable Bank field is dirty even when its value compared equal; reserved
+ * padding remains unmarked. Why: normal setters retain efficient change-aware
+ * scalar behavior, while Bank Load needs one explicit complete-object boundary
+ * alongside its separately committed Scene-child notifications. Affiliates:
+ * filesystem_storeLoadedBankMetadata() and autosave_markResidentBankDirty().
+ */
+void autosave_markBankDataDirty(void);
+/*
  * Mark the complete currently gettable resident Bank parameter image.
  *
  * Inputs: BankData fields and its present-Scene mask after tracking has been
- * enabled. Output: all live Bank fields plus every present Scene's implemented
- * non-Pattern scope become dirty in the one canonical mask. Why: runtime
+ * enabled. Output: autosave_markBankDataDirty() marks all live Bank fields,
+ * then every present Scene's implemented non-Pattern scope becomes dirty in
+ * the one canonical mask. Why: runtime
  * AutoSave re-enable must capture changes made while tracking was OFF rather
  * than waiting only for later scalar edits. Names remain owned by the existing
  * HCNAMES/baseline identity path. Affiliates: filesystem runtime setup and the

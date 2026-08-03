@@ -1,9 +1,9 @@
 #include "SceneData.h"
 #include "Autosave.h"
+#include "BankData.h"
 #include <string.h>
 
 scene_t scenes[SCENE_COUNT];
-static uint8_t scene_active_index;
 
 /*
  * Exact resident Scene-source allocation approved for settings provenance.
@@ -200,27 +200,31 @@ const scene_t *scene_getConst(uint8_t scene_index)
 uint8_t scene_getActiveIndex(void)
 {
     /*
-     * Return the active Scene index.
+     * Expose BankData's authoritative active index through the stable Scene API.
      *
-     * Inputs: none. Output: current active resident Scene index. This remains
-     * an accessor rather than a public global so Phase 3/4 Bank work can change
-     * scene selection/apply policy behind one boundary.
+     * Input: BankData's sole retained owner. Output: current bounded active
+     * resident Scene index. Why: existing DSP, Menu, MIDI, Pattern, and Preset
+     * callers keep their established accessor without SceneData retaining a
+     * second byte. Affiliate: bank_activeSceneSlot().
      */
-    return scene_active_index;
+    return bank_activeSceneSlot();
 }
 
 uint8_t scene_selectActive(uint8_t scene_index)
 {
     /*
-     * Selection changes identity, never data.
+     * Bounds-check and delegate ordinary selection to the sole owner.
      *
-     * Input is a resident Scene index; output reports acceptance. DSP apply is
-     * deliberately owned by Preset so selecting a record cannot unexpectedly
-     * perform a large foreground update.
+     * Input: resident Scene index. Output: acceptance plus BankData's existing
+     * change-aware active/VOICE notifications. Why: selection must update one
+     * active byte and preserve the active-in-VOICE-mask invariant. DSP apply
+     * remains owned by Preset, so this call performs no foreground sound
+     * update. Affiliates: PERF selection and
+     * bank_selectActiveSceneForEditMask().
      */
     if (!scene_indexValid(scene_index))
         return 0u;
-    scene_active_index = scene_index;
+    bank_selectActiveSceneForEditMask(scene_index);
     return 1u;
 }
 
@@ -637,6 +641,30 @@ uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index)
                  : 0u;
 }
 
+void scene_storeKitSettingsImage(uint8_t scene_index,
+                                 const kit_settings_t *source)
+{
+    /*
+     * Install the complete live Kit-settings image through scalar ownership.
+     *
+     * Inputs: a validated staged Kit-settings record and resident Scene.
+     * Output: the two currently serialized generated-decay bytes use their
+     * normal change-aware setters and exact Kit mutation bits. Why: Kit, Scene,
+     * and Bank loads all share this boundary, eliminating direct Kit-setting
+     * assignment and load-specific whole-Kit publication. A future Kit scalar
+     * must be added here when its owner setter and Autosave index are added.
+     * Affiliates: preset_storeKitImage(), the Kit live getter, and the two
+     * generated-decay setters above. Instrument slots are committed separately
+     * by Preset because descriptor/type ownership lives there.
+     */
+    if (!scene_get(scene_index) || !source)
+        return;
+    scene_setSlot6Track7AmpEnvelopeDecay(
+        scene_index, source->slot6_track7_amp_envelope_decay);
+    scene_setSlot6Track7MorphAmpEnvelopeDecay(
+        scene_index, source->slot6_track7_morph_amp_envelope_decay);
+}
+
 void scene_initAll(void)
 {
     uint8_t scene_index;
@@ -651,11 +679,12 @@ void scene_initAll(void)
      *
      * Processing clears stale bytes, establishes safe Scene settings, and
      * resets all six slots through descriptors, then asks PatternData to apply
-     * its step/track defaults inside the same Scene record.
+     * its step/track defaults inside the same Scene record. It initializes
+     * payload and provenance only; adjacent later bank_init() establishes the
+     * sole active identity after these Scene owners exist.
      */
     memset(scenes, 0, sizeof(scenes));
     scene_resetSources();
-    scene_active_index = 0u;
     for (scene_index = 0u; scene_index < SCENE_COUNT; scene_index++) {
         scenes[scene_index].settings.voice_decimation_all = 127u;
         for (track = 0u; track < NUM_TRACKS; track++)

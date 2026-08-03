@@ -428,10 +428,13 @@ int main(void)
      * because DRM is enum value zero: initializing runtime first would mistake
      * raw BSS for six valid Drum assignments and let a loaded Snare/Cymbal/Hat
      * descriptor write through the wrong tagged member until a later switch.
-     * Bank init remains adjacent because boot may load a Bank, an empty Bank,
-     * a root Scene fallback, or a root Kit fallback from this defined state.
-     * Affiliates: SceneData's default-type construction, BankData container
-     * identity, InstrumentManager tagged slots, and Preset's post-load apply.
+     * scene_initAll() constructs payload/type/provenance only; adjacent
+     * bank_init() then initializes Bank metadata and the sole active-Scene
+     * identity. The executable order is unchanged because tagged DSP setup
+     * still requires Scene payload first. Boot may then load a Bank, an empty
+     * Bank, a root Scene fallback, or a root Kit fallback from this defined
+     * state. Affiliates: SceneData's compatibility getter, BankData authority,
+     * InstrumentManager tagged slots, and Preset's post-load apply.
      */
     scene_initAll();
     bank_init();
