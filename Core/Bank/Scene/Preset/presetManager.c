@@ -270,7 +270,7 @@ static void on_kit_load_complete(void)
 	 * once per destination by preset_storeKitImage() at the earlier resident
 	 * commit boundary; this callback must not duplicate it or depend on later UI
 	 * cleanup. Affiliates: filesystem_loadKitDirectory_tick(),
-	 * preset_storeKitImage(), and autosave_markKitDirty().
+	 * preset_storeKitImage(), and autosave_noteKitLoaded().
 	 */
 	preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
 }
@@ -1539,17 +1539,18 @@ uint8_t preset_storeKitImage(uint8_t scene_index, const kit_t *source)
      * Instrument images pass through the generic type/descriptor transfer
      * above. Why: root Kit Load retains exact parameter ownership for changed
      * cells, then adds one aggregate marker so equal incoming cells are also
-     * represented. Whole Scene/Bank-child replacement no longer
+     * represented after Load/Save exits. Whole Scene/Bank-child replacement no longer
      * calls this helper; it copies the aggregate and uses Autosave's two-byte
      * loaded-Scene register before root Scene request or after Bank-child
      * commit. Future Kit scalars and Instrument descriptors join their
      * respective owner transfer here. After all six transfers succeed, one
-     * complete-Kit marker re-dirties the same canonical mask so equal incoming
-     * values are still represented as part of this load object. The marker is
-     * deliberately outside the slot loop: one Kit Load produces one aggregate
-     * event per destination, not six Instrument-load events. Affiliates:
+     * complete-Kit notification queues the destination so equal incoming
+     * values are represented without sampling resident data inside Load/Save.
+     * The notification is deliberately outside the slot loop: one Kit Load
+     * produces one aggregate event per destination, not six Instrument-load
+     * events. Affiliates:
      * scene_storeKitSettingsImage(), preset_storeInstrumentImage(), and the
-     * root Kit final staged commit, and autosave_markKitDirty().
+     * root Kit final staged commit, and autosave_noteKitLoaded().
      */
     if (!scene_get(scene_index) || !source)
         return 0u;
@@ -1560,7 +1561,7 @@ uint8_t preset_storeKitImage(uint8_t scene_index, const kit_t *source)
             return 0u;
         }
     }
-    autosave_markKitDirty(scene_index);
+    autosave_noteKitLoaded(scene_index);
     return 1u;
 }
 
@@ -1790,16 +1791,16 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
          *
          * Inputs: validated staged slot and one selected destination. Outputs:
          * changed type/normal/Morph cells use the generic parameter boundary,
-         * then one complete-Instrument marker publishes the accepted Load
+         * then one complete-Instrument notification queues the accepted Load
          * object before any active-Scene-only DSP branch. Why: inactive
          * destinations require persistence too, and equal incoming descriptor
          * values still belong to the loaded Instrument transaction. The
          * filesystem-owned display name remains outside this SRAM image.
-         * Affiliates: filesystem staging, reversible `kit` restore,
-         * preset_storeInstrumentImage(), and autosave_markWholeInstrumentDirty().
+         * Affiliates: filesystem staging, the explicit temporary `kit` restore,
+         * preset_storeInstrumentImage(), and autosave_noteInstrumentLoaded().
          */
         if (preset_storeInstrumentImage(target_scene_index, slot, staged)) {
-            autosave_markWholeInstrumentDirty(target_scene_index, slot);
+            autosave_noteInstrumentLoaded(target_scene_index, slot);
             if (target_scene_index == scene_getActiveIndex())
                 active_scene_touched = 1u;
         }

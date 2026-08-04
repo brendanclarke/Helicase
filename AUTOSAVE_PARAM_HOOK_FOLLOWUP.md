@@ -1096,8 +1096,8 @@ selection code performs no SD interaction.
 
 ### Verification results
 
-- `make -j4` completed successfully with only the existing unused filesystem
-  helper and bare-metal newlib syscall warnings.
+- `make -j4` and `make img` completed successfully with only the existing
+  unused filesystem helper and bare-metal newlib syscall warnings.
 - `make img` produced `build/LXRV2_lxr02.img` at 369,996 bytes.
 - `git diff --check` passed.
 - Linked BSS remains 78,468 bytes; no second selection or mutation mask was
@@ -1287,3 +1287,77 @@ leave Load/Save and interrupt after the normal five-second debounce.
   the canonical mask 3,856 bytes, the parameter cache 4,608 bytes, and the
   filesystem stage workspace 2,048 bytes. The new behavior adds no SRAM owner,
   queue, or second mutation mask.
+
+## Load/Save exclusion and compact complete-load records — 2026-08-04
+
+Hardware output from the first normal-Instrument test exposed an ownership
+error in the scheduling boundary: preventing a *new* autosave start while the
+Load/Save page was visible did not itself guarantee that the page opened only
+after an already-active autosave transaction had released the filesystem. The
+returned records advanced from generations 0/1 to 32/33 and contained the old
+resident Instrument values, demonstrating that the old backlog transaction was
+still the file publisher during the user session.
+
+The targeted correction does not abort AsyncFATFS, add another mutation mask,
+change the record format, or alter the parameter getter:
+
+- `filesystem.c/.h` now expose one narrow Load/Save suspension setter and one
+  autosave-transaction ownership query. Menu arms suspension on the initial
+  Load/Save gesture. This prevents setup, validation, ordinary debounce, and
+  continuation starts until final page exit.
+- An already-active writer is allowed to reach its existing close/final-flush
+  callback while Menu remains on the prior page. It is not frozen beneath open
+  file handles, which would permanently retain the sole filesystem facade and
+  prevent Load/Save from opening.
+- `menu.c` retains one byte only when this safe-entry wait is necessary.
+  `menu_serviceRuntimeWidgets()` observes the transaction release and invokes
+  the ordinary Load-page entry exactly once. Thus no autosave state-machine
+  tick occurs while `menu_activePage` is Load or Save, and every existing cache,
+  LED, selection, and repaint path remains the normal page-entry path.
+- Final Load/Save exit clears suspension. Load/Save-to-Save toggling retains it.
+  A different page gesture while entry is pending cancels the pending entry and
+  clears suspension.
+
+Complete-object load ownership now uses the explicitly approved compact SRAM
+records in `Autosave.c`:
+
+- one byte flags final BankData replacement;
+- two bytes coalesce the exact destination Scenes of complete Kit loads;
+- six bytes retain one `Scene + 1` coordinate for each Instrument slot.
+
+The six Instrument bytes cover all 96 Scene/slot coordinates without pretending
+that six bytes are a 96-bit bitset. If the same slot is loaded into another
+Scene before drain, its displaced coordinate is first marked in the canonical
+mask and the newest coordinate remains in that slot byte. Since autosave is
+suspended for the complete Load/Save session, none of those bits can be
+classified before entry exits.
+
+`presetManager.c` and the final Bank metadata commit now queue these complete
+load events instead of directly invoking their whole-object dirty markers.
+Changed individual cells still pass through their existing parameter-boundary
+hooks. On the first post-menu autosave operation, `filesystem.c` atomically
+snapshots the Bank/Kit/Instrument records beside the existing Scene record,
+expands all snapshots through the existing typed whole-object markers, and
+performs the same two mask-only ping-pong commits before taking any bit. Only
+after both CRC-valid records carry the complete dirty scopes are the matching
+compact notifications acknowledged and normal bounded parameter capture begun.
+Errors retain the notifications and the existing captured-offset rollback.
+
+No `.hcprms` fixture, format offset, debounce, 1,536-get cap, CRC/commit order,
+source tracking, Morph-only load behavior, or Save behavior was changed.
+
+### Verification results
+
+- `make -j4` completed successfully with only the existing unused filesystem
+  helper and bare-metal newlib syscall warnings.
+- `git diff --check` passed.
+- Linked symbols confirm exactly 1 byte for the Bank notification, 2 bytes for
+  the Kit mask, 6 bytes for the Instrument records, and 1 byte for deferred
+  Menu entry. The canonical mask remains 3,856 bytes, the parameter cache
+  remains 4,608 bytes, and the filesystem stage workspace remains 2,048 bytes.
+- The linked image reports 78,492 bytes of BSS. The packaged firmware image is
+  371,348 bytes.
+- Hardware verification remains outstanding. The next normal-Instrument test
+  should enter Load/Save, change the five intended Scene-15 slots, exit to Voice,
+  wait for the five-second debounce plus drain, and compare the newest valid
+  payload against the five selected Instrument sources.

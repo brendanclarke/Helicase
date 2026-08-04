@@ -600,10 +600,16 @@ typedef struct {
     uint16_t payload_scan_offset;
     uint16_t patch_count;
     uint16_t patch_cursor;
-    /* Snapshot of the sole two-byte loaded-Scene register for this operation.
-     * It lives inside the already allocated 2 KB stage union, so the approved
-     * persistent SRAM increase remains exactly two bytes in Autosave.c. */
+    /* Snapshot of the two-byte loaded-Scene register for this operation. It
+     * lives beside the other compact Load snapshots inside the already
+     * allocated 2 KB stage union, so no second mutation mask is retained. */
     uint16_t loaded_scene_mask;
+    /* Complete Bank/Kit/Instrument Load notifications are snapshotted beside
+     * the Scene register so one pair of mask-only commits publishes every
+     * object accepted during the same Load/Save session. */
+    uint16_t loaded_kit_scene_mask;
+    uint8_t loaded_instrument_scene[AUTOSAVE_INSTRUMENTS_PER_KIT];
+    uint8_t loaded_bank;
     uint8_t winner_index;
     uint8_t winner_probe;
     uint8_t candidate_index;
@@ -613,8 +619,8 @@ typedef struct {
     uint8_t recovery_target_index;
     uint8_t recovery_using_names;
     /* Zero is ordinary drain; one/two identify the two mask-only A/B commits
-     * that must precede classification of a loaded Scene. */
-    uint8_t scene_mask_publish_pass;
+     * that must precede classification of any complete loaded object. */
+    uint8_t load_mask_publish_pass;
 } filesystem_autosave_writer_state_t;
 
 /*
@@ -925,13 +931,14 @@ static void filesystem_storeLoadedBankMetadata(
      * presence, active Scene, and VOICE edit mask. Outputs: each serialized
      * field first passes through its existing normalized/change-aware BankData
      * setter; the nonserialized resident flag is set next; one BankData-only
-     * aggregate marker then publishes every live field even when a loaded value
+     * notification then queues every live field even when a loaded value
      * compared equal. Why: scalar edits should remain change-aware, but Bank
-     * Load replaces one complete BankData object. Scene children are separate
+     * Load replaces one complete BankData object and autosave sampling is
+     * deferred until Load/Save exits. Scene children are separate
      * retained objects and continue through autosave_noteSceneLoaded() only
      * after each child lands. The values are final at both call sites, so no
      * provisional state is exposed. Affiliates: Bank Load phases 17/20,
-     * BankData's five payload setters, autosave_markBankDataDirty(), and
+     * BankData's five payload setters, autosave_noteBankLoaded(), and
      * Autosave's Bank live getter. Save continues to update only the name/slot
      * fields after durable completion.
      */
@@ -941,7 +948,7 @@ static void filesystem_storeLoadedBankMetadata(
     bank_setActiveSceneSlot(active_scene);
     bank_setSceneMaskVoiceEdit(voice_edit_mask);
     bank_setHasResidentBank(1u);
-    autosave_markBankDataDirty();
+    autosave_noteBankLoaded();
 }
 
 typedef enum {
@@ -1398,6 +1405,20 @@ static uint8_t fs_autosave_setup_pending = 0u;
 static uint8_t fs_autosave_setup_failed = 0u;
 static uint8_t fs_autosave_transaction_active = 0u;
 static uint8_t fs_autosave_discard_pending = 0u;
+/*
+ * Load/Save exclusion gate for the autonomous hidden-record writer.
+ *
+ * Input: Menu arms this before entering either filesystem page and clears it
+ * only after leaving. Output: no setup, validation, parameter capture, or
+ * continuation can start while Menu owns the card. An already active autosave
+ * is allowed to finish while Menu remains on the prior page; Menu enters only
+ * after filesystem_autosaveTransactionActive() reports release. Why: simply
+ * freezing the active state machine would retain the sole filesystem facade
+ * forever and prevent the requested Load/Save operation from starting.
+ * Affiliates: menu_switchPage(), menu_serviceRuntimeWidgets(), and the idle
+ * autosave scheduler.
+ */
+static uint8_t fs_autosave_load_save_suspended = 0u;
 
 /* Existing morph destination buffer owned by preset/sound code.
  *
@@ -4487,11 +4508,12 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 ** number of stable live payload bytes are captured, their bits plus every
 ** classified nonexistent bit are cleared in the canonical record, and the
 ** current canonical mask/value image is copy-forwarded into the inactive peer.
-** A pending aggregate Scene-load notification first expands to all 1,920 bits
-** of each selected Scene and performs two mask-only copy-forward commits, so
-** both CRC-valid files contain the complete request before classification can
-** clear any bit. Those transaction fields reuse this operation's existing 2 KB
-** stage union; only Autosave.c's two-byte notification register is persistent.
+** Pending aggregate Load notifications first expand Scene, Bank, Kit, and
+** Instrument objects into their canonical dirty regions and perform two
+** mask-only copy-forward commits, so both CRC-valid files contain the complete
+** request before classification can clear any bit. Those transaction fields
+** reuse this operation's existing 2 KB stage union; only Autosave.c's approved
+** compact notification registers are persistent.
 ** Remaining dirty bits stay in SRAM and are also carried by any target mask
 ** chunk staged after they were set. If neither record passes structural and
 ** integrity validation, both are asynchronously regenerated B then A from
@@ -4519,19 +4541,28 @@ static void filesystem_autosaveParameterDrain_tick(void)
         memset(&fs_autosave_parameter_cache, 0,
                sizeof(fs_autosave_parameter_cache));
         /*
-         * Snapshot and expand complete Scene-load events before file access.
+         * Snapshot and expand complete-object Load events before file access.
          *
-         * Inputs: Autosave.c's two-byte coalescing register. Outputs: the
-         * operation retains exactly the Scene bits it must publish, while all
-         * 1,920 bits per Scene are ORed into the canonical mask. The producer
-         * register remains armed until two valid target commits have synced;
-         * a failed operation therefore retries without losing the aggregate
-         * request. Affiliates: phases 55/22/68 and the scheduler pending test.
+         * Inputs: Autosave.c's Scene register plus compact Bank/Kit/Instrument
+         * records. Outputs: the operation retains the exact objects it must
+         * publish and expands their typed regions into the canonical mask. The
+         * producer records remain armed until two valid target commits have
+         * synced; a failed operation therefore retries without losing the
+         * aggregate request. Affiliates: phases 55/22/68 and the scheduler
+         * pending test.
          */
         op_autosave_writer.loaded_scene_mask =
             autosave_loadedScenePendingMask();
+        autosave_snapshotPendingLoads(
+            &op_autosave_writer.loaded_bank,
+            &op_autosave_writer.loaded_kit_scene_mask,
+            op_autosave_writer.loaded_instrument_scene);
         autosave_markLoadedSceneRegionsDirty(
             op_autosave_writer.loaded_scene_mask);
+        autosave_markPendingLoadsDirty(
+            op_autosave_writer.loaded_bank,
+            op_autosave_writer.loaded_kit_scene_mask,
+            op_autosave_writer.loaded_instrument_scene);
         op_autosave_writer.candidate_index = 0u;
         op_phase = 1u;
         return;
@@ -4721,7 +4752,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         return;
     }
 
-    case 55: /* CLOSE COMPLETE: PUBLISH WHOLE-SCENE MASK OR CLASSIFY */
+    case 55: /* CLOSE COMPLETE: PUBLISH COMPLETE-LOAD MASK OR CLASSIFY */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -4742,19 +4773,26 @@ static void filesystem_autosaveParameterDrain_tick(void)
             return;
         }
         /*
-         * Publish the complete aggregate Scene mask before taking any bits.
+         * Publish every complete aggregate Load mask before taking any bits.
          *
-         * Inputs: a valid winner, its merged recovery mask, and the Scene-load
-         * snapshot expanded in phase zero. Output: pass one enters the normal
-         * transformed-copy path with zero payload patches and without calling
-         * autosave_maskBitTake(). The transformed mask therefore contains the
-         * complete canonical Scene regions. Phase 68 repeats against the other
-         * peer before returning here conceptually as an ordinary drain. Why:
-         * classification must not create a partially drained newest record
-         * before both recovery files have recorded the bulk-load request.
+         * Inputs: a valid winner, its merged recovery mask, and the Scene,
+         * Bank, Kit, and Instrument snapshots expanded in phase zero. Output:
+         * pass one enters the normal transformed-copy path with zero payload
+         * patches and without calling autosave_maskBitTake(). Phase 68 repeats
+         * against the other peer before ordinary classification. Why: no
+         * complete Load request may become partially drained before both
+         * recovery files contain its complete dirty scope.
          */
-        if (op_autosave_writer.loaded_scene_mask != 0u) {
-            op_autosave_writer.scene_mask_publish_pass = 1u;
+        if (op_autosave_writer.loaded_scene_mask != 0u ||
+            op_autosave_writer.loaded_bank != 0u ||
+            op_autosave_writer.loaded_kit_scene_mask != 0u ||
+            op_autosave_writer.loaded_instrument_scene[0] != 0u ||
+            op_autosave_writer.loaded_instrument_scene[1] != 0u ||
+            op_autosave_writer.loaded_instrument_scene[2] != 0u ||
+            op_autosave_writer.loaded_instrument_scene[3] != 0u ||
+            op_autosave_writer.loaded_instrument_scene[4] != 0u ||
+            op_autosave_writer.loaded_instrument_scene[5] != 0u) {
+            op_autosave_writer.load_mask_publish_pass = 1u;
             op_autosave_writer.patch_count = 0u;
             op_phase = 10u;
             return;
@@ -5231,9 +5269,9 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * remains in Autosave.c; the completion callback reads it directly and
          * no transaction-local scalar replaces or clears it.
          */
-        if (op_autosave_writer.scene_mask_publish_pass != 0u) {
+        if (op_autosave_writer.load_mask_publish_pass != 0u) {
             /* A mask-only target must become durable before it is selected as
-             * the second pass's source or before Scene notification is
+             * the second pass's source or before any Load notification is
              * acknowledged. The ordinary drain still uses filesystem_finish()
              * below and therefore retains its existing final flush behavior. */
             op_phase = 68u;
@@ -5244,15 +5282,15 @@ static void filesystem_autosaveParameterDrain_tick(void)
 
     case 68: /* SYNC EACH MASK-ONLY COMMIT; AFTER TWO, BEGIN NORMAL DRAIN */
         /*
-         * Complete the two-record loaded-Scene publication transaction.
+         * Complete the two-record aggregate-Load publication transaction.
          *
          * Inputs: a closed CRC/commit-valid target from pass one or two.
          * Output: sync makes that target durable, promotes it to the next
          * winner coordinate, and either copies the same untouched canonical
-         * mask into the opposite peer or acknowledges the Scene snapshot and
-         * begins bounded classification. Why: both files must independently
-         * carry the full Scene mask before the SRAM event bit is cleared. No
-         * parameter value is captured during either publication pass.
+         * mask into the opposite peer or acknowledges all exact Load snapshots
+         * and begins bounded classification. Why: both files must independently
+         * carry the full dirty scopes before any compact SRAM event is cleared.
+         * No parameter value is captured during either publication pass.
          */
         if (!afatfs_sync())
             return;
@@ -5260,16 +5298,24 @@ static void filesystem_autosaveParameterDrain_tick(void)
             op_autosave_writer.winner_index ^ 1u);
         op_autosave_writer.winner_generation++;
         op_autosave_writer.winner_probe++;
-        if (op_autosave_writer.scene_mask_publish_pass == 1u) {
-            op_autosave_writer.scene_mask_publish_pass = 2u;
+        if (op_autosave_writer.load_mask_publish_pass == 1u) {
+            op_autosave_writer.load_mask_publish_pass = 2u;
             op_autosave_writer.patch_count = 0u;
             op_phase = 10u;
             return;
         }
         autosave_acknowledgeLoadedScenes(
             op_autosave_writer.loaded_scene_mask);
+        autosave_acknowledgePendingLoads(
+            op_autosave_writer.loaded_bank,
+            op_autosave_writer.loaded_kit_scene_mask,
+            op_autosave_writer.loaded_instrument_scene);
         op_autosave_writer.loaded_scene_mask = 0u;
-        op_autosave_writer.scene_mask_publish_pass = 0u;
+        op_autosave_writer.loaded_bank = 0u;
+        op_autosave_writer.loaded_kit_scene_mask = 0u;
+        memset(op_autosave_writer.loaded_instrument_scene, 0,
+               sizeof(op_autosave_writer.loaded_instrument_scene));
+        op_autosave_writer.load_mask_publish_pass = 0u;
         op_autosave_writer.payload_scan_offset = 0u;
         op_autosave_writer.patch_count = 0u;
         op_phase = 56u;
@@ -17732,6 +17778,7 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
     fs_autosave_setup_failed = 0u;
     fs_autosave_transaction_active = 0u;
     fs_autosave_discard_pending = 0u;
+    fs_autosave_load_save_suspended = 0u;
     autosave_setMutationTrackingEnabled(0u);
     /*
      * Abandon autonomous settings scheduling with the destroyed FAT facade.
@@ -17782,6 +17829,7 @@ void filesystem_initAfterCardReady(void)
     fs_autosave_setup_failed = 0u;
     fs_autosave_transaction_active = 0u;
     fs_autosave_discard_pending = 0u;
+    fs_autosave_load_save_suspended = 0u;
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_writer_armed = 0u;
     fs_autosave_recovery_pending = 0u;
@@ -17849,6 +17897,37 @@ uint8_t filesystem_autosaveEnabled(void)
      * filesystem_setAutosaveEnabled() and main.c's pre-audio setup ladder.
      */
     return fs_autosave_enabled;
+}
+
+void filesystem_setAutosaveLoadSaveSuspended(uint8_t suspended)
+{
+    /*
+     * Apply Menu's explicit exclusive-ownership gate without touching files.
+     *
+     * Input: nonzero from the first Load/Save entry gesture, zero from the
+     * final page exit or a cancelled pending entry. Output: the autonomous
+     * scheduler may not start any hidden-file work while armed. Existing work
+     * is not aborted or frozen because it may own open AsyncFATFS handles; Menu
+     * waits outside Load/Save until that transaction reaches its normal safe
+     * completion. Affiliates: filesystem_autosaveTransactionActive() and
+     * menu_switchPage().
+     */
+    fs_autosave_load_save_suspended = suspended ? 1u : 0u;
+}
+
+uint8_t filesystem_autosaveTransactionActive(void)
+{
+    /*
+     * Expose only autonomous transaction ownership to Menu's entry gate.
+     *
+     * Input: the retained flag spanning runtime pair setup or drain plus the
+     * shared final flush.
+     * Output: nonzero until the private completion callback has acknowledged
+     * the operation. Why: Menu must not inspect private operation enums or
+     * confuse settings/library work with autosave exclusion. No filesystem
+     * state advances here. Affiliate: filesystem_autosaveWriterCompleted().
+     */
+    return fs_autosave_transaction_active;
 }
 
 void filesystem_setAutosaveEnabled(uint8_t enabled)
@@ -18187,9 +18266,11 @@ static void filesystem_autosaveSetupCompleted(void)
      * complete live Bank snapshot; failure/OFF leaves authorization revoked.
      * Why: runtime re-enable must use the foreground-pumped ensure state machine
      * without exposing partially created files to the drain scheduler.
-     * Affiliates: filesystem_setAutosaveEnabled(), Autosave whole-Bank marker,
-     * and filesystem_autosaveWriterSchedule_tick().
+     * The same completion releases autosave transaction ownership used by
+     * Menu's Load/Save entry gate. Affiliates: filesystem_setAutosaveEnabled(),
+     * Autosave whole-Bank marker, and filesystem_autosaveWriterSchedule_tick().
      */
+    fs_autosave_transaction_active = 0u;
     filesystem_ack();
     if (!setup_ok || !fs_autosave_enabled || !bank_hasResidentBank()) {
         /* A mounted/resident failure waits for an explicit OFF/ON transition
@@ -18202,6 +18283,15 @@ static void filesystem_autosaveSetupCompleted(void)
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_armed = 0u;
         autosave_setMutationTrackingEnabled(0u);
+        if (!fs_autosave_enabled && fs_autosave_discard_pending) {
+            /* OFF may have arrived while runtime ensure owned the facade.
+             * Input: the same deferred-discard latch used by a drain. Output:
+             * compact Load notifications and canonical bits clear only after
+             * ensure's final callback released ownership. Affiliate:
+             * filesystem_setAutosaveEnabled(). */
+            autosave_discardDirtyMask();
+            fs_autosave_discard_pending = 0u;
+        }
         return;
     }
     fs_autosave_writer_boot_ready = 1u;
@@ -18217,10 +18307,13 @@ static void filesystem_autosaveWriterSchedule_tick(void)
     uint16_t now;
 
     /*
-     * This check is reached only while the facade is idle. Load/Save pages own
-     * the library-name cache by contract, so they suppress new starts; an
-     * already-running writer is deliberately never preempted mid-commit.
+     * This check is reached only while the facade is idle. Menu arms the
+     * explicit suspension gate before page entry, then waits outside Load/Save
+     * for an already-running writer to complete. The page checks below remain
+     * a defensive second boundary around the shared library-name cache.
     */
+    if (fs_autosave_load_save_suspended)
+        return;
     if (!fs_autosave_enabled) {
         /*
          * Defensive policy fall-through before every hidden-file start.
@@ -18283,6 +18376,12 @@ static void filesystem_autosaveWriterSchedule_tick(void)
                              FS_FILE_SETTINGS, 0u,
                              filesystem_autosaveSetupCompleted)) {
             fs_autosave_setup_pending = 0u;
+            /* Runtime creation/validation is autosave filesystem ownership too.
+             * Input: an accepted hidden-pair ensure. Output: Load/Save entry
+             * waits through its final flush exactly as it waits for a drain.
+             * Why: exclusion covers all hidden-record operations, not only
+             * parameter capture. Affiliate: setup completion above. */
+            fs_autosave_transaction_active = 1u;
         }
         return;
     }
@@ -18299,15 +18398,16 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         return;
     /*
      * Fall through before arming when neither boot recovery, scalar SRAM work,
-     * nor a complete-Scene notification exists. Inputs are the one-time
-     * recovery flag, canonical mask, and Autosave's two-byte Scene-load
-     * register. Output: a clean post-recovery writer remains disarmed and never
-     * calls filesystem_start(). Why: periodic generation/CRC/file traffic is
-     * not an autosave operation. A later scalar mutation or Scene load is
-     * observed on a later tick and receives the normal five-second debounce.
+     * nor a complete-object notification exists. Inputs are the one-time
+     * recovery flag, canonical mask, and Autosave's compact Load registers.
+     * Output: a clean post-recovery writer remains disarmed and never calls
+     * filesystem_start(). Why: periodic generation/CRC/file traffic is not an
+     * autosave operation. A later scalar mutation or complete load is observed
+     * on a later tick and receives the normal five-second debounce.
      */
     if (!fs_autosave_recovery_pending && !autosave_maskHasDirty() &&
-        autosave_loadedScenePendingMask() == 0u) {
+        autosave_loadedScenePendingMask() == 0u &&
+        !autosave_loadedAggregatePending()) {
         fs_autosave_writer_armed = 0u;
         return;
     }

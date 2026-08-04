@@ -344,8 +344,8 @@ void autosave_setMutationTrackingEnabled(uint8_t enabled);
  * Discard pending SRAM work only at a safe autosave transaction boundary.
  *
  * Input: mutation tracking already disabled and no transform consuming the
- * canonical mask. Output: all 3,856 mask bytes and the two-byte loaded-Scene
- * notification become clean; neither hidden file is opened or changed. Why:
+ * canonical mask. Output: all 3,856 mask bytes and the compact complete-Load
+ * notifications become clean; neither hidden file is opened or changed. Why:
  * OFF/new-session transitions must not carry stale scalar or aggregate work
  * into a later enable, but clearing beneath an active CRC/copy is forbidden.
  * Affiliates: filesystem_setAutosaveEnabled() and its deferred active-
@@ -381,6 +381,36 @@ void autosave_setSceneLoadSelectionMask(uint16_t scene_mask);
 uint16_t autosave_loadedScenePendingMask(void);
 void autosave_markLoadedSceneRegionsDirty(uint16_t scene_mask);
 void autosave_acknowledgeLoadedScenes(uint16_t scene_mask);
+
+/*
+ * Queue and publish complete Bank/Kit/Instrument Load ownership after Menu.
+ *
+ * Inputs: successful resident commit coordinates. Outputs: note functions arm
+ * the approved 1-byte Bank, 2-byte Kit, and 6-byte Instrument records;
+ * Pending reports scheduler work; Snapshot copies one transaction image;
+ * Mark expands it into existing typed canonical-mask scopes; Acknowledge
+ * removes only entries durably published into both ping-pong peers. Why:
+ * complete loads include equal incoming parameters but autosave must not sample
+ * resident data while Load/Save is open. No function performs file I/O or
+ * allocates another mutation mask. Affiliates: Preset aggregate commits and
+ * filesystem autosave phases 0/55/68.
+ */
+void autosave_noteBankLoaded(void);
+void autosave_noteKitLoaded(uint8_t scene_index);
+void autosave_noteInstrumentLoaded(uint8_t scene_index, uint8_t slot);
+uint8_t autosave_loadedAggregatePending(void);
+void autosave_snapshotPendingLoads(
+    uint8_t *bank_pending,
+    uint16_t *kit_scene_mask,
+    uint8_t instrument_scene[AUTOSAVE_INSTRUMENTS_PER_KIT]);
+void autosave_markPendingLoadsDirty(
+    uint8_t bank_pending,
+    uint16_t kit_scene_mask,
+    const uint8_t instrument_scene[AUTOSAVE_INSTRUMENTS_PER_KIT]);
+void autosave_acknowledgePendingLoads(
+    uint8_t bank_pending,
+    uint16_t kit_scene_mask,
+    const uint8_t instrument_scene[AUTOSAVE_INSTRUMENTS_PER_KIT]);
 
 /*
  * Mark one logical retained parameter dirty without exposing wire arithmetic.

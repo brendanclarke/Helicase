@@ -86,10 +86,35 @@ static volatile uint8_t autosave_mutation_tracking_enabled;
  */
 static volatile uint16_t autosave_loaded_scene_pending_mask;
 
+/*
+ * Coalesced complete-object Load notifications outside the canonical mask.
+ *
+ * Inputs: successful resident Bank, Kit, and Instrument commits while the
+ * Load/Save surface owns parameter replacement. Outputs: one Bank flag, one
+ * exact 16-Scene Kit mask, and one pending Scene coordinate for each of the six
+ * Instrument slots. The Instrument byte stores Scene+1 so zero remains empty;
+ * if the same slot is loaded into another Scene before drain, the displaced
+ * coordinate is first expanded into the canonical mask and the newest remains
+ * queued. Why: these small records keep complete-load ownership armed until the
+ * writer can publish it after Load/Save exits, without allocating a second
+ * mutation mask. Affiliates: Preset's aggregate commit boundaries and the
+ * filesystem drain's two-peer mask publication pass.
+ */
+static volatile uint8_t autosave_loaded_bank_pending;
+static volatile uint16_t autosave_loaded_kit_pending_mask;
+static volatile uint8_t
+    autosave_loaded_instrument_pending_scene[AUTOSAVE_INSTRUMENTS_PER_KIT];
+
 _Static_assert(sizeof(autosave_dirty_mask) == AUTOSAVE_MASK_BYTES,
                "autosave canonical dirty record must match the wire mask");
 _Static_assert(sizeof(autosave_loaded_scene_pending_mask) == 2u,
                "loaded-Scene register must consume exactly two SRAM bytes");
+_Static_assert(sizeof(autosave_loaded_bank_pending) == 1u,
+               "loaded-Bank register must consume exactly one SRAM byte");
+_Static_assert(sizeof(autosave_loaded_kit_pending_mask) == 2u,
+               "loaded-Kit register must consume exactly two SRAM bytes");
+_Static_assert(sizeof(autosave_loaded_instrument_pending_scene) == 6u,
+               "loaded-Instrument registers must consume exactly six SRAM bytes");
 
 /*
  * Protect one canonical-mask byte without extending the critical section.
@@ -836,13 +861,98 @@ void autosave_discardDirtyMask(void)
      *
      * Inputs: filesystem lifecycle has disabled tracking and verified that no
      * autosave operation is consuming mask chunks. Output: every pending bit
-     * and every not-yet-published loaded-Scene notification is discarded in
-     * SRAM; SD records remain untouched. Why: stale work from an intentionally
+     * and every not-yet-published Scene/Bank/Kit/Instrument Load notification
+     * is discarded in SRAM; SD records remain untouched. Why: stale work from an intentionally
      * disabled/retired Bank session must not reappear after re-enable.
      * Affiliates: filesystem's immediate/deferred OFF transition.
      */
     memset((void *)autosave_dirty_mask, 0, sizeof(autosave_dirty_mask));
     autosave_loaded_scene_pending_mask = 0u;
+    autosave_loaded_bank_pending = 0u;
+    autosave_loaded_kit_pending_mask = 0u;
+    memset((void *)autosave_loaded_instrument_pending_scene, 0,
+           sizeof(autosave_loaded_instrument_pending_scene));
+}
+
+void autosave_noteBankLoaded(void)
+{
+    uint32_t primask;
+
+    /*
+     * Retain one complete BankData Load event until post-menu publication.
+     *
+     * Input: final validated Bank metadata has landed in BankData. Output: the
+     * approved one-byte flag is armed atomically; no canonical bit or file is
+     * touched here. Why: Bank fields that compare equal are still members of
+     * the loaded object, and the background writer must not sample them while
+     * Load/Save remains open. Affiliates: filesystem_storeLoadedBankMetadata()
+     * and autosave_markPendingLoadsDirty().
+     */
+    if (!autosave_mutation_tracking_enabled)
+        return;
+    primask = autosave_irqSave();
+    autosave_loaded_bank_pending = 1u;
+    autosave_irqRestore(primask);
+}
+
+void autosave_noteKitLoaded(uint8_t scene_index)
+{
+    uint32_t primask;
+
+    /*
+     * Retain one complete Kit Load destination in the approved two-byte mask.
+     *
+     * Input: a staged Kit successfully committed to one resident Scene.
+     * Output: that Scene bit is atomically coalesced; no writer-owned mask byte
+     * is changed yet. Why: multi-destination Kit loads must survive as one
+     * post-menu aggregate request even when incoming cells compare equal.
+     * Affiliates: preset_storeKitImage() and the drain-side expansion helper.
+     */
+    if (scene_index >= AUTOSAVE_SCENE_COUNT ||
+        !autosave_mutation_tracking_enabled) {
+        return;
+    }
+    primask = autosave_irqSave();
+    autosave_loaded_kit_pending_mask = (uint16_t)(
+        autosave_loaded_kit_pending_mask | (uint16_t)(1u << scene_index));
+    autosave_irqRestore(primask);
+}
+
+void autosave_noteInstrumentLoaded(uint8_t scene_index, uint8_t slot)
+{
+    uint8_t displaced_scene = 0xffu;
+    uint8_t encoded_scene;
+    uint32_t primask;
+
+    /*
+     * Retain one complete Instrument Load coordinate per physical slot.
+     *
+     * Inputs: a successfully committed Scene/slot pair. Output: the approved
+     * six-byte register stores Scene+1 at that slot. Repeating the same pair
+     * coalesces; replacing it first marks the displaced pair in the canonical
+     * mask, then retains the newest pair. Why: one byte cannot represent a
+     * 16-Scene subset, but this replacement rule preserves every one of the 96
+     * possible coordinates exactly while staying inside six bytes. During
+     * Load/Save the writer is suspended, so the displaced direct mark cannot
+     * be consumed before the queued aggregate is published. Affiliates:
+     * Preset's normal Instrument apply and autosave_markWholeInstrumentDirty().
+     */
+    if (scene_index >= AUTOSAVE_SCENE_COUNT ||
+        slot >= AUTOSAVE_INSTRUMENTS_PER_KIT ||
+        !autosave_mutation_tracking_enabled) {
+        return;
+    }
+    encoded_scene = (uint8_t)(scene_index + 1u);
+    primask = autosave_irqSave();
+    if (autosave_loaded_instrument_pending_scene[slot] != 0u &&
+        autosave_loaded_instrument_pending_scene[slot] != encoded_scene) {
+        displaced_scene = (uint8_t)(
+            autosave_loaded_instrument_pending_scene[slot] - 1u);
+    }
+    autosave_loaded_instrument_pending_scene[slot] = encoded_scene;
+    autosave_irqRestore(primask);
+    if (displaced_scene < AUTOSAVE_SCENE_COUNT)
+        autosave_markWholeInstrumentDirty(displaced_scene, slot);
 }
 
 void autosave_noteSceneLoaded(uint8_t scene_index)
@@ -919,6 +1029,127 @@ uint16_t autosave_loadedScenePendingMask(void)
     pending = autosave_loaded_scene_pending_mask;
     autosave_irqRestore(primask);
     return pending;
+}
+
+uint8_t autosave_loadedAggregatePending(void)
+{
+    uint8_t slot;
+    uint8_t pending;
+    uint32_t primask;
+
+    /*
+     * Report whether a complete Bank/Kit/Instrument Load awaits publication.
+     *
+     * Input: the approved one-, two-, and six-byte notification records.
+     * Output: one stable boolean used only to wake/sustain the idle writer.
+     * Why: canonical-mask emptiness cannot suppress an aggregate Load whose
+     * expansion is deliberately deferred until after Load/Save exits.
+     * Affiliates: filesystem_autosaveWriterSchedule_tick() and drain phase 0.
+     */
+    primask = autosave_irqSave();
+    pending = (uint8_t)(autosave_loaded_bank_pending != 0u ||
+                        autosave_loaded_kit_pending_mask != 0u);
+    for (slot = 0u; !pending && slot < AUTOSAVE_INSTRUMENTS_PER_KIT; slot++)
+        pending = (uint8_t)(
+            autosave_loaded_instrument_pending_scene[slot] != 0u);
+    autosave_irqRestore(primask);
+    return pending;
+}
+
+void autosave_snapshotPendingLoads(
+    uint8_t *bank_pending,
+    uint16_t *kit_scene_mask,
+    uint8_t instrument_scene[AUTOSAVE_INSTRUMENTS_PER_KIT])
+{
+    uint32_t primask;
+
+    /*
+     * Snapshot complete-object Load ownership without acknowledging it.
+     *
+     * Inputs: caller-owned operation storage. Outputs: one atomic copy of the
+     * Bank flag, Kit destination mask, and six Instrument Scene coordinates.
+     * Why: exactly this snapshot must remain armed until both CRC-valid peers
+     * carry its expanded mutation bits. Affiliates: drain phase 0 and
+     * autosave_acknowledgePendingLoads().
+     */
+    if (!bank_pending || !kit_scene_mask || !instrument_scene)
+        return;
+    primask = autosave_irqSave();
+    *bank_pending = autosave_loaded_bank_pending;
+    *kit_scene_mask = autosave_loaded_kit_pending_mask;
+    memcpy(instrument_scene,
+           (const void *)autosave_loaded_instrument_pending_scene,
+           AUTOSAVE_INSTRUMENTS_PER_KIT);
+    autosave_irqRestore(primask);
+}
+
+void autosave_markPendingLoadsDirty(
+    uint8_t bank_pending,
+    uint16_t kit_scene_mask,
+    const uint8_t instrument_scene[AUTOSAVE_INSTRUMENTS_PER_KIT])
+{
+    uint8_t scene_index;
+    uint8_t slot;
+
+    /*
+     * Expand a stable complete-object Load snapshot into the canonical mask.
+     *
+     * Inputs: operation-local Bank/Kit/Instrument notification coordinates.
+     * Outputs: all currently gettable bytes of each loaded object become dirty
+     * through the existing typed whole-object markers. Why: expansion after
+     * Load/Save exit samples final resident data and lets equal incoming cells
+     * participate without creating another full mask. Affiliates: drain phase
+     * 0 and the ordinary live-byte classifier.
+     */
+    if (bank_pending)
+        autosave_markBankDataDirty();
+    for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT; scene_index++) {
+        if ((kit_scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            autosave_markKitDirty(scene_index);
+    }
+    if (!instrument_scene)
+        return;
+    for (slot = 0u; slot < AUTOSAVE_INSTRUMENTS_PER_KIT; slot++) {
+        if (instrument_scene[slot] != 0u &&
+            instrument_scene[slot] <= AUTOSAVE_SCENE_COUNT) {
+            autosave_markWholeInstrumentDirty(
+                (uint8_t)(instrument_scene[slot] - 1u), slot);
+        }
+    }
+}
+
+void autosave_acknowledgePendingLoads(
+    uint8_t bank_pending,
+    uint16_t kit_scene_mask,
+    const uint8_t instrument_scene[AUTOSAVE_INSTRUMENTS_PER_KIT])
+{
+    uint8_t slot;
+    uint32_t primask;
+
+    /*
+     * Clear only complete-object notifications published into both peers.
+     *
+     * Inputs: the operation snapshot after its second durable mask-only
+     * commit. Outputs: matching Bank/Kit/Instrument entries clear atomically;
+     * a later replacement coordinate remains armed. Why: request observation
+     * is not completion, and a newer Instrument event must not be erased by an
+     * older transaction's acknowledgement. Affiliates: drain phase 68 and the
+     * autonomous scheduler pending test.
+     */
+    primask = autosave_irqSave();
+    if (bank_pending)
+        autosave_loaded_bank_pending = 0u;
+    autosave_loaded_kit_pending_mask = (uint16_t)(
+        autosave_loaded_kit_pending_mask & (uint16_t)~kit_scene_mask);
+    if (instrument_scene) {
+        for (slot = 0u; slot < AUTOSAVE_INSTRUMENTS_PER_KIT; slot++) {
+            if (autosave_loaded_instrument_pending_scene[slot] ==
+                instrument_scene[slot]) {
+                autosave_loaded_instrument_pending_scene[slot] = 0u;
+            }
+        }
+    }
+    autosave_irqRestore(primask);
 }
 
 void autosave_markLoadedSceneRegionsDirty(uint16_t scene_mask)

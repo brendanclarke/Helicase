@@ -98,6 +98,19 @@ static uint8_t menu_storageBusy = 0;
  * owns presentation/final-reset only; it retains no payload or cache data.
  */
 static uint8_t menu_loadSaveCommandActive = 0u;
+/*
+ * Deferred physical entry while an older autosave transaction releases SD.
+ *
+ * Input: one Load/Save button gesture observed while the autonomous writer is
+ * active. Output: Menu stays on its current non-filesystem page until the
+ * writer's final flush/callback completes, then enters LOAD_PAGE exactly once.
+ * Why: pausing ticks beneath open AsyncFATFS handles would deadlock the sole
+ * filesystem facade, while opening Load/Save before release permits stale
+ * autosave capture. The filesystem suspension gate is armed for the whole wait
+ * and remains armed until final Load/Save exit. Affiliates: menu_switchPage(),
+ * menu_serviceRuntimeWidgets(), and filesystem's autosave exclusion API.
+ */
+static uint8_t menu_loadSaveEntryPending = 0u;
 static uint8_t menu_deferSelectionRequest = 0;
 static uint8_t menu_deferSelectionLoadKit = 0;
 static uint8_t menu_lcdRefreshPending = 0;
@@ -7372,6 +7385,24 @@ void menu_serviceRuntimeWidgets(void)
     uint16_t now = time_sysTick;
     uint8_t sample;
 
+    /*
+     * Complete a deferred Load/Save entry at the first safe ownership edge.
+     *
+     * Inputs: the retained entry gesture and the autosave transaction flag
+     * spanning its final media flush. Output: once idle, the ordinary page
+     * switch performs all existing cache, selection, LED, and repaint setup;
+     * no autosave can restart because suspension was armed on the gesture.
+     * Why: this wait occurs while the old page remains visible, so Load/Save
+     * never overlaps even one autosave state-machine tick. Affiliates:
+     * menu_switchPage() and filesystem_autosaveTransactionActive().
+     */
+    if (menu_loadSaveEntryPending &&
+        !filesystem_autosaveTransactionActive()) {
+        menu_loadSaveEntryPending = 0u;
+        menu_switchPage(LOAD_PAGE);
+        return;
+    }
+
     if (menu_storageBusy)
         return;
 
@@ -8154,6 +8185,35 @@ void menu_switchPage(uint8_t pageNr)
     uint8_t end_resident_name_session;
 
     if (menu_storageBusy) return;
+
+    /*
+     * Establish exclusive autosave/Load-Save ownership before page mutation.
+     *
+     * Inputs: a fresh physical Load/Save entry or a final exit to any other
+     * page. Output: entry suspends all new autonomous starts immediately; if a
+     * transaction already owns the filesystem, the gesture is retained and
+     * this function returns while the old page stays active. Exit clears the
+     * suspension only after a real Load/Save session. Why: no autosave tick may
+     * run while the Load/Save page is open, but an owner with open asynchronous
+     * handles must finish rather than be frozen. Affiliates: the runtime-widget
+     * deferred-entry service and filesystem's two exclusion accessors.
+     */
+    if (pageNr == LOAD_PAGE &&
+        menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) {
+        filesystem_setAutosaveLoadSaveSuspended(1u);
+        if (filesystem_autosaveTransactionActive()) {
+            menu_loadSaveEntryPending = 1u;
+            return;
+        }
+        menu_loadSaveEntryPending = 0u;
+    } else if (menu_loadSaveEntryPending) {
+        menu_loadSaveEntryPending = 0u;
+        filesystem_setAutosaveLoadSaveSuspended(0u);
+    }
+    if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+        pageNr != LOAD_PAGE) {
+        filesystem_setAutosaveLoadSaveSuspended(0u);
+    }
 
     /* Capture the old context before page mutation. Pressing the Load/Save
      * mode button toggles LOAD_PAGE/SAVE_PAGE through pageNr==LOAD_PAGE and

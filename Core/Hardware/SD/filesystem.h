@@ -271,6 +271,22 @@ void        filesystem_setAutosaveEnabled(uint8_t enabled);
  */
 uint8_t     filesystem_autosaveEnabled(void);
 /*
+ * Give Load/Save exclusive ownership over autonomous autosave starts.
+ *
+ * Menu sets the suspension flag on the entry gesture, waits for a previously
+ * active hidden-record setup or drain transaction to finish while still
+ * displaying the prior page, and
+ * clears it only after leaving Load/Save. The active query reports that one
+ * transaction through its final flush without exposing private filesystem-op
+ * identifiers. Neither function opens, closes, polls, or modifies a file.
+ * Why: stopping ticks beneath open handles deadlocks the sole filesystem
+ * facade, while entering before completion allows stale parameter capture.
+ * Affiliates: menu_switchPage(), menu_serviceRuntimeWidgets(), and the
+ * autonomous scheduler.
+ */
+void        filesystem_setAutosaveLoadSaveSuspended(uint8_t suspended);
+uint8_t     filesystem_autosaveTransactionActive(void);
+/*
  * Create/refresh one `.hcindex` file in every registry-defined Instrument
  * directory. This boot-only wrapper is valid before audio starts; normal
  * runtime SD work remains asynchronous through filesystem_tick(). It returns
