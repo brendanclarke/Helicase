@@ -53,6 +53,7 @@
 | 042 | 2026-07-25 | local working directory, development branch | HCNAMES authority, exact 81-byte musical identity, independent 9,000-byte cache/2,048-byte stage, selective Bank preservation, five asyncfatfs handles, Instrument `.hctmp` kit restore, and documentation recovery |
 | 043 | 2026-07-25 | local working directory, development branch | Bitmap-only Pattern storage, 1,024-float slider LUT, tagged instrument runtime slots, transient PCM FLASH relocation, SRAM/DTCM reservation policy, and fresh memory manifest |
 | 044 | 2026-07-28 | local working directory, branch `dev-ph3-autosave` with uncommitted load/save and boot-pacing changes | Cold-boot tagged-runtime/LFO repair, working runtime Bank Load and final index ordering, unified OK/OW command UI, and inconclusive intermittent-boot pacing experiment |
+| 045 | 2026-08-02 | production source restored to commit `326a8a1` on branch `dev-ph3-autosave-retry`; later rejected code retained only as `*.failed` reference | Autosave A/B format and bounded parameter drain, single canonical dirty mask, Phase 1 scalar mutation hooks, settings/provenance persistence, boot splash ordering, and quarantine of the failed Phase 2 branch |
 
 ---
 
@@ -410,6 +411,11 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | Load:Bank index residency is not selection readiness: Menu must preview the highlighted Bank's `00..15` children and gate input until the destination mask is published | 044 |
 | Pure root Scene/Bank Load ends with a read-only `.hcindex` reload after DSP apply; only a Save that mutated Kit/Scene/Bank owns physical parent rescan and full index rebuild | 044 |
 | The committed Autosave implementation/drafts were explicitly rejected and are not an accepted Phase 3 baseline; the intermittent boot hang is also unlocalized despite four pre-audio timing holds | 044 |
+| Session 045 accepted Autosave baseline is commit `326a8a1`: 34,768-byte `.hcprms1/.hcprms2` records, one 3,856-byte canonical SRAM mask, a 4,608-byte transaction patch cache, 1,536 gets per write, 256 mask positions per foreground tick, five-second debounce, and 250 ms backlog continuation | 045 |
+| Session 045 Phase 1 covers change-aware scalar Bank/Scene/Kit/Instrument endpoint owners; whole-object Load/Save publication is still Phase 2 and is not accepted merely because region-marker stubs exist | 045 |
+| `settings.cfg` remains version 1 and now includes `autosave` plus sixteen `scene_source_NN` values; SRAM provenance is exactly 32 bytes, but the full source/update/error/off-on hardware matrix remains open | 045 |
+| `DEV_MODE_DIAGNOSTIC` is screen-only and disabled; `DEV_MODE_LOGGING` is file-only and enabled. Never make either diagnostic perform the other mode's work or add timing/file perturbation to the operation being observed | 045 |
+| Files ending in `.failed`, `_failed.c/.h`, or `_failed.md` preserve the rejected post-`326a8a1` Phase 2 attempts for diagnosis only; they are not production source, an implementation plan, or evidence of accepted behavior | 045 |
 
 ---
 
@@ -491,3 +497,23 @@ outcome.
   pre-init/ACMD41/post-mount/pre-Bank pacing, unresolved intermittent boot,
   zero retained-SRAM growth, rejected autosave scope, and
   [044_SESSION_HANDOFF_LOG.md](044_SESSION_HANDOFF_LOG.md)
+
+### 045 — Autosave Baseline, Settings Persistence, And Failed Phase 2 Quarantine (2026-08-02)
+Established and hardware-exercised the retained autosave foundation through
+commit `326a8a1`: two CRC/commit-last hidden records, bounded asynchronous
+parameter draining, one canonical mutation mask, and Phase 1 scalar mutation
+hooks. Added version-1 settings persistence for AutoSave policy and sixteen
+Scene-source values, a one-second background settings debounce, and the boot
+splash ordering correction. Later Phase 2/whole-load work changed too many
+ownership and scheduling boundaries, ultimately leaving both records unchanged
+and even preventing pre-existing bits from draining; all of that later work was
+rolled back and preserved only in `failed` reference files. Next work should
+first verify `AUTOSAVE_SETTINGS.md` end to end, establish non-perturbing
+autosave observability, rerun the retained Phase 1 matrix, and only then
+re-audit Phase 2 one independently testable boundary at a time.
+- **Find here**: exact 34,768-byte record geometry, CRC/generation/commit order,
+  one-mask ownership, 1,536-get bounded drain, Phase 1 scalar hooks, Effect and
+  copy/paste stubs, `settings.cfg` schema/provenance, AutoSave ON/OFF policy,
+  boot logger mode separation, splash hold correction, hardware evidence,
+  unverified areas, failed Phase 2 chronology, prohibited approaches, and
+  [045_SESSION_HANDOFF_LOG.md](045_SESSION_HANDOFF_LOG.md)
