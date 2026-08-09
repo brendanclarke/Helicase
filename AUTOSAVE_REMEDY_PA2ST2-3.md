@@ -10,8 +10,8 @@ This document is the code-level remediation plan for exactly two steps of
 
 It was produced by reading `MEMORY.md`, `AUTOSAVE_PHASE2_PLAN.md`,
 `knowledge_files/log_archive/045_SESSION_HANDOFF_LOG.md`, and then doing a
-direct source read of the current accepted baseline (commit `326a8a1`, the
-state this repository snapshot matches) — specifically
+direct source read of the accepted Session 045 baseline plus the completed
+Part 2 Step 1 trace implementation — specifically
 `Core/Bank/Scene/Autosave.c/.h`, `Core/Hardware/SD/filesystem.c/.h`,
 `Core/Bank/BankData.c`, `Core/Bank/Scene/SceneData.c`,
 `Core/Bank/Scene/Preset/presetManager.c`, `Core/Menu/menu.c`, `config.h`, and
@@ -26,12 +26,11 @@ only; it does not touch Step 4 (identity/completeness rules), Step 5
 
 **Dependency on Step 1**: `AUTOSAVE_PHASE2_PLAN.md` orders Step 1
 (observability) before Step 2 and requires Step 2's checkpoint to be
-evidenced by "a trace consistent with Step 1's expectations." Step 1 itself
-is out of this document's scope. Where Step 2/3 checkpoints cannot be met
-without *some* runtime observability, this document specifies the smallest
-possible diagnostic surface needed to unblock them (§2.2, §3.4) — this is
-infrastructure, not a duplicate of Step 1's full six-stage trace, and it
-should be revisited/merged with Step 1's design rather than built twice.
+evidenced by "a trace consistent with Step 1's expectations." Step 1 is now
+implemented as the eight-stage `asavetrc.bin` trace, although its hardware
+checkpoint remains in progress. Steps 2–3 therefore propose no new firmware
+diagnostic state. The old snapshot proposals in §§1, 2.2–2.3, 3.4, and 4 are
+superseded historical context and must not be implemented.
 
 ---
 
@@ -72,7 +71,10 @@ not to this accepted baseline — that branch touched `presetManager.c.failed`
 and `filesystem.c.failed`, which are not compiled and must not be confused
 with the current source.
 
-**What this document therefore proposes is not new feature code.** It is:
+**What this document therefore proposes is not new feature code.** The current
+execution plan is the trace-plus-fixture procedure in §5 below. The older list
+that follows is retained only to explain why the former snapshot design was
+rejected after Step 1 landed:
 
 1. A small, explicitly-disclosed observability surface that Steps 2 and 3
    need in order to produce the recorded evidence their checkpoints require
@@ -93,7 +95,7 @@ with the current source.
 
 ---
 
-## 1. RAM allocation disclosure (read before implementing §2.2/§3.4)
+## 1. Superseded RAM allocation disclosure (historical only — do not implement)
 
 `MEMORY.md`'s RAM Allocation Approval Policy requires every new or enlarged
 static allocation to state its exact byte count, memory region, lifetime,
@@ -177,11 +179,11 @@ under real timing:
   `!fs_autosave_recovery_pending && !autosave_maskHasDirty()`
   (filesystem.c ~line 18028) — no file is opened. Confirming *zero* hidden
   file I/O on a truly idle mask is a hardware observation task, not a code
-  task, **provided §2.2's diagnostic exists to prove no `filesystem_start()`
-  call fired** (see below — this is exactly why the observability gap
-  matters even for a "no code needed" coordinate).
+  task. The current trace proves this without a second snapshot: after an
+  isolated trace-file boundary, no new `D`, `S`, or later lifecycle record may
+  appear and neither hidden-record fixture may change during the observation.
 
-### 2.2 Required code additions: the minimum observability Step 2 needs
+### 2.2 Superseded diagnostic additions (historical only — do not implement)
 
 Everything in §2.1 is correct by inspection, but Step 2's checkpoint is not
 "the code looks correct" — it is "record exact generation/CRC/mask-bit-count/
@@ -423,7 +425,7 @@ dirtied" from "scheduler never admitted" the way Step 1's per-stage events
 can) — it exists to make Step 2 executable now, and should be treated as a
 subset of Step 1's eventual design, not a replacement for it.
 
-### 2.3 Execution plan tying §2.1's table to §2.2's new APIs
+### 2.3 Superseded execution plan (replaced by §5)
 
 For each row of the §2.1 table, in the order Step 2.1 lists (Bank, Scene,
 Kit, Instrument Normal, Instrument Morph, supplemental descriptor, MIDI
@@ -552,7 +554,7 @@ they hold under real SD timing, particularly the deferred-discard path
 *when* OFF arrives relative to an in-flight write and is hardest to reason
 about statically.
 
-### 3.4 Additional diagnostic needed for Items 2 and 3
+### 3.4 Superseded additional diagnostic (replaced by §5)
 
 The same `filesystem_getAutosaveDiagnostic()` from §2.2.2 is the mechanism
 Step 3.2 and 3.3 need too — the plan explicitly says to "diagnose this with
@@ -563,7 +565,7 @@ snapshot answers. No further additions beyond §2.2.2 are proposed here —
 this section exists only to record that Steps 2 and 3 share one
 observability addition rather than needing two.
 
-### 3.5 Contingency map — what to change *if* hardware testing fails
+### 3.5 Superseded contingency map (historical only — use §5.5)
 
 Per root cause (b), this is written as a decision table, not a proposed
 edit, so that if a test in §3.2 or §3.3 fails, exactly one function is
@@ -608,7 +610,7 @@ tool's role here is read-only verification, not modification.
 
 ---
 
-## 4. Summary of every proposed source change
+## 4. Superseded summary of proposed source changes (historical only)
 
 | File | Change | New/modified | Bytes of new static storage | Depends on user sign-off (§1)? |
 |---|---|---|---:|---|
@@ -623,3 +625,133 @@ Every coordinate and provenance/policy boundary those files own was found
 already correct by direct reading (§2.1, §3.1–§3.3); §3.5 specifies the one
 function to touch for each plausible hardware-test failure, to be applied
 only if and when that specific failure is actually observed.
+
+---
+
+## 5. Current-source reconciliation and executable Steps 2–3 plan — 2026-08-09
+
+This section supersedes the historical diagnostic/source-change proposals in
+§§1, 2.2–2.3, 3.4, and 4. **Do not add
+`autosave_maskDirtyBitCount()`, `filesystem_autosave_diagnostic_t`, or a
+`filesystem_getAutosaveDiagnostic()` API.** They were designed before Step 1
+existed and would duplicate its diagnostic responsibility while adding the
+previously proposed 16-byte SRAM allocation.
+
+### 5.1 Current code facts this plan relies on
+
+- `AutosaveTrace.c/.h` now owns a fixed 64-record, eight-byte ring and writes
+  append-only root `asavetrc.bin` through the lowest-priority filesystem
+  scheduler. It records `D/S/A/V/M/C/P/T` for dirty production, scheduling,
+  admission, validation, mask merge, capture, publication, and terminal
+  outcome. Trace records survive a failed trace append; an overwritten record
+  increments the ring's dropped count rather than being silently accepted.
+- The trace is sufficient for the scalar matrix: `D` carries the exact
+  payload offset, `V` carries the selected generation and winner flag/index,
+  `M` says whether the merged canonical mask was dirty, `C` gives the captured
+  patch count/budget condition, `P` gives the new target/generation, and `T`
+  distinguishes a final success from a final filesystem error. It is not a
+  record CRC or full-mask dump by design.
+- Exact generation, header CRC32C, commit byte, on-file mask population, and
+  payload bytes must be taken from the preserved `.hcprms1`/`.hcprms2`
+  fixtures. This is the authoritative durable evidence; a runtime snapshot
+  would be advisory and can never replace the post-sync files.
+- The four provenance callbacks remain correct in the current source:
+  `on_scene_load_complete()`, `on_scene_save_complete()`,
+  `on_bank_load_complete()`, and `on_bank_save_complete()` update source
+  state and call `filesystem_markSettingsDirty()` only after `FS_STATUS_DONE`.
+  Bank Load uses `filesystem_lastBankLoadSceneMask()`; Bank Save uses the
+  captured selected mask.
+- `filesystem_settingsWriterSchedule_tick()` deliberately has **no**
+  Load/Save-page suppression. It may write only after a foreground operation
+  releases the single filesystem owner and its normal one-second debounce
+  expires. The old §3.5 row claiming a settings-page gate is therefore stale.
+  The autosave scheduler, by contrast, continues to suppress new hidden-file
+  starts while Load/Save owns the page.
+
+### 5.2 Required test-artifact workflow (no firmware change)
+
+1. First pass Step 1's hardware checkpoint twice: one known-clean scalar edit
+   must produce one ordered `D,S,A,V,M,C,P,T` sequence with no extra/missing
+   stage. Do not start this matrix until that evidence is saved.
+2. For each later test, allow startup recovery and any existing autosave work
+   to finish. Archive both hidden records and `asavetrc.bin`, then remove the
+   archived card trace before the one-coordinate run so its append file is
+   fresh. Do not interpret a boot or prior-test trace tail as evidence for the
+   current row.
+3. Preserve before/after copies of both `.hcprms` files and the matching
+   `asavetrc.bin`. Decode each trace as fixed eight-byte records using
+   `AutosaveTrace.h`; record the payload offsets from `D` and all lifecycle
+   stage values. A scalar row is invalid if its expected trace sequence is not
+   complete or contains evidence of ring loss.
+4. Inspect the A/B fixtures using the wire constants in `Autosave.h`: magic,
+   version, commit, generation, CRC32C header field, probe, 3,856-byte mask,
+   and expected payload byte(s). The recorded mask-bit count is the population
+   count of that on-card mask. For a fully drained successful scalar write it
+   should be zero; before admission, expected pending cardinality is derived
+   from the unique `D` offsets in the isolated trace, not from a new firmware
+   counter.
+5. Before implementation work begins, add only a **read-only host-side
+   fixture/trace inspector** if manual decoding becomes error-prone. It must
+   parse existing files only, calculate CRC32C/popcount, report fixed record
+   fields and trace records, and make no SD-card or firmware write. This is a
+   tooling convenience, not an alternative firmware diagnostic or a RAM
+   allocation. It is not needed to finish Step 1 testing.
+
+### 5.3 Step 2 matrix, in current execution order
+
+Run one isolated value-changing edit for each §2.1 coordinate: Bank, Scene,
+Kit generated endpoint, Instrument Normal, Instrument Morph, supplemental
+descriptor, MIDI channel/note, and the second generated Kit endpoint. Then
+run the four required edge cases: identical value, repeated edits inside one
+debounce window, re-dirty during an admitted drain, and a clean-idle
+observation.
+
+For every row save the fixture/trace triplet and record: expected payload
+offset(s), unique `D` offsets, starting/ending valid-record generation and
+CRC32C, selected A/B file, commit marker, on-card mask population, final
+payload byte, and ordered lifecycle stages. For the re-dirty row, require a
+second transaction whose `D`/`S` follows the first `T`; do not infer survival
+from a generation change alone. For clean idle, require no new trace record
+and no changed hidden-file fixture over an observation longer than the normal
+writer debounce.
+
+### 5.4 Step 3 tests, using the same artifacts
+
+- Test root Scene Load, root Scene Save, partial Bank Load, and partial Bank
+  Save independently. After the one-second settings debounce, preserve and
+  inspect `settings.cfg`; only the intended Scene source rows and any expected
+  active-Bank field may change. A matching autosave trace is context evidence,
+  not proof of a settings write.
+- For the post-load settings case, establish a pre-operation `settings.cfg`
+  fixture, complete exactly one Scene Load, wait for the settings writer to
+  finish, then compare the post-operation file. Do not diagnose a failure by
+  moving a callback: first establish whether the completion was `DONE`, the
+  settings file was rewritten, and the correct live source was serialized.
+- For AutoSave OFF→ON, test OFF while idle first, then once during an admitted
+  transaction. Existing records must remain untouched by OFF; the admitted
+  transaction may finish at its safe boundary, with a terminal trace record.
+  ON then runs an asynchronous ensure and marks the resident Bank dirty. That
+  full-Bank mark legitimately overflows the 64-record `D` ring, so do not
+  require a lossless `D` list for this case; require later writer admission,
+  successful terminal events, and correct resulting A/B fixtures instead.
+- Keep the packaged-image-size reconciliation as a separate build/tooling
+  task. It is unrelated to trace, settings, or autosave runtime behavior.
+
+### 5.5 Decisions and gates before any implementation
+
+There is **no approved C/H firmware change to implement for Steps 2–3** while
+Step 1 is under test. The only gates are:
+
+1. Step 1 must pass its two isolated scalar trace runs. If it does not, repair
+   Step 1 only; do not add a Step 2 snapshot or Phase 2 hook to compensate.
+2. Decide whether to create the read-only host inspector before the full
+   matrix. It is recommended once the first trace/fixture is available, but
+   it is not a blocker if the records are being decoded reliably by hand.
+3. If a Step 3 test fails, preserve the fixture and trace, identify the failed
+   boundary, and write one evidence-backed contingency before editing one owner
+   function. The old §3.5 row that attributes a settings rewrite failure to a
+   Load/Save-page scheduler gate is invalid and must not drive a patch.
+
+The accepted result of these steps is evidence, not new product behavior. On
+success, retain the fixtures and traces as the Phase 1 reference baseline for
+the later identity/completeness and whole-object-hook steps.

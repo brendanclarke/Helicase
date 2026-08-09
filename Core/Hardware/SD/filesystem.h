@@ -253,6 +253,19 @@ void        filesystem_initAfterCardReady(void);
  */
 uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
 /*
+ * Flush the currently pending autosave lifecycle trace before a deliberate
+ * bench-test power cycle.
+ *
+ * Inputs: an idle, mounted filesystem facade; output is nonzero only after
+ * pending trace records have closed and passed the normal AsyncFATFS sync gate.
+ * Why: a tester who removes power immediately after an observed transaction
+ * needs a deterministic trace boundary rather than the background 500 ms
+ * cadence. This is a test convenience, not a normal runtime path. When
+ * DEV_MODE_LOGGING is 0 there are no pending records and this returns success
+ * without opening a trace file. Affiliate: filesystem_autosaveTraceFlush_tick().
+ */
+uint8_t     filesystem_autosaveTraceFlushBlocking(void);
+/*
  * Apply/query the persistent AutoSave policy without synchronous runtime I/O.
  *
  * Input: a settings/Menu byte normalized to OFF/ON. Output: OFF immediately

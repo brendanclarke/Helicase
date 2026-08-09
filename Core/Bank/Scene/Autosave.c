@@ -9,6 +9,7 @@
  * captured-value patches remain exclusively owned by filesystem.c.
  */
 #include "Autosave.h"
+#include "AutosaveTrace.h"
 
 #include "BankData.h"
 #include "SceneData.h"
@@ -133,6 +134,15 @@ static void autosave_markPayloadOffsetDirty(uint16_t payload_offset)
     autosave_maskByteOr(
         (uint16_t)(payload_offset >> 3u),
         (uint8_t)(1u << (payload_offset & 7u)));
+    /*
+     * Record only dirty bits that passed this helper's tracking/range guard.
+     * Input is the canonical payload offset just ORed into the retained mask;
+     * output is a RAM-only trace point with no scheduler or filesystem side
+     * effect. Why: this is the sole scalar dirty-production funnel, so it
+     * proves an accepted Phase 1 mutation reached canonical autosave state.
+     */
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_DIRTY, 0u,
+                         (uint32_t)payload_offset);
 }
 
 /* Return the validated payload-relative base for one resident Scene. */

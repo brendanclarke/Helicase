@@ -67,6 +67,7 @@
 #include "SceneData.h"
 #include "BankData.h"
 #include "Autosave.h"
+#include "AutosaveTrace.h"
 #include "sd_routines.h"
 #include "spi_sd.h"
 #include "sdcard_lxr02.h"
@@ -213,6 +214,15 @@ typedef enum {
      * map and the dedicated non-name cache below.
      */
     FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN,
+    /*
+     * Lowest-priority diagnostic append of already-captured autosave stages.
+     *
+     * Inputs are a bounded RAM-ring snapshot; output is one root
+     * `asavetrc.bin` append which advances the ring only after a sync gate.
+     * Why: trace persistence must share the facade's one AsyncFATFS owner and
+     * must never be confused with, or allowed to preempt, parameter draining.
+     */
+    FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
     /*
      * Runtime reader/update operations borrow the generalized name cache.
      * Instrument operations address one voice row per selected Scene. Kit
@@ -983,10 +993,14 @@ static void filesystem_writeBootLog_tick(void);
 static void filesystem_residentNames_tick(void);
 static void filesystem_ensureAutosaveFiles_tick(void);
 static void filesystem_autosaveParameterDrain_tick(void);
+static void filesystem_autosaveTraceFlush_tick(void);
 static void filesystem_settingsWriterSchedule_tick(void);
 static void filesystem_settingsWriterCompleted(void);
 static void filesystem_autosaveWriterSchedule_tick(void);
 static void filesystem_autosaveWriterCompleted(void);
+static void filesystem_autosaveTraceFlushSchedule_tick(void);
+static void filesystem_autosaveTraceFlushCompleted(void);
+static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
 static void filesystem_autosaveSetupCompleted(void);
 static uint8_t filesystem_residentNameIsBlank(const char *name);
 static uint8_t filesystem_formatResidentNameLine(char *dst,
@@ -1354,6 +1368,17 @@ static uint8_t op_settings_write_active = 0u;
  */
 static uint16_t fs_autosave_next_due_tick = 0u;
 static uint8_t fs_autosave_writer_armed = 0u;
+/*
+ * Logging-only trace cadence state.
+ *
+ * Input is the next wrapping millisecond deadline selected after a trace
+ * append; output prevents diagnostic appends from repeatedly claiming an idle
+ * facade. This extra two-byte allocation is excluded with the trace module in
+ * production, so DEV_MODE_LOGGING 0 has neither trace SRAM nor trace I/O.
+ */
+#if DEV_MODE_LOGGING
+static uint16_t fs_autosave_trace_next_due_tick = 0u;
+#endif
 /*
  * Pre-audio boot owns first creation of the hidden record pair. This gate
  * remains clear from reset until that create-only transaction has completed,
@@ -2684,6 +2709,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_WRITE_HCNAMES:         return "HNam";
     case FS_INTERNAL_OP_WRITE_BOOT_LOG:        return "BLog";
     case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN: return "ASv";
+    case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:  return "AST";
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:return "HNrL";
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:return "HNrU";
     case FS_INTERNAL_OP_LOAD_HCNAMES_KIT:      return "HNkL";
@@ -3812,6 +3838,137 @@ static void filesystem_writeBootLog_tick(void)
     }
 }
 
+/*
+ * Serialize the pending AutosaveTrace prefix into the shared 512-byte buffer.
+ *
+ * Inputs: a pending-count snapshot capped by the 64-record ring. Output:
+ * `byte_count` receives its exact eight-byte-record length and staging_buf
+ * contains records in oldest-first order. Why: trace owns no filesystem
+ * buffer, while exactly 64 * 8 bytes fits the existing one-operation staging
+ * buffer without introducing another retained allocation. Affiliate:
+ * filesystem_autosaveTraceFlush_tick().
+ */
+static void filesystem_autosaveTraceSerialize(uint16_t record_count,
+                                              uint16_t *byte_count)
+{
+    uint16_t i;
+
+    for (i = 0u; i < record_count; i++) {
+        (void)autosaveTrace_peekRecord(
+            i, staging_buf + (i * AUTOSAVE_TRACE_RECORD_BYTES));
+    }
+    *byte_count = (uint16_t)(record_count * AUTOSAVE_TRACE_RECORD_BYTES);
+}
+
+/*
+ * Append one bounded RAM trace batch to root `asavetrc.bin`.
+ *
+ * Inputs: AutosaveTrace's pending records. Output: an append-mode file write
+ * that advances the trace flush cursor only after file close and the shared
+ * filesystem sync gate. Why: acknowledging before sync could silently lose
+ * the only evidence of an autosave failure during a power cut. This state
+ * machine is never scheduled in DEV_MODE_LOGGING 0; its explicit disabled
+ * branch also guarantees that an accidental direct start cannot write a trace
+ * file in a production build. Affiliates: AutosaveTrace.c, the trace scheduler,
+ * filesystem_finish(), and on_file_opened()/on_file_closed().
+ */
+static void filesystem_autosaveTraceFlush_tick(void)
+{
+#if DEV_MODE_LOGGING
+    switch (op_phase) {
+    case 0u: /* RETURN ROOT + SNAPSHOT/OPEN APPEND TRACE FILE */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_stream_index = autosaveTrace_pendingCount();
+        if (op_stream_index > AUTOSAVE_TRACE_RECORD_COUNT)
+            op_stream_index = AUTOSAVE_TRACE_RECORD_COUNT;
+        if (op_stream_index == 0u) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        filesystem_autosaveTraceSerialize((uint16_t)op_stream_index,
+                                          &op_write_line_len);
+        op_file_ready = false;
+        op_file = NULL;
+        op_bytes_done = 0u;
+        if (!afatfs_fopen_lfn(AUTOSAVE_TRACE_FILENAME, "a",
+                              AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 1u;
+        return;
+
+    case 1u: /* WAIT FOR APPEND FILE OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2u: /* STREAM THE SNAPSHOT, RETRYING ASYNC BACK-PRESSURE */
+    {
+        uint32_t written;
+
+        if (op_bytes_done >= op_write_line_len) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 3u;
+            return;
+        }
+        written = afatfs_fwrite(op_file, staging_buf + op_bytes_done,
+                                op_write_line_len - op_bytes_done);
+        op_bytes_done += written;
+        if (written == 0u && afatfs_isFull()) {
+            /*
+             * Full media is a real error, but the append handle still belongs
+             * to this operation. Close it before publishing ERROR so a later
+             * foreground load/save cannot inherit an orphaned AsyncFATFS owner
+             * or mistake this diagnostic failure for successful trace loss.
+             */
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 4u;
+        }
+        return;
+    }
+
+    case 3u: /* WAIT CLOSE + DURABLE SYNC BEFORE ACKNOWLEDGING THE RING */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_sync())
+            return;
+        /*
+         * op_stream_index is the phase-0 record-count snapshot. Advancing
+         * only here preserves every still-pending trace record across failed
+         * opens, partial writes, closes, and syncs; ring overflow is exposed
+         * separately by autosaveTrace_droppedCount(), never hidden.
+         */
+        autosaveTrace_advanceFlushCursor((uint16_t)op_stream_index);
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 4u: /* WAIT ERROR-HANDLE CLOSE BEFORE PUBLISHING TRACE FAILURE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_finish(op_close_status);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+#else
+    filesystem_finish(FS_STATUS_DONE);
+#endif
+}
+
 static uint16_t filesystem_residentInstrumentRow(uint8_t scene_index,
                                                  uint8_t instrument_slot)
 {
@@ -4843,6 +5000,21 @@ static void filesystem_autosaveParameterDrain_tick(void)
             op_phase = 1u;
             return;
         }
+        /*
+         * VALIDATED marks the complete two-candidate decision before either
+         * recovery or copy-forward work begins. flags bit 0 says a winner
+         * exists; bit 1 is its A/B index when present; value is its generation
+         * (zero without a winner). This preserves validation failure evidence
+         * rather than inferring it later from a recovery path.
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_VALIDATED,
+            (uint8_t)((op_autosave_writer.have_winner ? 1u : 0u) |
+                      (op_autosave_writer.have_winner
+                           ? (uint8_t)(op_autosave_writer.winner_index << 1u)
+                           : 0u)),
+            op_autosave_writer.have_winner
+                ? op_autosave_writer.winner_generation : 0u);
         op_phase = op_autosave_writer.have_winner ? 50u : 30u;
         return;
 
@@ -4941,6 +5113,9 @@ static void filesystem_autosaveParameterDrain_tick(void)
     }
 
     case 55: /* CLOSE COMPLETE: FALL THROUGH IF CANONICAL SRAM IS EMPTY */
+    {
+        uint8_t has_dirty;
+
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -4956,7 +5131,16 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * nonempty record continues into bounded classification. Affiliates:
          * autosave_maskHasDirty() and filesystem_autosaveWriterCompleted().
          */
-        if (!autosave_maskHasDirty()) {
+        has_dirty = autosave_maskHasDirty();
+        /*
+         * MASK_MERGED distinguishes a clean read-only recovery from work that
+         * will enter live-byte capture. flags is the post-merge dirty result;
+         * value is the exact on-file mask bytes accepted before the handle
+         * closed. This records the canonical-owner boundary without changing it.
+         */
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_MASK_MERGED, has_dirty,
+                             (uint32_t)op_autosave_writer.mask_bytes_read);
+        if (!has_dirty) {
             filesystem_complete(FS_STATUS_DONE);
             return;
         }
@@ -4964,6 +5148,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_autosave_writer.patch_count = 0u;
         op_phase = 56u;
         return;
+    }
 
     case 56: /* CLASSIFY/CAPTURE A BOUNDED NUMBER OF MASK POSITIONS */
     {
@@ -4988,6 +5173,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
 
             if (op_autosave_writer.patch_count >=
                 AUTOSAVE_PARAMETER_GETS_PER_WRITE) {
+                filesystem_autosaveTraceCaptured(1u);
                 op_phase = 10u;
                 return;
             }
@@ -5013,6 +5199,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         }
         if (op_autosave_writer.payload_scan_offset >=
             AUTOSAVE_PAYLOAD_BYTES) {
+            filesystem_autosaveTraceCaptured(0u);
             op_phase = 10u;
         }
         return;
@@ -5423,6 +5610,17 @@ static void filesystem_autosaveParameterDrain_tick(void)
         if (!op_close_done)
             return;
         op_file = NULL;
+        /*
+         * PUBLISHED fires after the final A5 handle is closed but before the
+         * generic sync owner replaces this autosave operation. flags is the
+         * newly active target index; value is its new generation. The generic
+         * final sync remains the durability authority, so this hook cannot
+         * claim a hidden write succeeded if that shared gate later fails.
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_PUBLISHED,
+            (uint8_t)(op_autosave_writer.winner_index ^ 1u),
+            op_autosave_writer.winner_generation + 1u);
         /*
          * Hand the committed target to the shared success flush unchanged.
          *
@@ -18462,6 +18660,15 @@ static void filesystem_autosaveWriterCompleted(void)
      * recovery/rollback work. Why: clean state must perform no periodic file
      * operations. Affiliates: drain phase 22 and the scheduler below.
      */
+    /*
+     * TERMINAL is recorded before this callback resets lifecycle ownership.
+     * flags bit 0 is the actual shared-facade terminal status; value is unused.
+     * Why: an I/O error, a failed final sync, or a later policy transition must
+     * remain distinguishable from a successful published generation in the
+     * trace, never be masked by scheduler acknowledgement below.
+     */
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_TERMINAL,
+                         (uint8_t)(status == FS_STATUS_DONE ? 1u : 0u), 0u);
     fs_autosave_transaction_active = 0u;
     /*
      * OFF takes ownership at the first safe post-transform boundary.
@@ -18639,6 +18846,14 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         fs_autosave_next_due_tick = (uint16_t)(
             now + AUTOSAVE_WRITER_INTERVAL_MS);
         fs_autosave_writer_armed = 1u;
+        /*
+         * SCHEDULED records the one 0-to-1 armed edge, separate from eventual
+         * facade admission. value is the deadline selected for this debounce;
+         * keeping it distinct proves whether a later missing drain failed in
+         * scheduling, menu/deadline gating, or filesystem_start().
+         */
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_SCHEDULED, 0u,
+                             (uint32_t)fs_autosave_next_due_tick);
         return;
     }
     if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE ||
@@ -18655,7 +18870,85 @@ static void filesystem_autosaveWriterSchedule_tick(void)
          * FS_INTERNAL_OP_FLUSH_FINISH. Affiliate: policy transition.
          */
         fs_autosave_transaction_active = 1u;
+        /*
+         * ADMITTED records the exact point at which this private drain owns
+         * the facade. This intentionally follows the active-transaction flag,
+         * so policy code and the trace agree that a transform has begun.
+         */
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_ADMITTED, 0u, 0u);
     }
+}
+
+/*
+ * Record whether classification reached the source-copy boundary.
+ *
+ * Input is a boolean saying the live-byte patch budget ended this scan pass.
+ * Output is one CAPTURED stage whose value is the immutable patch count used
+ * by the next copy. Why: it proves a later failure occurred after capture and
+ * exposes the expected bounded-continuation condition without altering either
+ * mask ownership or the existing state-machine transitions. Affiliate: drain
+ * phase 56's two phase-10 exits.
+ */
+static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted)
+{
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CAPTURED,
+                         budget_exhausted ? 1u : 0u,
+                         (uint32_t)op_autosave_writer.patch_count);
+}
+
+/*
+ * Release the autonomous trace append's terminal facade status.
+ *
+ * Input is the DONE or ERROR status published after the diagnostic append
+ * closes and syncs. Output is FS_STATUS_IDLE, so the ordinary settings and
+ * autosave schedulers may run on their next tick. Why: unlike a foreground
+ * filesystem request, this best-effort logger has no caller to observe and
+ * acknowledge its terminal state; leaving it at DONE/ERROR would permanently
+ * prevent every idle-only scheduler from claiming the facade. An ERROR does
+ * not hide a trace failure: the trace flush cursor advanced only after sync,
+ * so the next low-priority cadence retains and retries the pending records.
+ * Affiliate: filesystem_autosaveTraceFlushSchedule_tick().
+ */
+static void filesystem_autosaveTraceFlushCompleted(void)
+{
+    filesystem_ack();
+}
+
+/*
+ * Give durable trace flushing the last claim on an otherwise idle facade.
+ *
+ * Inputs are the ring's pending count and a wrapping cadence deadline. Output
+ * is at most one append operation per interval, after settings persistence and
+ * autosave writer scheduling declined this same tick. Why: diagnostics must
+ * never delay the work they diagnose. A zero deadline is a reset sentinel: it
+ * is initialized from the current tick before unsigned deadline comparison so
+ * a first edit long after boot cannot wait for the 16-bit clock to wrap.
+ */
+static void filesystem_autosaveTraceFlushSchedule_tick(void)
+{
+#if DEV_MODE_LOGGING
+    uint16_t now;
+
+    if (autosaveTrace_pendingCount() == 0u)
+        return;
+    now = time_sysTick;
+    if (fs_autosave_trace_next_due_tick == 0u)
+        fs_autosave_trace_next_due_tick = now;
+    if ((uint16_t)(now - fs_autosave_trace_next_due_tick) >= 0x8000u)
+        return;
+    /*
+     * The background trace append owns no foreground caller, so its completion
+     * callback must return the terminal facade state to IDLE. This prevents an
+     * optional successful (or failed) diagnostic flush from stalling settings
+     * persistence or the autosave writer after its first trace batch.
+     */
+    if (filesystem_start(FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
+                         FS_FILE_SETTINGS, 0u,
+                         filesystem_autosaveTraceFlushCompleted)) {
+        fs_autosave_trace_next_due_tick = (uint16_t)(
+            now + AUTOSAVE_TRACE_FLUSH_INTERVAL_MS);
+    }
+#endif
 }
 
 void filesystem_tick(void)
@@ -18699,6 +18992,10 @@ void filesystem_tick(void)
         filesystem_settingsWriterSchedule_tick();
     if (status == FS_STATUS_IDLE)
         filesystem_autosaveWriterSchedule_tick();
+    /* Trace persistence is deliberately last: it is diagnostic, not durable
+     * user work, and may start only after both autonomous writers declined. */
+    if (status == FS_STATUS_IDLE)
+        filesystem_autosaveTraceFlushSchedule_tick();
     if (status != FS_STATUS_BUSY) return;
 
     switch (current_op) {
@@ -18722,6 +19019,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN:
         filesystem_autosaveParameterDrain_tick();
+        break;
+    case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:
+        filesystem_autosaveTraceFlush_tick();
         break;
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:
@@ -19136,6 +19436,41 @@ uint8_t filesystem_createBootIndexBlocking(void)
     op_instrument_index_type = INSTRUMENT_TYPE_UNKNOWN;
     filesystem_clearInstrumentCacheStorage();
     return 1u;
+}
+
+/*
+ * Pump one trace append to its durable terminal boundary for a bench harness.
+ *
+ * Inputs: an idle facade and any current ring tail. Output: success if nothing
+ * is pending or the private append operation completes successfully; busy or a
+ * real I/O error returns zero. Why: this supplies an explicit pre-power-cycle
+ * evidence boundary without making normal runtime code block for diagnostics.
+ * Terminal status is acknowledged before return so this optional helper cannot
+ * leave the autonomous schedulers disabled behind a stale DONE/ERROR state.
+ */
+uint8_t filesystem_autosaveTraceFlushBlocking(void)
+{
+    uint8_t trace_flushed;
+
+    if (autosaveTrace_pendingCount() == 0u)
+        return 1u;
+    /*
+     * The autonomous scheduler supplies a self-acknowledging callback because
+     * it has no result consumer. This explicit bench helper instead needs to
+     * inspect the terminal result below, so it deliberately owns the matching
+     * filesystem_ack() after its local pump completes.
+     */
+    if (status == FS_STATUS_BUSY ||
+        !filesystem_start(FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
+                          FS_FILE_SETTINGS, 0u, NULL)) {
+        return 0u;
+    }
+    while (status == FS_STATUS_BUSY)
+        filesystem_tick();
+    trace_flushed = (uint8_t)(status == FS_STATUS_DONE);
+    /* See the function contract: return the outcome, but restore idle ownership. */
+    filesystem_ack();
+    return trace_flushed;
 }
 
 uint8_t filesystem_ensureAutosaveFilesBlocking(void)

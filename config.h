@@ -74,14 +74,16 @@
  * modules that might otherwise be obscured by screen write delays.
  *
  * What: value 1 compiles the eight-byte filesystem-operation register,
- * cooperative boot timeout, and best-effort `/bootlog.bin` timeout writer.
- * Value 0 removes that logging/timeout behavior. Why: a splash-screen stall
- * otherwise loses the exact operation coordinate when power is removed.
+ * cooperative boot timeout, best-effort `/bootlog.bin` timeout writer, and
+ * bounded autosave lifecycle trace. Value 0 removes those logging behaviors.
+ * Why: a splash-screen stall or autosave regression otherwise loses the exact
+ * operation coordinate when power is removed.
  * Inputs: main.c's pre-audio logging window and filesystem.c's foreground
  * polling paths. Outputs/effects: SRAM code capture during normal progress and
  * one bounded file write only after timeout recovery begins. This flag owns no
  * LCD calls or LCD waits. Affiliates: filesystem_bootLoggingBegin(),
- * filesystem_bootLoggingArm(), filesystem_tick(), and the LXR-02 SD shim.
+ * filesystem_bootLoggingArm(), filesystem_tick(), AutosaveTrace.c, and the
+ * LXR-02 SD shim.
  */
 #define DEV_MODE_LOGGING    1
 
@@ -209,6 +211,15 @@
  * scan work but no live get. Affiliates: filesystem_autosaveParameterDrain_tick().
  */
 #define AUTOSAVE_MASK_BITS_PER_TICK 256u
+
+/*
+ * Minimum idle interval between background autosave-trace append attempts.
+ * Input is time_sysTick's wrapping millisecond clock; output keeps diagnostic
+ * trace I/O below settings persistence and the autosave writer in the shared
+ * filesystem scheduler. This is observability cadence only, never a writer
+ * debounce or durability policy, and applies solely when DEV_MODE_LOGGING is 1.
+ */
+#define AUTOSAVE_TRACE_FLUSH_INTERVAL_MS 500u
 
 /* -----------------------------------------------------------------------
 ** Display — WS0010 OLED 16×2, 4-bit parallel

@@ -1120,6 +1120,19 @@ Add next to `filesystem_autosaveWriterSchedule_tick()`:
 
 ```c
 /*
+ * Return a background trace append's unobserved terminal state to IDLE.
+ *
+ * This callback exists because a background diagnostic has no foreground
+ * caller to consume DONE/ERROR. The ring's flush cursor advances only after
+ * sync, so acknowledging ERROR releases the shared facade without hiding a
+ * failed append: the next low-priority cadence retries the same records.
+ */
+static void filesystem_autosaveTraceFlushCompleted(void)
+{
+    filesystem_ack();
+}
+
+/*
  * Start a bounded trace-flush operation only when nothing else wants the
  * one idle filesystem owner and enough time has passed since the last
  * attempt.
@@ -1139,10 +1152,19 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
 
     if (autosaveTrace_pendingCount() == 0u)
         return;
+    /* A zero deadline is initialized from the current clock first, so a
+     * first dirty event after tick16 has wrapped cannot be deferred for a
+     * half-cycle by an uninitialized absolute-time comparison. */
+    if (fs_autosave_trace_next_due_tick == 0u)
+        fs_autosave_trace_next_due_tick = now;
     if ((uint16_t)(now - fs_autosave_trace_next_due_tick) >= 0x8000u)
         return;
+    /* This autonomous append must self-ack on either terminal outcome. A
+     * NULL callback would strand the shared facade at DONE/ERROR and block
+     * the settings and autosave schedulers after the first trace batch. */
     if (filesystem_start(FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
-                         FS_FILE_SETTINGS, 0u, NULL)) {
+                         FS_FILE_SETTINGS, 0u,
+                         filesystem_autosaveTraceFlushCompleted)) {
         fs_autosave_trace_next_due_tick = (uint16_t)(
             now + AUTOSAVE_TRACE_FLUSH_INTERVAL_MS);
     }
@@ -1233,17 +1255,22 @@ Implementation, added near `filesystem_ensureAutosaveFilesBlocking()` in
 ```c
 uint8_t filesystem_autosaveTraceFlushBlocking(void)
 {
+    uint8_t trace_flushed;
+
     if (autosaveTrace_pendingCount() == 0u)
         return 1u;
-    if (status == FS_STATUS_BUSY)
-        return 0u;
-    if (!filesystem_start(FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
+    if (status == FS_STATUS_BUSY ||
+        !filesystem_start(FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
                           FS_FILE_SETTINGS, 0u, NULL)) {
         return 0u;
     }
-    while (filesystem_status() == FS_STATUS_BUSY)
+    while (status == FS_STATUS_BUSY)
         filesystem_tick();
-    return (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    trace_flushed = (uint8_t)(status == FS_STATUS_DONE);
+    /* Restore idle ownership: this helper must not strand autonomous writers
+     * behind the terminal status it deliberately consumed for its return. */
+    filesystem_ack();
+    return trace_flushed;
 }
 ```
 
@@ -1356,3 +1383,72 @@ requires:
   when it is `1`, it is a deliberate bench diagnostic alongside the existing
   non-screen boot logger. Do not add a second trace mode or alter the current
   logging selection incidentally while implementing this step.
+
+---
+
+## Implementation record — 2026-08-09
+
+**Status: implemented, but the initial hardware build exposed a scheduler
+lifecycle defect in the diagnostic writer; corrected below and awaiting a new
+hardware verification run.** No Phase 2 whole-object hook, Load/Save
+exclusion, autosave writer timing, or parameter ownership behavior was
+intended to change.
+
+- Added `AutosaveTrace.c/.h`: 64 fixed eight-byte records (512 bytes), two
+  wrapping cursors and one saturated dropped-record counter (6 bytes). The
+  ring is IRQ-protected and records `D/S/A/V/M/C/P/T` stages with tick16 and
+  stage payloads. An overwrite advances only the oldest undurable cursor and
+  increments `autosaveTrace_droppedCount()`; it is therefore visible rather
+  than treated as a successful trace.
+- Added the approved 2-byte logging-only trace cadence in `filesystem.c`, for
+  **520 trace-specific static bytes** while logging is enabled. `DEV_MODE_LOGGING
+  == 0` compiles trace APIs to no-op/zero stubs, omits the ring and cadence, and
+  the scheduler cannot start a trace file operation.
+- Added the eight lifecycle call sites exactly at the documented scalar dirty,
+  scheduler-arm, drain-admission, candidate-validation, mask-merge,
+  capture-to-copy, closed-final-commit, and terminal-callback boundaries.
+  Trace failure is not conflated with success: append open/write/sync failures
+  leave the ring pending, and a full-card write closes its owned file before
+  publishing `FS_STATUS_ERROR`.
+- Added root append file `asavetrc.bin`, scheduled after settings and autosave
+  work only. It serializes at most one 512-byte batch, closes, syncs, and only
+  then advances the durable-flush cursor. Added the documented bench-only
+  `filesystem_autosaveTraceFlushBlocking()` helper; it acknowledges its own
+  terminal facade status before returning so it cannot stall later schedulers.
+- Verified with `make -B -j4` for both logging configurations, then restored
+  `DEV_MODE_LOGGING` to its project value of `1`. Logging-on image: text
+  372,876, data 400, BSS 78,996 bytes. Logging-off image: text 367,212, data
+  396, BSS 78,444 bytes; `arm-none-eabi-nm` found no `autosave_trace` or
+  `fs_autosave_trace` symbol in the logging-off image. The normal build's
+  existing warnings remain, with no new warning from these files.
+
+### Post-hardware correction — 2026-08-09
+
+The first bench fixture proved a defect in this Step 1 implementation, not a
+failure of the parameter hook: `asavetrc.bin` contained one durable
+`SCHEDULED` (`S`) record, with its five-second deadline elapsed during the
+test, but no subsequent records and no autosave update. The background trace
+flush had been started with a `NULL` completion callback. Generic filesystem
+completion therefore left the shared facade in `FS_STATUS_DONE`; all three
+background schedulers run only while it is `FS_STATUS_IDLE`. The first trace
+append consequently disabled settings persistence, autosave admission, and
+every later trace flush. This also means the prior absence of `DIRTY` (`D`)
+records is **not evidence** about parameter producers: records generated after
+the first append remained trapped in SRAM and could not reach the card.
+
+The correction adds the private
+`filesystem_autosaveTraceFlushCompleted()` callback. It acknowledges either
+the trace append's `DONE` or `ERROR` terminal state back to `IDLE`; the trace
+ring retains unsynced records on error, so this does not mask a failed append
+or claim durability that did not occur. The explicit blocking bench helper
+continues to use `NULL` intentionally because it observes the terminal result
+and performs its own acknowledgement immediately afterwards.
+
+Rebuild and retest before drawing any conclusion about Stage 1 instrumentation:
+preserve the parameter records for comparison, replace or archive only
+`asavetrc.bin`, boot, play/change a scene parameter, and leave the unit
+running for at least ten seconds. Preserve the resulting trace and both dot
+records. A working run must show the initial `S`, then an admitted drain and
+its terminal path (`A`, `V`, `M`, and `T`, with `C`/`P` when a write is needed)
+without preventing subsequent trace batches from appearing. Only that new
+fixture can assess whether the expected scalar `D` records were produced.

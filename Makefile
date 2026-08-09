@@ -93,6 +93,7 @@ SRCS = \
   Core/Bank/BankData.c \
   Core/Bank/Scene/SceneData.c \
   Core/Bank/Scene/Autosave.c \
+  Core/Bank/Scene/AutosaveTrace.c \
   Core/Bank/Scene/SceneModTargets.c \
   Core/DSP/Instruments/InstrumentManager.c \
   Core/DSP/Instruments/Drum/DrumParameters.c \
