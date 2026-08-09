@@ -130,9 +130,15 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   suppress every cursor, and retain input locking until true terminal work
   finishes. Preparatory index/preview work may use `menu_storageBusy` without
   showing `...`. Every completion resets to the bracketed type row.
-- The committed Autosave module/plans are explicitly rejected work and are not
-  an accepted Phase 3 baseline. Autosave remains target-only until restarted
-  from the documented ownership/durability requirements.
+- Session 045's committed Autosave implementation is the accepted Phase 1
+  production baseline, not rejected work: it owns the 34,768-byte A/B records,
+  canonical 3,856-byte mutation mask, bounded atomic take/re-dirty drain,
+  typed scalar dirty markers, and v1 AutoSave/settings provenance. Hardware
+  testing has exercised ordinary single-parameter hooks for the testable
+  Scene, Kit, and Instrument parameter types. Whole-object load/save hooks,
+  transaction-wide Load/Save exclusion, and the remaining complete behavioral
+  matrix are still unimplemented or unclosed. Authority:
+  `045_SESSION_HANDOFF_LOG.md` and `SESSION_045_CONSOLIDATED_POST_MORTEM.md`.
 - Production currently includes four pre-audio SD timing holds (250 ms before
   SD init, paced ACMD41 with one-second timeout, 50 ms post-mount, and 50 ms
   pre-Bank). The intermittent boot hang that motivated them is not reproducible
@@ -754,6 +760,25 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ---
 
 ## Known Issues / Technical Debt
+
+### Resolved / Changed in Session 045
+
+- Accepted the Phase 1 Autosave production baseline at commit `326a8a1`:
+  durable 34,768-byte hidden A/B records; one canonical 3,856-byte dirty mask;
+  bounded asynchronous live-value drain with atomic take/re-dirty semantics;
+  typed Bank/Scene/Kit/Instrument scalar markers; and 33-line v1 settings
+  persistence including Scene source and AutoSave policy.
+- Hardware evidence includes A/B multi-generation progress and ordinary
+  single-parameter changes for the testable Scene, Kit, and Instrument types.
+  This is evidence for the scalar path, not closure of the full Phase 1 test
+  matrix: Bank fields, MIDI/supplemental values, identical-value no-ops,
+  re-dirty timing, clean-idle behavior, recovery/power-cut cases, and the
+  AutoSave OFF/ON lifecycle remain separately testable obligations.
+- Whole-object Instrument/Kit/Scene/Bank publication, Morph projection, and
+  transaction-wide Load/Save exclusion were rejected Phase 2 experiments and
+  are not present in accepted production source. The next boundary is
+  observability as defined by `AUTOSAVE_REMEDY_PA2ST1.md`, not restoration of
+  any historical `AUTOSAVE_PARAM_HOOK*.md` source or plan.
 
 ### Resolved / Changed in Session 044
 - Cold boot initializes SceneData before tagged runtime construction. DRM's

@@ -14,11 +14,23 @@ The governing rule is one change boundary at a time, with a saved hardware check
 
 ### 1. Reconcile the baseline before code changes
 
+The existing firmware build and playback/Load/Save smoke tests have already been run successfully, and the `SD_CARD/` working tree now reflects the post-test card state. Treat that as useful baseline evidence, while still recording the exact source/image and card metadata required below; it does not by itself satisfy the diagnostic-trace or full matrix checkpoints.
+
 Confirm the source/build boundary, update stale project context, verify failed files are excluded from the build, and reconcile the retained plans with the 045 handoff. Capture clean A/B records with generation, CRC, commit, identity, and dirty-bit counts.
 
 ### 2. Obtain RAM sign-off and implement observability
 
-Before adding diagnostic storage, obtain acknowledgement for the allocations specified by the detailed remedy plans: the optional 518-byte trace ring in `AUTOSAVE_REMEDY_PA2ST1.md` and the 16-byte diagnostic snapshot proposed for Steps 2–3 in `AUTOSAVE_REMEDY_PA2ST2-3.md`. Resolve whether these should be implemented together so duplicate diagnostic surfaces are not created.
+The RAM condition is approved: these allocations are permitted only when
+`DEV_MODE_LOGGING == 1`. They must compile out, and their logging/trace paths
+must be inactive, when `DEV_MODE_LOGGING == 0`.
+
+The mode distinction is simple: `DEV_MODE_DIAGNOSTIC` is for diagnostics that print to the screen; `DEV_MODE_LOGGING` is for diagnostics that do not print to the screen, including file logging. The autosave trace and its diagnostic snapshot therefore use `DEV_MODE_LOGGING`. Do not introduce a separate autosave trace mode.
+
+Implement `AUTOSAVE_REMEDY_PA2ST1.md` first and test it to completion. Do not
+implement the diagnostic additions in `AUTOSAVE_REMEDY_PA2ST2-3.md` at the
+same time. After Step 1 has been tested, reassess Steps 2–3 and decide which,
+if any, Step 1 interfaces or trace data can be reused without duplicating or
+expanding the diagnostic surface.
 
 Then add the smallest disabled-by-default lifecycle trace needed to distinguish:
 
@@ -28,7 +40,60 @@ The trace must be bounded, non-blocking, separate from screen diagnostics, and m
 
 ### 3. Close the accepted Phase 1 matrix
 
-Starting from known clean valid records, test one coordinate at a time across Bank, Scene, Kit, Instrument Normal, Instrument Morph, supplemental descriptor values, MIDI channel/note, and generated Kit endpoints. Include identical-value no-ops, coalesced edits, re-dirty during an active drain, and clean-mask idle behavior. Save exact file and trace evidence for every result.
+This is a verification and evidence task, not a Phase 2 feature decision. Its
+purpose is to establish that the accepted Phase 1 scalar behavior is a stable
+reference before whole-object hooks are added.
+
+Prerequisite: Step 1's diagnostic implementation has passed its own test, and
+the starting A/B records are valid, fully drained, and copied aside. If Step 1
+does not produce trustworthy lifecycle evidence, stop and repair Step 1 before
+using it for this matrix.
+
+Test one coordinate at a time across:
+
+- Bank fields;
+- Scene parameters;
+- Kit generated endpoints;
+- Instrument Normal endpoints;
+- Instrument Morph endpoints for Morphable descriptors;
+- supplemental descriptor values; and
+- MIDI channel/note fields.
+
+For each coordinate, perform and record:
+
+1. one value-changing edit;
+2. an identical-value write, which must not dirty the mask;
+3. repeated edits within one debounce window, which should coalesce to the
+   final value; and
+4. where applicable, an edit that re-dirties the same byte during an active
+   drain, which must survive for a later generation.
+
+Also perform one clean-mask idle observation after recovery is complete. It
+must show no new autosave transaction or hidden-file I/O.
+
+For every run, preserve the starting and ending `.hcprms` records and record
+the expected payload offset(s), starting/ending generation, CRC, commit marker,
+dirty-bit count, final payload value, and the Step 1 lifecycle events. The
+matrix is passed only when the expected owner marks the expected bit, the
+writer captures the final live value, identical writes produce no dirty work,
+re-dirty is not lost, and idle state remains idle.
+
+Decisions required before moving on are limited to test interpretation:
+
+- If a value-changing test produces no dirty bit, determine whether the owner
+  setter was not reached or the writer was not admitted; do not add a Phase 2
+  hook to compensate.
+- If the bit is marked but the payload is wrong, isolate capture/publication
+  before changing ownership.
+- If an identical write dirties, treat that as a Phase 1 regression to fix or
+  explicitly explain before proceeding.
+- If re-dirty is lost, stop Phase 2 work until atomic take/re-dirty behavior is
+  repaired and retested.
+- If clean idle starts I/O, stop and diagnose scheduler/recovery state before
+  continuing.
+
+The resulting fixtures and trace become the Phase 1 reference baseline for
+Steps 4–7; no new whole-object behavior is authorized by this matrix alone.
 
 ### 4. Close settings and provenance gaps
 

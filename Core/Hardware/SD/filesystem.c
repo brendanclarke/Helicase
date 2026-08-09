@@ -102,6 +102,17 @@
 #define FS_KIT_LFN_MAX 80u
 #define FS_RESIDENT_NAMES_FILENAME ".hcnames"
 /*
+ * `/.hcnames` is one firmware-owned root singleton in FAT's case-insensitive
+ * namespace. Every read, rewrite, and first-use creation must therefore use
+ * folded display-name lookup: a host-created case variant is the same register
+ * to preserve, not evidence that the canonical name is absent. This prevents
+ * a later write from allocating a second visible HCNAMES object solely because
+ * its display case differs. It does not classify an I/O open failure as absent;
+ * callers that bootstrap after a NULL open still require a separate
+ * failure-versus-absence remedy.
+ */
+#define FS_RESIDENT_NAMES_MATCH_MODE AFATFS_MATCH_CASE_INSENSITIVE
+/*
  * Fixed logical row coordinates inside the variable-length `/.hcnames` file.
  *
  * What: the register contains one Bank row, sixteen Scene rows, sixteen Kit
@@ -180,7 +191,7 @@ typedef enum {
      * operation scratch. Output: exactly those eight bytes, closed and passed
      * through the normal sync gate. Why: main must not issue ad-hoc FAT writes
      * while the filesystem facade owns all async progress. Affiliates:
-     * filesystem_writeBootTimeoutLogBlocking() and filesystem_tick().
+     * filesystem_writeBootFailureLogBlocking() and filesystem_tick().
      */
     FS_INTERNAL_OP_WRITE_BOOT_LOG,
     /*
@@ -423,6 +434,35 @@ static afatfsFinder_t op_finder;
  */
 static afatfsObjectFinder_t op_object_finder;
 static afatfsObjectInfo_t op_object;
+/*
+ * One bounded `/.hcnames` absence-proof scan borrows the facade's normal file
+ * handle and object-finder scratch between a failed read and a possible
+ * bootstrap write.  These two bytes retain only the live scan phase and a
+ * saturated 0/1/2-or-more match count; they are not an HCNAMES cache and are
+ * reset for every facade request.  Keeping the proof inside the owning
+ * operation prevents a NULL open callback (which can also mean I/O failure)
+ * from authorizing a root-file creation.
+ */
+typedef enum {
+    FS_HCNAMES_PROBE_IDLE = 0u,
+    FS_HCNAMES_PROBE_OPEN_ROOT,
+    FS_HCNAMES_PROBE_WAIT_ROOT,
+    FS_HCNAMES_PROBE_SCAN,
+    FS_HCNAMES_PROBE_CLOSE_ROOT,
+    FS_HCNAMES_PROBE_WAIT_CLOSE
+} fs_hcnames_probe_state_t;
+
+typedef enum {
+    FS_HCNAMES_PROBE_IN_PROGRESS = 0u,
+    FS_HCNAMES_PROBE_ABSENT,
+    FS_HCNAMES_PROBE_PRESENT,
+    FS_HCNAMES_PROBE_DUPLICATE,
+    FS_HCNAMES_PROBE_ERROR
+} fs_hcnames_probe_result_t;
+
+static fs_hcnames_probe_state_t op_hcnames_probe_state =
+    FS_HCNAMES_PROBE_IDLE;
+static uint8_t op_hcnames_probe_matches = 0u;
 static char op_root_open_name[AFATFS_SHORT_FILENAME_MAX];
 /*
  * One-operation Scene directory alias returned by asyncfatfs.
@@ -958,8 +998,22 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
                                                uint16_t row);
 static void filesystem_repairNames_tick(void);
 static uint8_t filesystem_repairBuildCandidate(void);
-static uint8_t filesystem_quarantineKitLibraryBlocking(void);
+typedef enum {
+    FS_KIT_VALIDATION_VALID = 0u,
+    FS_KIT_VALIDATION_INVALID_CONTENT,
+    FS_KIT_VALIDATION_IO_ABORT,
+} fs_kit_validation_result_t;
+
+typedef enum {
+    FS_KIT_QUARANTINE_OK = 0u,
+    FS_KIT_QUARANTINE_IO_ABORT,
+} fs_kit_quarantine_result_t;
+
+static fs_kit_quarantine_result_t filesystem_quarantineKitLibraryBlocking(void);
 static uint8_t filesystem_kitMemberNameIsCanonical(const char *name);
+static void filesystem_bootLoggingSetBankDetail(const char suffix[3]);
+static void filesystem_bootLoggingSetBankSceneDetail(char family);
+static uint8_t filesystem_bankPayloadDetailActive(void);
 static bool filesystem_startRepairLibraryNames(fs_library_index_kind_t kind,
                                                fs_completion_cb_t cb);
 static bool filesystem_startRepairInstrumentNames(instrument_type_t type,
@@ -968,6 +1022,11 @@ static bool filesystem_startRepairBankNames(uint16_t slot,
                                             fs_completion_cb_t cb);
 static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
                              uint16_t slot, fs_completion_cb_t cb);
+static uint8_t filesystem_displayNameMatchesCaseInsensitive(
+    const char *candidate, const char *target);
+static void filesystem_hcnamesProbeBegin(void);
+static fs_hcnames_probe_result_t filesystem_hcnamesProbe_tick(void);
+static uint8_t filesystem_hcnamesProbeIsScanning(void);
 static void filesystem_libraryIndexRebuildScanComplete(void);
 static void filesystem_libraryIndexRebuildWriteComplete(void);
 static void filesystem_loadInstrumentIndex_tick(void);
@@ -2525,6 +2584,29 @@ void filesystem_bootLoggingArm(const char code[8])
 #endif
 }
 
+/*
+ * Update the retained substep label without changing the enclosing
+ * boot-operation deadline.
+ *
+ * Inputs: exactly eight bytes and an already armed normal boot logger. Output:
+ * only fs_boot_logging_code changes. Why: timeout recovery needs the last
+ * wait-capable primitive, while every successful substep must remain inside
+ * the enclosing operation's original ten-second budget. This helper does not
+ * arm, disarm, reset a tick, poll, allocate, call FAT, or write a file.
+ */
+static void filesystem_bootLoggingSetDetail(const char code[8])
+{
+#if DEV_MODE_LOGGING
+    if (!fs_boot_logging_active || !fs_boot_logging_armed ||
+        fs_boot_logging_recovery || fs_boot_logging_timed_out || !code) {
+        return;
+    }
+    memcpy(fs_boot_logging_code, code, sizeof(fs_boot_logging_code));
+#else
+    (void)code;
+#endif
+}
+
 uint8_t filesystem_bootLoggingTimedOut(void)
 {
     /*
@@ -2669,6 +2751,152 @@ static void filesystem_makeNamedErrorCode(const char *prefix,
     fs_error_code[i] = '\0';
 }
 
+/*
+ * Compare one AsyncFATFS display name against a firmware-owned FAT component.
+ *
+ * FAT treats ASCII case variants as one namespace entry, while displayName
+ * deliberately preserves host-selected case.  The root HCNAMES probe and the
+ * autosave no-overwrite scan therefore use this local folded comparison rather
+ * than trusting a case-sensitive C string comparison to prove absence.
+ */
+static uint8_t filesystem_displayNameMatchesCaseInsensitive(
+    const char *candidate, const char *target)
+{
+    if (!candidate || !target)
+        return 0u;
+    while (*candidate != '\0' && *target != '\0') {
+        char left = *candidate++;
+        char right = *target++;
+
+        if (left >= 'A' && left <= 'Z')
+            left = (char)(left + ('a' - 'A'));
+        if (right >= 'A' && right <= 'Z')
+            right = (char)(right + ('a' - 'A'));
+        if (left != right)
+            return 0u;
+    }
+    return (uint8_t)(*candidate == '\0' && *target == '\0');
+}
+
+/*
+ * Start the read-only proof required before any first-use HCNAMES creation.
+ *
+ * Inputs: the caller has received a completed NULL callback from a folded
+ * `/.hcnames` read and owns no other open facade handle.  Output: a fresh
+ * root-directory scan using the shared handle/finder scratch.  No deadline is
+ * armed or extended here: a Bank caller remains inside its original BANKLOAD
+ * ten-second operation budget while runtime callers retain normal async error
+ * handling.
+ */
+static void filesystem_hcnamesProbeBegin(void)
+{
+    op_hcnames_probe_matches = 0u;
+    op_hcnames_probe_state = FS_HCNAMES_PROBE_OPEN_ROOT;
+}
+
+/*
+ * Progress one read-only root scan and classify HCNAMES without creating it.
+ *
+ * A NULL direct read cannot distinguish a genuinely absent file from a failed
+ * lookup, damaged entry chain, wrong object kind, or device failure.  This
+ * helper enumerates every root object, counts folded `.hcnames` display-name
+ * matches through the ordinary callback/close path, and returns ABSENT only
+ * after that enumeration closes successfully.  One match is retried by the
+ * caller's existing read path; two or more matches and every scan/close error
+ * are terminal FS_STATUS_ERROR cases, preserving all card evidence.
+ */
+static fs_hcnames_probe_result_t filesystem_hcnamesProbe_tick(void)
+{
+    afatfsOperationStatus_e scan_status;
+
+    switch (op_hcnames_probe_state) {
+    case FS_HCNAMES_PROBE_OPEN_ROOT:
+        if (!afatfs_chdir(NULL))
+            return FS_HCNAMES_PROBE_IN_PROGRESS;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(".", "r", on_file_opened))
+            return FS_HCNAMES_PROBE_IN_PROGRESS;
+        op_hcnames_probe_state = FS_HCNAMES_PROBE_WAIT_ROOT;
+        return FS_HCNAMES_PROBE_IN_PROGRESS;
+
+    case FS_HCNAMES_PROBE_WAIT_ROOT:
+        if (!op_file_ready)
+            return FS_HCNAMES_PROBE_IN_PROGRESS;
+        if (!op_file) {
+            op_hcnames_probe_state = FS_HCNAMES_PROBE_IDLE;
+            return FS_HCNAMES_PROBE_ERROR;
+        }
+        afatfs_findFirstObject(op_file, &op_object_finder);
+        op_hcnames_probe_state = FS_HCNAMES_PROBE_SCAN;
+        return FS_HCNAMES_PROBE_IN_PROGRESS;
+
+    case FS_HCNAMES_PROBE_SCAN:
+        scan_status = afatfs_findNextObject(op_file, &op_object_finder,
+                                            &op_object);
+        if (scan_status == AFATFS_OPERATION_IN_PROGRESS)
+            return FS_HCNAMES_PROBE_IN_PROGRESS;
+        if (scan_status == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_file, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_hcnames_probe_state = FS_HCNAMES_PROBE_CLOSE_ROOT;
+            return FS_HCNAMES_PROBE_IN_PROGRESS;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_file, &op_object_finder);
+            op_close_status = FS_STATUS_DONE;
+            op_hcnames_probe_state = FS_HCNAMES_PROBE_CLOSE_ROOT;
+            return FS_HCNAMES_PROBE_IN_PROGRESS;
+        }
+        if (filesystem_displayNameMatchesCaseInsensitive(
+                op_object.id.displayName, FS_RESIDENT_NAMES_FILENAME) &&
+            op_hcnames_probe_matches < 2u) {
+            /* Saturation distinguishes 0, one, and duplicate-or-more without
+             * retaining object identities or introducing a second name cache. */
+            op_hcnames_probe_matches++;
+        }
+        return FS_HCNAMES_PROBE_IN_PROGRESS;
+
+    case FS_HCNAMES_PROBE_CLOSE_ROOT:
+        op_close_done = false;
+        if (!afatfs_fclose(op_file, on_file_closed))
+            return FS_HCNAMES_PROBE_IN_PROGRESS;
+        op_hcnames_probe_state = FS_HCNAMES_PROBE_WAIT_CLOSE;
+        return FS_HCNAMES_PROBE_IN_PROGRESS;
+
+    case FS_HCNAMES_PROBE_WAIT_CLOSE:
+        if (!op_close_done)
+            return FS_HCNAMES_PROBE_IN_PROGRESS;
+        op_file = NULL;
+        op_hcnames_probe_state = FS_HCNAMES_PROBE_IDLE;
+        if (op_close_status != FS_STATUS_DONE)
+            return FS_HCNAMES_PROBE_ERROR;
+        if (op_hcnames_probe_matches == 0u)
+            return FS_HCNAMES_PROBE_ABSENT;
+        if (op_hcnames_probe_matches == 1u)
+            return FS_HCNAMES_PROBE_PRESENT;
+        return FS_HCNAMES_PROBE_DUPLICATE;
+
+    case FS_HCNAMES_PROBE_IDLE:
+    default:
+        return FS_HCNAMES_PROBE_ERROR;
+    }
+}
+
+/*
+ * Expose only the probe's wait-capable scan boundary to the Bank boot logger.
+ *
+ * The Bank caller records `BKHCSCAN` after root open has completed so a later
+ * timeout distinguishes directory enumeration from the preceding HCNAMES
+ * read.  This query has no I/O or clock side effect and cannot rearm BANKLOAD.
+ */
+static uint8_t filesystem_hcnamesProbeIsScanning(void)
+{
+    return (uint8_t)(op_hcnames_probe_state == FS_HCNAMES_PROBE_SCAN ||
+                     op_hcnames_probe_state == FS_HCNAMES_PROBE_CLOSE_ROOT ||
+                     op_hcnames_probe_state == FS_HCNAMES_PROBE_WAIT_CLOSE);
+}
+
 static void filesystem_complete(fs_status_t final_status)
 {
     /*
@@ -2722,6 +2950,8 @@ static void filesystem_finish(fs_status_t final_status)
     }
 
     if (flush_before_complete) {
+        fs_internal_op_t finished_op = current_op;
+
         /*
          * Do not publish a successful filesystem operation until asyncfatfs has
          * persisted every dirty sector the operation left behind.
@@ -2740,7 +2970,16 @@ static void filesystem_finish(fs_status_t final_status)
          * failures in other modules that might otherwise be obscured by screen
          * write delays.
          */
-        filesystem_bootLoggingArm("FSFLUSH ");
+        /*
+         * Preserve Bank-load provenance across the mandatory final flush.
+         *
+         * Inputs: the operation which completed logical work. Output: a fresh
+         * BKFLUSH deadline only for Load Bank; every other owner retains
+         * FSFLUSH. Why: this selects a diagnostic label only, so a stalled
+         * sync still times out and an error never enters this DONE-only path.
+         */
+        filesystem_bootLoggingArm(
+            finished_op == FS_INTERNAL_OP_LOAD_BANK ? "BKFLUSH " : "FSFLUSH ");
         current_op = FS_INTERNAL_OP_FLUSH_FINISH;
         op_phase = 0u;
         return;
@@ -3389,18 +3628,44 @@ static void filesystem_createLibraryIndex_tick(void)
 
 static void filesystem_writeResidentNames_tick(void)
 {
+    fs_hcnames_probe_result_t probe_result;
+
     /*
      * Write root `/.hcnames` using the `.hcindex` writer pattern.
      *
      * Inputs: resident BankData/SceneData after the initial load/fallback
      * chain. Output: one root file whose row order is the resident-name
-     * register contract. This operation deliberately does not scan the card or
-     * allocate another name cache; it serializes only SRAM fields that already
-     * exist, then finishes through filesystem_finish() so asyncfatfs flushes
-     * the file before boot continues.
+     * register contract. Its first phase now proves whether the singleton is
+     * absent before allowing a create-capable writer: a completed NULL open is
+     * not sufficient evidence. The proof borrows only operation-local finder
+     * scratch; the writer still serializes the existing SRAM fields and
+     * finishes through filesystem_finish() so asyncfatfs flushes before boot
+     * continues.
      */
     switch (op_phase) {
-    case 0: /* RETURN ROOT + OPEN .hcnames */
+    case 0: /* PROVE ROOT HCNAMES ABSENT/UNIQUE, THEN OPEN FOR WRITE */
+        if (op_hcnames_probe_state == FS_HCNAMES_PROBE_IDLE)
+            filesystem_hcnamesProbeBegin();
+        probe_result = filesystem_hcnamesProbe_tick();
+        if (probe_result == FS_HCNAMES_PROBE_IN_PROGRESS)
+            return;
+        if (probe_result == FS_HCNAMES_PROBE_ERROR) {
+            /* A failed proof never falls through to a create-capable open;
+             * preserve the storage failure for the caller's normal error UI. */
+            filesystem_makeNamedErrorCode("HNPrb", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (probe_result == FS_HCNAMES_PROBE_DUPLICATE) {
+            /* Multiple folded matches are evidence for manual recovery, not a
+             * license to choose, overwrite, rename, or merge either entry. */
+            filesystem_bootLoggingSetDetail("HNDUP   ");
+            filesystem_makeNamedErrorCode("HNDup", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /* ABSENT authorizes initial creation; PRESENT authorizes this legacy
+         * refresh writer to reopen the one proven existing register. */
         if (!afatfs_chdir(NULL))
             return;
         op_file_ready = false;
@@ -3409,7 +3674,7 @@ static void filesystem_writeResidentNames_tick(void)
         op_bytes_done = 0u;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
                               "w",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
                               on_file_opened))
             return;
@@ -3480,7 +3745,7 @@ static void filesystem_writeResidentNames_tick(void)
  * single-owner asyncfatfs rules as every other facade write and must not claim
  * durability after only updating a cache. Input is fs_boot_logging_code, which
  * survives dirty recovery; output is an eight-byte file with no NUL/newline.
- * Affiliates: filesystem_writeBootTimeoutLogBlocking(), on_file_opened(),
+ * Affiliates: filesystem_writeBootFailureLogBlocking(), on_file_opened(),
  * on_file_closed(), filesystem_finish(), and the tick dispatcher.
  */
 static void filesystem_writeBootLog_tick(void)
@@ -3810,6 +4075,7 @@ static void filesystem_residentNames_tick(void)
         current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT ||
         current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT ||
         current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE);
+    fs_hcnames_probe_result_t probe_result;
 
     /*
      * Read `/.hcnames`, optionally replace affected Instrument or Kit rows,
@@ -3834,7 +4100,7 @@ static void filesystem_residentNames_tick(void)
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
                               "r",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
                               on_file_opened)) {
             return;
@@ -3848,32 +4114,17 @@ static void filesystem_residentNames_tick(void)
         if (!op_file) {
             if (update) {
                 /*
-                 * Bootstrap a missing register from the targeted update.
+                 * A failed read is not yet proof that HCNAMES is missing.
                  *
-                 * Inputs: an update request has already cleared/tagged the
-                 * shared 129-row cache, but root `/.hcnames` did not exist.
-                 * Output: leave those rows blank, overlay only the request's
-                 * committed Scene/Kit/Instrument identity below, and create
-                 * the file through the ordinary writer. This is required after
-                 * retiring SceneData's name mirror: first root Scene/Bank
-                 * activity must be able to establish the card authority rather
-                 * than failing before it can publish its own rows.
+                 * The AsyncFATFS callback has no reason code, so NULL can mean
+                 * a missing entry or an I/O/lookup failure.  Delay both cache
+                 * mutation and the write-capable bootstrap until the bounded
+                 * root scan proves absence; a present object instead receives
+                 * exactly one folded read retry and every duplicate/error is
+                 * exposed through FS_STATUS_ERROR without writing the card.
                  */
-                if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
-                    filesystem_cacheCurrentResidentKitNames();
-                else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
-                    filesystem_cacheCurrentResidentSceneNames();
-                else
-                    filesystem_cacheCurrentResidentInstrumentNames();
-                op_file_ready = false;
-                if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
-                                      "w",
-                                      AFATFS_MATCH_CASE_SENSITIVE,
-                                      NULL,
-                                      on_file_opened)) {
-                    return;
-                }
-                op_phase = 4u;
+                filesystem_hcnamesProbeBegin();
+                op_phase = 7u;
                 return;
             }
             filesystem_finish(FS_STATUS_ERROR);
@@ -3931,7 +4182,7 @@ static void filesystem_residentNames_tick(void)
         op_file_ready = false;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
                               "w",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
                               on_file_opened)) {
             return;
@@ -3999,6 +4250,82 @@ static void filesystem_residentNames_tick(void)
         filesystem_finish(FS_STATUS_DONE);
         return;
 
+    case 7: /* PROVE FAILED-READ REGISTER IS ABSENT BEFORE BOOTSTRAP */
+        probe_result = filesystem_hcnamesProbe_tick();
+        if (probe_result == FS_HCNAMES_PROBE_IN_PROGRESS)
+            return;
+        if (probe_result == FS_HCNAMES_PROBE_ERROR) {
+            /* A root scan or close failure must retain the failed read as an
+             * error; creating a new root register here would hide that fault. */
+            filesystem_makeNamedErrorCode("HNPrb", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (probe_result == FS_HCNAMES_PROBE_DUPLICATE) {
+            /* Do not select one duplicate or repair either entry implicitly.
+             * The named error is visible to runtime callers and boot logging
+             * retains the condition if this update occurs during boot. */
+            filesystem_bootLoggingSetDetail("HNDUP   ");
+            filesystem_makeNamedErrorCode("HNDup", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (probe_result == FS_HCNAMES_PROBE_PRESENT) {
+            /* The scan found exactly one folded match.  Retry its normal read
+             * once; a second NULL is an error, never a retry/create loop. */
+            op_phase = 8u;
+            return;
+        }
+        /* Only an empty, successfully closed root scan reaches this create.
+         * Start with blank preserved rows, then publish the completed action's
+         * identity block as the first authoritative HCNAMES content. */
+        if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
+            filesystem_cacheCurrentResidentKitNames();
+        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
+            filesystem_cacheCurrentResidentSceneNames();
+        else
+            filesystem_cacheCurrentResidentInstrumentNames();
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+                              "w",
+                              FS_RESIDENT_NAMES_MATCH_MODE,
+                              NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 4u;
+        return;
+
+    case 8: /* RETURN ROOT + RETRY THE ONE SCANNED EXISTING REGISTER */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+                              "r",
+                              FS_RESIDENT_NAMES_MATCH_MODE,
+                              NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 9u;
+        return;
+
+    case 9: /* WAIT ONE RETRY; DO NOT TURN A SECOND FAILURE INTO CREATE */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_makeNamedErrorCode("HNRtry", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_line_len = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 2u;
+        return;
+
     default:
         filesystem_finish(FS_STATUS_ERROR);
         return;
@@ -4044,25 +4371,11 @@ static uint8_t filesystem_autosaveTargetMatches(const char *candidate,
                                                 const char *target)
 {
     /*
-     * Treat FAT's ASCII case variants as the same existing target.  A
-     * creation-only boot pass must preserve an already-present record even if
-     * a host changed only its display case; it must never turn that case clash
-     * into a write-open that could replace card data.
+     * Autosave's creation-only pass shares the HCNAMES probe's FAT-folded
+     * comparison.  A host case variant is an existing record, never a reason
+     * to open the writer as though the root target were absent.
      */
-    if (!candidate || !target)
-        return 0u;
-    while (*candidate != '\0' && *target != '\0') {
-        char left = *candidate++;
-        char right = *target++;
-
-        if (left >= 'A' && left <= 'Z')
-            left = (char)(left + ('a' - 'A'));
-        if (right >= 'A' && right <= 'Z')
-            right = (char)(right + ('a' - 'A'));
-        if (left != right)
-            return 0u;
-    }
-    return (uint8_t)(*candidate == '\0' && *target == '\0');
+    return filesystem_displayNameMatchesCaseInsensitive(candidate, target);
 }
 
 static void filesystem_autosaveAdvanceTarget(void)
@@ -4108,7 +4421,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME, "r",
-                              AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                              FS_RESIDENT_NAMES_MATCH_MODE, NULL,
                               on_file_opened)) {
             return;
         }
@@ -5130,7 +5443,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME, "r",
-                              AFATFS_MATCH_CASE_SENSITIVE, NULL,
+                              FS_RESIDENT_NAMES_MATCH_MODE, NULL,
                               on_file_opened)) {
             filesystem_autosaveWriterFinishError();
             return;
@@ -7611,6 +7924,11 @@ static void filesystem_loadSceneDirectory_tick(void)
     case 12: /* OPEN sceneset.scg */
         storage_scenesetInit(&op_sceneset_state);
         op_line_len = 0u;
+        if (filesystem_bankPayloadDetailActive()) {
+            /* This shared loader is serving a selected Bank child; record the
+             * metadata/Kit file family without changing root Scene behaviour. */
+            filesystem_bootLoggingSetBankSceneDetail('K');
+        }
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(STORAGE_SCENESET_FILENAME, "r", on_file_opened))
@@ -7680,6 +7998,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     case 17: /* OPEN embedded Kit directory */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('K');
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(op_scene_child_open_name, "r", on_file_opened))
@@ -7706,6 +8026,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     case 20: /* CLOSE embedded Kit handle */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('K');
         op_close_done = false;
         if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
             op_phase = 21;
@@ -7720,6 +8042,8 @@ static void filesystem_loadSceneDirectory_tick(void)
     case 22: /* OPEN embedded kitset.kcg */
         storage_kitsetInit(&op_kitset);
         op_line_len = 0u;
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('K');
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(STORAGE_KITSET_FILENAME, "r", on_file_opened))
@@ -7860,6 +8184,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     case 25: /* CLOSE embedded kitset.kcg */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('K');
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 26;
@@ -7888,6 +8214,11 @@ static void filesystem_loadSceneDirectory_tick(void)
             &fs_stage_workspace.scene_stage.kit.instruments[op_instrument_slot],
             op_kitset.instrument_type[op_instrument_slot]);
         op_line_len = 0u;
+        if (filesystem_bankPayloadDetailActive()) {
+            /* Record the selected child's Instrument sequence before starting
+             * its open; logging cannot advance the slot or commit staging. */
+            filesystem_bootLoggingSetBankSceneDetail('I');
+        }
         op_file_ready = false;
         op_file = NULL;
         /*
@@ -7968,6 +8299,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     case 30: /* CLOSE embedded instrument */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('I');
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 31;
@@ -7993,7 +8326,14 @@ static void filesystem_loadSceneDirectory_tick(void)
          */
         filesystem_commitSceneStage();
         if (current_op == FS_INTERNAL_OP_LOAD_BANK) {
-            afatfsOperationStatus_e ast = afatfs_chdirParent();
+            afatfsOperationStatus_e ast;
+
+            if (op_bank_payload_active) {
+                /* Pattern/Effects and the return to Bank are one final
+                 * per-child I/O family; this label has no commit side effect. */
+                filesystem_bootLoggingSetBankSceneDetail('P');
+            }
+            ast = afatfs_chdirParent();
 
             /*
              * Bank-local Scene payloads are already inside
@@ -8116,6 +8456,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     case 44: /* OPEN bridge pattern */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('P');
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(op_scene_pattern_open_name, "r", on_file_opened))
@@ -8425,6 +8767,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     case 54: /* CLOSE bridge pattern */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('P');
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 55;
@@ -8443,6 +8787,8 @@ static void filesystem_loadSceneDirectory_tick(void)
     case 56: /* OPEN effect placeholder */
         storage_effectStateInit(&op_effect_state);
         op_line_len = 0u;
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('P');
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(op_scene_effect_open_name, "r", on_file_opened))
@@ -8493,6 +8839,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     case 59: /* CLOSE effect placeholder */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('P');
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 60;
@@ -8562,6 +8910,8 @@ static void filesystem_loadSceneDirectory_tick(void)
     }
 
     case 72: /* RETURN ROOT + FINISH */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('P');
         if (!afatfs_chdir(NULL))
             return;
         if (current_op == FS_INTERNAL_OP_LOAD_BANK &&
@@ -8632,6 +8982,7 @@ static void filesystem_loadBankDirectory_tick(void)
     uint8_t line_ready;
     uint8_t eof;
     storage_status_t st;
+    fs_hcnames_probe_result_t probe_result;
 
     if (op_bank_payload_active) {
         filesystem_loadSceneDirectory_tick();
@@ -8666,13 +9017,17 @@ static void filesystem_loadBankDirectory_tick(void)
          * adds no persistent SRAM allocation or browser-state ambiguity.
          */
         filesystem_prepareResidentNamesCache();
+        /* Record the HCNAMES preload before its wait-capable root/open path.
+         * This changes only the retained detail label; it never restarts the
+         * enclosing BANKLOAD deadline or changes missing-register semantics. */
+        filesystem_bootLoggingSetDetail("BKHCREAD");
         if (!afatfs_chdir(NULL))
             return;
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
                               "r",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
                               on_file_opened)) {
             return;
@@ -8685,20 +9040,22 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         if (!op_file) {
             /*
-             * A first-use card has no register to preserve. Inputs: selected
-             * Bank Load after repair and an empty HCNAMES cache prepared in
-             * phase 0. Output: continue with blank unselected rows; every
-             * successfully selected Bank child will fill its own 1+1+6 block
-             * before the final writer creates `/.hcnames`. Existing-register
-             * loads never take this branch, so their unmasked rows remain
-             * byte-for-byte logical copies of the prior file.
+             * A NULL HCNAMES read is ambiguous: it may describe a first-use
+             * card, but it may also be a failed lookup or device operation.
+             * Before Bank can continue with its blank cache and eventually
+             * open a create-capable writer, prove root absence with the
+             * bounded read-only scan.  The new detail identifies the scan's
+             * root-open boundary without rearming or extending BANKLOAD.
              */
-            op_phase = 1u;
+            filesystem_bootLoggingSetDetail("BKHCROOT");
+            filesystem_hcnamesProbeBegin();
+            op_phase = 87u;
             return;
         }
         op_item_offset = 0u;
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
+        filesystem_bootLoggingSetDetail("BKHCREAD");
         op_phase = 81u;
         return;
 
@@ -8743,7 +9100,79 @@ static void filesystem_loadBankDirectory_tick(void)
         op_phase = 1u;
         return;
 
+    case 87: /* READ-ONLY ROOT PROOF AFTER A NULL HCNAMES READ */
+        /* Once the helper owns an established root iterator, distinguish a
+         * scan stall from the preceding direct HCNAMES read in bootlog.bin.
+         * SetDetail() only replaces the retained eight-byte code; it cannot
+         * reset the enclosing BANKLOAD deadline. */
+        if (filesystem_hcnamesProbeIsScanning())
+            filesystem_bootLoggingSetDetail("BKHCSCAN");
+        probe_result = filesystem_hcnamesProbe_tick();
+        if (probe_result == FS_HCNAMES_PROBE_IN_PROGRESS)
+            return;
+        if (probe_result == FS_HCNAMES_PROBE_ERROR) {
+            /* Finder, root-open, or close failure is not file absence.  Stop
+             * before Bank's final HCNAMES writer can allocate a second entry. */
+            filesystem_makeNamedErrorCode("BKHprb", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (probe_result == FS_HCNAMES_PROBE_DUPLICATE) {
+            /* Preserve both physical entries for forensic recovery.  No boot
+             * policy chooses a winner, rewrites one, or removes either copy. */
+            filesystem_bootLoggingSetDetail("BKHCDUP ");
+            filesystem_makeNamedErrorCode("BKHdup", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (probe_result == FS_HCNAMES_PROBE_PRESENT) {
+            /* A single folded match must be opened once more through the
+             * ordinary reader.  A second NULL fails in phase 89; this cannot
+             * cycle back into the absence proof or authorize creation. */
+            op_phase = 88u;
+            return;
+        }
+        /* A complete root scan proved no matching object.  The existing blank
+         * cache path is now safe: selected children will populate it before
+         * Bank's final writer creates the first authoritative register. */
+        op_phase = 1u;
+        return;
+
+    case 88: /* RETURN ROOT + RETRY THE ONE SCANNED EXISTING REGISTER */
+        filesystem_bootLoggingSetDetail("BKHCREAD");
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+                              "r",
+                              FS_RESIDENT_NAMES_MATCH_MODE,
+                              NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 89u;
+        return;
+
+    case 89: /* WAIT ONE RETRY; NEVER CONVERT A SECOND NULL INTO CREATE */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_makeNamedErrorCode("BKHtry", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_line_len = 0u;
+        op_close_status = FS_STATUS_DONE;
+        filesystem_bootLoggingSetDetail("BKHCREAD");
+        op_phase = 81u;
+        return;
+
     case 1:
+        /* Record the root Bank directory boundary before its asynchronous
+         * open. The label remains until a later Bank sub-operation starts. */
+        filesystem_bootLoggingSetDetail("BKROOT  ");
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_opendir_lfn(STORAGE_ROOT_BANK,
@@ -8764,6 +9193,7 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         }
         op_kit_root_dir = op_file;
+        filesystem_bootLoggingSetDetail("BKROOT  ");
         op_phase = 3u;
         return;
 
@@ -8774,6 +9204,7 @@ static void filesystem_loadBankDirectory_tick(void)
         return;
 
     case 4:
+        filesystem_bootLoggingSetDetail("BKROOT  ");
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
             op_phase = 5u;
@@ -8790,6 +9221,9 @@ static void filesystem_loadBankDirectory_tick(void)
             op_root_open_name,
             op_slot,
             op_bank_display_name);
+        /* The selected Bank directory is now the next wait-capable boundary;
+         * identifying it must not mutate the cached key or BankData. */
+        filesystem_bootLoggingSetBankDetail("DIR");
         if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
                                 op_root_open_name,
@@ -8808,6 +9242,7 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         }
         op_kit_slot_dir = op_file;
+        filesystem_bootLoggingSetBankDetail("DIR");
         op_phase = 7u;
         return;
 
@@ -8820,6 +9255,9 @@ static void filesystem_loadBankDirectory_tick(void)
     case 8:
         storage_banksetInit(&op_bankset_state);
         op_line_len = 0u;
+        /* Bankset diagnostics name file-family work only; malformed content
+         * still reaches the existing FS_STATUS_ERROR path. */
+        filesystem_bootLoggingSetBankDetail("SET");
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(STORAGE_BANKSET_FILENAME, "r", on_file_opened))
@@ -8835,6 +9273,7 @@ static void filesystem_loadBankDirectory_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        filesystem_bootLoggingSetBankDetail("SET");
         op_phase = 10u;
         return;
 
@@ -8896,6 +9335,7 @@ static void filesystem_loadBankDirectory_tick(void)
          * child scan and makes the relative directory context explicit.
          */
         afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
+        filesystem_bootLoggingSetBankDetail("SCN");
         op_phase = 15u;
         return;
 
@@ -8946,6 +9386,7 @@ static void filesystem_loadBankDirectory_tick(void)
     }
 
     case 16:
+        filesystem_bootLoggingSetBankDetail("SCN");
         op_close_done = false;
         if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
             op_phase = 17u;
@@ -9021,6 +9462,7 @@ static void filesystem_loadBankDirectory_tick(void)
             if (!afatfs_chdir(NULL))
                 return;
             filesystem_cacheResidentName(0u, op_bank_display_name);
+            filesystem_bootLoggingSetDetail("BKHCWRIT");
             op_phase = 83u;
             return;
         }
@@ -9123,11 +9565,13 @@ static void filesystem_loadBankDirectory_tick(void)
         scene_selectActive(op_bank_active_scene);
         memcpy(preset_currentName, op_bank_display_name, 8u);
         filesystem_cacheResidentName(0u, op_bank_display_name);
+        filesystem_bootLoggingSetDetail("BKHCWRIT");
         op_phase = 83u;
         return;
     }
 
     case 21:
+        filesystem_bootLoggingSetBankSceneDetail('O');
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_opendir_lfn(STORAGE_ROOT_BANK,
@@ -9147,12 +9591,14 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         }
         op_kit_root_dir = op_file;
+        filesystem_bootLoggingSetBankSceneDetail('O');
         if (!afatfs_chdir(op_kit_root_dir))
             return;
         op_phase = 23u;
         return;
 
     case 23:
+        filesystem_bootLoggingSetBankSceneDetail('O');
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
             op_phase = 24u;
@@ -9168,6 +9614,7 @@ static void filesystem_loadBankDirectory_tick(void)
             op_root_open_name,
             op_slot,
             op_bank_display_name);
+        filesystem_bootLoggingSetBankSceneDetail('O');
         if (!afatfs_opendir_lfn(op_root_open_name,
                                 AFATFS_MATCH_CASE_INSENSITIVE,
                                 op_root_open_name,
@@ -9185,12 +9632,14 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         }
         op_kit_slot_dir = op_file;
+        filesystem_bootLoggingSetBankSceneDetail('O');
         if (!afatfs_chdir(op_kit_slot_dir))
             return;
         op_phase = 26u;
         return;
 
     case 26:
+        filesystem_bootLoggingSetBankSceneDetail('O');
         op_close_done = false;
         if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
             op_phase = 27u;
@@ -9211,6 +9660,7 @@ static void filesystem_loadBankDirectory_tick(void)
          * exact directory component used by the shared Scene loader.
          */
         op_scene_display_name[0] = '\0';
+        filesystem_bootLoggingSetBankSceneDetail('O');
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(".", "r", on_file_opened))
@@ -9285,6 +9735,7 @@ static void filesystem_loadBankDirectory_tick(void)
     }
 
     case 30:
+        filesystem_bootLoggingSetBankSceneDetail('O');
         op_close_done = false;
         if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
             op_phase = 31u;
@@ -9318,6 +9769,7 @@ static void filesystem_loadBankDirectory_tick(void)
                                    sizeof(op_root_open_name),
                                    op_bank_child_cursor,
                                    op_scene_display_name);
+        filesystem_bootLoggingSetBankSceneDetail('O');
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_opendir_lfn(op_root_open_name,
@@ -9339,11 +9791,14 @@ static void filesystem_loadBankDirectory_tick(void)
         return;
 
     case 83: /* OPEN HCNAMES DESTINATION AFTER BANK METADATA COMMIT */
+        /* The final merged register is Bank-owned; retain this label across
+         * open, streaming, close, and root return without changing errors. */
+        filesystem_bootLoggingSetDetail("BKHCWRIT");
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
                               "w",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
                               on_file_opened)) {
             return;
@@ -9360,6 +9815,7 @@ static void filesystem_loadBankDirectory_tick(void)
         }
         op_item_offset = 0u;
         op_bytes_done = 0u;
+        filesystem_bootLoggingSetDetail("BKHCWRIT");
         op_phase = 85u;
         return;
 
@@ -11981,7 +12437,7 @@ static void filesystem_saveBankDirectory_tick(void)
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
                               "r",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
                               on_file_opened)) {
             return;
@@ -12564,7 +13020,7 @@ static void filesystem_saveBankDirectory_tick(void)
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
                               "w",
-                              AFATFS_MATCH_CASE_SENSITIVE,
+                              FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
                               on_file_opened)) {
             return;
@@ -15467,6 +15923,82 @@ static uint32_t filesystem_blockRead(afatfsFilePtr_t file, uint8_t *buf, uint32_
     return done;
 }
 
+/*
+ * Format one Kit-quarantine detail label without retaining diagnostic state.
+ *
+ * Inputs: the already parsed Kit slot and three fixed suffix bytes. Output:
+ * one caller-local eight-byte code is passed to the private boot logger. Why:
+ * timeout recovery must identify the concrete Kit and pending file family,
+ * while quarantine remains a single ten-second operation and adds no SRAM.
+ */
+static void filesystem_bootLoggingSetKitDetail(uint16_t slot,
+                                               const char suffix[3])
+{
+    char code[8] = { 'K', 'Q', '0', '0', '0', ' ', ' ', ' ' };
+
+    code[2] = (char)('0' + ((slot / 100u) % 10u));
+    code[3] = (char)('0' + ((slot / 10u) % 10u));
+    code[4] = (char)('0' + (slot % 10u));
+    if (suffix) {
+        code[5] = suffix[0];
+        code[6] = suffix[1];
+        code[7] = suffix[2];
+    }
+    filesystem_bootLoggingSetDetail(code);
+}
+
+/*
+ * Format one selected-Bank detail label without retaining diagnostic state.
+ *
+ * Inputs: the active root Bank slot and three suffix bytes. Output: one
+ * caller-local `BKnnn...` label is passed to the private logger. Why: the
+ * timeout record must identify Bank container work without changing its
+ * deadline, masks, or persistent SRAM allocation.
+ */
+static void filesystem_bootLoggingSetBankDetail(const char suffix[3])
+{
+    char code[8] = { 'B', 'K', '0', '0', '0', ' ', ' ', ' ' };
+
+    code[2] = (char)('0' + ((op_slot / 100u) % 10u));
+    code[3] = (char)('0' + ((op_slot / 10u) % 10u));
+    code[4] = (char)('0' + (op_slot % 10u));
+    if (suffix) {
+        code[5] = suffix[0];
+        code[6] = suffix[1];
+        code[7] = suffix[2];
+    }
+    filesystem_bootLoggingSetDetail(code);
+}
+
+/*
+ * Format one Bank-local Scene detail label without retaining diagnostic state.
+ *
+ * Inputs: active Bank/child coordinates and one file-family letter. Output:
+ * caller-local `BnnnSssX` is copied to the retained boot code only. Why: a
+ * timeout can identify one selected child without changing Scene ownership,
+ * parser progress, the Bank mask, or the enclosing BANKLOAD deadline.
+ */
+static void filesystem_bootLoggingSetBankSceneDetail(char family)
+{
+    char code[8] = { 'B', '0', '0', '0', 'S', '0', '0', family };
+
+    code[1] = (char)('0' + ((op_slot / 100u) % 10u));
+    code[2] = (char)('0' + ((op_slot / 10u) % 10u));
+    code[3] = (char)('0' + (op_slot % 10u));
+    code[5] = (char)('0' + ((op_bank_child_cursor / 10u) % 10u));
+    code[6] = (char)('0' + (op_bank_child_cursor % 10u));
+    filesystem_bootLoggingSetDetail(code);
+}
+
+/* Return nonzero only while the shared Scene loader owns a selected Bank child.
+ * Why: root Scene Load shares these phases but must retain its existing
+ * SCNELOAD diagnostic taxonomy and behaviour. */
+static uint8_t filesystem_bankPayloadDetailActive(void)
+{
+    return (uint8_t)(current_op == FS_INTERNAL_OP_LOAD_BANK &&
+                     op_bank_payload_active);
+}
+
 static uint8_t filesystem_kitMemberNameIsCanonical(const char *name)
 {
     uint8_t stem_len = 0u;
@@ -15490,7 +16022,18 @@ static uint8_t filesystem_kitMemberNameIsCanonical(const char *name)
     return (uint8_t)(stem_len > 0u && name[stem_len] == '.');
 }
 
-static uint8_t filesystem_validateCurrentKitBlocking(void)
+/*
+ * Validate one current Kit directory without confusing content faults with
+ * interrupted filesystem work.
+ *
+ * Inputs: currentDirectory is the selected Kit and kit_slot is its already
+ * parsed numbered coordinate. Output: INVALID_CONTENT permits the established
+ * err... quarantine; IO_ABORT stops traversal because no parser conclusion was
+ * reached. Why: a timeout or lost FAT-ready state is not evidence that user
+ * data is malformed and must never authorize a rename.
+ */
+static fs_kit_validation_result_t filesystem_validateCurrentKitBlocking(
+    uint16_t kit_slot)
 {
     storage_kitset_t kitset;
     kit_t scratch_kit;
@@ -15502,21 +16045,17 @@ static uint8_t filesystem_validateCurrentKitBlocking(void)
     uint8_t saw_line_too_long = 0u;
     storage_status_t st;
 
-    /*
-     * Validate the Kit directory currently selected as currentDirectory.
-     *
-     * Inputs: current directory is a root Kit folder or embedded Scene Kit.
-     * Output: nonzero only when kitset.kcg parses, all six member basenames
-     * fit eight characters, and each member filename opens from this same
-     * directory. Bad Kits are quarantined by the caller rather than edited in
-     * place, preserving files for host-side repair.
-     */
     memset(&scratch_kit, 0, sizeof(scratch_kit));
     storage_kitsetInit(&kitset);
+    filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
     filesystem_reportBootSubstep(30u); /* open kitset.kcg */
     file = filesystem_blockOpen(STORAGE_KITSET_FILENAME);
-    if (!file)
-        return 0u;
+    if (!file) {
+        return filesystem_blockFsOk()
+            ? FS_KIT_VALIDATION_INVALID_CONTENT
+            : FS_KIT_VALIDATION_IO_ABORT;
+    }
+    filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
     filesystem_reportBootSubstep(31u); /* stream/parse kitset.kcg */
     while (filesystem_blockRead(file, &byte, 1u) == 1u) {
         if (byte == '\r')
@@ -15526,8 +16065,10 @@ static uint8_t filesystem_validateCurrentKitBlocking(void)
             if (!line_too_long) {
                 st = storage_kitsetParseLine(&kitset, line, &scratch_kit);
                 if (st != STORAGE_STATUS_OK) {
-                    (void)filesystem_blockClose(file);
-                    return 0u;
+                    filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
+                    if (!filesystem_blockClose(file))
+                        return FS_KIT_VALIDATION_IO_ABORT;
+                    return FS_KIT_VALIDATION_INVALID_CONTENT;
                 }
             }
             line_len = 0u;
@@ -15541,33 +16082,58 @@ static uint8_t filesystem_validateCurrentKitBlocking(void)
             saw_line_too_long = 1u;
         }
     }
+    if (!afatfs_feof(file)) {
+        filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
+        (void)filesystem_blockClose(file);
+        return FS_KIT_VALIDATION_IO_ABORT;
+    }
     if (line_len != 0u && !line_too_long) {
         line[line_len] = '\0';
         st = storage_kitsetParseLine(&kitset, line, &scratch_kit);
         if (st != STORAGE_STATUS_OK) {
-            (void)filesystem_blockClose(file);
-            return 0u;
+            filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
+            if (!filesystem_blockClose(file))
+                return FS_KIT_VALIDATION_IO_ABORT;
+            return FS_KIT_VALIDATION_INVALID_CONTENT;
         }
     }
+    filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
     filesystem_reportBootSubstep(32u); /* close kitset.kcg */
     if (!filesystem_blockClose(file))
-        return 0u;
+        return FS_KIT_VALIDATION_IO_ABORT;
     if (line_too_long ||
         saw_line_too_long ||
         storage_kitsetFinalize(&kitset) != STORAGE_STATUS_OK)
-        return 0u;
+        return FS_KIT_VALIDATION_INVALID_CONTENT;
     for (uint8_t i = 0u; i < STORAGE_KIT_SLOT_COUNT; i++) {
         if (!filesystem_kitMemberNameIsCanonical(kitset.instrument_file[i]))
-            return 0u;
+            return FS_KIT_VALIDATION_INVALID_CONTENT;
+        {
+            char instrument_suffix[3] = {
+                'I', '0', (char)('0' + i)
+            };
+
+            filesystem_bootLoggingSetKitDetail(kit_slot, instrument_suffix);
+        }
         filesystem_reportBootSubstep((uint8_t)(40u + i));
         file = filesystem_blockOpenLfn(kitset.instrument_file[i]);
-        if (!file)
-            return 0u;
+        if (!file) {
+            return filesystem_blockFsOk()
+                ? FS_KIT_VALIDATION_INVALID_CONTENT
+                : FS_KIT_VALIDATION_IO_ABORT;
+        }
+        {
+            char instrument_suffix[3] = {
+                'I', '0', (char)('0' + i)
+            };
+
+            filesystem_bootLoggingSetKitDetail(kit_slot, instrument_suffix);
+        }
         filesystem_reportBootSubstep((uint8_t)(50u + i));
         if (!filesystem_blockClose(file))
-            return 0u;
+            return FS_KIT_VALIDATION_IO_ABORT;
     }
-    return 1u;
+    return FS_KIT_VALIDATION_VALID;
 }
 
 static void filesystem_makeQuarantineName(char *dst,
@@ -15725,7 +16291,15 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
     return filesystem_formatResidentNameLine(dst, cap, NULL, 0u);
 }
 
-static uint8_t filesystem_quarantineKitLibraryBlocking(void)
+/*
+ * Quarantine only Kits proven invalid by the selected-content validator.
+ *
+ * Inputs: mounted root Kit namespace. Output: OK after a complete traversal or
+ * IO_ABORT after any interrupted FAT operation. Why: an I/O abort cannot prove
+ * a Kit is malformed, so it must leave the original directory intact rather
+ * than reaching the err... rename path.
+ */
+static fs_kit_quarantine_result_t filesystem_quarantineKitLibraryBlocking(void)
 {
     afatfsFilePtr_t root;
     afatfsFilePtr_t kit_dir;
@@ -15736,24 +16310,32 @@ static uint8_t filesystem_quarantineKitLibraryBlocking(void)
     char err_name[AFATFS_LONG_FILENAME_MAX + 1u];
     uint16_t slot;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+    fs_kit_validation_result_t validation;
 
 restart:
+    filesystem_bootLoggingSetDetail("KQROOT  ");
     if (!filesystem_blockChdir(NULL))
-        return 0u;
+        return FS_KIT_QUARANTINE_IO_ABORT;
+    filesystem_bootLoggingSetDetail("KQROOT  ");
     root = filesystem_blockOpenDirLfn(STORAGE_ROOT_KIT);
-    if (!root)
-        return 1u;
+    if (!root) {
+        return filesystem_blockFsOk()
+            ? FS_KIT_QUARANTINE_OK
+            : FS_KIT_QUARANTINE_IO_ABORT;
+    }
+    filesystem_bootLoggingSetDetail("KQROOT  ");
     if (!filesystem_blockChdir(root)) {
         (void)filesystem_blockClose(root);
-        return 0u;
+        return FS_KIT_QUARANTINE_IO_ABORT;
     }
     afatfs_findFirstObject(root, &finder);
     while (1) {
+        filesystem_bootLoggingSetDetail("KQSCAN  ");
         st = filesystem_blockFindNextObject(root, &finder, &object);
         if (st == AFATFS_OPERATION_FAILURE) {
             afatfs_findLastObject(root, &finder);
             (void)filesystem_blockClose(root);
-            return 0u;
+            return FS_KIT_QUARANTINE_IO_ABORT;
         }
         if (object.id.kind == AFATFS_OBJECT_NONE) {
             afatfs_findLastObject(root, &finder);
@@ -15768,19 +16350,28 @@ restart:
         }
         filesystem_copyLongComponent(old_name, sizeof(old_name),
                                      object.id.displayName);
+        filesystem_bootLoggingSetKitDetail(slot, "DIR");
         kit_dir = filesystem_blockOpenDirLfn(old_name);
         if (!kit_dir) {
             afatfs_findLastObject(root, &finder);
             (void)filesystem_blockClose(root);
-            return 0u;
+            return FS_KIT_QUARANTINE_IO_ABORT;
         }
+        filesystem_bootLoggingSetKitDetail(slot, "DIR");
         if (!filesystem_blockChdir(kit_dir)) {
             (void)filesystem_blockClose(kit_dir);
             afatfs_findLastObject(root, &finder);
             (void)filesystem_blockClose(root);
-            return 0u;
+            return FS_KIT_QUARANTINE_IO_ABORT;
         }
-        if (!filesystem_validateCurrentKitBlocking()) {
+        validation = filesystem_validateCurrentKitBlocking(slot);
+        if (validation == FS_KIT_VALIDATION_IO_ABORT) {
+            afatfs_findLastObject(root, &finder);
+            (void)filesystem_blockClose(kit_dir);
+            (void)filesystem_blockClose(root);
+            return FS_KIT_QUARANTINE_IO_ABORT;
+        }
+        if (validation == FS_KIT_VALIDATION_INVALID_CONTENT) {
             /*
              * Quarantine root Kit folders before `.hcindex` publication.
              *
@@ -15791,33 +16382,46 @@ restart:
              * reconstruct from bounded resident names.
              */
             afatfs_findLastObject(root, &finder);
+            filesystem_bootLoggingSetKitDetail(slot, "REN");
             if (!filesystem_blockChdir(root)) {
                 (void)filesystem_blockClose(kit_dir);
                 (void)filesystem_blockClose(root);
-                return 0u;
+                return FS_KIT_QUARANTINE_IO_ABORT;
             }
-            (void)filesystem_blockClose(kit_dir);
-            (void)filesystem_blockClose(root);
+            filesystem_bootLoggingSetKitDetail(slot, "REN");
+            if (!filesystem_blockClose(kit_dir)) {
+                (void)filesystem_blockClose(root);
+                return FS_KIT_QUARANTINE_IO_ABORT;
+            }
+            if (!filesystem_blockClose(root))
+                return FS_KIT_QUARANTINE_IO_ABORT;
             filesystem_makeQuarantineName(err_name, sizeof(err_name), old_name);
+            filesystem_bootLoggingSetKitDetail(slot, "REN");
             if (!filesystem_blockRename(old_name, err_name))
-                return 0u;
+                return FS_KIT_QUARANTINE_IO_ABORT;
             goto restart;
         }
+        filesystem_bootLoggingSetKitDetail(slot, "DIR");
         if (!filesystem_blockChdir(root)) {
             afatfs_findLastObject(root, &finder);
             (void)filesystem_blockClose(kit_dir);
             (void)filesystem_blockClose(root);
-            return 0u;
+            return FS_KIT_QUARANTINE_IO_ABORT;
         }
+        filesystem_bootLoggingSetKitDetail(slot, "DIR");
         if (!filesystem_blockClose(kit_dir)) {
             afatfs_findLastObject(root, &finder);
             (void)filesystem_blockClose(root);
-            return 0u;
+            return FS_KIT_QUARANTINE_IO_ABORT;
         }
     }
+    filesystem_bootLoggingSetDetail("KQROOT  ");
     if (!filesystem_blockClose(root))
-        return 0u;
-    return filesystem_blockChdir(NULL);
+        return FS_KIT_QUARANTINE_IO_ABORT;
+    filesystem_bootLoggingSetDetail("KQROOT  ");
+    return filesystem_blockChdir(NULL)
+        ? FS_KIT_QUARANTINE_OK
+        : FS_KIT_QUARANTINE_IO_ABORT;
 }
 
 #if 0
@@ -17425,7 +18029,7 @@ static void filesystem_saveTestSimpleDir_tick(void)
  * leak into the remount or root log write. Inputs are abandoned boot facade
  * state; output is an idle facade suitable for afatfs_init() and one new
  * operation. Affiliates: sdcard_abortTransferForBootLog(),
- * filesystem_writeBootTimeoutLogBlocking(), and filesystem_start().
+ * filesystem_writeBootFailureLogBlocking(), and filesystem_start().
  */
 static void filesystem_resetFacadeForBootLogRecovery(void)
 {
@@ -17704,26 +18308,27 @@ uint8_t filesystem_initCardAndMountBlocking(void)
     return 0;
 }
 
-uint8_t filesystem_writeBootTimeoutLogBlocking(void)
+uint8_t filesystem_writeBootFailureLogBlocking(void)
 {
     /*
-     * Make one bounded, best-effort durable report after a boot timeout.
+     * Make one bounded, best-effort durable report after confirmed boot failure.
      *
      * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
      * must never print anything to the screen or otherwise delay operations
      * unnecessarily since logging may be used to assess timing failures in
      * other modules that might otherwise be obscured by screen write delays.
      *
-     * What: abandons the active SD transfer, destroys dirty asyncfatfs state,
-     * resets invalid facade ownership, reinitializes/remounts the card, and
-     * runs the ordinary eight-byte writer plus sync gate. Why: a second FAT
-     * operation cannot safely coexist with the owner that timed out. Inputs
-     * are the latched timeout and preserved code; output is nonzero only after
-     * bootlog.bin closes and syncs. Dirty abandon can leave the timed-out
-     * operation partially represented on card and is acceptable only in this
-     * DEV_MODE_LOGGING build. The recovery has one ten-second ceiling,
-     * never retries, never invokes the abandoned callback, and failure must
-     * not prevent main.c from continuing to audio. Affiliates:
+     * What: abandons the active or failed SD state, destroys dirty asyncfatfs
+     * state, resets facade ownership, reinitializes/remounts the card, and
+     * runs the ordinary eight-byte writer plus sync gate. Why: a caller has
+     * already confirmed a timeout or boot filesystem failure, so it must not
+     * be silently acknowledged merely because the watchdog did not expire.
+     * Inputs are the retained detail code and active boot logging window;
+     * output is nonzero only after bootlog.bin closes and syncs. Dirty abandon
+     * can leave failed work partially represented on card and is acceptable
+     * only in this DEV_MODE_LOGGING build. The recovery has one ten-second
+     * ceiling, never retries, never invokes an abandoned callback, and failure
+     * must not prevent main.c from continuing to audio. Affiliates:
      * sdcard_abortTransferForBootLog(), afatfs_destroy(true), SD_init(),
      * filesystem_writeBootLog_tick(), and filesystem_bootLoggingEnd().
      */
@@ -17731,7 +18336,7 @@ uint8_t filesystem_writeBootTimeoutLogBlocking(void)
     uint8_t sd_init_result;
     uint8_t write_ok = 0u;
 
-    if (!fs_boot_logging_active || !fs_boot_logging_timed_out)
+    if (!fs_boot_logging_active || fs_boot_logging_recovery)
         return 0u;
 
     fs_boot_logging_recovery = 1u;
@@ -18338,6 +18943,11 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_file_ready = false;
     op_close_done = false;
     op_close_status = FS_STATUS_DONE;
+    /* The HCNAMES absence proof borrows generic handle/finder scratch.  Reset
+     * its two operation-local markers here so a cancelled/failed predecessor
+     * can never donate a stale scan result to a later create-capable request. */
+    op_hcnames_probe_state = FS_HCNAMES_PROBE_IDLE;
+    op_hcnames_probe_matches = 0u;
     op_flush_final_status = FS_STATUS_DONE;
     op_bytes_done = 0;
     op_stream_index = 0;
@@ -18873,7 +19483,7 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
     if (!filesystem_repairLibraryNamesBlocking(kind))
         return 0u;
     if (kind == FS_LIBRARY_INDEX_KIT) {
-        uint8_t quarantine_ok;
+        fs_kit_quarantine_result_t quarantine_result;
 
         /*
          * Kit quarantine uses raw blocking FAT helpers after name repair has
@@ -18891,10 +19501,21 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
          * write delays.
          */
         filesystem_bootLoggingArm("KITQUAR ");
-        quarantine_ok = filesystem_quarantineKitLibraryBlocking();
+        quarantine_result = filesystem_quarantineKitLibraryBlocking();
         filesystem_bootLoggingOperationDone();
-        if (!quarantine_ok)
+        if (quarantine_result != FS_KIT_QUARANTINE_OK) {
+            /*
+             * A failed Kit quarantine cannot be represented as a valid empty
+             * library.
+             *
+             * Inputs: a retained KITQUAR detail label and an interrupted raw
+             * FAT traversal. Output: this wrapper returns failure before cache
+             * publication. Why: the boot caller must not mistake partial
+             * traversal for a completed index or erase the evidence by moving
+             * on to later scans.
+             */
             return 0u;
+        }
     }
     filesystem_clearNameCacheStorage();
 

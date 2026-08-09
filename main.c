@@ -577,9 +577,23 @@ int main(void)
              * not and should not ever add additional file interaction steps,
              * since the diagnostic may be used to assess in-situ file
              * procedures.
-             */
+            */
             boot_showFilesystemStage(4u);
-            (void)filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT);
+            /*
+             * Do not discard the Kit-index result at boot.
+             *
+             * Inputs: completed repair/quarantine/index work. Output: timeout
+             * and ordinary I/O abort both enter the bounded boot-failure record
+             * path before later scans can conceal the retained KITQUAR detail.
+             * Why: an interrupted quarantine is neither a valid empty library
+             * nor authorization to continue into the Scene scan.
+             */
+            if (!filesystem_createLibraryIndexBlocking(
+                    FS_LIBRARY_INDEX_KIT)) {
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+                goto boot_filesystem_failure;
+            }
             if (filesystem_bootLoggingTimedOut())
                 goto boot_filesystem_timeout;
 
@@ -730,13 +744,26 @@ int main(void)
                  * It does not and should not ever add additional file
                  * interaction steps, since the diagnostic may be used to
                  * assess in-situ file procedures.
-                 */
+                */
                 boot_showFilesystemStage(10u);
-                filesystem_requestLoadBankIndex(NULL);
+                /*
+                 * A failed Bank-index read is not an empty Bank index.
+                 *
+                 * Inputs: a mounted card and the preceding boot scan state.
+                 * Output: only a completed successful index is acknowledged;
+                 * rejection or terminal error enters the shared failure record
+                 * path. Why: acknowledging here would discard the retained
+                 * BIDXLOAD detail before Bank fallback could distinguish error
+                 * from an intentionally empty library.
+                 */
+                if (!filesystem_requestLoadBankIndex(NULL))
+                    goto boot_filesystem_failure;
                 while (filesystem_status() == FS_STATUS_BUSY)
                     filesystem_tick();
                 if (filesystem_bootLoggingTimedOut())
                     goto boot_filesystem_timeout;
+                if (filesystem_status() != FS_STATUS_DONE)
+                    goto boot_filesystem_failure;
                 filesystem_ack();
 
                 /*
@@ -763,20 +790,37 @@ int main(void)
                  * It does not and should not ever add additional file
                  * interaction steps, since the diagnostic may be used to
                  * assess in-situ file procedures.
-                 */
+                */
                 boot_showFilesystemStage(11u);
                 if (filesystem_bankSlotExists(boot_bank_slot)) {
-                    preset_loadBank(boot_bank_slot, 0xffffu);
+                    /*
+                     * A rejected Bank Load has no callback to report it later.
+                     *
+                     * Inputs: the verified root Bank slot and all-children
+                     * mask. Output: the accepted request enters Preset's normal
+                     * completion path; rejection records a boot failure now.
+                     * Why: silently entering the fallback ladder here would
+                     * hide the retained BANKLOAD/BIDXLOAD diagnostic code.
+                     */
+                    if (!preset_loadBank(boot_bank_slot, 0xffffu))
+                        goto boot_filesystem_failure;
                 } else {
                     /* No Bank is available: load the root Scene index before
                      * asking the existing fallback ladder to choose Scene/Kit.
                      * This cache transition is safe because no Bank payload is
                      * being loaded in this branch. */
-                    filesystem_requestLoadSceneIndex(NULL);
+                    /* A failed root Scene-index read is not an empty Scene
+                     * library. Check request acceptance and terminal status
+                     * before acknowledgement so failure logging retains the
+                     * storage boundary instead of silently selecting Kit. */
+                    if (!filesystem_requestLoadSceneIndex(NULL))
+                        goto boot_filesystem_failure;
                     while (filesystem_status() == FS_STATUS_BUSY)
                         filesystem_tick();
                     if (filesystem_bootLoggingTimedOut())
                         goto boot_filesystem_timeout;
+                    if (filesystem_status() != FS_STATUS_DONE)
+                        goto boot_filesystem_failure;
                     filesystem_ack();
                     if (filesystem_sceneSlotExists(
                             filesystem_firstSceneSlot())) {
@@ -785,11 +829,17 @@ int main(void)
                         /* The Scene index is empty, so replace it with the
                          * Kit index before asking the same fallback helper to
                          * choose the first available Kit. */
-                        filesystem_requestLoadKitIndex(NULL);
+                        /* A failed root Kit-index read is not an empty Kit
+                         * library. Preserve its terminal error before the
+                         * fallback helper can treat the cache as empty. */
+                        if (!filesystem_requestLoadKitIndex(NULL))
+                            goto boot_filesystem_failure;
                         while (filesystem_status() == FS_STATUS_BUSY)
                             filesystem_tick();
                         if (filesystem_bootLoggingTimedOut())
                             goto boot_filesystem_timeout;
+                        if (filesystem_status() != FS_STATUS_DONE)
+                            goto boot_filesystem_failure;
                         filesystem_ack();
                         preset_loadFirstAvailableSceneOrKit();
                     }
@@ -827,6 +877,20 @@ int main(void)
                  */
                 if (filesystem_bootLoggingTimedOut())
                     goto boot_filesystem_timeout;
+                /*
+                 * Distinguish failed Bank Load from successful empty Bank
+                 * before Menu consumes Preset completion.
+                 *
+                 * Inputs: terminal Preset status and its filesystem-derived
+                 * success bit. Output: a failure enters the bounded bootlog
+                 * recovery; only success may let Menu post the Scene/Kit
+                 * fallback for a valid empty Bank. Why: acknowledgement would
+                 * otherwise hide a normal load error from file logging.
+                 */
+                if (preset_getStatus() == PRESET_UPDATE_READY &&
+                    !preset_getCompletedOk()) {
+                    goto boot_filesystem_failure;
+                }
                 menu_pollPresetStatus();  /* apply Bank/Scene/Kit + ack */
                 if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
                     break;
@@ -883,6 +947,16 @@ int main(void)
 
 boot_filesystem_timeout:
         /*
+         * Preserve timeout identity, then share the confirmed-failure cleanup.
+         *
+         * A watchdog timeout is one specific boot filesystem failure. It must
+         * not apply Preset work or retry the failed storage ladder before the
+         * bounded recovery writer records the retained operation/detail code.
+         */
+        goto boot_filesystem_failure;
+
+boot_filesystem_failure:
+        /*
          * Abandon the remaining SD boot ladder and make one bounded log attempt.
          *
          * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
@@ -891,19 +965,21 @@ boot_filesystem_timeout:
          * failures in other modules that might otherwise be obscured by screen
          * write delays.
          *
-         * Inputs: a latched filesystem timeout, possibly an installed substep
-         * observer, and possibly PRESET_LOAD_IN_PROGRESS. Outputs: observers
-         * and Preset ownership are cleared, then the filesystem facade
-         * remounts once and attempts the exact eight-byte `/bootlog.bin` write.
-         * Its result never gates startup. Why: applying an abandoned Preset
-         * stage or retrying the storage ladder could recreate the splash hang.
-         * Affiliates: filesystem_writeBootTimeoutLogBlocking() and the common
+         * Inputs: a confirmed timeout or ordinary boot filesystem failure,
+         * possibly an installed substep observer, and possibly
+         * PRESET_LOAD_IN_PROGRESS. Outputs: observers and Preset ownership are
+         * cleared, then the filesystem facade remounts once and attempts the
+         * exact eight-byte `/bootlog.bin` write. Its result never gates startup.
+         * Why: applying an abandoned Preset stage or retrying the storage ladder
+         * could recreate the splash hang, while silently acknowledging an
+         * ordinary failure would discard the only retained diagnostic detail.
+         * Affiliates: filesystem_writeBootFailureLogBlocking() and the common
          * pre-audio continuation below.
          */
         filesystem_setBootSubstepDiagnostic(NULL);
         if (preset_getStatus() != PRESET_IDLE)
             preset_ackStatus();
-        (void)filesystem_writeBootTimeoutLogBlocking();
+        (void)filesystem_writeBootFailureLogBlocking();
 
 boot_filesystem_done:
         /*

@@ -238,11 +238,11 @@ void filesystem_bootLoggingBegin(void);
 void filesystem_bootLoggingArm(const char code[8]);
 uint8_t filesystem_bootLoggingTimedOut(void);
 const uint8_t *filesystem_bootLoggingCode(void);
-uint8_t filesystem_writeBootTimeoutLogBlocking(void);
+uint8_t filesystem_writeBootFailureLogBlocking(void);
 void filesystem_bootLoggingEnd(void);
 ```
 
-When `DEV_LOGGING == 0`, the implementation may provide no-op functions rather
+When `DEV_MODE_LOGGING == 0`, the implementation may provide no-op functions rather
 than spreading preprocessor branches through `main.c`.
 
 The public contract must specify:
@@ -251,8 +251,9 @@ The public contract must specify:
 - `Arm` copies exactly eight bytes and starts a fresh per-operation deadline;
 - `TimedOut` is observational;
 - `Code` returns the captured eight-byte buffer and is valid through recovery;
-- `writeBootTimeoutLogBlocking` abandons the timed-out owner, remounts, and
-  attempts one bounded root-file write;
+- `writeBootFailureLogBlocking` abandons the failed owner, remounts, and
+  attempts one bounded root-file write after either a timeout or a
+  caller-confirmed boot filesystem failure;
 - `End` permanently disables boot timeout behavior before audio/runtime
   filesystem work starts;
 - no function is safe to invoke from an ISR;
@@ -434,7 +435,7 @@ Affiliates: `on_file_opened`, `on_file_closed`, `afatfs_fwrite()`,
 #### 5.5 Add diagnostic abandon, remount, and bounded log recovery
 
 Implement a private `filesystem_prepareBootLogRecovery()` used only by
-`filesystem_writeBootTimeoutLogBlocking()`:
+`filesystem_writeBootFailureLogBlocking()`:
 
 1. preserve `fs_boot_logging_code`;
 2. set recovery mode so internal starts cannot overwrite the culprit code;
@@ -580,17 +581,18 @@ Outputs: normal continuation or one jump to timeout cleanup.
 Affiliates: boot stages 2-13, Preset status, and all blocking filesystem
 wrappers.
 
-#### 6.4 Add one timeout cleanup path
+#### 6.4 Add one boot-failure cleanup path
 
-Use one clearly labeled boot-filesystem timeout cleanup path rather than
+Use one clearly labeled boot-filesystem failure cleanup path rather than
 duplicating recovery after every operation.
 
-On timeout:
+On timeout or caller-confirmed boot filesystem failure:
 
 1. unregister the boot substep diagnostic callback;
 2. call `preset_ackStatus()` if Preset remains non-idle, preventing the runtime
    Menu poller from waiting on an abandoned request;
-3. call `filesystem_writeBootTimeoutLogBlocking()`;
+3. call `filesystem_writeBootFailureLogBlocking()` for either timeout or a
+   caller-confirmed boot filesystem failure;
 4. ignore its return for boot-continuation purposes, while preserving it for
    OLED/error diagnostics if desired;
 5. skip all remaining index, payload, Globals, and autosave boot work;

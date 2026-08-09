@@ -106,14 +106,17 @@ being scattered through the document.
 | Proposed allocation | Bytes | Region | Lifetime | Owner |
 |---|---:|---|---|---|
 | `autosave_maskDirtyBitCount()` (§2.2.1) | 0 | — | — | `Autosave.c` — pure function, no new storage; iterates the existing 3,856-byte `autosave_dirty_mask` |
-| `filesystem_autosave_diagnostic_t fs_autosave_diagnostic` (§2.2.2 / §3.4) | 16 | normal SRAM1 (not DTCM, not `.dma_nocache`) | process lifetime (persists across operations; explicitly **not** part of the `fs_stage_workspace_t` union, see §2.2.2 rationale) | `filesystem.c`, exposed read-only via `filesystem.h` |
+| `filesystem_autosave_diagnostic_t fs_autosave_diagnostic` (§2.2.2 / §3.4) | 16 | normal SRAM1 (not DTCM, not `.dma_nocache`) | process lifetime while `DEV_MODE_LOGGING == 1`; compiles out when `DEV_MODE_LOGGING == 0`; explicitly **not** part of the `fs_stage_workspace_t` union, see §2.2.2 rationale | `filesystem.c`, exposed read-only via `filesystem.h` |
 
-Total new static allocation: **16 bytes**, SRAM1, owned by `filesystem.c`.
+Total new static allocation: **16 bytes** in a logging-enabled diagnostic build, SRAM1, owned by `filesystem.c`; it is zero bytes in the normal `DEV_MODE_LOGGING == 0` build.
 This is far below delay-line/Pattern-reserved DTCM or SRAM1 headroom and is
 not DMA-visible, but per policy it still requires explicit acknowledgement
-before `filesystem.c` is edited — **do not implement §2.2.2 until that
-acknowledgement is given**, independent of any other approval already given
-for Steps 0/1.
+before `filesystem.c` is edited. The user has approved the allocation subject
+to the `DEV_MODE_LOGGING == 1` gate, but this document remains a later,
+separate implementation step: do not implement its diagnostic snapshot during
+the Step 1 work in `AUTOSAVE_REMEDY_PA2ST1.md`. Reassess whether it is still
+needed, and whether Step 1 interfaces can be reused, after Step 1 hardware
+testing.
 
 ---
 

@@ -185,17 +185,23 @@ typedef void (*fs_boot_substep_diag_cb_t)(uint8_t substep);
  * runtime. Why: a splash-screen stall otherwise leaves no durable indication
  * of the last storage boundary entered. Inputs are fixed-width operation codes
  * and the existing filesystem/SD state; outputs are a timeout flag and, when
- * recovery succeeds, an exactly eight-byte root file. These functions are
- * boot/main-context APIs only, are not ISR-safe, and a failed recovery never
- * prevents the caller from continuing startup. Affiliates:
+ * a caller confirms timeout or boot filesystem failure, an exactly eight-byte
+ * root file. These functions are boot/main-context APIs only, are not ISR-safe,
+ * and a failed recovery never prevents the caller from continuing startup.
+ * Affiliates:
  * filesystem_tick(), the private blocking FAT helpers, main.c's pre-audio
  * ladder, and sdcard_abortTransferForBootLog().
  */
 void        filesystem_bootLoggingBegin(void);
+/* Public Arm starts a new operation deadline; private filesystem.c detail
+ * capture may change only the retained eight-byte label inside that deadline. */
 void        filesystem_bootLoggingArm(const char code[8]);
 uint8_t     filesystem_bootLoggingTimedOut(void);
 const uint8_t *filesystem_bootLoggingCode(void);
-uint8_t     filesystem_writeBootTimeoutLogBlocking(void);
+/* Write the retained boot failure code after either watchdog timeout or a
+ * caller-confirmed boot filesystem failure; recovery is bounded and never
+ * gates startup. */
+uint8_t     filesystem_writeBootFailureLogBlocking(void);
 void        filesystem_bootLoggingEnd(void);
 
 /*
@@ -287,7 +293,11 @@ uint8_t     filesystem_createBootIndexBlocking(void);
  * this bootstrap writer because Scene identity is card-owned HCNAMES metadata,
  * not a scene_t field; successful root Scene and Bank operations subsequently
  * preserve/update them through the shared register cache. Rows with no loaded
- * object are blank. This is only a bootstrap writer, not a second name store.
+ * object are blank. Before its create-capable write, the implementation makes
+ * one read-only folded root scan: it creates only after proving HCNAMES absent,
+ * refreshes one proven existing entry, and returns an error without changing
+ * the card for duplicate entries or any scan/close failure. This is only a
+ * bootstrap writer, not a second name store or a duplicate-repair policy.
  */
 uint8_t filesystem_writeResidentNamesBlocking(
     fs_hcnames_diag_cb_t diagnostic_cb);
@@ -343,7 +353,9 @@ bool filesystem_requestRepairBankNames(uint16_t slot, fs_completion_cb_t cb);
  * Write one slot-ordered Kit, root Scene, or root Bank cache as `.hcindex` at
  * boot. If the requested domain is not active in the one shared cache, the
  * implementation first performs the matching physical directory scan so a
- * missed caller scan cannot silently omit the index.
+ * missed caller scan cannot silently omit the index. Returns nonzero only
+ * when the requested cache was produced and flushed; zero is not a successful
+ * empty cache, including an interrupted Kit-quarantine pass.
  */
 uint8_t     filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind);
 void        filesystem_tick(void);

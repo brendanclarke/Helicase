@@ -4,19 +4,32 @@
 
 This document is the detailed implementation plan for **Part 2, Step 1** of
 `AUTOSAVE_PHASE2_PLAN.md` ("Build observability before building features"). It
-is grounded in the actual current source (matching commit `326a8a1`'s
-production files, confirmed present and unchanged in this working tree):
+is grounded in the accepted Session 045 production baseline at commit
+`326a8a1`:
 
 - `Core/Bank/Scene/Autosave.c` / `.h`
-- `Core/Hardware/SD/filesystem.c` / `.h`
-- `config.h`
 - `Makefile`
+
+At this planning checkpoint, `Autosave.c`, `Autosave.h`, and the Makefile
+source entry remain byte-identical to that accepted baseline. `filesystem.c`,
+`filesystem.h`, and `config.h` have subsequently received independent boot
+and HCNAMES work, so every listed insertion point in those files must be
+re-read immediately before implementation; line numbers and copied current
+snippets are aids, not authority.
+
+`AUTOSAVE_PARAM_HOOK.md` was a completed historical Phase 1 implementation
+record and was intentionally compacted into the Session 045 handoff and
+`SESSION_045_CONSOLIDATED_POST_MORTEM.md`. It is not a missing implementation
+prerequisite. The authoritative Phase 1 architecture and accepted limits are
+the current Autosave source plus those consolidated records.
 
 It does **not** implement Phase 2 whole-object hooks or Load/Save exclusion
 (Steps 5–6 of the parent plan). It builds only the tracing infrastructure
 needed to make every later step diagnosable, and re-validates it against the
 already-working Phase 1 baseline before anything else is allowed to depend on
-it.
+it. Ordinary single-parameter hooks have hardware evidence for the testable
+Scene, Kit, and Instrument types; this trace checkpoint does not claim the
+remaining complete Phase 1 matrix is closed.
 
 The six/seven stages this step must make observable were named explicitly in
 `045_SESSION_HANDOFF_LOG.md`'s BLOCKERS section: *"No runtime trace currently
@@ -38,18 +51,23 @@ request to make is:
 
 | Field | Value |
 | --- | --- |
-| Byte count | 518 bytes (512-byte ring + 6 bytes of cursor/counter state) |
+| Byte count | 520 bytes (512-byte ring + 6 bytes of trace cursor/counter state + 2-byte trace-flush cadence) |
 | Memory region | Normal SRAM1 (not DTCM — DTCM headroom is reserved for delay lines; this data is not audio-timing-critical) |
-| Lifetime | Static/BSS for the life of a diagnostic build; the module compiles to zero bytes when `AUTOSAVE_TRACE_ENABLED` is 0 |
-| Owner | New module `Core/Bank/Scene/AutosaveTrace.c` |
+| Lifetime | Static/BSS for the life of a diagnostic build; the module compiles to zero bytes when `DEV_MODE_LOGGING` is 0 |
+| Owner | `AutosaveTrace.c` owns 518 bytes; `filesystem.c` owns the 2-byte private cadence scratch |
 
-This is a diagnostic-only allocation, gated off by default (see config.h
-changes below), and is not drawn from the delay-line/Pattern-reserved
-headroom the policy protects — it is a new, separate, small, explicitly
-disable-able allocation. State this plainly when requesting sign-off; do not
-assume it is exempt from the policy because it is diagnostic.
+This is a diagnostic-only allocation, gated solely by the established
+`DEV_MODE_LOGGING` selection (see config.h changes below), and is not drawn
+from the delay-line/Pattern-reserved headroom the policy protects — it is a
+new, separate, small, explicitly disable-able allocation. State this plainly
+when requesting sign-off; do not assume it is exempt from the policy because
+it is diagnostic.
 
-**Do not proceed past this section until that acknowledgement exists.**
+The user has approved this diagnostic allocation subject to the
+`DEV_MODE_LOGGING == 1` gate. The corrected 520-byte total includes every
+trace-specific static, including the scheduler cadence previously omitted from
+the 518-byte subtotal. Do not allocate any part of this state or perform
+trace/file logging in a build where `DEV_MODE_LOGGING == 0`.
 
 ---
 
@@ -156,7 +174,7 @@ module later.
  * autosave transaction actually reach.
  *
  * Every function in this header is safe to call unconditionally, from any
- * build. When AUTOSAVE_TRACE_ENABLED is 0, every function compiles to a
+ * build. When DEV_MODE_LOGGING is 0, every function compiles to a
  * trivial no-op/zero-return stub, matching the existing DEV_MODE_LOGGING/
  * DEV_MODE_DIAGNOSTIC convention of keeping call sites unconditional while
  * gating behavior inside the implementation.
@@ -305,14 +323,14 @@ uint16_t autosaveTrace_droppedCount(void);
  *
  * See AutosaveTrace.h for the ownership boundary this module keeps against
  * filesystem.c. Every public function is unconditionally callable; behavior
- * is gated internally on AUTOSAVE_TRACE_ENABLED so call sites in Autosave.c
+ * is gated internally on DEV_MODE_LOGGING so call sites in Autosave.c
  * and filesystem.c never need their own #if.
  */
 #include "AutosaveTrace.h"
 #include "config.h"
 #include "timebase.h"
 
-#if AUTOSAVE_TRACE_ENABLED
+#if DEV_MODE_LOGGING
 
 #define AUTOSAVE_TRACE_INDEX_MASK (AUTOSAVE_TRACE_RECORD_COUNT - 1u)
 
@@ -419,7 +437,7 @@ uint16_t autosaveTrace_droppedCount(void)
     return autosave_trace_dropped_count;
 }
 
-#else /* !AUTOSAVE_TRACE_ENABLED */
+#else /* !DEV_MODE_LOGGING */
 
 void autosaveTrace_record(autosave_trace_stage_t stage,
                           uint8_t flags,
@@ -453,7 +471,7 @@ uint16_t autosaveTrace_droppedCount(void)
     return 0u;
 }
 
-#endif /* AUTOSAVE_TRACE_ENABLED */
+#endif /* DEV_MODE_LOGGING */
 ```
 
 Notes on this implementation:
@@ -475,30 +493,18 @@ Notes on this implementation:
 
 ## Modified file: `config.h`
 
-Add immediately after the existing `AUTOSAVE_MASK_BITS_PER_TICK` block (after
-line 211 in the current file), keeping the same doc-comment voice already
-used for `DEV_MODE_LOGGING` and the other autosave constants:
+Do **not** add or redefine a trace-specific mode. `DEV_MODE_LOGGING` already
+exists near the top of `config.h` and is the project-wide non-screen diagnostic
+mode; amend that existing adjacent comment to state that it also gates the
+Autosave trace ring and its file output. Value `1` compiles the 518-byte trace
+allocation and trace file path, while value `0` must leave only zero-storage
+stubs and no trace file activity. The current value is a bench-build choice;
+this plan does not introduce another mode or silently change its value.
+
+Add the trace cadence immediately after the existing
+`AUTOSAVE_MASK_BITS_PER_TICK` block, retaining the following adjacent comment:
 
 ```c
-/*
- * AUTOSAVE_TRACE_ENABLED gates the bounded SRAM lifecycle trace used only to
- * diagnose the autosave writer's own state machine. It must never be enabled
- * in a production build: it adds a new 518-byte static SRAM allocation
- * (governed by MEMORY.md's RAM Allocation Approval Policy) and a periodic
- * best-effort file write that exists purely to make bench testing legible.
- *
- * What: value 1 compiles AutosaveTrace.c's ring buffer and every trace call
- * site in Autosave.c/filesystem.c into real code; value 0 compiles every one
- * of those call sites down to an empty stub with zero retained storage.
- * Why: separate from DEV_MODE_LOGGING on purpose -- the parent remediation
- * plan requires "keep runtime diagnostics separate from the existing
- * pre-audio boot logger," since the boot logger's window closes before audio
- * starts while this trace must run for the entire runtime session.
- * Affiliates: AutosaveTrace.c/.h, Autosave.c's one dirty-marker call site, and
- * every filesystem.c call site documented in AUTOSAVE_REMEDY_PA2ST1.md.
- */
-#define AUTOSAVE_TRACE_ENABLED 0
-
 /*
  * Ordinary pause between best-effort trace-file flush attempts.
  *
@@ -607,7 +613,14 @@ after `FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN` (current location: inside the
 Add next to the existing `fs_autosave_*` static block (near line 1296):
 
 ```c
+#if DEV_MODE_LOGGING
+/*
+ * The trace flush cadence is diagnostic-only state.  Keep it inside the same
+ * build gate as the ring so a non-logging image retains neither this two-byte
+ * scheduler value nor any trace-file behavior.
+ */
 static uint16_t fs_autosave_trace_next_due_tick = 0u;
+#endif
 ```
 
 Only one new static is needed: the flush operation is stateless between
@@ -615,6 +628,9 @@ calls beyond this due-tick (it always flushes whatever is currently pending,
 re-derived from `autosaveTrace_pendingCount()` each time it starts), so it
 does not need its own "armed" latch the way the autosave writer does — there
 is no debounce-vs-continuation distinction to track, only a fixed cadence.
+The 2-byte cadence plus the trace module's 518 bytes make the exact approved
+diagnostic allocation 520 bytes when logging is enabled and zero when it is
+disabled.
 
 ### 4. Call site — `SCHEDULED` and `ADMITTED`
 
@@ -1006,8 +1022,7 @@ static void filesystem_autosaveTraceSerialize(uint16_t record_count,
 /*
  * Append AutosaveTrace's currently pending records to the root trace file.
  *
- * DEV_MODE_LOGGING's discipline applies here too even though this is a
- * separate flag: never print to the screen, never delay other filesystem
+ * DEV_MODE_LOGGING's discipline applies here: never print to the screen, never delay other filesystem
  * work, never claim durability before afatfs_sync() confirms it.
  *
  * What: opens AUTOSAVE_TRACE_FILENAME in append mode (creating it on first
@@ -1119,6 +1134,7 @@ Add next to `filesystem_autosaveWriterSchedule_tick()`:
  */
 static void filesystem_autosaveTraceFlushSchedule_tick(void)
 {
+#if DEV_MODE_LOGGING
     uint16_t now = time_sysTick;
 
     if (autosaveTrace_pendingCount() == 0u)
@@ -1130,6 +1146,12 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
         fs_autosave_trace_next_due_tick = (uint16_t)(
             now + AUTOSAVE_TRACE_FLUSH_INTERVAL_MS);
     }
+#else
+    /* Keep the idle scheduler call harmless in a production build.  The
+     * trace module supplies zero-return stubs, but this explicit no-op also
+     * guarantees no trace-only filesystem state or file operation exists. */
+    return;
+#endif
 }
 ```
 
@@ -1256,7 +1278,7 @@ matching how `#include "Autosave.h"` already works.
 | --- | --- |
 | `Core/Bank/Scene/AutosaveTrace.h` | new — public API, stage enum, record layout, sizing |
 | `Core/Bank/Scene/AutosaveTrace.c` | new — ring buffer, cursors, IRQ-safe append |
-| `config.h` | + `AUTOSAVE_TRACE_ENABLED` (default 0), + `AUTOSAVE_TRACE_FLUSH_INTERVAL_MS` |
+| `config.h` | use existing `DEV_MODE_LOGGING` gate; add `AUTOSAVE_TRACE_FLUSH_INTERVAL_MS` |
 | `Core/Bank/Scene/Autosave.c` | + 1 include, + 1 call in `autosave_markPayloadOffsetDirty()` |
 | `Core/Bank/Scene/Autosave.h` | no change |
 | `Core/Hardware/SD/filesystem.c` | + 1 include, + 1 private enum value, + 1 static, + 2 new static functions (`filesystem_autosaveTraceCaptured`, `filesystem_autosaveTraceSerialize`), + 2 new tick/scheduler functions, + 1 public function, + 7 call sites at existing phase transitions, + 1 dispatcher case, + 1 idle-scheduler line |
@@ -1280,7 +1302,7 @@ Before this module is trusted for anything in Steps 2–6, run the parent
 plan's own check: *"run one full Phase 1 debounce/commit cycle from a known
 clean mask, and confirm every stage fires exactly once with correct
 ordering, with zero feature code changed."* Concretely, with
-`AUTOSAVE_TRACE_ENABLED` set to 1 for this bench pass only:
+`DEV_MODE_LOGGING` set to 1 for this bench pass only:
 
 1. Power on with both `.hcprms1`/`.hcprms2` valid and clean (no dirty bits).
 2. Make exactly one Phase 1 scalar edit (e.g. one Scene parameter).
@@ -1329,6 +1351,8 @@ requires:
   INTERVAL_MS`, `AUTOSAVE_PARAMETER_GETS_PER_WRITE`, or
   `AUTOSAVE_MASK_BITS_PER_TICK` — this step only observes the existing
   schedule, it does not tune it.
-- `AUTOSAVE_TRACE_ENABLED` defaults to 0. Flipping it to 1 for a bench
-  session is a deliberate, temporary, single-variable action, not a new
-  permanent build default.
+- The trace uses the established `DEV_MODE_LOGGING` build selection. It must
+  allocate no trace SRAM and issue no trace-file I/O when that mode is `0`;
+  when it is `1`, it is a deliberate bench diagnostic alongside the existing
+  non-screen boot logger. Do not add a second trace mode or alter the current
+  logging selection incidentally while implementing this step.

@@ -65,7 +65,7 @@ uint8_t sdcard_getState(void);
  * callback into that discarded image would corrupt the recovery mount.
  * Inputs: the current read/write shim state. Outputs/effects: transport becomes
  * idle and the interrupted operation is lost. This is not a general runtime
- * cancellation API. Affiliates: filesystem_writeBootTimeoutLogBlocking(),
+ * cancellation API. Affiliates: filesystem_writeBootFailureLogBlocking(),
  * afatfs_destroy(true), and SD_init().
  */
 void sdcard_abortTransferForBootLog(void);
