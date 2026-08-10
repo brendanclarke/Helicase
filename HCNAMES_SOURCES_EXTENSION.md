@@ -2,10 +2,40 @@
 
 ## Status and purpose
 
-This is a design-and-implementation plan only.  It authorizes no source
-change by itself.  It replaces the current `settings.cfg`-owned, 16-entry
-Scene provenance with a root-register provenance model that supports the
-future AutoSave boot-restore path.
+Implementation is complete pending target validation. This document remains
+the change log and acceptance plan; it does not by itself claim target
+validation.
+
+### Implementation notes — 2026-08-10
+
+- Added the approved 129-by-`uint16_t` (258-byte) filesystem-owned source
+  register, with a high-bit pending-publication flag so a source selected by a
+  successful load survives the asynchronous reread of the old HCNAMES file.
+- Extended HCNAMES parsing and serialization to `name<TAB>source`; legacy
+  name-only rows parse as `UNKNOWN`, malformed new source tokens fail closed,
+  and all writers now emit a source token even for blank names.
+- Removed the 32-byte `SceneData` source array/API and the corresponding
+  `settings.cfg` read/write fields.  Legacy `scene_source_NN` settings keys
+  are accepted and ignored during migration.
+- Completed source staging at successful root Instrument, Kit, Scene, and Bank
+  load boundaries.  A root Instrument `@` source is assigned at its actual
+  payload commit, not in the shared name publisher, so an Instrument Save
+  retains rather than overwrites provenance. The existing HCNAMES close/sync
+  gate clears staged source flags only after durability.
+- Added `filesystem_resolveResidentSource()`. It follows the fixed
+  Instrument -> Kit -> Scene -> Bank chain in one place and deliberately does
+  no file I/O; missing-direct-target retry and global boot fallback remain the
+  later AutoSave reader's responsibility.
+- Kept malformed-source error handling inside each reader's existing async
+  close path, so a bad HCNAMES record reports an error only after its open file
+  is closed.
+- Updated the filesystem/interchange/SRAM reference documents for the paired
+  register and removed stale Preset/settings provenance comments. The SRAM
+  manifest records the approved 258-byte allocation but is not a newly linked
+  size report.
+- Source-level review is complete for the changed writer/read paths. Hardware
+  validation remains required. No build was run because the requested toolchain
+  is unavailable in this environment.
 
 The desired ownership model is:
 
@@ -48,10 +78,10 @@ Source tokens are compact text encodings of a `uint16_t` cache value:
 
 | Token | Cached value | Meaning |
 | --- | ---: | --- |
-| `-` | `0xffff` | Inherit from the enclosing level. |
-| `?` | `0xfffe` | Unknown: no asserted source; boot must use the documented fallback path. |
+| `-` | `0x7fff` | Inherit from the enclosing level. |
+| `?` | `0x7ffe` | Unknown: no asserted source; boot must use the documented fallback path. |
 | `000`–`999` | `0`–`999` | A direct root object slot.  The row class determines Bank, Scene, or Kit namespace. |
-| `@` | `0xfffd` | Direct root Instrument source.  The same HCNAMES row supplies its stem; the resolved Instrument type supplies its extension. |
+| `@` | `0x7ffd` | Direct root Instrument source.  The same HCNAMES row supplies its stem; the resolved Instrument type supplies its extension. |
 
 The logical row class is already fixed by the existing row map, so a separate
 type byte is not needed.  `@` cannot use an unstable Instrument browser index:
@@ -100,7 +130,8 @@ sections of `MODULE_INTERCHANGE_SPEC.md` / `FILESYSTEM_SPEC.md`.
   16 Kits, then 96 Instruments.  The source is a field of each logical row,
   not another 129 physical cache rows.
 - Add source constants for `INHERIT`, `UNKNOWN`, and `INSTRUMENT_DIRECT`, plus
-  `filesystem_identitySource(row)` and a controlled setter.  These APIs make
+  `filesystem_residentSource(row)`, `filesystem_resolveResidentSource()`, and
+  a controlled setter.  These APIs make
   row ownership explicit and prevent Menu/Preset code from constructing raw
   source values.
 - Extend `filesystem_prepareResidentNamesCache()` to clear both the existing

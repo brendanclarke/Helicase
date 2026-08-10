@@ -86,33 +86,6 @@ static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_U
 static volatile uint16_t         pm_instrument_request_index = 0u;
 static volatile uint16_t         pm_kit_request_scene_mask = 0u;
 
-static void preset_setSceneSourcesFromMask(uint16_t scene_mask,
-                                           uint16_t source_slot,
-                                           uint8_t source_is_bank)
-{
-    uint8_t scene_index;
-
-    /*
-     * Apply one immutable successful-operation source to selected Scenes.
-     *
-     * Inputs: final resident mask, root 0..999 slot, and Scene/Bank kind.
-     * Output: every bounded set bit receives the compact SceneData encoding;
-     * unset bits retain their prior provenance. Why: root Scene fan-out and
-     * partial Bank operations need one shared, non-filesystem metadata loop.
-     * Affiliates: SceneData's exact 32-byte source owner and the four
-     * completion callbacks below.
-     */
-    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
-         scene_index++) {
-        if ((scene_mask & (uint16_t)(1u << scene_index)) == 0u)
-            continue;
-        if (source_is_bank)
-            (void)scene_setSourceBankSlot(scene_index, source_slot);
-        else
-            (void)scene_setSourceLibrarySlot(scene_index, source_slot);
-    }
-}
-
 static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
 {
     /*
@@ -411,19 +384,15 @@ static void on_instrument_morph_load_complete(void)
 static void on_scene_load_complete(void)
 {
     /*
-     * Record root Scene provenance only at durable public success.
+     * Complete a durable root Scene load.
      *
-     * Inputs: filesystem terminal status, accepted source slot, and retained
-     * destination mask. Outputs: successful destinations point at /Scene/NNN
-     * and one settings debounce is restarted; errors change neither source nor
-     * settings state. Affiliates: resident-presence promotion and the common
+     * Inputs: filesystem terminal status and the retained destination mask.
+     * Output: successful destinations become Bank-present before Menu begins
+     * runtime apply. The filesystem already stages HCNAMES provenance with the
+     * paired committed identity; Preset neither mirrors it nor dirties
+     * settings.cfg. Affiliates: resident-presence promotion and the common
      * Preset completion below.
      */
-    if (filesystem_status() == FS_STATUS_DONE) {
-        preset_setSceneSourcesFromMask(
-            pm_kit_request_scene_mask, pm_request_slot, 0u);
-        filesystem_markSettingsDirty();
-    }
     preset_markRequestedScenesPresentOnSuccessfulLoad();
     preset_completeFilesystemOp(PRESET_OP_SCENE_LOAD);
 }
@@ -438,18 +407,6 @@ static void on_scene_save_complete(void)
      * operation identity so Menu can clear Save busy state without starting any
      * runtime sound-apply work.
      */
-    /*
-     * Inputs: durable Scene Save status, retained resident source Scene, and
-     * target root slot. Output: only a successful save assigns /Scene/NNN and
-     * queues settings persistence. Why: request acceptance does not prove the
-     * directory/HCNAMES/index flush completed. Affiliates:
-     * preset_saveScene()'s immutable request capture.
-     */
-    if (filesystem_status() == FS_STATUS_DONE) {
-        (void)scene_setSourceLibrarySlot(
-            pm_instrument_request_scene, pm_request_slot);
-        filesystem_markSettingsDirty();
-    }
     preset_completeFilesystemOp(PRESET_OP_SCENE_SAVE);
 }
 
@@ -463,19 +420,6 @@ static void on_bank_load_complete(void)
      * filesystem_lastBankLoadLoadedScene(). Menu/boot decide whether to run
      * the fallback chain after reading that bit.
      */
-    /*
-     * Inputs: durable Bank Load status, root Bank slot, and filesystem's final
-     * loaded-child mask. Outputs: the BankData restore slot already committed
-     * by the loader is queued for settings, while only actual child bits gain
-     * Bank provenance. Empty Banks still queue active_bank once. Why: the
-     * original request mask may include absent children. Affiliates:
-     * filesystem_lastBankLoadSceneMask() and settings.cfg active_bank.
-     */
-    if (filesystem_status() == FS_STATUS_DONE) {
-        preset_setSceneSourcesFromMask(
-            filesystem_lastBankLoadSceneMask(), pm_request_slot, 1u);
-        filesystem_markSettingsDirty();
-    }
     preset_completeFilesystemOp(PRESET_OP_BANK_LOAD);
 }
 
@@ -488,18 +432,6 @@ static void on_bank_save_complete(void)
      * It does not imply runtime DSP changes, so Menu can share the ordinary
      * Save completion cleanup used by Scene Save.
      */
-    /*
-     * Inputs: durable Bank Save status, promoted root slot, and immutable
-     * selected Scene mask. Outputs: successful saved children point at their
-     * same-number Bank children and active_bank/source metadata queues one
-     * settings rewrite. Errors preserve all prior provenance. Affiliates:
-     * preset_saveBank() and filesystem_requestSaveBank().
-     */
-    if (filesystem_status() == FS_STATUS_DONE) {
-        preset_setSceneSourcesFromMask(
-            pm_kit_request_scene_mask, pm_request_slot, 1u);
-        filesystem_markSettingsDirty();
-    }
     preset_completeFilesystemOp(PRESET_OP_BANK_SAVE);
 }
 

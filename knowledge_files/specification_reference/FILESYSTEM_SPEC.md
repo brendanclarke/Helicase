@@ -295,15 +295,22 @@ rows 33..128 six Instruments per Scene
               row = 33 + scene * 6 + voice
 ```
 
-Rows are newline-delimited text, at most eight printable characters, with blank
-lines representing unknown/unpublished identity. The cache representation is
-space-padded and NUL-terminated. The format is currently fixed-order and
-unversioned.
+Rows use fixed-order `name<TAB>source\n` text. `name` is at most eight
+printable characters and may be empty; `source` is `-` (inherit), `?`
+(unknown), `000` through `999` (direct root slot), or `@` (direct root
+Instrument stem). The fixed row class supplies the namespace for a numeric
+slot. The 129-by-`uint16_t` filesystem-owned source register follows
+Instrument -> Kit -> Scene -> Bank until it finds a direct source or reaches
+ordinary boot fallback. A legacy name-only line remains readable as unknown;
+malformed extended records fail the read rather than silently inheriting. The
+name cache remains space-padded and NUL-terminated.
 
 Changing a row can change its physical byte length. Every targeted update
-therefore reads all 129 rows into `fs_list_cache_name`, overlays only the rows
-owned by the successful action, rewrites the complete file, closes, and uses
-the normal flush gate. A missing file can be created by a targeted update from
+therefore reads all 129 name/source pairs into the shared cache/register,
+overlays only the rows owned by the successful action, rewrites the complete
+file, closes, and uses the normal flush gate. A staged source survives that
+reread until the close succeeds, preventing stale on-card provenance from
+overwriting a newly committed load. A missing file can be created by a targeted update from
 blank rows plus the rows that action has proved valid, but only after a complete
 case-insensitive root scan has proved zero matching HCNAMES entries. A NULL
 read-open result is not proof of absence: one folded match permits one read
@@ -332,22 +339,20 @@ file. It stores allowlisted system-level settings and the active Bank number,
 not the Bank display name. At boot, the current firmware reads this numbered
 Bank selector; legacy glo.cfg is not attempted.
 
-The current file is keyed text with:
+The current writer emits keyed text with:
 
     format=helicase.settings
     version=1
     active_bank=<0..999>
     autosave=<0|1>
-    scene_source_00=<encoded source>
-    ...
-    scene_source_15=<encoded source>
 
 The remaining accepted/written keys are bpm, ext_sync, quantisation,
 midi_chan_global, midi_filt_tx, midi_filt_rx, midi_routing,
 screensaver_on_off, bar_reset_mode, prescaler_clock_in,
 prescaler_clock_out1, prescaler_clock_out2, follow, and osc_wave_interp.
-The complete 33-line schema also includes `autosave` and sixteen
-`scene_source_NN` rows.
+The complete writer schema is 17 lines. Legacy `scene_source_NN` keys are
+accepted and ignored so an existing settings file migrates without becoming an
+error; provenance is now owned only by HCNAMES.
 Unknown or out-of-scope keys are not a way to restore Scene state. In
 particular, Morph, per-voice Morph, and Scene decimation belong to Scene
 payloads, not global settings.
@@ -517,8 +522,8 @@ Current behavior:
   occupancy mask, rescans the selected Bank parent for each requested child,
   resolves one lexical `SS Name` component into operation scratch, stages that
   child, and discards the component before advancing.
-- Bank Load borrows the HCNAMES image once, overlays exactly eight rows for each
-  successfully committed selected child, updates the Bank row on successful
+- Bank Load borrows the HCNAMES image once, overlays exactly eight name/source
+  pairs for each successfully committed selected child, updates the Bank row on successful
   metadata commit, and writes once. A child counts as loaded only after the
   shared Scene reader validates and commits it, not when its directory merely
   opens. The completed result reaches Preset/Menu before any later filesystem

@@ -5,102 +5,6 @@
 scene_t scenes[SCENE_COUNT];
 static uint8_t scene_active_index;
 
-/*
- * Exact resident Scene-source allocation approved for settings provenance.
- *
- * Inputs: settings.cfg overlay and successful root Scene/Bank operations.
- * Outputs: one encoded uint16_t per resident Scene, retained after the file is
- * closed. Why: future source reload can query SRAM without reopening settings
- * and without adding source metadata/alignment to scene_t. This metadata does
- * not participate in the musical autosave mask. Affiliates: SceneData.h's
- * encoding constants, Preset completion callbacks, and filesystem settings.
- */
-static uint16_t scene_sources[SCENE_COUNT];
-_Static_assert(sizeof(scene_sources) == 32u,
-               "Scene provenance must consume exactly 32 SRAM bytes");
-
-void scene_resetSources(void)
-{
-    uint8_t scene_index;
-
-    /*
-     * Establish the missing/legacy-settings provenance default.
-     *
-     * Input: cold Scene initialization or settings-load phase zero. Output:
-     * every resident source becomes the explicit unknown sentinel. Why: a
-     * later manual settings load must not retain source words from the prior
-     * image when keys are absent. Affiliates: scene_initAll() and
-     * filesystem_resetSettingsToDefaults().
-     */
-    for (scene_index = 0u; scene_index < SCENE_COUNT; scene_index++)
-        scene_sources[scene_index] = SCENE_SOURCE_UNKNOWN;
-}
-
-uint8_t scene_setSourceEncoded(uint8_t scene_index, uint16_t source)
-{
-    /*
-     * Store one already-encoded settings source after strict validation.
-     *
-     * Inputs: resident Scene index and 0..1999 or UINT16_MAX. Output: nonzero
-     * only when the coordinate/value is accepted; storage receives that exact
-     * word. Why: settings parsing needs to restore unknown without exposing the
-     * array, while 2000..65534 must never become invented source kinds.
-     * Affiliates: filesystem_parseSettingsLine() and the typed setters below.
-     */
-    if (!scene_indexValid(scene_index) ||
-        (source >= SCENE_SOURCE_LIMIT && source != SCENE_SOURCE_UNKNOWN)) {
-        return 0u;
-    }
-    scene_sources[scene_index] = source;
-    return 1u;
-}
-
-uint8_t scene_setSourceLibrarySlot(uint8_t scene_index, uint16_t slot)
-{
-    /*
-     * Encode one successful root Scene library source.
-     *
-     * Inputs: resident Scene and root library slot 0..999. Output: the direct
-     * 0..999 encoding, or rejection for invalid coordinates. Why: Preset must
-     * not duplicate provenance arithmetic. Affiliates: Scene Load/Save
-     * completion callbacks and scene_setSourceEncoded().
-     */
-    if (slot >= SCENE_SOURCE_BANK_BASE)
-        return 0u;
-    return scene_setSourceEncoded(
-        scene_index, (uint16_t)(SCENE_SOURCE_LIBRARY_BASE + slot));
-}
-
-uint8_t scene_setSourceBankSlot(uint8_t scene_index, uint16_t slot)
-{
-    /*
-     * Encode one successful root Bank source.
-     *
-     * Inputs: resident Scene and Bank slot 0..999. Output: 1000..1999, with
-     * child identity implicit in scene_index. Why: this preserves all two
-     * thousand source choices in the approved two bytes. Affiliates: Bank
-     * Load/Save completion callbacks and scene_setSourceEncoded().
-     */
-    if (slot >= (SCENE_SOURCE_LIMIT - SCENE_SOURCE_BANK_BASE))
-        return 0u;
-    return scene_setSourceEncoded(
-        scene_index, (uint16_t)(SCENE_SOURCE_BANK_BASE + slot));
-}
-
-uint16_t scene_sourceValue(uint8_t scene_index)
-{
-    /*
-     * Read one retained source without reopening settings.cfg.
-     *
-     * Input: resident Scene index. Output: its exact encoded word, or unknown
-     * for invalid input. Affiliates: the settings writer and future direct
-     * reload-from-source UI.
-     */
-    return scene_indexValid(scene_index)
-        ? scene_sources[scene_index]
-        : SCENE_SOURCE_UNKNOWN;
-}
-
 static uint8_t scene_defaultVoiceAudioOut(uint8_t slot)
 {
     /*
@@ -654,7 +558,6 @@ void scene_initAll(void)
      * its step/track defaults inside the same Scene record.
      */
     memset(scenes, 0, sizeof(scenes));
-    scene_resetSources();
     scene_active_index = 0u;
     for (scene_index = 0u; scene_index < SCENE_COUNT; scene_index++) {
         scenes[scene_index].settings.voice_decimation_all = 127u;

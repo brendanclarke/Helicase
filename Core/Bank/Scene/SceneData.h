@@ -23,21 +23,6 @@
 #define SCENE_COUNT 16u
 
 /*
- * Compact source provenance for each resident Scene.
- *
- * What: values 0..999 encode a root Scene library slot, values 1000..1999
- * encode a root Bank slot, and UINT16_MAX means unknown. For Bank provenance,
- * the child coordinate is the resident Scene index because Bank Load/Save maps
- * bit N to child N. Why: all 2,000 valid sources fit in one uint16_t per Scene
- * with no parallel type array. Inputs: successful Scene/Bank completion and
- * settings.cfg load. Outputs: exactly 32 retained SRAM bytes serialized back
- * to settings.cfg. Affiliates: presetManager.c and filesystem settings text.
- */
-#define SCENE_SOURCE_LIBRARY_BASE 0u
-#define SCENE_SOURCE_BANK_BASE    1000u
-#define SCENE_SOURCE_LIMIT        2000u
-#define SCENE_SOURCE_UNKNOWN      UINT16_MAX
-/*
  * Fixed-width resident object display names.
  *
  * Kit, Scene, and Instrument browser/editor names use the LCD's eight visible
@@ -252,21 +237,6 @@ extern scene_t scenes[SCENE_COUNT];
  * This is called at boot before filesystem-loaded Kit data is applied.
  */
 void scene_initAll(void);
-/*
- * Reset, store, and read resident Scene source provenance.
- *
- * Inputs: a bounded resident Scene plus a 0..999 root Scene/Bank slot, or a
- * validated encoded settings value. Outputs: the one two-byte source changes
- * or SCENE_SOURCE_UNKNOWN is returned for invalid coordinates. These metadata
- * APIs never mark the musical autosave mutation mask. Why: provenance belongs
- * to settings.cfg and must remain independent of Bank payload dirtiness.
- * Affiliates: Preset successful completion and filesystem settings parsing.
- */
-void scene_resetSources(void);
-uint8_t scene_setSourceLibrarySlot(uint8_t scene_index, uint16_t slot);
-uint8_t scene_setSourceBankSlot(uint8_t scene_index, uint16_t slot);
-uint8_t scene_setSourceEncoded(uint8_t scene_index, uint16_t source);
-uint16_t scene_sourceValue(uint8_t scene_index);
 /*
  * Validate a resident Scene index.
  *

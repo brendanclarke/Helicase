@@ -56,6 +56,7 @@ sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 373,308 B.
 | --- | ---: | --- |
 | `scenes` | 20,992 B | 16 resident `scene_t` values; each holds one 112-B bitmap `PatternSet` |
 | `fs_list_cache_name` | 9,000 B | Shared library-name/HCNAMES cache |
+| `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved source cache, pending the next linked-size regeneration |
 | `afatfs` | 7,344 B | Async FAT filesystem state |
 | `runtime_slots` | 7,056 B | Six tagged engine slots, 1,176 B reserve each |
 | `sample_info_cache` | 1,440 B | Sample-information cache |

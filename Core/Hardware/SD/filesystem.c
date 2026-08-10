@@ -131,6 +131,18 @@
     (FS_RESIDENT_NAMES_INSTRUMENT_BASE + \
      (STORAGE_BANK_SCENE_MAX_SLOTS * STORAGE_KIT_SLOT_COUNT))
 /*
+ * One compact provenance word accompanies each logical HCNAMES row.
+ *
+ * Direct numbered-library sources occupy 0..999; the row class determines the
+ * library.  The three high values are non-library tokens.  Bit 15 is retained
+ * only while an asynchronous HCNAMES rewrite has a caller-staged source
+ * update: it lets the reader preserve a new source while it streams the old
+ * register into the shared name cache, with no second dirty bitmap allocation.
+ */
+#define FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT 1000u
+#define FS_RESIDENT_SOURCE_DIRTY_FLAG        0x8000u
+#define FS_RESIDENT_SOURCE_VALUE_MASK        0x7fffu
+/*
  * Text line buffer for storageTypes schemas.
  *
  * Most files fit under 96 bytes, but the draft Scene/Bank pattern format writes
@@ -730,6 +742,13 @@ typedef union {
  */
 static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
                               [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+/*
+ * Persistent HCNAMES provenance register: one two-byte source per logical
+ * Bank/Scene/Kit/Instrument row.  This is the user-approved 258-byte cache;
+ * it replaces SceneData's former 32-byte settings provenance array and never
+ * belongs to playable Scene/Kit data or Menu scratch.
+ */
+static uint16_t fs_resident_source[FS_RESIDENT_NAMES_ROW_COUNT];
 static filesystem_stage_workspace_t fs_stage_workspace;
 static filesystem_autosave_parameter_cache_t fs_autosave_parameter_cache;
 
@@ -755,6 +774,8 @@ _Static_assert(sizeof(fs_list_cache_name) ==
                    (FS_LIBRARY_NAME_CACHE_MAX *
                     (STORAGE_KIT_DISPLAY_NAME_LEN + 1u)),
                "the index/HCNAMES cache must remain exactly 9000 bytes");
+_Static_assert(sizeof(fs_resident_source) == 258u,
+               "HCNAMES provenance register must remain 129 x uint16_t");
 _Static_assert(sizeof(fs_identity_name) + BANK_DISPLAY_NAME_LEN + 1u == 81u,
                "one Bank plus one Scene, Kit, and six Instrument names is 81 bytes");
 _Static_assert(INSTRUMENT_SLOT_COUNT * INSTRUMENT_PARAM_COUNT <=
@@ -1024,11 +1045,14 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void);
 static void filesystem_autosaveTraceFlushCompleted(void);
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
 static void filesystem_autosaveSetupCompleted(void);
+static void filesystem_clearResidentSourceDirtyFlags(void);
 static uint8_t filesystem_residentNameIsBlank(const char *name);
 static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t cap,
                                                  const char *name,
-                                                 uint8_t present);
+                                                 uint8_t present,
+                                                 uint16_t source,
+                                                 uint16_t row);
 static uint8_t filesystem_nextResidentNameLine(char *dst,
                                                uint16_t cap,
                                                uint16_t row);
@@ -1904,14 +1928,11 @@ static void filesystem_resetSettingsToDefaults(void)
     /*
      * New settings fields retain backward-compatible defaults under version 1.
      *
-     * Input: every keyed settings load before file overlay. Outputs: AutoSave
-     * starts ON and all sixteen Scene sources become explicitly unknown. Why:
-     * missing files/keys and later manual Settings Loads must not retain stale
-     * provenance. Affiliates: SceneData's exact 32-byte source owner and the
-     * parser/writer below.
+     * Input: every keyed settings load before file overlay. Output: AutoSave
+     * starts ON.  HCNAMES, not settings.cfg, owns resident provenance, so this
+     * reset deliberately cannot alter source fallback state.
      */
     parameter_values[PAR_AUTOSAVE_ENABLED] = 1u;
-    scene_resetSources();
     bank_setRestoreBankSlot(0u);
 }
 
@@ -1980,41 +2001,6 @@ static uint8_t filesystem_settingsParamForKey(const char *key,
     return 1u;
 }
 
-static uint8_t filesystem_settingsSceneSourceIndex(const char *key,
-                                                   uint8_t *scene_index)
-{
-    static const char prefix[] = "scene_source_";
-    uint8_t tens;
-    uint8_t ones;
-    uint8_t parsed_index;
-
-    /*
-     * Recognize one exact scene_source_00..15 key with a tri-state result.
-     *
-     * Inputs: trimmed settings key and output index. Output: zero means an
-     * unrelated forward-compatible key, one means a valid Scene-source key,
-     * and two means the reserved prefix was present but malformed. Why: the
-     * parser must ignore unrelated future keys while failing closed for a
-     * misspelled source assignment. Affiliates: filesystem_parseSettingsLine()
-     * and SceneData's bounded encoded setter.
-     */
-    if (!key || strncmp(key, prefix, sizeof(prefix) - 1u) != 0)
-        return 0u;
-    key += sizeof(prefix) - 1u;
-    if (key[0] < '0' || key[0] > '9' ||
-        key[1] < '0' || key[1] > '9' || key[2] != '\0') {
-        return 2u;
-    }
-    tens = (uint8_t)(key[0] - '0');
-    ones = (uint8_t)(key[1] - '0');
-    parsed_index = (uint8_t)(tens * 10u + ones);
-    if (!scene_indexValid(parsed_index))
-        return 2u;
-    if (scene_index)
-        *scene_index = parsed_index;
-    return 1u;
-}
-
 static fs_status_t filesystem_parseSettingsLine(const char *line)
 {
     char key[32];
@@ -2023,8 +2009,6 @@ static fs_status_t filesystem_parseSettingsLine(const char *line)
     uint8_t len = 0u;
     uint16_t parsed;
     uint16_t param;
-    uint8_t source_key_state;
-    uint8_t source_scene;
 
     /*
      * Parse and apply one settings.cfg assignment.
@@ -2067,23 +2051,8 @@ static fs_status_t filesystem_parseSettingsLine(const char *line)
         bank_setRestoreBankSlot(parsed);
         return FS_STATUS_DONE;
     }
-    source_key_state = filesystem_settingsSceneSourceIndex(
-        key, &source_scene);
-    if (source_key_state != 0u) {
-        /*
-         * Restore one two-byte Scene provenance value from keyed text.
-         *
-         * Inputs: exact scene_source_NN key and decimal U16 text. Output: the
-         * retained source receives 0..1999 or UINT16_MAX; malformed reserved
-         * keys/values fail the settings operation. Why: 2000..65534 have no
-         * defined source meaning. Affiliates: SceneData's 32-byte owner and
-         * filesystem_nextSettingsLine().
-         */
-        if (source_key_state != 1u ||
-            !filesystem_parseSettingsU16(value, &parsed) ||
-            !scene_setSourceEncoded(source_scene, parsed)) {
-            return FS_STATUS_ERROR;
-        }
+    if (strncmp(key, "scene_source_", 13u) == 0) {
+        /* Legacy v1 provenance is deliberately ignored: HCNAMES owns it. */
         return FS_STATUS_DONE;
     }
     if (filesystem_settingsParamForKey(key, &param)) {
@@ -3962,6 +3931,9 @@ static void filesystem_writeResidentNames_tick(void)
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
+        /* Initial/recovery serialization also emits paired source tokens;
+         * make any staged values clean only after its register close. */
+        filesystem_clearResidentSourceDirtyFlags();
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -4272,8 +4244,96 @@ static const char *filesystem_cachedResidentName(uint16_t row)
     return fs_list_cache_name[row];
 }
 
+/* Validate one unflagged source value against the fixed HCNAMES row class. */
+static uint8_t filesystem_residentSourceValid(uint16_t row, uint16_t source)
+{
+    source = (uint16_t)(source & FS_RESIDENT_SOURCE_VALUE_MASK);
+    if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
+        return 0u;
+    if (source < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT ||
+        source == FS_RESIDENT_SOURCE_INHERIT ||
+        source == FS_RESIDENT_SOURCE_UNKNOWN) {
+        return 1u;
+    }
+    return (uint8_t)(source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT &&
+                     row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE);
+}
+
+uint16_t filesystem_residentSource(uint16_t row)
+{
+    /*
+     * Return one logical HCNAMES provenance word without exposing its pending
+     * rewrite flag.  Inputs are fixed register coordinates; output is UNKNOWN
+     * for invalid rows.  This is RAM-only and never opens the register.
+     */
+    return row < FS_RESIDENT_NAMES_ROW_COUNT
+        ? (uint16_t)(fs_resident_source[row] & FS_RESIDENT_SOURCE_VALUE_MASK)
+        : FS_RESIDENT_SOURCE_UNKNOWN;
+}
+
+uint8_t filesystem_setResidentSource(uint16_t row, uint16_t source)
+{
+    /*
+     * Stage one source update for the next ordinary HCNAMES rewrite.
+     *
+     * The dirty flag survives the subsequent read of the old register, so an
+     * asynchronous preserve/overlay update cannot overwrite a just-committed
+     * load source with stale on-card provenance.  The physical file changes
+     * only through the existing close/sync state machine.
+     */
+    if (!filesystem_residentSourceValid(row, source))
+        return 0u;
+    fs_resident_source[row] = (uint16_t)(
+        (source & FS_RESIDENT_SOURCE_VALUE_MASK) |
+        FS_RESIDENT_SOURCE_DIRTY_FLAG);
+    return 1u;
+}
+
+uint16_t filesystem_resolveResidentSource(uint16_t row,
+                                          uint16_t *resolved_row)
+{
+    /*
+     * Resolve a resident row's explicit fallback source through its fixed
+     * enclosing hierarchy.
+     *
+     * Inputs: one HCNAMES row and optional output for the row that supplied a
+     * direct source. Output: a direct token/slot, or UNKNOWN once Bank has no
+     * usable source. Why: AutoSave boot recovery must consult the same durable
+     * register semantics for Instrument, Kit, Scene, and Bank rather than
+     * recreating parent-offset arithmetic in a future reader. Unknown and
+     * inherit both continue upward; a later missing direct target can use the
+     * same traversal from its parent before the normal global fallback.
+     */
+    while (row < FS_RESIDENT_NAMES_ROW_COUNT) {
+        uint16_t source = filesystem_residentSource(row);
+
+        if (source < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT ||
+            source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT) {
+            if (resolved_row)
+                *resolved_row = row;
+            return source;
+        }
+        if (row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE) {
+            row = (uint16_t)(FS_RESIDENT_NAMES_KIT_BASE +
+                             ((row - FS_RESIDENT_NAMES_INSTRUMENT_BASE) /
+                              STORAGE_KIT_SLOT_COUNT));
+        } else if (row >= FS_RESIDENT_NAMES_KIT_BASE) {
+            row = (uint16_t)(1u + (row - FS_RESIDENT_NAMES_KIT_BASE));
+        } else if (row >= 1u) {
+            row = FS_IDENTITY_BANK_ROW;
+        } else {
+            break;
+        }
+    }
+    if (resolved_row)
+        *resolved_row = FS_RESIDENT_NAMES_ROW_COUNT;
+    return FS_RESIDENT_SOURCE_UNKNOWN;
+}
+
 static void filesystem_prepareResidentNamesCache(void)
 {
+    uint16_t row;
+
     /*
      * Borrow the existing generalized cache for the complete root register.
      *
@@ -4285,29 +4345,134 @@ static void filesystem_prepareResidentNamesCache(void)
      * its selected eight cells before the cache is replaced by `.hcindex`.
      */
     filesystem_clearNameCacheStorage();
+    /* A short/legacy register cannot retain source words from a prior cache
+     * use.  Keep only caller-staged dirty values until this transaction writes
+     * them through the normal durable HCNAMES path. */
+    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+        if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_DIRTY_FLAG) == 0u)
+            fs_resident_source[row] = FS_RESIDENT_SOURCE_UNKNOWN;
+    }
     fs_list_cache_kind = FS_NAME_CACHE_HCNAMES;
     fs_list_cache_count = FS_RESIDENT_NAMES_ROW_COUNT;
 }
 
-static void filesystem_cacheResidentName(uint16_t row, const char *line)
+static uint8_t filesystem_parseResidentSourceToken(const char *token,
+                                                   uint16_t row,
+                                                   uint16_t *source_out)
 {
     /*
-     * Normalize one parsed `.hcnames` line into the shared eight-cell format.
-     *
-     * Inputs: physical line number and its newline-free text. Output: only the
-     * matching cache row is changed, printable text is space padded, and blank
-     * lines remain blank occupancy. The ninth byte stays NUL so Menu may copy
-     * or inspect the cell before the next cache-domain transition.
+     * Decode the compact provenance field of one extended HCNAMES record.
+     * Inputs are the tab-suffix token and its fixed row class; output is one
+     * validated unflagged source word.  Strict parsing prevents malformed card
+     * text from silently becoming an inherited fallback.
+     */
+    uint16_t value;
+
+    if (!token || !source_out)
+        return 0u;
+    if (strcmp(token, "-") == 0)
+        value = FS_RESIDENT_SOURCE_INHERIT;
+    else if (strcmp(token, "?") == 0)
+        value = FS_RESIDENT_SOURCE_UNKNOWN;
+    else if (strcmp(token, "@") == 0)
+        value = FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT;
+    else {
+        if (token[0] < '0' || token[0] > '9' ||
+            token[1] < '0' || token[1] > '9' ||
+            token[2] < '0' || token[2] > '9' || token[3] != '\0') {
+            return 0u;
+        }
+        value = (uint16_t)((token[0] - '0') * 100u +
+                           (token[1] - '0') * 10u +
+                           (token[2] - '0'));
+    }
+    if (!filesystem_residentSourceValid(row, value))
+        return 0u;
+    *source_out = value;
+    return 1u;
+}
+
+static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
+{
+    const char *tab;
+    char name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+    uint16_t source = FS_RESIDENT_SOURCE_UNKNOWN;
+    uint8_t name_len = 0u;
+
+    /*
+     * Parse one physical HCNAMES line into its paired name/source cache cells.
+     * A legacy name-only line is accepted as UNKNOWN provenance; a new-format
+     * row must contain exactly one tab and a valid source token.  A caller's
+     * staged source wins over old card content until the rewrite is durable.
+     */
+    if (row >= FS_RESIDENT_NAMES_ROW_COUNT ||
+        fs_list_cache_kind != FS_NAME_CACHE_HCNAMES || !line) {
+        return 0u;
+    }
+    tab = strchr(line, '\t');
+    if (tab) {
+        const char *tail = tab + 1u;
+        if (strchr(tail, '\t') != NULL ||
+            !filesystem_parseResidentSourceToken(tail, row, &source)) {
+            return 0u;
+        }
+        while (line + name_len < tab) {
+            if (name_len >= STORAGE_KIT_DISPLAY_NAME_LEN)
+                return 0u;
+            name[name_len] = line[name_len];
+            name_len++;
+        }
+        name[name_len] = '\0';
+    } else {
+        /* Legacy rows retain current name normalization and gain UNKNOWN. */
+        while (line[name_len] != '\0') {
+            if (name_len >= STORAGE_KIT_DISPLAY_NAME_LEN)
+                return 0u;
+            name[name_len] = line[name_len];
+            name_len++;
+        }
+        name[name_len] = '\0';
+    }
+    memset(fs_list_cache_name[row], 0, sizeof(fs_list_cache_name[row]));
+    if (name[0] != '\0')
+        storage_copyDisplayName(fs_list_cache_name[row], name);
+    fs_list_cache_name[row][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_DIRTY_FLAG) == 0u)
+        fs_resident_source[row] = source;
+    return 1u;
+}
+
+static void filesystem_cacheResidentName(uint16_t row, const char *name)
+{
+    /*
+     * Overlay only a committed display name while retaining its paired source.
+     * Callers that change provenance use filesystem_setResidentSource() before
+     * the rewrite; this helper deliberately cannot manufacture an implicit
+     * source from a UI string.
      */
     if (row >= FS_RESIDENT_NAMES_ROW_COUNT ||
         fs_list_cache_kind != FS_NAME_CACHE_HCNAMES) {
         return;
     }
-    memset(fs_list_cache_name[row], 0,
-           sizeof(fs_list_cache_name[row]));
-    if (line && line[0] != '\0')
-        storage_copyDisplayName(fs_list_cache_name[row], line);
+    memset(fs_list_cache_name[row], 0, sizeof(fs_list_cache_name[row]));
+    if (name && name[0] != '\0')
+        storage_copyDisplayName(fs_list_cache_name[row], name);
     fs_list_cache_name[row][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+}
+
+static void filesystem_clearResidentSourceDirtyFlags(void)
+{
+    uint16_t row;
+
+    /*
+     * Publish staged source values only after the enclosing HCNAMES file has
+     * closed through the normal flush gate.  Before this point the dirty flag
+     * intentionally protects a newly committed load source from the old file
+     * image being streamed into the cache.
+     */
+    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+        fs_resident_source[row] &= FS_RESIDENT_SOURCE_VALUE_MASK;
+    }
 }
 
 static void filesystem_cacheCurrentResidentInstrumentNames(void)
@@ -4437,9 +4602,10 @@ static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
      * Inputs: the Bank loader's one-bit child cursor, its parsed Scene display
      * name in op_scene_display_name, and the resident Scene just atomically
      * committed by the shared Scene loader. Output: only that Scene row, its
-     * Kit row, and its six Instrument rows change in the borrowed cache.
-     * Unmasked resident Scenes are deliberately never touched, preserving both
-     * their payload/name pairing during every mask-selective Bank Load.
+     * Kit row, and its six Instrument rows change as name/source pairs in the
+     * borrowed cache. The child hierarchy inherits the Bank source; unmasked
+     * resident Scenes are deliberately never touched, preserving both their
+     * payload/name/source pairing during every mask-selective Bank Load.
      * Affiliates: filesystem_loadSceneDirectory_tick() commit phase and the
      * final Bank HCNAMES writer.
      */
@@ -4447,13 +4613,19 @@ static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
         return;
     filesystem_cacheResidentName(filesystem_residentSceneRow(scene_index),
                                  op_scene_display_name);
+    (void)filesystem_setResidentSource(filesystem_residentSceneRow(scene_index),
+                                       FS_RESIDENT_SOURCE_INHERIT);
     filesystem_cacheResidentName(filesystem_residentKitRow(scene_index),
                                  filesystem_identityName(FS_IDENTITY_KIT_ROW));
+    (void)filesystem_setResidentSource(filesystem_residentKitRow(scene_index),
+                                       FS_RESIDENT_SOURCE_INHERIT);
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
+        uint16_t row = filesystem_residentInstrumentRow(scene_index, slot);
         filesystem_cacheResidentName(
-            filesystem_residentInstrumentRow(scene_index, slot),
+            row,
             filesystem_identityName((uint8_t)(
                 FS_IDENTITY_INSTRUMENT_ROW_0 + slot)));
+        (void)filesystem_setResidentSource(row, FS_RESIDENT_SOURCE_INHERIT);
     }
 }
 
@@ -4540,7 +4712,13 @@ static void filesystem_residentNames_tick(void)
             return;
         }
         if (line_ready) {
-            filesystem_cacheResidentName(op_item_offset, op_line_buf);
+            if (!filesystem_cacheResidentRecord(op_item_offset, op_line_buf)) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 3u;
+                return;
+            }
             if (op_item_offset < UINT16_MAX)
                 op_item_offset++;
             op_line_len = 0u;
@@ -4598,7 +4776,8 @@ static void filesystem_residentNames_tick(void)
                     op_line_buf,
                     sizeof(op_line_buf),
                     name,
-                    (uint8_t)!filesystem_residentNameIsBlank(name));
+                    (uint8_t)!filesystem_residentNameIsBlank(name),
+                    fs_resident_source[op_item_offset], op_item_offset);
                 if (op_line_len == 0u) {
                     filesystem_finish(FS_STATUS_ERROR);
                     return;
@@ -4625,6 +4804,7 @@ static void filesystem_residentNames_tick(void)
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
+        filesystem_clearResidentSourceDirtyFlags();
         /*
          * Finish only the requested resident-name transaction.
          *
@@ -4867,7 +5047,16 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             return;
         }
         if (line_ready) {
-            filesystem_cacheResidentName(op_item_offset, op_line_buf);
+            if (!filesystem_cacheResidentRecord(op_item_offset, op_line_buf)) {
+                /* A malformed paired record is a read failure, but the open
+                 * register still must close before this async transaction can
+                 * report it. */
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 3u;
+                return;
+            }
             if (op_item_offset < UINT16_MAX)
                 op_item_offset++;
             op_line_len = 0u;
@@ -6001,7 +6190,15 @@ static void filesystem_autosaveParameterDrain_tick(void)
             op_close_status = FS_STATUS_ERROR;
         }
         if (line_ready) {
-            filesystem_cacheResidentName(op_item_offset, op_line_buf);
+            if (!filesystem_cacheResidentRecord(op_item_offset, op_line_buf)) {
+                /* Preserve the normal close-before-error contract even when
+                 * an extended HCNAMES source token is malformed. */
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 33u;
+                return;
+            }
             if (op_item_offset < UINT16_MAX)
                 op_item_offset++;
             op_line_len = 0u;
@@ -8126,6 +8323,28 @@ static void filesystem_loadKitDirectory_tick(void)
                         (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 + identity_slot),
                         op_kitset.instrument_file[identity_slot]);
                 }
+                /* Stage paired provenance before Menu's deferred HCNAMES
+                 * flush rereads the old register: this root Kit is the direct
+                 * source and its member Instrument rows inherit from it. */
+                for (scene_index = 0u;
+                     scene_index < SCENE_COUNT && scene_index < 16u;
+                     scene_index++) {
+                    uint8_t source_slot;
+                    if ((op_kit_load_scene_mask &
+                         (uint16_t)(1u << scene_index)) == 0u) {
+                        continue;
+                    }
+                    (void)filesystem_setResidentSource(
+                        filesystem_residentKitRow(scene_index), op_slot);
+                    for (source_slot = 0u;
+                         source_slot < STORAGE_KIT_SLOT_COUNT;
+                         source_slot++) {
+                        (void)filesystem_setResidentSource(
+                            filesystem_residentInstrumentRow(scene_index,
+                                                             source_slot),
+                            FS_RESIDENT_SOURCE_INHERIT);
+                    }
+                }
                 for (scene_index = 0u;
                      scene_index < SCENE_COUNT && scene_index < 16u;
                      scene_index++) {
@@ -8739,6 +8958,31 @@ static void filesystem_loadSceneDirectory_tick(void)
                             (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 +
                                       identity_slot),
                             op_kitset.instrument_file[identity_slot]);
+                    }
+                    /* A root Scene supplies this whole child hierarchy;
+                     * Bank-local Scene loads use the enclosing Bank instead. */
+                    for (uint8_t source_scene = 0u;
+                         source_scene < STORAGE_BANK_SCENE_MAX_SLOTS;
+                         source_scene++) {
+                        if ((op_scene_load_scene_mask &
+                             (uint16_t)(1u << source_scene)) == 0u) {
+                            continue;
+                        }
+                        (void)filesystem_setResidentSource(
+                            filesystem_residentSceneRow(source_scene),
+                            current_op == FS_INTERNAL_OP_LOAD_SCENE
+                                ? op_slot : FS_RESIDENT_SOURCE_INHERIT);
+                        (void)filesystem_setResidentSource(
+                            filesystem_residentKitRow(source_scene),
+                            FS_RESIDENT_SOURCE_INHERIT);
+                        for (identity_slot = 0u;
+                             identity_slot < STORAGE_KIT_SLOT_COUNT;
+                             identity_slot++) {
+                            (void)filesystem_setResidentSource(
+                                filesystem_residentInstrumentRow(
+                                    source_scene, identity_slot),
+                                FS_RESIDENT_SOURCE_INHERIT);
+                        }
                     }
                 }
                 op_close_status = FS_STATUS_DONE;
@@ -9643,7 +9887,15 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         }
         if (line_ready) {
-            filesystem_cacheResidentName(op_item_offset, op_line_buf);
+            if (!filesystem_cacheResidentRecord(op_item_offset, op_line_buf)) {
+                /* The Bank preload owns an open HCNAMES handle here; close it
+                 * before surfacing a malformed name/source record. */
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 82u;
+                return;
+            }
             if (op_item_offset < UINT16_MAX)
                 op_item_offset++;
             op_line_len = 0u;
@@ -10011,8 +10263,11 @@ static void filesystem_loadBankDirectory_tick(void)
              * can initialize audible Scene data from root Scene, root Kit, or
              * SRAM defaults. The restore slot is still updated because the
              * Bank itself was successfully loaded.
-             */
-            bank_setDisplayName(op_bank_display_name);
+        */
+        bank_setDisplayName(op_bank_display_name);
+        /* The root Bank directory selected by this completed load is the
+         * direct top-level fallback for every child that inherits upward. */
+        (void)filesystem_setResidentSource(0u, op_slot);
             /*
              * No requested child exists in this Bank. Preserve the existing
              * resident Scene availability rather than clearing it: the caller
@@ -10393,7 +10648,8 @@ static void filesystem_loadBankDirectory_tick(void)
                     op_line_buf, sizeof(op_line_buf),
                     fs_list_cache_name[op_item_offset],
                     (uint8_t)!filesystem_residentNameIsBlank(
-                        fs_list_cache_name[op_item_offset]));
+                        fs_list_cache_name[op_item_offset]),
+                    fs_resident_source[op_item_offset], op_item_offset);
                 if (op_line_len == 0u) {
                     filesystem_finish(FS_STATUS_ERROR);
                     return;
@@ -10419,6 +10675,9 @@ static void filesystem_loadBankDirectory_tick(void)
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
+        /* This Bank-owned writer bypasses the generic HCNAMES transaction, so
+         * it must publish its staged source words at the same durable close. */
+        filesystem_clearResidentSourceDirtyFlags();
         /*
          * Complete Bank Load after its resident identity is durable.
          *
@@ -10848,6 +11107,15 @@ static void filesystem_loadInstrument_tick(void)
                         (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 +
                                   op_instrument_load_destination_slot),
                         display);
+                    /* The accepted root Instrument row is a direct source
+                     * for the destination only.  This precedes the deferred
+                     * HCNAMES reread so its high-bit staging flag protects it
+                     * from the older card record until publication succeeds. */
+                    (void)filesystem_setResidentSource(
+                        filesystem_residentInstrumentRow(
+                            op_instrument_load_destination_scene,
+                            op_instrument_load_destination_slot),
+                        FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT);
                 }
                 op_close_status = FS_STATUS_DONE;
             }
@@ -11964,7 +12232,8 @@ static uint8_t filesystem_nextSettingsLine(char *dst, uint16_t cap,
      * Inputs: op_write_line_index and the live global settings/Bank restore
      * slot. Output: a complete keyed text line or zero after the schema ends.
      * The switch is deliberately an allowlist: Scene-owned Morph and voice
-     * values are absent even though they still have ParameterArray ids.
+     * values, plus retired HCNAMES provenance, are absent even though they
+     * still have ParameterArray ids or legacy file keys.
      */
     switch (op_write_line_index) {
     case 0u:
@@ -12029,24 +12298,6 @@ static uint8_t filesystem_nextSettingsLine(char *dst, uint16_t cap,
         return filesystem_formatAssignmentU16Line(
             dst, cap, "autosave", parameter_values[PAR_AUTOSAVE_ENABLED]);
     default:
-        if (op_write_line_index >= 17u && op_write_line_index < 33u) {
-            char key[] = "scene_source_00";
-            uint8_t scene_index = (uint8_t)(op_write_line_index - 17u);
-
-            /*
-             * Stream one resident Scene source without a sixteen-string table.
-             *
-             * Inputs: line index 17..32 and SceneData's encoded uint16_t.
-             * Output: scene_source_00..15 in stable resident order. Why: one
-             * generated key keeps parser/writer numbering visibly paired and
-             * retains the exact 32-byte SRAM design. Affiliates:
-             * filesystem_settingsSceneSourceIndex() and scene_sourceValue().
-             */
-            key[13] = (char)('0' + (scene_index / 10u));
-            key[14] = (char)('0' + (scene_index % 10u));
-            return filesystem_formatAssignmentU16Line(
-                dst, cap, key, scene_sourceValue(scene_index));
-        }
         return 0u;
     }
 }
@@ -13042,7 +13293,15 @@ static void filesystem_saveBankDirectory_tick(void)
             return;
         }
         if (line_ready) {
-            filesystem_cacheResidentName(op_item_offset, op_line_buf);
+            if (!filesystem_cacheResidentRecord(op_item_offset, op_line_buf)) {
+                /* Retain the save reader's close-before-error invariant for
+                 * malformed extended HCNAMES input. */
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 82u;
+                return;
+            }
             if (op_item_offset < UINT16_MAX)
                 op_item_offset++;
             op_line_len = 0u;
@@ -13614,7 +13873,8 @@ static void filesystem_saveBankDirectory_tick(void)
                     op_line_buf, sizeof(op_line_buf),
                     fs_list_cache_name[op_item_offset],
                     (uint8_t)!filesystem_residentNameIsBlank(
-                        fs_list_cache_name[op_item_offset]));
+                        fs_list_cache_name[op_item_offset]),
+                    fs_resident_source[op_item_offset], op_item_offset);
                 if (op_line_len == 0u) {
                     filesystem_finish(FS_STATUS_ERROR);
                     return;
@@ -13640,6 +13900,9 @@ static void filesystem_saveBankDirectory_tick(void)
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
+        /* Bank Save preserves source pairs while rewriting the full register;
+         * a previously staged load source becomes clean only after this close. */
+        filesystem_clearResidentSourceDirtyFlags();
         /*
          * Bank Save has now promoted its complete temporary tree. Park the
          * original callback and run the same boot-equivalent Bank rescan plus
@@ -16777,20 +17040,22 @@ static uint8_t filesystem_residentNameIsBlank(const char *name)
 static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t cap,
                                                  const char *name,
-                                                 uint8_t present)
+                                                 uint8_t present,
+                                                 uint16_t source,
+                                                 uint16_t row)
 {
     uint8_t len = 0u;
+    const char *token;
 
     /*
      * Format one fixed-order name-register row.
      *
-     * Inputs: a resident eight-cell display field plus the caller's loaded
-     * object predicate. Output: either the trimmed visible name and newline,
-     * or a bare blank line when that register slot has no loaded object.
-     * Trimming keeps root `/.hcnames` human-readable while the row number
-     * preserves the exact Bank/Scene/Kit/Instrument coordinate.
+     * Inputs: a resident eight-cell display field, presence predicate, paired
+     * source word, and row class. Output: one `name<TAB>source` record. Empty
+     * names still emit a token, so fixed logical row identity is never lost.
      */
-    if (!dst || cap < 2u)
+    source = (uint16_t)(source & FS_RESIDENT_SOURCE_VALUE_MASK);
+    if (!dst || cap < 4u || !filesystem_residentSourceValid(row, source))
         return 0u;
     dst[0] = '\0';
     if (present && !filesystem_residentNameIsBlank(name)) {
@@ -16809,8 +17074,28 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
             }
         }
     }
-    if (len + 1u >= cap)
+    if (len + 2u >= cap)
         return 0u;
+    dst[len++] = '\t';
+    if (source == FS_RESIDENT_SOURCE_INHERIT)
+        token = "-";
+    else if (source == FS_RESIDENT_SOURCE_UNKNOWN)
+        token = "?";
+    else if (source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT)
+        token = "@";
+    else {
+        if (len + 4u >= cap)
+            return 0u;
+        dst[len++] = (char)('0' + (source / 100u));
+        dst[len++] = (char)('0' + ((source / 10u) % 10u));
+        dst[len++] = (char)('0' + (source % 10u));
+        dst[len++] = '\n';
+        dst[len] = '\0';
+        return len;
+    }
+    if (len + 2u >= cap)
+        return 0u;
+    dst[len++] = token[0];
     dst[len++] = '\n';
     dst[len] = '\0';
     return len;
@@ -16832,7 +17117,8 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
     if (row == 0u) {
         return filesystem_formatResidentNameLine(dst, cap,
                                                  bank_displayName(),
-                                                 bank_hasResidentBank());
+                                                 bank_hasResidentBank(),
+                                                 fs_resident_source[0u], 0u);
     }
     row--;
     if (row < STORAGE_BANK_SCENE_MAX_SLOTS) {
@@ -16847,7 +17133,9 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
          * current row/presence mask. Output: blank placeholder row. Affiliates:
          * first-card bootstrap and later targeted HCNAMES update state.
          */
-        return filesystem_formatResidentNameLine(dst, cap, NULL, 0u);
+        return filesystem_formatResidentNameLine(dst, cap, NULL, 0u,
+                                                 fs_resident_source[row + 1u],
+                                                 (uint16_t)(row + 1u));
     }
     /*
      * The generic boot serializer cannot reconstruct Kit/Instrument identity
@@ -16855,7 +17143,9 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
      * replace those authoritative rows from the identity block instead.
      */
     (void)row;
-    return filesystem_formatResidentNameLine(dst, cap, NULL, 0u);
+    return filesystem_formatResidentNameLine(
+        dst, cap, NULL, 0u,
+        fs_resident_source[row + 1u], (uint16_t)(row + 1u));
 }
 
 /*
@@ -18641,6 +18931,8 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
 
 void filesystem_initAfterCardReady(void)
 {
+    uint16_t source_row;
+
     current_op = FS_INTERNAL_OP_NONE;
     status = FS_STATUS_IDLE;
     memset(fs_error_code, 0, sizeof(fs_error_code));
@@ -18676,6 +18968,12 @@ void filesystem_initAfterCardReady(void)
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_writer_armed = 0u;
     fs_autosave_recovery_pending = 0u;
+    /* A remount must never inherit a direct source from the prior card. */
+    for (source_row = 0u;
+         source_row < FS_RESIDENT_NAMES_ROW_COUNT;
+         source_row++) {
+        fs_resident_source[source_row] = FS_RESIDENT_SOURCE_UNKNOWN;
+    }
     autosave_setMutationTrackingEnabled(0u);
     afatfs_init();
 }
@@ -18683,10 +18981,10 @@ void filesystem_initAfterCardReady(void)
 void filesystem_markSettingsDirty(void)
 {
     /*
-     * Record one settings/provenance change and restart trailing debounce.
+     * Record one settings change and restart trailing debounce.
      *
-     * Inputs: live time_sysTick after a changed Global Menu byte or successful
-     * Bank/Scene completion. Outputs: dirty/revision state only; no file is
+     * Inputs: live time_sysTick after a changed Global Menu byte. Outputs:
+     * dirty/revision state only; no file is
      * opened or polled. Why: all runtime SD work must remain asynchronous and
      * multiple changes inside one second should coalesce. Affiliates:
      * SETTINGS_AUTOWRITE_DEBOUNCE_MS and the idle scheduler below.

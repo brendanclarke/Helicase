@@ -571,6 +571,25 @@ enum {
     FS_IDENTITY_INSTRUMENT_ROW_0,
     FS_IDENTITY_ROW_COUNT = FS_IDENTITY_INSTRUMENT_ROW_0 + 6u,
 };
+
+/*
+ * Root HCNAMES provenance tokens.
+ *
+ * Direct numbered-library sources are 0..999 and inherit their library class
+ * from the fixed HCNAMES row.  INHERIT walks Instrument -> Kit -> Scene ->
+ * Bank; UNKNOWN requests ordinary boot fallback; INSTRUMENT_DIRECT uses the
+ * row stem plus the committed type rather than an unstable browser index.
+ */
+#define FS_RESIDENT_SOURCE_INHERIT           0x7fffu
+#define FS_RESIDENT_SOURCE_UNKNOWN           0x7ffeu
+#define FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT 0x7ffdu
+
+/* Read, stage, or resolve one logical HCNAMES source without direct file I/O. */
+uint16_t filesystem_residentSource(uint16_t row);
+uint8_t filesystem_setResidentSource(uint16_t row, uint16_t source);
+uint16_t filesystem_resolveResidentSource(uint16_t row,
+                                          uint16_t *resolved_row);
+
 void filesystem_setIdentityName(uint8_t row, const char name[8]);
 const char *filesystem_identityName(uint8_t row);
 /*
