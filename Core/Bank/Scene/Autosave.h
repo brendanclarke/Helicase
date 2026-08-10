@@ -248,8 +248,9 @@ _Static_assert(AUTOSAVE_KIT_PARAM_COUNT <=
  * Inputs: caller-owned destination interval, generation, Bank restore slot,
  * precomputed CRC, Bank name, and complete HCNAMES rows. Output: deterministic
  * header/slot/name bytes with zero mask, parameters, Effects, and padding.
- * `crc32c` must come from autosave_initialRecordCrc() with identical identity
- * inputs. This helper owns no storage and performs no I/O.
+ * `crc32c` must come from a completed autosave_initialRecordCrcUpdate()
+ * sequence with identical identity inputs. This helper owns no storage and
+ * performs no I/O.
  */
 void autosave_formatInitialChunk(
     uint8_t *dst,
@@ -263,13 +264,22 @@ void autosave_formatInitialChunk(
                              [AUTOSAVE_HCNAMES_ROW_BYTES]);
 
 /*
- * Calculate the deterministic creation image's CRC32C.
+ * Update the deterministic creation image's CRC32C by one bounded interval.
  *
- * Inputs match autosave_formatInitialChunk() except for the resulting CRC.
- * Output is the final Castagnoli value for one complete 34,768-byte baseline.
- * The caller retains only this scalar while filesystem.c streams its chunks.
+ * Inputs are the in-progress accumulator, next absolute record offset, at
+ * most AUTOSAVE_CRC_BYTES_PER_TICK bytes, and the same identity inputs used by
+ * autosave_formatInitialChunk(). Output is the next unfinalized accumulator;
+ * callers finalize it only after the cursor reaches AUTOSAVE_RECORD_BYTES.
+ * Why: initial creation and no-valid-record recovery must synthesize their CRC
+ * without scanning a complete record in one foreground pass. Oversized input
+ * is clamped here as a defensive boundary, while filesystem.c advances its
+ * cursor only by its independently bounded request. This helper owns no I/O,
+ * record buffer, or retained state.
  */
-uint32_t autosave_initialRecordCrc(
+uint32_t autosave_initialRecordCrcUpdate(
+    uint32_t crc32c,
+    uint32_t absolute_offset,
+    uint16_t byte_count,
     uint32_t generation,
     uint16_t bank_slot,
     const char bank_name[AUTOSAVE_NAME_BYTES],
@@ -297,10 +307,12 @@ typedef struct {
 /*
  * Begin/update/finish a contiguous record validation stream.
  *
- * update() accepts one bounded sequential chunk, parses intersecting control
- * and Bank identity cells, and updates CRC32C with stored CRC bytes 12..15
- * treated as zero. finish() accepts only one exact-size, magic/version/commit
- * valid record with a matching checksum. No helper owns I/O or persistent RAM.
+ * update() accepts only one bounded sequential chunk, parses intersecting
+ * control and Bank identity cells, and updates CRC32C with stored CRC bytes
+ * 12..15 treated as zero. An oversized update is rejected as invalid rather
+ * than allowing a caller to hide unbounded CRC work. finish() accepts only one
+ * exact-size, magic/version/commit valid record with a matching checksum. No
+ * helper owns I/O or persistent RAM.
  */
 void autosave_streamValidationBegin(autosave_stream_validation_t *state);
 void autosave_streamValidationUpdate(autosave_stream_validation_t *state,
@@ -472,9 +484,12 @@ void autosave_transformDrainChunk(
  * Incrementally calculate a record CRC from caller-owned chunks.
  *
  * Stored CRC bytes are always treated as zero. Begin returns the unfinalized
- * accumulator, update returns its next value, and finish returns the stored
- * CRC32C. Affiliates: candidate validation and the single transformed target
- * copy followed by post-copy CRC publication.
+ * accumulator, update returns its next value only for a bounded caller chunk,
+ * and finish returns the stored CRC32C. Oversized update input is rejected by
+ * returning the unchanged accumulator; filesystem.c never advances a cursor
+ * beyond its own requested budget. Affiliates: candidate validation, bounded
+ * initial-image synthesis, and the single transformed target copy followed by
+ * post-copy CRC publication.
  */
 uint32_t autosave_recordCrcBegin(void);
 uint32_t autosave_recordCrcUpdate(uint32_t crc32c,
@@ -482,14 +497,5 @@ uint32_t autosave_recordCrcUpdate(uint32_t crc32c,
                                   const uint8_t *src,
                                   uint16_t byte_count);
 uint32_t autosave_recordCrcFinish(uint32_t crc32c);
-
-/*
- * Validate one complete in-memory record.
- *
- * Input is an exact 34,768-byte image. Output is nonzero only for a valid
- * header/commit/full-record CRC. This host/simple helper uses the same
- * streaming implementation as filesystem.c and owns no retained buffer.
- */
-uint8_t autosave_validateRecord(const uint8_t *record, uint32_t record_bytes);
 
 #endif /* AUTOSAVE_H_ */

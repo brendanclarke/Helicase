@@ -10,6 +10,8 @@
  */
 #include "Autosave.h"
 #include "AutosaveTrace.h"
+/* Supplies the shared per-tick CRC CPU-work cap; no scheduling state lives here. */
+#include "config.h"
 
 #include "BankData.h"
 #include "SceneData.h"
@@ -340,9 +342,11 @@ uint32_t autosave_recordCrcUpdate(uint32_t crc32c,
      * Inputs: running accumulator and one record interval. Output: updated
      * accumulator with stored CRC bytes logically zero. Why: validation,
      * initial formatting, and transformed copy-forward must never diverge on
-     * the checksum's self-reference rule.
+     * the checksum's self-reference rule. Oversized input is rejected without
+     * advancing any state so an accidental caller cannot conceal unbounded
+     * foreground CRC work behind this low-level helper.
      */
-    if (!src)
+    if (!src || byte_count > AUTOSAVE_CRC_BYTES_PER_TICK)
         return crc32c;
     for (i = 0u; i < byte_count; i++) {
         uint32_t record_offset = absolute_offset + i;
@@ -362,30 +366,45 @@ uint32_t autosave_recordCrcFinish(uint32_t crc32c)
     return ~crc32c;
 }
 
-uint32_t autosave_initialRecordCrc(
+uint32_t autosave_initialRecordCrcUpdate(
+    uint32_t crc32c,
+    uint32_t absolute_offset,
+    uint16_t byte_count,
     uint32_t generation,
     uint16_t bank_slot,
     const char bank_name[AUTOSAVE_NAME_BYTES],
     const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
                              [AUTOSAVE_HCNAMES_ROW_BYTES])
 {
-    uint32_t crc = autosave_recordCrcBegin();
-    uint32_t offset;
+    uint16_t i;
 
     /*
-     * Calculate the complete creation image before streaming it.
+     * Synthesize only one bounded initial-image interval for the CRC stream.
      *
-     * The CRC input byte is resolved with crc32c zero, so bytes 12..15 never
-     * self-reference. Output covers all 34,768 header/mask/payload bytes while
-     * retaining only one accumulator and one byte of local storage.
+     * Inputs: the caller-retained accumulator/cursor and immutable creation
+     * identity. Output: the accumulator after no more than the configured
+     * CPU-work budget. Why: creation and recovery must yield between CRC
+     * intervals instead of monopolizing a foreground pass; neither path needs
+     * a record-sized image. The stored CRC field is synthesized as zero here,
+     * matching autosave_recordCrcUpdate()'s wire exception.
      */
-    for (offset = 0u; offset < AUTOSAVE_RECORD_BYTES; offset++) {
-        uint8_t value = autosave_initialRecordByte(
-            offset, generation, bank_slot, 0u, bank_name, resident_names);
+    if (!bank_name || !resident_names ||
+        absolute_offset >= AUTOSAVE_RECORD_BYTES)
+        return crc32c;
+    if (byte_count > AUTOSAVE_CRC_BYTES_PER_TICK)
+        byte_count = AUTOSAVE_CRC_BYTES_PER_TICK;
+    if (byte_count > AUTOSAVE_RECORD_BYTES - absolute_offset)
+        byte_count = (uint16_t)(AUTOSAVE_RECORD_BYTES - absolute_offset);
 
-        crc = autosave_recordCrcUpdate(crc, offset, &value, 1u);
+    for (i = 0u; i < byte_count; i++) {
+        uint8_t value = autosave_initialRecordByte(
+            absolute_offset + i, generation, bank_slot, 0u,
+            bank_name, resident_names);
+
+        crc32c = autosave_recordCrcUpdate(
+            crc32c, absolute_offset + i, &value, 1u);
     }
-    return autosave_recordCrcFinish(crc);
+    return crc32c;
 }
 
 void autosave_formatInitialChunk(
@@ -453,6 +472,7 @@ void autosave_streamValidationUpdate(autosave_stream_validation_t *state,
      */
     if (!state || !src || absolute_offset != state->bytes_seen ||
         absolute_offset > AUTOSAVE_RECORD_BYTES ||
+        byte_count > AUTOSAVE_CRC_BYTES_PER_TICK ||
         byte_count > AUTOSAVE_RECORD_BYTES - absolute_offset) {
         if (state)
             state->header_valid = 0u;
@@ -1477,22 +1497,4 @@ void autosave_transformDrainChunk(
         cursor++;
     }
     *patch_cursor = cursor;
-}
-
-uint8_t autosave_validateRecord(const uint8_t *record, uint32_t record_bytes)
-{
-    autosave_stream_validation_t state;
-
-    /*
-     * Keep whole-image verification on the runtime streaming implementation.
-     *
-     * Input is one exact record image. Output is the same header/CRC decision
-     * used for A/B selection, without Bank identity matching.
-     */
-    if (!record || record_bytes != AUTOSAVE_RECORD_BYTES)
-        return 0u;
-    autosave_streamValidationBegin(&state);
-    autosave_streamValidationUpdate(
-        &state, 0u, record, (uint16_t)record_bytes);
-    return autosave_streamValidationFinish(&state);
 }

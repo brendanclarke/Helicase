@@ -781,6 +781,19 @@ _Static_assert(AUTOSAVE_WRITER_INTERVAL_MS < 0x8000u,
                "autosave debounce must fit the wrapping scheduler comparison");
 _Static_assert(AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS < 0x8000u,
                "autosave continuation must fit the wrapping scheduler comparison");
+/*
+ * Keep the configured CRC work interval inside the existing stream buffer.
+ *
+ * What: compile-time proof that every AutoSave CRC caller can request its
+ * bounded interval without a second buffer. Why: the CRC cap is a cooperative
+ * CPU-work contract, and silently exceeding staging_buf would either break
+ * that contract or require forbidden permanent SRAM. Affiliates:
+ * filesystem_autosaveCrcChunkBytes(), AutoSave validation, copy, creation,
+ * and recovery phases below.
+ */
+_Static_assert(AUTOSAVE_CRC_BYTES_PER_TICK > 0u &&
+               AUTOSAVE_CRC_BYTES_PER_TICK <= sizeof(staging_buf),
+               "autosave CRC budget must fit the existing staging buffer");
 _Static_assert(SETTINGS_AUTOWRITE_DEBOUNCE_MS > 0u &&
                SETTINGS_AUTOWRITE_DEBOUNCE_MS < 0x8000u,
                "settings debounce must fit the wrapping scheduler comparison");
@@ -4513,6 +4526,22 @@ static const char *filesystem_autosaveFilenameForIndex(uint8_t index)
                          : AUTOSAVE_RECORD_B_FILENAME;
 }
 
+/*
+ * Select one bounded AutoSave CRC interval without introducing timing waits.
+ *
+ * Input: bytes remaining in the fixed record. Output: 1..128 bytes when work
+ * remains, otherwise zero. Why: every creation, recovery, validation, and
+ * transformed-copy caller must share the one CPU-work cap so audio gets a main
+ * loop opportunity between CRC intervals. This does not delay SD transfers or
+ * pace unrelated filesystem operations. Affiliates: config.h's
+ * AUTOSAVE_CRC_BYTES_PER_TICK and the two AutoSave state machines below.
+ */
+static uint16_t filesystem_autosaveCrcChunkBytes(uint32_t remaining)
+{
+    return (uint16_t)((remaining > AUTOSAVE_CRC_BYTES_PER_TICK)
+        ? AUTOSAVE_CRC_BYTES_PER_TICK : remaining);
+}
+
 static uint32_t filesystem_autosaveCreatedTargetGeneration(void)
 {
     /*
@@ -4699,7 +4728,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             op_phase = 8u;
         return;
 
-    case 8: /* WAIT ROOT SCAN CLOSE */
+    case 8: /* WAIT ROOT SCAN CLOSE, THEN PREPARE A MISSING RECORD'S CRC */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -4711,48 +4740,82 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             filesystem_autosaveAdvanceTarget();
             return;
         }
+        /*
+         * Prepare the complete initial-image CRC before CREATE can truncate a
+         * missing target. Inputs: the proven-absent A/B selector and resident
+         * identity cache. Output: one retained accumulator/cursor reused from
+         * generic operation scratch; a reset during this preparation leaves
+         * the filesystem unchanged. Why: creation must yield every bounded CRC
+         * interval and must not widen the power-loss window around mutation.
+         */
+        op_file_version = (uint8_t)op_stream_index;
+        op_stream_index = autosave_recordCrcBegin();
+        op_bytes_done = 0u;
+        op_phase = 9u;
+        return;
+
+    case 9: /* UPDATE ONE INITIAL-RECORD CRC INTERVAL BEFORE CREATE */
+    {
+        uint16_t crc_bytes;
+
+        /*
+         * Advance only the next bounded serialized interval and yield.
+         *
+         * Inputs: op_bytes_done as the absolute CRC cursor and op_stream_index
+         * as the unfinalized accumulator. Output: cursor advances only by the
+         * requested capped count; finalization occurs once after the full
+         * record. Why: no single ensure pass may calculate all 34,768 bytes.
+         */
+        if (op_bytes_done < AUTOSAVE_RECORD_BYTES) {
+            crc_bytes = filesystem_autosaveCrcChunkBytes(
+                AUTOSAVE_RECORD_BYTES - op_bytes_done);
+            op_stream_index = autosave_initialRecordCrcUpdate(
+                op_stream_index, op_bytes_done, crc_bytes,
+                filesystem_autosaveCreatedTargetGeneration(),
+                bank_restoreBankSlot(), bank_displayName(),
+                (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
+            op_bytes_done += crc_bytes;
+            return;
+        }
+        op_stream_index = autosave_recordCrcFinish(op_stream_index);
+        op_phase = 10u;
+        return;
+    }
+
+    case 10: /* OPEN THE CRC-PREPARED MISSING TARGET */
         if (!afatfs_chdir(NULL))
             return;
         op_file_ready = false;
+        op_file = NULL;
         if (!afatfs_fopen_lfn(filesystem_autosaveTargetName(), "w",
                               AFATFS_MATCH_CASE_INSENSITIVE, NULL,
                               on_file_opened)) {
             return;
         }
-        op_phase = 9u;
+        op_phase = 11u;
         return;
 
-    case 9: /* WAIT NEW TARGET OPEN */
+    case 11: /* WAIT NEW TARGET OPEN, THEN INITIALIZE ITS WRITE CURSOR */
         if (!op_file_ready)
             return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        /*
-         * Compute the deterministic whole-record CRC once per newly created
-         * target. The existing fields change roles only after the root scan:
-         * op_file_version retains A/B and op_stream_index now holds CRC32C.
-         */
-        op_file_version = (uint8_t)op_stream_index;
-        op_stream_index = autosave_initialRecordCrc(
-            filesystem_autosaveCreatedTargetGeneration(),
-            bank_restoreBankSlot(), bank_displayName(),
-            (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
-        op_bytes_done = 0u;
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
-        op_phase = 10u;
+        op_bytes_done = 0u;
+        op_phase = 12u;
         return;
 
-    case 10: /* STREAM ONE COMPLETE HEADER/MASK/NAME CHUNK AT A TIME */
+    case 12: /* STREAM ONE COMPLETE HEADER/MASK/NAME CHUNK AT A TIME */
     {
         uint32_t written;
 
         if (op_bytes_done >= AUTOSAVE_RECORD_BYTES) {
             op_close_done = false;
             if (afatfs_fclose(op_file, on_file_closed))
-                op_phase = 11u;
+                op_phase = 13u;
             return;
         }
         if (op_write_line_len == 0u) {
@@ -4787,7 +4850,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         if (written == 0u && afatfs_isFull()) {
             op_close_done = false;
             if (afatfs_fclose(op_file, on_file_closed))
-                op_phase = 12u;
+                op_phase = 14u;
             return;
         }
         if (op_write_line_offset >= op_write_line_len) {
@@ -4798,7 +4861,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         return;
     }
 
-    case 11: /* WAIT NEW TARGET CLOSE, THEN HANDLE THE OTHER TARGET */
+    case 13: /* WAIT NEW TARGET CLOSE, THEN HANDLE THE OTHER TARGET */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -4807,7 +4870,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         filesystem_autosaveAdvanceTarget();
         return;
 
-    case 12: /* WAIT FAILED PARTIAL-FILE CLOSE, THEN RELEASE BOOT */
+    case 14: /* WAIT FAILED PARTIAL-FILE CLOSE, THEN RELEASE BOOT */
         /*
          * The caller only authorizes the runtime writer after a DONE result.
          * Returning ERROR here therefore leaves autosave disabled while still
@@ -4948,9 +5011,25 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_phase = 3u;
         return;
 
-    case 3: /* STREAM ONE CANDIDATE THROUGH CRC/HEADER/BANK-NAME VALIDATION */
+    case 3: /* STREAM ONE BOUNDED CANDIDATE INTERVAL THROUGH VALIDATION */
     {
-        uint32_t n = afatfs_fread(op_file, staging_buf, sizeof(staging_buf));
+        uint16_t read_bytes;
+        uint32_t n;
+
+        /*
+         * Limit every CRC-bearing candidate read to the shared work budget.
+         *
+         * Inputs: op_bytes_done is the next validation offset until the exact
+         * record end. Output: no more than AUTOSAVE_CRC_BYTES_PER_TICK reaches
+         * Autosave.c per filesystem pass; one later single-byte read detects a
+         * trailing overlong record without adding CRC work. Why: validation is
+         * a foreground CRC producer just like initial creation and copy.
+         */
+        read_bytes = (op_bytes_done < AUTOSAVE_RECORD_BYTES)
+            ? filesystem_autosaveCrcChunkBytes(
+                  AUTOSAVE_RECORD_BYTES - op_bytes_done)
+            : 1u;
+        n = afatfs_fread(op_file, staging_buf, read_bytes);
 
         if (n != 0u) {
             autosave_streamValidationUpdate(&op_autosave_writer.validation,
@@ -5321,12 +5400,18 @@ static void filesystem_autosaveParameterDrain_tick(void)
             op_phase = 67u;
             return;
         }
+        /*
+         * Read only one shared CRC-work interval before transforming it.
+         *
+         * Input: the remaining winner stream. Output: the transformed-copy
+         * checksum and subsequent write see at most the configured byte cap,
+         * while AsyncFATFS retains its normal asynchronous transfer behavior.
+         * Why: this bounds CPU CRC work without reviving rejected fixed-delay
+         * filesystem pacing or allocating another stream buffer.
+         */
         n = afatfs_fread(
-            op_file, staging_buf,
-            ((AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset) >
-             sizeof(staging_buf))
-                ? sizeof(staging_buf)
-                : (AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset));
+            op_file, staging_buf, filesystem_autosaveCrcChunkBytes(
+                AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset));
         if (n == 0u) {
             if (afatfs_feof(op_file))
                 filesystem_autosaveWriterFinishError();
@@ -5689,7 +5774,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
         return;
     }
 
-    case 33: /* WAIT HCNAMES CLOSE, THEN REGENERATE B BEFORE A */
+    case 33: /* WAIT HCNAMES CLOSE, THEN PREPARE B'S RECOVERY CRC */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -5698,10 +5783,47 @@ static void filesystem_autosaveParameterDrain_tick(void)
             return;
         }
         op_autosave_writer.recovery_target_index = 1u;
-        op_phase = 34u;
+        op_autosave_writer.target_crc32c = autosave_recordCrcBegin();
+        op_autosave_writer.stream_offset = 0u;
+        op_phase = 39u;
         return;
 
-    case 34: /* REMOVE ALL CORRUPT TARGET VARIANTS BEFORE RECOVERY CREATE */
+    case 39: /* UPDATE ONE RECOVERY INITIAL-RECORD CRC INTERVAL BEFORE REMOVE */
+    {
+        uint16_t crc_bytes;
+
+        /*
+         * Prepare one complete recovery image before touching its target name.
+         *
+         * Inputs: the current B-then-A recovery selector, retained accumulator,
+         * and absolute CRC cursor. Output: only a capped interval is
+         * synthesized per pass; after finalization the cursor is reset solely
+         * for later file writing. Why: a reset during CRC preparation leaves
+         * both on-card candidates untouched, and pair recovery must never
+         * combine unbounded CPU work with destructive target removal.
+         */
+        if (op_autosave_writer.stream_offset < AUTOSAVE_RECORD_BYTES) {
+            crc_bytes = filesystem_autosaveCrcChunkBytes(
+                AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset);
+            op_autosave_writer.target_crc32c =
+                autosave_initialRecordCrcUpdate(
+                    op_autosave_writer.target_crc32c,
+                    op_autosave_writer.stream_offset, crc_bytes,
+                    filesystem_autosaveRecoveryGeneration(),
+                    bank_restoreBankSlot(), bank_displayName(),
+                    (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])
+                        fs_list_cache_name);
+            op_autosave_writer.stream_offset += crc_bytes;
+            return;
+        }
+        op_autosave_writer.target_crc32c = autosave_recordCrcFinish(
+            op_autosave_writer.target_crc32c);
+        op_autosave_writer.stream_offset = 0u;
+        op_phase = 34u;
+        return;
+    }
+
+    case 34: /* REMOVE CRC-PREPARED CORRUPT TARGET VARIANTS BEFORE CREATE */
         if (!afatfs_chdir(NULL))
             return;
         /*
@@ -5736,17 +5858,13 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_phase = 35u;
         return;
 
-    case 35: /* WAIT RECOVERY TARGET OPEN AND PREPARE ITS FIXED CRC */
+    case 35: /* WAIT RECOVERY TARGET OPEN AND INITIALIZE ITS WRITE CURSOR */
         if (!op_file_ready)
             return;
         if (!op_file) {
             filesystem_autosaveWriterFinishError();
             return;
         }
-        op_autosave_writer.target_crc32c = autosave_initialRecordCrc(
-            filesystem_autosaveRecoveryGeneration(),
-            bank_restoreBankSlot(), bank_displayName(),
-            (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
         op_autosave_writer.stream_offset = 0u;
         op_autosave_writer.chunk_bytes = 0u;
         op_autosave_writer.chunk_written = 0u;
@@ -5809,7 +5927,17 @@ static void filesystem_autosaveParameterDrain_tick(void)
             if (!afatfs_sync())
                 return;
             op_autosave_writer.recovery_target_index = 0u;
-            op_phase = 34u;
+            /*
+             * Begin A's CRC only after B is closed and durable.
+             *
+             * Inputs: the completed B recovery target and the fixed A
+             * generation. Output: phase 39 performs bounded preparation while
+             * B remains a complete card-resident peer. Why: pair recovery may
+             * not leave both targets intentionally in destructive progress.
+             */
+            op_autosave_writer.target_crc32c = autosave_recordCrcBegin();
+            op_autosave_writer.stream_offset = 0u;
+            op_phase = 39u;
             return;
         }
         filesystem_clearNameCacheStorage();
@@ -18928,6 +19056,22 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
 {
 #if DEV_MODE_LOGGING
     uint16_t now;
+
+    /*
+     * Reserve the one filesystem facade for a foreground Load/Save command.
+     *
+     * Input: the active Menu page, which remains LOAD_PAGE or SAVE_PAGE until
+     * its accepted command has completed any post-apply root-index restore.
+     * Output: retain the RAM trace ring and its existing deadline without
+     * opening `asavetrc.bin`. Why: this optional diagnostic append previously
+     * could start between Bank payload completion and Menu's final read-only
+     * `.hcindex` request, making that foreground request fail with generic
+     * FsErr solely because the shared facade was busy. The next non-Load/Save
+     * idle tick resumes this unchanged best-effort trace flush; no trace data
+     * is discarded and no foreground filesystem operation is delayed.
+     */
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+        return;
 
     if (autosaveTrace_pendingCount() == 0u)
         return;

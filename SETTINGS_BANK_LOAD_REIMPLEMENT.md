@@ -63,6 +63,61 @@ The reimplementation must not include any of the following unless a new, specifi
 - No new permanent SRAM allocation for CRC state or active-Scene preservation.
 - No repetition of the already accepted parameter-hook coverage matrix.
 
+## 2026-08-10 implementation record — Phase 2 CRC bound
+
+Status: source implementation is in progress; no hardware claim is made in
+this entry. The checked-out `f033574` worktree is a documentation-only
+descendant of `c9807fa`: `Core/`, `config.h`, `main.c`, and `Makefile` remain
+at the stated rollback-source boundary. User-owned `SD_CARD/` fixtures remain
+untouched.
+
+The isolated code change uses `AUTOSAVE_CRC_BYTES_PER_TICK == 128` and existing
+operation cursors only. It replaces the whole-record initial CRC helper with
+an incremental creation-image updater, bounds candidate-validation reads and
+transformed-copy reads to the same cap, and prepares initial/recovery CRCs
+before create/remove mutations. No fixed-delay pacing, Bank Load behavior,
+settings path, logging path, hidden-file format, record-sized buffer, or new
+permanent SRAM allocation is included. `make -B -j2` passed with logging on
+(`text=373,076`, `data=400`, `bss=78,996`) and with logging off
+(`text=367,372`, `data=396`, `bss=78,444`); the normal logging-on image was
+then rebuilt and packaged. Hardware validation remains required before this
+phase can be accepted.
+
+### 2026-08-10 hardware observation — `013 LoadTst` post-load `FsErr`
+
+The first CRC-only hardware run loaded `SD_CARD/Bank/013 LoadTst` far enough
+to commit its payload: the copied card's `settings.cfg` now records
+`active_bank=13` and every `scene_source_00` through `scene_source_15` as
+`1013`, while `/.hcnames` contains the Bank and all sixteen selected Scene/Kit
+identity rows. The literal on-screen `FsErr` is therefore not evidence of a
+Bank child parse/load failure and must not be used to judge the bounded CRC
+implementation.
+
+Source review identifies a separate post-load race in the existing logging
+path. After the payload's bounded DSP apply, Menu requests a read-only
+`/Bank/.hcindex` restore; if the one filesystem facade is busy, that helper
+immediately closes the command and shows generic `FsErr` without an operation
+code. The optional AutoSave trace-flush scheduler, and after its debounce the
+settings writer, can claim that facade during the Load page. The trace does
+not identify which autonomous owner held it for this run, so the fixture is
+evidence of the generic rejection boundary rather than proof of one owner.
+This observation does not authorize a fix in the CRC-only image: preserve the
+SD evidence and address the background-writer/index arbitration as a
+separately scoped change after the CRC hardware result has been isolated.
+
+### 2026-08-10 targeted trace guard — ready for retest
+
+At the user's direction, the normal logging build now makes
+`filesystem_autosaveTraceFlushSchedule_tick()` retain its in-RAM trace records
+without opening `asavetrc.bin` while either Load or Save is the active page.
+This is deliberately limited to optional trace-flush admission: it prevents
+the observed post-payload facade collision before Menu restores the unchanged
+root `.hcindex`, while preserving the writer's existing deadline, record
+format, completion acknowledgement, and later best-effort flush. No change
+was made to the settings writer, Bank loader, CRC bound, or generic final-index
+request behavior. Hardware retest: load `013 LoadTst` with logging enabled,
+then leave the Load page and confirm trace persistence resumes normally.
+
 ## Required implementation order
 
 Each firmware behavior change is a separate build and hardware test gate. Do not combine the CRC correction, Bank Load semantics, and a conditional settings fix into one untested image.

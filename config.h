@@ -213,6 +213,20 @@
 #define AUTOSAVE_MASK_BITS_PER_TICK 256u
 
 /*
+ * Bound CRC32C CPU work performed by one cooperative filesystem pass.
+ *
+ * Input is a contiguous interval of one 34,768-byte hidden AutoSave record.
+ * Output limits initial-image generation, candidate validation, recovery, and
+ * transformed-copy checksum work to this many bytes before filesystem.c yields
+ * to the main loop. Why: a full-record CRC previously monopolized the
+ * foreground long enough to starve audio rendering; this is a work budget, not
+ * an SD transfer delay, timer interval, or filesystem pacing mechanism.
+ * Affiliates: Autosave.c's bounded initial-image updater and filesystem.c's
+ * AutoSave ensure/writer state machines.
+ */
+#define AUTOSAVE_CRC_BYTES_PER_TICK 128u
+
+/*
  * Minimum idle interval between background autosave-trace append attempts.
  * Input is time_sysTick's wrapping millisecond clock; output keeps diagnostic
  * trace I/O below settings persistence and the autosave writer in the shared
