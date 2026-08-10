@@ -1,8 +1,8 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware through rollback baseline
-`c9807fa` at the end of Session 046. It includes the
+reference for the Helicase/LXR-02 firmware through the Session 047 bounded-CRC
+and boot-capture update. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
@@ -48,7 +48,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented through rollback baseline `c9807fa`:
+Implemented through the inherited Session 046 baseline plus Session 047:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -1445,7 +1445,7 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status retained through rollback baseline `c9807fa`:
+Status retained through the Session 047 baseline:
 
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
@@ -1576,10 +1576,14 @@ filename sanitization, and caller checklist live in
 FAT/VFAT traversal locally.
 
 Current production replacement captures the selected object from an
-LFN-aware scan and uses native afatfs_deleteTree for same-slot cleanup. Bank
-Save additionally uses temporary/old sibling naming and promotion preflight.
-No current path has an atomic or crash-recoverable replace primitive, so none
-may claim power-loss-safe commit semantics.
+LFN-aware scan and requests native `afatfs_deleteTree()` for same-slot cleanup.
+That low-level recursive-delete path is not yet reliable enough to guarantee
+replacement: an overwrite Save may leave the old Bank, root Scene, or Kit
+folder in place. The product contract is therefore deliberately stronger than
+the present implementation; repair the native deleter rather than adding an
+`old*` rename/boot-cleanup workaround. No current path has an atomic or
+crash-recoverable replace primitive, so none may claim power-loss-safe commit
+semantics.
 
 ## Verification Anchors
 
@@ -1656,9 +1660,9 @@ instrument runtime propagation:
 
 ## AutoSave boundary
 
-Status: the hidden A/B scalar writer is implemented in rollback baseline
-`c9807fa`. Its complete format, ownership, scheduling, power-loss behavior,
-known CRC limitation, duplicate rules, and extension process live only in
+Status: the hidden A/B scalar writer is implemented in the Session 047
+baseline. Its complete format, ownership, scheduling, power-loss behavior,
+bounded CRC contract, duplicate rules, and extension process live only in
 `AUTOSAVE.md`.
 
 The obsolete per-Instrument/Scene dot-backer proposal formerly in this section

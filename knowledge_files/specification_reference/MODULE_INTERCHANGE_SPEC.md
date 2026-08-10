@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through rollback baseline `c9807fa` at the end of
-Session 046 for the one-pattern bridge,
+Session 030 baseline, updated through the Session 047 bounded-CRC and
+boot-capture build after the Session 046 rollback, for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
@@ -755,9 +755,18 @@ asyncfatfs boundary:
 - Dot-prefixed files/directories are ordinary objects. Product scanners filter
   after object iteration.
 - Native `afatfs_deleteTree()` provides filesystem-level recursive cleanup for
-  one captured object. Bank Save currently performs temporary/old sibling
-  promotion, but atomic/journaled replace is still missing; the existing flow
-  must not be described as power-loss recoverable.
+  one captured object, but its present recursive replacement behavior is a
+  known defect: an overwrite may leave the old Bank, root Scene, or Kit
+  directory. Repair that primitive; do not add temporary/old sibling promotion
+  or boot cleanup as a workaround. Atomic/journaled replace is also missing,
+  so no flow may be described as power-loss recoverable.
+- `afatfs_getDiagnosticSnapshot()` and `sdcard_getTransportSnapshot()` are
+  logging-only, read-only observation helpers for a frozen boot-time
+  `ASENSURE` failure capsule. They copy live allocator/cache/file and SD
+  transport state without polling, allocating, issuing I/O, changing callbacks,
+  retries, or filesystem ownership. `filesystem.c` may call them only while
+  freezing the capsule immediately before existing boot recovery destroys the
+  active state; ordinary product code must not use them as control flow.
 
 Private but important pattern serialization helpers:
 

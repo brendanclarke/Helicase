@@ -277,12 +277,17 @@ Removal modes:
 - `AFATFS_REMOVE_EMPTY_DIRECTORIES`: remove matching directories only when they
   are already empty.
 
-`afatfs_deleteTree()` is the native non-blocking recursive-delete primitive
-for one captured directory identity. It copies the supplied `afatfsObjectId_t`,
-walks the target tree, retires complete LFN/SFN entry runs, frees cluster
-chains, releases retained cache state, resets its private handle, and invokes
-its result callback once. A false start means no handle accepted the request
-and no callback will occur.
+`afatfs_deleteTree()` is intended to be the native non-blocking
+recursive-delete primitive for one captured directory identity. It copies the
+supplied `afatfsObjectId_t`, walks the target tree, retires complete LFN/SFN
+entry runs, frees cluster chains, releases retained cache state, resets its
+private handle, and invokes its result callback once. A false start means no
+handle accepted the request and no callback will occur. **Known defect:** the
+present implementation is not reliable enough to guarantee full Bank, root
+Scene, or Kit replacement and may leave the old slot folder. Its recursive
+walk, entry retirement, parent return, cache/handle ownership, and
+exactly-once completion must be made correct before callers can rely on this
+contract; do not substitute an `old*` rename/boot-cleanup mechanism.
 
 Product code still owns scope selection before it invokes deletion:
 
@@ -296,6 +301,17 @@ parsed as two-digit `00..15` folders before their selected identity is supplied
 to native deletion. The legacy `filesystem.c` delete walker remains only as
 compatibility/fallback code and uses `afatfs_removeObject()` with an exact
 short alias when available.
+
+## Logging-only diagnostic snapshots
+
+`afatfs_getDiagnosticSnapshot(file, snapshot)` and the paired SD-layer
+`sdcard_getTransportSnapshot(snapshot)` exist solely for the Session 047
+boot-time `ASENSURE` forensic capsule. They are read-only copies of live file,
+allocator/cache, and transport fields taken immediately before existing boot
+recovery abandons the failed operation. They must not poll, allocate, issue
+I/O, change cache/handle ownership, alter callbacks/retries, or drive product
+control flow. Their result is diagnostic evidence, not an AsyncFATFS recovery
+API; the fixed 72-byte bootlog envelope is specified in `DEV_MODES.md`.
 
 ## Rename
 

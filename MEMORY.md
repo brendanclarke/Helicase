@@ -17,8 +17,10 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: repository root at rollback baseline `c9807fa`
-(`autosave trace logger working, pre steps 2 and 3 implementation`).
+**Current working source**: Session 047 bounded-CRC and boot-capture build.
+The durable closeout is
+`knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md`; verify the actual
+commit/worktree before making the next source change.
 
 ## RAM Allocation Approval Policy
 
@@ -55,8 +57,8 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter now contains the current `c9807fa` linked
-  totals. AutoSave format/writer authority is `AUTOSAVE.md`;
+  `SRAM_MANIFEST.md`; the latter records the Session 047 logging-on capture
+  allocation and linked totals. AutoSave format/writer authority is `AUTOSAVE.md`;
   development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live
@@ -179,16 +181,19 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   filesystem/Preset calls do no work, although residual Menu display code and
   the two 49-byte strings remain linked. There are exactly two development
   flags: `DEV_MODE_DIAGNOSTIC` is screen-only and `DEV_MODE_LOGGING` is
-  file-only; trace is logging. At `c9807fa`, diagnostic is 0 and logging is 1.
-  Current file outputs are `/bootlog.bin` and `/asavetrc.bin`; there is no
-  implemented `/devlog.bin`. Authority:
+  file-only; trace is logging. The normal Session 047 configuration is
+  diagnostic 0 and logging 1. Current file outputs are `/bootlog.bin` and
+  `/asavetrc.bin`; there is no implemented `/devlog.bin`. A timed-out
+  `ASENSURE` may append a 64-byte raw diagnostic capsule to its normal
+  eight-byte boot token (72 bytes total); `tools/decode_bootlog.py` decodes
+  the current schema. Authority:
   `knowledge_files/specification_reference/DEV_MODES.md`.
-- Session 046 is closed in
-  `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md`. Read it before
-  deleting or relying on `SESSION_045_CONSOLIDATED_POST_MORTEM.md`,
-  `BOOT_LOGGING.md`, `KITQUAR_FIX.md`, `BANKLOAD_FIX.md`,
-  `DUAL_HCNAMES_FIX.md`, `AUTOSAVE_PARAM_HOOK.md`, or
-  `AUTOSAVE_REMEDY_PA2ST1.md`; the handoff is their deletion-safe record.
+- Session 047 is closed in
+  `knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md`. Read it before
+  deleting `SETTINGS_BANK_LOAD_REIMPLEMENT.md`,
+  `HCPRMS_BOOTLOCK_DIAGNOSIS.md`, `AUTOSAVE_REMEDY_PA2ST1.md`, or
+  `AUTOSAVE_REMEDY_PA2ST2-3.md`; the handoff and
+  `AUTOSAVE_PHASE2_PLAN.md` retain their necessary decisions/evidence.
 
 ---
 
@@ -792,44 +797,62 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Known Issues / Technical Debt
 
-### Rollback state after failed Session 046 work
+### Session 047 carryover and known defects
 
-- The repository was reset to `c9807fa`. It includes the accepted Session 045
-  scalar AutoSave path and lifecycle trace, but excludes later working-tree
-  pacing, active-Scene Bank Load, unified-log, and boot-lock diagnostic
-  experiments.
-- Initial creation and no-valid-record recovery still call
-  `autosave_initialRecordCrc()` over the complete 34,768-byte record in one
-  foreground call. Candidate validation and transformed-copy CRC work stream,
-  but all AutoSave CRC paths are not governed by one byte budget. The required
-  repair is retained-cursor, byte-limited CRC work across filesystem passes for
-  every CRC path; see `AUTOSAVE.md` and `SETTINGS_BANK_LOAD_REIMPLEMENT.md`.
-- `c9807fa` still calls `autosave_streamValidationMatchesBank()` when selecting
-  a winner. This is accurate current behavior but not the settled future
-  contract: Bank slot/name are mutable payload. Resolve that validator/session
-  boundary before whole-object Bank Load/Save publication; do not pretend the
-  mismatch check has already been removed.
-- Do not restore the failed generic one-millisecond filesystem pacing. It made
-  Bank Save/Load take tens of seconds to about a minute and delayed two audible
-  glitches without eliminating them.
-- The one-second debounced `settings.cfg` writer and Menu dirty hooks are
-  present in `c9807fa`. Re-test this rollback before changing settings control
-  flow; patch only if current evidence reproduces a failure.
-- Runtime Bank Load still follows the loaded Bank's active Scene. Preserving
-  the pre-load active Scene is not implemented at this rollback and remains a
-  separate targeted change after the CRC repair/test boundary.
-- Current logging uses `/bootlog.bin` and `/asavetrc.bin`; both writers lack a
-  complete duplicate-safe singleton proof. Preserve duplicate entries as
-  evidence. A failed open callback is not proof of absence because append and
-  write modes include CREATE.
-- Do not restore the failed uncommitted `/devlog.bin` consolidation. Its test
-  ended in a boot timeout, no `devlog.bin`, and a partial 32,768-byte
-  `/.hcprms2`. The partial prefix supports a possible cluster-extension,
-  cache, or SD-transport stall, but does not prove that cause. Logger failure
-  must never mask the original AutoSave failure.
-  `HCPRMS_BOOTLOCK_DIAGNOSIS.md` still assumes the rolled-back DEVLOG sink and
-  untracked host tooling; reconcile it with `DEV_MODES.md` before implementing
-  any part of that plan.
+- Every AutoSave CRC path is now byte-bounded at 128 bytes per filesystem
+  tick: initial creation, neither-valid recovery, candidate validation, and
+  transformed-copy generation. It uses retained cursors and no delay,
+  record-sized buffer, or ordinary-runtime pacing. Never restore the rejected
+  generic one-millisecond pacing layer; it made Bank operations extremely slow
+  and did not eliminate audio glitches.
+- A missing-record setup selector defect was fixed: creation now uses the
+  retained A/B target selector, not the CRC accumulator that later reuses the
+  same scratch field. The later successful card fixture has both hidden files
+  at exactly 34,768 bytes with committed headers.
+- One reproduction after that correction timed out during initial B creation:
+  A was complete (34,768 bytes) and B stopped at exactly 32,768 bytes. The
+  resulting eight-byte `ASENSURE` `/bootlog.bin` proves that the ten-second
+  boot deadline fired while ensure was active. It supports, but does not prove,
+  an AsyncFATFS cluster-extension/cache/SD transport stall. Several later
+  boots succeeded and produced no bootlog, so this is intermittent and not
+  resolved. The logging-only 64-byte capsule plus read-only AsyncFATFS/SD
+  snapshots are in the build to capture a recurrence; they make no retry,
+  allocator, timing, or recovery-policy change.
+- The one-second debounced `settings.cfg` writer was re-tested by the user and
+  is fine. Make no settings source change without new contrary evidence.
+- Repeated runtime loading of `000 Full` and `013 LoadTst` while playing, plus
+  saves over slots 024 and 009, produced no heard audio glitch after the trace
+  flush admission guard. This is a useful stability result, not proof that all
+  Bank Save/Load or AutoSave interactions are complete.
+- **Known bug — overwrite save can leave an old folder.** Bank, root Scene,
+  and Kit replacement require a correct native `afatfs_deleteTree()` recursive
+  delete. Do not bring back `old*` directory renames or boot cleanup as a
+  workaround.
+- **Known bug — runtime Bank Load can switch the playing Scene.** Defer the
+  request-time active-Scene preservation change until Bank Load/Save is
+  otherwise stable. Boot must retain its saved-default-Scene behavior.
+- **Deferred tooling — developer-log converter.** When AutoSave is complete
+  and logging formats are stable, add a read-only `/tools/` script that turns
+  copied `SD_CARD/` development outputs into dated project-root
+  `dev_log_date.txt`. Do not implement it yet; it must target the settled
+  `asavetrc.bin` and bootlog/capsule contracts.
+- The settled future semantic rule remains: Bank slot/name are payload, not
+  record-selection identity. The current live-Bank validator boundary still
+  needs reconciliation before Phase-2 whole-object Bank publication.
+
+### Resolved / Changed in Session 047
+
+- Replaced the remaining unbounded whole-record CRC work with a uniform
+  retained, 128-byte-per-tick implementation across all AutoSave setup,
+  validation, recovery, and copy paths.
+- Fixed the boot ensure A/B filename selector corruption caused by reusing the
+  selector scratch field as a CRC accumulator.
+- Kept the accepted settings persistence path unchanged after user retest.
+- Added a logging-only `ASENSURE` forensic capsule, read-only lower-layer
+  snapshot APIs, and `tools/decode_bootlog.py`; both logging-on and logging-off
+  builds passed. The normal logging-on image was rebuilt after the change.
+- The permanent detail and hardware chronology are in
+  `knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md`.
 
 ### Resolved / Changed in Session 046
 

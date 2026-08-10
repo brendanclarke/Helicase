@@ -5595,6 +5595,68 @@ uint32_t afatfs_fwrite(afatfsFilePtr_t file, const uint8_t *buffer, uint32_t len
     return writtenBytes;
 }
 
+void afatfs_getDiagnosticSnapshot(afatfsFilePtr_t file,
+                                  afatfsDiagnosticSnapshot_t *snapshot)
+{
+    uint8_t cache_index;
+
+    /*
+     * Freeze-copy the state an external boot watchdog would otherwise lose.
+     * Input: the currently owned handle, which may be busy in a cluster
+     * append, plus AsyncFATFS global cache state. Output: scalar diagnostics
+     * only; no operation phase, cache flag, file cursor, poll, allocation, or
+     * SD request is changed. Why: callers must be able to classify a stalled
+     * append before afatfs_destroy(true) invalidates the handle during boot
+     * recovery. A NULL handle deliberately yields an unavailable snapshot.
+     */
+    if (!snapshot)
+        return;
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->active_cache_index = -1;
+    snapshot->filesystem_state = (uint8_t)afatfs.filesystemState;
+    snapshot->filesystem_full = afatfs.filesystemFull ? 1u : 0u;
+    snapshot->cache_flush_in_progress = afatfs.cacheFlushInProgress ? 1u : 0u;
+    for (cache_index = 0u; cache_index < AFATFS_NUM_CACHE_SECTORS;
+         cache_index++) {
+        const afatfsCacheBlockDescriptor_t *descriptor =
+            &afatfs.cacheDescriptor[cache_index];
+
+        if (descriptor->state == AFATFS_CACHE_STATE_DIRTY)
+            snapshot->cache_dirty_count++;
+        if (descriptor->locked)
+            snapshot->cache_locked_count++;
+        if (descriptor->state == AFATFS_CACHE_STATE_READING)
+            snapshot->cache_reading_count++;
+        if (descriptor->state == AFATFS_CACHE_STATE_WRITING)
+            snapshot->cache_writing_count++;
+    }
+    if (!file)
+        return;
+    snapshot->available = 1u;
+    snapshot->cursor_offset = file->cursorOffset;
+    snapshot->logical_size = file->logicalSize;
+    snapshot->physical_size = file->physicalSize;
+    snapshot->cursor_cluster = file->cursorCluster;
+    snapshot->cursor_previous_cluster = file->cursorPreviousCluster;
+    snapshot->file_operation = (uint8_t)file->operation.operation;
+    snapshot->sectors_per_cluster = afatfs.sectorsPerCluster;
+    if (file->writeLockedCacheIndex >= 0 &&
+        file->writeLockedCacheIndex < AFATFS_NUM_CACHE_SECTORS) {
+        snapshot->active_cache_index = file->writeLockedCacheIndex;
+    }
+    if (file->operation.operation ==
+        AFATFS_FILE_OPERATION_APPEND_FREE_CLUSTER) {
+        const afatfsAppendFreeCluster_t *append =
+            &file->operation.state.appendFreeCluster;
+
+        snapshot->append_phase = (uint8_t)append->phase;
+        snapshot->append_previous_cluster = append->previousCluster;
+        snapshot->search_cluster = append->searchCluster;
+        snapshot->search_start_cluster = append->searchStartCluster;
+        snapshot->search_wrapped = append->searchWrapped;
+    }
+}
+
 /**
  * Attempt to read `len` bytes from `file` into the `buffer`.
  *

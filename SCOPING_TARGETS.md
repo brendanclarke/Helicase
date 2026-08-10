@@ -41,6 +41,53 @@ Every phase ends with **Open Engineering Questions** (things that need a decisio
 
 ---
 
+## Pinned filesystem correctness target — duplicate-slot overwrite
+
+**Status: deferred; do not implement in the current session.**
+
+The duplicate-folder defect in Bank, root Scene, and Kit overwrites is an
+AsyncFATFS recursive-delete correctness problem. Its solution is to repair
+`afatfs_deleteTree()`, not to introduce an `oldNNN-xxxx` rename protocol,
+temporary root promotion, or a boot-time cleanup feature.
+
+The repair must make the native deleter recursively retire one exact directory
+object captured from the immediate parent scan, including its nested children,
+VFAT name entries, parent return, cluster chains, cache/handle ownership, and
+exactly-once terminal callback. Existing Save callers must continue to parse
+the requested visible slot, capture that one `afatfsObjectId_t`, wait for
+successful native deletion, and only then create the replacement numbered
+directory. A delete failure remains a Save failure; it must not delete a
+guessed path, all same-slot siblings, or be hidden behind a later boot task.
+
+Validation requires populated recursive Bank, Scene, and Kit fixtures: replace
+one occupied slot, reload the result, confirm neighbouring slots are unchanged,
+and exercise the native callback/error path. Saving while audio runs is a
+separate hardware gate. `OLD_OVERWRITE_CLEANUP.md` is the condensed decision
+record; it contains no implementation plan that overrides this pinned target.
+
+## Session 047 deferred filesystem and Bank behavior
+
+**Status: known bugs; deliberately deferred to a later, isolated session.**
+
+- **Overwrite Save may leave the old slot folder in place.** This remains the
+  observable consequence of the incomplete AsyncFATFS recursive-delete path.
+  It applies to Bank, root Scene, and Kit replacement. The required fix is the
+  pinned `afatfs_deleteTree()` correctness work above; do not reintroduce an
+  `old*`-rename scheme, boot-time cleanup, or a silent best-effort fallback.
+- **Runtime Bank Load may switch the playing Scene while playback is active.**
+  This is not a bounded-CRC or logging problem. Preserve the pre-load active
+  Scene only after ordinary Bank Load/Save behavior is stable enough to test
+  that one request-time contract in isolation. Boot must continue to restore
+  the Bank's saved default Scene.
+- **Deferred host tooling:** after AutoSave is complete and every development
+  log format is settled, add one read-only `/tools/` converter that consumes
+  copied `SD_CARD/` logging outputs and writes a dated, human-readable
+  `dev_log_date.txt` in the project root. It must understand the final
+  `asavetrc.bin` lifecycle records and `/bootlog.bin` token/capsule format,
+  but must not be implemented while either format is still evolving.
+
+---
+
 ## Session 043 implementation baseline (2026-07-25)
 
 The storage prerequisites for later Pattern and DSP work are complete and must

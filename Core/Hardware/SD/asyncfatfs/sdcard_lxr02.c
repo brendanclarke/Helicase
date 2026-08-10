@@ -94,6 +94,25 @@ static sdcard_operationCompleteCallback_c xfer_callback;
 static uint32_t       xfer_callbackData;
 static sdcardBlockOperation_e xfer_operation;
 
+void sdcard_getTransportSnapshot(sdcardTransportSnapshot_t *snapshot)
+{
+    /*
+     * Copy, rather than expose, the live SD transfer before boot recovery
+     * aborts it. Input: the shim's private scalar state; output: a caller
+     * owned snapshot with no pointer into driver state. Why: this observer
+     * must distinguish card-busy/transfer stalls from an AsyncFATFS allocator
+     * stall without sending clocks, invoking a callback, or changing retries.
+     */
+    if (!snapshot)
+        return;
+    snapshot->state = (uint8_t)state;
+    snapshot->operation = (uint8_t)xfer_operation;
+    snapshot->callback_pending = (xfer_callback != NULL) ? 1u : 0u;
+    snapshot->block = xfer_block;
+    snapshot->offset = xfer_offset;
+    snapshot->retry_count = retry_count;
+}
+
 void sdcard_abortTransferForBootLog(void)
 {
     /*

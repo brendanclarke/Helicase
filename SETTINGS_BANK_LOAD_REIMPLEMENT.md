@@ -7,7 +7,9 @@ This document is the rollback-safe implementation plan for restoring the useful 
 - `SAVE_FIX_SETTINGS_BANK_BACKGROUND.md`
 - `AUTOSAVE_REMEDY_PA2ST2-3.md`
 
-The expected rollback target is commit `c9807fa` (`autosave trace logger working, pre steps 2 and 3 implementation`). Verify the actual rollback target before changing code; do not assume the commit if branch history has changed.
+The active baseline is commit `aca846a` (`CRC bounded fix in autosave`), the
+commit immediately after the bounded-CRC correction. Verify the actual commit
+before changing code; do not assume branch history has remained unchanged.
 
 The central correction is that **all AutoSave CRC work must be byte-bounded across filesystem ticks**. The failed generic one-millisecond runtime pacing change must not be restored. It delayed every filesystem operation, made Bank Save and Bank Load take roughly a minute, delayed rather than eliminated the audio glitches, and introduced unrelated boot/load behavior changes.
 
@@ -36,13 +38,24 @@ The following findings are already established and should not be reopened withou
    - There are no user-editable Bank scalar values requiring a separate parameter-hook test.
    - No additional “repeated edit,” “idle,” or broad coverage matrix is required.
 
-2. Commit `c9807fa` already contains the Step 1 AutoSave trace ring and trace writer. Do not reintroduce the superseded proposed 16-byte diagnostic structure, dirty-bit-count API, or combined Step 2/3 firmware diagnostics.
+2. Commit `aca846a` contains the Step 1 AutoSave trace ring/trace writer and
+   the bounded-CRC correction. Do not reintroduce the superseded proposed
+   16-byte diagnostic structure, dirty-bit-count API, combined Step 2/3
+   firmware diagnostics, or whole-record CRC path.
 
-3. The measured long-running work was whole-record CRC generation over a 34,768-byte AutoSave record. One captured interval was at least 77.7 ms. This is sufficient evidence for byte-bounding the CRC work.
+3. The measured long-running work was whole-record CRC generation over a
+   34,768-byte AutoSave record. One captured interval was at least 77.7 ms;
+   `aca846a` already addresses that evidence with the bounded CRC work. It is
+   not part of the settings-notification change.
 
 4. Generic one-millisecond filesystem pacing was a failed implementation. It must not be restored in any form.
 
-5. The settings persistence test succeeded in the observability build: changed settings were written and survived reboot. Therefore the rollback baseline must be tested before changing settings control flow. A settings code change is conditional on reproducing a missing dirty notification after rollback.
+5. The rollback baseline already has a complete asynchronous `settings.cfg`
+   writer, revision protection, failure retry, and the required one-second
+   trailing debounce. The required change is therefore not another settings
+   writer: every user Menu commit of a setting represented by the current
+   `settings.cfg` schema must notify that existing writer, regardless of which
+   Menu page owns the setting.
 
 6. A user-initiated runtime Bank Load must preserve the active Scene. A boot-time Bank Load must retain the existing behavior of restoring the Bank's saved default Scene.
 
@@ -63,13 +76,11 @@ The reimplementation must not include any of the following unless a new, specifi
 - No new permanent SRAM allocation for CRC state or active-Scene preservation.
 - No repetition of the already accepted parameter-hook coverage matrix.
 
-## 2026-08-10 implementation record — Phase 2 CRC bound
+## 2026-08-10 implementation record — bounded CRC baseline
 
-Status: source implementation is in progress; no hardware claim is made in
-this entry. The checked-out `f033574` worktree is a documentation-only
-descendant of `c9807fa`: `Core/`, `config.h`, `main.c`, and `Makefile` remain
-at the stated rollback-source boundary. User-owned `SD_CARD/` fixtures remain
-untouched.
+Status: the source implementation is present in the active `aca846a` baseline;
+this historical entry makes no hardware claim. User-owned `SD_CARD/` fixtures
+remain untouched.
 
 The isolated code change uses `AUTOSAVE_CRC_BYTES_PER_TICK == 128` and existing
 operation cursors only. It replaces the whole-record initial CRC helper with
@@ -120,25 +131,27 @@ then leave the Load page and confirm trace persistence resumes normally.
 
 ## Required implementation order
 
-Each firmware behavior change is a separate build and hardware test gate. Do not combine the CRC correction, Bank Load semantics, and a conditional settings fix into one untested image.
+Each firmware behavior change is a separate build and hardware test gate. The
+bounded-CRC work is already in the active baseline; this session starts with
+the settings-notification change and does not reimplement CRC, Bank overwrite,
+or folder-cleanup behavior.
 
-### Phase 0 — Restore and audit the rollback baseline
+### Phase 0 — audit the active baseline
 
-After rollback:
+1. Confirm `aca846a` is checked out and inspect the worktree.
+2. Confirm the baseline contains `AUTOSAVE_CRC_BYTES_PER_TICK == 128u`,
+   `autosave_initialRecordCrcUpdate()`, and bounded creation, recovery,
+   validation, and copy callers.
+3. Confirm the failed generic runtime pacing function and one-millisecond
+   interval are absent.
+4. Confirm the existing settings writer, dirty revision, one-second debounce,
+   retry callback, and Menu's page-coupled notification are present; those are
+   the Phase 4 starting boundary.
+5. Record the baseline firmware size and static RAM/BSS use before the first
+   settings source change.
 
-1. Confirm the exact commit and inspect the worktree.
-2. Build the unchanged rollback baseline before editing it.
-3. Record the baseline firmware size and static RAM/BSS use for comparison.
-4. Verify the expected baseline symbols:
-   - `autosave_initialRecordCrc()` still performs a whole-record calculation.
-   - Initial-record creation and no-valid-record recovery call that whole-record helper.
-   - Candidate validation and transformed-copy CRC paths are identified and inspected, not assumed to be bounded.
-   - The failed generic runtime pacing function and one-millisecond interval are absent.
-   - Runtime Bank Load does not yet have an explicit preserve-active-Scene request flag.
-   - The Step 1 AutoSave trace implementation from `c9807fa` is present.
-5. Restore the reconciled planning documents and the read-only host inspector described in Phase 1.
-
-Stop if the rollback baseline itself does not build. Do not mix baseline repair with the behavior changes below.
+Stop if this baseline does not build. Do not repair CRC, Bank overwrite, or
+unrelated filesystem behavior as part of the settings change.
 
 ### Phase 1 — Restore PA2ST2-3 evidence tooling and document state
 
@@ -164,7 +177,12 @@ Update `AUTOSAVE_REMEDY_PA2ST2-3.md` so that it records:
 
 Run the inspector against known valid fixtures before changing firmware. This validates the tool independently of the reimplementation.
 
-### Phase 2 — Implement byte-bounded CRC work only
+### Phase 2 — historical bounded-CRC implementation record
+
+The following CRC implementation and its validation criteria are retained as
+historical evidence for `aca846a`. Do not execute its code-change instructions
+again during the settings update; the current source audit confirms the bounded
+API and all four caller classes are already present.
 
 This is the first firmware behavior change and must be tested by itself.
 
@@ -312,30 +330,50 @@ Do not add Bank Load pacing, timing diagnostics, HCNAMES retries, or unrelated l
 4. Reboot into the Bank. Boot must still restore the Bank's saved default Scene.
 5. Confirm normal Bank Load duration remains comparable to the pre-pacing baseline.
 
-### Phase 4 — Recheck settings persistence; patch only if it fails
+### Phase 4 — make every Menu settings edit rewrite `settings.cfg`
 
-The previous hardware run showed settings persistence working. Do not change the settings path merely because its page-coupled notification looks fragile.
+This is required behavior, not a conditional repair. A user edit to any setting
+that the current Menu exposes and the current `settings.cfg` schema owns must
+rewrite the complete file after a one-second trailing debounce. Repeated
+encoder edits restart that one-second interval, so a rapid parameter spin
+produces one durable rewrite after the final change instead of one SD write per
+detent.
 
-First test the rollback image plus the passed Phase 2/3 changes:
+The baseline already provides the correct writer mechanics:
 
-1. Change AutoSave ON/OFF and at least one unrelated persistent setting.
-2. Leave the menu normally and allow the existing settings debounce/write to complete.
-3. Copy and inspect `settings.cfg` before reboot if practical.
-4. Reboot and verify both settings are restored.
+- `SETTINGS_AUTOWRITE_DEBOUNCE_MS` is `1000u`;
+- `filesystem_markSettingsDirty()` increments a revision, records dirty state,
+  and restarts the trailing deadline;
+- `filesystem_settingsWriterSchedule_tick()` starts only from an idle,
+  mounted facade after the deadline;
+- `filesystem_saveGlobals_tick()` streams the complete keyed file and uses the
+  existing final flush gate; and
+- a changed revision during write remains dirty, while failure retries after
+  the same debounce.
 
-If this passes, make no settings C/H change. Record the passing result in `SAVE_FIX_SETTINGS_BANK_BACKGROUND.md` and close the settings branch as verified on the restored baseline.
+Do not add a second scheduler, timer, staging file, rename protocol, blocking
+Menu write, or additional permanent RAM. The implementation is a precise
+notification/schema change around this established writer.
 
-If the edited value changes in RAM but no dirty revision is issued, implement only the missing notification boundary:
+The existing scheduler must also defer—without clearing dirty state—while the
+Menu is on a Load or Save page. The settings file is background persistence;
+it must not claim the one AsyncFATFS facade between a foreground page's
+preparation and accepted command, where it could make an otherwise valid
+load/save index request report `FsErr`. Once the page exits and the facade is
+idle, an already-expired debounce is immediately eligible to start. This is a
+foreground-admission gate, not a second debounce and not permission to drop a
+settings edit.
 
-#### Conditional `filesystem.h` / `filesystem.c` change
+#### `filesystem.h` / `filesystem.c`
 
-Add a narrowly named API such as:
+Add a public API such as:
 
 ```c
 void filesystem_notifyPersistentSettingChanged(uint16_t parameter_id);
 ```
 
-The API must contain an explicit allowlist matching the settings parser/writer schema. The expected persistent parameter IDs are:
+It must accept only the exact parameter IDs that the writer emits and parser
+accepts today:
 
 - `PAR_BPM`
 - `PAR_EXT_SYNC`
@@ -352,27 +390,96 @@ The API must contain an explicit allowlist matching the settings parser/writer s
 - `PAR_OSC_WAVE_INTERP`
 - `PAR_AUTOSAVE_ENABLED`
 
-Reconcile these names against the rollback code before implementation. The adjacent comment must identify the settings parser and writer as affiliates that must be updated together when the schema changes.
+For an accepted ID, it calls the existing dirty/revision/debounce boundary.
+For every other ID, it has no filesystem or policy side effect. This makes the
+on-card schema—not a mutable Menu page—the authority for persistence, so
+Pattern, PERF, Scene, Kit, Instrument, CPU-display, and legacy global cells
+cannot accidentally cause a settings rewrite.
 
-The API ignores non-persistent parameters and marks settings dirty only for an accepted persistent ID. It must preserve the existing revision, debounce, asynchronous write, flush, retry, and failure-reporting behavior.
+The source audit found a specification/code discrepancy: the specification
+mentions `prescaler_clock_out2`, but the current Menu does not expose it and
+the current `settings.cfg` parser/writer does not implement it. It is not part
+of this notification change. Reconcile that separate schema decision before
+adding it; do not silently serialize an unexposed parameter merely because it
+has a global ParameterArray ID.
 
-#### Conditional `menu.c` change
+Every changed declaration and implementation branch must carry adjacent
+comments stating the accepted input IDs, no-op output for non-schema IDs, the
+one-second debounce owner, and the parser/writer/Menu affiliates. The API must
+reuse `filesystem_markSettingsDirty()` rather than duplicate its revision or
+timer state.
 
-After a static parameter commit actually changes the stored value, call the notification API without relying on `menu_activePage == MENU_MIDI_PAGE`. The API's allowlist, not mutable page identity, determines persistence.
+In `filesystem_settingsWriterSchedule_tick()`, add the analogous adjacent
+comment and Load/Save-page admission check. It must preserve the deadline,
+revision, and dirty bit unchanged while deferred; only the existing successful
+flush/revision comparison may clear the dirty bit.
 
-The AutoSave policy update remains a separate immediate call to `filesystem_setAutosaveEnabled()`. Persistence notification writes the setting for the next boot; the policy call changes current runtime behavior. Comments must explain that both effects are required and neither substitutes for the other.
+#### `menu.c`
 
-Bulk settings application through `menu_sendAllGlobals()` must not manufacture a user dirty event while boot is applying `settings.cfg`.
+At the one user-edit commit boundary, after a static Menu cell has actually
+changed its stored byte and its immediate runtime side effect has been applied,
+call `filesystem_notifyPersistentSettingChanged(cell->static_param)` without
+testing `menu_activePage`. The API allowlist decides whether that commit is a
+settings change.
 
-If the failure occurs later than dirty notification—open, write, sync, rename, close, or retry—do not apply the menu notification patch. Preserve the evidence and fix only the demonstrated filesystem boundary.
+Keep `menu_sendAllGlobals()` and `menu_parseGlobalParam()` as apply-only paths:
+they run during boot and bulk settings application and must never manufacture a
+dirty event. The notification call belongs only to the user commit path, not
+to the generic runtime-apply helper.
+
+For `PAR_AUTOSAVE_ENABLED`, retain the separate immediate
+`filesystem_setAutosaveEnabled()` call. It changes present AutoSave policy;
+the notification schedules persistence for the next boot. Both calls are
+required, and neither replaces the other.
+
+#### Phase 4 source checks
+
+1. Verify the allowlist exactly matches `filesystem_nextSettingsLine()` and
+   `filesystem_settingsParamForKey()`; no Menu-persistent parameter may appear
+   in only one direction.
+2. Verify all fourteen editable persistent cells in `menuPages.h` reach the
+   user commit boundary and therefore restart the same debounce.
+3. Verify nonpersistent static cells, especially `PAR_RUNTIME_CPU_USE`, have
+   no notification side effect.
+4. Verify `menu_sendAllGlobals()` and settings-file load still cause zero dirty
+   notifications and zero autonomous write starts during boot.
+5. Verify a settings deadline expiring while Load or Save is active cannot
+   start `SAVE_GLOBALS`; after the foreground page exits, the same pending
+   revision is eligible without a second user edit.
+6. Verify a second user edit while `SAVE_GLOBALS` is writing advances the
+   existing revision and causes one later rewrite rather than clearing dirty.
+7. Build with development logging enabled and disabled; compare linked RAM and
+   confirm no new allocation was introduced.
 
 #### Phase 4 hardware gate
 
-Repeat the two-setting test, inspect `settings.cfg`, and reboot. Also verify AutoSave OFF stops new AutoSave work and AutoSave ON permits the next real edit to be written. A failed settings write must remain visible and retryable; it must not be acknowledged as saved.
+Use one fresh copied SD fixture and test the writer independently of Bank
+Save/overwrite work:
+
+1. Change each of the fourteen persisted Menu settings at least once. For each
+   test, wait just over one second after the final edit, copy `settings.cfg`,
+   and confirm the complete file contains the new value while unrelated rows
+   remain present.
+2. Spin one persisted value repeatedly for less than one second, stop, then
+   confirm exactly one final value survives reboot. The test is about the
+   trailing debounce; it must not cause a write per detent.
+3. Change a nonpersistent visible/static cell and confirm `settings.cfg` is
+   not rewritten solely by that edit.
+4. Toggle AutoSave OFF and ON. Confirm the policy changes immediately, the
+   final preference survives reboot, and an ordinary settings write remains
+   possible while AutoSave is OFF.
+5. Make one persisted edit, then another while the first rewrite is active.
+   After the later debounce, reboot and confirm the second value survived.
+6. Change a persisted setting, enter the Load page before its debounce expires,
+   wait beyond one second, and perform a normal Load/Save-page interaction.
+   Confirm no settings-writer `FsErr` occurs; leave the page, wait for idle
+   persistence, and confirm the setting survives reboot.
+7. Force or observe a settings-write failure only with a disposable fixture;
+   confirm the value remains dirty/retryable and is never reported as saved.
 
 ### Phase 5 — PA2ST2-3 integration checks
 
-After the separate CRC, Bank Load, and conditional settings gates pass, run one combined integration image.
+After the separate CRC, Bank Load, and settings-notification gates pass, run one combined integration image.
 
 This is not a new broad parameter matrix. Carry forward the accepted Scene and Kit/Instrument hook evidence. Perform only one scalar edit as a regression smoke test for the writer.
 
@@ -380,10 +487,8 @@ Exercise:
 
 1. Scene Load and Scene Save provenance updates.
 2. Bank Load with active-Scene preservation.
-3. Bank Save while stopped.
-4. Bank Save while playing.
-5. AutoSave OFF, then ON, with reboot confirmation through `settings.cfg`.
-6. One Scene or Kit scalar edit after AutoSave is re-enabled.
+3. AutoSave OFF, then ON, with reboot confirmation through `settings.cfg`.
+4. One Scene or Kit scalar edit after AutoSave is re-enabled.
 
 Use the host inspector to verify:
 
@@ -395,18 +500,13 @@ Use the host inspector to verify:
 
 The settings writer keeps its existing priority over AutoSave work. Byte-bounded CRC work yields between ticks; it does not add another scheduler or timer.
 
-### Phase 6 — Bank Save/audio sign-off
+### Phase 6 — Deferred Bank Save overwrite/audio sign-off
 
-The Bank Save issue is closed only when the correctly chunked CRC build passes on hardware:
-
-- Bank Save completes while stopped.
-- Bank Save completes while playing.
-- The saved Bank can be loaded.
-- No long audio glitch occurs a few seconds after leaving the Save menu when AutoSave drains.
-- No new audio-underrun evidence appears.
-- Settings and AutoSave records remain structurally valid.
-
-Do not add generic pacing if a glitch remains. Preserve the exact SD image and existing trace, identify the specific phase/function that exceeds the cooperative-loop budget, and split only that demonstrated CPU or SD operation. Any such follow-up requires a new targeted plan before code changes.
+Do not use Bank Save overwrite as a gate in this session. The duplicate-slot
+folder defect is deferred to the pinned AsyncFATFS recursive-delete repair in
+`SCOPING_TARGETS.md`; it must not be worked around with sibling-directory
+renames or boot-time cleanup. Preserve any existing Bank Save fixture evidence
+and do not claim overwrite/audio sign-off from this reimplementation plan.
 
 ## File-by-file implementation map
 
@@ -415,9 +515,9 @@ Do not add generic pacing if a glitch remains. Preserve the exact SD image and e
 | `config.h` | Define the CRC bytes-per-tick CPU budget. No timing interval. |
 | `Autosave.h` | Declare the incremental initial-record CRC API and document its bounded contract. |
 | `Autosave.c` | Implement bounded serialized CRC updates; remove obsolete whole-record helpers. |
-| `filesystem.c` | Convert initial creation, recovery, candidate validation, and transformed-copy CRC phases to cursor-driven bounded work; implement runtime active-Scene preservation; conditionally implement settings notification. |
-| `filesystem.h` | Document the Bank Load preservation input and, only if evidence requires it, the persistent-setting notification API. |
-| `menu.c` | Pass runtime Bank Load preservation intent; conditionally notify persistent setting edits independently of page identity. |
+| `filesystem.c` | Convert initial creation, recovery, candidate validation, and transformed-copy CRC phases to cursor-driven bounded work; implement runtime active-Scene preservation; expose the schema-allowlisted settings notification API and defer its existing writer during foreground Load/Save ownership. |
+| `filesystem.h` | Document the Bank Load preservation input and the persistent-setting notification API. |
+| `menu.c` | Pass runtime Bank Load preservation intent; notify every changed user-persisted setting independently of page identity. |
 | Boot/load caller file(s) | Pass `preserve_active_scene = false` explicitly for boot. Reconcile actual call sites after rollback. |
 | `tools/inspect_autosave_fixture.py` | Restore read-only structural, CRC, provenance, and trace inspection. |
 | `AUTOSAVE_REMEDY_PA2ST2-3.md` | Record accepted coverage and the evidence-only Step 2/3 disposition. |

@@ -52,6 +52,28 @@
 uint8_t sdcard_getState(void);
 
 /*
+ * Read-only SD transport copy used by boot-time failure forensics.
+ *
+ * What: reports the current private transfer coordinates without exposing the
+ * private state-machine object. Why: AsyncFATFS may be correctly waiting for
+ * an SD command that has stopped advancing, and aborting that command clears
+ * the only evidence. Input: none; output: scalar copy valid until the next
+ * poll/abort. This getter never clocks SPI, invokes callbacks, or changes
+ * retries, chip-select, or transfer ownership; filesystem.c copies it before
+ * sdcard_abortTransferForBootLog().
+ */
+typedef struct {
+    uint8_t state;
+    uint8_t operation;
+    uint8_t callback_pending;
+    uint32_t block;
+    uint16_t offset;
+    uint16_t retry_count;
+} sdcardTransportSnapshot_t;
+
+void sdcard_getTransportSnapshot(sdcardTransportSnapshot_t *snapshot);
+
+/*
  * Abandon one LXR-02 SD block transfer for boot-log recovery.
  *
  * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It

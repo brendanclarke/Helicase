@@ -549,3 +549,23 @@ boundary at a time.
   AutoSave trace layout and scheduler callback correction, hardware evidence,
   reverted pacing/unified-log failures, current `c9807fa` authority, and
   Session 047 reimplementation order
+
+### 047 — Bounded AutoSave CRC, Trace Arbitration, And HCPRMS Capture (2026-08-10)
+
+Bounded every AutoSave CRC path to a retained 128-byte-per-tick work budget,
+then fixed the missing-A creation selector corruption exposed by the first
+boot fixture. Kept the accepted one-second `settings.cfg` writer unchanged
+after user retest, and prevented optional `asavetrc.bin` flushing from
+competing with an active Load/Save page; repeated playing-time Full/LoadTst
+loads and overwrites had no heard glitch. One initial-record B write stopped
+at exactly 32 KiB and hit the real `ASENSURE` boot deadline; added a
+logging-only 64-byte, E0..E7 AsyncFATFS/SD state capsule appended to the normal
+boot token solely on recurrence. Later boots created both exact 34,768-byte
+records and produced no bootlog, so the lower-layer cause is captured but not
+claimed solved. Deferred correct native recursive delete for stale overwrite
+folders, runtime Bank Load active-Scene preservation, and a future stable-log
+converter.
+- **Find here**: [047_SESSION_HANDOFF_LOG.md](047_SESSION_HANDOFF_LOG.md),
+  bounded CRC/cursor contract, selector fix, trace facade guard, settings
+  no-change result, 32 KiB evidence and capsule decoder, build modes/RAM,
+  PA2ST1/PA2ST2-3 disposition, and Session 048 boundaries

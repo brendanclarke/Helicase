@@ -20,6 +20,41 @@ typedef enum {
     AFATFS_OPERATION_FAILURE,
 } afatfsOperationStatus_e;
 
+/*
+ * Read-only diagnostic copy of one active AsyncFATFS file and allocator.
+ *
+ * What: exposes scalar state needed to distinguish a stalled FAT search,
+ * FAT update, cache wait, and explicit-full result after an external boot
+ * timeout. Why: the opaque file handle otherwise loses all of these values
+ * when the recovery path destroys AsyncFATFS. Input: a live handle or NULL;
+ * output: copied values only, with `available` zero for NULL. This API never
+ * polls, allocates, starts I/O, releases cache ownership, or retains a pointer.
+ * filesystem.c owns the resulting logging capsule; this header owns no storage.
+ */
+typedef struct {
+    uint8_t available;
+    uint8_t filesystem_state;
+    uint8_t filesystem_full;
+    uint8_t file_operation;
+    uint8_t append_phase;
+    uint8_t search_wrapped;
+    uint8_t cache_dirty_count;
+    uint8_t cache_locked_count;
+    uint8_t cache_reading_count;
+    uint8_t cache_writing_count;
+    uint8_t cache_flush_in_progress;
+    int8_t active_cache_index;
+    uint32_t cursor_offset;
+    uint32_t logical_size;
+    uint32_t physical_size;
+    uint32_t cursor_cluster;
+    uint32_t cursor_previous_cluster;
+    uint32_t append_previous_cluster;
+    uint32_t search_cluster;
+    uint32_t search_start_cluster;
+    uint32_t sectors_per_cluster;
+} afatfsDiagnosticSnapshot_t;
+
 typedef enum {
     AFATFS_ERROR_NONE = 0,
     AFATFS_ERROR_GENERIC = 1,
@@ -297,6 +332,9 @@ bool afatfs_feof(afatfsFilePtr_t file);
 void afatfs_fputc(afatfsFilePtr_t file, uint8_t c);
 uint32_t afatfs_fwrite(afatfsFilePtr_t file, const uint8_t *buffer, uint32_t len);
 uint32_t afatfs_fread(afatfsFilePtr_t file, uint8_t *buffer, uint32_t len);
+/* Copy current diagnostics without changing AsyncFATFS progress or ownership. */
+void afatfs_getDiagnosticSnapshot(afatfsFilePtr_t file,
+                                  afatfsDiagnosticSnapshot_t *snapshot);
 afatfsOperationStatus_e afatfs_fseek(afatfsFilePtr_t file, int32_t offset, afatfsSeek_e whence);
 bool afatfs_ftell(afatfsFilePtr_t file, uint32_t *position);
 

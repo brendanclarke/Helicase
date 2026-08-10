@@ -185,9 +185,11 @@ typedef void (*fs_boot_substep_diag_cb_t)(uint8_t substep);
  * runtime. Why: a splash-screen stall otherwise leaves no durable indication
  * of the last storage boundary entered. Inputs are fixed-width operation codes
  * and the existing filesystem/SD state; outputs are a timeout flag and, when
- * a caller confirms timeout or boot filesystem failure, an exactly eight-byte
- * root file. These functions are boot/main-context APIs only, are not ISR-safe,
- * and a failed recovery never prevents the caller from continuing startup.
+ * a caller confirms timeout or boot filesystem failure, an eight-byte root
+ * file. A frozen `ASENSURE` timeout is the sole exception: it appends a
+ * documented 64-byte RAM-only FAT/SD capsule after the same token, for a
+ * 72-byte forensic file. These functions are boot/main-context APIs only, are
+ * not ISR-safe, and a failed recovery never prevents startup from continuing.
  * Affiliates:
  * filesystem_tick(), the private blocking FAT helpers, main.c's pre-audio
  * ladder, and sdcard_abortTransferForBootLog().

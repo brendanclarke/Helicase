@@ -88,6 +88,25 @@
 #define DEV_MODE_LOGGING    1
 
 /*
+ * Fixed boot-time AutoSave-ensure failure capsule geometry.
+ *
+ * What: reserves eight fixed eight-byte records only in a logging build.
+ * Why: an ASENSURE timeout destroys the live AsyncFATFS state before the
+ * existing boot logger remounts, so the otherwise-ephemeral write/allocator
+ * coordinates must be copied into a bounded SRAM image first. Inputs: the
+ * logging-only snapshot producers; output: a 64-byte suffix after the normal
+ * eight-byte boot token. Ownership: filesystem.c; lifetime: one boot attempt.
+ * No file is opened and no storage exists when DEV_MODE_LOGGING is zero.
+ */
+#if DEV_MODE_LOGGING
+#define HCPRMS_BOOT_CAPSULE_SCHEMA_VERSION 1u
+#define HCPRMS_BOOT_CAPSULE_RECORD_BYTES   8u
+#define HCPRMS_BOOT_CAPSULE_RECORD_COUNT   8u
+#define HCPRMS_BOOT_CAPSULE_BYTES \
+    (HCPRMS_BOOT_CAPSULE_RECORD_BYTES * HCPRMS_BOOT_CAPSULE_RECORD_COUNT)
+#endif
+
+/*
  * Maximum duration of one armed boot filesystem operation.
  *
  * What: supplies the millisecond deadline used only while DEV_MODE_LOGGING is

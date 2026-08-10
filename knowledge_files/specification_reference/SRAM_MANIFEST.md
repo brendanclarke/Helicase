@@ -1,9 +1,13 @@
 # SRAM manifest
 
-Generated from `build/lxr02.elf` at rollback baseline `c9807fa` on 2026-08-10,
-after Session 046 boot/HCNAMES diagnostics and the AutoSave scalar writer/trace
-work. This is a fresh
-linked-image inventory: sizes come
+The detailed section/symbol inventory below was generated at rollback baseline
+`c9807fa` on 2026-08-10, after Session 046 boot/HCNAMES diagnostics and the
+AutoSave scalar writer/trace work. Session 047 adds the logging-only 64-byte
+`fs_hcprms_boot_capsule`; alignment/layout makes the observed logging-on BSS
+increase 80 bytes. The current Session 047 `make` result is `text=374,044`,
+`data=396`, `bss=79,076`; a forced logging-off build is `text=367,372`,
+`data=396`, `bss=78,444`. The normal logging-on image was rebuilt afterward.
+This remains a linked-image inventory: sizes come
 from `arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
 estimates.
 
@@ -61,6 +65,7 @@ sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 373,308 B.
 | `autosave_dirty_mask` | 3,856 B | Sole canonical AutoSave mutation mask |
 | `fs_autosave_parameter_cache` | 4,608 B | Dedicated bounded AutoSave patch offsets/values |
 | `autosave_trace_records` | 512 B | `DEV_MODE_LOGGING`-only 64-by-8-byte lifecycle ring |
+| `fs_hcprms_boot_capsule` | 64 B | `DEV_MODE_LOGGING`-only frozen eight-record ASENSURE timeout snapshot; owned by `filesystem.c` for one boot attempt |
 | `usb_MidiMessages` | 2,048 B | USB MIDI message storage |
 | `slider_lut` | 4,096 B | 1,024 native `float` attenuator nodes; lookup is `raw >> 2`, without interpolation |
 | `parameter_values` | 384 B | Legacy MIDI parameter cells |
@@ -144,6 +149,19 @@ cache, plus the Session 046 logging-only AutoSave trace. With
 512 bytes of records, six bytes of cursor/drop state, and a two-byte flush
 cadence. The approved condition is binding: a logging-off build must omit the
 ring/cadence and perform no trace-file I/O.
+
+## 2026-08-10 HCPRMS boot-lock diagnostic allocation
+
+`fs_hcprms_boot_capsule` is exactly **64 bytes** of normal SRAM1 `.bss` when
+`DEV_MODE_LOGGING == 1`: eight fixed eight-byte records. It is owned solely by
+`filesystem.c`, exists only for the current boot attempt, receives RAM-only
+copies while `FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES` is active, and is frozen
+before timeout recovery destroys AsyncFATFS/SD state. It is omitted entirely
+when logging is off; the AsyncFATFS and SD snapshot getters allocate no storage
+and retain no pointers. The logging-on build checked for this change reports
+`data=396 B`, `bss=79,076 B`; the linked 80-byte `.bss` increase includes the
+64-byte owner plus unavoidable object-layout/alignment movement. No DTCM, DMA,
+name-cache, AutoSave mask, or record-sized allocation is added.
 
 The SRAM1 increase from the Session 044 snapshot is 9,048 bytes. The principal
 new owners account for 8,984 bytes (3,856-byte canonical mask, 4,608-byte patch

@@ -11,6 +11,23 @@ speculative FAT fix. The next code change must collect the state that separates
 an AutoSave application-state error, an AsyncFATFS cluster-extension lock, a
 cache deadlock, and an SD transport stall.
 
+## Implementation note — 2026-08-10 capture build
+
+The logging-only diagnostic described here is now implemented against the
+current `/bootlog.bin` authority, not the stale `/devlog.bin` proposal. The
+existing eight-byte printable boot token remains unchanged for all ordinary
+failures. Only a timed-out `ASENSURE` operation freezes a 64-byte SRAM capsule
+before transport abort/AsyncFATFS destruction and writes it immediately after
+that token, yielding a 72-byte `bootlog.bin` if recovery remount/write/flush
+succeeds.
+
+The implemented capsule deliberately retains the planned eight `0xE0..0xE7`
+records and read-only AsyncFATFS/SD snapshots, but it does not attempt to add a
+new logger, fallback filename, allocator repair, SD retry, pacing delay, or
+recursive-delete change. `tools/decode_bootlog.py` decodes the current schema.
+The precise binary layout is authoritative in `DEV_MODES.md`; this plan retains
+the investigative rationale and next-capture interpretation below.
+
 The CRC scheduling problem and this boot write lock are related only because
 they occur in the same AutoSave setup transaction. They have different
 evidence:

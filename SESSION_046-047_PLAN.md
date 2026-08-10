@@ -1,4 +1,4 @@
-# Session 046 Plan — Closed; Remaining Work Carried to Session 047
+# Sessions 046–047 Plan — Closed; Deferred Work Carried to Session 048
 
 ## Closeout boundary
 
@@ -87,81 +87,55 @@ slowdowns and delayed rather than removed audio glitches. The unified-log
 experiment caused a boot timeout, no durable `devlog.bin`, and a partial
 32,768-byte `.hcprms2`. Neither may be restored mechanically.
 
-## Session 047 plan
+## Session 047 closeout — completed and deferred
 
-Use `SETTINGS_BANK_LOAD_REIMPLEMENT.md` as the immediate implementation plan
-and `AUTOSAVE_PHASE2_PLAN.md` only for later whole-object sequencing.
+The authoritative detailed record is
+`knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md`. The removable
+working plans `SETTINGS_BANK_LOAD_REIMPLEMENT.md` and
+`HCPRMS_BOOTLOCK_DIAGNOSIS.md` are preserved there and in
+`AUTOSAVE_PHASE2_PLAN.md`.
 
-### 1. Confirm the rollback baseline
+### Completed
 
-Build unchanged `c9807fa`, record image/RAM, confirm the whole-record CRC call
-still exists, confirm the failed pacing layer is absent, and preserve the
-user-owned `SD_CARD/` fixtures.
+1. **Bounded CRC:** every AutoSave CRC path now advances through a uniform
+   128-byte retained work budget: initial A/B creation, invalid-pair recovery,
+   candidate validation, and transformed-copy generation. No generic pacing,
+   blind delay, record-sized buffer, or permanent CRC allocation was added.
+2. **Missing-pair selector repair:** boot creation now opens the saved A/B
+   selector rather than the scratch field later reused as the CRC accumulator.
+   This fixed the deterministic “only `.hcprms2` exists” outcome.
+3. **Settings:** the user re-tested the existing one-second debounced
+   `settings.cfg` writer and found it correct. No settings source change was
+   made.
+4. **Trace arbitration and audio test:** the optional lifecycle trace does not
+   open `asavetrc.bin` while a Load/Save page owns the facade. Repeated
+   playback-time loads of `000 Full` and `013 LoadTst`, plus overwrites of 024
+   and 009, produced no audible glitch.
+5. **Intermittent 32 KiB capture:** one initial-B write stopped at 32,768 bytes
+   and the real ten-second `ASENSURE` deadline fired. A logging-only capsule
+   now records application progress plus read-only AsyncFATFS/cache/allocator
+   and SD-transport snapshots before ordinary boot recovery. The 64-byte
+   capsule follows the eight-byte token only for that timeout; it changes no
+   allocator, retry, timing, or recovery behavior. Later boots had two full
+   34,768-byte committed records and no bootlog, so the lower-level failure is
+   not reproduced or diagnosed.
 
-### 2. Establish read-only fixture inspection
+### Deferred to Session 048 or later
 
-Use or add a host-only reader for exact record size, header, CRC32C,
-generation/commit selection, dirty-mask population, relevant payload offsets,
-and existing eight-byte trace records. It must never modify a fixture.
-
-### 3. Byte-bound every AutoSave CRC path
-
-One explicit per-tick byte budget must cover:
-
-1. initial A/B creation;
-2. recovery when neither candidate is valid;
-3. validation of existing candidates; and
-4. transformed-copy CRC generation.
-
-Use retained operation cursors, no record-sized buffer, no blind delay, and no
-new permanent SRAM. Test this change alone with valid-pair drain, missing-pair
-creation, invalid-pair recovery, playback, exact 34,768-byte files, and CRCs.
-
-### 4. Preserve active Scene during runtime Bank Load
-
-After CRC testing passes, add one explicit request-time contract:
-
-- boot Load restores the Bank's saved default Scene;
-- user/runtime Load preserves the previously active Scene, including when the
-  selected child mask excludes it;
-- failed Load keeps the old active Scene and reports the failure.
-
-Do not add pacing or new Bank timing diagnostics in this pass.
-
-### 5. Retest settings before editing
-
-Change AutoSave and one unrelated persistent setting, wait for the existing
-writer, inspect `settings.cfg`, reboot, and verify both values. If it passes,
-make no settings source change. If it fails, patch only the demonstrated dirty-
-notification or filesystem boundary.
-
-### 6. Integration and audio sign-off
-
-Test Scene provenance, Bank Load preservation, Bank Save stopped/playing,
-AutoSave OFF→ON, rebooted settings, and one scalar writer smoke edit. Confirm
-no delayed AutoSave glitches and no hidden-record failure is acknowledged as
-success.
-
-### 7. Conditional 32 KiB boot-lock diagnosis
-
-If a hidden record again stops at 32,768 bytes or boot times out, stop and
-preserve the card. Capture the application write phase, exact byte progress,
-actual cluster geometry, AsyncFATFS allocator/cache state, SD transport state,
-and logger recovery result before any FAT/SD fix. CRC chunking is not proof of
-a cluster-extension repair.
-
-### 8. Resume Phase 2 only after the baseline passes
-
-Add whole-object hooks one successful public completion boundary at a time:
-Whole Instrument, Whole Kit, root Scene without Pattern, selective Bank
-session replacement, then Morph projection. Reattempt Load/Save exclusion
-last, with separate tests for already-active versus not-yet-admitted AutoSave
-work.
-
-## Session 047 completion condition
-
-The immediate reimplementation is complete only when every AutoSave CRC path
-is byte-bounded, runtime Bank Load preserves active Scene without changing boot
-semantics, settings persistence is verified, stopped/playing Bank Save does not
-produce deferred audio glitches, and every failed write remains visible and
-retryable. Whole-object Phase 2 work is a later gate, not part of that claim.
+1. **Overwrite Save stale folder:** Bank, root Scene, and Kit overwrite may
+   leave the old directory. Repair `afatfs_deleteTree()` recursively and test
+   it with populated fixtures. Do not revive the rejected `old*` rename or
+   boot-cleanup feature.
+2. **Runtime Bank Load playing-Scene switch:** preserve the pre-load active
+   Scene only after ordinary Bank Load/Save behavior is stable. Boot must keep
+   restoring the Bank's saved default Scene.
+3. **Intermittent 32 KiB boot stop:** do not speculate on a FAT/SD repair. If
+   it recurs, preserve `SD_CARD/bootlog.bin`, decode the 72-byte ASENSURE
+   capsule, and use its state to choose one lower-layer investigation.
+4. **AutoSave Phase 2:** preserve the completed trace/scalar/settings results,
+   then resume only the written whole-object sequence: Whole Instrument,
+   Whole Kit, root Scene without Pattern, selective Bank, Morph projection;
+   retry Load/Save exclusion last and in isolation.
+5. **Host log conversion:** only after AutoSave and logging formats settle,
+   add a read-only `/tools/` converter from copied `SD_CARD/` outputs to a
+   dated root `dev_log_date.txt`.

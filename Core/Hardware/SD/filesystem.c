@@ -361,6 +361,15 @@ static uint8_t          fs_boot_logging_recovery_failed = 0u;
 static uint16_t         fs_boot_logging_started_tick = 0u;
 static uint16_t         fs_boot_logging_recovery_started_tick = 0u;
 static uint8_t          fs_boot_logging_code[8];
+/*
+ * Frozen eight-record ASENSURE failure capsule, retained only in a logging
+ * build. Input: in-place observations of one boot-time creation operation;
+ * output: a 64-byte suffix for bootlog.bin after recovery remount. Why: the
+ * timeout path must snapshot before it destroys the live FAT/SD state, yet
+ * must not perform diagnostic I/O while the stalled operation owns the card.
+ * Region/lifetime/owner: 64 bytes normal SRAM1 for one boot, filesystem.c.
+ */
+static uint8_t fs_hcprms_boot_capsule[HCPRMS_BOOT_CAPSULE_BYTES];
 #endif
 /*
  * Current numbered operation slot.
@@ -2491,6 +2500,187 @@ static const char *filesystem_bootLogCodeForOperation(
     }
 }
 
+#if DEV_MODE_LOGGING
+/* The non-printable range cannot collide with ASCII boot tokens or trace stages. */
+#define FS_HCPRMS_CAPSULE_CONTEXT_STAGE    0xe0u
+#define FS_HCPRMS_CAPSULE_PROGRESS_STAGE   0xe1u
+#define FS_HCPRMS_CAPSULE_CHUNK_STAGE      0xe2u
+#define FS_HCPRMS_CAPSULE_CURSOR_STAGE     0xe3u
+#define FS_HCPRMS_CAPSULE_ALLOC_STAGE      0xe4u
+#define FS_HCPRMS_CAPSULE_OWNER_STAGE      0xe5u
+#define FS_HCPRMS_CAPSULE_CACHE_STAGE      0xe6u
+#define FS_HCPRMS_CAPSULE_TRANSPORT_STAGE  0xe7u
+#define FS_HCPRMS_CAPSULE_ACTIVE_FLAG      0x80u
+#define FS_HCPRMS_CAPSULE_FROZEN_FLAG      0x01u
+
+/* Store fixed-width fields explicitly so the on-card capsule is little-endian. */
+static void filesystem_hcprmsCapsulePut16(uint8_t *dst, uint16_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8);
+}
+
+static void filesystem_hcprmsCapsulePut24(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8);
+    dst[2] = (uint8_t)(value >> 16);
+}
+
+static void filesystem_hcprmsCapsulePut32(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8);
+    dst[2] = (uint8_t)(value >> 16);
+    dst[3] = (uint8_t)(value >> 24);
+}
+
+static uint8_t filesystem_hcprmsCapsuleIsActive(void)
+{
+    return (fs_hcprms_boot_capsule[7] & FS_HCPRMS_CAPSULE_ACTIVE_FLAG) != 0u;
+}
+
+static uint8_t filesystem_hcprmsCapsuleIsFrozen(void)
+{
+    return (fs_hcprms_boot_capsule[7] & FS_HCPRMS_CAPSULE_FROZEN_FLAG) != 0u;
+}
+
+static void filesystem_hcprmsCapsuleBegin(void)
+{
+    /*
+     * Start a fresh in-place capsule only when ASENSURE enters phase zero.
+     * Input: no target has been selected yet; output: active schema marker
+     * and stable stage tags, with no FAT/SD call. Why: a later timeout can be
+     * tied to this exact ensure attempt without retaining a trace ring.
+     */
+    memset(fs_hcprms_boot_capsule, 0, sizeof(fs_hcprms_boot_capsule));
+    fs_hcprms_boot_capsule[0] = FS_HCPRMS_CAPSULE_CONTEXT_STAGE;
+    fs_hcprms_boot_capsule[1] = HCPRMS_BOOT_CAPSULE_SCHEMA_VERSION;
+    fs_hcprms_boot_capsule[2] = 0xffu; /* target unknown before root scan */
+    fs_hcprms_boot_capsule[7] = FS_HCPRMS_CAPSULE_ACTIVE_FLAG;
+    fs_hcprms_boot_capsule[8] = FS_HCPRMS_CAPSULE_PROGRESS_STAGE;
+    fs_hcprms_boot_capsule[16] = FS_HCPRMS_CAPSULE_CHUNK_STAGE;
+    fs_hcprms_boot_capsule[24] = FS_HCPRMS_CAPSULE_CURSOR_STAGE;
+    fs_hcprms_boot_capsule[32] = FS_HCPRMS_CAPSULE_ALLOC_STAGE;
+    fs_hcprms_boot_capsule[40] = FS_HCPRMS_CAPSULE_OWNER_STAGE;
+    fs_hcprms_boot_capsule[48] = FS_HCPRMS_CAPSULE_CACHE_STAGE;
+    fs_hcprms_boot_capsule[56] = FS_HCPRMS_CAPSULE_TRANSPORT_STAGE;
+}
+
+static void filesystem_hcprmsCapsuleSetTarget(uint8_t target)
+{
+    /* Record the A/B scan coordinate without changing its operation scratch. */
+    if (filesystem_hcprmsCapsuleIsActive() &&
+        !filesystem_hcprmsCapsuleIsFrozen()) {
+        fs_hcprms_boot_capsule[2] = target;
+        fs_hcprms_boot_capsule[3] = op_phase;
+    }
+}
+
+static void filesystem_hcprmsCapsuleNoteWrite(uint16_t requested,
+                                               uint32_t written,
+                                               uint16_t chunk_offset)
+{
+    uint8_t *progress = fs_hcprms_boot_capsule + 8u;
+    uint8_t *chunk = fs_hcprms_boot_capsule + 16u;
+
+    /*
+     * Replace only the latest write coordinates, never append a per-tick log.
+     * Inputs: the request before fwrite and its returned count; output: enough
+     * state to expose partial progress inside a 512-byte chunk plus a
+     * saturating zero-write streak. Why: op_bytes_done moves only after a
+     * complete chunk and alone would conceal a stalled partial write.
+     */
+    if (!filesystem_hcprmsCapsuleIsActive() ||
+        filesystem_hcprmsCapsuleIsFrozen())
+        return;
+    filesystem_hcprmsCapsulePut32(progress + 1u, op_bytes_done);
+    filesystem_hcprmsCapsulePut16(progress + 5u, op_write_line_len);
+    if (written == 0u) {
+        if (progress[7] != 0xffu)
+            progress[7]++;
+    } else {
+        progress[7] = 0u;
+    }
+    filesystem_hcprmsCapsulePut16(chunk + 1u, (uint16_t)written);
+    filesystem_hcprmsCapsulePut16(chunk + 3u, chunk_offset);
+    filesystem_hcprmsCapsulePut16(chunk + 5u, requested);
+    chunk[7] = op_file_version;
+}
+
+static void filesystem_hcprmsCapsuleFreeze(void)
+{
+    afatfsDiagnosticSnapshot_t fat_snapshot;
+    sdcardTransportSnapshot_t sd_snapshot;
+    uint8_t *context = fs_hcprms_boot_capsule;
+    uint8_t *cursor = fs_hcprms_boot_capsule + 24u;
+    uint8_t *allocation = fs_hcprms_boot_capsule + 32u;
+    uint8_t *owner = fs_hcprms_boot_capsule + 40u;
+    uint8_t *cache = fs_hcprms_boot_capsule + 48u;
+    uint8_t *transport = fs_hcprms_boot_capsule + 56u;
+    uint32_t cluster_bytes;
+    uint8_t allocation_flags = 0u;
+
+    /*
+     * Freeze exactly once before timeout recovery aborts transport or destroys
+     * AsyncFATFS. Input: live ensure scratch plus read-only FAT/SD snapshots;
+     * output: a complete 64-byte capsule with no poll, file operation, cache
+     * release, allocation, delay, or callback. Why: post-abort observations
+     * describe recovery, not the 32-KiB failure being diagnosed.
+     */
+    if (!filesystem_hcprmsCapsuleIsActive() ||
+        filesystem_hcprmsCapsuleIsFrozen())
+        return;
+    afatfs_getDiagnosticSnapshot(op_file, &fat_snapshot);
+    sdcard_getTransportSnapshot(&sd_snapshot);
+    context[2] = op_file_version;
+    context[3] = op_phase;
+    context[4] = (uint8_t)status;
+    context[5] = fat_snapshot.file_operation;
+    context[6] = fat_snapshot.append_phase;
+    context[7] |= FS_HCPRMS_CAPSULE_FROZEN_FLAG;
+    filesystem_hcprmsCapsulePut32(cursor + 1u, fat_snapshot.cursor_offset);
+    filesystem_hcprmsCapsulePut24(cursor + 5u, fat_snapshot.logical_size);
+    filesystem_hcprmsCapsulePut32(allocation + 1u,
+                                  fat_snapshot.search_cluster);
+    allocation[5] = (fat_snapshot.sectors_per_cluster > 0xffu)
+        ? 0xffu : (uint8_t)fat_snapshot.sectors_per_cluster;
+    allocation[6] = fat_snapshot.search_wrapped;
+    if (fat_snapshot.filesystem_full)
+        allocation_flags |= 0x01u;
+    if (fat_snapshot.available)
+        allocation_flags |= 0x02u;
+    cluster_bytes = fat_snapshot.sectors_per_cluster * 512u;
+    if (cluster_bytes != 0u && op_bytes_done % cluster_bytes == 0u)
+        allocation_flags |= 0x04u;
+    allocation[7] = allocation_flags;
+    filesystem_hcprmsCapsulePut32(owner + 1u,
+                                  fat_snapshot.append_previous_cluster);
+    filesystem_hcprmsCapsulePut24(owner + 5u,
+                                  fat_snapshot.cursor_cluster);
+    cache[1] = fat_snapshot.cache_dirty_count;
+    cache[2] = fat_snapshot.cache_locked_count;
+    cache[3] = fat_snapshot.cache_reading_count;
+    cache[4] = fat_snapshot.cache_writing_count;
+    cache[5] = fat_snapshot.cache_flush_in_progress;
+    cache[6] = (fat_snapshot.active_cache_index < 0) ? 0xffu :
+        (uint8_t)fat_snapshot.active_cache_index;
+    cache[7] = fat_snapshot.filesystem_full;
+    transport[1] = sd_snapshot.state;
+    transport[2] = sd_snapshot.operation;
+    filesystem_hcprmsCapsulePut16(transport + 3u, sd_snapshot.offset);
+    filesystem_hcprmsCapsulePut16(transport + 5u, sd_snapshot.retry_count);
+    transport[7] = sd_snapshot.callback_pending;
+}
+
+static uint32_t filesystem_hcprmsCapsulePayloadBytes(void)
+{
+    /* A non-ASENSURE failure retains the existing eight-byte bootlog format. */
+    return filesystem_hcprmsCapsuleIsFrozen()
+        ? HCPRMS_BOOT_CAPSULE_BYTES : 0u;
+}
+#endif
+
 /*
  * Poll the cooperative boot deadline from either filesystem progress path.
  *
@@ -2533,6 +2723,15 @@ static uint8_t filesystem_bootLoggingPollDeadline(void)
     if ((uint16_t)(time_sysTick - fs_boot_logging_started_tick) <
         BOOT_FILESYSTEM_TIMEOUT_MS)
         return 0u;
+    /*
+     * Capture ASENSURE's live application/FAT/SD state before publishing the
+     * error that leads to abort/destroy recovery. Why: all lower-level state
+     * is deliberately invalidated by that recovery, so freezing afterward
+     * would report the logger remount instead of the stalled hidden-record
+     * creation. No other boot operation allocates this AutoSave-specific data.
+     */
+    if (current_op == FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES)
+        filesystem_hcprmsCapsuleFreeze();
     fs_boot_logging_timed_out = 1u;
     fs_boot_logging_armed = 0u;
     status = FS_STATUS_ERROR;
@@ -2590,6 +2789,8 @@ void filesystem_bootLoggingBegin(void)
     fs_boot_logging_started_tick = time_sysTick;
     fs_boot_logging_recovery_started_tick = time_sysTick;
     memset(fs_boot_logging_code, ' ', sizeof(fs_boot_logging_code));
+    /* Clear the prior boot's forensic image before a new ASENSURE can own it. */
+    memset(fs_hcprms_boot_capsule, 0, sizeof(fs_hcprms_boot_capsule));
 #endif
 }
 
@@ -3779,11 +3980,12 @@ static void filesystem_writeResidentNames_tick(void)
  * modules that might otherwise be obscured by screen write delays.
  *
  * What: returns to root, opens the file with replacement semantics, writes
- * exactly eight bytes with partial-write tracking, closes it, and enters the
- * ordinary sync finish gate. Why: the diagnostic recovery must obey the same
- * single-owner asyncfatfs rules as every other facade write and must not claim
- * durability after only updating a cache. Input is fs_boot_logging_code, which
- * survives dirty recovery; output is an eight-byte file with no NUL/newline.
+ * the eight-byte printable culprit and, only for a frozen ASENSURE timeout,
+ * its 64-byte raw forensic suffix, then closes and enters the ordinary sync
+ * gate. Why: recovery must obey the same single-owner asyncfatfs rules as
+ * every other facade write and must not claim durability after only updating a
+ * cache. The retained payload survives dirty recovery; ordinary failures stay
+ * eight bytes, while ASENSURE becomes one 72-byte no-NUL/no-newline image.
  * Affiliates: filesystem_writeBootFailureLogBlocking(), on_file_opened(),
  * on_file_closed(), filesystem_finish(), and the tick dispatcher.
  */
@@ -3815,13 +4017,29 @@ static void filesystem_writeBootLog_tick(void)
         op_phase = 2u;
         return;
 
-    case 2u: /* WRITE EXACTLY EIGHT BYTES + QUEUE CLOSE */
+    case 2u: /* WRITE BOOT TOKEN + OPTIONAL FROZEN ASENSURE CAPSULE */
 #if DEV_MODE_LOGGING
-        if (op_bytes_done < 8u) {
-            uint32_t n = afatfs_fwrite(
-                op_file,
-                fs_boot_logging_code + op_bytes_done,
-                8u - op_bytes_done);
+        if (op_bytes_done < 8u + filesystem_hcprmsCapsulePayloadBytes()) {
+            const uint8_t *source;
+            uint32_t remaining;
+            uint32_t n;
+
+            /*
+             * Select only retained RAM that survived the dirty teardown.
+             * Input: absolute bootlog payload offset; output: one bounded
+             * partial-write request. Why: the capsule must follow the ASCII
+             * token in one durable file, but must never be emitted for an
+             * unrelated boot failure or read from destroyed operation scratch.
+             */
+            if (op_bytes_done < 8u) {
+                source = fs_boot_logging_code + op_bytes_done;
+                remaining = 8u - op_bytes_done;
+            } else {
+                source = fs_hcprms_boot_capsule + (op_bytes_done - 8u);
+                remaining = 8u + filesystem_hcprmsCapsulePayloadBytes() -
+                    op_bytes_done;
+            }
+            n = afatfs_fwrite(op_file, source, remaining);
             op_bytes_done += n;
             if (n == 0u && afatfs_isFull()) {
                 filesystem_finish(FS_STATUS_ERROR);
@@ -4596,6 +4814,11 @@ static void filesystem_ensureAutosaveFiles_tick(void)
 {
     switch (op_phase) {
     case 0: /* RETURN ROOT + OPEN AUTHORITATIVE HCNAMES */
+#if DEV_MODE_LOGGING
+        /* Begin the RAM-only capsule before this ensure transaction owns FAT. */
+        if (!filesystem_hcprmsCapsuleIsActive())
+            filesystem_hcprmsCapsuleBegin();
+#endif
         if (!bank_hasResidentBank()) {
             /* Defensive duplicate of the public wrapper's no-Bank gate. */
             filesystem_finish(FS_STATUS_ERROR);
@@ -4670,6 +4893,10 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         return;
 
     case 4: /* OPEN ROOT AS A DIRECTORY FOR A NO-OVERWRITE EXISTENCE SCAN */
+#if DEV_MODE_LOGGING
+        /* Preserve the selected A/B scan coordinate independently of CRC scratch. */
+        filesystem_hcprmsCapsuleSetTarget((uint8_t)op_stream_index);
+#endif
         if (!afatfs_chdir(NULL))
             return;
         op_file_ready = false;
@@ -4787,7 +5014,15 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             return;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen_lfn(filesystem_autosaveTargetName(), "w",
+        /*
+         * op_stream_index now holds the finalized whole-record CRC, not the
+         * A/B selector. Use op_file_version, captured before CRC work, so a
+         * missing A creates .hcprms1 and a missing B creates .hcprms2. This
+         * separation is required because every practical CRC is nonzero and
+         * would otherwise select B, falsely completing ensure with only B.
+         */
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(op_file_version), "w",
                               AFATFS_MATCH_CASE_INSENSITIVE, NULL,
                               on_file_opened)) {
             return;
@@ -4810,6 +5045,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
 
     case 12: /* STREAM ONE COMPLETE HEADER/MASK/NAME CHUNK AT A TIME */
     {
+        uint16_t requested;
         uint32_t written;
 
         if (op_bytes_done >= AUTOSAVE_RECORD_BYTES) {
@@ -4830,9 +5066,14 @@ static void filesystem_ensureAutosaveFiles_tick(void)
                 bank_restoreBankSlot(), op_stream_index, bank_displayName(),
                 (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
         }
-        written = afatfs_fwrite(
-            op_file, staging_buf + op_write_line_offset,
-            op_write_line_len - op_write_line_offset);
+        requested = (uint16_t)(op_write_line_len - op_write_line_offset);
+        written = afatfs_fwrite(op_file, staging_buf + op_write_line_offset,
+                                requested);
+#if DEV_MODE_LOGGING
+        /* Capture before advancing the chunk offset, including partial writes. */
+        filesystem_hcprmsCapsuleNoteWrite(requested, written,
+                                          op_write_line_offset);
+#endif
         op_write_line_offset =
             (uint16_t)(op_write_line_offset + written);
         /*

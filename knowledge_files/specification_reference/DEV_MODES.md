@@ -8,9 +8,9 @@ own AutoSave format/writer behavior, product filesystem layout, or low-level
 AsyncFATFS semantics; those belong to `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, and
 `ASYNCFATFS_REFERENCE.md` respectively.
 
-This document describes rollback baseline `c9807fa`. Plans and failed working
-tree experiments that mention a unified `/devlog.bin` are not implemented
-state.
+This document describes the Session 047 logging build. Plans and failed
+working-tree experiments that mention a unified `/devlog.bin` are not
+implemented state.
 
 The build has exactly two development modes:
 
@@ -65,20 +65,37 @@ and owner in `SRAM_MANIFEST.md` before implementation.
 
 ## Current logging files
 
-Rollback baseline `c9807fa` has two producer-specific root files. There is no
+The Session 047 build has two producer-specific root files. There is no
 `DEV_LOG_FILENAME`, `/devlog.bin`, `SaveFixTrace`, or `/savefix.bin` in the
 current code.
 
 ### `/bootlog.bin`
 
-The boot logger attempts to write exactly one eight-byte printable ASCII
-operation token after a pre-audio filesystem operation reaches the configured
-timeout/failure path. The path abandons the dirty filesystem state, remounts,
-opens `/bootlog.bin` with direct write/create/truncate mode, writes the token,
-closes, and flushes on a bounded best-effort deadline.
+The boot logger writes one eight-byte printable ASCII operation token after a
+pre-audio filesystem operation reaches the configured timeout/failure path.
+The path abandons the dirty filesystem state, remounts, opens `/bootlog.bin`
+with direct write/create/truncate mode, writes the payload, closes, and flushes
+on a bounded best-effort deadline.
 
 Examples include `BANKLOAD`, `KITQUAR `, and `HCNAMES `. The record has no NUL
 and no newline.
+
+For every ordinary failure, the payload is exactly the eight-byte token. A
+frozen `ASENSURE` timeout appends a 64-byte, eight-record HCPRMS capsule, so
+that specific payload is exactly 72 bytes. The raw suffix uses stages `0xE0`
+through `0xE7`, all integers are little-endian, and it exists only when
+`DEV_MODE_LOGGING` is enabled:
+
+| Stage | Bytes after stage | Meaning |
+| --- | --- | --- |
+| `E0` | schema, target, ensure phase, facade status, file operation, append phase, flags | `flags bit 7=active`, `bit 0=frozen` |
+| `E1` | `bytes_done:u32`, chunk length `u16`, zero-write streak | latest application progress |
+| `E2` | last written `u16`, chunk offset `u16`, requested `u16`, target generation | latest `afatfs_fwrite()` call |
+| `E3` | file cursor `u32`, logical size `u24` | pre-destroy file coordinates |
+| `E4` | search cluster `u32`, sectors/cluster, wrapped flag, flags | flags: full, file available, `bytes_done` at cluster boundary |
+| `E5` | append previous cluster `u32`, cursor cluster `u24` | allocator ownership |
+| `E6` | dirty, locked, reading, writing, flush, active-cache-index, full | cache summary; cache index `0xff` means none |
+| `E7` | SD state, operation, offset `u16`, retry count `u16`, callback-pending | transport state before abort |
 
 The file is forensic evidence only. Failure to create it must not prevent boot
 from continuing to the firmware's existing failure handling. Conversely, an
@@ -190,7 +207,8 @@ already identifies that fix and the two cannot be separated safely.
 For the current baseline:
 
 - preserve raw captures before inspection;
-- parse `/bootlog.bin` only as one eight-byte operation token;
+- parse `/bootlog.bin` as one eight-byte token, with the HCPRMS suffix only
+  when that token is `ASENSURE` and the file is exactly 72 bytes;
 - parse `/asavetrc.bin` only in eight-byte boundaries using the layout above;
 - treat a non-multiple-of-eight trace size as partial/corrupt evidence;
 - test logging-on and logging-off builds;
@@ -199,5 +217,7 @@ For the current baseline:
 - test absent, unique, case-variant, duplicate, scan-failure, open-failure, and
   power-interruption cases before declaring any future singleton repair done.
 
-There is no tracked host decoder for these files in rollback baseline
-`c9807fa`; do not cite deleted or uncommitted scripts as required tooling.
+`tools/decode_bootlog.py` is a tracked read-only decoder for ordinary boot
+tokens and the conditional `ASENSURE` capsule. It does not decode AutoSave
+records or replace the later, intentionally deferred general development-log
+converter.

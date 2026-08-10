@@ -2,36 +2,40 @@
 
 ## How to use this document
 
-This is the retained failure analysis and later whole-object plan. Session 046
-closed at rollback commit `c9807fa`; its authoritative outcome is
-`knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md`.
+This is the retained failure analysis and later whole-object plan. Session 047
+closed with the bounded-CRC and logging-capture work recorded in
+`knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md`. That handoff
+preserves the details formerly held in the two removable remedy documents.
 
 The execution state is now:
 
 - Steps 0–1 are complete: documentation was reconciled and the corrected
-  `D/S/A/V/M/C/P/T` lifecycle trace is present.
+  `D/S/A/V/M/C/P/T` lifecycle trace is present, its append completion
+  self-acknowledges the shared facade, and the trace-flush admission guard
+  avoids colliding with an active Load/Save page.
 - Step 2 is complete for the user-testable scalar owner classes. Do not reopen
   a vague matrix: Scene, Kit/Instrument, and Scene-owned MIDI channel/note were
   tested; there is no separate user-editable Bank scalar control.
-- Step 3 static reconciliation is complete, but exact rollback-boundary
-  settings persistence must be retested before any source change.
+- Step 3 static reconciliation is complete. The user re-tested the existing
+  one-second `settings.cfg` debounce/write behavior in Session 047 and found
+  it correct, so no settings source change is authorized. The broader four
+  provenance/AutoSave-policy hardware cases remain separately recorded below.
 - Step 4 semantics are settled: Bank slot/name are payload, and a structurally
   valid initial record can still be incomplete as a resident-Bank snapshot.
 - Steps 5–6—whole-object publication and Load/Save exclusion—remain future
-  work, after Session 047's CRC/settings/Bank baseline passes.
+  work. The bounded-CRC baseline has passed its focused follow-up, but Bank
+  Load/Save retains separate known defects and must stabilize before either
+  cross-cutting Phase-2 change.
 
-Use `SETTINGS_BANK_LOAD_REIMPLEMENT.md` first. It owns the immediate Session
-047 order: byte-bound every CRC path, test it alone, preserve active Scene
-during runtime Bank Load, retest settings, and complete Bank Save/audio
-sign-off. Only then return to Steps 5–6 below. Read this historical analysis
-together with:
+Read this historical analysis together with:
 
 - `knowledge_files/log_archive/045_SESSION_HANDOFF_LOG.md` for the original
   failure sections referenced as “§N” below;
-- `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md` for the deletion-safe
-  current status of `AUTOSAVE_PARAM_HOOK.md` and the remedy documents;
+- `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md` for the deleted-safe
+  pre-Session-047 status of `AUTOSAVE_PARAM_HOOK.md` and the remedy documents;
 - `knowledge_files/specification_reference/AUTOSAVE.md` for current behavior;
-- `SETTINGS_BANK_LOAD_REIMPLEMENT.md` for immediate implementation.
+- `knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md` for the completed
+  CRC/settings/trace/boot-capture chronology and remaining gates.
 
 Nothing in this document authorizes a source change by itself. It is the
 review/staging document Topics A–E of the 045 handoff asked for, turned into
@@ -401,3 +405,129 @@ Steps 0–1 fix the process gap first; Steps 2–4 rebuild a trustworthy baselin
 and settle the semantic questions on paper; Steps 5–6 re-implement the actual
 features one boundary at a time against that baseline, using the
 instrumentation to prove each step before moving to the next.
+
+---
+
+## Implementation note — boot-time A/B baseline creation selector (2026-08-10)
+
+Hardware fixture review after deleting both root AutoSave records and booting
+found a deterministic setup defect: `/.hcprms2` was created as a complete
+34,768-byte committed generation-1 record, but `/.hcprms1` was absent. The
+eight-byte trace contained only the scheduled (`S`) event, which is consistent
+with setup returning successfully and the writer being armed, not with a
+filesystem write error.
+
+Cause: the boot ensure operation ordinarily uses `op_stream_index` as the
+zero-based A/B selector. Before creating a missing record it saves that
+selector in `op_file_version`, then reuses `op_stream_index` as the bounded
+CRC32C accumulator. The subsequent open incorrectly called
+`filesystem_autosaveTargetName()`, which interprets its now-nonzero CRC value
+as the B selector. A missing A therefore created B; the next root scan found
+that B and reported the pair ensured without ever creating A.
+
+Implemented correction: phase 10 opens
+`filesystem_autosaveFilenameForIndex(op_file_version)` instead. The saved
+selector remains stable through the bounded CRC pass, so each missing member
+of the A/B pair receives its intended filename. No interface or header change
+is needed: the index-to-filename helper already exists in `filesystem.c`, and
+the fix only corrects the internal caller that had selected the wrong source
+of truth.
+
+Required hardware retest: remove both `/.hcprms1` and `/.hcprms2` plus the
+trace, boot with AutoSave enabled and a valid resident Bank, then inspect the
+card. Both files must be present at exactly 34,768 bytes with committed
+headers. Leave the unit powered long enough for the normal five-second writer
+deadline only if testing recovery/idle behavior too; pair creation itself is
+boot-time work and does not require waiting for that deadline.
+
+---
+
+## Session 047 progress and remedy-document disposition (2026-08-10)
+
+This section is the deletion-safe disposition of `AUTOSAVE_REMEDY_PA2ST1.md`
+and `AUTOSAVE_REMEDY_PA2ST2-3.md`. Those planning files may be removed after
+this closeout; their remaining decisions and evidence are preserved here and
+in `047_SESSION_HANDOFF_LOG.md`.
+
+### Completed from PA2ST1 — Step 1 observability
+
+- The `DEV_MODE_LOGGING` lifecycle trace is complete: `AutosaveTrace` keeps a
+  bounded 64-record / 512-byte RAM ring and records `D/S/A/V/M/C/P/T` at the
+  scalar dirty, schedule, admission, validation, mask-merge, capture,
+  publication, and terminal boundaries. `filesystem.c` alone owns its
+  lower-priority `asavetrc.bin` append/close/sync and acknowledges records only
+  after durable completion.
+- The first hardware fixture exposed a trace-writer scheduler bug rather than
+  a dirty-hook defect: a `NULL` append callback left the shared filesystem
+  facade terminal, preventing later background work. The implemented private
+  completion callback returns `DONE` or `ERROR` to `IDLE`; failed appends keep
+  the undurable ring records. The bench-only blocking helper observes and
+  acknowledges its own terminal state separately.
+- Session 047 additionally held optional trace-file admission while a Load or
+  Save page owns the facade. Repeated playback-time `000 Full` / `013 LoadTst`
+  loads and saves over 024/009 produced no audible glitch. This is a narrow
+  trace-arbitration result, not the rejected generic pacing experiment and not
+  a general Load/Save-exclusion implementation.
+- The Step-1 trace is usable evidence for later work. No broader trace ring,
+  screen logging, scheduler delay, or proposed Step-2/3 snapshot structure is
+  authorized.
+
+### Completed and remaining from PA2ST2-3 — Steps 2 and 3
+
+- **Step 2 scalar owner coverage is accepted complete.** The source audit and
+  hardware work cover Scene values, Kit/generated endpoints, Instrument Normal
+  and Morph descriptors (including supplemental descriptors), and Scene-owned
+  MIDI channel/note. Equal-value guards, debounce coalescing, and atomic
+  take/re-dirty behavior remain properties to protect when changing an owner,
+  not a reason to reopen an unbounded matrix. There is no separately editable
+  Bank scalar UI control. Whole-object publication, Pattern/Effect state, and
+  power-cut behavior were explicitly outside that acceptance.
+- **Step 3 settings result:** the existing revision-protected, one-second
+  `settings.cfg` writer was user re-tested in Session 047 and passed. No
+  settings implementation change was made or is pending. The old failed-branch
+  report of a stale post-load settings file must not be used as a reason to
+  move current callbacks speculatively.
+- **Step 3 still needs focused hardware evidence** if/when AutoSave work is
+  resumed: root Scene Load, root Scene Save, partial Bank Load, and partial
+  Bank Save provenance each need independent `settings.cfg`/source-row
+  fixtures; AutoSave OFF→ON needs idle and in-flight checks. Use the existing
+  trace plus copied record/settings fixtures. Do not implement the superseded
+  16-byte combined diagnostic or a new C/H evidence API merely to run them.
+- The former proposed read-only AutoSave record inspector remains optional
+  future host tooling. The new `tools/decode_bootlog.py` only decodes the
+  boot-failure capsule; it is not a replacement for a full A/B record/trace
+  inspector. A general human-readable log converter is deferred until all
+  AutoSave/log formats are final.
+
+### Session 047 bounded-CRC and boot-capture boundary
+
+- All four CRC consumers—initial record creation, no-valid-record recovery,
+  candidate validation, and transformed copy—now share the 128-byte-per-tick
+  retained-cursor limit. This replaces the remaining foreground whole-record
+  CRC; it adds no delay, record-sized staging buffer, or permanent CRC store.
+- The selector correction above was found during the missing-pair test. It
+  prevents the CRC accumulator from selecting B when creation meant A.
+- One subsequent initial-B creation stopped at exactly 32,768 bytes and hit the
+  real ten-second `ASENSURE` boot watchdog. The capture build freezes a
+  64-byte E0..E7 capsule containing application progress, AsyncFATFS
+  allocator/cache/file state, and SD transport state before normal recovery.
+  It is emitted only after the ordinary eight-byte boot token, never performs
+  diagnostic I/O while the failed transaction owns the filesystem, and does
+  not alter retry/allocator/recovery policy. Both logging configurations built;
+  later boots produced two complete 34,768-byte records and no bootlog.
+- Therefore the 32 KiB lower-layer failure is an intermittent observation, not
+  a diagnosed CRC fault or a resolved defect. If it returns, preserve the SD
+  card and decode the 72-byte `ASENSURE` bootlog before attempting an
+  AsyncFATFS or SD-driver change.
+
+### Next Phase-2 gate
+
+Do not start Steps 5 or 6 in Session 048 merely because the CRC work is
+bounded. First keep Bank Load/Save stable and resolve only one demonstrated
+Bank behavior at a time. The active-playing-Scene switch and stale overwrite
+folder are known independent bugs; the latter requires native recursive-delete
+correctness, while the former requires a separate runtime-vs-boot selection
+contract. Once the relevant baseline is stable, Step 5 resumes in the written
+order: Whole Instrument, Whole Kit, root Scene without Pattern, selective
+Bank session replacement, then Morph projection. Reattempt Load/Save
+exclusion last and in isolation.

@@ -15,14 +15,14 @@ Related authority is deliberately separate:
 - `DEV_MODES.md` owns development-mode selection and diagnostic file output;
 - `ASYNCFATFS_REFERENCE.md` owns low-level AsyncFATFS contracts;
 - `SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
-  `c9807fa` linked allocation snapshot.
+  Session 047 linked allocation/capture snapshot.
 
 AutoSave currently persists the active resident Bank's implemented scalar
 state into two hidden root records. It does not modify root `Bank/`, `Scene/`,
 `Kit/`, or `Instrument/` library objects and does not replace explicit Load or
 Save operations.
 
-Implemented in rollback baseline `c9807fa`:
+Implemented in the Session 047 AutoSave baseline:
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
@@ -186,7 +186,7 @@ restore every captured offset to the canonical mask and retry after the normal
 five-second interval. An empty merged mask completes read-only and must not
 advance generation, probe, or target contents.
 
-The live-Bank match in step 1 is current `c9807fa` behavior, implemented by
+The live-Bank match in step 1 is current inherited behavior, implemented by
 `autosave_streamValidationMatchesBank()`, but it is not the settled future
 semantic contract. Bank slot and name are also mutable payload fields; treating
 a mismatch as foreign-record identity can force regeneration instead of
@@ -195,19 +195,16 @@ boundary explicitly before whole-object Bank Load/Save publication. Do not
 silently describe the current comparison as proof that Bank metadata is
 immutable identity.
 
-## CRC scheduling: current limitation and required remedy
+## CRC scheduling: implemented bounded contract
 
-The rollback baseline does **not** byte-limit every CRC traversal:
-
-- candidate validation and transformed-copy CRC work are streamed through the
-  filesystem staging buffer;
-- initial-record generation and recovery use `autosave_initialRecordCrc()`,
-  which traverses the complete 34,768-byte record in one call.
-
-That whole-record call is a known scheduler risk. The required remedy is to
-give all four CRC paths retained cursors and one explicit byte budget per
-filesystem service pass. The current reimplementation plan proposes 128 bytes
-per pass, but that constant and code are not present in `c9807fa`.
+Every CRC traversal is now governed by
+`AUTOSAVE_CRC_BYTES_PER_TICK == 128`: candidate validation, transformed-copy
+CRC, initial-record generation, and neither-valid recovery each retain their
+cursor/accumulator between filesystem passes and consume no more than the
+shared byte budget in one tick. The creation selector is retained separately
+before its former scratch field is reused as the CRC accumulator, so a missing
+A cannot be opened accidentally as B. This needs no record-sized buffer, blind
+delay, or new permanent CRC store.
 
 Do not add a blind one-millisecond interval or sleep between unbounded work.
 That failed experiment slowed Bank operations dramatically and merely delayed
@@ -250,9 +247,9 @@ repeated same-display-name failures and are mandatory for future work:
 - Never add another hidden record name as a workaround for a failed lookup.
 
 The hidden A/B paths implement their own scan/create discipline. Development
-log files in the rollback baseline do not yet have equivalent duplicate-safe
-singleton handling; that limitation belongs to `DEV_MODES.md` and must not be
-mistaken for an AutoSave format rule.
+log files do not yet have equivalent duplicate-safe singleton handling; that
+limitation belongs to `DEV_MODES.md` and must not be mistaken for an AutoSave
+format rule.
 
 ## Known `.hcprms` boot-lock evidence
 
@@ -264,9 +261,11 @@ possibly in FAT cluster allocation/cache handling or the SD transport. That is
 evidence, not proof, and does not justify changing the format or hiding an
 AsyncFATFS failure.
 
-No detailed `.hcprms` allocation/write milestone hook is implemented in the
-rollback baseline. Any older diagnosis plan that assumes `/devlog.bin` is a
-current sink must be reconciled with `DEV_MODES.md` before use.
+The Session 047 logging build freezes a fixed 64-byte application/AsyncFATFS/
+SD diagnostic capsule only on an `ASENSURE` boot deadline, before normal
+recovery destroys live state. It does not change AutoSave validity, retry, or
+allocation behavior; `DEV_MODES.md` owns its exact 72-byte bootlog envelope.
+Any older diagnosis plan that assumes `/devlog.bin` is a current sink is stale.
 
 ## Extending AutoSave
 
@@ -310,7 +309,17 @@ policy, dirty state, scheduling, or writer results. AutoSave does not own the
 development flag, destination filename, record envelope, or persistence
 policy; those details are authoritative only in `DEV_MODES.md`.
 
-There is no tracked host AutoSave-inspection script in the rollback baseline.
-Validate captures without editing the source files: check exact record sizes,
+An `ASENSURE` boot timeout additionally freezes a logging-only diagnostic
+capsule before boot recovery destroys the active filesystem state. It observes
+creation only and neither changes record validity nor retries, truncates,
+repairs, or accepts either hidden record. Its exact `/bootlog.bin` envelope is
+owned by `DEV_MODES.md`; this specification deliberately does not duplicate
+the diagnostic wire layout.
+
+`tools/decode_bootlog.py` is a tracked, read-only decoder for the current
+eight-byte boot token and conditional 72-byte `ASENSURE` capsule. It is not an
+AutoSave record inspector and it must not modify fixtures. Validate AutoSave
+captures without editing the source files: check exact record sizes,
 header/commit fields, CRC32C, generation selection, dirty masks, and trace
-records independently.
+records independently. A broader human-readable development-log converter is
+deferred until AutoSave behavior and every logging format are complete.
