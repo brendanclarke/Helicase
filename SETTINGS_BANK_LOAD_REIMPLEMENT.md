@@ -118,6 +118,51 @@ was made to the settings writer, Bank loader, CRC bound, or generic final-index
 request behavior. Hardware retest: load `013 LoadTst` with logging enabled,
 then leave the Load page and confirm trace persistence resumes normally.
 
+### 2026-08-10 hardware result — CRC/load pass; Bank overwrite stop condition
+
+With the trace guard installed, the user loaded `000 Full` and `013 LoadTst`
+several times while playing and heard no audio glitches. The copied card
+contains two exact 34,768-byte AutoSave records: `/.hcprms1` is committed
+generation 3 and `/.hcprms2` is committed generation 2; each stored CRC32C
+matches an independent recomputation that zeroes the stored-CRC field exactly
+as the firmware validator does. `asavetrc.bin` is an integral 112 records and
+its final two writer cycles each contain publish and successful terminal
+events. This is accepted hardware evidence for the bounded-CRC and trace-guard
+load path, subject to the remaining reboot test.
+
+The same card reveals a separate Bank Save overwrite failure. Saving `Full`
+to previously empty slot 024 produced `024 Full/`, sixteen child directories,
+and index row 024 `Full`. Saving `LoadTst` over occupied slot 009 instead left
+both `009 Full/` and `009 LoadTst/`; `/Bank/.hcindex` row 009 remains `Full`.
+The saved `LoadTst` tree exists, but it is not the authoritative slot-009
+entry. Do not treat the Bank Save phase as passed and do not clean either
+directory: the duplicate is the fixture for a separate overwrite-target fix.
+The likely source boundary is Bank promotion phase 43, which renames only the
+new final name (`009 LoadTst`) instead of first resolving the existing
+same-number directory (`009 Full`).
+
+### 2026-08-10 implementation record — Bank Save same-slot promotion
+
+The Bank Save promotion path now scans `/Bank/` after its complete temporary
+tree has been written. It parses each visible numbered directory and captures
+the actual LFN for exactly one directory whose slot equals the immutable save
+slot. That old directory is renamed to the existing non-numbered `oldNNN-...`
+scratch component before the temporary tree is promoted to the reconstructed
+`NNN NewName` component. The scan reuses the scratch-preflight collision byte
+as a bounded 0/1/2 match count; no SRAM field or allocation was added.
+
+Two or more same-slot directories are now an explicit safe stop (`BDup36`):
+the existing directories and the completed non-numbered temp tree remain for
+inspection, and no lexical winner is selected. Consequently, the current
+duplicate slot-009 fixture is a negative test only. Test the fix first by
+saving the current `LoadTst` Bank over a *different*, singly occupied `Full`
+slot (for example 012). Expected result: the old numbered directory becomes
+non-numbered `old012-...`, exactly one `012 LoadTst/` remains, and index row
+012 reads `LoadTst`. Then attempt slot 009 only to verify it reports the safe
+duplicate error without modifying either duplicate directory. `make -j2`
+passed with normal logging enabled (`text=372,628`, `data=404`, `bss=78,988`);
+the ordinary pre-existing unused-function and newlib syscall warnings remain.
+
 ## Required implementation order
 
 Each firmware behavior change is a separate build and hardware test gate. Do not combine the CRC correction, Bank Load semantics, and a conditional settings fix into one untested image.

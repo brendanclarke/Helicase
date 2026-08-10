@@ -13259,18 +13259,145 @@ static void filesystem_saveBankDirectory_tick(void)
             return;
         op_kit_root_dir = NULL;
         /*
-         * Move the old numbered Bank out of the loadable namespace.
+         * Find the physical Bank directory currently occupying this slot.
          *
-         * Inputs: current directory is `/Bank/`; op_save_bank_dir_display_name
-         * is the final `NNN Name` slot and op_save_bank_old_display_name is a
-         * non-numbered `old...` component. Output: if the old Bank exists, it
-         * is renamed out of the numbered namespace without recursing through
-         * its children. If it does not exist, asyncfatfs completes with an
-         * empty open-name buffer and phase 45 still attempts temp promotion.
+         * Inputs: current directory is `/Bank/`; op_slot is the immutable
+         * numeric target and op_bank_display_name is the new eight-cell Bank
+         * identity. Output: op_root_open_name is rebuilt as the final
+         * `NNN NewName` component, while the later scan replaces
+         * op_save_bank_dir_display_name with the actual old LFN, if exactly
+         * one same-number directory exists. op_save_bank_scratch_collision is
+         * reused after its earlier temp-name preflight as this scan's bounded
+         * match count, so no new permanent operation storage is required.
          *
-         * Why: deleting a damaged old Bank tree recursively has been the
-         * failure point. Renaming the old directory preserves its contents for
-         * manual cleanup while making it invisible to root Bank scans.
+         * Why: the previous promotion tried to rename the new final component
+         * (for example `009 LoadTst`) before it existed, leaving an old
+         * `009 Full` alongside the promoted tree. Root Bank indexing then
+         * selected the lexical duplicate instead of the just-saved Bank.
+         * Matching by parsed numeric slot makes overwrite independent of a
+         * changed display name, without recursively deleting user data.
+         */
+        filesystem_makeNumberedDir(op_root_open_name, op_slot,
+                                   op_bank_display_name);
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(".", "r", on_file_opened))
+            return;
+        op_phase = 51u;
+        return;
+
+    case 51: /* WAIT /Bank/ SLOT-OVERWRITE SCAN HANDLE */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /*
+         * Start an exact numeric-slot scan before any rename can mutate /Bank/.
+         *
+         * Inputs: the `.` handle opened in phase 43 and immutable op_slot.
+         * Output: the old preflight collision byte becomes a 0/1/2 match
+         * counter for phase 52. This reuse is safe because phase 50 consumed
+         * the scratch-name collision result before temp-tree creation began.
+         * A count of two is sufficient: it proves an ambiguous duplicate and
+         * avoids retaining an unbounded list of user directory names.
+         */
+        afatfs_findFirstObject(op_file, &op_object_finder);
+        op_save_bank_scratch_collision = 0u;
+        op_phase = 52u;
+        return;
+
+    case 52: /* FIND ONE EXISTING `NNN Name` DIRECTORY FOR op_slot */
+    {
+        afatfsOperationStatus_e ast =
+            afatfs_findNextObject(op_file, &op_object_finder, &op_object);
+        uint16_t found_slot;
+        char found_display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+        if (ast == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (ast == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_file, &op_object_finder);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_file, &op_object_finder);
+            op_phase = 53u;
+            return;
+        }
+        if (op_object.id.kind != AFATFS_OBJECT_DIRECTORY ||
+            !storage_parseNumberedFolder(op_object.id.displayName,
+                                         &found_slot, found_display) ||
+            found_slot != op_slot) {
+            return;
+        }
+        /*
+         * Retain one physical old component, but fail closed on duplicates.
+         *
+         * Inputs: a visible directory whose parsed `NNN` matches op_slot.
+         * Output: the first exact LFN replaces the no-longer-needed requested
+         * final name in op_save_bank_dir_display_name; a second match stops
+         * enumeration and leaves the new temp tree unpublished. Why: choosing
+         * one duplicate would preserve another loadable same-slot Bank and
+         * recreate the ambiguity this promotion boundary is intended to stop.
+         */
+        if (op_save_bank_scratch_collision == 0u) {
+            filesystem_copyLongComponent(op_save_bank_dir_display_name,
+                                         sizeof(op_save_bank_dir_display_name),
+                                         op_object.id.displayName);
+            op_save_bank_scratch_collision = 1u;
+            return;
+        }
+        op_save_bank_scratch_collision = 2u;
+        afatfs_findLastObject(op_file, &op_object_finder);
+        op_phase = 53u;
+        return;
+    }
+
+    case 53: /* CLOSE THE SLOT-OVERWRITE SCAN HANDLE */
+        /*
+         * Release the directory iterator before renaming within its parent.
+         *
+         * Input: the phase-52 finder is exhausted or stopped after a duplicate.
+         * Output: phase 54 owns no live iterator while it either rejects an
+         * ambiguous card or starts the old-tree rename. This preserves
+         * AsyncFATFS's one-handle ownership rule and cannot affect the already
+         * complete non-numbered temp payload.
+         */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 54u;
+        return;
+
+    case 54: /* DECIDE ABSENT, UNIQUE, OR DUPLICATE OLD SLOT TARGET */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_save_bank_scratch_collision > 1u) {
+            /* A duplicate same-number Bank is card ambiguity, not a safe
+             * overwrite target. Preserve both existing directories and the
+             * temp tree for inspection instead of silently selecting one. */
+            filesystem_makeNamedErrorCode("BDup", 54u);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (op_save_bank_scratch_collision == 0u) {
+            /* No old `NNN Name` exists; the normal new-slot promotion below
+             * can publish the completed temp tree directly under op_root_open_name. */
+            op_phase = 44u;
+            return;
+        }
+        /*
+         * Move the one discovered old numbered Bank out of the loadable namespace.
+         *
+         * Inputs: op_save_bank_dir_display_name now holds the actual old LFN
+         * (such as `009 Full`) and op_save_bank_old_display_name is this
+         * request's non-numbered `old009-...` destination. Output: phase 55
+         * waits for the rename before phase 44 promotes the new temp tree.
+         * Renaming, rather than recursively deleting, preserves old user data
+         * while ensuring the numeric slot has no competing directory.
          */
         op_rename_done = 0u;
         memset(op_save_bank_rename_open_name, 0,
@@ -13282,27 +13409,36 @@ static void filesystem_saveBankDirectory_tick(void)
                                      on_rename_complete)) {
             return;
         }
+        op_phase = 55u;
+        return;
+
+    case 55: /* WAIT OLD SAME-SLOT BANK RENAME */
+        if (!op_rename_done)
+            return;
+        /* The old tree is now non-numbered, so phase 44 can make the complete
+         * temp tree the sole visible directory for this root Bank slot. */
         op_phase = 44u;
         return;
 
     case 44:
-        if (!op_rename_done)
-            return;
         /*
          * Publish the complete temp Bank as the numbered slot.
          *
-         * Inputs: temp tree name from filesystem_requestSaveBank() and final
-         * `NNN Name` display name. Output: op_save_bank_rename_open_name
-         * receives the final asyncfatfs-openable alias on success. If this
-         * buffer stays empty, the promotion did not happen and the numbered
-         * Bank is not trustworthy, so the save reports an error instead of
-         * silently leaving the menu on a broken slot.
+         * Inputs: temp tree name from filesystem_requestSaveBank() and the
+         * reconstructed final `NNN NewName` in op_root_open_name. Output:
+         * op_save_bank_rename_open_name receives the final
+         * asyncfatfs-openable alias on success. The target is deliberately not
+         * op_save_bank_dir_display_name: that scratch now identifies the old
+         * tree discovered by slot, or is irrelevant for a new slot. If the
+         * alias stays empty, promotion did not happen and the numbered Bank is
+         * not trustworthy, so the save reports an error rather than silently
+         * leaving the menu on a broken slot.
          */
         op_rename_done = 0u;
         memset(op_save_bank_rename_open_name, 0,
                sizeof(op_save_bank_rename_open_name));
         if (!afatfs_renameObject_lfn(op_save_bank_tmp_display_name,
-                                     op_save_bank_dir_display_name,
+                                     op_root_open_name,
                                      AFATFS_MATCH_CASE_INSENSITIVE,
                                      op_save_bank_rename_open_name,
                                      on_rename_complete)) {
@@ -13323,7 +13459,9 @@ static void filesystem_saveBankDirectory_tick(void)
                              op_save_bank_rename_open_name);
         if (!afatfs_chdir(NULL))
             return;
-        filesystem_recordSavedBankDirectory(op_save_bank_dir_display_name,
+        /* op_root_open_name remains the just-promoted visible component;
+         * publish that name into the Bank cache rather than the displaced old LFN. */
+        filesystem_recordSavedBankDirectory(op_root_open_name,
                                             op_save_bank_dir_open_name);
         bank_setDisplayName(op_bank_display_name);
         bank_setScenePresentMask(op_bank_scene_save_mask);
