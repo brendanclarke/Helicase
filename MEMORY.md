@@ -17,7 +17,8 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: repository root, a development branch.
+**Current working source**: repository root at rollback baseline `c9807fa`
+(`autosave trace logger working, pre steps 2 and 3 implementation`).
 
 ## RAM Allocation Approval Policy
 
@@ -31,6 +32,10 @@ acknowledgement. This applies to globals, static storage, linker sections,
 pools/unions, DMA buffers, and any material stack-budget increase, in this and
 future sessions. A change that releases RAM does not authorise reuse of that
 capacity for another subsystem.
+
+Logging/trace allocations are approved only while `DEV_MODE_LOGGING` is
+enabled and the corresponding logging path is compiled. A logging-off build
+must not allocate those rings, cursors, or timing records.
 
 ## Volatile Notes
 
@@ -50,7 +55,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; read
+  `SRAM_MANIFEST.md`; the latter now contains the current `c9807fa` linked
+  totals. AutoSave format/writer authority is `AUTOSAVE.md`;
+  development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live
   memory manifest, module map, and oscillator-interpolation document.
@@ -108,6 +115,10 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   or retained filename stems. Because text rows have variable length, a
   targeted update reads all 129 rows into the shared cache, overlays only its
   owned rows, and rewrites the file.
+- Every create-capable HCNAMES path first completes and closes a
+  case-insensitive root absence proof. A NULL read open is not absence; one
+  folded match permits one read retry, while duplicate matches and every
+  scan/open/close/FAT failure remain errors and authorize no creation.
 - Typed load staging is a separate aligned 2,048-byte union, never the
   9,000-byte name cache. It holds one Kit, one Instrument candidate, or Scene
   settings plus one Kit. Scene Pattern data is excluded: after settings and
@@ -130,15 +141,15 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   suppress every cursor, and retain input locking until true terminal work
   finishes. Preparatory index/preview work may use `menu_storageBusy` without
   showing `...`. Every completion resets to the bracketed type row.
-- Session 045's committed Autosave implementation is the accepted Phase 1
-  production baseline, not rejected work: it owns the 34,768-byte A/B records,
-  canonical 3,856-byte mutation mask, bounded atomic take/re-dirty drain,
-  typed scalar dirty markers, and v1 AutoSave/settings provenance. Hardware
-  testing has exercised ordinary single-parameter hooks for the testable
-  Scene, Kit, and Instrument parameter types. Whole-object load/save hooks,
-  transaction-wide Load/Save exclusion, and the remaining complete behavioral
-  matrix are still unimplemented or unclosed. Authority:
-  `045_SESSION_HANDOFF_LOG.md` and `SESSION_045_CONSOLIDATED_POST_MORTEM.md`.
+- Sessions 045–046's committed AutoSave implementation at `c9807fa` is the
+  accepted baseline, not rejected work: exact 34,768-byte A/B records, one 3,856-byte
+  canonical mutation mask, bounded mask/value capture with atomic
+  take/re-dirty behavior, typed scalar markers, v1 settings provenance, and
+  the AutoSave lifecycle trace. Available scalar controls are accepted as
+  hardware tested: Scene; Kit/Instrument; and MIDI channel/note, which are
+  Scene values. There is no user-changeable Bank scalar control for another UI
+  test. Do not reopen this as a vague coverage matrix. Authority:
+  `knowledge_files/specification_reference/AUTOSAVE.md`.
 - Production currently includes four pre-audio SD timing holds (250 ms before
   SD init, paced ACMD41 with one-second timeout, 50 ms post-mount, and 50 ms
   pre-Bank). The intermittent boot hang that motivated them is not reproducible
@@ -166,9 +177,18 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `ASYNCFATFS_REFERENCE.md`.
 - File/Dir/sDir are no longer in the normal type cycle; their compatibility
   filesystem/Preset calls do no work, although residual Menu display code and
-  the two 49-byte strings remain linked. Boot filesystem diagnostic observers
-  remain compiled but are selected only when `CONFIG_DEV_MODE != 0`;
-  production uses `CONFIG_DEV_MODE == 0`.
+  the two 49-byte strings remain linked. There are exactly two development
+  flags: `DEV_MODE_DIAGNOSTIC` is screen-only and `DEV_MODE_LOGGING` is
+  file-only; trace is logging. At `c9807fa`, diagnostic is 0 and logging is 1.
+  Current file outputs are `/bootlog.bin` and `/asavetrc.bin`; there is no
+  implemented `/devlog.bin`. Authority:
+  `knowledge_files/specification_reference/DEV_MODES.md`.
+- Session 046 is closed in
+  `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md`. Read it before
+  deleting or relying on `SESSION_045_CONSOLIDATED_POST_MORTEM.md`,
+  `BOOT_LOGGING.md`, `KITQUAR_FIX.md`, `BANKLOAD_FIX.md`,
+  `DUAL_HCNAMES_FIX.md`, `AUTOSAVE_PARAM_HOOK.md`, or
+  `AUTOSAVE_REMEDY_PA2ST1.md`; the handoff is their deletion-safe record.
 
 ---
 
@@ -192,11 +212,13 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   ├── OSC_INTERP_AUDIT.md         ← oscillator interpolation audit
 │   ├── specification_reference/
 │   │   ├── ASYNCFATFS_REFERENCE.md    ← low-level async FAT/VFAT API contracts, pumping, LFN/object identity, deletion, and caller rules
+│   │   ├── AUTOSAVE.md                 ← authoritative hidden A/B format, dirty ownership, writer lifecycle, limitations, and validation status
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
+│   │   ├── DEV_MODES.md                ← authoritative screen-diagnostic versus file-logging policy and current log formats
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map, updated through Session 044
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through c9807fa
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
-│   │   └── SRAM_MANIFEST.md           ← current linked SRAM1/DTCM, Pattern/delay reservations, and major owners
+│   │   └── SRAM_MANIFEST.md           ← current c9807fa linked snapshot and binding reservation policy
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -305,6 +327,8 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 | Which session introduced a fix? | `knowledge_files/log_archive/000_SESSION_INDEX.md` |
 | Full details of a fix or decision? | `knowledge_files/log_archive/00x_SESSION_HANDOFF_LOG.md` |
 | Current filesystem, instrument/kit file, Scene storage, menu, and DSP propagation spec? | `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` |
+| Current AutoSave format, ownership, writer, and limitations? | `knowledge_files/specification_reference/AUTOSAVE.md` |
+| Development screen diagnostics and file logging? | `knowledge_files/specification_reference/DEV_MODES.md` |
 | Current module/API ownership boundaries? | `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` |
 | Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
 | Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
@@ -312,20 +336,25 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 
 ### Specification-reference index
 
-These are the six authoritative/reference documents under
+These are the eight authoritative/reference documents under
 `knowledge_files/specification_reference/`. `FILESYSTEM_SPEC.md` is the
 product-level source of truth; `ASYNCFATFS_REFERENCE.md` is its low-level
-filesystem implementation companion. The remaining documents are audits or
-API/feature references and may contain historical snapshots as noted below.
+filesystem implementation companion. For AutoSave specifically,
+`AUTOSAVE.md` is authoritative and `FILESYSTEM_SPEC.md` contains only the
+product-filesystem boundary. `DEV_MODES.md` exclusively owns development-mode and
+logging behavior. The remaining documents are audits or API/feature references
+and may contain historical snapshots as noted below.
 
 | File | What it contains | Use it when |
 |------|------------------|------------|
 | `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, sanitization, LFN/SFN display-vs-alias identity, object iteration, navigation, removal, rename, flush boundaries, production users, and unfinished APIs. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
+| `AUTOSAVE.md` | Implemented hidden A/B wire format, ownership, canonical dirty mask, writer lifecycle, power-loss behavior, CRC limitation, and accepted scalar validation status. | Changing AutoSave format, dirty hooks, capture, scheduling, or recovery. |
 | `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
+| `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
 | `FILESYSTEM_SPEC.md` | Current product storage specification: root layout, numbered Kit/Scene/Bank folders, `kitset.kcg`, instrument schemas/keys, Scene-owned state, Morph/modulation, Pattern/Sample/Wavetable/Effect targets, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
 | `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map for Pattern, UI, sequencer, Preset, ParameterArray, instruments, modulation, MIDI, filesystem, storageTypes, and boot; also records removed front-panel protocol surfaces. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `SRAM_MANIFEST.md` | Fresh linked-image SRAM1/DTCM totals, Pattern/delay reservation policy, Scene/Pattern/Kit structure sizes, cache/staging ownership, and major runtime owners. | Changing retained state, adding caches/names, or evaluating RAM cost. |
+| `SRAM_MANIFEST.md` | Current `c9807fa` linked snapshot, AutoSave/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
 
 ---
 
@@ -538,7 +567,9 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
   particular `.hctmp.<ext>` is excluded from Instrument indexes and repair.
 - Filesystem-level recursive directory cleanup exists for replacement-style
   saves such as Kit Save. Atomic rename/replace remains missing and is required
-  before Scene/Bank/autosave promotion can claim power-loss-safe commits.
+  before Scene/Bank library promotion can claim power-loss-safe commits.
+  Hidden AutoSave A/B publication uses its separate commit-last contract in
+  `AUTOSAVE.md`; it is not the abandoned per-library-file dot-backer design.
 - Root `Instrument/` is a separately scanned, type-filtered source pool.
   Instrument Load shows a `kit` row above numbered row `000`. On menu entry or
   voice change, the original voice is saved as
@@ -761,24 +792,78 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Known Issues / Technical Debt
 
+### Rollback state after failed Session 046 work
+
+- The repository was reset to `c9807fa`. It includes the accepted Session 045
+  scalar AutoSave path and lifecycle trace, but excludes later working-tree
+  pacing, active-Scene Bank Load, unified-log, and boot-lock diagnostic
+  experiments.
+- Initial creation and no-valid-record recovery still call
+  `autosave_initialRecordCrc()` over the complete 34,768-byte record in one
+  foreground call. Candidate validation and transformed-copy CRC work stream,
+  but all AutoSave CRC paths are not governed by one byte budget. The required
+  repair is retained-cursor, byte-limited CRC work across filesystem passes for
+  every CRC path; see `AUTOSAVE.md` and `SETTINGS_BANK_LOAD_REIMPLEMENT.md`.
+- `c9807fa` still calls `autosave_streamValidationMatchesBank()` when selecting
+  a winner. This is accurate current behavior but not the settled future
+  contract: Bank slot/name are mutable payload. Resolve that validator/session
+  boundary before whole-object Bank Load/Save publication; do not pretend the
+  mismatch check has already been removed.
+- Do not restore the failed generic one-millisecond filesystem pacing. It made
+  Bank Save/Load take tens of seconds to about a minute and delayed two audible
+  glitches without eliminating them.
+- The one-second debounced `settings.cfg` writer and Menu dirty hooks are
+  present in `c9807fa`. Re-test this rollback before changing settings control
+  flow; patch only if current evidence reproduces a failure.
+- Runtime Bank Load still follows the loaded Bank's active Scene. Preserving
+  the pre-load active Scene is not implemented at this rollback and remains a
+  separate targeted change after the CRC repair/test boundary.
+- Current logging uses `/bootlog.bin` and `/asavetrc.bin`; both writers lack a
+  complete duplicate-safe singleton proof. Preserve duplicate entries as
+  evidence. A failed open callback is not proof of absence because append and
+  write modes include CREATE.
+- Do not restore the failed uncommitted `/devlog.bin` consolidation. Its test
+  ended in a boot timeout, no `devlog.bin`, and a partial 32,768-byte
+  `/.hcprms2`. The partial prefix supports a possible cluster-extension,
+  cache, or SD-transport stall, but does not prove that cause. Logger failure
+  must never mask the original AutoSave failure.
+  `HCPRMS_BOOTLOCK_DIAGNOSIS.md` still assumes the rolled-back DEVLOG sink and
+  untracked host tooling; reconcile it with `DEV_MODES.md` before implementing
+  any part of that plan.
+
+### Resolved / Changed in Session 046
+
+- Boot Kit quarantine and Bank Load have one ten-second operation deadline plus
+  non-rearming substep labels. Ordinary operation failure and timeout reach the
+  same bounded best-effort boot failure writer without being converted into
+  success.
+- Kit validation distinguishes valid content, invalid content, and I/O abort.
+  Only proven invalid content may reach quarantine rename; an interrupted FAT
+  operation leaves the Kit intact and aborts index publication.
+- Boot consumes failed index/load request acceptance and terminal status before
+  Menu acknowledgement or empty-library fallback can hide the failure.
+- HCNAMES direct access is case-insensitive and every create-capable path uses
+  one shared root absence proof. Duplicate or failed proof never mutates the
+  card. Hardware retest did not reproduce the dual HCNAMES entry.
+- The `DEV_MODE_LOGGING`-only 520-byte AutoSave lifecycle trace is present at
+  `c9807fa`. Its autonomous append has a completion callback that returns the
+  facade to `IDLE`; failed appends retain pending records.
+- User-testable scalar owner coverage is accepted complete: Scene,
+  Kit/Instrument, and Scene-owned MIDI channel/note. No separate Bank scalar UI
+  test exists. Whole-object publication remains future work.
+- The deletion-safe Session 046 record is
+  `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md`.
+
 ### Resolved / Changed in Session 045
 
-- Accepted the Phase 1 Autosave production baseline at commit `326a8a1`:
-  durable 34,768-byte hidden A/B records; one canonical 3,856-byte dirty mask;
-  bounded asynchronous live-value drain with atomic take/re-dirty semantics;
-  typed Bank/Scene/Kit/Instrument scalar markers; and 33-line v1 settings
-  persistence including Scene source and AutoSave policy.
-- Hardware evidence includes A/B multi-generation progress and ordinary
-  single-parameter changes for the testable Scene, Kit, and Instrument types.
-  This is evidence for the scalar path, not closure of the full Phase 1 test
-  matrix: Bank fields, MIDI/supplemental values, identical-value no-ops,
-  re-dirty timing, clean-idle behavior, recovery/power-cut cases, and the
-  AutoSave OFF/ON lifecycle remain separately testable obligations.
-- Whole-object Instrument/Kit/Scene/Bank publication, Morph projection, and
-  transaction-wide Load/Save exclusion were rejected Phase 2 experiments and
-  are not present in accepted production source. The next boundary is
-  observability as defined by `AUTOSAVE_REMEDY_PA2ST1.md`, not restoration of
-  any historical `AUTOSAVE_PARAM_HOOK*.md` source or plan.
+- Accepted foundation at `326a8a1`, retained by `c9807fa`: exact 34,768-byte hidden A/B records; one
+  canonical 3,856-byte dirty mask; bounded asynchronous mask/value capture
+  with atomic take/re-dirty semantics; typed Bank/Scene/Kit/Instrument scalar
+  markers; and 33-line v1 settings.
+- Pattern and Effect persistence, applying a hidden winner at boot, and
+  crash-recoverable promotion into explicit library files remain unimplemented.
+  `AUTOSAVE.md` is authoritative; stale historical plans and the old AutoSave
+  section in `FILESYSTEM_SPEC.md` are not.
 
 ### Resolved / Changed in Session 044
 - Cold boot initializes SceneData before tagged runtime construction. DRM's
@@ -798,8 +883,10 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   bracketed type row only after their real terminal work.
 - Four SD boot-pacing holds are present, but the motivating intermittent hang
   was seen once and is not reproducible. Do not claim it resolved.
-- Final static allocation is 12,280 B DTCM and 66,776 B SRAM1. No retained
-  Scene/LFO/cache state was added.
+- Session 044's final static allocation was 12,280 B DTCM and 66,776 B SRAM1.
+  That SRAM1 value is historical, not the `c9807fa` total. The current
+  `SRAM_MANIFEST.md` records 12,280 B DTCM and 75,824 B SRAM1
+  (`bss=78,996 B` conventionally).
 
 ### Resolved / Changed in Session 042
 - `/.hcnames` is the authoritative fixed-row name register. Runtime identity is
@@ -1037,6 +1124,20 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Failed Approaches — Do Not Retry
 
+- **Blind one-millisecond filesystem runtime pacing**: slowed Bank operations
+  to tens of seconds/about a minute and delayed rather than eliminated two
+  audible glitches. Bound the actual CRC/work loop by bytes across retained
+  filesystem passes; do not sleep around unbounded work. Session 046, rolled
+  back.
+- **Bundled `/devlog.bin` consolidation and duplicate-safe append rewrite**:
+  the hardware test timed out during boot, produced no DEVLOG, and left
+  `/.hcprms2` at 32,768 bytes. Do not reapply the patch wholesale or allow
+  logger recovery to hide the original operation failure. Session 046, rolled
+  back.
+- **Treating failed open as proof of absence**: AsyncFATFS append/write modes
+  include CREATE, so error fall-through can create duplicate same-visible-name
+  FAT entries. Complete and close a case-insensitive scan, classify
+  zero/one/multiple matches, and preserve every scan/open error.
 - **TIM7 idle gating**: wakeup race → freeze. Session 6.
 - **Broad repaint coalescing**: freezes and lag. Session 6.
 - **`val >>= 2` in `encode_read4()`**: asymmetric floor divide. Session 7.

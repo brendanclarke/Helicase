@@ -2,17 +2,36 @@
 
 ## How to use this document
 
-This is a planning document, not a session handoff. It analyzes why Session
-045 only partially succeeded and lays out an ordered sequence of steps for a
-future session (or sessions) to finish the remaining autosave work without
-repeating the same failure mode. Read it together with:
+This is the retained failure analysis and later whole-object plan. Session 046
+closed at rollback commit `c9807fa`; its authoritative outcome is
+`knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md`.
 
-- `knowledge_files/log_archive/045_SESSION_HANDOFF_LOG.md` (primary source
-  for everything below — sections referenced as "§N" refer to this file)
-- `AUTOSAVE_PARAM_HOOK.md` (the still-current, unimplemented Phase 2 design)
-- `AUTOSAVE_SETTINGS.md` (accepted, implemented settings/provenance design)
-- `MEMORY.md` Volatile Notes (see the discrepancy flagged in Step 0 below —
-  resolve it before anything else)
+The execution state is now:
+
+- Steps 0–1 are complete: documentation was reconciled and the corrected
+  `D/S/A/V/M/C/P/T` lifecycle trace is present.
+- Step 2 is complete for the user-testable scalar owner classes. Do not reopen
+  a vague matrix: Scene, Kit/Instrument, and Scene-owned MIDI channel/note were
+  tested; there is no separate user-editable Bank scalar control.
+- Step 3 static reconciliation is complete, but exact rollback-boundary
+  settings persistence must be retested before any source change.
+- Step 4 semantics are settled: Bank slot/name are payload, and a structurally
+  valid initial record can still be incomplete as a resident-Bank snapshot.
+- Steps 5–6—whole-object publication and Load/Save exclusion—remain future
+  work, after Session 047's CRC/settings/Bank baseline passes.
+
+Use `SETTINGS_BANK_LOAD_REIMPLEMENT.md` first. It owns the immediate Session
+047 order: byte-bound every CRC path, test it alone, preserve active Scene
+during runtime Bank Load, retest settings, and complete Bank Save/audio
+sign-off. Only then return to Steps 5–6 below. Read this historical analysis
+together with:
+
+- `knowledge_files/log_archive/045_SESSION_HANDOFF_LOG.md` for the original
+  failure sections referenced as “§N” below;
+- `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md` for the deletion-safe
+  current status of `AUTOSAVE_PARAM_HOOK.md` and the remedy documents;
+- `knowledge_files/specification_reference/AUTOSAVE.md` for current behavior;
+- `SETTINGS_BANK_LOAD_REIMPLEMENT.md` for immediate implementation.
 
 Nothing in this document authorizes a source change by itself. It is the
 review/staging document Topics A–E of the 045 handoff asked for, turned into
@@ -24,8 +43,9 @@ an executable order of operations.
 
 ### 1.1 What succeeded (do not re-litigate this)
 
-Session 045 shipped a real, hardware-verified baseline, now sitting at commit
-`326a8a1` and matching the current repository state:
+Session 045 shipped a real, hardware-verified baseline at commit `326a8a1`.
+That statement is historical; current repository authority is its later
+`c9807fa` descendant after Session 046's boot/HCNAMES and trace work:
 
 - A 34,768-byte A/B record pair (`/.hcprms1`, `/.hcprms2`) with a 64-byte
   header (magic, version, valid marker, generation, CRC32C, probe byte),

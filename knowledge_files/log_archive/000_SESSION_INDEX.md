@@ -54,6 +54,7 @@
 | 043 | 2026-07-25 | local working directory, development branch | Bitmap-only Pattern storage, 1,024-float slider LUT, tagged instrument runtime slots, transient PCM FLASH relocation, SRAM/DTCM reservation policy, and fresh memory manifest |
 | 044 | 2026-07-28 | local working directory, branch `dev-ph3-autosave` with uncommitted load/save and boot-pacing changes | Cold-boot tagged-runtime/LFO repair, working runtime Bank Load and final index ordering, unified OK/OW command UI, and inconclusive intermittent-boot pacing experiment |
 | 045 | 2026-08-02 | production source restored to commit `326a8a1` on branch `dev-ph3-autosave-retry`; later rejected code retained only as `*.failed` reference | Autosave A/B format and bounded parameter drain, single canonical dirty mask, Phase 1 scalar mutation hooks, settings/provenance persistence, boot splash ordering, and quarantine of the failed Phase 2 branch |
+| 046 | 2026-08-10 | rollback boundary commit `c9807fa`; later Session 046 firmware experiments reset, documentation/SD fixtures remain in the working tree | Boot filesystem localization and failure transparency, duplicate-safe HCNAMES handling, accepted Phase 1 scalar coverage, working autosave lifecycle trace, and rollback-safe Session 047 reimplementation plan |
 
 ---
 
@@ -416,6 +417,10 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | `settings.cfg` remains version 1 and now includes `autosave` plus sixteen `scene_source_NN` values; SRAM provenance is exactly 32 bytes, but the full source/update/error/off-on hardware matrix remains open | 045 |
 | `DEV_MODE_DIAGNOSTIC` is screen-only and disabled; `DEV_MODE_LOGGING` is file-only and enabled. Never make either diagnostic perform the other mode's work or add timing/file perturbation to the operation being observed | 045 |
 | Files ending in `.failed`, `_failed.c/.h`, or `_failed.md` preserve the rejected post-`326a8a1` Phase 2 attempts for diagnosis only; they are not production source, an implementation plan, or evidence of accepted behavior | 045 |
+| Session 046 closes at commit `c9807fa`: the retained firmware includes ten-second boot filesystem deadlines/detail codes, failure-transparent Kit/Bank boot handling, duplicate-safe HCNAMES absence proof, and the corrected `D/S/A/V/M/C/P/T` autosave lifecycle trace | 046 |
+| Phase 1 scalar coverage is accepted complete for user-testable owners: Scene, Kit/Instrument, and Scene-owned MIDI channel/note. There are no user-editable Bank scalar values in the current UI; do not reopen a vague coverage-matrix task | 046 |
+| Current logging files at `c9807fa` are `/bootlog.bin` and `/asavetrc.bin`; duplicate physical entries remain possible. The failed unified `/devlog.bin` experiment is not current code and must not be restored mechanically | 046 |
+| All autosave CRC work must be bounded across foreground ticks before further runtime save/load pacing work. The reverted blind 1 ms pacing experiment caused severe boot/load/save regressions and delayed, rather than removed, audio glitches | 046 |
 
 ---
 
@@ -517,3 +522,30 @@ re-audit Phase 2 one independently testable boundary at a time.
   boot logger mode separation, splash hold correction, hardware evidence,
   unverified areas, failed Phase 2 chronology, prohibited approaches, and
   [045_SESSION_HANDOFF_LOG.md](045_SESSION_HANDOFF_LOG.md)
+
+### 046 — Boot/HCNAMES Hardening, Autosave Trace, And Rollback Reconciliation (2026-08-10)
+
+Closed the session at rollback commit `c9807fa`. The retained source adds a
+ten-second cooperative boot-filesystem watchdog with operation/substep logging,
+explicitly propagates Kit quarantine and Bank-load failures instead of
+misclassifying or acknowledging them, and guards every create-capable HCNAMES
+path with a case-insensitive root absence proof so a failed read cannot silently
+authorize a duplicate singleton. Phase 1 scalar AutoSave coverage was accepted
+complete for all user-testable parameter owners, and the corrected
+`D/S/A/V/M/C/P/T` lifecycle trace was hardware-exercised after fixing its first
+append callback so it no longer strands the shared filesystem facade. Later
+attempts to add generic 1 ms storage pacing, unify logs into `devlog.bin`, and
+combine duplicate-log work with AutoSave changes caused major regressions,
+including minute-scale Bank operations, persistent audio glitches, a boot
+timeout, and a partial 32,768-byte `.hcprms2`; those firmware changes were reset.
+Session 047 should start from the current source, chunk every AutoSave CRC path
+without sleeps, preserve the active Scene during runtime Bank Load, restore and
+verify settings persistence, then address SD/audio pressure one isolated
+boundary at a time.
+
+- **Find here**: [046_SESSION_HANDOFF_LOG.md](046_SESSION_HANDOFF_LOG.md),
+  Session 045 deletion-safe consolidation, KITQUAR/BANKLOAD detail codes and
+  non-masking failure rules, HCNAMES absence proof, accepted scalar-test scope,
+  AutoSave trace layout and scheduler callback correction, hardware evidence,
+  reverted pacing/unified-log failures, current `c9807fa` authority, and
+  Session 047 reimplementation order

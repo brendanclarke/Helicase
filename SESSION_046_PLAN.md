@@ -1,132 +1,167 @@
-# Session 046 Plan — Autosave Phase 2 Remediation
+# Session 046 Plan — Closed; Remaining Work Carried to Session 047
 
-## Purpose
+## Closeout boundary
 
-Session 046 begins from the accepted Session 045 production baseline at commit `326a8a1`. It does not restore or mechanically compare failed-branch source. The working references are:
+Session 046 is closed on 2026-08-10 at rollback commit `c9807fa` (`autosave
+trace logger working, pre steps 2 and 3 implementation`). The authoritative
+verbose record is `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md`.
 
-- [`AUTOSAVE_PHASE2_PLAN.md`](AUTOSAVE_PHASE2_PLAN.md) — parent sequence and failure analysis;
-- [`AUTOSAVE_REMEDY_PA2ST1.md`](AUTOSAVE_REMEDY_PA2ST1.md) — diagnostic observability;
-- [`AUTOSAVE_REMEDY_PA2ST2-3.md`](AUTOSAVE_REMEDY_PA2ST2-3.md) — Phase 1 and settings/provenance verification.
+Later Session 046 firmware experiments were reset. Do not infer current source
+behavior from a later SD-card fixture or from an untracked plan.
 
-The governing rule is one change boundary at a time, with a saved hardware checkpoint before the next boundary is attempted.
+## Completed in Session 046
 
-## Implementation overview
+### 1. Baseline reconciliation
 
-### 1. Reconcile the baseline before code changes
+- Session 045 was consolidated into a deletion-safe post-mortem and handoff.
+- Current source/build state was checked against the accepted scalar AutoSave
+  architecture rather than restored from `*.failed` files.
+- Development modes were reduced to the binding distinction:
+  `DEV_MODE_DIAGNOSTIC` is screen-only; `DEV_MODE_LOGGING` is file-only.
 
-The existing firmware build and playback/Load/Save smoke tests have already been run successfully, and the `SD_CARD/` working tree now reflects the post-test card state. Treat that as useful baseline evidence, while still recording the exact source/image and card metadata required below; it does not by itself satisfy the diagnostic-trace or full matrix checkpoints.
+### 2. Boot filesystem localization and failure transparency
 
-Confirm the source/build boundary, update stale project context, verify failed files are excluded from the build, and reconcile the retained plans with the 045 handoff. Capture clean A/B records with generation, CRC, commit, identity, and dirty-bit counts.
+- The timeout remains ten seconds per boot operation. A timeout means real
+  non-progress because normal boot, including Bank Load, completes well inside
+  that interval.
+- Kit quarantine and Bank Load now retain detailed non-rearming substep labels.
+- Kit I/O abort is distinct from malformed content and cannot authorize
+  quarantine rename.
+- Boot index/load request failures are consumed before Menu acknowledgement or
+  empty-library fallback can hide them.
+- Normal hardware smoke testing passed; the intermittent hang did not recur
+  with a more specific detail code.
 
-### 2. Obtain RAM sign-off and implement observability
+### 3. HCNAMES singleton correction
 
-The RAM condition is approved: these allocations are permitted only when
-`DEV_MODE_LOGGING == 1`. They must compile out, and their logging/trace paths
-must be inactive, when `DEV_MODE_LOGGING == 0`.
+- All HCNAMES access uses one case-insensitive singleton match policy.
+- Every create-capable HCNAMES path requires a complete root absence proof.
+- A NULL read open, duplicate match, or scan/open/close/FAT error remains an
+  error and cannot authorize creation.
+- Hardware retesting did not reproduce the duplicate HCNAMES entry.
 
-The mode distinction is simple: `DEV_MODE_DIAGNOSTIC` is for diagnostics that print to the screen; `DEV_MODE_LOGGING` is for diagnostics that do not print to the screen, including file logging. The autosave trace and its diagnostic snapshot therefore use `DEV_MODE_LOGGING`. Do not introduce a separate autosave trace mode.
+### 4. AutoSave Step-1 observability
 
-Implement `AUTOSAVE_REMEDY_PA2ST1.md` first and test it to completion. Do not
-implement the diagnostic additions in `AUTOSAVE_REMEDY_PA2ST2-3.md` at the
-same time. After Step 1 has been tested, reassess Steps 2–3 and decide which,
-if any, Step 1 interfaces or trace data can be reused without duplicating or
-expanding the diagnostic surface.
+- The approved 520-byte `DEV_MODE_LOGGING`-only lifecycle trace is implemented.
+- The first background append defect was corrected: the trace writer now
+  acknowledges its terminal facade status through its completion callback.
+- `D/S/A/V/M/C/P/T` records can distinguish dirty production, scheduling,
+  admission, validation, mask merge, capture, publication, and completion.
 
-Then add the smallest disabled-by-default lifecycle trace needed to distinguish:
+### 5. Phase 1 scalar acceptance
 
-`DIRTY → SCHEDULED → ADMITTED → VALIDATED → MASK_MERGED → CAPTURED → PUBLISHED → TERMINAL`.
+This work is complete and must not be reopened as a vague matrix:
 
-The trace must be bounded, non-blocking, separate from screen diagnostics, and must not add incidental filesystem traffic during the autosave operation. Prove the trace itself with a normal Phase 1 scalar edit before using it to diagnose new features.
+- Scene values were tested.
+- Kit and Instrument values were tested.
+- MIDI channel/note are Scene-owned and were covered by Scene testing.
+- There are no separate user-editable Bank scalar values in the current UI.
 
-### 3. Close the accepted Phase 1 matrix
+The acceptance does not claim whole-object Load/Save/copy publication, Pattern
+or Effect persistence, or power-cut coverage.
 
-This is a verification and evidence task, not a Phase 2 feature decision. Its
-purpose is to establish that the accepted Phase 1 scalar behavior is a stable
-reference before whole-object hooks are added.
+### 6. Semantics settled
 
-Prerequisite: Step 1's diagnostic implementation has passed its own test, and
-the starting A/B records are valid, fully drained, and copied aside. If Step 1
-does not produce trustworthy lifecycle evidence, stop and repair Step 1 before
-using it for this matrix.
+- Bank slot/name and other Bank metadata are payload, not record-selection
+  identity.
+- A current-format record can be structurally valid but incomplete as a
+  resident-Bank snapshot; initial records contain zero parameter payload.
+- Partial Bank operations do not imply replacement of all sixteen Scenes.
 
-Test one coordinate at a time across:
+This settles the design rule, not the current validator implementation:
+`c9807fa` still performs a live-Bank match during winner selection. Reconcile
+that boundary before whole-object Bank session publication.
 
-- Bank fields;
-- Scene parameters;
-- Kit generated endpoints;
-- Instrument Normal endpoints;
-- Instrument Morph endpoints for Morphable descriptors;
-- supplemental descriptor values; and
-- MIDI channel/note fields.
+## Reverted Session 046 work
 
-For each coordinate, perform and record:
+The following is explicitly not in `c9807fa`:
 
-1. one value-changing edit;
-2. an identical-value write, which must not dirty the mask;
-3. repeated edits within one debounce window, which should coalesce to the
-   final value; and
-4. where applicable, an edit that re-dirties the same byte during an active
-   drain, which must survive for a later generation.
+- generic one-millisecond filesystem pacing;
+- byte-bounded CRC generation;
+- runtime Bank Load active-Scene preservation;
+- later settings-notification changes;
+- unified `/devlog.bin` output or duplicate-safe log publication.
 
-Also perform one clean-mask idle observation after recovery is complete. It
-must show no new autosave transaction or hidden-file I/O.
+The one-millisecond pacing experiment caused severe boot and Load/Save
+slowdowns and delayed rather than removed audio glitches. The unified-log
+experiment caused a boot timeout, no durable `devlog.bin`, and a partial
+32,768-byte `.hcprms2`. Neither may be restored mechanically.
 
-For every run, preserve the starting and ending `.hcprms` records and record
-the expected payload offset(s), starting/ending generation, CRC, commit marker,
-dirty-bit count, final payload value, and the Step 1 lifecycle events. The
-matrix is passed only when the expected owner marks the expected bit, the
-writer captures the final live value, identical writes produce no dirty work,
-re-dirty is not lost, and idle state remains idle.
+## Session 047 plan
 
-Decisions required before moving on are limited to test interpretation:
+Use `SETTINGS_BANK_LOAD_REIMPLEMENT.md` as the immediate implementation plan
+and `AUTOSAVE_PHASE2_PLAN.md` only for later whole-object sequencing.
 
-- If a value-changing test produces no dirty bit, determine whether the owner
-  setter was not reached or the writer was not admitted; do not add a Phase 2
-  hook to compensate.
-- If the bit is marked but the payload is wrong, isolate capture/publication
-  before changing ownership.
-- If an identical write dirties, treat that as a Phase 1 regression to fix or
-  explicitly explain before proceeding.
-- If re-dirty is lost, stop Phase 2 work until atomic take/re-dirty behavior is
-  repaired and retested.
-- If clean idle starts I/O, stop and diagnose scheduler/recovery state before
-  continuing.
+### 1. Confirm the rollback baseline
 
-The resulting fixtures and trace become the Phase 1 reference baseline for
-Steps 4–7; no new whole-object behavior is authorized by this matrix alone.
+Build unchanged `c9807fa`, record image/RAM, confirm the whole-record CRC call
+still exists, confirm the failed pacing layer is absent, and preserve the
+user-owned `SD_CARD/` fixtures.
 
-### 4. Close settings and provenance gaps
+### 2. Establish read-only fixture inspection
 
-Independently test root Scene Load/Save, partial Bank Load/Save, post-load `settings.cfg` rewriting, and the complete AutoSave OFF→ON lifecycle. Treat failures as isolated diagnosis tasks with one candidate owner change per pass. Separately perform the clean packaged-image size reconciliation.
+Use or add a host-only reader for exact record size, header, CRC32C,
+generation/commit selection, dirty-mask population, relevant payload offsets,
+and existing eight-byte trace records. It must never modify a fixture.
 
-### 5. Resolve semantic contracts before whole-object hooks
+### 3. Byte-bound every AutoSave CRC path
 
-Document and obtain agreement on two rules: Bank name/slot and other metadata are payload, not record identity; and a clear definition of “valid” versus “complete” autosave records. Do not implement Phase 2 whole-object publication until these rules are settled.
+One explicit per-tick byte budget must cover:
 
-### 6. Reintroduce Phase 2 hooks incrementally
+1. initial A/B creation;
+2. recovery when neither candidate is valid;
+3. validation of existing candidates; and
+4. transformed-copy CRC generation.
 
-Add and test successful-public-completion dirty marking in this order:
+Use retained operation cursors, no record-sized buffer, no blind delay, and no
+new permanent SRAM. Test this change alone with valid-pair drain, missing-pair
+creation, invalid-pair recovery, playback, exact 34,768-byte files, and CRCs.
 
-1. Whole Instrument load.
-2. Whole Kit load.
-3. Whole Scene load without Pattern, including a regression check that Menu preview/selection alone does not dirty autosave.
-4. Partial Bank Load/Save using the actual selected/loaded child mask; Save must remain a resident-data read, not a whole-workspace replacement.
-5. Morph projection, limited to the descriptors that actually support Morph.
+### 4. Preserve active Scene during runtime Bank Load
 
-Each item gets its own trace and fixture pair. Do not move publication points repeatedly without evidence, and do not change active-Scene or other cross-cutting ownership in the same pass.
+After CRC testing passes, add one explicit request-time contract:
 
-### 7. Reattempt Load/Save exclusion last
+- boot Load restores the Bank's saved default Scene;
+- user/runtime Load preserves the previously active Scene, including when the
+  selected child mask excludes it;
+- failed Load keeps the old active Scene and reports the failure.
 
-First trace current behavior while Load/Save is open. Then, in separate passes, prevent only new autosave starts during Load/Save and verify that pre-existing dirty bits still drain afterward; only after that passes should physical Load/Save entry deferral be considered. Distinguish an operation already active at page entry from one that has not yet been admitted.
+Do not add pacing or new Bank timing diagnostics in this pass.
 
-### 8. Close out with evidence
+### 5. Retest settings before editing
 
-Record source commit, rebuilt image identity, A/B metadata, expected offsets, operation classification, Load/Save state, settings revision, runtime duration, returned fixtures, and trace results. Update `MEMORY.md` and write a new handoff only after the implementation outcome is genuinely established.
+Change AutoSave and one unrelated persistent setting, wait for the existing
+writer, inspect `settings.cfg`, reboot, and verify both values. If it passes,
+make no settings source change. If it fails, patch only the demonstrated dirty-
+notification or filesystem boundary.
 
-## Explicit non-goals
+### 6. Integration and audio sign-off
 
-Session 046 does not restore `*.failed` source, redesign the autosave wire format, add Pattern/Effect persistence, infer success from Menu state or build size alone, or combine observability, ownership, scheduler exclusion, and publication changes into one hardware test.
+Test Scene provenance, Bank Load preservation, Bank Save stopped/playing,
+AutoSave OFF→ON, rebooted settings, and one scalar writer smoke edit. Confirm
+no delayed AutoSave glitches and no hidden-record failure is acknowledged as
+success.
 
-## Completion condition
+### 7. Conditional 32 KiB boot-lock diagnosis
 
-The session is complete only when each attempted boundary has an independently interpretable hardware result, the accepted Phase 1 baseline remains intact, and any Phase 2 behavior claimed as implemented is backed by matching trace and fixture evidence.
+If a hidden record again stops at 32,768 bytes or boot times out, stop and
+preserve the card. Capture the application write phase, exact byte progress,
+actual cluster geometry, AsyncFATFS allocator/cache state, SD transport state,
+and logger recovery result before any FAT/SD fix. CRC chunking is not proof of
+a cluster-extension repair.
+
+### 8. Resume Phase 2 only after the baseline passes
+
+Add whole-object hooks one successful public completion boundary at a time:
+Whole Instrument, Whole Kit, root Scene without Pattern, selective Bank
+session replacement, then Morph projection. Reattempt Load/Save exclusion
+last, with separate tests for already-active versus not-yet-admitted AutoSave
+work.
+
+## Session 047 completion condition
+
+The immediate reimplementation is complete only when every AutoSave CRC path
+is byte-bounded, runtime Bank Load preserves active Scene without changing boot
+semantics, settings persistence is verified, stopped/playing Bank Save does not
+produce deferred audio glitches, and every failed write remains visible and
+retryable. Whole-object Phase 2 work is a later gate, not part of that claim.

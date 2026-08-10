@@ -1,7 +1,8 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware after Session 044. It includes the
+reference for the Helicase/LXR-02 firmware through rollback baseline
+`c9807fa` at the end of Session 046. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
@@ -14,6 +15,11 @@ final Scene/Bank Load index-ordering contracts. Low-level asyncfatfs API contrac
 and caller rules now live in
 `ASYNCFATFS_REFERENCE.md`.
 
+AutoSave's hidden-record format, dirty ownership, and background writer are
+authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
+authoritative only in `DEV_MODES.md`; this document names those facilities only
+where they intersect the product filesystem.
+
 Use this document to distinguish three things:
 
 - Implemented now: root `Kit/NNN Name/` directory loading/saving, root
@@ -23,12 +29,15 @@ Use this document to distinguish three things:
   Load/Save, 16-Scene root Bank scan/load/save, keyed settings.cfg,
   slot-ordered `.hcindex` name indexes for every Instrument type plus root Kit,
   Scene, and Bank, root `/.hcnames`, canonical eight-character name repair, a
-  separate 2,048-byte non-Pattern validation stage, and the reversible
-  Instrument Load `kit` row backed by `.hctmp.<ext>`.
+  separate 2,048-byte non-Pattern validation stage, the reversible Instrument
+  Load `kit` row backed by `.hctmp.<ext>`, and the root
+  `/.hcprms1`/`/.hcprms2` AutoSave pair specified in `AUTOSAVE.md`.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: crash-recoverable Scene/Bank autosave promotion, real
-  Effect load/save, final dynamic Pattern storage, descriptor-backed step
+- Not implemented yet: applying the hidden AutoSave winner to resident state,
+  whole-object AutoSave publication for Load/Save/copy operations, AutoSave
+  Pattern/Effect persistence, crash-recoverable promotion into explicit Bank
+  library files, real Effect load/save, final dynamic Pattern storage, descriptor-backed step
   automation playback, versioned/recoverable HCNAMES, and `/.hcrepair`
   roll-forward. The legacy `kitBrowser` map and File/Dir diagnostic caches are
   retired.
@@ -39,7 +48,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented through Session 044:
+Implemented through rollback baseline `c9807fa`:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -201,9 +210,11 @@ Current bridges and limitations:
   modulation targets.
 - New Scene modulation target IDs are runtime/menu IDs; current Scene files
   persist Scene mix/routing settings but not the future full effect stack.
-- The 16-Scene workspace, present/edit masks, linked Scene/Pattern PERF
-  selection are implemented. Crash-recoverable autosave/dot-file promotion
-  and a separate background staging Scene remain future work.
+- The 16-Scene workspace, present/edit masks, and linked Scene/Pattern PERF
+  selection are implemented. The hidden A/B scalar AutoSave writer exists as
+  specified in `AUTOSAVE.md`; winner replay, whole-object publication,
+  explicit-Bank promotion, and a separate background staging Scene remain
+  future work.
 
 ## Root Layout
 
@@ -225,6 +236,8 @@ Settled target root file:
 ```text
 settings.cfg
 /.hcnames
+/.hcprms1
+/.hcprms2
 ```
 
 ### Slot-ordered `.hcindex` name indexes and the single SRAM cache
@@ -291,7 +304,11 @@ Changing a row can change its physical byte length. Every targeted update
 therefore reads all 129 rows into `fs_list_cache_name`, overlays only the rows
 owned by the successful action, rewrites the complete file, closes, and uses
 the normal flush gate. A missing file can be created by a targeted update from
-blank rows plus the rows that action has proved valid.
+blank rows plus the rows that action has proved valid, but only after a complete
+case-insensitive root scan has proved zero matching HCNAMES entries. A NULL
+read-open result is not proof of absence: one folded match permits one read
+retry; multiple matches or any root-open/finder/close/FAT failure return an
+error and authorize no creation or automatic repair.
 
 Normal boot does not regenerate HCNAMES from resident SRAM. Scene identity is
 not stored in `scene_t`, so a snapshot after a mask-selective Bank Load would
@@ -320,18 +337,24 @@ The current file is keyed text with:
     format=helicase.settings
     version=1
     active_bank=<0..999>
+    autosave=<0|1>
+    scene_source_00=<encoded source>
+    ...
+    scene_source_15=<encoded source>
 
 The remaining accepted/written keys are bpm, ext_sync, quantisation,
 midi_chan_global, midi_filt_tx, midi_filt_rx, midi_routing,
 screensaver_on_off, bar_reset_mode, prescaler_clock_in,
 prescaler_clock_out1, prescaler_clock_out2, follow, and osc_wave_interp.
+The complete 33-line schema also includes `autosave` and sixteen
+`scene_source_NN` rows.
 Unknown or out-of-scope keys are not a way to restore Scene state. In
 particular, Morph, per-voice Morph, and Scene decimation belong to Scene
 payloads, not global settings.
 
-There is no implemented .settings.cfg backer or power-loss transaction for
-settings.cfg. Do not claim dot-file autosave/promotion until the AsyncFATFS
-transaction/recovery primitive exists.
+There is no implemented `.settings.cfg` backer or power-loss transaction for
+`settings.cfg`. Its existing one-second revision/debounce writer rewrites the
+live file; do not claim atomic replacement.
 
 Root-level entries outside the recognized list are ignored by normal
 loader/browser code.
@@ -413,8 +436,9 @@ before reintroduction.
 ## Bank
 
 Status: implemented as a 16-resident-Scene Bank workspace. It has selected
-child save/load and a staged root-Bank promotion flow; it is not yet a
-crash-recoverable autosave transaction.
+child save/load and a staged root-Bank promotion flow; that explicit Save flow
+is not a crash-recoverable transaction. The separate hidden A/B scalar
+AutoSave record is specified in `AUTOSAVE.md`.
 
 `Bank/` contains bank folders:
 
@@ -1421,7 +1445,7 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status after Session 044:
+Status retained through rollback baseline `c9807fa`:
 
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
@@ -1630,93 +1654,25 @@ instrument runtime propagation:
 - Treat step automation as pending until the descriptor-aware AutomationNode
   pass is complete.
 
-## Debounced Autosave and Reload Target
+## AutoSave boundary
 
-Status: settled target, not implemented.
+Status: the hidden A/B scalar writer is implemented in rollback baseline
+`c9807fa`. Its complete format, ownership, scheduling, power-loss behavior,
+known CRC limitation, duplicate rules, and extension process live only in
+`AUTOSAVE.md`.
 
-The currently committed `Core/Bank/Scene/Autosave.c/.h`,
-`AUTOSAVE_IMPLEMENTATION.md`, and draft blob schema are explicitly rejected
-work from before the Session 044 load/save closeout. They are not an implemented
-subset of this target and must not be used as evidence that any autosave,
-resume, promotion, or reload contract below is live.
+The obsolete per-Instrument/Scene dot-backer proposal formerly in this section
+was never implemented and is removed to prevent two competing AutoSave
+specifications. Current firmware writes only the root `/.hcprms1` and
+`/.hcprms2` records; it does not create `.sceneset.scg`, `.kitset.kcg`,
+`.pattern.pat`, `.effects.fx`, `.bankset.bcg`, or `.settings.cfg` backers.
+Explicit Bank/Scene/Kit/Instrument Load and Save continue to use the ordinary
+product objects specified above.
 
-Bank is the only autosaved workspace. Root-library folders such as `Scene/`,
-`Kit/`, `Instrument/`, `Pattern/`, and `Effect/` are explicit
-load/save/copy/import/export pools and are not autosaved.
-
-The active Bank is a resident workspace containing 16 editable Scenes. The
-currently playing/viewed Scene is only the audition/playback focus. Voice mode
-also has a Scene edit target set, toggled with SEQ buttons, that may contain any
-subset of the 16 Scenes. Voice/Kit/Instrument parameter edits apply to every
-Scene in that edit target set as one logical batch edit. Pattern edits are
-excluded from this multi-Scene parameter behavior and remain active/viewed-Scene
-scoped until the final Pattern model says otherwise.
-
-This multi-Scene edit behavior is binding. It supports workflows where the Bank
-is treated as one conceptual Kit with 16 Patterns, or where a selected Scene
-range receives the same parameter reconciliation. Storage still remains
-Scene-local: identical Kits or Instruments across Scenes are separate copies on
-disk unless a future feature explicitly introduces linked/shared files.
-
-Inside the active Bank, autosave applies to dot-file backers for:
-
-- Per-instrument files.
-- Scene `effects.fx`.
-- Scene `pattern.pat`.
-- `sceneset.scg`.
-- Embedded kit `kitset.kcg`.
-- `bankset.bcg` as needed.
-
-Committed and autosaved filenames:
-
-- The non-dot filename is the committed save/load file. Examples:
-  `sceneset.scg`, `kitset.kcg`, `slakd1.drm`, `pattern.pat`, `effects.fx`, and
-  `bankset.bcg`.
-- The matching dot-file is the autosave working backer. Examples:
-  `.sceneset.scg`, `.kitset.kcg`, `.slakd1.drm`, `.pattern.pat`, `.effects.fx`,
-  and `.bankset.bcg`.
-- Autosave writes dirty retained-memory state to dot-file backers only.
-- Bank SAVE waits for selected autosave writes to finish, then copies/promotes
-  the selected dot-file backers over the matching non-dot committed files.
-- Bank LOAD reads the non-dot committed files.
-- Bank load/save operations start with all 16 Scenes selected. SEQ buttons can
-  restrict the operation to a subset of Scenes before commit.
-- Startup/resume normally loads valid dot-file backers for the active Bank, so
-  autosaved working changes return without requiring explicit SAVE. If a
-  dot-file is missing or fails validation, fall back to the matching non-dot
-  committed file.
-
-Mechanism:
-
-- A parameter edit marks its owning dot-file backer stale and starts or resets a
-  5-second idle timer.
-- A multi-Scene Voice/Kit/Instrument edit marks the owning dot-file backer stale
-  for each selected Scene affected by that batch edit. Repeated knob motion
-  refreshes the same dirty records rather than enqueueing per-tick writes.
-- If edits continue for 30 seconds without a 5-second gap, force a dot-file
-  write.
-- The autosave scheduler is bank-wide and tracks dirty records by Scene, file
-  domain, and optional instrument slot.
-- A successful autosave clears only the dirty record for the dot-file that was
-  written. It does not update the committed non-dot file.
-- Instrument, Kit, and Scene copy/paste within the active Bank are resident
-  memory batch mutations. They dirty destination dot-file backers and do not
-  change committed non-dot files until explicit Bank SAVE.
-- RELOAD applies to Scene scope. It reads the selected Scene's non-dot committed
-  files into resident memory and resets the selected Scene's dot-file backers to
-  match those committed files.
-- Dot-file autosave should use a temp-file-then-rename/replace sequence when
-  the asyncfatfs primitive exists. On startup, a leftover `.tmp` means the temp
-  write was incomplete; ignore/delete it, then use the previous dot-file if it
-  validates. Only fall back to non-dot when the dot-file itself is missing or
-  invalid.
-- Root `settings.cfg` records the active Bank number and has a `.settings.cfg`
-  backer. Closing the global settings menu or loading/saving a Bank rewrites
-  both settings files.
-
-Implementation note: confirm or add the required asyncfatfs rename/replace or
-safe copy/replace primitive before relying on dot-file promotion for
-power-loss-safe Bank SAVE.
+Whole-object Load/Save/copy publication, winner replay into resident state,
+Pattern/Effect persistence, and crash-recoverable promotion into explicit Bank
+files remain future AutoSave work. They must be added through `AUTOSAVE.md`, not
+by reviving the removed dot-backer design.
 
 ## Example Target Layout
 

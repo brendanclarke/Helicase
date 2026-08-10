@@ -1,9 +1,8 @@
 # SRAM manifest
 
-Generated from the current `build/lxr02.elf` on 2026-07-28 after the Session
-044 cold-boot tagged-runtime activation and Scene/Bank Load terminal-ordering
-work, on top of Session 043's bitmap Pattern minimization, slider-LUT reduction,
-tagged runtime migration, and `transientData` FLASH move. This is a fresh
+Generated from `build/lxr02.elf` at rollback baseline `c9807fa` on 2026-08-10,
+after Session 046 boot/HCNAMES diagnostics and the AutoSave scalar writer/trace
+work. This is a fresh
 linked-image inventory: sizes come
 from `arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
 estimates.
@@ -23,12 +22,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 63,676 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **66,776 B** | **310,056 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **79,056 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 72,724 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **75,824 B** | **301,008 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **88,104 B** | — |
 
-The image contains 400 B of initialized SRAM1 data and 69,948 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 63,276 B in normal SRAM1
+The image contains 400 B of initialized SRAM1 data and 78,996 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 72,324 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -36,16 +35,16 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 339,472 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 359,976 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
 | `.data` | `0x20020c1c` | 400 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020db0` | 63,276 B | SRAM1 | Normal zero-initialized globals |
+| `.bss` | `0x20020db0` | 72,324 B | SRAM1 | Normal zero-initialized globals |
 
-The final FLASH load image ends at `0x0805e224`, safely before the reserved
-sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 352,804 B.
+The final FLASH load image ends at `0x0806323c`, safely before the reserved
+sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 373,308 B.
 
 ## Primary SRAM1 owners
 
@@ -59,6 +58,9 @@ sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 352,804 B.
 | `sample_name_cache` | 1,080 B | Sample-name cache |
 | `USB_OTG_dev` | 1,524 B | USB device state |
 | `fs_stage_workspace` | 2,048 B | Aligned Kit/Instrument/Scene staging workspace |
+| `autosave_dirty_mask` | 3,856 B | Sole canonical AutoSave mutation mask |
+| `fs_autosave_parameter_cache` | 4,608 B | Dedicated bounded AutoSave patch offsets/values |
+| `autosave_trace_records` | 512 B | `DEV_MODE_LOGGING`-only 64-by-8-byte lifecycle ring |
 | `usb_MidiMessages` | 2,048 B | USB MIDI message storage |
 | `slider_lut` | 4,096 B | 1,024 native `float` attenuator nodes; lookup is `raw >> 2`, without interpolation |
 | `parameter_values` | 384 B | Legacy MIDI parameter cells |
@@ -66,13 +68,12 @@ sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 352,804 B.
 | `velocityModulators` | 264 B | One velocity modulation node per instrument slot |
 | `lfo_descriptor_targets` | 192 B | Per-slot LFO descriptor target adapters |
 | `lcd_queue` | 384 B | LCD command queue |
-| `staging_buf` | 512 B | Audio/sample staging scratch |
+| `staging_buf` | 512 B | Shared filesystem stream/serialization scratch, including one trace batch |
 
 The remaining normal SRAM1 state is intentionally distributed across
-filesystem-operation records, menu/UI state, MIDI rings, sequencer state,
-modulation metadata and small driver records. Every individual remaining
-writable symbol is 255 B or smaller; the section totals above include all of
-them.
+filesystem-operation records, Menu/UI state, MIDI rings, sequencer state,
+modulation metadata, and small driver records. The section totals above include
+all of them.
 
 ## DTCM, DMA, and FLASH-ROM owners
 
@@ -103,8 +104,8 @@ arm-none-eabi-nm -S --size-sort build/lxr02.elf
 arm-none-eabi-readelf -l -W build/lxr02.elf
 ```
 
-For the current image, conventional `arm-none-eabi-size` reports `text=352,404
-B`, `data=400 B`, and `bss=69,948 B`. The latter is the combined zero-init
+For the current image, conventional `arm-none-eabi-size` reports `text=372,908
+B`, `data=400 B`, and `bss=78,996 B`. The latter is the combined zero-init
 total across memory regions; `size -A` provides the section split above.
 
 ## 2026-07-27 Bank Load / command-UI implementation note
@@ -134,3 +135,19 @@ The final image remains at `bss=69,948 B`; initialized `.data` is four bytes
 smaller than the Session 043 inventory, so total static SRAM1 use is 66,776 B.
 The temporary session allowance for up to 32 bytes of unanticipated growth did
 not authorize reuse of any reserved capacity and no such growth was consumed.
+
+## 2026-08-10 Session 046 rollback-baseline note
+
+The `c9807fa` image adds the Session 045 AutoSave mask and 4,608-byte patch
+cache, plus the Session 046 logging-only AutoSave trace. With
+`DEV_MODE_LOGGING == 1`, trace-specific static storage is exactly 520 bytes:
+512 bytes of records, six bytes of cursor/drop state, and a two-byte flush
+cadence. The approved condition is binding: a logging-off build must omit the
+ring/cadence and perform no trace-file I/O.
+
+The SRAM1 increase from the Session 044 snapshot is 9,048 bytes. The principal
+new owners account for 8,984 bytes (3,856-byte canonical mask, 4,608-byte patch
+cache, and 520-byte trace); the remaining 64 bytes are other linked
+filesystem/AutoSave state and layout effects. No second dirty mask or complete
+record-sized SRAM image is linked. DTCM remains unchanged at 12,280 bytes and
+retains its delay-line-only remainder reservation.

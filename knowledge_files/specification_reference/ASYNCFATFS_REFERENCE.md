@@ -36,6 +36,9 @@ Important completion rules:
   the final flush boundary.
 - `afatfs_fread()` returning `0` is not EOF by itself. It may mean the sector
   buffer is not ready. EOF is `n == 0 && afatfs_feof(file)`.
+- A callback receiving `NULL` does not prove that a singleton name is absent.
+  Product code must distinguish missing, failed, and duplicate lookup before a
+  CREATE-capable mode is allowed to run.
 
 ## Paths Are Components
 
@@ -305,8 +308,10 @@ first cluster, file size, attributes, timestamps, and directory children.
 
 Session 038's working Kit Save path does not rely on rename for overwrite. It
 recursively deletes the old numbered slot directories and writes a clean
-replacement. Rename remains the intended future primitive for safe dot-file
-promotion and Bank autosave workflows after dedicated testing.
+replacement. Rename remains a building block for a future crash-recoverable
+replace transaction after dedicated testing; the current AutoSave design is
+the root A/B record pair specified in `AUTOSAVE.md`, not per-product-file dot
+backers.
 
 ## Directory Terminators And LFN Creation
 
@@ -334,6 +339,9 @@ Do:
 - Use object iteration for scans that care about LFNs, case, aliases, or object
   kind.
 - Treat missing objects as normal where a browser slot can be empty.
+- For a firmware-owned singleton, prove absence with a complete,
+  successfully-closed case-insensitive directory scan before CREATE. Treat
+  multiple matches and scan/open/close failure as errors.
 - Drain close/flush before reporting save completion.
 - Use `afatfs_chdirParent()` for structural parent traversal.
 
@@ -344,6 +352,8 @@ Don't:
 - Treat `fread() == 0` as EOF without `afatfs_feof()`.
 - Optimistically publish browser/cache entries before a real scan/open proves
   the object exists.
+- Treat a failed/NULL open as permission to create a singleton, or silently
+  choose/delete one of multiple case-folded matches.
 - Start deletion from a display name after a scan already selected a concrete
   object; retain and use the captured object identity instead.
 - Hide dot-prefixed objects in asyncfatfs; filtering belongs in product scans.

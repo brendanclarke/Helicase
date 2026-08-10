@@ -102,26 +102,26 @@
 			<integer>0</integer>
 			<key>true</key>
 			<integer>1</integer>
-			<key>uuid.8c87a63f-1fa7-31f0-981a-7dda478fe574</key>
+			<key>uuid.ffcb91d6-efa1-335e-9014-6383c6c18b21</key>
 			<integer>1</integer>
 		</dict>
 		<key>DebugKey1</key>
-		<string>2026-05-23 08:54:26 +0000 3</string>
+		<string>2026-08-10 07:02:10 +0000 3</string>
 		<key>DefaultStore_EffectiveSearch</key>
 		<integer>3</integer>
 		<key>DefaultStore_RequestedSearch</key>
 		<integer>3</integer>
 	</dict>
 	<key>ConfigurationCreationDate</key>
-	<date>2026-05-23T08:54:26Z</date>
+	<date>2026-08-10T07:02:10Z</date>
 	<key>ConfigurationCreationVersion</key>
 	<string>Version 10.15.7 (Build 19H2026)</string>
 	<key>ConfigurationModificationDate</key>
-	<date>2026-08-01T18:56:41Z</date>
+	<date>2026-08-10T07:02:10Z</date>
 	<key>ConfigurationModificationVersion</key>
 	<string>Version 10.15.7 (Build 19H2026)</string>
 	<key>ConfigurationVolumeUUID</key>
-	<string>8C87A63F-1FA7-31F0-981A-7DDA478FE574</string>
+	<string>FFCB91D6-EFA1-335E-9014-6383C6C18B21</string>
 	<key>ConfigurationWriteback</key>
 	<false/>
 	<key>Exclusions</key>
@@ -133,10 +133,10 @@
 	</dict>
 	<key>Stores</key>
 	<dict>
-		<key>8C60108B-D79F-4C3E-8CF6-6BFD1162A6DF</key>
+		<key>EBD62FB6-34AB-4411-9A9A-679D8FC35071</key>
 		<dict>
 			<key>CreationDate</key>
-			<date>2026-05-23T08:54:26Z</date>
+			<date>2026-08-10T07:02:10Z</date>
 			<key>CreationVersion</key>
 			<string>Version 10.15.7 (Build 19H2026)</string>
 			<key>IndexVersion</key>
@@ -144,7 +144,7 @@
 			<key>PartialPath</key>
 			<string>/</string>
 			<key>PolicyDate</key>
-			<date>2026-08-01T18:56:41Z</date>
+			<date>2026-08-10T07:02:10Z</date>
 			<key>PolicyLevel</key>
 			<string>kMDConfigSearchLevelReadWrite</string>
 			<key>PolicyProcess</key>

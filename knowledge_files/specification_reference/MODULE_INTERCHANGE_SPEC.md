@@ -1,6 +1,7 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 044 for the one-pattern bridge,
+Session 030 baseline, updated through rollback baseline `c9807fa` at the end of
+Session 046 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
@@ -55,6 +56,9 @@ does not recreate a generic bridge or duplicate resident names.
   The sole active identity block is 81 bytes: BankData's Bank row plus
   filesystem's Scene, Kit, and six Instrument rows. SceneData stores no name or
   filename text.
+- HCNAMES creation requires a complete case-insensitive root absence proof.
+  A NULL read open, duplicate match, or failed scan/close remains an error and
+  cannot authorize creation or automatic repair.
 - The 9,000-byte cache never aliases payload validation. A separate aligned
   2,048-byte union stages one Kit, one Instrument candidate, or Scene settings
   plus embedded Kit. Pattern is excluded and reads directly into final Scene
@@ -83,6 +87,10 @@ does not recreate a generic bridge or duplicate resident names.
 - Filesystem shape, instrument file shape, descriptor tables, Scene storage,
   menu layout, and DSP propagation are specified in
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
+- AutoSave wire geometry, dirty ownership, scheduling, and extension rules are
+  specified only in `knowledge_files/specification_reference/AUTOSAVE.md`.
+  Development-mode and diagnostic-file policy are specified only in
+  `knowledge_files/specification_reference/DEV_MODES.md`.
 - Instrument voice parameter values are Scene-owned descriptor images. Dynamic
   VOICE menu cells resolve through the active slot's instrument descriptor
   layout, not through static `menuPages.h` cells or `parameter_values[]`.
@@ -607,10 +615,29 @@ render boundary. Session 028 removed obsolete front-panel dependency.
 | `voiceControl_processPending()` | Drain pending triggers at audio render boundary. | `audio_check_and_render()` |
 | `voiceControl_isVoicePlaying(voice)` | Query voice state. | clients/future UI |
 
+## Core/Bank/Scene/Autosave and AutosaveTrace
+
+Affiliate modules: BankData, SceneData, Preset, filesystem, config.
+
+Purpose: `Autosave.c/.h` owns the hidden-record wire contract, live-byte
+projection, one canonical dirty mask, atomic dirty operations, typed scalar and
+whole-region marker vocabulary, and CRC helpers. It owns no file handle or
+scheduler. `AutosaveTrace.c/.h` is a logging-only observer with no filesystem
+ownership. Exact format and trace-field semantics remain authoritative in
+`AUTOSAVE.md` and `DEV_MODES.md` rather than being duplicated here.
+
+| API family | Interchange rule | Usual callers / clients |
+| --- | --- | --- |
+| `autosave_mark*Dirty(...)` | Retained owners store/commit first, then mark typed coordinates. Producers perform SRAM-only work and never calculate wire offsets. | BankData, SceneData, Preset; future successful whole-object commits |
+| `autosave_maskHasDirty()` / atomic take and merge helpers | One canonical mask coordinates foreground capture and interrupt-reachable producers; filesystem may consume through the documented API but never owns a second mask. | filesystem AutoSave scheduler/writer |
+| `autosave_getLivePayloadByte()` and format/CRC helpers | Project final resident bytes and serialize/validate v1 records without copying C structs as the wire format. | filesystem AutoSave setup/validation/copy |
+| `autosave_setMutationTrackingEnabled()` / complete-resident dirty boundary | Filesystem policy enables tracking only after successful setup; AutoSave OFF/new-session transitions preserve active-transaction safety. | filesystem policy lifecycle |
+| `autosaveTrace_record()` and ring read/ack APIs | Producers append bounded RAM records; only filesystem may append them to the diagnostic file and acknowledge them after durable sync. | AutoSave and filesystem under `DEV_MODE_LOGGING` |
+
 ## Core/Hardware/SD/filesystem
 
-Affiliate modules: Preset, Menu, PatternData, SampleMemory,
-storageTypes, SceneData.
+Affiliate modules: Preset, Menu, PatternData, SampleMemory, storageTypes,
+SceneData, AutoSave, AutoSaveTrace, and development-mode boot logging.
 
 Purpose: public typed async filesystem facade. It serializes pattern data
 through PatternData accessors after Session 028. Normal kit load/save scans,
@@ -623,6 +650,7 @@ stay in `storageTypes.c/h`.
 | API | Use | Usual callers / clients |
 |---|---|---|
 | `filesystem_initCardAndMountBlocking()` / `filesystem_initAfterCardReady()` | Boot card init/mount. | `main.c` |
+| `filesystem_bootLoggingBegin()` / `filesystem_bootLoggingArm()` / `filesystem_bootLoggingTimedOut()` / `filesystem_writeBootFailureLogBlocking()` / `filesystem_bootLoggingEnd()` | Own the pre-audio ten-second filesystem deadline and one bounded best-effort retained-code recovery write. Private detail hooks may change only the label inside an armed deadline. | `main.c`; filesystem boot operations under `DEV_MODE_LOGGING` |
 | `filesystem_tick()` | Pump asyncfatfs work. | main loop |
 | `filesystem_status()` / `filesystem_ack()` | Operation status protocol. | Preset/Menu |
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is `Kit/NNN Name/kitset.kcg` plus instruments and save routes to the new Kit directory writer. For `FS_FILE_MORPH`, load/save remains legacy `.SND`. | Preset |
@@ -635,6 +663,9 @@ stay in `storageTypes.c/h`.
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Capture one typed index selection into immutable operation scratch and validate it into the one Instrument candidate stage without mutating live SceneData. | Preset Instrument request |
 | `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` / `filesystem_requestSaveInstrumentMorph(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. The Morph variant writes current interpolated values into both endpoint sections and preserves resident source naming. | Preset Instrument Save |
 | `filesystem_requestSaveInstrumentTemp(scene, slot, cb)` / `filesystem_requestLoadInstrumentTemp(scene, slot, type, cb)` | Write/read the hidden typed `.hctmp.<ext>` through the normal serializer/parser without publishing it to HCNAMES or `.hcindex`. | Preset/Menu reversible `kit` row |
+| `filesystem_ensureAutosaveFilesBlocking()` / `filesystem_setAutosaveEnabled(enabled)` / `filesystem_autosaveEnabled()` | Establish the hidden pair at boot, apply runtime policy, and authorize mutation tracking/background work only after successful setup. Format and failure rules are in `AUTOSAVE.md`. | `main.c`, Menu/settings policy |
+| `filesystem_autosaveTraceFlushBlocking()` | Bench-only durable boundary for currently pending lifecycle records; ordinary runtime trace flushing is autonomous and lower priority. | temporary test harness only |
+| `filesystem_markSettingsDirty()` | Increment the keyed-settings change revision; the one-second writer acknowledges only the revision it actually serialized and synced. | Menu and successful Preset provenance callbacks |
 | `filesystem_loadedInstrumentSlot()` | Borrow the validated candidate payload for Preset's ordered commit. Names are exchanged through identity rows, not staged filename/stem accessors. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
 | `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the shared slot-indexed name cache; non-blank rows provide occupancy. | main startup, Menu |
