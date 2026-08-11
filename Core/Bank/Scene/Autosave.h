@@ -418,7 +418,18 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
  * matching types before calling their marker. Kit includes all six Instruments;
  * Scene includes settings, the Effect stub, and Kit. SceneWithPattern is
  * intentionally only the non-Pattern alias until Pattern persistence exists.
- * Affiliates: Preset Instrument commits, copy/paste, and load-region hooks.
+ *
+ * Current load affiliates are intentionally asymmetric: successful normal Kit
+ * completion calls autosave_markKitDirty() for each target; successful root
+ * Scene and exact-mask Bank completion call
+ * autosave_markSceneWithoutPatternDirty(); KitMrp and InstrumentMrp call
+ * autosave_markInstrumentMorphDirty() only after compatible endpoint copies.
+ * The generated KitMrp track-7 Morph decay is a named Kit scalar and therefore
+ * reaches autosave_markKitParameterDirty() through SceneData, not an
+ * Instrument marker. These calls must occur after retained assignment and
+ * before any completion handoff makes request-local filesystem state invalid.
+ * Affiliates: Preset load completions, copy/paste, SceneData's generated Kit
+ * setter, and load-region hooks.
  */
 void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot);
 void autosave_markInstrumentNormalDirty(uint8_t scene_index, uint8_t slot);

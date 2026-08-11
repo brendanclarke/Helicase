@@ -443,15 +443,24 @@ void    preset_startInstrumentApply(uint8_t scene_index,
                                     uint8_t slot,
                                     uint8_t mark_autosave_whole_instrument);
 /*
- * Commit staged morph-load endpoints and drain the Morph worker.
+ * Commit staged KitMrp or InstrumentMrp endpoints and drain the bounded Morph
+ * worker without replacing identity, Normal images, routing, or modulation
+ * ownership.
  *
- * KitMrp and InstrumentMrp change endpoint values only. They must not clear
- * modulation, reset instrument runtime objects, replace display names, or
- * apply routing. A successful InstrumentMrp commit marks only its changed
- * Morphable Morph endpoints for AutoSave; it does not mark type, Normal,
- * identity, or HCNAMES provenance. These starters preserve slot identity and
- * reuse the bounded Morph worker so active-scene interpolation is refreshed
- * safely.
+ * Inputs: filesystem-owned validated staging plus the immutable selected
+ * destination coordinates. Outputs: InstrumentMrp marks only the committed
+ * destination's Morphable Morph descriptors; KitMrp marks the same
+ * Morphable-only descriptor domain for each successfully type-compatible
+ * selected slot and commits its generated slot-6 Morph-decay setting through
+ * SceneData's named Kit setter. Mismatched slots, types, Normal endpoints,
+ * HCNAMES identity/source, and routing remain unchanged. Why: each loader
+ * imports endpoint data without becoming a normal Kit/Instrument replacement.
+ * The active Scene alone receives the existing deferred runtime refresh; an
+ * inactive selected Scene can publish only if it is already Bank-present.
+ * Affiliates: preset_commitStagedKitNormalToMorph(),
+ * preset_commitStagedInstrumentNormalToMorph(),
+ * autosave_markInstrumentMorphDirty(), and
+ * scene_setSlot6Track7MorphAmpEnvelopeDecay().
  */
 void    preset_startKitMorphApply(void);
 void    preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot);

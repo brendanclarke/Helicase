@@ -1132,12 +1132,13 @@ void autosave_markInstrumentMorphDirty(uint8_t scene_index, uint8_t slot)
     /*
      * Mark one committed same-type Morph-endpoint import.
      *
-     * Inputs: destination Scene/slot after a successful InstrumentMrp (or later
-     * matching-type Morph copy) commit. Output: every Morphable endpoint
+     * Inputs: destination Scene/slot after a successful InstrumentMrp or KitMrp
+     * matching-type Morph copy commit. Output: every Morphable endpoint
      * becomes dirty; Normal/type/name/HCNAMES provenance do not. Why: selectors
      * have no serialized Morph owner, and the marker must match exactly the
-     * endpoint domain that the commit changed. Affiliate:
-     * preset_startInstrumentMorphApply().
+     * endpoint domain that the commit changed. Affiliates:
+     * preset_startInstrumentMorphApply() and
+     * preset_commitStagedKitNormalToMorph().
      */
     if (!instrument)
         return;
@@ -1238,12 +1239,13 @@ void autosave_markKitDirty(uint8_t scene_index)
     uint8_t slot;
 
     /*
-     * Mark the implemented payload of one future whole-Kit commit.
+     * Mark the implemented payload of one committed normal whole-Kit load.
      *
      * Input: destination Scene. Output: all live Kit settings and six complete
      * Instrument data regions are dirty; HCNAMES-owned Kit/Instrument names
      * remain excluded. Why: compound copy/load code needs one post-commit hook.
-     * Affiliates: future Kit copy and Phase 2 successful-load marking.
+     * Affiliates: normal Kit Load completion, future Kit copy, and the six
+     * complete Instrument scopes below.
      */
     for (parameter_index = 0u; parameter_index < AUTOSAVE_KIT_PARAM_COUNT;
          parameter_index++) {
@@ -1277,12 +1279,13 @@ void autosave_markSceneWithoutPatternDirty(uint8_t scene_index)
     uint8_t parameter_index;
 
     /*
-     * Mark the implemented non-Pattern payload of a future Scene commit.
+     * Mark the implemented non-Pattern payload of one committed Scene load.
      *
      * Input: destination Scene. Output: all Scene settings, Effect scope, and
-     * Kit scope become dirty; Scene name and Pattern are excluded. Why: this is
-     * the requested first copy/paste Scene boundary. Affiliates: future Scene
-     * copy, Phase 2 load commits, Effect stub, and Kit marker.
+     * Kit scope become dirty; Scene name and Pattern are excluded. Why: direct
+     * Scene replacements bypass scalar setters but must not imply Pattern
+     * persistence. Affiliates: successful root Scene completion, exact-mask
+     * Bank completion, future Scene copy, Effect stub, and Kit marker.
      */
     for (parameter_index = 0u; parameter_index < AUTOSAVE_SCENE_PARAM_COUNT;
          parameter_index++) {

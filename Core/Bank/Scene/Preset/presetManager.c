@@ -234,8 +234,36 @@ static void preset_completeFilesystemOp(preset_op_type_t completed_op)
 
 static void on_kit_load_complete(void)
 {
+    uint8_t scene_index;
+
+    /*
+     * Publish the complete retained Kit image only after the normal Kit request
+     * reached its terminal successful filesystem callback.
+     *
+     * Inputs: the immutable pm_kit_request_scene_mask captured when
+     * preset_loadKitForScenes() was accepted, and FS_STATUS_DONE before
+     * preset_completeFilesystemOp() acknowledges the facade. Outputs: every
+     * selected now-present Scene receives the existing whole-Kit dirty scope,
+     * comprising its two live Kit settings and all six complete Instrument
+     * regions. Why: filesystem_loadKitDirectory_tick() assigns kit_t directly
+     * after validation, bypassing scalar SceneData/Preset setters. The marker
+     * records the already-retained bytes only; it performs no I/O and does not
+     * change HCNAMES, Menu state, or runtime application. Affiliates:
+     * preset_markRequestedScenesPresentOnSuccessfulLoad(),
+     * autosave_markKitDirty(), and preset_completeFilesystemOp().
+     */
     preset_markRequestedScenesPresentOnSuccessfulLoad();
-	preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
+    if (filesystem_status() == FS_STATUS_DONE) {
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((pm_kit_request_scene_mask &
+                 (uint16_t)(1u << scene_index)) != 0u) {
+                autosave_markKitDirty(scene_index);
+            }
+        }
+    }
+    preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
 }
 
 static void on_kit_save_complete(void)
@@ -384,6 +412,8 @@ static void on_instrument_morph_load_complete(void)
 
 static void on_scene_load_complete(void)
 {
+    uint8_t scene_index;
+
     /*
      * Complete a durable root Scene load.
      *
@@ -391,10 +421,32 @@ static void on_scene_load_complete(void)
      * Output: successful destinations become Bank-present before Menu begins
      * runtime apply. The filesystem already stages HCNAMES provenance with the
      * paired committed identity; Preset neither mirrors it nor dirties
-     * settings.cfg. Affiliates: resident-presence promotion and the common
-     * Preset completion below.
+     * settings.cfg.
+     *
+     * Inputs: FS_STATUS_DONE and the immutable destination mask captured by
+     * preset_loadSceneForScenes(). Outputs: every selected now-present Scene
+     * gets the existing non-Pattern scope—live Scene settings, the current
+     * Effect scope, and the complete Kit scope. Why:
+     * filesystem_commitSceneStage() assigns settings and kit_t directly before
+     * Pattern I/O; marking there could publish a load whose later Pattern,
+     * Effect, or HCNAMES work failed. Pattern is intentionally absent because
+     * the chosen marker has no Pattern payload. Affiliates:
+     * filesystem_commitSceneStage(),
+     * preset_markRequestedScenesPresentOnSuccessfulLoad(),
+     * autosave_markSceneWithoutPatternDirty(), and
+     * preset_completeFilesystemOp().
      */
     preset_markRequestedScenesPresentOnSuccessfulLoad();
+    if (filesystem_status() == FS_STATUS_DONE) {
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((pm_kit_request_scene_mask &
+                 (uint16_t)(1u << scene_index)) != 0u) {
+                autosave_markSceneWithoutPatternDirty(scene_index);
+            }
+        }
+    }
     preset_completeFilesystemOp(PRESET_OP_SCENE_LOAD);
 }
 
@@ -413,6 +465,9 @@ static void on_scene_save_complete(void)
 
 static void on_bank_load_complete(void)
 {
+    uint16_t completed_scene_mask;
+    uint8_t scene_index;
+
     /*
      * Complete one root Bank load.
      *
@@ -420,7 +475,27 @@ static void on_bank_load_complete(void)
      * Scene child or reported a valid empty Bank through
      * filesystem_lastBankLoadLoadedScene(). Menu/boot decide whether to run
      * the fallback chain after reading that bit.
+     *
+     * Inputs: FS_STATUS_DONE and filesystem_lastBankLoadSceneMask() before the
+     * completion helper acknowledges operation scratch. Output: each set child
+     * bit receives the existing non-Pattern Scene dirty scope; a valid empty
+     * Bank yields no Scene marks. Why: the original request may name absent
+     * children, while bank_scenePresentMask() also contains retained unselected
+     * Scenes; only the completed effective-child mask identifies this Bank
+     * Load's payload. BankData has already marked changed Bank fields through
+     * its own setters. Affiliates: filesystem_lastBankLoadSceneMask(), Bank
+     * phase-20 metadata commit, autosave_markSceneWithoutPatternDirty(), and
+     * preset_completeFilesystemOp().
      */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        completed_scene_mask = filesystem_lastBankLoadSceneMask();
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((completed_scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+                autosave_markSceneWithoutPatternDirty(scene_index);
+        }
+    }
     preset_completeFilesystemOp(PRESET_OP_BANK_LOAD);
 }
 
@@ -1433,16 +1508,55 @@ static uint8_t preset_commitStagedKitNormalToMorph(void)
         for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
             if (preset_copyInstrumentNormalToMorphIfSameType(
                     &scene->kit.instruments[slot],
-                    &source->instruments[slot]) &&
-                scene_index == scene_getActiveIndex()) {
-                presetMorph_requestVoice(scene_index, slot);
-                active_queued = 1u;
+                    &source->instruments[slot])) {
+                /*
+                 * Record one successful KitMrp endpoint import at its
+                 * retained-data boundary.
+                 *
+                 * Inputs: a selected resident Scene/slot and a nonzero result
+                 * from preset_copyInstrumentNormalToMorphIfSameType(), which
+                 * proves the source and destination types matched and one or
+                 * more Morphable destination cells were assigned. Output:
+                 * Autosave offers exactly that slot's Morphable Morph
+                 * descriptor cells to its existing tracking/Bank-present map.
+                 * Why: KitMrp preserves type, Normal image, names, routing,
+                 * and modulation ownership, so a whole-Kit or whole-Instrument
+                 * marker would over-publish unrelated payload. This is outside
+                 * the active Scene runtime branch: inactive Bank-present Scenes
+                 * also need persistence, while only the active Scene needs
+                 * presetMorph_requestVoice(). Affiliates:
+                 * autosave_markInstrumentMorphDirty(),
+                 * presetMorph_requestVoice(), and the staged Kit lifetime
+                 * established by on_kit_morph_load_complete().
+                 */
+                autosave_markInstrumentMorphDirty(scene_index, slot);
+                if (scene_index == scene_getActiveIndex()) {
+                    presetMorph_requestVoice(scene_index, slot);
+                    active_queued = 1u;
+                }
             }
         }
         if (INSTRUMENT_SLOT_COUNT > 5u &&
             scene->kit.instruments[5].type == source->instruments[5].type) {
-            scene->kit.settings.slot6_track7_morph_amp_envelope_decay =
-                source->settings.slot6_track7_amp_envelope_decay;
+            /*
+             * Commit the KitMrp source's generated track-7 normal decay as the
+             * destination Morph endpoint through SceneData's named setter.
+             *
+             * Inputs: a selected Scene, matching slot-6 types, and the bounded
+             * staged normal decay value. Output: the generated Morph-decay byte
+             * changes only when different and then offers
+             * AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY to its existing dirty
+             * map. Why: this endpoint is a Kit setting rather than an
+             * Instrument descriptor, so the per-slot Morph marker cannot
+             * represent it. The setter preserves the normal owner rule—store
+             * first, then mark—and leaves runtime scheduling to the existing
+             * active-Scene branch. Affiliates:
+             * scene_setSlot6Track7MorphAmpEnvelopeDecay(),
+             * scene_storeKitParameterByte(), and presetMorph_requestVoice().
+             */
+            scene_setSlot6Track7MorphAmpEnvelopeDecay(
+                scene_index,
+                source->settings.slot6_track7_amp_envelope_decay);
             if (scene_index == scene_getActiveIndex()) {
                 presetMorph_requestVoice(scene_index, 5u);
                 active_queued = 1u;
