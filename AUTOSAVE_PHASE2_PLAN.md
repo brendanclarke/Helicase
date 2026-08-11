@@ -22,10 +22,12 @@ The execution state is now:
   provenance/AutoSave-policy hardware cases remain separately recorded below.
 - Step 4 semantics are settled: Bank slot/name are payload, and a structurally
   valid initial record can still be incomplete as a resident-Bank snapshot.
-- Steps 5–6—whole-object publication and Load/Save exclusion—remain future
-  work. The bounded-CRC baseline has passed its focused follow-up, but Bank
-  Load/Save retains separate known defects and must stabilize before either
-  cross-cutting Phase-2 change.
+- Step 5 has begun and its normal root-Instrument plus InstrumentMrp boundary
+  is hardware-accepted in Session 048. Whole Kit, root Scene without Pattern,
+  and selective Bank Load remain separate future owner boundaries. Step 6
+  Load/Save exclusion remains future work. The bounded-CRC baseline has passed
+  its focused follow-up, but Bank Load/Save retains separate known defects and
+  must stabilize before cross-cutting writer-admission changes.
 
 Read this historical analysis together with:
 
@@ -64,8 +66,10 @@ That statement is historical; current repository authority is its later
   consistent output (§4.1).
 - Phase 1 scalar dirty hooks for Bank/Scene/Kit/Instrument Normal+Morph
   scalar owners, confirmed against a live Scene-0 edit test (§4.2).
-- Version-1 `settings.cfg` persistence (33 lines, including 16 Scene-source
-  words and the `AutoSave` on/off setting), confirmed on hardware (§4.3).
+- Version-1 `settings.cfg` persistence, including the `AutoSave` on/off
+  setting, confirmed on hardware (§4.3). Session 048 removed the former
+  sixteen Scene-source keys; the current 17-line settings schema delegates
+  provenance exclusively to paired HCNAMES records.
 - Two real AsyncFATFS defects found and fixed under hardware load: the
   16,384-byte free-cluster-wrap stop, and a leading-dot short-alias collision
   between `.hcprms1`/`.hcprms2` (§2.3).
@@ -255,9 +259,10 @@ Purpose: close out the two items 045 explicitly left unresolved in the
 *already-shipped* settings feature, before adding Phase 2 surface area on top
 of it (§3.2, §6.6, and Topic A).
 
-1. Scene-source persistence after a runtime Load/Save: 045 confirmed initial
-   Bank-derived provenance but not root Scene Load/Save or partial Bank
-   Load/Save provenance transitions (BLOCKERS). Test each independently.
+1. HCNAMES-source propagation after a runtime root Scene or partial Bank Load:
+   Session 048 moved provenance out of settings and into the paired 129-row
+   HCNAMES register. Future fixtures must test those source transitions there,
+   independently of parameter mutation marking.
 2. `settings.cfg` post-load rewrite: 045 observed the file retaining stale
    content after Scene Load and did not isolate why (§6.6). Diagnose this
    with Step 1's tracing rather than re-guessing publication points the way
@@ -308,15 +313,20 @@ Ordering rationale: implement in order of *fewest dependent owners first*, so
 each step's blast radius is small and diagnosable with Step 1's tracing
 before the next step adds complexity.
 
-1. **Whole-Instrument load** (type + Normal + Morph as one region mark).
-   Single owner (`presetManager.c`), no Bank/Scene ownership questions
-   involved. Hook exactly one boundary: successful public Instrument load
-   completion. Verify with Step 1 tracing that dirty bits appear only after
-   that boundary, not at staged-parse time. Hardware test, save trace.
-2. **Whole-Kit load.** Depends on step 5.1 being solid (Kit contains
+1. **Whole-Instrument load — complete in Session 048.** The root-pool commit
+   in `presetManager.c` marks type plus owned Normal/Morphable Morph bytes
+   immediately after the retained assignment; the temporary `kit` path passes
+   a disabled mark decision. Hardware accepted `J=0x03`, `I=0x07`, 76/76
+   accepted bytes, and a successful generation-2 writer transaction.
+2. **InstrumentMrp projection — complete in Session 048.** A compatible
+   staged source copies only Morphable normal values to the destination Morph
+   image, then marks precisely those Morph payload cells. Generation-3 A/B
+   comparison confirmed a Drum-2 Morph-only change, with type, Normal, and
+   name allocation unchanged. This does not claim KitMrp publication.
+3. **Whole-Kit load.** Depends on the completed Instrument boundary (Kit contains
    Instruments). Same single-boundary discipline: successful public Kit load
    completion only.
-3. **Whole-Scene load, without Pattern** (Pattern stays explicitly excluded,
+4. **Whole-Scene load, without Pattern** (Pattern stays explicitly excluded,
    consistent with the existing "future Scene with Pattern" stub in §2.8 and
    the Pattern-redesign note in MEMORY.md). Before touching this, re-verify
    the Menu-selection-vs-committed-load distinction that broke §6.3's test:
@@ -325,16 +335,15 @@ before the next step adds complexity.
    was the specific bug (§6.3, "Menu reset logic overwrote the accepted
    selection") — write a regression test for exactly that scenario before
    calling this step done.
-4. **Partial Bank Load/Save**, using the *actual* selected/loaded child mask,
+5. **Selective Bank Load**, using the *actual* selected/loaded child mask,
    not "all sixteen Scenes" (§6.1's explicit error, and the explicit
    prohibition in §7: "Do not mark all sixteen Scenes for a partial Bank
-   Load/Save"). Treat Bank Save as reading resident data, not as a
-   whole-workspace mutation (§6.1, §7).
-5. **Morph projection.** Last, since it's the highest-cardinality case
-   (Morphable descriptors only, per the existing Phase 1 rule in §2.8) and
-   benefits from every earlier boundary being proven first.
+   Load"). Bank Save reads resident data and is not a Session-049 mutation
+   producer. Do not add Save-side marking in this boundary.
+6. **KitMrp or other remaining Morph projection.** This remains separate from
+   the accepted InstrumentMrp scope and needs its own endpoint-domain review.
 
-For every one of 5.1–5.5: change exactly one owner boundary per hardware
+For every remaining Step-5 boundary: change exactly one owner boundary per hardware
 test pass (the direct fix for root cause (b)); do not move the publication
 point more than once without first writing down, in the session log, why the
 previous placement didn't fire, using Step 1's trace to show *which stage*
@@ -520,14 +529,19 @@ in `047_SESSION_HANDOFF_LOG.md`.
   card and decode the 72-byte `ASENSURE` bootlog before attempting an
   AsyncFATFS or SD-driver change.
 
-### Next Phase-2 gate
+### Session 048 acceptance and Session 049 gate
 
-Do not start Steps 5 or 6 in Session 048 merely because the CRC work is
-bounded. First keep Bank Load/Save stable and resolve only one demonstrated
-Bank behavior at a time. The active-playing-Scene switch and stale overwrite
-folder are known independent bugs; the latter requires native recursive-delete
-correctness, while the former requires a separate runtime-vs-boot selection
-contract. Once the relevant baseline is stable, Step 5 resumes in the written
-order: Whole Instrument, Whole Kit, root Scene without Pattern, selective
-Bank session replacement, then Morph projection. Reattempt Load/Save
-exclusion last and in isolation.
+Session 048 completed the first two low-coupling Step-5 boundaries without
+changing record geometry, adding production RAM, or broadening writer
+admission: normal root Instrument and InstrumentMrp. The direct HCNAMES flush
+acknowledgement and the approved one-byte Menu exit queue were necessary to
+allow the existing deferred schedulers to start after the normal physical page
+exit; they are part of the verified boundary, not a general Load/Save
+exclusion redesign.
+
+Session 049 begins with normal Kit Load, root Scene Load without Pattern, then
+selective Bank Load. Keep each in its own implementation and hardware fixture.
+The active-playing-Scene switch and stale overwrite folder remain independent
+known bugs; the latter requires native recursive-delete correctness, while the
+former requires a separate runtime-vs-boot selection contract. Reattempt
+Load/Save exclusion last and in isolation.

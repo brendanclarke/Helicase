@@ -1,8 +1,8 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware through the Session 047 bounded-CRC
-and boot-capture update. It includes the
+reference for the Helicase/LXR-02 firmware through the Session 048 HCNAMES
+source-authority and Instrument-Load AutoSave update. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
@@ -35,9 +35,10 @@ Use this document to distinguish three things:
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
 - Not implemented yet: applying the hidden AutoSave winner to resident state,
-  whole-object AutoSave publication for Load/Save/copy operations, AutoSave
-  Pattern/Effect persistence, crash-recoverable promotion into explicit Bank
-  library files, real Effect load/save, final dynamic Pattern storage, descriptor-backed step
+  whole-object AutoSave publication beyond accepted root Instrument and
+  InstrumentMrp Load (Kit, Scene, Bank, copy, and remaining Morph scopes),
+  AutoSave Pattern/Effect persistence, crash-recoverable promotion into explicit
+  Bank library files, real Effect load/save, final dynamic Pattern storage, descriptor-backed step
   automation playback, versioned/recoverable HCNAMES, and `/.hcrepair`
   roll-forward. The legacy `kitBrowser` map and File/Dir diagnostic caches are
   retired.
@@ -48,7 +49,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented through the inherited Session 046 baseline plus Session 047:
+Implemented through the inherited Session 046/047 baseline plus Session 048:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -107,6 +108,11 @@ Implemented through the inherited Session 046 baseline plus Session 047:
 - Root Instrument parsing is staged. An active-Scene commit clears all current
   modulation owners before type replacement, rebuilds all six runtime Morph
   images, then normalizes and reinstalls all source target relationships.
+- Filesystem Instrument parsing/staging never marks AutoSave. After Preset
+  commits a successful root-pool Instrument into each destination, it marks
+  that typed payload immediately; the hidden `.hctmp.<ext>` `kit` restore is
+  non-marking. HCNAMES remains the independent identity/provenance owner and
+  its deferred session rewrite is not a parameter-mutation hook.
 - Kit Morph Load is a Load menu entry `Load:[KitMrp  ]`. It parses the same
   root Kit directory as normal Kit Load, but Preset copies source normal
   endpoint values into resident morph endpoints only for slots whose instrument
@@ -115,7 +121,9 @@ Implemented through the inherited Session 046 baseline plus Session 047:
   currently loaded slot type only, shown as `<Type>Mrp`. It loads the selected
   root Instrument file through normal staging, then copies staged normal
   endpoint values into the destination slot's morph endpoint only when the
-  slot type still matches.
+  slot type still matches. A successful compatible copy immediately marks only
+  those Morphable destination endpoint bytes for AutoSave; it does not alter
+  HCNAMES identity/source or the slot's Normal image.
 - Normal `Save:[Kit     ]` writes the active Scene kit to the directory Kit
   format: a numbered `Kit/` folder, `kitset.kcg`, and six descriptor-keyed
   instrument files containing `[params]` and `[morph]`.
@@ -1450,7 +1458,7 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status retained through the Session 047 baseline:
+Status retained through the Session 048 baseline:
 
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
@@ -1665,7 +1673,8 @@ instrument runtime propagation:
 
 ## AutoSave boundary
 
-Status: the hidden A/B scalar writer is implemented in the Session 047
+Status: the hidden A/B scalar writer and the accepted root-Instrument /
+InstrumentMrp mutation boundaries are implemented through the Session 048
 baseline. Its complete format, ownership, scheduling, power-loss behavior,
 bounded CRC contract, duplicate rules, and extension process live only in
 `AUTOSAVE.md`.
@@ -1678,10 +1687,12 @@ specifications. Current firmware writes only the root `/.hcprms1` and
 Explicit Bank/Scene/Kit/Instrument Load and Save continue to use the ordinary
 product objects specified above.
 
-Whole-object Load/Save/copy publication, winner replay into resident state,
+Normal Kit Load, root Scene Load without Pattern, and selective Bank Load
+publication remain the next separate AutoSave owner boundaries. General
+whole-object Load/Save/copy publication, winner replay into resident state,
 Pattern/Effect persistence, and crash-recoverable promotion into explicit Bank
-files remain future AutoSave work. They must be added through `AUTOSAVE.md`, not
-by reviving the removed dot-backer design.
+files remain future work. They must be added through `AUTOSAVE.md`, not by
+reviving the removed dot-backer design.
 
 ## Example Target Layout
 

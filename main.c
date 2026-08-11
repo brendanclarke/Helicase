@@ -516,13 +516,14 @@ int main(void)
              *
              * Inputs: mounted card, initialized Menu parameter storage, and
              * the completed post-mount settle. Outputs: Global runtime values,
-             * active_bank, sixteen Scene source words, and the AutoSave byte
-             * are available before their first consumers. Why: the former late
+             * active_bank, and the AutoSave byte are available before their
+             * first consumers. Why: the former late
              * stage loaded settings only after Bank/fallback selection, making
              * active_bank and AutoSave OFF ineffective during boot. Preset's
              * pre-audio completion applies Globals synchronously and a missing
              * file retains defaults. Affiliates: filesystem settings parser,
-             * BankData restore slot, and the policy call below.
+             * BankData restore slot, HCNAMES' later Bank-load publication, and
+             * the policy call below.
              */
             /*
              * DEV_MODE_DIAGNOSTIC displays runtime information on the screen

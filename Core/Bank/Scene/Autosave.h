@@ -406,16 +406,19 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
                                        uint16_t parameter_index);
 
 /*
- * Preserve named dirty scopes for future validated copy/paste and Phase 2
- * whole-object commits; these functions mark data but never copy it.
+ * Preserve named dirty scopes for validated copy/paste and whole-object
+ * commits; these functions mark data but never copy it.
  *
- * Inputs: destination Scene/slot after a successful future commit. Outputs:
- * currently gettable cells in that scope become dirty. Whole Instrument adds
- * type plus normal/Morph endpoints but not its HCNAMES-owned name; endpoint-
- * only copies require matching types before calling their marker. Kit includes
- * all six Instruments; Scene includes settings, the Effect stub, and Kit.
- * SceneWithPattern is intentionally only the non-Pattern alias until Pattern
- * persistence exists. Affiliates: future copy/paste and load-region hooks.
+ * Inputs: destination Scene/slot after a successful retained commit. Outputs:
+ * currently gettable cells in that scope become dirty. A successful root-pool
+ * Instrument Load calls Whole Instrument immediately after each retained
+ * destination commit, adding type plus Normal/Morph endpoints but not its
+ * HCNAMES-owned name. A successful InstrumentMrp Load calls the Morph scope
+ * only after its compatible endpoint commit. Endpoint-only copies require
+ * matching types before calling their marker. Kit includes all six Instruments;
+ * Scene includes settings, the Effect stub, and Kit. SceneWithPattern is
+ * intentionally only the non-Pattern alias until Pattern persistence exists.
+ * Affiliates: Preset Instrument commits, copy/paste, and load-region hooks.
  */
 void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot);
 void autosave_markInstrumentNormalDirty(uint8_t scene_index, uint8_t slot);

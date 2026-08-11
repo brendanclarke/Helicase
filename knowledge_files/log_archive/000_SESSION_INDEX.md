@@ -55,6 +55,8 @@
 | 044 | 2026-07-28 | local working directory, branch `dev-ph3-autosave` with uncommitted load/save and boot-pacing changes | Cold-boot tagged-runtime/LFO repair, working runtime Bank Load and final index ordering, unified OK/OW command UI, and inconclusive intermittent-boot pacing experiment |
 | 045 | 2026-08-02 | production source restored to commit `326a8a1` on branch `dev-ph3-autosave-retry`; later rejected code retained only as `*.failed` reference | Autosave A/B format and bounded parameter drain, single canonical dirty mask, Phase 1 scalar mutation hooks, settings/provenance persistence, boot splash ordering, and quarantine of the failed Phase 2 branch |
 | 046 | 2026-08-10 | rollback boundary commit `c9807fa`; later Session 046 firmware experiments reset, documentation/SD fixtures remain in the working tree | Boot filesystem localization and failure transparency, duplicate-safe HCNAMES handling, accepted Phase 1 scalar coverage, working autosave lifecycle trace, and rollback-safe Session 047 reimplementation plan |
+| 047 | 2026-08-10 | current working tree after bounded-CRC/boot-capture implementation | Bounded AutoSave CRC, missing-pair selector repair, trace arbitration, ASENSURE forensic capture, and focused hardware validation |
+| 048 | 2026-08-11 | `/Users/bc/Helicase Project/Helicase-check-fs/Helicase`, intentional dirty worktree based on `63bdd6e` | HCNAMES source authority, source-free settings, immediate Instrument/InstrumentMrp AutoSave mutation marks, trace/exit repair, and hardware acceptance |
 
 ---
 
@@ -421,6 +423,9 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | Phase 1 scalar coverage is accepted complete for user-testable owners: Scene, Kit/Instrument, and Scene-owned MIDI channel/note. There are no user-editable Bank scalar values in the current UI; do not reopen a vague coverage-matrix task | 046 |
 | Current logging files at `c9807fa` are `/bootlog.bin` and `/asavetrc.bin`; duplicate physical entries remain possible. The failed unified `/devlog.bin` experiment is not current code and must not be restored mechanically | 046 |
 | All autosave CRC work must be bounded across foreground ticks before further runtime save/load pacing work. The reverted blind 1 ms pacing experiment caused severe boot/load/save regressions and delayed, rather than removed, audio glitches | 046 |
+| `/.hcnames` is the sole 129-row resident identity/provenance register: paired `name<TAB>source` records use `-`, `?`, `000..999`, or `@`; its filesystem-owned 258-B source cache replaces the retired 32-B SceneData source array. `settings.cfg` is now a 17-line source-free schema and accepts old `scene_source_NN` keys only to ignore them during migration | 048 |
+| Successful root Instrument Load immediately marks type plus owned Normal/Morphable Morph payload; compatible InstrumentMrp marks only Morphable Morph payload. Hardware accepted `J=0x03`, `I=0x07`, 76/76 root bytes, and generation-3 A/B proof of a Drum-2 Morph-only change. HCPRMS names are not identity authority; HCNAMES is | 048 |
+| Session 049 scope is only normal Kit Load, root Scene Load without Pattern, and selective Bank Load mutation marks, one owner boundary and hardware fixture at a time. Do not combine it with writer exclusion, boot reader, Save-side marking, KitMrp, recursive delete, or active-Scene Bank behavior | 048 |
 
 ---
 
@@ -569,3 +574,22 @@ converter.
   bounded CRC/cursor contract, selector fix, trace facade guard, settings
   no-change result, 32 KiB evidence and capsule decoder, build modes/RAM,
   PA2ST1/PA2ST2-3 disposition, and Session 048 boundaries
+
+### 048 — HCNAMES Source Authority And Instrument-Load AutoSave Acceptance (2026-08-11)
+
+Moved resident source authority entirely into paired `/.hcnames` records and
+removed Scene provenance from `settings.cfg`, then completed and hardware
+accepted the first Phase-2 mutation boundaries: root Instrument Load marks
+type/Normal/Morphable Morph at retained commit, while InstrumentMrp marks only
+the compatible Morph endpoints. Corrected the normal Load/Save exit release so
+the existing trace and writer schedulers can run, added compact `I`/`J`/`N`
+diagnostics, and verified generation-2/3 A/B records from copied hardware SD
+fixtures. Session 049 continues only with Kit, Scene-without-Pattern, and
+selective Bank Load marking. The blank InstrumentMrp `kit` row is documented
+as a deferred Morph-only temporary-snapshot UI bug.
+- **Find here**: [048_SESSION_HANDOFF_LOG.md](048_SESSION_HANDOFF_LOG.md),
+  HCNAMES paired source grammar/ownership, source-free settings migration,
+  immediate Instrument/InstrumentMrp dirty rules, direct-callback facade
+  acknowledgement, queued normal Load/Save exit, trace evidence and ring-wrap
+  interpretation, current SRAM/build figures, deferred UI bug, and Session
+  049 fixture order

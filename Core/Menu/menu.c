@@ -49,6 +49,7 @@
 #include "SceneData.h"
 #include "BankData.h"
 #include "SceneModTargets.h"
+#include "AutosaveTrace.h"
 #include "config.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
@@ -86,6 +87,21 @@ static inline void lockPotentiometerFetch(void){}
 
 static uint8_t menu_TargetVoiceGapIndex = 0xFF;
 static uint8_t menu_storageBusy = 0;
+/*
+ * One deferred physical page destination (+1 B normal SRAM1).
+ *
+ * Input: the latest mode-button target pressed while an existing Load/Save
+ * filesystem or apply transaction owns menu_storageBusy. Output: the normal
+ * menu_switchPage() exit runs exactly once as soon as that owner releases the
+ * Menu; zero means no queued destination and nonzero stores page+1. Why:
+ * discarding a mode-button edge
+ * at the busy guard can strand a completed Instrument session on Load/Save,
+ * suppressing its normal HCNAMES/trace follow-up. Lifetime: only from that
+ * rejected edge until the next safe foreground Menu poll. Affiliates:
+ * menu_switchPage() and menu_processPendingPageSwitch().
+ */
+#define MENU_PENDING_PAGE_NONE 0u
+static uint8_t menu_pendingPageSwitch;
 /*
  * Explicit OK/OW command presentation state (+1 B SRAM1).
  *
@@ -128,6 +144,8 @@ static uint8_t menu_instrumentApplySlot = 0u;
 static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot);
 static void menu_libraryIndexLoadComplete(void);
 static void menu_requestKitEntryNames(void);
+static void menu_traceInstrumentEntry(uint8_t phase, uint8_t failed);
+static void menu_processPendingPageSwitch(void);
 static void menu_requestInstrumentIndexLoad(instrument_type_t type);
 static uint8_t menu_requestLoadCommandFinalIndexRestore(void);
 static uint8_t menu_staleWarningActive = 0;
@@ -509,21 +527,29 @@ static uint8_t menu_tickSoundApply(void)
  * storage. It returns nonzero only when it posted the one deferred restore. */
 static uint8_t menu_finishInstrumentApplySession(void);
 
-static void menu_startInstrumentApply(uint8_t scene_index, uint8_t slot)
+static void menu_startInstrumentApply(uint8_t scene_index,
+                                      uint8_t slot,
+                                      uint8_t mark_autosave_whole_instrument)
 {
     /*
      * Start post-load commit/apply for one staged Instrument slot.
      *
      * Inputs: exact destination Scene and slot just loaded from Instrument/.
-     * Output: Preset commits retained state and, for the audible Scene, arms the
-     * six-slot runtime rebuild/target-rebind cursor. Menu holds input through
-     * the completion boundary either way. This stays separate from
-     * menu_startSoundApply() because Instrument browsing must not replace other
-     * retained kit slots, Scene settings, globals, or patterns.
+     * `mark_autosave_whole_instrument` is captured from the accepted operation,
+     * not the mutable lower-row cursor: a root pool replacement changes
+     * retained Instrument data and must arm AutoSave at commit, while a hidden
+     * reversible `kit` restore merely returns to the session baseline and must
+     * not create a second mutation event. Output: Preset commits retained state
+     * and, for the audible Scene, arms the six-slot runtime rebuild/target-
+     * rebind cursor. Menu holds input through the completion boundary either
+     * way. This stays separate from menu_startSoundApply() because Instrument
+     * browsing must not replace other retained kit slots, Scene settings,
+     * globals, or patterns.
      */
     menu_instrumentApplyActive = 1u;
     menu_instrumentApplySlot = slot;
-    preset_startInstrumentApply(scene_index, slot);
+    preset_startInstrumentApply(scene_index, slot,
+                                mark_autosave_whole_instrument);
 }
 
 static void menu_startKitMorphApply(void)
@@ -1091,8 +1117,9 @@ static uint8_t menu_instrumentTempValid = 0u;
  * operation without consulting the mutable encoder cursor. Why: Load-number
  * turns are deliberately accepted while a pool Instrument operation drains;
  * `menu_instrumentLoadSource` may therefore say `kit` when that *pool* load
- * completes. Reusing this existing byte avoids a second session cache or SRAM
- * allocation. Affiliates: menu_prepareInstrumentLoadTemp(),
+ * completes. This latch sequences temporary save/restore UI work only; it
+ * must not classify AutoSave provenance, which comes from filesystem's
+ * immutable request flag. Affiliates: menu_prepareInstrumentLoadTemp(),
  * menu_restoreInstrumentLoadTemp(), menu_tickInstrumentApply(), and
  * PRESET_OP_INSTRUMENT_TEMP_SAVE / PRESET_OP_INSTRUMENT_LOAD handling.
  */
@@ -3197,6 +3224,9 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
 
 static void menu_instrumentIndexLoadComplete(void)
 {
+    menu_traceInstrumentEntry(
+        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_COMPLETE,
+        (uint8_t)(filesystem_status() != FS_STATUS_DONE));
     /*
      * Finish one typed Instrument index load for either nested Load or Save.
      * The filesystem has replaced the selected type's general name cache;
@@ -3236,6 +3266,33 @@ static void menu_instrumentIndexLoadComplete(void)
             return;
     }
     menu_repaintAll();
+}
+
+static void menu_traceInstrumentEntry(uint8_t phase, uint8_t failed)
+{
+    uint8_t flags = phase;
+    uint32_t value;
+
+    /*
+     * Publish one diagnostic-only milestone for the nested Instrument entry
+     * chain. Inputs: the phase's request/callback result and Menu's current
+     * Scene/slot/type coordinate. Output: one existing eight-byte RAM trace
+     * record; no filesystem request, UI state, or persistence decision changes.
+     * Why: HCNAMES, hidden `.hctmp`, and `.hcindex` are serialized but otherwise
+     * indistinguishable to a user watching the blank `kit` label. Affiliates:
+     * the matching request/completion sites and AutosaveTrace's logging stubs.
+     */
+    if (!menu_instrumentLoadActive)
+        return;
+    if (failed)
+        flags |= AUTOSAVE_TRACE_INSTRUMENT_ENTRY_FLAG_FAILED;
+    value = ((uint32_t)menu_instrumentLoadScene <<
+             AUTOSAVE_TRACE_INSTRUMENT_ENTRY_SCENE_SHIFT) |
+            ((uint32_t)menu_instrumentLoadSlot <<
+             AUTOSAVE_TRACE_INSTRUMENT_ENTRY_SLOT_SHIFT) |
+            ((uint32_t)menu_instrumentLoadType <<
+             AUTOSAVE_TRACE_INSTRUMENT_ENTRY_TYPE_SHIFT);
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_INSTRUMENT_ENTRY, flags, value);
 }
 
 static void menu_refreshResidentNameScratchKit(uint16_t scene_mask)
@@ -3291,6 +3348,8 @@ static void menu_requestKitEntryNames(void);
 
 static void menu_residentNameScratchFlushComplete(void)
 {
+    uint8_t flush_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+
     /*
      * Complete the only HCNAMES write allowed by a Menu name session.
      *
@@ -3300,10 +3359,31 @@ static void menu_residentNameScratchFlushComplete(void)
      * begin that context's one entry read; otherwise load the new non-name
      * browser or simply release storage after leaving Load/Save altogether.
      */
-    if (filesystem_status() != FS_STATUS_DONE) {
+    /*
+     * Release the terminal direct-filesystem result before either ending the
+     * session or posting its next foreground request.
+     *
+     * Inputs: the completed HCNAMES status captured above. Output: the shared
+     * facade returns from DONE/ERROR to IDLE exactly once; the error string
+     * remains available to the existing overlay path. Why: this callback is
+     * not routed through Preset, whose completion helper normally performs the
+     * acknowledgement. Leaving HCNAMES at DONE made every idle-only scheduler
+     * permanently decline ownership after a normal Load/Save exit, including
+     * the AutoSave trace flush and the parameter writer. A completed page exit
+     * must release that facade regardless of success or failure. Affiliates:
+     * filesystem_ack(), filesystem_autosaveTraceFlushSchedule_tick(), and
+     * filesystem_autosaveWriterSchedule_tick().
+     */
+    filesystem_ack();
+
+    if (!flush_ok) {
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSHED, 1u);
         menu_showFilesystemErrorOverlay();
         return;
     }
+    menu_traceInstrumentEntry(
+        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSHED, 0u);
     menu_residentNameDirtySceneMask = 0u;
     menu_residentNameScratchValid = 0u;
     menu_residentNameScratchScene =
@@ -3353,8 +3433,12 @@ static uint8_t menu_endResidentNameScratchSession(void)
     if (filesystem_requestUpdateResidentKitNames(
             menu_residentNameDirtySceneMask,
             menu_residentNameScratchFlushComplete)) {
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH, 0u);
         return 1u;
     }
+    menu_traceInstrumentEntry(
+        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH, 1u);
     menu_storageBusy = 0u;
     menu_showFilesystemErrorOverlay();
     return 0u;
@@ -3375,9 +3459,13 @@ static void menu_residentNameScratchLoaded(void)
      * fast in-session browsing and payload opens.
      */
     if (filesystem_status() != FS_STATUS_DONE || scene >= 16u) {
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_COMPLETE, 1u);
         menu_showFilesystemErrorOverlay();
         return;
     }
+    menu_traceInstrumentEntry(
+        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_COMPLETE, 0u);
     filesystem_setIdentityName(FS_IDENTITY_KIT_ROW,
                                filesystem_residentKitName(scene));
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
@@ -3421,10 +3509,14 @@ static uint8_t menu_requestResidentNameScratch(uint8_t scene)
     menu_storageBusy = 1u;
     if (!filesystem_requestLoadResidentKitName(
             scene, menu_residentNameScratchLoaded)) {
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_REQUEST, 1u);
         menu_storageBusy = 0u;
         menu_deferSelectionRequest = 1u;
         return 0u;
     }
+    menu_traceInstrumentEntry(
+        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_REQUEST, 0u);
     return 1u;
 }
 
@@ -3489,9 +3581,13 @@ static uint8_t menu_prepareInstrumentLoadTemp(void)
     menu_instrumentTempType = menu_instrumentLoadType;
     if (!preset_saveInstrumentTemp(menu_instrumentLoadScene,
                                    menu_instrumentLoadSlot)) {
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST, 1u);
         menu_invalidateInstrumentLoadTemp();
         return 0u;
     }
+    menu_traceInstrumentEntry(
+        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST, 0u);
     menu_instrumentTempOperationPending = 1u;
     menu_storageBusy = 1u;
     return 0u;
@@ -3543,9 +3639,9 @@ static uint8_t menu_finishInstrumentApplySession(void)
     /*
      * Resolve the precise desired state after an Instrument apply completes.
      *
-     * Inputs: the immutable temporary-operation tag captured when Preset
-     * accepted the request, plus the mutable current lower-row cursor. Output:
-     * a completed temporary restore clears its tag exactly once; a completed
+     * Inputs: the UI temporary-operation latch, plus the mutable current
+     * lower-row cursor. Output: a completed temporary restore clears its tag
+     * exactly once; a completed
      * ordinary pool load whose cursor is now `kit` posts one deferred temporary
      * restore and returns nonzero. Why: free Load-number scrolling may change
      * the cursor while an older pool read/apply drains, so the cursor cannot
@@ -3572,6 +3668,8 @@ static uint8_t menu_finishInstrumentApplySession(void)
 
 static void menu_requestInstrumentEntryNames(void)
 {
+    menu_traceInstrumentEntry(
+        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_REQUEST, 0u);
     /*
      * Enter or re-enter nested Instrument mode using the seven-name session.
      *
@@ -3611,8 +3709,14 @@ static void menu_requestInstrumentIndexLoad(instrument_type_t type)
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
     if (!filesystem_requestLoadInstrumentIndex(
-            type, menu_instrumentIndexLoadComplete))
+            type, menu_instrumentIndexLoadComplete)) {
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_REQUEST, 1u);
         menu_deferSelectionRequest = 1u;
+    } else {
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_REQUEST, 0u);
+    }
 }
 
 static void menu_requestKitEntryNames(void)
@@ -7349,6 +7453,17 @@ void menu_pollPresetStatus(void)
     uint8_t retrySelectionAfterAck = 0;
     uint8_t retrySelectionLoadKit = 0;
 
+    /*
+     * Give a queued physical Load/Save exit priority over new browser work.
+     * Input: a mode-button destination retained only while the previous owner
+     * held menu_storageBusy. Output: invokes the ordinary page switch after
+     * release, including its HCNAMES session finalization; an in-flight owner
+     * remains untouched. Why: the user-visible exit is a durable intent, not
+     * an input edge that may be dropped because a temporary file or index is
+     * still closing. Affiliate: menu_switchPage() busy-path queue below.
+     */
+    menu_processPendingPageSwitch();
+
     /* Sound apply runs before globals because ALL/performance completion first
     ** installs loaded modulation routing, then starts any global apply that
     ** belongs to the container. Keep both paths one bounded unit per
@@ -7679,6 +7794,9 @@ void menu_pollPresetStatus(void)
          */
         menu_instrumentTempOperationPending = 0u;
         menu_instrumentTempValid = preset_getCompletedOk();
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_COMPLETE,
+            (uint8_t)!menu_instrumentTempValid);
         menu_storageBusy = 0u;
         if (menu_instrumentTempValid && menu_instrumentLoadActive &&
             !menu_instrumentSaveMode && !menu_instrumentLoadMorphMode) {
@@ -7691,6 +7809,10 @@ void menu_pollPresetStatus(void)
         break;
 
     case PRESET_OP_INSTRUMENT_LOAD:
+    {
+        uint8_t mark_autosave_whole_instrument = (uint8_t)(
+            !filesystem_loadedInstrumentWasTemporary());
+
         /*
          * Single Instrument load completion.
          *
@@ -7715,10 +7837,23 @@ void menu_pollPresetStatus(void)
             menu_refreshResidentNameScratchInstrument(
                 menu_kitLoadSceneMask, menu_instrumentLoadSlot);
         }
+        /*
+         * Carry the filesystem-captured persistence meaning into the shared
+         * staged-Instrument commit. The visible Load cursor may have moved
+         * while I/O completed, and Menu's temporary-operation latch sequences
+         * UI work rather than the loaded file's origin; neither can identify
+         * root-pool versus hidden `kit` data. The filesystem flag remains valid
+         * through this completion window and says exactly which request opened
+         * the staged file: ordinary pool loads mark their committed payload
+         * now, while a temporary restore produces no new whole-Instrument
+         * mutation mark.
+         */
         menu_startInstrumentApply(preset_getRequestScene(),
-                                  preset_getRequestSlot());
+                                  preset_getRequestSlot(),
+                                  mark_autosave_whole_instrument);
         menu_refreshLoadSceneLeds();
         break;
+    }
 
     case PRESET_OP_INSTRUMENT_MORPH_LOAD:
         /*
@@ -8064,7 +8199,25 @@ void menu_switchPage(uint8_t pageNr)
 {
     uint8_t end_resident_name_session;
 
-    if (menu_storageBusy) return;
+    if (menu_storageBusy) {
+        /*
+         * Retain every genuine physical exit requested during busy work.
+         * Inputs: a requested page while Load/Save owns a filesystem/apply
+         * transaction. Output: the one-byte slot stores the latest non-Load
+         * destination plus one, without mutating the active page or in-flight
+         * request.
+         * Why: pressing any mode button is the normal way to leave Load/Save;
+         * dropping that edge leaves the exit path and its required cleanup
+         * unstarted. A Load target is the existing Load-to-Save toggle, not an
+         * exit, and deliberately remains unavailable until the owner releases.
+         * Affiliate: menu_processPendingPageSwitch() at the next safe poll.
+         */
+        if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+            pageNr != LOAD_PAGE) {
+            menu_pendingPageSwitch = (uint8_t)(pageNr + 1u);
+        }
+        return;
+    }
 
     /* Capture the old context before page mutation. Pressing the Load/Save
      * mode button toggles LOAD_PAGE/SAVE_PAGE through pageNr==LOAD_PAGE and
@@ -8211,6 +8364,30 @@ void menu_switchPage(uint8_t pageNr)
     if (end_resident_name_session)
         (void)menu_endResidentNameScratchSession();
     menu_repaintAll();
+}
+
+static void menu_processPendingPageSwitch(void)
+{
+    uint8_t pending = menu_pendingPageSwitch;
+    uint8_t pageNr;
+
+    /*
+     * Consume the one queued Load/Save exit only after its owner is idle.
+     * Inputs: a page-plus-one destination held in the approved one-byte Menu
+     * slot, current busy state, and Preset's terminal acknowledgement state.
+     * Output: clears the slot before entering menu_switchPage(), so a new busy
+     * period cannot replay a stale exit. Why: this routes deferred exits through
+     * the sole existing cleanup/page-switch implementation after every callback
+     * has installed its required retained state, instead of duplicating HCNAMES,
+     * cache, LED, or trace policy in a completion callback. Affiliate:
+     * menu_pollPresetStatus().
+     */
+    if (pending == MENU_PENDING_PAGE_NONE || menu_storageBusy ||
+        preset_getStatus() != PRESET_IDLE)
+        return;
+    menu_pendingPageSwitch = MENU_PENDING_PAGE_NONE;
+    pageNr = (uint8_t)(pending - 1u);
+    menu_switchPage(pageNr);
 }
 
 /* -----------------------------------------------------------------------

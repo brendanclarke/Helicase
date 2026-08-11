@@ -8,7 +8,7 @@ own AutoSave format/writer behavior, product filesystem layout, or low-level
 AsyncFATFS semantics; those belong to `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, and
 `ASYNCFATFS_REFERENCE.md` respectively.
 
-This document describes the Session 047 logging build. Plans and failed
+This document describes the Session 048 logging build. Plans and failed
 working-tree experiments that mention a unified `/devlog.bin` are not
 implemented state.
 
@@ -65,7 +65,7 @@ and owner in `SRAM_MANIFEST.md` before implementation.
 
 ## Current logging files
 
-The Session 047 build has two producer-specific root files. There is no
+The Session 048 build has two producer-specific root files. There is no
 `DEV_LOG_FILENAME`, `/devlog.bin`, `SaveFixTrace`, or `/savefix.bin` in the
 current code.
 
@@ -114,10 +114,28 @@ Each record is eight bytes:
 stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
-Integer fields are little-endian. Stage bytes are uppercase `D S A V M C P T`
-and their meanings/values are owned by `AutosaveTrace.h`. Records are
-acknowledged only after the file operation succeeds; overflow is reported by
-the ring's bounded dropped-record counter.
+Integer fields are little-endian. Stage bytes are uppercase `D I J N S A V M C P T`
+and their meanings/values are owned by `AutosaveTrace.h`. `D` is one accepted
+payload-bit OR. `I` is one whole-Instrument marker outcome: flags report valid
+payload-map base, live tracking, and whether all requested bytes reached the
+dirty funnel; value packs Scene, slot, expected byte count, and accepted byte
+count. It exists because a whole Instrument can produce enough `D` records to
+wrap the small ring before a card is copied. Records are acknowledged only
+after the file operation succeeds; overflow is reported by the ring's bounded
+dropped-record counter.
+
+`J` is the committed-Instrument pre-marker witness. It records the destination
+Scene/slot/type and flags for “whole marker requested” and “whole marker
+called.” It is emitted immediately after the SceneData assignment and follows
+the marker's `I` record, allowing a failed provenance gate to be separated from
+an internal marker rejection without changing persistence behavior.
+
+`N` is a nested-Instrument-entry timing milestone. Its low flag bits select
+entry, HCNAMES read/flush, temporary snapshot, or typed-index request and
+completion; flag bit 7 reports a rejected request or failed callback. Its value
+packs the Scene, slot, and selected type. The paired ticks expose the exact SD
+operation behind a delayed blank `kit` name without changing Menu behavior or
+adding any state.
 
 ## Current duplicate-name limitation
 

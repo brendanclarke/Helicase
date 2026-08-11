@@ -1,6 +1,6 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through the Session 047 bounded-CRC and
+Session 030 baseline, updated through the Session 048 bounded-CRC,
 boot-capture build after the Session 046 rollback, for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
@@ -451,8 +451,8 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_applyLfoModTarget(lfo, targetParam)` | Direct LFO mod destination update. | Menu, preset load apply |
 | `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Clear outgoing modulation, quiet/trigger-time reset and image-apply all six incoming tagged slots, then keep the Scene gate active while the existing Instrument cursor normalizes/rebinds every source's two LFO pairs and velocity against the final type vector. | Menu and `main.c` post-audio boot activation |
 | `preset_startKitMorphApply()` | Drain same-type KitMrp endpoint copies and refresh active-scene Morph runtime images without replacing kit membership or routing. | Menu KitMrp completion |
-| `preset_startInstrumentApply(scene, slot)` / `preset_tickInstrumentApply()` | Commit one validated staged Instrument. Active Scene path clears all outgoing modulation owners, commits/resets the incoming runtime, rebuilds all six Morph images, then normalizes/rebinds all six source target relationships. | Menu Instrument completion |
-| `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
+| `filesystem_loadedInstrumentWasTemporary()` plus `preset_startInstrumentApply(scene, slot, mark_autosave_whole_instrument)` / `preset_tickInstrumentApply()` | Filesystem exposes the existing request-local root-pool versus hidden-`kit` origin during completion; Menu passes that immutable result as the mark flag. A root-pool commit immediately marks each destination's type/Normal/Morph payload for AutoSave; hidden restore supplies zero. Active Scene path clears all outgoing modulation owners, commits/resets the incoming runtime, rebuilds all six Morph images, then normalizes/rebinds all six source target relationships. | Filesystem, then Menu Instrument completion |
+| `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image, immediately mark only the committed Morphable Morph payload for AutoSave, and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values; per-voice Morph is the engine input. | Menu, MIDI, velocity modulation, main loop |
 | `presetMorph_setVoiceLfoModulation(source_slot, target_slot, amount, polarity, lfo_value)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay that is summed around retained per-voice Morph base values. | InstrumentManager/LFO dispatch |
 

@@ -175,14 +175,10 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
  * preset_loadFirstAvailableSceneOrKit() for the required fallback chain.
  */
 /*
- * Successful-completion source persistence.
- *
- * Inputs remain the root slot and resident mask. Output/effects now also
- * update SceneData's compact provenance and queue settings.cfg only after the
- * filesystem reports durable DONE; failed/rejected operations preserve prior
- * sources. Bank Load uses the filesystem's final child-intersection mask,
- * while Bank Save retains this submitted mask through completion. Affiliates:
- * SceneData source APIs and filesystem_markSettingsDirty().
+ * Bank requests use settings.cfg only for the boot restore slot.  Successful
+ * Bank loads publish their own HCNAMES Bank/child provenance through the
+ * filesystem close gate; neither this interface nor settings.cfg owns Scene
+ * source state.
  */
 uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask);
 uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask);
@@ -193,12 +189,11 @@ uint8_t preset_loadFirstAvailableSceneOrKit(void);
  *
  * Inputs: direct root Scene slot and the current eight-cell preset_currentName
  * edited by the Save page. Output: asynchronous Scene directory write and a
- * PRESET_OP_SCENE_SAVE completion. After durable DONE, the retained source
- * Scene receives the encoded root-library source and settings.cfg is queued;
- * failure preserves its former provenance. This is separate from
+ * PRESET_OP_SCENE_SAVE completion. Saving does not alter the retained HCNAMES
+ * source provenance; failure likewise preserves it. This is separate from
  * preset_saveDrumset() because Scene Save serializes Scene settings, embedded
  * Kit, Pattern stub, and Effect placeholder, not only the Kit payload.
- * Affiliates: SceneData's compact source owner and the settings dirty debounce.
+ * Affiliates: filesystem's HCNAMES identity/source register.
  */
 uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene);
 /*
@@ -430,24 +425,33 @@ void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
 /*
  * Commit and start bounded runtime application for one staged Instrument slot.
  *
- * Inputs: immutable request Scene/slot and filesystem's validated staging
- * payload. Output: inactive Scenes receive retained state only. Active Scene
- * commits clear all outgoing modulation owners, replace/reset the incoming
- * runtime, rebuild all six Morph images, and rebind one normalized source per
- * tick. Client: Menu's Instrument Load completion handler.
+ * Inputs: immutable request Scene/slot, filesystem's validated staging payload,
+ * and a root-pool versus hidden-temporary persistence decision that Menu reads
+ * from filesystem's immutable completed-request flag. Output: inactive Scenes receive retained
+ * state only. A root-pool commit marks its complete type/Normal/Morph payload
+ * for AutoSave immediately at each retained Scene destination; hidden `kit`
+ * restore is deliberately non-marking. Active Scene commits clear all outgoing
+ * modulation owners, replace/reset the incoming runtime, rebuild all six Morph
+ * images, and rebind one normalized source per tick. Client: Menu's Instrument
+ * Load completion handler.
  *
  * This remains separate from the Kit cursor because Instrument commit must
  * preserve the outgoing slot identity until targets are cleared, whereas Kit
  * loading has already atomically replaced a fully staged six-slot payload.
  */
-void    preset_startInstrumentApply(uint8_t scene_index, uint8_t slot);
+void    preset_startInstrumentApply(uint8_t scene_index,
+                                    uint8_t slot,
+                                    uint8_t mark_autosave_whole_instrument);
 /*
  * Commit staged morph-load endpoints and drain the Morph worker.
  *
  * KitMrp and InstrumentMrp change endpoint values only. They must not clear
  * modulation, reset instrument runtime objects, replace display names, or
- * apply routing. These starters preserve slot identity and reuse the bounded
- * Morph worker so active-scene interpolation is refreshed safely.
+ * apply routing. A successful InstrumentMrp commit marks only its changed
+ * Morphable Morph endpoints for AutoSave; it does not mark type, Normal,
+ * identity, or HCNAMES provenance. These starters preserve slot identity and
+ * reuse the bounded Morph worker so active-scene interpolation is refreshed
+ * safely.
  */
 void    preset_startKitMorphApply(void);
 void    preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot);

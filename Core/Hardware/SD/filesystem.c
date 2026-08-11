@@ -10369,6 +10369,14 @@ static void filesystem_loadBankDirectory_tick(void)
          */
         bank_setDisplayName(op_bank_display_name);
         /*
+         * The completed root Bank payload is the direct top-level source for
+         * its selected Bank-local children.  This mirrors the empty-Bank
+         * completion above: both paths publish row zero through the same
+         * HCNAMES close gate, so boot's settings-selected Bank cannot retain
+         * an obsolete UNKNOWN token after a normal child load.
+         */
+        (void)filesystem_setResidentSource(FS_IDENTITY_BANK_ROW, op_slot);
+        /*
          * Retain availability for resident Scenes outside this Bank request.
          *
          * Inputs: the effective selected-child mask and the pre-commit Bank
@@ -19666,19 +19674,45 @@ void filesystem_tick(void)
     /*
      * Give the one-second metadata writer first use of an idle facade.
      *
-     * Input: no current filesystem owner. Output: settings may start; autosave
-     * scheduling runs only if the facade remains idle. Why: short source/
-     * Global persistence should not be starved by 250 ms autosave backlog
-     * continuations. Affiliates: both autonomous completion callbacks.
+     * Input: no current filesystem owner. Output: settings may start; trace
+     * and autosave scheduling run only if the facade remains idle. Why: short
+     * source/Global persistence should not be starved by an Autosave backlog;
+     * the trace remains behind settings because it is diagnostic-only.
+     * Affiliates: both autonomous completion callbacks and the trace scheduler.
      */
     if (status == FS_STATUS_IDLE)
         filesystem_settingsWriterSchedule_tick();
-    if (status == FS_STATUS_IDLE)
-        filesystem_autosaveWriterSchedule_tick();
-    /* Trace persistence is deliberately last: it is diagnostic, not durable
-     * user work, and may start only after both autonomous writers declined. */
+    /*
+     * Persist a pending diagnostic batch before an eligible AutoSave drain
+     * claims the one facade after leaving Load/Save.
+     *
+     * Inputs: an idle facade outside Load/Save and any RAM lifecycle records
+     * produced while the foreground Instrument operation owned the card.
+     * Output: at most one existing bounded append starts before the overdue
+     * first full-bank drain; the normal writer starts on the next idle poll.
+     * Why: the former writer-before-trace order let an exit immediately start
+     * a long initial drain, so a power-off during that drain left only an older
+     * S record and concealed the J/I evidence needed to distinguish a missed
+     * publication from an unfinished persistence attempt. This changes only
+     * logging-build diagnostic arbitration: tracing still never starts on a
+     * Load/Save page and neither mask ownership nor writer bytes change.
+     * Affiliates: filesystem_autosaveTraceFlushSchedule_tick(),
+     * filesystem_autosaveWriterSchedule_tick(), and AutosaveTrace.c.
+     */
     if (status == FS_STATUS_IDLE)
         filesystem_autosaveTraceFlushSchedule_tick();
+    /*
+     * Start the durable AutoSave writer only after settings and, when pending,
+     * its pre-drain diagnostic witness declined the idle facade.
+     *
+     * Inputs: the unchanged writer gate/deadline and an idle facade. Output:
+     * the original parameter-drain state machine owns the card exactly as
+     * before, except that a pending logging-build trace has one append first.
+     * Why: the trace's J/I batch must become durable before a long first drain
+     * can be interrupted by power removal. Affiliate: the scheduler above.
+     */
+    if (status == FS_STATUS_IDLE)
+        filesystem_autosaveWriterSchedule_tick();
     if (status != FS_STATUS_BUSY) return;
 
     switch (current_op) {
@@ -21929,6 +21963,23 @@ const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void)
      * targets have been cleared.
      */
     return &op_staged_instrument;
+}
+
+uint8_t filesystem_loadedInstrumentWasTemporary(void)
+{
+    /*
+     * Expose the filesystem-captured origin of the completed Instrument.
+     *
+     * Inputs: the existing request-local flag, which filesystem_start() resets
+     * for every new operation and filesystem_requestLoadInstrumentTemp() alone
+     * sets. Output: the exact normal-pool versus `.hctmp` classification remains
+     * available beside the validated staging image until a subsequent request
+     * reuses operation storage. Why: Menu's temporary save/restore sequencing
+     * latch can remain set for UI reasons even when this completed file was a
+     * normal root-pool load, so it is not safe AutoSave provenance. This getter
+     * copies no payload and allocates no state. Affiliate: Menu completion.
+     */
+    return op_instrument_load_temporary;
 }
 
 /* Query whether the active Kit name cache contains a numbered folder.

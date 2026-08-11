@@ -22,8 +22,11 @@ scan/load/save bridge, Bank-first boot fallback, and draft Scene/Bank
 workspace, compact bitmap Pattern bridge, bounded identity/cache ownership,
 cold-boot tagged-runtime activation, and harmonized root Scene/Bank Load
 completion. The remaining Phase 3 emphasis is descriptor-aware automation,
-Effect placeholders, and a fresh autosave design; the currently committed
-autosave experiment is explicitly rejected and is not a baseline.
+Effect placeholders, and the remaining isolated AutoSave Phase-2 owner
+boundaries. The earlier AutoSave prototype was rejected, but the current A/B
+writer, scalar hooks, and Session 048 root-Instrument/InstrumentMrp mutation
+boundaries are accepted baseline work; Kit, root Scene without Pattern, and
+selective Bank Load marking remain next.
 Phase 4 is the dynamic stack Pattern implementation that used to be scoped as
 Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup, copy/clear
 helpers, and menu controls. Phase 6 is DSP expansion.
@@ -79,6 +82,16 @@ record; it contains no implementation plan that overrides this pinned target.
   Scene only after ordinary Bank Load/Save behavior is stable enough to test
   that one request-time contract in isolation. Boot must continue to restore
   the Bank's saved default Scene.
+- **InstrumentMrp shows a blank `kit` row at the top of its browser.** Normal
+  Instrument Load first snapshots the selected slot's current instrument so
+  the `kit` row can show its authoritative HCNAMES name and restore that
+  image. InstrumentMrp must provide the equivalent Morph-only snapshot: cache
+  the selected slot's current Morph endpoint values while entering the browser,
+  display the current instrument name beside `kit`, and restore only those
+  Morphable endpoints when that row is selected. Do not reuse a normal
+  Instrument restore, overwrite the slot's type/Normal image/name/source, or
+  make HCPRMS a name authority. This is a deferred UI/temporary-snapshot
+  parity fix, not part of the completed Instrument Load AutoSave work.
 - **Deferred host tooling:** after AutoSave is complete and every development
   log format is settled, add one read-only `/tools/` converter that consumes
   copied `SD_CARD/` logging outputs and writes a dated, human-readable
@@ -557,12 +570,14 @@ one-file wording is not sufficient once a resident Bank has sixteen editable
 Scenes: menu parameter edits may target any subset of Scenes, and one gesture
 can dirty multiple embedded Kits/Instruments at once.
 
-**Current status after Session 044: target only, not implemented.** The
-committed `Core/Bank/Scene/Autosave.c/.h`, `AUTOSAVE_IMPLEMENTATION.md`, and
-draft blob schema were explicitly rejected by the user as incorrectly
-implemented. Do not extend, validate, or describe that code as partial Phase 3
-completion; restart from the ownership and durability requirements below when
-autosave is explicitly resumed.
+**Current status after Session 048: partially implemented under an accepted
+isolated-boundary plan.** An earlier prototype was rejected, but the current
+root A/B writer, scalar mutation hooks, normal root-Instrument marking, and
+compatible InstrumentMrp Morph-only marking are accepted hardware work. Do not
+generalize those results into a broad whole-object claim: Session 049 is
+limited to normal Kit Load, root Scene Load without Pattern, and selective
+Bank Load marking, one committed owner boundary at a time. The authoritative
+current contract is `knowledge_files/specification_reference/AUTOSAVE.md`.
 
 Architecture decision:
 

@@ -15,14 +15,14 @@ Related authority is deliberately separate:
 - `DEV_MODES.md` owns development-mode selection and diagnostic file output;
 - `ASYNCFATFS_REFERENCE.md` owns low-level AsyncFATFS contracts;
 - `SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
-  Session 047 linked allocation/capture snapshot.
+  Session 048 linked allocation/capture snapshot.
 
 AutoSave currently persists the active resident Bank's implemented scalar
 state into two hidden root records. It does not modify root `Bank/`, `Scene/`,
 `Kit/`, or `Instrument/` library objects and does not replace explicit Load or
 Save operations.
 
-Implemented in the Session 047 AutoSave baseline:
+Implemented through the Session 048 AutoSave baseline:
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
@@ -143,6 +143,13 @@ Use only the typed API:
 - future Effect marker functions only after Effect ownership exists.
 
 Whole-object helpers mark currently gettable cells but do not copy data.
+Successful root Instrument Load is the first admitted whole-object load hook:
+immediately after every retained destination-slot commit it marks that slot's
+three type bytes, all owned Normal endpoints, and all owned Morphable Morph
+endpoints. Successful InstrumentMrp Load marks only the committed destination's
+Morphable Morph endpoints. Hidden temporary `kit` restore, failed loads,
+identity/HCNAMES source, and names remain excluded. These are writer-side
+marks only; they do not implement an AutoSave boot reader.
 `autosave_markSceneWithPatternDirty()` is presently the non-Pattern alias and
 must not be described as Pattern persistence. The complete-Bank helper is used
 by runtime AutoSave re-enable; broad Load/copy/paste integration must be added
@@ -308,6 +315,14 @@ the RAM-only `AutosaveTrace` producer. The trace must not alter AutoSave
 policy, dirty state, scheduling, or writer results. AutoSave does not own the
 development flag, destination filename, record envelope, or persistence
 policy; those details are authoritative only in `DEV_MODES.md`.
+
+Whole-Instrument marking additionally emits one bounded diagnostic outcome
+record after each request. It records map eligibility, the mutation-tracking
+gate, and expected versus accepted dirty-byte counts; it does not change the
+mask, scheduling, retained record, or loader result. This terminal summary is
+necessary because the individual dirty-byte records for one Instrument can
+wrap the fixed trace ring. Its exact flags and packing are owned by
+`AutosaveTrace.h` and `DEV_MODES.md`.
 
 An `ASENSURE` boot timeout additionally freezes a logging-only diagnostic
 capsule before boot recovery destroys the active filesystem state. It observes

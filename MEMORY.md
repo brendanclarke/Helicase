@@ -17,10 +17,10 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 047 bounded-CRC and boot-capture build.
-The durable closeout is
-`knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md`; verify the actual
-commit/worktree before making the next source change.
+**Current working source**: Session 048 HCNAMES-source and Instrument-Load
+AutoSave build in an intentional dirty worktree based on `63bdd6e`. The durable
+closeout is `knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md`; verify
+the actual commit/worktree before making the next source change.
 
 ## RAM Allocation Approval Policy
 
@@ -57,8 +57,8 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter records the Session 047 logging-on capture
-  allocation and linked totals. AutoSave format/writer authority is `AUTOSAVE.md`;
+  `SRAM_MANIFEST.md`; the latter records the Session 048 logging-on linked
+  allocation and totals. AutoSave format/writer authority is `AUTOSAVE.md`;
   development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live
@@ -110,13 +110,78 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   blank rows preserved. Root `/.hcnames` temporarily borrows its first 129
   rows. Menu entry/type changes and exit dispose or reload the same cache; no
   per-instrument or per-library name cache is allowed.
-- Root `/.hcnames` is the authoritative active identity register: row 0 Bank;
-  rows 1..16 Scene; rows 17..32 Kit; rows 33..128 six Instruments per Scene.
-  Runtime holds exactly 81 bytes of musical identity: one Bank, one Scene, one
-  Kit, and six Instrument names. `scene_t` and `kit_t` contain no display names
-  or retained filename stems. Because text rows have variable length, a
-  targeted update reads all 129 rows into the shared cache, overlays only its
-  owned rows, and rewrites the file.
+- Root `/.hcnames` is the authoritative active identity **and provenance**
+  register: row 0 Bank; rows 1..16 Scene; rows 17..32 Kit; rows 33..128 six
+  Instruments per Scene. Every row is `name<TAB>source`; `-`, `?`, `000..999`,
+  and `@` are its only source tokens. The 258-byte filesystem-owned source
+  register survives name-cache reuse and replaces the retired 32-byte
+  SceneData source array. Runtime holds exactly 81 bytes of musical identity:
+  one Bank, one Scene, one Kit, and six Instrument names. `scene_t` and `kit_t`
+  contain no display names or retained filename stems. Because text rows have
+  variable length, a targeted update reads all 129 paired rows, overlays only
+  its owned rows, and rewrites the file.
+- HCNAMES paired source correction: a successful non-empty root Bank Load must
+  stage row 0 to its direct `op_slot` before the Bank-owned HCNAMES close gate,
+  just as the empty-Bank branch does. `settings.cfg` is the 17-line
+  source-free system file: it supplies `active_bank` for boot selection and
+  never stores Scene sources. Legacy `scene_source_NN` keys are accepted only
+  to be ignored during migration.
+- Instrument Load AutoSave root-Instrument and InstrumentMrp fixtures are
+  hardware-confirmed:
+  root-pool Instrument commit marks type plus owned Normal/Morphable Morph
+  endpoints for every committed destination; InstrumentMrp marks only committed
+  Morphable Morph endpoints; hidden `kit` restore marks nothing. Authority:
+  `048_SESSION_HANDOFF_LOG.md` and `AUTOSAVE.md`. Hardware inspection must leave both nested
+  Instrument Load and the parent Load/Save page, then wait through both the
+  normal five-second debounce and the bounded record transaction. That page
+  intentionally holds the canonical mask and trace in RAM, while HCNAMES
+  defers its `@` publication until the nested session closes. A copied card
+  while browsing—or after a lone trace `S` but before `A...T`—cannot disprove
+  an immediate marker. Field evidence on 2026-08-11 showed HCNAMES `@` for a
+  normal pool file while tracking was live but its Instrument offsets were
+  absent; Menu's temporary-operation latch was therefore rejected as request
+  provenance. The corrective path reads the existing filesystem request flag,
+  without allocating new state. The same field pass exposed the map's
+  Bank-present precondition, so the final commit also publishes each actual
+  destination before marking it. A subsequent current-image capture still had
+  no Instrument `D` offsets, so no further persistence-path guess is allowed:
+  `autosave_markWholeInstrumentDirty()` now emits a fixed-size `I` trace
+  summary with map-valid/tracking/all-published flags and expected/accepted
+  counts. The acknowledgement fix was then hardware-confirmed: a normal root
+  load at Scene 5/slot 0 produced `J flags=0x03`, `I flags=0x07` with 76
+  expected/accepted bytes, and a successful `A/V/M/C/P/T` sequence; the newly
+  committed `.hcprms2` generation 2 persisted `drm` Normal/Morph bytes matching
+  `brezeld1.drm`, while HCNAMES row 63 was `brezeld1 @`. The preserved AutoSave
+  name `rollind1` is correct because names/sources remain HCNAMES authority.
+  A later combined hardware fixture wrote generation 3 in `.hcprms1`: Scene
+  5/slot 0 Normal and Morph values matched `brezeld3.drm`, while Scene 5/slot
+  1 changed only its Morph allocation and matched `casiopd3.drm`; its type,
+  AutoSave name allocation, and Normal allocation were byte-for-byte
+  unchanged from generation 2. The retained 64-entry trace ring wrapped the
+  earlier root `I`/`J` records behind two Drum-Morphable dirty sweeps, but its
+  `A/V/M/C/P/T` sequence reached successful generation-3 publication. Only
+  the reversible-`kit` fixture remains pending; the observer has no new RAM
+  allocation or record-size change.
+- The first nested Instrument-entry `kit` label delay is now observed with
+  trace stage `N`: paired entry, HCNAMES read/flush, `.hctmp` snapshot, and
+  typed-index request/completion ticks, each with Scene/slot/type. It is a
+  diagnostic-only producer in the existing logging ring and must identify the
+  slow step before entry behavior changes.
+- Root Instrument commits additionally emit `J` immediately after SceneData
+  assignment: requested/called flags prove whether the whole-marker gate was
+  reached before its `I` map/tracking/publication outcome. This is diagnostic
+  only and exists because clean-card captures currently retain only `S`.
+- User-approved Menu exit queue: one normal-SRAM1 byte,
+  `menu_pendingPageSwitch` (zero none; page-plus-one encoding), retains the latest requested
+  non-Load page only while a Load/Save owner holds `menu_storageBusy`. The
+  Menu poll consumes it via the ordinary page-switch exit path before any
+  browser retry. This prevents a physical mode-button exit from being silently
+  dropped during Instrument I/O/apply; it owns no payload or name data.
+- **Deferred UI bug — InstrumentMrp `kit` row is blank.** Its browser must
+  snapshot the selected slot's current Morphable endpoints and show that
+  slot's HCNAMES name beside `kit`; selecting it must restore only those Morph
+  endpoints, never the normal type/image/name/source. `SCOPING_TARGETS.md`
+  owns this later UI-parity task.
 - Every create-capable HCNAMES path first completes and closes a
   case-insensitive root absence proof. A NULL read open is not absence; one
   folded match permits one read retry, while duplicate matches and every
@@ -143,10 +208,10 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   suppress every cursor, and retain input locking until true terminal work
   finishes. Preparatory index/preview work may use `menu_storageBusy` without
   showing `...`. Every completion resets to the bracketed type row.
-- Sessions 045–046's committed AutoSave implementation at `c9807fa` is the
+- Sessions 045–048's committed AutoSave implementation is the
   accepted baseline, not rejected work: exact 34,768-byte A/B records, one 3,856-byte
   canonical mutation mask, bounded mask/value capture with atomic
-  take/re-dirty behavior, typed scalar markers, v1 settings provenance, and
+  take/re-dirty behavior, typed scalar markers, source-free v1 settings, and
   the AutoSave lifecycle trace. Available scalar controls are accepted as
   hardware tested: Scene; Kit/Instrument; and MIDI channel/note, which are
   Scene values. There is no user-changeable Bank scalar control for another UI
@@ -181,19 +246,20 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   filesystem/Preset calls do no work, although residual Menu display code and
   the two 49-byte strings remain linked. There are exactly two development
   flags: `DEV_MODE_DIAGNOSTIC` is screen-only and `DEV_MODE_LOGGING` is
-  file-only; trace is logging. The normal Session 047 configuration is
+  file-only; trace is logging. The normal Session 048 configuration is
   diagnostic 0 and logging 1. Current file outputs are `/bootlog.bin` and
   `/asavetrc.bin`; there is no implemented `/devlog.bin`. A timed-out
   `ASENSURE` may append a 64-byte raw diagnostic capsule to its normal
   eight-byte boot token (72 bytes total); `tools/decode_bootlog.py` decodes
   the current schema. Authority:
   `knowledge_files/specification_reference/DEV_MODES.md`.
-- Session 047 is closed in
-  `knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md`. Read it before
-  deleting `SETTINGS_BANK_LOAD_REIMPLEMENT.md`,
-  `HCPRMS_BOOTLOCK_DIAGNOSIS.md`, `AUTOSAVE_REMEDY_PA2ST1.md`, or
-  `AUTOSAVE_REMEDY_PA2ST2-3.md`; the handoff and
-  `AUTOSAVE_PHASE2_PLAN.md` retain their necessary decisions/evidence.
+- Session 048 is closed in
+  `knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md`. It absorbs the
+  removable `HCNAMES_SOURCES_EXTENSION.md` and
+  `INSTRUMENT_LOAD_AUTOSAVE.md` working records; `SESSION_046-048_PLAN.md` is
+  also closed. `AUTOSAVE_PHASE2_PLAN.md` remains the active execution order
+  for Kit, Scene-without-Pattern, and selective Bank Load marking in Session
+  049.
 
 ---
 
@@ -221,9 +287,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
 │   │   ├── DEV_MODES.md                ← authoritative screen-diagnostic versus file-logging policy and current log formats
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through c9807fa
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 048
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
-│   │   └── SRAM_MANIFEST.md           ← current c9807fa linked snapshot and binding reservation policy
+│   │   └── SRAM_MANIFEST.md           ← current Session 048 linked snapshot and binding reservation policy
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -359,7 +425,7 @@ and may contain historical snapshots as noted below.
 | `FILESYSTEM_SPEC.md` | Current product storage specification: root layout, numbered Kit/Scene/Bank folders, `kitset.kcg`, instrument schemas/keys, Scene-owned state, Morph/modulation, Pattern/Sample/Wavetable/Effect targets, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
 | `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map for Pattern, UI, sequencer, Preset, ParameterArray, instruments, modulation, MIDI, filesystem, storageTypes, and boot; also records removed front-panel protocol surfaces. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `SRAM_MANIFEST.md` | Current `c9807fa` linked snapshot, AutoSave/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
+| `SRAM_MANIFEST.md` | Current Session 048 logging-on linked snapshot, AutoSave/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
 
 ---
 
@@ -797,7 +863,22 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Known Issues / Technical Debt
 
-### Session 047 carryover and known defects
+### Session 048 carryover and known defects
+
+- **Session 049 AutoSave scope is fixed:** implement normal Kit Load, root
+  Scene Load without Pattern, and selective Bank Load marking in that order,
+  one committed owner boundary and hardware fixture at a time. Do not combine
+  it with writer exclusion, boot reader, Save-side marking, KitMrp, recursive
+  delete, or active-Scene Bank behavior.
+- **Known UI bug — InstrumentMrp `kit` row is blank.** It needs the current
+  slot's HCNAMES name plus a Morph-only temporary snapshot/restore; do not use
+  normal Instrument restore because type, Normal, and source must remain
+  unchanged.
+- Root Instrument and InstrumentMrp AutoSave are now accepted hardware work,
+  not future whole-object scope. The root fixture proved `J=0x03`, `I=0x07`,
+  and 76/76 accepted bytes; the combined generation-3 fixture proved Drum-2
+  Morph-only persistence. The 64-entry trace can wrap under multiple loads,
+  so compare the two durable HCPRMS generations as the final proof.
 
 - Every AutoSave CRC path is now byte-bounded at 128 bytes per filesystem
   tick: initial creation, neither-valid recovery, candidate validation, and
@@ -819,7 +900,8 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   snapshots are in the build to capture a recurrence; they make no retry,
   allocator, timing, or recovery-policy change.
 - The one-second debounced `settings.cfg` writer was re-tested by the user and
-  is fine. Make no settings source change without new contrary evidence.
+  is fine. It is now source-free; make no settings change without new contrary
+  evidence.
 - Repeated runtime loading of `000 Full` and `013 LoadTst` while playing, plus
   saves over slots 024 and 009, produced no heard audio glitch after the trace
   flush admission guard. This is a useful stability result, not proof that all
@@ -839,6 +921,21 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - The settled future semantic rule remains: Bank slot/name are payload, not
   record-selection identity. The current live-Bank validator boundary still
   needs reconciliation before Phase-2 whole-object Bank publication.
+
+### Resolved / Changed in Session 048
+
+- HCNAMES is now the paired name/source authority. The filesystem-owned 258-B
+  register replaces the retired 32-B SceneData source array; `settings.cfg`
+  writes no Scene-source values and legacy keys are ignored only for migration.
+- Root-pool Instrument commits mark type plus owned Normal/Morphable Morph
+  bytes immediately; compatible InstrumentMrp commits mark only Morphable
+  Morph bytes. Hidden temporary `kit` restore remains non-marking.
+- Corrected the direct HCNAMES completion acknowledgement and added the
+  approved one-byte queued page exit, so normal hardware exit releases the
+  facade for trace and AutoSave scheduling. Added trace stages `I`, `J`, and
+  `N` without a logging-off allocation.
+- The permanent detail and hardware fixtures are in
+  `knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md`.
 
 ### Resolved / Changed in Session 047
 
@@ -873,7 +970,8 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   facade to `IDLE`; failed appends retain pending records.
 - User-testable scalar owner coverage is accepted complete: Scene,
   Kit/Instrument, and Scene-owned MIDI channel/note. No separate Bank scalar UI
-  test exists. Whole-object publication remains future work.
+  test exists. Whole-object publication remained future work at the Session
+  046 close; Session 048 later accepted the Instrument boundaries.
 - The deletion-safe Session 046 record is
   `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md`.
 
@@ -882,7 +980,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - Accepted foundation at `326a8a1`, retained by `c9807fa`: exact 34,768-byte hidden A/B records; one
   canonical 3,856-byte dirty mask; bounded asynchronous mask/value capture
   with atomic take/re-dirty semantics; typed Bank/Scene/Kit/Instrument scalar
-  markers; and 33-line v1 settings.
+  markers; and the then-33-line v1 settings schema.
 - Pattern and Effect persistence, applying a hidden winner at boot, and
   crash-recoverable promotion into explicit library files remain unimplemented.
   `AUTOSAVE.md` is authoritative; stale historical plans and the old AutoSave
@@ -907,9 +1005,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - Four SD boot-pacing holds are present, but the motivating intermittent hang
   was seen once and is not reproducible. Do not claim it resolved.
 - Session 044's final static allocation was 12,280 B DTCM and 66,776 B SRAM1.
-  That SRAM1 value is historical, not the `c9807fa` total. The current
-  `SRAM_MANIFEST.md` records 12,280 B DTCM and 75,824 B SRAM1
-  (`bss=78,996 B` conventionally).
+  That SRAM1 value is historical. The current Session 048 logging-on linked
+  result is 12,280 B DTCM and 76,124 B normal SRAM1
+  (`bss=79,300 B` conventionally); `SRAM_MANIFEST.md` is the binding record.
 
 ### Resolved / Changed in Session 042
 - `/.hcnames` is the authoritative fixed-row name register. Runtime identity is

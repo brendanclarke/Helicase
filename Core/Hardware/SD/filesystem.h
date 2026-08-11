@@ -816,6 +816,19 @@ const kit_t *filesystem_loadedKit(void);
  */
 const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
 /*
+ * Report whether the just-completed staged Instrument came from `.hctmp`.
+ *
+ * Inputs: none; valid only in the completion window after the successful
+ * Instrument callback and before any later filesystem request starts. Output:
+ * nonzero exactly for the hidden reversible `kit` source captured by
+ * filesystem_requestLoadInstrumentTemp(). Why: Menu must distinguish a root
+ * pool replacement, which changes retained Instrument owners and marks
+ * AutoSave, from a temporary rollback without inferring it from the mutable
+ * browser cursor or its separate UI-operation latch. Affiliate: Menu's
+ * PRESET_OP_INSTRUMENT_LOAD completion handling.
+ */
+uint8_t filesystem_loadedInstrumentWasTemporary(void);
+/*
  * Save/load the reversible normal Instrument Load `kit` source.
  *
  * Inputs: one Scene/voice and its typed family. Output: the normal Instrument

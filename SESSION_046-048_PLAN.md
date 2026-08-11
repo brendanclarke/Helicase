@@ -1,6 +1,11 @@
-# Sessions 046–047 Plan — Closed; Deferred Work Carried to Session 048
+# Sessions 046–048 Closeout — Archived; Session 049 Carryover Identified
 
 ## Closeout boundary
+
+Sessions 046–048 are closed. This historical working plan is now superseded
+by `knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md` for Session 048
+and `AUTOSAVE_PHASE2_PLAN.md` for the still-active later Phase-2 order. It may
+be deleted after those durable records are retained.
 
 Session 046 is closed on 2026-08-10 at rollback commit `c9807fa` (`autosave
 trace logger working, pre steps 2 and 3 implementation`). The authoritative
@@ -135,7 +140,63 @@ working plans `SETTINGS_BANK_LOAD_REIMPLEMENT.md` and
 4. **AutoSave Phase 2:** preserve the completed trace/scalar/settings results,
    then resume only the written whole-object sequence: Whole Instrument,
    Whole Kit, root Scene without Pattern, selective Bank, Morph projection;
-   retry Load/Save exclusion last and in isolation.
+   retry Load/Save exclusion last and in isolation. Session 048 completed the
+   normal root-Instrument and InstrumentMrp portions; Kit, Scene, and Bank
+   Load publication now carry to Session 049.
 5. **Host log conversion:** only after AutoSave and logging formats settle,
    add a read-only `/tools/` converter from copied `SD_CARD/` outputs to a
    dated root `dev_log_date.txt`.
+
+## Session 048 closeout — completed
+
+### HCNAMES source authority
+
+- `/.hcnames` is now the sole resident identity/provenance authority. Its 129
+  rows use `name<TAB>source`; `-`, `?`, `000..999`, and `@` encode inheritance,
+  unknown, direct numbered source, and direct root-Instrument stem.
+- The approved 258-byte filesystem-owned source register replaced the retired
+  32-byte SceneData source array. Source propagation is staged at successful
+  Instrument, Kit, Scene, and Bank boundaries and remains independent of the
+  later AutoSave reader.
+- `settings.cfg` now contains only its 17 current allowlisted settings,
+  including `active_bank` and `autosave`; legacy `scene_source_NN` keys are
+  accepted and ignored during migration. It is not a source authority.
+
+### Instrument Load AutoSave Phase-2 acceptance
+
+- A root-pool Instrument commit immediately marks its three type bytes, all
+  owned Normal endpoints, and all Morphable Morph endpoints. The hidden typed
+  `kit` restore, staging, cancellation, and invalid operation remain
+  non-marking.
+- A compatible InstrumentMrp commit immediately marks only the destination's
+  Morphable Morph endpoints. It changes neither type nor Normal values,
+  HCNAMES identity/source, or AutoSave name storage.
+- Menu takes the immutable filesystem request-local temporary flag before
+  starting the shared Preset apply path; it does not use a mutable browser or
+  temporary-session latch as load provenance. A one-byte approved queued page
+  switch ensures the ordinary physical exit begins after a busy Load/Save
+  operation releases its owner.
+- The direct HCNAMES flush callback now acknowledges its terminal filesystem
+  status before UI follow-up. This releases the facade to `IDLE`, allowing the
+  autonomous trace and writer schedulers to run after the ordinary exit.
+
+### Hardware evidence and Session 049 boundary
+
+- Normal root Instrument hardware fixture: `J=0x03`, `I=0x07`, and packed
+  `0x004c4c05` prove Scene 5/slot 0 accepted all 76 expected bytes. The trace
+  reached successful `A/V/M/C/P/T`; generation 2 persisted the `brezeld1.drm`
+  type/Normal/Morph payload while its HCPRMS name remained intentionally old.
+- Combined fixture: generation 3 in `.hcprms1` contains Drum 1 Normal/Morph
+  values from `brezeld3.drm`; Drum 2's type/name/Normal bytes are unchanged
+  and only its Morph allocation matches `casiopd3.drm`. The final writer trace
+  reached successful publication. The 64-entry diagnostic ring wrapped the
+  prior root `I/J` behind two Drum-2 Morph dirty sweeps, so the durable A/B
+  byte comparison—not a single-command trace count—is the acceptance proof.
+- Session 049 is limited to the next three distinct owner boundaries: normal
+  Kit Load, root Scene Load without Pattern, and selective Bank Load using the
+  actual committed child mask. Test each separately with copied records and
+  trace. Do not add a writer exclusion, Boot reader, Save-side mutation mark,
+  KitMrp expansion, or unrelated Bank fix in the same pass.
+- Deferred UI bug: InstrumentMrp's `kit` row is blank. It needs a Morph-only
+  temporary snapshot plus the current HCNAMES name, without replacing the
+  slot's Normal/type/source state. `SCOPING_TARGETS.md` is the backlog owner.

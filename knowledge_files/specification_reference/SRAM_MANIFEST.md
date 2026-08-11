@@ -1,13 +1,12 @@
 # SRAM manifest
 
-The detailed section/symbol inventory below was generated at rollback baseline
-`c9807fa` on 2026-08-10, after Session 046 boot/HCNAMES diagnostics and the
-AutoSave scalar writer/trace work. Session 047 adds the logging-only 64-byte
-`fs_hcprms_boot_capsule`; alignment/layout makes the observed logging-on BSS
-increase 80 bytes. The current Session 047 `make` result is `text=374,044`,
-`data=396`, `bss=79,076`; a forced logging-off build is `text=367,372`,
-`data=396`, `bss=78,444`. The normal logging-on image was rebuilt afterward.
-This remains a linked-image inventory: sizes come
+The detailed section/symbol inventory below was regenerated from the Session
+048 logging-on worktree build after HCNAMES source ownership, Instrument Load
+AutoSave, and the Menu exit correction. `make -j2 && make img` produced
+`text=375,812`, `data=396`, and `bss=79,300`; `build/lxr02.bin` is 376,208 B.
+The approved 258-byte `fs_resident_source` cache replaces the retired 32-byte
+SceneData source array, and the approved one-byte `menu_pendingPageSwitch`
+shares normal SRAM1. This remains a linked-image inventory: sizes come
 from `arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
 estimates.
 
@@ -26,12 +25,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 72,724 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **75,824 B** | **301,008 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **88,104 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 73,024 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **76,124 B** | **300,708 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **88,404 B** | — |
 
-The image contains 400 B of initialized SRAM1 data and 78,996 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 72,324 B in normal SRAM1
+The image contains 396 B of initialized SRAM1 data and 79,300 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 72,628 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -39,16 +38,16 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 359,976 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 362,880 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
-| `.data` | `0x20020c1c` | 400 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020db0` | 72,324 B | SRAM1 | Normal zero-initialized globals |
+| `.data` | `0x20020c1c` | 396 B | SRAM1 | Initialized writable globals |
+| `.bss` | `0x20020da8` | 72,628 B | SRAM1 | Normal zero-initialized globals |
 
-The final FLASH load image ends at `0x0806323c`, safely before the reserved
-sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 373,308 B.
+The final FLASH load image ends at `0x08063d90`, safely before the reserved
+sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 376,208 B.
 
 ## Primary SRAM1 owners
 
@@ -56,7 +55,8 @@ sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 373,308 B.
 | --- | ---: | --- |
 | `scenes` | 20,992 B | 16 resident `scene_t` values; each holds one 112-B bitmap `PatternSet` |
 | `fs_list_cache_name` | 9,000 B | Shared library-name/HCNAMES cache |
-| `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved source cache, pending the next linked-size regeneration |
+| `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved filesystem-owned source cache |
+| `menu_pendingPageSwitch` | 1 B | Approved normal-SRAM1 queued non-Load destination while a busy Load/Save owner drains; page-plus-one encoding, no payload/name storage |
 | `afatfs` | 7,344 B | Async FAT filesystem state |
 | `runtime_slots` | 7,056 B | Six tagged engine slots, 1,176 B reserve each |
 | `sample_info_cache` | 1,440 B | Sample-information cache |
@@ -85,7 +85,7 @@ all of them.
 
 | Symbol/group | Size | Region | Purpose |
 | --- | ---: | --- | --- |
-| `transientData` | 26,460 B | FLASH `.text` at `0x080534f4` | Immutable transient PCM ROM; no DTCM/SRAM shadow |
+| `transientData` | 26,460 B | FLASH `.text` at `0x08058e40` | Immutable transient PCM ROM; no DTCM/SRAM shadow |
 | `sine_table` | 8,194 B | DTCM `.dtcm` | Sine lookup table |
 | `squareRootLut` | 512 B | DTCM `.dtcm` | Mixer pan-gain lookup table |
 | `audioOutBuffer` + `audioOutBuffer2` | 3,072 B | DTCM `.dtcmz` | DSP output working buffers |
@@ -110,9 +110,11 @@ arm-none-eabi-nm -S --size-sort build/lxr02.elf
 arm-none-eabi-readelf -l -W build/lxr02.elf
 ```
 
-For the current image, conventional `arm-none-eabi-size` reports `text=372,908
-B`, `data=400 B`, and `bss=78,996 B`. The latter is the combined zero-init
-total across memory regions; `size -A` provides the section split above.
+For the current logging-on image, conventional `arm-none-eabi-size` reports
+`text=375,812 B`, `data=396 B`, and `bss=79,300 B`. The latter is the combined
+zero-init total across memory regions; `size -A` provides the section split
+above. Regenerate both configurations before a future change that alters
+logging-gated allocations.
 
 ## 2026-07-27 Bank Load / command-UI implementation note
 
@@ -141,6 +143,17 @@ The final image remains at `bss=69,948 B`; initialized `.data` is four bytes
 smaller than the Session 043 inventory, so total static SRAM1 use is 66,776 B.
 The temporary session allowance for up to 32 bytes of unanticipated growth did
 not authorize reuse of any reserved capacity and no such growth was consumed.
+
+## 2026-08-11 deferred Load/Save exit allocation
+
+User-approved `menu_pendingPageSwitch` is exactly **one byte** of normal
+SRAM1 `.bss`, owned by `menu.c`. Zero means no pending request; otherwise it
+holds the latest non-Load physical destination plus one while Load/Save's
+existing storage/apply owner is busy. Its lifetime ends when the next safe
+`menu_pollPresetStatus()` invokes the existing `menu_switchPage()` exit path.
+It owns no payload, name, filesystem handle, or AutoSave state. The allocation
+exists solely to preserve the normal mode-switch exit intent until cleanup can
+begin; its linked section impact is checked by the build below.
 
 ## 2026-08-10 Session 046 rollback-baseline note
 

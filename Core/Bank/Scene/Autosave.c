@@ -122,16 +122,17 @@ static void autosave_maskByteOr(uint16_t mask_byte, uint8_t bits)
  * Set one payload bit for an ordinary retained mutation when tracking is live.
  *
  * Inputs: validated payload-relative offset. Output: its LSB-first bit is
- * atomically ORed, or nothing changes while boot ownership is disabled. Why:
- * initialization/load setup must not manufacture mutations, and owner modules
- * must not know mask geometry. Affiliates: every typed marker below and the
- * filesystem boot-lifecycle tracking gate.
+ * atomically ORed and this helper returns one, or it returns zero without a
+ * change while the tracking/range guard rejects it. Why: initialization/load
+ * setup must not manufacture mutations, and owner modules must not know mask
+ * geometry. Affiliates: every typed marker below and the filesystem
+ * boot-lifecycle tracking gate.
  */
-static void autosave_markPayloadOffsetDirty(uint16_t payload_offset)
+static uint8_t autosave_markPayloadOffsetDirty(uint16_t payload_offset)
 {
     if (!autosave_mutation_tracking_enabled ||
         payload_offset >= AUTOSAVE_PAYLOAD_BYTES) {
-        return;
+        return 0u;
     }
     autosave_maskByteOr(
         (uint16_t)(payload_offset >> 3u),
@@ -145,6 +146,12 @@ static void autosave_markPayloadOffsetDirty(uint16_t payload_offset)
      */
     autosaveTrace_record(AUTOSAVE_TRACE_STAGE_DIRTY, 0u,
                          (uint32_t)payload_offset);
+    /*
+     * Report the accepted publication to compound markers. Why: only this
+     * scalar funnel can prove a requested cell survived both tracking and
+     * range guards before the canonical mask was changed.
+     */
+    return 1u;
 }
 
 /* Return the validated payload-relative base for one resident Scene. */
@@ -1123,11 +1130,14 @@ void autosave_markInstrumentMorphDirty(uint8_t scene_index, uint8_t slot)
     uint8_t descriptor_index;
 
     /*
-     * Mark a future same-type Morph-endpoint copy destination.
+     * Mark one committed same-type Morph-endpoint import.
      *
-     * Inputs: destination Scene/slot after matching-type validation. Output:
-     * every Morphable endpoint becomes dirty; normal/type/name do not. Why:
-     * selectors have no serialized Morph owner. Affiliate: future Morph copy.
+     * Inputs: destination Scene/slot after a successful InstrumentMrp (or later
+     * matching-type Morph copy) commit. Output: every Morphable endpoint
+     * becomes dirty; Normal/type/name/HCNAMES provenance do not. Why: selectors
+     * have no serialized Morph owner, and the marker must match exactly the
+     * endpoint domain that the commit changed. Affiliate:
+     * preset_startInstrumentMorphApply().
      */
     if (!instrument)
         return;
@@ -1147,26 +1157,79 @@ void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot)
     uint16_t instrument_base;
     const instrument_registry_entry_t *entry;
     uint8_t type_byte;
+    uint8_t descriptor_index;
+    uint8_t expected_count = 0u;
+    uint8_t published_count = 0u;
+    uint8_t trace_flags = 0u;
+    uint32_t trace_value;
 
     /*
-     * Mark a future whole-Instrument replacement after its resident commit.
+     * Mark one committed root-pool whole-Instrument replacement.
      *
      * Inputs: destination Scene/slot. Output: three type-token bytes plus every
      * live normal and Morphable endpoint are dirty; the HCNAMES-owned name is
-     * deliberately excluded. Why: type is required to interpret endpoints.
-     * Affiliates: future Instrument copy/load commit and endpoint markers.
+     * deliberately excluded. Why: type is required to interpret endpoints, but
+     * identity/provenance remain HCNAMES-owned. The marker only records the
+     * already-committed SceneData image; it copies no data and performs no I/O.
+     * It also emits one RAM-only I summary after every request, including a
+     * rejected request, so field traces retain its outcome after D-record
+     * wrap. Affiliate: preset_startInstrumentApplyImage() after a root pool
+     * commit.
      */
     entry = autosave_instrumentMarkerBase(scene_index, slot, 0u,
-                                           &instrument_base);
-    if (!entry)
-        return;
-    for (type_byte = 0u; type_byte < AUTOSAVE_INSTRUMENT_TYPE_BYTES;
-         type_byte++) {
-        autosave_markPayloadOffsetDirty((uint16_t)(instrument_base +
-                                                   type_byte));
+                                          &instrument_base);
+    if (entry) {
+        trace_flags |= AUTOSAVE_TRACE_INSTRUMENT_MARK_FLAG_BASE_VALID;
+        expected_count = AUTOSAVE_INSTRUMENT_TYPE_BYTES;
+        for (descriptor_index = 0u;
+             descriptor_index < entry->descriptor_count;
+             descriptor_index++) {
+            expected_count++;
+            if ((entry->descriptors[descriptor_index].flags &
+                 INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
+                expected_count++;
+            }
+        }
+        for (type_byte = 0u; type_byte < AUTOSAVE_INSTRUMENT_TYPE_BYTES;
+             type_byte++) {
+            published_count = (uint8_t)(published_count +
+                autosave_markPayloadOffsetDirty((uint16_t)(instrument_base +
+                                                           type_byte)));
+        }
+        for (descriptor_index = 0u;
+             descriptor_index < entry->descriptor_count;
+             descriptor_index++) {
+            published_count = (uint8_t)(published_count +
+                autosave_markPayloadOffsetDirty((uint16_t)(instrument_base +
+                    AUTOSAVE_INSTRUMENT_NORMAL_OFFSET + descriptor_index)));
+            if ((entry->descriptors[descriptor_index].flags &
+                 INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
+                published_count = (uint8_t)(published_count +
+                    autosave_markPayloadOffsetDirty((uint16_t)(instrument_base +
+                        AUTOSAVE_INSTRUMENT_MORPH_OFFSET + descriptor_index)));
+            }
+        }
     }
-    autosave_markInstrumentNormalDirty(scene_index, slot);
-    autosave_markInstrumentMorphDirty(scene_index, slot);
+    if (autosave_mutation_tracking_enabled)
+        trace_flags |= AUTOSAVE_TRACE_INSTRUMENT_MARK_FLAG_TRACKING_ENABLED;
+    if (expected_count != 0u && published_count == expected_count)
+        trace_flags |= AUTOSAVE_TRACE_INSTRUMENT_MARK_FLAG_ALL_PUBLISHED;
+    /*
+     * Keep one terminal outcome even when the marker's D records exceed the
+     * 64-record RAM ring. Why: a field capture must reveal whether the root
+     * load called this marker, passed its map gate, and published every byte
+     * instead of forcing diagnosis from the absence of wrapped D records.
+     */
+    trace_value = ((uint32_t)scene_index <<
+                   AUTOSAVE_TRACE_INSTRUMENT_MARK_SCENE_SHIFT) |
+                  ((uint32_t)slot <<
+                   AUTOSAVE_TRACE_INSTRUMENT_MARK_SLOT_SHIFT) |
+                  ((uint32_t)expected_count <<
+                   AUTOSAVE_TRACE_INSTRUMENT_MARK_EXPECTED_SHIFT) |
+                  ((uint32_t)published_count <<
+                   AUTOSAVE_TRACE_INSTRUMENT_MARK_PUBLISHED_SHIFT);
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_INSTRUMENT_MARK, trace_flags,
+                         trace_value);
 }
 
 void autosave_markKitDirty(uint8_t scene_index)

@@ -2,9 +2,16 @@
 
 ## Status and purpose
 
-Implementation is complete pending target validation. This document remains
-the change log and acceptance plan; it does not by itself claim target
-validation.
+Implementation is complete. Session 048 hardware work confirmed the active
+post-migration contract: source-bearing HCNAMES rows are written as paired
+identity/provenance records, a root Instrument load publishes its `@` source,
+and `settings.cfg` no longer stores Scene sources. The future AutoSave boot
+reader has not been implemented or tested; neither the resolver's missing /
+malformed direct-target retry matrix nor a complete cold-boot fallback matrix
+may be inferred from the writer-side result. This document is now a working
+change record whose durable closeout is
+`knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md` and may be removed
+after that handoff is retained.
 
 ### Implementation notes — 2026-08-10
 
@@ -33,9 +40,11 @@ validation.
   register and removed stale Preset/settings provenance comments. The SRAM
   manifest records the approved 258-byte allocation but is not a newly linked
   size report.
-- Source-level review is complete for the changed writer/read paths. Hardware
-  validation remains required. No build was run because the requested toolchain
-  is unavailable in this environment.
+- Source-level review and the active-writer hardware confirmation are complete.
+  The logging-on firmware build passed, and the copied card proved a root
+  Instrument `@` publication with no `scene_source_NN` settings entries. The
+  future reader's missing/malformed direct-target retry and cold-boot fallback
+  matrix remain intentionally untested because that reader does not exist yet.
 
 The desired ownership model is:
 
@@ -704,9 +713,10 @@ What it does: removes the old on-card provenance authority.
 Why it exists: an HCNAMES source and a settings source could disagree after a
 partial Bank load, precisely where the new hierarchy is meant to be reliable.
 
-### Documentation and verification files
+### Documentation and verification files — completed
 
-Update together after code is proven:
+The listed references and the Session 048 handoff were updated after the code
+and hardware fixtures passed:
 
 - `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`: new HCNAMES
   grammar, source tokens, resolver, row propagation, missing/legacy behavior;
@@ -717,11 +727,15 @@ Update together after code is proven:
   filesystem source APIs and deletion of SceneData source APIs;
 - `knowledge_files/specification_reference/SRAM_MANIFEST.md`: +258 B source
   cache, -32 B SceneData source array, net +226 B, owner/lifetime;
-- `knowledge_files/specification_reference/DEV_MODES.md` only if a new test
-  trace event is separately approved (none is part of this plan);
+- `knowledge_files/specification_reference/DEV_MODES.md` for the approved
+  Session 048 `I`/`J`/`N` logging-only trace events;
 - `MEMORY.md`: remove settings provenance claims and record the new authority;
   and
 - a new session handoff with exact hardware fixtures and compatibility result.
 
 No Makefile or linker-script change is expected.  No new task, stack buffer,
 DMA buffer, cache, or AsyncFATFS handle allocation is permitted.
+
+The durable decisions, current limitations, build evidence, and copied-card
+fixtures now live in `knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md`.
+This working change record is safe to remove once that archive record is kept.

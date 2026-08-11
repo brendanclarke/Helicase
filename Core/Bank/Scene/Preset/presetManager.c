@@ -47,6 +47,7 @@
 #include "presetMorphEngine.h"
 #include "BankData.h"
 #include "Autosave.h"
+#include "AutosaveTrace.h"
 #include "mixer.h"
 #include "valueShaper.h"
 #include <string.h>
@@ -1481,24 +1482,35 @@ void preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
      * display name, performs no routing apply, and does not clear/rebind
      * modulation targets. A type mismatch is a no-change operation; the cursor
      * remains inactive and Menu will simply unlock on the next poll.
-     */
+    */
     instrument_apply_active = 0u;
     preset_ensureMorphInitialized();
-    if (preset_commitStagedInstrumentNormalToMorph(scene_index, slot) &&
-        scene_index == scene_getActiveIndex()) {
-        presetMorph_requestVoice(scene_index, slot);
-        instrument_apply_active = 1u;
-        instrument_apply_scene = scene_index;
-        instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
-        instrument_apply_rebind_source = 0u;
-        instrument_apply_morph_only = 1u;
+    if (preset_commitStagedInstrumentNormalToMorph(scene_index, slot)) {
+        /*
+         * InstrumentMrp copied only compatible Morphable endpoint values into
+         * the retained destination. Mark precisely that same descriptor domain
+         * now: type, Normal endpoints, name, HCNAMES source, routing, and
+         * runtime interpolation did not change. This remains outside the
+         * active-Scene branch because inactive resident Scene data still needs
+         * persistence even though it requires no immediate audible refresh.
+         */
+        autosave_markInstrumentMorphDirty(scene_index, slot);
+        if (scene_index == scene_getActiveIndex()) {
+            presetMorph_requestVoice(scene_index, slot);
+            instrument_apply_active = 1u;
+            instrument_apply_scene = scene_index;
+            instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
+            instrument_apply_rebind_source = 0u;
+            instrument_apply_morph_only = 1u;
+        }
     }
 }
 
 static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged,
                                              uint16_t destination_mask,
                                              uint8_t slot,
-                                             instrument_type_t expected_type)
+                                             instrument_type_t expected_type,
+                                             uint8_t mark_autosave_whole_instrument)
 {
     uint8_t target_scene_index;
     uint8_t active_scene_touched = 0u;
@@ -1507,11 +1519,14 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
      * Commit one validated Instrument image and arm the bounded runtime apply.
      *
      * Inputs: an immutable typed stage, exact destination Scene mask, voice
-     * slot, and expected type. Output: every selected Scene receives audio
-     * parameters and the active Scene receives the existing ordered
-     * modulation-clear/reset/routing/Morph apply. The public normal loader and
-     * the reversible `kit` restore both use this one lifecycle path, so a
-     * restore cannot leave stale runtime targets or differ from a file load.
+     * slot, expected type, and an accepted-operation persistence decision.
+     * Output: every selected Scene receives audio parameters and the active
+     * Scene receives the existing ordered modulation-clear/reset/routing/Morph
+     * apply. The public normal loader and the reversible `kit` restore both
+     * use this one lifecycle path, so a restore cannot leave stale runtime
+     * targets or differ from a file load. Only a root-pool load enables the
+     * whole-Instrument AutoSave marker; temporary restore deliberately does
+     * not manufacture a new retained-data mutation.
      *
      * Affiliates: preset_startInstrumentApply(),
      * preset_loadInstrumentTemp(), filesystem_loadedInstrumentSlot(),
@@ -1535,7 +1550,53 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
         scene = scene_get(target_scene_index);
         if (!scene)
             continue;
+        /*
+         * Publish this committed destination before deriving its AutoSave map.
+         *
+         * Inputs: a valid Scene selected by the immutable accepted Instrument
+         * request and its existing resident kit storage. Output: an otherwise
+         * absent physical Scene becomes Bank-present before the assignment and
+         * whole-Instrument marker below; an already-present Scene is unchanged.
+         * Why: AutoSave deliberately maps only Bank-present Scene payloads, so
+         * relying solely on the earlier asynchronous completion notification
+         * leaves a timing-sensitive gap in which a valid Instrument commit can
+         * be real but its complete payload has no map and is silently skipped.
+         * This is the commit's authoritative retained-data boundary, and the
+         * Bank setter itself records its changed present-mask bytes when needed.
+         * Affiliates: preset_markRequestedScenesPresentOnSuccessfulLoad(),
+         * autosave_scenePayloadBase(), and autosave_markWholeInstrumentDirty().
+         */
+        bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
+                                            (uint16_t)(1u << target_scene_index)));
         scene->kit.instruments[slot] = *staged;
+        {
+            uint8_t trace_flags = mark_autosave_whole_instrument
+                ? AUTOSAVE_TRACE_INSTRUMENT_COMMIT_FLAG_REQUESTED : 0u;
+            uint32_t trace_value =
+                ((uint32_t)target_scene_index <<
+                 AUTOSAVE_TRACE_INSTRUMENT_COMMIT_SCENE_SHIFT) |
+                ((uint32_t)slot <<
+                 AUTOSAVE_TRACE_INSTRUMENT_COMMIT_SLOT_SHIFT) |
+                ((uint32_t)staged->type <<
+                 AUTOSAVE_TRACE_INSTRUMENT_COMMIT_TYPE_SHIFT);
+
+            /*
+             * Witness the decision immediately beside the committed owner.
+             * Inputs: Menu's captured provenance decision and this loop's
+             * exact destination. Output: one existing RAM trace record says
+             * whether a whole-marker was requested and actually called; no
+             * persistence bit, SceneData value, or runtime ordering changes.
+             * Why: I records diagnose inside the marker, but only this point
+             * can prove a completed root Instrument reached that marker gate.
+             * Affiliates: Menu's completion classifier and Autosave's I event.
+             */
+            if (mark_autosave_whole_instrument) {
+                autosave_markWholeInstrumentDirty(target_scene_index, slot);
+                trace_flags |= AUTOSAVE_TRACE_INSTRUMENT_COMMIT_FLAG_CALLED;
+            }
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_INSTRUMENT_COMMIT,
+                                 trace_flags, trace_value);
+        }
         /*
          * Do not attach a filename or display-name copy to the resident slot.
          *
@@ -1564,7 +1625,9 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
     instrument_apply_morph_only = 0u;
 }
 
-void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
+void preset_startInstrumentApply(uint8_t scene_index,
+                                 uint8_t slot,
+                                 uint8_t mark_autosave_whole_instrument)
 {
     const kit_instrument_slot_t *staged =
         (const kit_instrument_slot_t *)filesystem_loadedInstrumentSlot();
@@ -1577,13 +1640,15 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
      * image commit helper.
      *
      * Inputs: callback-captured Scene/slot plus Preset's immutable request
-     * type/mask. Output: the normal Instrument file result commits exactly as
-     * before. Keeping this wrapper preserves the filesystem completion API
-     * while allowing the `kit` preview restore to reuse the same DSP ordering.
-     * Affiliates: on_instrument_load_complete() and Menu completion polling.
+     * type/mask plus Menu's immutable root-pool versus temporary-restore
+     * decision. Output: the Instrument result commits through the same safe
+     * runtime ordering, while only a root-pool replacement marks its complete
+     * retained Instrument payload for AutoSave. Affiliates:
+     * on_instrument_load_complete() and Menu completion polling.
      */
     preset_startInstrumentApplyImage(staged, destination_mask, slot,
-                                     (instrument_type_t)pm_instrument_request_type);
+                                     (instrument_type_t)pm_instrument_request_type,
+                                     mark_autosave_whole_instrument);
 }
 
 uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot)
