@@ -593,3 +593,20 @@ as a deferred Morph-only temporary-snapshot UI bug.
   acknowledgement, queued normal Load/Save exit, trace evidence and ring-wrap
   interpretation, current SRAM/build figures, deferred UI bug, and Session
   049 fixture order
+
+### 049 — Kit/Scene AutoSave Completion And Bank-Load Failure Evidence (2026-08-12)
+
+Completed the normal Kit, KitMrp, root Scene-without-Pattern, and selective
+Bank write-on-load boundaries. Hardware testing persisted two morph-kit changes
+and two root Scene loads in valid generation-5 `.hcprms` data. A subsequent
+Bank load updated `.hcnames` to `Full 005` but left the autosave payload and
+restore slot unchanged: the final `asavetrc.bin` whole-instrument markers had
+valid bases but tracking disabled and zero published bytes. `settings.cfg`
+also remained `active_bank=12`, so Bank identity and both restore authorities
+diverged. Bank-load repair and reboot verification are deferred to Session 050.
+
+- **Find here**: [049_SESSION_HANDOFF_LOG.md](049_SESSION_HANDOFF_LOG.md),
+  [AUTOSAVE_WRITE_LOAD_OPERATIONS_COMPLETE.md](../../AUTOSAVE_WRITE_LOAD_OPERATIONS_COMPLETE.md),
+  Kit/Scene implementation boundaries, hardware payload comparisons, trace
+  flag decoding, stale Bank restore-slot evidence, and the Session 050 repair
+  target

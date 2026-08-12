@@ -92,6 +92,21 @@ record; it contains no implementation plan that overrides this pinned target.
   Instrument restore, overwrite the slot's type/Normal image/name/source, or
   make HCPRMS a name authority. This is a deferred UI/temporary-snapshot
   parity fix, not part of the completed Instrument Load AutoSave work.
+- **Pinned AutoSave reader rule — resolve Instrument type before reading its
+  parameter matrix.** The future HCPRMS reader must use each stored three-byte
+  Instrument type token (`drm`, `snr`, `cym`, or `hat`) to select the registry
+  descriptor table before interpreting that slot's fixed Normal/Morph cells.
+  For slot 6, a Choke type owns the alternate track-7 decay through its real
+  `amp_envelope_decay_choke` descriptor; the reader must not look for a second
+  generated Kit value in that case. Only a non-Choke slot-6 type with a base
+  `amp_envelope_decay` descriptor uses the separate Kit-owned track-7 endpoint
+  bytes (normal and Morph) in the Scene's Kit region. If the non-Choke type has
+  no base decay descriptor, there is no generated track-7 parameter to restore.
+  The `7dc` Scene modulation target remains a runtime overlay on that retained
+  base value, not another AutoSave field. Instrument names/filenames/provenance
+  continue to come from HCNAMES. Preserve this type-first reconstruction and
+  the existing wire layout when implementing the reader; do not add a second
+  parameter hunt or duplicate name authority.
 - **Deferred host tooling:** after AutoSave is complete and every development
   log format is settled, add one read-only `/tools/` converter that consumes
   copied `SD_CARD/` logging outputs and writes a dated, human-readable

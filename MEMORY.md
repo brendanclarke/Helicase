@@ -17,10 +17,10 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 048 HCNAMES-source and Instrument-Load
-AutoSave build in an intentional dirty worktree based on `63bdd6e`. The durable
-closeout is `knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md`; verify
-the actual commit/worktree before making the next source change.
+**Current working source**: Session 049 AutoSave write-on-load build in an
+intentional dirty worktree based on `63bdd6e`. The durable closeout is
+`knowledge_files/log_archive/049_SESSION_HANDOFF_LOG.md`; verify the actual
+commit/worktree before making the next source change.
 
 ## RAM Allocation Approval Policy
 
@@ -863,13 +863,20 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Known Issues / Technical Debt
 
-### Session 048 carryover and known defects
+### Session 049 carryover and known defects
 
-- **Session 049 AutoSave scope is fixed:** implement normal Kit Load, root
-  Scene Load without Pattern, and selective Bank Load marking in that order,
-  one committed owner boundary and hardware fixture at a time. Do not combine
-  it with writer exclusion, boot reader, Save-side marking, KitMrp, recursive
-  delete, or active-Scene Bank behavior.
+- **Session 049 AutoSave write-on-load work is complete for the implemented
+  boundaries:** normal Kit Load, KitMrp, root Scene Load without Pattern, and
+  selective Bank Load marking are in source and documented. KitMrp and root
+  Scene persistence were accepted on hardware.
+- **Deferred Bank-load failure:** the Bank completion callback reached the
+  whole-instrument markers while AutoSave tracking was disabled. `I` trace
+  records had valid bases but zero published bytes, so HCNAMES changed while
+  the `.hcprms` payload did not. The loaded Bank also left
+  `settings.cfg active_bank` and the autosave restore slot stale. Fix and
+  reboot verification are the Session 050 priority.
+- Do not combine the Bank repair with writer exclusion, boot-reader work,
+  Save-side marking, recursive delete, or unrelated Pattern persistence.
 - **Known UI bug — InstrumentMrp `kit` row is blank.** It needs the current
   slot's HCNAMES name plus a Morph-only temporary snapshot/restore; do not use
   normal Instrument restore because type, Normal, and source must remain

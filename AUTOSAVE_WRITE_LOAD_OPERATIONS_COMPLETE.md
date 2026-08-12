@@ -740,3 +740,41 @@ RAM approval rather than using reserved SRAM1/DTCM capacity.
 - Normal Instrument and InstrumentMrp load behavior remains as previously
   implemented; this work adds only the remaining normal Kit, KitMrp, root
   Scene, and selective Bank write-on-load coverage.
+
+## Hardware test results — 2026-08-12
+
+The following tests were performed against the SD-card fixtures after the
+Session 049 implementation.
+
+### KitMrp and root Scene test
+
+- Two morph-kit changes were persisted.  `.hcprms1` advanced to generation 5
+  and compared validly with generation-4 `.hcprms2`; the payload differences
+  were confined to two Kit regions (Scene 2 and Scene 9), with no unrelated
+  Bank, Scene-setting, or Effect bytes changed.
+- Two root Scene loads updated `.hcnames` to `Hard 002` and `FilMod 011`
+  (resident Scene slots 14 and 15).  The autosave record remained valid and
+  showed no unrelated payload corruption.
+- The generated slot-6 Choke/track-7 decay observation remains a reader-side
+  interpretation issue documented in `SCOPING_TARGETS.md`; the persisted
+  Choke endpoint itself was captured correctly.
+
+### Bank-load test
+
+- A Bank load changed `.hcnames` to `Full 005` and replaced the resident Scene
+  names, but `.hcprms1` and `.hcprms2` differed only in their record headers;
+  the 34,704-byte payload was unchanged.
+- The tail of `asavetrc.bin` contains whole-instrument marker records for the
+  Bank's Scene/slot destinations.  Every marker has `flags = 0x01` (payload
+  base valid) but lacks the tracking-enabled (`0x02`) and all-published
+  (`0x04`) flags; expected counts are 74/76 bytes and accepted counts are 0.
+- A subsequent `A/V/M/T` writer sequence completed, but no dirty payload bits
+  had been accepted.  This identifies the failure path: the Bank completion
+  callback ran while AutoSave tracking was disabled.  HCNAMES persistence
+  succeeded independently, while Bank/Scene payload persistence did not.
+- The loaded Bank identity also diverged from the two restore authorities:
+  `.hcnames` reported `Full 005`, while `settings.cfg` still contained
+  `active_bank=12` and the autosave Bank restore-slot field remained `12`.
+  Bank-load investigation is intentionally deferred; the next session must
+  decide whether successful Bank Load should schedule a `settings.cfg` rewrite,
+  re-enable AutoSave before completion marking, or both.
