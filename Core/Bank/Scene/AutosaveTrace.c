@@ -5,17 +5,17 @@
  * run beside interrupt-side parameter changes, while filesystem.c alone owns
  * serialization, file handles, and the point at which a flush becomes durable.
  */
-#include "AutosaveTrace.h"
-
 #include "config.h"
+#include "AutosaveTrace.h"
 #include "timebase.h"
 
 #if DEV_MODE_LOGGING
 
 /*
- * Retained diagnostic storage: 64 * 8 bytes plus three uint16_t cursors is
- * exactly 518 bytes. These objects exist only in a logging build; the #else
- * stubs below retain neither the ring nor any trace cursor in production.
+ * Retained diagnostic storage: AUTOSAVE_TRACE_RECORD_COUNT * 8 bytes plus
+ * three uint16_t cursors. The default is 518 bytes; this approved temporary
+ * 2048-record experiment is 16,390 bytes. These objects exist only in a
+ * logging build; the #else stubs retain neither ring nor cursor in production.
  */
 static volatile uint8_t autosave_trace_records[AUTOSAVE_TRACE_RECORD_COUNT]
                                               [AUTOSAVE_TRACE_RECORD_BYTES];
@@ -38,7 +38,7 @@ static void autosaveTrace_irqRestore(uint32_t primask)
     __asm volatile("msr primask, %0" :: "r"(primask) : "memory");
 }
 
-/* Return a wrapping cursor distance; ring occupancy can never exceed 64. */
+/* Return a wrapping cursor distance bounded by the configured ring capacity. */
 static uint16_t autosaveTrace_pendingCountUnsafe(void)
 {
     return (uint16_t)(autosave_trace_write_cursor -
@@ -66,7 +66,7 @@ void autosaveTrace_record(autosave_trace_stage_t stage, uint8_t flags,
     autosave_trace_write_cursor = (uint16_t)(cursor + 1u);
 
     /*
-     * Keep all 64 slots usable. A producer that laps the durable-flush cursor
+     * Keep all configured slots usable. A producer that laps the durable-flush cursor
      * discards only the oldest record, advances that cursor with it, and leaves
      * an explicit saturated loss witness rather than silently masking overflow.
      */

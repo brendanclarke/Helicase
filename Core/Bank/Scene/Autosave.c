@@ -9,9 +9,9 @@
  * captured-value patches remain exclusively owned by filesystem.c.
  */
 #include "Autosave.h"
-#include "AutosaveTrace.h"
-/* Supplies the shared per-tick CRC CPU-work cap; no scheduling state lives here. */
+/* Supplies DEV_MODE_LOGGING, the trace-ring capacity, and the per-tick CRC cap. */
 #include "config.h"
+#include "AutosaveTrace.h"
 
 #include "BankData.h"
 #include "SceneData.h"
@@ -1247,12 +1247,25 @@ void autosave_markKitDirty(uint8_t scene_index)
      * Affiliates: normal Kit Load completion, future Kit copy, and the six
      * complete Instrument scopes below.
      */
+    /* Pack the terminal LOAD_MARK in locals only; no persistent state is added. */
+    uint8_t trace_flags = 0u;
+    uint32_t trace_value;
+
     for (parameter_index = 0u; parameter_index < AUTOSAVE_KIT_PARAM_COUNT;
          parameter_index++) {
         autosave_markKitParameterDirty(scene_index, parameter_index);
     }
     for (slot = 0u; slot < AUTOSAVE_INSTRUMENTS_PER_KIT; slot++)
         autosave_markWholeInstrumentDirty(scene_index, slot);
+
+    /* Emit the durable whole-Kit witness after nested D/I records may wrap the ring. */
+    if (autosave_mutation_tracking_enabled)
+        trace_flags |= AUTOSAVE_TRACE_LOAD_MARK_FLAG_TRACKING_ENABLED;
+    trace_value = ((uint32_t)AUTOSAVE_TRACE_LOAD_MARK_KIND_KIT <<
+                   AUTOSAVE_TRACE_LOAD_MARK_KIND_SHIFT) |
+                  ((uint32_t)scene_index << AUTOSAVE_TRACE_LOAD_MARK_SCENE_SHIFT);
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_LOAD_MARK, trace_flags,
+                         trace_value);
 }
 
 void autosave_markEffectDirty(uint8_t scene_index)
@@ -1287,12 +1300,25 @@ void autosave_markSceneWithoutPatternDirty(uint8_t scene_index)
      * persistence. Affiliates: successful root Scene completion, exact-mask
      * Bank completion, future Scene copy, Effect stub, and Kit marker.
      */
+    /* Pack the outer terminal LOAD_MARK in locals only; no persistent state is added. */
+    uint8_t trace_flags = 0u;
+    uint32_t trace_value;
+
     for (parameter_index = 0u; parameter_index < AUTOSAVE_SCENE_PARAM_COUNT;
          parameter_index++) {
         autosave_markSceneParameterDirty(scene_index, parameter_index);
     }
     autosave_markEffectDirty(scene_index);
     autosave_markKitDirty(scene_index);
+
+    /* Emit the durable whole-Scene witness after the nested Kit marker completes. */
+    if (autosave_mutation_tracking_enabled)
+        trace_flags |= AUTOSAVE_TRACE_LOAD_MARK_FLAG_TRACKING_ENABLED;
+    trace_value = ((uint32_t)AUTOSAVE_TRACE_LOAD_MARK_KIND_SCENE <<
+                   AUTOSAVE_TRACE_LOAD_MARK_KIND_SHIFT) |
+                  ((uint32_t)scene_index << AUTOSAVE_TRACE_LOAD_MARK_SCENE_SHIFT);
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_LOAD_MARK, trace_flags,
+                         trace_value);
 }
 
 void autosave_markSceneWithPatternDirty(uint8_t scene_index)

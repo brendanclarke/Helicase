@@ -528,6 +528,20 @@ further edits are required to fulfil items 5.2/5.3/5.5.
   decoder/converter is already deferred project tooling; the `L` record is
   human-readable as a raw one-byte stage code.
 
+## 3.1 Implementation notes (2026-08-14)
+
+- Confirmed the worktree was clean and no `.failed` or `_failed.*` files
+  remain, so Phase 1 required no additional deletion or staging.
+- Applied C1-C7 to the five live files. Each new C/H change has adjacent
+  comment text describing its purpose and ownership; the existing trace ring
+  and persistent RAM allocations remain unchanged.
+- Build checks are intentionally skipped because the embedded toolchain is not
+  installed in this environment. Static source inspection and diff checks are
+  the available verification for this pass.
+- `git diff --check` passes after restoring the repository's LF line endings.
+  A broad `git status`/`git diff --stat` scan timed out on the mounted
+  worktree, so no build or unbounded repository scan was attempted afterward.
+
 ## 5. Dependency and phase ordering
 
 - C1 must precede C3 and C4 (the enum member must exist before the code
@@ -693,3 +707,49 @@ Each must be a separate future change with its own hardware checkpoint.
 | Kit Load `L` on page | 5 | `KIND_KIT` record |
 | Writer lifecycle intact | 5 | `A/V/M/C/P/T` reaches publication |
 | Logging-off runtime | 5 | no `/asavetrc.bin` write |
+
+## 10. Risk review (2026-08-14)
+
+The C1-C7 edits are present in the working tree and match the intended
+behavior on source inspection, but they are not compile-verified because
+`arm-none-eabi-gcc` is not installed in this environment. The risks below are
+ordered by severity.
+
+### 10.1 Verification status
+
+- Applied: C1-C7 to the five live files.
+- Applied: the twelve shadow-file removals (already committed).
+- Static checks passed: recursive shadow-file search is empty; all new symbols
+  resolve; `git diff --check` reports no whitespace errors (it does print the
+  repository's normal LF-to-CRLF warnings).
+- Not performed: `make` (logging-on and logging-off), `arm-none-eabi-size`,
+  logging-off trace-ring symbol check, and all hardware fixtures.
+
+### 10.2 Risk register
+
+| # | Severity | Risk | Impact | Mitigation |
+| --- | --- | --- | --- | --- |
+| R1 | High | Changes are not compile-verified. The toolchain is absent, so a typo, missing include, or `-Werror`-class warning would be invisible here. | A broken build would not be discovered until the real toolchain run. | Run `make clean && make` for both `DEV_MODE_LOGGING=1` and `0` before commit/hardware; check size and the absence of `autosave_trace_records` in the logging-off image. |
+| R2 | Medium | Working tree changes are uncommitted and git reports LF-will-become-CRLF warnings. | Risk of losing unstaged edits or introducing line-ending churn on commit. | Stage and commit C1-C7 separately; normalize line endings to the repository convention first so the commit diff is only the intended change. |
+| R3 | Medium | Residual ring wrap can still overwrite `L` records. `autosave_markResidentBankDirty()` loops up to 16 scenes, each emitting nested KIT+SCENE `L` records plus a large `D`/`I` flood; early-scene `L` records can wrap before any flush. | Diagnostic only; it cannot change dirty-bit production or persistence, but a full-Bank re-enable may show only the last scenes' `L` records. | Treat `L` as "marker ran", not a complete census. For multi-scene Bank proof, compare the two durable HCPRMS generations as the existing Session 048 note already prescribes. Do not enlarge the ring without RAM-approval. |
+| R4 | Medium | A naive `asavetrc.bin` reader may read a Scene mark's two `L` records (KIT then SCENE) as a duplicate. | Confusing diagnosis, not a firmware defect. | Document the kind bits; any future decoder must group by scene index and kind rather than dedupe by stage alone. |
+| R5 | Low | `menu_loadSaveCommandActive` could become stuck at 1 if an accepted command terminates without reaching `menu_finishLoadSaveCommand()`. | The diagnostic flush (and the existing `...` UI) would be blocked; foreground I/O and the autosave writer are unaffected. | This flag-lifecycle invariant predates C7, but C7 now ties trace flush to it. Verify every accepted-command error/timeout path clears the flag; if a recurrence appears, clear it on terminal filesystem status or add a watchdog. |
+| R6 | Low | In `DEV_MODE_LOGGING=0`, the two markers now read `autosave_mutation_tracking_enabled`, compute shifts/ORs, and call the no-op stub. | Negligible CPU on whole-object loads; no state or I/O is added. | Accept as-is; no action required beyond noting it. |
+| R7 | Low | New locals are declared mid-function after the doc comment rather than with the file's top-of-function declarations. | Cosmetic; legal under `-std=gnu11`. | Optionally move `trace_flags`/`trace_value` next to the existing locals for consistency. |
+| R8 | Low | The applied comments are condensed relative to the plan's "Exact edit" blocks and the `autosave-trace_refactor/` copies. | Documentation drift only; code behavior is identical. | Either reconcile the comment text or remove `autosave-trace_refactor/` after the change is committed and confirmed. |
+| R9 | Low | No decoder/tooling exists for the new `L` stage yet. | Raw card inspection only for now. | Already deferred project tooling; not required for this pass. |
+| R10 | Informational | `menu_isLoadSaveCommandActive()` is a plain read of a non-volatile static, safe only from the main-loop context used today. | None now. | If the flag ever becomes ISR-writable, add a critical section/volatile. |
+
+### 10.3 Things checked and found safe
+
+- C1 stage code `'L'` was previously unused and is not consumed by any switch.
+- C2 shift layout fits `kind` (2 bits) and `scene_index` (4 bits) without
+  overlap or truncation.
+- C7 still protects the original hazard window: `menu_loadSaveCommandActive`
+  remains set through `menu_requestLoadCommandFinalIndexRestore()` and is
+  cleared only in `menu_finishLoadSaveCommand()`, so the deferred root-index
+  restore is still guarded.
+- The flush scheduler is only invoked when the filesystem is `IDLE`, so the
+  narrower guard cannot make the optional append contend with a BUSY facade.
+- `AutosaveTrace.c`, `presetManager.c`, and `Makefile` correctly require no
+  changes for this pass.

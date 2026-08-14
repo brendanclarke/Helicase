@@ -408,6 +408,8 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value);
 void menu_sendAllParameters(void);
 void menu_serviceRuntimeWidgets(void);
 uint8_t menu_getActivePage(void);
+/* Use the accepted OK/OW busy window, not mere presence on the Load/Save page. */
+uint8_t menu_isLoadSaveCommandActive(void);
 uint8_t menu_areMuteLedsShown(void);
 uint8_t menu_getActiveVoice(void);
 void menu_setActiveVoice(uint8_t voiceNr);

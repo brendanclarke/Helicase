@@ -27,11 +27,13 @@
 #define AUTOSAVE_TRACE_RECORD_BYTES  8u
 
 /*
- * Sixty-four records fill filesystem.c's existing 512-byte staging buffer
- * exactly. Keep these values coupled: changing the record size requires a
- * fresh proof that one trace batch still fits that shared buffer.
+ * Retained ring capacity is owned by config.h. Keep a 64-record fallback for
+ * consumers that include this header before config.h; filesystem.c drains a
+ * larger configured ring in bounded staging-buffer batches.
  */
+#ifndef AUTOSAVE_TRACE_RECORD_COUNT
 #define AUTOSAVE_TRACE_RECORD_COUNT  64u
+#endif
 #define AUTOSAVE_TRACE_FILENAME      "asavetrc.bin"
 
 /* One-byte stage codes make a raw trace readable without a separate decoder. */
@@ -56,6 +58,8 @@ typedef enum {
      * in flags and the captured Scene/slot/type coordinate in value.
      */
     AUTOSAVE_TRACE_STAGE_INSTRUMENT_ENTRY = 'N',
+    /* Terminal whole-Kit/Scene witness retained after a synchronous D-record burst. */
+    AUTOSAVE_TRACE_STAGE_LOAD_MARK = 'L',
     AUTOSAVE_TRACE_STAGE_SCHEDULED = 'S',
     AUTOSAVE_TRACE_STAGE_ADMITTED = 'A',
     AUTOSAVE_TRACE_STAGE_VALIDATED = 'V',
@@ -137,6 +141,13 @@ typedef enum {
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_SCENE_SHIFT  0u
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_SLOT_SHIFT   4u
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_TYPE_SHIFT   8u
+
+/* LOAD_MARK kind, tracking flag, and packed value shifts; Scene marks nest Kit marks. */
+#define AUTOSAVE_TRACE_LOAD_MARK_KIND_KIT    0u
+#define AUTOSAVE_TRACE_LOAD_MARK_KIND_SCENE  1u
+#define AUTOSAVE_TRACE_LOAD_MARK_FLAG_TRACKING_ENABLED  (1u << 0u)
+#define AUTOSAVE_TRACE_LOAD_MARK_KIND_SHIFT   0u
+#define AUTOSAVE_TRACE_LOAD_MARK_SCENE_SHIFT  2u
 
 /* Append one timestamped stage record without performing filesystem I/O. */
 void autosaveTrace_record(autosave_trace_stage_t stage, uint8_t flags,

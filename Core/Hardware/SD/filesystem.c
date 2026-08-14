@@ -405,6 +405,16 @@ static fs_completion_cb_t completion_callback = NULL;
  * NUM_PARAMS is kept wide for descriptor-id compatibility; use 512 for margin. */
 static uint8_t staging_buf[512];
 
+/*
+ * Bound each trace append to the existing staging buffer, independently of
+ * the larger retained ring. The assertion prevents a record-size or buffer
+ * change from making the batch serializer overrun staging_buf.
+ */
+#define AUTOSAVE_TRACE_FLUSH_BATCH_RECORDS \
+    ((uint16_t)(sizeof(staging_buf) / AUTOSAVE_TRACE_RECORD_BYTES))
+_Static_assert((sizeof(staging_buf) % AUTOSAVE_TRACE_RECORD_BYTES) == 0u,
+               "staging_buf must hold whole autosave trace records");
+
 /* Name buffer for load_name operation.
  *
  * loaded_name is the public result returned by filesystem_loadedName(). It is
@@ -4044,12 +4054,13 @@ static void filesystem_writeBootLog_tick(void)
 /*
  * Serialize the pending AutosaveTrace prefix into the shared 512-byte buffer.
  *
- * Inputs: a pending-count snapshot capped by the 64-record ring. Output:
+ * Inputs: a pending-count snapshot capped by AUTOSAVE_TRACE_FLUSH_BATCH_RECORDS.
+ * Output:
  * `byte_count` receives its exact eight-byte-record length and staging_buf
  * contains records in oldest-first order. Why: trace owns no filesystem
- * buffer, while exactly 64 * 8 bytes fits the existing one-operation staging
- * buffer without introducing another retained allocation. Affiliate:
- * filesystem_autosaveTraceFlush_tick().
+ * buffer, while one bounded batch fits the existing one-operation staging
+ * buffer without introducing another retained allocation; repeated flushes
+ * drain a larger retained ring. Affiliate: filesystem_autosaveTraceFlush_tick().
  */
 static void filesystem_autosaveTraceSerialize(uint16_t record_count,
                                               uint16_t *byte_count)
@@ -4083,8 +4094,8 @@ static void filesystem_autosaveTraceFlush_tick(void)
         if (!afatfs_chdir(NULL))
             return;
         op_stream_index = autosaveTrace_pendingCount();
-        if (op_stream_index > AUTOSAVE_TRACE_RECORD_COUNT)
-            op_stream_index = AUTOSAVE_TRACE_RECORD_COUNT;
+        if (op_stream_index > AUTOSAVE_TRACE_FLUSH_BATCH_RECORDS)
+            op_stream_index = AUTOSAVE_TRACE_FLUSH_BATCH_RECORDS;
         if (op_stream_index == 0u) {
             filesystem_finish(FS_STATUS_DONE);
             return;
@@ -19586,6 +19597,12 @@ static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted)
  */
 static void filesystem_autosaveTraceFlushCompleted(void)
 {
+    /* Re-arm immediately after a successful full-batch append while backlog remains. */
+#if DEV_MODE_LOGGING
+    if (status == FS_STATUS_DONE &&
+        autosaveTrace_pendingCount() >= AUTOSAVE_TRACE_FLUSH_BATCH_RECORDS)
+        fs_autosave_trace_next_due_tick = 0u;
+#endif
     filesystem_ack();
 }
 
@@ -19607,17 +19624,18 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
     /*
      * Reserve the one filesystem facade for a foreground Load/Save command.
      *
-     * Input: the active Menu page, which remains LOAD_PAGE or SAVE_PAGE until
-     * its accepted command has completed any post-apply root-index restore.
+     * Input: menu_isLoadSaveCommandActive(), true only for the accepted
+     * command and its post-apply root-index restore.
      * Output: retain the RAM trace ring and its existing deadline without
      * opening `asavetrc.bin`. Why: this optional diagnostic append previously
      * could start between Bank payload completion and Menu's final read-only
      * `.hcindex` request, making that foreground request fail with generic
-     * FsErr solely because the shared facade was busy. The next non-Load/Save
-     * idle tick resumes this unchanged best-effort trace flush; no trace data
-     * is discarded and no foreground filesystem operation is delayed.
+     * FsErr solely because the shared facade was busy. The narrower busy
+     * predicate also permits flushing while the user remains on the page
+     * after the command completes; no trace data is discarded and no
+     * foreground filesystem operation is delayed.
      */
-    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+    if (menu_isLoadSaveCommandActive())
         return;
 
     if (autosaveTrace_pendingCount() == 0u)
@@ -20156,38 +20174,33 @@ uint8_t filesystem_createBootIndexBlocking(void)
 }
 
 /*
- * Pump one trace append to its durable terminal boundary for a bench harness.
+ * Pump every pending trace batch to its durable terminal boundary for a bench harness.
  *
- * Inputs: an idle facade and any current ring tail. Output: success if nothing
- * is pending or the private append operation completes successfully; busy or a
- * real I/O error returns zero. Why: this supplies an explicit pre-power-cycle
- * evidence boundary without making normal runtime code block for diagnostics.
+ * Inputs: an idle facade and any current ring tail. Output: success only after
+ * every pending batch completes; busy or a real I/O error returns zero. Why:
+ * this supplies an explicit pre-power-cycle evidence boundary without making
+ * normal runtime code block for diagnostics.
  * Terminal status is acknowledged before return so this optional helper cannot
  * leave the autonomous schedulers disabled behind a stale DONE/ERROR state.
  */
 uint8_t filesystem_autosaveTraceFlushBlocking(void)
 {
-    uint8_t trace_flushed;
-
-    if (autosaveTrace_pendingCount() == 0u)
-        return 1u;
-    /*
-     * The autonomous scheduler supplies a self-acknowledging callback because
-     * it has no result consumer. This explicit bench helper instead needs to
-     * inspect the terminal result below, so it deliberately owns the matching
-     * filesystem_ack() after its local pump completes.
-     */
-    if (status == FS_STATUS_BUSY ||
-        !filesystem_start(FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
-                          FS_FILE_SETTINGS, 0u, NULL)) {
-        return 0u;
+    while (autosaveTrace_pendingCount() != 0u) {
+        /* Each loop owns one bounded append and acknowledges it before the next. */
+        if (status == FS_STATUS_BUSY ||
+            !filesystem_start(FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
+                              FS_FILE_SETTINGS, 0u, NULL)) {
+            return 0u;
+        }
+        while (status == FS_STATUS_BUSY)
+            filesystem_tick();
+        if (status != FS_STATUS_DONE) {
+            filesystem_ack();
+            return 0u;
+        }
+        filesystem_ack();
     }
-    while (status == FS_STATUS_BUSY)
-        filesystem_tick();
-    trace_flushed = (uint8_t)(status == FS_STATUS_DONE);
-    /* See the function contract: return the outcome, but restore idle ownership. */
-    filesystem_ack();
-    return trace_flushed;
+    return 1u;
 }
 
 uint8_t filesystem_ensureAutosaveFilesBlocking(void)

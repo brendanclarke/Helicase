@@ -246,6 +246,15 @@
 #define AUTOSAVE_CRC_BYTES_PER_TICK 128u
 
 /*
+ * Retained autosave-trace capacity. The default is 64 records (512 bytes);
+ * this diagnostic pass temporarily retains 2048 records (16,384 bytes) in
+ * the DEV_MODE_LOGGING-only SRAM1 ring. Restore the effective value to the
+ * default when the trace extension experiment is complete.
+ */
+#define AUTOSAVE_TRACE_RECORD_COUNT_DEFAULT 64u
+#define AUTOSAVE_TRACE_RECORD_COUNT 2048u /* TEMPORARY approved expansion */
+
+/*
  * Minimum idle interval between background autosave-trace append attempts.
  * Input is time_sysTick's wrapping millisecond clock; output keeps diagnostic
  * trace I/O below settings persistence and the autosave writer in the shared

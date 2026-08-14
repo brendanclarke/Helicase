@@ -259,10 +259,10 @@ uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
  * bench-test power cycle.
  *
  * Inputs: an idle, mounted filesystem facade; output is nonzero only after
- * pending trace records have closed and passed the normal AsyncFATFS sync gate.
- * Why: a tester who removes power immediately after an observed transaction
- * needs a deterministic trace boundary rather than the background 500 ms
- * cadence. This is a test convenience, not a normal runtime path. When
+ * every pending trace batch has closed and passed the normal AsyncFATFS sync
+ * gate. Why: a tester who removes power immediately after an observed
+ * transaction needs a deterministic trace boundary rather than the background
+ * 500 ms cadence. This is a test convenience, not a normal runtime path. When
  * DEV_MODE_LOGGING is 0 there are no pending records and this returns success
  * without opening a trace file. Affiliate: filesystem_autosaveTraceFlush_tick().
  */

@@ -49,8 +49,8 @@
 #include "SceneData.h"
 #include "BankData.h"
 #include "SceneModTargets.h"
-#include "AutosaveTrace.h"
 #include "config.h"
+#include "AutosaveTrace.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
 #include "triggerJacks.h"
@@ -8939,6 +8939,8 @@ void menu_sendAllParameters(void)
 ** Accessors
 ** ----------------------------------------------------------------------- */
 uint8_t menu_getActivePage(void)   { return menu_activePage; }
+/* Expose only the accepted-command busy window needed by filesystem tracing. */
+uint8_t menu_isLoadSaveCommandActive(void) { return menu_loadSaveCommandActive; }
 uint8_t menu_getActiveVoice(void)  { return menu_activeVoice; }
 void    menu_setActiveVoice(uint8_t v) { menu_activeVoice = v; }
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
