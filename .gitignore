@@ -13,6 +13,8 @@
 *.so.*
 *.dylib
 .DS_store
+.DS_Store
+.Trashes 
 
 # Executables
 *.exe
