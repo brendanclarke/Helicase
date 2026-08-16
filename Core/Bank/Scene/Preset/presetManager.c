@@ -124,6 +124,20 @@ static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
  * Morph menu mirrors and global decimation apply at Scene switch time.
  */
 static uint8_t drumset_apply_active = 0;
+/*
+ * A Scene activation normally waits for each pending voice's amp envelope to
+ * become quiet before replacing that voice's runtime image. Continuous play
+ * can keep an envelope non-quiet indefinitely, which leaves this foreground
+ * worker active and consequently keeps Menu's accepted Load command from
+ * reaching its terminal index restore and command cleanup. The existing
+ * trigger-time force path already defines the accepted recovery behavior for
+ * a voice that cannot wait; this one-second bound selects that path after
+ * 1,000 main-tick passes without quiet progress. The value is a timing bound,
+ * not a new persistence or audio image.
+ */
+#define DRUMSET_APPLY_FORCE_TICKS 1000u
+/* Consecutive non-quiet foreground passes for the currently armed worker. */
+static uint16_t drumset_apply_stall_ticks = 0u;
 static uint8_t drumset_apply_voice = 0;
 static uint8_t drumset_apply_scene = 0u;
 static uint16_t drumset_apply_pending_mask = 0u;
@@ -413,6 +427,23 @@ static void on_instrument_morph_load_complete(void)
 static void on_scene_load_complete(void)
 {
     uint8_t scene_index;
+
+    /*
+     * This is a RAM-only completion witness, emitted before any presence
+     * promotion or mutation marking. Its input is the filesystem terminal
+     * status still associated with this callback and the immutable destination
+     * mask captured by preset_loadSceneForScenes(). Bit 0 proves that the
+     * callback observed FS_STATUS_DONE; value32 preserves the exact Scene
+     * destinations the callback will iterate. Thus a missing R record proves
+     * the callback was not reached, R with bit 0 clear proves a terminal error
+     * entered it, and R with value zero proves the request arrived without a
+     * destination. It performs no filesystem I/O and adds no retained state.
+     */
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_SCENE_LOAD_COMPLETE,
+                         (uint8_t)(filesystem_status() == FS_STATUS_DONE
+                                       ? AUTOSAVE_TRACE_SCENE_LOAD_COMPLETE_FLAG_STATUS_DONE
+                                       : 0u),
+                         (uint32_t)pm_kit_request_scene_mask);
 
     /*
      * Complete a durable root Scene load.
@@ -1311,6 +1342,8 @@ void preset_startDrumsetApply(void)
         (uint16_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u);
     drumset_apply_active = 1u;
     drumset_apply_voice = 0u;
+    /* A new Scene worker must not inherit non-progress from its predecessor. */
+    drumset_apply_stall_ticks = 0u;
 }
 
 uint8_t preset_tickDrumsetApply(void)
@@ -1367,8 +1400,25 @@ uint8_t preset_tickDrumsetApply(void)
             drumset_apply_voice = 0u;
         if ((drumset_apply_pending_mask & bit) == 0u)
             continue;
-        if (!instrumentManager_ampEnvelopeQuiet(voice))
+        if (!instrumentManager_ampEnvelopeQuiet(voice)) {
+            /*
+             * No quiet result is observable for this pending voice. Count
+             * foreground passes rather than wall-clock calls so the bound is
+             * expressed in the same cadence that owns this cooperative
+             * worker. Once the bound is reached, use the already-established
+             * trigger-time force commit for this exact voice and clear the
+             * episode counter. The pending-mask helper performs the normal
+             * runtime-image commit; this branch only guarantees progress.
+             */
+            if (++drumset_apply_stall_ticks >= DRUMSET_APPLY_FORCE_TICKS) {
+                drumset_apply_stall_ticks = 0u;
+                preset_applyDeferredSceneSlotForTrigger(voice);
+            }
             continue;
+        }
+
+        /* A quiet commit is real progress; a later voice starts a new wait. */
+        drumset_apply_stall_ticks = 0u;
 
         preset_resetAndApplyKitVoiceImage(drumset_apply_scene, voice);
         drumset_apply_pending_mask =

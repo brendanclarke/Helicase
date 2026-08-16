@@ -57,6 +57,8 @@
 | 046 | 2026-08-10 | rollback boundary commit `c9807fa`; later Session 046 firmware experiments reset, documentation/SD fixtures remain in the working tree | Boot filesystem localization and failure transparency, duplicate-safe HCNAMES handling, accepted Phase 1 scalar coverage, working autosave lifecycle trace, and rollback-safe Session 047 reimplementation plan |
 | 047 | 2026-08-10 | current working tree after bounded-CRC/boot-capture implementation | Bounded AutoSave CRC, missing-pair selector repair, trace arbitration, ASENSURE forensic capture, and focused hardware validation |
 | 048 | 2026-08-11 | `/Users/bc/Helicase Project/Helicase-check-fs/Helicase`, intentional dirty worktree based on `63bdd6e` | HCNAMES source authority, source-free settings, immediate Instrument/InstrumentMrp AutoSave mutation marks, trace/exit repair, and hardware acceptance |
+| 049 | 2026-08-12 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Kit/Scene/Bank write-on-load markers; KitMrp and Scene accepted, Bank persistence/restore failure isolated |
+| 050 | 2026-08-16 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Root Scene Load terminal facade acknowledgement; hardware-confirmed trace and AutoSave publication; deferred Scene/Bank embedded HCNAMES exit flush |
 
 ---
 
@@ -610,3 +612,28 @@ diverged. Bank-load repair and reboot verification are deferred to Session 050.
   Kit/Scene implementation boundaries, hardware payload comparisons, trace
   flag decoding, stale Bank restore-slot evidence, and the Session 050 repair
   target
+
+### 050 — Scene-Load Trace And AutoSave Publication (2026-08-16)
+
+Diagnosed the actual root Scene/Bank Load publication blocker: the direct
+callback after its final read-only `.hcindex` reload observed `FS_STATUS_DONE`
+but did not call `filesystem_ack()`. The facade therefore remained terminal,
+so both idle-only autonomous publishers were permanently denied even though
+payload, HCNAMES Scene-row, and the correct Scene dirty marker had already
+completed. The minimal in-path fix snapshots the terminal result and
+acknowledges it before Menu teardown. Hardware loading root Scene 024
+`SeaWaked` into resident Scene 15 then exiting Load produced `R`, nested Kit
+and Scene `L`, command/page witnesses `F/W`, and the complete `A/V/M/C/P/T`
+transaction; `.hcprms2` advanced from generation 5 to 6. The temporary
+2,048-record logging ring, R/W/F/G diagnostic stages, and 1,000-pass
+non-quiet Scene-apply bound remain active. A Scene completion now accumulates
+the HCNAMES Kit-family mask, but the existing Menu exit predicate does not
+flush it for Scene/Bank sessions: the Scene row was `SeaWaked/024` while the
+embedded Kit/Instrument rows remained old. Bank persistence/restore and that
+one existing family-exit boundary are deferred separately.
+
+- **Find here**: [050_SESSION_HANDOFF_LOG.md](050_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`,
+  `DEV_MODES.md`, and `SRAM_MANIFEST.md` for the durable contracts, the exact
+  card evidence, temporary diagnostic RAM/configuration, and next-session
+  boundaries.

@@ -1,7 +1,7 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware through the Session 048 HCNAMES
+reference for the Helicase/LXR-02 firmware through the Session 050 HCNAMES
 source-authority and Instrument-Load AutoSave update. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
@@ -156,9 +156,15 @@ Implemented through the inherited Session 046/047 baseline plus Session 048:
 - Root Scene Load/Save is implemented for `Scene/NNN Name/` folders containing
   `sceneset.scg`, embedded `Kit <name>/`, `pattern.pat`, and `effects.fx`.
   `sceneset.scg` never stores the Scene name.
-- Root Scene and embedded Kit names originate in directory names but are
-  published to their fixed HCNAMES rows. They are not fields of `scene_t` or
-  `kit_t`.
+- Root Scene and embedded Kit names originate in directory names, not fields of
+  `scene_t` or `kit_t`. A successful root Scene Load publishes its Scene row
+  inside the loader. The Kit-plus-six-Instrument HCNAMES block is intended to
+  be serialized by the existing Menu family-exit transaction, but this remains
+  a deferred defect: the 2026-08-16 Scene-024-to-Scene-15 fixture left that
+  block at its prior `Pop`/`barf*` identities after exit even though the Scene
+  row correctly became `SeaWaked<TAB>024`. Do not describe root Scene Load as
+  fully registering its embedded Kit/Instrument identities until that Menu
+  exit boundary is repaired.
 - Root Bank scan/load/save uses the 16 resident Scene slots. Boot repairs,
   scans, and rebuilds `/Bank/.hcindex`, reloads it after Instrument index
   generation has disposed the shared cache, and tries BankData's restored slot
@@ -188,7 +194,10 @@ Implemented through the inherited Session 046/047 baseline plus Session 048:
   and one final read-only reload of the unchanged root `.hcindex`. A pure Load
   does not physically scan or rewrite that index. Kit/Scene/Bank Saves alone
   own physical parent rescan plus complete index rebuild after namespace
-  mutation.
+  mutation. The final direct Scene/Bank index callback snapshots its terminal
+  result and acknowledges the filesystem facade before it releases `...`; this
+  returns the facade to `IDLE` so the deferred trace and AutoSave writers can
+  run after Load-page exit.
 - Entering top-level Load:Bank is not ready when `/Bank/.hcindex` alone has
   loaded. Menu immediately scans the highlighted Bank's immediate `00..15`
   children and holds input until that callback publishes the selectable mask.
@@ -1651,8 +1660,11 @@ instrument runtime propagation:
   until the physical mask is resident, and never submits a zero-mask request.
 - Confirm explicit root Scene/Bank Load ordering is payload -> HCNAMES ->
   completed Preset result -> shared Scene DSP clear/image/all-source rebind ->
-  read-only root-index reload -> command reset. No root scan or index write may
-  occur in a pure Load.
+  read-only root-index reload -> terminal facade acknowledgement -> command
+  reset. No root scan or index write may occur in a pure Load. The final
+  acknowledgement is mandatory for the idle-only trace and AutoSave schedulers;
+  it must occur after the callback captures its success/error result and before
+  Menu command teardown.
 - Confirm an accepted OK/OW command displays `...` with no cursor through its
   complete terminal work and always returns to the bracketed type row.
 - Confirm a Kit, Scene, or Bank Save makes a new or renamed directory visible

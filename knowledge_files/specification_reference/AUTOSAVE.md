@@ -15,7 +15,7 @@ Related authority is deliberately separate:
 - `DEV_MODES.md` owns development-mode selection and diagnostic file output;
 - `ASYNCFATFS_REFERENCE.md` owns low-level AsyncFATFS contracts;
 - `SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
-  Session 048 linked allocation/capture snapshot.
+  Session 050 linked allocation/capture snapshot.
 
 AutoSave currently persists the active resident Bank's implemented scalar
 state into two hidden root records. It does not modify root `Bank/`, `Scene/`,
@@ -28,6 +28,9 @@ Implemented through the Session 048 AutoSave baseline:
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
 - scalar dirty hooks for Scene, Kit, Instrument normal, and morphable
   Instrument Morph values, plus the format's implemented Bank fields;
+- successful normal Kit Load, root Scene Load without Pattern, and selective
+  Bank Load whole-object markers; a root Scene marker runs only after its
+  complete Scene/HCNAMES filesystem transaction reports success;
 - one canonical mutation mask, bounded dirty scanning and value capture, A/B
   transformed copy, CRC32C, commit-last runtime publication, retry, and
   continuation scheduling;
@@ -48,7 +51,9 @@ Not implemented and not to be inferred from the A/B writer:
   no file handle or scheduler.
 - Retained owners mark their own changes: `BankData`, `SceneData`, and Preset's
   descriptor-aware Instrument path call typed marker functions only after the
-  retained value changes.
+  retained value changes. `on_scene_load_complete()` owns the root Scene
+  whole-object marker after the terminal Scene/Pattern/Effect/HCNAMES result,
+  so no partial Scene commit can be published as a successful load.
 - `Core/Hardware/SD/filesystem.c` is the sole AsyncFATFS owner. It owns pair
   setup, validation, winner selection, bounded capture, transformed copying,
   publication, scheduling, and error rollback.
@@ -166,6 +171,14 @@ the same bits; they do not start one file operation per edit. Load and Save
 pages suppress new background starts, and the single filesystem facade gives
 foreground work priority. An already active transaction runs to its safe
 close/flush boundary.
+
+The page rule is a deferment, not a discard. After a direct foreground
+filesystem callback consumes a terminal result, it must acknowledge that
+`DONE`/`ERROR` result before it releases its UI owner; otherwise the facade is
+not `IDLE` and neither the trace append nor this writer can acquire it. The
+final read-only root Scene/Bank index callback follows this rule after it has
+captured its success byte. It does not alter the page guard, writer debounce,
+or mutation mask.
 
 One transaction:
 
@@ -306,6 +319,15 @@ Hardware validation already accepted for the available scalar controls:
 - MIDI channel/note values, which are Scene parameters;
 - no user-changeable Bank scalar control exists for an additional UI test.
 
+The complete root Scene Load publication boundary is hardware-confirmed on
+2026-08-16. Loading root Scene slot 024 (`SeaWaked`) into resident Scene 15
+emitted `R flags=0x01 value=0x00008000`, tracking-enabled Kit and Scene `L`
+witnesses (`0x3c` and `0x3d`), then the expected trace-flush/page-suppression
+observations and one successful `A/V/M/C/P/T` writer transaction. The publish
+record selected generation 6 in `/.hcprms2`; the HCNAMES Scene row became
+`SeaWaked<TAB>024`. This confirms the existing terminal Scene marker and
+writer path. Pattern and live Effect remain excluded exactly as above.
+
 Do not reopen that completed work as a vague “coverage matrix,” “idle,” or
 “repeated edit” requirement. A future code change should be tested against the
 specific owner and failure boundary it changes.
@@ -331,10 +353,12 @@ repairs, or accepts either hidden record. Its exact `/bootlog.bin` envelope is
 owned by `DEV_MODES.md`; this specification deliberately does not duplicate
 the diagnostic wire layout.
 
-`tools/decode_bootlog.py` is a tracked, read-only decoder for the current
-eight-byte boot token and conditional 72-byte `ASENSURE` capsule. It is not an
-AutoSave record inspector and it must not modify fixtures. Validate AutoSave
-captures without editing the source files: check exact record sizes,
-header/commit fields, CRC32C, generation selection, dirty masks, and trace
-records independently. A broader human-readable development-log converter is
-deferred until AutoSave behavior and every logging format are complete.
+`tools/decode_bootlog.py` decodes the eight-byte boot token and conditional
+72-byte `ASENSURE` capsule. The user is updating that self-contained tool
+separately as Session 050 closes, so inspect its completed state before relying
+on its invocation or documenting a schema change. It is not an AutoSave record
+inspector and it must not modify fixtures. Validate AutoSave captures without
+editing the source files: check exact record sizes, header/commit fields,
+CRC32C, generation selection, dirty masks, and trace records independently. A
+broader human-readable development-log converter is deferred until AutoSave
+behavior and every logging format are complete.

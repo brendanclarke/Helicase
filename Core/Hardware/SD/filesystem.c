@@ -1434,6 +1434,16 @@ static uint8_t fs_autosave_writer_armed = 0u;
  */
 #if DEV_MODE_LOGGING
 static uint16_t fs_autosave_trace_next_due_tick = 0u;
+/*
+ * Edge latches make the evidence records bounded: W and F describe an episode
+ * once instead of appending on every foreground tick while a page/command
+ * remains active. The dropped-count latch makes G describe each new amount of
+ * ring loss once. All three objects exist only with the logging ring, so an
+ * ordinary build receives no production-RAM allocation for this observer.
+ */
+static uint8_t fs_autosave_suppress_witness = 0u;
+static uint8_t fs_trace_suppress_witness = 0u;
+static uint16_t fs_trace_reported_dropped = 0u;
 #endif
 /*
  * Pre-audio boot owns first creation of the hidden record pair. This gate
@@ -19542,10 +19552,32 @@ static void filesystem_autosaveWriterSchedule_tick(void)
                              (uint32_t)fs_autosave_next_due_tick);
         return;
     }
-    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE ||
-        (uint16_t)(now - fs_autosave_next_due_tick) >= 0x8000u) {
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+#if DEV_MODE_LOGGING
+        /*
+         * The page guard is intentional: Load/Save owns the shared 9,000-byte
+         * name cache while the user browses, so the AutoSave writer must wait
+         * until the page is left. This witness proves that the writer was
+         * armed with canonical dirty work and was stopped at that designed
+         * admission boundary. flags bit 0 mirrors the dirty predicate and
+         * value32 records the existing debounce deadline; no writer admission
+         * or mutation-mask behavior is changed here.
+         */
+        if (!fs_autosave_suppress_witness && autosave_maskHasDirty()) {
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_WRITER_SUPPRESSED,
+                                 1u,
+                                 (uint32_t)fs_autosave_next_due_tick);
+            fs_autosave_suppress_witness = 1u;
+        }
+#endif
         return;
     }
+#if DEV_MODE_LOGGING
+    /* Leaving the page ends this W episode; a later dirty arm may report anew. */
+    fs_autosave_suppress_witness = 0u;
+#endif
+    if ((uint16_t)(now - fs_autosave_next_due_tick) >= 0x8000u)
+        return;
     if (filesystem_start(FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN,
                          FS_FILE_SETTINGS, 0u,
                          filesystem_autosaveWriterCompleted)) {
@@ -19597,11 +19629,42 @@ static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted)
  */
 static void filesystem_autosaveTraceFlushCompleted(void)
 {
-    /* Re-arm immediately after a successful full-batch append while backlog remains. */
 #if DEV_MODE_LOGGING
-    if (status == FS_STATUS_DONE &&
-        autosaveTrace_pendingCount() >= AUTOSAVE_TRACE_FLUSH_BATCH_RECORDS)
-        fs_autosave_trace_next_due_tick = 0u;
+    if (status == FS_STATUS_DONE) {
+        /* A full batch leaves work pending and should receive the existing
+         * immediate continuation cadence rather than waiting another interval. */
+        if (autosaveTrace_pendingCount() >=
+            AUTOSAVE_TRACE_FLUSH_BATCH_RECORDS)
+            fs_autosave_trace_next_due_tick = 0u;
+
+        /*
+         * The trace ring's dropped counter is otherwise only an internal
+         * getter. Publish its changed value after a successful append so a
+         * field capture can distinguish a missing producer from records that
+         * were overwritten before the SD drain acknowledged them. One G per
+         * changed value avoids adding a record on every successful append.
+         */
+        {
+            uint16_t dropped = autosaveTrace_droppedCount();
+            if (dropped != fs_trace_reported_dropped) {
+                autosaveTrace_record(AUTOSAVE_TRACE_STAGE_TRACE_DROPPED,
+                                     0u, (uint32_t)dropped);
+                fs_trace_reported_dropped = dropped;
+            }
+        }
+        /* A completed append ends both the gate/error episode. */
+        fs_trace_suppress_witness = 0u;
+    } else if (status == FS_STATUS_ERROR && !fs_trace_suppress_witness) {
+        /*
+         * An append reached its terminal callback but failed. The flush cursor
+         * is intentionally not advanced by that failure, so the same records
+         * remain pending for retry; F only documents the failed boundary.
+         */
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED,
+                             AUTOSAVE_TRACE_TRACE_SUPPRESSED_FLAG_APPEND_ERROR,
+                             0u);
+        fs_trace_suppress_witness = 1u;
+    }
 #endif
     filesystem_ack();
 }
@@ -19635,8 +19698,26 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
      * after the command completes; no trace data is discarded and no
      * foreground filesystem operation is delayed.
      */
-    if (menu_isLoadSaveCommandActive())
+    if (menu_isLoadSaveCommandActive()) {
+#if DEV_MODE_LOGGING
+        /*
+         * Trace flushing uses the staging buffer and is independent of the
+         * name-cache ownership rule, but it must still defer while an accepted
+         * Load/Save command owns the filesystem facade. Record the pending
+         * count at this gate once per episode; if no later flush appears, the
+         * evidence identifies command finalization as the missing boundary.
+         */
+        if (!fs_trace_suppress_witness &&
+            autosaveTrace_pendingCount() != 0u) {
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED,
+                AUTOSAVE_TRACE_TRACE_SUPPRESSED_FLAG_COMMAND_ACTIVE,
+                (uint32_t)autosaveTrace_pendingCount());
+            fs_trace_suppress_witness = 1u;
+        }
+#endif
         return;
+    }
 
     if (autosaveTrace_pendingCount() == 0u)
         return;
@@ -19656,6 +19737,11 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
                          filesystem_autosaveTraceFlushCompleted)) {
         fs_autosave_trace_next_due_tick = (uint16_t)(
             now + AUTOSAVE_TRACE_FLUSH_INTERVAL_MS);
+#if DEV_MODE_LOGGING
+        /* Starting an append proves the gate opened; permit a later error
+         * callback to report a new failure episode. */
+        fs_trace_suppress_witness = 0u;
+#endif
     }
 #endif
 }

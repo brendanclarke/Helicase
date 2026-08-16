@@ -1,14 +1,15 @@
 # SRAM manifest
 
-The detailed section/symbol inventory below was regenerated from the Session
-048 logging-on worktree build after HCNAMES source ownership, Instrument Load
-AutoSave, and the Menu exit correction. `make -j2 && make img` produced
-`text=375,812`, `data=396`, and `bss=79,300`; `build/lxr02.bin` is 376,208 B.
-The approved 258-byte `fs_resident_source` cache replaces the retired 32-byte
-SceneData source array, and the approved one-byte `menu_pendingPageSwitch`
-shares normal SRAM1. This remains a linked-image inventory: sizes come
-from `arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
-estimates.
+The detailed section/symbol inventory below was regenerated from the current
+2026-08-16 logging-on Scene-Load record-publication build. `make -j2 && make
+img` produced `text=376,596`, `data=396`, and `bss=95,188`;
+`build/lxr02.bin` is 376,992 B. The approved 258-byte
+`fs_resident_source` cache replaces the retired 32-byte SceneData source
+array, and the approved one-byte `menu_pendingPageSwitch` shares normal SRAM1.
+This remains a linked-image inventory: sizes come from
+`arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
+estimates. The earlier Session 048 figures retained below are historical
+baseline notes, not the current allocation total.
 
 ## Allocation policy
 
@@ -25,12 +26,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 73,024 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **76,124 B** | **300,708 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **88,404 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 88,912 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **92,012 B** | **284,820 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **104,292 B** | — |
 
-The image contains 396 B of initialized SRAM1 data and 79,300 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 72,628 B in normal SRAM1
+The image contains 396 B of initialized SRAM1 data and 95,188 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 88,516 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -38,16 +39,16 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 362,880 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 363,664 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
 | `.data` | `0x20020c1c` | 396 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020da8` | 72,628 B | SRAM1 | Normal zero-initialized globals |
+| `.bss` | `0x20020da8` | 88,516 B | SRAM1 | Normal zero-initialized globals |
 
-The final FLASH load image ends at `0x08063d90`, safely before the reserved
-sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 376,208 B.
+The final FLASH load image remains safely before the reserved sample-FLASH
+boundary `0x08080000`. `build/lxr02.bin` is 376,992 B.
 
 ## Primary SRAM1 owners
 
@@ -65,7 +66,9 @@ sample-FLASH boundary `0x08080000`. `build/lxr02.bin` is 376,208 B.
 | `fs_stage_workspace` | 2,048 B | Aligned Kit/Instrument/Scene staging workspace |
 | `autosave_dirty_mask` | 3,856 B | Sole canonical AutoSave mutation mask |
 | `fs_autosave_parameter_cache` | 4,608 B | Dedicated bounded AutoSave patch offsets/values |
-| `autosave_trace_records` | 512 B | `DEV_MODE_LOGGING`-only 64-by-8-byte lifecycle ring |
+| `autosave_trace_records` | 16,384 B | `DEV_MODE_LOGGING`-only 2,048-by-8-byte lifecycle ring; temporary approved diagnostic expansion |
+| AutoSave trace cursors/cadence/witness latches | 12 B | `DEV_MODE_LOGGING`-only: three 16-bit ring cursors/drop count, 16-bit flush cadence, and 4 B of W/F/G observer latches |
+| `drumset_apply_stall_ticks` | 2 B | Normal SRAM1 bound for a continuously non-quiet Scene post-load voice apply |
 | `fs_hcprms_boot_capsule` | 64 B | `DEV_MODE_LOGGING`-only frozen eight-record ASENSURE timeout snapshot; owned by `filesystem.c` for one boot attempt |
 | `usb_MidiMessages` | 2,048 B | USB MIDI message storage |
 | `slider_lut` | 4,096 B | 1,024 native `float` attenuator nodes; lookup is `raw >> 2`, without interpolation |
@@ -111,10 +114,23 @@ arm-none-eabi-readelf -l -W build/lxr02.elf
 ```
 
 For the current logging-on image, conventional `arm-none-eabi-size` reports
-`text=375,812 B`, `data=396 B`, and `bss=79,300 B`. The latter is the combined
+`text=376,596 B`, `data=396 B`, and `bss=95,188 B`. The latter is the combined
 zero-init total across memory regions; `size -A` provides the section split
 above. Regenerate both configurations before a future change that alters
 logging-gated allocations.
+
+## 2026-08-16 Scene-Load record-publication allocation
+
+The current logging-on image carries the approved temporary
+`AUTOSAVE_TRACE_RECORD_COUNT == 2048` ring: 16,384 B in normal SRAM1,
+owned by `AutosaveTrace.c` for the process lifetime and omitted entirely when
+`DEV_MODE_LOGGING == 0`. Its cursor/drop state, filesystem flush cadence, and
+the W/F/G evidence latches total 12 B, also logging-only. The separately
+approved `drumset_apply_stall_ticks` is 2 B of normal SRAM1 `.bss`, owned by
+`presetManager.c` for the cooperative Scene post-load worker's process
+lifetime. It bounds a non-quiet envelope wait at 1,000 foreground passes; it
+does not hold payload, identity, or persistence data. No DTCM, DMA, name-cache,
+AutoSave-mask, patch-cache, or additional writer allocation was added.
 
 ## 2026-07-27 Bank Load / command-UI implementation note
 

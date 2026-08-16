@@ -67,6 +67,16 @@ typedef enum {
     AUTOSAVE_TRACE_STAGE_CAPTURED = 'C',
     AUTOSAVE_TRACE_STAGE_PUBLISHED = 'P',
     AUTOSAVE_TRACE_STAGE_TERMINAL = 'T',
+    /*
+     * R: Scene-load completion callback entry; W: intentional writer
+     * suppression on the Load/Save page; F: trace-flush suppression or
+     * append error; G: changed ring dropped-count publication. These stages
+     * are records only; they do not alter the production state machines.
+     */
+    AUTOSAVE_TRACE_STAGE_SCENE_LOAD_COMPLETE = 'R',
+    AUTOSAVE_TRACE_STAGE_WRITER_SUPPRESSED = 'W',
+    AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED = 'F',
+    AUTOSAVE_TRACE_STAGE_TRACE_DROPPED = 'G',
 } autosave_trace_stage_t;
 
 /*
@@ -148,6 +158,22 @@ typedef enum {
 #define AUTOSAVE_TRACE_LOAD_MARK_FLAG_TRACKING_ENABLED  (1u << 0u)
 #define AUTOSAVE_TRACE_LOAD_MARK_KIND_SHIFT   0u
 #define AUTOSAVE_TRACE_LOAD_MARK_SCENE_SHIFT  2u
+
+/*
+ * R flags: bit 0 means the Scene completion callback observed DONE. The R
+ * value is the callback's immutable destination Scene mask, allowing the
+ * callback-entry witness to be compared directly with later L/D/I records.
+ */
+#define AUTOSAVE_TRACE_SCENE_LOAD_COMPLETE_FLAG_STATUS_DONE (1u << 0u)
+
+/*
+ * F flags: bit 0 means the command-active gate retained pending trace records;
+ * bit 1 means a started trace append terminated with ERROR. W uses bit 0 to
+ * report that canonical mutation work was dirty while the writer was held by
+ * the intentional Load/Save-page cache ownership rule. G carries no flags.
+ */
+#define AUTOSAVE_TRACE_TRACE_SUPPRESSED_FLAG_COMMAND_ACTIVE (1u << 0u)
+#define AUTOSAVE_TRACE_TRACE_SUPPRESSED_FLAG_APPEND_ERROR   (1u << 1u)
 
 /* Append one timestamped stage record without performing filesystem I/O. */
 void autosaveTrace_record(autosave_trace_stage_t stage, uint8_t flags,

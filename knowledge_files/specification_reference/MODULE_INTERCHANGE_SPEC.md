@@ -1,7 +1,8 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through the Session 048 bounded-CRC,
-boot-capture build after the Session 046 rollback, for the one-pattern bridge,
+Session 030 baseline, updated through the Session 050 bounded-CRC,
+boot-capture and Scene-Load publication build after the Session 046 rollback,
+for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
 dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
@@ -74,7 +75,10 @@ does not recreate a generic bridge or duplicate resident names.
 - Pure root Scene and Bank Loads never enter that Save-owned physical rebuild.
   After payload and HCNAMES commit, Preset/Menu applies the loaded active Scene,
   then Menu reloads the unchanged selected `.hcindex` read-only before ending
-  `...` and releasing input.
+  `...` and releasing input. Its direct final-index callback snapshots the
+  terminal result, calls `filesystem_ack()`, then releases Menu; without that
+  acknowledgement the idle-only trace and AutoSave schedulers remain blocked
+  at `FS_STATUS_DONE`.
 - Load:Bank index completion is only the first browser boundary. Menu continues
   directly into a physical child preview for the highlighted Bank and holds
   input until that callback publishes the `00..15` destination mask.
@@ -82,6 +86,11 @@ does not recreate a generic bridge or duplicate resident names.
   identities once and family exit performs at most one HCNAMES rewrite. Bank
   Load/Save own a full-register transaction; selective Bank Load overlays only
   requested/present children.
+- Root Scene completion also accumulates its committed Kit-family identity mask,
+  but the current physical Load/Save exit predicate fails to run that existing
+  family rewrite for Scene/Bank sessions. This is a known deferred defect: do
+  not claim that a changed root Scene row means its embedded Kit/six-Instrument
+  rows are registered until the existing exit boundary is widened.
 - asyncfatfs owns exact-case filename behavior. Product code should use
   filesystem/asyncfatfs object/LFN APIs instead of local FAT/LFN reconstruction.
   Dot-prefixed files are ordinary filesystem objects and must not be hidden by
@@ -654,12 +663,12 @@ stay in `storageTypes.c/h`.
 | `filesystem_initCardAndMountBlocking()` / `filesystem_initAfterCardReady()` | Boot card init/mount. | `main.c` |
 | `filesystem_bootLoggingBegin()` / `filesystem_bootLoggingArm()` / `filesystem_bootLoggingTimedOut()` / `filesystem_writeBootFailureLogBlocking()` / `filesystem_bootLoggingEnd()` | Own the pre-audio ten-second filesystem deadline and one bounded best-effort retained-code recovery write. Private detail hooks may change only the label inside an armed deadline. | `main.c`; filesystem boot operations under `DEV_MODE_LOGGING` |
 | `filesystem_tick()` | Pump asyncfatfs work. | main loop |
-| `filesystem_status()` / `filesystem_ack()` | Operation status protocol. | Preset/Menu |
+| `filesystem_status()` / `filesystem_ack()` | Operation status protocol. A direct Menu callback must snapshot its terminal result before acknowledging it; if it does not immediately post another filesystem request, it must acknowledge `DONE`/`ERROR` before releasing its UI owner so autonomous idle-only schedulers can run. | Preset/Menu |
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is `Kit/NNN Name/kitset.kcg` plus instruments and save routes to the new Kit directory writer. For `FS_FILE_MORPH`, load/save remains legacy `.SND`. | Preset |
 | `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one direct Kit library slot `000..999` into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
 | `filesystem_requestLoadKitMorphForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging only so Preset can copy matching source normal endpoints into resident morph endpoints. | Preset/Menu KitMrp Load |
 | `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
-| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit into the independent non-Pattern stage, commit them after validation, then read Pattern directly into final Scene SRAM and validate the Effect placeholder. Pattern is intentionally non-atomic. | Preset/Menu Scene Load, boot |
+| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit into the independent non-Pattern stage, commit them after validation, then read Pattern directly into final Scene SRAM and validate the Effect placeholder. Pattern is intentionally non-atomic. On successful terminal root completion, Preset marks the implemented Scene-without-Pattern AutoSave scope before reporting `PRESET_OP_SCENE_LOAD`. | Preset/Menu Scene Load, boot |
 | `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, thin `pattern.pat`, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the single shared 1,000-entry root Instrument browser cache for the currently loaded type. | Menu Instrument Load; boot uses one type-at-a-time scan/index passes |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Capture one typed index selection into immutable operation scratch and validate it into the one Instrument candidate stage without mutating live SceneData. | Preset Instrument request |
@@ -671,7 +680,7 @@ stay in `storageTypes.c/h`.
 | `filesystem_loadedInstrumentSlot()` | Borrow the validated candidate payload for Preset's ordered commit. Names are exchanged through identity rows, not staged filename/stem accessors. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
 | `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the shared slot-indexed name cache; non-blank rows provide occupancy. | main startup, Menu |
-| `filesystem_requestReloadLibraryIndex(kind, cb)` / domain-specific Kit/Scene/Bank wrappers | Read an existing slot-ordered root `.hcindex` into the one shared cache; blank rows remain slot positions. This is read-only cache restoration and never scans or rewrites the namespace. | Menu entry/type changes and post-DSP root Scene/Bank Load terminal work |
+| `filesystem_requestReloadLibraryIndex(kind, cb)` / domain-specific Kit/Scene/Bank wrappers | Read an existing slot-ordered root `.hcindex` into the one shared cache; blank rows remain slot positions. This is read-only cache restoration and never scans or rewrites the namespace. The accepted root Scene/Bank terminal callback acknowledges its captured result before Menu teardown. | Menu entry/type changes and post-DSP root Scene/Bank Load terminal work |
 | `filesystem_createLibraryIndexBlocking(kind)` | Boot-only repair/scan and slot-ordered `.hcindex` rebuild for one root library. Runtime numbered-root Saves use the common asynchronous scan/rebuild continuation instead. | boot |
 | `filesystem_clearNameCache()` / `filesystem_libraryNameCacheLoaded(kind)` | Dispose/query the one active Instrument/Kit/Scene/Bank browser-name cache. | Menu lifecycle and index gating |
 | `filesystem_setIdentityName(row, name)` / `filesystem_identityName(row)` / `filesystem_identityNameMutable(row)` / `filesystem_clearIdentityNames()` | Own the logical Bank/Scene/Kit/six-Instrument identity interface. Bank aliases BankData; the other eight rows occupy 72 bytes. | Menu and filesystem HCNAMES/load/save completion |

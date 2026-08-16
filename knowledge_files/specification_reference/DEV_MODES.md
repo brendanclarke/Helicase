@@ -8,9 +8,9 @@ own AutoSave format/writer behavior, product filesystem layout, or low-level
 AsyncFATFS semantics; those belong to `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, and
 `ASYNCFATFS_REFERENCE.md` respectively.
 
-This document describes the Session 048 logging build. Plans and failed
-working-tree experiments that mention a unified `/devlog.bin` are not
-implemented state.
+This document describes the Session 048 logging baseline plus the current
+2026-08-16 Scene-Load record-publication build. Plans and failed working-tree
+experiments that mention a unified `/devlog.bin` are not implemented state.
 
 The build has exactly two development modes:
 
@@ -65,7 +65,7 @@ and owner in `SRAM_MANIFEST.md` before implementation.
 
 ## Current logging files
 
-The Session 048 build has two producer-specific root files. There is no
+The current build has two producer-specific root files. There is no
 `DEV_LOG_FILENAME`, `/devlog.bin`, `SaveFixTrace`, or `/savefix.bin` in the
 current code.
 
@@ -102,11 +102,19 @@ from continuing to the firmware's existing failure handling. Conversely, an
 absent file does not prove that no boot failure occurred: the same SD/FAT layer
 being diagnosed is also required to persist the record.
 
+As of Session 050, the user is independently updating
+`tools/decode_bootlog.py`. Do not alter or infer the decoder's final contract
+from its transient worktree state; before the next boot-log analysis, inspect
+the completed self-contained script and update this reference only if its
+documented input schema or invocation changed.
+
 ### `/asavetrc.bin`
 
-`AutosaveTrace.c` owns a 64-record (512-byte) bounded SRAM ring when logging is
-enabled. Producers append RAM records; `filesystem.c` owns the AsyncFATFS
-append/close/flush operation.
+`AutosaveTrace.c` owns a bounded SRAM ring when logging is enabled. The normal
+default is 64 records (512 bytes); the current approved diagnostic build sets
+`AUTOSAVE_TRACE_RECORD_COUNT` to 2,048 records (16,384 bytes). Producers append
+RAM records; `filesystem.c` owns the AsyncFATFS append/close/flush operation.
+The exact logging-only allocation is recorded in `SRAM_MANIFEST.md`.
 
 Each record is eight bytes:
 
@@ -114,8 +122,9 @@ Each record is eight bytes:
 stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
-Integer fields are little-endian. Stage bytes are uppercase `D I J N S A V M C P T`
-and their meanings/values are owned by `AutosaveTrace.h`. `D` is one accepted
+Integer fields are little-endian. Stage bytes are uppercase
+`D I J N L R W F G S A V M C P T` and their meanings/values are owned by
+`AutosaveTrace.h`. `D` is one accepted
 payload-bit OR. `I` is one whole-Instrument marker outcome: flags report valid
 payload-map base, live tracking, and whether all requested bytes reached the
 dirty funnel; value packs Scene, slot, expected byte count, and accepted byte
@@ -136,6 +145,26 @@ completion; flag bit 7 reports a rejected request or failed callback. Its value
 packs the Scene, slot, and selected type. The paired ticks expose the exact SD
 operation behind a delayed blank `kit` name without changing Menu behavior or
 adding any state.
+
+`L` is the terminal whole-load marker. Flag bit 0 reports mutation tracking;
+the value packs kind in bits 0..1 (`0` Kit, `1` Scene) and the destination
+Scene in bits 2..5. It follows all subordinate `D`/`I` records for that scope.
+
+`R` is the root Scene Load completion witness: it is emitted at callback entry;
+flag bit 0 reports that filesystem status was `DONE`, and the value is the
+destination Scene mask. `W` records the intentional Load/Save-page suppression
+of an armed dirty writer; flag bit 0 reports dirty work and the value is the
+debounce deadline. `F` records trace-flush suppression: bit 0 is the
+command-active gate with pending-record count in the value, and bit 1 is an
+append error. `G` reports a changed trace-ring dropped count in its value.
+
+The 2026-08-16 root-Scene hardware fixture is the reference example for the
+terminal publication chain: Scene 15 loaded root Scene 024 and produced
+`R flags=0x01 value=0x00008000`, Kit `L=0x3c`, Scene `L=0x3d`, one
+command-active `F`, one page-suppression `W`, then `A/V/M/C/P/T`; `P` reported
+generation 6. The final root-index callback must acknowledge its captured
+terminal result before Menu teardown, otherwise these RAM records and the
+AutoSave writer remain blocked behind a non-idle filesystem facade.
 
 ## Current duplicate-name limitation
 
@@ -185,7 +214,10 @@ is stale and must not be implemented as written.
   SD work.
 - `filesystem.c` remains the sole owner of diagnostic file handles.
 - Normal trace flushing starts only while the facade is idle and yields to
-  durable user work.
+  settings persistence and foreground work. It is deferred while an accepted
+  Load/Save command is active; after that command has finalized it may append
+  on a Load/Save page, whereas the AutoSave writer remains page-suppressed
+  until exit.
 - Logging must not add a blind sleep, busy wait, LCD wait, or arbitrary pacing
   interval to the operation being observed.
 - A trace cursor advances only after write, close, and flush succeed.
@@ -235,7 +267,8 @@ For the current baseline:
 - test absent, unique, case-variant, duplicate, scan-failure, open-failure, and
   power-interruption cases before declaring any future singleton repair done.
 
-`tools/decode_bootlog.py` is a tracked read-only decoder for ordinary boot
-tokens and the conditional `ASENSURE` capsule. It does not decode AutoSave
-records or replace the later, intentionally deferred general development-log
-converter.
+`tools/decode_bootlog.py` is the decoder for ordinary boot tokens and the
+conditional `ASENSURE` capsule. The user is currently updating it separately;
+review its completed self-contained state before relying on its invocation or
+schema description. It does not decode AutoSave records or replace the later,
+intentionally deferred general development-log converter.

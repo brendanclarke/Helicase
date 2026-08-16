@@ -1,5 +1,65 @@
 # SCENE_LOAD_ASAVE_TRACE_RESTORE.md - Scene Load Autosave and HCNAMES Registration Fix (Concrete Diff)
 
+## Implementation notes
+
+2026-08-16 — Implementation started after the prior source edits were
+reverted. The source changes are being reapplied with the complete rationale
+from each concrete-diff entry preserved beside the changed code. The
+intentional AutoSave writer Load/Save-page admission guard remains unchanged;
+the W witness will document that boundary without making the writer drain while
+the shared name cache belongs to the browser. The approved 2-byte
+`drumset_apply_stall_ticks` allocation and the logging-only evidence latches
+remain the only new retained state.
+
+2026-08-16 — Verification completed: `make clean && make -j2` passed with
+`DEV_MODE_LOGGING=0`; the linked image contained no `autosave_trace` ring or
+new filesystem witness symbols. The flag was restored to `1`, and a clean
+logging-on build passed with the approved `drumset_apply_stall_ticks` (2 B),
+`fs_autosave_suppress_witness` (1 B), `fs_trace_suppress_witness` (1 B), and
+`fs_trace_reported_dropped` (2 B) symbols present. The only diagnostics were
+pre-existing unused-function, linker syscall-stub, and LTO serialisation
+warnings. Hardware Tests A/B remain the next validation step.
+
+2026-08-16 — SD_CARD_NOEXIT field capture reviewed. The earlier assessment
+that the card might predate the fix is **wrong**: `SD_CARD_NOEXIT/LXRV2_lxr02.img`
+is byte-identical to the freshly packaged current-build image (SHA-256
+`0a61f995…`), so the test genuinely ran this code. The trace grew by exactly
+276 records between the old SD_CARD copy and SD_CARD_NOEXIT: two complete
+tracking-off boot sweeps (128 records each) and two 3-byte Bank writer drains
+publishing generations 4 and 5 (`.hcprms2` 2→4, `.hcprms1` 3→5 across the
+two boots). The file ends at the second boot drain's `T` (tick 0x28fc)
+and contains **zero** records from the Scene Load: no `R`, no tracking-on
+`D/I/L`, no `S`, no `F`, no `W`. The `.hcnames` diff proves the load's
+filesystem terminal work ran on the new build (Scene row 16 changed
+`Forest/009` → `KitWool/016`), while the Kit row and six Instrument rows
+remain stale as expected before session exit. What the capture cannot show:
+`R/F/W` are RAM-ring records and only become card-visible after a successful
+flush, which requires the command to have finalized before power-off. A
+no-exit capture is therefore structurally unable to distinguish "completion
+callback never ran" from "records were pending in RAM at power-off". The
+decisive next pass is the exit leg: same Scene Load, wait for the busy
+indicator to clear (record whether `...` actually cleared), leave the Load
+page, wait ≥6 s, then copy. If `R/D/I/L/S/F/W` plus the writer `A/V/M/C/P/T`
+land, the no-exit copy was taken too early; if the writer drain lands without
+`R`, the callback chain is genuinely broken; if neither lands, dirty marking
+never happened and the completion chain is the failure.
+
+2026-08-16 — Root cause confirmed against SD_CARD_NOPLAY:
+`menu_loadCommandFinalIndexComplete()` (Core/Menu/menu.c:2965) is the final
+step of a root Scene/Bank Load and never calls `filesystem_ack()`. The shared
+facade therefore remains at `FS_STATUS_DONE` after the read-only index
+restore, and both idle-only schedulers (trace flush and AutoSave writer)
+never run again until an unrelated later operation acknowledges. The Kit
+Load in the same capture proved the differential: Kit Load has no final
+index restore, its Preset completion acknowledges, and its full D/I/L burst
+plus W landed on the card, while the Scene Load's R/D/L records stayed in
+RAM and were lost at power-off. SCENE_LOAD_RECORDS_FIX.md's single
+`filesystem_ack()` addition in that callback (after sampling status, before
+`menu_finishLoadSaveCommand()`) is the correct, sufficient fix; it matches
+the existing `menu_residentNameScratchFlushComplete()` precedent. Hardware
+re-run after implementing it should reproduce the original Test A expected
+sequence without leaving the Load page.
+
 ## 1. Purpose
 
 This document is the implementation-ready plan for making root Scene Load

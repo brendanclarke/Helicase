@@ -17,9 +17,9 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 049 AutoSave write-on-load build in an
-intentional dirty worktree based on `63bdd6e`. The durable closeout is
-`knowledge_files/log_archive/049_SESSION_HANDOFF_LOG.md`; verify the actual
+**Current working source**: Session 050 Scene-Load publication build in an
+intentional dirty worktree on `dev-ph3-autosave-ph2`. The durable closeout is
+`knowledge_files/log_archive/050_SESSION_HANDOFF_LOG.md`; verify the actual
 commit/worktree before making the next source change.
 
 ## RAM Allocation Approval Policy
@@ -57,7 +57,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter records the Session 048 logging-on linked
+  `SRAM_MANIFEST.md`; the latter records the Session 050 logging-on linked
   allocation and totals. AutoSave format/writer authority is `AUTOSAVE.md`;
   development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
@@ -246,20 +246,21 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   filesystem/Preset calls do no work, although residual Menu display code and
   the two 49-byte strings remain linked. There are exactly two development
   flags: `DEV_MODE_DIAGNOSTIC` is screen-only and `DEV_MODE_LOGGING` is
-  file-only; trace is logging. The normal Session 048 configuration is
-  diagnostic 0 and logging 1. Current file outputs are `/bootlog.bin` and
+  file-only; trace is logging. The current Session 050 configuration is
+  diagnostic 0 and logging 1, with the temporarily approved 2,048-record
+  trace ring (normal default: 64). Current file outputs are `/bootlog.bin` and
   `/asavetrc.bin`; there is no implemented `/devlog.bin`. A timed-out
   `ASENSURE` may append a 64-byte raw diagnostic capsule to its normal
-  eight-byte boot token (72 bytes total); `tools/decode_bootlog.py` decodes
-  the current schema. Authority:
+  eight-byte boot token (72 bytes total). The user is independently updating
+  `tools/decode_bootlog.py`; do not inspect or rely on its transient state.
+  Review the completed self-contained script before the next boot-log
+  analysis. Authority:
   `knowledge_files/specification_reference/DEV_MODES.md`.
-- Session 048 is closed in
-  `knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md`. It absorbs the
-  removable `HCNAMES_SOURCES_EXTENSION.md` and
-  `INSTRUMENT_LOAD_AUTOSAVE.md` working records; `SESSION_046-048_PLAN.md` is
-  also closed. `AUTOSAVE_PHASE2_PLAN.md` remains the active execution order
-  for Kit, Scene-without-Pattern, and selective Bank Load marking in Session
-  049.
+- Session 050 is closed in
+  `knowledge_files/log_archive/050_SESSION_HANDOFF_LOG.md`. Its verification
+  supersedes the disposable root planning/evidence files for Scene Load
+  publication. Those files may be deleted after retaining the handoff and
+  specification references; they are not future authority.
 
 ---
 
@@ -287,9 +288,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
 │   │   ├── DEV_MODES.md                ← authoritative screen-diagnostic versus file-logging policy and current log formats
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 048
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 050
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
-│   │   └── SRAM_MANIFEST.md           ← current Session 048 linked snapshot and binding reservation policy
+│   │   └── SRAM_MANIFEST.md           ← current Session 050 linked snapshot and binding reservation policy
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -425,7 +426,7 @@ and may contain historical snapshots as noted below.
 | `FILESYSTEM_SPEC.md` | Current product storage specification: root layout, numbered Kit/Scene/Bank folders, `kitset.kcg`, instrument schemas/keys, Scene-owned state, Morph/modulation, Pattern/Sample/Wavetable/Effect targets, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
 | `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map for Pattern, UI, sequencer, Preset, ParameterArray, instruments, modulation, MIDI, filesystem, storageTypes, and boot; also records removed front-panel protocol surfaces. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `SRAM_MANIFEST.md` | Current Session 048 logging-on linked snapshot, AutoSave/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
+| `SRAM_MANIFEST.md` | Current Session 050 logging-on linked snapshot, AutoSave/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
 
 ---
 
@@ -863,20 +864,32 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Known Issues / Technical Debt
 
-### Session 049 carryover and known defects
+### Session 050 carryover and known defects
 
-- **Session 049 AutoSave write-on-load work is complete for the implemented
-  boundaries:** normal Kit Load, KitMrp, root Scene Load without Pattern, and
-  selective Bank Load marking are in source and documented. KitMrp and root
-  Scene persistence were accepted on hardware.
-- **Deferred Bank-load failure:** the Bank completion callback reached the
-  whole-instrument markers while AutoSave tracking was disabled. `I` trace
-  records had valid bases but zero published bytes, so HCNAMES changed while
-  the `.hcprms` payload did not. The loaded Bank also left
-  `settings.cfg active_bank` and the autosave restore slot stale. Fix and
-  reboot verification are the Session 050 priority.
-- Do not combine the Bank repair with writer exclusion, boot-reader work,
-  Save-side marking, recursive delete, or unrelated Pattern persistence.
+- **Root Scene Load trace and AutoSave publication are hardware-accepted.**
+  The final direct Scene/Bank `.hcindex` callback now snapshots status then
+  calls `filesystem_ack()` before Menu teardown. A SeaWaked/024 load into
+  resident Scene 15 emitted `R=0x8000`, Kit/Scene `L`, `F/W`, and successful
+  `A/V/M/C/P/T`; `.hcprms2` advanced from generation 5 to 6. The terminal
+  acknowledgement is mandatory in this existing callback and must not be
+  moved into a new load/persistence path.
+- **Deferred HCNAMES defect — root Scene/Bank family exit.** The Scene
+  completion now accumulates `menu_residentNameDirtySceneMask`, but
+  `menu_switchPage()` asks `menu_endResidentNameScratchSession()` only for
+  Instrument/Kit/KitMrp sessions. A Scene/Bank exit therefore leaves the
+  embedded Kit plus six Instrument rows stale even though its Scene row is
+  correct. Extend that one existing exit boundary; do not add another writer.
+  The current `-` token remains the valid inherited HCNAMES source token.
+- **Deferred Bank-load failure remains untested after Session 050.** Session
+  049's Bank completion ran while tracking was disabled, so HCNAMES changed
+  without HCPRMS payload publication; `settings.cfg active_bank` and the
+  hidden-record restore slot remained stale. Re-test/fix it separately from
+  the Scene HCNAMES exit work. Do not combine it with writer exclusion,
+  boot-reader work, Save-side marking, recursive delete, or Pattern work.
+- The current diagnostic build retains 2,048 trace records (16,384 B) and
+  64-record/512-B append batches. This is temporary approved logging-only RAM;
+  keep it until the remaining diagnosis is complete, then explicitly restore
+  the 64-record default and regenerate the memory manifest.
 - **Known UI bug — InstrumentMrp `kit` row is blank.** It needs the current
   slot's HCNAMES name plus a Morph-only temporary snapshot/restore; do not use
   normal Instrument restore because type, Normal, and source must remain
@@ -884,8 +897,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - Root Instrument and InstrumentMrp AutoSave are now accepted hardware work,
   not future whole-object scope. The root fixture proved `J=0x03`, `I=0x07`,
   and 76/76 accepted bytes; the combined generation-3 fixture proved Drum-2
-  Morph-only persistence. The 64-entry trace can wrap under multiple loads,
-  so compare the two durable HCPRMS generations as the final proof.
+  Morph-only persistence. That historical 64-entry trace could wrap under
+  multiple loads; the current temporary diagnostic ring is 2,048 entries, but
+  compare durable HCPRMS generations as the final proof in either build.
 
 - Every AutoSave CRC path is now byte-bounded at 128 bytes per filesystem
   tick: initial creation, neither-valid recovery, candidate validation, and
@@ -1012,9 +1026,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - Four SD boot-pacing holds are present, but the motivating intermittent hang
   was seen once and is not reproducible. Do not claim it resolved.
 - Session 044's final static allocation was 12,280 B DTCM and 66,776 B SRAM1.
-  That SRAM1 value is historical. The current Session 048 logging-on linked
-  result is 12,280 B DTCM and 76,124 B normal SRAM1
-  (`bss=79,300 B` conventionally); `SRAM_MANIFEST.md` is the binding record.
+  That SRAM1 value is historical. The current Session 050 logging-on linked
+  result is 12,280 B DTCM and 92,012 B SRAM1 total
+  (`bss=95,188 B` conventionally); `SRAM_MANIFEST.md` is the binding record.
 
 ### Resolved / Changed in Session 042
 - `/.hcnames` is the authoritative fixed-row name register. Runtime identity is

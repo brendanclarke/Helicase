@@ -2967,6 +2967,39 @@ static void menu_loadCommandFinalIndexComplete(void)
     uint8_t index_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
 
     /*
+     * Return the shared filesystem facade to IDLE after the terminal index
+     * read.
+     *
+     * What: the terminal Scene/Bank `.hcindex` result is captured first, then
+     * acknowledged with filesystem_ack() before any Menu state changes. The
+     * acknowledgement converts the facade from FS_STATUS_DONE (or
+     * FS_STATUS_ERROR) back to FS_STATUS_IDLE; it does not alter the captured
+     * index_ok byte, does not clear filesystem_errorCode(), and has no effect
+     * if the facade is already IDLE or BUSY.
+     * Why: filesystem_complete() publishes the terminal status before invoking
+     * this callback, and this callback deliberately bypasses Preset's
+     * acknowledgement helper. Without this call the facade stays DONE
+     * indefinitely, and filesystem_tick() admits both the AutoSave trace
+     * flush and the AutoSave writer only while status == FS_STATUS_IDLE. The
+     * result is the observed failure: every RAM-ring trace record the
+     * completed Scene Load produced (R, D, I, L, F, S, W) remains unflushed,
+     * and the armed `.hcprms` mutation drain can never start, even after the
+     * user leaves the Load page. Both sinks must resume here because this is
+     * the last operation the accepted Scene/Bank Load command performs.
+     * Inputs: filesystem_status() is still this operation's terminal result
+     * when the callback runs; index_ok snapshots it before acknowledgement.
+     * Outputs: FS_STATUS_IDLE with current_op already NONE, so the next
+     * filesystem_tick() pass can run the trace flush scheduler and, on a
+     * later idle pass, arm/admit the AutoSave writer. Menu command teardown,
+     * error overlay, and cache handling below are unchanged.
+     * Affiliates: filesystem_ack(), filesystem_complete(),
+     * filesystem_tick()'s idle-only scheduler gates, and
+     * menu_residentNameScratchFlushComplete(), which already performs this
+     * acknowledgement for the exit-time HCNAMES transaction.
+     */
+    filesystem_ack();
+
+    /*
      * Publish the terminal result of a post-DSP browser-cache restoration.
      *
      * Inputs: the read-only Scene or Bank `.hcindex` request posted only after
@@ -7638,6 +7671,29 @@ void menu_pollPresetStatus(void)
 
     case PRESET_OP_SCENE_LOAD:
     {
+        /*
+         * Scene Load commits a complete embedded Kit image into each selected
+         * resident Scene. The filesystem completion path has already copied
+         * that image's Kit name, six Instrument names, and provenance into the
+         * filesystem-owned identity block, and it has already handled the
+         * Scene-name row. This Menu-side accumulation is the missing bridge
+         * between that completed identity block and the existing deferred
+         * HCNAMES writer: it records which committed Scene blocks need their
+         * Kit-family rows rewritten when the shared Load/Save name session
+         * exits.
+         *
+         * The mask is the immutable destination mask captured when the Scene
+         * request was accepted, not the current encoder selection. Therefore
+         * a user changing the selection while the asynchronous load runs
+         * cannot cause the later HCNAMES write to serialize the wrong Scene.
+         * This call performs no card I/O and creates no overlay or new cache;
+         * menu_endResidentNameScratchSession() consumes the accumulated mask
+         * through filesystem_requestUpdateResidentKitNames(). It is before the
+         * selection-retry branch deliberately, so a deferred browser retry
+         * cannot lose the identity of the load that actually committed.
+         */
+        menu_refreshResidentNameScratchKit(
+            preset_getKitRequestSceneMask());
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
             !menu_isLoadSaveSelectionCurrent()) {
             retrySelectionAfterAck = 1;
