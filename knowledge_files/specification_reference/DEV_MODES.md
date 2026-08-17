@@ -9,7 +9,7 @@ AsyncFATFS semantics; those belong to `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, and
 `ASYNCFATFS_REFERENCE.md` respectively.
 
 This document describes the Session 048 logging baseline plus the current
-2026-08-16 Scene-Load record-publication build. Plans and failed working-tree
+2026-08-17 Session 051 Scene-follow-up build. Plans and failed working-tree
 experiments that mention a unified `/devlog.bin` are not implemented state.
 
 The build has exactly two development modes:
@@ -102,11 +102,9 @@ from continuing to the firmware's existing failure handling. Conversely, an
 absent file does not prove that no boot failure occurred: the same SD/FAT layer
 being diagnosed is also required to persist the record.
 
-As of Session 050, the user is independently updating
-`tools/decode_bootlog.py`. Do not alter or infer the decoder's final contract
-from its transient worktree state; before the next boot-log analysis, inspect
-the completed self-contained script and update this reference only if its
-documented input schema or invocation changed.
+The completed read-only decoder is `tools/decode_devlogs.py`; it decodes both
+`/bootlog.bin` and `/asavetrc.bin`. Update this reference only if its
+documented input schema or invocation changes.
 
 ### `/asavetrc.bin`
 
@@ -267,8 +265,7 @@ For the current baseline:
 - test absent, unique, case-variant, duplicate, scan-failure, open-failure, and
   power-interruption cases before declaring any future singleton repair done.
 
-`tools/decode_bootlog.py` is the decoder for ordinary boot tokens and the
-conditional `ASENSURE` capsule. The user is currently updating it separately;
-review its completed self-contained state before relying on its invocation or
-schema description. It does not decode AutoSave records or replace the later,
-intentionally deferred general development-log converter.
+`tools/decode_devlogs.py` is the decoder for ordinary boot tokens, the
+conditional `ASENSURE` capsule, and `/asavetrc.bin` records. It does not
+decode AutoSave record payloads or replace the later, intentionally deferred
+general development-log converter.

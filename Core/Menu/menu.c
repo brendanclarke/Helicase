@@ -3602,8 +3602,27 @@ static uint8_t menu_prepareInstrumentLoadTemp(void)
      * while storage is busy and resumes typed-index loading after completion.
      * Affiliates: menu_requestInstrumentEntryNames() and temp-save completion.
      */
-    if (menu_instrumentSaveMode || menu_instrumentLoadMorphMode)
+    if (menu_instrumentSaveMode)
         return 1u;
+    if (menu_instrumentLoadMorphMode) {
+        if (menu_instrumentTempValid)
+            return 1u;
+        if (menu_instrumentTempOperationPending)
+            return 0u;
+        menu_instrumentTempType = menu_instrumentLoadType;
+        if (!preset_saveInstrumentMorphTemp(menu_instrumentLoadScene,
+                                             menu_instrumentLoadSlot)) {
+            menu_traceInstrumentEntry(
+                AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST, 1u);
+            menu_invalidateInstrumentLoadTemp();
+            return 0u;
+        }
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST, 0u);
+        menu_instrumentTempOperationPending = 1u;
+        menu_storageBusy = 1u;
+        return 0u;
+    }
     if (menu_instrumentTempValid)
         return 1u;
     if (menu_instrumentTempOperationPending)
@@ -3641,6 +3660,23 @@ static void menu_restoreInstrumentLoadTemp(void)
      * scratch after a type change. Affiliates: preset_loadInstrumentTemp(),
      * menu_invalidateInstrumentLoadTemp(), and lower-row decrement handling.
      */
+    if (menu_instrumentLoadMorphMode) {
+        if (menu_storageBusy ||
+            !menu_instrumentTempValid ||
+            menu_instrumentTempType >= INSTRUMENT_TYPE_UNKNOWN ||
+            menu_instrumentTempType != menu_instrumentLoadType)
+            return;
+        if (preset_loadInstrumentMorphTemp(
+                menu_instrumentLoadScene,
+                menu_instrumentLoadSlot,
+                menu_instrumentTempType)) {
+            /* The shared pending tag is consumed after the Morph worker
+             * drains, just like the normal reversible restore. */
+            menu_instrumentTempOperationPending = 1u;
+            menu_storageBusy = 1u;
+        }
+        return;
+    }
     if (menu_storageBusy ||
         !menu_instrumentTempValid ||
         menu_instrumentTempType >= INSTRUMENT_TYPE_UNKNOWN ||
@@ -4226,18 +4262,22 @@ static void menu_instrumentLoadStepType(int8_t inc)
     if (inc > 0 && !menu_instrumentLoadMorphMode &&
         menu_instrumentLoadType == menu_instrumentLoadBaseType) {
         /* Changing normal Load to the same-type Morph row is a declared
-         * preview boundary: publish a selected pool stem once, then discard
-         * the normal-image restore snapshot before endpoint semantics change. */
+         * preview boundary: discard the normal-image restore snapshot and
+         * capture only the current Morph endpoint cells for the new `kit`
+         * restore semantics. */
         menu_invalidateInstrumentLoadTemp();
         menu_instrumentLoadMorphMode = 1u;
+        menu_requestInstrumentEntryNames();
         return;
     }
     if (inc < 0 && menu_instrumentLoadMorphMode) {
         /* Returning from Morph to normal is likewise not a continuation of
          * the original normal-load preview; a Morph operation may have changed
-         * endpoint data, so the old reversible image must not be reused. */
+         * endpoint data, so the old reversible image must not be reused. Start
+         * a fresh normal snapshot before exposing the normal `kit` row again. */
         menu_invalidateInstrumentLoadTemp();
         menu_instrumentLoadMorphMode = 0u;
+        menu_requestInstrumentEntryNames();
         return;
     }
     for (i = 0u; i < registry_count; i++) {
@@ -4271,7 +4311,9 @@ static void menu_instrumentLoadStepType(int8_t inc)
                 (uint8_t)(direction < 0 &&
                           entry->type == menu_instrumentLoadBaseType);
             menu_instrumentLoadClampIndex();
-            if (!menu_instrumentLoadMorphMode)
+            if (menu_instrumentLoadMorphMode)
+                menu_requestInstrumentEntryNames();
+            else
                 menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
             return;
         }
@@ -6042,10 +6084,13 @@ static void menu_repaintLoadSavePage(void)
             /* Preserve the normal `[slot]name` split: `kit` occupies the
              * three selector cells and the resident name used by this direct
              * Kit-source row starts after the closing bracket/spacing cell.
-             * This row does not browse a typed `.hcindex`. */
+             * InstrumentMrp has no normal-load snapshot name, so it borrows
+             * the selected slot's HCNAMES identity row directly. */
             memcpy(&editDisplayBuffer[1][1], "kit", 3u);
             memcpy(&editDisplayBuffer[1][5],
-                   menu_instrumentTempName,
+                   menu_instrumentLoadMorphMode
+                       ? menu_instrumentSaveName
+                       : menu_instrumentTempName,
                    8u);
         } else {
             char pool_display_name[MENU_INSTRUMENT_SAVE_NAME_LEN + 1u];
@@ -6966,6 +7011,42 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     menu_refreshLoadSceneLeds();
                     break;
                 }
+                /*
+                 * End a Scene name session before any later Kit-family payload
+                 * can overwrite the operation-scoped identity block.
+                 *
+                 * What: flush a nonzero accumulated Scene dirty mask when the
+                 * type row leaves SAVE_TYPE_SCENE, mirroring the Kit-family
+                 * boundary condition above. The new type is installed first so
+                 * an asynchronous flush completion continues directly into
+                 * that type's browser.
+                 * Why: filesystem publishes each committed Scene's embedded Kit
+                 * name and six Instrument names into the single nine-row
+                 * identity block, and the deferred exit writer later serializes
+                 * that block into every Scene bit in
+                 * menu_residentNameDirtySceneMask. A subsequent normal Kit Load
+                 * overwrites the same block, so carrying Scene bits past this
+                 * boundary (reachable via Scene -> KitMrp -> Kit) could publish
+                 * the later Kit's identity for the Scene-loaded destinations.
+                 * Inputs: previous_type captured before the type advance, the
+                 * newly installed menu_saveOptions.what, and the accumulated
+                 * mask.
+                 * Outputs: at most one HCNAMES rewrite through
+                 * filesystem_requestUpdateResidentKitNames(); on success
+                 * menu_residentNameScratchFlushComplete() clears the mask and
+                 * the completion resumes the new type's browser.
+                 * Affiliates: menu_endResidentNameScratchSession(),
+                 * menu_residentNameScratchFlushComplete(), and the equivalent
+                 * Kit-family boundary condition directly above.
+                 */
+                if (previous_type == SAVE_TYPE_SCENE &&
+                    menu_saveOptions.what != previous_type &&
+                    menu_residentNameDirtySceneMask != 0u &&
+                    menu_endResidentNameScratchSession()) {
+                    menu_resetLoadSaveSceneSelection();
+                    menu_refreshLoadSceneLeds();
+                    break;
+                }
                 if (menu_saveOptions.what != previous_type)
                     filesystem_clearNameCache();
             }
@@ -7604,6 +7685,18 @@ void menu_pollPresetStatus(void)
             filesystem_clearNameCache();
             menu_resetSaveParameters();
         }
+        if (preset_getCompletedOp() == PRESET_OP_INSTRUMENT_TEMP_SAVE ||
+            preset_getCompletedOp() == PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE) {
+            /* A failed baseline write must not leave the shared pending tag
+             * blocking the next nested Instrument entry. */
+            menu_invalidateInstrumentLoadTemp();
+        } else if (preset_getCompletedOp() == PRESET_OP_INSTRUMENT_LOAD ||
+                   preset_getCompletedOp() ==
+                       PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD) {
+            /* Keep a valid baseline available for a retry, but release the
+             * accepted restore tag after a failed hidden-file read. */
+            menu_instrumentTempOperationPending = 0u;
+        }
         menu_showFilesystemErrorOverlay();
         preset_ackStatus();
         return;
@@ -7864,6 +7957,30 @@ void menu_pollPresetStatus(void)
             menu_repaintAll();
         break;
 
+    case PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE:
+        /*
+         * Release the Morph-only baseline after its hidden file closes.
+         *
+         * The selected InstrumentMrp row uses the existing HCNAMES identity
+         * cell for display, so this completion only validates the reversible
+         * endpoint snapshot and resumes the selected typed index.
+         */
+        menu_instrumentTempOperationPending = 0u;
+        menu_instrumentTempValid = preset_getCompletedOk();
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_COMPLETE,
+            (uint8_t)!menu_instrumentTempValid);
+        menu_storageBusy = 0u;
+        if (menu_instrumentTempValid && menu_instrumentLoadActive &&
+            !menu_instrumentSaveMode && menu_instrumentLoadMorphMode) {
+            menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
+        } else if (!menu_instrumentTempValid) {
+            menu_invalidateInstrumentLoadTemp();
+        }
+        if (!menu_storageBusy)
+            menu_repaintAll();
+        break;
+
     case PRESET_OP_INSTRUMENT_LOAD:
     {
         uint8_t mark_autosave_whole_instrument = (uint8_t)(
@@ -7919,6 +8036,14 @@ void menu_pollPresetStatus(void)
          * load was posted. Output: only that slot's morph endpoint is updated,
          * and only if the staged type still matches the resident slot type.
          */
+        menu_startInstrumentMorphApply(preset_getRequestScene(),
+                                       preset_getRequestSlot());
+        menu_refreshLoadSceneLeds();
+        break;
+
+    case PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD:
+        /* The hidden snapshot is already a Morph-only request; preserve the
+         * name/type/Normal image and run the ordinary bounded Morph worker. */
         menu_startInstrumentMorphApply(preset_getRequestScene(),
                                        preset_getRequestSlot());
         menu_refreshLoadSceneLeds();
@@ -8275,15 +8400,38 @@ void menu_switchPage(uint8_t pageNr)
         return;
     }
 
-    /* Capture the old context before page mutation. Pressing the Load/Save
+    /*
+     * Capture the old context before page mutation. Pressing the Load/Save
      * mode button toggles LOAD_PAGE/SAVE_PAGE through pageNr==LOAD_PAGE and
-     * keeps the shared Kit/Instrument session. Any other page target is the
-     * physical exit boundary that must flush accumulated resident names once. */
+     * keeps the shared name session. Any other page target is the physical
+     * exit boundary that must flush accumulated resident names once.
+     *
+     * What: the predicate now also admits a root Scene Load session. Its
+     * completion accumulated menu_residentNameDirtySceneMask, but its
+     * menu_saveOptions.what is SAVE_TYPE_SCENE, so the Kit-family type checks
+     * alone never matched and the mask was silently dropped on exit.
+     * Why: a nonzero mask means committed Scene payloads replaced resident Kit
+     * and Instrument identities that still need their one deferred HCNAMES
+     * rewrite; without this clause the Scene row changes while its Kit row and
+     * six Instrument rows stay stale.
+     * Inputs: the pre-switch menu_activePage, menu_saveOptions, and
+     * menu_residentNameDirtySceneMask values, evaluated before any page
+     * mutation below.
+     * Outputs: end_resident_name_session, which posts exactly one
+     * menu_endResidentNameScratchSession() call after the page mutation. The
+     * deferred busy exit reenters here through menu_processPendingPageSwitch()
+     * and sees the same condition.
+     * Affiliates: menu_endResidentNameScratchSession(),
+     * filesystem_requestUpdateResidentKitNames(),
+     * menu_residentNameScratchFlushComplete(), and
+     * menu_processPendingPageSwitch().
+     */
     end_resident_name_session = (uint8_t)(
         (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
         (menu_instrumentLoadActive ||
          menu_saveOptions.what == SAVE_TYPE_KIT ||
-         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) &&
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH ||
+         menu_residentNameDirtySceneMask != 0u) &&
         pageNr != LOAD_PAGE);
 
     if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&

@@ -59,10 +59,13 @@ typedef enum {
     PRESET_OP_INSTRUMENT_SAVE,
     /* Hidden `.hctmp.<ext>` save that prepares Menu's reversible `kit` row. */
     PRESET_OP_INSTRUMENT_TEMP_SAVE,
+    /* Hidden Morph-only `.hctmp` save/load for InstrumentMrp's reversible row. */
+    PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE,
     PRESET_OP_KIT_SAVE,
     PRESET_OP_KIT_MORPH_LOAD,
     PRESET_OP_KIT_MORPH_SAVE,
     PRESET_OP_INSTRUMENT_MORPH_LOAD,
+    PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD,
     /*
      * New-format Morph Save completions.
      *
@@ -266,6 +269,13 @@ uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot);
 uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
                                   uint8_t destination_slot,
                                   instrument_type_t type);
+/* Save/load only the current Morphable Morph endpoints for the reversible
+ * InstrumentMrp `kit` row. */
+uint8_t preset_saveInstrumentMorphTemp(uint8_t source_scene,
+                                       uint8_t source_slot);
+uint8_t preset_loadInstrumentMorphTemp(uint8_t destination_scene,
+                                       uint8_t destination_slot,
+                                       instrument_type_t type);
 /*
  * Save one resident kit voice into the root Instrument/ pool.
  *

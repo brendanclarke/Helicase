@@ -59,6 +59,7 @@
 | 048 | 2026-08-11 | `/Users/bc/Helicase Project/Helicase-check-fs/Helicase`, intentional dirty worktree based on `63bdd6e` | HCNAMES source authority, source-free settings, immediate Instrument/InstrumentMrp AutoSave mutation marks, trace/exit repair, and hardware acceptance |
 | 049 | 2026-08-12 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Kit/Scene/Bank write-on-load markers; KitMrp and Scene accepted, Bank persistence/restore failure isolated |
 | 050 | 2026-08-16 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Root Scene Load terminal facade acknowledgement; hardware-confirmed trace and AutoSave publication; deferred Scene/Bank embedded HCNAMES exit flush |
+| 051 | 2026-08-17 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Scene Load embedded Kit/Instrument HCNAMES exit flush and Scene-to-Kit-family boundary; InstrumentMrp reversible `kit` row with Morph-only snapshot/restore; hardware-confirmed Scene rows plus repaired Mrp restore |
 
 ---
 
@@ -637,3 +638,23 @@ one existing family-exit boundary are deferred separately.
   `DEV_MODES.md`, and `SRAM_MANIFEST.md` for the durable contracts, the exact
   card evidence, temporary diagnostic RAM/configuration, and next-session
   boundaries.
+
+### 051 — Scene Follow-up: HCNAMES Exit And InstrumentMrp Kit Restore (2026-08-17)
+
+Completed the two scoped Scene-follow-up items. Root Scene Load now
+accumulates its committed destination mask in Menu, and the physical Load/Save
+exit flushes the embedded Kit plus six Instrument HCNAMES rows through the
+existing one-shot writer; a Scene-to-Kit-family type boundary flushes first so
+a later Kit payload cannot overwrite the operation-scoped identity block.
+InstrumentMrp now displays the selected slot's HCNAMES name beside `kit`,
+writes a Morph-only `.hctmp` projection, and restores only the Morphable Morph
+endpoint cells. A post-build hardware pass caught the initial restore copying
+the staged normal image into the Morph endpoints; `presetManager.c` now
+selects a Morph-to-Morph staged commit when the morph-temporary origin flag is
+set. Hardware verified the Scene Load HCNAMES rows and AutoSave publication,
+and the repaired Mrp `kit` restore. Bank Load persistence is deferred to
+Session 052.
+
+- **Find here**: [051_SESSION_HANDOFF_LOG.md](051_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, and
+  `SRAM_MANIFEST.md`.

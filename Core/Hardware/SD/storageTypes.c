@@ -1005,6 +1005,66 @@ uint8_t storage_formatInstrumentLineView(
     if (line_index == 4u)
         return storage_formatLiteral(dst, capacity, "[params]\n");
 
+    if (view->mode == STORAGE_INSTRUMENT_SAVE_MORPH_SNAPSHOT) {
+        /*
+         * Emit the smallest valid Instrument container for a reversible
+         * InstrumentMrp baseline.
+         *
+         * What: retain one ordinary [params] anchor for the existing parser,
+         * then stream every Morphable endpoint into [morph]. Why: the hidden
+         * `kit` row needs only the entry Morph image; writing the complete
+         * normal Instrument image would make InstrumentMrp depend on the
+         * normal-load snapshot and could accidentally restore type/Normal
+         * state. Inputs: the resident slot and its descriptor registry. Output:
+         * an ordinary parseable Instrument file whose only meaningful payload
+         * is the Morph endpoint domain. No RAM image is created.
+         */
+        if (line_index == 5u) {
+            for (i = 0u; i < entry->descriptor_count; i++) {
+                const ParamDescriptor *descriptor = &entry->descriptors[i];
+                if (storage_descriptorWritableInSection(descriptor, 0u)) {
+                    if ((descriptor->runtime.kind ==
+                             INSTRUMENT_BIND_LFO_TARGET_VOICE ||
+                         descriptor->runtime.kind ==
+                             INSTRUMENT_BIND_LFO_TARGET_VOICE_2) &&
+                        storage_valueForInstrumentSaveSection(
+                            view, descriptor, i, 0u) == view->one_based_voice) {
+                        return storage_formatAssignmentText(dst, capacity,
+                                                            descriptor->file_key,
+                                                            "self");
+                    }
+                    return storage_formatAssignmentU8(
+                        dst, capacity, descriptor->file_key,
+                        storage_valueForInstrumentSaveSection(
+                            view, descriptor, i, 0u));
+                }
+            }
+            return 0u;
+        }
+        if (line_index == 6u)
+            return storage_formatLiteral(dst, capacity, "\n");
+        if (line_index == 7u)
+            return storage_formatLiteral(dst, capacity, "[morph]\n");
+
+        descriptor_ordinal = (uint16_t)(line_index - 8u);
+        for (i = 0u; i < entry->descriptor_count; i++) {
+            const ParamDescriptor *descriptor = &entry->descriptors[i];
+            if (!storage_descriptorWritableInSection(descriptor, 1u))
+                continue;
+            if (descriptor_ordinal > 0u) {
+                descriptor_ordinal--;
+                continue;
+            }
+            return storage_formatAssignmentU8(
+                dst, capacity, descriptor->file_key,
+                storage_valueForInstrumentSaveSection(
+                    view, descriptor, i, 1u));
+        }
+        if (descriptor_ordinal == 0u)
+            return storage_formatLiteral(dst, capacity, "\n");
+        return 0u;
+    }
+
     descriptor_ordinal = (uint16_t)(line_index - 5u);
     for (i = 0u; i < entry->descriptor_count; i++) {
         const ParamDescriptor *descriptor = &entry->descriptors[i];

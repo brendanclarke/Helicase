@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through the Session 050 bounded-CRC,
-boot-capture and Scene-Load publication build after the Session 046 rollback,
+Session 030 baseline, updated through the Session 051 Scene-follow-up build
+after the Session 046 rollback,
 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
@@ -442,6 +442,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_loadName(presetNr, what)` / `preset_applyLoadedName()` | Async slot name browsing. | Menu |
 | `preset_loadInstrument(scene, slot, type, browser_index)` | Post one immutable root Instrument request; request coordinates publish only after filesystem accepts it. | Instrument Load lower-row browser |
 | `preset_saveInstrumentTemp(scene, slot)` / `preset_loadInstrumentTemp(scene, slot, type)` | Save or restore the hidden typed `.hctmp.<ext>` used by the reversible Instrument Load `kit` row. These operations publish neither HCNAMES nor `.hcindex`. | Menu Instrument Load session |
+| `preset_saveInstrumentMorphTemp(scene, slot)` / `preset_loadInstrumentMorphTemp(scene, slot, type)` | Save or restore the Morph-only hidden baseline used by the reversible InstrumentMrp `kit` row. The load completion commits the staged Morph image back into the resident Morphable Morph endpoints only, never type/Normal/name/source/routing. | Menu InstrumentMrp session |
 | `preset_loadInstrumentMorph(scene, slot, type, browser_index)` | Post one root Instrument request for morph endpoint import; type must match the destination slot and only morphable source normal endpoint values are copied into the resident morph image. | Instrument Load `<Type>Mrp` lower-row browser |
 | `preset_saveInstrument(scene, slot, display_name)` | Post one root Instrument Save request from a resident Scene/voice slot. The display stem is captured at request acceptance and filesystem writes `Instrument/<stem.ext>`. | Instrument Save nested Save-page OK |
 | `preset_saveInstrumentMorph(scene, slot, display_name)` | Post one root InstrumentMrp Save request. The writer uses the normal Instrument schema but writes the current interpolated values into both endpoint sections and does not rename resident source metadata. | Instrument Save `<Type>Mrp` OK |
@@ -674,6 +675,8 @@ stay in `storageTypes.c/h`.
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Capture one typed index selection into immutable operation scratch and validate it into the one Instrument candidate stage without mutating live SceneData. | Preset Instrument request |
 | `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` / `filesystem_requestSaveInstrumentMorph(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. The Morph variant writes current interpolated values into both endpoint sections and preserves resident source naming. | Preset Instrument Save |
 | `filesystem_requestSaveInstrumentTemp(scene, slot, cb)` / `filesystem_requestLoadInstrumentTemp(scene, slot, type, cb)` | Write/read the hidden typed `.hctmp.<ext>` through the normal serializer/parser without publishing it to HCNAMES or `.hcindex`. | Preset/Menu reversible `kit` row |
+| `filesystem_requestSaveInstrumentMorphTemp(scene, slot, cb)` / `filesystem_requestLoadInstrumentMorphTemp(scene, slot, type, cb)` | Write/read the Morph-only `.hctmp.<ext>` projection: one parser anchor plus every Morphable `[morph]` endpoint. The load sets the morph-temporary origin flag so Preset can choose the Morph-to-Morph restore commit. | Preset/Menu InstrumentMrp reversible row |
+| `filesystem_loadedInstrumentWasMorphTemporary()` | Query whether the staged hidden Instrument load is the InstrumentMrp Morph-only baseline, valid beside the staged Instrument until the next request reuses operation scratch. | Preset Morph-apply origin dispatch |
 | `filesystem_ensureAutosaveFilesBlocking()` / `filesystem_setAutosaveEnabled(enabled)` / `filesystem_autosaveEnabled()` | Establish the hidden pair at boot, apply runtime policy, and authorize mutation tracking/background work only after successful setup. Format and failure rules are in `AUTOSAVE.md`. | `main.c`, Menu/settings policy |
 | `filesystem_autosaveTraceFlushBlocking()` | Bench-only durable boundary for currently pending lifecycle records; ordinary runtime trace flushing is autonomous and lower priority. | temporary test harness only |
 | `filesystem_markSettingsDirty()` | Increment the keyed-settings change revision; the one-second writer acknowledges only the revision it actually serialized and synced. | Menu settings policy |

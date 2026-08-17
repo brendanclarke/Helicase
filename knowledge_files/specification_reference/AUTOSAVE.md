@@ -15,7 +15,7 @@ Related authority is deliberately separate:
 - `DEV_MODES.md` owns development-mode selection and diagnostic file output;
 - `ASYNCFATFS_REFERENCE.md` owns low-level AsyncFATFS contracts;
 - `SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
-  Session 050 linked allocation/capture snapshot.
+  Session 051 linked allocation/capture snapshot.
 
 AutoSave currently persists the active resident Bank's implemented scalar
 state into two hidden root records. It does not modify root `Bank/`, `Scene/`,
@@ -153,7 +153,10 @@ immediately after every retained destination-slot commit it marks that slot's
 three type bytes, all owned Normal endpoints, and all owned Morphable Morph
 endpoints. Successful InstrumentMrp Load marks only the committed destination's
 Morphable Morph endpoints. Hidden temporary `kit` restore, failed loads,
-identity/HCNAMES source, and names remain excluded. These are writer-side
+identity/HCNAMES source, and names remain excluded. The reversible InstrumentMrp
+`kit` restore uses a Morph-only hidden snapshot but follows the same
+non-normalizing rule: only the restored Morphable Morph endpoint cells are
+marked. These are writer-side
 marks only; they do not implement an AutoSave boot reader.
 `autosave_markSceneWithPatternDirty()` is presently the non-Pattern alias and
 must not be described as Pattern persistence. The complete-Bank helper is used
@@ -353,11 +356,10 @@ repairs, or accepts either hidden record. Its exact `/bootlog.bin` envelope is
 owned by `DEV_MODES.md`; this specification deliberately does not duplicate
 the diagnostic wire layout.
 
-`tools/decode_bootlog.py` decodes the eight-byte boot token and conditional
-72-byte `ASENSURE` capsule. The user is updating that self-contained tool
-separately as Session 050 closes, so inspect its completed state before relying
-on its invocation or documenting a schema change. It is not an AutoSave record
-inspector and it must not modify fixtures. Validate AutoSave captures without
+`tools/decode_devlogs.py` decodes the eight-byte boot token and conditional
+72-byte `ASENSURE` capsule; it also decodes `/asavetrc.bin`. It is not an
+AutoSave record inspector and it must not modify fixtures. Validate AutoSave
+captures without
 editing the source files: check exact record sizes, header/commit fields,
 CRC32C, generation selection, dirty masks, and trace records independently. A
 broader human-readable development-log converter is deferred until AutoSave

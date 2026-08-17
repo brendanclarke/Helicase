@@ -828,6 +828,9 @@ const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
  * PRESET_OP_INSTRUMENT_LOAD completion handling.
  */
 uint8_t filesystem_loadedInstrumentWasTemporary(void);
+/* True only when the completed hidden Instrument load is the Morph-only
+ * reversible `kit` baseline used by InstrumentMrp. */
+uint8_t filesystem_loadedInstrumentWasMorphTemporary(void);
 /*
  * Save/load the reversible normal Instrument Load `kit` source.
  *
@@ -841,10 +844,17 @@ uint8_t filesystem_loadedInstrumentWasTemporary(void);
 bool filesystem_requestSaveInstrumentTemp(uint8_t source_scene,
                                           uint8_t source_slot,
                                           fs_completion_cb_t cb);
+bool filesystem_requestSaveInstrumentMorphTemp(uint8_t source_scene,
+                                               uint8_t source_slot,
+                                               fs_completion_cb_t cb);
 bool filesystem_requestLoadInstrumentTemp(uint8_t destination_scene,
                                           uint8_t destination_slot,
                                           instrument_type_t type,
                                           fs_completion_cb_t cb);
+bool filesystem_requestLoadInstrumentMorphTemp(uint8_t destination_scene,
+                                               uint8_t destination_slot,
+                                               instrument_type_t type,
+                                               fs_completion_cb_t cb);
 uint8_t filesystem_installSamplesBlocking(void);
 uint8_t filesystem_installLoopsBlocking(void);
 

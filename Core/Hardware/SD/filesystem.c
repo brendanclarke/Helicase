@@ -1184,7 +1184,10 @@ static uint16_t fs_list_cache_count;
 static uint8_t op_instrument_load_destination_slot = 0u;
 static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
-/* True only while loading `.hctmp.<ext>` back into the `kit` menu row. */
+/* Hidden reversible-load origin: ordinary temp, or Morph-only temp snapshot. */
+#define FS_INSTRUMENT_LOAD_TEMP_NONE  0u
+#define FS_INSTRUMENT_LOAD_TEMP_NORMAL 1u
+#define FS_INSTRUMENT_LOAD_TEMP_MORPH  2u
 static uint8_t op_instrument_load_temporary = 0u;
 /* A browser index addresses any row in the shared 1,000-entry cache. */
 static uint16_t op_instrument_load_index = 0u;
@@ -21970,6 +21973,28 @@ bool filesystem_requestSaveInstrumentTemp(uint8_t source_scene,
         FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP, source_scene, source_slot, NULL, cb);
 }
 
+bool filesystem_requestSaveInstrumentMorphTemp(uint8_t source_scene,
+                                               uint8_t source_slot,
+                                               fs_completion_cb_t cb)
+{
+    /*
+     * Write the hidden Morph-only baseline for InstrumentMrp.
+     *
+     * Inputs: the resident Scene/voice and the existing temporary-file
+     * completion callback. Output: `.hctmp.<ext>` contains one parser anchor
+     * plus the current Morphable Morph endpoints, never a second persistent
+     * RAM image or a normal-load snapshot. The same filename is intentional:
+     * only one nested Instrument mode can own this reversible source.
+     */
+    if (!filesystem_requestSaveInstrumentMode(
+            FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP, source_scene, source_slot,
+            NULL, cb)) {
+        return false;
+    }
+    op_instrument_save_mode = STORAGE_INSTRUMENT_SAVE_MORPH_SNAPSHOT;
+    return true;
+}
+
 bool filesystem_requestLoadInstrumentTemp(uint8_t destination_scene,
                                           uint8_t destination_slot,
                                           instrument_type_t type,
@@ -21995,6 +22020,34 @@ bool filesystem_requestLoadInstrumentTemp(uint8_t destination_scene,
     op_instrument_load_type = type;
     op_instrument_load_index = 0u;
     op_instrument_load_temporary = 1u;
+    return true;
+}
+
+bool filesystem_requestLoadInstrumentMorphTemp(uint8_t destination_scene,
+                                               uint8_t destination_slot,
+                                               instrument_type_t type,
+                                               fs_completion_cb_t cb)
+{
+    /*
+     * Load the hidden Morph-only baseline through the existing Instrument
+     * parser/staging union.
+     *
+     * Inputs: the current destination Scene/slot/type and callback. Output:
+     * the staged candidate is consumed by the Morph-only Preset commit; type,
+     * Normal image, and HCNAMES identity are never copied to the resident slot.
+     */
+    if (!scene_indexValid(destination_scene) ||
+        destination_slot >= STORAGE_KIT_SLOT_COUNT ||
+        type >= INSTRUMENT_TYPE_UNKNOWN ||
+        !filesystem_start(FS_INTERNAL_OP_LOAD_INSTRUMENT, FS_FILE_KIT, 0u, cb))
+        return false;
+    filesystem_makeInstrumentTemporaryFilename(op_instrument_save_display_name,
+                                               type);
+    op_instrument_load_destination_scene = destination_scene;
+    op_instrument_load_destination_slot = destination_slot;
+    op_instrument_load_type = type;
+    op_instrument_load_index = 0u;
+    op_instrument_load_temporary = FS_INSTRUMENT_LOAD_TEMP_MORPH;
     return true;
 }
 
@@ -22079,6 +22132,14 @@ uint8_t filesystem_loadedInstrumentWasTemporary(void)
      * copies no payload and allocates no state. Affiliate: Menu completion.
      */
     return op_instrument_load_temporary;
+}
+
+uint8_t filesystem_loadedInstrumentWasMorphTemporary(void)
+{
+    /* The origin flag remains valid beside the staged Instrument until the
+     * next filesystem request reuses operation storage. */
+    return (uint8_t)(op_instrument_load_temporary ==
+                     FS_INSTRUMENT_LOAD_TEMP_MORPH);
 }
 
 /* Query whether the active Kit name cache contains a numbered folder.

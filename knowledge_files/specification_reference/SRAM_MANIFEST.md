@@ -1,9 +1,9 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-08-16 logging-on Scene-Load record-publication build. `make -j2 && make
-img` produced `text=376,596`, `data=396`, and `bss=95,188`;
-`build/lxr02.bin` is 376,992 B. The approved 258-byte
+2026-08-17 logging-on Session 051 Scene-follow-up build. `make -j2 && make
+img` produced `text=377,956`, `data=400`, and `bss=95,176`;
+`build/lxr02.bin` is 378,356 B. The approved 258-byte
 `fs_resident_source` cache replaces the retired 32-byte SceneData source
 array, and the approved one-byte `menu_pendingPageSwitch` shares normal SRAM1.
 This remains a linked-image inventory: sizes come from
@@ -114,10 +114,16 @@ arm-none-eabi-readelf -l -W build/lxr02.elf
 ```
 
 For the current logging-on image, conventional `arm-none-eabi-size` reports
-`text=376,596 B`, `data=396 B`, and `bss=95,188 B`. The latter is the combined
+`text=377,956 B`, `data=400 B`, and `bss=95,176 B`. The latter is the combined
 zero-init total across memory regions; `size -A` provides the section split
 above. Regenerate both configurations before a future change that alters
 logging-gated allocations.
+
+Session 051 moved no allocated region, but the linked totals shifted from the
+Session 050 build: text grew 1,360 B, initialized `.data` grew 4 B, and bss
+shrank 12 B (net -8 B RAM). The four initialized bytes must still be
+identified to their owner under the allocation policy even though total RAM
+shrank.
 
 ## 2026-08-16 Scene-Load record-publication allocation
 

@@ -1,7 +1,7 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware through the Session 050 HCNAMES
+reference for the Helicase/LXR-02 firmware through the Session 051 HCNAMES
 source-authority and Instrument-Load AutoSave update. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
@@ -30,7 +30,7 @@ Use this document to distinguish three things:
   slot-ordered `.hcindex` name indexes for every Instrument type plus root Kit,
   Scene, and Bank, root `/.hcnames`, canonical eight-character name repair, a
   separate 2,048-byte non-Pattern validation stage, the reversible Instrument
-  Load `kit` row backed by `.hctmp.<ext>`, and the root
+  Load and InstrumentMrp `kit` rows backed by `.hctmp.<ext>`, and the root
   `/.hcprms1`/`/.hcprms2` AutoSave pair specified in `AUTOSAVE.md`.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
@@ -158,13 +158,12 @@ Implemented through the inherited Session 046/047 baseline plus Session 048:
   `sceneset.scg` never stores the Scene name.
 - Root Scene and embedded Kit names originate in directory names, not fields of
   `scene_t` or `kit_t`. A successful root Scene Load publishes its Scene row
-  inside the loader. The Kit-plus-six-Instrument HCNAMES block is intended to
-  be serialized by the existing Menu family-exit transaction, but this remains
-  a deferred defect: the 2026-08-16 Scene-024-to-Scene-15 fixture left that
-  block at its prior `Pop`/`barf*` identities after exit even though the Scene
-  row correctly became `SeaWaked<TAB>024`. Do not describe root Scene Load as
-  fully registering its embedded Kit/Instrument identities until that Menu
-  exit boundary is repaired.
+  inside the loader, accumulates the destination Scene mask in Menu, and the
+  physical Load/Save exit now performs the existing deferred rewrite of the
+  embedded Kit plus six Instrument HCNAMES rows. A Scene-to-Kit-family type
+  boundary flushes first when needed so a later Kit payload cannot overwrite
+  the operation-scoped identity block. Direct Scene/Bank transitions and
+  deferred busy exits use the same writer; no second Scene-load writer exists.
 - Root Bank scan/load/save uses the 16 resident Scene slots. Boot repairs,
   scans, and rebuilds `/Bank/.hcindex`, reloads it after Instrument index
   generation has disposed the shared cache, and tries BankData's restored slot
@@ -185,10 +184,15 @@ Implemented through the inherited Session 046/047 baseline plus Session 048:
   staging. Pattern streams directly to final Scene SRAM after Scene
   settings/Kit validation and commit.
 - Instrument Load exposes a synthetic `kit` row above typed pool row `000`.
-  Entry writes the original voice to `Instrument/<type>/.hctmp.<ext>` and
-  retains one nine-byte label. The hidden file is excluded from name repair and
-  `.hcindex`; returning to `kit` parses it through the ordinary one-candidate
-  Instrument stage.
+  Normal entry writes the original voice to
+  `Instrument/<type>/.hctmp.<ext>` and retains one nine-byte label. The hidden
+  file is excluded from name repair and `.hcindex`; returning to `kit` parses
+  it through the ordinary one-candidate Instrument stage and restores the full
+  slot image. InstrumentMrp uses the same hidden filename but writes a
+  Morph-only projection (one parser anchor plus every Morphable `[morph]`
+  endpoint), displays the selected slot's HCNAMES name directly, and restores
+  only the Morphable Morph endpoint cells through the existing Morph worker.
+  Type, Normal image, HCNAMES name/source, and routing remain unchanged.
 - Explicit Scene/Bank OK commands keep `...`, cursor suppression, and the
   Menu input gate active through payload/HCNAMES work, shared runtime apply,
   and one final read-only reload of the unchanged root `.hcindex`. A pure Load
@@ -1467,7 +1471,7 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status retained through the Session 048 baseline:
+Status retained through the Session 051 baseline:
 
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
@@ -1502,8 +1506,8 @@ Status retained through the Session 048 baseline:
   the unchanged selected root index and only then terminates the command.
 - Combined Kit/Instrument entry first borrows HCNAMES for one Scene's Kit plus
   six Instrument identity rows, then replaces the cache with the requested
-  index. Normal actions mark rows dirty; leaving the family performs at most
-  one HCNAMES rewrite.
+  index. Normal actions mark rows dirty; Scene Load actions accumulate their
+  destination mask; leaving the family performs at most one HCNAMES rewrite.
 
 Still compiled but intentionally gated from the normal type cycler:
 
@@ -1635,6 +1639,10 @@ instrument runtime propagation:
   `.hcindex` publishes it, decrementing `000 -> kit` restores the original
   parameters/name, repeated negative detents remain clamped, and a rapid
   backspin still permits a later positive move into the pool.
+- Confirm InstrumentMrp entry shows the current HCNAMES instrument name beside
+  `kit`, writes a Morph-only `.hctmp.<ext>` projection, and `000 -> kit`
+  restores only the entry Morphable Morph endpoint cells. Type, Normal image,
+  HCNAMES name/source, and AutoSave's scope remain unchanged.
 - Confirm an accepted Instrument transaction keeps immutable Scene/voice/type
   coordinates while number-only cursor movement coalesces the newest desired
   pool row; Scene, VOICE, type, and mode boundaries must invalidate the
@@ -1665,6 +1673,12 @@ instrument runtime propagation:
   acknowledgement is mandatory for the idle-only trace and AutoSave schedulers;
   it must occur after the callback captures its success/error result and before
   Menu command teardown.
+- Confirm a root Scene Load followed by physical Load/Save exit rewrites the
+  destination Kit row and all six Instrument rows with the embedded identity,
+  preserves unrelated rows, and still flushes exactly once for deferred exits
+  and Load/Save toggles. Confirm Scene -> KitMrp -> Kit flushes before the later
+  Kit payload can replace the identity block, while failed Scene Loads flush
+  nothing.
 - Confirm an accepted OK/OW command displays `...` with no cursor through its
   complete terminal work and always returns to the bracketed type row.
 - Confirm a Kit, Scene, or Bank Save makes a new or renamed directory visible
