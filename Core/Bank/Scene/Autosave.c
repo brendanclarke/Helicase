@@ -685,6 +685,28 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
         }
         if (payload_offset >= 10u && payload_offset < 12u) {
             bank_value = bank_scenePresentMask();
+            /*
+             * Witness the live present-mask value exactly when the drain
+             * captures the field's first byte.
+             *
+             * Inputs: payload_offset and the resident mask. Output: one B
+             * record with the drain-site flag set; value32 packs the resident
+             * mask in bits 16..31 and payload offset 10 in bits 0..15. Why:
+             * this is the boundary where SRAM becomes captured record bytes,
+             * so the trace separates a zero resident value from later copy or
+             * offset loss. The first-byte condition avoids duplicate records.
+             * Affiliate: filesystem.c's patch application.
+             */
+            if (payload_offset ==
+                (AUTOSAVE_BANK_SCENE_PRESENT_MASK_OFFSET -
+                 AUTOSAVE_PAYLOAD_OFFSET)) {
+                autosaveTrace_record(
+                    AUTOSAVE_TRACE_STAGE_BANK_PRESENT,
+                    AUTOSAVE_TRACE_BANK_PRESENT_FLAG_DRAIN,
+                    ((uint32_t)bank_value <<
+                     AUTOSAVE_TRACE_BANK_PRESENT_MASK_SHIFT) |
+                        payload_offset);
+            }
             *value = autosave_u16Byte(
                 bank_value, (uint8_t)(payload_offset - 10u));
             return 1u;

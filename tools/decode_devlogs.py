@@ -108,6 +108,7 @@ STAGE_ENUM = {
     "W": "AUTOSAVE_TRACE_STAGE_WRITER_SUPPRESSED",
     "F": "AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED",
     "G": "AUTOSAVE_TRACE_STAGE_TRACE_DROPPED",
+    "B": "AUTOSAVE_TRACE_STAGE_BANK_PRESENT",
 }
 
 STAGE_PRODUCER = {
@@ -128,6 +129,7 @@ STAGE_PRODUCER = {
     "F": "filesystem_autosaveTraceFlushSchedule_tick() / "
          "filesystem_autosaveTraceFlushCompleted()",
     "G": "filesystem_autosaveTraceFlushCompleted()",
+    "B": "filesystem_loadBankDirectory_tick() / autosave_getLivePayloadByte()",
 }
 
 INSTRUMENT_TYPES = {0: "drm", 1: "snr", 2: "cym", 3: "hat"}
@@ -347,6 +349,19 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
     elif ch == "G":
         detail = (f"{enum_name} via {producer}: ring dropped-count "
                   f"publication; dropped={value}")
+    elif ch == "B":
+        drain = bool(flags & 0x01)
+        resident = (value >> 16) & 0xFFFF
+        low = value & 0xFFFF
+        if drain:
+            detail = (f"{enum_name} via {producer}: drain capture; "
+                      f"resident present mask 0x{resident:04x} "
+                      f"{scene_mask_text(resident)}, payload offset {low}")
+        else:
+            detail = (f"{enum_name} via {producer}: Bank Load commit; "
+                      f"resident present mask 0x{resident:04x} "
+                      f"{scene_mask_text(resident)}, effective load mask "
+                      f"0x{low:04x} {scene_mask_text(low)}")
     else:
         detail = f"{enum_name}: no decoder for this stage"
 

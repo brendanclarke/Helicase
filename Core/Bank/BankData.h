@@ -43,7 +43,8 @@ void bank_setDisplayName(const char name[BANK_DISPLAY_NAME_LEN]);
 const char *bank_displayName(void);
 void bank_setRestoreBankSlot(uint16_t slot);
 uint16_t bank_restoreBankSlot(void);
-void bank_setScenePresentMask(uint16_t mask);
+/* Return nonzero when the normalized resident mask changed and was marked. */
+uint8_t bank_setScenePresentMask(uint16_t mask);
 uint16_t bank_scenePresentMask(void);
 uint8_t bank_scenePresent(uint8_t scene_index);
 void bank_setActiveSceneSlot(uint8_t slot);

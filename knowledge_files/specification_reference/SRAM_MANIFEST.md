@@ -11,6 +11,11 @@ This remains a linked-image inventory: sizes come from
 estimates. The earlier Session 048 figures retained below are historical
 baseline notes, not the current allocation total.
 
+Session 052 adds no retained allocation: the Bank present-mask witness reuses
+the existing eight-byte trace record/ring, and the no-op dirty-mark fallback
+uses only the existing canonical mutation mask. The linked totals below remain
+the Session 051 baseline until the ARM toolchain is available for regeneration.
+
 ## Allocation policy
 
 No listed free capacity is general headroom. DTCM free capacity, including the

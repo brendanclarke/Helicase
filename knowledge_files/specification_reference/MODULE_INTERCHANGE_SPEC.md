@@ -82,6 +82,10 @@ does not recreate a generic bridge or duplicate resident names.
 - Load:Bank index completion is only the first browser boundary. Menu continues
   directly into a physical child preview for the highlighted Bank and holds
   input until that callback publishes the `00..15` destination mask.
+- Bank Load and Bank Save call `filesystem_markSettingsDirty()` beside their
+  committed `bank_setRestoreBankSlot()` update. The existing filesystem-owned
+  settings scheduler owns asynchronous `active_bank` serialization; Menu,
+  BankData, and AutoSave do not open or write `settings.cfg` directly.
 - Combined Kit/Instrument menu entry reads one Scene's Kit plus six Instrument
   identities once and family exit performs at most one HCNAMES rewrite. Bank
   Load/Save own a full-register transaction; selective Bank Load overlays only

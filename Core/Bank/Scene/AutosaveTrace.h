@@ -77,6 +77,16 @@ typedef enum {
     AUTOSAVE_TRACE_STAGE_WRITER_SUPPRESSED = 'W',
     AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED = 'F',
     AUTOSAVE_TRACE_STAGE_TRACE_DROPPED = 'G',
+    /*
+     * B: Bank present-mask lifecycle witness for the Session 052 persistence
+     * investigation. One retained RAM-only trace point is emitted at the Bank
+     * Load metadata commit and at the writer drain's present-mask capture.
+     * flags bit 0 selects the site (0 = commit, 1 = drain); value32 packs the
+     * resident present mask in bits 16..31 and site-specific data in bits
+     * 0..15. Why: scalar D records prove only which payload offsets were
+     * marked, not the mask value at the commit/capture boundary.
+     */
+    AUTOSAVE_TRACE_STAGE_BANK_PRESENT = 'B',
 } autosave_trace_stage_t;
 
 /*
@@ -174,6 +184,15 @@ typedef enum {
  */
 #define AUTOSAVE_TRACE_TRACE_SUPPRESSED_FLAG_COMMAND_ACTIVE (1u << 0u)
 #define AUTOSAVE_TRACE_TRACE_SUPPRESSED_FLAG_APPEND_ERROR   (1u << 1u)
+
+/* B flags: bit 0 selects the writer-drain capture site; clear means the Bank
+ * Load metadata commit site. */
+#define AUTOSAVE_TRACE_BANK_PRESENT_FLAG_DRAIN (1u << 0u)
+
+/* B value32 layout: bits 16..31 hold the resident Bank present mask. At the
+ * commit site bits 0..15 hold the effective selected-child load mask; at the
+ * drain site they hold the payload offset of the field's first byte (10). */
+#define AUTOSAVE_TRACE_BANK_PRESENT_MASK_SHIFT 16u
 
 /* Append one timestamped stage record without performing filesystem I/O. */
 void autosaveTrace_record(autosave_trace_stage_t stage, uint8_t flags,

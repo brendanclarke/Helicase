@@ -92,6 +92,15 @@ Instrument records retain a three-byte type token, eight identity bytes,
 reserved padding. A Morph cell is live only when its descriptor is Morphable.
 C structs are never copied as the wire format.
 
+The Bank `scene_present_mask` occupies payload bytes 10..11 (absolute record
+offsets 3930..3931) and is the effective resident Scene availability union.
+Bank Load preserves existing resident bits and ORs in its effective
+selected-child mask; an equal-value completion explicitly re-marks those two
+bytes so a successful load refreshes the hidden record even when the
+change-aware BankData setter is a no-op. The logging-only `B` trace stage
+witnesses the resident mask at Bank Load commit and at the drain's first-byte
+capture; it uses the existing eight-byte trace ring and adds no production RAM.
+
 Header requirements:
 
 - magic `HCPR`;
@@ -166,6 +175,11 @@ and tested explicitly before claiming general whole-object coverage.
 The ordering rule is binding: update the retained owner first, then mark the
 matching typed coordinate. Never calculate wire offsets in Menu, DSP, MIDI, or
 another producer. Never mark runtime-only DSP overlays as retained state.
+
+Successful Bank Load and Bank Save also mark the existing settings writer
+dirty immediately after committing the restore slot. The debounced writer then
+serializes `active_bank` from `bank_restoreBankSlot()`; the mark performs no
+filesystem I/O and does not create a second settings writer.
 
 ## Background writer
 

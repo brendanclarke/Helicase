@@ -121,7 +121,7 @@ stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
 Integer fields are little-endian. Stage bytes are uppercase
-`D I J N L R W F G S A V M C P T` and their meanings/values are owned by
+`D I J N L R W F G B S A V M C P T` and their meanings/values are owned by
 `AutosaveTrace.h`. `D` is one accepted
 payload-bit OR. `I` is one whole-Instrument marker outcome: flags report valid
 payload-map base, live tracking, and whether all requested bytes reached the
@@ -155,6 +155,12 @@ of an armed dirty writer; flag bit 0 reports dirty work and the value is the
 debounce deadline. `F` records trace-flush suppression: bit 0 is the
 command-active gate with pending-record count in the value, and bit 1 is an
 append error. `G` reports a changed trace-ring dropped count in its value.
+
+`B` is the Session 052 Bank present-mask witness. With flags bit 0 clear it
+records the resident mask at Bank Load metadata commit and packs the effective
+selected-child load mask in value bits 0..15. With bit 0 set it records the
+resident mask at the AutoSave drain's first present-mask byte and packs the
+payload offset (10) in bits 0..15. It is diagnostic-only and uses no new RAM.
 
 The 2026-08-16 root-Scene hardware fixture is the reference example for the
 terminal publication chain: Scene 15 loaded root Scene 024 and produced

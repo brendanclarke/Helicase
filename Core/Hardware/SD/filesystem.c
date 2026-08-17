@@ -10298,11 +10298,52 @@ static void filesystem_loadBankDirectory_tick(void)
              * asked for a selective Bank identity/load operation, not a reset
              * of every unselected playable Scene. HCNAMES rows remain the
              * preloaded register values for the same reason.
+            */
+            if (!bank_setScenePresentMask(bank_scenePresentMask())) {
+                /*
+                 * Guarantee a fresh present-mask capture for an empty Bank.
+                 *
+                 * Inputs: the preserved resident mask and a setter result of
+                 * zero, meaning the normalized value was unchanged. Output:
+                 * the existing two canonical mask bits are marked for the
+                 * next drain. Why: this branch intentionally preserves the
+                 * mask, so change-aware setters cannot otherwise refresh a
+                 * record whose previous mask bytes are stale or zero.
+                 * Affiliate: autosave_markBankFieldDirty().
+                 */
+                autosave_markBankFieldDirty(
+                    AUTOSAVE_BANK_FIELD_SCENE_PRESENT_MASK);
+            }
+            /*
+             * Witness the empty-Bank presence boundary in the retained trace.
+             *
+             * Inputs: the deliberately preserved resident mask and the zero
+             * effective load mask. Output: one B record with the drain-site
+             * flag clear; value32 packs both masks for comparison with the
+             * later live-byte capture. Why: an empty Bank's setter is a
+             * deliberate no-op, so this proves which value the commit kept.
+             * Affiliate: autosave_getLivePayloadByte().
              */
-            bank_setScenePresentMask(bank_scenePresentMask());
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_BANK_PRESENT, 0u,
+                ((uint32_t)bank_scenePresentMask() <<
+                 AUTOSAVE_TRACE_BANK_PRESENT_MASK_SHIFT) |
+                    op_bank_scene_load_mask);
             bank_selectActiveSceneForEditMask(op_bank_active_scene);
             bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
             bank_setRestoreBankSlot(op_slot);
+            /*
+             * Persist the newly selected boot-restore Bank after a valid
+             * empty-Bank identity load.
+             *
+             * Inputs: the committed restore slot above. Output: the existing
+             * debounced settings writer re-serializes active_bank later; this
+             * call opens no file. Why: an empty Bank is still the new boot
+             * selection authority and must not leave a stale settings value.
+             * Affiliates: filesystem_settingsWriterSchedule_tick() and
+             * filesystem_nextSettingsLine().
+             */
+            filesystem_markSettingsDirty();
             bank_setHasResidentBank(1u);
             memcpy(preset_currentName, op_bank_display_name, 8u);
             if (!afatfs_chdir(NULL))
@@ -10410,11 +10451,54 @@ static void filesystem_loadBankDirectory_tick(void)
          * preservation rules. This is a metadata merge only; the payload loop
          * above remains the sole writer of selected SceneData.
          */
-        bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
-                                            op_bank_scene_load_mask));
+        if (!bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
+                                                 op_bank_scene_load_mask))) {
+            /*
+             * Guarantee a fresh present-mask capture when the Bank Load union
+             * is a no-op against the already-resident mask.
+             *
+             * Inputs: the effective selected-child union and a setter result
+             * of zero. Output: the existing two-byte field is marked without
+             * allocating state or changing the resident mask. Why: the
+             * change-aware setter correctly suppresses equal writes, but a
+             * later AutoSave reader still needs the committed value refreshed
+             * after this successful load boundary. Affiliate:
+             * autosave_markBankFieldDirty().
+             */
+            autosave_markBankFieldDirty(
+                AUTOSAVE_BANK_FIELD_SCENE_PRESENT_MASK);
+        }
+        /*
+         * Witness the post-commit Bank presence boundary in the retained
+         * trace.
+         *
+         * Inputs: the merged resident mask and effective selected-child mask.
+         * Output: one B record with the drain-site flag clear; value32 packs
+         * the resident mask in bits 16..31 and the effective load mask in
+         * bits 0..15. Why: D records identify marked offsets but cannot prove
+         * the live mask value seen by the later drain. Affiliate: the drain
+         * witness in autosave_getLivePayloadByte().
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_BANK_PRESENT, 0u,
+            ((uint32_t)bank_scenePresentMask() <<
+             AUTOSAVE_TRACE_BANK_PRESENT_MASK_SHIFT) |
+                op_bank_scene_load_mask);
         bank_selectActiveSceneForEditMask(op_bank_active_scene);
         bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
         bank_setRestoreBankSlot(op_slot);
+        /*
+         * Persist the newly selected boot-restore Bank after a complete
+         * non-empty Bank Load.
+         *
+         * Inputs: the committed restore slot above. Output: dirty/revision/
+         * deadline state only; no file is opened here. Why: the Bank Load
+         * changed the boot-selection authority, so a reboot must select this
+         * Bank rather than the stale settings.cfg slot. Affiliates:
+         * filesystem_settingsWriterSchedule_tick() and
+         * filesystem_nextSettingsLine().
+         */
+        filesystem_markSettingsDirty();
         bank_setHasResidentBank(1u);
         scene_selectActive(op_bank_active_scene);
         memcpy(preset_currentName, op_bank_display_name, 8u);
@@ -13862,6 +13946,17 @@ static void filesystem_saveBankDirectory_tick(void)
         bank_selectActiveSceneForEditMask(op_bank_active_scene);
         bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
         bank_setRestoreBankSlot(op_slot);
+        /*
+         * Persist the boot-restore Bank selected by a successful Bank Save.
+         *
+         * Inputs: the committed restore slot above. Output: the existing
+         * debounced settings writer re-emits active_bank later; this call
+         * opens no file. Why: Bank Save changes the same boot-selection
+         * authority as Bank Load, so the two paths must remain symmetric.
+         * Affiliates: filesystem_settingsWriterSchedule_tick() and
+         * filesystem_nextSettingsLine().
+         */
+        filesystem_markSettingsDirty();
         bank_setHasResidentBank(1u);
         /*
          * The promoted root folder is the authoritative new Bank identity.

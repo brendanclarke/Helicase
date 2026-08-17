@@ -162,7 +162,7 @@ uint16_t bank_restoreBankSlot(void)
     return bank_restore_bank_slot;
 }
 
-void bank_setScenePresentMask(uint16_t mask)
+uint8_t bank_setScenePresentMask(uint16_t mask)
 {
     uint16_t normalized_mask;
 
@@ -175,14 +175,18 @@ void bank_setScenePresentMask(uint16_t mask)
      * allowed for a valid empty Bank; selection callers decide when at least
      * one Scene is required. A changed normalized final mask is stored before
      * the two-byte Scene-present Autosave field is marked; equal input creates
-     * no writer work. Affiliate: Scene marker presence validation.
+     * no writer work. Return: nonzero only when the normalized value changed
+     * and the two-byte field was marked. Affiliate: Scene marker presence
+     * validation and Bank Load's no-op dirty-mark fallback.
      */
     normalized_mask = bank_normalizeSceneMask(mask);
     if (normalized_mask != bank_scene_mask_present) {
         bank_scene_mask_present = normalized_mask;
         autosave_markBankFieldDirty(
             AUTOSAVE_BANK_FIELD_SCENE_PRESENT_MASK);
+        return 1u;
     }
+    return 0u;
 }
 
 uint16_t bank_scenePresentMask(void)

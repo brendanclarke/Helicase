@@ -551,6 +551,13 @@ Current behavior:
   request resets operation scratch; after DSP apply, Menu reloads the unchanged
   `/Bank/.hcindex` read-only.
 
+Both successful Bank Load and Bank Save commits mark the existing one-second
+debounced `settings.cfg` writer immediately after updating the resident
+restore slot. The writer later serializes `active_bank` from that live slot;
+the completion mark performs no synchronous file I/O. Bank Load's resident
+Scene-present mask is the OR of the retained mask and effective selected-child
+mask, and an equal union is explicitly re-marked for AutoSave capture.
+
 ## Scene
 
 Status: root Scene Load/Save is implemented and promoted. Sixteen resident
