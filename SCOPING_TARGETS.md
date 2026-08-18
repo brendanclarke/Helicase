@@ -165,6 +165,73 @@ be treated as the current baseline, superseding older roadmap estimates:
   boot report. The hang is not reproducible or localized; these holds are not
   evidence of a verified root-cause fix.
 
+## Session 052 Bank persistence and deferred boot-sanitizer refactor (2026-08-18)
+
+### Discovery and retry evidence
+
+The first updated-card boot failed before Bank Load with `bootlog.bin` equal to
+`KQ019KST`: the boot Kit-quarantine traversal had reached root Kit slot 019
+while opening/streaming `kitset.kcg`. The current boot path runs that content
+validation from `filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT)`
+before the Scene and Bank scans (`main.c:551-599`; `filesystem.c:20732-20766`).
+It uses one ten-second `KITQUAR` deadline for the whole root Kit traversal and
+reads each `kitset.kcg` one byte at a time (`filesystem.c:16992-17064`). The
+visible Kit 019 fixture is structurally valid on the copied card, so this
+evidence identifies an unnecessarily broad/expensive boot gate, not proof of a
+bad Kit 019 file.
+
+On retry, boot completed and a full Bank 008 test load completed. The copied
+card then showed:
+
+- `settings.cfg`: `active_bank=8`;
+- both `.hcprms` records: Bank 008 / `Full`, active Scene 6, voice-edit mask
+  `0x0040`, and `scene_present_mask=0xffff`;
+- trace `B` at Bank commit: resident mask `0xffff`, effective load mask
+  `0xffff`;
+- trace `B` at AutoSave drain: resident mask `0xffff`, payload offset 10;
+- `tools/verify_bank_autosave.py SD_CARD 8`: `PASS`.
+
+This confirms the Session 052 settings and present-mask corrections. The
+unchanged eight-byte `bootlog.bin` is stale failure evidence: a successful
+boot does not delete the previous boot-failure record.
+
+### Deferred refactor target — boot sanitation versus load validation
+
+**Status: scoped for a later filesystem refactor; do not implement as part of
+the current session.**
+
+Boot sanitation should establish only that every browser/menu member can be
+reconstructed from its `.hcindex` display row, then generate the indexes. It
+must not parse or open every Kit payload merely to decide whether boot may
+continue.
+
+The later refactor should:
+
+1. Remove root Kit `kitset.kcg` parsing, six-member opens, and Kit quarantine
+   from the boot path. Full Kit/content validation moves to the actual load
+   attempt, whether reached through root Kit Load, root Scene Load's embedded
+   Kit, or Bank Load's selected child Scene/Kit.
+2. For root `/Kit`, `/Scene`, and `/Bank`, canonicalize every numbered folder to
+   `NNN Name`, preserving the three-digit slot and truncating the display name
+   to the eight cells that `.hcindex` and resident identity can represent.
+3. For root `/Instrument/<type>/`, canonicalize every eligible instrument
+   filename to an eight-cell stem plus its registered extension. The existing
+   product-owned `.hctmp.*` files remain excluded from this pass.
+4. Generate each `.hcindex` from the post-sanitization physical scan, retaining
+   blank slot rows and the existing shared-cache ownership rules.
+
+The sanitizer must retain the existing one-object-at-a-time rename, duplicate
+target detection/retry, sync, and rescan behavior. Truncation must not create
+an ambiguous visible entry or silently map a file to a different slot. Bank
+local `00..15 Name` child repair remains a load-time concern; it is not a new
+root-library boot pass.
+
+The refactor must also preserve the failure distinction: a malformed or
+unreadable payload discovered during an explicit load fails that load and must
+not be converted into a successful empty library. Any future quarantine or
+repair-on-load policy is a separate decision and should not be reintroduced as
+an implicit boot-wide content scan.
+
 ---
 
 ## Phase 1 — Foundation Refactors
