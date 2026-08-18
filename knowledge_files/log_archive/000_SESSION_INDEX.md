@@ -60,6 +60,8 @@
 | 049 | 2026-08-12 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Kit/Scene/Bank write-on-load markers; KitMrp and Scene accepted, Bank persistence/restore failure isolated |
 | 050 | 2026-08-16 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Root Scene Load terminal facade acknowledgement; hardware-confirmed trace and AutoSave publication; deferred Scene/Bank embedded HCNAMES exit flush |
 | 051 | 2026-08-17 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Scene Load embedded Kit/Instrument HCNAMES exit flush and Scene-to-Kit-family boundary; InstrumentMrp reversible `kit` row with Morph-only snapshot/restore; hardware-confirmed Scene rows plus repaired Mrp restore |
+| 052 | 2026-08-18 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Bank Load persistence: settings active_bank and AutoSave scene-present mask; Candidate B no-op re-mark, B trace witness, host validator, and deferred boot-sanitizer/Bank-Save refactor targets |
+
 
 ---
 
@@ -658,3 +660,25 @@ Session 052.
 - **Find here**: [051_SESSION_HANDOFF_LOG.md](051_SESSION_HANDOFF_LOG.md),
   `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, and
   `SRAM_MANIFEST.md`.
+
+### 052 — Bank Load Persistence And Deferred Refactor Targets (2026-08-18)
+
+Made Bank Load durable in two ways: `settings.cfg` re-serializes `active_bank`
+from the committed Bank restore slot after a successful Bank Load/Save, and the
+AutoSave Bank `scene_present_mask` now equals the effective selected-child
+union. The zero-mask root cause was the change-aware BankData setter being a
+no-op against the boot-time mask; `bank_setScenePresentMask()` now reports
+whether it changed, and Bank Load explicitly re-marks the two present-mask bytes
+on a no-op. Added the logging-only `B` trace witness (commit and drain sites),
+its decoder in `decode_devlogs.py`, and the read-only
+`tools/verify_bank_autosave.py` validator. A rebuilt-image hardware pass
+verified `settings.cfg active_bank=8`, both `.hcprms` records
+`scene_present_mask=0xffff`, `B` trace commit/drain `0xffff`, and a validator
+PASS. A first-boot `KQ019KST` Kit-quarantine hang and two follow-up refactor
+targets (Bank Save present-mask union, boot settings-mark redundancy) are
+deferred in `SCOPING_TARGETS.md`.
+
+- **Find here**: [052_SESSION_HANDOFF_LOG.md](052_SESSION_HANDOFF_LOG.md),
+  `SESSION_052_POST_ANALYSIS.md`, `SESSION_052_PRE_PLAN.md`, `AUTOSAVE.md`,
+  `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `DEV_MODES.md`,
+  `SRAM_MANIFEST.md`, and the `SCOPING_TARGETS.md` Session 052 section.

@@ -101,6 +101,13 @@ change-aware BankData setter is a no-op. The logging-only `B` trace stage
 witnesses the resident mask at Bank Load commit and at the drain's first-byte
 capture; it uses the existing eight-byte trace ring and adds no production RAM.
 
+
+Known deferred limitation: `Save:[Bank]` still assigns its saved child subset
+directly (`bank_setScenePresentMask(op_bank_scene_save_mask)`) rather than
+unioning into the retained mask, so a partial save can shrink the resident
+Scene-present mask. This is tracked as a refactor target in
+`SCOPING_TARGETS.md` (Session 052 deferred targets, P1).
+
 Header requirements:
 
 - magic `HCPR`;

@@ -232,6 +232,77 @@ not be converted into a successful empty library. Any future quarantine or
 repair-on-load policy is a separate decision and should not be reintroduced as
 an implicit boot-wide content scan.
 
+
+### Deferred refactor targets — Bank Save present-mask union and settings boot mark
+
+**Status: deferred to a later refactor session; do not implement as part of the
+current session.** These are the two items from `SESSION_052_POST_ANALYSIS.md`
+Section 8 (P1 and P2).
+
+#### P1 — Bank Save still overwrites the resident Scene-present mask
+
+`filesystem.c:13945` still performs:
+
+    bank_setScenePresentMask(op_bank_scene_save_mask);
+
+`op_bank_scene_save_mask` is the caller-supplied save mask, validated only to
+16 bits at `filesystem.c:21165-21167`. Bank Save is explicitly a **subset**
+operation: the payload loop writes only children whose bits are set
+(`filesystem.c:13687-13703`), and the active-scene relocation guard at
+`filesystem.c:21175-21197` treats a partial mask as a first-class case
+("Save:[Bank] may intentionally save only a subset of resident Scenes").
+
+Failure scenario: start with 16 resident Scenes (`0xFFFF`), then `Save:[Bank]`
+with only Scenes 0-3 selected (`0x000F`). The overwrite drops bits 4-15 even
+though those Scenes remain resident in SRAM. Consequences:
+
+- `bank_scenePresent()` returns false for the dropped Scenes, so the AutoSave
+  Scene-payload capture (`autosave_scenePayloadBase()` gates on it) silently
+  stops persisting them.
+- Load/Save SEQ LEDs and voice-edit fan-out no longer match the data still in
+  RAM.
+- A later Bank Load that does a *union* cannot restore those bits unless the
+  new load happens to request them.
+
+Bank Load already uses a union (`filesystem.c:10454`); Save is the lone
+inconsistent writer and the only mechanism that can take a mask `bank_init()`
+seeded to 1 and make it zero. The Session 052 test was a **Load**, so this path
+was never exercised by the verification.
+
+Resolution (Candidate C, one line):
+
+    bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() | op_bank_scene_save_mask));
+
+#### P2 — Unconditional settings mark produces one redundant `active_bank` write per boot
+
+The three `filesystem_markSettingsDirty()` calls (`filesystem.c:10346`, `10501`,
+`13959`) are unconditional, so the boot ladder fires the settings writer on
+every power-on:
+
+1. `settings.cfg` parses `active_bank=12` -> `bank_setRestoreBankSlot(12)`
+   (`filesystem.c:2071-2075`).
+2. `main.c:806` runs `preset_loadBank(12, 0xffff)` -> the boot Bank Load commit
+   executes `bank_setRestoreBankSlot(12)` (a no-op, already 12) followed by
+   `filesystem_markSettingsDirty()`.
+3. At that moment `fs_settings_runtime_ready` is still `0`; the gate is not
+   opened until `main.c:942` calls `filesystem_enableRuntimeSettingsWrites()`.
+   The mark only latches `fs_settings_dirty = 1`.
+4. `filesystem_enableRuntimeSettingsWrites()` sees the dirty latch and restarts
+   the one-second debounce deadline (`filesystem.c:19151-19154`).
+5. `filesystem_settingsWriterSchedule_tick()` then starts
+   `FS_INTERNAL_OP_SAVE_GLOBALS`, which re-serializes `active_bank` from
+   `bank_restoreBankSlot()` — writing back the *same* value already on the card.
+
+Net effect: one value-idempotent `settings.cfg` rewrite on every boot with a
+valid Bank. It is harmless to correctness and has a real upside (if the boot
+Bank fell back to a different slot than the stored one, it reconciles
+`settings.cfg`), but it is an extra SD write plus one foreground filesystem
+operation per power-on. The Session 052 pre-plan explicitly chose the
+unconditional mark ("the unconditional mark so both paths share one authority")
+rather than gating it on `fs_settings_runtime_ready`. That tradeoff should be
+accepted deliberately, or the mark should be gated, as part of the refactor
+session.
+
 ---
 
 ## Phase 1 — Foundation Refactors

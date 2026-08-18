@@ -17,9 +17,9 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 051 Scene-follow-up implementation in a
+**Current working source**: Session 052 Bank Load persistence in a
 dirty worktree on `dev-ph3-autosave-ph2`. The durable closeout is
-`knowledge_files/log_archive/051_SESSION_HANDOFF_LOG.md`; verify the actual
+`knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`; verify the actual
 commit/worktree before making the next source change.
 
 ## RAM Allocation Approval Policy
@@ -277,10 +277,17 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   filesystem_loadedInstrumentWasMorphTemporary() is set. The repaired image is
   hardware-confirmed. Type, Normal image, HCNAMES identity/source, and routing
   remain untouched.
-- Session 052 is pre-planned in `SESSION_052_PRE_PLAN.md`. The Bank Load card
-  audit showed .hcnames fully correct, but `settings.cfg active_bank` stayed
-  stale and the AutoSave Bank scene-present mask captured as zero. Do not start
-  Bank persistence work without reading that plan.
+- Session 052 closed Bank Load persistence. `settings.cfg` now re-serializes
+  `active_bank` after a successful Bank Load/Save, and the AutoSave Bank
+  scene-present mask equals the effective selected-child union.
+  `bank_setScenePresentMask()` now returns whether it changed, and Bank Load
+  re-marks the two present-mask bytes on a no-op union. Hardware-verified with
+  Bank 008: active_bank=8, scene_present_mask=0xffff, B trace commit/drain
+  0xffff, and `tools/verify_bank_autosave.py` PASS. Deferred to
+  `SCOPING_TARGETS.md`: the boot Kit-quarantine refactor (KQ019KST), the Bank
+  Save present-mask union (P1), and the boot settings-mark redundancy (P2).
+  The disposable `SESSION_052_PRE_PLAN.md` and `SESSION_052_POST_ANALYSIS.md`
+  are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 
 ---
 
@@ -903,15 +910,17 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   Scene->KitMrp->Kit hazard, and failed-load preservation still need evidence.
   Do not add another writer.
   The current `-` token remains the valid inherited HCNAMES source token.
-- **Bank Load persistence is the Session 052 target.** A Session 051 card
-  audit showed .hcnames fully correct after Bank 008 Full, but `settings.cfg
-  active_bank` stayed stale and the AutoSave Bank scene-present mask captured
-  as zero. See `SESSION_052_PRE_PLAN.md`. Do not combine it with Scene HCNAMES,
-  writer exclusion, boot-reader work, recursive delete, or Pattern work.
+- **Bank Load persistence is implemented and hardware-verified (Session 052).**
+  `settings.cfg active_bank` follows the committed restore slot and the AutoSave
+  Bank scene-present mask equals the effective selected-child union (re-marked
+  on a no-op). Deferred refactor targets are in `SCOPING_TARGETS.md`: Bank Save
+  still overwrites the present mask (union pending), the boot settings mark
+  writes settings.cfg once per boot, and the boot Kit-quarantine pass
+  (KQ019KST) should be refactored. See `052_SESSION_HANDOFF_LOG.md`.
 - The current diagnostic build retains 2,048 trace records (16,384 B) and
-  64-record/512-B append batches. This is temporary approved logging-only RAM;
-  keep it until the remaining diagnosis is complete, then explicitly restore
-  the 64-record default and regenerate the memory manifest.
+  64-record/512-B append batches. This is temporary approved logging-only RAM.
+  The Session 052 B-witness diagnosis is complete; restore the 64-record default
+  and regenerate the memory manifest on the next rebuild.
 - **InstrumentMrp `kit` row fix is implemented and hardware-confirmed.**
   It displays the selected slot's HCNAMES name, uses a Morph-only hidden
   snapshot, and restores only Morphable Morph endpoints. The first pass showed
