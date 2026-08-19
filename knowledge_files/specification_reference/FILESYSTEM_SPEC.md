@@ -462,8 +462,8 @@ before reintroduction.
 ## Bank
 
 Status: implemented as a 16-resident-Scene Bank workspace. It has selected
-child save/load and a staged root-Bank promotion flow; that explicit Save flow
-is not a crash-recoverable transaction. The separate hidden A/B scalar
+child save/load and direct exact-object root-Bank delete/recreate; that explicit
+Save flow is not a crash-recoverable transaction. The separate hidden A/B scalar
 AutoSave record is specified in `AUTOSAVE.md`.
 
 `Bank/` contains bank folders:
@@ -532,11 +532,11 @@ Current behavior:
 - Bank Save writes bankset.bcg and every child selected by the 16-bit mask.
   If the active Scene is outside a nonempty save mask, the saved manifest
   selects the first saved child so it never points to an absent payload.
-- Save builds a non-numbered temporary sibling, preflights temp/old-name
-  collisions, renames any previous numbered Bank to a non-loadable old
-  sibling, and promotes the completed temp directory to the numbered name.
-  Promotion failure reports BProm. This prevents in-place stale-tree merges
-  but is not a durable journal/recovery transaction.
+- Save scans `/Bank/` to prove zero or one exact same-slot directory and rejects
+  duplicates, same-slot files, malformed product objects, and scan failures.
+  It deletes the one captured directory through native recursive delete, then
+  creates the final numbered Bank directly. There are no temporary or `old*`
+  promotion names; failure is non-atomic and publishes no replacement metadata.
 - A full Bank Load resets Scene child discovery for every delegated child.
   Filenames discovered in one local folder must never be reused for another.
 - Bank Load retains no 16-child name or alias arrays. It keeps only a 16-bit
@@ -1553,8 +1553,8 @@ Implemented:
   names are directory-owned.
 - Bank Save writes bankset.bcg version 2 and one local `SS <scene name>/`
   payload for every selected Scene bit. A zero child-scene mask is valid and
-  creates an empty Bank. The completed payload is written to a unique
-  non-numbered temporary Bank sibling before promotion to the numbered slot.
+  creates an empty Bank. The previous root Bank is deleted exactly before the
+  final numbered directory is created.
 - After Kit, root Scene, or root Bank Save completes its physical directory
   write and final FAT flush, firmware rescans that parent directory and
   rewrites the complete slot-ordered `.hcindex`. The original Save completion
@@ -1593,12 +1593,13 @@ Root library replacement must be scoped by parent directory and product parser:
   string.
 
 Kit Save may use short-alias fallback for older/converted Kit folders. Scene
-Save deliberately disables short-alias fallback and deletes only visible names
+Save deliberately disables short-alias fallback and accepts only visible names
 that parse as the exact Scene slot, preventing the root Scene wipe class of
-bug. Bank-local selection uses storage_parseBankSceneFolder and carries the
-captured afatfsObjectId_t to native deletion, avoiding a second ambiguous LFN
-lookup. Bank Save promotes a complete temporary root tree; it does not claim
-to preserve unselected old children across a replacement.
+bug. The resolver continues scanning to reject duplicate directories, same-slot
+files, malformed product objects, and scan failures before deleting. Native
+deletion receives the complete captured `afatfsObjectInfo_t`, avoiding a second
+ambiguous LFN lookup. Bank Save uses the same direct root delete/recreate flow
+and does not claim power-loss atomicity or preserve unselected old children.
 
 ### asyncfatfs Boundary
 
@@ -1608,14 +1609,14 @@ filename sanitization, and caller checklist live in
 `filesystem.c` or those documented asyncfatfs primitives instead of rebuilding
 FAT/VFAT traversal locally.
 
-Current production replacement captures the selected object from an
-LFN-aware scan and requests native `afatfs_deleteTree()` for same-slot cleanup.
-That low-level recursive-delete path is not yet reliable enough to guarantee
-replacement: an overwrite Save may leave the old Bank, root Scene, or Kit
-folder in place. The product contract is therefore deliberately stronger than
-the present implementation; repair the native deleter rather than adding an
-`old*` rename/boot-cleanup workaround. No current path has an atomic or
-crash-recoverable replace primitive, so none may claim power-loss-safe commit
+Current production replacement captures the complete object from an LFN-aware
+immediate-parent scan and requests native `afatfs_deleteTree()` for one exact
+same-slot directory. The native operation validates physical VFAT identity,
+handles cross-sector LFN runs, frees child chains before name retirement,
+returns through one structured result callback, and is bounded against cycles.
+Deletion is non-transactional: partial media mutation is possible after an
+I/O/layout failure, and no caller may mkdir, publish HCNAMES, or rebuild an
+index after a non-OK result. No current path claims power-loss-safe commit
 semantics.
 
 ## Verification Anchors

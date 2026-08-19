@@ -524,6 +524,8 @@ static storage_kitset_t op_kitset;
 static storage_instrument_state_t op_instrument_state;
 static uint8_t op_instrument_slot = 0;
 static uint8_t op_remove_done = 0u;
+/* Result paired with the asynchronous remove latch; failure must gate create. */
+static afatfsResultCode_t op_remove_result = AFATFS_RESULT_OK;
 /*
  * Shared streaming writer scratch.
  *
@@ -609,9 +611,13 @@ typedef enum {
 static fs_delete_slot_phase_t op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
 static afatfsFilePtr_t op_delete_slot_dir = NULL;
 static uint8_t op_delete_slot_allow_short_alias = 0u;
-static uint8_t op_delete_slot_bank_scene = 0u;
 static uint16_t op_delete_slot_number = 0u;
-static afatfsObjectId_t op_delete_slot_target_id;
+/* Complete scan result copied for one exact delete; no display re-lookup. */
+static afatfsObjectInfo_t op_delete_slot_target;
+/* Scan latches prove singularity before any delete is accepted. */
+static uint8_t op_delete_slot_match_count = 0u;
+static uint8_t op_delete_slot_scan_error = 0u;
+static uint8_t op_delete_slot_timeout_observed = 0u;
 /*
  * Completion latch for asyncfatfs' maintained recursive deleter.
  *
@@ -965,12 +971,7 @@ static storage_pattern_stub_state_t op_pattern_stub_state;
 static storage_bankset_t op_bankset_state;
 static char op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static char op_save_bank_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
-static char op_save_bank_tmp_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
-static char op_save_bank_old_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_save_bank_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
-static char op_save_bank_rename_open_name[AFATFS_SHORT_FILENAME_MAX];
-static uint8_t op_save_bank_scratch_attempts = 0u;
-static uint8_t op_save_bank_scratch_collision = 0u;
 static uint16_t op_bank_child_present_mask = 0u;
 static uint16_t op_bank_scene_load_mask = 0u;
 static uint16_t op_bank_scene_save_mask = 0u;
@@ -979,6 +980,8 @@ static uint8_t op_bank_child_cursor = 0u;
 static uint8_t op_bank_loaded_scene = 0u;
 static uint8_t op_bank_payload_active = 0u;
 static uint8_t op_rename_done = 0u;
+/* Result paired with rename completion; open-name output is trusted only on OK. */
+static afatfsResultCode_t op_rename_result = AFATFS_RESULT_OK;
 typedef enum {
     FS_REPAIR_SCOPE_NONE = 0u,
     FS_REPAIR_SCOPE_LIBRARY,
@@ -1367,7 +1370,6 @@ static char op_test_parent_alias[AFATFS_SHORT_FILENAME_MAX];
 static uint8_t op_test_bytes[FS_TEST_RESULT_BYTES];
 static fs_test_result_kind_t op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
 static uint32_t fs_test_payload_counter = 0u;
-static uint16_t fs_bank_scratch_counter = 0u;
 static afatfsObjectFinder_t op_test_object_finder;
 static afatfsObjectInfo_t op_test_object;
 static afatfsObjectKind_t op_test_best_kind = AFATFS_OBJECT_NONE;
@@ -1380,16 +1382,6 @@ static uint8_t op_test_verify_seen_fold = 0u;
 #define FS_TEST_LOOKUP_OPEN_ALIAS 1u
 #define FS_TEST_LOOKUP_CREATE 2u
 #endif
-
-/*
- * Bank Save scratch-name nonce counter.
- *
- * This is independent of the retired File/Dir diagnostic state above. Inputs:
- * each Bank Save scratch-directory attempt. Output: one incrementing value
- * mixed with RNG/tick by filesystem_nextBankScratchNonce(), avoiding stale
- * temporary-tree collisions without retaining any name cache.
- */
-static uint16_t fs_bank_scratch_counter = 0u;
 
 #define FS_IDLE_POLL_MS 5u
 /* .all still carries the old raw meta prefix until that container is rebuilt.
@@ -1523,14 +1515,14 @@ static void on_autosave_target_opened(afatfsFilePtr_t file)
     op_autosave_writer.target_ready = 1u;
 }
 
-static void on_remove_complete(void)
+static void on_remove_complete(afatfsResultCode_t result)
 {
     /*
      * Mark completion of asyncfatfs overwrite preflight work.
      *
      * What: Latches that afatfs_removeObjects_lfn() has called back. The
-     * following state-machine phase decides success by opening the expected
-     * object with the target display name.
+     * following state-machine phase decides whether creation may proceed from
+     * this structured result.
      *
      * Why: File overwrite is now a two-step operation: collapse same-casefold
      * file variants before writing, then create exactly one object with the
@@ -1540,20 +1532,21 @@ static void on_remove_complete(void)
      * Affiliates/clients: filesystem_saveInstrument_tick(), InstrumentMrp
      * Save, and the autosave writer's inactive-record deduplication phases.
      */
+    op_remove_result = result;
     op_remove_done = 1u;
 }
 
-static void on_rename_complete(void)
+static void on_rename_complete(afatfsResultCode_t result)
 {
     /*
      * Latch completion of an async directory rename.
      *
      * Inputs: asyncfatfs_renameObject_lfn() invokes this after it has either
      * rewritten the object name run or failed to find/rename the source.
-     * Output: Bank Save promotion phases wake up and inspect the caller-owned
-     * open-name buffer. asyncfatfs writes that buffer only on success, so an
-     * empty buffer means "rename did not produce the requested object".
+     * Output: callers receive the structured result and may inspect the
+     * caller-owned open-name buffer only when it is OK.
      */
+    op_rename_result = result;
     op_rename_done = 1u;
 }
 
@@ -1682,31 +1675,6 @@ static void filesystem_makeTestBytes(void)
     op_test_result_kind = FS_TEST_RESULT_BYTES_READY;
 }
 #endif
-
-static uint16_t filesystem_nextBankScratchNonce(void)
-{
-    uint16_t nonce;
-
-    /*
-     * Generate one short nonce for Bank Save scratch directory names.
-     *
-     * Inputs: hardware RNG, the 1ms service tick, and a firmware-local counter
-     * that advances on every Save Bank request. Output: a 16-bit value encoded
-     * by filesystem_makeBankScratchDir() into `tmpSSS-NNNN` and `oldSSS-NNNN`.
-     *
-     * Why: asyncfatfs mkdir is intentionally create-or-open. If a previous
-     * failed save left a `tmp...` directory and a later save reused the exact
-     * same component, the writer could merge into that stale temp tree. Mixing
-     * three independent sources makes reuse across repeated hardware retests
-     * and the 16-bit tick wrap much less likely without adding recursive
-     * cleanup back into the foreground Save Bank path.
-     */
-    fs_bank_scratch_counter++;
-    nonce = (uint16_t)GetRngValue();
-    nonce ^= time_sysTick;
-    nonce ^= (uint16_t)(fs_bank_scratch_counter * 0x9e37u);
-    return nonce;
-}
 
 /* Retired File/Dir diagnostic stream helpers; no product operation calls them. */
 #if 0
@@ -5770,6 +5738,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * visible to a desktop filesystem.
          */
         op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
         if (!afatfs_removeObjects_lfn(
                 filesystem_autosaveFilenameForIndex(
                     (uint8_t)(op_autosave_writer.winner_index ^ 1u)),
@@ -5783,6 +5752,10 @@ static void filesystem_autosaveParameterDrain_tick(void)
     case 24: /* WAIT TARGET-VARIANT RETIREMENT, THEN CREATE ONE TARGET */
         if (!op_remove_done)
             return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
         op_autosave_writer.target_file = NULL;
         op_autosave_writer.target_ready = 0u;
         if (!afatfs_fopen_lfn(
@@ -6295,6 +6268,7 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * a repaired card returns with exactly one .hcprms1 and one .hcprms2.
          */
         op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
         if (!afatfs_removeObjects_lfn(
                 filesystem_autosaveFilenameForIndex(
                     op_autosave_writer.recovery_target_index),
@@ -6308,6 +6282,10 @@ static void filesystem_autosaveParameterDrain_tick(void)
     case 25: /* WAIT RECOVERY TARGET-VARIANT RETIREMENT, THEN OPEN ONE FILE */
         if (!op_remove_done)
             return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(
@@ -6636,6 +6614,7 @@ static void filesystem_repairNames_tick(void)
 
     case 32: /* START rename */
         op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
         memset(op_repair_rename_open_name, 0,
                sizeof(op_repair_rename_open_name));
         if (!afatfs_renameObject_lfn(op_repair_old_name,
@@ -6650,6 +6629,10 @@ static void filesystem_repairNames_tick(void)
     case 33: /* WAIT rename */
         if (!op_rename_done)
             return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         if (op_repair_rename_open_name[0] == '\0') {
             if (op_repair_retry) {
                 if (op_repair_suffix >= 999u) {
@@ -11485,6 +11468,7 @@ static void filesystem_saveInstrument_tick(void)
 
     case 15: /* REMOVE target instrument variants */
         op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
         if (!afatfs_removeObjects_lfn(op_instrument_save_display_name,
                                       AFATFS_MATCH_CASE_INSENSITIVE,
                                       AFATFS_REMOVE_FILES_ONLY,
@@ -11497,6 +11481,10 @@ static void filesystem_saveInstrument_tick(void)
     case 16: /* WAIT remove + OPEN target instrument file */
         if (!op_remove_done)
             return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         op_file_ready = false;
         op_file = NULL;
         memset(op_instrument_save_open_name, 0,
@@ -11926,103 +11914,6 @@ static void filesystem_makeNumberedDir(char *dst,
     for (uint8_t i = 0u; i < STORAGE_KIT_DISPLAY_NAME_LEN; i++)
         dst[4u + i] = display ? display[i] : ' ';
     dst[4u + STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-}
-
-static void filesystem_makeBankScratchDir(char *dst,
-                                          uint16_t cap,
-                                          const char prefix[3],
-                                          uint16_t slot,
-                                          uint16_t nonce)
-{
-    static const char hex[] = "0123456789abcdef";
-    uint8_t pos = 0u;
-
-    /*
-     * Format a non-slot Bank staging directory name.
-     *
-     * Inputs: three-letter prefix (`tmp` for the newly written payload or
-     * `old` for the displaced previous Bank), root Bank slot, and a mixed
-     * request nonce. Output: a single FAT component like
-     * `tmp000-4a3f` that never begins with a digit. Root Bank scanning accepts
-     * only `NNN Name`, so these scratch directories are ignored by Bank Load if
-     * power is lost during promotion.
-     *
-     * Why: Bank Save must stop mutating `000 Slak/` in place. Writing a
-     * complete non-numbered temp tree first prevents stale child Scenes and
-     * duplicate Instrument files from being merged into the loadable Bank
-     * namespace. The nonce makes repeated failed saves unlikely to reopen a
-     * stale temp folder if a previous promotion was interrupted.
-     */
-    if (!dst || cap < 12u || !prefix)
-        return;
-    dst[pos++] = prefix[0];
-    dst[pos++] = prefix[1];
-    dst[pos++] = prefix[2];
-    dst[pos++] = (char)('0' + ((slot / 100u) % 10u));
-    dst[pos++] = (char)('0' + ((slot / 10u) % 10u));
-    dst[pos++] = (char)('0' + (slot % 10u));
-    dst[pos++] = '-';
-    dst[pos++] = hex[(nonce >> 12) & 0x0fu];
-    dst[pos++] = hex[(nonce >> 8) & 0x0fu];
-    dst[pos++] = hex[(nonce >> 4) & 0x0fu];
-    dst[pos++] = hex[nonce & 0x0fu];
-    dst[pos] = '\0';
-}
-
-static void filesystem_prepareBankScratchDirs(uint16_t nonce)
-{
-    /*
-     * Build the paired scratch names for one Bank Save attempt.
-     *
-     * Inputs: op_slot is the root Bank slot being saved and nonce is already
-     * mixed by filesystem_nextBankScratchNonce(). Outputs: temp and displaced
-     * old directory names share the same suffix, e.g. `tmp000-4a3f` and
-     * `old000-4a3f`, so a card directory listing shows which old Bank was
-     * moved aside by which temp publish attempt.
-     */
-    filesystem_makeBankScratchDir(op_save_bank_tmp_display_name,
-                                  sizeof(op_save_bank_tmp_display_name),
-                                  "tmp",
-                                  op_slot,
-                                  nonce);
-    filesystem_makeBankScratchDir(op_save_bank_old_display_name,
-                                  sizeof(op_save_bank_old_display_name),
-                                  "old",
-                                  op_slot,
-                                  nonce);
-}
-
-static uint8_t filesystem_bankScratchNameCollides(
-    const afatfsObjectInfo_t *object)
-{
-    /*
-     * Check whether one existing /Bank child already owns the chosen scratch
-     * display name.
-     *
-     * Inputs: LFN-aware object metadata from the /Bank preflight scan. Output:
-     * nonzero when either paired scratch component is already present. This is
-     * deliberately a display-name check, matching the later mkdir_lfn() open
-     * rule. The object type does not matter: a stale file named like the temp
-     * directory should also force a different scratch component.
-     *
-     * Why: asyncfatfs mkdir_lfn() is create-or-open. If Save Bank reuses an
-     * old `tmp...` component, the payload writer merges new Scenes into that
-     * stale temp tree and can preserve obsolete embedded Kit directories such
-     * as the extra `Kit Slak` observed in `000 SlakBad4/01 Slak2/`.
-     */
-    if (!object || object->id.kind == AFATFS_OBJECT_NONE)
-        return 0u;
-    if (fat_compareDisplayName(object->id.displayName,
-                               op_save_bank_tmp_display_name,
-                               false) == 0) {
-        return 1u;
-    }
-    if (fat_compareDisplayName(object->id.displayName,
-                               op_save_bank_old_display_name,
-                               false) == 0) {
-        return 1u;
-    }
-    return 0u;
 }
 
 static void filesystem_makeSceneEmbeddedKitDir(char *dst,
@@ -12504,11 +12395,10 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
     }
 }
 
-static uint8_t filesystem_directoryObjectMatchesSlot(
+static uint8_t filesystem_objectMatchesSlot(
         const afatfsObjectInfo_t *object,
         uint16_t slot,
-        uint8_t allow_short_alias,
-        uint8_t bank_scene_namespace)
+        uint8_t allow_short_alias)
 {
     uint16_t parsed_slot;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
@@ -12517,15 +12407,13 @@ static uint8_t filesystem_directoryObjectMatchesSlot(
      * Decide whether one child directory is eligible for slot replacement.
      *
      * Inputs: asyncfatfs object info from the current parent directory, the
-     * requested slot, whether old compact 8.3 aliases may match by their first
-     * three short-name digits, and whether the parent is a Bank-local Scene
-     * namespace. Output: nonzero only for directories that belong to the exact
-     * requested numeric slot in the correct namespace.
+     * requested slot and whether old compact 8.3 aliases may match by their
+     * first three short-name digits. Output: nonzero for any immediate object
+     * whose root-library name parses as the requested slot; the caller then
+     * rejects files as a same-slot conflict.
      *
-     * Critical distinction: root Kit/Scene/Bank folders use `NNN Name`, but
-     * Bank-local Scene folders use `NN Name`. Using the root parser for Bank
-     * children misses `01 Slak2`, leaves the old directory alive, and lets a
-     * later create path produce duplicate visible child folders on FAT cards.
+     * Bank-local two-digit children are deliberately outside this resolver;
+     * Bank Save replaces the root Bank tree as one exact object.
      *
      * Why the short-alias flag exists: root Kit Save historically had to clean
      * host/firmware aliases such as "001SLA~1" whose visible component may not
@@ -12536,28 +12424,8 @@ static uint8_t filesystem_directoryObjectMatchesSlot(
      * for Scene is leaving an odd alias behind, never recursing into a
      * directory that was not visibly a same-slot Scene.
      */
-    if (!object || object->id.kind != AFATFS_OBJECT_DIRECTORY)
+    if (!object || object->id.kind == AFATFS_OBJECT_NONE)
         return 0u;
-    if (bank_scene_namespace) {
-        uint8_t bank_slot;
-
-        /*
-         * Match Bank child Scene folders with the two-digit parser only.
-         *
-         * Inputs: object display component from inside `/Bank/NNN Name/`.
-         * Output: a match only when it parses as `SS Name` and SS equals the
-         * requested Bank-local Scene slot. Short-alias fallback is deliberately
-         * ignored here because a two-digit prefix is too broad for safe deletion
-         * in a mixed user-created directory.
-         */
-        if (storage_parseBankSceneFolder(object->id.displayName,
-                                         &bank_slot,
-                                         display) &&
-            bank_slot == (uint8_t)slot) {
-            return 1u;
-        }
-        return 0u;
-    }
     if (storage_parseNumberedFolder(object->id.displayName,
                                     &parsed_slot,
                                     display) &&
@@ -12604,9 +12472,8 @@ static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
     return (uint16_t)(numerator / 255);
 }
 
-static void filesystem_deleteSlotDirectoriesStart(uint16_t slot,
-                                                  uint8_t allow_short_alias,
-                                                  uint8_t bank_scene_namespace)
+static void filesystem_deleteSlotDirectoryStart(uint16_t slot,
+                                                uint8_t allow_short_alias)
 {
     /*
      * Start same-slot directory cleanup in the current parent directory.
@@ -12615,25 +12482,26 @@ static void filesystem_deleteSlotDirectoriesStart(uint16_t slot,
      * owns the numbered children; slot is the exact 000..999 root slot or
      * Bank-local 00..15 child number to replace. allow_short_alias controls
      * whether the scan may match legacy compact 8.3 aliases by short-name
-     * digits. bank_scene_namespace selects the two-digit Bank child parser.
-     * Output: the delete-slot state machine is reset and will repeatedly scan
-     * the current parent, recursively delete one matching child, return to this
-     * parent, and rescan until no same-slot directory remains.
+     * digits. Output: the delete-slot state machine proves zero or one matching
+     * directory, then deletes only that captured object.
      *
      * Safety: this function never receives a path to delete. It only deletes
-     * children discovered by filesystem_directoryObjectMatchesSlot(), so Scene
+     * children discovered by filesystem_objectMatchesSlot(), so Scene
      * Save can opt out of short-alias matching and avoid deleting anything
      * except visibly numbered Scene folders for the target slot.
      */
-    op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
+    memset(&op_delete_slot_target, 0, sizeof(op_delete_slot_target));
+    op_delete_slot_target.id.kind = AFATFS_OBJECT_NONE;
     op_delete_slot_dir = NULL;
     op_delete_slot_number = slot;
     op_delete_slot_allow_short_alias = allow_short_alias;
-    op_delete_slot_bank_scene = bank_scene_namespace;
+    op_delete_slot_match_count = 0u;
+    op_delete_slot_scan_error = 0u;
+    op_delete_slot_timeout_observed = 0u;
     op_delete_slot_phase = FS_DELETE_SLOT_OPEN_SCAN;
 }
 
-static void filesystem_deleteKitSlotDirectoriesStart(void)
+static void filesystem_deleteKitSlotDirectoryStart(void)
 {
     /*
      * Kit Save cleanup allows short-alias fallback.
@@ -12643,10 +12511,10 @@ static void filesystem_deleteKitSlotDirectoriesStart(void)
      * digits is acceptable inside /Kit because the product tree contains only
      * Kit directories and member files.
      */
-    filesystem_deleteSlotDirectoriesStart(op_slot, 1u, 0u);
+    filesystem_deleteSlotDirectoryStart(op_slot, 1u);
 }
 
-static void filesystem_deleteSceneSlotDirectoriesStart(void)
+static void filesystem_deleteSceneSlotDirectoryStart(void)
 {
     /*
      * Scene Save cleanup forbids short-alias fallback.
@@ -12656,28 +12524,55 @@ static void filesystem_deleteSceneSlotDirectoriesStart(void)
      * replacement scoped to the requested Scene slot no matter how many nested
      * directories exist inside other Scene folders.
      */
-    filesystem_deleteSlotDirectoriesStart(op_slot, 0u, 0u);
+    filesystem_deleteSlotDirectoryStart(op_slot, 0u);
 }
 
 static uint32_t op_delete_slot_timeout_ticks = 0;
 static uint8_t op_delete_slot_last_phase = 0;
 
-static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
+static fs_status_t filesystem_deleteSlotDirectory_tick(void)
 {
     if (op_delete_slot_phase != op_delete_slot_last_phase) {
         op_delete_slot_last_phase = op_delete_slot_phase;
         op_delete_slot_timeout_ticks = 0;
     }
     op_delete_slot_timeout_ticks++;
-    if (op_delete_slot_timeout_ticks > 50000) {
+    if (op_delete_slot_timeout_ticks > 50000 &&
+        !op_delete_slot_timeout_observed) {
         uint8_t subphase = afatfs_getDeleteTreePhase();
         if (op_delete_slot_phase == FS_DELETE_SLOT_DELETE_MATCH && subphase != 0xFF) {
             filesystem_makeNamedErrorCode("TDel", subphase);
         } else {
             filesystem_makeNamedErrorCode("TOut", (uint8_t)op_delete_slot_phase);
         }
-        op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
-        return FS_STATUS_ERROR;
+        /* Observation is not cancellation: native delete has no abort API,
+         * so retain ownership until its callback releases the handle. */
+        op_delete_slot_timeout_observed = 1u;
+        if (op_delete_slot_phase == FS_DELETE_SLOT_DELETE_MATCH ||
+            op_delete_slot_phase == FS_DELETE_SLOT_WAIT_SCAN ||
+            op_delete_slot_phase == FS_DELETE_SLOT_WAIT_CLOSE_SCAN)
+            return FS_STATUS_BUSY;
+        op_delete_slot_scan_error = 1u;
+        if (op_delete_slot_dir)
+            op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
+        else
+            op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+    }
+
+    /* A timed-out open/close remains the owner of its native handle. Once the
+     * callback publishes that handle, close it before returning failure; never
+     * release the facade while asyncfatfs may still be using the slot. */
+    if (op_delete_slot_timeout_observed &&
+        op_delete_slot_phase == FS_DELETE_SLOT_WAIT_SCAN) {
+        if (!op_file_ready)
+            return FS_STATUS_BUSY;
+        if (!op_file) {
+            op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+            return FS_STATUS_ERROR;
+        }
+        op_delete_slot_dir = op_file;
+        op_file = NULL;
+        op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
     }
 
     for (;;) {
@@ -12712,6 +12607,12 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
 
         case FS_DELETE_SLOT_SCAN_NEXT:
         {
+            if (op_delete_slot_scan_error) {
+                afatfs_findLastObject(op_delete_slot_dir,
+                                      &op_object_finder);
+                op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
+                break;
+            }
             afatfsOperationStatus_e st =
                 afatfs_findNextObject(op_delete_slot_dir,
                                       &op_object_finder,
@@ -12719,30 +12620,31 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
             if (st == AFATFS_OPERATION_IN_PROGRESS)
                 return FS_STATUS_BUSY;
             if (st == AFATFS_OPERATION_FAILURE) {
+                op_delete_slot_scan_error = 1u;
                 afatfs_findLastObject(op_delete_slot_dir,
                                       &op_object_finder);
-                filesystem_makeNamedErrorCode(
-                    "KDel", (uint8_t)op_delete_slot_phase);
-                op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
-                return FS_STATUS_ERROR;
+                op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
+                break;
             }
             if (op_object.id.kind == AFATFS_OBJECT_NONE) {
                 afatfs_findLastObject(op_delete_slot_dir,
                                       &op_object_finder);
-                op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
                 op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
                 break;
             }
-            if (filesystem_directoryObjectMatchesSlot(
+            if (filesystem_objectMatchesSlot(
                     &op_object,
                     op_delete_slot_number,
-                    op_delete_slot_allow_short_alias,
-                    op_delete_slot_bank_scene)) {
-                op_delete_slot_target_id = op_object.id;
-                afatfs_findLastObject(op_delete_slot_dir,
-                                      &op_object_finder);
-                op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
-                break;
+                    op_delete_slot_allow_short_alias)) {
+                if (op_object.lfnMalformed ||
+                    op_object.id.kind != AFATFS_OBJECT_DIRECTORY ||
+                    op_delete_slot_match_count != 0u) {
+                    op_delete_slot_scan_error = 1u;
+                } else {
+                    op_delete_slot_target = op_object;
+                }
+                if (op_delete_slot_match_count != 0xffu)
+                    op_delete_slot_match_count++;
             }
             return FS_STATUS_BUSY;
         }
@@ -12758,22 +12660,28 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
             if (!op_close_done)
                 return FS_STATUS_BUSY;
             op_delete_slot_dir = NULL;
-            if (op_delete_slot_target_id.kind == AFATFS_OBJECT_NONE) {
+            if (op_delete_slot_scan_error ||
+                op_delete_slot_match_count > 1u ||
+                op_delete_slot_timeout_observed) {
+                op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            if (op_delete_slot_match_count == 0u) {
                 op_delete_slot_phase = FS_DELETE_SLOT_DONE;
                 return FS_STATUS_DONE;
             }
             /*
-             * Delete the concrete directory object discovered by the scan.
+             * Delete the complete object captured by the parent scan.
              *
-             * Inputs: op_delete_slot_target_name is the visible name, while
-             * op_delete_slot_target_open_name is the matching object's exact
-             * short alias captured from afatfsObjectInfo_t. Output: recursive
-             * deletion opens and finally removes that physical alias. This is
-             * essential when repairing a Bank folder that already has duplicate
-             * `SS Name` children from an interrupted or pre-fix save.
+             * Input: op_delete_slot_target contains the validated display,
+             * SFN, LFN-fragment pointers, and first cluster from that one scan.
+             * Output: native deletion follows that copied physical identity;
+             * it performs no display-name or short-alias re-resolution. This
+             * is essential when a card already has duplicate visible names.
              */
             op_delete_tree_done = false;
-            if (!afatfs_deleteTree(&op_delete_slot_target_id, on_delete_tree_complete)) {
+            if (!afatfs_deleteTree(&op_delete_slot_target,
+                                   on_delete_tree_complete)) {
                 op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
                 return FS_STATUS_ERROR;
             }
@@ -12787,302 +12695,15 @@ static fs_status_t filesystem_deleteKitSlotDirectories_tick(void)
                 op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
                 return FS_STATUS_ERROR;
             }
-            op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
-            op_delete_slot_phase = FS_DELETE_SLOT_OPEN_SCAN;
-            break;
-        }
-    }
-}
-
-/*
- * Retired firmware-owned recursive deleter.
- *
- * asyncfatfs_deleteTree() now owns recursive traversal for the concrete
- * object captured by filesystem_deleteKitSlotDirectories_tick(). Keeping this
- * historical implementation disabled ensures its 558-byte name/alias stack
- * cannot return to SRAM while preserving the old algorithm only as temporary
- * source archaeology until the next broad storage cleanup removes it entirely.
- */
-#if 0
-static fs_status_t filesystem_deleteTree_tick(void)
-{
-    for (;;) {
-        switch (op_delete_tree_phase) {
-        case FS_DELETE_TREE_IDLE:
-        case FS_DELETE_TREE_DONE:
+            if (op_delete_slot_timeout_observed) {
+                op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
+                return FS_STATUS_ERROR;
+            }
+            op_delete_slot_phase = FS_DELETE_SLOT_DONE;
             return FS_STATUS_DONE;
-        case FS_DELETE_TREE_ERROR:
-            return FS_STATUS_ERROR;
-
-        case FS_DELETE_TREE_OPEN_TARGET:
-            op_file_ready = false;
-            op_file = NULL;
-            if (op_delete_tree_open_name_stack[0][0] != '\0') {
-                /*
-                 * Open by the exact SFN alias when the caller supplied one.
-                 *
-                 * Input: slot cleanup captured op_object.id.shortName for the
-                 * same directory it matched. Output: the recursive deleter
-                 * enters that physical directory instead of asking the LFN
-                 * matcher to choose among duplicate visible names.
-                 */
-                if (!afatfs_opendir(op_delete_tree_open_name_stack[0],
-                                    on_file_opened)) {
-                    return FS_STATUS_BUSY;
-                }
-            } else {
-                if (!afatfs_opendir_lfn(op_delete_tree_name_stack[0],
-                                        AFATFS_MATCH_CASE_INSENSITIVE,
-                                        op_delete_tree_child_open_name,
-                                        on_file_opened)) {
-                    return FS_STATUS_BUSY;
-                }
-            }
-            op_delete_tree_phase = FS_DELETE_TREE_WAIT_TARGET;
-            return FS_STATUS_BUSY;
-
-        case FS_DELETE_TREE_WAIT_TARGET:
-            if (!op_file_ready)
-                return FS_STATUS_BUSY;
-            if (!op_file) {
-                op_delete_tree_phase = FS_DELETE_TREE_DONE;
-                return FS_STATUS_DONE;
-            }
-            if (op_delete_tree_open_name_stack[0][0] == '\0') {
-                /*
-                 * LFN-open callers did not know the exact alias up front.
-                 *
-                 * afatfs_opendir_lfn() returned the concrete open component it
-                 * selected. Store it now so REMOVE_EMPTY_DIR still retires the
-                 * same entry that this delete tree entered.
-                 */
-                filesystem_copyLongComponent(
-                    op_delete_tree_open_name_stack[0],
-                    sizeof(op_delete_tree_open_name_stack[0]),
-                    op_delete_tree_child_open_name);
-            }
-            op_delete_tree_dir = op_file;
-            if (!afatfs_chdir(op_delete_tree_dir))
-                return FS_STATUS_BUSY;
-            op_delete_tree_phase = FS_DELETE_TREE_CLOSE_TARGET;
-            break;
-
-        case FS_DELETE_TREE_CLOSE_TARGET:
-            op_close_done = false;
-            if (!afatfs_fclose(op_delete_tree_dir, on_file_closed))
-                return FS_STATUS_BUSY;
-            op_delete_tree_phase = FS_DELETE_TREE_CLOSE_CHILD_DIR;
-            return FS_STATUS_BUSY;
-
-        case FS_DELETE_TREE_CLOSE_CHILD_DIR:
-            if (!op_close_done)
-                return FS_STATUS_BUSY;
-            op_delete_tree_dir = NULL;
-            op_delete_tree_phase = FS_DELETE_TREE_OPEN_SCAN;
-            break;
-
-        case FS_DELETE_TREE_OPEN_SCAN:
-            op_file_ready = false;
-            op_file = NULL;
-            if (!afatfs_fopen(".", "r", on_file_opened))
-                return FS_STATUS_BUSY;
-            op_delete_tree_phase = FS_DELETE_TREE_WAIT_SCAN;
-            return FS_STATUS_BUSY;
-
-        case FS_DELETE_TREE_WAIT_SCAN:
-            if (!op_file_ready)
-                return FS_STATUS_BUSY;
-            if (!op_file) {
-                filesystem_makeNamedErrorCode(
-                    "Del", (uint8_t)op_delete_tree_phase);
-                op_delete_tree_phase = FS_DELETE_TREE_ERROR;
-                return FS_STATUS_ERROR;
-            }
-            op_delete_tree_dir = op_file;
-            afatfs_findFirstObject(op_delete_tree_dir, &op_object_finder);
-            op_delete_tree_phase = FS_DELETE_TREE_SCAN_NEXT;
-            break;
-
-        case FS_DELETE_TREE_SCAN_NEXT:
-        {
-            afatfsOperationStatus_e st =
-                afatfs_findNextObject(op_delete_tree_dir,
-                                      &op_object_finder,
-                                      &op_object);
-            if (st == AFATFS_OPERATION_IN_PROGRESS)
-                return FS_STATUS_BUSY;
-            if (st == AFATFS_OPERATION_FAILURE) {
-                afatfs_findLastObject(op_delete_tree_dir, &op_object_finder);
-                filesystem_makeNamedErrorCode(
-                    "Del", (uint8_t)op_delete_tree_phase);
-                op_delete_tree_phase = FS_DELETE_TREE_ERROR;
-                return FS_STATUS_ERROR;
-            }
-            if (op_object.id.kind == AFATFS_OBJECT_NONE) {
-                afatfs_findLastObject(op_delete_tree_dir, &op_object_finder);
-                op_delete_tree_child_kind = AFATFS_OBJECT_NONE;
-            } else {
-                filesystem_copyLongComponent(op_delete_tree_child_name,
-                                             sizeof(op_delete_tree_child_name),
-                                             op_object.id.displayName);
-                filesystem_copyLongComponent(
-                    op_delete_tree_child_open_name,
-                    sizeof(op_delete_tree_child_open_name),
-                    op_object.id.shortName);
-                op_delete_tree_child_kind = op_object.id.kind;
-                afatfs_findLastObject(op_delete_tree_dir, &op_object_finder);
-            }
-            op_delete_tree_phase = FS_DELETE_TREE_CLOSE_SCAN_BEFORE_CHILD;
-            break;
-        }
-
-        case FS_DELETE_TREE_CLOSE_SCAN_BEFORE_CHILD:
-            op_close_done = false;
-            if (!afatfs_fclose(op_delete_tree_dir, on_file_closed))
-                return FS_STATUS_BUSY;
-            op_delete_tree_phase = FS_DELETE_TREE_HANDLE_CHILD;
-            return FS_STATUS_BUSY;
-
-        case FS_DELETE_TREE_HANDLE_CHILD:
-            if (!op_close_done)
-                return FS_STATUS_BUSY;
-            op_delete_tree_dir = NULL;
-            if (op_delete_tree_child_kind == AFATFS_OBJECT_FILE) {
-                op_remove_done = 0u;
-                if (!afatfs_removeObjects_lfn(op_delete_tree_child_name,
-                                              AFATFS_MATCH_CASE_INSENSITIVE,
-                                              AFATFS_REMOVE_FILES_ONLY,
-                                              on_remove_complete)) {
-                    return FS_STATUS_BUSY;
-                }
-                op_delete_tree_phase = FS_DELETE_TREE_WAIT_FILE_REMOVE;
-                return FS_STATUS_BUSY;
-            }
-            if (op_delete_tree_child_kind == AFATFS_OBJECT_DIRECTORY) {
-                if (op_delete_tree_depth + 1u >= FS_DELETE_DEPTH_MAX) {
-                    filesystem_makeNamedErrorCode(
-                        "Del", (uint8_t)op_delete_tree_phase);
-                    op_delete_tree_phase = FS_DELETE_TREE_ERROR;
-                    return FS_STATUS_ERROR;
-                }
-                op_file_ready = false;
-                op_file = NULL;
-                if (!afatfs_opendir(op_delete_tree_child_open_name,
-                                    on_file_opened)) {
-                    return FS_STATUS_BUSY;
-                }
-                op_delete_tree_phase = FS_DELETE_TREE_WAIT_CHILD_DIR;
-                return FS_STATUS_BUSY;
-            }
-            op_delete_tree_phase = FS_DELETE_TREE_OPEN_PARENT;
-            break;
-
-        case FS_DELETE_TREE_WAIT_FILE_REMOVE:
-            if (!op_remove_done)
-                return FS_STATUS_BUSY;
-            op_delete_tree_phase = FS_DELETE_TREE_OPEN_SCAN;
-            break;
-
-        case FS_DELETE_TREE_WAIT_CHILD_DIR:
-            if (!op_file_ready)
-                return FS_STATUS_BUSY;
-            if (!op_file) {
-                filesystem_makeNamedErrorCode(
-                    "Del", (uint8_t)op_delete_tree_phase);
-                op_delete_tree_phase = FS_DELETE_TREE_ERROR;
-                return FS_STATUS_ERROR;
-            }
-            op_delete_tree_dir = op_file;
-            if (!afatfs_chdir(op_delete_tree_dir))
-                return FS_STATUS_BUSY;
-            op_delete_tree_depth++;
-            filesystem_copyLongComponent(
-                op_delete_tree_name_stack[op_delete_tree_depth],
-                sizeof(op_delete_tree_name_stack[op_delete_tree_depth]),
-                op_delete_tree_child_name);
-            /*
-             * Keep the nested directory's exact alias beside its display name.
-             *
-             * Input: SCAN_NEXT copied the child afatfsObjectInfo_t.shortName
-             * before opening it. Output: after children are removed and the
-             * state climbs back to the parent, REMOVE_EMPTY_DIR can delete the
-             * exact nested directory that was just emptied.
-             */
-            filesystem_copyLongComponent(
-                op_delete_tree_open_name_stack[op_delete_tree_depth],
-                sizeof(op_delete_tree_open_name_stack[op_delete_tree_depth]),
-                op_delete_tree_child_open_name);
-            op_delete_tree_phase = FS_DELETE_TREE_CLOSE_CHILD_DIR;
-            break;
-
-        case FS_DELETE_TREE_OPEN_PARENT:
-        {
-            afatfsOperationStatus_e st = afatfs_chdirParent();
-            if (st == AFATFS_OPERATION_IN_PROGRESS)
-                return FS_STATUS_BUSY;
-            if (st == AFATFS_OPERATION_FAILURE) {
-                filesystem_makeNamedErrorCode(
-                    "Del", (uint8_t)op_delete_tree_phase);
-                op_delete_tree_phase = FS_DELETE_TREE_ERROR;
-                return FS_STATUS_ERROR;
-            }
-            op_delete_tree_phase = FS_DELETE_TREE_REMOVE_EMPTY_DIR;
-            break;
-        }
-
-        case FS_DELETE_TREE_WAIT_PARENT:
-        case FS_DELETE_TREE_CLOSE_PARENT:
-            op_delete_tree_phase = FS_DELETE_TREE_ERROR;
-            return FS_STATUS_ERROR;
-
-        case FS_DELETE_TREE_REMOVE_EMPTY_DIR:
-            op_delete_tree_dir = NULL;
-            op_remove_done = 0u;
-            if (op_delete_tree_open_name_stack[op_delete_tree_depth][0] !=
-                '\0') {
-                /*
-                 * Retire the exact directory entry that this recursion level
-                 * opened.
-                 *
-                 * Inputs: current directory is the parent, and the stack entry
-                 * is the printable SFN alias for the emptied child. Output:
-                 * asyncfatfs removes only that physical object. This is the
-                 * duplicate-LFN guard needed for Bank overwrite recovery: a
-                 * damaged `01 Slak2` sibling cannot intercept the removal.
-                 */
-                if (!afatfs_removeObject(
-                        op_delete_tree_open_name_stack[op_delete_tree_depth],
-                        AFATFS_REMOVE_EMPTY_DIRECTORIES,
-                        on_remove_complete)) {
-                    return FS_STATUS_BUSY;
-                }
-            } else {
-                if (!afatfs_removeObjects_lfn(
-                        op_delete_tree_name_stack[op_delete_tree_depth],
-                        AFATFS_MATCH_CASE_INSENSITIVE,
-                        AFATFS_REMOVE_EMPTY_DIRECTORIES,
-                        on_remove_complete)) {
-                    return FS_STATUS_BUSY;
-                }
-            }
-            op_delete_tree_phase = FS_DELETE_TREE_WAIT_REMOVE_EMPTY_DIR;
-            return FS_STATUS_BUSY;
-
-        case FS_DELETE_TREE_WAIT_REMOVE_EMPTY_DIR:
-            if (!op_remove_done)
-                return FS_STATUS_BUSY;
-            if (op_delete_tree_depth == 0u) {
-                op_delete_tree_phase = FS_DELETE_TREE_DONE;
-                return FS_STATUS_DONE;
-            }
-            op_delete_tree_depth--;
-            op_delete_tree_phase = FS_DELETE_TREE_OPEN_SCAN;
-            break;
         }
     }
 }
-
-#endif
 
 static void filesystem_saveKitDirectory_tick(void)
 {
@@ -13139,21 +12760,19 @@ static void filesystem_saveKitDirectory_tick(void)
             return;
         op_kit_root_dir = NULL;
         /*
-         * Remove every physical directory for this numbered Kit slot before
-         * creating the fresh one.
+         * Prove zero/one directory for this numbered Kit slot, then delete
+         * only the captured exact object before creating the fresh one.
          *
-         * This is stronger than deleting a cached old name plus the requested
-         * new name. A card can contain duplicate same-slot folders such as
-         * "003 RedSnap" and "003 Slak"; the scan cache will expose only one,
-         * so overwrite must discover and delete all matching numbered folders
-         * directly from /Kit/.
-         */
-        filesystem_deleteKitSlotDirectoriesStart();
+         * A card containing duplicate same-slot folders such as "003 RedSnap"
+         * and "003 Slak" is rejected before deletion or creation; the shared
+         * name cache is not used to rediscover a target.
+        */
+        filesystem_deleteKitSlotDirectoryStart();
         op_phase = 5u;
         return;
 
     case 5:
-        delete_status = filesystem_deleteKitSlotDirectories_tick();
+        delete_status = filesystem_deleteSlotDirectory_tick();
         if (delete_status == FS_STATUS_BUSY)
             return;
         if (delete_status == FS_STATUS_ERROR) {
@@ -13361,7 +12980,8 @@ static void filesystem_saveBankDirectory_tick(void)
          * while Instrument member filenames retain their required 16-character
          * source stems from SceneData. This replaces no new SRAM: the 129 rows
          * occupy the already-existing generalized cache until Bank index
-         * restoration after promotion. Affiliates: prepareBankSceneSaveSource
+         * restoration after direct replacement. Affiliates:
+         * prepareBankSceneSaveSource
          * and final Bank HCNAMES writer.
          */
         filesystem_prepareResidentNamesCache();
@@ -13430,7 +13050,7 @@ static void filesystem_saveBankDirectory_tick(void)
         return;
     }
 
-    case 82: /* CLOSE PRELOAD, THEN CREATE THE TEMP BANK */
+    case 82: /* CLOSE PRELOAD, THEN ENTER ROOT BANK REPLACEMENT */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -13477,144 +13097,47 @@ static void filesystem_saveBankDirectory_tick(void)
         if (!op_close_done)
             return;
         op_kit_root_dir = NULL;
-        /*
-         * Preflight the chosen scratch names before mkdir_lfn().
-         *
-         * Inputs: current directory is `/Bank/`; the request path already
-         * generated paired temp/old components. Output: phases 46..48 scan
-         * existing children and either prove both scratch names are absent or
-         * generate a different pair. This must happen before mkdir_lfn()
-         * because that API intentionally opens an existing directory instead
-         * of failing on same-name collision.
-         */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(".", "r", on_file_opened))
-            return;
-        op_phase = 46u;
+        /* Prove zero/one exact root Bank candidate before creating anything. */
+        filesystem_deleteSlotDirectoryStart(op_slot, 0u);
+        op_phase = 5u;
         return;
 
-    case 46:
-        if (!op_file_ready)
-            return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        afatfs_findFirstObject(op_file, &op_object_finder);
-        op_save_bank_scratch_collision = 0u;
-        op_phase = 47u;
-        return;
-
-    case 47:
+    case 5:
     {
-        afatfsOperationStatus_e ast =
-            afatfs_findNextObject(op_file, &op_object_finder, &op_object);
-        if (ast == AFATFS_OPERATION_IN_PROGRESS)
+        fs_status_t delete_status = filesystem_deleteSlotDirectory_tick();
+        if (delete_status == FS_STATUS_BUSY)
             return;
-        if (ast == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLastObject(op_file, &op_object_finder);
+        if (delete_status == FS_STATUS_ERROR) {
             filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
-            afatfs_findLastObject(op_file, &op_object_finder);
-            op_save_bank_scratch_collision = 0u;
-            op_phase = 48u;
-            return;
-        }
-        if (filesystem_bankScratchNameCollides(&op_object)) {
-            /*
-             * Found a stale scratch component.
-             *
-             * Inputs: the currently selected temp or old name is already a
-             * visible /Bank child. Output: close the scan handle and let phase
-             * 48 generate a new pair. The scan stops immediately because one
-             * collision is enough to make this pair unsafe for create-or-open.
-             */
-            afatfs_findLastObject(op_file, &op_object_finder);
-            op_save_bank_scratch_collision = 1u;
-            op_phase = 48u;
-            return;
-        }
-        return;
-    }
-
-    case 48:
-        /*
-         * Close the scratch preflight scan handle.
-         *
-         * Inputs: op_file is the temporary "." directory handle used only for
-         * /Bank enumeration. Output: phase 50 can safely inspect the latched
-         * collision flag after asyncfatfs has released the handle.
-         */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 50u;
-        return;
-
-    case 50:
-        if (!op_close_done)
-            return;
-        op_file = NULL;
-        if (op_save_bank_scratch_collision) {
-            uint16_t scratch_nonce;
-
-            if (op_save_bank_scratch_attempts++ >= 16u) {
-                filesystem_makeNamedErrorCode("BTmp", 48u);
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            /*
-             * Retry with a different paired scratch suffix.
-             *
-             * Inputs: a real /Bank child collided with either the temp or old
-             * scratch component. Output: both names are regenerated together
-             * and phase 4 starts a fresh scan from the top of /Bank. The retry
-             * loop avoids recursive deletion while still guaranteeing that the
-             * writer never opens a stale temp folder.
-             */
-            scratch_nonce = filesystem_nextBankScratchNonce();
-            filesystem_prepareBankScratchDirs(scratch_nonce);
-            op_phase = 4u;
             return;
         }
         op_phase = 49u;
         return;
+    }
 
     case 49:
         /*
-         * Create a non-numbered staging Bank directory.
+         * Create the final numbered Bank directory after exact deletion.
          *
-         * Inputs: current directory is `/Bank/`; op_save_bank_tmp_display_name
-         * is a request-unique name such as `tmp000-4a3f`, not a loadable
-         * `NNN Name` Bank slot. Output: phases 5..12 write bankset.bcg and all
-         * selected Bank-local Scenes into this temp folder first.
-         *
-         * Why: in-place Bank overwrite has repeatedly merged stale child
-         * Scenes and duplicate Instrument files into the numbered Bank folder.
-         * The numbered `000 Slak` slot should appear only after a complete temp
-         * payload exists. Promotion below renames the old numbered Bank aside
-         * and renames this temp folder into the final numbered slot.
-         *
-         * Accessing code: filesystem_requestSaveBank() captures final/temp/old
-         * names, filesystem_saveSceneDirectory_tick() writes child payloads
-         * under the temp folder, and promotion phases 39..45 publish it.
+         * Inputs: current directory is `/Bank/`; the old exact slot has already
+         * been removed by the singular resolver. Output: phases 5..12 write
+         * bankset.bcg and selected Bank-local Scenes directly into this fresh
+         * final tree. No temporary-root or old-name promotion exists.
          */
         op_file_ready = false;
         op_file = NULL;
         memset(op_save_bank_dir_open_name, 0,
                sizeof(op_save_bank_dir_open_name));
-        if (!afatfs_mkdir_lfn(op_save_bank_tmp_display_name,
+        if (!afatfs_mkdir_lfn(op_save_bank_dir_display_name,
                               AFATFS_MATCH_CASE_INSENSITIVE,
                               op_save_bank_dir_open_name,
                               on_file_opened)) {
             return;
         }
-        op_phase = 5u;
+        op_phase = 50u;
         return;
 
-    case 5:
+    case 50:
         if (!op_file_ready)
             return;
         if (!op_file) {
@@ -13681,7 +13204,7 @@ static void filesystem_saveBankDirectory_tick(void)
         if (op_bank_scene_save_mask == 0u) {
             if (!afatfs_chdir(NULL))
                 return;
-            op_phase = 39u;
+            op_phase = 45u;
             return;
         }
         for (op_bank_child_cursor = 0u;
@@ -13690,13 +13213,15 @@ static void filesystem_saveBankDirectory_tick(void)
             if ((op_bank_scene_save_mask &
                  (uint16_t)(1u << op_bank_child_cursor)) != 0u) {
                 /*
-                 * Write the selected Scene into the temp Bank folder.
+                 * Write the selected Scene into the freshly-created final
+                 * Bank folder.
                  *
                  * Input: op_bank_child_cursor is both resident Scene index and
                  * two-digit Bank-local child number. Output: phase 20 prepares
                  * the per-child Scene writer and delegates to the existing
                  * Scene payload save. No recursive child cleanup is needed
-                 * here because the parent is a unique non-numbered temp folder.
+                 * here because exact replacement already removed the previous
+                 * Bank tree.
                  */
                 op_phase = 20u;
                 return;
@@ -13719,7 +13244,7 @@ static void filesystem_saveBankDirectory_tick(void)
                 return;
             }
         }
-        op_phase = 39u;
+        op_phase = 45u;
         return;
     }
 
@@ -13764,12 +13289,12 @@ static void filesystem_saveBankDirectory_tick(void)
          * Reopen the just-created Bank directory by its short open component.
          *
          * Inputs: op_save_bank_dir_open_name was captured from mkdir_lfn() when
-         * the temp Bank folder was created/opened. Output: the temp Bank
+         * the final Bank folder was created/opened. Output: the final Bank
          * directory handle is restored after a child Scene payload returned to
          * root.
          * This must use afatfs_opendir(), not afatfs_opendir_lfn(): the LFN
-         * opener compares display names, while this scratch value is the 8.3
-         * open alias. Using the LFN opener here produced ERR BnkS11 after the
+         * opener compares display names, while this operation-local alias is
+         * the 8.3 open name. Using the LFN opener here produced ERR BnkS11 after the
          * first child Scene save.
          */
         if (!afatfs_opendir(op_save_bank_dir_open_name,
@@ -13808,14 +13333,14 @@ static void filesystem_saveBankDirectory_tick(void)
     case 20:
     {
         /*
-         * Prepare and write one Bank-local child into the temp Bank folder.
+         * Prepare and write one Bank-local child into the final Bank folder.
          *
-         * Inputs: current directory is the unique temp Bank directory and
+         * Inputs: current directory is the unique final Bank directory and
          * op_bank_child_cursor selects the resident Scene slot. Output: the
          * existing Scene writer starts at phase 8 and creates `SS Name/` with
-         * sceneset, embedded Kit, pattern, and effects. Because the temp parent
-         * is new, this path deliberately avoids recursive delete and cannot
-         * merge stale Instrument files into the child.
+         * sceneset, embedded Kit, pattern, and effects. Exact replacement
+         * completed first, so this path cannot merge stale Instrument files
+         * into the child.
          */
         if (!filesystem_prepareBankSceneSaveSource(op_bank_child_cursor)) {
             filesystem_finish(FS_STATUS_ERROR);
@@ -13826,117 +13351,8 @@ static void filesystem_saveBankDirectory_tick(void)
         return;
     }
 
-    case 39:
-        /*
-         * Begin temp Bank promotion from filesystem root.
-         *
-         * Inputs: a complete temp Bank tree has been written under `/Bank/`
-         * using op_save_bank_tmp_display_name. Output: phase 40 opens `/Bank/`
-         * so the following rename operations happen among root Bank children.
-         */
-        if (!afatfs_chdir(NULL))
-            return;
-        op_phase = 40u;
-        return;
-
-    case 40:
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_opendir_lfn(STORAGE_ROOT_BANK,
-                                AFATFS_MATCH_CASE_INSENSITIVE,
-                                op_root_open_name,
-                                on_file_opened)) {
-            return;
-        }
-        op_phase = 41u;
-        return;
-
-    case 41:
-        if (!op_file_ready)
-            return;
-        if (!op_file) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_kit_root_dir = op_file;
-        if (!afatfs_chdir(op_kit_root_dir))
-            return;
-        op_phase = 42u;
-        return;
-
-    case 42:
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 43u;
-        return;
-
-    case 43:
-        if (!op_close_done)
-            return;
-        op_kit_root_dir = NULL;
-        /*
-         * Move the old numbered Bank out of the loadable namespace.
-         *
-         * Inputs: current directory is `/Bank/`; op_save_bank_dir_display_name
-         * is the final `NNN Name` slot and op_save_bank_old_display_name is a
-         * non-numbered `old...` component. Output: if the old Bank exists, it
-         * is renamed out of the numbered namespace without recursing through
-         * its children. If it does not exist, asyncfatfs completes with an
-         * empty open-name buffer and phase 45 still attempts temp promotion.
-         *
-         * Why: deleting a damaged old Bank tree recursively has been the
-         * failure point. Renaming the old directory preserves its contents for
-         * manual cleanup while making it invisible to root Bank scans.
-         */
-        op_rename_done = 0u;
-        memset(op_save_bank_rename_open_name, 0,
-               sizeof(op_save_bank_rename_open_name));
-        if (!afatfs_renameObject_lfn(op_save_bank_dir_display_name,
-                                     op_save_bank_old_display_name,
-                                     AFATFS_MATCH_CASE_INSENSITIVE,
-                                     op_save_bank_rename_open_name,
-                                     on_rename_complete)) {
-            return;
-        }
-        op_phase = 44u;
-        return;
-
-    case 44:
-        if (!op_rename_done)
-            return;
-        /*
-         * Publish the complete temp Bank as the numbered slot.
-         *
-         * Inputs: temp tree name from filesystem_requestSaveBank() and final
-         * `NNN Name` display name. Output: op_save_bank_rename_open_name
-         * receives the final asyncfatfs-openable alias on success. If this
-         * buffer stays empty, the promotion did not happen and the numbered
-         * Bank is not trustworthy, so the save reports an error instead of
-         * silently leaving the menu on a broken slot.
-         */
-        op_rename_done = 0u;
-        memset(op_save_bank_rename_open_name, 0,
-               sizeof(op_save_bank_rename_open_name));
-        if (!afatfs_renameObject_lfn(op_save_bank_tmp_display_name,
-                                     op_save_bank_dir_display_name,
-                                     AFATFS_MATCH_CASE_INSENSITIVE,
-                                     op_save_bank_rename_open_name,
-                                     on_rename_complete)) {
-            return;
-        }
-        op_phase = 45u;
-        return;
-
     case 45:
-        if (!op_rename_done)
-            return;
-        if (op_save_bank_rename_open_name[0] == '\0') {
-            filesystem_makeNamedErrorCode("BProm", 45u);
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        storage_copyFilename(op_save_bank_dir_open_name,
-                             op_save_bank_rename_open_name);
+        /* The final directory is already openable through its captured alias. */
         if (!afatfs_chdir(NULL))
             return;
         filesystem_recordSavedBankDirectory(op_save_bank_dir_display_name,
@@ -13959,7 +13375,7 @@ static void filesystem_saveBankDirectory_tick(void)
         filesystem_markSettingsDirty();
         bank_setHasResidentBank(1u);
         /*
-         * The promoted root folder is the authoritative new Bank identity.
+         * The newly-created final root folder is the authoritative Bank identity.
          * Update only row zero in the already-read register; selected Scene,
          * Kit, and Instrument rows were copied from HCNAMES into the just
          * written Bank tree and remain unchanged in resident memory.
@@ -13968,7 +13384,7 @@ static void filesystem_saveBankDirectory_tick(void)
         op_phase = 83u;
         return;
 
-    case 83: /* OPEN ROOT HCNAMES FOR POST-PROMOTION REGISTER WRITE */
+    case 83: /* OPEN ROOT HCNAMES FOR DIRECT-REPLACEMENT REGISTER WRITE */
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
@@ -14031,7 +13447,7 @@ static void filesystem_saveBankDirectory_tick(void)
          * a previously staged load source becomes clean only after this close. */
         filesystem_clearResidentSourceDirtyFlags();
         /*
-         * Bank Save has now promoted its complete temporary tree. Park the
+         * Bank Save has now completed its direct delete/recreate tree. Park the
          * original callback and run the same boot-equivalent Bank rescan plus
          * `/Bank/.hcindex` rewrite used by Kit, root Scene, and Bank. This is required
          * for newly-created, renamed, or removed root Bank folders to become
@@ -14128,12 +13544,12 @@ static void filesystem_saveSceneDirectory_tick(void)
          * or to other numbered Scene children, regardless of nested Kit,
          * pattern, or effect subdirectories inside those other Scenes.
          */
-        filesystem_deleteSceneSlotDirectoriesStart();
+        filesystem_deleteSceneSlotDirectoryStart();
         op_phase = 5u;
         return;
 
     case 5:
-        delete_status = filesystem_deleteKitSlotDirectories_tick();
+        delete_status = filesystem_deleteSlotDirectory_tick();
         if (delete_status == FS_STATUS_BUSY)
             return;
         if (delete_status == FS_STATUS_ERROR) {
@@ -16801,6 +16217,7 @@ static uint8_t filesystem_blockRename(const char *old_name,
      */
     memset(open_name, 0, sizeof(open_name));
     op_rename_done = 0u;
+    op_rename_result = AFATFS_RESULT_OK;
     while (!afatfs_renameObject_lfn(old_name,
                                     new_name,
                                     AFATFS_MATCH_CASE_INSENSITIVE,
@@ -16815,7 +16232,7 @@ static uint8_t filesystem_blockRename(const char *old_name,
         if (!filesystem_blockFsOk())
             return 0u;
     }
-    if (open_name[0] == '\0')
+    if (op_rename_result != AFATFS_RESULT_OK || open_name[0] == '\0')
         return 0u;
     while (!afatfs_sync()) {
         filesystem_blockPoll();
@@ -20192,9 +19609,9 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
     op_delete_slot_dir = NULL;
     op_delete_slot_allow_short_alias = 0u;
-    op_delete_slot_bank_scene = 0u;
     op_delete_slot_number = 0u;
-    op_delete_slot_target_id.kind = AFATFS_OBJECT_NONE;
+    memset(&op_delete_slot_target, 0, sizeof(op_delete_slot_target));
+    op_delete_slot_target.id.kind = AFATFS_OBJECT_NONE;
     /*
      * Do not clear either dedicated cache or stage in generic request setup.
      *
@@ -20221,15 +19638,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(op_bank_display_name, 0, sizeof(op_bank_display_name));
     memset(op_save_bank_dir_display_name, 0,
            sizeof(op_save_bank_dir_display_name));
-    memset(op_save_bank_tmp_display_name, 0,
-           sizeof(op_save_bank_tmp_display_name));
-    memset(op_save_bank_old_display_name, 0,
-           sizeof(op_save_bank_old_display_name));
     memset(op_save_bank_dir_open_name, 0, sizeof(op_save_bank_dir_open_name));
-    memset(op_save_bank_rename_open_name, 0,
-           sizeof(op_save_bank_rename_open_name));
-    op_save_bank_scratch_attempts = 0u;
-    op_save_bank_scratch_collision = 0u;
     op_bank_child_present_mask = 0u;
     op_bank_scene_load_mask = 0u;
     op_bank_scene_save_mask = 0u;
@@ -21146,8 +20555,6 @@ bool filesystem_requestSaveBank(uint16_t slot,
                                 uint16_t bank_scene_save_mask,
                                 fs_completion_cb_t cb)
 {
-    uint16_t scratch_nonce;
-
     /*
      * Capture one Bank Save request.
      *
@@ -21204,8 +20611,6 @@ bool filesystem_requestSaveBank(uint16_t slot,
     filesystem_makeNumberedDir(op_save_bank_dir_display_name,
                                slot,
                                display_name);
-    scratch_nonce = filesystem_nextBankScratchNonce();
-    filesystem_prepareBankScratchDirs(scratch_nonce);
     memcpy(op_bank_display_name, display_name, STORAGE_KIT_DISPLAY_NAME_LEN);
     op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     return true;

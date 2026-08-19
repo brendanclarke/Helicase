@@ -102,6 +102,10 @@ typedef afatfsDirEntryPointer_t afatfsFinder_t;
  */
 #define AFATFS_SHORT_FILENAME_MAX 13u
 #define AFATFS_LONG_FILENAME_MAX  48u
+/* Four VFAT fragments cover the complete 48-character component bound. */
+#define AFATFS_LONG_FILENAME_ENTRY_MAX \
+    ((AFATFS_LONG_FILENAME_MAX + FAT_LFN_CHARS_PER_ENTRY - 1u) / \
+     FAT_LFN_CHARS_PER_ENTRY)
 
 typedef enum {
     AFATFS_MATCH_CASE_INSENSITIVE = 0,
@@ -130,14 +134,20 @@ typedef enum {
  * Opaque physical identity of a FAT object.
  * Why: Resolves the "stale short alias" and "duplicate LFN" bugs. By storing
  * the physical directory entry pointers and cluster chains, subsequent operations
- * (open, delete, move) guarantee they act on the exact same object discovered
- * during scanning, regardless of string overlaps.
+ * (open, delete, and name retirement) guarantee they act on the exact same
+ * object discovered
+ * during scanning, regardless of string overlaps. `lfnFirstEntry` is the
+ * first on-card LFN fragment and `lfnFollowingEntry[0..N-2]` are the remaining
+ * fragments in physical directory order; they are never reconstructed by
+ * pointer arithmetic.
  */
 typedef struct {
     afatfsObjectKind_t kind;
     char displayName[AFATFS_LONG_FILENAME_MAX + 1u];
     char shortName[AFATFS_SHORT_FILENAME_MAX];
     afatfsDirEntryPointer_t lfnFirstEntry;
+    /* Physical VFAT entries after lfnFirstEntry, in on-card order. */
+    afatfsDirEntryPointer_t lfnFollowingEntry[AFATFS_LONG_FILENAME_ENTRY_MAX - 1u];
     uint8_t lfnEntryCount;
     afatfsDirEntryPointer_t sfnEntry;
     uint32_t firstCluster;
@@ -169,6 +179,9 @@ typedef enum {
  * opens. sfnEntry points at the owning physical directory entry; lfnFirstEntry
  * and lfnEntryCount identify the preceding VFAT fragment run so future delete
  * or rename code can update the whole object instead of only the short entry.
+ * lfnMalformed is set when VFAT-looking entries immediately precede this SFN
+ * but fail ordinal, checksum, shape, or completeness validation; destructive
+ * clients must reject that object rather than guess which entries belong to it.
  *
  * Note: Now wraps afatfsObjectId_t to enforce unified identity semantics.
  */
@@ -176,6 +189,7 @@ typedef struct {
     afatfsObjectId_t id;
     uint8_t ntReserved;
     uint8_t hasLongName;
+    uint8_t lfnMalformed;
 } afatfsObjectInfo_t;
 
 /*
@@ -198,8 +212,11 @@ typedef struct {
     uint8_t lfnValid;
     uint8_t lfnChecksum;
     uint8_t lfnEntryCount;
+    uint8_t lfnExpectedOrdinal;
+    uint8_t lfnMalformed;
     char lfnName[AFATFS_LONG_FILENAME_MAX + 1u];
     afatfsDirEntryPointer_t lfnFirstEntry;
+    afatfsDirEntryPointer_t lfnFollowingEntry[AFATFS_LONG_FILENAME_ENTRY_MAX - 1u];
 } afatfsObjectFinder_t;
 
 typedef enum {
@@ -233,7 +250,6 @@ bool afatfs_fopen_lfn(const char *displayName,
                       afatfsFileCallback_t complete);
 bool afatfs_ftruncate(afatfsFilePtr_t file, afatfsFileCallback_t callback);
 bool afatfs_fclose(afatfsFilePtr_t file, afatfsCallback_t callback);
-bool afatfs_funlink(afatfsFilePtr_t file, afatfsCallback_t callback);
 
 /*
  * Rename one object in the current directory by display component.
@@ -250,9 +266,8 @@ bool afatfs_funlink(afatfsFilePtr_t file, afatfsCallback_t callback);
  * short alias needed by existing open paths.
  *
  * Inputs: oldDisplayName and newDisplayName are current-directory components,
- * not paths. openNameOut may be NULL. complete fires after success or failure;
- * callers inspect openNameOut[0] or their outer filesystem state to decide
- * whether the rename succeeded.
+ * not paths. openNameOut may be NULL. complete receives a structured result
+ * after success or failure; openNameOut is valid only with OK.
  *
  * Outputs/effects: first cluster, file size, attributes, timestamps, and
  * directory children are preserved. Only the object name entry run changes.
@@ -265,7 +280,7 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
                              const char *newDisplayName,
                              afatfsMatchMode_t matchMode,
                              char openNameOut[AFATFS_SHORT_FILENAME_MAX],
-                             afatfsCallback_t complete);
+                             afatfsResultCallback_t complete);
 
 /*
  * Remove all objects whose display name matches one component.
@@ -278,8 +293,9 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
  * Why: Product overwrite is case-insensitive and case-preserving. If an
  * external filesystem created `Kick.drm` and `kick.drm`, saving `KiCk.drm`
  * must remove both old physical variants before writing one new object with the
- * user's entered case. afatfs_funlink() cannot do this because it needs an open
- * handle and deletes only the SFN entry.
+ * user's entered case. The retired opened-handle unlink shortcut was removed
+ * because it could only retire an SFN entry and was not a safe product
+ * primitive.
  *
  * Inputs: displayName is a single component in the current directory. LFN
  * operations convert unsupported display characters to '_' and strip trailing
@@ -288,8 +304,9 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
  * writes. AFATFS_REMOVE_EMPTY_DIRECTORIES is used only by filesystem.c after
  * its recursive delete state machine has emptied the target directory.
  *
- * Outputs/effects: callbacks fire once the scan has reached the end or failed.
- * A successful no-op is allowed when no matching object exists. The operation
+ * Outputs/effects: callbacks receive a structured result once the scan has
+ * reached the end or failed. A successful no-op is allowed when no matching
+ * object exists. The operation
  * restarts its scan after each deletion because retiring entries mutates the
  * directory being scanned.
  *
@@ -300,7 +317,7 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
 bool afatfs_removeObjects_lfn(const char *displayName,
                               afatfsMatchMode_t matchMode,
                               afatfsRemoveObjectMode_t mode,
-                              afatfsCallback_t complete);
+                              afatfsResultCallback_t complete);
 /*
  * Remove one exact short-alias object from the current directory.
  *
@@ -321,12 +338,12 @@ bool afatfs_removeObjects_lfn(const char *displayName,
  *
  * Inputs/accessors: filename must be the printable shortName returned in
  * afatfsObjectInfo_t or an openNameOut returned by mkdir/open LFN helpers.
- * Output/effects: the completion callback fires after the scan either retires
- * that exact entry or reaches the end as a successful no-op.
+ * Output/effects: the result callback fires after the scan either retires that
+ * exact entry or reaches the end as a successful no-op.
  */
 bool afatfs_removeObject(const char *filename,
                          afatfsRemoveObjectMode_t mode,
-                         afatfsCallback_t complete);
+                         afatfsResultCallback_t complete);
 
 bool afatfs_feof(afatfsFilePtr_t file);
 void afatfs_fputc(afatfsFilePtr_t file, uint8_t c);
@@ -392,16 +409,6 @@ bool afatfs_opendir_lfn(const char *displayName,
                         afatfsMatchMode_t matchMode,
                         char openNameOut[AFATFS_SHORT_FILENAME_MAX],
                         afatfsFileCallback_t complete);
-
-/*
- * Parent-relative operations.
- * Why: Prevents asynchronous product state machines from clobbering the global
- * `afatfs.currentDirectory`.
- * Inputs: A valid open directory handle instead of using global state.
- */
-void afatfs_findFirstObjectInDir(afatfsDirHandle_t parent, afatfsObjectFinder_t *finder);
-bool afatfs_fopenChild(afatfsDirHandle_t parent, const char *displayName, afatfsCreateMode_t mode, afatfsFileCallback_t complete);
-bool afatfs_mkdirChild(afatfsDirHandle_t parent, const char *displayName, afatfsCreateMode_t mode, afatfsFileCallback_t complete);
 
 /**
  * @brief Change the working directory to the specified directory handle.
@@ -476,9 +483,10 @@ afatfsError_e afatfs_getLastError();
  * Why: replacement saves must delete the exact same-slot directory selected by
  * the product scanner, including cards with duplicate or stale display names,
  * without blocking audio while FAT sectors are read and written.
- * Inputs: root must describe a directory and remain valid only for the duration
- * of this call because the identity is copied into private operation state. cb
- * may be NULL; when non-NULL it is invoked exactly once with OK or an error.
+ * Inputs: root must be the complete directory result returned by
+ * afatfs_findNextObject() and remain valid only for the duration of this call
+ * because the identity is copied into private operation state. cb may be NULL;
+ * when non-NULL it is invoked exactly once with OK or an error.
  * Outputs/lifecycle: true means a private file handle accepted the operation;
  * false means no handle was available and no callback will occur. On every
  * terminal path the implementation releases retained cache sectors and resets
@@ -487,35 +495,6 @@ afatfsError_e afatfs_getLastError();
  * Affiliates: filesystem.c same-slot Kit/Scene cleanup,
  * afatfsObjectFinder_t, afatfs_getDeleteTreePhase(), and afatfs_poll().
  */
-bool afatfs_deleteTree(const afatfsObjectId_t *root, afatfsResultCallback_t cb);
+bool afatfs_deleteTree(const afatfsObjectInfo_t *root,
+                       afatfsResultCallback_t cb);
 uint8_t afatfs_getDeleteTreePhase(void);
-
-/*
- * State machine for cross-directory movement.
- * Why: Moves a physical object (and its cluster chain) to a new parent directory.
- * Requires allocating a new directory entry run in the destination, copying the
- * cluster pointer, and marking the old entry run as deleted (0xE5).
- */
-bool afatfs_moveObject(const afatfsObjectId_t *src, afatfsDirHandle_t dst_parent, const char *dst_name, afatfsResultCallback_t cb);
-
-/*
- * State machine for deep tree copy.
- * Why: Avoids loading product files into RAM just to re-serialize them.
- * Reads source clusters into the 4KB cache and flushes them to newly allocated
- * destination clusters.
- */
-bool afatfs_copyObjectTree(const afatfsObjectId_t *src, afatfsDirHandle_t dst_parent, const char *dst_name, afatfsResultCallback_t cb);
-
-/*
- * Transactional directory replace.
- * Why: Bank Save needs to guarantee that old data is entirely displaced and the
- * new tree is completely synced before becoming visible.
- * Internals:
- * 1. Generates `tmp_XXXX` under the parent.
- * 2. Caller populates `tmp_XXXX` (via explicit handle, not `chdir`).
- * 3. `commitTreeReplace` executes a rename of the old target to `old_XXXX`,
- *    renames `tmp_XXXX` to target, and schedules `old_XXXX` for background deletion.
- */
-bool afatfs_beginTreeReplace(afatfsDirHandle_t parent, const char *target_name, afatfsDirHandle_t *tx_out);
-bool afatfs_commitTreeReplace(afatfsDirHandle_t tx, afatfsResultCallback_t cb);
-bool afatfs_abortTreeReplace(afatfsDirHandle_t tx, afatfsResultCallback_t cb);

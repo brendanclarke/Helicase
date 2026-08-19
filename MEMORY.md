@@ -17,9 +17,9 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 052 Bank Load persistence in a
+**Current working source**: Session 053 recursive-delete reimplementation in a
 dirty worktree on `dev-ph3-autosave-ph2`. The durable closeout is
-`knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`; verify the actual
+`knowledge_files/log_archive/053_SESSION_HANDOFF_LOG.md`; verify the actual
 commit/worktree before making the next source change.
 
 ## RAM Allocation Approval Policy
@@ -89,8 +89,8 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   active_scene and a 16-bit scene_mask_voice_edit; Bank-local Scene folders
   are 00..15. Bank Load delegates each selected local payload through the
   shared Scene loader, and Bank Save serializes the selected children through
-  a temporary sibling/promotion flow. This is not a crash-recoverable
-  transaction.
+  direct exact-root delete/recreate. This is not a crash-recoverable
+  transaction; temporary/old promotion names are not used.
 - Instrument membership is fully dynamic at boot and runtime. SceneData must
   initialize before InstrumentManager constructs tagged members. Scene
   activation clears outgoing targets, image-applies all six incoming types,
@@ -237,11 +237,11 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Never add object self-name fields to `sceneset.scg`, `bankset.bcg`, or
   instrument files. Object identity comes from directory/file names.
 - For overwrite code, enter the correct parent root first, parse visible child
-  names with the right product parser, capture the selected afatfsObjectId_t,
-  and delete only that exact same-slot object. Native afatfs_deleteTree copies
-  its identity and completes asynchronously; its false return means no
-  callback. This is documented in `FILESYSTEM_SPEC.md` and
-  `ASYNCFATFS_REFERENCE.md`.
+  names with the right product parser, prove zero/one candidate, capture the
+  complete selected afatfsObjectInfo_t, and delete only that exact same-slot
+  object. Native afatfs_deleteTree copies its identity and completes
+  asynchronously; its false return means no callback. This is documented in
+  `FILESYSTEM_SPEC.md` and `ASYNCFATFS_REFERENCE.md`.
 - File/Dir/sDir are no longer in the normal type cycle; their compatibility
   filesystem/Preset calls do no work, although residual Menu display code and
   the two 49-byte strings remain linked. There are exactly two development
@@ -286,8 +286,23 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   0xffff, and `tools/verify_bank_autosave.py` PASS. Deferred to
   `SCOPING_TARGETS.md`: the boot Kit-quarantine refactor (KQ019KST), the Bank
   Save present-mask union (P1), and the boot settings-mark redundancy (P2).
-  The disposable `SESSION_052_PRE_PLAN.md` and `SESSION_052_POST_ANALYSIS.md`
-  are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
+The disposable `SESSION_052_PRE_PLAN.md` and `SESSION_052_POST_ANALYSIS.md`
+are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
+- Session 053 reimplemented AsyncFATFS recursive delete and the Bank/Scene/Kit
+  overwrite path (exact-object delete/recreate, direct Bank Save, structured
+  remove/rename results, no tmp/old promotion) and relaxed the LFN shape
+  validator to accept 0xffff padding. Source builds (text 379,660, data 396,
+  bss 94,612) but the overwrite matrix is UNPROVEN on hardware: Scene overwrite
+  returned ScnS05 though the slot was replaced, Kit Save did not materialize,
+  Kit Save menu was empty, and boot Bank Load still times out (B012S09I).
+  HCNAMES source provenance is not updated on Save (reports loaded slot, not
+  saved). The AutoSave boot Bank section is empty by design (tracking enabled
+  after the boot Bank Load) and is deferred to the AutoSave reader milestone.
+  Deferred targets are in SCOPING_TARGETS.md; durable closeout is
+  knowledge_files/log_archive/053_SESSION_HANDOFF_LOG.md. The four working docs
+  (SESSION_053_PRE_PLANNING.md, RECURSIVE_TREE_DELETE_REIMPLEMENT.md,
+  KIT_PARSE_BOOTLOCK_RESOLVE.md, LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md) may be
+  deleted; their durable facts are preserved in the handoff and SCOPING_TARGETS.
 
 ---
 
@@ -664,9 +679,9 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
 - Dot-prefixed files/directories are real filesystem objects. asyncfatfs
   exposes them; product scanners filter only after object iteration. In
   particular `.hctmp.<ext>` is excluded from Instrument indexes and repair.
-- Filesystem-level recursive directory cleanup exists for replacement-style
-  saves such as Kit Save. Atomic rename/replace remains missing and is required
-  before Scene/Bank library promotion can claim power-loss-safe commits.
+- Filesystem-level exact-object recursive delete/recreate now exists for Kit,
+  root Scene, and root Bank replacement. It is non-atomic; no old/temporary
+  promotion or power-loss-safe commit is claimed.
   Hidden AutoSave A/B publication uses its separate commit-last contract in
   `AUTOSAVE.md`; it is not the abandoned per-library-file dot-backer design.
 - Root `Instrument/` is a separately scanned, type-filtered source pool.
@@ -961,10 +976,9 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   saves over slots 024 and 009, produced no heard audio glitch after the trace
   flush admission guard. This is a useful stability result, not proof that all
   Bank Save/Load or AutoSave interactions are complete.
-- **Known bug — overwrite save can leave an old folder.** Bank, root Scene,
-  and Kit replacement require a correct native `afatfs_deleteTree()` recursive
-  delete. Do not bring back `old*` directory renames or boot cleanup as a
-  workaround.
+- Native recursive tree delete was reimplemented on 2026-08-19. Card-fixture
+  and hardware acceptance remain pending; do not claim power-loss atomicity or
+  reintroduce `old*`/temporary promotion as a workaround.
 - **Known bug — runtime Bank Load can switch the playing Scene.** Defer the
   request-time active-Scene preservation change until Bank Load/Save is
   otherwise stable. Boot must retain its saved-default-Scene behavior.

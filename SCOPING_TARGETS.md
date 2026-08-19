@@ -46,7 +46,13 @@ Every phase ends with **Open Engineering Questions** (things that need a decisio
 
 ## Pinned filesystem correctness target — duplicate-slot overwrite
 
-**Status: deferred; do not implement in the current session.**
+**Status: implemented in Session 053 (source + ARM build); hardware acceptance
+still FAILS and must be re-run.** The native deleter and overwrite callers were
+rebuilt per `RECURSIVE_TREE_DELETE_REIMPLEMENT.md`, but the overwrite matrix has
+not passed on hardware: Scene overwrite returned `ScnS05` (the delete-slot
+resolver phase) even though the slot was physically replaced, Kit overwrite did
+not materialize a library Kit, and the Kit Save menu came up empty. Treat the
+source as unproven until those are fixed.
 
 The duplicate-folder defect in Bank, root Scene, and Kit overwrites is an
 AsyncFATFS recursive-delete correctness problem. Its solution is to repair
@@ -302,6 +308,120 @@ unconditional mark ("the unconditional mark so both paths share one authority")
 rather than gating it on `fs_settings_runtime_ready`. That tradeoff should be
 accepted deliberately, or the mark should be gated, as part of the refactor
 session.
+
+### Deferred refactor target — AutoSave boot-load durability and read model
+
+**Status: deferred until the AutoSave reader is implemented; do not fix the
+current boot Bank Load write now.** The present boot Bank Load AutoSave write is
+known-incorrect, but changing it before the reader exists would only move the
+divergence around. It is accepted as-is for now.
+
+#### Known-incorrect boot Bank Load write
+
+On a boot that loads Bank 008, `/.hcprms1/2` are created, but the Bank section
+is written with `scene_present_mask=0x0000`, `active_scene=0`,
+`scene_mask_voice_edit=0x0000`, and the Scene payloads are absent. Root cause:
+`autosave_setMutationTrackingEnabled(1)` is only called at the end of
+`filesystem_ensureAutosaveFilesBlocking()`, after the boot Bank Load has
+already run, so every boot-load marker is rejected
+(`autosave_markPayloadOffsetDirty()` returns zero while tracking is off) and the
+canonical mask stays empty (`post-merge canonical mask dirty=0`).
+
+This is deliberate in the current design ("boot population must not be mistaken
+for user mutation"), but it means the boot Bank Load resident state is not
+captured into AutoSave. The reader milestone below is what makes this matter.
+
+#### Correct boot-load model for AutoSave read
+
+When the AutoSave reader lands, boot order becomes:
+
+1. Validate `/.hcprms1` / `/.hcprms2`, select the newest valid generation, and
+   restore the resident Bank/Scenes/Kits/Instruments from it. This is the
+   primary boot path.
+2. Only when the records are missing, corrupt, or fail validation does boot fall
+   back to loading from `Bank`, `Scene`, `Kit`, or `Instrument` (the current
+   path).
+
+Boot fallback loads must not be captured live (tracking is still off). Instead,
+record a small deferred boot-fallback scope and bulk-apply it after boot.
+
+#### Deferred boot-fallback scope
+
+- **Latch location:** a small retained record in the filesystem/AutoSave layer,
+  not the transient `pm_request_*` state in Menu. Contents: fallback type enum
+  (Bank / Scene / Kit / Instrument), the destination Scene mask, and (for Bank)
+  the 16-bit child mask. A few bytes total.
+- **Set it synchronously** at fallback load commit, even though the dirty-marking
+  is deferred.
+- **Apply it once**, immediately after `filesystem_ensureAutosaveFilesBlocking()`
+  enables tracking and before the first drain, then clear it.
+- **Clear it** in every reset/remount path so a stale "fallback happened" bit
+  cannot force a spurious full drain on the next boot.
+- **Arm only on actual fallback.** A clean AutoSave restore must not arm it, or
+  every normal boot would re-dirty the whole record.
+- **Granularity:** at least instrument-level, using the existing
+  `autosave_markWholeInstrumentDirty()`, `autosave_markKitDirty()`,
+  `autosave_markSceneWithoutPatternDirty()`, and `autosave_markBankFieldDirty()`.
+  Over-marking is safe (the drain reads live RAM); under-marking is the bug.
+
+#### Durability model
+
+- `/.hcnames` is the synchronous identity/provenance guard. A load does not
+  report completion until its HCNAMES update is written and flushed, so "load a
+  thing and immediately switch off" preserves *what* was loaded (name + source).
+- `/.hcprms1/2` are the all-or-nothing value guard. A drain copies the winner +
+  taken patches into the inactive record, CRCs it, and only then commits the
+  generation (`0xa5` commit byte). Power-off before commit leaves the previous
+  winner intact; the partial inactive record is discarded.
+- The 3,856-byte canonical mask is RAM-only and is the sole uncommitted marker.
+  `autosave_maskBitTake()` clears a bit before capturing its live value; a
+  concurrent mutation re-sets the bit, and a clean write error restores taken
+  bits via `autosave_maskRestoreCaptured()`. Power-off between take and commit
+  is not recoverable and is equivalent to a never-drained change.
+- Therefore fallback loads are RAM-only-deferrable without data loss: their
+  identity is already durable in `/.hcnames`, and their values are recoverable
+  by re-loading from the library on the next fallback. Unsaved parameter edits
+are the only AutoSave-critical class and continue through the normal immediate
+dirty-bit path.
+
+### Deferred targets folded from Session 053 pre-planning
+
+**Status: not implemented this session; carried into SCOPING_TARGETS for later.**
+
+- **AUTOSAVE Phase-2 Step 6 (Load/Save exclusion).** Two isolated sub-changes:
+  (a) prevent a new AutoSave writer start while a Load/Save page owns the
+  filesystem facade, while still draining dirty bits that existed before the
+  page opened; (b) defer physical Load/Save entry while an AutoSave transaction
+  is mid-flight. The `A/V/M/C/P/T` trace already exists to prove the chosen path.
+- **AUTOSAVE Phase-2 Step 3 remaining hardware evidence.** Independent fixtures
+  for root Scene Load/Save provenance, partial Bank Load/Save provenance, and
+  AutoSave OFF-to-ON lifecycle (idle re-arm; in-flight transaction reaches its
+  close boundary).
+- **AUTOSAVE Phase-2 Step 5.4 regression check.** Prove Menu preview/selection
+  alone never produces an AutoSave dirty mark (only a publicly completed Scene
+  load does).
+
+### Session 053 test-report defects (to schedule)
+
+- **HCNAMES source provenance is not updated on Save (primary).** The Save
+  completion paths refresh the resident name cache but do not call
+  `filesystem_setResidentSource(row, op_slot)` (or `@` for instruments); the
+  source token keeps the loaded slot instead of the saved slot. Confirmed for
+  Scene (source `004` vs saved `031`) and Kit (`013`), and Instrument save
+  published no `@`.
+- **Scene overwrite `ScnS05`.** `SAVE_SCENE` phase 5 is the delete-slot
+  resolver; the slot was physically replaced yet the save reported error. The
+  resolver must return a clean, consistent result.
+- **Kit Save does not materialize a library Kit.** No new or renamed `/Kit/`
+  directory was produced in the overwrite test.
+- **Kit Save menu empty.** The Kit index file is valid but the shared name cache
+  was empty on entry; the Kit Save menu must reload `/Kit/.hcindex` after save
+  operations retag the cache.
+- **Boot Bank Load timeout `B012S09I`.** The boot Bank Load embedded-instrument
+  stall still exceeds even a 20 s budget. This is separate from the boot
+  Kit-quarantine (`KQ...`) gate.
+- **Bank Save entry freeze** and **boot freeze with `.hcprms2` truncated at
+  32 KiB** both need isolated menu-path / drain robustness investigation.
 
 ---
 

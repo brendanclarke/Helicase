@@ -116,7 +116,7 @@
  * terminal completion. Affiliates: filesystem_bootLoggingArm(),
  * filesystem_tick(), and filesystem_blockPoll().
  */
-#define BOOT_FILESYSTEM_TIMEOUT_MS 10000u
+#define BOOT_FILESYSTEM_TIMEOUT_MS 20000u
 
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time

@@ -61,6 +61,7 @@
 | 050 | 2026-08-16 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Root Scene Load terminal facade acknowledgement; hardware-confirmed trace and AutoSave publication; deferred Scene/Bank embedded HCNAMES exit flush |
 | 051 | 2026-08-17 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Scene Load embedded Kit/Instrument HCNAMES exit flush and Scene-to-Kit-family boundary; InstrumentMrp reversible `kit` row with Morph-only snapshot/restore; hardware-confirmed Scene rows plus repaired Mrp restore |
 | 052 | 2026-08-18 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Bank Load persistence: settings active_bank and AutoSave scene-present mask; Candidate B no-op re-mark, B trace witness, host validator, and deferred boot-sanitizer/Bank-Save refactor targets |
+| 053 | 2026-08-19 | intentional dirty worktree on `dev-ph3-autosave-ph2` | AsyncFATFS recursive-delete reimplementation (exact-object delete/recreate, direct Bank Save, structured remove/rename); LFN validator repair; boot/overwrite/AutoSave defect diagnosis; HCNAMES source-provenance failure |
 
 
 ---
@@ -680,5 +681,35 @@ deferred in `SCOPING_TARGETS.md`.
 
 - **Find here**: [052_SESSION_HANDOFF_LOG.md](052_SESSION_HANDOFF_LOG.md),
   `SESSION_052_POST_ANALYSIS.md`, `SESSION_052_PRE_PLAN.md`, `AUTOSAVE.md`,
-  `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `DEV_MODES.md`,
-  `SRAM_MANIFEST.md`, and the `SCOPING_TARGETS.md` Session 052 section.
+`FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `DEV_MODES.md`,
+`SRAM_MANIFEST.md`, and the `SCOPING_TARGETS.md` Session 052 section.
+
+### 053 — Recursive Delete Reimplementation And Boot/Overwrite/AutoSave Diagnosis (2026-08-19)
+
+Reimplemented the AsyncFATFS recursive delete and overwrite path per the pinned
+duplicate-slot target. `afatfs_deleteTree()` now copies a complete
+`afatfsObjectInfo_t` identity (all physical LFN/SFN pointers), validates the
+VFAT run, frees each cluster chain before retiring its name run, handles FAT16
+root, and is bounded by a structural budget with one structured result
+callback. The object iterator gained cross-sector LFN pointer capture and
+shape/ordinal/checksum validation; remove/rename use structured results.
+`filesystem.c` gained a singular delete-slot resolver and direct Bank Save
+delete/recreate; `tmp*`/`old*` promotion and funlink/move/copy/replace stubs
+were removed. ARM build text 379,660, data 396, bss 94,612 (no net SRAM
+increase).
+
+A follow-up boot stall traced to the new LFN shape validator rejecting valid
+host long names padded with `0xffff` (no `0x0000` terminator); relaxing the
+validator restored boot fallback and HCNAMES creation. Hardware passes then
+surfaced: boot Bank Load still times out (`B012S09I`) even at 20 s; the boot
+AutoSave Bank section stays empty (tracking enabled only after the boot Bank
+Load, deferred for the AutoSave reader milestone); HCNAMES source provenance is
+not updated on Save (reports the loaded slot, not the saved); Scene overwrite
+errors `ScnS05` though slot 019 was replaced; Kit Save did not materialize a
+library Kit; Kit Save menu was empty; and two hangs (Bank Save entry, boot
+drain truncating `.hcprms2` at 32 KiB). All deferred in `SCOPING_TARGETS.md`.
+
+- **Find here**: [053_SESSION_HANDOFF_LOG.md](053_SESSION_HANDOFF_LOG.md),
+  `RECURSIVE_TREE_DELETE_REIMPLEMENT.md`, `KIT_PARSE_BOOTLOCK_RESOLVE.md`,
+  `LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md`, `ASYNCFATFS_REFERENCE.md`,
+  `FILESYSTEM_SPEC.md`, and the `SCOPING_TARGETS.md` Session 053 sections.

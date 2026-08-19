@@ -163,24 +163,14 @@ After writing:
 - use `afatfs_fclose(file, cb)`;
 - then let `filesystem.c` drain the final flush before reporting save success.
 
-## Declared APIs That Are Not Yet Product Primitives
+## Unsupported alternatives
 
-The public header currently declares parent-relative child lookup/create,
-move, copy-tree, and tree-replace entry points. They are design placeholders,
-not supported production operations in this checkout:
-
-- `afatfs_findFirstObjectInDir`, `afatfs_fopenChild`, and `afatfs_mkdirChild`
-  do not have the required parent-relative implementation.
-- `afatfs_moveObject` does not initialize its recycled handle or copy its
-  destination name, and its dispatcher continuation does not perform a move.
-- `afatfs_copyObjectTree` and the begin/commit/abort tree-replace API do not
-  provide a functioning foreground-pumped implementation.
-- `AFATFS_CREATE_REPLACE_FILE` must not be interpreted as an atomic or
-  crash-recoverable replacement promise.
-
-Use only the implemented component APIs, object iteration, exact removal, and
-`afatfs_deleteTree` described in this reference until those contracts are made
-real. The implementation plan is archived in `SESSION_040_AFATFS_FOLLOWUP.md`.
+Parent-relative child lookup/create, cross-parent move, tree copy, tree
+replace, and opened-handle unlink were removed from the public API because
+they had no complete foreground-pumped implementation. Use only the component
+APIs, object iteration, structured removal/rename, and exact `afatfs_deleteTree`
+described in this reference. A future move or transaction needs a separately
+approved API and RAM design.
 
 ## Object Iteration
 
@@ -197,7 +187,14 @@ Object iteration resolves:
 - short alias;
 - SFN case bits;
 - whether VFAT LFN entries were present;
-- the physical SFN entry and LFN entry-run position.
+- the physical SFN entry and every physical LFN entry-run pointer.
+
+The iterator validates the VFAT LAST ordinal, exact descending ordinal
+sequence, stable checksum, legal entry shape, and complete run before exposing
+the physical pointers. A malformed run is still returned as a browsable SFN
+object with a malformed-run flag; destructive clients must return
+`AFATFS_RESULT_CORRUPT_LFN_RUN` rather than infer adjacency across sectors or
+directory clusters.
 
 Use object iteration for production scans. It sees dot-prefixed files and
 directories as real objects. Product code may filter names by schema, but
@@ -262,14 +259,15 @@ Caller rule:
 
 APIs:
 
-- `afatfs_funlink(file, cb)`
 - `afatfs_removeObjects_lfn(display_name, match_mode, mode, cb)`
-
-`afatfs_funlink()` removes one opened file handle.
+- `afatfs_removeObject(short_alias, mode, cb)`
 
 `afatfs_removeObjects_lfn()` scans the current directory and removes every
 matching object under the supplied match mode. It restarts scanning after each
-delete because removing VFAT/SFN entry runs mutates the directory.
+delete because removing VFAT/SFN entry runs mutates the directory. Completion
+callbacks receive `afatfsResultCode_t`; non-OK results forbid a caller from
+creating or publishing a replacement. Regular removal releases at most one
+FAT cluster per foreground continuation, then retires the complete name run.
 
 Removal modes:
 
@@ -277,17 +275,15 @@ Removal modes:
 - `AFATFS_REMOVE_EMPTY_DIRECTORIES`: remove matching directories only when they
   are already empty.
 
-`afatfs_deleteTree()` is intended to be the native non-blocking
-recursive-delete primitive for one captured directory identity. It copies the
-supplied `afatfsObjectId_t`, walks the target tree, retires complete LFN/SFN
-entry runs, frees cluster chains, releases retained cache state, resets its
-private handle, and invokes its result callback once. A false start means no
-handle accepted the request and no callback will occur. **Known defect:** the
-present implementation is not reliable enough to guarantee full Bank, root
-Scene, or Kit replacement and may leave the old slot folder. Its recursive
-walk, entry retirement, parent return, cache/handle ownership, and
-exactly-once completion must be made correct before callers can rely on this
-contract; do not substitute an `old*` rename/boot-cleanup mechanism.
+`afatfs_deleteTree()` is the native non-blocking recursive-delete primitive for
+one captured `afatfsObjectInfo_t` directory identity. It copies every physical
+LFN/SFN pointer, walks without C recursion, frees each chain before retiring its
+name run, handles FAT16 root binding distinctly, and bounds descents plus
+released clusters with a structural budget. It releases the private handle and
+cache ownership before invoking exactly one structured result callback. A
+false start means no handle was accepted and no callback will occur. The
+operation is non-transactional: an I/O/layout failure may leave partial card
+mutation, and callers must not create or publish a replacement after failure.
 
 Product code still owns scope selection before it invokes deletion:
 
@@ -296,11 +292,10 @@ Product code still owns scope selection before it invokes deletion:
 - parse the product-visible name with the namespace-appropriate parser; and
 - pass the exact captured object identity for the selected slot.
 
-This prevents root-wipe and duplicate-LFN failures. Bank-local children are
-parsed as two-digit `00..15` folders before their selected identity is supplied
-to native deletion. The legacy `filesystem.c` delete walker remains only as
-compatibility/fallback code and uses `afatfs_removeObject()` with an exact
-short alias when available.
+This prevents root-wipe and duplicate-LFN failures. Root Kit may use its
+documented legacy short-alias fallback; root Scene and root Bank do not. Bank
+Save replaces the root Bank tree directly through this exact-object flow; it
+does not use temporary or `old*` promotion names.
 
 ## Logging-only diagnostic snapshots
 
@@ -322,12 +317,11 @@ API:
 Rename updates the complete VFAT LFN/SFN entry run while preserving the object's
 first cluster, file size, attributes, timestamps, and directory children.
 
-Session 038's working Kit Save path does not rely on rename for overwrite. It
-recursively deletes the old numbered slot directories and writes a clean
-replacement. Rename remains a building block for a future crash-recoverable
-replace transaction after dedicated testing; the current AutoSave design is
-the root A/B record pair specified in `AUTOSAVE.md`, not per-product-file dot
-backers.
+Rename updates a validated complete run and returns a structured result;
+`alias_out` is valid only with `AFATFS_RESULT_OK`. Kit, Scene, and Bank
+overwrite do not rely on rename: they use exact delete/recreate. The current
+AutoSave design is the root A/B record pair specified in `AUTOSAVE.md`, not a
+per-product-file dot-backer transaction.
 
 ## Directory Terminators And LFN Creation
 
@@ -384,8 +378,8 @@ Don't:
   same-slot replacement through captured identities, and text schemas in
   `storageTypes`.
 - Bank scan/load/save uses object iteration, namespace-aware root/two-digit
-  child matching, captured identities for cleanup, staging/promotion
-  preflight, and text schemas in `storageTypes`. Bank Load rescans one selected
+  child matching, captured identities for cleanup, direct exact delete/recreate
+  for root Bank Save, and text schemas in `storageTypes`. Bank Load rescans one selected
   child at a time and retains no 16-child name/alias table.
 - Root Instrument scan/load/save uses object iteration, registry-owned typed
   directories, one shared generalized browser-name cache with up to 1,000
@@ -405,9 +399,6 @@ Don't:
 
 - Parent-relative lookup/open/create with explicit collision policy and copied
   input lifetime.
-- Hardening native delete against corrupt/cyclic structures and reporting
-  partial progress.
-- Real same-parent rename and cross-parent move, bounded tree copy, and a
-  crash-recoverable staged replace protocol. The current move/copy/replace
-  declarations are not completed APIs.
+- Hardware/card-fixture validation of the repaired recursive-delete matrix,
+  including malformed LFN and cyclic/broken-parent cases.
 - Effect storage and any feature that needs durable replacement/promotion.

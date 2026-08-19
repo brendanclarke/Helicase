@@ -1,8 +1,10 @@
 # Recursive Tree Delete — Complete Re-implementation Recipe
 
-**Scope:** Plan only. Repair the existing foreground-pumped
+**Scope:** Requirements and implementation log. Repair the existing foreground-pumped
 `afatfs_deleteTree()` and make Bank, root Scene, and Kit overwrite use one
-exact-object delete-recreate flow. No code is changed by this plan.
+exact-object delete-recreate flow. The implementation log below records the
+source changes and verification status; the acceptance matrix remains the
+hardware/card test plan.
 
 **Authority:** `SCOPING_TARGETS.md` requires native exact-object deletion and
 forbids `oldNNN-xxxx` rename, temporary-root promotion, and boot cleanup as an
@@ -10,7 +12,102 @@ overwrite workaround. `FILESYSTEM_SPEC.md` and `ASYNCFATFS_REFERENCE.md` own
 the product/API contract. The old recursive-delete draft is requirements/test
 reference only, never an implementation plan.
 
-## 1. Verified code state and defects
+## Implementation log
+
+### 2026-08-18 — baseline and RAM gate
+
+- Read `MEMORY.md`, the filesystem specifications, and this recipe before
+  touching source. The only pre-existing worktree change is the deleted
+  generated `build/LXRV2_lxr02.img`; it is being preserved.
+- The baseline ARM build succeeds (`make -j2`). Linked baseline is
+  `text=378,460`, `data=400`, `bss=95,176` bytes; `afatfs` is 7,344 bytes.
+- ARM layout probe measured: `afatfsObjectId_t` 96 bytes,
+  `afatfsObjectInfo_t` 100 bytes, `afatfsObjectFinder_t` 68 bytes,
+  `afatfsDeleteTree_t` 284 bytes, `afatfsFile_t` 328 bytes, and the file
+  operation union 284 bytes. The probe was temporary and was removed after
+  measurement.
+- The planned complete-LFN identity fields are three additional physical
+  entry pointers (24 bytes) in each object result/finder owner, plus finder
+  validation state. With the existing six resident `afatfsFile_t` owners and
+  the global remove state, the projected `afatfs` increase is approximately
+  508 bytes. The two filesystem object/finder pairs plus the exact delete
+  target are projected at approximately 132 bytes, for approximately 640
+  bytes net BSS. The implementation will add no tree stack, handle slot, or
+  deliberate stack budget; the current relevant stack records are 24 bytes for
+  name-run retirement, 56 bytes for object iteration, and 24 bytes for the
+  remove continuation.
+- This is a RAM-gated checkpoint under `MEMORY.md`. Source implementation is
+  paused until the user acknowledges the exact projected allocation:
+  approximately 640 bytes of additional normal SRAM1 BSS, owned by the
+  AsyncFATFS object/finder/delete state and the filesystem exact-target scan
+  state for the lifetime of those existing static/handle owners. The final
+  linked delta and stack report will be measured again before closeout.
+
+### 2026-08-19 — implementation pass 1
+
+- User approved the RAM checkpoint and implementation resumed.
+- Complete object results now retain the first LFN pointer plus up to three
+  validated following physical pointers. The iterator validates LAST ordinal,
+  descending sequence, checksum, entry shape, and run completeness; malformed
+  runs remain browsable as SFN objects but are flagged for destructive clients.
+- One shared name-retirement continuation now batches only pointers in the
+  currently cached physical sector and yields between batches. It is used by
+  rename, regular removal, and native tree deletion; it performs no FAT work.
+  Regular removal now releases at most one FAT cluster per continuation and
+  retires the complete name run only after chain release.
+- `afatfs_deleteTree()` now accepts and copies complete `afatfsObjectInfo_t`
+  input. Its traversal is iterative, exact-pointer based on parent re-find and
+  root completion, handles FAT16 root `.. == 0` distinctly, frees clusters
+  before names, and bounds descents/cluster releases by a saturated structural
+  budget. A timeout is not used as native cancellation.
+- The expanded delete state is owned once by `afatfs.deleteTreeState` and the
+  operation handle stores only a pointer; this avoids multiplying the expanded
+  state across all six existing file owners. The final ARM layout is
+  `ObjectId=120`, `ObjectInfo=124`, `ObjectFinder=96`, `DeleteTree=388`,
+  `File=180`, and operation union `136` bytes. The linked build is
+  `text=378,956`, `data=396`, `bss=94,612` bytes, versus the baseline
+  `text=378,460`, `data=400`, `bss=95,176`; there is no net SRAM increase.
+- Filesystem overwrite selection is now singular: the parent scan continues
+  after a candidate to prove no duplicate directory or same-slot file, closes
+  its scan handle on every path, and passes the complete captured result to
+  native delete. Delete success does not trigger a cleanup rescan.
+- Kit, root Scene, and root Bank Save callers use the singular resolver. Bank
+  Save now deletes the exact old root Bank and creates the final numbered Bank
+  directly; temporary/old names, scratch collision scans, and promotion
+  phases were removed. The legacy firmware recursive walker and unsupported
+  movement/copy/replace/unlink API scaffolding were removed.
+- Remaining work before closeout: finish structured-result gating audit in all
+  active callers, update the authoritative filesystem references and
+  `MEMORY.md`, run the complete build/image verification, and perform static
+  acceptance checks for pointer/LFN/phase invariants. Hardware/card fixture
+  validation is not claimed by this source-only pass.
+
+### 2026-08-19 — final source verification pass
+
+- Completed the structured-result audit: active remove/rename callers now gate
+  create/publish work on `AFATFS_RESULT_OK`; native delete callbacks are
+  likewise checked before Kit, root Scene, or direct Bank replacement proceeds.
+- Added the final malformed-child guard to native traversal. A browsable SFN
+  fallback is never accepted by destructive code when its preceding VFAT run
+  is incomplete, out of order, checksum-invalid, or structurally malformed.
+  The slot timeout path now remains the owner of pending open/close/native
+  handles until their callback releases them; timeout is diagnostic, not abort.
+- Final ARM build succeeds with `text=379,676`, `data=396`, `bss=94,612`
+  bytes. Relative to the baseline, this is `+1,216` text, `-4` data, and
+  `-564` BSS bytes; the approved approximately 640-byte SRAM checkpoint was
+  not exceeded, and the final object/delete layout remains
+  `ObjectId=120`, `ObjectInfo=124`, `ObjectFinder=96`, `DeleteTree=388`,
+  `File=180`, operation union `136` bytes. The build emits only the existing
+  `eraseCount`/unused-legacy-helper and embedded-libc warnings.
+- Static checks passed: no removed movement/copy/tree-replace/unlink APIs or
+  firmware recursive walker remain in live Core code; no Bank `tmp*`/`old*`
+  promotion state remains; `git diff --check` is clean; and the generated
+  `build/LXRV2_lxr02.img` deletion present before this work was preserved.
+- Hardware/card fixture execution, desktop remount checks, injected
+  FAT/cache-error tests, FAT16 media checks, and audio-under-save stress are
+  still pending. This source/build pass does not claim those results.
+
+## 1. Pre-implementation diagnosis and requirements
 
 The checked-out code already has `AFATFS_FILE_OPERATION_DELETE_TREE` in
 `asyncfatfs.c`; it allocates one private `openFiles[]` handle, copies an
@@ -396,3 +493,52 @@ every changed `.c` state/helper and `.h` API has adjacent comments stating what,
 why, inputs, outputs, ownership, failure behavior, and affiliates; fold code
 into existing scanner/state-machine helpers rather than adding one-line
 accessors.
+
+## Follow-up — boot now falls back; Load menus fail on missing /.hcnames (2026-08-19, updated)
+
+### Current state
+
+- Rebuilt with DEV_MODE_DIAGNOSTIC re-enabled: LXRV2_lxr02.img is now 380,776 bytes.
+- Boot no longer stops at the Kit-quarantine gate in this run; it reaches the Scene/Kit fallback.
+- bootlog.bin is 8 bytes B008S03I (Bank 008 / Scene 03 / Instrument). This is stale evidence from the prior Bank-load attempt; the fallback boot did not write a new boot-failure record.
+- /.hcnames, /.hcprms1, and /.hcprms2 are still absent from the card root.
+
+### New symptom
+
+Entering the load browsers now errors before any row is shown:
+
+- Load:[Scene] -> HNsL01
+- Load:[Kit] -> HNkL01
+
+### What the error codes mean
+
+HNsL / HNkL are the FS_INTERNAL_OP_LOAD_HCNAMES_SCENE / _KIT operation prefixes (filesystem.c error-prefix table). The trailing 01 is op_phase.
+
+In filesystem_residentNames_tick():
+
+- phase 0 opens /.hcnames read-only with afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME, "r", ...);
+- phase 1, in LOAD mode, calls filesystem_finish(FS_STATUS_ERROR) immediately when that open callback returns NULL.
+
+So HNsL01 and HNkL01 are the "register is missing or unreadable" result at the open boundary. They are not a scan/parse failure and do not go through the delete/rename/remove code changed by this recipe.
+
+### Why this is the missing /.hcnames, not a read-path regression
+
+The HCNAMES LOAD path touches only:
+
+- afatfs_chdir(NULL) — unchanged;
+- afatfs_fopen_lfn(".hcnames", "r") — the raw-finder create-file LFN scan (afatfs_createFileContinue / afatfs_lfnScan*) is unchanged by this recipe;
+- filesystem_readTextLine() / afatfs_fclose() — unchanged.
+
+The only HCNAMES-adjacent code this recipe changed is the absence-proof probe filesystem_hcnamesProbe_tick(), which uses the object finder. That probe is part of the HCNAMES update/create path, not the LOAD path that emits HNsL01 / HNkL01. The register is simply absent on the card, so the LOAD path correctly errors.
+
+### Why the register is absent
+
+The earlier failed boots (KQ003KST, then B008S00I, B008S03I) all abort before the Bank/Scene commit stage that reads and writes /.hcnames. The failed-boot recovery writes only /bootlog.bin; it does not delete or recreate /.hcnames. The Session 052 register files are no longer on the card, so there is nothing to read until a successful load/save commits the register.
+
+The fallback boot reached a Scene/Kit; whether that fallback actually completed its HCNAMES register write is the open question. The reported HNsL01/HNkL01 occur on menu entry, before that update path is involved.
+
+### What to do
+
+1. Restore a valid /.hcnames to the card (it is tracked in git) and re-test Load:[Scene] and Load:[Kit]. If the two errors clear, the asyncfatfs open and HCNAMES read path are healthy and the symptom was purely the missing file.
+2. Exercise the HCNAMES write/update path once (a Scene or Kit save/load that commits the register) and watch for HNPrb, HNDup, HNsU, or HNkU. That path uses the changed object finder through filesystem_hcnamesProbe_tick(), so it is the correct place to confirm the probe still returns ABSENT and creates the file.
+3. Keep the boot Kit-quarantine removal from KIT_PARSE_BOOTLOCK_RESOLVE.md as the next source change; it is still unapplied and still addresses the earlier KQ... boot gate.
