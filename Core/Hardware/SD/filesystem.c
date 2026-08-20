@@ -617,15 +617,88 @@ static afatfsObjectInfo_t op_delete_slot_target;
 /* Scan latches prove singularity before any delete is accepted. */
 static uint8_t op_delete_slot_match_count = 0u;
 static uint8_t op_delete_slot_scan_error = 0u;
+/*
+ * Distinguishing reason code for a non-BUSY FS_STATUS_ERROR completion.
+ *
+ * What: a small enum-like byte identifying exactly which of
+ * filesystem_deleteSlotDirectory_tick()'s several distinct failure branches
+ * produced this session's error, plus (for the two delete-outcome reasons)
+ * the raw afatfsResultCode_t in the low byte of
+ * op_delete_slot_error_detail. Why: the ScnS05/KitS/BnkS-visible failure
+ * status alone cannot distinguish a scan I/O error from a malformed LFN, a
+ * duplicate same-slot candidate, a rejected native-delete start, or a
+ * non-OK native-delete result — five architecturally different problems
+ * that need different next steps. Inputs: set once per session, at the
+ * single branch that actually failed. Outputs: read by the caller's own
+ * O/DELETE_RESULT trace record (filesystem_saveKitDirectory_tick() /
+ * filesystem_saveSceneDirectory_tick()) immediately after this function
+ * returns FS_STATUS_ERROR; reset to FS_DELETE_SLOT_REASON_NONE only by
+ * filesystem_deleteSlotDirectoryStart(). Affiliates:
+ * AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_DELETE_RESULT's packed value.
+ */
+typedef enum {
+    FS_DELETE_SLOT_REASON_NONE = 0u,
+    FS_DELETE_SLOT_REASON_SCAN_IO,
+    FS_DELETE_SLOT_REASON_MALFORMED_LFN,
+    FS_DELETE_SLOT_REASON_WRONG_KIND,
+    FS_DELETE_SLOT_REASON_DUPLICATE,
+    FS_DELETE_SLOT_REASON_MATCH_COUNT_BACKSTOP,
+    FS_DELETE_SLOT_REASON_DELETE_REJECTED,
+    FS_DELETE_SLOT_REASON_DELETE_RESULT,
+    /*
+     * The "." open that OPEN_SCAN/the post-stall WAIT_SCAN recovery block
+     * issues resolved to a NULL handle. Unlike every other branch here, this
+     * one does not depend on scan progress at all -- opening "." is a
+     * synchronous snapshot of afatfs.currentDirectory (see
+     * afatfs_createFileInternal()'s strcmp(name, ".") == 0 branch), so a
+     * failure here points either at open-handle-pool pressure from a
+     * concurrent/leaked handle, or at afatfs.currentDirectory itself being
+     * invalid at the moment this operation's chdir left off.
+     */
+    FS_DELETE_SLOT_REASON_DIR_OPEN_FAILED,
+    /*
+     * The stall observer (filesystem_pollPhaseStall(), 50,000-poll budget)
+     * gave up on OPEN_SCAN/SCAN_NEXT/CLOSE_SCAN specifically (not the three
+     * phases that already have their own deliberate "observation, not
+     * cancellation" wait) and abandoned the scan. A paired
+     * AUTOSAVE_TRACE_STAGE_PHASE_STALL record for site DELETE_SLOT always
+     * precedes this in the trace.
+     */
+    FS_DELETE_SLOT_REASON_STALL_ABANDONED
+} fs_delete_slot_reason_t;
+
+static fs_delete_slot_reason_t op_delete_slot_error_reason =
+    FS_DELETE_SLOT_REASON_NONE;
+static uint8_t op_delete_slot_error_detail = 0u;
+/*
+ * The exact internal asyncfatfs check behind a FS_DELETE_SLOT_REASON_DELETE_RESULT
+ * failure (afatfsDeleteTreeFailureSite_e, asyncfatfs.c). Read via
+ * afatfs_getDeleteTreeFailureSite() immediately after op_delete_tree_result
+ * is known non-OK, before starting any other delete -- that call resets it.
+ * Only meaningful when op_delete_slot_error_reason ==
+ * FS_DELETE_SLOT_REASON_DELETE_RESULT; zero (NONE) otherwise. Affiliates:
+ * AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_DELETE_RESULT's packed value.
+ */
+static uint8_t op_delete_slot_error_site = 0u;
 static uint8_t op_delete_slot_timeout_observed = 0u;
 /*
  * Completion latch for asyncfatfs' maintained recursive deleter.
  *
- * Inputs: afatfs_deleteTree() invokes the callback for the concrete object
- * captured by the slot scanner. Output: the slot-delete state machine learns
- * that the one foreground-pumped delete finished and whether it succeeded.
- * This is intentionally only a result latch, not the former firmware-owned
- * recursive name/alias stack; asyncfatfs owns that traversal now.
+ * What: op_delete_tree_done/op_delete_tree_result record whether/how the one
+ * foreground-pumped afatfs_deleteTree() call for this slot finished.
+ * op_delete_slot_timeout_observed is separate, purely diagnostic state: it
+ * records that the 50,000-poll stall counter fired during scan or delete, but
+ * never turns a later AFATFS_RESULT_OK/clean-scan result into FS_STATUS_ERROR.
+ * Why: observation is not cancellation; native delete has no abort API, so a
+ * slow legitimate nested-tree delete must finish and report its true result.
+ * The completion gates therefore use only scan-error/duplicate latches and
+ * the native delete result. The observation remains durable through the
+ * AUTOSAVE_TRACE_STAGE_PHASE_STALL record emitted by
+ * filesystem_deleteSlotDirectory_tick(). Inputs: afatfs_deleteTree()'s
+ * callback for the object captured by the slot scanner. Output: the
+ * slot-delete state machine learns whether the one native delete finished and
+ * how. Affiliates: filesystem_deleteSlotDirectory_tick(),
+ * filesystem_pollPhaseStall(), and autosaveTrace_record().
  */
 static bool op_delete_tree_done = false;
 static afatfsResultCode_t op_delete_tree_result = AFATFS_RESULT_OK;
@@ -1049,6 +1122,11 @@ static void filesystem_writeBootLog_tick(void);
 static void filesystem_residentNames_tick(void);
 static void filesystem_ensureAutosaveFiles_tick(void);
 static void filesystem_autosaveParameterDrain_tick(void);
+/* Shared edge-triggered stall detector used by the foreground state machines. */
+static uint8_t filesystem_pollPhaseStall(uint8_t phase,
+                                         uint8_t *last_phase,
+                                         uint32_t *stall_ticks,
+                                         uint32_t threshold_ticks);
 static void filesystem_autosaveTraceFlush_tick(void);
 static void filesystem_settingsWriterSchedule_tick(void);
 static void filesystem_settingsWriterCompleted(void);
@@ -1231,6 +1309,16 @@ static storage_instrument_save_mode_t op_instrument_save_mode =
     STORAGE_INSTRUMENT_SAVE_NORMAL;
 /* True only for the hidden reversible-load save; skip cache/name publication. */
 static uint8_t op_instrument_save_temporary = 0u;
+/*
+ * Running raw-byte fingerprint for one normal root Instrument Save.
+ *
+ * What: retains the four-byte CRC32C accumulator while the text serializer
+ * spans foreground polls. Why: the lifecycle trace needs content evidence for
+ * an overwrite without buffering the complete Instrument file. Inputs are
+ * bytes accepted by afatfs_fwrite(); output is the CREATE_RESULT CRC16.
+ * Affiliates: filesystem_writeTextLine() and Autosave.h's raw CRC helper.
+ */
+static uint32_t op_instrument_save_content_crc = 0u;
 
 /*
  * Dispose the only physical browser-name array.
@@ -3118,6 +3206,41 @@ static void filesystem_complete(fs_status_t final_status)
     op_settings_write_active = 0u;
     if (final_status == FS_STATUS_ERROR && fs_error_code[0] == '\0')
         filesystem_makeAutoErrorCode(current_op, op_phase);
+    /*
+     * Universal error-completion witness -- see AutosaveTrace.h's full
+     * rationale beside AUTOSAVE_TRACE_STAGE_OPERATION_ERROR.
+     *
+     * What: records current_op/op_phase/op_slot for every single
+     * FS_STATUS_ERROR completion in this file, with no per-branch call site
+     * to add or forget. Why: this session's own retest cycle showed that
+     * hand-picking which failure branches to instrument reliably misses one
+     * (the delete-slot resolver's ". open failed" path went untagged for a
+     * full round-trip before being found), and there is no way to
+     * enumerate every current and future failure branch across every Load/
+     * Save/scan/HCNAMES/index operation in this facade by hand with
+     * confidence. Hooking the one shared completion point instead makes
+     * that enumeration unnecessary: whatever fails, however it fails,
+     * whenever a future change adds a new failure path nobody thought to
+     * instrument, this still fires. Inputs: current_op, op_phase, op_slot,
+     * and whether the delete-slot resolver already tagged a more specific
+     * reason for this same failure. Outputs: one trace record; no state
+     * change, no behavior change. Affiliates: AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE
+     * DELETE_RESULT's packed delete-slot reason (more specific, when
+     * present), AUTOSAVE_TRACE_STAGE_PHASE_STALL (more specific, when a
+     * stall preceded this).
+     */
+    if (final_status == FS_STATUS_ERROR) {
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_OPERATION_ERROR,
+            (op_delete_slot_error_reason != FS_DELETE_SLOT_REASON_NONE)
+                ? AUTOSAVE_TRACE_OPERATION_ERROR_FLAG_DELETE_REASON_SET : 0u,
+            ((uint32_t)current_op <<
+                 AUTOSAVE_TRACE_OPERATION_ERROR_OP_SHIFT) |
+            ((uint32_t)op_phase <<
+                 AUTOSAVE_TRACE_OPERATION_ERROR_PHASE_SHIFT) |
+            ((uint32_t)op_slot <<
+                 AUTOSAVE_TRACE_OPERATION_ERROR_SLOT_SHIFT));
+    }
     status = final_status;
     current_op = FS_INTERNAL_OP_NONE;
     filesystem_bootLoggingOperationDone();
@@ -3202,6 +3325,34 @@ static void filesystem_completeLibraryIndexRebuild(fs_status_t final_status)
 {
     fs_completion_cb_t cb = op_library_index_rebuild_callback;
 
+    /*
+     * Universal error-completion witness, second instance.
+     *
+     * This is a deliberately separate terminal function from
+     * filesystem_complete() -- see AutosaveTrace.h beside
+     * AUTOSAVE_TRACE_STAGE_OPERATION_ERROR for the full rationale. Every
+     * Save path's own primary write can succeed and still have its
+     * subsequent `.hcindex`/typed-Instrument-index rebuild fail here,
+     * completely bypassing filesystem_complete(); without this second copy
+     * of the same hook, that whole failure class would stay invisible no
+     * matter how thoroughly the primary completion path is instrumented.
+     * flags bit 1 (INDEX_REBUILD) distinguishes this record from a primary
+     * one at decode time.
+     */
+    if (final_status == FS_STATUS_ERROR) {
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_OPERATION_ERROR,
+            (uint8_t)(AUTOSAVE_TRACE_OPERATION_ERROR_FLAG_INDEX_REBUILD |
+                      ((op_delete_slot_error_reason != FS_DELETE_SLOT_REASON_NONE)
+                           ? AUTOSAVE_TRACE_OPERATION_ERROR_FLAG_DELETE_REASON_SET
+                           : 0u)),
+            ((uint32_t)current_op <<
+                 AUTOSAVE_TRACE_OPERATION_ERROR_OP_SHIFT) |
+            ((uint32_t)op_phase <<
+                 AUTOSAVE_TRACE_OPERATION_ERROR_PHASE_SHIFT) |
+            ((uint32_t)op_slot <<
+                 AUTOSAVE_TRACE_OPERATION_ERROR_SLOT_SHIFT));
+    }
     op_library_index_rebuild_callback = NULL;
     op_library_index_rebuild_kind = FS_NAME_CACHE_NONE;
     op_library_index_rebuild_pending = 0u;
@@ -3211,14 +3362,57 @@ static void filesystem_completeLibraryIndexRebuild(fs_status_t final_status)
         cb();
 }
 
-/* Start the boot-equivalent physical rescan after a successful save flush.
+/*
+ * Rebuild one registry-owned Instrument cache after HCNAMES borrowed it.
+ *
+ * What: starts the existing single-type physical Instrument scan for the
+ * selected saved type and parks the library-rebuild callback. Why: the shared
+ * cache is deliberately retagged as HCNAMES during Instrument provenance
+ * publication, so writing `.hcindex` directly afterward would serialize the
+ * wrong cache domain. Inputs: op_instrument_index_type and the parked callback.
+ * Outputs: one typed cache scan, followed by the existing index writer; no
+ * second name array or extra persistent scratch. Affiliates:
+ * filesystem_startLibraryIndexRebuild(), filesystem_scanInstruments_tick(),
+ * and filesystem_libraryIndexRebuildScanComplete().
+ */
+static bool filesystem_startInstrumentIndexRebuildScan(fs_completion_cb_t cb)
+{
+    uint8_t i;
+    uint8_t registry_index = instrumentManager_registryCount();
+
+    if (op_instrument_index_type >= INSTRUMENT_TYPE_UNKNOWN ||
+        status == FS_STATUS_BUSY)
+        return false;
+    for (i = 0u; i < instrumentManager_registryCount(); i++) {
+        const instrument_registry_entry_t *entry =
+            instrumentManager_registryEntryAt(i);
+
+        if (entry && entry->type == op_instrument_index_type) {
+            registry_index = i;
+            break;
+        }
+    }
+    if (registry_index >= instrumentManager_registryCount())
+        return false;
+    filesystem_clearInstrumentCacheStorage();
+    fs_list_cache_kind = FS_NAME_CACHE_INSTRUMENT;
+    fs_list_cache_type = op_instrument_index_type;
+    op_instrument_scan_one_type = 1u;
+    op_instrument_scan_registry_index = registry_index;
+    return filesystem_start(FS_INTERNAL_OP_SCAN_INSTRUMENTS,
+                            FS_FILE_KIT, 0u, cb);
+}
+
+/* Start the boot-equivalent physical rescan/index rewrite after a save flush.
  *
  * What: replaces the old cache-row-only save update with a real Kit/Scene/Bank
  * directory scan. Why: a save can create, rename, or remove a numbered folder;
  * only scanning the parent directory observes the complete resulting set.
  * Inputs: op_library_index_rebuild_kind and the parked original callback.
- * Output: the shared cache is rebuilt and the scan callback starts the full
- * 1,000-row `.hcindex` writer.
+ * Output: numbered-root kinds are rescanned before their full `.hcindex`
+ * writer; Instrument Save already refreshed its typed cache, so its selected
+ * registry `.hcindex` is written directly. No additional operation scratch is
+ * allocated for the distinction.
  */
 static void filesystem_startLibraryIndexRebuild(void)
 {
@@ -3231,6 +3425,15 @@ static void filesystem_startLibraryIndexRebuild(void)
     op_library_index_kind = kind;
     status = FS_STATUS_IDLE;
     current_op = FS_INTERNAL_OP_NONE;
+
+    if (kind == FS_NAME_CACHE_INSTRUMENT) {
+        if (!filesystem_startInstrumentIndexRebuildScan(
+                filesystem_libraryIndexRebuildScanComplete)) {
+            filesystem_makeNamedErrorCode("Idx", 2u);
+            filesystem_completeLibraryIndexRebuild(FS_STATUS_ERROR);
+        }
+        return;
+    }
 
     started = (kind == FS_NAME_CACHE_KIT)
         ? filesystem_requestScanKits(filesystem_libraryIndexRebuildScanComplete)
@@ -5384,8 +5587,40 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 ** transformed copy calculates CRC from the exact staged bytes, then publishes
 ** durable CRC and the final commit marker in separate post-copy steps.
 ** ----------------------------------------------------------------------- */
+/* Diagnostic-only phase observer for the runtime AutoSave drain. */
+static uint8_t op_autosave_drain_last_phase = 0u;
+static uint32_t op_autosave_drain_stall_ticks = 0u;
+
 static void filesystem_autosaveParameterDrain_tick(void)
 {
+    /*
+     * Observe and recover a true cooperative drain stall.
+     *
+     * What: records one PHASE_STALL after 30,000 unchanged polls and routes
+     * the operation through the existing asynchronous writer error close-down.
+     * Why: unlike the delete and Bank observers, this state machine previously
+     * had no bounded escape from a soft SD stall. Inputs: op_phase and the
+     * current streamed byte offset. Outputs: one trace record and ERROR
+     * completion; no blocking close, remount, or new storage. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_autosaveWriterFinishError(),
+     * and op_autosave_writer.stream_offset.
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_autosave_drain_last_phase,
+                                  &op_autosave_drain_stall_ticks,
+                                  30000u)) {
+        uint32_t value = (uint32_t)op_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        value |= (op_autosave_writer.stream_offset >> 4u) <<
+                 AUTOSAVE_TRACE_PHASE_STALL_EXTRA_SHIFT;
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_DRAIN,
+                             value);
+        filesystem_autosaveWriterFinishError();
+        return;
+    }
+
     switch (op_phase) {
     case 0: /* INITIALIZE ONE OPERATION-LOCAL A/B VALIDATION PASS */
         /*
@@ -6743,6 +6978,15 @@ static void filesystem_libraryIndexRebuildScanComplete(void)
 
     if (scan_status != FS_STATUS_DONE) {
         filesystem_completeLibraryIndexRebuild(scan_status);
+        return;
+    }
+    if (op_library_index_rebuild_kind == FS_NAME_CACHE_INSTRUMENT) {
+        if (!filesystem_start(FS_INTERNAL_OP_CREATE_BOOT_INDEX,
+                              FS_FILE_SETTINGS, 0u,
+                              filesystem_libraryIndexRebuildWriteComplete)) {
+            filesystem_makeNamedErrorCode("Idx", 3u);
+            filesystem_completeLibraryIndexRebuild(FS_STATUS_ERROR);
+        }
         return;
     }
     if (!filesystem_start(FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
@@ -9036,6 +9280,23 @@ static void filesystem_loadSceneDirectory_tick(void)
             /* Record the selected child's Instrument sequence before starting
              * its open; logging cannot advance the slot or commit staging. */
             filesystem_bootLoggingSetBankSceneDetail('I');
+            /*
+             * Timestamp one embedded Instrument-entry request.
+             *
+             * What: records the Bank-local Scene cursor and voice slot before
+             * the asynchronous open. Why: the retained bootlog suffix keeps
+             * only the final substep, while consecutive N records expose
+             * per-Instrument timing from their existing tick16 fields. Inputs:
+             * op_bank_child_cursor/op_instrument_slot. Output: one trace record
+             * and no state change. Affiliate: the existing boot-detail marker.
+             */
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_INSTRUMENT_ENTRY,
+                AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_REQUEST,
+                ((uint32_t)op_bank_child_cursor <<
+                 AUTOSAVE_TRACE_INSTRUMENT_ENTRY_SCENE_SHIFT) |
+                ((uint32_t)op_instrument_slot <<
+                 AUTOSAVE_TRACE_INSTRUMENT_ENTRY_SLOT_SHIFT));
         }
         op_file_ready = false;
         op_file = NULL;
@@ -11501,12 +11762,23 @@ static void filesystem_saveInstrument_tick(void)
     case 17: /* WAIT target instrument file */
         if (!op_file_ready) return;
         if (!op_file) {
+            /* The target open failed before any content fingerprint exists. */
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_CREATE_RESULT <<
+                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_INSTRUMENT |
+                AUTOSAVE_TRACE_SAVE_LIFECYCLE_FLAG_FAILED,
+                (uint32_t)op_instrument_save_source_slot <<
+                    AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
         op_write_line_index = 0u;
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
+        /* Start the raw-byte fingerprint at the first serialized line. */
+        op_instrument_save_content_crc = autosave_recordCrcBegin();
         op_phase = 18;
         return;
 
@@ -11527,6 +11799,30 @@ static void filesystem_saveInstrument_tick(void)
     }
 
     case 19: /* CLOSE target instrument file */
+        /*
+         * Record successful Instrument materialization and its content hash.
+         *
+         * What: publishes the top sixteen bits of the completed streamed
+         * CRC32C in the existing O/CREATE_RESULT value. Why: directory
+         * identity alone cannot prove an in-place overwrite changed bytes.
+         * Inputs: all bytes accepted by filesystem_writeTextLine(). Output:
+         * one lifecycle record; the normal close path remains unchanged.
+         * This is deliberately the raw running accumulator, not the
+         * autosave_recordCrcFinish()-complemented form used by the fixed
+         * AutoSave record elsewhere in this file: it is a diagnostic
+         * fingerprint compared only against another value produced the same
+         * way (a later Save/Load of the same slot), never against a
+         * "finished" CRC32C. Affiliates: op_instrument_save_content_crc and
+         * the later HCNAMES SOURCE_STAGED handoff.
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_CREATE_RESULT <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+            AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_INSTRUMENT,
+            (op_instrument_save_content_crc & 0xffff0000u) |
+            ((uint32_t)op_instrument_save_source_slot <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT));
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 20;
@@ -11577,6 +11873,48 @@ static void filesystem_saveInstrument_tick(void)
                 (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 +
                           op_instrument_save_source_slot),
                 display);
+            /*
+             * Stage direct Instrument provenance before the HCNAMES merge.
+             *
+             * What: marks the saved resident voice's row with the '@' source
+             * token and prepares the typed index rebuild that follows the
+             * durable register update. Why: the old path updated only the
+             * ephemeral identity/cache and never requested an Instrument
+             * HCNAMES publication. Inputs: captured resident Scene/slot and
+             * saved Instrument type. Outputs: one dirty source cell, one
+             * source witness, and a deferred index-chain request; no new
+             * SRAM. Affiliates: Instrument Load staging,
+             * filesystem_cacheCurrentResidentInstrumentNames(), and the
+             * FS_NAME_CACHE_INSTRUMENT rebuild branch.
+             */
+            (void)filesystem_setResidentSource(
+                filesystem_residentInstrumentRow(
+                    op_instrument_save_source_scene,
+                    op_instrument_save_source_slot),
+                FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT);
+            op_kit_load_scene_mask = (uint16_t)(1u <<
+                                                op_instrument_save_source_scene);
+            op_slot = op_instrument_save_source_slot;
+            /* op_instrument_index_type is set unconditionally just below,
+             * for both the morph and non-morph path; no need to set it here
+             * too. */
+            op_library_index_rebuild_kind = FS_NAME_CACHE_INSTRUMENT;
+            op_library_index_rebuild_pending = 1u;
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SOURCE_STAGED <<
+                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_INSTRUMENT,
+                (uint32_t)op_instrument_save_source_slot <<
+                    AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_FINISH <<
+                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_INSTRUMENT,
+                (uint32_t)op_instrument_save_source_slot <<
+                    AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
+            filesystem_prepareResidentNamesCache();
         }
         
         /*
@@ -11600,8 +11938,13 @@ static void filesystem_saveInstrument_tick(void)
          * failures in other modules that might otherwise be obscured by screen
          * write delays.
          */
-        filesystem_bootLoggingArm("INSINDEX");
-        current_op = FS_INTERNAL_OP_CREATE_BOOT_INDEX;
+        if (!morph_save) {
+            filesystem_bootLoggingArm("HCNAMES ");
+            current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT;
+        } else {
+            filesystem_bootLoggingArm("INSINDEX");
+            current_op = FS_INTERNAL_OP_CREATE_BOOT_INDEX;
+        }
         op_phase = 0u;
         return;
 
@@ -11615,6 +11958,8 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
                                                              void *),
                                         void *ctx)
 {
+    uint32_t written;
+
     /*
      * Stream text save files one line at a time.
      *
@@ -11631,11 +11976,32 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
         if (op_write_line_len == 0u)
             return 0u;
     }
-    op_write_line_offset = (uint16_t)(op_write_line_offset +
-        afatfs_fwrite(op_file,
-                      (const uint8_t *)op_write_line_buf +
-                          op_write_line_offset,
-                      op_write_line_len - op_write_line_offset));
+    written = afatfs_fwrite(op_file,
+                            (const uint8_t *)op_write_line_buf +
+                                op_write_line_offset,
+                            op_write_line_len - op_write_line_offset);
+    /*
+     * Fingerprint only bytes accepted by a normal root Instrument Save.
+     *
+     * What: folds the exact streamed write interval into the persistent
+     * Instrument-save accumulator. Why: a line may be split across many
+     * foreground polls, so the complete file cannot be fingerprinted from a
+     * single buffer at case 18. Inputs: the returned byte count and current
+     * line offset. Output: one running CRC32C; all other text writers are
+     * untouched. Affiliates: Autosave.h's raw-byte helper and the O
+     * CREATE_RESULT record in filesystem_saveInstrument_tick().
+     */
+    if (current_op == FS_INTERNAL_OP_SAVE_INSTRUMENT &&
+        !op_instrument_save_temporary) {
+        uint32_t i;
+
+        for (i = 0u; i < written; i++) {
+            op_instrument_save_content_crc = autosave_crc32cByteUpdate(
+                op_instrument_save_content_crc,
+                (uint8_t)op_write_line_buf[op_write_line_offset + i]);
+        }
+    }
+    op_write_line_offset = (uint16_t)(op_write_line_offset + written);
     if (op_write_line_offset >= op_write_line_len) {
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
@@ -12472,6 +12838,35 @@ static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
     return (uint16_t)(numerator / 255);
 }
 
+/*
+ * Detect a cooperative state-machine phase that stops advancing.
+ *
+ * What: compares a caller-owned phase with its previous value and returns one
+ * exactly once when the unchanged phase crosses threshold_ticks. Why:
+ * foreground-pumped SD work must remain asynchronous, while several
+ * diagnostic sites need the same edge-triggered stall observation. Inputs:
+ * phase, caller-owned last_phase/stall_ticks cells, and a site threshold.
+ * Output: one on the crossing poll, zero otherwise; a phase change resets and
+ * rearms the counter. This helper performs no logging or recovery because the
+ * correct response differs between delete, Bank Save, and AutoSave drain.
+ * Affiliates: filesystem_deleteSlotDirectory_tick(),
+ * filesystem_saveBankDirectory_tick(), and
+ * filesystem_autosaveParameterDrain_tick().
+ */
+static uint8_t filesystem_pollPhaseStall(uint8_t phase,
+                                         uint8_t *last_phase,
+                                         uint32_t *stall_ticks,
+                                         uint32_t threshold_ticks)
+{
+    if (phase != *last_phase) {
+        *last_phase = phase;
+        *stall_ticks = 0u;
+        return 0u;
+    }
+    (*stall_ticks)++;
+    return (uint8_t)(*stall_ticks == threshold_ticks + 1u);
+}
+
 static void filesystem_deleteSlotDirectoryStart(uint16_t slot,
                                                 uint8_t allow_short_alias)
 {
@@ -12498,6 +12893,9 @@ static void filesystem_deleteSlotDirectoryStart(uint16_t slot,
     op_delete_slot_match_count = 0u;
     op_delete_slot_scan_error = 0u;
     op_delete_slot_timeout_observed = 0u;
+    op_delete_slot_error_reason = FS_DELETE_SLOT_REASON_NONE;
+    op_delete_slot_error_detail = 0u;
+    op_delete_slot_error_site = 0u;
     op_delete_slot_phase = FS_DELETE_SLOT_OPEN_SCAN;
 }
 
@@ -12527,24 +12925,32 @@ static void filesystem_deleteSceneSlotDirectoryStart(void)
     filesystem_deleteSlotDirectoryStart(op_slot, 0u);
 }
 
-static uint32_t op_delete_slot_timeout_ticks = 0;
-static uint8_t op_delete_slot_last_phase = 0;
+static uint32_t op_delete_slot_stall_ticks = 0u;
+static uint8_t op_delete_slot_last_phase = 0u;
 
 static fs_status_t filesystem_deleteSlotDirectory_tick(void)
 {
-    if (op_delete_slot_phase != op_delete_slot_last_phase) {
-        op_delete_slot_last_phase = op_delete_slot_phase;
-        op_delete_slot_timeout_ticks = 0;
-    }
-    op_delete_slot_timeout_ticks++;
-    if (op_delete_slot_timeout_ticks > 50000 &&
+    if (filesystem_pollPhaseStall((uint8_t)op_delete_slot_phase,
+                                  &op_delete_slot_last_phase,
+                                  &op_delete_slot_stall_ticks,
+                                  50000u) &&
         !op_delete_slot_timeout_observed) {
         uint8_t subphase = afatfs_getDeleteTreePhase();
+        uint8_t flags = AUTOSAVE_TRACE_PHASE_STALL_SITE_DELETE_SLOT;
+        uint32_t value = (uint32_t)op_delete_slot_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        value |= (uint32_t)op_delete_slot_number <<
+                 AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT;
         if (op_delete_slot_phase == FS_DELETE_SLOT_DELETE_MATCH && subphase != 0xFF) {
+            flags |= AUTOSAVE_TRACE_PHASE_STALL_FLAG_IN_NATIVE_DELETE;
+            value |= (uint32_t)subphase <<
+                     AUTOSAVE_TRACE_PHASE_STALL_EXTRA_SHIFT;
             filesystem_makeNamedErrorCode("TDel", subphase);
         } else {
             filesystem_makeNamedErrorCode("TOut", (uint8_t)op_delete_slot_phase);
         }
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL, flags, value);
         /* Observation is not cancellation: native delete has no abort API,
          * so retain ownership until its callback releases the handle. */
         op_delete_slot_timeout_observed = 1u;
@@ -12552,6 +12958,14 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
             op_delete_slot_phase == FS_DELETE_SLOT_WAIT_SCAN ||
             op_delete_slot_phase == FS_DELETE_SLOT_WAIT_CLOSE_SCAN)
             return FS_STATUS_BUSY;
+        /*
+         * Tag this abandonment before branching, so both the immediate
+         * (OPEN_SCAN, no dir yet) and the deferred (SCAN_NEXT/CLOSE_SCAN,
+         * via WAIT_CLOSE_SCAN) paths to FS_DELETE_SLOT_ERROR carry the same
+         * correct reason instead of leaving the deferred path to fall
+         * through to WAIT_CLOSE_SCAN's untagged-backstop label.
+         */
+        op_delete_slot_error_reason = FS_DELETE_SLOT_REASON_STALL_ABANDONED;
         op_delete_slot_scan_error = 1u;
         if (op_delete_slot_dir)
             op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
@@ -12567,6 +12981,7 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
         if (!op_file_ready)
             return FS_STATUS_BUSY;
         if (!op_file) {
+            op_delete_slot_error_reason = FS_DELETE_SLOT_REASON_DIR_OPEN_FAILED;
             op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
             return FS_STATUS_ERROR;
         }
@@ -12595,6 +13010,29 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
             if (!op_file_ready)
                 return FS_STATUS_BUSY;
             if (!op_file) {
+                /*
+                 * The "." open resolved to a NULL handle.
+                 *
+                 * What: tags this specific failure branch so the caller's
+                 * O/DELETE_RESULT trace record (and the universal
+                 * E/OPERATION_ERROR backstop in filesystem_complete()) can
+                 * distinguish it from every other delete-slot failure mode.
+                 * Why: this is the branch that produced an untagged
+                 * (reason=NONE) DELETE_RESULT record on Session 054's first
+                 * post-fix retest -- opening "." is a synchronous snapshot
+                 * of afatfs.currentDirectory
+                 * (afatfs_createFileInternal()'s strcmp(name,".")==0
+                 * branch), not a directory scan, so its failure points at
+                 * open-handle-pool pressure or an invalid currentDirectory
+                 * rather than anything about the target slot's own entry.
+                 * Inputs: none beyond the NULL callback result already
+                 * observed. Outputs: op_delete_slot_error_reason set; no
+                 * other state change. Affiliates:
+                 * FS_DELETE_SLOT_REASON_DIR_OPEN_FAILED,
+                 * afatfs_createFileInternal(), afatfs_allocateFileHandle().
+                 */
+                op_delete_slot_error_reason =
+                    FS_DELETE_SLOT_REASON_DIR_OPEN_FAILED;
                 filesystem_makeNamedErrorCode(
                     "KDel", (uint8_t)op_delete_slot_phase);
                 op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
@@ -12621,6 +13059,7 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
                 return FS_STATUS_BUSY;
             if (st == AFATFS_OPERATION_FAILURE) {
                 op_delete_slot_scan_error = 1u;
+                op_delete_slot_error_reason = FS_DELETE_SLOT_REASON_SCAN_IO;
                 afatfs_findLastObject(op_delete_slot_dir,
                                       &op_object_finder);
                 op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
@@ -12636,10 +13075,25 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
                     &op_object,
                     op_delete_slot_number,
                     op_delete_slot_allow_short_alias)) {
-                if (op_object.lfnMalformed ||
-                    op_object.id.kind != AFATFS_OBJECT_DIRECTORY ||
-                    op_delete_slot_match_count != 0u) {
+                /*
+                 * Distinguish which eligibility check rejected this match.
+                 * Kept as separate branches (rather than the equivalent
+                 * single ||-chain) purely so op_delete_slot_error_reason can
+                 * name the exact rejected condition for the trace record;
+                 * behavior/evaluation order is unchanged.
+                 */
+                if (op_object.lfnMalformed) {
                     op_delete_slot_scan_error = 1u;
+                    op_delete_slot_error_reason =
+                        FS_DELETE_SLOT_REASON_MALFORMED_LFN;
+                } else if (op_object.id.kind != AFATFS_OBJECT_DIRECTORY) {
+                    op_delete_slot_scan_error = 1u;
+                    op_delete_slot_error_reason =
+                        FS_DELETE_SLOT_REASON_WRONG_KIND;
+                } else if (op_delete_slot_match_count != 0u) {
+                    op_delete_slot_scan_error = 1u;
+                    op_delete_slot_error_reason =
+                        FS_DELETE_SLOT_REASON_DUPLICATE;
                 } else {
                     op_delete_slot_target = op_object;
                 }
@@ -12661,8 +13115,15 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
                 return FS_STATUS_BUSY;
             op_delete_slot_dir = NULL;
             if (op_delete_slot_scan_error ||
-                op_delete_slot_match_count > 1u ||
-                op_delete_slot_timeout_observed) {
+                op_delete_slot_match_count > 1u) {
+                if (op_delete_slot_error_reason == FS_DELETE_SLOT_REASON_NONE) {
+                    /* scan_error was clear but match_count > 1 anyway: the
+                     * per-match branch above should always have already
+                     * tagged DUPLICATE before match_count could exceed 1, so
+                     * reaching here untagged is itself diagnostic. */
+                    op_delete_slot_error_reason =
+                        FS_DELETE_SLOT_REASON_MATCH_COUNT_BACKSTOP;
+                }
                 op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
                 return FS_STATUS_ERROR;
             }
@@ -12682,6 +13143,8 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
             op_delete_tree_done = false;
             if (!afatfs_deleteTree(&op_delete_slot_target,
                                    on_delete_tree_complete)) {
+                op_delete_slot_error_reason =
+                    FS_DELETE_SLOT_REASON_DELETE_REJECTED;
                 op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
                 return FS_STATUS_ERROR;
             }
@@ -12692,10 +13155,20 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
             if (!op_delete_tree_done)
                 return FS_STATUS_BUSY;
             if (op_delete_tree_result != AFATFS_RESULT_OK) {
-                op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
-                return FS_STATUS_ERROR;
-            }
-            if (op_delete_slot_timeout_observed) {
+                op_delete_slot_error_reason =
+                    FS_DELETE_SLOT_REASON_DELETE_RESULT;
+                op_delete_slot_error_detail = (uint8_t)op_delete_tree_result;
+                /*
+                 * Capture asyncfatfs's own exact internal failure site now,
+                 * before any later delete request resets it. See the doc
+                 * comment on op_delete_slot_error_site and on
+                 * afatfsDeleteTree_t::failureSite in asyncfatfs.c for why
+                 * the bare afatfsResultCode_t above is not specific enough
+                 * on its own -- ~17 different checks in
+                 * afatfs_deleteTreeContinue() can all return
+                 * AFATFS_RESULT_UNSUPPORTED_LAYOUT.
+                 */
+                op_delete_slot_error_site = afatfs_getDeleteTreeFailureSite();
                 op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
                 return FS_STATUS_ERROR;
             }
@@ -12775,6 +13248,34 @@ static void filesystem_saveKitDirectory_tick(void)
         delete_status = filesystem_deleteSlotDirectory_tick();
         if (delete_status == FS_STATUS_BUSY)
             return;
+        /*
+         * Record the one resolved delete result after BUSY clears.
+         *
+         * A failed result additionally packs op_delete_slot_error_reason and
+         * (when the reason is a non-OK native-delete result)
+         * op_delete_slot_error_detail's raw afatfsResultCode_t, so this one
+         * record can distinguish a scan I/O error, a malformed LFN, a wrong
+         * object kind, a duplicate match, the match-count backstop, a
+         * rejected native-delete start, or a genuine non-OK delete result —
+         * five to seven architecturally different problems that previously
+         * all looked identical as a bare FAILED bit.
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (uint8_t)((AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_DELETE_RESULT <<
+                       AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                      AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT |
+                      (delete_status == FS_STATUS_ERROR
+                           ? AUTOSAVE_TRACE_SAVE_LIFECYCLE_FLAG_FAILED : 0u)),
+            ((uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT) |
+            (delete_status == FS_STATUS_ERROR
+                 ? (((uint32_t)op_delete_slot_error_reason <<
+                     AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_REASON_SHIFT) |
+                    ((uint32_t)op_delete_slot_error_detail <<
+                     AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_DETAIL_SHIFT) |
+                    ((uint32_t)op_delete_slot_error_site <<
+                     AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_SITE_SHIFT))
+                 : 0u));
         if (delete_status == FS_STATUS_ERROR) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -12798,6 +13299,14 @@ static void filesystem_saveKitDirectory_tick(void)
     case 9:
         if (!op_file_ready)
             return;
+        /* Record whether the fresh Kit directory materialized. */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (uint8_t)((AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_CREATE_RESULT <<
+                       AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                      AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT |
+                      (!op_file ? AUTOSAVE_TRACE_SAVE_LIFECYCLE_FLAG_FAILED : 0u)),
+            (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -12927,9 +13436,40 @@ static void filesystem_saveKitDirectory_tick(void)
     case 21:
         if (!afatfs_chdir(NULL))
             return;
-        if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_NORMAL)
+        if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_NORMAL) {
+            uint8_t instrument_slot;
+
             filesystem_setIdentityName(FS_IDENTITY_KIT_ROW,
                                        preset_currentName);
+            /*
+             * Stage the saved Kit's direct source and inherited members.
+             *
+             * What: marks the saved Kit row direct to op_slot and its six
+             * Instrument rows inherited from that Kit before Menu's existing
+             * HCNAMES session-exit flush. Why: the LCD identity cache alone
+             * cannot change durable /.hcnames provenance. Inputs: saved root
+             * slot and source Scene. Outputs: seven dirty source cells; no
+             * file I/O. Affiliates: Kit Load staging and
+             * menu_endResidentNameScratchSession().
+             */
+            (void)filesystem_setResidentSource(
+                filesystem_residentKitRow(op_kit_save_source_scene),
+                op_slot);
+            for (instrument_slot = 0u;
+                 instrument_slot < STORAGE_KIT_SLOT_COUNT;
+                 instrument_slot++) {
+                (void)filesystem_setResidentSource(
+                    filesystem_residentInstrumentRow(
+                        op_kit_save_source_scene, instrument_slot),
+                    FS_RESIDENT_SOURCE_INHERIT);
+            }
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SOURCE_STAGED <<
+                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT,
+                (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
+        }
         /*
          * Defer successful completion until the boot-equivalent Kit rebuild
          * chain has finished. The directory is now written, but the active
@@ -12939,6 +13479,13 @@ static void filesystem_saveKitDirectory_tick(void)
          */
         op_library_index_rebuild_kind = FS_NAME_CACHE_KIT;
         op_library_index_rebuild_pending = 1u;
+        /* The callback is not released until the index rebuild chain ends. */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_FINISH <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+            AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT,
+            (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -12948,11 +13495,39 @@ static void filesystem_saveKitDirectory_tick(void)
     }
 }
 
+/* Diagnostic-only phase observer for Bank Save's non-payload phases. */
+static uint8_t op_bank_save_entry_last_phase = 0u;
+static uint32_t op_bank_save_entry_stall_ticks = 0u;
+
 static void filesystem_saveBankDirectory_tick(void)
 {
     if (op_bank_payload_active) {
         filesystem_saveSceneDirectory_tick();
         return;
+    }
+
+    /*
+     * Observe Bank Save entry/metadata phases without changing the writer.
+     *
+     * What: records one PHASE_STALL when op_phase remains unchanged for
+     * 20,000 polls. Why: a Bank Save hang must be separated into Menu request,
+     * Bank metadata, and delegated Scene-payload evidence. Inputs: op_phase
+     * and op_slot; output: one diagnostic record only. The delegated payload
+     * returns above and is intentionally not misclassified as a Bank-entry
+     * stall. Affiliates: filesystem_pollPhaseStall(), Menu's Bank request
+     * witness, and filesystem_saveSceneDirectory_tick().
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_bank_save_entry_last_phase,
+                                  &op_bank_save_entry_stall_ticks,
+                                  20000u)) {
+        uint32_t value = (uint32_t)op_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        value |= (uint32_t)op_slot << AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT;
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY,
+                             value);
     }
 
     /*
@@ -13379,8 +13954,25 @@ static void filesystem_saveBankDirectory_tick(void)
          * Update only row zero in the already-read register; selected Scene,
          * Kit, and Instrument rows were copied from HCNAMES into the just
          * written Bank tree and remain unchanged in resident memory.
-         */
+        */
         filesystem_cacheResidentName(0u, op_bank_display_name);
+        /*
+         * Stage the newly committed Bank's direct root provenance.
+         *
+         * What: marks HCNAMES row zero direct to the saved root slot before
+         * phase 85 streams the already-read register back to disk. Why: the
+         * direct Bank writer otherwise preserves the prior row-zero source.
+         * Inputs: op_slot, the final numbered Bank directory. Output: one
+         * dirty source cell and one lifecycle witness; no new storage or I/O.
+         * Affiliates: Bank Load's symmetric staging and phase 85.
+         */
+        (void)filesystem_setResidentSource(FS_IDENTITY_BANK_ROW, op_slot);
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SOURCE_STAGED <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+            AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_BANK,
+            (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
         op_phase = 83u;
         return;
 
@@ -13455,6 +14047,12 @@ static void filesystem_saveBankDirectory_tick(void)
          */
         op_library_index_rebuild_kind = FS_NAME_CACHE_BANK;
         op_library_index_rebuild_pending = 1u;
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_FINISH <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+            AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_BANK,
+            (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -13552,6 +14150,24 @@ static void filesystem_saveSceneDirectory_tick(void)
         delete_status = filesystem_deleteSlotDirectory_tick();
         if (delete_status == FS_STATUS_BUSY)
             return;
+        /* See the Kit Save equivalent (filesystem_saveKitDirectory_tick()
+         * case 5) for what the packed reason/detail bits mean. */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (uint8_t)((AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_DELETE_RESULT <<
+                       AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                      AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE |
+                      (delete_status == FS_STATUS_ERROR
+                           ? AUTOSAVE_TRACE_SAVE_LIFECYCLE_FLAG_FAILED : 0u)),
+            ((uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT) |
+            (delete_status == FS_STATUS_ERROR
+                 ? (((uint32_t)op_delete_slot_error_reason <<
+                     AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_REASON_SHIFT) |
+                    ((uint32_t)op_delete_slot_error_detail <<
+                     AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_DETAIL_SHIFT) |
+                    ((uint32_t)op_delete_slot_error_site <<
+                     AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_SITE_SHIFT))
+                 : 0u));
         if (delete_status == FS_STATUS_ERROR) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -13575,6 +14191,13 @@ static void filesystem_saveSceneDirectory_tick(void)
     case 9:
         if (!op_file_ready)
             return;
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (uint8_t)((AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_CREATE_RESULT <<
+                       AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                      AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE |
+                      (!op_file ? AUTOSAVE_TRACE_SAVE_LIFECYCLE_FLAG_FAILED : 0u)),
+            (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -13909,7 +14532,47 @@ static void filesystem_saveSceneDirectory_tick(void)
                 (uint16_t)(1u << op_kit_save_source_scene);
             op_library_index_rebuild_kind = FS_NAME_CACHE_SCENE;
             op_library_index_rebuild_pending = 1u;
+            /*
+             * Stage the direct Scene source before the HCNAMES read/merge.
+             *
+             * What: marks the saved Scene direct to op_slot and its embedded
+             * Kit/Instrument rows inherited. Why: the immediately following
+             * register read must preserve the new provenance over the old
+             * on-card values. Inputs: saved root slot/source Scene. Outputs:
+             * dirty source cells and one SOURCE_STAGED trace; no file I/O.
+             * Affiliates: Scene Load's equivalent staging and the shared
+             * HCNAMES updater.
+             */
+            (void)filesystem_setResidentSource(
+                filesystem_residentSceneRow(op_kit_save_source_scene),
+                op_slot);
+            (void)filesystem_setResidentSource(
+                filesystem_residentKitRow(op_kit_save_source_scene),
+                FS_RESIDENT_SOURCE_INHERIT);
+            {
+                uint8_t instrument_slot;
+                for (instrument_slot = 0u;
+                     instrument_slot < STORAGE_KIT_SLOT_COUNT;
+                     instrument_slot++) {
+                    (void)filesystem_setResidentSource(
+                        filesystem_residentInstrumentRow(
+                            op_kit_save_source_scene, instrument_slot),
+                        FS_RESIDENT_SOURCE_INHERIT);
+                }
+            }
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SOURCE_STAGED <<
+                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE,
+                (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
             filesystem_prepareResidentNamesCache();
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_FINISH <<
+                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE,
+                (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
             /*
              * Scene Save hands directly to HCNAMES without generic start.
              * Input is the saved root Scene identity; output is a separately
@@ -19097,6 +19760,23 @@ static void filesystem_autosaveWriterSchedule_tick(void)
                          FS_FILE_SETTINGS, 0u,
                          filesystem_autosaveWriterCompleted)) {
         /*
+         * Rearm the runtime drain's stall observer for this fresh admission.
+         *
+         * What: forces filesystem_pollPhaseStall()'s first call for this
+         * drain to see a "changed" phase, the same way Bank Save's request
+         * function rearms its own observer. Why: unlike the two
+         * purely-diagnostic stall sites, a stall here forces a real
+         * FS_STATUS_ERROR completion (see filesystem_autosaveParameterDrain_tick());
+         * a stale near-threshold count carried over from an earlier,
+         * unrelated drain admission could otherwise make a healthy drain fail
+         * earlier than the intended ~30,000-poll budget if both happened to
+         * linger at the same early phase. Inputs: none. Outputs: two
+         * statics; no file I/O. Affiliates: filesystem_pollPhaseStall(),
+         * filesystem_autosaveParameterDrain_tick().
+         */
+        op_autosave_drain_last_phase = 0xffu;
+        op_autosave_drain_stall_ticks = 0u;
+        /*
          * Retain active transform ownership across the later generic FLUSH op.
          * Input: accepted drain start. Output: OFF defers mask discard until
          * the private completion callback, even after current_op becomes
@@ -20314,6 +20994,22 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
                                slot,
                                display_name);
 
+    /*
+     * Save-lifecycle request witness.
+     *
+     * What: records that the Kit Save request was accepted by the filesystem
+     * facade. Why: later DELETE_RESULT/CREATE_RESULT/SOURCE_STAGED/FINISH
+     * records can now distinguish an upstream Menu gate from a filesystem
+     * phase. Inputs: the accepted numbered Kit slot. Output: one eight-byte
+     * trace record and no state change. Affiliate: AutosaveTrace.h's O layout.
+     */
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+        (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST <<
+         AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+        AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT,
+        (uint32_t)slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
+
     return true;
 }
 
@@ -20369,6 +21065,14 @@ bool filesystem_requestSaveSceneDirectory(uint16_t slot,
         op_save_scene_kit_display_name,
         sizeof(op_save_scene_kit_display_name),
         filesystem_identityName(FS_IDENTITY_KIT_ROW));
+
+    /* Record accepted Scene Save before its asynchronous writer begins. */
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+        (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST <<
+         AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+        AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE,
+        (uint32_t)slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
 
     return true;
 }
@@ -20575,6 +21279,26 @@ bool filesystem_requestSaveBank(uint16_t slot,
     if (!filesystem_start(FS_INTERNAL_OP_SAVE_BANK, FS_FILE_BANK, slot, cb))
         return false;
 
+    /*
+     * Rearm the Bank Save entry stall observer for this fresh request.
+     *
+     * What: forces filesystem_pollPhaseStall()'s next call to see a "changed"
+     * phase by setting the retained last-observed phase to a value
+     * op_phase can never hold (fs_delete_slot_phase_t-style phase numbers
+     * here are all small case labels well under 0xff). Why: without this,
+     * a stale last_phase/stall_ticks pair left by an earlier, unrelated Bank
+     * Save request could carry a near-threshold count into this new request
+     * if both happen to sit at the same early phase, causing an
+     * earlier-than-intended AUTOSAVE_TRACE_STAGE_PHASE_STALL report. This
+     * site is diagnostic-only (§3.3), so the only consequence was a
+     * possibly-premature trace record, not a wrong result — but resetting
+     * here removes the ambiguity for good. Inputs: none. Outputs: two
+     * statics; no file I/O. Affiliates: filesystem_pollPhaseStall(),
+     * filesystem_saveBankDirectory_tick().
+     */
+    op_bank_save_entry_last_phase = 0xffu;
+    op_bank_save_entry_stall_ticks = 0u;
+
     op_kit_save_source_scene = source_scene;
     op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
     op_bank_scene_save_mask = bank_scene_save_mask;
@@ -20613,6 +21337,13 @@ bool filesystem_requestSaveBank(uint16_t slot,
                                display_name);
     memcpy(op_bank_display_name, display_name, STORAGE_KIT_DISPLAY_NAME_LEN);
     op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    /* Record accepted Bank Save before its child payload loop begins. */
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+        (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST <<
+         AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+        AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_BANK,
+        (uint32_t)slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
     return true;
 }
 
@@ -21429,6 +22160,15 @@ static bool filesystem_requestSaveInstrumentMode(fs_internal_op_t op,
             sizeof(op_instrument_save_display_name) - 1u);
     op_instrument_save_display_name[
         sizeof(op_instrument_save_display_name) - 1u] = '\0';
+    if (op != FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP) {
+        /* Record accepted root Instrument Save/Morph request. */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+            AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_INSTRUMENT,
+            (uint32_t)source_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
+    }
     return true;
 }
 

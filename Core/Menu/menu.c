@@ -3802,6 +3802,23 @@ static void menu_requestKitEntryNames(void)
      */
     if (!menu_residentNameScratchValid ||
         menu_residentNameScratchScene != menu_loadSaveSourceScene) {
+        /*
+         * Diagnose which Kit-entry cache branch actually ran.
+         *
+         * What: records branch A when the resident seven-name scratch is
+         * invalid or belongs to another Scene. Why: an empty Kit browser
+         * report needs live evidence at this decision boundary. Inputs are
+         * the three existing scratch-validity fields; output is one O/REQUEST
+         * trace record with no state change. The high value word is a local
+         * Menu branch tag, not the normal lifecycle CRC field. Affiliate:
+         * filesystem_requestKitEntryNames()'s cache-domain decision below.
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+            AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT,
+            1u << AUTOSAVE_TRACE_SAVE_LIFECYCLE_MENU_BRANCH_SHIFT);
         (void)menu_requestResidentNameScratch(menu_loadSaveSourceScene);
         return;
     }
@@ -3811,6 +3828,13 @@ static void menu_requestKitEntryNames(void)
                8u);
     }
     if (filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
+        /* Branch B: the existing shared cache is already a Kit index. */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+            AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT,
+            2u << AUTOSAVE_TRACE_SAVE_LIFECYCLE_MENU_BRANCH_SHIFT);
         if (menu_activePage == LOAD_PAGE) {
             memcpy(preset_currentName,
                    filesystem_kitSlotName(
@@ -3823,10 +3847,23 @@ static void menu_requestKitEntryNames(void)
     }
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
-    if (!filesystem_requestLoadKitIndex(menu_libraryIndexLoadComplete)) {
-        menu_storageBusy = 0u;
-        menu_deferSelectionRequest = 1u;
-        menu_repaintAll();
+    {
+        uint8_t accepted = filesystem_requestLoadKitIndex(
+            menu_libraryIndexLoadComplete);
+
+        /* Branch C: the shared cache was retagged and a Kit index reload was requested. */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+            (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST <<
+             AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+            AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT,
+            3u << AUTOSAVE_TRACE_SAVE_LIFECYCLE_MENU_BRANCH_SHIFT |
+            (accepted ? 1u : 0u));
+        if (!accepted) {
+            menu_storageBusy = 0u;
+            menu_deferSelectionRequest = 1u;
+            menu_repaintAll();
+        }
     }
 }
 
@@ -6943,6 +6980,14 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_BANK:
+                    /* Bracket Menu's accepted Bank Save request. */
+                    autosaveTrace_record(
+                        AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                        (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST <<
+                         AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                        AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_BANK,
+                        (uint32_t)menu_currentPresetNr[SAVE_TYPE_BANK] <<
+                        AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
                     if (preset_saveBank(
                             menu_currentPresetNr[SAVE_TYPE_BANK],
                             menu_kitLoadSceneMask))

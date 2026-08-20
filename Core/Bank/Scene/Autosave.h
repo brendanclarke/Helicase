@@ -512,4 +512,17 @@ uint32_t autosave_recordCrcUpdate(uint32_t crc32c,
                                   uint16_t byte_count);
 uint32_t autosave_recordCrcFinish(uint32_t crc32c);
 
+/*
+ * Update the table-free CRC32C fingerprint by one raw byte.
+ *
+ * What: exposes the existing byte-wise CRC primitive for diagnostic
+ * fingerprints of streamed non-AutoSave payloads. Why: filesystem.c writes
+ * Instrument text a line at a time and must retain only its running four-byte
+ * accumulator while comparing a later save/load image. Inputs: the running
+ * CRC and one byte in write order. Output: the next running CRC; no storage or
+ * wire-format CRC exception is applied. Affiliates: filesystem.c's
+ * Instrument Save lifecycle trace and the record-oriented CRC helpers above.
+ */
+uint32_t autosave_crc32cByteUpdate(uint32_t crc32c, uint8_t value);
+
 #endif /* AUTOSAVE_H_ */

@@ -373,6 +373,13 @@ uint32_t autosave_recordCrcFinish(uint32_t crc32c)
     return ~crc32c;
 }
 
+uint32_t autosave_crc32cByteUpdate(uint32_t crc32c, uint8_t value)
+{
+    /* See Autosave.h: this is the raw-byte diagnostic view of the same
+     * table-free CRC32C primitive used by the fixed AutoSave record. */
+    return autosave_crc32cUpdate(crc32c, value);
+}
+
 uint32_t autosave_initialRecordCrcUpdate(
     uint32_t crc32c,
     uint32_t absolute_offset,

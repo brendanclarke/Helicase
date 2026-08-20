@@ -78,6 +78,61 @@ typedef enum {
     AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED = 'F',
     AUTOSAVE_TRACE_STAGE_TRACE_DROPPED = 'G',
     /*
+     * X: a foreground-pumped state machine crossed its cooperative stall
+     * threshold. This is observation only: the owner may still complete
+     * successfully. Flags select the call site; value32 carries its phase,
+     * slot, and any site-specific progress coordinate.
+     */
+    AUTOSAVE_TRACE_STAGE_PHASE_STALL = 'X',
+    /*
+     * O: one Kit/Scene/Bank/Instrument Save lifecycle checkpoint. It proves
+     * request, delete/create result, source staging, and terminal boundaries
+     * without adding a new record shape or persistent storage class.
+     */
+    AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE = 'O',
+    /*
+     * E: universal error-completion witness. Emitted exactly once, from
+     * filesystem_complete() itself, whenever ANY internal filesystem
+     * operation (every Save, every Load, every scan, HCNAMES, index rebuild
+     * -- not only the four Save paths 'O' otherwise tracks) reaches
+     * FS_STATUS_ERROR. This is deliberately the one hook a future failure
+     * cannot bypass by occurring in a phase nobody thought to instrument by
+     * hand: it fires from the single terminal completion point every state
+     * machine in this file funnels through, not from a per-branch call site.
+     * Point-specific records ('O' checkpoints, 'X' stalls, the delete-slot
+     * reason packed into 'O' DELETE_RESULT) remain more informative when
+     * present; this is the backstop that guarantees a trace file always
+     * shows at least current_op/op_phase/op_slot for every failure, even one
+     * nobody anticipated when writing this header.
+     */
+    AUTOSAVE_TRACE_STAGE_OPERATION_ERROR = 'E',
+    /*
+     * Y: RETIRED -- no longer producible. Was a one-shot diagnostic probe
+     * for AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_EXHAUSTED,
+     * emitted from filesystem.c whenever that asyncfatfs failure site
+     * fired. That failure site's only producer (asyncfatfs.c's
+     * AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF/_LOOP) was removed entirely
+     * once its "re-scan the parent to re-find myself by identity" premise
+     * turned out to be unnecessary -- afatfs_retireObjectNameRun() never
+     * needed a live re-scan, only the already-known object identity, which
+     * AFATFS_DELETE_TREE_REOPEN_PARENT now uses directly. See that phase's
+     * doc comment in asyncfatfs.c. The layout below is kept only so
+     * Session 054 rounds 5/6's already-captured card evidence (which used
+     * it) stays decodable; the backing filesystem.c call site, its two
+     * accessor functions, and the asyncfatfsDeleteTree_t fields it read are
+     * all gone, so this stage can never appear in a fresh trace again.
+     * flags: the re-scan's candidate count (0..255, saturating). value32:
+     * numbered slot in bits 0..9 (0..999 fits), the last directory-kind
+     * candidate's near-miss detail in bits 14..15 (bit 14: its SFN entry
+     * pointer matched the target; bit 15: its cluster matched; neither bit
+     * alone means the recorded target's cluster reappeared under a
+     * different directory-entry pointer or vice versa, both clear with a
+     * nonzero candidate count means no directory-kind candidate was seen
+     * at all that re-scan), the target cluster the re-scan was looking for
+     * (truncated to its low 16 bits) in bits 16..31.
+     */
+    AUTOSAVE_TRACE_STAGE_SCAN_PARENT_DIAG = 'Y',
+    /*
      * B: Bank present-mask lifecycle witness for the Session 052 persistence
      * investigation. One retained RAM-only trace point is emitted at the Bank
      * Load metadata commit and at the writer drain's present-mask capture.
@@ -88,6 +143,96 @@ typedef enum {
      */
     AUTOSAVE_TRACE_STAGE_BANK_PRESENT = 'B',
 } autosave_trace_stage_t;
+
+/*
+ * X (PHASE_STALL) flags/value layout. Bits 0..2 select the observer; bit 3
+ * identifies a stall inside native recursive delete. value32 stores phase in
+ * bits 0..7, numbered slot in bits 8..17, and site-specific extra data in
+ * bits 18..31.
+ */
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_MASK 0x07u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_DELETE_SLOT 0u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY 1u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_DRAIN 2u
+#define AUTOSAVE_TRACE_PHASE_STALL_FLAG_IN_NATIVE_DELETE (1u << 3u)
+#define AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT 0u
+#define AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT 8u
+#define AUTOSAVE_TRACE_PHASE_STALL_EXTRA_SHIFT 18u
+
+/*
+ * O (SAVE_LIFECYCLE) flags/value layout. Bits 0..1 select element type;
+ * bits 2..4 select checkpoint; bit 7 reports a failed result. value32 stores
+ * the numbered slot in bits 0..9 and a CREATE_RESULT CRC16 in bits 16..31.
+ */
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_MASK 0x03u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT 0u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE 1u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_BANK 2u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_INSTRUMENT 3u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT 2u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_REQUEST 0u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_DELETE_RESULT 1u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_CREATE_RESULT 2u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SOURCE_STAGED 3u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_FINISH 4u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_FLAG_FAILED (1u << 7u)
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT 0u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_CRC16_SHIFT 16u
+
+/* Menu-only branch tags reuse O/REQUEST's otherwise-unused value high word. */
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_MENU_BRANCH_SHIFT 16u
+
+/*
+ * DELETE_RESULT-only fields, reusing the same otherwise-unused high word as
+ * CRC16/the Menu branch tag above (each checkpoint owns its own high-word
+ * meaning). Bits 16-19 carry filesystem.c's fs_delete_slot_reason_t (which
+ * of the delete-slot resolver's several distinct failure branches actually
+ * fired: scan I/O error, malformed LFN, wrong object kind, duplicate match,
+ * the match-count backstop, a rejected native-delete start, a "." open
+ * failure, a stall abandonment, or a non-OK native-delete result); bits
+ * 20-23 carry the raw asyncfatfs afatfsResultCode_t when the reason is
+ * DELETE_RESULT (0 for every other reason); bits 24-31 carry asyncfatfs's
+ * own afatfsDeleteTreeFailureSite_e (asyncfatfs.c) -- which of the ~17
+ * architecturally distinct checks inside afatfs_deleteTreeContinue()
+ * produced that result code -- also only meaningful when the reason is
+ * DELETE_RESULT. A DELETE_RESULT record with FAILED clear never sets any
+ * of these three sub-fields.
+ */
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_REASON_SHIFT 16u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_DETAIL_SHIFT 20u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_DELETE_SITE_SHIFT   24u
+
+/*
+ * E (OPERATION_ERROR) flags/value layout. flags bit 0 is set when
+ * filesystem.c's delete-slot resolver had already tagged a specific
+ * fs_delete_slot_reason_t for this same failure (cross-reference the most
+ * recent 'O' DELETE_RESULT record for that detail rather than duplicating
+ * it here). flags bit 1 is set when this record came from
+ * filesystem_completeLibraryIndexRebuild() (the deferred `.hcindex`/typed
+ * Instrument index rebuild chain every Save path hands off to after its own
+ * primary work succeeds) rather than from filesystem_complete() (every
+ * operation's primary completion path); the two are separate terminal
+ * functions with no shared call site, so a save whose main write succeeds
+ * but whose subsequent index rebuild fails is only visible through the
+ * bit-1 record. value32: bits 0..7 the fs_internal_op_t current_op that was
+ * failing (filesystem.c's own FS_INTERNAL_OP_* enum -- 44 values as of this
+ * writing, comfortably under 256; at a bit-1 record this is the rebuild
+ * chain's own internal operation, e.g. a scan or index-write step, not
+ * necessarily the original Save op that started the chain); bits 8..15 the
+ * op_phase reached; bits 16..25 the numbered op_slot in effect (0..999,
+ * matching every other packed slot field in this file).
+ */
+#define AUTOSAVE_TRACE_OPERATION_ERROR_FLAG_DELETE_REASON_SET (1u << 0u)
+#define AUTOSAVE_TRACE_OPERATION_ERROR_FLAG_INDEX_REBUILD     (1u << 1u)
+#define AUTOSAVE_TRACE_OPERATION_ERROR_OP_SHIFT    0u
+#define AUTOSAVE_TRACE_OPERATION_ERROR_PHASE_SHIFT 8u
+#define AUTOSAVE_TRACE_OPERATION_ERROR_SLOT_SHIFT  16u
+
+/* Y (SCAN_PARENT_DIAG) value32 layout; flags is the raw seen-count byte. */
+#define AUTOSAVE_TRACE_SCAN_PARENT_DIAG_SLOT_SHIFT    0u
+#define AUTOSAVE_TRACE_SCAN_PARENT_DIAG_SFN_MATCH     (1u << 14u)
+#define AUTOSAVE_TRACE_SCAN_PARENT_DIAG_CLUSTER_MATCH (1u << 15u)
+#define AUTOSAVE_TRACE_SCAN_PARENT_DIAG_CLUSTER_SHIFT 16u
 
 /*
  * Flags for AUTOSAVE_TRACE_STAGE_INSTRUMENT_MARK. The marker sets BASE_VALID

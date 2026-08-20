@@ -408,8 +408,7 @@ typedef enum {
     AFATFS_DELETE_TREE_OPEN_DIR,
     AFATFS_DELETE_TREE_SCAN,
     AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND,
-    AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF,
-    AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF_LOOP,
+    AFATFS_DELETE_TREE_REOPEN_PARENT,
     AFATFS_DELETE_TREE_DESCEND_DIR,
     AFATFS_DELETE_TREE_RESUME_PARENT,
     AFATFS_DELETE_TREE_RETIRE_ENTRIES,
@@ -422,10 +421,47 @@ typedef struct afatfsDeleteTree_t {
     afatfsObjectInfo_t root;
     afatfsObjectInfo_t currentTarget;
     uint32_t currentCluster;
-    uint32_t targetClusterToRetire;
-    afatfsDirEntryPointer_t targetEntryToRetire;
     uint32_t parentCluster;
+    /*
+     * The parent directory's OWN directory-entry pointer, captured at descend.
+     *
+     * What: while AFATFS_DELETE_TREE_SCAN is iterating a directory, that
+     * directory's own identity lives in file->directoryEntryPos (written by
+     * AFATFS_DELETE_TREE_OPEN_DIR). Descending into a child overwrites that
+     * field with the child's identity, so the parent's copy is saved here
+     * first and restored by AFATFS_DELETE_TREE_REOPEN_PARENT on the way back
+     * up. Why: file->directoryEntryPos is what AFATFS_DELETE_TREE_SCAN's
+     * "directory is now empty" branch compares against root.id.sfnEntry to
+     * decide whether it has finished the whole tree (retire the root, then
+     * SUCCESS) or has merely emptied a nested child (ascend). If that field
+     * does not identify the directory actually being scanned, an emptied
+     * delete root is misread as a nested child and the traversal ascends out
+     * of the tree it was asked to delete. Pairs with parentCluster, and like
+     * parentCluster it holds one level only -- a descend nested inside
+     * another descend overwrites it, which is the same depth-one bound
+     * parentCluster's own ".."-agreement check already enforces.
+     */
     afatfsDirEntryPointer_t parentEntry;
+    /*
+     * The complete identity of the directory this traversal descended into.
+     *
+     * What: a verbatim copy of currentTarget taken at descend time, when it
+     * still describes the child directory itself. Why: currentTarget is the
+     * "object currently being deleted" register, and AFATFS_DELETE_TREE_SCAN
+     * rewrites it for every object it processes -- so once the traversal has
+     * deleted the child's own contents, currentTarget names the LAST FILE
+     * deleted inside that child, not the child. The ascend path needs the
+     * child's cluster (to free its chain) and its complete VFAT name run
+     * (lfnEntryCount/lfnFirstEntry/lfnFollowingEntry, so
+     * afatfs_retireObjectNameRun() retires every fragment rather than
+     * orphaning them); neither survives in currentTarget, and
+     * file->directoryEntryPos carries only the short-entry pointer. Saving
+     * the whole afatfsObjectInfo_t at the one moment it is known-good is
+     * what lets AFATFS_DELETE_TREE_REOPEN_PARENT delete the right object
+     * without re-deriving it from a second physical scan. Same depth-one
+     * bound as parentCluster/parentEntry above.
+     */
+    afatfsObjectInfo_t descendTarget;
     /* Saturated structural-work allowance; this is not a wall-clock timeout. */
     uint32_t structuralBudget;
     /* Next physical target-name entry to retire; zero means a fresh run. */
@@ -449,7 +485,41 @@ typedef struct afatfsDeleteTree_t {
     afatfsResultCallback_t callback;
     afatfsDeleteTreePhase_e phase;
     afatfsDeleteTreePhase_e lastPhase;
+    /*
+     * Which exact check inside afatfs_deleteTreeContinue() produced the most
+     * recent non-OK afatfsResultCode_t.
+     *
+     * What: afatfsResultCode_t alone cannot distinguish AFATFS_RESULT_UNSUPPORTED_LAYOUT
+     * raised by ~17 architecturally different checks scattered across this
+     * traversal (out-of-range cluster on open, a malformed ".." entry, a
+     * parent-cluster mismatch on ascend, failing to re-find a child's exact
+     * SFN/cluster identity in its re-scanned parent, a structural-budget
+     * exhaustion, and more). Why: filesystem.c's caller only ever sees the
+     * bare result code through afatfs_deleteTree()'s callback, and this
+     * project's card testing found that code alone is not enough to know
+     * which check to investigate. Set immediately before every non-OK
+     * afatfs_deleteTreeFinish() call in this file; read afterward through
+     * afatfs_getDeleteTreeFailureSite(), which -- unlike
+     * afatfs_getDeleteTreePhase() -- deliberately does not require an
+     * active openFiles[] entry, because by the time a caller wants this
+     * value, afatfs_deleteTreeFinish() has already reset the handle via
+     * afatfs_initFileHandle(); this struct is the persistent
+     * afatfs.deleteTreeState singleton, not part of that handle, so its
+     * fields (including this one) survive that reset until the next delete
+     * starts. Reset only by afatfs_deleteTree()'s own setup. Affiliates:
+     * afatfsDeleteTreeFailureSite_e, afatfs_getDeleteTreeFailureSite(),
+     * filesystem.c's op_delete_slot_error_detail/DELETE_RESULT trace record.
+     */
+    uint8_t failureSite;
 } afatfsDeleteTree_t;
+
+/* afatfsDeleteTreeFailureSite_e is declared in asyncfatfs.h (public API,
+ * needed by filesystem.c to recognize specific sites) and defined there. */
+
+/*
+ * afatfs_getDeleteTreeFailureSite() is declared in asyncfatfs.h (public API)
+ * and defined beside afatfs_getDeleteTreePhase() below.
+ */
 
 typedef enum {
     AFATFS_FILE_OPERATION_NONE,
@@ -6369,6 +6439,21 @@ uint8_t afatfs_getDeleteTreePhase(void)
     return 0xFF;
 }
 
+uint8_t afatfs_getDeleteTreeFailureSite(void)
+{
+    /*
+     * Deliberately reads afatfs.deleteTreeState directly rather than
+     * scanning openFiles[] the way afatfs_getDeleteTreePhase() does: by the
+     * time a caller wants this value, the delete has already completed and
+     * afatfs_deleteTreeFinish() has already reset its borrowed handle, so
+     * no matching openFiles[] entry exists to scan for. This struct is the
+     * persistent singleton afatfs_deleteTree() writes into, not part of
+     * that handle, and afatfs_deleteTreeFinish() never touches it -- only
+     * the next afatfs_deleteTree() call's memset() does.
+     */
+    return afatfs.deleteTreeState.failureSite;
+}
+
 /*
  * Complete one native tree delete through a single ownership boundary.
  *
@@ -6444,6 +6529,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
             file->directoryEntryPos.entryIndex = -1;
             if (op->currentTarget.id.firstCluster == 0u) {
                 if (afatfs.filesystemType != FAT_FILESYSTEM_TYPE_FAT16) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_BAD_ROOT_ON_FAT32;
                     afatfs_deleteTreeFinish(file,
                                             AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
@@ -6456,6 +6543,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                         FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
                     op->currentTarget.id.firstCluster >=
                         afatfs.numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_CLUSTER_OUT_OF_RANGE;
                     afatfs_deleteTreeFinish(file,
                                             AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
@@ -6502,6 +6591,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                 if (afatfs_entryPointerEquals(&file->directoryEntryPos,
                                               &op->root.id.sfnEntry)) {
                     if (file->firstCluster != op->root.id.firstCluster) {
+                        op->failureSite =
+                            AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_ROOT_CLUSTER_MISMATCH;
                         afatfs_deleteTreeFinish(
                             file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                         return;
@@ -6521,6 +6612,10 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
             if (objectResult != AFATFS_RESULT_OK) {
                 op->finderActive = 0u;
                 afatfs_findLastObject(file, &op->finder);
+                if (!object.lfnMalformed) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_MALFORMED_OBJECT;
+                }
                 afatfs_deleteTreeFinish(
                     file, object.lfnMalformed
                         ? AFATFS_RESULT_CORRUPT_LFN_RUN
@@ -6534,6 +6629,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                  afatfs_FATIsEndOfChainMarker(object.id.firstCluster))) {
                 op->finderActive = 0u;
                 afatfs_findLastObject(file, &op->finder);
+                op->failureSite =
+                    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_CHILD_CLUSTER_OUT_OF_RANGE;
                 afatfs_deleteTreeFinish(
                     file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                 return;
@@ -6559,13 +6656,36 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                 if (op->structuralBudget == 0u) {
                     op->finderActive = 0u;
                     afatfs_findLastObject(file, &op->finder);
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_STRUCTURAL_BUDGET_EXHAUSTED_DESCEND;
                     afatfs_deleteTreeFinish(
                         file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
                 }
                 op->structuralBudget--;
                 op->parentCluster = file->firstCluster;
+                /*
+                 * Snapshot everything the eventual ascend will need, now,
+                 * while it is all still known-good.
+                 *
+                 * What: parentEntry saves the directory-entry pointer of the
+                 * directory being left (file->directoryEntryPos still names
+                 * it, because AFATFS_DELETE_TREE_OPEN_DIR has not yet
+                 * rebound the handle to the child); descendTarget saves the
+                 * child's complete object identity, including its VFAT name
+                 * run. Why: both are destroyed by the descent itself --
+                 * OPEN_DIR overwrites file->directoryEntryPos with the
+                 * child's pointer, and the child's own scan overwrites
+                 * currentTarget with each object it deletes inside the
+                 * child. AFATFS_DELETE_TREE_REOPEN_PARENT restores both.
+                 * Inputs: file->directoryEntryPos and currentTarget as of
+                 * this instant. Outputs: two operation-state copies; no I/O
+                 * and no change to the card. Affiliates:
+                 * AFATFS_DELETE_TREE_REOPEN_PARENT (the sole reader),
+                 * afatfs_retireObjectNameRun() (consumes the saved name run).
+                 */
                 op->parentEntry = file->directoryEntryPos;
+                op->descendTarget = op->currentTarget;
                 op->finderActive = 0u;
                 afatfs_findLastObject(file, &op->finder);
                 op->phase = AFATFS_DELETE_TREE_DESCEND_DIR;
@@ -6597,6 +6717,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                 if ((dotDot->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) == 0u ||
                     dotDot->filename[0] != '.' || dotDot->filename[1] != '.' ||
                     dotDot->filename[2] != ' ') {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_BAD_DOTDOT_ENTRY;
                     afatfs_deleteTreeFinish(file,
                                             AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
@@ -6610,6 +6732,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                     (parentCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
                      parentCluster >= afatfs.numClusters +
                          FAT_SMALLEST_LEGAL_CLUSTER_NUMBER)) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_PARENT_CLUSTER_OUT_OF_RANGE;
                     afatfs_deleteTreeFinish(file,
                                             AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
@@ -6617,33 +6741,84 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                 if (op->parentCluster != parentCluster &&
                     !(parentCluster == op->root.id.firstCluster &&
                       op->parentCluster == op->root.id.firstCluster)) {
+                    /*
+                     * This is the specific check most consistent with
+                     * Session 054's slot-11 evidence: a nested Scene child
+                     * directory's own ".." entry disagrees with the parent
+                     * cluster recorded when this traversal descended into
+                     * it. See the failureSite doc comment on
+                     * afatfsDeleteTree_t for why this needed its own tag
+                     * rather than being lumped with every other
+                     * UNSUPPORTED_LAYOUT site.
+                     */
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_PARENT_CLUSTER_MISMATCH;
                     afatfs_deleteTreeFinish(file,
                                             AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
                 }
-                op->targetClusterToRetire = file->firstCluster;
-                op->targetEntryToRetire = file->directoryEntryPos;
                 op->parentCluster = parentCluster;
-                op->phase = AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF;
+                op->phase = AFATFS_DELETE_TREE_REOPEN_PARENT;
                 goto doMore;
             }
             break;
 
-        case AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF:
+        case AFATFS_DELETE_TREE_REOPEN_PARENT:
             /*
-             * Start a fresh scan of the recovered parent cluster.
+             * Rebind `file` to the parent directory -- no search.
              *
-             * The child scan was released before descent/ascend. Releasing
-             * again is harmless and guarantees this transition is safe if a
-             * future phase begins retaining a sector. The parent is scanned by
-             * physical firstCluster identity so duplicate display names cannot
-             * select a sibling directory.
+             * What: reopens `file` by cluster identity only (op->parentCluster,
+             * already validated and ".."-agreement checked in
+             * AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND just above), restores both
+             * identities the descent destroyed, and proceeds to free the
+             * just-ascended-from child's own cluster chain.
+             *
+             * Why the identities are restored from saved copies rather than
+             * read out of live state: this phase previously took the child's
+             * identity straight from op->currentTarget, on the assumption
+             * that it still described the child. It does not. currentTarget
+             * is the "object currently being deleted" register, rewritten by
+             * AFATFS_DELETE_TREE_SCAN for every object it processes -- so
+             * whenever the child directory had contents, currentTarget by
+             * this point names the LAST FILE deleted inside the child, whose
+             * cluster chain was freed moments ago. Freeing it a second time
+             * walked a FAT link that now reads as free space, which is
+             * exactly the AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NEXT_CLUSTER_INVALID
+             * that Session 054's Scene-slot-12 evidence reported (the
+             * assumption held only for a child that was already empty when
+             * discovered, which is why simpler fixtures appeared to work).
+             * op->descendTarget is that identity captured at descend time,
+             * complete with the VFAT name run afatfs_retireObjectNameRun()
+             * needs to retire every fragment instead of orphaning them.
+             *
+             * file->directoryEntryPos must likewise be restored to the
+             * PARENT's own pointer, not left cleared: AFATFS_DELETE_TREE_SCAN
+             * reads it to tell "I have emptied the delete root, retire it and
+             * finish" from "I have emptied a nested child, ascend". Leaving
+             * it zeroed made an emptied delete root look like a nested child
+             * and sent the traversal ascending out of the tree it was
+             * deleting. The root case is restored from op->root (the delete
+             * root's identity, always available); any deeper parent is
+             * restored from op->parentEntry.
+             *
+             * Inputs: op->parentCluster, op->parentEntry, op->descendTarget,
+             * op->root. Outputs: `file` rebound to and correctly identified
+             * as the parent; currentTarget/currentCluster/nameRunNextEntry
+             * set up so AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS then
+             * AFATFS_DELETE_TREE_RETIRE_ENTRIES delete the child. No search
+             * and no extra card I/O. Affiliates:
+             * AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_EXHAUSTED
+             * and ..._MATCH_CLUSTER_OUT_OF_RANGE, permanently unreachable
+             * since the re-scan this phase replaced was removed, and retained
+             * only so already-captured card evidence naming them decodes.
              */
             afatfs_fileUnlockCacheSector(file);
             file->directoryEntryPos.sectorNumberPhysical = 0;
             file->directoryEntryPos.entryIndex = -1;
             if (op->parentCluster == 0u) {
                 if (afatfs.filesystemType != FAT_FILESYSTEM_TYPE_FAT16) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_BAD_ROOT_ON_FAT32;
                     afatfs_deleteTreeFinish(file,
                                             AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
@@ -6662,53 +6837,28 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
             file->cursorOffset = 0;
             file->mode = AFATFS_FILE_MODE_READ;
             file->attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
-            afatfs_findFirstObject(file, &op->finder);
-            op->finderActive = 1u;
-            op->phase = AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF_LOOP;
+            /*
+             * Re-establish "which directory is `file` open on" for the parent.
+             * The delete root is identified from op->root so the traversal can
+             * still recognize the root once the parent's scan empties it; any
+             * deeper parent uses the pointer saved when we descended past it.
+             */
+            file->directoryEntryPos =
+                (op->parentCluster == op->root.id.firstCluster)
+                    ? op->root.id.sfnEntry
+                    : op->parentEntry;
+            /*
+             * Restore the ascended-from child as the object being deleted,
+             * then hand off: FREE_FILE_CLUSTERS releases its cluster chain and
+             * RETIRE_ENTRIES retires its complete name run. nameRunNextEntry
+             * is rewound to zero exactly as AFATFS_DELETE_TREE_SCAN does when
+             * it selects a fresh object.
+             */
+            op->currentTarget = op->descendTarget;
+            op->currentCluster = op->currentTarget.id.firstCluster;
+            op->nameRunNextEntry = 0u;
+            op->phase = AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS;
             goto doMore;
-
-        case AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF_LOOP:
-            status = afatfs_findNextObject(file, &op->finder, &object);
-            if (status == AFATFS_OPERATION_IN_PROGRESS)
-                return;
-            if (status == AFATFS_OPERATION_FAILURE || object.id.kind == AFATFS_OBJECT_NONE) {
-                op->finderActive = 0u;
-                afatfs_findLastObject(file, &op->finder);
-                afatfs_deleteTreeFinish(
-                    file, status == AFATFS_OPERATION_FAILURE
-                        ? AFATFS_RESULT_IO_ERROR
-                        : AFATFS_RESULT_UNSUPPORTED_LAYOUT);
-                return;
-            }
-            if (object.lfnMalformed) {
-                op->finderActive = 0u;
-                afatfs_findLastObject(file, &op->finder);
-                afatfs_deleteTreeFinish(file, AFATFS_RESULT_CORRUPT_LFN_RUN);
-                return;
-            }
-            if (object.id.kind == AFATFS_OBJECT_DIRECTORY &&
-                afatfs_entryPointerEquals(&object.id.sfnEntry,
-                                          &op->targetEntryToRetire) &&
-                object.id.firstCluster == op->targetClusterToRetire) {
-                if (object.id.firstCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
-                    object.id.firstCluster >= afatfs.numClusters +
-                        FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
-                    afatfs_FATIsEndOfChainMarker(object.id.firstCluster)) {
-                    op->finderActive = 0u;
-                    afatfs_findLastObject(file, &op->finder);
-                    afatfs_deleteTreeFinish(
-                        file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
-                    return;
-                }
-                op->finderActive = 0u;
-                afatfs_findLastObject(file, &op->finder);
-                op->currentTarget = object;
-                op->currentCluster = object.id.firstCluster;
-                op->nameRunNextEntry = 0u;
-                op->phase = AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS;
-                return; // YIELD
-            }
-            return; // YIELD (process one entry per poll)
 
         case AFATFS_DELETE_TREE_RETIRE_ENTRIES:
             status = afatfs_retireObjectNameRun(&op->currentTarget,
@@ -6728,6 +6878,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                                           &op->root.id.sfnEntry)) {
                 if (op->currentTarget.id.firstCluster !=
                     op->root.id.firstCluster) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_RETIRE_ENTRIES_ROOT_CLUSTER_MISMATCH;
                     afatfs_deleteTreeFinish(
                         file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
@@ -6742,6 +6894,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
             if (op->currentCluster == 0u) {
                 if (op->currentTarget.id.kind != AFATFS_OBJECT_FILE ||
                     op->currentTarget.id.logicalSize != 0u) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NONFILE_NONZERO_SIZE;
                     afatfs_deleteTreeFinish(
                         file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                     return;
@@ -6758,6 +6912,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                 op->currentCluster >= afatfs.numClusters +
                     FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
                 op->structuralBudget == 0u) {
+                op->failureSite =
+                    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_CLUSTER_OUT_OF_RANGE_OR_BUDGET;
                 afatfs_deleteTreeFinish(
                     file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                 return;
@@ -6774,6 +6930,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                  (nextCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
                   nextCluster >= afatfs.numClusters +
                       FAT_SMALLEST_LEGAL_CLUSTER_NUMBER))) {
+                op->failureSite =
+                    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NEXT_CLUSTER_INVALID;
                 afatfs_deleteTreeFinish(
                     file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
                 return;
@@ -6791,18 +6949,65 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
             return;
 
         case AFATFS_DELETE_TREE_RESUME_PARENT:
-            /* Re-scan the parent after mutation; the old finder cannot safely
-             * survive deleted entries. Root pointer restoration is explicit,
-             * while ordinary parents use the exact pointer captured at descent. */
-            memset(&op->currentTarget, 0, sizeof(op->currentTarget));
-            op->currentTarget.id.kind = AFATFS_OBJECT_DIRECTORY;
-            op->currentTarget.id.firstCluster = op->parentCluster;
-            if (op->parentCluster == op->root.id.firstCluster) {
-                op->currentTarget.id.sfnEntry = op->root.id.sfnEntry;
-            } else {
-                op->currentTarget.id.sfnEntry = op->parentEntry;
-            }
-            op->phase = AFATFS_DELETE_TREE_OPEN_DIR;
+            /*
+             * Re-scan the directory `file` already has open -- no reopen.
+             *
+             * What: resets the scan cursor on the currently-open handle and
+             * restarts AFATFS_DELETE_TREE_SCAN on it directly, instead of
+             * reconstructing a target from op->parentCluster and re-entering
+             * through AFATFS_DELETE_TREE_OPEN_DIR. Why: `file` is already
+             * correctly bound to the directory that needs to be resumed in
+             * both paths that reach this phase -- after deleting a plain
+             * file, `file` was never rebound away from the directory that
+             * contained it; after retiring an ascended, now-empty child's
+             * own entry, `file` is the parent AFATFS_DELETE_TREE_REOPEN_PARENT
+             * already reopened. Deriving a fresh target from
+             * op->parentCluster was the bug: that field is only ever
+             * assigned by a prior descend or ascend, so the first plain
+             * file object encountered directly under the traversal's own
+             * root -- before any descend/ascend has run this operation --
+             * reopened using its zero-initialized default, which
+             * AFATFS_DELETE_TREE_OPEN_DIR then reads as a FAT16 root
+             * reference on a FAT32 card and rejects. Root-caused from
+             * Session 054's ScnS05 evidence (Scene slot 2, "002 Hard",
+             * whose first scanned child was a plain file rather than its
+             * nested "Kit Hard" subdirectory). Inputs: the already-open
+             * `file` handle, whose firstCluster and directoryEntryPos both
+             * already describe the directory to resume. Outputs: one
+             * restarted scan; op->currentTarget and op->parentCluster are
+             * untouched (currentTarget is about to be overwritten by the
+             * next object AFATFS_DELETE_TREE_SCAN selects anyway; the
+             * ascend path reads op->descendTarget, not currentTarget).
+             * Affiliates:
+             * AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_BAD_ROOT_ON_FAT32,
+             * AFATFS_DELETE_TREE_OPEN_DIR's reset sequence (which resets the
+             * same cursor fields but, unlike this phase, legitimately
+             * rebinds the handle and therefore rewrites directoryEntryPos).
+             */
+            afatfs_fileUnlockCacheSector(file);
+            /*
+             * Deliberately does NOT touch file->directoryEntryPos.
+             *
+             * This phase rewinds a scan of the directory `file` is already
+             * open on; it never rebinds the handle, so that directory's own
+             * identity must survive untouched. Clearing it here (as an
+             * earlier revision of this phase did, by copying
+             * AFATFS_DELETE_TREE_OPEN_DIR's reset sequence wholesale) erased
+             * the only record of which directory was being scanned, with two
+             * consequences: AFATFS_DELETE_TREE_SCAN could no longer recognize
+             * an emptied delete root and ascended out of the tree instead of
+             * retiring it, and the pointer that AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND
+             * hands onward became a zeroed placeholder. Only the cursor
+             * fields below are reset, which is all a rewind requires.
+             */
+            file->cursorCluster = file->firstCluster;
+            file->cursorPreviousCluster = 0;
+            file->logicalSize = 0;
+            file->physicalSize = 0;
+            file->cursorOffset = 0;
+            afatfs_findFirstObject(file, &op->finder);
+            op->finderActive = 1u;
+            op->phase = AFATFS_DELETE_TREE_SCAN;
             goto doMore;
 
         case AFATFS_DELETE_TREE_SUCCESS:
@@ -6817,6 +7022,7 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
 
         default:
             /* Corrupt or unsupported phase state is a terminal driver error. */
+            op->failureSite = AFATFS_DELETE_TREE_FAILURE_SITE_CORRUPT_PHASE;
             afatfs_deleteTreeFinish(file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
             return;
     }

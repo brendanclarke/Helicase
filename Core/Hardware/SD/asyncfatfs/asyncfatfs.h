@@ -474,6 +474,48 @@ afatfsFilesystemState_e afatfs_getFilesystemState();
 afatfsError_e afatfs_getLastError();
 
 /*
+ * One code per distinct non-OK check inside afatfs_deleteTreeContinue() in
+ * asyncfatfs.c. Declaration order matches the order those checks appear in
+ * that function, top to bottom; add new sites at the end so previously-
+ * captured card evidence stays decodable. AFATFS_DELETE_TREE_FAILURE_SITE_NONE
+ * is the value afatfs_deleteTree() resets to before a fresh traversal
+ * starts, and is also what a caller reads if a result completed OK (no site
+ * fired). Declared here rather than in asyncfatfs.c so filesystem.c can
+ * recognize specific sites by name (see afatfs_getDeleteTreeFailureSite()).
+ *
+ * AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_EXHAUSTED and
+ * ..._MATCH_CLUSTER_OUT_OF_RANGE are permanently unreachable as of the fix
+ * eliminating AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF/_LOOP (see
+ * AFATFS_DELETE_TREE_REOPEN_PARENT's doc comment in asyncfatfs.c for why
+ * that re-scan-by-identity step was unnecessary and is gone, not just
+ * fixed) -- kept declared, not removed, only so already-captured card
+ * evidence from Session 054 rounds 5/6 naming them stays decodable.
+ */
+typedef enum {
+    AFATFS_DELETE_TREE_FAILURE_SITE_NONE = 0u,
+    AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_BAD_ROOT_ON_FAT32,
+    AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_CLUSTER_OUT_OF_RANGE,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_ROOT_CLUSTER_MISMATCH,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_MALFORMED_OBJECT,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_CHILD_CLUSTER_OUT_OF_RANGE,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_STRUCTURAL_BUDGET_EXHAUSTED_DESCEND,
+    AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_BAD_DOTDOT_ENTRY,
+    AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_PARENT_CLUSTER_OUT_OF_RANGE,
+    AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_PARENT_CLUSTER_MISMATCH,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_BAD_ROOT_ON_FAT32,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_EXHAUSTED, /* unreachable, see above */
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_MATCH_CLUSTER_OUT_OF_RANGE, /* unreachable, see above */
+    AFATFS_DELETE_TREE_FAILURE_SITE_RETIRE_ENTRIES_ROOT_CLUSTER_MISMATCH,
+    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NONFILE_NONZERO_SIZE,
+    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_CLUSTER_OUT_OF_RANGE_OR_BUDGET,
+    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NEXT_CLUSTER_INVALID,
+    /* Defensive catch-all: op->phase held a value no case above matches.
+     * Not expected to be reachable; tagged only so it is never silently
+     * indistinguishable from a real layout problem if it somehow is. */
+    AFATFS_DELETE_TREE_FAILURE_SITE_CORRUPT_PHASE
+} afatfsDeleteTreeFailureSite_e;
+
+/*
  * Start native asynchronous deletion of one concrete directory tree.
  *
  * What: root is the physical object identity returned by
@@ -498,3 +540,13 @@ afatfsError_e afatfs_getLastError();
 bool afatfs_deleteTree(const afatfsObjectInfo_t *root,
                        afatfsResultCallback_t cb);
 uint8_t afatfs_getDeleteTreePhase(void);
+/*
+ * Read which exact internal check produced the last afatfs_deleteTree()
+ * call's afatfsResultCode_t (see afatfsDeleteTreeFailureSite_e above for
+ * the full list and afatfs_deleteTreeContinue() in asyncfatfs.c for where
+ * each fires). Returns 0 (NONE) if the last completed delete succeeded.
+ * Unlike afatfs_getDeleteTreePhase(), safe to call after the operation's
+ * result callback has already run and its openFiles[] handle reset -- read
+ * it there, before starting another delete, since that resets it.
+ */
+uint8_t afatfs_getDeleteTreeFailureSite(void);

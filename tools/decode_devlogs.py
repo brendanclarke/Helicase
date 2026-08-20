@@ -109,6 +109,10 @@ STAGE_ENUM = {
     "F": "AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED",
     "G": "AUTOSAVE_TRACE_STAGE_TRACE_DROPPED",
     "B": "AUTOSAVE_TRACE_STAGE_BANK_PRESENT",
+    "X": "AUTOSAVE_TRACE_STAGE_PHASE_STALL",
+    "O": "AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE",
+    "E": "AUTOSAVE_TRACE_STAGE_OPERATION_ERROR",
+    "Y": "AUTOSAVE_TRACE_STAGE_SCAN_PARENT_DIAG",
 }
 
 STAGE_PRODUCER = {
@@ -130,6 +134,179 @@ STAGE_PRODUCER = {
          "filesystem_autosaveTraceFlushCompleted()",
     "G": "filesystem_autosaveTraceFlushCompleted()",
     "B": "filesystem_loadBankDirectory_tick() / autosave_getLivePayloadByte()",
+    "X": "filesystem_pollPhaseStall() call sites (delete-slot / Bank Save "
+         "entry / AutoSave drain)",
+    "O": "Kit/Scene/Bank/Instrument Save request+tick functions, and "
+         "menu_requestKitEntryNames()/menu_handleLoadSaveMenu()",
+    "E": "filesystem_complete() / filesystem_completeLibraryIndexRebuild() "
+         "-- fires for ANY internal operation's FS_STATUS_ERROR completion, "
+         "not just Save",
+    "Y": "RETIRED -- was filesystem_deleteSlotDirectory_tick() "
+         "FS_DELETE_SLOT_DELETE_MATCH, only emitted when the native "
+         "delete's failure site was SCAN_PARENT_FOR_SELF_EXHAUSTED; that "
+         "producer no longer exists (the bug it was diagnosing was fixed "
+         "by eliminating the code path), kept only to decode already-"
+         "captured Session 054 evidence",
+}
+
+PHASE_STALL_SITES = {
+    0: "delete-slot resolver (filesystem_deleteSlotDirectory_tick)",
+    1: "Bank Save entry (filesystem_saveBankDirectory_tick)",
+    2: "runtime AutoSave drain (filesystem_autosaveParameterDrain_tick)",
+}
+
+SAVE_LIFECYCLE_TYPES = {0: "Kit", 1: "Scene", 2: "Bank", 3: "Instrument"}
+
+SAVE_LIFECYCLE_CHECKPOINTS = {
+    0: "REQUEST",
+    1: "DELETE_RESULT",
+    2: "CREATE_RESULT",
+    3: "SOURCE_STAGED",
+    4: "FINISH",
+}
+
+# fs_delete_slot_reason_t (filesystem.c), packed into a failed DELETE_RESULT
+# record's value bits 16-19.
+DELETE_SLOT_REASONS = {
+    0: "NONE",
+    1: "SCAN_IO (AFATFS_OPERATION_FAILURE from findNextObject)",
+    2: "MALFORMED_LFN (matching candidate's LFN run failed validation)",
+    3: "WRONG_KIND (matching candidate is not a directory)",
+    4: "DUPLICATE (a second same-slot candidate was seen during the scan)",
+    5: "MATCH_COUNT_BACKSTOP (match_count>1 with no per-match reason set "
+       "-- should not normally happen independently of DUPLICATE)",
+    6: "DELETE_REJECTED (afatfs_deleteTree() refused to start)",
+    7: "DELETE_RESULT (native delete finished with a non-OK "
+       "afatfsResultCode_t; see the detail field)",
+    8: "DIR_OPEN_FAILED (the synchronous \".\" open resolved to a NULL "
+       "handle -- open-handle-pool pressure or an invalid "
+       "afatfs.currentDirectory, not a scan/match problem)",
+    9: "STALL_ABANDONED (the 50,000-poll stall observer gave up on "
+       "OPEN_SCAN/SCAN_NEXT/CLOSE_SCAN; see the paired X/PHASE_STALL "
+       "record for the exact phase)",
+}
+
+# fs_internal_op_t (filesystem.c), in declaration order -- its numeric value
+# is simply its index here since the enum assigns no explicit values.
+# Packed into an E/OPERATION_ERROR record's value bits 0-7.
+FS_INTERNAL_OPS = [
+    "FS_INTERNAL_OP_NONE",
+    "FS_INTERNAL_OP_FLUSH_FINISH",
+    "FS_INTERNAL_OP_CREATE_BOOT_INDEX",
+    "FS_INTERNAL_OP_CREATE_LIBRARY_INDEX",
+    "FS_INTERNAL_OP_WRITE_HCNAMES",
+    "FS_INTERNAL_OP_WRITE_BOOT_LOG",
+    "FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES",
+    "FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN",
+    "FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH",
+    "FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT",
+    "FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT",
+    "FS_INTERNAL_OP_LOAD_HCNAMES_KIT",
+    "FS_INTERNAL_OP_UPDATE_HCNAMES_KIT",
+    "FS_INTERNAL_OP_LOAD_HCNAMES_SCENE",
+    "FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE",
+    "FS_INTERNAL_OP_LOAD_KIT",
+    "FS_INTERNAL_OP_LOAD_KIT_MORPH",
+    "FS_INTERNAL_OP_LOAD_SCENE",
+    "FS_INTERNAL_OP_LOAD_BANK",
+    "FS_INTERNAL_OP_SAVE_KIT",
+    "FS_INTERNAL_OP_SAVE_SCENE",
+    "FS_INTERNAL_OP_SAVE_BANK",
+    "FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH",
+    "FS_INTERNAL_OP_LOAD_MORPH",
+    "FS_INTERNAL_OP_LOAD_PATTERN",
+    "FS_INTERNAL_OP_SAVE_PATTERN",
+    "FS_INTERNAL_OP_LOAD_ALL",
+    "FS_INTERNAL_OP_SAVE_ALL",
+    "FS_INTERNAL_OP_LOAD_PERFORMANCE",
+    "FS_INTERNAL_OP_SAVE_PERFORMANCE",
+    "FS_INTERNAL_OP_LOAD_GLOBALS",
+    "FS_INTERNAL_OP_SAVE_GLOBALS",
+    "FS_INTERNAL_OP_SCAN_KITS",
+    "FS_INTERNAL_OP_SCAN_SCENES",
+    "FS_INTERNAL_OP_SCAN_BANKS",
+    "FS_INTERNAL_OP_SCAN_BANK_SCENES",
+    "FS_INTERNAL_OP_SCAN_INSTRUMENTS",
+    "FS_INTERNAL_OP_REPAIR_NAMES",
+    "FS_INTERNAL_OP_LOAD_INSTRUMENT",
+    "FS_INTERNAL_OP_SAVE_INSTRUMENT",
+    "FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP",
+    "FS_INTERNAL_OP_LOAD_NAME",
+    "FS_INTERNAL_OP_LOAD_INDEX",
+    "FS_INTERNAL_OP_LOAD_LIBRARY_INDEX",
+]
+# NOTE: keep this list in sync with the fs_internal_op_t enum in
+# filesystem.c by hand -- there is no automatic extraction here. If a
+# decoded op name looks wrong, re-diff this list against the enum first.
+
+# afatfsResultCode_t (asyncfatfs.h), packed into a failed DELETE_RESULT
+# record's value bits 20-23 only when reason == 7 (DELETE_RESULT).
+AFATFS_RESULT_CODES = {
+    0: "AFATFS_RESULT_OK",
+    1: "AFATFS_RESULT_NOT_FOUND",
+    2: "AFATFS_RESULT_ALREADY_EXISTS",
+    3: "AFATFS_RESULT_INVALID_NAME",
+    4: "AFATFS_RESULT_UNSUPPORTED_NAME",
+    5: "AFATFS_RESULT_NOT_EMPTY",
+    6: "AFATFS_RESULT_NOT_DIRECTORY",
+    7: "AFATFS_RESULT_NOT_FILE",
+    8: "AFATFS_RESULT_IO_ERROR",
+    9: "AFATFS_RESULT_CORRUPT_LFN_RUN",
+    10: "AFATFS_RESULT_UNSUPPORTED_LAYOUT",
+}
+
+# afatfsDeleteTreeFailureSite_e (asyncfatfs.c), packed into a failed
+# DELETE_RESULT record's value bits 24-31, only meaningful when reason == 7
+# (DELETE_RESULT) -- i.e. which of the ~17 distinct checks inside
+# afatfs_deleteTreeContinue() actually produced that afatfsResultCode_t.
+ASYNCFATFS_DELETE_TREE_FAILURE_SITES = {
+    0: "NONE",
+    1: "OPEN_DIR_BAD_ROOT_ON_FAT32 (target's firstCluster==0 but "
+       "filesystem isn't FAT16)",
+    2: "OPEN_DIR_CLUSTER_OUT_OF_RANGE (target's firstCluster out of the "
+       "volume's legal range)",
+    3: "SCAN_ROOT_CLUSTER_MISMATCH (directory exhausted at what should be "
+       "the delete root, but its firstCluster disagrees with the copied "
+       "root identity)",
+    4: "SCAN_MALFORMED_OBJECT (a scanned child failed "
+       "afatfs_validateObjectInfo(), and is not simply a malformed-LFN "
+       "case)",
+    5: "SCAN_CHILD_CLUSTER_OUT_OF_RANGE (a scanned child's firstCluster is "
+       "out of range or an end-of-chain marker)",
+    6: "SCAN_STRUCTURAL_BUDGET_EXHAUSTED_DESCEND (the numClusters*2 "
+       "structural budget hit zero before descending into a child "
+       "directory)",
+    7: "ASCEND_BAD_DOTDOT_ENTRY (a child directory's own \"..\" entry is "
+       "missing/malformed)",
+    8: "ASCEND_PARENT_CLUSTER_OUT_OF_RANGE (the cluster read from a "
+       "child's \"..\" entry is out of the volume's legal range)",
+    9: "ASCEND_PARENT_CLUSTER_MISMATCH (a child directory's own \"..\" "
+       "cluster disagrees with the parent cluster recorded when this "
+       "traversal descended into it -- the leading hypothesis for "
+       "Session 054's slot-11 evidence; see the paired "
+       "SCAN_PARENT_FOR_SELF_EXHAUSTED site)",
+    10: "SCAN_PARENT_BAD_ROOT_ON_FAT32 (recovered parentCluster==0 but "
+        "filesystem isn't FAT16)",
+    11: "SCAN_PARENT_FOR_SELF_EXHAUSTED (re-scanning the recovered parent "
+        "never found an entry whose exact SFN pointer AND firstCluster "
+        "match what was recorded on descent -- the other half of the "
+        "slot-11 pair with ASCEND_PARENT_CLUSTER_MISMATCH)",
+    12: "SCAN_PARENT_FOR_SELF_MATCH_CLUSTER_OUT_OF_RANGE (found the exact "
+        "matching entry in the parent, but its firstCluster is now out of "
+        "range)",
+    13: "RETIRE_ENTRIES_ROOT_CLUSTER_MISMATCH (finished retiring what "
+        "should be the delete root's own name entries, but its "
+        "firstCluster disagrees with the copied root identity)",
+    14: "FREE_CLUSTERS_NONFILE_NONZERO_SIZE (currentCluster==0 but the "
+        "target isn't a zero-length file -- an empty directory should "
+        "never reach this check with a nonzero size)",
+    15: "FREE_CLUSTERS_CLUSTER_OUT_OF_RANGE_OR_BUDGET (currentCluster out "
+        "of range, or the structural budget hit zero while freeing a "
+        "cluster chain)",
+    16: "FREE_CLUSTERS_NEXT_CLUSTER_INVALID (the FAT's next-cluster link "
+        "is free space, or out of range and not an end-of-chain marker)",
+    17: "CORRUPT_PHASE (defensive catch-all: op->phase held a value no "
+        "case matches -- should not be reachable)",
 }
 
 INSTRUMENT_TYPES = {0: "drm", 1: "snr", 2: "cym", 3: "hat"}
@@ -362,6 +539,99 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                       f"resident present mask 0x{resident:04x} "
                       f"{scene_mask_text(resident)}, effective load mask "
                       f"0x{low:04x} {scene_mask_text(low)}")
+    elif ch == "X":
+        site = flags & 0x07
+        in_native_delete = bool(flags & 0x08)
+        site_name = PHASE_STALL_SITES.get(site, f"unknown site {site}")
+        phase = value & 0xFF
+        slot = (value >> 8) & 0x3FF
+        extra = (value >> 18) & 0x3FFF
+        detail = (f"{enum_name} via {producer}: site={site_name}, "
+                  f"phase={phase}, slot={slot}; "
+                  f"IN_NATIVE_DELETE={int(in_native_delete)}")
+        if site == 0 and in_native_delete:
+            detail += f", afatfs_getDeleteTreePhase() subphase={extra & 0xFF}"
+        elif site == 2:
+            detail += f", stream_offset~={extra * 16} bytes"
+        detail += (". Observation only unless site is the runtime drain, "
+                   "where a stall also forces FS_STATUS_ERROR completion.")
+    elif ch == "O":
+        elem_type = SAVE_LIFECYCLE_TYPES.get(flags & 0x03,
+                                             f"unknown type {flags & 0x03}")
+        checkpoint_id = (flags >> 2) & 0x07
+        checkpoint = SAVE_LIFECYCLE_CHECKPOINTS.get(
+            checkpoint_id, f"unknown checkpoint {checkpoint_id}")
+        failed = bool(flags & 0x80)
+        slot = value & 0x3FF
+        high_word = (value >> 16) & 0xFFFF
+        detail = (f"{enum_name} via {producer}: type={elem_type}, "
+                  f"checkpoint={checkpoint}, slot={slot}, "
+                  f"FAILED={int(failed)}")
+        if checkpoint == "DELETE_RESULT" and failed:
+            reason_id = (value >> 16) & 0xF
+            detail_id = (value >> 20) & 0xF
+            site_id = (value >> 24) & 0xFF
+            reason_name = DELETE_SLOT_REASONS.get(
+                reason_id, f"unknown reason {reason_id}")
+            detail += f"; reason={reason_name}"
+            if reason_id == 7:
+                detail += (f", native afatfsResultCode_t="
+                           f"{AFATFS_RESULT_CODES.get(detail_id, detail_id)}"
+                           f", asyncfatfs failure site="
+                           f"{ASYNCFATFS_DELETE_TREE_FAILURE_SITES.get(site_id, site_id)}")
+        elif elem_type == "Instrument" and checkpoint == "CREATE_RESULT":
+            detail += (f"; bits16-31=0x{high_word:04x} is the running "
+                       f"(unfinished) CRC32C content fingerprint, top 16 "
+                       f"bits")
+        elif elem_type == "Kit" and checkpoint == "REQUEST" and high_word:
+            detail += (f"; bits16-31=0x{high_word:04x} may be "
+                       f"menu_requestKitEntryNames()'s local branch tag "
+                       f"(1/2/3xxx) rather than the normal lifecycle field "
+                       f"-- only true for Kit REQUEST records emitted from "
+                       f"menu.c, ambiguous from the record alone")
+        elif high_word:
+            detail += f"; bits16-31=0x{high_word:04x}"
+    elif ch == "E":
+        op_id = value & 0xFF
+        phase = (value >> 8) & 0xFF
+        slot = (value >> 16) & 0x3FF
+        op_name = (FS_INTERNAL_OPS[op_id] if op_id < len(FS_INTERNAL_OPS)
+                   else f"unknown op {op_id}")
+        from_rebuild = bool(flags & 0x02)
+        has_delete_reason = bool(flags & 0x01)
+        detail = (f"{enum_name} via {producer}: current_op={op_name}, "
+                  f"op_phase={phase}, op_slot={slot}"
+                  f"{' [from index-rebuild completion]' if from_rebuild else ''}")
+        if has_delete_reason:
+            detail += ("; see the most recent O/DELETE_RESULT record for "
+                       "the specific delete-slot reason")
+    elif ch == "Y":
+        slot = value & 0x3FF
+        sfn_match = bool(value & (1 << 14))
+        cluster_match = bool(value & (1 << 15))
+        target_cluster = (value >> 16) & 0xFFFF
+        seen_count = flags
+        detail = (f"{enum_name} via {producer}: slot={slot}, "
+                  f"re-scan target cluster (low 16 bits)={target_cluster}, "
+                  f"candidates examined before giving up={seen_count}")
+        if seen_count == 0:
+            detail += " (parent looked completely empty)"
+        elif not sfn_match and not cluster_match:
+            detail += (", last directory candidate: no SFN-pointer match, "
+                       "no cluster match (or no directory-kind candidate "
+                       "was seen at all despite other objects present)")
+        elif sfn_match and not cluster_match:
+            detail += (", last directory candidate: SFN pointer matched "
+                       "but cluster did NOT -- same directory-entry slot "
+                       "now reports a different firstCluster")
+        elif cluster_match and not sfn_match:
+            detail += (", last directory candidate: cluster matched but "
+                       "SFN pointer did NOT -- the target cluster reappeared "
+                       "under a different directory-entry pointer")
+        else:
+            detail += (", last directory candidate matched on BOTH SFN "
+                       "pointer and cluster (unexpected at EXHAUSTED -- a "
+                       "full match should have retired immediately)")
     else:
         detail = f"{enum_name}: no decoder for this stage"
 
