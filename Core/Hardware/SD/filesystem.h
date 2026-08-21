@@ -207,6 +207,18 @@ uint8_t     filesystem_writeBootFailureLogBlocking(void);
 void        filesystem_bootLoggingEnd(void);
 
 /*
+ * DEV_LOGGING_IWDG one-time boot entry point (config.h). Call exactly once,
+ * immediately after filesystem_bootLoggingBegin(), before
+ * filesystem_initCardAndMountBlocking(). It starts the STM32F765 independent
+ * watchdog for this boot and, only if RCC_CSR shows the previous reset was
+ * IWDG-caused and the retained SRAM2 capsule looks valid, replays that
+ * capsule's boot-log code through filesystem_writeBootFailureLogBlocking()
+ * before continuing. A no-op when DEV_LOGGING_IWDG is 0. Not ISR-safe; boot
+ * context only. See DEV_LOGGING_IWDG in config.h for the full contract.
+ */
+void        filesystem_devIwdgBootCheck(void);
+
+/*
  * Initialize and mount the SD card during pre-audio boot.
  *
  * Inputs: TIM6 millisecond timing is active and no runtime filesystem request

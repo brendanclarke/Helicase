@@ -303,6 +303,51 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
   (SESSION_053_PRE_PLANNING.md, RECURSIVE_TREE_DELETE_REIMPLEMENT.md,
   KIT_PARSE_BOOTLOCK_RESOLVE.md, LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md) may be
   deleted; their durable facts are preserved in the handoff and SCOPING_TARGETS.
+- 2026-08-21: investigated a boot hang/timeout with no `/bootlog.bin` on the
+  card. `tools/devlog_unpack.py` (new, low-token sibling of
+  `decode_devlogs.py`, same lookup tables) showed the captured
+  `/asavetrc.bin` was an ordinary clean prior session with no `X`/`E`
+  records — the actual finding was that a raw blocking call inside the
+  pre-audio window that never returns (`SD_init()`, bit-bang SPI, or a fixed
+  `timebase_holdPreAudioMs()` hold) skips every cooperative check, so nothing
+  ever runs to log it. Added `DEV_LOGGING_IWDG` (config.h, default 1) as the
+  fix: starts the STM32F765 IWDG once at boot, fed from both foreground pumps
+  (`filesystem_tick()` and `filesystem_blockPoll()`, never an ISR) so a genuine
+  hang stops feeding and the IWDG resets the MCU on its own ~32.8s native
+  period; a software `DEV_LOGGING_IWDG_EXPIRE` (2 minutes, config.h) ceiling
+  separately catches a foreground loop that keeps ticking forever without
+  finishing boot. **The flag now defaults to 0 and is UNVERIFIED on hardware.**
+  Its first version caused an indefinite boot-splash hang (IWDG init spun on
+  `IWDG_SR` before writing the `0xCCCC` key that starts the LSI; nothing else
+  in this firmware enables the LSI). The init is now correctly ordered, bounds
+  every handshake against TIM6 ms, and starts nothing if `LSIRDY` never
+  appears. The `filesystem_blockPoll()` feed is mandatory: modal sample install
+  bypasses `filesystem_tick()` and would otherwise be reset mid `sampleFlash`
+  erase/program. Enable deliberately, not as a default. Since the IWDG has no early-warning interrupt on this part, a 12-byte
+  capsule in a new `.devwdg_noinit` SRAM2 section (approved ceiling 32 bytes;
+  see SRAM_MANIFEST.md) survives the reset and is replayed to `/bootlog.bin`
+  on the next boot via the existing `filesystem_writeBootFailureLogBlocking()`
+  path — no new on-card format. No NVIC/interrupt configuration is touched;
+  the IWDG has no interrupt line on this part. Full contract in DEV_MODES.md
+  and config.h. UNPROVEN on hardware — this has not yet been exercised
+  through an actual reproduced hang.
+- **Build-system footgun (found 2026-08-21):** the Makefile has NO header
+  dependency tracking (no `-MMD`/`-MP`/`-include *.d`). Editing `config.h`
+  alone does not rebuild anything, so a flag flip followed by a bare `make`
+  silently produces a binary with the OLD flag value and identical reported
+  sizes. Always `make clean` after editing a header, or add `-MMD -MP` plus
+  `-include $(OBJS:.o=.d)`. This affects every `config.h` experiment
+  (`DEV_MODE_*`, trace sizes, timing constants), not just one feature.
+- Session 2026-08-21 Scene-Pattern fix: Pattern is the only Scene payload
+  playback/UI address through `seq_activePattern`/`menu_shownPattern` instead
+  of `scene_getActiveIndex()`. Bank Load committed a new active Scene without
+  realigning them, so Scene Load wrote the committed Scene while the sequencer
+  read Scene 0 — presenting as "Scene Load never loads the pattern". Fixed by
+  new `seq_alignActivePatternToScene()` (state realign only: no LED notify, no
+  MIDI program change, no note-off) plus `menu_setShownPattern()`, called at
+  the Bank Load phase-20 commit. Scene Load itself was correct and unchanged.
+  Confirmed by trace (`R DONE=1 mask=0x0020 {5}`); UNVERIFIED on hardware.
+  Authority: `SCENE_LOAD_PAT_RESTORE.md`.
 
 ---
 
@@ -484,6 +529,16 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 ## General Process Reminders
 
 - Always verify the local working repository directory before writing code.
+- **Always `make clean` after editing `config.h` (or any header).** The Makefile
+  has no header dependency tracking — no `-MMD`, no `-MP`, no `-include *.d` —
+  so editing a header rebuilds *nothing*. A flag flip followed by a bare `make`
+  silently produces a binary containing the OLD value, with byte-identical
+  reported sizes, which makes it look like the change had no effect. This
+  affects every `config.h` experiment (`DEV_MODE_DIAGNOSTIC`,
+  `DEV_MODE_LOGGING`, `DEV_LOGGING_IWDG`, `AUTOSAVE_TRACE_RECORD_COUNT`, the
+  timing constants). Never trust an incremental build across a header edit, and
+  never report build sizes from one. The durable fix is adding `-MMD -MP` to
+  `CFLAGS` plus `-include $(OBJS:.o=.d)` to the Makefile. Confirmed 2026-08-21.
 - Blocking for 1ms anywhere in the main loop or any ISR at priority <= 4 is unacceptable.
 - Runtime SD/file work must remain asynchronous; boot-only synchronous polling is allowed before audio starts.
 - New code should be commented at detailed contract level: why the function,

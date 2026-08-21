@@ -16,6 +16,15 @@ the existing eight-byte trace record/ring, and the no-op dirty-mark fallback
 uses only the existing canonical mutation mask. The linked totals below remain
 the Session 051 baseline until the ARM toolchain is available for regeneration.
 
+`DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
+new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
+(`0x2007c000`), the `.devwdg_noinit` linker section in
+STM32F765VIHx_FLASH.ld. It does not touch SRAM1 or DTCM and is outside the
+table below, which only ever covered SRAM1/DTCM; confirmed via
+`arm-none-eabi-size -A`: `.devwdg_noinit 12 537378816` (`0x2007c000`).
+DEV_MODE_LOGGING-and-DEV_LOGGING_IWDG-gated only, lifetime one boot attempt,
+owner filesystem.c.
+
 ## Allocation policy
 
 No listed free capacity is general headroom. DTCM free capacity, including the

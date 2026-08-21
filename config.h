@@ -118,6 +118,81 @@
  */
 #define BOOT_FILESYSTEM_TIMEOUT_MS 20000u
 
+/*
+ * DEV_LOGGING_IWDG: catch a genuine pre-audio hard lockup that the
+ * cooperative BOOT_FILESYSTEM_TIMEOUT_MS deadline above cannot see -- a raw
+ * blocking call (SD_init()'s command loop, the bit-bang SPI byte clocking,
+ * or a fixed timebase_holdPreAudioMs() hold) that never returns skips every
+ * cooperative poll, so nothing after it ever runs to notice or log it.
+ *
+ * What: value 1 starts the STM32F765's independent watchdog (IWDG) once,
+ * early in main(), and feeds it from the two foreground pumps --
+ * filesystem_tick() and filesystem_blockPoll() -- both reachable only from
+ * ordinary foreground code, never from an ISR. If the
+ * foreground genuinely stops calling filesystem_tick() (a blocking call
+ * above never returns), or keeps calling it forever without ever finishing
+ * boot, feeding stops and the IWDG resets the MCU on its own free-running
+ * hardware timer, independent of interrupts or software state. On the next
+ * boot, RCC_CSR's IWDGRSTF flag identifies that reset cause; if a small
+ * retained SRAM2 capsule (see filesystem.c) still holds a valid last-known
+ * boot-log code from before the reset, that code is written to bootlog.bin
+ * exactly like an ordinary cooperative timeout would, through the existing
+ * filesystem_writeBootFailureLogBlocking() path -- no new on-card format.
+ * Value 0 leaves the IWDG peripheral untouched and never starts it.
+ *
+ * This owns no NVIC/interrupt configuration and changes none: the IWDG has
+ * no interrupt line on this part, only a free-running hardware reset, so
+ * enabling it does not touch vector priorities or any existing ISR. Once
+ * started for a boot the IWDG cannot be stopped in software (only fed or
+ * left to expire), so it remains armed for the rest of that session,
+ * including all of runtime after boot completes.
+ *
+ * Affiliates: DEV_LOGGING_IWDG_EXPIRE below, filesystem.c's retained boot
+ * capsule, and main.c's single call to filesystem_devIwdgBootCheck()
+ * immediately after filesystem_bootLoggingBegin().
+ *
+ * DEFAULT IS 0 AFTER A REGRESSION (2026-08-21). The first version of this
+ * feature hung the instrument indefinitely on the boot splash: the IWDG init
+ * spun on IWDG_SR waiting for a PR/RLR write to cross into the LSI clock
+ * domain before it had written the 0xCCCC key that starts the LSI, and this
+ * firmware enables the LSI nowhere else. It produced no timeout, no bootlog,
+ * and no trace, because it ran before the card was mounted and the watchdog
+ * itself had not started. filesystem_devIwdgStart() is now ordered correctly,
+ * bounds every handshake against TIM6 milliseconds, and starts nothing at all
+ * if the LSI never reports ready, so that specific hang cannot recur.
+ *
+ * It is nevertheless left OFF by default so a normal build carries no
+ * watchdog risk. Before setting it back to 1, confirm every foreground path
+ * that can legitimately run longer than the ~32.8 s period still reaches a
+ * feed. Both known pumps are covered — filesystem_tick() and
+ * filesystem_blockPoll(), the latter specifically so the modal sample install
+ * cannot be reset part-way through a sampleFlash erase/program — but that
+ * audit should be repeated for any new long-running blocking operation.
+ * Enable it deliberately, for a hang-hunting session, not as a standing
+ * default.
+ */
+#define DEV_LOGGING_IWDG 0
+
+/*
+ * Software ceiling, in milliseconds, on how long the pre-audio boot window
+ * may keep feeding the IWDG before deliberately letting it lapse.
+ *
+ * What: measured against the free-running 32-bit systick_ticks (0.25ms
+ * resolution, ~12.4-day wrap) rather than the wrapping 16-bit time_sysTick
+ * used elsewhere in this file, because 2 minutes exceeds time_sysTick's safe
+ * 32,768ms comparison range. Why: a foreground loop that keeps calling
+ * filesystem_tick() forever without ever reaching filesystem_bootLoggingEnd()
+ * -- e.g. a state-machine retry loop that never reaches DONE and never trips
+ * the per-operation BOOT_FILESYSTEM_TIMEOUT_MS deadline -- is a hang
+ * BOOT_FILESYSTEM_TIMEOUT_MS cannot always bound end-to-end; this is the
+ * backstop that intentionally stops feeding once it elapses, letting the
+ * IWDG's own native period reset the MCU shortly after. A call that never
+ * returns at all is caught sooner, by the IWDG's native period alone.
+ * Only meaningful while DEV_LOGGING_IWDG is 1. Affiliate:
+ * filesystem_tick()'s IWDG feed gate.
+ */
+#define DEV_LOGGING_IWDG_EXPIRE 120000u
+
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time
 //if 0 they are calculated for each dma buffer once, only a smoothing LP will be calculated in the sync loop

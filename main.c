@@ -476,6 +476,13 @@ int main(void)
          */
         filesystem_bootLoggingBegin();
         /*
+         * DEV_LOGGING_IWDG (config.h): starts the independent watchdog for
+         * this boot and, only if the previous boot's reset cause was the
+         * IWDG itself, replays its retained last-known boot-log code to
+         * bootlog.bin before continuing. A no-op when the flag is 0.
+         */
+        filesystem_devIwdgBootCheck();
+        /*
          * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for
          * the user to assess how operations are proceeding. It does not and
          * should not ever add additional file interaction steps, since the

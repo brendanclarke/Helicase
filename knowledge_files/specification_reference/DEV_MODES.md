@@ -103,8 +103,84 @@ absent file does not prove that no boot failure occurred: the same SD/FAT layer
 being diagnosed is also required to persist the record.
 
 The completed read-only decoder is `tools/decode_devlogs.py`; it decodes both
-`/bootlog.bin` and `/asavetrc.bin`. Update this reference only if its
-documented input schema or invocation changes.
+`/bootlog.bin` and `/asavetrc.bin`. A second, low-token decoder,
+`tools/devlog_unpack.py`, imports the same lookup tables and produces one
+compact line per record instead of prose; it does not change the on-card
+format. Update either only if the documented input schema or invocation
+changes.
+
+### DEV_LOGGING_IWDG — genuine pre-audio hard-lockup backstop
+
+Every case above still depends on the foreground making it back to a
+cooperative check. A raw blocking call that never returns at all -- stuck
+inside `SD_init()`'s command loop, the bit-bang SPI byte clocking, or a fixed
+`timebase_holdPreAudioMs()` hold -- skips every cooperative poll, so nothing
+after it ever runs to notice or log it, and a card pulled after that kind of
+freeze shows neither `/bootlog.bin` nor a new `/asavetrc.bin` record (this
+was the actual finding behind the 2026-08-21 session's "no bootlog.bin"
+question).
+
+`DEV_LOGGING_IWDG` (config.h) closes that gap with the STM32F765's
+independent watchdog (IWDG), which resets the MCU on its own free-running
+hardware timer regardless of interrupts or software state.
+
+> **This flag defaults to 0 and is UNVERIFIED on hardware.** Its first version
+> hung the instrument indefinitely on the boot splash (IWDG init spun on
+> `IWDG_SR` before writing the `0xCCCC` key that starts the LSI, which nothing
+> else in this firmware enables). `filesystem_devIwdgStart()` is now ordered
+> correctly, bounds every handshake against TIM6 milliseconds, and starts
+> nothing at all if `LSIRDY` never appears -- so it cannot hang, and it cannot
+> arm the dangerous ~512 ms reset-default period. Enable it deliberately for a
+> hang-hunting session, not as a standing default, and re-audit feed coverage
+> first for any long-running blocking operation. Full analysis:
+> `SCENE_LOAD_PAT_RESTORE.md`.
+
+`filesystem.c` starts it once per boot (`filesystem_devIwdgBootCheck()`, called
+from main.c immediately after `filesystem_bootLoggingBegin()`) and feeds it
+from **both** foreground pumps -- `filesystem_tick()` and
+`filesystem_blockPoll()` -- each reachable only from ordinary foreground code,
+never an ISR. The second feed is mandatory, not defensive: the modal sample
+install runs entirely through `filesystem_blockPoll()` (the blocking helpers
+deliberately bypass `filesystem_tick()`) and can exceed the ~32.8 s period
+while erasing six 256 KB sectors and streaming megabytes over bit-bang SPI.
+Without it, that operation would be reset mid `sampleFlash` erase/program,
+risking sample-FLASH corruption rather than a clean reboot.
+
+Two distinct hangs are covered:
+
+- A call that never returns: `filesystem_tick()` is simply never called
+  again, feeding stops, and the IWDG's native ~32.8s period (max prescaler,
+  max 12-bit reload, nominal 32kHz LSI) resets the MCU.
+- A foreground loop that keeps calling `filesystem_tick()` forever without
+  ever finishing boot (e.g. a state-machine retry that never reaches DONE and
+  never trips its own `BOOT_FILESYSTEM_TIMEOUT_MS` deadline): feeding is
+  deliberately stopped once `DEV_LOGGING_IWDG_EXPIRE` (2 minutes, measured
+  against the free-running 32-bit `systick_ticks` rather than the wrapping
+  16-bit `time_sysTick`) elapses since `filesystem_bootLoggingBegin()` without
+  reaching `filesystem_bootLoggingEnd()`.
+
+Once started for a boot the IWDG cannot be stopped in software, so it remains
+armed for the rest of that session, including all of runtime after boot
+completes -- it becomes a full-runtime hang backstop, not only a boot one.
+It owns no NVIC/interrupt configuration: the IWDG has no interrupt line on
+this part, only the hardware reset, so enabling it does not touch vector
+priorities or any existing ISR.
+
+Because the IWDG has no early-warning interrupt on this part, it cannot write
+`/bootlog.bin` before it resets. Instead, a 12-byte capsule (`magic` +
+mirrored `fs_boot_logging_code`) lives in the `.devwdg_noinit` linker section
+(STM32F765VIHx_FLASH.ld, previously-unmapped SRAM2), explicitly excluded from
+the startup zero-fill loop so it survives an IWDG-caused warm reset. On the
+next boot, `filesystem_devIwdgBootCheck()` checks RCC_CSR's `IWDGRSTF` flag;
+if it is set and the capsule's magic is still valid, the capsule's retained
+code is copied into `fs_boot_logging_code` and written to `/bootlog.bin`
+through the existing `filesystem_writeBootFailureLogBlocking()` path -- the
+same 8-byte token format as an ordinary cooperative timeout, no new on-card
+schema. `magic` alone is never trusted as proof of a watchdog reset; RCC_CSR's
+hardware flag is the actual gate, and is cleared (`RMVF`) every boot after
+being read so it cannot misattribute a later, unrelated reset. RAM allocation:
+12 of a 32-byte approved ceiling (linker `ASSERT` enforces the ceiling),
+DEV_MODE_LOGGING-and-DEV_LOGGING_IWDG-gated only, filesystem.c.
 
 ### `/asavetrc.bin`
 

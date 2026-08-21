@@ -81,6 +81,7 @@
 #include "MidiMessages.h"
 #include "timebase.h"
 #include "random.h"
+#include "globals.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -382,6 +383,42 @@ static uint8_t          fs_boot_logging_code[8];
  * Region/lifetime/owner: 64 bytes normal SRAM1 for one boot, filesystem.c.
  */
 static uint8_t fs_hcprms_boot_capsule[HCPRMS_BOOT_CAPSULE_BYTES];
+
+/*
+ * DEV_LOGGING_IWDG retained cross-reset capsule (config.h owns the feature
+ * contract). Region/lifetime/owner: 12 of 32 approved bytes, SRAM2, the
+ * `.devwdg_noinit` linker section (STM32F765VIHx_FLASH.ld), one boot
+ * attempt, filesystem.c. That section is explicitly excluded from
+ * Reset_Handler's zero-fill loop, so this survives an IWDG-caused warm
+ * reset -- it is lost only on an actual power cycle, which is not the
+ * failure this exists to catch.
+ *
+ * Input: the same eight-byte code already tracked by fs_boot_logging_code,
+ * mirrored here on every Arm/SetDetail call below. Output: read back once,
+ * at the very next boot, by filesystem_devIwdgBootCheck(); `magic` alone is
+ * never trusted as proof of a watchdog reset -- RCC_CSR's IWDGRSTF hardware
+ * flag is the actual gate, checked before this capsule is ever consulted.
+ */
+#if DEV_LOGGING_IWDG
+#define DEV_IWDG_CAPSULE_MAGIC 0x49574447u /* ASCII "IWDG" */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint8_t  code[8];
+} devIwdgCapsule_t;
+__attribute__((section(".devwdg_noinit")))
+static volatile devIwdgCapsule_t fs_devwdg_capsule;
+static uint32_t fs_devwdg_boot_start_tick = 0u;
+static uint8_t  fs_devwdg_lapsed = 0u;
+/*
+ * Nonzero only after filesystem_devIwdgStart() actually reached the 0xCCCC
+ * start key. It gates the feed so that a boot which deliberately skipped the
+ * watchdog (LSI never became ready) never pretends to have one, and so the
+ * DEV_LOGGING_IWDG_EXPIRE backstop cannot report a lapse for a watchdog that
+ * was never armed. Region/lifetime/owner: one byte of normal SRAM1 inside the
+ * existing DEV_MODE_LOGGING-gated block, one boot attempt, filesystem.c.
+ */
+static uint8_t  fs_devwdg_armed = 0u;
+#endif
 #endif
 /*
  * Current numbered operation slot.
@@ -1122,6 +1159,16 @@ static void filesystem_writeBootLog_tick(void);
 static void filesystem_residentNames_tick(void);
 static void filesystem_ensureAutosaveFiles_tick(void);
 static void filesystem_autosaveParameterDrain_tick(void);
+#if DEV_MODE_LOGGING && DEV_LOGGING_IWDG
+/*
+ * Declared ahead of its definition because both foreground pumps feed the
+ * watchdog: filesystem_tick() (defined far below, beside the feed itself) and
+ * filesystem_blockPoll() (defined earlier, for the blocking helpers that
+ * deliberately bypass filesystem_tick()). See the call site in
+ * filesystem_blockPoll() for why that second feed is mandatory.
+ */
+static void filesystem_devIwdgFeed(void);
+#endif
 /* Shared edge-triggered stall detector used by the foreground state machines. */
 static uint8_t filesystem_pollPhaseStall(uint8_t phase,
                                          uint8_t *last_phase,
@@ -2866,6 +2913,10 @@ void filesystem_bootLoggingArm(const char code[8])
     memcpy(fs_boot_logging_code, code, sizeof(fs_boot_logging_code));
     fs_boot_logging_started_tick = time_sysTick;
     fs_boot_logging_armed = 1u;
+#if DEV_LOGGING_IWDG
+    fs_devwdg_capsule.magic = DEV_IWDG_CAPSULE_MAGIC;
+    memcpy((void *)fs_devwdg_capsule.code, code, sizeof(fs_devwdg_capsule.code));
+#endif
 #else
     (void)code;
 #endif
@@ -2889,6 +2940,9 @@ static void filesystem_bootLoggingSetDetail(const char code[8])
         return;
     }
     memcpy(fs_boot_logging_code, code, sizeof(fs_boot_logging_code));
+#if DEV_LOGGING_IWDG
+    memcpy((void *)fs_devwdg_capsule.code, code, sizeof(fs_devwdg_capsule.code));
+#endif
 #else
     (void)code;
 #endif
@@ -10745,6 +10799,43 @@ static void filesystem_loadBankDirectory_tick(void)
         filesystem_markSettingsDirty();
         bank_setHasResidentBank(1u);
         scene_selectActive(op_bank_active_scene);
+        /*
+         * Realign Pattern playback and the STEP view with the Scene just
+         * committed as active.
+         *
+         * Why: scene_selectActive() is deliberately "identity, never data" and
+         * changes only SceneData's active index. Pattern is the one Scene-owned
+         * payload that playback and the STEP UI do NOT address through
+         * scene_getActiveIndex(): the sequencer reads seq_activePattern and the
+         * LED/button layer reads menu_shownPattern. Both are BSS-zero at boot
+         * and were previously assigned only by a front-panel PERF press, so a
+         * Bank whose manifest selects any Scene other than 0 left them
+         * disagreeing with SceneData for the whole session. A later Scene Load
+         * then wrote its Pattern into the committed active Scene (correctly)
+         * while playback and the STEP LEDs kept reading Scene 0, which
+         * presented as "Scene Load never loads the pattern". Every other Scene
+         * payload resolved through scene_getActiveIndex() and looked fine,
+         * which is why only Pattern appeared broken.
+         *
+         * Inputs: the Bank manifest's committed active Scene. Outputs: the
+         * sequencer's active/pending Pattern indices and Menu's viewed Pattern
+         * follow it. Both callees validate the index themselves and are pure
+         * state realignment — no SD access, no allocation, no payload change,
+         * and no MIDI emission (the reason seq_alignActivePatternToScene()
+         * exists instead of seq_selectActivePattern(), which would send a
+         * program change and force note-offs during pre-audio boot).
+         *
+         * Repaint is intentionally not triggered here: filesystem.c must not
+         * drive LCD/LED work. Boot repaints via menu_start()/menu_repaintAll()
+         * and runtime Bank Load repaints through menu_startSoundApply() in
+         * Menu's PRESET_OP_BANK_LOAD completion.
+         *
+         * Affiliates: seq_alignActivePatternToScene(), menu_setShownPattern(),
+         * menu_perfModeSceneButtonPressed() (the equivalent front-panel
+         * pairing), and SCENE_LOAD_PAT_RESTORE.md.
+         */
+        seq_alignActivePatternToScene(op_bank_active_scene);
+        menu_setShownPattern(op_bank_active_scene);
         memcpy(preset_currentName, op_bank_display_name, 8u);
         filesystem_cacheResidentName(0u, op_bank_display_name);
         filesystem_bootLoggingSetDetail("BKHCWRIT");
@@ -16776,6 +16867,24 @@ static void filesystem_blockPoll(void)
      * FAT poll or an immediate return after timeout. Why: private blocking
      * helpers bypass filesystem_tick(). Affiliate: filesystem_blockFsOk().
      */
+#if DEV_MODE_LOGGING && DEV_LOGGING_IWDG
+    /*
+     * This is the second foreground pump, and it must feed the watchdog for
+     * exactly the reason stated above: the blocking helpers bypass
+     * filesystem_tick(), which is where the only other feed lives.
+     *
+     * Concretely, the modal sample install
+     * (filesystem_installSampleFolderBlocking() -> filesystem_blockOpen/
+     * blockChdir/installOneSample) runs entirely through this path and can
+     * legitimately take far longer than the IWDG's ~32.8 s period while it
+     * erases six 256 KB flash sectors and streams megabytes over bit-bang SPI.
+     * Without a feed here that operation would be reset part-way through a
+     * sampleFlash erase/program, which risks corrupting the sample-FLASH
+     * region rather than merely rebooting. Feeding here keeps the watchdog
+     * scoped to genuine hangs instead of penalising long legitimate work.
+     */
+    filesystem_devIwdgFeed();
+#endif
     if (filesystem_bootLoggingPollDeadline())
         return;
     afatfs_poll();
@@ -19941,8 +20050,197 @@ static void filesystem_autosaveTraceFlushSchedule_tick(void)
 #endif
 }
 
+#if DEV_MODE_LOGGING && DEV_LOGGING_IWDG
+/*
+ * IWDG/RCC register access, following this file's plain-register style (see
+ * clocks.c's own RCC/PWR/FLASH defines) -- no CMSIS device header exists in
+ * this project. Addresses and bit positions are from RM0410 (STM32F76xxx
+ * reference manual): Chapter 34 (IWDG) and RCC_CSR (Section 6.3.20). Local to
+ * this file; not exposed, not used anywhere else.
+ */
+#define DEV_IWDG_KR          (*((volatile uint32_t *)0x40003000UL))
+#define DEV_IWDG_PR          (*((volatile uint32_t *)0x40003004UL))
+#define DEV_IWDG_RLR         (*((volatile uint32_t *)0x40003008UL))
+#define DEV_IWDG_SR          (*((volatile uint32_t *)0x4000300CUL))
+#define DEV_RCC_CSR          (*((volatile uint32_t *)0x40023874UL))
+#define DEV_RCC_CSR_IWDGRSTF (1UL << 29)
+#define DEV_RCC_CSR_RMVF     (1UL << 24)
+/*
+ * LSI control lives in the same RCC_CSR register as the reset-cause flags.
+ * The IWDG counts on the LSI, and nothing else in this firmware ever starts
+ * it, so filesystem_devIwdgStart() must enable it explicitly and confirm
+ * LSIRDY before touching any IWDG register that handshakes across that clock
+ * domain. See the hazard note in filesystem_devIwdgStart().
+ */
+#define DEV_RCC_CSR_LSION    (1UL << 0)
+#define DEV_RCC_CSR_LSIRDY   (1UL << 1)
+/*
+ * Bounds for the two watchdog bring-up handshakes, in TIM6 milliseconds.
+ * LSI startup is specified in the hundreds of microseconds, so 10 ms is
+ * generous; these exist purely so a dead LSI or an unresponsive register can
+ * never stall boot the way the original unbounded spin did.
+ */
+#define DEV_IWDG_LSI_READY_TIMEOUT_MS   10u
+#define DEV_IWDG_REG_UPDATE_TIMEOUT_MS  10u
+
+/* Max 12-bit reload with the max /256 prescaler: ~32.8s at nominal 32kHz
+** LSI. This is only the hardware dead-man period; DEV_LOGGING_IWDG_EXPIRE
+** (config.h) is a separate, much longer software ceiling layered on top by
+** filesystem_devIwdgFeed() below -- the two are not the same timeout. */
+#define DEV_IWDG_PRESCALER_DIV256 0x6UL
+#define DEV_IWDG_RELOAD_MAX       0xFFFUL
+
+static void filesystem_devIwdgStart(void)
+{
+    uint16_t wait_start;
+
+    /*
+     * Bring up the independent watchdog without ever being able to hang boot.
+     *
+     * HAZARD THIS FUNCTION EXISTS TO AVOID (regression fixed 2026-08-21): the
+     * IWDG is clocked by the LSI, and IWDG_SR's PVU/RVU bits only clear once a
+     * PR/RLR write has propagated into that LSI clock domain. This firmware
+     * never enables the LSI anywhere (no LSION write exists outside this
+     * function), and the LSI is off after reset. An earlier version of this
+     * code wrote the unlock key, then PR/RLR, then spun on
+     * `while (IWDG_SR & 3)` BEFORE writing the 0xCCCC start key. Since 0xCCCC
+     * is what implicitly starts the LSI, the LSI was still stopped, PVU/RVU
+     * could never clear, and the spin never exited: an indefinite boot hang
+     * with no timeout, no bootlog, and no trace file, because it ran before
+     * the card was even mounted. The watchdog also could not rescue it, since
+     * it had not been started yet.
+     *
+     * ORDER IS LOAD-BEARING. The LSI is enabled and confirmed ready FIRST, so
+     * every subsequent register handshake has a running clock domain to
+     * complete against. Only then is PR/RLR programmed, and only then is the
+     * watchdog started.
+     *
+     * FAIL-SAFE ON A DEAD LSI: if LSIRDY never appears, this returns having
+     * started nothing at all. That is deliberate and is the only safe
+     * outcome. Starting the IWDG with its reset-default PR/RLR would arm a
+     * ~512 ms period (PR=0 => /4, RLR=0xFFF at ~32 kHz), which the pre-audio
+     * SD ladder would blow through immediately, converting a diagnostic aid
+     * into a permanent reset boot-loop. No watchdog is strictly better than a
+     * watchdog that reboots the instrument twice a second.
+     *
+     * EVERY WAIT IS BOUNDED. Both handshakes time out against the TIM6 1 kHz
+     * time_sysTick, which main.c starts (time_initTimer()) long before this
+     * runs. By construction this function cannot spin forever regardless of
+     * LSI, register, or silicon behaviour.
+     *
+     * Inputs: a running TIM6 millisecond tick. Outputs: either a fully armed
+     * ~32.8 s watchdog plus initialized feed-deadline state, or no watchdog at
+     * all and an untouched IWDG peripheral. Affiliates:
+     * filesystem_devIwdgBootCheck() (sole caller) and
+     * filesystem_devIwdgFeed().
+     */
+
+    /* 1. Enable the LSI and confirm it is actually running. */
+    DEV_RCC_CSR |= DEV_RCC_CSR_LSION;
+    wait_start = time_sysTick;
+    while ((DEV_RCC_CSR & DEV_RCC_CSR_LSIRDY) == 0u) {
+        if ((uint16_t)(time_sysTick - wait_start) >= DEV_IWDG_LSI_READY_TIMEOUT_MS)
+            return;   /* LSI dead: start nothing, boot continues normally. */
+    }
+
+    /* 2. Program the longest available period now that the LSI is clocking. */
+    DEV_IWDG_KR = 0x5555UL;                  /* unlock PR/RLR for write */
+    DEV_IWDG_PR = DEV_IWDG_PRESCALER_DIV256;
+    DEV_IWDG_RLR = DEV_IWDG_RELOAD_MAX;
+    wait_start = time_sysTick;
+    while ((DEV_IWDG_SR & 0x3UL) != 0u) {    /* PVU/RVU propagate to LSI */
+        if ((uint16_t)(time_sysTick - wait_start) >= DEV_IWDG_REG_UPDATE_TIMEOUT_MS)
+            return;   /* Never armed, so the default short period cannot bite. */
+    }
+
+    /* 3. Load the new period, then start counting. */
+    DEV_IWDG_KR = 0xAAAAUL;                  /* first feed, applies RLR */
+    DEV_IWDG_KR = 0xCCCCUL;                  /* start counting */
+    fs_devwdg_boot_start_tick = systick_ticks;
+    fs_devwdg_lapsed = 0u;
+    fs_devwdg_armed = 1u;
+}
+
+/*
+ * Feed the IWDG only from ordinary foreground code -- this is called solely
+ * from filesystem_tick(), itself reachable only from main.c's boot
+ * spin-loops and the post-audio main superloop, never from an ISR. A raw
+ * blocking call that never returns therefore also never returns here to
+ * feed it; the hardware watchdog then resets on its own ~32-second native
+ * period regardless of interrupts or any other software state.
+ *
+ * While still inside the pre-audio window (fs_boot_logging_active), feeding
+ * additionally stops on its own once DEV_LOGGING_IWDG_EXPIRE elapses without
+ * ever reaching filesystem_bootLoggingEnd(). This catches a foreground loop
+ * that keeps calling filesystem_tick() forever without making real boot
+ * progress, which a call-never-returns check alone cannot see. After boot
+ * ends, feeding is unconditional: the IWDG cannot be stopped once started,
+ * so it remains a full-runtime hang backstop for the rest of the session.
+ */
+static void filesystem_devIwdgFeed(void)
+{
+    /*
+     * Never feed a watchdog that was not actually armed. filesystem_devIwdgStart()
+     * intentionally returns without starting anything when the LSI does not come
+     * ready, and in that case there is nothing to service; writing the reload key
+     * to a stopped IWDG is harmless but misleading, and the EXPIRE backstop below
+     * must not treat a never-armed boot as having lapsed.
+     */
+    if (!fs_devwdg_armed)
+        return;
+    if (fs_devwdg_lapsed)
+        return;
+    if (fs_boot_logging_active &&
+        (uint32_t)(systick_ticks - fs_devwdg_boot_start_tick) >=
+            ((uint32_t)DEV_LOGGING_IWDG_EXPIRE * SYSTICK_TICKS_PER_MS)) {
+        fs_devwdg_lapsed = 1u;  /* deliberately stop feeding; let it lapse */
+        return;
+    }
+    DEV_IWDG_KR = 0xAAAAUL;
+}
+
+void filesystem_devIwdgBootCheck(void)
+{
+    uint8_t was_iwdg_reset;
+    uint8_t capsule_valid;
+
+    /*
+     * Sample the reset cause BEFORE filesystem_devIwdgStart() touches RCC_CSR.
+     * LSION and the reset-cause flags share that register, so reading first
+     * keeps the diagnosis independent of the read-modify-write below and makes
+     * the ordering intent explicit rather than incidental.
+     */
+    was_iwdg_reset = (DEV_RCC_CSR & DEV_RCC_CSR_IWDGRSTF) != 0u;
+    capsule_valid = (fs_devwdg_capsule.magic == DEV_IWDG_CAPSULE_MAGIC);
+
+    /* Always clear reset-cause flags after reading them, so IWDGRSTF cannot
+     * misattribute some later, unrelated reset to this feature. */
+    DEV_RCC_CSR |= DEV_RCC_CSR_RMVF;
+
+    /* Arm before the recovery write below, so a stall inside that one-time
+     * write is itself covered rather than running unwatched. This call is
+     * bounded and fail-safe: it cannot hang, and it starts nothing at all if
+     * the LSI does not come ready. */
+    filesystem_devIwdgStart();
+
+    if (was_iwdg_reset && capsule_valid) {
+        memcpy(fs_boot_logging_code, (const void *)fs_devwdg_capsule.code,
+               sizeof(fs_boot_logging_code));
+        (void)filesystem_writeBootFailureLogBlocking();
+    }
+    fs_devwdg_capsule.magic = 0u;  /* consumed, or never valid; start clean */
+}
+#else
+void filesystem_devIwdgBootCheck(void)
+{
+}
+#endif /* DEV_MODE_LOGGING && DEV_LOGGING_IWDG */
+
 void filesystem_tick(void)
 {
+#if DEV_MODE_LOGGING && DEV_LOGGING_IWDG
+    filesystem_devIwdgFeed();
+#endif
     /*
      * Timeout is checked before another SD/FAT step can extend the failed
      * transaction. Input is the armed pre-audio or recovery deadline; output

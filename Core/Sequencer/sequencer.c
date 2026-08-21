@@ -320,6 +320,41 @@ void seq_selectActivePattern(uint8_t pattern)
 	voiceControl_noteOff(0xFF);
 }
 
+void seq_alignActivePatternToScene(uint8_t scene_index)
+{
+	/*
+	 * Realign playback to a Scene selection an external owner already committed.
+	 *
+	 * See sequencer.h for the full contract and the defect history; the short
+	 * version is that seq_activePattern is the index playback reads at
+	 * seq_advanceTrackStep()'s pat_isStepActive() call, and it is NOT derived
+	 * from scene_getActiveIndex(). Any owner that changes the active Scene
+	 * without a front-panel PERF press must therefore realign it here, or
+	 * playback keeps reading whichever Scene was last selected (Scene 0 from
+	 * BSS at boot) while loads write the newly committed one.
+	 *
+	 * Inputs: resident Scene index; rejected unless pat_patternValid() accepts
+	 * it, so an out-of-range Bank manifest value leaves playback untouched
+	 * rather than pointing at a nonexistent Scene. Outputs: the active and
+	 * pending indices agree, no boundary swap is left queued, and every track
+	 * cursor is rederived from the running master clock so an alignment during
+	 * playback lands on the correct step rather than restarting the bar.
+	 *
+	 * This intentionally shares seq_selectActivePattern()'s state assignments
+	 * but none of its performance side effects (LED notify, MIDI program
+	 * change, all-notes-off). Boot-time Bank Load calls this before audio
+	 * starts, where those would be wrong or actively harmful.
+	 */
+	if (!pat_patternValid(scene_index))
+		return;
+
+	seq_activePattern = scene_index;
+	seq_pendingPattern = scene_index;
+	seq_loadPendigFlag = 0u;
+	seq_newPatternAvailable = 0u;
+	seq_realignActivePatternToMasterClock();
+}
+
 static void seq_advanceTrackStep(uint8_t track)
 {
 	/*
