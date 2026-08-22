@@ -197,8 +197,58 @@ stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
 Integer fields are little-endian. Stage bytes are uppercase
-`D I J N L R W F G B S A V M C P T` and their meanings/values are owned by
-`AutosaveTrace.h`. `D` is one accepted
+`D I J N L R W F G B S A V M C P T X O E` and their meanings/values are owned
+by `AutosaveTrace.h`. `X`, `O`, and `E` were added in Session 054 while
+chasing the recursive-delete `ScnS05` defect (see
+`knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`); a fourth stage,
+`Y` (`SCAN_PARENT_DIAG`), was added and then fully retired in the same
+session once its root cause was fixed outright — its layout stays documented
+below only so any `asavetrc.bin` already captured during that window still
+decodes; it has no live producer.
+
+`X` (`PHASE_STALL`) is a purely diagnostic, edge-triggered "this cooperative
+state machine's phase stopped advancing" observer
+(`filesystem_pollPhaseStall()`), used at three sites: the delete-slot
+resolver (site 0, 50,000-poll threshold), Bank Save's own entry/metadata
+phases (site 1, 20,000 polls), and the runtime AutoSave parameter drain
+(site 2, 30,000 polls — the one site where a stall also forces a real
+`FS_STATUS_ERROR` completion instead of only observing, since a wedged drain
+previously had no bounded escape at all). `flags` bits 0-2 select the site;
+`value` packs the stalled phase, the numbered slot, and (site 0 only, when
+inside native delete) the asyncfatfs subphase.
+
+`O` (`SAVE_LIFECYCLE`) is an ordered per-save-type timeline —
+`REQUEST`/`DELETE_RESULT`/`CREATE_RESULT`/`SOURCE_STAGED`/`FINISH` — for Kit,
+Scene, Bank, and Instrument Save, plus three Menu-side `REQUEST`-tagged
+branch witnesses for `menu_requestKitEntryNames()`'s cache-domain decision
+(these three reuse the CRC16 bit range as a local branch tag 1/2/3, not a
+CRC — decode with that call site in mind). Instrument's `CREATE_RESULT`
+additionally packs a raw (unfinished, not `~crc32c`-complemented) CRC32C
+content fingerprint, comparable only against another value produced the same
+way.
+
+`E` (`OPERATION_ERROR`) is a universal backstop: both of filesystem.c's
+shared terminal-completion functions (`filesystem_complete()` and
+`filesystem_completeLibraryIndexRebuild()`) emit one record whenever an
+operation ends in `FS_STATUS_ERROR`, regardless of which specific failure
+branch was hit — by construction, not by having hand-instrumented every
+branch. `value` packs the failing `current_op`/`op_phase`/`op_slot`; flag bit
+0 reports whether the more specific delete-slot failure-reason field was
+also set (cross-reference the paired `'O'` `DELETE_RESULT` record in that
+case); flag bit 1 distinguishes the two hook sites.
+
+**Known diagnostics gap (Session 055):** `N` (`INSTRUMENT_ENTRY`) is only
+emitted while `menu_instrumentLoadActive` is true, so every refusal/entry
+record on the *top-level* Kit or Scene Load/Save row is silently suppressed
+— an absent `N` record does not prove no request was posted. Worse, the
+Scene entry path (`menu_requestSceneEntryName()`) has no trace producer at
+all. Both cost real investigation time chasing the Session 055 Load-menu
+freeze (its absence looked like "nothing happened" when in fact the request
+was being posted and refused every pass). A top-level equivalent of the `N`
+entry trace, and a trace producer for the Scene entry path, are recommended
+before the next Load/Save-family investigation; not yet implemented.
+
+`D` is one accepted
 payload-bit OR. `I` is one whole-Instrument marker outcome: flags report valid
 payload-map base, live tracking, and whether all requested bytes reached the
 dirty funnel; value packs Scene, slot, expected byte count, and accepted byte

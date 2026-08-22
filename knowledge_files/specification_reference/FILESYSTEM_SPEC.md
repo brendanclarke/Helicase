@@ -1601,6 +1601,16 @@ deletion receives the complete captured `afatfsObjectInfo_t`, avoiding a second
 ambiguous LFN lookup. Bank Save uses the same direct root delete/recreate flow
 and does not claim power-loss atomicity or preserve unselected old children.
 
+All four Save paths (Kit, Scene, Bank, root Instrument) stage their HCNAMES
+row's `source` alongside its name, mirroring the equivalent Load path exactly
+(each stages `op_slot`/direct-source for its own row and
+`FS_RESIDENT_SOURCE_INHERIT` for the rows it owns beneath it). This closed a
+Session 053-054 defect where a saved row kept reporting its previously
+*loaded* slot as source; root Instrument Save additionally required a new
+hand-off into `FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT`; it previously never
+reached any HCNAMES publish path at all (see
+`knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`).
+
 ### asyncfatfs Boundary
 
 The low-level asyncfatfs API, LFN/SFN alias rules, object iteration behavior,

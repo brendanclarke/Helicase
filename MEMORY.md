@@ -17,10 +17,14 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 053 recursive-delete reimplementation in a
-dirty worktree on `dev-ph3-autosave-ph2`. The durable closeout is
-`knowledge_files/log_archive/053_SESSION_HANDOFF_LOG.md`; verify the actual
-commit/worktree before making the next source change.
+**Current working source**: Session 055 close-out, on branch
+`dev-ph3-autosave-ph3`. The durable closeouts are
+`knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md` (recursive-delete
+root-cause repair, HCNAMES source-on-save, Scene-Pattern desync, boot-IWDG
+regression) and `055_SESSION_HANDOFF_LOG.md` (hardware confirmation of 054's
+fixes, plus the Load-menu freeze, Instrument `kit`-row restore, and stale
+Bank-name-on-entry fixes); verify the actual commit/worktree before making
+the next source change.
 
 ## RAM Allocation Approval Policy
 
@@ -346,8 +350,148 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
   new `seq_alignActivePatternToScene()` (state realign only: no LED notify, no
   MIDI program change, no note-off) plus `menu_setShownPattern()`, called at
   the Bank Load phase-20 commit. Scene Load itself was correct and unchanged.
-  Confirmed by trace (`R DONE=1 mask=0x0020 {5}`); UNVERIFIED on hardware.
-  Authority: `SCENE_LOAD_PAT_RESTORE.md`.
+  Confirmed by trace (`R DONE=1 mask=0x0020 {5}`) and by Session 055's
+  hardware round-trip testing (loading a Scene after a PERF Scene switch now
+  plays/displays immediately). Authority: `SCENE_LOAD_PAT_RESTORE.md`,
+  `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`.
+- Session 054 closed the pinned recursive-delete/overwrite target
+  (`SCOPING_TARGETS.md`'s "duplicate-slot overwrite"), through five
+  successive bugs found by an iterative card-driven diagnostic process, not
+  by inspection alone:
+  - **Bug #1** — `filesystem_deleteSlotDirectory_tick()` had two completion
+    gates that treated its own diagnostic-only 50,000-poll stall latch
+    (`op_delete_slot_timeout_observed`) as a hard failure by itself, so a
+    nested Scene delete slow enough to trip the counter reported
+    `FS_STATUS_ERROR` even after finishing correctly (`ScnS05`, seen even
+    though the slot was actually replaced). Fixed: only the scan's own
+    error/duplicate latches or the native result now decide pass/fail; the
+    stall is purely observational and durably traced (see the `'X'`
+    `PHASE_STALL` stage below).
+  - **Bug #2** — none of the four Save paths (Kit/Scene/Bank/root
+    Instrument) staged `filesystem_setResidentSource()`, so a saved row kept
+    reporting its previously *loaded* slot as HCNAMES source. Root Instrument
+    Save's gap was deeper: it never reached any HCNAMES publish path at all
+    (`filesystem_requestUpdateResidentInstrumentNames()` had zero callers
+    repo-wide) — fixed by adding a hand-off into
+    `FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT` plus a new type-filtered
+    index-rebuild path. See `FILESYSTEM_SPEC.md`'s Save/Overwrite Safety
+    section.
+  - **Bugs #3/#4/#5 — the actual `ScnS05` root cause**, found only after
+    building exhaustive failure-site instrumentation into the native
+    `afatfs_deleteTree()` traversal (17-value
+    `afatfsDeleteTreeFailureSite_e`) and iterating repeated card retests: the
+    descend/ascend path depends on one invariant —
+    `file->directoryEntryPos` must always identify whichever directory the
+    handle currently has open, since that is the only thing distinguishing
+    "the delete root just emptied, finish" from "a nested child just
+    emptied, ascend". Two *sequential* bug fixes (Bug #3: stop
+    reconstructing a resume target from an unset `parentCluster`; Bug #4:
+    remove a redundant, apparently-unreliable parent re-scan) each correctly
+    fixed their own symptom but broke one half of that invariant in the
+    process — Bug #3's fix cleared `directoryEntryPos` as a side effect of
+    reusing `OPEN_DIR`'s reset code, and Bug #4's fix assumed
+    `op->currentTarget` survived a descent untouched, when the descended-into
+    child's own internal deletes overwrite that register with every object
+    they process. **Bug #5** is the real fix: snapshot the child's identity
+    and directory-entry pointer at the moment of descent
+    (`descendTarget`/`parentEntry` on the persistent `afatfs.deleteTreeState`
+    singleton) and restore both on ascend, one level deep only (matching the
+    existing `parentCluster` depth bound; `afatfs_deleteTree()` has exactly
+    one caller, never more than one nested directory below a delete root).
+    **Hardware-confirmed Session 055**: a full Kit-modify-save,
+    Instrument-modify, Scene-modify-save, and Bank-save-then-load round trip
+    reported no errors. The dedicated low-level acceptance matrix (malformed
+    LFN, cyclic/broken-parent, injected FAT/cache error) is still unexercised
+    as its own fixture set — see `ASYNCFATFS_REFERENCE.md`.
+  - Extensive new, permanent diagnostics were added while chasing this:
+    delete-slot failure-reason classification (`fs_delete_slot_reason_t`),
+    the native 17-site failure-site enum above, a shared
+    `filesystem_pollPhaseStall()` edge-triggered stall detector (also used at
+    Bank Save entry and the runtime AutoSave drain — the drain site is the
+    one place a stall now forces a real error completion instead of only
+    observing, since it previously had no bounded escape at all), an ordered
+    per-Save-type lifecycle trace (`'O'`), and a universal `'E'` backstop on
+    both of filesystem.c's shared terminal-completion functions so a future
+    failure path nobody thought to instrument still gets caught by
+    construction. All documented in `DEV_MODES.md`'s stage-letter list.
+  - Card damage found and repaired along the way: six root Scene folders were
+    missing `effects.fx` and/or their embedded Kit contents, all consistent
+    with an *earlier* interrupted, non-atomic Scene Save (the old tree is
+    deleted first, and `effects.fx` is written last of ~12 sequential file
+    operations, so an interruption anywhere in between leaves a stub that
+    Load's current all-or-nothing child check permanently rejects). Repaired
+    on-card; **no save-path hardening was implemented** — four ranked options
+    (tolerate a missing `.fx`; write it earlier; clean up a failed save;
+    real atomic commit) are recorded but deferred. See
+    `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md` for the full
+    round-by-round trail and every file/line changed.
+  - `AUTOSAVE_TRACE_RECORD_COUNT` is still the temporary, approved 2,048-record
+    expansion (`config.h:255`, normal default 64) adopted for this
+    investigation. **Needs a decision**, not yet reverted: keep it while any
+    further recursive-delete/Save-path work is plausible, or shrink back to
+    64 now that the pinned target is hardware-confirmed closed.
+- Session 055 hardware round-trip testing (Kit/Instrument/Scene/Bank
+  load-modify-save) confirmed Session 054's fixes above and surfaced a new
+  Load-menu freeze, root-caused across two rounds — **do not re-litigate as
+  one bug, they are different defects**:
+  - **Round 1 (real, but not the freeze)**: an unbounded, no-backoff retry
+    livelock — Menu re-posted a doomed Kit/Scene entry request once per
+    foreground pass for as long as AutoSave held the filesystem facade,
+    destructively clearing the shared name cache each time before
+    discovering the refusal. Self-recovering in under a second once AutoSave
+    released, but it visibly rendered the page against a cleared cache (a
+    Scene stem appearing on the Kit row) and burned the foreground. Fixed by
+    gating the deferred-selection dispatch on `filesystem_status() !=
+    FS_STATUS_BUSY` and adding a non-destructive early busy-check to
+    `menu_requestResidentNameScratch()`.
+  - **Round 2 (the actual freeze)**: `menu_showFilesystemErrorOverlay()` —
+    the shared terminal path for nearly every failed Menu filesystem
+    operation — never called `filesystem_ack()`, so one failed read parked
+    the facade at `FS_STATUS_ERROR` **permanently**, silently killing both
+    the AutoSave writer and the trace flush from that moment on (both are
+    admitted only while the facade is `IDLE`). This is why *both* freeze
+    captures ended cleanly with a normal AutoSave completion and contained
+    zero evidence of the freeze itself. Separately, two request helpers
+    (`menu_requestInstrumentIndexLoad()`, `menu_requestLibraryIndexLoad()`)
+    raised `menu_storageBusy` expecting acceptance and left it stuck on
+    refusal, self-deadlocking their own only retry path. Fixed (6 sites
+    total, all in `menu.c`, no RAM cost). **Closed per user hardware
+    confirmation** — freeze no longer reproduces. General rule this
+    reinforces, now stated once in `AUTOSAVE.md`: every Menu-side filesystem
+    terminal path, success or failure, must `filesystem_ack()`.
+  - **Deferred, not fixed**: the AutoSave writer reads the shared 9,000-byte
+    name cache live while serializing its record, and Menu clears that same
+    cache directly (bypassing facade arbitration) from 18 call sites. Only
+    the two hottest callers were closed. The general hazard (a torn AutoSave
+    record, not a hang) needs a proper ownership interlock — deliberately
+    left as a `SCOPING_TARGETS.md` item rather than an architecture change
+    riding along with a freeze fix.
+  - Also fixed this session: a permanent (not merely delayed) failure to
+    restore the cached `kit` row in Load: Instrument/InstrumentMrp when
+    scrolling back to it while the previewed pool file's apply was still
+    draining — the cursor latched to `kit` before the restore was even
+    attempted, and a declined attempt was never retried. Fixed by tracking
+    restore-owed-ness as slot state (data), not as one call's outcome.
+    Preliminary hardware check looked correct; full test matrix (endless pot,
+    InstrumentMrp, stopping dead on `kit`) not yet exhaustively run.
+  - Also fixed (provable race, root cause of the exact symptom shape but not
+    confirmed as the *only* contributor — no trace record survived from the
+    actual incident): a stale Bank/Scene/Kit name briefly shown with the
+    correct slot number on fresh Load/Save entry, because the page's shared
+    tail repaint ran unconditionally before the async `.hcindex` reload it
+    had just posted could complete. Fixed by gating that one repaint behind
+    `!menu_storageBusy`, matching the convention already used elsewhere in
+    `menu.c`.
+  - Full investigation, evidence, and rejected-first-attempt record:
+    `knowledge_files/log_archive/055_SESSION_HANDOFF_LOG.md`.
+- Root-directory working docs for Sessions 054-055 (`SESSION_054_PREPLAN_ASYNC_RECURSIVE_CLEANUP.md`,
+  `SESSION_054_PLAN_DEFECT_EVIDENCE_FIX.md`, `AFAT_RECURSIVE_WHITEPAPER.md`,
+  `SCENE_LOAD_PAT_RESTORE.md`, `LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md`,
+  `SESSION_054-055_TESTING.md`, `S055_KIT_LOAD_FREEZE_FIX.md`,
+  `S055_INST_RESTORE_FIX.md`, `S055_BANK_NAME_ENTRY_FIX.md`) are superseded by
+  `054_SESSION_HANDOFF_LOG.md`/`055_SESSION_HANDOFF_LOG.md` and the
+  specification-reference updates above; their durable facts are preserved
+  there and they may be deleted.
 
 ---
 

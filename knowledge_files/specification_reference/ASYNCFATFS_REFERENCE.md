@@ -297,6 +297,37 @@ documented legacy short-alias fallback; root Scene and root Bank do not. Bank
 Save replaces the root Bank tree directly through this exact-object flow; it
 does not use temporary or `old*` promotion names.
 
+**Descend/ascend identity invariant (Session 054, hardware-confirmed Session
+055).** The traversal binds one `file` handle to whichever directory is
+currently open and tracks it via `file->directoryEntryPos`; that field is the
+sole thing distinguishing "the delete root just emptied" (finish
+successfully) from "a nested child just emptied" (ascend and continue). Two
+fields on the persistent `afatfs.deleteTreeState` singleton — `descendTarget`
+(a full `afatfsObjectInfo_t`) and `parentEntry` (a directory-entry
+pointer) — snapshot the child's identity and its directory-entry location at
+the moment of descent, and are restored into `op->currentTarget` and
+`file->directoryEntryPos` respectively on ascend. Both fields hold exactly
+one level (a descend nested inside another descend overwrites them), which
+matches the existing `op->parentCluster` depth-one bound and is not a
+regression: `afatfs_deleteTree()` has exactly one caller
+(`filesystem_deleteSlotDirectory_tick()`), invoked on at most a Kit slot
+(files only) or a Scene slot (files plus one `Kit …/` subdirectory) — never
+more than one nested directory below the delete root.
+
+Two earlier attempts at fixing an unrelated resume-target bug each broke one
+half of this invariant before the final repair: reconstructing a resume
+target directly from `op->parentCluster` cleared `directoryEntryPos` as a
+side effect of reusing `OPEN_DIR`'s reset sequence, and a later fix that
+removed a redundant (and apparently unreliable) parent re-scan assumed
+`op->currentTarget` stayed untouched between a child's discovery and its
+ascend — but the child's own internal deletes overwrite that register with
+every object they process. Both symptoms (an emptied root misread as a
+nested child; an ascend that free-list-corrupts by re-freeing an
+already-freed cluster chain) trace to the same missing snapshot-and-restore,
+not to two independent defects. Full round-by-round diagnostic trail
+(originally `AFAT_RECURSIVE_WHITEPAPER.md`) is preserved in
+`knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`.
+
 ## Logging-only diagnostic snapshots
 
 `afatfs_getDiagnosticSnapshot(file, snapshot)` and the paired SD-layer
@@ -399,6 +430,14 @@ Don't:
 
 - Parent-relative lookup/open/create with explicit collision policy and copied
   input lifetime.
-- Hardware/card-fixture validation of the repaired recursive-delete matrix,
-  including malformed LFN and cyclic/broken-parent cases.
+- The recursive-delete descend/ascend defect (`ScnS05` and its relatives) is
+  fixed and hardware-confirmed for ordinary Kit/Scene/Bank overwrite as of
+  Session 055 (a full Kit-modify-save / Instrument-modify / Scene-modify-save
+  / Bank-save-then-load round trip reported no errors). The low-level
+  acceptance matrix from `RECURSIVE_TREE_DELETE_REIMPLEMENT.md` §10
+  (malformed LFN, cyclic/broken-parent layout, injected FAT/cache error,
+  exhausted handle pool, cross-sector LFN runs) has still never been
+  exercised as dedicated fixtures — only encountered incidentally through
+  ordinary product use. Do not claim that matrix closed from product-level
+  testing alone.
 - Effect storage and any feature that needs durable replacement/promotion.

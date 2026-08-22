@@ -62,6 +62,8 @@
 | 051 | 2026-08-17 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Scene Load embedded Kit/Instrument HCNAMES exit flush and Scene-to-Kit-family boundary; InstrumentMrp reversible `kit` row with Morph-only snapshot/restore; hardware-confirmed Scene rows plus repaired Mrp restore |
 | 052 | 2026-08-18 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Bank Load persistence: settings active_bank and AutoSave scene-present mask; Candidate B no-op re-mark, B trace witness, host validator, and deferred boot-sanitizer/Bank-Save refactor targets |
 | 053 | 2026-08-19 | intentional dirty worktree on `dev-ph3-autosave-ph2` | AsyncFATFS recursive-delete reimplementation (exact-object delete/recreate, direct Bank Save, structured remove/rename); LFN validator repair; boot/overwrite/AutoSave defect diagnosis; HCNAMES source-provenance failure |
+| 054 | 2026-08-20/21 | commits `b9bdb92`, `0827b40` on `dev-ph3-autosave-ph3` | Recursive-delete root cause found and fixed (Bugs #1-#5: spurious timeout error, then a descend/ascend identity invariant broken across two intermediate fixes); HCNAMES source-on-save staged for all four element types; Scene-Pattern playback/UI desync fix; self-introduced-and-fixed IWDG boot-hang regression; extensive new trace diagnostics (`'X'`/`'O'`/`'E'`) |
+| 055 | 2026-08-21 | uncommitted `Core/Menu/menu.c` on `dev-ph3-autosave-ph3` (338 insertions/2 deletions vs `0827b40`) | Hardware-confirmed Session 054's recursive-delete/HCNAMES fixes via full round-trip testing; Load-menu freeze root-caused and closed (missing `filesystem_ack()` in the shared error overlay, plus two self-deadlocking retry helpers); Load: Instrument `kit`-row restore permanent-failure fix; stale Bank/Scene/Kit name-on-entry race fix |
 
 
 ---
@@ -713,3 +715,57 @@ drain truncating `.hcprms2` at 32 KiB). All deferred in `SCOPING_TARGETS.md`.
   `RECURSIVE_TREE_DELETE_REIMPLEMENT.md`, `KIT_PARSE_BOOTLOCK_RESOLVE.md`,
   `LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md`, `ASYNCFATFS_REFERENCE.md`,
   `FILESYSTEM_SPEC.md`, and the `SCOPING_TARGETS.md` Session 053 sections.
+
+### 054 — Recursive-Delete Root-Cause Repair, HCNAMES Source-on-Save, Scene-Pattern Desync (2026-08-20/21)
+
+Fixed the two bugs left open by Session 053 (a delete-resolver completion gate
+that converted its own diagnostic-only stall latch into a hard failure by
+itself; HCNAMES source never staged on any of the four Save paths, with root
+Instrument Save found to never reach any HCNAMES publish path at all), then
+used the new diagnostics those fixes required to iteratively hunt the actual
+`ScnS05` defect through five successive bugs. The real cause (#3/#4/#5): the
+native delete traversal's descend/ascend path depends on
+`file->directoryEntryPos` always identifying the directory currently open,
+and two well-intentioned earlier fixes (removing an invalid resume-target
+reconstruction; removing a redundant parent re-scan) each broke one half of
+that invariant while fixing their own narrower symptom. Fixed by snapshotting
+the child's identity and directory-entry pointer at descent
+(`descendTarget`/`parentEntry`) and restoring both on ascend. Also fixed,
+found during retest: a Scene-Pattern playback/UI desync (Bank Load never
+realigned `seq_activePattern`/`menu_shownPattern` to its committed active
+Scene) via new `seq_alignActivePatternToScene()`; a self-introduced IWDG
+boot-hang regression, fixed and shipped disabled by default; and six
+structurally-damaged root Scene folders repaired on the test card. Extensive
+new, permanent trace diagnostics were added (`'X'` `PHASE_STALL`, `'O'`
+`SAVE_LIFECYCLE`, `'E'` `OPERATION_ERROR`, a shared stall-detector helper, a
+17-value native failure-site classification).
+
+- **Find here**: [054_SESSION_HANDOFF_LOG.md](054_SESSION_HANDOFF_LOG.md),
+  `ASYNCFATFS_REFERENCE.md`, `FILESYSTEM_SPEC.md`, `AUTOSAVE.md`,
+  `DEV_MODES.md`, and the `SCOPING_TARGETS.md` Session 053-055 sections.
+
+### 055 — Recursive-Delete Hardware Confirmation, Load-Menu Freeze, Instrument `kit`-Row Restore, Stale Bank Name (2026-08-21)
+
+Hardware-confirmed Session 054's recursive-delete/HCNAMES fixes via a full
+Kit/Instrument/Scene/Bank load-modify-save round trip, then investigated a
+Load-menu freeze that same testing round surfaced. A first diagnosis (an
+AutoSave-vs-Menu retry livelock) was real but not the freeze — self-recovers
+in under a second, later confirmed by re-reading the same trace capture — and
+its fix was kept but is not the closing one. The actual cause:
+`menu_showFilesystemErrorOverlay()`, the shared terminal path for nearly
+every failed Menu filesystem operation, never called `filesystem_ack()`, so
+one failed read permanently parked the facade at `FS_STATUS_ERROR` — silently
+killing both the AutoSave writer and the trace flush from that moment on,
+which is why both freeze captures ended cleanly with no evidence of the
+freeze itself. Two request helpers that self-deadlocked their own retry path
+on refusal were fixed alongside it. Confirmed closed by the user. Also fixed:
+a permanent (not merely delayed) failure to restore the Load: Instrument
+`kit` row when scrolling back to it while a previewed pool file's apply was
+still draining (fixed by tracking restore-owed-ness as slot state rather than
+a call outcome); and a stale Bank/Scene/Kit name briefly shown with the
+correct slot number on fresh Load/Save entry (an unconditional repaint racing
+an async `.hcindex` reload it had just posted).
+
+- **Find here**: [055_SESSION_HANDOFF_LOG.md](055_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE.md`, `DEV_MODES.md`, and the `SCOPING_TARGETS.md` Session
+  054-055 sections.

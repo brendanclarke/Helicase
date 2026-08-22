@@ -46,13 +46,21 @@ Every phase ends with **Open Engineering Questions** (things that need a decisio
 
 ## Pinned filesystem correctness target — duplicate-slot overwrite
 
-**Status: implemented in Session 053 (source + ARM build); hardware acceptance
-still FAILS and must be re-run.** The native deleter and overwrite callers were
-rebuilt per `RECURSIVE_TREE_DELETE_REIMPLEMENT.md`, but the overwrite matrix has
-not passed on hardware: Scene overwrite returned `ScnS05` (the delete-slot
-resolver phase) even though the slot was physically replaced, Kit overwrite did
-not materialize a library Kit, and the Kit Save menu came up empty. Treat the
-source as unproven until those are fixed.
+**Status: CLOSED for ordinary use.** Session 054 found and fixed the actual
+root cause across five successive bugs (a spurious timeout-to-error
+conversion; HCNAMES source never staged on any Save path; and — the real
+`ScnS05` defect — a descend/ascend identity invariant in the native
+`afatfs_deleteTree()` traversal broken across two well-intentioned earlier
+fixes). Session 055 hardware-confirmed the fix: a full Kit-modify-save,
+Instrument-modify, Scene-modify-save, and Bank-save-then-load round trip
+reported no errors. Full round-by-round diagnostic trail:
+`knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`.
+
+**Still open:** the dedicated low-level acceptance matrix below (malformed
+LFN, cyclic/broken-parent layout, injected FAT/cache error, exhausted handle
+pool, cross-sector LFN runs) has never been exercised as its own fixture
+set — only encountered incidentally through ordinary product use. Do not
+claim that matrix closed from product-level testing alone.
 
 The duplicate-folder defect in Bank, root Scene, and Kit overwrites is an
 AsyncFATFS recursive-delete correctness problem. Its solution is to repair
@@ -78,11 +86,10 @@ record; it contains no implementation plan that overrides this pinned target.
 
 **Status: known bugs; deliberately deferred to a later, isolated session.**
 
-- **Overwrite Save may leave the old slot folder in place.** This remains the
-  observable consequence of the incomplete AsyncFATFS recursive-delete path.
-  It applies to Bank, root Scene, and Kit replacement. The required fix is the
-  pinned `afatfs_deleteTree()` correctness work above; do not reintroduce an
-  `old*`-rename scheme, boot-time cleanup, or a silent best-effort fallback.
+- **Overwrite Save may leave the old slot folder in place — RESOLVED Session
+  054, hardware-confirmed Session 055.** See the pinned target above. Do not
+  reintroduce an `old*`-rename scheme, boot-time cleanup, or a silent
+  best-effort fallback; the fixed design is exact-object delete/recreate.
 - **Runtime Bank Load may switch the playing Scene while playback is active.**
   This is not a bounded-CRC or logging problem. Preserve the pre-load active
   Scene only after ordinary Bank Load/Save behavior is stable enough to test
@@ -401,27 +408,119 @@ dirty-bit path.
   alone never produces an AutoSave dirty mark (only a publicly completed Scene
   load does).
 
-### Session 053 test-report defects (to schedule)
+### Session 053 test-report defects (status after Sessions 054-055)
 
-- **HCNAMES source provenance is not updated on Save (primary).** The Save
-  completion paths refresh the resident name cache but do not call
-  `filesystem_setResidentSource(row, op_slot)` (or `@` for instruments); the
-  source token keeps the loaded slot instead of the saved slot. Confirmed for
-  Scene (source `004` vs saved `031`) and Kit (`013`), and Instrument save
-  published no `@`.
-- **Scene overwrite `ScnS05`.** `SAVE_SCENE` phase 5 is the delete-slot
-  resolver; the slot was physically replaced yet the save reported error. The
-  resolver must return a clean, consistent result.
-- **Kit Save does not materialize a library Kit.** No new or renamed `/Kit/`
-  directory was produced in the overwrite test.
-- **Kit Save menu empty.** The Kit index file is valid but the shared name cache
-  was empty on entry; the Kit Save menu must reload `/Kit/.hcindex` after save
-  operations retag the cache.
-- **Boot Bank Load timeout `B012S09I`.** The boot Bank Load embedded-instrument
-  stall still exceeds even a 20 s budget. This is separate from the boot
-  Kit-quarantine (`KQ...`) gate.
-- **Bank Save entry freeze** and **boot freeze with `.hcprms2` truncated at
-  32 KiB** both need isolated menu-path / drain robustness investigation.
+- **HCNAMES source provenance is not updated on Save — RESOLVED Session 054.**
+  All four Save paths now stage `filesystem_setResidentSource()`; root
+  Instrument Save additionally needed a new hand-off into
+  `FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT` since it had never reached any
+  HCNAMES publish path before. See `FILESYSTEM_SPEC.md`.
+- **Scene overwrite `ScnS05` — RESOLVED Session 054, hardware-confirmed
+  Session 055.** Not one bug but three in sequence (a spurious
+  timeout-to-error gate, then a descend/ascend identity invariant broken
+  across two intermediate fixes). See the pinned target above and
+  `054_SESSION_HANDOFF_LOG.md`.
+- **Kit Save does not materialize a library Kit — believed resolved as a
+  side effect of the `ScnS05` root-cause fix**, but not individually
+  re-confirmed against the `'O'` `CREATE_RESULT` trace bit added for exactly
+  this purpose. Session 055's full Kit-modify-save round trip reported no
+  problem. Worth one explicit trace check next time Kit Save is touched, not
+  worth a dedicated session on its own.
+- **Kit Save menu empty — not individually re-confirmed, plausibly resolved
+  as a side effect of the Session 055 facade/livelock fixes** (a stuck facade
+  or a destructive cache-clearing retry would produce exactly this symptom).
+  Diagnostic instrumentation exists (`menu_requestKitEntryNames()`'s
+  branch-tag `'O'` records, `SESSION_054_PLAN_DEFECT_EVIDENCE_FIX.md` §3.5)
+  if it recurs.
+- **Bank Save entry freeze — almost certainly the same defect as, and fixed
+  by, the Session 055 Load-menu freeze investigation** (identical signature:
+  no forensic evidence, only the ordinary Load/Save-page writer-suppression
+  record). Not a separate open item; watch for a recurrence rather than
+  re-investigating from scratch.
+- **Boot Bank Load timeout `B012S09I` — still open, untouched.** The boot Bank
+  Load embedded-instrument stall still exceeds even a 20 s budget. This is
+  separate from the boot Kit-quarantine (`KQ...`) gate (itself still
+  unimplemented, see the deferred refactor target above) and separate from
+  the AutoSave/HCNAMES work. Session 054 added per-instrument timing
+  breadcrumbs (reused `'N'` stage) so the next attempt can compute real
+  per-instrument load duration from `asavetrc.bin` instead of guessing.
+- **Boot freeze with `.hcprms2` truncated at 32 KiB — still open, untouched.**
+  Session 054 added a bounded stall-and-fail safety net to the runtime
+  AutoSave drain (30,000-poll threshold, forces `FS_STATUS_ERROR` instead of
+  hanging forever) so a repeat of this class of freeze will now recover
+  instead of wedging silently, but the specific root cause of this
+  32,768-byte truncation (suspected FAT cluster-size boundary interaction
+  with the delete-tree work's changed allocation-hint search) was never
+  confirmed.
+
+### Session 054-055 deferred targets
+
+- **Name-cache ownership interlock.** The AutoSave writer reads the shared
+  9,000-byte name cache (`fs_list_cache_name`) live while serializing its
+  record, and Menu calls `filesystem_clearNameCache()` directly — bypassing
+  facade arbitration entirely — from 18 call sites. The writer's page guard
+  only blocks *admission* while the user is on Load/Save; nothing stops Menu
+  from clearing the cache out from under a transaction admitted just before
+  the page was entered. Session 055 closed the two hottest callers with a
+  non-destructive early busy-check; the general hazard remains. Consequence
+  if it fires is a torn AutoSave record, not a hang. Proper fix: refuse or
+  defer the clear while `fs_autosave_transaction_active` borrows the cache.
+  Deliberately not attempted as part of a freeze fix that needed clean
+  verification.
+- **Top-level Load/Save entry trace coverage.** `menu_traceInstrumentEntry()`
+  ('N') is gated on `menu_instrumentLoadActive`, so every refusal/entry
+  record on the *top-level* Kit/Scene/Bank row is silently suppressed, and
+  `menu_requestSceneEntryName()` has no trace producer at all. Cost real
+  investigation time twice in Session 055 (an absent record looked like proof
+  nothing happened, when the request was simply unrecordable from that
+  context). Add a top-level equivalent before the next Load/Save-family
+  investigation.
+- **`AUTOSAVE_TRACE_RECORD_COUNT` reversion decision.** Currently 2,048
+  records (`config.h:255`), a session-scoped approved expansion for the
+  recursive-delete investigation; normal default is 64. Needs an explicit
+  decision — revert now that the pinned target is hardware-confirmed closed,
+  or keep it while further Save-path work is plausible.
+- **Recursive-delete low-level acceptance matrix.** Still never exercised as
+  dedicated fixtures (malformed LFN, cyclic/broken-parent, injected FAT/cache
+  error, exhausted handle pool, cross-sector LFN runs) — see
+  `ASYNCFATFS_REFERENCE.md`.
+- **Scene Save partial-write hardening.** Session 054 repaired six
+  structurally-damaged root Scene folders found on the test card (missing
+  `effects.fx` and/or embedded Kit contents), root-caused to Scene Save's
+  non-atomic ~12-phase write sequence (old tree deleted first;
+  `effects.fx` written last) combined with Load's current all-or-nothing
+  child-completeness check. Four ranked hardening options recorded in
+  `054_SESSION_HANDOFF_LOG.md`, none implemented: (1) tolerate a missing
+  `.fx` on Load — cheapest, removes the most common failure mode; (2) write
+  `effects.fx` right after `sceneset.scg` instead of last; (3) clean up the
+  partial directory on a failed save; (4) real atomic commit (reopens the
+  Session 053 tmp/old-promotion decision — needs its own scoping).
+- **Scene Load error-code granularity.** Every `filesystem_loadSceneDirectory_tick()`
+  failure reports the identical `ScnL48`, because the code is built from the
+  terminal phase rather than the failing one; the `'E'` trace record shares
+  the same blind spot. Worth capturing the failing phase at the point of
+  failure.
+- **Phase-33 re-entrancy note.** `filesystem_commitSceneStage()`'s
+  `pat_initPatternSet()` zeroing re-runs on every `afatfs_chdir(NULL)` retry
+  tick at phase 33. Harmless today only because the pattern read happens
+  later (phases 44+); would silently destroy data if phases were ever
+  reordered. Hoist behind a completed-once guard when that area is next
+  touched.
+- **Single-source-of-truth Pattern/Scene index.** The Scene-Pattern desync
+  fix (`seq_alignActivePatternToScene()`) patches the one reachable seam
+  (Bank Load); retiring `seq_activePattern`/`menu_shownPattern` in favor of
+  `scene_getActiveIndex()` directly would remove this whole class of desync
+  permanently. Rejected for Session 054 because it changes PERF queued-Scene
+  -change semantics — a larger behavioral change than the reported defect.
+- **`DEV_LOGGING_IWDG` hardware validation.** Ships disabled by default
+  (Session 054 fixed a boot-hang regression in it, and a second hazard where
+  it would have reset the modal sample install mid-`sampleFlash`
+  erase/program). The feature itself has never successfully run on hardware.
+  Enable deliberately for a future hang-hunting session, `make clean` first.
+- **Makefile header dependency tracking.** No `-MMD`/`-MP`/`-include *.d`;
+  editing `config.h` alone triggers no rebuild. Add `-MMD -MP` to `CFLAGS`
+  plus `-include $(OBJS:.o=.d)`. Until then, always `make clean` after any
+  header edit.
 
 ---
 

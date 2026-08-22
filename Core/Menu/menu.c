@@ -1124,6 +1124,39 @@ static uint8_t menu_instrumentTempValid = 0u;
  * PRESET_OP_INSTRUMENT_TEMP_SAVE / PRESET_OP_INSTRUMENT_LOAD handling.
  */
 static uint8_t menu_instrumentTempOperationPending = 0u;
+/*
+ * "A `kit` row restore is owed" — resident-versus-snapshot state (+1 B SRAM1).
+ *
+ * This is deliberately a statement about *data*, not about a call outcome: it
+ * means the resident slot currently holds some previewed pool Instrument
+ * rather than the retained entry snapshot, so returning the cursor to the
+ * `kit` row still has real work to do. It is therefore immune to *why* any one
+ * restore attempt failed to post.
+ *
+ * Inputs: set when a pool preview (normal or Morph) commits over the browsed
+ * slot; cleared when a `.hctmp.<ext>` restore actually reaches a completion
+ * for that slot, and at every session boundary through
+ * menu_invalidateInstrumentLoadTemp(). Output: three independent places
+ * consult it — the pool-to-`kit` crossing, the "already on `kit`" repeat-turn
+ * branch, and the idle retry at the top of menu_pollPresetStatus() — so the
+ * restore lands whether the user keeps scrolling or stops dead on `kit`.
+ *
+ * Why it exists: the crossing handler latches menu_instrumentLoadSource to
+ * MENU_INSTRUMENT_SOURCE_KIT *before* attempting the restore. If that attempt
+ * could not post — the filesystem was busy with the pool preview the user just
+ * scrolled through, or filesystem_requestLoadInstrumentTemp() itself rejected
+ * the request — the UI was already "on `kit`" while the parameters were never
+ * restored, and every subsequent detent hit the idempotent no-op branch and
+ * did nothing. Playback made this the common case rather than a rare one,
+ * because a sounding voice lengthens the preview's apply and therefore widens
+ * the busy window the crossing lands in. Tracking owed-ness instead of a
+ * single call's outcome closes every one of those drop paths with one rule.
+ * Affiliates: the nested Instrument Load encoder handler,
+ * menu_restoreInstrumentLoadTemp(), menu_invalidateInstrumentLoadTemp(),
+ * menu_pollPresetStatus(), and the PRESET_OP_INSTRUMENT_*_LOAD completions.
+ * Root-caused and documented in S054_INST_RESTORE_FIX.md.
+ */
+static uint8_t menu_instrumentKitRestorePending = 0u;
 static uint8_t editModeActive = 0;
 static uint8_t lastEncoderButton = 0;
 
@@ -2957,6 +2990,38 @@ static void menu_showFilesystemErrorOverlay(void)
         strncpy(menu_testResultName, code, FS_TEST_NAME_MAX);
     else
         strncpy(menu_testResultName, "FsErr", FS_TEST_NAME_MAX);
+    /*
+     * Return the shared facade to IDLE on every Menu-visible failure.
+     *
+     * What: acknowledge the terminal FS_STATUS_ERROR (or DONE) that produced
+     * this overlay, after the error code has already been copied into the
+     * overlay buffer above. filesystem_ack() does not clear
+     * filesystem_errorCode() and has no effect when the facade is already IDLE
+     * or BUSY, so the displayed code and every other caller are unaffected.
+     *
+     * Why this is required: this overlay is the common terminal path for
+     * essentially every failed Menu filesystem operation, and none of the
+     * callers that reach it acknowledged the facade. A single failed
+     * name/index read therefore left status parked at FS_STATUS_ERROR
+     * permanently. filesystem_tick() admits the AutoSave parameter drain and
+     * the AutoSave trace flush *only* while status == FS_STATUS_IDLE, so from
+     * that moment on both background sinks were dead for the rest of the
+     * session: retained parameter mutations were never drained to `.hcprms`,
+     * and every trace record produced afterwards stayed in the RAM ring and
+     * never reached `asavetrc.bin`. That is why two separate menu-freeze
+     * captures both ended cleanly with an AutoSave completion and contained no
+     * record whatsoever of the freeze that followed — the evidence could not
+     * be written. Foreground requests were unaffected (filesystem_start()
+     * rejects only on BUSY), which is what made this silent.
+     *
+     * This mirrors the identical acknowledgement already documented in
+     * menu_loadCommandFinalIndexComplete() and
+     * menu_residentNameScratchFlushComplete(); those two callbacks each fixed
+     * this class of strand at one site, while every other failure path still
+     * leaked it. Affiliates: filesystem_ack(), filesystem_tick()'s idle-only
+     * scheduler gates. See S054_KIT_LOAD_FREEZE_FIX.md.
+     */
+    filesystem_ack();
     menu_testResultActive = 1u;
     menu_testResultStart = time_sysTick;
     menu_repaintAll();
@@ -3536,6 +3601,31 @@ static uint8_t menu_requestResidentNameScratch(uint8_t scene)
         menu_endResidentNameScratchSession()) {
         return 1u;
     }
+    /*
+     * Refuse early — and non-destructively — while the facade is busy.
+     *
+     * Input: filesystem_status() before any state is touched. Output: the one
+     * coalesced deferred retry is armed and the caller is told the scratch is
+     * not ready, while the resident scratch identity and the shared name cache
+     * are left exactly as they were.
+     *
+     * Why this must precede the mutations below: the request that follows is
+     * certain to be refused when the facade is busy, but the three lines under
+     * it are already destructive by then — the scratch Scene is reassigned,
+     * its valid flag is cleared, and filesystem_clearNameCache() discards
+     * whatever browser index the cache held. Repeated once per foreground pass
+     * (see the retry guard in menu_pollPresetStatus()), that turned a
+     * transient AutoSave write into a torn UI: the Kit row kept rendering from
+     * a cache that no longer held Kit rows, which is how a Scene stem such as
+     * `RollinZ` came to be displayed against Kit slot 000. Leaving the cache
+     * intact means the last good name stays on screen until the real reload
+     * completes. Affiliates: menu_requestKitEntryNames() branch A and the
+     * deferred-selection dispatcher. See S054_KIT_LOAD_FREEZE_FIX.md.
+     */
+    if (filesystem_status() == FS_STATUS_BUSY) {
+        menu_deferSelectionRequest = 1u;
+        return 0u;
+    }
     menu_residentNameScratchScene = scene;
     menu_residentNameScratchValid = 0u;
     filesystem_clearNameCache();
@@ -3589,6 +3679,17 @@ static void menu_invalidateInstrumentLoadTemp(void)
     menu_instrumentTempType = INSTRUMENT_TYPE_UNKNOWN;
     menu_instrumentTempValid = 0u;
     menu_instrumentTempOperationPending = 0u;
+    /*
+     * Disposing the snapshot also disposes any restore owed against it.
+     *
+     * Why: menu_instrumentKitRestorePending only means "the resident slot
+     * still differs from *this* snapshot". Once the snapshot is gone — voice,
+     * type, mode, or session boundary — there is nothing left to restore to,
+     * and leaving the flag set would let a later session's idle retry fire
+     * against an unrelated slot. Clearing it here keeps the owed state and the
+     * snapshot strictly the same lifetime.
+     */
+    menu_instrumentKitRestorePending = 0u;
 }
 
 static uint8_t menu_prepareInstrumentLoadTemp(void)
@@ -3781,6 +3882,19 @@ static void menu_requestInstrumentIndexLoad(instrument_type_t type)
             type, menu_instrumentIndexLoadComplete)) {
         menu_traceInstrumentEntry(
             AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_REQUEST, 1u);
+        /*
+         * Release the input gate that the refused request never earned.
+         *
+         * menu_storageBusy was raised above in anticipation of an accepted
+         * request. When the request is refused, leaving it raised is a
+         * self-inflicted deadlock: the deferred retry armed on the next line
+         * is dispatched only while `!menu_storageBusy`, so the one recovery
+         * path this function relies on can never fire, and nothing else clears
+         * the flag. The result is a permanently locked nested Instrument menu
+         * with no error overlay and no trace. Clearing it here restores the
+         * intended "wait, then retry once idle" behaviour.
+         */
+        menu_storageBusy = 0u;
         menu_deferSelectionRequest = 1u;
     } else {
         menu_traceInstrumentEntry(
@@ -3968,6 +4082,39 @@ static void menu_requestSceneEntryName(void)
      * the removed 16-by-9 SceneData mirror, and it deliberately does not
      * traverse the root Scene directory one row at a time.
      */
+    /*
+     * Refuse early and non-destructively while the facade is busy.
+     *
+     * This is the Scene twin of the guard in menu_requestResidentNameScratch()
+     * and exists for the same two reasons, both of which bite harder here
+     * because this path emits no trace record of its own — a livelock on the
+     * Scene page is completely invisible in `asavetrc.bin`, which is exactly
+     * what a reported Load:[Scene] freeze looked like.
+     *
+     * First: the request below is certain to be refused while another owner
+     * holds the facade, and the refusal arms menu_deferSelectionRequest, which
+     * the poll loop would re-dispatch straight back here — one full retry per
+     * foreground pass, with no repaint, for as long as the other owner runs.
+     *
+     * Second, and worse: filesystem_clearNameCache() is a *direct* call that
+     * bypasses facade arbitration entirely, and the AutoSave writer reads
+     * fs_list_cache_name as a live data source while serializing its record
+     * (autosave_formatInitialChunk() in both the ensure and the runtime drain).
+     * Clearing the cache underneath an in-flight AutoSave transaction feeds it
+     * a torn buffer. The writer's page guard only blocks *admission* while the
+     * user is on Load/Save; nothing stops Menu from yanking the cache out from
+     * under a transaction that was admitted before the page was entered.
+     * Checking busy first closes that window for this caller.
+     *
+     * Input: filesystem_status() before any state is touched. Output: the
+     * coalesced deferred retry is armed; the scratch Scene, the shared name
+     * cache, and the storage gate are all left untouched.
+     * See S054_KIT_LOAD_FREEZE_FIX.md.
+     */
+    if (filesystem_status() == FS_STATUS_BUSY) {
+        menu_deferSelectionRequest = 1u;
+        return;
+    }
     menu_sceneResidentNameScratchScene = menu_loadSaveSourceScene;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
@@ -4018,8 +4165,21 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
      */
     requested = filesystem_requestReloadLibraryIndex(
         kind, menu_libraryIndexLoadComplete);
-    if (!requested)
+    if (!requested) {
+        /*
+         * Release the input gate that the refused request never earned.
+         *
+         * Identical hazard to menu_requestInstrumentIndexLoad(): menu_storageBusy
+         * was raised above expecting acceptance, and the deferred retry armed
+         * below is dispatched only while `!menu_storageBusy`. Leaving it raised
+         * strands the top-level Kit/Bank browser permanently — no retry, no
+         * overlay, no trace. This is reachable whenever another owner (most
+         * often the AutoSave parameter drain) holds the facade at the moment
+         * the user enters or re-enters the page.
+         */
+        menu_storageBusy = 0u;
         menu_deferSelectionRequest = 1u;
+    }
 }
 
 /* Refresh the Save page's resident display after a Kit/Scene/Bank save.
@@ -6893,6 +7053,29 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                                 MENU_INSTRUMENT_SOURCE_KIT &&
                             menu_instrumentLoadShownType ==
                                 menu_instrumentLoadType) {
+                            /*
+                             * Already displaying `kit`: repeat the restore only
+                             * when one is still genuinely owed.
+                             *
+                             * Input: menu_instrumentKitRestorePending, i.e. the
+                             * resident slot still holds a previewed pool file
+                             * rather than the entry snapshot. Output: a further
+                             * decrement re-posts the restore instead of being
+                             * discarded. Why: this branch is reached whenever
+                             * the cursor is already on `kit`, including the case
+                             * where the *crossing* below latched the source row
+                             * but its restore could not post (busy filesystem,
+                             * or a rejected request). Treating every repeat turn
+                             * as a pure no-op is what made a dropped restore
+                             * permanent — the display said `kit` while the
+                             * parameters stayed on the previewed instrument, and
+                             * no amount of further scrolling could recover it.
+                             * Turns that arrive with nothing owed remain exactly
+                             * as cheap as before: no filesystem or Preset state
+                             * is touched. Affiliate: the owed-state declaration.
+                             */
+                            if (menu_instrumentKitRestorePending)
+                                menu_restoreInstrumentLoadTemp();
                             if (!menu_storageBusy)
                                 menu_repaintAll();
                             return;
@@ -6900,6 +7083,15 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_KIT;
                         menu_instrumentLoadShownType = menu_instrumentLoadType;
                         menu_instrumentLoadShownIndex = 0u;
+                        /*
+                         * Attempt the restore for this first crossing. It may
+                         * legitimately fail to post while the pool preview the
+                         * user just scrolled through still owns the filesystem;
+                         * menu_instrumentKitRestorePending stays set in that
+                         * case, so both the repeat-turn branch above and the
+                         * idle retry in menu_pollPresetStatus() will complete
+                         * the work without any further user input.
+                         */
                         menu_restoreInstrumentLoadTemp();
                         if (!menu_storageBusy)
                             menu_repaintAll();
@@ -7623,6 +7815,36 @@ void menu_pollPresetStatus(void)
      */
     menu_processPendingPageSwitch();
 
+    /*
+     * Complete an owed `kit` row restore once the filesystem falls idle.
+     *
+     * Input: menu_instrumentKitRestorePending together with a cursor that is
+     * still resting on the `kit` row of an active nested Instrument Load.
+     * Output: the `.hctmp.<ext>` restore is re-posted; the owed flag is left
+     * alone here and cleared only by the completion that actually restores the
+     * slot, so a request rejected again this pass is simply retried on the
+     * next one. Why: the user may stop turning the moment they reach `kit`, so
+     * the restore cannot depend on another detent arriving to carry it. This
+     * check deliberately sits ahead of every tick function below because those
+     * return early as soon as any one of them does work — in particular
+     * preset_tickDrumsetApply(), whose Scene-switch quiet-gate can stay active
+     * for seconds while a pattern keeps re-triggering the browsed voice, which
+     * is exactly the condition under which this bug was reported. Placing the
+     * retry here makes it unstarvable. menu_restoreInstrumentLoadTemp() is
+     * itself a no-op unless the snapshot is valid and its type still matches,
+     * so an unusable snapshot cannot spin. Morph mode is included: the same
+     * owed-state rule drives preset_loadInstrumentMorphTemp() through that
+     * function's own morph branch. See S054_INST_RESTORE_FIX.md.
+     */
+    if (menu_instrumentKitRestorePending &&
+        menu_instrumentLoadActive &&
+        !menu_instrumentSaveMode &&
+        menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT &&
+        preset_getStatus() == PRESET_IDLE &&
+        !menu_storageBusy) {
+        menu_restoreInstrumentLoadTemp();
+    }
+
     /* Sound apply runs before globals because ALL/performance completion first
     ** installs loaded modulation routing, then starts any global apply that
     ** belongs to the container. Keep both paths one bounded unit per
@@ -7687,9 +7909,34 @@ void menu_pollPresetStatus(void)
             menu_lcdRefreshPending && lcd_queueFree() >= 72u) {
             menu_repaint();
         }
+        /*
+         * Do not dispatch a coalesced selection retry while the filesystem
+         * facade is still executing somebody else's operation.
+         *
+         * Input: filesystem_status(), the authority on whether a new typed
+         * request can be accepted at all. Output: the retry waits quietly and
+         * fires once, on the first pass after the facade goes idle.
+         *
+         * Why this guard is required: menu_storageBusy and preset_getStatus()
+         * only describe work *Menu* started. They are both clear while an
+         * independent owner — most importantly the AutoSave writer, which
+         * takes the facade for a full 34,768-byte A/B record after a Scene
+         * Load marks thousands of bytes dirty — holds FS_STATUS_BUSY. Every
+         * request Menu posts in that window is refused, and each refusal
+         * re-arms menu_deferSelectionRequest, so this dispatcher used to
+         * re-post the same doomed request on every single foreground pass for
+         * as long as the other owner ran. That is a livelock, not a wait: it
+         * burns the foreground at full rate, and because the Kit-entry retry
+         * path returns before reaching any repaint, the LCD holds its last
+         * frame throughout — the reported "frozen Load:[Kit] menu". Hardware
+         * trace evidence: ~855 consecutive Kit-entry branch-A records with no
+         * intervening progress, bracketed by an AutoSave admit and its
+         * V/M/C/P/T completion. Root-caused in S054_KIT_LOAD_FREEZE_FIX.md.
+         */
         if (menu_deferSelectionRequest &&
             preset_getStatus() == PRESET_IDLE &&
             !menu_storageBusy &&
+            filesystem_status() != FS_STATUS_BUSY &&
             (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
             /*
              * A freely-scrolled nested Instrument number is not a top-level
@@ -7741,6 +7988,26 @@ void menu_pollPresetStatus(void)
             /* Keep a valid baseline available for a retry, but release the
              * accepted restore tag after a failed hidden-file read. */
             menu_instrumentTempOperationPending = 0u;
+            /*
+             * Bound the owed-restore retry at a genuine terminal failure.
+             *
+             * Input: a hidden `.hctmp.<ext>` read that was accepted and then
+             * failed — proven for the normal op by the filesystem's immutable
+             * temporary-origin flag, and implicit for the Morph temp op. Output:
+             * the owed state is released so the idle retry in
+             * menu_pollPresetStatus() stops re-posting a read that just failed;
+             * the user sees the ERR overlay and can scroll off and back onto
+             * `kit` to try again. A *failed pool* load is deliberately excluded:
+             * it never replaced the slot, so whatever was owed before it stays
+             * owed. This branch is the failure counterpart of the owed-state
+             * updates in the PRESET_OP_INSTRUMENT_*_LOAD success cases, which
+             * this early return would otherwise skip entirely.
+             */
+            if (preset_getCompletedOp() ==
+                    PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD ||
+                filesystem_loadedInstrumentWasTemporary()) {
+                menu_instrumentKitRestorePending = 0u;
+            }
         }
         menu_showFilesystemErrorOverlay();
         preset_ackStatus();
@@ -8032,6 +8299,26 @@ void menu_pollPresetStatus(void)
             !filesystem_loadedInstrumentWasTemporary());
 
         /*
+         * Track whether the resident slot still matches the `kit` snapshot.
+         *
+         * Input: the filesystem's immutable record of which request opened the
+         * staged file — the only trustworthy discriminator here, because the
+         * visible cursor may have moved while this load drained. Output: a
+         * completed pool load marks a restore as owed; a completed `.hctmp`
+         * restore clears it. The restore clears on failure too: the request
+         * genuinely reached a terminal failed completion (the user also gets
+         * the ERR overlay), so continuing to retry it would spin rather than
+         * recover. A transient inability to *post* the request never reaches
+         * this point and therefore correctly leaves the owed state standing.
+         * Why here rather than at request time: only completion proves what
+         * actually landed in the slot. Affiliate: the owed-state declaration.
+         */
+        if (filesystem_loadedInstrumentWasTemporary())
+            menu_instrumentKitRestorePending = 0u;
+        else if (preset_getCompletedOk())
+            menu_instrumentKitRestorePending = 1u;
+
+        /*
          * Single Instrument load completion.
          *
          * Inputs: Preset request slot retained when the Instrument/ file load
@@ -8081,6 +8368,15 @@ void menu_pollPresetStatus(void)
          * load was posted. Output: only that slot's morph endpoint is updated,
          * and only if the staged type still matches the resident slot type.
          */
+        /*
+         * A pool Morph preview leaves the slot's Morph endpoints differing
+         * from the reversible InstrumentMrp snapshot, so the `kit` row owes a
+         * restore for exactly the same reason the normal path does. Morph mode
+         * shares the owed flag because only one nested Instrument session — and
+         * therefore only one snapshot — can be open at a time.
+         */
+        if (preset_getCompletedOk())
+            menu_instrumentKitRestorePending = 1u;
         menu_startInstrumentMorphApply(preset_getRequestScene(),
                                        preset_getRequestSlot());
         menu_refreshLoadSceneLeds();
@@ -8089,6 +8385,11 @@ void menu_pollPresetStatus(void)
     case PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD:
         /* The hidden snapshot is already a Morph-only request; preserve the
          * name/type/Normal image and run the ordinary bounded Morph worker. */
+        /* The owed Morph restore has now reached its terminal completion.
+         * Cleared on failure as well as success for the same reason as the
+         * normal path: a failed terminal completion must not be retried
+         * forever, and the user already receives the ERR overlay. */
+        menu_instrumentKitRestorePending = 0u;
         menu_startInstrumentMorphApply(preset_getRequestScene(),
                                        preset_getRequestSlot());
         menu_refreshLoadSceneLeds();
@@ -8612,7 +8913,42 @@ void menu_switchPage(uint8_t pageNr)
     menu_endlessPotMappingChanged();
     if (end_resident_name_session)
         (void)menu_endResidentNameScratchSession();
-    menu_repaintAll();
+    /*
+     * Do not paint this frame while an async entry request is still in flight.
+     *
+     * Input: menu_storageBusy as left by whichever branch above just ran.
+     * Output: every non-Load/Save page target is unaffected — menu_switchPage()
+     * refuses to even start its body while busy (see the guard at the top of
+     * this function), and none of those case bodies touch menu_storageBusy, so
+     * it is provably still 0 here for them and this check is a no-op. The one
+     * case that changes it is LOAD_PAGE: entering (or toggling into) a Kit,
+     * Scene, or Bank row calls filesystem_clearNameCache() and then posts an
+     * async `.hcindex`/HCNAMES reload through
+     * menu_requestCurrentLoadSaveSelection(), which raises menu_storageBusy for
+     * the entire remaining span of this function.
+     *
+     * Why this matters: with the cache already cleared and the reload only
+     * just requested, this frame's slot NUMBER is already correct (it comes
+     * from menu_currentPresetNr[], set synchronously above), but the slot NAME
+     * is read live from the shared cache at paint time
+     * (filesystem_bankSlotName() / filesystem_sceneSlotName() /
+     * filesystem_kitSlotName()) and that cache does not hold this Scene/Bank's
+     * real rows yet. Painting here draws a genuinely wrong name next to a
+     * correct number, using the exact same shared LCD frame buffers
+     * (editDisplayBuffer / currentDisplayBuffer) that the reload's own
+     * completion callback (menu_libraryIndexLoadComplete() and, for Bank, the
+     * chained menu_bankLoadPreviewComplete()) will shortly repaint correctly.
+     * Skipping this one premature paint removes the wrong frame instead of
+     * requiring the user to scroll — which forces a fresh repaint against the
+     * by-then-populated cache — to clear it manually. This is also why the
+     * glitch is timing-dependent and does not reproduce right after boot: it
+     * only appears when the shared cache still held a different Load/Save
+     * type's data at the moment of entry, which boot's own synchronous
+     * pre-audio index population does not leave behind on the very first
+     * navigation into Load/Save. See S054_BANK_NAME_ENTRY_FIX.md.
+     */
+    if (!menu_storageBusy)
+        menu_repaintAll();
 }
 
 static void menu_processPendingPageSwitch(void)

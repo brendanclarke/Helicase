@@ -204,6 +204,24 @@ final read-only root Scene/Bank index callback follows this rule after it has
 captured its success byte. It does not alter the page guard, writer debounce,
 or mutation mask.
 
+**This is a general rule, not a one-off, and it has already been missed more
+than once.** Every Menu-side terminal path — success or failure — must call
+`filesystem_ack()` before releasing its UI owner. Sessions 050 and 051 each
+fixed one missing call at one specific completion site. Session 055 found and
+fixed the largest remaining gap: `menu_showFilesystemErrorOverlay()` is the
+*shared* terminal path for nearly every failed Menu filesystem operation
+(nested Instrument entry, top-level Kit/Scene/Bank entry, index reloads, and
+more), and it never acknowledged the facade at all. One failed read from any
+of those callers parked `status` at `FS_STATUS_ERROR` permanently — silently
+killing both this writer and the trace flush for the rest of the session,
+since foreground requests keep working even while the facade is stuck
+(`filesystem_start()` rejects only on `BUSY`, not `ERROR`), which is what made
+the earlier failures so hard to notice. See
+`knowledge_files/log_archive/055_SESSION_HANDOFF_LOG.md` for the full
+investigation. When adding any new Menu-side filesystem completion path,
+audit it against this rule before assuming the writer/trace will keep
+running.
+
 One transaction:
 
 1. validates both candidates and chooses the newest valid record matching the
