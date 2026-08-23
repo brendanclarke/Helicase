@@ -54,3 +54,10 @@
 *.res
 *.dep
 *.htm
+
+# annoying mac stuff
+.bundle
+.localized
+Thumbs.db
+.aider*
+.Spotlight*

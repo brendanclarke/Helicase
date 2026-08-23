@@ -524,6 +524,149 @@ dirty-bit path.
 
 ---
 
+## Session 056 — resident-name publication ownership and Load/Save completion shapes (2026-08-23)
+
+Recorded from the `/.hcnames` investigation in `S056_HCNAMES_FOLLOW_UP.md`
+§§9-11. The immediate defect fix is scoped there and does **not** refactor
+anything; this section records the structural differences that made a
+single defect appear in three unrelated-looking forms, plus refactor
+candidates for a later pass. Nothing here is scheduled.
+
+### The observed problem, in one line
+
+`/.hcnames` — the 129-row Bank/Scene/Kit/Instrument identity and provenance
+register — has not been written by any Load or Save since Session 055,
+across at least five Bank operations, two root Scene Loads, one Kit Load
+and several Instrument Loads on two separate cards.
+
+### Difference 1 — four different completion shapes
+
+Eight Load/Save operations finish in four structurally different ways.
+Nothing enforces or documents which shape a new operation should adopt.
+
+| Shape | Operations | Completion |
+|---|---|---|
+| **Inline register writer** | Bank Load, Bank Save | reads `/.hcnames` at its own phase 0, holds the borrowed register across the entire tree traversal, writes it at phases 83-86 |
+| **`current_op` handoff** | Scene Load ([filesystem.c:10137](Core/Hardware/SD/filesystem.c#L10137)), Scene Save ([14744](Core/Hardware/SD/filesystem.c#L14744)), Instrument Save non-morph ([12096](Core/Hardware/SD/filesystem.c#L12096)) | reassigns `current_op` to `FS_INTERNAL_OP_UPDATE_HCNAMES_*` and resets `op_phase`, parking the caller's completion callback |
+| **Index-rebuild chain** | Kit Save, Scene Save, Bank Save | sets `op_library_index_rebuild_kind/_pending` and lets `filesystem_finish()` run a `.hcindex` rebuild before releasing the callback |
+| **Plain finish** | Kit Load, Instrument Load, Instrument Save morph | `filesystem_finish()` with no chain at all |
+
+Consequence: Kit Load, Kit Save, Instrument Load and Instrument-Save-morph
+publish no identity rows whatsoever, and `FS_INTERNAL_OP_UPDATE_HCNAMES_KIT`
+has **no producer anywhere in filesystem.c**.
+
+### Difference 2 — two competing publication owners
+
+Scene *name* rows are published by the filesystem. The Kit row and six
+Instrument rows for **every** operation type were instead delegated to a
+Menu-side deferred session: `menu_endResidentNameScratchSession()`
+([menu.c:3531](Core/Menu/menu.c#L3531)), armed only when the Load/Save type
+row leaves the Kit family or leaves `SAVE_TYPE_SCENE`.
+
+That flush has **never executed**: zero `HCNAMES_FLUSH` and zero
+`HCNAMES_FLUSHED` trace records in 69,012 cumulative events spanning every
+recorded session. Three separate filesystem sites stage provenance with
+comments explicitly describing it as happening "before Menu's deferred
+HCNAMES flush rereads the old register" — against a consumer that has never
+run.
+
+### Difference 3 — three chaining idioms that all bypass `filesystem_start()`
+
+`current_op` reassignment, `op_library_index_rebuild_pending`, and Bank's
+inline phases each continue an operation without going through
+`filesystem_start()`, because that function resets every `op_*` scratch
+field the next stage still needs. Each therefore re-arms boot logging by
+hand, and each has its own ordering hazard. The most important undocumented
+one: **an HCNAMES publish must precede any `.hcindex` rebuild**, because
+`filesystem_prepareLibraryNameCache()` `memset`s the same 9,000-byte cache
+the register is borrowing. Scene Save happens to get this right; nothing
+states the rule.
+
+### Difference 4 — destination coordinates live in different fields per type
+
+`filesystem_cacheCurrentResidentKitNames()` and
+`...InstrumentNames()` read `op_kit_load_scene_mask` and `op_slot`;
+`...SceneNames()` reads `op_scene_load_scene_mask` and
+`op_scene_display_name`; Kit Save carries its Scene in
+`op_kit_save_source_scene`; Instrument Load carries its destination in
+`op_instrument_load_destination_scene` / `_slot`. Every handoff therefore
+has to translate between coordinate systems, and Instrument Save already
+open-codes an `op_slot` overwrite ([12049](Core/Hardware/SD/filesystem.c#L12049))
+to do it.
+
+### Difference 5 — sub-variants that must not publish
+
+Three operations have variants that deliberately must not touch identity:
+Kit Load vs Kit **Morph** Load (one shared tick function, two `current_op`
+values), Instrument Save normal vs morph, and Instrument Load's tri-state
+`op_instrument_load_temporary` (normal / `.hctmp` temp / temp morph). Only
+the last is currently guarded at the identity level; the other two are
+guarded, when at all, by whichever branch happens to contain the handoff.
+
+### Difference 6 — silent failure is the default
+
+`filesystem_cacheResidentName()` ([4711](Core/Hardware/SD/filesystem.c#L4711))
+returns `void` and early-returns when the shared cache is not tagged
+`FS_NAME_CACHE_HCNAMES`. `filesystem_setResidentSource()` returns a status
+that all eighteen call sites discard with `(void)`. A completely lost
+publication is therefore indistinguishable from a successful one, which is
+why this survived two test sessions and three wrong diagnoses.
+
+---
+
+### Refactor candidates (not scheduled; no code changed)
+
+**R1 — One completion-chain declaration instead of three idioms.**
+Replace ad-hoc `current_op` reassignment and `op_library_index_rebuild_pending`
+with a small ordered pending-work bitmask consumed by `filesystem_finish()`
+(publish register → rebuild index → flush settings). Ordering constraints
+then live in one place instead of being a property of which site remembered
+them. Cost: one `uint8_t`. Biggest single reduction in this whole surface.
+
+**R2 — Dedicated HCNAMES name register. NEEDS RAM ALLOCATION APPROVAL:
+1,161 bytes (129 rows × 9 bytes).** Today the register borrows
+`fs_list_cache_name[1000][9]`, the shared browser cache, and that borrow is
+what forces the silent cache-kind guard, the "Menu copies its selected row
+before `.hcindex` replaces it" dance, and Bank's fragile hold-across-traversal
+pattern. Note the existing asymmetry: the *provenance* half of each row is
+already a dedicated 258-byte array (`fs_resident_source`) and the identity
+block is a dedicated 81 bytes (`fs_identity_name`) — precisely because
+borrowing them was unsafe. The name half is the last borrowed piece and the
+one that fails. A dedicated register removes an entire hazard class for all
+eight operations at once. Deferred pending your judgement on the 1,161 bytes.
+
+**R3 — One publication entry point.** A single
+`filesystem_beginResidentNamePublish(op)` helper (drafted as change A1 in
+`S056_HCNAMES_FOLLOW_UP.md` §11.2) replacing six open-coded handoffs. This
+one is small enough that the §11 fix adopts it immediately; listed here
+because the same argument extends to Bank, which could drop its private
+phases 83-86 entirely and use the shared writer with a new BANK overlay
+branch — removing roughly 80 lines of duplicated open/stream/close logic.
+
+**R4 — Uniform destination coordinates.** A single
+`{ scene_mask, slot }` pair set by every request function, so overlays stop
+translating between four naming schemes and handoffs stop overwriting
+`op_slot` as a side channel.
+
+**R5 — Typed return on the identity helpers.** Give
+`filesystem_cacheResidentName()` a status return and stop discarding
+`filesystem_setResidentSource()`'s. The §11 fix instruments the helpers with
+trace records instead, as the cheap version; converting the eighteen call
+sites is the thorough version.
+
+**R6 — Retire the Menu-deferred name session** (`menu_endResidentNameScratchSession()`,
+`menu_residentNameDirtySceneMask`, `menu_refreshResidentNameScratchKit()`,
+and the three now-dead `filesystem_requestUpdateResident*Names()` entry
+points). Scheduled as Group D of the §11 fix, listed here because it is the
+architectural half: it removes the second publication owner permanently.
+
+**R7 — Verify-after-write as a facade contract.** §11's Group B adds a
+read-back probe to four writers. If it proves useful, the same one-row
+read-back is worth applying to `settings.cfg` and the `.hcindex` writers —
+every file whose loss is silent today.
+
+---
+
 ## Phase 1 — Foundation Refactors
 
 **Location:** `Core/MIDI/frontPanelParser.c`, `Core/Sequencer/sequencer.c` → `Core/Bank/Scene/Pattern/`, `Core/Preset/` → `Core/Bank/Scene/Preset/`

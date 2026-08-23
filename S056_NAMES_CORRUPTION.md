@@ -238,9 +238,10 @@ timing-dependent hazard).
 # Implementation Plan
 
 Expanded from §4/§5 above into an exact, file-by-file change list.
-**No code has been changed — this is planning only.** Every code block below
-is written the way it should land in the source, including the comment
-block that should sit next to it.
+Implementation is now in progress. The source trace confirmed the proposed
+9-byte Bank-child snapshot is the smallest operation-local boundary that
+removes the phase-31-to-phase-61 shared-scratch dependency; the implementation
+log at the end of this document records landed changes and verification.
 
 This covers both pieces from §4/§5 together, since they touch the same
 handful of lines and are cheapest to land as one pass: the structural
@@ -674,3 +675,29 @@ together.
   `value32` bit-packing's 0..7 slot field in Change 4/5 comfortably fitting
   a 0..15 range) — read from existing code, not re-verified independently
   for this plan.
+
+---
+
+## Implementation log
+
+### 2026-08-22 — source implementation landed
+
+- Added `op_bank_child_scene_display_name[9]`, a filesystem-owned normal-SRAM1
+  operation scratch copy. It is cleared at Bank-child phase 27 and populated
+  immediately after the successful phase-31 child-name validation.
+- Bank-child HCNAMES publication now always uses the frozen snapshot rather
+  than the shared `op_scene_display_name` scratch. This closes the observed
+  Scene-row corruption without changing the existing Kit or Instrument row
+  paths.
+- Added trace stage `H` as the planned bracket-and-compare detector. It uses
+  reserved flags (`0`) and packs child slot, snapshot first byte, and live
+  scratch first byte into `value32`; it fires only on a mismatch, while the
+  snapshot remains authoritative for the actual HCNAMES write.
+- Added `H` documentation and both decoder views. `STORAGE_BANK_SCENE_MAX_SLOTS`
+  is confirmed as 16 and `STORAGE_SCENE_DISPLAY_NAME_LEN` as 8, so the packed
+  fields and 9-byte snapshot match the existing contracts.
+- Verification status: `git diff --check` passed; `make clean && make` passed
+  with the linked image reporting `text=381644`, `data=400`, `bss=94760`; the
+  `make img` packaging check passed; and synthetic `H` records decoded
+  correctly through both decoder entry points. The interactive
+  playback-running and playback-stopped hardware retests remain pending.

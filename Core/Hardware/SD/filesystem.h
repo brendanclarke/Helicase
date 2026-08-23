@@ -407,6 +407,20 @@ void        filesystem_ack(void);
 void filesystem_markSettingsDirty(void);
 void filesystem_enableRuntimeSettingsWrites(void);
 
+/*
+ * Apply the shared settings-write completion policy without acknowledging it.
+ *
+ * Input: terminal result of an FS_INTERNAL_OP_SAVE_GLOBALS operation. Output:
+ * a failed write re-arms the normal trailing-debounce retry; a successful
+ * write leaves the revision state to filesystem_complete(), which clears the
+ * dirty flag only after the final FAT flush. Why public: the ordinary
+ * debounced writer and the Bank Load/Save synchronous completion bridge must
+ * share one retry policy while each caller retains ownership of its own
+ * terminal acknowledgement. Affiliate: filesystem_settingsWriterCompleted()
+ * and Preset's on_bank_settings_flush_complete().
+ */
+void filesystem_handleSettingsWriteResult(fs_status_t result);
+
 bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 /*
  * Load one numbered Kit directory into every Scene selected by scene_mask.

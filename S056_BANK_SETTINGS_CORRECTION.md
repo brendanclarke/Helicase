@@ -9,8 +9,10 @@ are durable":
 - **Part B** — why `settings.cfg`'s `active_bank` can still be stale after
   the menu has already unlocked, and how to make that impossible.
 
-No code has been changed yet; this is the investigation and a concrete
-proposal for both.
+Implementation is now in progress. The source trace confirmed the proposal's
+public API correction (`filesystem_requestSave(FS_FILE_SETTINGS, ...)`) and
+the chained-operation scratch hazard; the implementation log at the end of
+this document records each landed change and verification result.
 
 ---
 
@@ -1096,3 +1098,39 @@ add one entry there rather than in both files separately.
   this same fix — it funnels into the same `on_bank_load_complete()`
   callback, so no separate change should be needed, but this was reasoned
   from code reading, not exercised on hardware.
+
+---
+
+## Implementation log
+
+### 2026-08-22 — source implementation landed
+
+- Added trace stage `K` in `AutosaveTrace.h`. Bit 0 is the callback's observed
+  `FS_STATUS_DONE`; bit 1 selects Save versus Load; the value is the requested
+  Bank slot. `presetManager.c` emits it as the first action in both Bank
+  completion callbacks.
+- Added `filesystem_handleSettingsWriteResult(fs_status_t)` as the shared
+  retry-policy helper. The existing debounced settings callback still owns its
+  own `filesystem_ack()`, while the Bank bridge calls the helper and lets
+  Preset acknowledge the chained terminal operation.
+- Bank Load/Save success now acknowledges the Bank operation, starts the public
+  `filesystem_requestSave(FS_FILE_SETTINGS, 0u, ...)` path immediately, and
+  delays `PRESET_UPDATE_READY` until that settings write reaches its final
+  filesystem completion. A refused request falls back to immediate Bank
+  completion so Menu cannot self-deadlock; a failed settings write re-arms the
+  normal debounce and does not falsely fail the already-successful Bank.
+- Preset snapshots `filesystem_lastBankLoadLoadedScene()` before starting the
+  settings operation, because `filesystem_start()` clears
+  `op_bank_loaded_scene`. The snapshot and pending Bank operation identity use
+  exactly 2 bytes of ordinary SRAM1 `.bss`, owned by Preset for the current
+  Bank completion.
+- Confirmed `FS_FILE_SETTINGS` is numbered=0, supports_load=1, and
+  supports_save=1; confirmed `menu_refreshSavedLibraryName()` reads the
+  durable Bank name cache/index and does not depend on reset Bank-load scratch.
+  Added `K` decoding to the shared human-readable decoder and the compact
+  decoder through its existing import path.
+- Verification status: `git diff --check` passed; `make clean && make` passed
+  with the linked image reporting `text=381572`, `data=400`, `bss=94744`; the
+  `make img` packaging check passed; and synthetic Load/Save `K` records were
+  decoded correctly by both decoder entry points. Hardware retest remains
+  pending.

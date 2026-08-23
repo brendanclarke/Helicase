@@ -1088,6 +1088,23 @@ static uint16_t op_bank_scene_save_mask = 0u;
 static uint8_t op_bank_active_scene = 0u;
 static uint8_t op_bank_child_cursor = 0u;
 static uint8_t op_bank_loaded_scene = 0u;
+/*
+ * Bank-Load-owned copy of the currently validated child Scene name.
+ *
+ * Inputs: copied from op_scene_display_name at phase 31, immediately after
+ * the Bank-parent rescan has completed successfully for op_bank_child_cursor.
+ * Output: phase 61's HCNAMES overlay reads this independent value instead of
+ * trusting shared Scene/Kit scratch across the intervening settings, Kit,
+ * Instrument, Pattern, and Effect phases. Storage: exactly 9 bytes in normal
+ * SRAM1 .bss, owned by this asynchronous filesystem operation and reused for
+ * one child at a time. Why: Session 056 found a Bank-local Scene row changed
+ * to an unrelated root-library name while the matching Kit/Instrument rows
+ * remained correct; freezing the validated name closes that shared-scratch
+ * lifetime regardless of which intervening phase caused the drift. Affiliates:
+ * phase 27 reset, phase 31 capture, and
+ * filesystem_cacheCurrentBankSceneNameBlock()'s phase 61 read.
+ */
+static char op_bank_child_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 static uint8_t op_bank_payload_active = 0u;
 static uint8_t op_rename_done = 0u;
 /* Result paired with rename completion; open-name output is trusted only on OK. */
@@ -4848,20 +4865,42 @@ static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
     /*
      * Overlay one successfully committed Bank child onto the HCNAMES register.
      *
-     * Inputs: the Bank loader's one-bit child cursor, its parsed Scene display
-     * name in op_scene_display_name, and the resident Scene just atomically
-     * committed by the shared Scene loader. Output: only that Scene row, its
-     * Kit row, and its six Instrument rows change as name/source pairs in the
-     * borrowed cache. The child hierarchy inherits the Bank source; unmasked
-     * resident Scenes are deliberately never touched, preserving both their
-     * payload/name/source pairing during every mask-selective Bank Load.
-     * Affiliates: filesystem_loadSceneDirectory_tick() commit phase and the
-     * final Bank HCNAMES writer.
+     * Inputs: the Bank loader's one-bit child cursor, the child's Scene
+     * display name in the Bank-Load-owned op_bank_child_scene_display_name
+     * snapshot, and the resident Scene just atomically committed by the shared
+     * Scene loader. Output: only that Scene row, its Kit row, and its six
+     * Instrument rows change as name/source pairs in the borrowed cache. The
+     * child hierarchy inherits the Bank source; unmasked resident Scenes are
+     * deliberately never touched, preserving both their payload/name/source
+     * pairing during every mask-selective Bank Load. Affiliates:
+     * filesystem_loadSceneDirectory_tick() phase 31 (snapshot capture), phase
+     * 61 (this read), and the final Bank HCNAMES writer.
      */
     if (scene_index >= STORAGE_BANK_SCENE_MAX_SLOTS)
         return;
+
+    /*
+     * Diagnostic-only Session 056 drift witness. Compare the shared scratch
+     * against the frozen child value immediately before publication so a
+     * future reproduction identifies the affected child and the first byte of
+     * each value. flags is reserved and remains zero; the H value layout is
+     * documented in AutosaveTrace.h. This comparison never controls the
+     * HCNAMES write: the snapshot below is always authoritative, so detected
+     * drift cannot corrupt the published Scene row. Affiliate:
+     * AUTOSAVE_TRACE_STAGE_NAME_SCRATCH_DRIFT.
+     */
+    if (memcmp(op_scene_display_name, op_bank_child_scene_display_name,
+               sizeof(op_scene_display_name)) != 0) {
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_NAME_SCRATCH_DRIFT,
+            0u,
+            (uint32_t)scene_index |
+            ((uint32_t)(uint8_t)op_bank_child_scene_display_name[0] << 8u) |
+            ((uint32_t)(uint8_t)op_scene_display_name[0] << 16u));
+    }
+
     filesystem_cacheResidentName(filesystem_residentSceneRow(scene_index),
-                                 op_scene_display_name);
+                                 op_bank_child_scene_display_name);
     (void)filesystem_setResidentSource(filesystem_residentSceneRow(scene_index),
                                        FS_RESIDENT_SOURCE_INHERIT);
     filesystem_cacheResidentName(filesystem_residentKitRow(scene_index),
@@ -10933,6 +10972,15 @@ static void filesystem_loadBankDirectory_tick(void)
          * exact directory component used by the shared Scene loader.
          */
         op_scene_display_name[0] = '\0';
+        /*
+         * Start each Bank-child name lifetime empty as well. If a future
+         * control-flow error reaches phase 61 without a successful phase-31
+         * capture, this prevents silently reusing the previous child's name;
+         * the existing phase-29/31 error path still rejects the child before
+         * publication. Affiliate: op_bank_child_scene_display_name's phase-31
+         * write and phase-61 HCNAMES read.
+         */
+        op_bank_child_scene_display_name[0] = '\0';
         filesystem_bootLoggingSetBankSceneDetail('O');
         op_file_ready = false;
         op_file = NULL;
@@ -11025,6 +11073,20 @@ static void filesystem_loadBankDirectory_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        /*
+         * Freeze the validated Bank-local Scene display name before entering
+         * the shared multi-phase Scene payload reader. Inputs: the
+         * op_bank_child_cursor-selected name that phase 29 found and the
+         * successful close status above. Output: an independent nine-byte
+         * value for phase 61 HCNAMES publication, immune to any later reuse of
+         * op_scene_display_name by settings/Kit/Instrument/Pattern/Effect
+         * work. Why: the Scene directory name is not serialized in sceneset.scg
+         * and must remain paired with the committed resident Scene. Affiliate:
+         * op_bank_child_scene_display_name and
+         * filesystem_cacheCurrentBankSceneNameBlock().
+         */
+        memcpy(op_bank_child_scene_display_name, op_scene_display_name,
+               sizeof(op_bank_child_scene_display_name));
         op_scene_load_scene_mask = (uint16_t)(1u << op_bank_child_cursor);
         filesystem_initSceneStage(&fs_stage_workspace.scene_stage);
         /*
@@ -19584,23 +19646,37 @@ recovery_failed:
 #endif
 }
 
-static void filesystem_settingsWriterCompleted(void)
+void filesystem_handleSettingsWriteResult(fs_status_t result)
 {
     /*
-     * Complete an invisible settings.cfg write without involving Preset/Menu.
+     * Apply the shared retry policy for one completed settings.cfg write.
      *
-     * Inputs: terminal SAVE_GLOBALS status after filesystem_complete() has
-     * conditionally acknowledged the captured revision. Outputs: DONE simply
-     * acknowledges; ERROR preserves/creates dirty work and restarts the
-     * one-second retry deadline before acknowledging. Why: an autonomous
-     * callback must not leave DONE/ERROR for an unrelated foreground caller or
-     * tight-loop on media failure. Affiliates: filesystem_settingsWriterSchedule_tick().
+     * Input: terminal SAVE_GLOBALS result. Output: DONE leaves the durable
+     * revision decision to filesystem_complete(); ERROR preserves/creates
+     * dirty work and restarts the one-second retry deadline. Why: both the
+     * autonomous debounced writer and Bank Load/Save's immediate bridge need
+     * identical retry behavior, but their callers acknowledge the terminal
+     * facade state at different ownership boundaries. No filesystem I/O is
+     * started here. Affiliates: filesystem_settingsWriterCompleted() and
+     * presetManager.c's on_bank_settings_flush_complete().
      */
-    if (status != FS_STATUS_DONE) {
+    if (result != FS_STATUS_DONE) {
         fs_settings_dirty = 1u;
         fs_settings_next_due_tick = (uint16_t)(
             time_sysTick + SETTINGS_AUTOWRITE_DEBOUNCE_MS);
     }
+}
+
+static void filesystem_settingsWriterCompleted(void)
+{
+    /*
+     * Complete an invisible debounced settings.cfg write without involving
+     * Preset/Menu. The shared retry policy runs before this callback releases
+     * the terminal facade state, so a failed write converges later without
+     * trapping future foreground or autonomous requests at DONE/ERROR.
+     * Affiliate: filesystem_handleSettingsWriteResult().
+     */
+    filesystem_handleSettingsWriteResult(status);
     filesystem_ack();
 }
 

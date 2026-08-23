@@ -484,6 +484,20 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     `menu.c`.
   - Full investigation, evidence, and rejected-first-attempt record:
     `knowledge_files/log_archive/055_SESSION_HANDOFF_LOG.md`.
+- Session 056 Bank settings correction is source-implemented but not yet
+  hardware-confirmed: Bank Load/Save now emit the callback-entry `K` trace
+  witness and synchronously chain `settings.cfg` through the existing
+  SAVE_GLOBALS flush gate before Preset publishes completion. The normal
+  settings debounce remains unchanged for other callers. Preset retains two
+  one-byte SRAM1 fields so the chained request cannot erase Bank Load's
+  completed-Scene result or operation identity. Authority and test checklist:
+  `S056_BANK_SETTINGS_CORRECTION.md`.
+- Session 056 HCNAMES Scene-row corruption correction is source-implemented but
+  not yet hardware-confirmed: Bank-child Scene names are frozen in a 9-byte
+  filesystem-owned SRAM1 snapshot at phase 31 and published from that copy at
+  phase 61. Trace stage `H` reports any live shared-scratch drift without
+  allowing it to affect HCNAMES. Authority and test checklist:
+  `S056_NAMES_CORRUPTION.md`.
 - Root-directory working docs for Sessions 054-055 (`SESSION_054_PREPLAN_ASYNC_RECURSIVE_CLEANUP.md`,
   `SESSION_054_PLAN_DEFECT_EVIDENCE_FIX.md`, `AFAT_RECURSIVE_WHITEPAPER.md`,
   `SCENE_LOAD_PAT_RESTORE.md`, `LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md`,

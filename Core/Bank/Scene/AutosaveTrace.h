@@ -60,6 +60,18 @@ typedef enum {
     AUTOSAVE_TRACE_STAGE_INSTRUMENT_ENTRY = 'N',
     /* Terminal whole-Kit/Scene witness retained after a synchronous D-record burst. */
     AUTOSAVE_TRACE_STAGE_LOAD_MARK = 'L',
+    /*
+     * H: diagnostic-only Bank-child Scene-name scratch drift witness. The
+     * filesystem compares shared op_scene_display_name against the frozen
+     * Bank-owned child snapshot immediately before the Scene-name HCNAMES row
+     * is published. flags is reserved and always zero. value32 packs the
+     * Bank-local child slot in bits 0..7, the snapshot's first display byte in
+     * bits 8..15, and the live/drifted value's first display byte in bits
+     * 16..23. The HCNAMES write itself always uses the snapshot, so H proves
+     * the shared-scratch hazard was observed but cannot itself indicate a
+     * corrupted card. Affiliate: S056_NAMES_CORRUPTION.md.
+     */
+    AUTOSAVE_TRACE_STAGE_NAME_SCRATCH_DRIFT = 'H',
     AUTOSAVE_TRACE_STAGE_SCHEDULED = 'S',
     AUTOSAVE_TRACE_STAGE_ADMITTED = 'A',
     AUTOSAVE_TRACE_STAGE_VALIDATED = 'V',
@@ -142,6 +154,14 @@ typedef enum {
      * marked, not the mask value at the commit/capture boundary.
      */
     AUTOSAVE_TRACE_STAGE_BANK_PRESENT = 'B',
+    /*
+     * K: unconditional Bank Load/Save completion witness. Bit 0 reports
+     * whether the Preset callback observed FS_STATUS_DONE; bit 1 selects
+     * Save (1) versus Load (0). The value is the requested Bank slot. This
+     * mirrors R for root Scene Load and proves callback reachability even
+     * when no later AutoSave or trace-flush record survives to disk.
+     */
+    AUTOSAVE_TRACE_STAGE_BANK_OP_COMPLETE = 'K',
 } autosave_trace_stage_t;
 
 /*
@@ -320,6 +340,10 @@ typedef enum {
  * callback-entry witness to be compared directly with later L/D/I records.
  */
 #define AUTOSAVE_TRACE_SCENE_LOAD_COMPLETE_FLAG_STATUS_DONE (1u << 0u)
+
+/* K flags: bit 0 is terminal DONE; bit 1 distinguishes Save from Load. */
+#define AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_STATUS_DONE (1u << 0u)
+#define AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_KIND_SAVE    (1u << 1u)
 
 /*
  * F flags: bit 0 means the command-active gate retained pending trace records;

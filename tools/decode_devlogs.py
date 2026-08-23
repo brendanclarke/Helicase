@@ -97,6 +97,7 @@ STAGE_ENUM = {
     "J": "AUTOSAVE_TRACE_STAGE_INSTRUMENT_COMMIT",
     "N": "AUTOSAVE_TRACE_STAGE_INSTRUMENT_ENTRY",
     "L": "AUTOSAVE_TRACE_STAGE_LOAD_MARK",
+    "H": "AUTOSAVE_TRACE_STAGE_NAME_SCRATCH_DRIFT",
     "S": "AUTOSAVE_TRACE_STAGE_SCHEDULED",
     "A": "AUTOSAVE_TRACE_STAGE_ADMITTED",
     "V": "AUTOSAVE_TRACE_STAGE_VALIDATED",
@@ -105,6 +106,7 @@ STAGE_ENUM = {
     "P": "AUTOSAVE_TRACE_STAGE_PUBLISHED",
     "T": "AUTOSAVE_TRACE_STAGE_TERMINAL",
     "R": "AUTOSAVE_TRACE_STAGE_SCENE_LOAD_COMPLETE",
+    "K": "AUTOSAVE_TRACE_STAGE_BANK_OP_COMPLETE",
     "W": "AUTOSAVE_TRACE_STAGE_WRITER_SUPPRESSED",
     "F": "AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED",
     "G": "AUTOSAVE_TRACE_STAGE_TRACE_DROPPED",
@@ -121,6 +123,7 @@ STAGE_PRODUCER = {
     "J": "presetManager on_instrument_load_complete()",
     "N": "menu_traceInstrumentEntry()",
     "L": "autosave_markKitDirty() / autosave_markSceneWithoutPatternDirty()",
+    "H": "filesystem_cacheCurrentBankSceneNameBlock() drift detector",
     "S": "filesystem_autosaveWriterSchedule_tick()",
     "A": "filesystem_autosaveWriterSchedule_tick()",
     "V": "filesystem_autosaveParameterDrain_tick()",
@@ -129,6 +132,7 @@ STAGE_PRODUCER = {
     "P": "filesystem_autosaveParameterDrain_tick()",
     "T": "filesystem_autosaveWriterCompleted()",
     "R": "on_scene_load_complete()",
+    "K": "on_bank_load_complete() / on_bank_save_complete()",
     "W": "filesystem_autosaveWriterSchedule_tick()",
     "F": "filesystem_autosaveTraceFlushSchedule_tick() / "
          "filesystem_autosaveTraceFlushCompleted()",
@@ -475,11 +479,24 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
             kind_name = f"unknown kind {kind}"
         detail = (f"{enum_name} via {producer}: {kind_name}, Scene{scene}; "
                   f"TRACKING_ENABLED={int(tracking)}")
+    elif ch == "H":
+        scene = value & 0xFF
+        snapshot_first = (value >> 8) & 0xFF
+        live_first = (value >> 16) & 0xFF
+        detail = (f"{enum_name} via {producer}: Bank child {scene} shared "
+                  f"Scene-name scratch drift; snapshot_first=0x{snapshot_first:02x} "
+                  f"live_first=0x{live_first:02x}; HCNAMES used snapshot")
     elif ch == "R":
         done = bool(flags & 0x01)
         detail = (f"{enum_name} via {producer}: filesystem status "
                   f"{'DONE' if done else 'not DONE'}; destination Scene mask "
                   f"0x{value:04x} {scene_mask_text(value)}")
+    elif ch == "K":
+        done = bool(flags & 0x01)
+        is_save = bool(flags & 0x02)
+        detail = (f"{enum_name} via {producer}: Bank "
+                  f"{'Save' if is_save else 'Load'} callback observed "
+                  f"{'DONE' if done else 'not DONE'}; target slot {value}")
     elif ch == "S":
         detail = (f"{enum_name} via {producer}: writer armed once; "
                   f"five-second debounce deadline tick={value}")

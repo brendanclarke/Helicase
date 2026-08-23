@@ -197,7 +197,7 @@ stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
 Integer fields are little-endian. Stage bytes are uppercase
-`D I J N L R W F G B S A V M C P T X O E` and their meanings/values are owned
+`D I J N L H R K W F G B S A V M C P T X O E` and their meanings/values are owned
 by `AutosaveTrace.h`. `X`, `O`, and `E` were added in Session 054 while
 chasing the recursive-delete `ScnS05` defect (see
 `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`); a fourth stage,
@@ -274,6 +274,16 @@ adding any state.
 the value packs kind in bits 0..1 (`0` Kit, `1` Scene) and the destination
 Scene in bits 2..5. It follows all subordinate `D`/`I` records for that scope.
 
+`H` is a diagnostic-only Session 056 Bank-child Scene-name scratch-drift
+witness. The Bank loader freezes the validated child Scene name before the
+long shared payload phase and publishes HCNAMES from that snapshot. `H` fires
+only when the old shared `op_scene_display_name` differs at publication time;
+the published row still uses the snapshot, so this record cannot itself mean
+that the card was corrupted. flags is reserved and always zero. value32 packs
+the child slot in bits 0..7, the snapshot's first name byte in bits 8..15, and
+the live/drifted first name byte in bits 16..23. See
+`S056_NAMES_CORRUPTION.md`.
+
 `R` is the root Scene Load completion witness: it is emitted at callback entry;
 flag bit 0 reports that filesystem status was `DONE`, and the value is the
 destination Scene mask. `W` records the intentional Load/Save-page suppression
@@ -287,6 +297,16 @@ records the resident mask at Bank Load metadata commit and packs the effective
 selected-child load mask in value bits 0..15. With bit 0 set it records the
 resident mask at the AutoSave drain's first present-mask byte and packs the
 payload offset (10) in bits 0..15. It is diagnostic-only and uses no new RAM.
+
+`K` is the Session 056 unconditional Bank Load/Save completion witness. Flag
+bit 0 reports whether the Preset callback observed `FS_STATUS_DONE`; bit 1
+selects Load (0) versus Save (1). The value is the target Bank library slot.
+A missing `K` proves `on_bank_load_complete()`/
+`on_bank_save_complete()` was not reached, while a `K` with bit 0 clear proves
+the callback observed a terminal error. Successful Bank Load/Save callbacks
+also chain one immediate `FS_INTERNAL_OP_SAVE_GLOBALS` operation before Menu
+unlock, so `settings.cfg` has passed its own final flush at the completion
+boundary. This does not change the AutoSave parameter-record debounce.
 
 The 2026-08-16 root-Scene hardware fixture is the reference example for the
 terminal publication chain: Scene 15 loaded root Scene 024 and produced

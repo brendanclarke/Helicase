@@ -86,6 +86,29 @@ static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_U
 /* The selected Instrument row can be any of the shared cache's 1,000 entries. */
 static volatile uint16_t         pm_instrument_request_index = 0u;
 static volatile uint16_t         pm_kit_request_scene_mask = 0u;
+/*
+ * Deferred Bank completion identity for the immediate settings.cfg bridge.
+ *
+ * Inputs: PRESET_OP_BANK_LOAD or PRESET_OP_BANK_SAVE, written immediately
+ * before the chained filesystem_requestSave(FS_FILE_SETTINGS, ...) call.
+ * Output: on_bank_settings_flush_complete() publishes the original Bank
+ * operation after the settings write reaches its own terminal boundary.
+ * Storage: one byte in ordinary SRAM1 .bss, Preset-owned for one Bank
+ * Load/Save; it is not a logging or payload allocation. Why separate from
+ * pm_completed_op: that field is Menu-facing output and stays unpublished
+ * until the whole chained sequence is complete.
+ */
+static volatile uint8_t          pm_pending_bank_op = (uint8_t)PRESET_OP_NONE;
+/*
+ * Snapshot of the Bank Load "did a Scene commit?" result before chaining.
+ *
+ * Input: filesystem_lastBankLoadLoadedScene() at Bank callback entry. Output:
+ * preset_completedBankLoadedScene() returns this stable result after the
+ * settings write has reset filesystem.c's generic op_* scratch. Storage: one
+ * byte in ordinary SRAM1 .bss, Preset-owned for the latest Bank Load result;
+ * it replaces no existing cache or payload.
+ */
+static volatile uint8_t          pm_pending_bank_loaded_scene = 0u;
 
 static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
 {
@@ -216,10 +239,20 @@ void preset_ackStatus(void)
 /* -----------------------------------------------------------------------
 ** Completion callbacks — fired by filesystem_tick() context
 ** ----------------------------------------------------------------------- */
-static void preset_completeFilesystemOp(preset_op_type_t completed_op)
+static void preset_completeFilesystemOpWithResult(preset_op_type_t completed_op,
+                                                  uint8_t completed_ok)
 {
-    fs_status_t fs_status = filesystem_status();
-    uint8_t completed_ok = (uint8_t)(fs_status == FS_STATUS_DONE);
+    /*
+     * Publish one Preset operation with an explicitly supplied result.
+     *
+     * Inputs: the Menu-facing operation identity and its success result.
+     * Output: acknowledge the currently terminal filesystem operation, then
+     * publish pm_completed_ok/pm_completed_op/pm_status. The explicit result
+     * matters for the Bank settings bridge: its live facade status belongs to
+     * SAVE_GLOBALS, while Menu must receive the earlier successful Bank
+     * Load/Save result. Existing callers continue through the wrapper below.
+     * Affiliate: on_bank_settings_flush_complete().
+     */
     uint8_t is_test_op = (uint8_t)(completed_op == PRESET_OP_TEST_SCAN ||
                                    completed_op == PRESET_OP_TEST_FILE_LOAD ||
                                    completed_op == PRESET_OP_TEST_DIR_LOAD ||
@@ -244,6 +277,21 @@ static void preset_completeFilesystemOp(preset_op_type_t completed_op)
         pm_completed_op = PRESET_OP_NONE;
         pm_status = PRESET_UPDATE_READY;
     }
+}
+
+static void preset_completeFilesystemOp(preset_op_type_t completed_op)
+{
+    /*
+     * Preserve the original completion behavior for ordinary callbacks.
+     *
+     * Input: operation identity paired with the currently terminal
+     * filesystem facade status. Output: the same acknowledgement and Menu
+     * publication as before this refactor. Only the Bank settings bridge uses
+     * the explicit-result helper directly, because it acknowledges a chained
+     * operation while reporting the earlier Bank operation's result.
+     */
+    preset_completeFilesystemOpWithResult(
+        completed_op, (uint8_t)(filesystem_status() == FS_STATUS_DONE));
 }
 
 static void on_kit_load_complete(void)
@@ -506,10 +554,52 @@ static void on_scene_save_complete(void)
     preset_completeFilesystemOp(PRESET_OP_SCENE_SAVE);
 }
 
+static void on_bank_settings_flush_complete(void)
+{
+    /*
+     * Finish the Bank operation after its immediate settings.cfg write.
+     *
+     * Input: filesystem_status() now describes SAVE_GLOBALS, while
+     * pm_pending_bank_op retains the Bank Load/Save identity captured before
+     * that request was posted. Output: failed settings writes re-arm the
+     * ordinary debounce through the shared policy, then the Bank operation is
+     * published as successful because its own filesystem callback already
+     * observed DONE. Why: a settings.cfg failure must not turn a correctly
+     * loaded/saved Bank into a false Menu error or leave Menu locked forever;
+     * the retry path still converges active_bank later. Affiliate:
+     * filesystem_handleSettingsWriteResult().
+     */
+    filesystem_handleSettingsWriteResult(filesystem_status());
+    preset_completeFilesystemOpWithResult(
+        (preset_op_type_t)pm_pending_bank_op, 1u);
+}
+
 static void on_bank_load_complete(void)
 {
     uint16_t completed_scene_mask;
     uint8_t scene_index;
+    uint8_t load_done = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+
+    /*
+     * Unconditional Bank Load completion witness, mirroring root Scene Load's
+     * R record. A missing K proves this callback was not reached; bit 0 proves
+     * whether it observed DONE. The value preserves pm_request_slot so the
+     * record identifies the attempted Bank without adding trace state.
+     */
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_BANK_OP_COMPLETE,
+        (uint8_t)(load_done
+                      ? AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_STATUS_DONE
+                      : 0u),
+        (uint32_t)pm_request_slot);
+
+    /*
+     * Preserve the completed Bank result before any chained request starts.
+     * filesystem_start() resets op_bank_loaded_scene for every new operation;
+     * Menu reads this result only after the settings bridge completes, so it
+     * must come from Preset-owned SRAM rather than live filesystem scratch.
+     */
+    pm_pending_bank_loaded_scene = filesystem_lastBankLoadLoadedScene();
 
     /*
      * Complete one root Bank load.
@@ -530,7 +620,7 @@ static void on_bank_load_complete(void)
      * phase-20 metadata commit, autosave_markSceneWithoutPatternDirty(), and
      * preset_completeFilesystemOp().
      */
-    if (filesystem_status() == FS_STATUS_DONE) {
+    if (load_done) {
         completed_scene_mask = filesystem_lastBankLoadSceneMask();
         for (scene_index = 0u;
              scene_index < SCENE_COUNT && scene_index < 16u;
@@ -538,12 +628,47 @@ static void on_bank_load_complete(void)
             if ((completed_scene_mask & (uint16_t)(1u << scene_index)) != 0u)
                 autosave_markSceneWithoutPatternDirty(scene_index);
         }
+
+        /*
+         * Bank Load owns one deliberate active_bank change, so bypass the
+         * normal one-second debounce and keep Menu's accepted command locked
+         * until settings.cfg itself passes its final filesystem flush.
+         * Inputs: the successful Bank commit and its already-armed settings
+         * dirty revision. Output: the public settings writer runs now; a
+         * refusal falls back to immediate Bank completion rather than risking
+         * a permanent Menu lock. filesystem_start() is private, therefore
+         * filesystem_requestSave(FS_FILE_SETTINGS, ...) is the public route
+         * to the identical SAVE_GLOBALS state machine.
+         */
+        pm_pending_bank_op = (uint8_t)PRESET_OP_BANK_LOAD;
+        filesystem_ack();
+        if (!filesystem_requestSave(FS_FILE_SETTINGS, 0u,
+                                    on_bank_settings_flush_complete)) {
+            preset_completeFilesystemOpWithResult(PRESET_OP_BANK_LOAD, 1u);
+        }
+        return;
     }
     preset_completeFilesystemOp(PRESET_OP_BANK_LOAD);
 }
 
 static void on_bank_save_complete(void)
 {
+    uint8_t save_done = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+
+    /*
+     * Unconditional Bank Save completion witness. Bit 0 reports DONE and bit
+     * 1 distinguishes Save from Load; value32 is the requested Bank slot.
+     * This callback-entry record remains independent of downstream settings
+     * persistence and therefore proves whether Preset reached this boundary.
+     */
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_BANK_OP_COMPLETE,
+        (uint8_t)((save_done
+                       ? AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_STATUS_DONE
+                       : 0u) |
+                  AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_KIND_SAVE),
+        (uint32_t)pm_request_slot);
+
     /*
      * Complete one root Bank save.
      *
@@ -551,6 +676,21 @@ static void on_bank_save_complete(void)
      * It does not imply runtime DSP changes, so Menu can share the ordinary
      * Save completion cleanup used by Scene Save.
      */
+    if (save_done) {
+        /*
+         * Bank Save changes the same boot-restore active_bank authority as
+         * Bank Load. Chain the immediate settings.cfg write and keep Menu's
+         * accepted Save command owned until the write reaches its durable
+         * terminal callback; refusal uses the same no-hang fallback as Load.
+         */
+        pm_pending_bank_op = (uint8_t)PRESET_OP_BANK_SAVE;
+        filesystem_ack();
+        if (!filesystem_requestSave(FS_FILE_SETTINGS, 0u,
+                                    on_bank_settings_flush_complete)) {
+            preset_completeFilesystemOpWithResult(PRESET_OP_BANK_SAVE, 1u);
+        }
+        return;
+    }
     preset_completeFilesystemOp(PRESET_OP_BANK_SAVE);
 }
 
@@ -2273,7 +2413,13 @@ uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
 
 uint8_t preset_completedBankLoadedScene(void)
 {
-    return filesystem_lastBankLoadLoadedScene();
+    /*
+     * Return the Bank Load result captured before the chained settings write.
+     * A fresh filesystem_start() clears op_bank_loaded_scene, so consulting
+     * filesystem.c here would make every successful non-empty Bank appear
+     * empty to Menu after Session 056's synchronous settings bridge.
+     */
+    return pm_pending_bank_loaded_scene;
 }
 
 uint8_t preset_loadFirstAvailableSceneOrKit(void)

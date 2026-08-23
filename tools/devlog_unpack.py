@@ -58,9 +58,18 @@ def compact_detail(ch: str, flags: int, value: int) -> str:
         scene = (value >> 2) & 0xF
         kind_name = "Kit" if kind == 0 else ("Scene" if kind == 1 else f"kind{kind}")
         return f"{kind_name} Scn{scene} TRK={int(bool(flags & 1))}"
+    if ch == "H":
+        scene = value & 0xFF
+        snapshot_first = (value >> 8) & 0xFF
+        live_first = (value >> 16) & 0xFF
+        return (f"Bank child={scene} scratch_drift "
+                f"snap=0x{snapshot_first:02x} live=0x{live_first:02x}")
     if ch == "R":
         return (f"DONE={int(bool(flags & 1))} mask=0x{value:04x} "
                 f"{dd.scene_mask_text(value)}")
+    if ch == "K":
+        return (f"kind={'Save' if flags & 2 else 'Load'} "
+                f"DONE={int(bool(flags & 1))} slot={value}")
     if ch == "S":
         return f"debounce_tick={value}"
     if ch == "A":
