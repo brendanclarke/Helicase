@@ -154,6 +154,20 @@ def main() -> int:
     if len(rows) != 129:
         add_error(errors, f"HCNAMES row count: expected 129, got {len(rows)}")
 
+    settings: dict[str, str] = {}
+    active_bank: int | None = None
+    try:
+        settings = parse_assignments(root / "settings.cfg")
+        active_bank = int(settings["active_bank"], 0)
+        if rows and rows[0][1] != f"{active_bank:03d}":
+            # A source mismatch is a whole-register publication verdict. Add it
+            # before per-row checks so a frozen image is not misread as a few
+            # scattered identity mismatches. The detailed row-0 error below is
+            # retained for the requested Bank-slot comparison.
+            add_error(errors, "HCNAMES was not rewritten by the last Bank operation")
+    except (OSError, KeyError, ValueError) as exc:
+        add_error(errors, f"settings.cfg: {exc}")
+
     bank_dirs = [
         item for item in (root / "Bank").iterdir()
         if item.is_dir() and parse_numbered(item.name, 3)
@@ -233,15 +247,10 @@ def main() -> int:
                 check_row(row, expected_name,
                          f"Instrument {scene:02d}/{instrument + 1}")
 
-    settings: dict[str, str] = {}
-    try:
-        settings = parse_assignments(root / "settings.cfg")
-        active_bank = int(settings["active_bank"], 0)
+    if active_bank is not None:
         if active_bank != args.bank_slot:
             add_error(errors, f"settings.cfg active_bank: expected "
                              f"{args.bank_slot}, got {active_bank}")
-    except (OSError, KeyError, ValueError) as exc:
-        add_error(errors, f"settings.cfg: {exc}")
 
     records = []
     for name in (".hcprms1", ".hcprms2"):

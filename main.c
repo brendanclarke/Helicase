@@ -72,6 +72,7 @@
 #include "screensaver.h"
 #include "ParameterArray.h"
 #include "presetManager.h"
+#include "AutosaveTrace.h"
 #include "BankData.h"
 #include "SceneData.h"
 #include "InstrumentManager.h"
@@ -230,6 +231,130 @@ static void boot_delayMs(uint16_t ms)
 }
 
 /*
+ * Record the pre-audio boot ladder without touching the display or filesystem.
+ *
+ * What: captures one ENTER/EXIT/HEARTBEAT/ABORT event with the public
+ * filesystem operation, private phase, caller predicate, and facade status.
+ * Why: a blocking boot pump can run indefinitely before the runtime loop and
+ * previously left no durable evidence; the existing AutoSave trace ring and
+ * its 500 ms append are the only proven channel that survives this exact
+ * class of hang. Inputs are event/site/predicate bytes. Output is one ring
+ * store only, with no file handle, formatting, LCD call, or retry. Affiliates:
+ * AUTOSAVE_TRACE_STAGE_BOOT_LADDER, filesystem_getBootDiagnostic(),
+ * filesystem_autosaveTraceFlushBlocking(), and S056_BOOT_HANG_FOLLOWUP.md §7.
+ */
+#if DEV_MODE_LOGGING
+static uint16_t boot_trace_last_heartbeat_tick = 0u;
+#endif
+
+static void boot_traceLadder(uint8_t event, uint8_t site, uint8_t predicate)
+{
+    uint8_t op = 0u;
+    uint8_t phase = 0u;
+
+    filesystem_getBootDiagnostic(&op, &phase);
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_BOOT_LADDER,
+        (uint8_t)((event & AUTOSAVE_TRACE_BOOT_EVENT_MASK) |
+                  ((site << AUTOSAVE_TRACE_BOOT_SITE_SHIFT) &
+                   AUTOSAVE_TRACE_BOOT_SITE_MASK)),
+        ((uint32_t)op << AUTOSAVE_TRACE_BOOT_OP_SHIFT) |
+        ((uint32_t)phase << AUTOSAVE_TRACE_BOOT_PHASE_SHIFT) |
+        ((uint32_t)predicate << AUTOSAVE_TRACE_BOOT_PREDICATE_SHIFT) |
+        ((uint32_t)filesystem_status() << AUTOSAVE_TRACE_BOOT_FSSTATUS_SHIFT));
+}
+
+static void boot_traceWaitHeartbeat(uint8_t site, uint8_t predicate)
+{
+    /*
+     * Emit at most one Z heartbeat per configured interval while a pump waits.
+     * The interval is shorter than the trace append cadence, so a genuinely
+     * stuck pump leaves evidence in every normal flush opportunity without
+     * perturbing boot timing or allocating state in a logging-off build.
+     */
+#if DEV_MODE_LOGGING
+    uint16_t now = time_sysTick;
+
+    if ((uint16_t)(now - boot_trace_last_heartbeat_tick) <
+        AUTOSAVE_TRACE_BOOT_HEARTBEAT_MS)
+        return;
+    boot_trace_last_heartbeat_tick = now;
+    boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_HEARTBEAT, site, predicate);
+#else
+    (void)site;
+    (void)predicate;
+#endif
+}
+
+static uint8_t boot_waitFilesystemPump(uint8_t site)
+{
+    uint16_t started = time_sysTick;
+
+    /*
+     * Bound one status-based boot pump from its own entry. The filesystem
+     * logger's deadline belongs to the active operation and may already have
+     * been consumed by a completed Bank Load; this pump-owned bound prevents
+     * a later retry loop from becoming an unbounded splash hang. The caller
+     * distinguishes the existing logger timeout from this new local abort.
+     */
+    while (filesystem_status() == FS_STATUS_BUSY) {
+        if (filesystem_bootLoggingTimedOut() ||
+            (uint16_t)(time_sysTick - started) >=
+                BOOT_FILESYSTEM_PUMP_WAIT_MS) {
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                             site,
+                             (uint8_t)filesystem_status());
+            return 0u;
+        }
+        boot_traceWaitHeartbeat(site, (uint8_t)filesystem_status());
+        filesystem_tick();
+    }
+    if (filesystem_bootLoggingTimedOut()) {
+        boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                         site,
+                         (uint8_t)filesystem_status());
+        return 0u;
+    }
+    boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                     site,
+                     (uint8_t)filesystem_status());
+    return 1u;
+}
+
+static uint8_t boot_waitPresetPump(uint8_t site, uint16_t timeout_ms)
+{
+    uint16_t started = time_sysTick;
+
+    /*
+     * Apply the same independent deadline to Preset's higher-level wait.
+     * Unlike a filesystem-status pump, this predicate remains true while the
+     * facade may be idle between callbacks, which is exactly how the Session
+     * 056 boot hang escaped the consumed filesystem timeout latch.
+     */
+    while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS) {
+        if (filesystem_bootLoggingTimedOut() ||
+            (uint16_t)(time_sysTick - started) >= timeout_ms) {
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                             site,
+                             (uint8_t)preset_getStatus());
+            return 0u;
+        }
+        boot_traceWaitHeartbeat(site, (uint8_t)preset_getStatus());
+        filesystem_tick();
+    }
+    if (filesystem_bootLoggingTimedOut()) {
+        boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                         site,
+                         (uint8_t)preset_getStatus());
+        return 0u;
+    }
+    boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                     site,
+                     (uint8_t)preset_getStatus());
+    return 1u;
+}
+
+/*
  * Development-only boot-screen instrumentation.
  *
  * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
@@ -296,6 +421,16 @@ static void boot_showFilesystemStage(uint8_t stage)
      * the following filesystem call. This helper does not start, pump,
      * acknowledge, or reorder any filesystem operation.
      */
+    /*
+     * The trace event is deliberately outside the diagnostic LCD contract.
+     * Stage 12 carries the Preset predicate because that is the only boot
+     * stage whose pump can remain alive while filesystem_status() is idle;
+     * every other numbered stage records the facade status byte here.
+     */
+    if (stage != 12u && stage != 14u)
+        boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ENTER,
+                         stage,
+                         (uint8_t)filesystem_status());
     /*
      * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
      * user to assess how operations are proceeding. It does not and should not
@@ -384,7 +519,13 @@ static void boot_showFilesystemSubstep(uint8_t substep)
  * touching the LCD. NULL callbacks also prevent filesystem.c from entering any
  * observer path while preserving the writer and repair state machines.
  */
-#define boot_showFilesystemStage(stage) ((void)(stage))
+#define boot_showFilesystemStage(stage) \
+    do { \
+        if ((stage) != 12u && (stage) != 14u) \
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ENTER, \
+                             (uint8_t)(stage), \
+                             (uint8_t)filesystem_status()); \
+    } while (0)
 #define boot_showActiveFilesystemDiagnostic() ((void)0)
 #define BOOT_HCNAMES_DIAGNOSTIC_CALLBACK NULL
 #define BOOT_SUBSTEP_DIAGNOSTIC_CALLBACK NULL
@@ -491,6 +632,14 @@ int main(void)
         boot_showFilesystemStage(1u);  /* card init + asyncfatfs mount */
         uint8_t sd_ok = filesystem_initCardAndMountBlocking();
         show_unsupported_card_warning = filesystem_bootDetectedUnsupportedCard();
+        if (filesystem_bootLoggingTimedOut())
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                             1u,
+                             (uint8_t)filesystem_status());
+        else
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                             1u,
+                             (uint8_t)filesystem_status());
 
         /* Menu init — must be before preset load (memsets parameter_values) */
         menu_init();
@@ -541,9 +690,8 @@ int main(void)
              */
             boot_showFilesystemStage(2u);
             preset_loadGlobals();
-            while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
-                   !filesystem_bootLoggingTimedOut())
-                filesystem_tick();
+            if (!boot_waitPresetPump(2u, BOOT_FILESYSTEM_PUMP_WAIT_MS))
+                goto boot_filesystem_timeout;
             if (filesystem_bootLoggingTimedOut())
                 goto boot_filesystem_timeout;
             menu_pollPresetStatus();  /* apply globals + ack */
@@ -565,8 +713,8 @@ int main(void)
              */
             boot_showFilesystemStage(3u);
             filesystem_requestScanKits(NULL);
-            while (filesystem_status() == FS_STATUS_BUSY)
-                filesystem_tick();
+            if (!boot_waitFilesystemPump(3u))
+                goto boot_filesystem_timeout;
             if (filesystem_bootLoggingTimedOut())
                 goto boot_filesystem_timeout;
             filesystem_ack();
@@ -598,12 +746,26 @@ int main(void)
              */
             if (!filesystem_createLibraryIndexBlocking(
                     FS_LIBRARY_INDEX_KIT)) {
-                if (filesystem_bootLoggingTimedOut())
+                if (filesystem_bootLoggingTimedOut()) {
+                    boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                     4u,
+                                     (uint8_t)filesystem_status());
                     goto boot_filesystem_timeout;
+                }
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                                 4u,
+                                 (uint8_t)filesystem_status());
                 goto boot_filesystem_failure;
             }
-            if (filesystem_bootLoggingTimedOut())
+            if (filesystem_bootLoggingTimedOut()) {
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                 4u,
+                                 (uint8_t)filesystem_status());
                 goto boot_filesystem_timeout;
+            }
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                             4u,
+                             (uint8_t)filesystem_status());
 
             /*
              * Synchronous Scene/ scan.
@@ -623,8 +785,8 @@ int main(void)
              */
             boot_showFilesystemStage(5u);
             filesystem_requestScanScenes(NULL);
-            while (filesystem_status() == FS_STATUS_BUSY)
-                filesystem_tick();
+            if (!boot_waitFilesystemPump(5u))
+                goto boot_filesystem_timeout;
             if (filesystem_bootLoggingTimedOut())
                 goto boot_filesystem_timeout;
             filesystem_ack();
@@ -641,12 +803,32 @@ int main(void)
              * not and should not ever add additional file interaction steps,
              * since the diagnostic may be used to assess in-situ file
              * procedures.
-             */
+            */
             boot_showFilesystemStage(6u);
-            (void)filesystem_createLibraryIndexBlocking(
+            uint8_t scene_index_ok = filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_SCENE);
-            if (filesystem_bootLoggingTimedOut())
+            /*
+             * Observe the wrapper's own bound, not just the logger latch.
+             *
+             * DEV_MODE_LOGGING == 0 cannot report the internal pump deadline
+             * through filesystem_bootLoggingTimedOut(). Preserve this site's
+             * existing continue policy, but retain an ABORT witness when the
+             * index wrapper did not reach DONE. See S056_BOOT_HANG_FOLLOWUP.md
+             * section 10.4.
+             */
+            if (!scene_index_ok)
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                 6u,
+                                 (uint8_t)filesystem_status());
+            if (filesystem_bootLoggingTimedOut()) {
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                 6u,
+                                 (uint8_t)filesystem_status());
                 goto boot_filesystem_timeout;
+            }
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                             6u,
+                             (uint8_t)filesystem_status());
 
             /*
              * Synchronous Bank/ scan.
@@ -666,8 +848,8 @@ int main(void)
              */
             boot_showFilesystemStage(7u);
             filesystem_requestScanBanks(NULL);
-            while (filesystem_status() == FS_STATUS_BUSY)
-                filesystem_tick();
+            if (!boot_waitFilesystemPump(7u))
+                goto boot_filesystem_timeout;
             if (filesystem_bootLoggingTimedOut())
                 goto boot_filesystem_timeout;
             filesystem_ack();
@@ -684,12 +866,28 @@ int main(void)
              * not and should not ever add additional file interaction steps,
              * since the diagnostic may be used to assess in-situ file
              * procedures.
-             */
+            */
             boot_showFilesystemStage(8u);
-            (void)filesystem_createLibraryIndexBlocking(
+            uint8_t bank_index_ok = filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_BANK);
-            if (filesystem_bootLoggingTimedOut())
+            /*
+             * The wrapper result is independent of the boot logger latch.
+             * A logging-off build must still retain the failure witness while
+             * this existing site continues according to its prior policy.
+             */
+            if (!bank_index_ok)
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                 8u,
+                                 (uint8_t)filesystem_status());
+            if (filesystem_bootLoggingTimedOut()) {
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                 8u,
+                                 (uint8_t)filesystem_status());
                 goto boot_filesystem_timeout;
+            }
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                             8u,
+                             (uint8_t)filesystem_status());
 
             /*
              * Scan and create fresh per-type `.hcindex` files one type at a
@@ -705,11 +903,28 @@ int main(void)
              * not and should not ever add additional file interaction steps,
              * since the diagnostic may be used to assess in-situ file
              * procedures.
-             */
+            */
             boot_showFilesystemStage(9u);
-            (void)filesystem_createBootIndexBlocking();
-            if (filesystem_bootLoggingTimedOut())
+            uint8_t instrument_index_ok = filesystem_createBootIndexBlocking();
+            /*
+             * Do not infer wrapper success from a clear logger latch: the
+             * internal facade deadline also exists in DEV_MODE_LOGGING == 0.
+             * Preserve the existing ladder continuation while recording a
+             * failed typed-index wrapper as an ABORT witness.
+             */
+            if (!instrument_index_ok)
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                 9u,
+                                 (uint8_t)filesystem_status());
+            if (filesystem_bootLoggingTimedOut()) {
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                 9u,
+                                 (uint8_t)filesystem_status());
                 goto boot_filesystem_timeout;
+            }
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                             9u,
+                             (uint8_t)filesystem_status());
 
             /*
              * Settle the final boot index write before reloading/using Bank.
@@ -766,12 +981,13 @@ int main(void)
                  */
                 if (!filesystem_requestLoadBankIndex(NULL))
                     goto boot_filesystem_failure;
-                while (filesystem_status() == FS_STATUS_BUSY)
-                    filesystem_tick();
+                if (!boot_waitFilesystemPump(10u))
+                    goto boot_filesystem_timeout;
                 if (filesystem_bootLoggingTimedOut())
                     goto boot_filesystem_timeout;
-                if (filesystem_status() != FS_STATUS_DONE)
+                if (filesystem_status() != FS_STATUS_DONE) {
                     goto boot_filesystem_failure;
+                }
                 filesystem_ack();
 
                 /*
@@ -823,12 +1039,13 @@ int main(void)
                      * storage boundary instead of silently selecting Kit. */
                     if (!filesystem_requestLoadSceneIndex(NULL))
                         goto boot_filesystem_failure;
-                    while (filesystem_status() == FS_STATUS_BUSY)
-                        filesystem_tick();
+                    if (!boot_waitFilesystemPump(11u))
+                        goto boot_filesystem_timeout;
                     if (filesystem_bootLoggingTimedOut())
                         goto boot_filesystem_timeout;
-                    if (filesystem_status() != FS_STATUS_DONE)
+                    if (filesystem_status() != FS_STATUS_DONE) {
                         goto boot_filesystem_failure;
+                    }
                     filesystem_ack();
                     if (filesystem_sceneSlotExists(
                             filesystem_firstSceneSlot())) {
@@ -842,16 +1059,20 @@ int main(void)
                          * fallback helper can treat the cache as empty. */
                         if (!filesystem_requestLoadKitIndex(NULL))
                             goto boot_filesystem_failure;
-                        while (filesystem_status() == FS_STATUS_BUSY)
-                            filesystem_tick();
+                        if (!boot_waitFilesystemPump(11u))
+                            goto boot_filesystem_timeout;
                         if (filesystem_bootLoggingTimedOut())
                             goto boot_filesystem_timeout;
-                        if (filesystem_status() != FS_STATUS_DONE)
+                        if (filesystem_status() != FS_STATUS_DONE) {
                             goto boot_filesystem_failure;
+                        }
                         filesystem_ack();
                         preset_loadFirstAvailableSceneOrKit();
                     }
                 }
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                                 11u,
+                                 (uint8_t)filesystem_status());
             }
             /*
              * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
@@ -864,16 +1085,30 @@ int main(void)
             for (uint8_t boot_load_pass = 0u;
                  boot_load_pass < 2u;
                  boot_load_pass++) {
-                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
-                       !filesystem_bootLoggingTimedOut()) {
+                uint16_t preset_pump_started = time_sysTick;
+
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ENTER,
+                                 12u,
+                                 (uint8_t)preset_getStatus());
+                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS) {
+                    if (filesystem_bootLoggingTimedOut() ||
+                        (uint16_t)(time_sysTick - preset_pump_started) >=
+                            BOOT_PRESET_WAIT_MS) {
+                        boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                         12u,
+                                         (uint8_t)preset_getStatus());
+                        goto boot_filesystem_timeout;
+                    }
                     /*
                      * DEV_MODE_DIAGNOSTIC displays runtime information on the
                      * screen for the user to assess how operations are
                      * proceeding. It does not and should not ever add
                      * additional file interaction steps, since the diagnostic
                      * may be used to assess in-situ file procedures.
-                     */
+                    */
                     boot_showActiveFilesystemDiagnostic();
+                    boot_traceWaitHeartbeat(12u,
+                                             (uint8_t)preset_getStatus());
                     filesystem_tick();
                 }
                 /*
@@ -883,8 +1118,12 @@ int main(void)
                  * incomplete stage or post a fallback request. Affiliates:
                  * preset_ackStatus() in the common timeout cleanup.
                  */
-                if (filesystem_bootLoggingTimedOut())
+                if (filesystem_bootLoggingTimedOut()) {
+                    boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                     12u,
+                                     (uint8_t)preset_getStatus());
                     goto boot_filesystem_timeout;
+                }
                 /*
                  * Distinguish failed Bank Load from successful empty Bank
                  * before Menu consumes Preset completion.
@@ -900,6 +1139,9 @@ int main(void)
                     goto boot_filesystem_failure;
                 }
                 menu_pollPresetStatus();  /* apply Bank/Scene/Kit + ack */
+                boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                                 12u,
+                                 (uint8_t)preset_getStatus());
                 if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
                     break;
             }
@@ -929,8 +1171,30 @@ int main(void)
              * only missing baseline files; it neither reads an overlay nor
              * marks a record active before audio starts.
              */
+            /*
+             * Site 14 brackets the optional boot AutoSave ensure operation.
+             * This wrapper has no prior Z producer, so its result must be
+             * observed separately from the common pre-audio EXIT below. The
+             * failure policy remains unchanged: an ordinary setup failure is
+             * recorded and runtime setup continues; a logger timeout still
+             * enters the existing bounded boot-failure path.
+             */
+            boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ENTER,
+                             14u,
+                             (uint8_t)filesystem_status());
             if (bank_hasResidentBank() && filesystem_autosaveEnabled()) {
-                (void)filesystem_ensureAutosaveFilesBlocking();
+                uint8_t autosave_setup_ok =
+                    filesystem_ensureAutosaveFilesBlocking();
+                /*
+                 * Observe the wrapper's own deadline, which is invisible to
+                 * filesystem_bootLoggingTimedOut() when logging is disabled.
+                 * Keep the existing continue-versus-timeout policy unchanged;
+                 * only make a zero result durable in the boot trace.
+                 */
+                if (!autosave_setup_ok)
+                    boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_ABORT,
+                                     14u,
+                                     (uint8_t)filesystem_status());
                 if (filesystem_bootLoggingTimedOut())
                     goto boot_filesystem_timeout;
             }
@@ -984,6 +1248,14 @@ boot_filesystem_failure:
          * Affiliates: filesystem_writeBootFailureLogBlocking() and the common
          * pre-audio continuation below.
          */
+        /*
+         * Drain boot evidence before recovery can remount or halt the current
+         * filesystem owner. The normal 500 ms scheduler is intentionally not
+         * trusted here: a failure route may never return to another idle pass.
+         * This is a logging-only synchronous append of the existing ring and
+         * does not change the boot failure token or startup continuation.
+         */
+        (void)filesystem_autosaveTraceFlushBlocking();
         filesystem_setBootSubstepDiagnostic(NULL);
         if (preset_getStatus() != PRESET_IDLE)
             preset_ackStatus();
@@ -1005,9 +1277,22 @@ boot_filesystem_done:
          * abandon policy is boot-only. Affiliates: stage 14, audio startup,
          * Menu/Preset requests, and background autosave.
          */
+        /* Stage 14 is the common pre-audio boundary after normal work or
+         * failure recovery has converged. Its ENTER brackets the optional
+         * AutoSave ensure above; record the final EXIT before the boot-only
+         * logger is disarmed. The existing LCD marker remains below this
+         * label so diagnostic timing is unchanged. */
+        boot_traceLadder(AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                         14u,
+                         (uint8_t)filesystem_status());
         filesystem_bootLoggingEnd();
     }
 
+
+    /* Preserve the existing diagnostic marker after boot logging is closed;
+     * stage 14 has no second Z ENTER because the common boundary above owns it.
+     */
+    boot_showFilesystemStage(14u);  /* pre-audio filesystem boot completed */
 
     /* Initialise audio path: PLLI2S, GPIO, DMA circular streams, I2S.
     ** AFTER all blocking SD operations. From this point forward, SD
@@ -1018,7 +1303,6 @@ boot_filesystem_done:
      * ever add additional file interaction steps, since the diagnostic may be
      * used to assess in-situ file procedures.
      */
-    boot_showFilesystemStage(14u);  /* pre-audio filesystem boot completed */
     audioCodec_init();
     /*
      * Replay the selected boot Scene through the exact runtime Scene-switch

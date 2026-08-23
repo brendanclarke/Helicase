@@ -59,6 +59,12 @@ def compact_detail(ch: str, flags: int, value: int) -> str:
         kind_name = "Kit" if kind == 0 else ("Scene" if kind == 1 else f"kind{kind}")
         return f"{kind_name} Scn{scene} TRK={int(bool(flags & 1))}"
     if ch == "H":
+        if flags & 1:
+            return (f"overlay_refused row={value & 0xffff} "
+                    f"cache_kind={(value >> 16) & 0xffff}")
+        if flags & 2:
+            return (f"source_stage_refused row={value & 0xffff} "
+                    f"source=0x{(value >> 16) & 0xffff:04x}")
         scene = value & 0xFF
         snapshot_first = (value >> 8) & 0xFF
         live_first = (value >> 16) & 0xFF
@@ -68,8 +74,51 @@ def compact_detail(ch: str, flags: int, value: int) -> str:
         return (f"DONE={int(bool(flags & 1))} mask=0x{value:04x} "
                 f"{dd.scene_mask_text(value)}")
     if ch == "K":
+        verified = bool(flags & 4)
+        proof = ("match" if verified else
+                 "ambiguous-probe(mismatch/reopen/read failure; not op failure)")
         return (f"kind={'Save' if flags & 2 else 'Load'} "
-                f"DONE={int(bool(flags & 1))} slot={value}")
+                f"DONE={int(bool(flags & 1))} "
+                f"HCNAMES_OK={int(verified)}[{proof}] slot={value}")
+    if ch == "U":
+        class_id = (flags >> 2) & 0x03
+        class_name = {0: "Scene", 1: "Kit", 2: "Instrument"}.get(
+            class_id, f"class{class_id}")
+        row = value & 0xffff
+        mask = (value >> 16) & 0xffff
+        proof = ("match" if flags & 2 else
+                 "ambiguous-probe(mismatch/reopen/read failure; not op failure)")
+        return (f"{class_name} DONE={int(bool(flags & 1))} "
+                f"HCNAMES_OK={int(bool(flags & 2))}[{proof}] row={row} "
+                f"mask=0x{mask:04x} {dd.scene_mask_text(mask)}")
+    if ch == "Z":
+        event = flags & dd.AUTOSAVE_TRACE_BOOT_EVENT_MASK
+        site = ((flags & dd.AUTOSAVE_TRACE_BOOT_SITE_MASK) >>
+                dd.AUTOSAVE_TRACE_BOOT_SITE_SHIFT)
+        op = value & 0xff
+        phase = (value >> 8) & 0xff
+        predicate = (value >> 16) & 0xff
+        fs_status = (value >> 24) & 0xff
+        op_name = dd.BOOT_OPS.get(op, f"op{op}")
+        return (f"boot site={site}({dd.BOOT_SITES.get(site, 'reserved')}) "
+                f"{dd.BOOT_EVENTS.get(event, event)} op={op_name} "
+                f"phase={phase} predicate={predicate} "
+                f"fs={dd.BOOT_FS_STATUS.get(fs_status, fs_status)}")
+    if ch == "Q":
+        status_id = flags & dd.AUTOSAVE_TRACE_PRESET_STATUS_MASK
+        completed = value & 0xff
+        pending = (value >> 8) & 0xff
+        slot = (value >> 16) & 0xff
+        fs_status = (value >> 24) & 0xff
+        completed_name = (dd.PRESET_OPS[completed]
+                          if completed < len(dd.PRESET_OPS) else completed)
+        pending_name = (dd.PRESET_OPS[pending]
+                        if pending < len(dd.PRESET_OPS) else pending)
+        return (f"status={dd.PRESET_STATUS.get(status_id, status_id)} "
+                f"ok={int(bool(flags & dd.AUTOSAVE_TRACE_PRESET_FLAG_COMPLETED_OK))} "
+                f"reentrant={int(bool(flags & dd.AUTOSAVE_TRACE_PRESET_FLAG_REENTRANT))} "
+                f"completed={completed_name} pending={pending_name} slot={slot} "
+                f"fs={dd.BOOT_FS_STATUS.get(fs_status, fs_status)}")
     if ch == "S":
         return f"debounce_tick={value}"
     if ch == "A":

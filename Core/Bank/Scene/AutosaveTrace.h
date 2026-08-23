@@ -61,15 +61,16 @@ typedef enum {
     /* Terminal whole-Kit/Scene witness retained after a synchronous D-record burst. */
     AUTOSAVE_TRACE_STAGE_LOAD_MARK = 'L',
     /*
-     * H: diagnostic-only Bank-child Scene-name scratch drift witness. The
-     * filesystem compares shared op_scene_display_name against the frozen
-     * Bank-owned child snapshot immediately before the Scene-name HCNAMES row
-     * is published. flags is reserved and always zero. value32 packs the
-     * Bank-local child slot in bits 0..7, the snapshot's first display byte in
-     * bits 8..15, and the live/drifted value's first display byte in bits
-     * 16..23. The HCNAMES write itself always uses the snapshot, so H proves
-     * the shared-scratch hazard was observed but cannot itself indicate a
-     * corrupted card. Affiliate: S056_NAMES_CORRUPTION.md.
+     * H: HCNAMES scratch/refusal diagnostics. With flags == 0 this retains
+     * the Session 056 Bank-child Scene-name scratch-drift witness: value32
+     * packs the Bank-local child slot in bits 0..7, the snapshot's first
+     * display byte in bits 8..15, and the live/drifted value's first display
+     * byte in bits 16..23. A nonzero refusal flag instead packs the rejected
+     * row in bits 0..15 and the observed cache kind or requested source value
+     * in bits 16..31. The HCNAMES writer uses the snapshot on drift; refusal
+     * records prove that a row/source update was discarded before streaming.
+     * Affiliates: S056_NAMES_CORRUPTION.md and S056_HCNAMES_FOLLOW_UP.md
+     * section 11.4.
      */
     AUTOSAVE_TRACE_STAGE_NAME_SCRATCH_DRIFT = 'H',
     AUTOSAVE_TRACE_STAGE_SCHEDULED = 'S',
@@ -157,11 +158,51 @@ typedef enum {
     /*
      * K: unconditional Bank Load/Save completion witness. Bit 0 reports
      * whether the Preset callback observed FS_STATUS_DONE; bit 1 selects
-     * Save (1) versus Load (0). The value is the requested Bank slot. This
-     * mirrors R for root Scene Load and proves callback reachability even
-     * when no later AutoSave or trace-flush record survives to disk.
+     * Save (1) versus Load (0); bit 2 reports that the Bank-owned HCNAMES row
+     * 0 read-back matched the staged cache/source pair before completion. The
+     * value is the requested Bank slot. This mirrors R for root Scene Load and
+     * proves callback reachability even when no later AutoSave or trace-flush
+     * record survives to disk. A clear VERIFIED bit is ambiguous by design: it
+     * covers a mismatch, register reopen failure, or read-back failure, and
+     * never means the Bank operation failed because the probe runs after the
+     * payload and register write. Treat it as "inspect this card capture," not
+     * as a fault report.
      */
     AUTOSAVE_TRACE_STAGE_BANK_OP_COMPLETE = 'K',
+    /*
+     * U: generic HCNAMES publication completion witness. It is emitted by the
+     * filesystem-owned Scene/Kit/Instrument register writer after its probe
+     * read closes, so those operations have the same staged-versus-on-card
+     * evidence as Bank's K record without adding another filesystem operation.
+     * A clear VERIFIED bit is ambiguous by design: the probe did not confirm
+     * a match, which covers a genuine mismatch, a register reopen failure, and
+     * a failed read-back. It never means the operation failed -- the payload
+     * and register write completed before the probe ran, and no probe outcome
+     * can alter the card. Treat a clear bit as "inspect the card capture," not
+     * as a payload fault.
+     */
+    AUTOSAVE_TRACE_STAGE_NAME_PUBLISH = 'U',
+    /*
+     * Z: pre-audio boot-ladder progress and wait heartbeat. The producer is
+     * main.c, not LCD code, so a timing-sensitive boot stall remains visible
+     * in the existing trace ring without adding display waits or file I/O.
+     * Flags bits 0..1 select ENTER, EXIT, HEARTBEAT, or ABORT; bits 2..6 are
+     * the numbered boot site. value32 packs the public filesystem operation,
+     * private phase, caller wait predicate, and filesystem status in bytes
+     * 0..3 respectively. A stuck pump therefore leaves repeated HEARTBEAT
+     * records instead of silent absence. See S056_BOOT_HANG_FOLLOWUP.md §7.
+     */
+    AUTOSAVE_TRACE_STAGE_BOOT_LADDER = 'Z',
+    /*
+     * Q: Preset status-transition witness. The single Preset setter emits it
+     * whenever pm_status changes, including callback-entry transitions, so a
+     * boot pump waiting on PRESET_LOAD_IN_PROGRESS can be joined to its
+     * completion callback and any chained Bank settings operation. Flags bits
+     * 0..3 carry the new status, bit 4 carries completed_ok, and bit 5 marks a
+     * filesystem-completion callback context. value32 packs completed op,
+     * pending Bank op, request slot low byte, and facade status in bytes 0..3.
+     */
+    AUTOSAVE_TRACE_STAGE_PRESET_STATE = 'Q',
 } autosave_trace_stage_t;
 
 /*
@@ -308,6 +349,16 @@ typedef enum {
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_REQUEST           1u
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_REQUEST   2u
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_COMPLETE  3u
+/*
+ * RETIRED -- no longer producible. Values 4 and 5 were emitted by
+ * menu_endResidentNameScratchSession() and
+ * menu_residentNameScratchFlushComplete() for the Menu-side deferred
+ * Kit-family HCNAMES write. That publication path was removed because it
+ * never produced a single record across 69,012 cumulative events; identity
+ * publication now belongs to the filesystem operation that changed it.
+ * Keep these values reserved so old captures remain decodable and their
+ * absence remains evidence. New publication witnesses use stage 'U'.
+ */
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH     4u
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSHED   5u
 #define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST      6u
@@ -341,9 +392,79 @@ typedef enum {
  */
 #define AUTOSAVE_TRACE_SCENE_LOAD_COMPLETE_FLAG_STATUS_DONE (1u << 0u)
 
-/* K flags: bit 0 is terminal DONE; bit 1 distinguishes Save from Load. */
+/*
+ * HCNAMES refusal flags/value layout. flags == 0 is the existing drift record;
+ * nonzero records pack row in bits 0..15 and the observed cache kind/requested
+ * source in bits 16..31. The source-stage flag uses the latter interpretation.
+ */
+#define AUTOSAVE_TRACE_NAME_SCRATCH_FLAG_OVERLAY_REFUSED \
+    (1u << 0u)
+#define AUTOSAVE_TRACE_NAME_SCRATCH_FLAG_SOURCE_STAGE_REFUSED \
+    (1u << 1u)
+#define AUTOSAVE_TRACE_NAME_SCRATCH_ROW_SHIFT 0u
+#define AUTOSAVE_TRACE_NAME_SCRATCH_DETAIL_SHIFT 16u
+
+/*
+ * K flags: bit 0 is terminal DONE; bit 1 distinguishes Save from Load; bit 2
+ * proves Bank row-0 HCNAMES read-back matched the staged register image. A
+ * clear VERIFIED bit is ambiguous by design: it covers a mismatch, register
+ * reopen failure, or read-back failure, and never means the Bank operation
+ * failed because the probe runs after the payload and register write. Treat
+ * it as "inspect this card capture," not as a fault report.
+ */
 #define AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_STATUS_DONE (1u << 0u)
 #define AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_KIND_SAVE    (1u << 1u)
+#define AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_HCNAMES_VERIFIED (1u << 2u)
+
+/*
+ * U flags/value layout. Bit 0 is the generic writer's terminal DONE result;
+ * bit 1 is the probe match; bits 2..3 classify the published row family.
+ * value32 packs the probe row in bits 0..15 and destination mask in bits
+ * 16..31. A class mask of zero is Scene, one is Kit, and two is Instrument.
+ * A clear VERIFIED bit is ambiguous by design: it covers a mismatch, register
+ * reopen failure, or read-back failure, and never means the operation failed
+ * because the probe runs after the payload and register write. Treat it as
+ * "inspect this card capture," not as a fault report.
+ */
+#define AUTOSAVE_TRACE_NAME_PUBLISH_FLAG_STATUS_DONE (1u << 0u)
+#define AUTOSAVE_TRACE_NAME_PUBLISH_FLAG_HCNAMES_VERIFIED (1u << 1u)
+#define AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_SHIFT 2u
+#define AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_MASK \
+    (0x03u << AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_SHIFT)
+#define AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_SCENE 0u
+#define AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_KIT 1u
+#define AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_INSTRUMENT 2u
+#define AUTOSAVE_TRACE_NAME_PUBLISH_ROW_SHIFT 0u
+#define AUTOSAVE_TRACE_NAME_PUBLISH_MASK_SHIFT 16u
+
+/*
+ * Z event/site/value layout. Event 0..3 is ENTER/EXIT/HEARTBEAT/ABORT;
+ * site 1..14 follows main.c's numbered boot ladder and 15..31 remain
+ * available for future unnumbered pumps. value32 stores public filesystem
+ * operation, phase, caller predicate, and fs_status_t in successive bytes.
+ */
+#define AUTOSAVE_TRACE_BOOT_EVENT_MASK      0x03u
+#define AUTOSAVE_TRACE_BOOT_EVENT_ENTER     0u
+#define AUTOSAVE_TRACE_BOOT_EVENT_EXIT      1u
+#define AUTOSAVE_TRACE_BOOT_EVENT_HEARTBEAT 2u
+#define AUTOSAVE_TRACE_BOOT_EVENT_ABORT     3u
+#define AUTOSAVE_TRACE_BOOT_SITE_SHIFT      2u
+#define AUTOSAVE_TRACE_BOOT_SITE_MASK       (0x1fu << AUTOSAVE_TRACE_BOOT_SITE_SHIFT)
+#define AUTOSAVE_TRACE_BOOT_OP_SHIFT        0u
+#define AUTOSAVE_TRACE_BOOT_PHASE_SHIFT     8u
+#define AUTOSAVE_TRACE_BOOT_PREDICATE_SHIFT 16u
+#define AUTOSAVE_TRACE_BOOT_FSSTATUS_SHIFT  24u
+
+/* Q status/value layout. Request slots above 255 are intentionally truncated
+ * because this fixed witness prioritizes the wait-state join over full slot
+ * identity; the corresponding K/O records retain the complete slot fields. */
+#define AUTOSAVE_TRACE_PRESET_STATUS_MASK       0x0fu
+#define AUTOSAVE_TRACE_PRESET_FLAG_COMPLETED_OK (1u << 4u)
+#define AUTOSAVE_TRACE_PRESET_FLAG_REENTRANT    (1u << 5u)
+#define AUTOSAVE_TRACE_PRESET_COMPLETED_OP_SHIFT 0u
+#define AUTOSAVE_TRACE_PRESET_PENDING_OP_SHIFT   8u
+#define AUTOSAVE_TRACE_PRESET_REQUEST_SLOT_SHIFT 16u
+#define AUTOSAVE_TRACE_PRESET_FSSTATUS_SHIFT    24u
 
 /*
  * F flags: bit 0 means the command-active gate retained pending trace records;

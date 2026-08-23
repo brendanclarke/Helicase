@@ -139,9 +139,6 @@ static uint8_t menu_soundApplyShowStaleWarning = 0;
 static fs_stale_warning_source_t menu_soundApplyStaleWarning = FS_STALE_WARNING_NONE;
 static uint8_t menu_instrumentApplyActive = 0u;
 static uint8_t menu_instrumentApplySlot = 0u;
-/* The bounded post-Instrument apply cursor records name changes into the Menu
- * session scratch before the later Load/Save helper definitions appear. */
-static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot);
 static void menu_libraryIndexLoadComplete(void);
 static void menu_requestKitEntryNames(void);
 static void menu_traceInstrumentEntry(uint8_t phase, uint8_t failed);
@@ -591,22 +588,16 @@ static uint8_t menu_tickInstrumentApply(void)
     /*
      * Advance one unit of Instrument Load post-apply work.
      *
-     * Output: nonzero while Menu should return to the main loop. When Preset's
-     * one-slot cursor finishes after a normal nested Instrument Load, Menu
-     * refreshes the affected row in its seven-name scratch and marks the
-     * destination Scene(s) dirty. The typed `.hcindex` remains resident, so
-     * encoder movement resumes without an HCNAMES rewrite or index reload.
-     * Morph Load and top-level KitMrp preserve identity and therefore add no
-     * dirty name work. The accumulated Scene blocks are serialized once at the
-     * later Kit/Instrument menu exit.
+     * Filesystem-owned publication now completes before Preset enters this
+     * runtime apply cursor. Menu therefore keeps only the existing typed-index
+     * and temporary-restore sequencing; it no longer accumulates or publishes
+     * HCNAMES rows at an exit boundary. See S056 section 11.5.
      */
     if (!menu_instrumentApplyActive)
         return 0u;
     if (preset_tickInstrumentApply())
         return 1u;
     menu_instrumentApplyActive = 0u;
-    if (menu_requestAppliedInstrumentNameUpdate(menu_instrumentApplySlot))
-        return 1u;
     menu_storageBusy = 0u;
     if (menu_finishInstrumentApplySession())
         return 1u;
@@ -1020,18 +1011,18 @@ static uint8_t menu_instrumentLoadSlot = 0u;
 static instrument_type_t menu_instrumentLoadType = INSTRUMENT_TYPE_DRM;
 static uint8_t menu_instrumentSaveMode = 0u;
 /*
- * Menu retains only session coordinates and dirty state; its strings live in
- * filesystem.c's single 81-byte identity block.
+ * Menu retains only read-session coordinates; its strings live in filesystem.c's
+ * single 81-byte identity block.
  *
- * Why: keeping a seven-row Menu scratch alongside that block would violate the
- * one-copy name contract after `.hcindex` replaces the shared 9,000-byte cache.
- * Inputs/outputs: helpers below borrow/set fixed filesystem identity rows.
- * Affiliates: HCNAMES entry/update and Kit/Instrument/Scene Save rendering.
+ * Why: keeping a seven-row Menu scratch or dirty mask alongside that block
+ * would violate the one-copy name contract after `.hcindex` replaces the
+ * shared 9,000-byte cache. Inputs/outputs: helpers below borrow/set fixed
+ * filesystem identity rows. Affiliates: HCNAMES entry and Load/Save rendering;
+ * filesystem operations, not Menu, own durable publication.
  */
 static uint8_t menu_residentNameScratchScene =
     MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
 static uint8_t menu_residentNameScratchValid = 0u;
-static uint16_t menu_residentNameDirtySceneMask = 0u;
 /*
  * One operation-scoped Scene identity for top-level Scene Load/Save.
  *
@@ -3015,9 +3006,8 @@ static void menu_showFilesystemErrorOverlay(void)
      * rejects only on BUSY), which is what made this silent.
      *
      * This mirrors the identical acknowledgement already documented in
-     * menu_loadCommandFinalIndexComplete() and
-     * menu_residentNameScratchFlushComplete(); those two callbacks each fixed
-     * this class of strand at one site, while every other failure path still
+     * menu_loadCommandFinalIndexComplete(); that callback fixed this class of
+     * strand at one site, while every other failure path still
      * leaked it. Affiliates: filesystem_ack(), filesystem_tick()'s idle-only
      * scheduler gates. See S054_KIT_LOAD_FREEZE_FIX.md.
      */
@@ -3057,10 +3047,8 @@ static void menu_loadCommandFinalIndexComplete(void)
      * filesystem_tick() pass can run the trace flush scheduler and, on a
      * later idle pass, arm/admit the AutoSave writer. Menu command teardown,
      * error overlay, and cache handling below are unchanged.
-     * Affiliates: filesystem_ack(), filesystem_complete(),
-     * filesystem_tick()'s idle-only scheduler gates, and
-     * menu_residentNameScratchFlushComplete(), which already performs this
-     * acknowledgement for the exit-time HCNAMES transaction.
+     * Affiliates: filesystem_ack(), filesystem_complete(), and
+     * filesystem_tick()'s idle-only scheduler gates.
      */
     filesystem_ack();
 
@@ -3393,153 +3381,28 @@ static void menu_traceInstrumentEntry(uint8_t phase, uint8_t failed)
     autosaveTrace_record(AUTOSAVE_TRACE_STAGE_INSTRUMENT_ENTRY, flags, value);
 }
 
-static void menu_refreshResidentNameScratchKit(uint16_t scene_mask)
-{
-    /*
-     * Record one committed normal full-Kit change without touching the card.
-     *
-     * Inputs: Preset's immutable destination Scene mask after successful
-     * commit. Output: every destination bit is accumulated for the one exit
-     * rewrite. If the currently displayed scratch Scene was a destination, all
-     * seven rows are refreshed from its committed SceneData immediately. Other
-     * destination Scenes remain distinct in SceneData and are serialized from
-     * their own records at exit, so a multi-Scene session needs no 16x7 cache.
-     */
-    menu_residentNameDirtySceneMask = (uint16_t)(
-        menu_residentNameDirtySceneMask | scene_mask);
-    if (!menu_residentNameScratchValid ||
-        menu_residentNameScratchScene >= 16u ||
-        (scene_mask & (uint16_t)(1u << menu_residentNameScratchScene)) == 0u) {
-        return;
-    }
-    /* Successful filesystem load/save has already refreshed the one identity
-     * block.  There is intentionally no SceneData or Menu duplicate to copy. */
-}
-
-static void menu_refreshResidentNameScratchInstrument(uint16_t scene_mask,
-                                                      uint8_t slot)
-{
-    /*
-     * Record one committed normal Instrument change without HCNAMES I/O.
-     *
-     * Inputs: immutable destination mask and voice slot from the accepted
-     * request. Output: dirty Scenes accumulate for the exit rewrite; only the
-     * matching row of the currently displayed Scene is refreshed in Menu RAM.
-     * The other six scratch rows and every unrelated HCNAMES Scene remain
-     * untouched until the single targeted exit transaction.
-     */
-    if (slot >= INSTRUMENT_SLOT_COUNT)
-        return;
-    menu_residentNameDirtySceneMask = (uint16_t)(
-        menu_residentNameDirtySceneMask | scene_mask);
-    if (!menu_residentNameScratchValid ||
-        menu_residentNameScratchScene >= 16u ||
-        (scene_mask & (uint16_t)(1u << menu_residentNameScratchScene)) == 0u) {
-        return;
-    }
-    /* The matching filesystem identity row was updated with the validated
-     * Instrument load; only the dirty-mask durability action remains here. */
-}
-
 static void menu_requestInstrumentEntryNames(void);
 static void menu_requestKitEntryNames(void);
 
-static void menu_residentNameScratchFlushComplete(void)
+static void menu_endResidentNameScratchSession(void)
 {
-    uint8_t flush_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
-
     /*
-     * Complete the only HCNAMES write allowed by a Menu name session.
+     * End the current read-only Kit/Instrument name session at a UI boundary.
      *
-     * Inputs: the exit-time full-block update has passed file close and media
-     * flush. Output: dirty/session state is cleared. If the UI transition has
-     * already entered another Kit/Instrument context (including another Scene),
-     * begin that context's one entry read; otherwise load the new non-name
-     * browser or simply release storage after leaving Load/Save altogether.
+     * HCNAMES publication now belongs to the filesystem Load/Save operation
+     * that changed the identity, so Menu has no dirty mask, callback, or write
+     * request to drain here. Inputs: the seven-name browse-session validity;
+     * output: the copied read-side identity is discarded and the shared cache
+     * is released synchronously. No filesystem write or retry is pending at
+     * this boundary. See S056 sections 11.5 and 12.7.
      */
-    /*
-     * Release the terminal direct-filesystem result before either ending the
-     * session or posting its next foreground request.
-     *
-     * Inputs: the completed HCNAMES status captured above. Output: the shared
-     * facade returns from DONE/ERROR to IDLE exactly once; the error string
-     * remains available to the existing overlay path. Why: this callback is
-     * not routed through Preset, whose completion helper normally performs the
-     * acknowledgement. Leaving HCNAMES at DONE made every idle-only scheduler
-     * permanently decline ownership after a normal Load/Save exit, including
-     * the AutoSave trace flush and the parameter writer. A completed page exit
-     * must release that facade regardless of success or failure. Affiliates:
-     * filesystem_ack(), filesystem_autosaveTraceFlushSchedule_tick(), and
-     * filesystem_autosaveWriterSchedule_tick().
-     */
-    filesystem_ack();
-
-    if (!flush_ok) {
-        menu_traceInstrumentEntry(
-            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSHED, 1u);
-        menu_showFilesystemErrorOverlay();
+    if (!menu_residentNameScratchValid) {
         return;
     }
-    menu_traceInstrumentEntry(
-        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSHED, 0u);
-    menu_residentNameDirtySceneMask = 0u;
     menu_residentNameScratchValid = 0u;
     menu_residentNameScratchScene =
         MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
     filesystem_clearNameCache();
-    menu_storageBusy = 0u;
-
-    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
-        if (menu_instrumentLoadActive) {
-            menu_requestInstrumentEntryNames();
-        } else if (menu_saveOptions.what == SAVE_TYPE_KIT ||
-                   menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
-            menu_requestKitEntryNames();
-        } else {
-            menu_requestCurrentLoadSaveSelection(0u);
-        }
-    }
-    if (!menu_storageBusy)
-        menu_repaintAll();
-}
-
-static uint8_t menu_endResidentNameScratchSession(void)
-{
-    /*
-     * End the current Kit/Instrument name session at a UI boundary.
-     *
-     * Output is nonzero when one asynchronous HCNAMES rewrite was started.
-     * Clean sessions discard the seven Menu rows without card I/O. Dirty
-     * sessions call the existing full-Kit-row updater once with the accumulated
-     * Scene mask; that updater preserves all unrelated HCNAMES rows and reads
-     * each changed Scene's own Kit plus six Instrument names from committed
-     * SceneData. Callers update their target UI state before invoking this
-     * helper so the completion callback can enter the new context directly.
-     */
-    if (!menu_residentNameScratchValid &&
-        menu_residentNameDirtySceneMask == 0u) {
-        return 0u;
-    }
-    if (menu_residentNameDirtySceneMask == 0u) {
-        menu_residentNameScratchValid = 0u;
-        menu_residentNameScratchScene =
-            MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
-        filesystem_clearNameCache();
-        return 0u;
-    }
-    menu_storageBusy = 1u;
-    if (filesystem_requestUpdateResidentKitNames(
-            menu_residentNameDirtySceneMask,
-            menu_residentNameScratchFlushComplete)) {
-        menu_traceInstrumentEntry(
-            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH, 0u);
-        return 1u;
-    }
-    menu_traceInstrumentEntry(
-        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH, 1u);
-    menu_storageBusy = 0u;
-    menu_showFilesystemErrorOverlay();
-    return 0u;
 }
 
 static void menu_residentNameScratchLoaded(void)
@@ -3596,10 +3459,17 @@ static uint8_t menu_requestResidentNameScratch(uint8_t scene)
         menu_residentNameScratchScene == scene) {
         return 1u;
     }
+    /*
+     * End a browse session that belongs to a different Scene before starting
+     * this one. HCNAMES publication moved to the filesystem operation that
+     * changed the identity, so the helper is synchronous and the call itself
+     * is the complete boundary action: it releases the seven-name scratch and
+     * shared cache without creating a deferred writer. Affiliate:
+     * S056_HCNAMES_FOLLOW_UP.md section 12.7.
+     */
     if (menu_residentNameScratchValid &&
-        menu_residentNameScratchScene != scene &&
-        menu_endResidentNameScratchSession()) {
-        return 1u;
+        menu_residentNameScratchScene != scene) {
+        menu_endResidentNameScratchSession();
     }
     /*
      * Refuse early — and non-destructively — while the facade is busy.
@@ -3641,26 +3511,6 @@ static uint8_t menu_requestResidentNameScratch(uint8_t scene)
     menu_traceInstrumentEntry(
         AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_REQUEST, 0u);
     return 1u;
-}
-
-static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot)
-{
-    uint16_t scene_mask;
-
-    /*
-     * Convert a successful normal Instrument Load into deferred Menu state.
-     *
-     * No filesystem request is made here. The committed destination mask and
-     * voice update the seven-name scratch/dirty state, then the existing typed
-     * `.hcindex` remains resident for immediate scrolling. Morph Load preserves
-     * identity and therefore creates no dirty HCNAMES work.
-     */
-    if (!menu_instrumentLoadActive || menu_instrumentLoadMorphMode ||
-        menu_instrumentLoadSource != MENU_INSTRUMENT_SOURCE_POOL)
-        return 0u;
-    scene_mask = menu_kitLoadSceneMask;
-    menu_refreshResidentNameScratchInstrument(scene_mask, slot);
-    return 0u;
 }
 
 static void menu_invalidateInstrumentLoadTemp(void)
@@ -5296,16 +5146,14 @@ static void menu_loadSaveEnterTop(uint8_t page, uint8_t what)
         menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
     menu_resetLoadSaveSceneSelection();
     /*
-     * Pot-1 can leave the combined Kit/Instrument family without leaving the
-     * overall Load/Save page. Update the target UI state first, then perform
-     * the one deferred HCNAMES write. Its completion sees this new non-Kit
-     * context and loads that browser. Kit <-> KitMrp and Kit <-> Instrument
-     * transitions retain the same seven-name session and skip this boundary.
+     * Leaving the Kit family ends the read-only browse session. Kit <->
+     * KitMrp and Kit <-> Instrument transitions deliberately retain it, so
+     * the type guard is preserved exactly. Nothing is deferred now: this
+     * synchronous discard releases the shared cache and then ordinary browser
+     * selection continues below. Affiliate: S056_HCNAMES_FOLLOW_UP.md §12.7.
      */
-    if (what != SAVE_TYPE_KIT && what != SAVE_TYPE_KIT_MORPH &&
-        menu_endResidentNameScratchSession()) {
-        menu_refreshLoadSceneLeds();
-        return;
+    if (what != SAVE_TYPE_KIT && what != SAVE_TYPE_KIT_MORPH) {
+        menu_endResidentNameScratchSession();
     }
     filesystem_clearNameCache();
     menu_requestCurrentLoadSaveSelection(0);
@@ -7234,58 +7082,17 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 uint8_t previous_type = menu_saveOptions.what;
                 menu_saveOptions.what =
                     menu_nextRestoredLoadSaveType(menu_saveOptions.what, inc);
-                /*
-                 * A top-level type change is a name-session boundary only when
-                 * it leaves Kit/KitMrp. The new type is installed first so an
-                 * asynchronous exit flush can continue directly into its
-                 * browser. Kit <-> KitMrp retains the seven-name scratch.
-                 */
-                if (menu_saveOptions.what != previous_type &&
-                    menu_saveOptions.what != SAVE_TYPE_KIT &&
-                    menu_saveOptions.what != SAVE_TYPE_KIT_MORPH &&
-                    menu_endResidentNameScratchSession()) {
-                    menu_resetLoadSaveSceneSelection();
-                    menu_refreshLoadSceneLeds();
-                    break;
-                }
-                /*
-                 * End a Scene name session before any later Kit-family payload
-                 * can overwrite the operation-scoped identity block.
-                 *
-                 * What: flush a nonzero accumulated Scene dirty mask when the
-                 * type row leaves SAVE_TYPE_SCENE, mirroring the Kit-family
-                 * boundary condition above. The new type is installed first so
-                 * an asynchronous flush completion continues directly into
-                 * that type's browser.
-                 * Why: filesystem publishes each committed Scene's embedded Kit
-                 * name and six Instrument names into the single nine-row
-                 * identity block, and the deferred exit writer later serializes
-                 * that block into every Scene bit in
-                 * menu_residentNameDirtySceneMask. A subsequent normal Kit Load
-                 * overwrites the same block, so carrying Scene bits past this
-                 * boundary (reachable via Scene -> KitMrp -> Kit) could publish
-                 * the later Kit's identity for the Scene-loaded destinations.
-                 * Inputs: previous_type captured before the type advance, the
-                 * newly installed menu_saveOptions.what, and the accumulated
-                 * mask.
-                 * Outputs: at most one HCNAMES rewrite through
-                 * filesystem_requestUpdateResidentKitNames(); on success
-                 * menu_residentNameScratchFlushComplete() clears the mask and
-                 * the completion resumes the new type's browser.
-                 * Affiliates: menu_endResidentNameScratchSession(),
-                 * menu_residentNameScratchFlushComplete(), and the equivalent
-                 * Kit-family boundary condition directly above.
-                 */
-                if (previous_type == SAVE_TYPE_SCENE &&
-                    menu_saveOptions.what != previous_type &&
-                    menu_residentNameDirtySceneMask != 0u &&
-                    menu_endResidentNameScratchSession()) {
-                    menu_resetLoadSaveSceneSelection();
-                    menu_refreshLoadSceneLeds();
-                    break;
-                }
-                if (menu_saveOptions.what != previous_type)
+                if (menu_saveOptions.what != previous_type) {
+                    /*
+                     * A type change discards the read-only resident-name
+                     * session before the shared browser cache changes domain.
+                     * Durable HCNAMES publication already completed inside the
+                     * Load/Save operation; this is synchronous cache cleanup,
+                     * not a second writer. See S056 section 11.5/D3.
+                     */
+                    (void)menu_endResidentNameScratchSession();
                     filesystem_clearNameCache();
+                }
             }
             if (menu_saveOptions.what == SAVE_TYPE_BANK)
                 menu_currentPresetNr[SAVE_TYPE_BANK] = bank_restoreBankSlot();
@@ -8032,19 +7839,11 @@ void menu_pollPresetStatus(void)
         }
 
         /*
-         * Retain the full resident Kit identity for the Menu-exit write.
-         *
-         * Filesystem has atomically committed scene_t.kit for every Scene in
-         * Preset's immutable request mask. That changes one Kit name and all
-         * six Instrument source names per destination. Refresh the matching
-         * Menu scratch block and accumulate the destination mask, but leave
-         * HCNAMES and `/Kit/.hcindex` untouched until the user exits the shared
-         * Kit/Instrument name session. Runtime apply can therefore begin
-         * immediately without a root-file traversal and index reload.
+         * Filesystem has already published the complete resident Kit identity
+         * block before this callback. Menu only holds the existing runtime
+         * apply gate; it does not retain a second HCNAMES write owner.
          */
         menu_storageBusy = 1u;
-        menu_refreshResidentNameScratchKit(
-            preset_getKitRequestSceneMask());
         if (!menu_isLoadSaveSelectionCurrent())
             memset(preset_currentName, ' ', 8u);
         menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 1u, 0u,
@@ -8077,28 +7876,11 @@ void menu_pollPresetStatus(void)
     case PRESET_OP_SCENE_LOAD:
     {
         /*
-         * Scene Load commits a complete embedded Kit image into each selected
-         * resident Scene. The filesystem completion path has already copied
-         * that image's Kit name, six Instrument names, and provenance into the
-         * filesystem-owned identity block, and it has already handled the
-         * Scene-name row. This Menu-side accumulation is the missing bridge
-         * between that completed identity block and the existing deferred
-         * HCNAMES writer: it records which committed Scene blocks need their
-         * Kit-family rows rewritten when the shared Load/Save name session
-         * exits.
-         *
-         * The mask is the immutable destination mask captured when the Scene
-         * request was accepted, not the current encoder selection. Therefore
-         * a user changing the selection while the asynchronous load runs
-         * cannot cause the later HCNAMES write to serialize the wrong Scene.
-         * This call performs no card I/O and creates no overlay or new cache;
-         * menu_endResidentNameScratchSession() consumes the accumulated mask
-         * through filesystem_requestUpdateResidentKitNames(). It is before the
-         * selection-retry branch deliberately, so a deferred browser retry
-         * cannot lose the identity of the load that actually committed.
+         * Scene Load's filesystem callback is reached only after its complete
+         * Scene/Kit/Instrument HCNAMES block has been published and verified.
+         * The Menu path therefore proceeds directly to runtime apply and keeps
+         * no deferred identity mask. See S056 section 11.2/A6.
          */
-        menu_refreshResidentNameScratchKit(
-            preset_getKitRequestSceneMask());
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
             !menu_isLoadSaveSelectionCurrent()) {
             retrySelectionAfterAck = 1;
@@ -8327,11 +8109,10 @@ void menu_pollPresetStatus(void)
          * that path is intentionally a whole-Kit/Scene apply operation.
          */
         /*
-         * A successful hidden-temp restore makes the original visible identity
-         * authoritative again before the normal bounded runtime apply starts.
-         * Inputs: direct `kit` source plus its valid nine-byte session label.
-         * Output: one Instrument HCNAMES row is marked dirty for normal menu
-         * exit; pool loads continue through their existing apply completion.
+         * A successful hidden-temp restore restores only the Menu-visible
+         * identity label before the bounded runtime apply. The filesystem
+         * deliberately publishes nothing for `.hctmp`, so the normal pool
+         * Instrument identity/source remains untouched.
          */
         if (preset_getCompletedOk() &&
             menu_instrumentTempOperationPending &&
@@ -8339,8 +8120,6 @@ void menu_pollPresetStatus(void)
             memcpy(menu_instrumentSaveName, menu_instrumentTempName,
                    MENU_INSTRUMENT_SAVE_NAME_LEN);
             menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
-            menu_refreshResidentNameScratchInstrument(
-                menu_kitLoadSceneMask, menu_instrumentLoadSlot);
         }
         /*
          * Carry the filesystem-captured persistence meaning into the shared
@@ -8475,25 +8254,15 @@ void menu_pollPresetStatus(void)
     case PRESET_OP_INSTRUMENT_SAVE:
     case PRESET_OP_INSTRUMENT_MORPH_SAVE:
     {
-        uint8_t source_scene = preset_getRequestScene();
-        uint8_t source_slot = (uint8_t)preset_getRequestSlot();
-
         /*
-         * Complete Instrument Save through the deferred name session.
+         * Complete Instrument Save after filesystem-owned publication.
          *
          * The normal save has already committed the edited source name into
-         * resident Scene metadata and refreshed the typed `.hcindex`; Morph
-         * Save preserves identity. Normal Save updates the matching scratch row
-         * and dirty Scene bit without opening HCNAMES. Nested Save then returns
-         * to the top-level Kit row; that menu transition may load `/Kit/.hcindex`
-         * but the root resident-name file is written only when the combined
-         * Kit/Instrument session is actually exited.
+         * the filesystem identity block, refreshed the typed `.hcindex`, and
+         * completed its direct HCNAMES transaction before this callback. Morph
+         * Save preserves identity by policy. Menu only returns to its existing
+         * browser selection; no deferred name write remains.
          */
-        if (preset_getCompletedOp() == PRESET_OP_INSTRUMENT_SAVE &&
-            source_scene < 16u) {
-            menu_refreshResidentNameScratchInstrument(
-                (uint16_t)(1u << source_scene), source_slot);
-        }
         if (menu_loadSaveCommandActive)
             menu_finishLoadSaveCommand();
         else {
@@ -8509,32 +8278,16 @@ void menu_pollPresetStatus(void)
     case PRESET_OP_KIT_SAVE:
     case PRESET_OP_KIT_MORPH_SAVE:
     {
-        uint8_t source_scene = preset_getRequestScene();
-
         /*
-         * Complete Kit Save in the deferred resident-name session.
+         * Complete Kit Save after filesystem-owned identity publication.
          *
          * filesystem.c has already written the physical Kit directory,
-         * rescanned `/Kit/`, and flushed the complete `/Kit/.hcindex` before
-         * Preset published this completion. Copy the saved library row into
-         * the existing UI buffer. For normal Save, reaffirm the resident Kit
-         * name from that durable index row, then refresh the seven-name scratch
-         * and mark its Scene dirty without opening HCNAMES. Hardware showed
-         * the correct source Scene's six
-         * Instrument rows changing while its Kit row remained blank, proving
-         * the mask/update path was correct and the resident Kit identity was
-         * the missing input. KitMrp Save preserves resident identity and does
-         * not mark the session dirty. The single HCNAMES rewrite happens only
-         * when the Kit/Instrument menu family is exited.
+         * rescanned `/Kit/`, and completed the Kit-family HCNAMES transaction
+         * before Preset published this completion. Copy the saved library row
+         * into the existing UI buffer. KitMrp Save preserves resident identity
+         * and has no HCNAMES publication by policy.
          */
         menu_refreshSavedLibraryName(preset_getCompletedOp());
-        if (preset_getCompletedOp() == PRESET_OP_KIT_SAVE &&
-            source_scene < SCENE_COUNT) {
-            filesystem_setIdentityName(FS_IDENTITY_KIT_ROW,
-                                       preset_currentName);
-            menu_refreshResidentNameScratchKit(
-                (uint16_t)(1u << source_scene));
-        }
         if (menu_loadSaveCommandActive)
             menu_finishLoadSaveCommand();
         else {
@@ -8747,37 +8500,15 @@ void menu_switchPage(uint8_t pageNr)
     }
 
     /*
-     * Capture the old context before page mutation. Pressing the Load/Save
-     * mode button toggles LOAD_PAGE/SAVE_PAGE through pageNr==LOAD_PAGE and
-     * keeps the shared name session. Any other page target is the physical
-     * exit boundary that must flush accumulated resident names once.
-     *
-     * What: the predicate now also admits a root Scene Load session. Its
-     * completion accumulated menu_residentNameDirtySceneMask, but its
-     * menu_saveOptions.what is SAVE_TYPE_SCENE, so the Kit-family type checks
-     * alone never matched and the mask was silently dropped on exit.
-     * Why: a nonzero mask means committed Scene payloads replaced resident Kit
-     * and Instrument identities that still need their one deferred HCNAMES
-     * rewrite; without this clause the Scene row changes while its Kit row and
-     * six Instrument rows stay stale.
-     * Inputs: the pre-switch menu_activePage, menu_saveOptions, and
-     * menu_residentNameDirtySceneMask values, evaluated before any page
-     * mutation below.
-     * Outputs: end_resident_name_session, which posts exactly one
-     * menu_endResidentNameScratchSession() call after the page mutation. The
-     * deferred busy exit reenters here through menu_processPendingPageSwitch()
-     * and sees the same condition.
-     * Affiliates: menu_endResidentNameScratchSession(),
-     * filesystem_requestUpdateResidentKitNames(),
-     * menu_residentNameScratchFlushComplete(), and
-     * menu_processPendingPageSwitch().
+     * Capture whether the read-only resident-name session must be discarded
+     * after the page mutation. Pressing Load/Save toggles through
+     * pageNr==LOAD_PAGE and keeps the session; every other page target releases
+     * it synchronously. Durable HCNAMES publication belongs to the filesystem
+     * operation and never waits for this UI boundary. See S056 section 11.5.
      */
     end_resident_name_session = (uint8_t)(
         (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
-        (menu_instrumentLoadActive ||
-         menu_saveOptions.what == SAVE_TYPE_KIT ||
-         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH ||
-         menu_residentNameDirtySceneMask != 0u) &&
+        menu_residentNameScratchValid &&
         pageNr != LOAD_PAGE);
 
     if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
@@ -9615,7 +9346,6 @@ void menu_init(void)
     menu_residentNameScratchScene =
         MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
     menu_residentNameScratchValid = 0u;
-    menu_residentNameDirtySceneMask = 0u;
     menu_sceneResidentNameScratchScene =
         MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
 

@@ -227,6 +227,14 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   or localized. If it recurs, capture a non-perturbing stage/operation deadline
   before adding more delays; Dev Mode's `lcd_waitForIdle()` changes timing at
   many internal transitions.
+- Session 056 boot-hang follow-up source is now implemented: the pre-audio
+  ladder has ring-only `Z` entry/exit/heartbeat/abort records, Preset status
+  transitions have `Q` records, the former unbounded Preset wait has a 15 s
+  independent deadline, ordinary boot pumps have entry-relative 20 s bounds,
+  and failure recovery attempts an immediate existing trace-ring drain. The
+  only new retained state is the explicitly scoped 2-byte,
+  `DEV_MODE_LOGGING`-only `main.c` heartbeat tick. Build and decoder checks
+  passed on 2026-08-23; hardware reproduction/confirmation remains pending.
 - The former Kit/Scene/Bank per-slot presence/display/alias arrays are retired
   (69,000 bytes combined). Session 042 also removed the dead `kitBrowser`
   compatibility bridge and its 1,000-entry `kb_map`, releasing the linked
@@ -370,12 +378,11 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
   - **Bug #2** — none of the four Save paths (Kit/Scene/Bank/root
     Instrument) staged `filesystem_setResidentSource()`, so a saved row kept
     reporting its previously *loaded* slot as HCNAMES source. Root Instrument
-    Save's gap was deeper: it never reached any HCNAMES publish path at all
-    (`filesystem_requestUpdateResidentInstrumentNames()` had zero callers
-    repo-wide) — fixed by adding a hand-off into
-    `FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT` plus a new type-filtered
-    index-rebuild path. See `FILESYSTEM_SPEC.md`'s Save/Overwrite Safety
-    section.
+    Save's gap was deeper: it never reached any HCNAMES publish path. The
+    current implementation stages the source before each payload completion and
+    uses one filesystem-owned hand-off into the matching HCNAMES update; the
+    former public deferred-update entry points are retired. See
+    `FILESYSTEM_SPEC.md`'s Save/Overwrite Safety section.
   - **Bugs #3/#4/#5 — the actual `ScnS05` root cause**, found only after
     building exhaustive failure-site instrumentation into the native
     `afatfs_deleteTree()` traversal (17-value
@@ -492,12 +499,14 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
   one-byte SRAM1 fields so the chained request cannot erase Bank Load's
   completed-Scene result or operation identity. Authority and test checklist:
   `S056_BANK_SETTINGS_CORRECTION.md`.
-- Session 056 HCNAMES Scene-row corruption correction is source-implemented but
-  not yet hardware-confirmed: Bank-child Scene names are frozen in a 9-byte
-  filesystem-owned SRAM1 snapshot at phase 31 and published from that copy at
-  phase 61. Trace stage `H` reports any live shared-scratch drift without
-  allowing it to affect HCNAMES. Authority and test checklist:
-  `S056_NAMES_CORRUPTION.md`.
+- Session 056 HCNAMES follow-up is now source-implemented: filesystem Load/Save
+  operations own publication of every identity row they change, Menu retains
+  only the read-side browse session, and generic `U`/Bank `K` witnesses read
+  back the staged register before completion. HCNAMES overlay/source refusals
+  emit `H` records. The Bank-child Scene-name snapshot remains defensive
+  hardening for a latent scratch hazard; it was not the cause of the frozen
+  register observed in Session 056. Authority and retest checklist:
+  `S056_HCNAMES_FOLLOW_UP.md` §11.
 - Root-directory working docs for Sessions 054-055 (`SESSION_054_PREPLAN_ASYNC_RECURSIVE_CLEANUP.md`,
   `SESSION_054_PLAN_DEFECT_EVIDENCE_FIX.md`, `AFAT_RECURSIVE_WHITEPAPER.md`,
   `SCENE_LOAD_PAT_RESTORE.md`, `LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md`,
@@ -1128,16 +1137,12 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   `A/V/M/C/P/T`; `.hcprms2` advanced from generation 5 to 6. The terminal
   acknowledgement is mandatory in this existing callback and must not be
   moved into a new load/persistence path.
-- **Root Scene HCNAMES exit fix is implemented and single-destination
-  hardware-confirmed.**
-  `menu_switchPage()` now admits a nonzero
-  `menu_residentNameDirtySceneMask`, and the Scene type boundary flushes before
-  a later Kit-family payload can overwrite the identity block. Scene 015
-  Machine -> Scene 15 produced correct Scene/Kit/Instrument rows and
-  generation-2 publication. Multi-destination, deferred/toggle exit,
-  Scene->KitMrp->Kit hazard, and failed-load preservation still need evidence.
-  Do not add another writer.
-  The current `-` token remains the valid inherited HCNAMES source token.
+- **Root Scene/Kit/Instrument HCNAMES publication ownership is filesystem-side.**
+  The former Menu exit mask and deferred Kit-family writer are retired. Scene
+  Load/Save publish Scene plus embedded Kit/Instrument rows; normal Kit and
+  Instrument Load/Save publish their owned rows before callbacks. The current
+  `-` token remains the valid inherited HCNAMES source token. Do not add a UI
+  boundary writer or reintroduce `menu_residentNameDirtySceneMask`.
 - **Bank Load persistence is implemented and hardware-verified (Session 052).**
   `settings.cfg active_bank` follows the committed restore slot and the AutoSave
   Bank scene-present mask equals the effective selected-child union (re-marked

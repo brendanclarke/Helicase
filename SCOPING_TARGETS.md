@@ -657,8 +657,9 @@ sites is the thorough version.
 **R6 — Retire the Menu-deferred name session** (`menu_endResidentNameScratchSession()`,
 `menu_residentNameDirtySceneMask`, `menu_refreshResidentNameScratchKit()`,
 and the three now-dead `filesystem_requestUpdateResident*Names()` entry
-points). Scheduled as Group D of the §11 fix, listed here because it is the
-architectural half: it removes the second publication owner permanently.
+points). Implemented as Group D of the §11 fix on 2026-08-23: Menu retains the
+read-side browse session only, and filesystem Load/Save operations are the one
+publication owner permanently.
 
 **R7 — Verify-after-write as a facade contract.** §11's Group B adds a
 read-back probe to four writers. If it proves useful, the same one-row

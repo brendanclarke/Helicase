@@ -34,6 +34,7 @@ changed by this document.
 | §10.1–§10.3 | Correct and load-bearing: the publication map and the two-defect split. |
 | §10.4–§10.5 | **SUPERSEDED** by §11.2–§11.6. |
 | **§11** | **The plan. Implement from here.** |
+| **§12** | Implementation review of the landed §11 work, plus one required correction to §11.3's verify policy. |
 
 ## What is actually wrong — final position
 
@@ -1855,3 +1856,677 @@ operations, three different chaining idioms that all bypass
 reason this defect could exist in three different forms simultaneously.
 Recorded, with refactor candidates, in `SCOPING_TARGETS.md` §"Session 056 —
 resident-name publication ownership and Load/Save completion shapes".
+
+## 12. Implementation notes — 2026-08-23
+
+Section 11 is now implemented.
+
+- Group A: `filesystem_beginResidentNamePublish()` centralizes the HCNAMES
+  handoff. Normal Kit Load, Kit Save, Instrument Load, Instrument Save, Scene
+  Load, and Scene Save now publish from their filesystem completion paths. Scene
+  publication covers its Scene row plus the matching Kit row and six Instrument
+  rows. Morph-only Kit and Instrument Save/Load paths remain identity-neutral.
+- Group B: the generic HCNAMES writer emits `U` after reopening the register and
+  probing the lowest affected row. Bank Load/Save reopen and probe row 0, and
+  the existing Preset `K` witness now carries the Bank verification bit. A
+  mismatch is recorded without failing an already-committed payload operation.
+  Bank Load's existing retry states already occupied phases 88/89, so its probe
+  states use phases 93..97; Bank Save uses 88..92.
+- Group C: rejected HCNAMES overlays and rejected source stages now emit `H`
+  refusal records with row/detail coordinates.
+- Group D: the Menu deferred Kit-family writer, dirty Scene mask, and three
+  public deferred-update entry points were removed. Menu still performs the
+  HCNAMES read needed by Kit/Instrument browsing and discards that read session
+  at UI boundaries; it no longer owns durable publication.
+- Group E: `AutosaveTrace.h`, both development-log decoders,
+  `DEV_MODES.md`, `verify_bank_autosave.py`, and `MEMORY.md` document the new
+  witnesses and filesystem publication-ownership invariant. The validator now
+  reports `HCNAMES was not rewritten by the last Bank operation` before its
+  per-row differences when row 0's source disagrees with `settings.cfg`.
+
+Validation completed:
+
+- `make clean && make` — passed; only pre-existing unused-function/toolchain
+  warnings remain.
+- `make img` — passed and regenerated `build/LXRV2_lxr02.img`.
+- `python3 -m py_compile tools/decode_devlogs.py tools/devlog_unpack.py
+  tools/verify_bank_autosave.py` — passed.
+- `git diff --check` — passed.
+- The existing `SD_CARD/` fixture still reports the historical frozen HCNAMES
+  image, now with the new whole-file verdict first; no hardware retest has yet
+  exercised the new `U`/`K` evidence or confirmed the physical write fix.
+
+---
+
+## 12. Implementation review, and one required correction to §11.3
+
+Review of the landed implementation against §11. Read-only pass; the only
+files touched by this review were build artefacts.
+
+### 12.1 Verdict — §11 is implemented, and implemented correctly
+
+| §11 change | Landed at | Notes |
+|---|---|---|
+| A1 shared handoff helper | `filesystem_beginResidentNamePublish()`, filesystem.c:5037 (decl 1204) | six call sites, all identical; three pre-existing open-coded handoffs converted |
+| A2 Kit Load publish | `case 28`, filesystem.c:9155 | guarded `op_close_status == DONE && current_op == FS_INTERNAL_OP_LOAD_KIT`; Morph correctly excluded |
+| A3 Kit Save publish | `case 21`, filesystem.c:14054 | published **after** arming the index rebuild and **before** `filesystem_finish()` — the ordering that mattered |
+| A4 Instrument Load publish | `case 16`, filesystem.c:12053 | `!op_instrument_load_temporary` guard present; mask/`op_slot` translation present |
+| A5 Instrument Save morph | filesystem.c:12494 | left excluded, with the policy stated in the `else` branch as requested |
+| A6 Scene → all three row classes | filesystem.c:5240 **and** 5451 | both dispatch copies, including the first-use bootstrap |
+| B1 verify helper | `filesystem_residentRowMatchesCache()`, filesystem.c:4957 | re-parses the read-back line and compares to the live cache; masks the dirty bit; no second line buffer |
+| B2 generic verify | phases 9-14, filesystem.c:5325-5417 | |
+| B3 Bank Load verify | phases 93-97, filesystem.c:11526-11592 | |
+| B4 Bank Save verify | phases 88-92, filesystem.c:14627-14720 | |
+| C1 overlay refusal | `filesystem_cacheResidentName()`, filesystem.c:4753 | |
+| C2 source-stage refusal | `filesystem_setResidentSource()`, filesystem.c:4541 | instrumented in the helper, not the eighteen call sites, as §11.4 revised |
+| D1-D5 retire second owner | menu.c −337 lines; all three `filesystem_requestUpdateResident*Names()` deleted | browse-read path (`menu_residentNameScratchLoaded()`, `filesystem_requestLoadResident*`) correctly retained |
+| E1-E5 trace/tools/docs | `'U'` stage, `H` refusal flags, `K` bit 2, both decoders, DEV_MODES stage list | |
+
+Two implementation choices that improve on the plan and should be kept:
+
+- `filesystem_residentPublishMask()` / `...ProbeRow()` / `...Class()`
+  (filesystem.c:4910-4954) factor the probe-row selection §11.3 specified as
+  a table into three small helpers, and correctly return
+  `op_scene_load_scene_mask` for the Scene class *after* A6 overwrites
+  `op_kit_load_scene_mask`. That subtlety was not called out in §11 and was
+  got right anyway.
+- The Bank Save failed-open path (filesystem.c:14643) re-arms
+  `op_library_index_rebuild_kind/_pending` rather than falling through, so a
+  probe that cannot open the register still rebuilds `/Bank/.hcindex`.
+
+**Build:** clean `make clean && make` succeeds with no warnings from any
+changed file. `text=381740 data=400 bss=94744`.
+
+**SRAM claim independently verified.** Rather than trusting the map file,
+the diff was scanned for file-scope `static` declarations: **zero added,
+one removed** (`menu_residentNameDirtySceneMask`, `uint16_t`). Net **−2
+bytes**, exactly as §11.7 stated. The verify path allocates nothing: it
+reuses `op_bytes_done` for the probe row and `op_hcnames_probe_matches` for
+the boolean result, and all three sites explicitly zero the latter before
+use, so its dual role with the root-absence probe counter is safe.
+
+---
+
+### 12.2 Required correction — the "witness, do not fail" policy is not fully applied
+
+§11.3 states the policy explicitly: *"**Policy: witness, do not fail.** A
+mismatch must not turn a good payload Load into an error."*
+
+The implementation honours this for a **mismatch** (the probe simply leaves
+`op_hcnames_probe_matches` at zero) and for a **failed open** (the phase
+above returns `FS_STATUS_DONE` with the witness clear). It does **not**
+honour it for a **read error on the probe**. Three identical sites:
+
+| Writer | Read-error branch | Terminal phase |
+|---|---|---|
+| generic | `case 12`, filesystem.c:5367 | `case 14`, filesystem.c:5405 |
+| Bank Load | `case 95`, filesystem.c:11552 | `case 97`, filesystem.c:11583 |
+| Bank Save | `case 90`, filesystem.c:14662 | `case 92`, filesystem.c:14693 |
+
+Each sets `op_close_status = FS_STATUS_ERROR`, and each terminal phase then
+does:
+
+```c
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(op_close_status);
+            return;
+        }
+```
+
+#### What that costs when it fires
+
+The register has already been streamed, closed and flushed by the time the
+probe runs. The probe is read-only. So a probe I/O error cannot change what
+is on the card — but under the current code it:
+
+1. **Reports a fully successful operation as a filesystem failure.** Preset
+   completes with `pm_completed_ok == 0`; Menu shows the error overlay for a
+   Load whose payload *and* whose register both landed correctly.
+2. **Skips `filesystem_clearResidentSourceDirtyFlags()`**, so staged source
+   words keep their `FS_RESIDENT_SOURCE_DIRTY_FLAG` set. The next
+   `filesystem_prepareResidentNamesCache()` preserves them, and the next
+   unrelated publication writes this operation's provenance into its
+   register image. This is a real cross-operation data leak, not merely a
+   status problem.
+3. **Skips the `/Bank/.hcindex` rebuild** on Bank Save (`case 92` returns
+   before arming it), so a newly created or renamed Bank folder stays
+   invisible to the browser until reboot. Note the failed-*open* path at
+   filesystem.c:14643 correctly arms it — only the read-error path does not.
+4. **Makes the new instrument lie.** The generic writer never emits its `U`
+   record at all on this path. Bank still emits `K` from
+   `on_bank_load_complete()`, but with `load_done == 0`, and the
+   `(load_done && hcnames_verified)` guard therefore reports
+   **"not DONE, not verified"** for an operation whose register write
+   succeeded.
+
+Point 4 is the one that matters. Group B exists precisely because five Bank
+operations completed `DONE` against an unchanged card and nothing recorded
+it. If the card is doing something anomalous at the storage layer — which
+is exactly what Defect B suspects — the read-back probe is where that
+anomaly surfaces first, and the current code responds by discarding the
+evidence and emitting a witness that says the opposite of what happened.
+
+#### The correction — summary
+
+Six small edits in `filesystem.c`, plus four documentation updates that keep
+the header and trace contracts truthful about what a clear VERIFIED bit now
+means. No new state, no SRAM, no behaviour change on any path that currently
+works. **The full change-by-change plan is §12.6.**
+
+**At each of the three read-error branches** — delete the
+`op_close_status = FS_STATUS_ERROR;` line so the phase simply advances to
+its close phase, leaving `op_hcnames_probe_matches` at zero:
+
+```c
+        if (read_status != STORAGE_STATUS_OK &&
+            read_status != STORAGE_STATUS_WAIT) {
+            /*
+             * A failed read-back is evidence, not a payload failure.
+             *
+             * What: abandons the probe and proceeds to the normal close,
+             * leaving op_hcnames_probe_matches at zero so the K/U witness
+             * reports VERIFIED clear.
+             *
+             * Why: the register was streamed, closed and flushed before this
+             * phase ran, and this probe is read-only, so nothing here can
+             * change what is on the card. Promoting a probe I/O error to
+             * FS_STATUS_ERROR would (a) report a committed, correctly
+             * published operation as a filesystem failure, (b) skip
+             * filesystem_clearResidentSourceDirtyFlags() and leak this
+             * operation's staged source words into the next transaction,
+             * (c) on Bank Save, skip the /Bank/.hcindex rebuild, and (d)
+             * emit a witness claiming "not DONE, not verified" for an
+             * operation that succeeded -- destroying the evidence in exactly
+             * the scenario this probe was added to illuminate.
+             *
+             * Inputs: the read status only. Output: op_phase only. This
+             * matches the failed-open policy in the phase above and the
+             * mismatch policy in the branch below, so all three probe
+             * outcomes now behave identically. Affiliates:
+             * filesystem_recordResidentNamePublish(),
+             * AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_HCNAMES_VERIFIED, and
+             * S056_HCNAMES_FOLLOW_UP.md sections 11.3 and 12.2.
+             */
+            op_phase = 13u;   /* 91u for Bank Load, 91u for Bank Save */
+            return;
+        }
+```
+
+**At each of the three terminal phases** — delete the
+`if (op_close_status != FS_STATUS_DONE)` early-return block, so each has a
+single unconditional exit that emits the witness, clears the dirty flags,
+arms any pending index rebuild, and finishes `FS_STATUS_DONE`. Add one line
+to each phase's existing comment:
+
+```c
+         * The probe has exactly one exit: whatever it observed, the payload
+         * and register work already completed, so this phase always publishes
+         * the witness and completes DONE. See section 12.2.
+```
+
+After this, `op_close_status` is never written by the verify phases. The
+`op_close_status = FS_STATUS_DONE;` initialisations at generic `case 11`,
+Bank Load `case 86` and Bank Save `case 86` become defensive no-ops and can
+be left in place.
+
+---
+
+### 12.3 How necessary is this correction?
+
+Separated by what it actually affects, because the answer differs sharply.
+
+**For correct `/.hcnames` generation: not necessary.** The probe runs
+strictly after the register file has been written, closed and flushed. It
+opens the file read-only and never writes. Nothing in this correction
+changes a single byte that reaches the card, on any path. If Groups A and B
+are otherwise correct, `.hcnames` will be generated correctly with or
+without this fix.
+
+**For correct Load/Save behaviour: necessary, but only on an error path.**
+The trigger is a genuine card I/O error while reading a file the firmware
+closed milliseconds earlier. A malformed register cannot trigger it — the
+preserve-read at phase 2 uses the same status check and would already have
+failed the operation long before the probe. So the probability is low. But
+the blast radius is disproportionate to the trigger: a false failure
+reported to the user, a genuine cross-operation provenance leak (point 2),
+and a skipped Bank index rebuild (point 3). A diagnostic probe should not
+be able to break an operation it was added only to observe.
+
+**For the next hardware test being conclusive: necessary.** This is the
+decisive consideration. §11.8 puts Groups C and B first specifically so that
+one ordinary Load answers whether Defect B is real. The three outcomes
+§11.9 enumerates all assume the witness is trustworthy. Under the current
+code there is a fourth, unlisted outcome — probe read error — in which the
+generic witness is absent entirely and the Bank witness actively reports the
+opposite of the truth. That is the same category of misleading evidence that
+produced three wrong diagnoses in §§3, 4 and 9.5, and it would be a poor
+trade to reintroduce it inside the instrument built to prevent it.
+
+**Verdict: fix before the next hardware test, not urgently otherwise.** Six
+line deletions and three comment blocks across three sites, no new state,
+zero SRAM, and it cannot regress any path that currently works — every
+change is on a branch that today produces a wrong answer.
+
+---
+
+### 12.4 Two minor follow-ups (non-blocking)
+
+- **Retired trace constants.**
+  `AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH` and `_FLUSHED`
+  (AutosaveTrace.h:321-322) are now unproducible — Group D removed their only
+  producer — but are not marked as such. The file already has the right
+  pattern for this: stage `'Y'` carries a "RETIRED — no longer producible"
+  block explaining what removed it and why the layout is kept for old
+  captures. These two deserve the same treatment, or a future reader will
+  hunt for a Menu flush path that no longer exists.
+- **Dead caller branches.** `menu_endResidentNameScratchSession()` now always
+  returns zero, which makes the bodies of
+  `if (... && menu_endResidentNameScratchSession()) { ... }` at menu.c:3465
+  and menu.c:5150 unreachable. The function's own comment says the zero
+  return is deliberate, to preserve caller shape, so this is intentional
+  rather than an oversight — but it leaves two dead blocks for a later
+  cleanup pass.
+
+### 12.5 One assumption to confirm on hardware, not by reading
+
+A3 assumes `op_library_index_rebuild_kind/_pending`, armed in Kit Save's
+`case 21` *before* the handoff, survives the `current_op` swap and fires
+after the register transaction completes. The code is arranged correctly and
+`filesystem_beginResidentNamePublish()` does not touch those fields, but it
+is the one interaction in this change set whose failure is **silent**: the
+Kit `/Kit/.hcindex` would simply not rebuild, and nothing would report it.
+Worth an explicit check on the next Kit Save — save a Kit to a new slot and
+confirm it appears in the browser without a reboot.
+
+---
+
+### 12.6 Implementation plan — the §12.2 correction
+
+Ten changes across four files. Every comment block below is written to be
+pasted in place as the change's own documentation.
+
+Shared rationale, stated once so each site's comment can stay short: **the
+read-back probe is strictly posthumous.** By the time any of these phases
+runs, the register has been streamed, closed by `afatfs_fclose()` and
+flushed through `filesystem_finish()`'s gate, and the probe reopens it
+`"r"`. No probe outcome can change a byte on the card. Therefore all three
+probe outcomes — *matched*, *mismatched*, *could not be read* — must have
+identical control flow, differing only in the witness bit they publish.
+
+#### C1 — generic writer: stop promoting a probe read error to `FS_STATUS_ERROR`
+
+*File:* `Core/Hardware/SD/filesystem.c`
+*Site:* `filesystem_residentNames_tick()`, `case 12 /* READ THROUGH THE
+GENERIC PUBLISH PROBE ROW */`, the `read_status` guard (~5375)
+
+```c
+        if (read_status != STORAGE_STATUS_OK &&
+            read_status != STORAGE_STATUS_WAIT) {
+-           op_close_status = FS_STATUS_ERROR;
+            op_phase = 13u;
+            return;
+        }
+```
+
+Comment to add above `op_phase = 13u;`:
+
+```c
+            /*
+             * A failed read-back is evidence, not a payload failure.
+             *
+             * What: abandons the probe and proceeds to the normal close,
+             * leaving op_hcnames_probe_matches at zero so the U witness
+             * reports VERIFIED clear.
+             *
+             * Why: this phase runs after the register was streamed, closed
+             * and flushed, and it holds a read-only handle, so nothing here
+             * can change what is on the card. Promoting a probe I/O error to
+             * FS_STATUS_ERROR would report a committed, correctly published
+             * operation as a filesystem failure; skip
+             * filesystem_clearResidentSourceDirtyFlags() in case 14 and leak
+             * this operation's staged source words into the next
+             * transaction's preserve-read; and suppress the U record
+             * entirely -- destroying the evidence in exactly the scenario
+             * this probe was added to illuminate. See
+             * S056_HCNAMES_FOLLOW_UP.md sections 11.3 and 12.2.
+             *
+             * Inputs: read_status only. Outputs: op_phase only; op_close_status
+             * is deliberately left at the FS_STATUS_DONE set in case 11.
+             * Affiliates: filesystem_recordResidentNamePublish(), case 11's
+             * failed-open policy, and the mismatch policy in the branch below
+             * -- all three probe outcomes now share one control flow.
+             */
+```
+
+#### C2 — generic writer: single unconditional exit
+
+*Site:* same function, `case 14 /* WAIT PROBE CLOSE + PUBLISH WITNESS */` (~5411)
+
+```c
+        if (!afatfs_chdir(NULL))
+            return;
+-       if (op_close_status != FS_STATUS_DONE) {
+-           filesystem_finish(op_close_status);
+-           return;
+-       }
+        filesystem_recordResidentNamePublish(1u);
+```
+
+Comment to add above `filesystem_recordResidentNamePublish(1u);`:
+
+```c
+        /*
+         * The probe has exactly one exit.
+         *
+         * What: publishes the U witness, clears the staged source dirty bits,
+         * and completes the original operation DONE, regardless of what the
+         * probe observed. Why: the payload and the register write both
+         * completed before this phase was reachable; the probe's only product
+         * is one bit of evidence. A conditional exit here previously allowed a
+         * read error to fail a successful publication and skip the dirty-flag
+         * clear. Inputs: op_hcnames_probe_matches and the probe row in
+         * op_bytes_done. Outputs: one U record, cleared provenance staging,
+         * and FS_STATUS_DONE to the parked callback. Affiliates:
+         * filesystem_recordResidentNamePublish(),
+         * filesystem_clearResidentSourceDirtyFlags(), and section 12.2.
+         */
+```
+
+#### C3 — Bank Load: same read-error branch
+
+*Site:* `filesystem_loadBankDirectory_tick()`, `case 95 /* READ BANK ROW 0 AND
+START CLOSE */` (~11560). Identical edit to C1: delete
+`op_close_status = FS_STATUS_ERROR;`, keep `op_phase = 96u;`. Reuse C1's
+comment with two substitutions — "case 97" for "case 14", and "the K witness
+in on_bank_load_complete()" for "the U witness", plus one added sentence:
+
+```c
+             * For Bank the loss is worse than a missing record: K is still
+             * emitted by Preset, but with load_done clear, so its
+             * (load_done && hcnames_verified) guard publishes
+             * "not DONE, not verified" for an operation whose register write
+             * actually succeeded.
+```
+
+#### C4 — Bank Load: single unconditional exit
+
+*Site:* `case 97 /* WAIT CLOSE + COMPLETE BANK LOAD */` (~11589). Delete the
+`if (op_close_status != FS_STATUS_DONE) { filesystem_finish(op_close_status);
+return; }` block. Reuse C2's comment, dropping the U-record sentence (Bank's
+witness is emitted later by Preset, not here).
+
+#### C5 — Bank Save: same read-error branch
+
+*Site:* `filesystem_saveBankDirectory_tick()`, `case 90 /* READ BANK-SAVE ROW 0
+AND START CLOSE */` (~14670). Identical edit; `op_phase = 91u;` retained.
+Add one further sentence to the comment, because Bank Save carries an extra
+consequence:
+
+```c
+             * Bank Save additionally arms op_library_index_rebuild_kind /
+             * _pending in case 92. Failing out of the probe skipped that,
+             * leaving a newly created or renamed root Bank folder invisible
+             * to the browser until reboot -- note that the failed-open path
+             * above already arms it correctly, so only this branch diverged.
+```
+
+#### C6 — Bank Save: single unconditional exit
+
+*Site:* `case 92 /* WAIT CLOSE + RESTORE ROOT BANK INDEX */` (~14699). Delete
+the same early-return block. The existing comment about parking the callback
+for the `/Bank/.hcindex` rebuild stays; prepend C2's "single exit" paragraph
+so the index-rebuild arming is visibly unconditional.
+
+#### C7 — `filesystem.h`: state what a clear VERIFIED bit means
+
+*File:* `Core/Hardware/SD/filesystem.h`
+*Site:* the doc comment above `filesystem_lastHcnamesVerified()` (~616-625)
+
+The function's behaviour does not change, but its **contract** does: after
+C1-C6, a clear result no longer implies "the register is wrong". Callers
+must not treat it as a failure signal. Replace the existing comment with:
+
+```c
+/*
+ * Return the last Bank-owned row-0 HCNAMES read-back result.
+ *
+ * What: exposes the witness-only boolean retained through Bank completion so
+ * Preset can add bit 2 to its existing K trace record.
+ *
+ * Why: FS_STATUS_DONE and the callback do not by themselves prove that the
+ * visible register contains the just-staged Bank identity -- five Bank
+ * operations across two sessions completed DONE against a byte-identical
+ * /.hcnames before this probe existed.
+ *
+ * A zero result has three distinct causes and distinguishes none of them:
+ * the probe row did not match the staged cache/source pair, the register
+ * could not be reopened, or the read-back itself failed. All three are
+ * deliberately equivalent here, because none of them can affect what was
+ * already written to the card. Callers must treat this strictly as
+ * diagnostic evidence: it must never gate payload completion, menu state, or
+ * any retry. A false clear costs one ambiguous trace bit; a false failure
+ * would cost a correctly saved Bank.
+ *
+ * Inputs/outputs are RAM-only. The value is reset by the next Bank proof.
+ * Affiliates: on_bank_load_complete()/on_bank_save_complete(),
+ * AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_HCNAMES_VERIFIED, and
+ * S056_HCNAMES_FOLLOW_UP.md sections 11.3 and 12.2.
+ */
+uint8_t filesystem_lastHcnamesVerified(void);
+```
+
+#### C8 — `AutosaveTrace.h`: make the witness bits self-describing
+
+*File:* `Core/Bank/Scene/AutosaveTrace.h`
+*Sites:* the `'K'` stage comment (~160-167) and the `'U'` stage comment
+(~168-174)
+
+Both currently document a set VERIFIED bit and say nothing about a clear
+one, which invites the reading "clear means the register is stale" — the
+same over-reading that produced §§3, 4 and 9.5. Append to each:
+
+```c
+     * A clear VERIFIED bit is ambiguous by design: it means the probe did
+     * not confirm a match, which covers a genuine mismatch, a register that
+     * could not be reopened, and a failed read-back. It never means the
+     * operation failed -- the payload and the register write both completed
+     * before the probe ran, and no probe outcome can alter the card. Treat a
+     * clear bit as "look at this card capture", not as a fault report.
+```
+
+#### C9 — decoders: print the ambiguity, not just the bit
+
+*Files:* `tools/decode_devlogs.py`, `tools/devlog_unpack.py`
+
+Both already decode `K` bit 2 and `U` bit 1. Extend the rendered text so a
+future forensic pass is not misled, e.g.
+
+```
+HCNAMES_VERIFIED=0 (probe did not confirm: mismatch, reopen failure, or
+read failure -- not an operation failure)
+```
+
+Both files carry the same tables and both must be edited; they are checked
+by decoding `SD_CARD2/asavetrc.bin` and confirming no traceback.
+
+#### C10 — `DEV_MODES.md`: same wording for the `K` and `U` paragraphs
+
+*File:* `knowledge_files/specification_reference/DEV_MODES.md`
+
+The `U` paragraph already says "A mismatch is witnessed, not promoted to a
+payload failure." Extend it and the `K` paragraph with the three-cause
+ambiguity from C8, so the card-side documentation and the header agree.
+
+---
+
+### 12.7 Implementation plan — the §12.4 follow-ups
+
+#### F1 — mark the unproducible entry phases RETIRED
+
+*File:* `Core/Bank/Scene/AutosaveTrace.h`
+*Site:* `AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH` (4u) and
+`_HCNAMES_FLUSHED` (5u), ~317-318
+
+Group D deleted their only producer. Keep the values — old captures decode
+against them, and §10.1's "zero FLUSH records in 69,012 events" is the
+central evidence of this whole investigation — but say so, following the
+existing precedent set by stage `'Y'`:
+
+```c
+/*
+ * RETIRED -- no longer producible. Values 4 and 5 were emitted by
+ * menu_endResidentNameScratchSession() when it requested, and
+ * menu_residentNameScratchFlushComplete() when it completed, the Menu-side
+ * deferred Kit-family HCNAMES write.
+ *
+ * That publication path was removed entirely: identity publication now
+ * belongs to the filesystem operation that changed the data, not to a UI
+ * boundary. The reason it was removed is that it never once executed --
+ * zero phase-4 and zero phase-5 records across 69,012 cumulative trace
+ * events spanning every recorded session, which is precisely why Kit Load,
+ * Kit Save and Instrument Load published nothing for months.
+ *
+ * The numbers are reserved and must not be reused: existing card captures
+ * decode against them, and their *absence* is the primary evidence in
+ * S056_HCNAMES_FOLLOW_UP.md section 10.1. New publication witnesses use
+ * stage 'U' instead.
+ */
+#define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH     4u
+#define AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSHED   5u
+```
+
+Optionally mirror one line of this into the decoders' phase tables.
+
+#### F2 — hoist the now-unconditional session-end calls
+
+*File:* `Core/Menu/menu.c`
+*Sites:* ~3463 and ~5149
+
+**Read this before editing.** `menu_endResidentNameScratchSession()` now
+always returns zero, so the *bodies* of these two `if` statements are dead —
+but the **call itself is still required**: it discards the seven-name browse
+scratch and releases the shared cache through `filesystem_clearNameCache()`.
+Deleting the call along with the dead branch would leak a stale browse
+session into the next Scene's Kit/Instrument entry. Hoist it, do not remove
+it.
+
+Site 1 (~3463), inside the entry-name request helper:
+
+```c
+-   if (menu_residentNameScratchValid &&
+-       menu_residentNameScratchScene != scene &&
+-       menu_endResidentNameScratchSession()) {
+-       return 1u;
+-   }
++   /*
++    * End a browse session that belongs to a different Scene before starting
++    * this one. The helper is synchronous since HCNAMES publication moved to
++    * the filesystem (S056 section 11.5), so it always returns zero and this
++    * is a plain statement rather than a deferred-completion branch. The call
++    * itself is still required: it releases the seven-name scratch and the
++    * shared cache.
++    */
++   if (menu_residentNameScratchValid &&
++       menu_residentNameScratchScene != scene) {
++       (void)menu_endResidentNameScratchSession();
++   }
+```
+
+Site 2 (~5149), the Kit-family type-row boundary:
+
+```c
+-   if (what != SAVE_TYPE_KIT && what != SAVE_TYPE_KIT_MORPH &&
+-       menu_endResidentNameScratchSession()) {
+-       menu_refreshLoadSceneLeds();
+-       return;
+-   }
++   /*
++    * Leaving the Kit family ends the browse session. Kit <-> KitMrp and
++    * Kit <-> Instrument transitions deliberately keep it, so the type guard
++    * must be preserved exactly. Nothing is deferred any more, so control
++    * falls through to the ordinary cache release and browser reselect below.
++    */
++   if (what != SAVE_TYPE_KIT && what != SAVE_TYPE_KIT_MORPH) {
++       (void)menu_endResidentNameScratchSession();
++   }
+    filesystem_clearNameCache();
+```
+
+The two existing `(void) menu_endResidentNameScratchSession();` statement
+sites (~7089, ~8642) already have the correct shape and need no change.
+
+Once both are hoisted, `menu_endResidentNameScratchSession()` has no
+remaining value-consuming caller and its return type can be narrowed to
+`void`, with its comment's "return value remains zero so existing callers
+keep their nonblocking boundary shape" sentence deleted. That is optional
+and can be a separate commit.
+
+---
+
+### 12.8 Cost, verification, and acceptance
+
+**Cost.** Six deletions and six comment blocks in `filesystem.c`; one
+rewritten comment in `filesystem.h`; two appended paragraphs and one retired
+block in `AutosaveTrace.h`; two hoists in `menu.c`; text in two Python
+decoders and one spec document.
+
+**SRAM: zero.** No variable is added, removed, widened or narrowed by
+§12.6. F2 removes no storage either. The net figure for the whole Session
+056 change set therefore stays at **−2 bytes** (§12.1).
+
+**Flash:** slightly negative — six branches removed, comments only otherwise.
+
+**Verification, in order:**
+
+1. `make clean && make` — required, because `AutosaveTrace.h` and
+   `filesystem.h` both change and the Makefile has no header dependency
+   tracking (`SCOPING_TARGETS.md`). Then `make img`; confirm `bss` is
+   unchanged from 94744.
+2. `python3 tools/decode_devlogs.py SD_CARD2/asavetrc.bin > /dev/null` —
+   both decoders must still parse an existing capture after C9/F1.
+3. Grep-check that no `op_close_status` assignment remains inside any probe
+   phase: `grep -n "op_close_status = FS_STATUS_ERROR" Core/Hardware/SD/filesystem.c`
+   should show no hit between the `case 88`-`case 97` ranges of either Bank
+   state machine or `case 9`-`case 14` of `filesystem_residentNames_tick()`.
+4. Grep-check that `menu_endResidentNameScratchSession()` has no remaining
+   value-consuming caller.
+
+**Acceptance on hardware** — one ordinary session covers all of it:
+
+| Action | Expect |
+|---|---|
+| boot (Bank Load) | `K` with DONE set; VERIFIED set if the register landed |
+| Load a Kit into any Scene | `U` with class=Kit, and the Kit row + six Instrument rows updated in `/.hcnames` |
+| Load an Instrument | `U` with class=Instrument, one row updated |
+| Load a Scene | `U` with class=Scene, and **eight** rows updated for that Scene, not one |
+| Save a Kit to a new slot | `U` with class=Kit, row source equal to the new slot, **and the Kit appears in the browser without a reboot** (§12.5's silent-failure check) |
+| any `H` record at all | a lost overlay or a rejected source stage — investigate before trusting the rest |
+
+If `/.hcnames` still does not change while `U`/`K` report VERIFIED clear on
+every operation, Defect B is confirmed below the publication layer and the
+next step is the storage layer, as §11.9 sets out — but that conclusion is
+only trustworthy with §12.6 landed, which is the entire argument for doing
+it first.
+
+### 12.9 Implementation of the §12.2 correction and §12.4 follow-ups — 2026-08-23
+
+The required correction is now landed.
+
+- Generic HCNAMES publication, Bank Load, and Bank Save no longer promote a
+  read-back probe error to `FS_STATUS_ERROR`. Each probe now abandons only its
+  diagnostic read, closes the read handle, preserves the already-completed
+  payload/register result, clears staged source dirtiness, and emits the
+  appropriate witness path. A clear verification bit now covers mismatch,
+  reopen failure, and read failure without claiming that the operation failed.
+- The three probe terminal phases now have unconditional DONE exits. Bank Save
+  therefore always reaches its existing `/Bank/.hcindex` rebuild handoff, and
+  generic publication always emits `U` after a probe read error.
+- `filesystem.h`, `AutosaveTrace.h`, `DEV_MODES.md`, and both decoders now use
+  the same three-cause ambiguity contract for `K`/`U` verification bits.
+- The retired Menu HCNAMES flush phase values 4/5 are explicitly reserved for
+  old captures. Menu's two value-consuming scratch-session branches were
+  hoisted into synchronous cleanup calls, and the helper now returns `void`;
+  the remaining call sites retain the required cache disposal.
+
+Validation is pending the required clean rebuild, image generation, decoder
+parse, probe-branch grep, and diff checks.

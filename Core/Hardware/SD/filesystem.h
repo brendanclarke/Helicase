@@ -304,6 +304,15 @@ void        filesystem_setAutosaveEnabled(uint8_t enabled);
  */
 uint8_t     filesystem_autosaveEnabled(void);
 /*
+ * Synchronous pre-audio wrappers below use an internal entry-relative
+ * BOOT_FILESYSTEM_PUMP_WAIT_MS bound for every cooperative BUSY loop. The
+ * bound is stack-only and preserves each wrapper's existing terminal failure
+ * branch; it exists independently of DEV_MODE_LOGGING so a logging-off build
+ * cannot spin forever inside filesystem.c. The diagnostic-aware HCNAMES
+ * wrapper keeps its callback in an inline equivalent loop. This is a facade
+ * state-machine bound only and cannot preempt a lower-level SD-driver call
+ * that never returns. See S056_BOOT_HANG_FOLLOWUP.md section 10.
+ *
  * Create/refresh one `.hcindex` file in every registry-defined Instrument
  * directory. This boot-only wrapper is valid before audio starts; normal
  * runtime SD work remains asynchronous through filesystem_tick(). It returns
@@ -613,6 +622,24 @@ enum {
 /* Read, stage, or resolve one logical HCNAMES source without direct file I/O. */
 uint16_t filesystem_residentSource(uint16_t row);
 uint8_t filesystem_setResidentSource(uint16_t row, uint16_t source);
+/*
+ * Return the last Bank-owned row-0 HCNAMES read-back result.
+ *
+ * What: exposes the witness-only boolean retained through Bank completion so
+ * Preset can add bit 2 to its existing K trace record. Why: FS_STATUS_DONE and
+ * the callback do not by themselves prove that the visible register contains
+ * the just-staged Bank identity -- five Bank operations across two sessions
+ * completed DONE against a byte-identical /.hcnames before this probe existed.
+ * A zero result is deliberately ambiguous: the probe may have found a
+ * mismatch, failed to reopen the register, or failed while reading it. None
+ * of those outcomes can change the already-written card, so callers must use
+ * this strictly as diagnostic evidence and must never gate payload completion,
+ * Menu state, or retry logic on it. Inputs/outputs are RAM-only; the value is
+ * reset by the next Bank proof. Affiliates: on_bank_load_complete(),
+ * on_bank_save_complete(), AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_HCNAMES_VERIFIED,
+ * and S056_HCNAMES_FOLLOW_UP.md sections 11.3 and 12.2.
+ */
+uint8_t filesystem_lastHcnamesVerified(void);
 uint16_t filesystem_resolveResidentSource(uint16_t row,
                                           uint16_t *resolved_row);
 
@@ -634,9 +661,8 @@ void filesystem_clearIdentityNames(void);
  *
  * What: the load request reads root `/.hcnames` into the existing generalized
  * name cache so Menu can copy one Scene/voice name on nested Instrument Load or
- * Save entry. The update request performs the same read, replaces only the
- * Instrument row(s) selected by scene_mask/instrument_slot from committed
- * resident state, and streams the variable-length file back before callback.
+ * Save entry. Completed normal Instrument Load/Save operations publish their
+ * owned row internally through the filesystem operation that changed it.
  *
  * Why the complete file is borrowed: `.hcnames` lines are trimmed, so changing
  * one name can change its byte length and cannot safely be overwritten at a
@@ -650,10 +676,6 @@ void filesystem_clearIdentityNames(void);
 bool filesystem_requestLoadResidentInstrumentName(uint8_t scene_index,
                                                   uint8_t instrument_slot,
                                                   fs_completion_cb_t cb);
-bool filesystem_requestUpdateResidentInstrumentNames(
-    uint16_t scene_mask,
-    uint8_t instrument_slot,
-    fs_completion_cb_t cb);
 /*
  * Borrow the selected eight-cell Instrument name after either request above.
  * The pointer is valid only while HCNAMES owns the shared cache; copy it before
@@ -667,22 +689,15 @@ const char *filesystem_residentInstrumentName(uint8_t scene_index,
  * The load request mirrors Instrument menu entry: it borrows the generalized
  * cache for all 129 root HCNAMES rows so Menu can copy one resident Scene's Kit
  * name plus all six Instrument names before `/Kit/.hcindex` replaces that same
- * allocation. Menu retains those seven rows for the complete combined
- * Kit/Instrument session. Loads and saves only update the Menu scratch and an
- * accumulated dirty-Scene mask; they do not reopen HCNAMES. At session exit,
- * one update request replaces exactly the Kit row plus all six Instrument rows
- * for every bit in scene_mask from committed resident state, while preserving
- * every other logical row read from the variable-length file. A successful
- * request makes those seven rows
- * authoritative even when the source Scene's Bank-present bit is clear; this
- * prevents a valid Kit Save from serializing its new Kit name as a blank row.
- * Both requests are asynchronous, return false for busy/invalid input, and
- * allocate no additional persistent SRAM.
+ * allocation. Completed normal Kit Load/Save operations publish their seven
+ * affected rows internally before their callbacks return; Menu retains only
+ * the read-side browse session. This ownership prevents a UI boundary from
+ * becoming a second, unreliable HCNAMES writer. The request is asynchronous,
+ * returns false for busy/invalid input, and allocates no additional persistent
+ * SRAM.
  */
 bool filesystem_requestLoadResidentKitName(uint8_t scene_index,
                                            fs_completion_cb_t cb);
-bool filesystem_requestUpdateResidentKitNames(uint16_t scene_mask,
-                                              fs_completion_cb_t cb);
 /*
  * Borrow the selected eight-cell Kit name after either Kit request above.
  * The pointer is valid only while HCNAMES owns the shared cache; callers must
@@ -693,22 +708,17 @@ const char *filesystem_residentKitName(uint8_t scene_index);
 /*
  * Resident Scene name-register access.
  *
- * What: reads one requested Scene identity from root `/.hcnames`, or replaces
- * only Scene rows selected by scene_mask with one fixed eight-cell name. Why:
+ * What: reads one requested Scene identity from root `/.hcnames`. Why:
  * SceneData deliberately has no per-Scene display-name mirror; Menu needs one
- * name for one Scene Load/Save editor, while a multi-target Scene Load must
- * publish the one loaded directory name for every destination. Inputs: Scene
- * coordinate/mask, eight-cell display name for update, optional callback.
+ * name for one Scene Load/Save editor. Completed root Scene Load/Save
+ * operations publish their Scene, Kit, and Instrument rows internally before
+ * their callbacks return. Inputs: Scene coordinate and optional callback.
  * Outputs: async operations borrowing the existing 1,000-row general cache;
  * no additional cache or retained Scene-name SRAM is allocated. Affiliates:
  * Menu Scene entry and filesystem root Scene/Bank load-save state machines.
  */
 bool filesystem_requestLoadResidentSceneName(uint8_t scene_index,
                                              fs_completion_cb_t cb);
-bool filesystem_requestUpdateResidentSceneNames(
-    uint16_t scene_mask,
-    const char name[8],
-    fs_completion_cb_t cb);
 /* Borrow the requested Scene row while HCNAMES owns the shared cache. */
 const char *filesystem_residentSceneName(uint8_t scene_index);
 /*

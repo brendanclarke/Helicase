@@ -175,6 +175,43 @@ enum {
 };
 static uint8_t preset_morph_initialized = 0;
 
+static void preset_setStatus(preset_status_t next,
+                             uint8_t reentrant,
+                             fs_status_t facade_status)
+{
+    /*
+     * Publish every Preset status write together with the state a boot waiter
+     * needs to interpret it.
+     *
+     * What: assigns pm_status and appends one Q record containing the new
+     * status, completed result, pending Bank bridge, request slot, and the
+     * facade status observed at this transition. Why: main.c's pre-audio pump
+     * waits on PRESET_LOAD_IN_PROGRESS and previously had no evidence that a
+     * filesystem callback or chained settings write changed Preset state.
+     * Inputs: next status, callback-context bit, and caller-captured facade
+     * status. Output: one ordinary Preset assignment plus one logging-only
+     * ring store; no I/O, LCD work, or new storage. Affiliates:
+     * AUTOSAVE_TRACE_STAGE_PRESET_STATE, on_bank_settings_flush_complete(),
+     * and S056_BOOT_HANG_FOLLOWUP.md section 7.2.
+     */
+    if (pm_status == next)
+        return;
+    pm_status = next;
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_PRESET_STATE,
+        (uint8_t)((uint8_t)next & AUTOSAVE_TRACE_PRESET_STATUS_MASK) |
+        (pm_completed_ok
+             ? AUTOSAVE_TRACE_PRESET_FLAG_COMPLETED_OK : 0u) |
+        (reentrant ? AUTOSAVE_TRACE_PRESET_FLAG_REENTRANT : 0u),
+        ((uint32_t)pm_completed_op <<
+             AUTOSAVE_TRACE_PRESET_COMPLETED_OP_SHIFT) |
+        ((uint32_t)pm_pending_bank_op <<
+             AUTOSAVE_TRACE_PRESET_PENDING_OP_SHIFT) |
+        ((uint32_t)(pm_request_slot & 0xffu) <<
+             AUTOSAVE_TRACE_PRESET_REQUEST_SLOT_SHIFT) |
+        ((uint32_t)facade_status << AUTOSAVE_TRACE_PRESET_FSSTATUS_SHIFT));
+}
+
 preset_status_t preset_getStatus(void)
 {
     return pm_status;
@@ -231,7 +268,7 @@ uint16_t preset_getKitRequestSceneMask(void)
 
 void preset_ackStatus(void)
 {
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_completed_ok = 0u;
 }
@@ -253,6 +290,7 @@ static void preset_completeFilesystemOpWithResult(preset_op_type_t completed_op,
      * Load/Save result. Existing callers continue through the wrapper below.
      * Affiliate: on_bank_settings_flush_complete().
      */
+    fs_status_t terminal_status = filesystem_status();
     uint8_t is_test_op = (uint8_t)(completed_op == PRESET_OP_TEST_SCAN ||
                                    completed_op == PRESET_OP_TEST_FILE_LOAD ||
                                    completed_op == PRESET_OP_TEST_DIR_LOAD ||
@@ -272,10 +310,10 @@ static void preset_completeFilesystemOpWithResult(preset_op_type_t completed_op,
          * filesystem_errorCode().
          */
         pm_completed_op = completed_op;
-        pm_status = PRESET_UPDATE_READY;
+        preset_setStatus(PRESET_UPDATE_READY, 1u, terminal_status);
     } else {
         pm_completed_op = PRESET_OP_NONE;
-        pm_status = PRESET_UPDATE_READY;
+        preset_setStatus(PRESET_UPDATE_READY, 1u, terminal_status);
     }
 }
 
@@ -579,18 +617,25 @@ static void on_bank_load_complete(void)
     uint16_t completed_scene_mask;
     uint8_t scene_index;
     uint8_t load_done = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    uint8_t hcnames_verified = filesystem_lastHcnamesVerified();
 
     /*
      * Unconditional Bank Load completion witness, mirroring root Scene Load's
      * R record. A missing K proves this callback was not reached; bit 0 proves
-     * whether it observed DONE. The value preserves pm_request_slot so the
-     * record identifies the attempted Bank without adding trace state.
+     * whether it observed DONE, and bit 2 proves the filesystem's row-0
+     * HCNAMES read-back matched the staged Bank identity before this callback.
+     * The value preserves pm_request_slot so the record identifies the
+     * attempted Bank without adding trace state. The verification result is
+     * deliberately witness-only and does not gate the already-committed Bank.
      */
     autosaveTrace_record(
         AUTOSAVE_TRACE_STAGE_BANK_OP_COMPLETE,
         (uint8_t)(load_done
                       ? AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_STATUS_DONE
-                      : 0u),
+                      : 0u) |
+                  ((load_done && hcnames_verified)
+                       ? AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_HCNAMES_VERIFIED
+                       : 0u),
         (uint32_t)pm_request_slot);
 
     /*
@@ -654,17 +699,23 @@ static void on_bank_load_complete(void)
 static void on_bank_save_complete(void)
 {
     uint8_t save_done = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    uint8_t hcnames_verified = filesystem_lastHcnamesVerified();
 
     /*
      * Unconditional Bank Save completion witness. Bit 0 reports DONE and bit
-     * 1 distinguishes Save from Load; value32 is the requested Bank slot.
-     * This callback-entry record remains independent of downstream settings
-     * persistence and therefore proves whether Preset reached this boundary.
+     * 1 distinguishes Save from Load; bit 2 proves the Bank-owned row-0
+     * HCNAMES read-back matched before the callback; value32 is the requested
+     * Bank slot. This callback-entry record remains independent of downstream
+     * settings persistence and therefore proves whether Preset reached this
+     * boundary.
      */
     autosaveTrace_record(
         AUTOSAVE_TRACE_STAGE_BANK_OP_COMPLETE,
         (uint8_t)((save_done
                        ? AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_STATUS_DONE
+                       : 0u) |
+                  ((save_done && hcnames_verified)
+                       ? AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_HCNAMES_VERIFIED
                        : 0u) |
                   AUTOSAVE_TRACE_BANK_OP_COMPLETE_FLAG_KIND_SAVE),
         (uint32_t)pm_request_slot);
@@ -837,10 +888,11 @@ void preset_applyVoiceDecimationAllRuntime(uint8_t value)
 ** ----------------------------------------------------------------------- */
 void preset_init(void)
 {
-    pm_status = PRESET_IDLE;
     pm_completed_op = PRESET_OP_NONE;
+    pm_completed_ok = 0u;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_KIT;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     preset_ensureMorphInitialized();
 }
 
@@ -2050,11 +2102,11 @@ uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot)
     if (!filesystem_requestSaveInstrumentTemp(source_scene, source_slot,
                                               on_instrument_temp_save_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = source_slot;
     pm_instrument_request_scene = source_scene;
     pm_instrument_request_slot = source_slot;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     return 1u;
 }
 
@@ -2072,11 +2124,11 @@ uint8_t preset_saveInstrumentMorphTemp(uint8_t source_scene,
     if (!filesystem_requestSaveInstrumentMorphTemp(
             source_scene, source_slot, on_instrument_morph_temp_save_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = source_slot;
     pm_instrument_request_scene = source_scene;
     pm_instrument_request_slot = source_slot;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     return 1u;
 }
 
@@ -2098,12 +2150,12 @@ uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
                                               type,
                                               on_instrument_load_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = destination_slot;
     pm_instrument_request_scene = destination_scene;
     pm_instrument_request_slot = destination_slot;
     pm_instrument_request_type = type;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     return 1u;
 }
 
@@ -2124,12 +2176,12 @@ uint8_t preset_loadInstrumentMorphTemp(uint8_t destination_scene,
             destination_scene, destination_slot, type,
             on_instrument_morph_temp_load_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = destination_slot;
     pm_instrument_request_scene = destination_scene;
     pm_instrument_request_slot = destination_slot;
     pm_instrument_request_type = type;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     return 1u;
 }
 
@@ -2185,17 +2237,17 @@ uint8_t preset_loadDrumset(uint16_t presetNr, uint8_t isMorph)
     fs_completion_cb_t cb = isMorph ? on_morph_load_complete : on_kit_load_complete;
 
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = isMorph ? PRESET_REQUEST_LEGACY_MORPH : SAVE_TYPE_KIT;
     pm_kit_request_scene_mask = (uint16_t)(1u << scene_getActiveIndex());
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if ((!isMorph && filesystem_requestLoadKitForScenes(
                          presetNr,
                          (uint16_t)(1u << scene_getActiveIndex()), cb)) ||
         (isMorph && filesystem_requestLoad(type, presetNr, cb)))
         return 1;
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0;
 }
 
@@ -2215,15 +2267,15 @@ uint8_t preset_loadKitForScenes(uint16_t presetNr, uint16_t scene_mask)
      * into BankData's resident-present mask after filesystem success.
      */
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_KIT;
     pm_kit_request_scene_mask = scene_mask;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (filesystem_requestLoadKitForScenes(presetNr, scene_mask,
                                            on_kit_load_complete))
         return 1u;
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0u;
 }
 
@@ -2241,7 +2293,6 @@ uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph,
      * storage/filesystem.
      */
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = isMorph ? SAVE_TYPE_KIT_MORPH : SAVE_TYPE_KIT;
@@ -2254,6 +2305,7 @@ uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph,
      * Scene selection. No additional request-state byte is introduced.
      */
     pm_instrument_request_scene = source_scene;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (filesystem_requestSaveKitDirectory(presetNr,
                                            source_scene,
                                            preset_currentName,
@@ -2262,7 +2314,7 @@ uint8_t preset_saveDrumset(uint16_t presetNr, uint8_t isMorph,
                                                    : on_kit_save_complete)) {
         return 1u;
     }
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0u;
 }
 
@@ -2279,15 +2331,15 @@ uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask)
      * membership.
      */
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_KIT_MORPH;
     pm_kit_request_scene_mask = scene_mask;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (filesystem_requestLoadKitMorphForScenes(presetNr, scene_mask,
                                                 on_kit_morph_load_complete))
         return 1u;
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0u;
 }
 
@@ -2302,15 +2354,15 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask)
      * may replace settings, pattern, effect state, and the embedded Kit.
      */
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_SCENE;
     pm_kit_request_scene_mask = scene_mask;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (filesystem_requestLoadSceneForScenes(presetNr, scene_mask,
                                              on_scene_load_complete))
         return 1u;
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0u;
 }
 
@@ -2325,7 +2377,6 @@ uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene)
      * repaints/clears UI busy state.
      */
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_SCENE;
@@ -2338,13 +2389,14 @@ uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene)
      * not a resident index. Affiliates: on_scene_save_complete().
      */
     pm_instrument_request_scene = source_scene;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (filesystem_requestSaveSceneDirectory(presetNr,
                                              source_scene,
                                              preset_currentName,
                                              on_scene_save_complete)) {
         return 1u;
     }
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0u;
 }
 
@@ -2360,15 +2412,15 @@ uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask)
      * or start fallback.
      */
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_BANK;
     pm_kit_request_scene_mask = scene_mask;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (filesystem_requestLoadBank(presetNr, scene_mask,
                                    on_bank_load_complete))
         return 1u;
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0u;
 }
 
@@ -2384,9 +2436,8 @@ uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
      * filesystem writes bankset.bcg and one Bank-local child folder per
      * selected bit. source_scene remains the active Scene for compatibility
      * validation, but the mask determines the actual child set.
-     */
+    */
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_BANK;
@@ -2400,6 +2451,7 @@ uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
      * Affiliate: pm_kit_request_scene_mask's existing immutable-mask role.
      */
     pm_kit_request_scene_mask = scene_mask;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (filesystem_requestSaveBank(presetNr,
                                    source_scene,
                                    preset_currentName,
@@ -2407,7 +2459,7 @@ uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
                                    on_bank_save_complete)) {
         return 1u;
     }
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0u;
 }
 
@@ -2454,12 +2506,12 @@ uint8_t preset_loadFirstAvailableSceneOrKit(void)
 uint8_t preset_loadGlobals(void)
 {
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_GLO;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (!filesystem_requestLoad(FS_FILE_SETTINGS, 0, on_globals_load_complete)) {
-        pm_status = PRESET_IDLE;
+        preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
         return 0u;
     }
     return 1u;
@@ -2476,12 +2528,12 @@ uint8_t preset_loadGlobals(void)
 uint8_t preset_saveGlobals(void)
 {
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_GLO;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (!filesystem_requestSave(FS_FILE_SETTINGS, 0, on_globals_save_complete)) {
-        pm_status = PRESET_IDLE;
+        preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
         return 0u;
     }
     return 1u;
@@ -2505,10 +2557,10 @@ char* preset_loadName(uint16_t presetNr, uint8_t what)
 
     memcpy(preset_currentName, "        ", 8);
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     if (!filesystem_requestLoadName(type, presetNr, on_name_load_complete))
-        pm_status = PRESET_IDLE;
+        preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return preset_currentName;
 }
 
@@ -2563,7 +2615,6 @@ uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
                                           on_instrument_load_complete)) {
         return 0u;
     }
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = destination_slot;
     pm_request_type = SAVE_TYPE_KIT;
@@ -2572,6 +2623,7 @@ uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
     pm_instrument_request_type = type;
     pm_instrument_request_index = browser_index;
     pm_kit_request_scene_mask = valid_mask;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     return 1u;
 }
 
@@ -2594,7 +2646,6 @@ uint8_t preset_saveInstrument(uint8_t source_scene,
                                           on_instrument_save_complete)) {
         return 0u;
     }
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = source_slot;
     pm_request_type = SAVE_TYPE_KIT;
@@ -2602,6 +2653,7 @@ uint8_t preset_saveInstrument(uint8_t source_scene,
     pm_instrument_request_slot = source_slot;
     pm_instrument_request_type = INSTRUMENT_TYPE_UNKNOWN;
     pm_instrument_request_index = 0u;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     return 1u;
 }
 
@@ -2628,7 +2680,6 @@ uint8_t preset_saveInstrumentMorph(uint8_t source_scene,
             on_instrument_morph_save_complete)) {
         return 0u;
     }
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = source_slot;
     pm_request_type = SAVE_TYPE_KIT_MORPH;
@@ -2636,6 +2687,7 @@ uint8_t preset_saveInstrumentMorph(uint8_t source_scene,
     pm_instrument_request_slot = source_slot;
     pm_instrument_request_type = INSTRUMENT_TYPE_UNKNOWN;
     pm_instrument_request_index = 0u;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     return 1u;
 }
 
@@ -2667,7 +2719,6 @@ uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
                                           on_instrument_morph_load_complete)) {
         return 0u;
     }
-    pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = destination_slot;
     pm_request_type = SAVE_TYPE_KIT_MORPH;
@@ -2675,6 +2726,7 @@ uint8_t preset_loadInstrumentMorph(uint8_t destination_scene,
     pm_instrument_request_slot = destination_slot;
     pm_instrument_request_type = type;
     pm_instrument_request_index = browser_index;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     return 1u;
 }
 
@@ -2692,7 +2744,7 @@ uint8_t preset_scanTestFiles(void)
     filesystem_ack();
     if (!filesystem_requestScanTestFiles(on_test_scan_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_type = SAVE_TYPE_FILE;
     pm_request_slot = 0u;
@@ -2704,7 +2756,7 @@ uint8_t preset_scanTestDirs(void)
     filesystem_ack();
     if (!filesystem_requestScanTestDirs(on_test_scan_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_type = SAVE_TYPE_DIR;
     pm_request_slot = 0u;
@@ -2717,7 +2769,7 @@ uint8_t preset_loadTestFile(const char *display_name)
     if (!filesystem_requestLoadTestFile(display_name,
                                         on_test_file_load_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_type = SAVE_TYPE_FILE;
     pm_request_slot = 0u;
@@ -2730,7 +2782,7 @@ uint8_t preset_loadTestDir(const char *display_name)
     if (!filesystem_requestLoadTestDir(display_name,
                                        on_test_dir_load_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_type = SAVE_TYPE_DIR;
     pm_request_slot = 0u;
@@ -2743,7 +2795,7 @@ uint8_t preset_saveTestFile(const char *display_name)
     if (!filesystem_requestSaveTestFile(display_name,
                                         on_test_file_save_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_type = SAVE_TYPE_FILE;
     pm_request_slot = 0u;
@@ -2756,7 +2808,7 @@ uint8_t preset_saveTestDir(const char *display_name)
     if (!filesystem_requestSaveTestDir(display_name,
                                        on_test_dir_save_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_type = SAVE_TYPE_DIR;
     pm_request_slot = 0u;
@@ -2769,7 +2821,7 @@ uint8_t preset_saveTestSimpleDir(const char *display_name)
     if (!filesystem_requestSaveTestSimpleDir(display_name,
                                              on_test_dir_save_complete))
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_type = SAVE_TYPE_SIMPLE_DIR;
     pm_request_slot = 0u;
@@ -2802,25 +2854,25 @@ uint8_t preset_saveTestSimpleDir(const char *name) { (void)name; return 0u; }
 uint8_t preset_loadPattern(uint8_t presetNr)
 {
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = PRESET_REQUEST_LEGACY_PATTERN;
     if (filesystem_requestLoad(FS_FILE_PATTERN, presetNr, on_pattern_load_complete))
         return 1;
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0;
 }
 
 void preset_savePattern(uint8_t presetNr)
 {
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = PRESET_REQUEST_LEGACY_PATTERN;
     if (!filesystem_requestSave(FS_FILE_PATTERN, presetNr, on_pattern_save_complete))
-        pm_status = PRESET_IDLE;
+        preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
 }
 
 void preset_saveAll(uint8_t presetNr, uint8_t isAll)
@@ -2829,13 +2881,13 @@ void preset_saveAll(uint8_t presetNr, uint8_t isAll)
     fs_completion_cb_t cb = isAll ? on_all_save_complete : on_performance_save_complete;
 
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = isAll ? PRESET_REQUEST_LEGACY_ALL :
                               PRESET_REQUEST_LEGACY_PERFORMANCE;
     if (!filesystem_requestSave(type, presetNr, cb))
-        pm_status = PRESET_IDLE;
+        preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
 }
 
 uint8_t preset_loadAll(uint8_t presetNr, uint8_t isAll)
@@ -2844,14 +2896,14 @@ uint8_t preset_loadAll(uint8_t presetNr, uint8_t isAll)
     fs_completion_cb_t cb = isAll ? on_all_load_complete : on_performance_load_complete;
 
     filesystem_ack();
-    pm_status = PRESET_LOAD_IN_PROGRESS;
+    preset_setStatus(PRESET_LOAD_IN_PROGRESS, 0u, filesystem_status());
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = isAll ? PRESET_REQUEST_LEGACY_ALL :
                               PRESET_REQUEST_LEGACY_PERFORMANCE;
     if (filesystem_requestLoad(type, presetNr, cb))
         return 1;
-    pm_status = PRESET_IDLE;
+    preset_setStatus(PRESET_IDLE, 0u, filesystem_status());
     return 0;
 }
 

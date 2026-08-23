@@ -11,10 +11,23 @@ This remains a linked-image inventory: sizes come from
 estimates. The earlier Session 048 figures retained below are historical
 baseline notes, not the current allocation total.
 
+The final clean Session 056 boot-hang follow-up link on 2026-08-23 reports
+`text=382,356`, `data=400`, `bss=94,744`; `boot_trace_last_heartbeat_tick`
+is confirmed as exactly 2 B by `arm-none-eabi-nm`. The detailed section rows
+below remain the Session 051 baseline except for that explicitly recorded
+follow-up allocation.
+
+Session 056's boot-hang follow-up adds exactly one two-byte logging-only
+allocation, `boot_trace_last_heartbeat_tick` in `main.c`. It exists only when
+`DEV_MODE_LOGGING == 1`, lives in normal SRAM1 for one boot attempt, and is
+owned by `main.c`; the Z/Q trace records themselves reuse the existing ring.
+This is the only new retained state in that follow-up and remains within the
+explicitly acknowledged 2-byte diagnostic scope.
+
 Session 052 adds no retained allocation: the Bank present-mask witness reuses
 the existing eight-byte trace record/ring, and the no-op dirty-mark fallback
-uses only the existing canonical mutation mask. The linked totals below remain
-the Session 051 baseline until the ARM toolchain is available for regeneration.
+uses only the existing canonical mutation mask. The detailed rows below remain
+the Session 051 baseline; the current follow-up link summary is recorded above.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -84,6 +97,7 @@ boundary `0x08080000`. `build/lxr02.bin` is 376,992 B.
 | AutoSave trace cursors/cadence/witness latches | 12 B | `DEV_MODE_LOGGING`-only: three 16-bit ring cursors/drop count, 16-bit flush cadence, and 4 B of W/F/G observer latches |
 | `drumset_apply_stall_ticks` | 2 B | Normal SRAM1 bound for a continuously non-quiet Scene post-load voice apply |
 | `fs_hcprms_boot_capsule` | 64 B | `DEV_MODE_LOGGING`-only frozen eight-record ASENSURE timeout snapshot; owned by `filesystem.c` for one boot attempt |
+| `boot_trace_last_heartbeat_tick` | 2 B | `DEV_MODE_LOGGING`-only boot-ladder heartbeat cadence tick; one boot attempt, owned by `main.c` |
 | `usb_MidiMessages` | 2,048 B | USB MIDI message storage |
 | `slider_lut` | 4,096 B | 1,024 native `float` attenuator nodes; lookup is `raw >> 2`, without interpolation |
 | `parameter_values` | 384 B | Legacy MIDI parameter cells |

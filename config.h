@@ -119,6 +119,23 @@
 #define BOOT_FILESYSTEM_TIMEOUT_MS 20000u
 
 /*
+ * Independent deadlines for the foreground boot pumps.
+ *
+ * What: bounds a main.c while-loop from its own entry rather than relying on
+ * filesystem_bootLoggingTimedOut(), whose operation arm is consumed when a
+ * Bank Load reaches DONE. Why: the Session 056 boot hang spun forever after
+ * that arm was gone, so the pump needed an exit that belongs to the pump
+ * itself. Ordinary filesystem-status pumps use the same conservative 20 s
+ * envelope as one armed filesystem operation; the Preset completion pump uses
+ * 15 s because it waits on a higher-level callback and must fail visibly while
+ * still allowing a slow healthy Bank chain to finish. Both values remain well
+ * below the 16-bit time_sysTick half-range. Affiliates: main.c's boot ladder,
+ * AUTOSAVE_TRACE_STAGE_BOOT_LADDER, and S056_BOOT_HANG_FOLLOWUP.md §7.5.
+ */
+#define BOOT_FILESYSTEM_PUMP_WAIT_MS BOOT_FILESYSTEM_TIMEOUT_MS
+#define BOOT_PRESET_WAIT_MS          15000u
+
+/*
  * DEV_LOGGING_IWDG: catch a genuine pre-audio hard lockup that the
  * cooperative BOOT_FILESYSTEM_TIMEOUT_MS deadline above cannot see -- a raw
  * blocking call (SD_init()'s command loop, the bit-bang SPI byte clocking,
@@ -171,7 +188,7 @@
  * Enable it deliberately, for a hang-hunting session, not as a standing
  * default.
  */
-#define DEV_LOGGING_IWDG 0
+#define DEV_LOGGING_IWDG 1
 
 /*
  * Software ceiling, in milliseconds, on how long the pre-audio boot window
@@ -337,6 +354,18 @@
  * debounce or durability policy, and applies solely when DEV_MODE_LOGGING is 1.
  */
 #define AUTOSAVE_TRACE_FLUSH_INTERVAL_MS 500u
+
+/*
+ * Boot-ladder heartbeat cadence for the logging-only Z witness.
+ *
+ * What: emits at most one in-memory heartbeat per 250 ms while a blocking boot
+ * pump is still waiting. Why: the existing trace append runs every 500 ms, so
+ * this guarantees a heartbeat can reach each flush batch without allowing a
+ * healthy boot to flood the 2,048-record ring. This is observability only and
+ * never adds a delay or filesystem operation. Affiliates: main.c's
+ * boot_traceWaitHeartbeat() and S056_BOOT_HANG_FOLLOWUP.md §7.1.
+ */
+#define AUTOSAVE_TRACE_BOOT_HEARTBEAT_MS 250u
 
 /* -----------------------------------------------------------------------
 ** Display — WS0010 OLED 16×2, 4-bit parallel

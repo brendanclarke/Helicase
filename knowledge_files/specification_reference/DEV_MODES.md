@@ -197,7 +197,7 @@ stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
 Integer fields are little-endian. Stage bytes are uppercase
-`D I J N L H R K W F G B S A V M C P T X O E` and their meanings/values are owned
+`D I J N L H R K U Z Q W F G B S A V M C P T X O E` and their meanings/values are owned
 by `AutosaveTrace.h`. `X`, `O`, and `E` were added in Session 054 while
 chasing the recursive-delete `ScnS05` defect (see
 `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`); a fourth stage,
@@ -279,10 +279,12 @@ witness. The Bank loader freezes the validated child Scene name before the
 long shared payload phase and publishes HCNAMES from that snapshot. `H` fires
 only when the old shared `op_scene_display_name` differs at publication time;
 the published row still uses the snapshot, so this record cannot itself mean
-that the card was corrupted. flags is reserved and always zero. value32 packs
-the child slot in bits 0..7, the snapshot's first name byte in bits 8..15, and
-the live/drifted first name byte in bits 16..23. See
-`S056_NAMES_CORRUPTION.md`.
+that the card was corrupted. flags is reserved and always zero for this legacy
+meaning. New nonzero H flags are refusal witnesses: bit 0 means a name overlay
+was rejected because the shared cache was not in HCNAMES mode; bit 1 means a
+source stage was rejected. Those records pack the row in value bits 0..15 and
+the observed cache kind or requested source in bits 16..31. See
+`S056_HCNAMES_FOLLOW_UP.md` §11.4 and `S056_NAMES_CORRUPTION.md`.
 
 `R` is the root Scene Load completion witness: it is emitted at callback entry;
 flag bit 0 reports that filesystem status was `DONE`, and the value is the
@@ -300,13 +302,47 @@ payload offset (10) in bits 0..15. It is diagnostic-only and uses no new RAM.
 
 `K` is the Session 056 unconditional Bank Load/Save completion witness. Flag
 bit 0 reports whether the Preset callback observed `FS_STATUS_DONE`; bit 1
-selects Load (0) versus Save (1). The value is the target Bank library slot.
+selects Load (0) versus Save (1); bit 2 reports that the Bank-owned row-0
+HCNAMES read-back matched the staged name/source pair. The value is the target
+Bank library slot. A clear VERIFIED bit is intentionally ambiguous: the probe
+may have seen a mismatch, failed to reopen the register, or failed while
+reading it. It never means the Bank operation failed; the probe runs after the
+payload and register write. Treat a clear bit as a request to inspect the card
+capture, not as a payload fault.
 A missing `K` proves `on_bank_load_complete()`/
 `on_bank_save_complete()` was not reached, while a `K` with bit 0 clear proves
 the callback observed a terminal error. Successful Bank Load/Save callbacks
 also chain one immediate `FS_INTERNAL_OP_SAVE_GLOBALS` operation before Menu
 unlock, so `settings.cfg` has passed its own final flush at the completion
 boundary. This does not change the AutoSave parameter-record debounce.
+
+`U` is the generic HCNAMES publication witness emitted after a filesystem-owned
+Scene, Kit, or Instrument Load/Save update closes its read-back probe. Flag bit
+0 reports the original operation remained `FS_STATUS_DONE`; bit 1 reports the
+probe row matched the staged cache/source pair; bits 2..3 classify Scene, Kit,
+or Instrument rows. The value packs the lowest affected probe row in bits
+0..15 and the destination Scene mask in bits 16..31. A mismatch, register
+reopen failure, or read-back failure is witnessed as VERIFIED clear, not
+promoted to a payload failure. This is the generic counterpart to `K` and
+enforces the publication ownership rule: the filesystem operation that changed
+identity publishes every affected row before its callback returns; Menu only
+reads HCNAMES for browsing.
+
+`Z` is the pre-audio boot-ladder witness. Its flags select ENTER, EXIT,
+HEARTBEAT, or ABORT and its site id follows the numbered boot stages in
+`main.c`; the value carries the public filesystem operation, private phase,
+caller predicate, and facade status. HEARTBEAT is emitted from a waiting pump
+every 250 ms and is flushed through the existing trace writer. The decoder
+reports any site that entered without a matching EXIT or ABORT. `Q` is the
+Preset status-transition witness: it records the new Preset status, completion
+result, pending Bank bridge, request slot, facade status, and whether the
+transition happened from a filesystem completion callback. Both stages are
+file-only timing-neutral diagnostics; `DEV_MODE_DIAGNOSTIC` is not a substitute
+because LCD waits perturb the boot timing under investigation. `Z` heartbeats
+are appended only while the filesystem facade is idle. A pump that waits with
+the facade BUSY buffers its heartbeats in the RAM ring until the operation
+reaches a terminal state; the tick values remain correct, but the records
+arrive in one batch rather than streaming.
 
 The 2026-08-16 root-Scene hardware fixture is the reference example for the
 terminal publication chain: Scene 15 loaded root Scene 024 and produced

@@ -107,6 +107,9 @@ STAGE_ENUM = {
     "T": "AUTOSAVE_TRACE_STAGE_TERMINAL",
     "R": "AUTOSAVE_TRACE_STAGE_SCENE_LOAD_COMPLETE",
     "K": "AUTOSAVE_TRACE_STAGE_BANK_OP_COMPLETE",
+    "U": "AUTOSAVE_TRACE_STAGE_NAME_PUBLISH",
+    "Z": "AUTOSAVE_TRACE_STAGE_BOOT_LADDER",
+    "Q": "AUTOSAVE_TRACE_STAGE_PRESET_STATE",
     "W": "AUTOSAVE_TRACE_STAGE_WRITER_SUPPRESSED",
     "F": "AUTOSAVE_TRACE_STAGE_TRACE_SUPPRESSED",
     "G": "AUTOSAVE_TRACE_STAGE_TRACE_DROPPED",
@@ -133,6 +136,9 @@ STAGE_PRODUCER = {
     "T": "filesystem_autosaveWriterCompleted()",
     "R": "on_scene_load_complete()",
     "K": "on_bank_load_complete() / on_bank_save_complete()",
+    "U": "filesystem_residentNames_tick() generic HCNAMES proof",
+    "Z": "main.c pre-audio boot ladder",
+    "Q": "preset_setStatus()",
     "W": "filesystem_autosaveWriterSchedule_tick()",
     "F": "filesystem_autosaveTraceFlushSchedule_tick() / "
          "filesystem_autosaveTraceFlushCompleted()",
@@ -327,6 +333,77 @@ ENTRY_PHASES = {
     9: "index complete",
 }
 
+BOOT_EVENTS = {
+    0: "ENTER",
+    1: "EXIT",
+    2: "HEARTBEAT",
+    3: "ABORT",
+}
+
+# fs_boot_diag_op_t (filesystem.h), returned by filesystem_getBootDiagnostic().
+# This is deliberately separate from fs_internal_op_t: the boot accessor
+# exposes this compact public enum, not the filesystem.c internal-operation
+# enum used by E records.
+BOOT_OPS = {
+    0: "OTHER",
+    1: "REPAIR_NAMES",
+    2: "LOAD_BANK",
+    3: "LOAD_SCENE",
+    4: "LOAD_KIT",
+    5: "FLUSH",
+}
+
+AUTOSAVE_TRACE_BOOT_EVENT_MASK = 0x03
+AUTOSAVE_TRACE_BOOT_EVENT_ENTER = 0
+AUTOSAVE_TRACE_BOOT_EVENT_EXIT = 1
+AUTOSAVE_TRACE_BOOT_EVENT_HEARTBEAT = 2
+AUTOSAVE_TRACE_BOOT_EVENT_ABORT = 3
+AUTOSAVE_TRACE_BOOT_SITE_SHIFT = 2
+AUTOSAVE_TRACE_BOOT_SITE_MASK = 0x1F << AUTOSAVE_TRACE_BOOT_SITE_SHIFT
+AUTOSAVE_TRACE_PRESET_STATUS_MASK = 0x0F
+AUTOSAVE_TRACE_PRESET_FLAG_COMPLETED_OK = 1 << 4
+AUTOSAVE_TRACE_PRESET_FLAG_REENTRANT = 1 << 5
+
+BOOT_SITES = {
+    1: "mount",
+    2: "globals",
+    3: "Kit scan",
+    4: "Kit index",
+    5: "Scene scan",
+    6: "Scene index",
+    7: "Bank scan",
+    8: "Bank index",
+    9: "Instrument indexes",
+    10: "Bank index reload",
+    11: "fallback index/load",
+    12: "Preset completion",
+    14: "pre-audio complete",
+}
+
+BOOT_FS_STATUS = {
+    0: "IDLE",
+    1: "BUSY",
+    2: "DONE",
+    3: "ERROR",
+}
+
+PRESET_STATUS = {
+    0: "IDLE",
+    1: "LOAD_IN_PROGRESS",
+    2: "UPDATE_READY",
+}
+
+PRESET_OPS = [
+    "NONE", "KIT_LOAD", "MORPH_LOAD", "GLOBALS_LOAD", "NAME_LOAD",
+    "GLOBALS_SAVE", "PATTERN_LOAD", "PATTERN_SAVE", "ALL_LOAD", "ALL_SAVE",
+    "PERFORMANCE_LOAD", "PERFORMANCE_SAVE", "INSTRUMENT_LOAD",
+    "INSTRUMENT_SAVE", "INSTRUMENT_TEMP_SAVE", "INSTRUMENT_MORPH_TEMP_SAVE",
+    "KIT_SAVE", "KIT_MORPH_LOAD", "KIT_MORPH_SAVE", "INSTRUMENT_MORPH_LOAD",
+    "INSTRUMENT_MORPH_TEMP_LOAD", "INSTRUMENT_MORPH_SAVE", "SCENE_LOAD",
+    "SCENE_SAVE", "BANK_LOAD", "BANK_SAVE", "TEST_SCAN", "TEST_FILE_LOAD",
+    "TEST_DIR_LOAD", "TEST_FILE_SAVE", "TEST_DIR_SAVE",
+]
+
 # AutoSave payload geometry (payload-relative), from Autosave.h/AUTOSAVE.md.
 BANK_BYTES = 128
 SCENE_BYTES = 1920
@@ -480,12 +557,23 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         detail = (f"{enum_name} via {producer}: {kind_name}, Scene{scene}; "
                   f"TRACKING_ENABLED={int(tracking)}")
     elif ch == "H":
-        scene = value & 0xFF
-        snapshot_first = (value >> 8) & 0xFF
-        live_first = (value >> 16) & 0xFF
-        detail = (f"{enum_name} via {producer}: Bank child {scene} shared "
-                  f"Scene-name scratch drift; snapshot_first=0x{snapshot_first:02x} "
-                  f"live_first=0x{live_first:02x}; HCNAMES used snapshot")
+        if flags & 0x01:
+            row = value & 0xFFFF
+            cache_kind = (value >> 16) & 0xFFFF
+            detail = (f"{enum_name} via {producer}: HCNAMES overlay refused; "
+                      f"row={row}, observed cache kind={cache_kind}")
+        elif flags & 0x02:
+            row = value & 0xFFFF
+            source = (value >> 16) & 0xFFFF
+            detail = (f"{enum_name} via {producer}: HCNAMES source stage "
+                      f"refused; row={row}, requested source=0x{source:04x}")
+        else:
+            scene = value & 0xFF
+            snapshot_first = (value >> 8) & 0xFF
+            live_first = (value >> 16) & 0xFF
+            detail = (f"{enum_name} via {producer}: Bank child {scene} shared "
+                      f"Scene-name scratch drift; snapshot_first=0x{snapshot_first:02x} "
+                      f"live_first=0x{live_first:02x}; HCNAMES used snapshot")
     elif ch == "R":
         done = bool(flags & 0x01)
         detail = (f"{enum_name} via {producer}: filesystem status "
@@ -494,9 +582,58 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
     elif ch == "K":
         done = bool(flags & 0x01)
         is_save = bool(flags & 0x02)
+        verified = bool(flags & 0x04)
+        proof = ("confirmed staged row-0 match" if verified else
+                 "probe did not confirm: mismatch, reopen failure, or read failure -- "
+                 "not an operation failure")
         detail = (f"{enum_name} via {producer}: Bank "
                   f"{'Save' if is_save else 'Load'} callback observed "
-                  f"{'DONE' if done else 'not DONE'}; target slot {value}")
+                  f"{'DONE' if done else 'not DONE'}; target slot {value}; "
+                  f"HCNAMES_VERIFIED={int(verified)} ({proof})")
+    elif ch == "U":
+        done = bool(flags & 0x01)
+        verified = bool(flags & 0x02)
+        row = value & 0xFFFF
+        mask = (value >> 16) & 0xFFFF
+        class_id = (flags >> 2) & 0x03
+        class_name = {0: "Scene", 1: "Kit", 2: "Instrument"}.get(
+            class_id, f"unknown class {class_id}")
+        proof = ("confirmed staged row match" if verified else
+                 "probe did not confirm: mismatch, reopen failure, or read failure -- "
+                 "not an operation failure")
+        detail = (f"{enum_name} via {producer}: {class_name} publication; "
+                  f"status={'DONE' if done else 'not DONE'}, "
+                  f"HCNAMES_VERIFIED={int(verified)} ({proof}), probe_row={row}, "
+                  f"destination_mask=0x{mask:04x} {scene_mask_text(mask)}")
+    elif ch == "Z":
+        event = flags & AUTOSAVE_TRACE_BOOT_EVENT_MASK
+        site = (flags & AUTOSAVE_TRACE_BOOT_SITE_MASK) >> AUTOSAVE_TRACE_BOOT_SITE_SHIFT
+        op = value & 0xFF
+        phase = (value >> 8) & 0xFF
+        predicate = (value >> 16) & 0xFF
+        fs_status = (value >> 24) & 0xFF
+        op_name = BOOT_OPS.get(op, f"op {op}")
+        detail = (f"{enum_name} via {producer}: boot site={site} "
+                  f"({BOOT_SITES.get(site, 'reserved')}) "
+                  f"{BOOT_EVENTS.get(event, f'event {event}')}; "
+                  f"op={op_name}, phase={phase}, "
+                  f"predicate={predicate}, fs={BOOT_FS_STATUS.get(fs_status, fs_status)}")
+    elif ch == "Q":
+        status_id = flags & AUTOSAVE_TRACE_PRESET_STATUS_MASK
+        completed_ok = bool(flags & AUTOSAVE_TRACE_PRESET_FLAG_COMPLETED_OK)
+        reentrant = bool(flags & AUTOSAVE_TRACE_PRESET_FLAG_REENTRANT)
+        completed_op = value & 0xFF
+        pending_op = (value >> 8) & 0xFF
+        request_slot = (value >> 16) & 0xFF
+        fs_status = (value >> 24) & 0xFF
+        detail = (f"{enum_name} via {producer}: status="
+                  f"{PRESET_STATUS.get(status_id, status_id)}, "
+                  f"completed_ok={int(completed_ok)}, "
+                  f"reentrant={int(reentrant)}, "
+                  f"completed_op={PRESET_OPS[completed_op] if completed_op < len(PRESET_OPS) else completed_op}, "
+                  f"pending_bank_op={PRESET_OPS[pending_op] if pending_op < len(PRESET_OPS) else pending_op}, "
+                  f"request_slot={request_slot}, "
+                  f"fs={BOOT_FS_STATUS.get(fs_status, fs_status)}")
     elif ch == "S":
         detail = (f"{enum_name} via {producer}: writer armed once; "
                   f"five-second debounce deadline tick={value}")
@@ -660,6 +797,7 @@ def decode_trace(data: bytes) -> list[str]:
              f"{len(data) // RECORD_BYTES} records of "
              f"{RECORD_BYTES} bytes each"]
     count = Counter()
+    boot_events = []
     for index in range(0, len(data) - len(data) % RECORD_BYTES,
                        RECORD_BYTES):
         rec = data[index:index + RECORD_BYTES]
@@ -669,6 +807,13 @@ def decode_trace(data: bytes) -> list[str]:
         value = u32(rec[4:8])
         key = chr(stage) if 32 <= stage < 127 else f"0x{stage:02x}"
         count[key] += 1
+        if key == "Z":
+            boot_events.append((
+                (flags & AUTOSAVE_TRACE_BOOT_SITE_MASK) >>
+                    AUTOSAVE_TRACE_BOOT_SITE_SHIFT,
+                flags & AUTOSAVE_TRACE_BOOT_EVENT_MASK,
+                tick,
+            ))
         lines.append(trace_record_text(index // RECORD_BYTES, stage, flags,
                                        tick, value))
     if len(data) % RECORD_BYTES:
@@ -676,6 +821,19 @@ def decode_trace(data: bytes) -> list[str]:
                      f"{data[-(len(data) % RECORD_BYTES):].hex(' ')}")
     lines.append("stage totals: " + ", ".join(
         f"{key}={value}" for key, value in sorted(count.items())))
+    open_sites = set()
+    for site, event, _tick in boot_events:
+        if event == AUTOSAVE_TRACE_BOOT_EVENT_ENTER:
+            open_sites.add(site)
+        elif event in (AUTOSAVE_TRACE_BOOT_EVENT_EXIT,
+                       AUTOSAVE_TRACE_BOOT_EVENT_ABORT):
+            open_sites.discard(site)
+    if open_sites:
+        lines.append("BOOT LADDER INCOMPLETE: " + ", ".join(
+            f"site {site} ({BOOT_SITES.get(site, 'reserved')})"
+            for site in sorted(open_sites)))
+    elif boot_events:
+        lines.append("BOOT LADDER: all observed sites exited or aborted")
     return lines
 
 

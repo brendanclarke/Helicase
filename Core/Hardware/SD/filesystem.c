@@ -1201,6 +1201,7 @@ static void filesystem_autosaveTraceFlushCompleted(void);
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
 static void filesystem_autosaveSetupCompleted(void);
 static void filesystem_clearResidentSourceDirtyFlags(void);
+static void filesystem_beginResidentNamePublish(fs_internal_op_t publish_op);
 static uint8_t filesystem_residentNameIsBlank(const char *name);
 static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t cap,
@@ -4547,12 +4548,45 @@ uint8_t filesystem_setResidentSource(uint16_t row, uint16_t source)
      * load source with stale on-card provenance.  The physical file changes
      * only through the existing close/sync state machine.
      */
-    if (!filesystem_residentSourceValid(row, source))
+    if (!filesystem_residentSourceValid(row, source)) {
+        /*
+         * Make a rejected provenance stage visible in the same HCNAMES
+         * diagnostic stream as a rejected name overlay.
+         *
+         * What: records the logical row and unmasked requested source before
+         * returning the existing failure result. Why: callers historically
+         * discarded this boolean, so a malformed coordinate could silently
+         * leave a newly committed identity paired with its old provenance.
+         * Inputs: the caller's row/source; output: one H record only, with no
+         * state or allocation change. Affiliate: AutosaveTrace.h's H refusal
+         * layout and S056_HCNAMES_FOLLOW_UP.md section 11.4.
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_NAME_SCRATCH_DRIFT,
+            AUTOSAVE_TRACE_NAME_SCRATCH_FLAG_SOURCE_STAGE_REFUSED,
+            ((uint32_t)row << AUTOSAVE_TRACE_NAME_SCRATCH_ROW_SHIFT) |
+            ((uint32_t)source << AUTOSAVE_TRACE_NAME_SCRATCH_DETAIL_SHIFT));
         return 0u;
+    }
     fs_resident_source[row] = (uint16_t)(
         (source & FS_RESIDENT_SOURCE_VALUE_MASK) |
         FS_RESIDENT_SOURCE_DIRTY_FLAG);
     return 1u;
+}
+
+uint8_t filesystem_lastHcnamesVerified(void)
+{
+    /*
+     * Return the last Bank-owned row-0 read-back result.
+     *
+     * Inputs: the existing operation-local probe byte retained after Bank
+     * Load/Save read-back close (phase 97 for Load, phase 92 for Save).
+     * Output: one boolean for Preset's K callback. This
+     * accessor performs no I/O and does not allocate or clear the probe; the
+     * next Bank operation resets it before its own read-back. Affiliate:
+     * on_bank_load_complete()/on_bank_save_complete() and section 11.3.
+     */
+    return (uint8_t)(op_hcnames_probe_matches != 0u);
 }
 
 uint16_t filesystem_resolveResidentSource(uint16_t row,
@@ -4718,6 +4752,21 @@ static void filesystem_cacheResidentName(uint16_t row, const char *name)
      */
     if (row >= FS_RESIDENT_NAMES_ROW_COUNT ||
         fs_list_cache_kind != FS_NAME_CACHE_HCNAMES) {
+        /*
+         * A refused overlay is a publication loss, not an ignorable no-op.
+         *
+         * What: records the requested row and live cache domain before the
+         * existing early return. Why: a caller can otherwise report success
+         * while the writer later streams the old row unchanged. Inputs are
+         * the row and cache tag; output is one H record and no cache mutation.
+         * Affiliate: the HCNAMES refusal layout in AutosaveTrace.h.
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_NAME_SCRATCH_DRIFT,
+            AUTOSAVE_TRACE_NAME_SCRATCH_FLAG_OVERLAY_REFUSED,
+            ((uint32_t)row << AUTOSAVE_TRACE_NAME_SCRATCH_ROW_SHIFT) |
+            ((uint32_t)fs_list_cache_kind <<
+             AUTOSAVE_TRACE_NAME_SCRATCH_DETAIL_SHIFT));
         return;
     }
     memset(fs_list_cache_name[row], 0, sizeof(fs_list_cache_name[row]));
@@ -4856,6 +4905,165 @@ static void filesystem_cacheCurrentResidentSceneNames(void)
         if (row < FS_RESIDENT_NAMES_ROW_COUNT)
             filesystem_cacheResidentName(row, op_scene_display_name);
     }
+}
+
+static uint16_t filesystem_residentPublishMask(void)
+{
+    /*
+     * Select the immutable destination mask owned by the active HCNAMES
+     * publisher. Scene publication keeps its original Scene mask even after
+     * the Kit-family overlay reuses op_kit_load_scene_mask.
+     */
+    if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
+        return op_scene_load_scene_mask;
+    return op_kit_load_scene_mask;
+}
+
+static uint16_t filesystem_residentPublishProbeRow(void)
+{
+    uint16_t mask = filesystem_residentPublishMask();
+    uint8_t scene_index;
+
+    /*
+     * Choose the lowest affected logical row for the generic read-back probe.
+     * Inputs are the existing operation masks and Instrument destination slot;
+     * output is a fixed HCNAMES row or the row-count sentinel for invalid
+     * state. No coordinate is retained in new storage.
+     */
+    for (scene_index = 0u;
+         scene_index < STORAGE_BANK_SCENE_MAX_SLOTS;
+         scene_index++) {
+        if ((mask & (uint16_t)(1u << scene_index)) == 0u)
+            continue;
+        if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
+            return filesystem_residentSceneRow(scene_index);
+        if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
+            return filesystem_residentKitRow(scene_index);
+        return filesystem_residentInstrumentRow(scene_index,
+                                                (uint8_t)op_slot);
+    }
+    return FS_RESIDENT_NAMES_ROW_COUNT;
+}
+
+static uint8_t filesystem_residentPublishClass(void)
+{
+    if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
+        return AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_KIT;
+    if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT)
+        return AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_INSTRUMENT;
+    return AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_SCENE;
+}
+
+static uint8_t filesystem_residentRowMatchesCache(uint16_t row,
+                                                  const char *line)
+{
+    const char *tab;
+    const char *cache_name;
+    uint16_t source;
+    uint8_t expected_len = 0u;
+    uint8_t actual_len;
+    uint8_t index;
+
+    /*
+     * Compare one physical HCNAMES row with the live staged cache pair.
+     *
+     * What: validates the tab-separated source token and compares the trimmed,
+     * printable name serialization against the cache cell. Why: a successful
+     * close and flush currently provide no evidence that the visible register
+     * contains the newly staged row. Inputs: one row and its NUL-terminated
+     * read-back line; outputs: a boolean only, with no I/O, mutation, or new
+     * persistent storage. The source comparison masks the dirty bit so this
+     * probe works before the enclosing transaction clears pending stages.
+     * Affiliates: filesystem_cacheResidentRecord(),
+     * filesystem_parseResidentSourceToken(), and the generic/Bank verify
+     * phases below. See S056_HCNAMES_FOLLOW_UP.md section 11.3.
+     */
+    if (row >= FS_RESIDENT_NAMES_ROW_COUNT || !line)
+        return 0u;
+    tab = strchr(line, '\t');
+    if (!tab || strchr(tab + 1u, '\t') != NULL)
+        return 0u;
+    cache_name = fs_list_cache_name[row];
+    if (!filesystem_residentNameIsBlank(cache_name)) {
+        expected_len = (uint8_t)SCENE_OBJECT_DISPLAY_NAME_LEN;
+        while (expected_len > 0u &&
+               (cache_name[expected_len - 1u] == ' ' ||
+                cache_name[expected_len - 1u] == '\0')) {
+            expected_len--;
+        }
+    }
+    actual_len = (uint8_t)(tab - line);
+    if (actual_len != expected_len)
+        return 0u;
+    for (index = 0u; index < expected_len; index++) {
+        char expected = cache_name[index];
+        if (expected < 0x20 || expected > 0x7e)
+            expected = ' ';
+        if (line[index] != expected)
+            return 0u;
+    }
+    if (!filesystem_parseResidentSourceToken(tab + 1u, row, &source))
+        return 0u;
+    return (uint8_t)(source ==
+                     (fs_resident_source[row] &
+                      FS_RESIDENT_SOURCE_VALUE_MASK));
+}
+
+static void filesystem_recordResidentNamePublish(uint8_t status_done)
+{
+    uint8_t flags = (uint8_t)(
+        (status_done != 0u)
+            ? AUTOSAVE_TRACE_NAME_PUBLISH_FLAG_STATUS_DONE : 0u);
+
+    /*
+     * Emit the generic writer's one terminal proof record before the final
+     * source cleanup. Inputs are the existing probe result in
+     * op_hcnames_probe_matches, op_bytes_done's probe row, and the operation's
+     * destination mask. Output is one U record; completion behavior is
+     * unchanged. Affiliates: AutosaveTrace.h and the three update handoffs.
+     */
+    if (op_hcnames_probe_matches != 0u)
+        flags |= AUTOSAVE_TRACE_NAME_PUBLISH_FLAG_HCNAMES_VERIFIED;
+    flags |= (uint8_t)(filesystem_residentPublishClass() <<
+                       AUTOSAVE_TRACE_NAME_PUBLISH_CLASS_SHIFT);
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_NAME_PUBLISH,
+        flags,
+        ((uint32_t)op_bytes_done << AUTOSAVE_TRACE_NAME_PUBLISH_ROW_SHIFT) |
+        ((uint32_t)filesystem_residentPublishMask() <<
+         AUTOSAVE_TRACE_NAME_PUBLISH_MASK_SHIFT));
+}
+
+static void filesystem_beginResidentNamePublish(fs_internal_op_t publish_op)
+{
+    /*
+     * Re-target one completed payload operation at the shared HCNAMES writer.
+     *
+     * What: prepares the 129-row register and replaces current_op with the
+     * requested UPDATE_HCNAMES_* operation, leaving op_phase at zero for the
+     * read -> overlay -> write -> verify sequence. Why: identity publication
+     * belongs to the filesystem operation that changed the payload and must
+     * finish before its original callback is released; the old Menu boundary
+     * publisher never executed in 69,012 recorded events. Inputs: publish_op,
+     * already-staged source words, and the caller-owned destination mask.
+     * Outputs: one shared HCNAMES transaction with the existing callback still
+     * parked; no file is opened and no SRAM is allocated. This bypasses
+     * filesystem_start() deliberately because that reset would erase the mask
+     * and display-name scratch the overlay reads. Affiliates:
+     * filesystem_prepareResidentNamesCache(),
+     * filesystem_residentNames_tick(), and the six Load/Save completion sites.
+     * See S056_HCNAMES_FOLLOW_UP.md section 11.2.
+     */
+    filesystem_prepareResidentNamesCache();
+    /*
+     * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+     * It must never print anything to the screen or otherwise delay operations
+     * unnecessarily since logging may be used to assess timing failures in
+     * other modules that might otherwise be obscured by screen write delays.
+     */
+    filesystem_bootLoggingArm("HCNAMES ");
+    current_op = publish_op;
+    op_phase = 0u;
 }
 
 static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
@@ -5029,9 +5237,27 @@ static void filesystem_residentNames_tick(void)
         }
         if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
             filesystem_cacheCurrentResidentKitNames();
-        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
+        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE) {
+            /*
+             * A Scene action replaces the Scene row and its complete embedded
+             * Kit identity block in one publication transaction.
+             *
+             * What: overlays Scene rows, then the matching Kit plus six
+             * Instrument rows. Why: Scene Load/Save commits all eight identity
+             * rows, and deferring seven of them to a Menu boundary left the
+             * durable register stale whenever that boundary was not crossed.
+             * Inputs: op_scene_load_scene_mask, op_scene_display_name, and the
+             * committed filesystem identity block. Output: every row changed
+             * by the action is streamed together; unrelated rows are preserved.
+             * The mask assignment is safe because this shared writer is entered
+             * directly from a completed Scene operation, not filesystem_start().
+             * Affiliate: filesystem_cacheCurrentResidentKitNames() and the
+             * retired Menu write owner. See S056 section 11.2/A6.
+             */
             filesystem_cacheCurrentResidentSceneNames();
-        else
+            op_kit_load_scene_mask = op_scene_load_scene_mask;
+            filesystem_cacheCurrentResidentKitNames();
+        } else
             filesystem_cacheCurrentResidentInstrumentNames();
         op_file_ready = false;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
@@ -5092,17 +5318,122 @@ static void filesystem_residentNames_tick(void)
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
-        filesystem_clearResidentSourceDirtyFlags();
         /*
-         * Finish only the requested resident-name transaction.
-         *
-         * Inputs: the complete HCNAMES cache and a closed root file. Output:
-         * HCNAMES is flushed without inferring whether `/Scene/` changed.
-         * Scene Save explicitly owns the namespace-rebuild flag before it
-         * enters this shared writer; pure Scene Load instead lets Menu reload
-         * the unchanged `.hcindex` after DSP apply. This keeps a metadata
-         * writer from selecting either caller's browser policy.
+         * Reopen the just-closed register before acknowledging publication.
+         * The row probe is witness-only: a mismatch must not turn already
+         * committed musical payload into a filesystem error. Reuse the
+         * existing op_bytes_done field for the logical probe row, and the
+         * existing probe-match byte for the boolean result; no new SRAM is
+         * allocated. Affiliates: the U trace record and section 11.3.
          */
+        op_bytes_done = filesystem_residentPublishProbeRow();
+        op_hcnames_probe_matches = 0u;
+        op_phase = 10u;
+        return;
+
+    case 10: /* RETURN ROOT + REOPEN HCNAMES READ-ONLY FOR PROBE */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+                              "r",
+                              FS_RESIDENT_NAMES_MATCH_MODE,
+                              NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 11u;
+        return;
+
+    case 11: /* WAIT HCNAMES PROBE OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            /*
+             * A failed read-back open is evidence, not a second write failure.
+             * Record DONE with VERIFIED clear, then preserve the original
+             * successful payload outcome.
+             */
+            filesystem_recordResidentNamePublish(1u);
+            filesystem_clearResidentSourceDirtyFlags();
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_item_offset = 0u;
+        op_line_len = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 12u;
+        return;
+
+    case 12: /* READ THROUGH THE GENERIC PUBLISH PROBE ROW */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t read_status = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (read_status != STORAGE_STATUS_OK &&
+            read_status != STORAGE_STATUS_WAIT) {
+            /*
+             * A failed read-back is evidence, not a payload failure.
+             *
+             * What: abandon the probe and proceed to the normal close,
+             * leaving op_hcnames_probe_matches at zero so the U witness
+             * reports VERIFIED clear. Why: this phase runs after the
+             * register was streamed, closed, and flushed, and its handle is
+             * read-only, so nothing here can change the card. Promoting a
+             * probe I/O error to FS_STATUS_ERROR would falsely fail a
+             * committed operation, skip the source-dirty clear, and suppress
+             * the U evidence this probe exists to provide. Inputs:
+             * read_status only. Output: op_phase only; op_close_status stays
+             * at the DONE value established before the probe. Affiliates:
+             * filesystem_recordResidentNamePublish(), the failed-open policy
+             * above, the mismatch branch below, and S056 section 12.2.
+             */
+            op_phase = 13u;
+            return;
+        }
+        if (line_ready) {
+            if (op_item_offset == op_bytes_done)
+                op_hcnames_probe_matches =
+                    filesystem_residentRowMatchesCache(
+                        (uint16_t)op_bytes_done, op_line_buf);
+            if (op_item_offset == op_bytes_done || eof) {
+                op_phase = 13u;
+                return;
+            }
+            if (op_item_offset < UINT16_MAX)
+                op_item_offset++;
+            op_line_len = 0u;
+        }
+        if (eof)
+            op_phase = 13u;
+        return;
+    }
+
+    case 13: /* START CLOSE OF GENERIC HCNAMES PROBE */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 14u;
+        return;
+
+    case 14: /* WAIT PROBE CLOSE + PUBLISH WITNESS */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        /*
+         * The probe has exactly one exit. The payload and register write
+         * completed before this phase was reachable, so every probe result
+         * publishes the U witness, clears staged source dirtiness, and
+         * completes the original operation DONE. A clear VERIFIED bit is
+         * diagnostic evidence, never a payload failure. Affiliates:
+         * filesystem_recordResidentNamePublish(),
+         * filesystem_clearResidentSourceDirtyFlags(), and section 12.2.
+         */
+        filesystem_recordResidentNamePublish(1u);
+        filesystem_clearResidentSourceDirtyFlags();
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -5137,9 +5468,19 @@ static void filesystem_residentNames_tick(void)
          * identity block as the first authoritative HCNAMES content. */
         if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
             filesystem_cacheCurrentResidentKitNames();
-        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
+        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE) {
+            /*
+             * The missing-register bootstrap follows the same complete Scene
+             * publication contract as the ordinary preserve-read path: a
+             * Scene action owns its Scene, Kit, and six Instrument rows. The
+             * cache is blank after a proven absence, so apply the same mask
+             * bridge before the first HCNAMES write. Affiliate: section
+             * 11.2/A6 and the dispatch above.
+             */
             filesystem_cacheCurrentResidentSceneNames();
-        else
+            op_kit_load_scene_mask = op_scene_load_scene_mask;
+            filesystem_cacheCurrentResidentKitNames();
+        } else
             filesystem_cacheCurrentResidentInstrumentNames();
         op_file_ready = false;
         op_file = NULL;
@@ -8824,6 +9165,20 @@ static void filesystem_loadKitDirectory_tick(void)
     case 28: /* RETURN TO ROOT + FINISH */
         if (!afatfs_chdir(NULL))
             return;
+        /*
+         * Normal Kit Load owns the Kit row and six Instrument rows for every
+         * destination Scene. Their sources were staged with the validated
+         * payload; hand the original callback to the filesystem-owned HCNAMES
+         * publisher before reporting completion. Morph loads intentionally
+         * remain endpoint-only and must not publish a morph filename as Kit
+         * identity. See S056_HCNAMES_FOLLOW_UP.md section 11.2/A2.
+         */
+        if (op_close_status == FS_STATUS_DONE &&
+            current_op == FS_INTERNAL_OP_LOAD_KIT) {
+            filesystem_beginResidentNamePublish(
+                FS_INTERNAL_OP_UPDATE_HCNAMES_KIT);
+            return;
+        }
         filesystem_finish(op_close_status);
         return;
 
@@ -10116,26 +10471,13 @@ static void filesystem_loadSceneDirectory_tick(void)
              * skips this branch because Bank owns its selected-row overlay and
              * one final register write.
              */
-            filesystem_prepareResidentNamesCache();
             /*
-             * This internal handoff bypasses filesystem_start().
-             *
-             * Input is a successfully loaded root Scene; output is a fresh
-             * HCNAMES diagnostic deadline before the register update owns the
-             * facade. Why: otherwise a stall would retain SCNELOAD even though
-             * payload loading had completed. Affiliate: the shared resident
-             * names state machine.
+             * The shared handoff now also publishes the embedded Kit family;
+             * its callback remains parked until the complete HCNAMES
+             * read/write/read-back sequence is done. See section 11.2/A1/A6.
              */
-            /*
-             * DEV_MODE_LOGGING writes operation codes to file for use in
-             * debugging. It must never print anything to the screen or
-             * otherwise delay operations unnecessarily since logging may be
-             * used to assess timing failures in other modules that might
-             * otherwise be obscured by screen write delays.
-             */
-            filesystem_bootLoggingArm("HCNAMES ");
-            current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE;
-            op_phase = 0u;
+            filesystem_beginResidentNamePublish(
+                FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE);
             return;
         }
         filesystem_finish(op_close_status);
@@ -11182,25 +11524,107 @@ static void filesystem_loadBankDirectory_tick(void)
             op_phase = 86u;
         return;
 
-    case 86: /* CLOSE AND FLUSH HCNAMES */
+    case 86: /* CLOSE HCNAMES, THEN PROVE THE BANK REGISTER */
         if (!op_close_done)
             return;
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
-        /* This Bank-owned writer bypasses the generic HCNAMES transaction, so
-         * it must publish its staged source words at the same durable close. */
-        filesystem_clearResidentSourceDirtyFlags();
         /*
-         * Complete Bank Load after its resident identity is durable.
-         *
-         * Inputs: committed Bank/Scene payload and closed HCNAMES file. Output:
-         * the original Preset callback can consume op_bank_loaded_scene before
-         * any new filesystem request resets operation scratch. Load does not
-         * mutate the root Bank namespace, so it neither scans `/Bank/` nor
-         * rewrites `.hcindex`; Menu reloads that existing index only after the
-         * active Scene has passed through the shared DSP apply worker.
+         * Bank Load's row-0 identity is staged unconditionally, so reopen the
+         * visible register and read exactly that row before clearing its dirty
+         * source bit. The result is witness-only: payload commit is already
+         * valid and a mismatch must not turn it into a failed Bank Load. The
+         * existing op_hcnames_probe_matches byte carries the result through
+         * the later Preset K callback; no new persistent SRAM is allocated.
+         * See S056_HCNAMES_FOLLOW_UP.md section 11.3/B3.
          */
+        op_hcnames_probe_matches = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 93u;
+        return;
+
+    case 93: /* OPEN BANK HCNAMES READ-BACK */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+                              "r",
+                              FS_RESIDENT_NAMES_MATCH_MODE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 94u;
+        return;
+
+    case 94: /* WAIT BANK HCNAMES READ-BACK OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            /* No handle is a failed proof, not a failed payload operation. */
+            filesystem_clearResidentSourceDirtyFlags();
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_line_len = 0u;
+        op_phase = 95u;
+        return;
+
+    case 95: /* READ BANK ROW 0 AND START CLOSE */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t read_status = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (read_status != STORAGE_STATUS_OK &&
+            read_status != STORAGE_STATUS_WAIT) {
+            /*
+             * A failed Bank row-0 read-back is evidence, not a Bank-load
+             * failure. The register was already streamed, closed, and
+             * flushed before this read-only probe ran, so leave the probe
+             * boolean clear and continue through the normal close. This
+             * preserves the committed payload, source-dirty cleanup, and the
+             * later K callback witness. Inputs: read_status only. Output:
+             * op_phase only; op_close_status remains DONE. Affiliates:
+             * filesystem_lastHcnamesVerified(), the mismatch branch below,
+             * and S056_HCNAMES_FOLLOW_UP.md section 12.2.
+             */
+            op_phase = 96u;
+            return;
+        }
+        if (line_ready) {
+            op_hcnames_probe_matches =
+                filesystem_residentRowMatchesCache(0u, op_line_buf);
+            op_phase = 96u;
+            return;
+        }
+        if (eof)
+            op_phase = 96u;
+        return;
+    }
+
+    case 96: /* START CLOSE BANK HCNAMES READ-BACK */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 97u;
+        return;
+
+    case 97: /* WAIT CLOSE + COMPLETE BANK LOAD */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        /*
+         * Bank Load's probe has one unconditional completion path. The
+         * payload and HCNAMES write were complete before this diagnostic
+         * read, so a clear VERIFIED bit is retained for K but cannot fail the
+         * Bank operation or skip source cleanup. Affiliates:
+         * filesystem_lastHcnamesVerified(), on_bank_load_complete(), and
+         * S056_HCNAMES_FOLLOW_UP.md section 12.2.
+         */
+        filesystem_clearResidentSourceDirtyFlags();
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -11651,6 +12075,23 @@ static void filesystem_loadInstrument_tick(void)
     case 16: /* RETURN ROOT + FINISH */
         if (!afatfs_chdir(NULL))
             return;
+        /*
+         * A successful normal pool Instrument Load owns one HCNAMES voice row.
+         * Point the shared writer at the captured destination coordinates and
+         * keep hidden `.hctmp` restores endpoint-only, so their temporary
+         * source can never replace visible identity. The source word and
+         * identity name were staged during validation. See S056 section
+         * 11.2/A4.
+         */
+        if (op_close_status == FS_STATUS_DONE &&
+            !op_instrument_load_temporary) {
+            op_kit_load_scene_mask =
+                (uint16_t)(1u << op_instrument_load_destination_scene);
+            op_slot = op_instrument_load_destination_slot;
+            filesystem_beginResidentNamePublish(
+                FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT);
+            return;
+        }
         filesystem_finish(op_close_status);
         return;
 
@@ -12067,7 +12508,6 @@ static void filesystem_saveInstrument_tick(void)
                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_INSTRUMENT,
                 (uint32_t)op_instrument_save_source_slot <<
                     AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
-            filesystem_prepareResidentNamesCache();
         }
         
         /*
@@ -12084,21 +12524,26 @@ static void filesystem_saveInstrument_tick(void)
          * is harmless at runtime because logging is inactive there. Affiliate:
          * filesystem_createBootIndex_tick().
          */
-        /*
-         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
-         * It must never print anything to the screen or otherwise delay
-         * operations unnecessarily since logging may be used to assess timing
-         * failures in other modules that might otherwise be obscured by screen
-         * write delays.
-         */
         if (!morph_save) {
-            filesystem_bootLoggingArm("HCNAMES ");
-            current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT;
+            /*
+             * Normal Instrument Save owns the direct voice identity row. The
+             * shared handoff preserves the parked callback through HCNAMES and
+             * then the already-armed typed-index rebuild. Morph Save remains
+             * endpoint-only by policy: its file name is not resident identity.
+             * See S056_HCNAMES_FOLLOW_UP.md section 11.2/A5.
+             */
+            filesystem_beginResidentNamePublish(
+                FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT);
         } else {
+            /*
+             * Morph Save deliberately skips identity publication. It writes a
+             * second parameter image for an existing voice, so publishing its
+             * morph filename would overwrite the normal HCNAMES name/source.
+             */
             filesystem_bootLoggingArm("INSINDEX");
             current_op = FS_INTERNAL_OP_CREATE_BOOT_INDEX;
+            op_phase = 0u;
         }
-        op_phase = 0u;
         return;
 
     default:
@@ -13639,6 +14084,20 @@ static void filesystem_saveKitDirectory_tick(void)
              AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
             AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_KIT,
             (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
+        if (op_kit_save_mode == STORAGE_INSTRUMENT_SAVE_NORMAL) {
+            /*
+             * Kit Save owns the saved Scene's Kit row and six inherited
+             * Instrument rows. Publish them before the pending Kit index
+             * rebuild can retag and clear the shared name cache; the parked
+             * callback then continues through that rebuild as before. See
+             * S056_HCNAMES_FOLLOW_UP.md section 11.2/A3.
+             */
+            op_kit_load_scene_mask =
+                (uint16_t)(1u << op_kit_save_source_scene);
+            filesystem_beginResidentNamePublish(
+                FS_INTERNAL_OP_UPDATE_HCNAMES_KIT);
+            return;
+        }
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -14182,21 +14641,122 @@ static void filesystem_saveBankDirectory_tick(void)
             op_phase = 86u;
         return;
 
-    case 86: /* CLOSE REGISTER, THEN RESTORE ROOT BANK INDEX */
+    case 86: /* CLOSE REGISTER, THEN PROVE IT BEFORE BANK INDEX RESTORE */
         if (!op_close_done)
             return;
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
-        /* Bank Save preserves source pairs while rewriting the full register;
-         * a previously staged load source becomes clean only after this close. */
+        /*
+         * Bank Save uses the same row-0 read-back proof as Bank Load. The
+         * register mismatch is diagnostic-only, while the original callback
+         * remains parked through the already-required Bank index rebuild. The
+         * existing probe byte carries VERIFIED into the Preset K witness; no
+         * extra state is allocated. See section 11.3/B3-B4.
+         */
+        op_hcnames_probe_matches = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 88u;
+        return;
+
+    case 88: /* OPEN BANK-SAVE HCNAMES READ-BACK */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+                              "r",
+                              FS_RESIDENT_NAMES_MATCH_MODE,
+                              NULL,
+                              on_file_opened))
+            return;
+        op_phase = 89u;
+        return;
+
+    case 89: /* WAIT BANK-SAVE HCNAMES READ-BACK OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            /* Witness clear is retained by the callback; payload stays valid. */
+            filesystem_clearResidentSourceDirtyFlags();
+            /* The index rebuild remains armed below only on the normal path. */
+            op_library_index_rebuild_kind = FS_NAME_CACHE_BANK;
+            op_library_index_rebuild_pending = 1u;
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_FINISH <<
+                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_BANK,
+                (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_line_len = 0u;
+        op_phase = 90u;
+        return;
+
+    case 90: /* READ BANK-SAVE ROW 0 AND START CLOSE */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t read_status = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (read_status != STORAGE_STATUS_OK &&
+            read_status != STORAGE_STATUS_WAIT) {
+            /*
+             * A failed Bank-save row-0 read-back is witness-only. The
+             * register was streamed, closed, and flushed before this
+             * read-only probe, so preserve DONE, leave VERIFIED clear, and
+             * continue to the common close/index-rebuild path. Failing here
+             * would also skip the /Bank/.hcindex rebuild and make a newly
+             * created or renamed Bank invisible until reboot; the failed-open
+             * branch above already arms that rebuild correctly. Inputs:
+             * read_status only. Output: op_phase only; op_close_status stays
+             * DONE. Affiliates: filesystem_lastHcnamesVerified(), the Bank
+             * Save lifecycle witness, and S056 section 12.2.
+             */
+            op_phase = 91u;
+            return;
+        }
+        if (line_ready) {
+            op_hcnames_probe_matches =
+                filesystem_residentRowMatchesCache(0u, op_line_buf);
+            op_phase = 91u;
+            return;
+        }
+        if (eof)
+            op_phase = 91u;
+        return;
+    }
+
+    case 91: /* START CLOSE BANK-SAVE HCNAMES READ-BACK */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 92u;
+        return;
+
+    case 92: /* WAIT CLOSE + RESTORE ROOT BANK INDEX */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        /*
+         * Bank Save's probe has one unconditional exit. The payload and
+         * register write already completed; this phase therefore always
+         * clears source dirtiness, arms the Bank index rebuild, emits the
+         * lifecycle witness, and completes DONE. Only the diagnostic K bit
+         * distinguishes a confirmed row match from an ambiguous probe.
+         * Affiliates: filesystem_lastHcnamesVerified(), the Bank index
+         * rebuild handoff, and S056_HCNAMES_FOLLOW_UP.md section 12.2.
+         */
         filesystem_clearResidentSourceDirtyFlags();
         /*
-         * Bank Save has now completed its direct delete/recreate tree. Park the
+         * Bank Save has completed its direct delete/recreate tree. Park the
          * original callback and run the same boot-equivalent Bank rescan plus
-         * `/Bank/.hcindex` rewrite used by Kit, root Scene, and Bank. This is required
-         * for newly-created, renamed, or removed root Bank folders to become
-         * visible immediately without a restart.
+         * `/Bank/.hcindex` rewrite used by Kit, root Scene, and Bank. This is
+         * required for newly-created, renamed, or removed root Bank folders to
+         * become visible immediately without a restart.
          */
         op_library_index_rebuild_kind = FS_NAME_CACHE_BANK;
         op_library_index_rebuild_pending = 1u;
@@ -14719,7 +15279,6 @@ static void filesystem_saveSceneDirectory_tick(void)
                  AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE,
                 (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
-            filesystem_prepareResidentNamesCache();
             autosaveTrace_record(
                 AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
                 (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_FINISH <<
@@ -14727,22 +15286,12 @@ static void filesystem_saveSceneDirectory_tick(void)
                 AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE,
                 (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
             /*
-             * Scene Save hands directly to HCNAMES without generic start.
-             * Input is the saved root Scene identity; output is a separately
-             * timed HCNAMES owner. Why: a logging build must report the actual
-             * stalled register update, while runtime behavior is unchanged
-             * after filesystem_bootLoggingEnd(). Affiliate: resident names.
+             * Scene Save now uses the common ownership handoff. Its complete
+             * Scene/Kit/Instrument identity block is published before the
+             * parked Scene index rebuild begins. See section 11.2/A1/A6.
              */
-            /*
-             * DEV_MODE_LOGGING writes operation codes to file for use in
-             * debugging. It must never print anything to the screen or
-             * otherwise delay operations unnecessarily since logging may be
-             * used to assess timing failures in other modules that might
-             * otherwise be obscured by screen write delays.
-             */
-            filesystem_bootLoggingArm("HCNAMES ");
-            current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE;
-            op_phase = 0u;
+            filesystem_beginResidentNamePublish(
+                FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE);
             return;
         }
         filesystem_finish(FS_STATUS_DONE);
@@ -20633,11 +21182,16 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_file_ready = false;
     op_close_done = false;
     op_close_status = FS_STATUS_DONE;
-    /* The HCNAMES absence proof borrows generic handle/finder scratch.  Reset
-     * its two operation-local markers here so a cancelled/failed predecessor
-     * can never donate a stale scan result to a later create-capable request. */
+    /*
+     * HCNAMES probe scratch is reset at the boundary that owns each probe:
+     * filesystem_hcnamesProbeBegin(), the generic writer's read-back phase,
+     * and Bank Load/Save's row-0 proof. Do not reset the result here: a Bank
+     * Save carries its verified bit through the deferred `.hcindex` rebuild,
+     * whose nested filesystem_start() would otherwise erase the witness before
+     * Preset emits K. Inputs/outputs are the existing one-byte scratch; no new
+     * storage is allocated. Affiliate: filesystem_lastHcnamesVerified().
+     */
     op_hcnames_probe_state = FS_HCNAMES_PROBE_IDLE;
-    op_hcnames_probe_matches = 0u;
     op_flush_final_status = FS_STATUS_DONE;
     op_bytes_done = 0;
     op_stream_index = 0;
@@ -20736,6 +21290,52 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     return true;
 }
 
+static uint8_t filesystem_pumpBlockingOperation(void)
+{
+    uint16_t started = time_sysTick;
+
+    /*
+     * Drive one facade-owned blocking wrapper to a terminal state, bounded.
+     *
+     * What: replaces the bare BUSY/tick pump body used by every blocking
+     * wrapper below. On
+     * expiry it forces FS_STATUS_ERROR and returns zero, so the caller's
+     * existing `if (status != FS_STATUS_DONE)` branch runs its normal
+     * acknowledge-and-clean-up path unchanged.
+     *
+     * Why: these loops were bounded only as a side effect of
+     * filesystem_bootLoggingPollDeadline(), which is compiled out when
+     * DEV_MODE_LOGGING == 0. In that build a stalled facade state machine
+     * could spin forever inside the callee, before main.c's own pump bound
+     * could regain control. This is the production-build form of the Session
+     * 056 boot hang one layer below the main ladder. See
+     * S056_BOOT_HANG_FOLLOWUP.md sections 9.2, 9.5, and 10.
+     *
+     * This deliberately duplicates the logging poll's policy rather than
+     * replacing it: the logger additionally latches timeout identity, freezes
+     * its forensic capsule, and preserves the retained operation code. When
+     * both bounds are active the logger fires first at the top of
+     * filesystem_tick(), so the current logging build keeps its behavior.
+     *
+     * Inputs: module-scope status, time_sysTick, and
+     * BOOT_FILESYSTEM_PUMP_WAIT_MS. Output: nonzero when the operation leaves
+     * BUSY on its own; zero when this deadline forces ERROR. State: one 16-bit
+     * stack local; no static storage is added. Like the logging poll, this is
+     * cooperative and cannot preempt a C or SD-driver call that never returns.
+     * Affiliates: filesystem_bootLoggingPollDeadline(), every blocking wrapper
+     * below, and main.c's boot_waitFilesystemPump().
+     */
+    for (; status == FS_STATUS_BUSY; ) {
+        if ((uint16_t)(time_sysTick - started) >=
+            BOOT_FILESYSTEM_PUMP_WAIT_MS) {
+            status = FS_STATUS_ERROR;
+            return 0u;
+        }
+        filesystem_tick();
+    }
+    return 1u;
+}
+
 uint8_t filesystem_createBootIndexBlocking(void)
 {
     /*
@@ -20785,8 +21385,7 @@ uint8_t filesystem_createBootIndexBlocking(void)
             filesystem_clearInstrumentCacheStorage();
             return 0u;
         }
-        while (status == FS_STATUS_BUSY)
-            filesystem_tick();
+        (void)filesystem_pumpBlockingOperation();
         if (status != FS_STATUS_DONE) {
             filesystem_ack();
             op_instrument_scan_one_type = 0u;
@@ -20803,8 +21402,7 @@ uint8_t filesystem_createBootIndexBlocking(void)
             filesystem_clearInstrumentCacheStorage();
             return 0u;
         }
-        while (status == FS_STATUS_BUSY)
-            filesystem_tick();
+        (void)filesystem_pumpBlockingOperation();
         if (status != FS_STATUS_DONE) {
             filesystem_ack();
             op_instrument_scan_one_type = 0u;
@@ -20839,8 +21437,7 @@ uint8_t filesystem_autosaveTraceFlushBlocking(void)
                               FS_FILE_SETTINGS, 0u, NULL)) {
             return 0u;
         }
-        while (status == FS_STATUS_BUSY)
-            filesystem_tick();
+        (void)filesystem_pumpBlockingOperation();
         if (status != FS_STATUS_DONE) {
             filesystem_ack();
             return 0u;
@@ -20909,8 +21506,7 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
         fs_autosave_setup_failed = 1u;
         return 0u;
     }
-    while (status == FS_STATUS_BUSY)
-        filesystem_tick();
+    (void)filesystem_pumpBlockingOperation();
     if (status != FS_STATUS_DONE) {
         filesystem_ack();
         fs_autosave_setup_failed = 1u;
@@ -21026,8 +21622,7 @@ uint8_t filesystem_repairLibraryNamesBlocking(fs_library_index_kind_t kind)
      */
     if (!filesystem_startRepairLibraryNames(kind, NULL))
         return 0u;
-    while (status == FS_STATUS_BUSY)
-        filesystem_tick();
+    (void)filesystem_pumpBlockingOperation();
     if (status != FS_STATUS_DONE) {
         filesystem_ack();
         return 0u;
@@ -21054,8 +21649,7 @@ uint8_t filesystem_repairInstrumentNamesBlocking(void)
         if (!entry ||
             !filesystem_startRepairInstrumentNames(entry->type, NULL))
             return 0u;
-        while (status == FS_STATUS_BUSY)
-            filesystem_tick();
+        (void)filesystem_pumpBlockingOperation();
         if (status != FS_STATUS_DONE) {
             filesystem_ack();
             return 0u;
@@ -21104,7 +21698,23 @@ uint8_t filesystem_writeResidentNamesBlocking(
                           0u,
                           NULL))
         return 0u;
+    uint16_t pump_started = time_sysTick;
+
     while (status == FS_STATUS_BUSY) {
+        /*
+         * Bound the diagnostic-aware wrapper inline because its loop body
+         * owns a per-iteration callback and therefore cannot use the uniform
+         * helper above. On expiry, force FS_STATUS_ERROR so the existing
+         * diagnostic failure branch acknowledges and returns zero. Why: a
+         * DEV_MODE_LOGGING == 0 build otherwise leaves this ninth blocking
+         * loop unbounded, even after the eight uniform wrappers are fixed.
+         * See S056_BOOT_HANG_FOLLOWUP.md section 10.3.
+         */
+        if ((uint16_t)(time_sysTick - pump_started) >=
+            BOOT_FILESYSTEM_PUMP_WAIT_MS) {
+            status = FS_STATUS_ERROR;
+            break;
+        }
         if (diagnostic_cb) {
             /*
              * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
@@ -21242,8 +21852,7 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
             scan_started = filesystem_requestScanBanks(NULL);
         if (!scan_started)
             return 0u;
-        while (status == FS_STATUS_BUSY)
-            filesystem_tick();
+        (void)filesystem_pumpBlockingOperation();
         if (status != FS_STATUS_DONE) {
             filesystem_ack();
             return 0u;
@@ -21259,8 +21868,7 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
                           0u,
                           NULL))
         return 0u;
-    while (status == FS_STATUS_BUSY)
-        filesystem_tick();
+    (void)filesystem_pumpBlockingOperation();
     if (status != FS_STATUS_DONE) {
         filesystem_ack();
         return 0u;
@@ -21830,51 +22438,6 @@ bool filesystem_requestLoadResidentInstrumentName(uint8_t scene_index,
     return true;
 }
 
-bool filesystem_requestUpdateResidentInstrumentNames(
-    uint16_t scene_mask,
-    uint8_t instrument_slot,
-    fs_completion_cb_t cb)
-{
-    uint16_t valid_mask = 0u;
-    uint8_t scene_index;
-
-    /*
-     * Refresh only resident Instrument rows changed by one Load/Save action.
-     *
-     * Inputs: destination/source Scene mask, one zero-based voice slot, and
-     * optional completion callback. Output: `/.hcnames` is first read into the
-     * existing generalized cache, only matching Instrument row(s) are replaced
-     * from committed resident state, and the variable-length file is streamed
-     * back through the normal close/flush gate. Other rows are preserved from
-     * the file rather than regenerated from SRAM. Multiple bits are accepted
-     * because one normal Instrument Load can target several Scenes; a Save
-     * supplies exactly one bit. No second cache or persistent scratch is added.
-     */
-    if (instrument_slot >= STORAGE_KIT_SLOT_COUNT ||
-        status == FS_STATUS_BUSY) {
-        return false;
-    }
-    for (scene_index = 0u;
-         scene_index < STORAGE_BANK_SCENE_MAX_SLOTS;
-         scene_index++) {
-        uint16_t bit = (uint16_t)(1u << scene_index);
-        if ((scene_mask & bit) != 0u)
-            valid_mask = (uint16_t)(valid_mask | bit);
-    }
-    if (valid_mask == 0u)
-        return false;
-    filesystem_prepareResidentNamesCache();
-    if (!filesystem_start(FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT,
-                          FS_FILE_SETTINGS,
-                          instrument_slot,
-                          cb)) {
-        filesystem_clearNameCacheStorage();
-        return false;
-    }
-    op_kit_load_scene_mask = valid_mask;
-    return true;
-}
-
 bool filesystem_requestLoadResidentKitName(uint8_t scene_index,
                                            fs_completion_cb_t cb)
 {
@@ -21904,51 +22467,6 @@ bool filesystem_requestLoadResidentKitName(uint8_t scene_index,
     return true;
 }
 
-bool filesystem_requestUpdateResidentKitNames(uint16_t scene_mask,
-                                              fs_completion_cb_t cb)
-{
-    uint16_t valid_mask = 0u;
-    uint8_t scene_index;
-
-    /*
-     * Refresh one full resident Kit identity block per selected Scene.
-     *
-     * Inputs: Menu's accumulated dirty-Scene mask at the combined
-     * Kit/Instrument family exit, plus an optional callback. Individual
-     * scroll, load, and save operations only update committed SceneData and
-     * Menu scratch; they do not call this updater.
-     * Output: `/.hcnames` is read into the existing generalized cache, exactly
-     * one Kit row and six Instrument rows per selected Scene are replaced from
-     * committed resident state, and the variable-length file is rewritten
-     * through the normal close/flush gate. Every unrelated logical row is
-     * preserved from the file. One exit request can therefore commit several
-     * actions and several Scenes without retaining a 16-by-7 name array. The
-     * request reuses the existing operation mask, line buffer, and general
-     * cache, so it adds no persistent SRAM storage.
-     */
-    if (status == FS_STATUS_BUSY)
-        return false;
-    for (scene_index = 0u;
-         scene_index < STORAGE_BANK_SCENE_MAX_SLOTS;
-         scene_index++) {
-        uint16_t bit = (uint16_t)(1u << scene_index);
-        if ((scene_mask & bit) != 0u)
-            valid_mask = (uint16_t)(valid_mask | bit);
-    }
-    if (valid_mask == 0u)
-        return false;
-    filesystem_prepareResidentNamesCache();
-    if (!filesystem_start(FS_INTERNAL_OP_UPDATE_HCNAMES_KIT,
-                          FS_FILE_SETTINGS,
-                          0u,
-                          cb)) {
-        filesystem_clearNameCacheStorage();
-        return false;
-    }
-    op_kit_load_scene_mask = valid_mask;
-    return true;
-}
-
 bool filesystem_requestLoadResidentSceneName(uint8_t scene_index,
                                              fs_completion_cb_t cb)
 {
@@ -21973,48 +22491,6 @@ bool filesystem_requestLoadResidentSceneName(uint8_t scene_index,
         filesystem_clearNameCacheStorage();
         return false;
     }
-    return true;
-}
-
-bool filesystem_requestUpdateResidentSceneNames(
-    uint16_t scene_mask,
-    const char name[8],
-    fs_completion_cb_t cb)
-{
-    uint16_t valid_mask = 0u;
-    uint8_t scene_index;
-
-    /*
-     * Publish a successful root Scene Load/Save without a SceneData mirror.
-     *
-     * Inputs: one or more destination Scene bits, the captured directory/save
-     * name, and callback. Output: the reader preserves every unrelated
-     * HCNAMES row, then replaces only selected Scene rows and rewrites the
-     * variable-length register through its normal flush gate. A multi-target
-     * root Scene Load legitimately assigns one source name to all destinations.
-     * No additional SRAM array is allocated; the supplied name uses existing
-     * operation scratch and the file uses fs_list_cache_name temporarily.
-     */
-    if (!name || status == FS_STATUS_BUSY)
-        return false;
-    for (scene_index = 0u;
-         scene_index < STORAGE_BANK_SCENE_MAX_SLOTS;
-         scene_index++) {
-        uint16_t bit = (uint16_t)(1u << scene_index);
-        if ((scene_mask & bit) != 0u)
-            valid_mask = (uint16_t)(valid_mask | bit);
-    }
-    if (valid_mask == 0u)
-        return false;
-    filesystem_prepareResidentNamesCache();
-    if (!filesystem_start(FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE,
-                          FS_FILE_SETTINGS, 0u, cb)) {
-        filesystem_clearNameCacheStorage();
-        return false;
-    }
-    op_scene_load_scene_mask = valid_mask;
-    memcpy(op_scene_display_name, name, STORAGE_SCENE_DISPLAY_NAME_LEN);
-    op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
     return true;
 }
 

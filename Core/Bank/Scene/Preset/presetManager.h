@@ -105,6 +105,12 @@ void    preset_init(void);
 ** Status polling — call from main loop (or menu tick) each iteration.
 ** Returns current status. When UPDATE_READY, caller should do post-load
 ** work then call preset_ackStatus() to clear back to IDLE.
+**
+** The implementation also emits the logging-only Q status witness whenever
+** this state changes. Q is ring-only and carries the completion result,
+** pending Bank bridge, request slot low byte, and filesystem facade status so
+** a pre-audio boot wait can be joined to its callback without adding an API
+** state field or filesystem I/O. See S056_BOOT_HANG_FOLLOWUP.md section 7.2.
 ** ----------------------------------------------------------------------- */
 preset_status_t  preset_getStatus(void);
 preset_op_type_t preset_getCompletedOp(void);
