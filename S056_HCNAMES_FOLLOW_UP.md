@@ -1,35 +1,67 @@
-# Session 056 — HCNAMES Follow-Up Test
+# Session 056 — HCNAMES Follow-Up
 
-Retest after landing `S056_BANK_SETTINGS_CORRECTION.md` and
-`S056_NAMES_CORRUPTION.md`. Sequence performed: edit the resident Bank, Save
-it to slot 16, Load a different Bank (slot 15), edit some parameters, power
-off. Card copied to `SD_CARD/` afterward. This is a findings-only pass —
-no code changed.
+Investigation into `/.hcnames` — the 129-row Bank/Scene/Kit/Instrument
+identity and provenance register — across two hardware test sessions and two
+card captures (`SD_CARD/`, `SD_CARD2/`). Findings and plan only; no code was
+changed by this document.
 
-## TL;DR
+> ### How to read this document
+>
+> **To implement, go straight to §11 — "Full remediation plan".** §11.0 lists
+> every correction §11 makes to the sections above it.
+>
+> This document was written incrementally as the investigation ran. It
+> contains **three diagnoses that turned out to be wrong** and **two earlier
+> plan sketches that are superseded**. Each is banner-marked in place. They
+> are kept because the reasoning that eliminated them is the evidence base
+> §11 rests on — not because any of them should be built.
 
-- **settings.cfg is correct** (`active_bank=15`) — the Part B synchronous
-  settings-write fix is confirmed working on a fresh interactive Bank Load.
-- **`.hcprms1`/`.hcprms2`'s Bank section is correct** in both generations
-  (slot=15, name="LoadTst!", present_mask=0xffff) — Part A/B's downstream
-  effects reached disk correctly this time.
-- **The `active_scene`/`voice_mask` "mismatch" against Bank 15's own saved
-  file is not a bug** — it correctly reflects a live edit made *after* the
-  Load, which the trace independently confirms.
-- **`.hcnames` has two distinct problems**, one very likely benign and
-  explained, one genuinely unresolved:
-  - Four scene "blocks" (Scenes/Kits/Instruments 06, 08, 10, 12) are stale,
-    not matching Bank 15 — plausibly explained by a partial destination-mask
-    selection at Load time (documented, intentional behavior), needs one
-    confirmation from you to close out.
-  - **Row 0 (the Bank's own name/source) is stale and cannot be explained by
-    anything in the code this session's Load actually ran** — a real,
-    unresolved anomaly, detailed in §3 below.
-- The interactive Bank Load of slot 15 produced **no `K` completion-witness
-  record** in `asavetrc.bin` at all (only the boot Load of 11 and the Save
-  to 16 did) — a trace-visibility gap, not proven to indicate a functional
-  problem, but worth noting since it limited how far this investigation
-  could get.
+| Section | Status |
+|---|---|
+| §1, §2 | Correct. `settings.cfg` and the AutoSave Bank section verified good. |
+| §3 | **RETRACTED.** Mask-selection theory, disproven in §8. |
+| §4 | **SUPERSEDED.** Observation correct; both hypotheses wrong; diagnostic replaced by §11.3. |
+| §5 | Partly superseded — see §10.1 on the trace file's real structure. |
+| §6 | Correct. |
+| §7 | **SUPERSEDED** by §11.8. |
+| §8 | Payload verification correct; its "five-row subset" framing superseded by §9.2. |
+| §9.1–§9.4 | Correct and load-bearing. |
+| §9.5 | **WITHDRAWN.** The read-hold-write differential is not the cause. |
+| §9.6 | Correct. Retracts the premise of `S056_NAMES_CORRUPTION.md`. |
+| §9.7 | **SUPERSEDED** by §11. |
+| §9.8 | **CONTAINS A FALSE TABLE.** Use §10.2 instead. |
+| §9.9 | **SUPERSEDED** by §11.8. |
+| §10.1–§10.3 | Correct and load-bearing: the publication map and the two-defect split. |
+| §10.4–§10.5 | **SUPERSEDED** by §11.2–§11.6. |
+| **§11** | **The plan. Implement from here.** |
+
+## What is actually wrong — final position
+
+- **`/.hcnames` has not been written by any Load or Save since Session 055.**
+  It is byte-identical across both card captures and the `11482fd` commit,
+  through five Bank operations, two root Scene Loads, a Kit Load and several
+  Instrument Loads. (§9.1, §10)
+- **Defect A — publication coverage.** Kit Load, Kit Save and Instrument Load
+  publish no identity rows at all; Scene Load/Save publish only one of the
+  three row classes they change; the missing remainder was delegated to a
+  Menu UI-boundary flush that has **never executed once** in 69,012 recorded
+  trace events. `FS_INTERNAL_OP_UPDATE_HCNAMES_KIT` has no producer anywhere
+  in `filesystem.c`. (§10.1, §10.2)
+- **Defect B — the write does not land.** A root Scene Load's register
+  transaction and both Bank writers complete `FS_STATUS_DONE`, with zero
+  error and zero stall records in the whole trace, and the card does not
+  change by one byte. Root cause not identified; §11.3's read-back gate is
+  what will settle it. (§9.3, §9.4, §10.3)
+- **Source staging is already correct at all eight operations.** The defect
+  is publication only — nothing needs to add or change
+  `filesystem_setResidentSource()` calls. (§11.0)
+- **`settings.cfg` and the AutoSave records are correct and durable.** The
+  Session 056 Part B settings fix and the `K` completion witness both work,
+  and are what made this diagnosis possible. (§1, §9.3)
+- **The premise of `S056_NAMES_CORRUPTION.md` is retracted.** Row 9's
+  `Moch to` is a completed Scene-level operation from Session 055, not a
+  Bank-Load name leak. The snapshot fix that landed is harmless hardening,
+  but it was never validated by card evidence. (§9.6)
 
 ---
 
@@ -79,6 +111,12 @@ happened in this test, and the record is correctly tracking live state, not
 the Bank's static file default. Not a defect.
 
 ## 3. Explained (pending one confirmation from you): scenes 06/08/10/12 stale
+
+> **RETRACTED — do not implement or reason from this section.** All 16
+> Scenes were loaded; §8 proves it against the complete AutoSave payload,
+> and §9.2 then showed the *entire* register was stale rather than four
+> blocks of it. Kept only as a record of a wrong turn.
+
 
 ```
 HCNAMES row 7 Scene 06 / row 23 Kit 06 / rows 69-74 Instruments: stale
@@ -130,6 +168,12 @@ first time, and it doesn't. Worth keeping in mind for the retest in §5
 regardless.
 
 ## 4. Unresolved: HCNAMES row 0 (Bank identity) is stale, and the code doesn't explain it
+
+> **SUPERSEDED.** The observation is correct — row 0 is stale — but both
+> hypotheses below are wrong, and the "recommended next diagnostic" is
+> replaced by §11.3 Group B. §9.1 shows the file had not been written at
+> all, which is why nothing in this section adds up.
+
 
 ```
 HCNAMES row 0 Bank name: expected 'LoadTst!', got 'LoadTst'
@@ -213,6 +257,13 @@ and the next step is instrumenting `op_bank_display_name`/
 
 ## 5. Missing `K` record for the interactive Bank Load
 
+> **PARTLY SUPERSEDED.** The missing-`K` observation held for that card,
+> but §10.1 established that `asavetrc.bin` is a cumulative append log of
+> ring flushes spanning every session — which also explains the
+> "not chronological" ordering noted at the end of this section. Later
+> captures contain `K` records for every Bank operation.
+
+
 `asavetrc.bin` for this session contains exactly two `K` records:
 
 ```
@@ -268,6 +319,10 @@ session's scope.
 
 ## 7. Recommended retest
 
+> **SUPERSEDED by §11.8.** Item 1 tests the retracted mask theory; item 2's
+> diagnostic is replaced by §11.3 Group B.
+
+
 1. Confirm (or rule out) §3's mask-selection theory: repeat a Bank Load
    with **all 16 scenes explicitly selected**, and check whether all 16
    HCNAMES blocks come out correct. If any of 6/8/10/12 (or any other slot)
@@ -287,6 +342,13 @@ session's scope.
 ---
 
 ## 8. Correction — §3's mask-selection theory was wrong; verified against full AutoSave payload
+
+> **Payload verification correct; framing superseded.** The proof that all
+> 16 Scenes loaded correctly stands and is still load-bearing. The
+> "stable five-row subset" conclusion does not: §9.2 shows every row was
+> stale, and the twelve "correct" rows matched only because Banks 012 and
+> 015 happen to share twelve child names.
+
 
 You were right to push on this, and right about the outcome: **all 16
 scenes were loaded**, and the full AutoSave payload proves it. I should
@@ -406,7 +468,7 @@ same way every time.
 
 ---
 
-## 9. Root cause found: `/.hcnames` has not been written since Session 055
+## 9. Confirmed: `/.hcnames` has not been written since Session 055
 
 §4 and §8 both assumed the register was being rewritten and asked *why
 five rows came out wrong*. That premise was wrong. The correct question
@@ -499,6 +561,15 @@ updates** — for the full duration of a Bank operation.
 
 ### 9.5 The structural difference: read-hold-write vs. read-write
 
+> **WITHDRAWN — see §10.3 and §11.0.** The read-hold-write differential
+> below is not the cause: a root Scene Load reads and writes the register
+> adjacently, with no traversal in between, and fails identically. The
+> claim that the generic writer "works (proved twice in 054/055)" is also
+> unsupported — source token `004` is produced identically by a Scene Load
+> *from* slot 004 and a Scene Save *to* slot 004, and both
+> `/Scene/004 Moch to` and `/Kit/004 Moch to` exist on the card.
+
+
 This is the part that identifies the defect, because one HCNAMES writer on
 this card demonstrably still works. Between `b9bdb92` and `11482fd` the
 register *was* rewritten twice — both times by the **generic** writer
@@ -563,9 +634,9 @@ leaked into a Bank child's Scene row.
 That withdraws the premise of `S056_NAMES_CORRUPTION.md`. The
 `op_bank_child_scene_display_name` snapshot that landed is still correct,
 cheap, defensible defensive hardening, and it should stay — but it fixes a
-latent hazard, not the observed symptom, and its `H` drift record will
-never fire until §9.7 lands, because the Bank writer's output never reaches
-the card at all. It should not be treated as validated by any `.hcnames`
+latent hazard, not the observed symptom, and its `H` drift record cannot
+fire until §11 lands, because the Bank writer's output never reaches the
+card at all. It should not be treated as validated by any `.hcnames`
 evidence.
 
 `S056_BANK_SETTINGS_CORRECTION.md`'s two fixes are unaffected and are what
@@ -575,6 +646,12 @@ witness is the record that let §9.3 prove phase 86 ran.
 ---
 
 ### 9.7 The targeted fix
+
+> **SUPERSEDED by §11 — do not implement from this section.** Change 1
+> (the borrow lock) is withdrawn outright: it has no known offender.
+> Changes 2, 3 and 4 survive, renumbered into §11.4 (C1/C2), §11.3
+> (Group B) and §11.6 (Group E).
+
 
 Design rule: **a Bank operation must never rely on the shared name cache
 surviving its own traversal, and must never be able to report `DONE` on an
@@ -722,6 +799,14 @@ operation"** and say so before listing any row diffs.
 
 ### 9.8 Are Scene, Kit, and Instrument Save/Load exposed?
 
+> **WRONG — do not use this table.** The row "Kit Save |
+> filesystem.c:13715 handoff" is false: line 13715 is inside
+> `filesystem_saveBankDirectory_tick()` (which begins at 13655), and Kit
+> Save publishes nothing at all. The section's conclusion — that
+> Scene/Kit/Instrument are "not exposed, by construction" — is also false.
+> §10.2 is the correct publication map.
+
+
 **Not to this defect, by construction — and the card proves it.** Every
 other HCNAMES publisher performs its preserve-read and its rewrite inside
 one adjacent, uninterrupted phase sequence, *after* all payload/tree work
@@ -760,6 +845,12 @@ Two caveats worth recording rather than assuming away:
    cross-operation mutex, and must be documented that way.
 
 ### 9.9 What the next test will show
+
+> **SUPERSEDED by §11.8.** The duplicate-directory-entry hypothesis at the
+> end was subsequently eliminated: reads and writes resolve through the
+> same scan in `afatfs_createFileInternal()` and would therefore agree, so
+> it cannot produce a file frozen at an old image.
+
 
 With Changes 1-3 in place, one ordinary Bank Load answers the remaining
 question with no special reproduction steps:
@@ -890,6 +981,11 @@ through the same scan in `afatfs_createFileInternal()` and would agree.
 ---
 
 ### 10.4 The fix
+
+> **SUPERSEDED by §11.2–§11.6**, which lists every code site with full
+> comment blocks. The diagnosis in §10.1–§10.3 stands; this plan sketch
+> does not, and its Kit Save site reference is wrong (see §11.0).
+
 
 **Principle: publication belongs to the filesystem operation that changed
 the data, and must complete before that operation reports completion.**
@@ -1032,6 +1128,11 @@ Bank and Scene staging sites.
 
 ### 10.5 Save operations are covered
 
+> **Intent still valid; the "Fix N" numbers refer to the superseded §10.4
+> sketch.** The implementable version is §11.2 Group A, and the rule at the
+> end of this section is restated there.
+
+
 Explicitly, per your requirement that Saves must also update names *and*
 sources to match the save slot:
 
@@ -1062,6 +1163,13 @@ Load, without another forensic round.
 ---
 
 ## 11. Full remediation plan — every code site
+
+> **THIS IS THE PLAN TO IMPLEMENT.** Everything before this section is the
+> investigation record, including three diagnoses that turned out to be
+> wrong and two superseded plan sketches. §11.0 states exactly what those
+> corrections are. If you are here to write code, start at §11.0 and treat
+> §§1–10 as background only.
+
 
 ### 11.0 Assessment re-check: three corrections to §9
 
