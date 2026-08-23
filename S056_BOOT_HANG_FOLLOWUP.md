@@ -1868,3 +1868,393 @@ The last row is the important one: it is the single check that distinguishes
 **"a cooperative deadline fired and boot took the failure path"** from
 **"the foreground stopped and the watchdog reset the part"**. Every capture
 so far has been ambiguous on exactly that point.
+
+## 16. Implementation notes — 2026-08-23 — Section 15
+
+Section 15 is now implemented in the working tree.
+
+- Added `filesystem_autosaveTraceFlushAfterBootFailureBlocking()` in
+  `filesystem.c` directly after the plain bench-harness drain, plus its
+  documented declaration in `filesystem.h`. The wrapper opens and closes its
+  own boot-recovery episode so the drain can progress after the cooperative
+  timeout latch, and clears that episode before
+  `filesystem_writeBootFailureLogBlocking()` runs.
+- Replaced the failure-path call in `main.c` with the recovery-framed drain
+  and extended the adjacent comment with the SD_CARD5 reason; ordering before
+  the bootlog writer is unchanged. The plain drain is no longer referenced
+  from `main.c`.
+- Added `filesystem_libraryIndexDetail()` immediately above
+  `filesystem_createLibraryIndex_tick()` and labelled all eight phases
+  (`LIX?ROOT/WAIT/ENTR/CLOS/IOPN/IWAI/ROWS/DONE`) as the first statement of
+  each case. Every literal is exactly eight characters; the fourth byte is
+  patched to `K`/`S`/`B`/`?` from `op_library_index_kind`.
+- Added the library-index phase code table to `DEV_MODES.md` and the
+  recovery-drain sentence to its `Z` stage paragraph.
+
+Validation on 2026-08-23:
+
+- `make clean && make img` passed with no errors from the changed files;
+  the linked image reports `text=382188`, `data=400`, `bss=94764`
+  (`build/lxr02.bin` 382588 bytes; `build/LXRV2_lxr02.img` 382604 bytes).
+- `bss` is +8 over §14.7's 94756. The named SRAM symbol inventory is
+  identical between the pre-change HEAD build and this build (same 486 bss
+  symbols, same sizes); the +8 is alignment padding from LTO reordering, not
+  a new allocation. §15.9's zero-SRAM claim therefore still holds.
+- `rg "filesystem_autosaveTraceFlushBlocking" main.c` returns nothing;
+  `filesystem_libraryIndexDetail` appears 9 times (one definition, eight
+  call sites); all eight labels are exactly 8 bytes; `git diff --check`
+  passes.
+- `DEV_LOGGING_IWDG` remains enabled and `DEV_LOGGING_IWDG_EXPIRE` stays at
+  120000u; §15.10's shorter-expiry suggestion is a test-time choice, not part
+  of the six changes, and the previous capture already fired before the full
+  period.
+
+Hardware capture remains required. The next hang should yield either a
+`LIX<L><PHASE>` capsule, a grown `Z`-bearing trace, or the decisive
+distinguishing case in §15.11's last row.
+
+## 16. Review of the §15 implementation — 2026-08-23
+
+Read-only review against §15, running every step of §15.10. Build artefacts
+regenerated; no source changed by this review.
+
+### 16.1 All six changes verified
+
+| §15 change | Landed | Evidence |
+|---|---|---|
+| 1 — recovery-framed drain | [filesystem.c:21496](Core/Hardware/SD/filesystem.c#L21496) | body matches the plan statement-for-statement |
+| 2 — declaration | [filesystem.h:293](Core/Hardware/SD/filesystem.h#L293) | present |
+| 3 — failure-path call site | [main.c:1265](main.c#L1265) | uses the new wrapper |
+| 4 — phase detail helper | [filesystem.c:3972](Core/Hardware/SD/filesystem.c#L3972) | immediately above the tick, as specified |
+| 5 — eight phase labels | filesystem.c:4022, 4039, 4068, 4075, 4082, 4100, 4111, 4135 | each is the **first statement** of its `case` |
+| 6 — DEV_MODES table | DEV_MODES.md:83-90, 358 | code table and the `Z` drain note both present |
+
+**§15.10 verification, step by step:**
+
+1. `make clean && make` — clean, no errors, no warnings from either changed
+   file. `text=382188` (+312 from 381876), `data=400`. `bss` discussed in
+   §16.2.
+2. `grep -n "filesystem_autosaveTraceFlushBlocking()" main.c` — **no hits.**
+   The plain helper's only remaining caller is the new wrapper inside
+   `filesystem.c`, exactly as required.
+3. `grep -c "filesystem_libraryIndexDetail" filesystem.c` — **9**: one
+   definition, eight call sites.
+4. Every label is **exactly eight characters** — `LIX?ROOT`, `LIX?WAIT`,
+   `LIX?ENTR`, `LIX?CLOS`, `LIX?IOPN`, `LIX?IWAI`, `LIX?ROWS`, `LIX?DONE`.
+   This was the step most likely to bite: `filesystem_bootLoggingSetDetail()`
+   copies eight bytes without reading a terminator, so a seven-character
+   literal would have read one byte past the string into whatever `.rodata`
+   follows. All eight are correct.
+5. `DEV_LOGGING_IWDG` remains `1`. `DEV_LOGGING_IWDG_EXPIRE` is still
+   `120000u` — see §16.4.
+
+Both new functions were read in full and use stack locals only (`char
+detail[8]`, `uint8_t drained`). The drain wrapper's flag discipline matches
+§15.2 exactly: it refuses if a recovery episode is already open,
+acknowledges a terminal-but-unacknowledged facade before starting, opens its
+episode with all three fields reset, and **clears
+`fs_boot_logging_recovery` on exit** — which is what allows
+`filesystem_writeBootFailureLogBlocking()` to run afterwards rather than
+refusing at its own `if (… || fs_boot_logging_recovery) return 0u;` guard.
+That was the single most breakable interaction in the plan and it is right.
+
+### 16.2 One measured deviation: bss is +8, not unchanged
+
+§15.9 claimed "0 bytes SRAM" and §15.10 predicted `bss` unchanged at 94756.
+The measured figure is **94764**.
+
+What I checked, and what it is not:
+
+- **No new file-scope `static` exists in either changed region.** Verified by
+  grep across filesystem.c:3960-4030 and 21440-21560: the only `static`
+  tokens are the two new function definitions themselves.
+- **Neither new function declares static storage.** Both bodies were read in
+  full; `detail` and `drained` are stack locals.
+- No new symbol in `.bss` corresponds to anything §15 introduced.
+
+The most likely explanation is LTO placement and alignment padding shifting
+under the added code — the same effect §14.7 already documented in the
+opposite direction, where `text` fell 608 bytes with no revert whatsoever.
+
+**Recording it accurately rather than repeating the prediction:** §15.9's
+"0 bytes SRAM" should read "**+8 bytes measured; no new declaration
+found**". Eight bytes is immaterial against the budget, but the claim was
+specific and the measurement disagrees with it, so the measurement stands.
+
+### 16.3 One thing the implementation got right that the plan understated
+
+§15.6 said the labels should be "the first statement of each `case`". They
+are, in all eight — including the four phases §14.3 identified as the likely
+stall (`ROOT`, `WAIT`, `ENTR`, `CLOS`). That placement is what makes the
+capsule meaningful under the retry idiom: those phases re-enter on every
+tick while waiting, so the label is refreshed continuously and the capsule
+always holds the phase that was current when the foreground stopped — not
+the last phase that happened to be entered. Had the calls been placed after
+the `if (!afatfs_…()) return;` guards instead, a spinning phase would have
+labelled itself exactly once and then never again, and a stall in a *later*
+phase would have left the earlier label in the capsule. The distinction is
+easy to miss and worth preserving if this block is edited again.
+
+### 16.4 Before the next boot
+
+- **Shorten `DEV_LOGGING_IWDG_EXPIRE`** ([config.h:211](config.h#L211)) from
+  `120000u` to roughly `25000u`. This has now been recommended twice (§13.6,
+  §14.7) and skipped twice. It costs one edit and turns a two-minute wait per
+  attempt into about twenty-five seconds — which matters because §15.11's
+  outcome table may need several boots to populate.
+- Keep `DEV_LOGGING_IWDG = 1` until the stall is identified, then revert it
+  per its own config policy.
+- `build/LXRV2_lxr02.img` regenerated at 382604 bytes and is ready to flash.
+
+### 16.5 Status
+
+§15 is complete and correct; the only deviation is the 8-byte `bss` figure
+in §16.2, which is not attributable to any new declaration. The tree is
+ready for the capture §15.11 describes.
+
+Standing caveat, unchanged since §9.4: **none of this is a fix.** It makes
+the failure name itself. The two evidence channels are now independent — the
+capsule names the phase even when nothing reaches the failure path, and the
+trace names the site and timeline when it does — so the next capture should
+resolve §15.11's table regardless of which way the boot dies.
+
+---
+
+## 17. SD_CARD6 — the capture is empty, and that finally names the defect
+
+### 17.1 Verdict first
+
+**SD_CARD6 contains no new evidence.** The only file that differs from
+SD_CARD5 is the firmware image the user copied on:
+
+```
+$ diff -rq SD_CARD5 SD_CARD6
+Files SD_CARD5/LXRV2_lxr02.img and SD_CARD6/LXRV2_lxr02.img differ
+```
+
+`bootlog.bin`, `asavetrc.bin`, `.hcnames`, `.hcprms1`, and `.hcprms2` are all
+byte-identical to SD_CARD5's. The firmware itself is confirmed correct —
+`SD_CARD6/LXRV2_lxr02.img` is byte-identical to `build/LXRV2_lxr02.img`
+(382,604 bytes) and differs from SD_CARD5's (382,292 bytes), so the §15 build
+was genuinely flashed. §15's instrumentation landed, ran, and produced nothing.
+
+That is not a wasted boot. Combined with one reading of the code it identifies,
+with certainty, why the trace channel has never produced evidence — and the
+answer is not what §15 assumed.
+
+### 17.2 The trace ring has never been drained since before §7
+
+`asavetrc.bin` is 553,944 bytes = 69,243 records. Its full stage histogram:
+
+```
+D 58791   O 3669   N 2754   I 2325   L 647   J 267   T 109   A 107
+V 107     M 105    P 98     C 96     S 77    W 35    B 18    F 15
+R 12      K 6      G 5
+```
+
+**There is not one `Z` record and not one `Q` record in the entire file.**
+Those are the boot-ladder and Preset-state stages added in §7. The last record
+in the file is `T flags=0x01 tick=8108`, from a boot that reached its idle
+flush normally.
+
+So this file predates the §7 work entirely. The ring has not been appended to
+in the SD_CARD5 boot, the SD_CARD6 boot, or any boot since the boot-ladder
+instrumentation was introduced. Three successive fixes — §7, §10, §15 — were
+each aimed at getting boot evidence into this file, and the file has not grown
+by a single record through any of them.
+
+This is a stronger statement than "the drain failed this time." The ring is
+append-only, so any successful append would have increased its size. The size
+has not moved. **The drain has never once succeeded on the boot-failure path.**
+
+### 17.3 Why — and §15 fixed a real cause that was not sufficient
+
+§15's premise is recorded in the code comment at
+[filesystem.c:21508-21517](Core/Hardware/SD/filesystem.c#L21508-L21517):
+once `fs_boot_logging_timed_out` latches, `filesystem_bootLoggingPollDeadline()`
+returns that latch on every call, `filesystem_tick()` returns at its first
+statement, and the facade can never advance. Recovery framing routes the poll
+down its separate branch and restores the tick.
+
+That is true, and §15 fixed it correctly. It is also **not the only thing
+standing in the way**, and the second obstacle is the decisive one.
+
+Compare the two functions that run at
+[main.c:1265](main.c#L1265) and [main.c:1269](main.c#L1269):
+
+| | trace drain (§15) | bootlog write (pre-existing) |
+|---|---|---|
+| `sdcard_abortTransferForBootLog()` | no | **yes** |
+| `afatfs_destroy(true)` | no | **yes** |
+| `filesystem_resetFacadeForBootLogRecovery()` | no | **yes** |
+| `SD_init()` + `spi_sd_set_fast()` | no | **yes** |
+| `filesystem_initAfterCardReady()` + remount pump | no | **yes** |
+| recovery framing for the deadline poll | yes | yes |
+
+`filesystem_writeBootFailureLogBlocking()`
+([filesystem.c:20184-20206](Core/Hardware/SD/filesystem.c#L20184-L20206))
+does all of that work for a reason stated in its own header comment: after a
+confirmed boot failure the SD transfer is stuck and asyncfatfs state is dirty.
+The card is **not usable** until it has been aborted, destroyed, re-initialised,
+and remounted.
+
+The §15 drain skips every one of those steps. It gives itself recovery framing
+and then calls `filesystem_autosaveTraceFlushBlocking()`
+([filesystem.c:21477](Core/Hardware/SD/filesystem.c#L21477)), which calls
+`filesystem_start(FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH, …)` and pumps. That
+pump is now permitted to run — §15 achieved that — but it is pumping the same
+wedged asyncfatfs that just failed to make progress. The open never completes.
+The pump spins until the recovery episode's own 20-second bound expires, sets
+`fs_boot_logging_recovery_failed`, returns zero records, and hands back.
+
+**The drain is attempting to append to a filesystem that is by definition
+broken, and it runs before the only code that repairs it.** It cannot succeed
+on this path — not once, not ever. That is consistent with every capture:
+`bootlog.bin` escapes because its writer remounts first; the trace never
+escapes because its writer does not.
+
+This also means the drain currently costs about 20 seconds of dead spinning
+before the bootlog write even begins. The IWDG is fed throughout — 
+`filesystem_devIwdgFeed()` is the first statement of `filesystem_tick()`
+([filesystem.c:20912-20914](Core/Hardware/SD/filesystem.c#L20912-L20914)) and
+the pump calls `filesystem_tick()` — so this delays the capture without
+endangering it.
+
+### 17.4 What `bootlog.bin` does and does not prove this time
+
+`bootlog.bin` is an 8-byte whole-file overwrite, so a fresh write of identical
+bytes is indistinguishable from a stale file. Both readings are live:
+
+- **It was rewritten this boot with the same eight bytes.** Then the detail
+  label from §15 Change 5 was never set, because a set label would have made
+  the code `LIX?ROOT`/`LIX?WAIT`/etc. rather than plain `LIBINDEX`. That would
+  mean no case body of `filesystem_createLibraryIndex_tick()` ever executed.
+- **It is stale from the SD_CARD5 boot.** Then SD_CARD6 says nothing at all
+  about where this boot stopped.
+
+**I cannot distinguish these from this capture, and I am not going to guess.**
+The trace file settles its own question conclusively because it is append-only;
+`bootlog.bin` has no such property and this is the second capture where that
+ambiguity has cost us.
+
+Worth recording explicitly, because §14 did not state it: `bootlog.bin` reaches
+the card by **two** different routes, and they have very different timing.
+
+1. The boot-failure path at [main.c:1269](main.c#L1269), during the same boot.
+2. The watchdog capsule, on the **following** boot —
+   `filesystem_devIwdgBootCheck()` at [main.c:626](main.c#L626) reads
+   `fs_devwdg_capsule` out of retained SRAM2 and calls the same writer
+   ([filesystem.c:20897-20901](Core/Hardware/SD/filesystem.c#L20897-L20901)).
+
+Route 2 has a long fuse. `filesystem_devIwdgFeed()` keeps feeding until
+`DEV_LOGGING_IWDG_EXPIRE` (120,000 ms) has elapsed, then deliberately stops
+([filesystem.c:20864-20869](Core/Hardware/SD/filesystem.c#L20864-L20869)),
+after which the hardware period (~32.8 s at PR=6/RLR=0xFFF) must also run out.
+That is **~153 seconds before the reset**, plus a second boot that has to reach
+main.c:626. If the unit is powered off before roughly two and a half minutes
+have passed, route 2 writes nothing and the card keeps the previous boot's file.
+
+### 17.5 The one step that makes the next capture unambiguous, with no code change
+
+**Delete `bootlog.bin` and `asavetrc.bin` from the card before the next boot.**
+
+This costs nothing, needs no rebuild, and permanently removes the ambiguity in
+§17.4: any file that exists afterwards was written by that boot, and an absent
+file is a real negative result rather than an unreadable one. Had this been done
+before SD_CARD6, this capture would have been conclusive either way.
+
+This should be standard procedure for every subsequent capture.
+
+### 17.6 The code fix — drain where the card actually works
+
+The drain must move to the only window in which the card is functional: after
+the recovery remount has succeeded. There are two placements; the first is
+better.
+
+**Preferred — inside `filesystem_writeBootFailureLogBlocking()`,** after
+`bootlog.bin` has been written and acknowledged at
+[filesystem.c:20217-20218](Core/Hardware/SD/filesystem.c#L20217-L20218) and
+before the recovery episode closes at
+[filesystem.c:20222](Core/Hardware/SD/filesystem.c#L20222). At that point the
+facade is mounted, idle, and demonstrably working — it has just completed a
+file write. The ring is still intact in SRAM because nothing on the failure
+path clears it. Ordering matters: `bootlog.bin` is the primary evidence and
+must be durable before the larger, slower append is attempted, so that a drain
+that fails cannot cost the token that has been the only working channel.
+
+**Alternative — a second recovery episode at the main.c call site,** moving the
+drain from before [main.c:1269](main.c#L1269) to after it and giving the
+wrapper its own abort/destroy/reset/`SD_init()`/remount preamble. This
+duplicates roughly twenty lines that already exist and re-tears-down a card
+that was just brought up successfully. It is worse, and it is only worth
+considering if the drain must be independently disableable.
+
+Either way, `filesystem_autosaveTraceFlushAfterBootFailureBlocking()`'s current
+body is not wrong, it is merely in the wrong place — the recovery framing it
+adds is still required, because the deadline latch described in §14.4 is real.
+What must change is that the framing now wraps a card that has been repaired.
+
+Three further points:
+
+- **Keep the drain bounded.** 69,243 records is 553,944 bytes already on card;
+  the pending in-SRAM ring is at most `AUTOSAVE_TRACE_RECORD_COUNT` (2,048)
+  records = 16,384 bytes, so the append is small. The existing 20-second
+  recovery bound is ample and must stay.
+- **The drain's result must never gate startup,** exactly as the bootlog
+  write's does not. It is `(void)`-cast today; keep that.
+- **Consider truncating `asavetrc.bin` on a boot that starts a new capture.**
+  Half a megabyte of pre-§7 history is now pure noise and makes every future
+  decode start by finding the tail.
+
+### 17.7 Also do this before the next boot
+
+**Shorten `DEV_LOGGING_IWDG_EXPIRE`** ([config.h:211](config.h#L211)) from
+`120000u` to roughly `25000u`. This has now been recommended in §13.6, §14.7,
+and §16.4, and skipped three times. §17.4 is the concrete cost of skipping it:
+route 2 needs ~153 seconds to fire, and any capture taken before that is
+silently empty. At `25000u` the full watchdog cycle completes in under a
+minute, which makes route 2 reachable in an ordinary bench wait rather than an
+exceptional one.
+
+### 17.8 Correction to my §16 review
+
+§16 verified the §15 implementation against the §15 plan and found it faithful.
+That verification was accurate as far as it went, and I am not withdrawing it —
+every change did land as specified, and the eight-character label check and the
+recovery-flag discipline were genuinely worth confirming.
+
+But the plan it was verifying was built on an incomplete mechanism. §15 read
+SD_CARD5's empty ring as a **gate** problem (the deadline latch stops the tick)
+and fixed the gate. The card-state problem sat behind it and was never
+mentioned in §14.4, §15, or §16. I reviewed conformance to the plan and did not
+step back to ask whether the plan's model of the failure was complete — and the
+table in §17.3, which is what would have exposed it, could have been built at
+any point from code already in front of me.
+
+The general lesson for this document: when an evidence channel produces nothing
+for the third consecutive attempt, the next move is to compare it against the
+channel that **does** work, rather than to refine it again. `bootlog.bin` has
+worked from the start. One column-by-column comparison against it is what
+finally located this.
+
+### 17.9 Status of the hang itself
+
+Unchanged and still unnamed. §15.11's outcome table cannot be populated from
+SD_CARD6 because §17.1 shows no row of it was exercised. `LIBINDEX` from
+SD_CARD5 remains the best and only localisation, with the §14 caveat still
+standing and now sharpened:
+
+`filesystem_bootLoggingOperationDone()`
+([filesystem.c:20872-20878](Core/Hardware/SD/filesystem.c#L20872-L20878))
+disarms the deadline but **preserves the code**. So `LIBINDEX` means "the last
+operation to arm was the library index" — which is compatible with that
+operation having *completed* and the stall being in later CPU work that arms
+nothing. That reading also explains a timeout that never fires: once
+`fs_boot_logging_armed` is zero, the poll returns only the (unset)
+`fs_boot_logging_timed_out` latch and no deadline can expire, leaving the
+watchdog as the sole escape. §15's detail labels were designed to break exactly
+this ambiguity, and they still will — on a boot whose evidence actually reaches
+the card.
+
+Standing caveat, unchanged since §9.4: none of this is a fix. It makes the
+failure name itself.

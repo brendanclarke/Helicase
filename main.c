@@ -241,7 +241,8 @@ static void boot_delayMs(uint16_t ms)
  * class of hang. Inputs are event/site/predicate bytes. Output is one ring
  * store only, with no file handle, formatting, LCD call, or retry. Affiliates:
  * AUTOSAVE_TRACE_STAGE_BOOT_LADDER, filesystem_getBootDiagnostic(),
- * filesystem_autosaveTraceFlushBlocking(), and S056_BOOT_HANG_FOLLOWUP.md §7.
+ * filesystem_autosaveTraceFlushAfterBootFailureBlocking(), and
+ * S056_BOOT_HANG_FOLLOWUP.md §7.
  */
 #if DEV_MODE_LOGGING
 static uint16_t boot_trace_last_heartbeat_tick = 0u;
@@ -1254,8 +1255,14 @@ boot_filesystem_failure:
          * trusted here: a failure route may never return to another idle pass.
          * This is a logging-only synchronous append of the existing ring and
          * does not change the boot failure token or startup continuation.
+         *
+         * The recovery-framed variant is required, not stylistic: this label
+         * is reachable only after the cooperative deadline has latched, and
+         * after that latch filesystem_tick() returns immediately on every
+         * call. The plain blocking drain cannot make progress here and
+         * silently writes nothing -- which is exactly what SD_CARD5 recorded.
          */
-        (void)filesystem_autosaveTraceFlushBlocking();
+        (void)filesystem_autosaveTraceFlushAfterBootFailureBlocking();
         filesystem_setBootSubstepDiagnostic(NULL);
         if (preset_getStatus() != PRESET_IDLE)
             preset_ackStatus();

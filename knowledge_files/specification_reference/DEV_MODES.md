@@ -80,6 +80,17 @@ on a bounded best-effort deadline.
 Examples include `BANKLOAD`, `KITQUAR `, and `HCNAMES `. The record has no NUL
 and no newline.
 
+**Library-index phase codes.** `FS_INTERNAL_OP_CREATE_LIBRARY_INDEX` arms
+`LIBINDEX` and then reports its current phase as `LIX<L><PHASE>`, where
+`<L>` is the library -- `K` Kit, `S` Scene, `B` Bank, `?` unset -- and
+`<PHASE>` is one of `ROOT` (chdir root and open the library directory),
+`WAIT` (waiting for that open), `ENTR` (chdir into it), `CLOS` (close the
+directory handle), `IOPN` (open `.hcindex` for write), `IWAI` (wait index
+open), `ROWS` (stream slot rows), `DONE` (wait index close). A bare
+`LIBINDEX` with no `LIX…` refinement means the operation was armed but no
+phase ran. Codes `ROOT` through `CLOS` precede any write to `.hcindex`, so
+a capture showing one of them cannot have truncated an index file.
+
 For every ordinary failure, the payload is exactly the eight-byte token. A
 frozen `ASENSURE` timeout appends a 64-byte, eight-record HCPRMS capsule, so
 that specific payload is exactly 72 bytes. The raw suffix uses stages `0xE0`
@@ -342,7 +353,11 @@ because LCD waits perturb the boot timing under investigation. `Z` heartbeats
 are appended only while the filesystem facade is idle. A pump that waits with
 the facade BUSY buffers its heartbeats in the RAM ring until the operation
 reaches a terminal state; the tick values remain correct, but the records
-arrive in one batch rather than streaming.
+arrive in one batch rather than streaming. After a cooperative boot timeout,
+the failure path drains through
+`filesystem_autosaveTraceFlushAfterBootFailureBlocking()`, not the plain
+blocking helper, because the timeout latch short-circuits `filesystem_tick()`
+and would otherwise make the drain unable to progress.
 
 The 2026-08-16 root-Scene hardware fixture is the reference example for the
 terminal publication chain: Scene 15 loaded root Scene 024 and produced

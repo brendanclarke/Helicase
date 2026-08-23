@@ -3969,6 +3969,44 @@ static void filesystem_loadInstrumentIndex_tick(void)
  * The root directory is opened before any mkdir fallback so index generation
  * cannot duplicate a host-created LFN root component.
  */
+static void filesystem_libraryIndexDetail(const char label[8])
+{
+    /*
+     * Retain which library-index phase is currently executing.
+     *
+     * What: patches the caller's eight-byte label with the active library
+     * letter and publishes it through filesystem_bootLoggingSetDetail(),
+     * which writes both the retained boot-log code and, in a DEV_LOGGING_IWDG
+     * build, the SRAM2 watchdog capsule.
+     *
+     * Why it must exist: FS_INTERNAL_OP_CREATE_LIBRARY_INDEX arms one code,
+     * "LIBINDEX", for all eight of its phases. SD_CARD5's watchdog capsule
+     * therefore identified the operation but not the library, not the phase,
+     * and not the primitive that stalled -- the whole eight-phase chain
+     * collapsed to one word. Per-phase detail is the cheapest way to resolve
+     * that, because SetDetail already updates the capsule and already leaves
+     * the enclosing deadline untouched, so labelling cannot mask a timeout.
+     *
+     * Inputs: an exactly-eight-byte label whose fourth byte is a placeholder,
+     * plus op_library_index_kind. Output: one retained code; no I/O, no
+     * allocation, no phase change. Called on every entry to a phase including
+     * retries, which is intentional: the capsule must always hold the phase
+     * that was current when the foreground stopped, not the last one entered.
+     *
+     * Affiliates: filesystem_bootLoggingSetDetail(),
+     * filesystem_createLibraryIndex_tick(), DEV_MODES.md's boot-code table,
+     * and S056_BOOT_HANG_FOLLOWUP.md section 14.3.
+     */
+    char detail[8];
+
+    memcpy(detail, label, sizeof(detail));
+    detail[3] = (op_library_index_kind == FS_NAME_CACHE_KIT)   ? 'K'
+              : (op_library_index_kind == FS_NAME_CACHE_SCENE) ? 'S'
+              : (op_library_index_kind == FS_NAME_CACHE_BANK)  ? 'B'
+                                                               : '?';
+    filesystem_bootLoggingSetDetail(detail);
+}
+
 static void filesystem_createLibraryIndex_tick(void)
 {
     const char *root = (op_library_index_kind == FS_NAME_CACHE_KIT)
@@ -3981,6 +4019,7 @@ static void filesystem_createLibraryIndex_tick(void)
 
     switch (op_phase) {
     case 0: /* RETURN ROOT + OPEN LIBRARY DIRECTORY */
+        filesystem_libraryIndexDetail("LIX?ROOT");
         if (!root || !afatfs_chdir(NULL)) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -3997,6 +4036,7 @@ static void filesystem_createLibraryIndex_tick(void)
         return;
 
     case 1: /* WAIT ROOT DIRECTORY */
+        filesystem_libraryIndexDetail("LIX?WAIT");
         if (!op_file_ready)
             return;
         if (!op_file) {
@@ -4025,18 +4065,21 @@ static void filesystem_createLibraryIndex_tick(void)
         return;
 
     case 2: /* ENTER ROOT DIRECTORY */
+        filesystem_libraryIndexDetail("LIX?ENTR");
         if (!afatfs_chdir(op_kit_root_dir))
             return;
         op_phase = 3u;
         return;
 
     case 3: /* CLOSE ROOT DIRECTORY HANDLE */
+        filesystem_libraryIndexDetail("LIX?CLOS");
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
             op_phase = 4u;
         return;
 
     case 4: /* WAIT ROOT CLOSE + OPEN INDEX */
+        filesystem_libraryIndexDetail("LIX?IOPN");
         if (!op_close_done)
             return;
         op_kit_root_dir = NULL;
@@ -4054,6 +4097,7 @@ static void filesystem_createLibraryIndex_tick(void)
         return;
 
     case 5: /* WAIT INDEX OPEN */
+        filesystem_libraryIndexDetail("LIX?IWAI");
         if (!op_file_ready)
             return;
         if (!op_file) {
@@ -4064,6 +4108,7 @@ static void filesystem_createLibraryIndex_tick(void)
         return;
 
     case 6: /* WRITE SLOT-ORDERED ROWS */
+        filesystem_libraryIndexDetail("LIX?ROWS");
         if (op_item_offset < fs_list_cache_count) {
             if (op_bytes_done == 0u) {
                 const char *name = fs_list_cache_name[op_item_offset];
@@ -4087,6 +4132,7 @@ static void filesystem_createLibraryIndex_tick(void)
         return;
 
     case 7: /* WAIT INDEX CLOSE */
+        filesystem_libraryIndexDetail("LIX?DONE");
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -21445,6 +21491,68 @@ uint8_t filesystem_autosaveTraceFlushBlocking(void)
         filesystem_ack();
     }
     return 1u;
+}
+
+uint8_t filesystem_autosaveTraceFlushAfterBootFailureBlocking(void)
+{
+#if DEV_MODE_LOGGING
+    uint8_t drained;
+
+    /*
+     * Drain the trace ring on a boot route that has already timed out.
+     *
+     * What: wraps filesystem_autosaveTraceFlushBlocking() in the same
+     * recovery framing filesystem_writeBootFailureLogBlocking() uses, so the
+     * append can still run after the cooperative boot deadline has latched.
+     *
+     * Why it must exist: once fs_boot_logging_timed_out is set and the
+     * operation arm is cleared, filesystem_bootLoggingPollDeadline() returns
+     * that latch for every subsequent call, and filesystem_tick()'s first
+     * statement is `if (filesystem_bootLoggingPollDeadline()) return;`. The
+     * facade can therefore never advance again, and the drain added to the
+     * boot failure path spins until its own pump bound expires and writes
+     * nothing. That is why SD_CARD5 produced an eight-byte bootlog.bin and
+     * zero trace records: bootlog escapes only because it enters recovery
+     * mode, which routes the poll down its separate branch. See
+     * S056_BOOT_HANG_FOLLOWUP.md section 14.4.
+     *
+     * Inputs: the module-scope logging latches and the pending ring. Output:
+     * nonzero when every pending batch reached its terminal boundary. The
+     * recovery episode is opened and closed here so
+     * filesystem_writeBootFailureLogBlocking(), which refuses to start while
+     * fs_boot_logging_recovery is set, still runs afterwards; its own entry
+     * additionally resets fs_boot_logging_recovery_failed, so a drain that
+     * exhausts this episode cannot cost the bootlog write.
+     *
+     * A terminal-but-unacknowledged facade is acknowledged first: the
+     * underlying helper refuses to start while status is BUSY and cannot
+     * start a new operation from DONE/ERROR.
+     *
+     * State: none. This adds no SRAM and no new file; the ring, the append
+     * operation, and `/asavetrc.bin` are all pre-existing.
+     *
+     * Affiliates: filesystem_autosaveTraceFlushBlocking(),
+     * filesystem_bootLoggingPollDeadline(),
+     * filesystem_writeBootFailureLogBlocking(), and main.c's
+     * boot_filesystem_failure label.
+     */
+    if (!fs_boot_logging_active || fs_boot_logging_recovery)
+        return 0u;
+    if (status == FS_STATUS_DONE || status == FS_STATUS_ERROR)
+        filesystem_ack();
+
+    fs_boot_logging_recovery = 1u;
+    fs_boot_logging_recovery_failed = 0u;
+    fs_boot_logging_recovery_started_tick = time_sysTick;
+
+    drained = filesystem_autosaveTraceFlushBlocking();
+
+    fs_boot_logging_recovery = 0u;
+    fs_boot_logging_recovery_failed = 0u;
+    return drained;
+#else
+    return 0u;
+#endif
 }
 
 uint8_t filesystem_ensureAutosaveFilesBlocking(void)

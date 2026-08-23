@@ -280,6 +280,18 @@ uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
  */
 uint8_t     filesystem_autosaveTraceFlushBlocking(void);
 /*
+ * Drain the trace ring from a boot route whose cooperative deadline has
+ * already latched.
+ *
+ * Use this, not filesystem_autosaveTraceFlushBlocking(), anywhere downstream
+ * of a boot timeout: after the latch, filesystem_tick() short-circuits and
+ * the plain helper can never make progress. Opens and closes its own boot
+ * recovery episode, so filesystem_writeBootFailureLogBlocking() may still run
+ * afterwards. Returns zero outside a logging build. Affiliate:
+ * S056_BOOT_HANG_FOLLOWUP.md section 14.4.
+ */
+uint8_t     filesystem_autosaveTraceFlushAfterBootFailureBlocking(void);
+/*
  * Apply/query the persistent AutoSave policy without synchronous runtime I/O.
  *
  * Input: a settings/Menu byte normalized to OFF/ON. Output: OFF immediately

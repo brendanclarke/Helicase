@@ -208,7 +208,7 @@
  * Only meaningful while DEV_LOGGING_IWDG is 1. Affiliate:
  * filesystem_tick()'s IWDG feed gate.
  */
-#define DEV_LOGGING_IWDG_EXPIRE 120000u
+#define DEV_LOGGING_IWDG_EXPIRE 25000u
 
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time
