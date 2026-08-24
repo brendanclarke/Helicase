@@ -2,7 +2,9 @@
 
 **Date:** 2026-08-24
 **File changed:** `Core/Hardware/SD/asyncfatfs/asyncfatfs.c`
-**Status:** Fix implemented, builds clean. Two-boot hardware test completed — see assessment below.
+**Status:** Fix implemented, builds clean, verified on hardware. Two-boot
+hardware test completed — see assessment below. Observation 2 (cluster-boundary
+file size) resolved in companion `S056_AFATFS_FILE_CLUSTER_CORRECTION.md`.
 
 ---
 
@@ -146,14 +148,13 @@ deleted it between boots — boot .hcindex generation worked.
 
 2. **SD_CARD_B `.hcprms1` is 32,768 bytes** — 2,000 bytes short of the
    expected 34,768 (`AUTOSAVE_RECORD_BYTES`, static-asserted). `.hcprms2`
-   is the correct 34,768 on both cards. The bank-mismatch recovery path
-   (phases 30-38) removes and recreates both files, writing each to
-   exactly `AUTOSAVE_RECORD_BYTES`. 32,768 = exactly one 32 KB cluster;
-   the full record needs a second cluster for the remaining 2,000 bytes.
-   The shortfall points to an asyncfatfs cluster-boundary file-size update
-   issue — the data may be on-card but the directory entry's size field
-   was not updated after the second cluster allocation. Needs
-   investigation if it reproduces.
+   is the correct 34,768 on both cards. 32,768 = exactly one 32 KB
+   cluster; the full record needs a second cluster for the remaining
+   2,000 bytes. Root cause identified and fixed: `afatfs_fseekAtomic()`
+   did not call `afatfs_fileUpdateFilesize()`, leaving `logicalSize` at 0
+   during sequential writes so only `physicalSize` (cluster-rounded) was
+   persisted to the directory entry. See companion document
+   `S056_AFATFS_FILE_CLUSTER_CORRECTION.md`.
 
 3. **Instrument `.hcindex` absent from SD_CARD_B** — boot should
    regenerate all four Instrument type directory `.hcindex` files

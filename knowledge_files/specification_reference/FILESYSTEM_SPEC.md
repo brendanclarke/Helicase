@@ -1,8 +1,9 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware through the Session 051 HCNAMES
-source-authority and Instrument-Load AutoSave update. It includes the
+reference for the Helicase/LXR-02 firmware through the Session 056
+AsyncFATFS duplicate-fix, cluster-boundary file-size fix, and autosave
+page-exit expedite update. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
@@ -1719,9 +1720,11 @@ instrument runtime propagation:
 
 Status: the hidden A/B scalar writer and the accepted root-Instrument /
 InstrumentMrp mutation boundaries are implemented through the Session 048
-baseline. Its complete format, ownership, scheduling, power-loss behavior,
-bounded CRC contract, duplicate rules, and extension process live only in
-`AUTOSAVE.md`.
+baseline. Session 056 added a page-exit expedite that resets the writer
+deadline to 250 ms after the user leaves the Load/Save page, eliminating
+wasted debounce time. Its complete format, ownership, scheduling, power-loss
+behavior, bounded CRC contract, duplicate rules, and extension process live
+only in `AUTOSAVE.md`.
 
 The obsolete per-Instrument/Scene dot-backer proposal formerly in this section
 was never implemented and is removed to prevent two competing AutoSave

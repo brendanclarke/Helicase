@@ -1610,6 +1610,7 @@ static uint8_t fs_autosave_setup_pending = 0u;
 static uint8_t fs_autosave_setup_failed = 0u;
 static uint8_t fs_autosave_transaction_active = 0u;
 static uint8_t fs_autosave_discard_pending = 0u;
+static uint8_t fs_autosave_page_suppressed = 0u;
 
 /* Existing morph destination buffer owned by preset/sound code.
  *
@@ -19229,6 +19230,7 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
     fs_autosave_setup_failed = 0u;
     fs_autosave_transaction_active = 0u;
     fs_autosave_discard_pending = 0u;
+    fs_autosave_page_suppressed = 0u;
     autosave_setMutationTrackingEnabled(0u);
     /*
      * Abandon autonomous settings scheduling with the destroyed FAT facade.
@@ -19281,6 +19283,7 @@ void filesystem_initAfterCardReady(void)
     fs_autosave_setup_failed = 0u;
     fs_autosave_transaction_active = 0u;
     fs_autosave_discard_pending = 0u;
+    fs_autosave_page_suppressed = 0u;
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_writer_armed = 0u;
     fs_autosave_recovery_pending = 0u;
@@ -19840,6 +19843,7 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         return;
     }
     if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+        fs_autosave_page_suppressed = 1u;
 #if DEV_MODE_LOGGING
         /*
          * The page guard is intentional: Load/Save owns the shared 9,000-byte
@@ -19858,6 +19862,11 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         }
 #endif
         return;
+    }
+    if (fs_autosave_page_suppressed) {
+        fs_autosave_page_suppressed = 0u;
+        fs_autosave_next_due_tick = (uint16_t)(
+            now + AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS);
     }
 #if DEV_MODE_LOGGING
     /* Leaving the page ends this W episode; a later dirty arm may report anew. */

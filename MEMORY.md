@@ -17,14 +17,13 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 055 close-out, on branch
-`dev-ph3-autosave-ph3`. The durable closeouts are
-`knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md` (recursive-delete
-root-cause repair, HCNAMES source-on-save, Scene-Pattern desync, boot-IWDG
-regression) and `055_SESSION_HANDOFF_LOG.md` (hardware confirmation of 054's
-fixes, plus the Load-menu freeze, Instrument `kit`-row restore, and stale
-Bank-name-on-entry fixes); verify the actual commit/worktree before making
-the next source change.
+**Current working source**: Session 056 close-out, on branch
+`dev-ph3-autosave-ph4`. Commits `509115b` (LFN duplicate fix) and `7108a00`
+(cluster-boundary fix) are pushed; `filesystem.c` page-exit expedite is
+uncommitted. The durable closeout is
+`knowledge_files/log_archive/056_SESSION_HANDOFF_LOG.md` (LFN duplicate-
+creation fix, cluster-boundary file-size fix, autosave page-exit expedite);
+verify the actual commit/worktree before making the next source change.
 
 ## RAM Allocation Approval Policy
 
@@ -492,6 +491,26 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
   `054_SESSION_HANDOFF_LOG.md`/`055_SESSION_HANDOFF_LOG.md` and the
   specification-reference updates above; their durable facts are preserved
   there and they may be deleted.
+- Session 056 fixed two independent AsyncFATFS bugs and added the autosave
+  page-exit expedite:
+  - **LFN duplicate-creation fix**: `afatfs_createFileContinue()` exited the
+    directory scan early when a viable free-run of deleted entries was found,
+    before checking whether the target file already existed later in the
+    directory. Fixed with a latch-and-continue approach (4 sites, 2 new struct
+    fields). Hardware-verified: no duplicate files across two-boot test.
+  - **Cluster-boundary file-size fix**: `afatfs_fseekAtomic()` did not call
+    `afatfs_fileUpdateFilesize()`, leaving `logicalSize` at 0 for new files so
+    only `physicalSize` (cluster-rounded) was persisted. This was the root cause
+    of the previously unexplained 32,768-byte `.hcprms` files. Fixed with one
+    added call. Hardware-verified: all `.hcprms` files now 34,768 bytes.
+  - **Page-exit expedite**: `fs_autosave_page_suppressed` flag in
+    `filesystem_autosaveWriterSchedule_tick()` resets the writer deadline to
+    250 ms after leaving the Load/Save page, instead of waiting for the original
+    5-second debounce. Pending hardware verification. Does not reduce the
+    inherent two-cycle recovery cost (~12 s) but eliminates wasted gap time.
+  - Root-directory working docs `S056_AFATFS_DUPLICATE_CORRECTION.md` and
+    `S056_AFATFS_FILE_CLUSTER_CORRECTION.md` are superseded by
+    `056_SESSION_HANDOFF_LOG.md` and may be deleted.
 
 ---
 

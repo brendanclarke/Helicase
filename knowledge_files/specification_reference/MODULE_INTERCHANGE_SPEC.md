@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through the Session 051 Scene-follow-up build
-after the Session 046 rollback,
+Session 030 baseline, updated through the Session 056 AsyncFATFS
+duplicate-fix and autosave page-exit expedite build,
 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and

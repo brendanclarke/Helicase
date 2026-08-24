@@ -64,6 +64,7 @@
 | 053 | 2026-08-19 | intentional dirty worktree on `dev-ph3-autosave-ph2` | AsyncFATFS recursive-delete reimplementation (exact-object delete/recreate, direct Bank Save, structured remove/rename); LFN validator repair; boot/overwrite/AutoSave defect diagnosis; HCNAMES source-provenance failure |
 | 054 | 2026-08-20/21 | commits `b9bdb92`, `0827b40` on `dev-ph3-autosave-ph3` | Recursive-delete root cause found and fixed (Bugs #1-#5: spurious timeout error, then a descend/ascend identity invariant broken across two intermediate fixes); HCNAMES source-on-save staged for all four element types; Scene-Pattern playback/UI desync fix; self-introduced-and-fixed IWDG boot-hang regression; extensive new trace diagnostics (`'X'`/`'O'`/`'E'`) |
 | 055 | 2026-08-21 | uncommitted `Core/Menu/menu.c` on `dev-ph3-autosave-ph3` (338 insertions/2 deletions vs `0827b40`) | Hardware-confirmed Session 054's recursive-delete/HCNAMES fixes via full round-trip testing; Load-menu freeze root-caused and closed (missing `filesystem_ack()` in the shared error overlay, plus two self-deadlocking retry helpers); Load: Instrument `kit`-row restore permanent-failure fix; stale Bank/Scene/Kit name-on-entry race fix |
+| 056 | 2026-08-24 | commits `509115b`, `7108a00` plus uncommitted `filesystem.c` on `dev-ph3-autosave-ph4` | AsyncFATFS LFN duplicate-creation fix (latch-and-continue scan replaces early free-run exit); `afatfs_fseekAtomic()` cluster-boundary file-size fix (missing `afatfs_fileUpdateFilesize()` call left `logicalSize` at 0); autosave writer page-exit expedite (`fs_autosave_page_suppressed` flag resets deadline to 250 ms on Load/Save exit); hardware-verified duplicate and file-size fixes, page-exit expedite pending verification |
 
 
 ---
@@ -254,6 +255,8 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | BAR1/BAR2 processPress() calls voiceControl_noteOn/Off() — latent DSP race | 010 |
 | encode_read4 moving to TIM6: cpsid/cpsie must become shadow copy — TIM1 preempts TIM6 | 010 |
 | asyncfatfs adopted — replaces ChaN FatFS entirely | 011 |
+| LFN create scan must complete entire directory before creating — do not reintroduce early free-run exit | 056 |
+| afatfs_fseekAtomic() must call afatfs_fileUpdateFilesize() — removal causes cluster-boundary file-size truncation | 056 |
 | SD cards: FAT16/FAT32 supported; MBR-FAT32 recommended; FAT12/exFAT unsupported and boot warning is `Unsupported card` / `use MBR-FAT32` | 025 |
 | NB_FatFS rejected — C++, heap, no FAT16, no _FS_TINY | 011 |
 | FatFS fork for async rejected — 20+ functions, 28 yield points, high risk | 011 |
@@ -769,3 +772,24 @@ an async `.hcindex` reload it had just posted).
 - **Find here**: [055_SESSION_HANDOFF_LOG.md](055_SESSION_HANDOFF_LOG.md),
   `AUTOSAVE.md`, `DEV_MODES.md`, and the `SCOPING_TARGETS.md` Session
   054-055 sections.
+
+### 056 — AsyncFATFS Duplicate Fix, Cluster-Boundary File-Size Fix, Page-Exit Expedite (2026-08-24)
+
+Fixed two independent AsyncFATFS bugs and added an autosave writer
+optimization. The LFN duplicate-creation bug in `afatfs_createFileContinue()`
+exited the directory scan early when a viable free-run of deleted entries was
+found, creating a second directory entry for an existing file; fixed by
+latching the first viable position and continuing the scan to directory
+exhaustion. The cluster-boundary file-size bug in `afatfs_fseekAtomic()` never
+called `afatfs_fileUpdateFilesize()`, leaving `logicalSize` at 0 for new files
+so only the cluster-rounded `physicalSize` persisted to the FAT directory —
+explaining the earlier 32,768-byte `.hcprms` captures. Both fixes
+hardware-verified across a two-boot test: no duplicate files, all four
+`.hcprms` files correct 34,768 bytes, clean autosave lifecycles. A page-exit
+expedite was added to `filesystem.c`: `fs_autosave_page_suppressed` resets the
+writer deadline to 250 ms after leaving the Load/Save page, eliminating wasted
+5-second debounce time. This does not reduce the inherent two-cycle recovery
+cost (~12 s) but removes the variable gap between cycles.
+
+- **Find here**: [056_SESSION_HANDOFF_LOG.md](056_SESSION_HANDOFF_LOG.md),
+  `ASYNCFATFS_REFERENCE.md`, `AUTOSAVE.md`, and `FILESYSTEM_SPEC.md`.

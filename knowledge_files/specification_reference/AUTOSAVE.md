@@ -22,7 +22,8 @@ state into two hidden root records. It does not modify root `Bank/`, `Scene/`,
 `Kit/`, or `Instrument/` library objects and does not replace explicit Load or
 Save operations.
 
-Implemented through the Session 048 AutoSave baseline:
+Implemented through the Session 048 AutoSave baseline, plus Session 056
+page-exit expedite and the underlying AsyncFATFS file-size fix:
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
@@ -196,6 +197,16 @@ pages suppress new background starts, and the single filesystem facade gives
 foreground work priority. An already active transaction runs to its safe
 close/flush boundary.
 
+When the page guard suppresses the writer, `fs_autosave_page_suppressed` is
+set. On the first scheduler tick after the user leaves the Load/Save page,
+the flag clears and the writer deadline resets to
+`now + AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS` (250 ms). This eliminates
+wasted debounce time between page exit and the first drain admission. The flag
+is unconditional — it fires whether or not the user loaded/saved something;
+if the mask is clean, the scheduler's existing dirty guard disarms the writer
+before any drain starts. The flag is also cleared in both card-failure reset
+paths. (Session 056, pending hardware verification.)
+
 The page rule is a deferment, not a discard. After a direct foreground
 filesystem callback consumes a terminal result, it must acknowledge that
 `DONE`/`ERROR` result before it releases its UI owner; otherwise the facade is
@@ -313,21 +324,23 @@ log files do not yet have equivalent duplicate-safe singleton handling; that
 limitation belongs to `DEV_MODES.md` and must not be mistaken for an AutoSave
 format rule.
 
-## Known `.hcprms` boot-lock evidence
+## Resolved: 32,768-byte `.hcprms` file-size truncation
 
-A failed hardware capture produced a valid 34,768-byte `/.hcprms1` and an
-exactly 32,768-byte `/.hcprms2` whose prefix looked like a valid initial
-record. No diagnostic log survived. The strongest current theory is a stall or
-failed callback while extending the second file beyond its first 32 KiB,
-possibly in FAT cluster allocation/cache handling or the SD transport. That is
-evidence, not proof, and does not justify changing the format or hiding an
-AsyncFATFS failure.
+Earlier hardware captures produced exactly 32,768-byte `.hcprms` files whose
+prefix appeared to be a valid initial record. The root cause was identified
+and fixed in Session 056: `afatfs_fseekAtomic()` did not call
+`afatfs_fileUpdateFilesize()`, so `logicalSize` stayed at 0 for newly created
+files. The only size persisted to the FAT directory entry was `physicalSize`
+(cluster-rounded to 32,768 = one 32 KB cluster) from
+`AFATFS_SAVE_DIRECTORY_NORMAL` during cluster allocation. See
+`ASYNCFATFS_REFERENCE.md` "Seek and file-size tracking" for the fix.
 
-The Session 047 logging build freezes a fixed 64-byte application/AsyncFATFS/
-SD diagnostic capsule only on an `ASENSURE` boot deadline, before normal
-recovery destroys live state. It does not change AutoSave validity, retry, or
-allocation behavior; `DEV_MODES.md` owns its exact 72-byte bootlog envelope.
-Any older diagnosis plan that assumes `/devlog.bin` is a current sink is stale.
+Post-fix hardware testing confirmed all four `.hcprms` files across two boots
+are the correct 34,768 bytes.
+
+The Session 047 logging-only 64-byte `ASENSURE` boot-deadline diagnostic
+capsule remains in place for any future lower-layer failures.
+`DEV_MODES.md` owns its exact 72-byte bootlog envelope.
 
 ## Extending AutoSave
 

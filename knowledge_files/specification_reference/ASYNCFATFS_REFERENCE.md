@@ -366,6 +366,21 @@ When a subdirectory is extended to create space, the create state machine resets
 the entry index so the fresh cluster is scanned from entry 0 instead of
 skipping its first sector.
 
+The LFN creation scan now uses a latch-and-continue approach (Session 056). The
+first viable free run of deleted (`0xE5`) entries is latched but does not
+immediately branch to the create phase. Scanning continues through the remainder
+of the directory. If a matching existing entry is found later, it is opened
+normally and the latch is unused. Only at directory exhaustion (`entry == NULL`)
+does the latched position get used for creation. This prevents duplicate
+directory entries when deleted-entry free runs appear before an existing file
+with the same name.
+
+The earlier code exited the scan the moment a viable free run was found,
+which created duplicates in any directory that had deleted entries before
+the target file's position. The SFN-only path and the rename path were never
+affected — they create only at the `0x00` terminator or at physical directory
+end respectively.
+
 These are internal details, but callers should understand the consequence:
 LFN creation is a multi-step directory mutation, and callers must wait for the
 callback/flush boundary before assuming a host or later scan can see the file.
@@ -425,6 +440,23 @@ Don't:
   unreachable Menu bytes (two 49-byte editor/result strings plus nine result
   bytes) remains above this layer, but no multi-entry diagnostic cache or
   asyncfatfs traversal remains.
+
+## Seek and file-size tracking
+
+`afatfs_fseekAtomic()` and `afatfs_fseekInternalContinue()` both call
+`afatfs_fileUpdateFilesize(file)` after advancing `cursorOffset`. This ensures
+`logicalSize` tracks the true written extent on every successful seek, not only
+on the queued continuation path.
+
+Before Session 056 the atomic path omitted this call, leaving `logicalSize` at
+0 for newly created files throughout the entire write sequence. The only
+on-disk size that persisted was `physicalSize` (cluster-rounded) from
+`AFATFS_SAVE_DIRECTORY_NORMAL` during cluster allocation. If `fclose()`'s
+final `AFATFS_SAVE_DIRECTORY_FOR_CLOSE` write was lost (cache eviction, power
+loss), the on-disk file size reverted to a cluster boundary — e.g. 32,768
+instead of the true 34,768 bytes for an AutoSave record.
+
+Do not remove the `afatfs_fileUpdateFilesize()` call from either seek path.
 
 ## AsyncFATFS work still required
 
