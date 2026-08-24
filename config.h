@@ -116,7 +116,25 @@
  * terminal completion. Affiliates: filesystem_bootLoggingArm(),
  * filesystem_tick(), and filesystem_blockPoll().
  */
-#define BOOT_FILESYSTEM_TIMEOUT_MS 20000u
+/*
+ * 2026-08-23: 20000u -> 30000u for the non-duplicate boot integrity sweep.
+ *
+ * FS_INTERNAL_OP_SWEEP_DUPLICATES walks each root singleton's directory chain
+ * to physical end rather than stopping at the first match, so it reads whole
+ * directory clusters (1024 entry slots at 32 KB clusters) once per name. That
+ * is a few hundred milliseconds on the bit-bang SPI bus, but it is new work
+ * inside one armed operation and the previous budget had no measured margin.
+ *
+ * HARD CEILING 32767: the deadline is evaluated as
+ * `(uint16_t)(time_sysTick - started) < BOOT_FILESYSTEM_TIMEOUT_MS`, and
+ * time_sysTick is a wrapping uint16_t. A value at or above 32768 makes the
+ * elapsed side unable to reach it, which does not extend the deadline -- it
+ * silently removes it. A 120000u value was briefly set during Session 056 and
+ * had exactly that effect: the build appeared to boot "with logging enabled and
+ * a generous timeout" when in fact no boot deadline existed at all. Do not
+ * raise this to hide a slow operation; find the slow operation.
+ */
+#define BOOT_FILESYSTEM_TIMEOUT_MS 30000u
 
 /*
  * Independent deadlines for the foreground boot pumps.

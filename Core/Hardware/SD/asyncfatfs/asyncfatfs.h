@@ -248,6 +248,41 @@ bool afatfs_fopen_lfn(const char *displayName,
                       afatfsMatchMode_t matchMode,
                       char openNameOut[AFATFS_SHORT_FILENAME_MAX],
                       afatfsFileCallback_t complete);
+/*
+ * Open one name and delete every duplicate of it in the current directory.
+ *
+ * NON-DUPLICATE MANDATE G2. The create/open path is structurally incapable of
+ * producing a same-name duplicate (G1: creation is reachable only after the
+ * directory has been scanned to physical end and found not to contain the
+ * name). It cannot, however, remove one that a host or an earlier build wrote,
+ * and ordinary opens deliberately stop at the first match so that routine
+ * writes do not pay for a full directory walk. This call performs that walk on
+ * purpose.
+ *
+ * Behaviour: opens read-only. The first match in scan order survives and is
+ * passed to `complete`; every later same-display-name entry has its SFN and
+ * checksum-matching LFN fragments marked deleted. Which copy survives is
+ * unspecified by design. Close the returned handle as usual.
+ *
+ * It never creates: an absent name completes with a NULL handle, which means
+ * "nothing to deduplicate", not an error.
+ *
+ * Prefer this over a duplicate probe built on afatfs_findNextObject(): that
+ * iterator stops at a 0x00 directory terminator and therefore cannot see a
+ * duplicate hidden after a stray one. This function reads the raw entry stream
+ * and has no such blind spot.
+ *
+ * Cost: one full walk of the target directory's cluster chain (whole clusters,
+ * so a nearly empty directory still costs a full cluster of sector reads).
+ * Intended for a bounded boot integrity pass over firmware-owned singletons,
+ * not for routine use. Returns false only if no file handle was available.
+ *
+ * Affiliates: afatfs_fopen_lfn(), filesystem.c's boot integrity pass, and
+ * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.4.
+ */
+bool afatfs_fsweep_lfn(const char *displayName,
+                       afatfsMatchMode_t matchMode,
+                       afatfsFileCallback_t complete);
 bool afatfs_ftruncate(afatfsFilePtr_t file, afatfsFileCallback_t callback);
 bool afatfs_fclose(afatfsFilePtr_t file, afatfsCallback_t callback);
 

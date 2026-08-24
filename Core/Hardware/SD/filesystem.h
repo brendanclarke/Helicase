@@ -330,6 +330,33 @@ uint8_t     filesystem_autosaveEnabled(void);
  * runtime SD work remains asynchronous through filesystem_tick(). It returns
  * nonzero only after every index file and the final FAT/data flush complete.
  */
+/*
+ * Boot integrity sweep: delete duplicate copies of the firmware-owned root
+ * singletons (`.hcnames`, `.hcprms1`, `.hcprms2`, `settings.cfg`,
+ * `asavetrc.bin`).
+ *
+ * NON-DUPLICATE MANDATE G2. asyncfatfs cannot create a same-name duplicate any
+ * more (G1: creation is reachable only after the directory has been walked to
+ * physical end and found not to contain the name), but it cannot remove one a
+ * host or an earlier build already wrote. A surviving duplicate is silently
+ * destructive: writes land in one directory entry while reads resolve the
+ * other. That is what made `/.hcnames` appear frozen across an entire
+ * debugging session.
+ *
+ * Call once at boot, after the card is mounted and before anything reads or
+ * rewrites those files. Blocking, and bounded by the number of names times one
+ * directory-chain walk each. Ordinary opens deliberately do not do this walk,
+ * so this is the only place duplicates are actively removed.
+ *
+ * Returns nonzero when every name was visited. **A zero return is advisory:
+ * continue booting.** Refusing to start because an integrity convenience could
+ * not run would be worse than the duplicate it was looking for. An absent file
+ * is not a failure -- there is nothing to deduplicate.
+ *
+ * Affiliates: afatfs_fsweep_lfn(), filesystem_sweepDuplicates_tick(), and
+ * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.4.
+ */
+uint8_t     filesystem_sweepDuplicateSingletonsBlocking(void);
 uint8_t     filesystem_createBootIndexBlocking(void);
 /*
  * Write the first-pass resident name register to `/.hcnames`.

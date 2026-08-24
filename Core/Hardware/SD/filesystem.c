@@ -183,6 +183,13 @@ typedef enum {
     FS_INTERNAL_OP_NONE,
     FS_INTERNAL_OP_FLUSH_FINISH,
     FS_INTERNAL_OP_CREATE_BOOT_INDEX,
+    /*
+     * NON-DUPLICATE MANDATE G2: boot integrity sweep over the firmware-owned
+     * root singletons. Walks each name's directory to physical end and deletes
+     * any surplus same-name entries. See
+     * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.4.
+     */
+    FS_INTERNAL_OP_SWEEP_DUPLICATES,
     /* Boot/runtime writer for slot-ordered Kit/Scene/Bank `.hcindex` rows. */
     FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
     /*
@@ -2588,6 +2595,7 @@ static const char *filesystem_bootLogCodeForOperation(
     case FS_INTERNAL_OP_FLUSH_FINISH:         return "FSFLUSH ";
     case FS_INTERNAL_OP_CREATE_BOOT_INDEX:    return "INSINDEX";
     case FS_INTERNAL_OP_CREATE_LIBRARY_INDEX: return "LIBINDEX";
+    case FS_INTERNAL_OP_SWEEP_DUPLICATES:     return "DUPSWEEP";
     case FS_INTERNAL_OP_WRITE_HCNAMES:        return "HCNAMES ";
     case FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES:return "ASENSURE";
     case FS_INTERNAL_OP_LOAD_KIT:
@@ -10533,6 +10541,123 @@ static void filesystem_loadSceneDirectory_tick(void)
         filesystem_setPresetNameInvalid();
         op_close_status = FS_STATUS_ERROR;
         op_phase = 72;
+        return;
+    }
+}
+
+/*
+ * Root singletons that must never exist twice.
+ *
+ * Every entry here is a file this firmware owns exclusively and re-creates or
+ * rewrites during normal operation. A second copy of any of them is silently
+ * destructive: writes land in one entry while reads resolve the other, which
+ * is exactly the state that made `/.hcnames` appear frozen across an entire
+ * debugging session.
+ *
+ * The table is `const char *const []` so it lives in flash and costs no SRAM.
+ * It deliberately does not include per-slot user files (Kit/Scene/Bank/
+ * Instrument objects): those are numerous, are not singletons, and G1 already
+ * makes it impossible to create a second one. Nor does it include the
+ * `.hcindex` files, which live in subdirectories and would each require a
+ * chdir; they are rebuilt wholesale at boot, so a stale duplicate cannot
+ * outlive the next index build.
+ *
+ * Affiliate: filesystem_sweepDuplicates_tick().
+ */
+static const char *const fs_duplicate_sweep_names[] = {
+    FS_RESIDENT_NAMES_FILENAME,
+    AUTOSAVE_RECORD_A_FILENAME,
+    AUTOSAVE_RECORD_B_FILENAME,
+    STORAGE_SETTINGS_FILENAME,
+    AUTOSAVE_TRACE_FILENAME,
+};
+#define FS_DUPLICATE_SWEEP_COUNT \
+    (sizeof(fs_duplicate_sweep_names) / sizeof(fs_duplicate_sweep_names[0]))
+
+static void filesystem_sweepDuplicates_tick(void)
+{
+    /*
+     * NON-DUPLICATE MANDATE G2: boot integrity sweep.
+     *
+     * What: for each root singleton in fs_duplicate_sweep_names[], opens the
+     * name through afatfs_fsweep_lfn() -- which walks the directory to physical
+     * end instead of stopping at the first match -- and closes it again. Any
+     * surplus same-name entry found on the way is marked deleted by asyncfatfs
+     * and persisted by the ordinary cache flush.
+     *
+     * Why it must exist: G1 makes it structurally impossible for this firmware
+     * to create a duplicate, but it cannot remove one already on the card, and
+     * ordinary opens deliberately stop at the first match so routine writes do
+     * not pay for a full directory walk. Something has to do that walk on
+     * purpose, once, where the cost is accounted for. This is that place.
+     *
+     * Why not the pre-existing `.hcnames` probe: that probe is built on
+     * afatfs_findNextObject(), which stops at a 0x00 directory terminator, so a
+     * duplicate hidden after a stray terminator is invisible to it. It can and
+     * did report a clean singleton when the card held two.
+     *
+     * Inputs: a mounted, idle facade at boot, positioned anywhere (this returns
+     * to root itself). Output: FS_STATUS_DONE once every name has been visited.
+     * An absent name is not an error -- there is nothing to deduplicate -- and
+     * a name that cannot be opened is skipped rather than failing the boot,
+     * because losing the sweep must never cost the user a startup.
+     *
+     * State: op_phase and op_item_offset only; no new persistent storage. The
+     * wrapper zeroes op_item_offset because filesystem_start() does not.
+     *
+     * Affiliates: afatfs_fsweep_lfn(), afatfs_retireDuplicateNameRun(),
+     * filesystem_sweepDuplicateSingletonsBlocking(), and
+     * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.4.
+     */
+    switch (op_phase) {
+    case 0u: /* RETURN ROOT + START ONE NAME'S FULL-DIRECTORY SWEEP */
+        if (op_item_offset >= FS_DUPLICATE_SWEEP_COUNT) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fsweep_lfn(fs_duplicate_sweep_names[op_item_offset],
+                               FS_RESIDENT_NAMES_MATCH_MODE,
+                               on_file_opened)) {
+            /*
+             * No free handle right now. Advance rather than retry forever: the
+             * sweep is an integrity convenience and must not be able to stall
+             * boot. The name keeps whatever duplicates it has until the next
+             * sweep.
+             */
+            op_item_offset++;
+            return;
+        }
+        op_phase = 1u;
+        return;
+
+    case 1u: /* WAIT SWEEP OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            /* Absent name: nothing to deduplicate. */
+            op_item_offset++;
+            op_phase = 0u;
+            return;
+        }
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 2u;
+        return;
+
+    case 2u: /* WAIT CLOSE, THEN NEXT NAME */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_item_offset++;
+        op_phase = 0u;
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
         return;
     }
 }
@@ -21023,6 +21148,9 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_LOAD_SCENE:
         filesystem_loadSceneDirectory_tick();
         break;
+    case FS_INTERNAL_OP_SWEEP_DUPLICATES:
+        filesystem_sweepDuplicates_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_BANK:
         filesystem_loadBankDirectory_tick();
         break;
@@ -21379,6 +21507,50 @@ static uint8_t filesystem_pumpBlockingOperation(void)
         }
         filesystem_tick();
     }
+    return 1u;
+}
+
+uint8_t filesystem_sweepDuplicateSingletonsBlocking(void)
+{
+    /*
+     * NON-DUPLICATE MANDATE G2: run the boot integrity sweep to completion.
+     *
+     * What: drives FS_INTERNAL_OP_SWEEP_DUPLICATES, which visits every root
+     * singleton in fs_duplicate_sweep_names[] with a full-directory walk and
+     * deletes any surplus same-name entries found.
+     *
+     * Why blocking and why at boot: the sweep must finish before anything reads
+     * or rewrites those files, otherwise the first `.hcnames` or `.hcprms`
+     * write of the session can still land in the wrong entry. Boot is also the
+     * one place where a full directory walk is affordable and accounted for --
+     * ordinary opens deliberately stop at the first match so routine writes do
+     * not pay for it.
+     *
+     * Inputs: an idle, mounted facade. Output: nonzero when every name was
+     * visited. op_item_offset is zeroed here because filesystem_start() does
+     * not reset it and the tick uses it as its table cursor.
+     *
+     * A zero return means the sweep did not complete; the caller must treat
+     * that as advisory and continue booting. Failing a startup because an
+     * integrity convenience could not run would be a worse outcome than the
+     * duplicate it was looking for.
+     *
+     * Affiliates: filesystem_sweepDuplicates_tick(), afatfs_fsweep_lfn(),
+     * main.c's boot ladder, and S056_AFATFS_NON_DUPLICATE_MANDATE.md §3.4.
+     */
+    if (status == FS_STATUS_BUSY)
+        return 0u;
+    if (!filesystem_start(FS_INTERNAL_OP_SWEEP_DUPLICATES,
+                          FS_FILE_SETTINGS, 0u, NULL))
+        return 0u;
+    op_item_offset = 0u;
+    while (status == FS_STATUS_BUSY)
+        filesystem_tick();
+    if (status != FS_STATUS_DONE) {
+        filesystem_ack();
+        return 0u;
+    }
+    filesystem_ack();
     return 1u;
 }
 

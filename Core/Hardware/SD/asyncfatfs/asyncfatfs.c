@@ -79,6 +79,26 @@
 #define AFATFS_FILE_MODE_CREATE           16
 // The file's directory entry should be locked in cache so we can read it with no latency:
 #define AFATFS_FILE_MODE_RETAIN_DIRECTORY 32
+/*
+ * NON-DUPLICATE MANDATE G2: walk the whole directory and retire same-name
+ * duplicates instead of stopping at the first match.
+ *
+ * Why a separate bit rather than doing this on every create-capable open: the
+ * G1 guarantee does not need it. A create only happens when the scan finds no
+ * match, and "no match" is only knowable after the scan has already reached
+ * physical end-of-directory. An open that DOES find its file will never create,
+ * so stopping there cannot produce a duplicate. The full walk is therefore
+ * already paid exactly when it is needed -- on genuine creation -- and forcing
+ * it on every rewrite of an existing file would add a whole directory cluster
+ * of reads (1024 entry slots at 32 KB clusters) to operations like the constant
+ * `.hcnames` rewrite, on a bit-bang SPI bus.
+ *
+ * This bit is for the deliberate integrity sweep instead: set it to pay for a
+ * complete walk when the goal is finding and deleting duplicates a host or an
+ * earlier build left behind. Set by afatfs_fsweep_lfn(); no mode string
+ * produces it. See S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.4.
+ */
+#define AFATFS_FILE_MODE_SWEEP            64
 
 // Open the cache sector for read access (it will be read from disk)
 #define AFATFS_CACHE_READ         1
@@ -255,6 +275,43 @@ typedef struct afatfsCreateFile_t {
     char scanLongName[AFATFS_LONG_FILENAME_MAX + 1u];
     char *openNameOut;
     afatfsDirEntryPointer_t freeRunStart;
+    /*
+     * Non-duplicate mandate state (S056_AFATFS_NON_DUPLICATE_MANDATE.md).
+     *
+     * Why these exist: the create scan used to branch to the create phase the
+     * instant it found a free run large enough, without finishing the
+     * directory. Any same-name entry lying after that run was never examined,
+     * so a create-capable open placed a second entry with the same display
+     * name -- which is how a duplicate `/.hcnames` reached the card and
+     * silently absorbed every write for a whole debugging session while the
+     * host read the other copy.
+     *
+     * savedEntryPos carries two mutually exclusive roles, which is why it is
+     * one field and not two. While matchFound is zero it latches the first
+     * free run large enough for this object, so the scan can continue to
+     * physical end-of-directory before any creation is authorized; it is
+     * separate from freeRunStart because afatfs_noteFreeDirectoryEntry()
+     * resets that whenever a run breaks. Once matchFound is set the object
+     * already exists, creation is impossible for this operation, and the field
+     * instead holds the surviving match's directory position. The finder IS
+     * file->directoryEntryPos, so continuing the scan to look for duplicates
+     * moves it; it must be restored before SUCCESS because close() writes size
+     * and first cluster back through it.
+     *
+     * The two roles cannot overlap: chosenFreeRunLength is only consulted when
+     * matchFound is zero, and the match position is only read when it is one.
+     *
+     * duplicatesRetired counts extra runs marked deleted in this pass. It is
+     * observational only and never changes the operation result.
+     *
+     * Sizing note: this struct is instantiated once per open file
+     * (AFATFS_MAX_OPEN_FILES) plus the current directory, so every byte added
+     * here is multiplied. Keep additions minimal.
+     */
+    afatfsDirEntryPointer_t savedEntryPos;
+    uint8_t chosenFreeRunLength;
+    uint8_t matchFound;
+    uint8_t duplicatesRetired;
 } afatfsCreateFile_t;
 
 typedef enum {
@@ -3620,6 +3677,70 @@ static void afatfs_retireDirectoryTerminator(fatDirectoryEntry_t *entry)
         afatfs_getCacheDescriptorForBuffer((uint8_t *)entry));
 }
 
+static uint8_t afatfs_retireDuplicateNameRun(fatDirectoryEntry_t *sfnEntry,
+                                             int16_t entryIndex)
+{
+    fatDirectoryEntry_t *sectorBase;
+    uint8_t checksum;
+    int16_t index;
+
+    /*
+     * NON-DUPLICATE MANDATE G2: delete one surplus same-name entry run.
+     *
+     * What: marks the supplied SFN entry deleted, together with the
+     * immediately preceding VFAT fragments in the same sector that carry its
+     * checksum. Marks the sector dirty so the normal cache flush persists it.
+     *
+     * Why it must exist: G1 makes it impossible for this firmware to create a
+     * duplicate, but it cannot unmake one that a host or an earlier build put
+     * on the card. A surviving duplicate silently absorbs writes while readers
+     * see the other copy, which is exactly the failure that hid a whole
+     * debugging session's worth of `.hcnames` writes. Every create-capable
+     * open now scans the complete directory anyway, so removing extras costs
+     * nothing beyond this walk.
+     *
+     * Inputs: the duplicate's SFN entry and its index within the cached
+     * directory sector. Output: entries marked 0xE5 in the cache and the
+     * sector marked dirty; returns 1 so the caller can count it. No FAT chain
+     * is touched -- the duplicate's clusters are intentionally left as they
+     * are rather than freed, because a card mutated outside this firmware
+     * carries no guarantee that the chain is exclusively owned. The mandate
+     * covers the operation contract, not the validity of foreign data.
+     *
+     * Backward walk bound: it stops at the start of the sector, at the first
+     * non-LFN entry, or at the first fragment whose checksum (raw byte 13)
+     * does not match this SFN. A fragment run that began in the previous
+     * sector is therefore left in place; that is safe because orphan fragments
+     * are discarded by any reader that binds a chain by checksum, including
+     * this file's own scanner.
+     *
+     * Affiliates: afatfs_createFileContinue()'s FIND_FILE match branch,
+     * afatfs_retireDirectoryTerminator(), and
+     * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.2.
+     */
+    if (entryIndex < 0)
+        return 0u;
+
+    sectorBase = sfnEntry - entryIndex;
+    checksum = afatfs_lfnChecksum((const uint8_t *)sfnEntry->filename);
+
+    for (index = (int16_t)(entryIndex - 1); index >= 0; index--) {
+        fatDirectoryEntry_t *fragment = sectorBase + index;
+        const uint8_t *raw = (const uint8_t *)fragment;
+
+        if (!afatfs_isLfnDirectoryEntry(fragment))
+            break;
+        if (raw[13] != checksum)
+            break;
+        fragment->filename[0] = FAT_DELETED_FILE_MARKER;
+    }
+
+    sfnEntry->filename[0] = FAT_DELETED_FILE_MARKER;
+    afatfs_cacheSectorMarkDirty(
+        afatfs_getCacheDescriptorForBuffer((uint8_t *)sfnEntry));
+    return 1u;
+}
+
 static void afatfs_writeLfnChar(uint8_t *raw, uint8_t offset, uint16_t value)
 {
     raw[offset] = (uint8_t)(value & 0xffu);
@@ -3759,6 +3880,15 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
         case AFATFS_CREATEFILE_PHASE_INITIAL:
             afatfs_findFirst(&afatfs.currentDirectory, &file->directoryEntryPos);
             opState->freeRunLength = 0u;
+            /*
+             * Reset the non-duplicate mandate state for this operation. Every
+             * field must start clear so a previous operation's latch or match
+             * can never authorize a create or suppress a scan in this one.
+             * See S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.
+             */
+            opState->chosenFreeRunLength = 0u;
+            opState->matchFound = 0u;
+            opState->duplicatesRetired = 0u;
             afatfs_lfnScanReset(opState);
             opState->phase = AFATFS_CREATEFILE_PHASE_FIND_FILE;
             goto doMore;
@@ -3778,6 +3908,44 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                          */
                         if (entry == NULL) {
                             afatfs_findLast(&afatfs.currentDirectory);
+
+                            /*
+                             * NON-DUPLICATE MANDATE: end of the complete scan.
+                             *
+                             * This is the only point at which the directory has
+                             * been proven, entry by entry to physical
+                             * end-of-allocation, either to contain the
+                             * requested display name or not to. Both decisions
+                             * below depend on that proof.
+                             *
+                             * G2 first: if the scan matched, the surviving
+                             * entry is the one already loaded into `file`, and
+                             * any later duplicates have been retired in place.
+                             * file->directoryEntryPos must be restored to that
+                             * entry because the finder shares that field and
+                             * the continued scan moved it; close() writes size
+                             * and first cluster back through it.
+                             */
+                            if (opState->matchFound) {
+                                file->directoryEntryPos = opState->savedEntryPos;
+                                opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
+                                goto doMore;
+                            }
+
+                            /*
+                             * G1: restore the latched free run so the create
+                             * phases below see the first suitable run found
+                             * during the scan rather than whatever partial span
+                             * happened to be running when the directory ended.
+                             * Without this the create would fall through to
+                             * extendSubdirectory() and grow the directory even
+                             * though a usable gap exists.
+                             */
+                            if (opState->chosenFreeRunLength != 0u) {
+                                opState->freeRunStart = opState->savedEntryPos;
+                                opState->freeRunLength =
+                                    opState->chosenFreeRunLength;
+                            }
 
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0) {
                                 if (opState->longNameEnabled) {
@@ -3822,15 +3990,43 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                             }
                         } else if (!opState->longNameEnabled &&
                                    fat_isDirectoryEntryTerminator(entry)) {
-                            afatfs_findLast(&afatfs.currentDirectory);
+                            /*
+                             * NON-DUPLICATE MANDATE G1, short-name path.
+                             *
+                             * This branch used to create the moment it reached
+                             * the first 0x00 terminator, which is the same
+                             * defect as the long-name free-run exit and is
+                             * more direct: a terminator only means "no further
+                             * entries are expected", and a card that has been
+                             * modified externally, or that carries a stray
+                             * terminator from an interrupted write, can hold
+                             * real entries beyond it. Creating there produces a
+                             * second entry with a name that already exists
+                             * further down the directory.
+                             *
+                             * A create-capable request therefore keeps scanning
+                             * to physical end-of-directory; the single
+                             * authorized creation point is the entry == NULL
+                             * branch above, which calls afatfs_findFirst() and
+                             * allocates the first genuinely free slot only
+                             * after absence has been proven.
+                             *
+                             * Read-only requests keep the original early exit:
+                             * they cannot manufacture a duplicate, and stopping
+                             * at a terminator is ordinary FAT semantics. See
+                             * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.3.
+                             *
+                             * Retiring this terminator is deliberately not done
+                             * here: the create allocator restarts from
+                             * afatfs_findFirst() and takes the first free slot,
+                             * which is at or before this position, so the new
+                             * entry is always reachable by ordinary
+                             * enumeration.
+                             */
+                            if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0)
+                                break;
 
-                            if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0) {
-                                afatfs_findFirst(&afatfs.currentDirectory,
-                                                 &file->directoryEntryPos);
-                                opState->phase =
-                                    AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE;
-                                goto doMore;
-                            }
+                            afatfs_findLast(&afatfs.currentDirectory);
                             opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
                             goto doMore;
                         } else if (opState->longNameEnabled &&
@@ -3840,15 +4036,66 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                 fat_isDirectoryEntryTerminator(entry) ? 1u : 0u;
                             afatfs_noteFreeDirectoryEntry(opState,
                                                           &file->directoryEntryPos);
+                            /*
+                             * NON-DUPLICATE MANDATE G1: latch, never create.
+                             *
+                             * What: records the first free run large enough to
+                             * hold this object's LFN fragments plus its SFN,
+                             * and keeps scanning.
+                             *
+                             * Why it must exist: this branch previously jumped
+                             * straight to CREATE_NEW_LFN_FILE the moment a run
+                             * was ready, abandoning the rest of the directory.
+                             * Any entry with the same display name lying after
+                             * that run was never examined, so a create-capable
+                             * open placed a second entry with the same name.
+                             * That is not a rare race -- it happens whenever a
+                             * deletion has left a gap ahead of the existing
+                             * file, which is the normal state of any directory
+                             * that has ever had a file removed. It is how a
+                             * duplicate `/.hcnames` reached the card and
+                             * absorbed every subsequent write while the host
+                             * read the other copy.
+                             *
+                             * Creation is now authorized in exactly one place:
+                             * the entry == NULL branch above, reached only at
+                             * physical end-of-directory. See
+                             * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.1.
+                             *
+                             * The latch is written once (chosenFreeRunLength
+                             * still zero), so first-fit placement is identical
+                             * to the previous behaviour. It is kept separate
+                             * from freeRunStart/freeRunLength because
+                             * afatfs_noteFreeDirectoryEntry() resets those
+                             * whenever the running span breaks.
+                             */
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0 &&
+                                opState->chosenFreeRunLength == 0u &&
                                 afatfs_freeRunIsReady(opState)) {
-                                afatfs_findLast(&afatfs.currentDirectory);
-                                opState->phase =
-                                    AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE;
-                                goto doMore;
+                                opState->savedEntryPos = opState->freeRunStart;
+                                opState->chosenFreeRunLength =
+                                    opState->freeRunLength;
                             }
+                            /*
+                             * Retire a passed terminator only while no run has
+                             * been latched.
+                             *
+                             * Why the extra condition: with creation deferred
+                             * to end-of-scan, an unconditional retire would
+                             * destroy the directory's real terminator on every
+                             * create-capable open, including the common case
+                             * where the object is finally placed *before* this
+                             * point and enumeration would have reached it
+                             * anyway. If a run is already latched the new entry
+                             * lands ahead of this terminator, so it must stay.
+                             * If none is latched the object may be placed after
+                             * it, and the original hazard applies exactly as
+                             * afatfs_retireDirectoryTerminator() describes:
+                             * enumeration would stop before the new object.
+                             */
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0 &&
-                                wasTerminator) {
+                                wasTerminator &&
+                                opState->chosenFreeRunLength == 0u) {
                                 afatfs_retireDirectoryTerminator(entry);
                             }
                             afatfs_lfnScanReset(opState);
@@ -3924,6 +4171,25 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                     opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
                                     goto doMore;
                                 }
+                                /*
+                                 * NON-DUPLICATE MANDATE G2: a second match in
+                                 * the same directory is a duplicate left by a
+                                 * host or an earlier build. Retire it and keep
+                                 * scanning; the first match stays the
+                                 * survivor. The mandate is explicit that which
+                                 * copy survives does not matter.
+                                 */
+                                if (opState->matchFound) {
+                                    if (opState->duplicatesRetired < 0xffu) {
+                                        opState->duplicatesRetired +=
+                                            afatfs_retireDuplicateNameRun(
+                                                entry,
+                                                file->directoryEntryPos.entryIndex);
+                                    }
+                                    afatfs_lfnScanReset(opState);
+                                    break;
+                                }
+
                                 // We found a file with this name!
                                 afatfs_fileLoadDirectoryEntry(file, entry);
                                 if (opState->openNameOut)
@@ -3931,11 +4197,34 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                         (const uint8_t *)entry->filename,
                                         entry->ntReserved,
                                         opState->openNameOut);
+                                opState->savedEntryPos = file->directoryEntryPos;
+                                opState->matchFound = 1u;
 
-                                afatfs_findLast(&afatfs.currentDirectory);
+                                /*
+                                 * Every ordinary open stops here, whatever its
+                                 * mode. This does not weaken G1: a create is
+                                 * only reachable from the entry == NULL branch,
+                                 * so an open that found its file will never
+                                 * create one, and the expensive proof of
+                                 * absence is paid only when the file really is
+                                 * absent.
+                                 *
+                                 * Only an explicit integrity sweep continues
+                                 * past the first match, to find and retire
+                                 * duplicates. See the AFATFS_FILE_MODE_SWEEP
+                                 * rationale above and
+                                 * S056_AFATFS_NON_DUPLICATE_MANDATE.md
+                                 * section 3.4.
+                                 */
+                                if ((file->mode & AFATFS_FILE_MODE_SWEEP) == 0) {
+                                    afatfs_findLast(&afatfs.currentDirectory);
+                                    opState->phase =
+                                        AFATFS_CREATEFILE_PHASE_SUCCESS;
+                                    goto doMore;
+                                }
 
-                                opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
-                                goto doMore;
+                                afatfs_lfnScanReset(opState);
+                                break;
                             }
                             if (strncmp(entry->filename,
                                         (char*) opState->filename,
@@ -5652,6 +5941,64 @@ bool afatfs_fopen_lfn(const char *displayName,
         afatfs_createFileInternal(file, displayName, FAT_FILE_ATTRIBUTE_ARCHIVE,
                                   fileMode, matchMode, openNameOut, true,
                                   complete);
+    } else if (complete) {
+        complete(NULL);
+    }
+    return file != NULL;
+}
+
+bool afatfs_fsweep_lfn(const char *displayName,
+                       afatfsMatchMode_t matchMode,
+                       afatfsFileCallback_t complete)
+{
+    afatfsFilePtr_t file = afatfs_allocateFileHandle();
+
+    /*
+     * NON-DUPLICATE MANDATE G2: open one name and retire every duplicate of it
+     * in the current directory.
+     *
+     * What: opens `displayName` read-only with AFATFS_FILE_MODE_SWEEP, which
+     * makes the FIND_FILE scan walk to physical end-of-directory instead of
+     * stopping at the first match. The first match is opened and handed to the
+     * callback; every later entry with the same display name has its SFN and
+     * checksum-matching LFN fragments marked deleted. The caller closes the
+     * handle exactly as it would after afatfs_fopen_lfn().
+     *
+     * Why it must exist: G1 makes it impossible for this firmware to create a
+     * duplicate, but it cannot unmake one already on the card, and the ordinary
+     * open path deliberately stops at the first match so that routine writes do
+     * not pay for a full directory walk. Something has to do the walk on
+     * purpose. This is that something.
+     *
+     * Why the existing probe was not enough: filesystem.c's
+     * `.hcnames` duplicate probe is built on afatfs_findNextObject(), which
+     * stops at a 0x00 terminator. A duplicate sitting after a stray terminator
+     * is invisible to it, so it can report a clean singleton when it is not
+     * one -- which is exactly the state that let a second `/.hcnames` absorb
+     * every write while the host read the other copy. This function scans the
+     * raw entry stream and has no such blind spot.
+     *
+     * NOTE ON MODE: deliberately no AFATFS_FILE_MODE_CREATE. A sweep must
+     * never bring the name into existence; an absent name has nothing to
+     * deduplicate and reports failure through the callback with a NULL handle,
+     * which callers treat as "nothing to do", not as an error.
+     *
+     * Inputs: a display name in the current working directory, the same match
+     * mode used for the corresponding open, and a completion callback. Output:
+     * the surviving handle or NULL. Duplicates are removed from the cached
+     * directory sectors and persisted by the ordinary cache flush; no FAT chain
+     * is freed, because a card mutated outside this firmware carries no
+     * guarantee that a duplicate's clusters are exclusively owned.
+     *
+     * Affiliates: afatfs_createFileContinue()'s FIND_FILE match branch,
+     * afatfs_retireDuplicateNameRun(), filesystem.c's boot integrity pass, and
+     * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.4.
+     */
+    if (file) {
+        afatfs_createFileInternal(file, displayName, FAT_FILE_ATTRIBUTE_ARCHIVE,
+                                  (uint8_t)(AFATFS_FILE_MODE_READ |
+                                            AFATFS_FILE_MODE_SWEEP),
+                                  matchMode, NULL, true, complete);
     } else if (complete) {
         complete(NULL);
     }

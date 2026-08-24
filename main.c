@@ -668,6 +668,36 @@ int main(void)
             timebase_holdPreAudioMs(BOOT_SD_POST_MOUNT_SETTLE_MS);
 
             /*
+             * Delete duplicate copies of the firmware-owned root singletons
+             * before anything reads or rewrites them.
+             *
+             * NON-DUPLICATE MANDATE G2. asyncfatfs can no longer create a
+             * same-name duplicate, but it cannot remove one a host or an
+             * earlier build already wrote. A surviving duplicate is silently
+             * destructive: writes land in one directory entry while reads
+             * resolve the other, so a file appears frozen while every write
+             * reports success. That is exactly what happened to `/.hcnames`.
+             *
+             * Placement is load-bearing. It must follow the mount, and it must
+             * precede preset_loadGlobals() below -- the first thing in the
+             * ladder that reads one of these files (settings.cfg) -- because a
+             * read resolved against the wrong entry before the sweep would
+             * seed the whole boot from the wrong data.
+             *
+             * The result is deliberately discarded. A sweep that could not run
+             * is advisory: refusing to start the instrument because an
+             * integrity convenience failed would be a worse outcome than the
+             * duplicate it was looking for. Cost is one directory-chain walk
+             * per name, paid once, here, where it is accounted for; ordinary
+             * opens still stop at the first match.
+             *
+             * Affiliates: filesystem_sweepDuplicateSingletonsBlocking(),
+             * afatfs_fsweep_lfn(), and
+             * S056_AFATFS_NON_DUPLICATE_MANDATE.md section 3.4.
+             */
+            (void)filesystem_sweepDuplicateSingletonsBlocking();
+
+            /*
              * Load keyed settings before any initial Bank choice or autosave
              * file decision.
              *
