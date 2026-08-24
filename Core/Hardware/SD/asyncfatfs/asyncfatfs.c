@@ -247,6 +247,7 @@ typedef struct afatfsCreateFile_t {
     uint8_t longNameEnabled;
     uint8_t lfnEntryCount;
     uint8_t freeRunLength;
+    uint8_t freeRunLatched;
     uint8_t scanLongNameValid;
     uint8_t scanLongNameChecksum;
     afatfsMatchMode_t matchMode;
@@ -255,6 +256,7 @@ typedef struct afatfsCreateFile_t {
     char scanLongName[AFATFS_LONG_FILENAME_MAX + 1u];
     char *openNameOut;
     afatfsDirEntryPointer_t freeRunStart;
+    afatfsDirEntryPointer_t latchedFreeRunStart;
 } afatfsCreateFile_t;
 
 typedef enum {
@@ -3759,6 +3761,7 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
         case AFATFS_CREATEFILE_PHASE_INITIAL:
             afatfs_findFirst(&afatfs.currentDirectory, &file->directoryEntryPos);
             opState->freeRunLength = 0u;
+            opState->freeRunLatched = 0u;
             afatfs_lfnScanReset(opState);
             opState->phase = AFATFS_CREATEFILE_PHASE_FIND_FILE;
             goto doMore;
@@ -3781,6 +3784,13 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
 
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0) {
                                 if (opState->longNameEnabled) {
+                                    if (opState->freeRunLatched) {
+                                        opState->freeRunStart =
+                                            opState->latchedFreeRunStart;
+                                        opState->phase =
+                                            AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE;
+                                        goto doMore;
+                                    }
                                     if (afatfs_freeRunIsReady(opState)) {
                                         opState->phase =
                                             AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE;
@@ -3841,11 +3851,10 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                             afatfs_noteFreeDirectoryEntry(opState,
                                                           &file->directoryEntryPos);
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0 &&
+                                !opState->freeRunLatched &&
                                 afatfs_freeRunIsReady(opState)) {
-                                afatfs_findLast(&afatfs.currentDirectory);
-                                opState->phase =
-                                    AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE;
-                                goto doMore;
+                                opState->latchedFreeRunStart = opState->freeRunStart;
+                                opState->freeRunLatched = 1u;
                             }
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0 &&
                                 wasTerminator) {
@@ -3976,6 +3985,7 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                             afatfs_findFirst(&afatfs.currentDirectory,
                                              &file->directoryEntryPos);
                             opState->freeRunLength = 0u;
+                            opState->freeRunLatched = 0u;
                             afatfs_lfnScanReset(opState);
                             break;
                         } else if (strncmp(entry->filename, (char*) opState->filename, FAT_FILENAME_LENGTH) == 0) {
