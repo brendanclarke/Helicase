@@ -145,10 +145,15 @@ deleted it between boots — boot .hcindex generation worked.
    gen2 to `.hcprms2`.
 
 2. **SD_CARD_B `.hcprms1` is 32,768 bytes** — 2,000 bytes short of the
-   expected 34,768. `.hcprms2` is the correct 34,768 on both cards.
-   `.hcprms1` is the prior-generation source, not the active published
-   record, so the short size may reflect a truncation/allocation edge case
-   rather than data loss. Needs investigation if it reproduces.
+   expected 34,768 (`AUTOSAVE_RECORD_BYTES`, static-asserted). `.hcprms2`
+   is the correct 34,768 on both cards. The bank-mismatch recovery path
+   (phases 30-38) removes and recreates both files, writing each to
+   exactly `AUTOSAVE_RECORD_BYTES`. 32,768 = exactly one 32 KB cluster;
+   the full record needs a second cluster for the remaining 2,000 bytes.
+   The shortfall points to an asyncfatfs cluster-boundary file-size update
+   issue — the data may be on-card but the directory entry's size field
+   was not updated after the second cluster allocation. Needs
+   investigation if it reproduces.
 
 3. **Instrument `.hcindex` absent from SD_CARD_B** — boot should
    regenerate all four Instrument type directory `.hcindex` files
@@ -161,11 +166,15 @@ deleted it between boots — boot .hcindex generation worked.
    not introduced by this fix. It fires once at boot during the name
    repair pass and does not prevent Bank Load or autosave from completing.
 
-5. **Boot 2 V(gen0, none)** — the second boot's first autosave validation
-   cycle found no existing winner despite `.hcprms2` gen2 being on-card
-   from Boot 1. The writer then created a fresh `.hcprms1` gen1 and
-   subsequently published gen2 to `.hcprms2`. This suggests the validator
-   could not read or validate the prior session's `.hcprms2`, possibly
-   because the file existed as a duplicate from the unfixed code, or
-   because validation requires specific header state that was not met.
-   The autosave lifecycle still completed correctly in both cases.
+5. **Boot 2 V(gen0, none) — RESOLVED, correct behaviour.** The validator
+   at `filesystem_autosaveParameterDrain_tick()` phase 3
+   ([filesystem.c:5754-5758](Core/Hardware/SD/filesystem.c#L5754-L5758))
+   calls `autosave_streamValidationMatchesBank()` which checks the file's
+   stored `bank_slot` and `bank_name` against the currently loaded bank
+   ([Autosave.c:589-594](Core/Bank/Scene/Autosave.c#L589-L594)). Boot 1
+   wrote `.hcprms` files for Bank 015 "LoadTst!"; Boot 2 loaded Bank 014
+   "Full". Both candidates pass CRC but fail the bank identity check, so
+   V correctly reports no winner. The no-winner recovery path (phases
+   30-38) then removes both files, writes fresh `.hcprms2` gen0 and
+   `.hcprms1` gen1 for Bank 014, and the second cycle validates gen1 and
+   publishes gen2 — all working as designed.

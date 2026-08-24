@@ -2362,6 +2362,8 @@ static bool afatfs_fseekAtomic(afatfsFilePtr_t file, int32_t offset)
         file->cursorOffset += offset;
     }
 
+    afatfs_fileUpdateFilesize(file);
+
     return true;
 }
 
@@ -2403,7 +2405,7 @@ static bool afatfs_fseekInternalContinue(afatfsFile_t *file)
         file->cursorOffset += opState->seekOffset;
     }
 
-    afatfs_fileUpdateFilesize(file); // TODO do we need this?
+    afatfs_fileUpdateFilesize(file);
 
     file->operation.operation = AFATFS_FILE_OPERATION_NONE;
 
