@@ -372,15 +372,67 @@ for a fast top-level review.
    trusting this reconstruction on real hardware — flagged in §5.3 at the
    exact line.
 5. **Root Kit/Scene canonical-member-name check stays Bank-only, deliberately
-   not widened.** `filesystem_kitMemberNameIsCanonical()` is currently only
-   invoked for a Bank-local embedded Kit (`filesystem.c:9280-9288`, gated on
-   `current_op == FS_INTERNAL_OP_LOAD_BANK`) — a root Kit Load or a root
-   Scene's embedded Kit can carry a non-canonical member filename today and
-   still load successfully. This plan does not add that check to the other
-   two paths: doing so would be new validation scope beyond "quarantine on
-   an existing failure," matching §3's stated principle of reusing what
-   already exists rather than inventing new checks. Noted so this asymmetry
-   isn't mistaken for an oversight later.
+   not widened** — **superseded by §4g below.** This item originally noted
+   that `filesystem_kitMemberNameIsCanonical()` (a length-only check: is the
+   member's filename stem 8 characters or fewer) currently only runs for a
+   Bank-local embedded Kit, and proposed leaving that asymmetry alone rather
+   than widening the check to reject the same over-length name elsewhere.
+   Direction received since: an over-length name should never be a rejection
+   at all — it should be silently repaired in place. §4g replaces "reject if
+   non-canonical" with "truncate to canonical on sight, everywhere," which
+   closes this asymmetry a different way than either original option (leave
+   it, or widen the rejection) — see §4g for the rule and its interaction
+   with the Kit-quarantine plan in §5.3.
+
+### 4g. General rule: lazy 8-character truncation on sight, everywhere (new)
+
+Per direction, a new standing rule, independent of the Kit-quarantine
+mechanism above but touching the same code paths:
+
+**Rule:** any time the filesystem code encounters an object name longer
+than 8 characters, it truncates that name to 8 characters. For everything
+except Instrument filenames, this is a plain truncation — no further
+disambiguation. For Instrument filenames specifically, truncation must also
+guarantee no duplicate results:
+
+- **Instrument embedded in a Kit** (one of the six `file=` members in
+  `kitset.kcg`): truncate to 7 characters and append the 1-based voice/slot
+  number as the 8th character. This alone guarantees uniqueness among a
+  single Kit's own members, since no two of a Kit's six member slots share a
+  voice number.
+- **Instrument in the library** (a standalone file under `Instrument/`, not
+  embedded in a Kit): truncate, then apply the **existing** duplicate-
+  avoidance numbering mechanism already used elsewhere in this codebase for
+  exactly this kind of collision. Per direction, this implementation is not
+  to be revised — only reused. (Not confirmed by name in this session per
+  the "no code dive" instruction, but the collision-retry loop already found
+  and read this session inside `filesystem_repairNames_tick()`
+  — `op_repair_retry`/`op_repair_suffix`, incrementing a numeric suffix up
+  to 999 on a naming collision, `filesystem.c:6967-7027` — looks like the
+  right existing mechanism to point the implementer at; confirm before
+  reusing.)
+
+**Trigger discipline — this is the part that differs from a simple
+validation-length check:** no new dedicated boot-time scan is added purely
+to hunt for over-length names. The rule fires lazily, at whatever point the
+filesystem's own existing code already touches that name for another
+reason — an existing repair pass, a load, a scan, a rename — not from a new
+proactive traversal added solely for this. "As soon as the filesystem sees
+it" means the first natural touch-point, not a synchronized sweep.
+
+**Interaction with §5's Kit-quarantine plan — flagged for the implementation
+pass, not resolved here:** §5.3 currently classifies a failed
+`filesystem_kitMemberNameIsCanonical()` check (Bank-embedded Kit context
+only, `filesystem.c:9280-9288`) as `FS_LOAD_INVALID_KIT`, feeding the same
+quarantine-the-whole-Kit path as a genuine parse failure. Under this new
+rule, an over-length member name is no longer a failure to quarantine over
+at all — it is a name to repair in place (truncate + rename the member
+file, then continue loading it normally). This changes the shape of that
+one classification row in §5.3's table and needs its own small
+sub-machine (truncate-and-rename the one over-length member, then resume
+the kitset parse) rather than reusing the quarantine machinery — left as a
+follow-up detailing pass, not worked out in this session per the "no code
+dive" direction for this rule.
 
 ## 5. Fully detailed implementation plan
 
