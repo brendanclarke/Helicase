@@ -1542,6 +1542,27 @@ static uint8_t fs_settings_dirty = 0u;
 static uint8_t fs_settings_runtime_ready = 0u;
 static uint8_t op_settings_write_active = 0u;
 /*
+ * Boot recovery-validation scratch for the settings temp-file prelude.
+ *
+ * What: tracks validity, line count, and terminator state while the boot
+ * recovery prelude reads and validates a leftover settings.tmp. After the
+ * temp file is closed, op_settings_recovery_valid doubles as the
+ * promote/discard path selector: 1 = promote (remove old settings.cfg then
+ * rename temp), 0 = discard (remove the invalid temp file).
+ *
+ * Inputs: the text lines read from settings.tmp by filesystem_readTextLine().
+ * Outputs: one promote/discard decision at the end of the read pass.
+ * Affiliates: filesystem_loadGlobals_tick()'s recovery prelude,
+ * filesystem_parseSettingsLine(), and the §6 terminator-count check.
+ *
+ * Lifetime: meaningful only during FS_INTERNAL_OP_LOAD_GLOBALS phases 0-10;
+ * not referenced by any other operation. 4 bytes total, normal SRAM .bss.
+ */
+static uint8_t op_settings_recovery_valid = 0u;
+static uint8_t op_settings_recovery_line_count = 0u;
+static uint8_t op_settings_recovery_terminator_n = 0u;
+static uint8_t op_settings_recovery_terminator_seen = 0u;
+/*
  * Background autosave cadence state.
  *
  * This is deliberately separate from fs_last_idle_poll_tick: the latter owns
@@ -2125,6 +2146,39 @@ static uint8_t filesystem_settingsParamForKey(const char *key,
     else if (strcmp(key, "osc_wave_interp") == 0) *param = PAR_OSC_WAVE_INTERP;
     else if (strcmp(key, "autosave") == 0) *param = PAR_AUTOSAVE_ENABLED;
     else return 0u;
+    return 1u;
+}
+
+/*
+ * Detect a settings terminator line and extract its declared count.
+ *
+ * What: returns 1 if the NUL-terminated line matches "lines=N" (where N is a
+ * valid unsigned decimal integer that fits in a uint8_t), storing N in *n_out.
+ * Returns 0 for all other lines, leaving *n_out unmodified.
+ *
+ * Why: the boot recovery prelude must distinguish a genuine terminator from an
+ * ordinary data line, and extract N for the completeness cross-check, without
+ * embedding format knowledge in the state machine itself. The normal load path
+ * (Pass B) never calls this; it accepts "lines" as an unknown key via
+ * filesystem_parseSettingsLine()'s existing unknown-key pass-through.
+ *
+ * Inputs: one NUL-terminated text line from filesystem_readTextLine() (newline
+ * already stripped). Outputs: *n_out receives N on match; return value signals
+ * whether the match succeeded. Affiliates: filesystem_loadGlobals_tick()
+ * recovery phase 2 and the §6 terminator design.
+ */
+static uint8_t filesystem_isSettingsTerminatorLine(const char *line,
+                                                    uint8_t *n_out)
+{
+    uint16_t parsed;
+
+    if (strncmp(line, "lines=", 6u) != 0)
+        return 0u;
+    if (!filesystem_parseSettingsU16(line + 6u, &parsed))
+        return 0u;
+    if (parsed > 255u)
+        return 0u;
+    *n_out = (uint8_t)parsed;
     return 1u;
 }
 
@@ -12762,6 +12816,20 @@ static uint8_t filesystem_nextSettingsLine(char *dst, uint16_t cap,
          */
         return filesystem_formatAssignmentU16Line(
             dst, cap, "autosave", parameter_values[PAR_AUTOSAVE_ENABLED]);
+    case 17u:
+        /*
+         * Self-checking terminator for future format expansion.
+         *
+         * What: emits "lines=17\n" as the final line, where 17 is the count
+         * of preceding data lines (cases 0u..16u). Why: gives any future
+         * consumer a cheap completeness signal that distinguishes a genuine
+         * end-of-file from a clean-but-early EOF after a crash. Adding a new
+         * settings key in the future requires incrementing both the key's own
+         * case and this declared count. The boot recovery prelude validates
+         * this count; the normal load path ignores it as an unknown key.
+         * Affiliates: §6 of S057_SETTINGS_WRITE_SAFE.md.
+         */
+        return filesystem_formatAssignmentU16Line(dst, cap, "lines", 17u);
     default:
         return 0u;
     }
@@ -15961,9 +16029,20 @@ static void filesystem_loadContainer_tick(void)
 
 #endif
 /* -----------------------------------------------------------------------
-** LOAD SETTINGS state machine
+** LOAD SETTINGS state machine — with boot recovery prelude.
 **
-** Phases: 0=defaults+open, 1=wait_open, 2=read lines, 3=close, 4=wait_close
+** Pass A (phases 0-8): boot recovery prelude. Checks for a leftover
+**   settings.tmp from an interrupted safe-write. If found: validates it
+**   with the existing parser + terminator check; promotes (valid) or
+**   discards (invalid). Either way, falls through to Pass B.
+** Pass B (phases 10-14): the existing settings.cfg load, unmodified in
+**   logic, only renumbered from the former phases 0-4.
+**
+** What: ensures that a power loss during settings persistence never leaves
+** the system with both files missing and no authoritative settings state.
+** Affiliates: filesystem_saveGlobals_tick()'s safe-write phases,
+** filesystem_parseSettingsLine(), filesystem_isSettingsTerminatorLine(),
+** S057 design §7.
 ** ----------------------------------------------------------------------- */
 static void filesystem_loadGlobals_tick(void)
 {
@@ -15972,7 +16051,208 @@ static void filesystem_loadGlobals_tick(void)
     storage_status_t st;
 
     switch (op_phase) {
-    case 0: /* DEFAULTS + OPEN */
+
+    /* =================================================================
+     * Pass A — Recovery prelude: settings.tmp discovery and resolution.
+     * ================================================================= */
+
+    case 0: /* OPEN_TEMP — try to open settings.tmp for read */
+        /*
+         * Attempt to open the temp file before any settings defaults are
+         * applied. A leftover settings.tmp proves a safe-write promotion was
+         * interrupted on the previous boot; its presence gates the validation
+         * and promote/discard decision that follows. The open uses "r" so
+         * afatfs reports not-found as a NULL callback, not an error. See §7.
+         */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(STORAGE_SETTINGS_TEMP_FILENAME, "r", on_file_opened))
+            return;
+        op_phase = 1;
+        return;
+
+    case 1: /* WAIT_OPEN_TEMP */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            /*
+             * No temp file: the common case. No interrupted write to resolve.
+             * Skip the entire recovery prelude and enter the existing load at
+             * Pass B (phase 10).
+             */
+            op_phase = 10;
+            return;
+        }
+        /*
+         * Temp file found: initialize recovery-validation state and begin
+         * reading. line_count increments for every line consumed; the
+         * terminator detector records N and a seen-flag so the EOF check can
+         * verify that the final line was "lines=N" with N == line_count - 1.
+         */
+        op_settings_recovery_valid = 1u;
+        op_settings_recovery_line_count = 0u;
+        op_settings_recovery_terminator_n = 0u;
+        op_settings_recovery_terminator_seen = 0u;
+        op_line_len = 0u;
+        op_phase = 2;
+        return;
+
+    case 2: /* READ_VALIDATE_TEMP — read and validate each line */
+        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
+                                     sizeof(op_line_buf), &line_ready, &eof);
+        if (st == STORAGE_STATUS_WAIT)
+            return;
+        if (st != STORAGE_STATUS_OK) {
+            /* Read error (e.g. line too long): mark invalid and close. */
+            op_settings_recovery_valid = 0u;
+            op_phase = 3;
+            return;
+        }
+        if (line_ready) {
+            op_settings_recovery_line_count++;
+            /*
+             * Check for the terminator line before passing to the parser.
+             * The parser silently accepts "lines=N" as an unknown key, which
+             * is correct for Pass B's normal load, but the recovery prelude
+             * also needs to extract and track N for the §6 completeness check.
+             * The seen-flag is set on terminator lines and cleared on
+             * non-terminator lines, so at EOF it is 1 only if the very last
+             * line was a terminator.
+             */
+            if (filesystem_isSettingsTerminatorLine(op_line_buf,
+                    &op_settings_recovery_terminator_n)) {
+                op_settings_recovery_terminator_seen = 1u;
+            } else {
+                op_settings_recovery_terminator_seen = 0u;
+            }
+            /*
+             * Validate syntax via the existing parser. This also applies
+             * values to parameter_values[]/BankData, but Pass B will call
+             * filesystem_resetSettingsToDefaults() (phase 10) before its own
+             * read pass, so these are harmlessly overwritten.
+             */
+            if (filesystem_parseSettingsLine(op_line_buf) != FS_STATUS_DONE)
+                op_settings_recovery_valid = 0u;
+            return;
+        }
+        if (eof) {
+            /*
+             * §6 completeness check: valid only if every line parsed without
+             * error AND the final line was a "lines=N" terminator whose N
+             * equals the number of preceding data lines. N == line_count - 1
+             * because the terminator itself is counted in line_count but does
+             * not count toward the "17 preceding key lines" it declares.
+             */
+            if (!op_settings_recovery_valid ||
+                !op_settings_recovery_terminator_seen ||
+                op_settings_recovery_terminator_n !=
+                    (uint8_t)(op_settings_recovery_line_count - 1u)) {
+                op_settings_recovery_valid = 0u;
+            }
+            op_phase = 3;
+        }
+        return;
+
+    case 3: /* CLOSE_TEMP */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 4;
+        return;
+
+    case 4: /* WAIT_CLOSE_TEMP — decide promote or discard */
+        if (!op_close_done) return;
+        /*
+         * op_settings_recovery_valid now serves double duty as the path
+         * selector: 1 = promote (valid temp file, remove old settings.cfg
+         * then rename), 0 = discard (invalid temp file, remove settings.tmp).
+         * The existing load (Pass B) follows either path.
+         */
+        op_phase = 5;
+        return;
+
+    case 5: /* REMOVE_FILE — remove the appropriate target */
+        /*
+         * Promote path: remove the old settings.cfg before renaming the
+         * validated temp file into its place. Tolerate not-found (genuine
+         * first boot, or a prior recovery already promoted successfully).
+         *
+         * Discard path: remove the invalid settings.tmp. The existing
+         * settings.cfg (if any) was never touched and remains authoritative.
+         *
+         * Both paths use the same shared on_remove_complete callback and the
+         * same case-insensitive singleton-removal discipline established for
+         * AutoSave's .hcprms target (AUTOSAVE.md). See §7.
+         */
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(
+                op_settings_recovery_valid
+                    ? STORAGE_SETTINGS_FILENAME
+                    : STORAGE_SETTINGS_TEMP_FILENAME,
+                AFATFS_MATCH_CASE_INSENSITIVE,
+                AFATFS_REMOVE_FILES_ONLY,
+                on_remove_complete))
+            return;
+        op_phase = 6;
+        return;
+
+    case 6: /* WAIT_REMOVE */
+        if (!op_remove_done) return;
+        if (op_settings_recovery_valid &&
+            op_remove_result == AFATFS_RESULT_OK) {
+            /*
+             * Promote path: old settings.cfg removed (or was already absent).
+             * Proceed to rename settings.tmp → settings.cfg.
+             */
+            op_phase = 7;
+            return;
+        }
+        /*
+         * Discard path, or promote-path remove error. In the discard case,
+         * the existing settings.cfg is untouched. In the remove-error case,
+         * settings.cfg is still present so the existing load will read it
+         * (the temp file remains as well; next boot retries recovery). Either
+         * way, skip rename and enter the existing load at Pass B.
+         */
+        op_phase = 10;
+        return;
+
+    case 7: /* RENAME — promote settings.tmp → settings.cfg */
+        /*
+         * Reuses the shared op_repair_rename_open_name buffer for the
+         * returned 8.3 alias (required by the API but not used further).
+         * Only reached when the promote path's remove succeeded, so the
+         * target name settings.cfg is guaranteed unoccupied.
+         */
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(STORAGE_SETTINGS_TEMP_FILENAME,
+                                     STORAGE_SETTINGS_FILENAME,
+                                     AFATFS_MATCH_CASE_INSENSITIVE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 8;
+        return;
+
+    case 8: /* WAIT_RENAME */
+        if (!op_rename_done) return;
+        /*
+         * Rename success or failure, proceed to the existing load. On
+         * success: settings.cfg is the promoted temp file; Pass B re-reads
+         * and applies it. On failure (extremely unlikely): settings.cfg was
+         * already removed so Pass B sees no file and uses defaults;
+         * settings.tmp remains durable for next boot's recovery.
+         */
+        op_phase = 10;
+        return;
+
+    /* =================================================================
+     * Pass B — Existing settings.cfg load (unchanged logic, renumbered).
+     * ================================================================= */
+
+    case 10: /* DEFAULTS + OPEN */
         op_file_ready = false;
         op_file = NULL;
         fs_stale_warning_pending = FS_STALE_WARNING_NONE;
@@ -15981,55 +16261,55 @@ static void filesystem_loadGlobals_tick(void)
         op_line_len = 0u;
         if (!afatfs_fopen(STORAGE_SETTINGS_FILENAME, "r", on_file_opened))
             return;
-        op_phase = 1;
+        op_phase = 11;
         return;
 
-    case 1: /* WAIT_OPEN */
+    case 11: /* WAIT_OPEN */
         if (!op_file_ready) return;
         if (op_file == NULL) {
             /*
              * No settings file is valid first-boot/card state.
              *
-             * Output: defaults from phase 0 remain live. No former raw globals
-             * fallback is attempted because that filename is retired and
-             * should not be recognized by current firmware.
+             * Output: defaults from phase 10 remain live. No former raw
+             * globals fallback is attempted because that filename is retired
+             * and should not be recognized by current firmware.
              */
             filesystem_finish(FS_STATUS_DONE);
             return;
         }
-        op_phase = 2;
+        op_phase = 12;
         return;
 
-    case 2: /* READ LINES */
+    case 12: /* READ LINES */
         st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
                                      sizeof(op_line_buf), &line_ready, &eof);
         if (st == STORAGE_STATUS_WAIT)
             return;
         if (st != STORAGE_STATUS_OK) {
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 3;
+            op_phase = 13;
             return;
         }
         if (line_ready) {
             op_close_status = filesystem_parseSettingsLine(op_line_buf);
             if (op_close_status != FS_STATUS_DONE)
-                op_phase = 3;
+                op_phase = 13;
             return;
         }
         if (eof) {
             filesystem_sanitizeLoadedGlobals();
             op_close_status = FS_STATUS_DONE;
-            op_phase = 3;
+            op_phase = 13;
         }
         return;
 
-    case 3: /* CLOSE */
+    case 13: /* CLOSE */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 4;
+            op_phase = 14;
         return;
 
-    case 4: /* WAIT_CLOSE */
+    case 14: /* WAIT_CLOSE */
         if (!op_close_done) return;
         /*
          * Data is in parameter_values[] and BankData. Global runtime apply
@@ -16046,14 +16326,27 @@ static void filesystem_loadGlobals_tick(void)
 }
 
 /* -----------------------------------------------------------------------
-** SAVE SETTINGS state machine
+** SAVE SETTINGS state machine — safe-write via temp + sync + promote.
 **
-** Phases: 0=open, 1=wait_open, 2=write lines, 3=close, 4=wait_close
+** Phases: 0=open temp, 1=wait_open, 2=write lines, 3=close temp,
+**         4=wait_close, 5=sync, 6=remove old, 7=wait_remove,
+**         8=rename, 9=wait_rename, 10=finish.
+**
+** What: writes settings to a temp file, syncs it durable, then atomically
+** promotes it to settings.cfg via remove-old + rename. A power loss at any
+** point either leaves the previous settings.cfg untouched (crash before
+** sync) or leaves a durable, complete temp file that boot recovery will
+** find and promote (crash between sync and rename completion).
+**
+** Inputs: live parameter_values[] and BankData, captured revision from
+** the debounced scheduler. Outputs: one durable settings.cfg after the
+** final flush. Affiliates: filesystem_settingsWriterSchedule_tick(),
+** filesystem_loadGlobals_tick()'s recovery prelude, S057 design §2/§5.
 ** ----------------------------------------------------------------------- */
 static void filesystem_saveGlobals_tick(void)
 {
     switch (op_phase) {
-    case 0: /* OPEN */
+    case 0: /* OPEN temp file */
         /*
          * Snapshot the settings revision before the first line is emitted.
          * Input: live dirty revision. Output: the final flush may clear dirty
@@ -16065,7 +16358,13 @@ static void filesystem_saveGlobals_tick(void)
         op_settings_write_active = 1u;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(STORAGE_SETTINGS_FILENAME, "w", on_file_opened))
+        /*
+         * Target the temp file, not settings.cfg. Truncating settings.tmp is
+         * safe regardless of whether a stale copy exists: nothing depends on
+         * preserving temp-file content. This is the key difference from the
+         * former in-place truncate of the live settings.cfg. See §4.
+         */
+        if (!afatfs_fopen(STORAGE_SETTINGS_TEMP_FILENAME, "w", on_file_opened))
             return;
         op_phase = 1;
         return;
@@ -16082,13 +16381,13 @@ static void filesystem_saveGlobals_tick(void)
         op_phase = 2;
         return;
 
-    case 2: /* WRITE LINES */
+    case 2: /* WRITE LINES (including terminator) */
         if (filesystem_writeTextLine(filesystem_nextSettingsLine, NULL))
             return;
         op_phase = 3;
         return;
 
-    case 3: /* CLOSE */
+    case 3: /* CLOSE temp file */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 4;
@@ -16096,6 +16395,100 @@ static void filesystem_saveGlobals_tick(void)
 
     case 4: /* WAIT_CLOSE */
         if (!op_close_done) return;
+        op_phase = 5;
+        return;
+
+    case 5: /* SYNC — make temp file durable before touching old settings.cfg */
+        /*
+         * Persistence boundary between the temp file and the irreversible
+         * remove/rename that follows. afatfs_sync() returns true only when
+         * every dirty cache sector and every in-flight SD write has completed.
+         * Without this sync, a crash after close but before the cache drains
+         * could leave a partially-written temp file that the recovery prelude
+         * would then validate and incorrectly promote. See §5.
+         */
+        if (!afatfs_sync())
+            return;
+        op_phase = 6;
+        return;
+
+    case 6: /* REMOVE_OLD — remove existing settings.cfg before rename */
+        /*
+         * afatfs_renameObject_lfn() fails with AFATFS_RESULT_ALREADY_EXISTS if
+         * the target name is occupied. The old settings.cfg must be removed
+         * first. Tolerate not-found (first boot, or a previous boot's recovery
+         * already promoted): afatfs_removeObjects_lfn() reports OK when zero
+         * matching objects exist. Case-insensitive match ensures any case
+         * variant is retired. See §2 step 3.
+         */
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(STORAGE_SETTINGS_FILENAME,
+                                      AFATFS_MATCH_CASE_INSENSITIVE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 7;
+        return;
+
+    case 7: /* WAIT_REMOVE */
+        if (!op_remove_done) return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            /*
+             * Cannot proceed to rename if the old file is still present.
+             * The temp file is durable; boot recovery will find and promote
+             * it on next power cycle. Error out so the scheduler retries or
+             * the next boot recovers.
+             */
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 8;
+        return;
+
+    case 8: /* RENAME temp → settings.cfg */
+        /*
+         * Promote the synced temp file to the live settings filename. Reuses
+         * the shared op_repair_rename_open_name buffer for the returned 8.3
+         * alias (not used further, but the API requires a non-NULL buffer).
+         * Case-insensitive match on the source name handles any case variant
+         * of the temp file.
+         */
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(STORAGE_SETTINGS_TEMP_FILENAME,
+                                     STORAGE_SETTINGS_FILENAME,
+                                     AFATFS_MATCH_CASE_INSENSITIVE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 9;
+        return;
+
+    case 9: /* WAIT_RENAME */
+        if (!op_rename_done) return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            /*
+             * Rename failure after old-file removal means settings.cfg is
+             * absent but settings.tmp is durable. Boot recovery will find
+             * and promote it. Error out to surface the condition.
+             */
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 10;
+        return;
+
+    case 10: /* FINISH — standard flush + revision acknowledgment */
+        /*
+         * filesystem_finish(FS_STATUS_DONE) defers to the shared
+         * filesystem_flushFinish_tick() which pumps afatfs_sync() until the
+         * rename's directory-entry changes are durable, then calls
+         * filesystem_complete() where the revision acknowledgment clears
+         * fs_settings_dirty if no newer mutation arrived during the write.
+         */
         filesystem_finish(FS_STATUS_DONE);
         return;
 

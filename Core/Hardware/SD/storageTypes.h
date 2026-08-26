@@ -48,6 +48,14 @@
 #define STORAGE_SCENESET_FILENAME     "sceneset.scg"
 #define STORAGE_BANKSET_FILENAME      "bankset.bcg"
 #define STORAGE_SETTINGS_FILENAME     "settings.cfg"
+/*
+ * Temp-file target for the safe settings writer. The safe-write flow
+ * serializes new settings content here first, syncs it durable, then
+ * promotes it to STORAGE_SETTINGS_FILENAME via remove-old + rename.
+ * Plainly visible (no dot-prefix) so a leftover after an interrupted
+ * write is discoverable by anyone inspecting the card root.
+ */
+#define STORAGE_SETTINGS_TEMP_FILENAME "settings.tmp"
 #define STORAGE_KIT_SLOT_COUNT        6u
 /*
  * Kit and Scene folders are numbered directory entries, not legacy file slots.
