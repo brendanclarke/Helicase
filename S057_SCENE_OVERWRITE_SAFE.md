@@ -89,24 +89,12 @@ in a future phase). In normal operation with a valid card, Bank Load
 replaces the boot seed with real present-bits before the user ever reaches
 Save.
 
-**The question for you:** should the guard treat boot-seeded Scene 0 as
-"present" (allowing it to be saved even though it contains only
-zeros/defaults), or should it also check `bank_hasResidentBank()` as a
-secondary gate — refusing any Scene as empty until at least one real
-Load/commit has occurred this session?
-
-The practical difference: without `bank_hasResidentBank()`, a user who
-boots with no card content and immediately saves would write BSS zeros into
-the Library. With it, that save is blocked until something real is loaded.
-The present-bit alone is already the right answer for every case *after*
-boot — this is only about the initial-boot window.
-
-**Decision:** check `bank_hasResidentBank()` as a secondary gate. A Scene
-is non-empty only when both (a) its present-bit is set AND (b)
-`bank_hasResidentBank()` is true. Before a real Bank Load or Save
-completes, every Scene is treated as empty regardless of the boot seed.
-Both guards (Bank Save mask filter and root Scene Save case 0) implement
-this. One extra byte-check, no new complexity.
+**Decision (resolved):** `bank_hasResidentBank()` is checked as a
+secondary gate. A Scene is non-empty only when both (a) its present-bit is
+set AND (b) `bank_hasResidentBank()` is true. Before a real Bank Load or
+Save completes, every Scene is treated as empty regardless of the boot
+seed. Both guards (Bank Save mask filter and root Scene Save case 0)
+implement this. One extra byte-check, no new complexity.
 
 ---
 
@@ -151,17 +139,22 @@ be empty when the destination they're about to overwrite is occupied.
 
 ### 3.1 Bank Save: silently exclude empty Scenes from the mask
 
-**In `filesystem_requestSaveBank()`** (`filesystem.c:21987`), after
-`op_bank_scene_save_mask` is captured and normalized (line 22007-22009),
-filter the mask against `bank_scenePresentMask()`:
+**In `filesystem_requestSaveBank()`** (`filesystem.c:22007`), after
+the mask is bounds-clamped (line 22027-22029), filter against both
+`bank_hasResidentBank()` and `bank_scenePresentMask()`:
 
 ```c
-op_bank_scene_save_mask =
-    (uint16_t)(op_bank_scene_save_mask & bank_scenePresentMask());
+bank_scene_save_mask =
+    (uint16_t)(bank_scene_save_mask &
+               (bank_hasResidentBank()
+                    ? bank_scenePresentMask() : 0u));
 ```
 
-This strips any empty (non-present) Scene from the save mask before the
-state machine even starts. The existing per-child loop
+When `bank_hasResidentBank()` is false (boot state, no real Bank loaded),
+the entire mask is zeroed — the boot-seeded present-bit on Scene 0 is not
+trusted. Otherwise, the mask is filtered against the present mask. This
+strips any empty (non-present) Scene from the save mask before the state
+machine even starts. The existing per-child loop
 (`case 11` at `filesystem.c:13969`) will simply never visit an excluded
 Scene. If the resulting mask is `0u` (every selected Scene was empty), the
 existing `case 11` already handles this: `op_bank_scene_save_mask == 0u`
@@ -188,18 +181,20 @@ could be falsely excluded. **P1 must land first.**
 ### 3.2 Root Scene Save: silent fail
 
 **In `filesystem_saveSceneDirectory_tick()` case 0** (`filesystem.c:14276`),
-add one check after the existing `!scene || !kit` validation:
+after the existing `!scene || !kit` validation, check both
+`bank_hasResidentBank()` and `bank_scenePresent()`:
 
 ```c
-if (!bank_scenePresent(op_kit_save_source_scene)) {
+if (!bank_hasResidentBank() ||
+    !bank_scenePresent(op_kit_save_source_scene)) {
     filesystem_finish(FS_STATUS_ERROR);
     return;
 }
 ```
 
-This uses the existing single-Scene accessor `bank_scenePresent()`
-(`BankData.c:197-201`) rather than the full mask, since root Scene Save
-operates on exactly one source Scene.
+Uses the same dual gate as the Bank Save mask filter:
+`bank_hasResidentBank()` for boot-seed safety, `bank_scenePresent()` for
+per-Scene emptiness.
 
 **Silent-fail semantics:** `FS_STATUS_ERROR` is the existing, already-used
 outcome for a case-0 rejection in both functions today (e.g., the

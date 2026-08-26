@@ -259,13 +259,15 @@ restore every captured offset to the canonical mask and retry after the normal
 five-second interval. An empty merged mask completes read-only and must not
 advance generation, probe, or target contents.
 
-The live-Bank match in step 1 is current inherited behavior, implemented by
-`autosave_streamValidationMatchesBank()`, but it is not the settled future
-semantic contract. Bank slot and name are also mutable payload fields; treating
-a mismatch as foreign-record identity can force regeneration instead of
-carrying a legitimate Bank-session transition. Resolve that validator/session
-boundary explicitly before whole-object Bank Load/Save publication. Do not
-silently describe the current comparison as proof that Bank metadata is
+The live-Bank match in step 1 is implemented by
+`autosave_streamValidationMatchesBank()`. A mismatch no longer forces
+regeneration: when a valid winner exists but its Bank identity differs from
+the current resident Bank (a legitimate Bank-session transition), the writer
+marks the entire Bank payload dirty via `autosave_markResidentBankDirty()`
+and proceeds to the transformed copy-forward path (phase 50), overwriting the
+mismatched winner's content with current live state in one drain cycle. The
+regeneration path (phase 30) is reserved for genuinely invalid records where
+no winner exists. Bank slot and name remain mutable payload fields, not
 immutable identity.
 
 ## CRC scheduling: implemented bounded contract

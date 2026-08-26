@@ -1,15 +1,18 @@
 # Session 057 — Pre-Reader Assessment
 
-Status: **assessment only, no code changed this session.** Goal: read back
-through the logs, `SCOPING_TARGETS.md`, and the current test card to produce
-a punch list of what needs to be wrapped/bugfixed in load/save, HCNAMES,
-`.hcindex`, AutoSave, and the dev logging/trace/diagnostic systems before
-starting the AutoSave boot reader (`AUTOSAVE_READ_PLAN.md`). Reordered per
-discussion: hardware-verify the page-exit expedite first, then P1 next
-(both fully diagnosed, no more investigation needed before acting). Two
-companion plans spun out of this session's work: `S057_SETTINGS_WRITE_SAFE.md`
-(settings.cfg safe-write redesign) and `S057_SCENE_OVERWRITE_SAFE.md`
-(empty-Scene overwrite guard, which P1 gates).
+Status: started as assessment-only, now with most of the punch list
+resolved or landed. Goal: read back through the logs, `SCOPING_TARGETS.md`,
+and the current test card to produce a punch list of what needs to be
+wrapped/bugfixed in load/save, HCNAMES, `.hcindex`, AutoSave, and the dev
+logging/trace/diagnostic systems before starting the AutoSave boot reader
+(`AUTOSAVE_READ_PLAN.md`). P1, P2, the trace-count reversion, and the two
+open design questions (§11, §12) are now resolved — see "Suggested order"
+at the bottom for what's actually left. Three companion plans spun out of
+this session's work: `S057_SETTINGS_WRITE_SAFE.md` (settings.cfg safe-write
+redesign, done and tested), `S057_SCENE_OVERWRITE_SAFE.md` (empty-Scene
+overwrite guard, code landed, needs testing), and
+`S057_BOOT_KIT_SANITIZE_REFACTOR.md` (boot Kit-directory sanitizer
+refactor, the last remaining code-change item before the reader).
 
 ---
 
@@ -27,53 +30,52 @@ re-derive from scratch if evidence already exists.)
 
 ---
 
-## 2. P1 — Bank Save present-mask overwrite (next)
+## 2. P1 — Bank Save present-mask overwrite — done
 
-Confirmed still present at `filesystem.c:14028`:
+**Done.** `filesystem.c:14126` now unions instead of overwriting:
 
 ```c
-bank_setScenePresentMask(op_bank_scene_save_mask);
+bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
+                                     op_bank_scene_save_mask));
 ```
 
-Still the caller-supplied **subset** mask assigned directly, not unioned
-with the retained resident mask — the exact bug and one-line fix
-(`bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
-op_bank_scene_save_mask))`) already recorded in `SCOPING_TARGETS.md:249-287`
-and `AUTOSAVE.md:106-110`. A partial `Save:[Bank]` still silently drops
-resident Scenes from `scene_present_mask`, which stops their AutoSave
-capture and desyncs Load/Save LEDs from what's actually in RAM. Small,
-scoped, already fully diagnosed — good candidate to close first, since Bank
-Load already does the union correctly (`filesystem.c:10753`) and Save is
-the one inconsistent writer.
+Previously the caller-supplied **subset** mask was assigned directly,
+dropping any resident Scene not included in the current save's mask from
+`scene_present_mask` — the exact bug and one-line fix already recorded in
+`SCOPING_TARGETS.md:249-287` and `AUTOSAVE.md:106-110`. Bank Load already
+did the union correctly (`filesystem.c:10753`); Save was the one
+inconsistent writer, now fixed to match.
 
-**Newly confirmed this session — P1 is not just a bookkeeping bug, it also
-feeds the Scene-selection UI directly:** the SEQ LED toggle surface for
+**Why this mattered beyond bookkeeping:** the SEQ LED toggle surface for
 `Save:[Bank]` (`menu_loadSaveSelectableSceneMask()` →
 `menu_residentPresentSceneMask()` → `bank_scenePresentMask()`,
 `menu.c:4745-4765`) gates both which LEDs can light (`menu.c:4856`) and
-which button presses are allowed to toggle a bit at all
-(`menu.c:4907`) directly off the same present mask P1 corrupts. So until
-P1 is fixed, a Scene that's still genuinely resident in SRAM but got
-dropped from the mask by a prior partial Bank Save becomes untoggleable —
-its SEQ LED can't be selected for the *next* save either. **This is why
-P1 must land before `S057_SCENE_OVERWRITE_SAFE.md`'s guard work** — that
-plan's proposed empty-Scene check leans on `bank_scenePresentMask()` as the
-"has real content" signal, which is only trustworthy once P1 no longer
-corrupts it. See that document for the full design.
+which button presses are allowed to toggle a bit at all (`menu.c:4907`)
+directly off this same present mask. With the union fix landed, a Scene
+that's still genuinely resident in SRAM no longer becomes untoggleable
+after a prior partial Bank Save. This also un-blocks
+`S057_SCENE_OVERWRITE_SAFE.md`'s guard, whose empty-Scene check leans on
+`bank_scenePresentMask()` as its "has real content" signal — that guard's
+code was already implemented ahead of this fix (§3 below); it's now safe
+to test.
 
 ---
 
-## 3. Scene/Bank empty-overwrite guard — see `S057_SCENE_OVERWRITE_SAFE.md`
+## 3. Scene/Bank empty-overwrite guard — implemented, see `S057_SCENE_OVERWRITE_SAFE.md`
 
-New companion plan (this session): make it structurally impossible for an
-empty resident Scene to overwrite an occupied on-disk Scene, at the actual
-save/write layer, not just the SEQ LED modal. Confirmed the destructive
-step in both `filesystem_saveBankDirectory_tick()` and
-`filesystem_saveSceneDirectory_tick()` is an unconditional whole-object
-delete (`filesystem_deleteSlotDirectoryStart()` / `filesystem_deleteSceneSlotDirectoryStart()`,
-both at each function's `case 4`) that runs *before* any new content is
-written — so a correctness guard must land before that phase, not after.
-Depends on P1 (§2). Full design in the companion document.
+**Done.** Two guards in `filesystem.c`, both checking
+`bank_hasResidentBank()` (boot-seed safety) and `bank_scenePresentMask()`/
+`bank_scenePresent()` (per-Scene emptiness):
+
+- `filesystem_requestSaveBank()` (`filesystem.c:22052-22055`): filters
+  `bank_scene_save_mask` against the present mask before the state machine
+  starts — empty Scenes are silently excluded from the child-write loop.
+- `filesystem_saveSceneDirectory_tick()` case 0 (`filesystem.c:14298-14302`):
+  refuses with `FS_STATUS_ERROR` if the source Scene is not present —
+  defense-in-depth for root Scene Save.
+
+Both depend on P1 (§2) for the present mask to be trustworthy. Full design
+and test plan in the companion document.
 
 ---
 
@@ -92,20 +94,15 @@ document.
 
 ---
 
-## 5. P2 — redundant settings write on every boot (still open, needs a decision)
+## 5. P2 — redundant settings write on every boot — resolved
 
-Confirmed still present: three unconditional
-`filesystem_markSettingsDirty()` calls (`filesystem.c:10645, 10800, 14042`).
-As documented (`SCOPING_TARGETS.md:289-317`), this produces one
-value-idempotent `settings.cfg` rewrite on every boot with a valid Bank.
-Harmless to correctness, has a real upside (reconciles `settings.cfg` if
-boot fell back to a different Bank slot), but is an extra SD write and one
-foreground filesystem op per power-on that was never deliberately accepted
-or rejected — it was simply left as the Session 052 default. Needs an
-explicit "accept as-is" or "gate on `fs_settings_runtime_ready`" decision,
-not more investigation. Independent of §4 — once the write itself is safe
-(§4), this decision is purely about whether the extra write should happen
-at all, not whether it's dangerous.
+**Decision: accept as-is, no gating.** Three unconditional
+`filesystem_markSettingsDirty()` calls (`filesystem.c:10645, 10800, 14042`)
+still produce one value-idempotent `settings.cfg` rewrite on every boot with
+a valid Bank (`SCOPING_TARGETS.md:289-317`). Now that the write itself is
+safe and tested (§4), the extra idempotent rewrite is harmless — and it
+keeps its real upside (reconciling `settings.cfg` if boot fell back to a
+different Bank slot). No gating on `fs_settings_runtime_ready` needed.
 
 ---
 
@@ -174,17 +171,22 @@ hypothesis above is the actual cause.
 
 ---
 
-## 7. `AUTOSAVE_TRACE_RECORD_COUNT` reversion — cheap, independent, close whenever
+## 7. `AUTOSAVE_TRACE_RECORD_COUNT` reversion — deferred
 
-Still 2,048 (`config.h:330`, "TEMPORARY approved expansion"), normal default
-64. `SCOPING_TARGETS.md:478-482` already flags this as needing an explicit
-keep/revert decision now that the pinned recursive-delete target is
-hardware-confirmed closed. Pure housekeeping, no dependency on anything
-else in this list.
+**Decision: defer.** Still 2,048 (`config.h:330`, "TEMPORARY approved
+expansion"), normal default 64. `SCOPING_TARGETS.md:478-482` already flags
+this as needing an explicit keep/revert decision now that the pinned
+recursive-delete target is hardware-confirmed closed — but the expanded
+trace window is useful headroom while the AutoSave reader lands. Revisit
+after the reader is fully implemented and tested, not before.
 
 ---
 
-## 8. Boot Kit-directory sanitizer (investigated this session)
+## 8. Boot Kit-directory sanitizer — diagnosed here, refactor plan in `S057_BOOT_KIT_SANITIZE_REFACTOR.md`
+
+The remaining real code-change item before the AutoSave reader. This
+section documents the diagnosis; `S057_BOOT_KIT_SANITIZE_REFACTOR.md` is
+the companion implementation plan.
 
 ### 8a. Card audit — no malformed Kit currently present
 
@@ -328,54 +330,49 @@ without also implementing the boot-fallback latch this depends on.
 
 ---
 
-## 11. Open design question already flagged in `AUTOSAVE.md` — resolve before/alongside the reader
+## 11. ~~Open design question already flagged in `AUTOSAVE.md`~~ — resolved
 
-`AUTOSAVE.md:262-269`: the writer's live-Bank-match validator
-(`autosave_streamValidationMatchesBank()`) currently treats *any* Bank
-slot/name mismatch as "foreign record → regenerate," which the doc itself
-says "is not the settled future semantic contract" — a legitimate Bank
-session transition (the exact scenario captured on hardware in
-`056_SESSION_HANDOFF_LOG.md` §3 observation 5, Boot 2's Bank 014 replacing
-Boot 1's Bank 015) currently forces a full two-cycle regeneration rather
-than being recognized as an intentional transition. The reader's root-level
-case (`AUTOSAVE_READ_PLAN.md §3`) sits directly on top of this validator —
-worth resolving the semantic question explicitly as part of, not after,
-the reader's root-level-case implementation step.
+**Done.** The writer's validation phase (`filesystem.c:5880-5893`) now
+distinguishes "no winner" (→ case 30, regeneration) from "winner exists
+but Bank doesn't match" (→ case 50, transformed copy-forward with all live
+bytes marked dirty via `autosave_markResidentBankDirty()`). A legitimate
+Bank-session transition reuses the structurally valid peer and overwrites
+its content in one drain cycle, rather than forcing a full two-cycle
+regeneration. `autosave_streamValidationMatchesBank()` itself still returns
+0 for mismatches, but the caller now uses `winner_bank_match` to separate
+the two cases. `AUTOSAVE.md:262-269` is now stale and should be updated to
+reflect the settled contract.
 
 ---
 
 ## 12. AutoSave boot reader readiness (`AUTOSAVE_READ_PLAN.md`)
 
-The plan is at **Rev 2, pre-implementation review** — not started. It has
-one explicit open question blocking implementation start:
+The plan is at **Rev 2, pre-implementation review** — not started.
 
-- **§13 Question A** — cutover mechanics for the existing dev-card
-  `.hcnames` once Instrument rows gain a third `type` field. Two options on
-  the table: (a) delete `/.hcnames` and let the bootstrap writer
-  regenerate it (zero new code, but the bootstrap writer currently emits
-  **blank** Scene/Kit/Instrument rows, so current names would be lost), or
-  (b) a small forced one-time rewrite path that keeps existing
-  names/sources and derives type from current resident state. This needs
-  an answer before implementation step 3 (`§14`, `.hcnames` format
-  extension) can start.
+- **§13 Question A (HCNAMES cutover mechanics) — resolved.** Doesn't
+  matter which option: go with (a), delete `/.hcnames` and let the
+  bootstrap writer regenerate it. **Action item for whoever lands the
+  `.hcnames` format expansion: notify the user to delete `/.hcnames` from
+  the dev card at that point**, since the regenerated file will emit blank
+  Scene/Kit/Instrument rows until re-populated.
+- **`main.c` boot-order reorder — no independent decision needed.** Leave
+  it as currently sequenced, or change it only as the boot Kit-sanitizer
+  refactor (`S057_BOOT_KIT_SANITIZE_REFACTOR.md`) requires — that refactor
+  touches the same boot sequence (§8c above). Re-examine explicitly again
+  during the reader's own implementation step, since
+  `AUTOSAVE_READ_PLAN.md §3` ("candidate validation before the
+  Bank/Scene/Kit scan-and-load ladder") also touches boot order and the
+  plan itself flags this as needing to be "treat[ed] as its own reviewable
+  unit given this project's boot-hang history" (`§11.3`).
 
 Everything else in the plan (`§14` implementation order, 7 steps) is
 internally consistent and appropriately sequenced — starts with the
 latch/notice mechanism against the whole-Bank fallback path specifically
 because it's testable without the larger apply-side reader existing yet.
-Two things from this list are **explicit prerequisites** the plan already
-depends on and that this session confirmed are still open:
-
-- The boot-fallback deferred-mark scope (§10 above / `SCOPING_TARGETS.md`'s
-  "Deferred boot-fallback scope," `SCOPING_TARGETS.md:355-372`) is new code
-  the plan's §7/§14 step 1 builds directly on top of.
-- The `main.c` boot-order reorder (`AUTOSAVE_READ_PLAN.md §3`, "candidate
-  validation before the Bank/Scene/Kit scan-and-load ladder") is explicitly
-  flagged in the plan itself as needing to be "treat[ed] as its own
-  reviewable unit given this project's boot-hang history" (`§11.3`) — this
-  is the same boot sequence the Kit-sanitizer refactor (§8c above) also
-  touches. Sequencing both boot-order changes in the same session, with one
-  combined hardware test, is lower-risk than landing them separately.
+One explicit prerequisite remains: the boot-fallback deferred-mark scope
+(§10 above / `SCOPING_TARGETS.md`'s "Deferred boot-fallback scope,"
+`SCOPING_TARGETS.md:355-372`) is new code the plan's §7/§14 step 1 builds
+directly on top of.
 
 ---
 
@@ -431,29 +428,27 @@ depends on and that this session confirmed are still open:
 
 ## Suggested order for the wrap session
 
+Status: P1 (§2), P2 (§5), the trace-count reversion (§7), the live-Bank-match
+validator question (§11), and the HCNAMES cutover question (§12) are all
+resolved. `S057_SCENE_OVERWRITE_SAFE.md` (§3) and `S057_SETTINGS_WRITE_SAFE.md`
+(§4) have code landed. The only remaining code-change item before the
+AutoSave reader is the boot Kit-sanitizer refactor; everything else left is
+testing.
+
 1. Hardware-verify the Session 056 page-exit expedite (§1) — re-check even
    if believed already tested.
-2. Close P1 (§2, one line).
-3. Work through `S057_SCENE_OVERWRITE_SAFE.md` (§3) — depends on P1.
-4. Implement `S057_SETTINGS_WRITE_SAFE.md` (§4) — independent of the above,
-   can be done in parallel/either order.
-5. Decide P2 (§5, accept-or-gate) — fully diagnosed, no further
-   investigation needed.
-6. Initial hardware investigation of the sequencer chaselight glitch (§6)
-   using the diagnostic-overlay approach described there.
-7. Decide the `AUTOSAVE_TRACE_RECORD_COUNT` reversion (§7) — pure
-   housekeeping, do whenever convenient.
-8. Capture a fresh logging-enabled boot + Bank Load on real hardware and
-   check it against §9a's HCNAMES/settings.cfg/AutoSave discrepancy before
-   assuming a root cause; while that trace exists, also check whether
-   `bootlog.bin`/`asavetrc.bin` still duplicate post-509115b (§13) and
-   update `DEV_MODES.md` accordingly.
-9. Implement the already-scoped boot-sanitizer refactor (§8c) — remove
-   full-content Kit validation from boot, canonicalize-and-index instead.
-10. Do the `main.c` boot-order reorder for AutoSave's root-level case
-    (§12) in the same pass as #9, since both touch the same boot sequence —
-    one combined hardware test instead of two.
-11. Resolve `AUTOSAVE_READ_PLAN.md §13 Question A` (HCNAMES cutover
-    mechanics) and the live-Bank-match validator semantic question (§11) —
-    both are decisions, not investigation.
-12. Only then start the reader's implementation order (`AUTOSAVE_READ_PLAN.md §14`).
+2. Test `S057_SCENE_OVERWRITE_SAFE.md` (§3, its own §8 test plan) — now
+   unblocked by P1.
+3. `S057_SETTINGS_WRITE_SAFE.md` (§4) — already implemented and tested.
+4. Implement the boot Kit-directory sanitizer refactor — see
+   `S057_BOOT_KIT_SANITIZE_REFACTOR.md`. The last piece of real code work
+   before the reader.
+5. Once #1, #2, and #4 are done (and their hardware tests pass), there are
+   no remaining code-change prerequisites — proceed to the reader's
+   implementation order (`AUTOSAVE_READ_PLAN.md §14`), remembering to
+   prompt for `/.hcnames` deletion at implementation step 3 (§12 above).
+
+Not gating the reader, do opportunistically alongside or after: the
+sequencer chaselight glitch investigation (§6), the HCNAMES/settings.cfg
+discrepancy trace capture (§9a), and the bootlog/asavetrc duplicate
+re-verification (§13).

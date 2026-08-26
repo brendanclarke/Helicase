@@ -14123,7 +14123,8 @@ static void filesystem_saveBankDirectory_tick(void)
         filesystem_recordSavedBankDirectory(op_save_bank_dir_display_name,
                                             op_save_bank_dir_open_name);
         bank_setDisplayName(op_bank_display_name);
-        bank_setScenePresentMask(op_bank_scene_save_mask);
+        bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
+                                             op_bank_scene_save_mask));
         bank_selectActiveSceneForEditMask(op_bank_active_scene);
         bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
         bank_setRestoreBankSlot(op_slot);
