@@ -802,6 +802,8 @@ typedef struct {
     uint8_t candidate_index;
     uint8_t have_winner;
     uint8_t candidate_valid;
+    uint8_t candidate_bank_match;
+    uint8_t winner_bank_match;
     uint8_t target_ready;
     uint8_t recovery_target_index;
     uint8_t recovery_using_names;
@@ -5806,8 +5808,10 @@ static void filesystem_autosaveParameterDrain_tick(void)
         }
         if (!afatfs_feof(op_file))
             return;
-        op_autosave_writer.candidate_valid = (uint8_t)(
-            autosave_streamValidationFinish(&op_autosave_writer.validation) &&
+        op_autosave_writer.candidate_valid =
+            autosave_streamValidationFinish(&op_autosave_writer.validation);
+        op_autosave_writer.candidate_bank_match = (uint8_t)(
+            op_autosave_writer.candidate_valid &&
             autosave_streamValidationMatchesBank(
                 &op_autosave_writer.validation, bank_restoreBankSlot(),
                 bank_displayName()));
@@ -5825,13 +5829,23 @@ static void filesystem_autosaveParameterDrain_tick(void)
         return;
 
     case 5: /* RECORD BEST VALID CANDIDATE, THEN ADVANCE A -> B */
+        /*
+         * Winner selection prefers a Bank-matching candidate over a structurally
+         * valid but identity-mismatched one. Among same-match-level candidates,
+         * the newer generation wins; A wins ties at equal generations.
+         */
         if (op_autosave_writer.candidate_valid &&
             (!op_autosave_writer.have_winner ||
-             autosave_generationIsNewer(
-                 op_autosave_writer.validation.generation,
-                 op_autosave_writer.winner_generation))) {
-            /* A remains the deterministic winner on equal generations. */
+             (op_autosave_writer.candidate_bank_match &&
+              !op_autosave_writer.winner_bank_match) ||
+             (op_autosave_writer.candidate_bank_match ==
+              op_autosave_writer.winner_bank_match &&
+              autosave_generationIsNewer(
+                  op_autosave_writer.validation.generation,
+                  op_autosave_writer.winner_generation)))) {
             op_autosave_writer.have_winner = 1u;
+            op_autosave_writer.winner_bank_match =
+                op_autosave_writer.candidate_bank_match;
             op_autosave_writer.winner_index =
                 op_autosave_writer.candidate_index;
             op_autosave_writer.winner_generation =
@@ -5848,18 +5862,34 @@ static void filesystem_autosaveParameterDrain_tick(void)
         /*
          * VALIDATED marks the complete two-candidate decision before either
          * recovery or copy-forward work begins. flags bit 0 says a winner
-         * exists; bit 1 is its A/B index when present; value is its generation
-         * (zero without a winner). This preserves validation failure evidence
-         * rather than inferring it later from a recovery path.
+         * exists; bit 1 is its A/B index when present; bit 2 indicates the
+         * winner's Bank identity does not match the current resident Bank
+         * (a legitimate Bank-session transition, not corruption). value is its
+         * generation (zero without a winner).
          */
         autosaveTrace_record(
             AUTOSAVE_TRACE_STAGE_VALIDATED,
             (uint8_t)((op_autosave_writer.have_winner ? 1u : 0u) |
                       (op_autosave_writer.have_winner
                            ? (uint8_t)(op_autosave_writer.winner_index << 1u)
-                           : 0u)),
+                           : 0u) |
+                      (op_autosave_writer.have_winner &&
+                       !op_autosave_writer.winner_bank_match ? 4u : 0u)),
             op_autosave_writer.have_winner
                 ? op_autosave_writer.winner_generation : 0u);
+        if (op_autosave_writer.have_winner &&
+            !op_autosave_writer.winner_bank_match) {
+            /*
+             * Seed the canonical mask so the normal drain substitutes every
+             * live byte — Bank identity, Scene parameters, Kit, and Instrument
+             * values — during its transformed copy of the mismatched winner.
+             * The regeneration path (case 30) is reserved for genuinely invalid
+             * records; a Bank-session transition reuses the structurally valid
+             * peer and overwrites its content in one drain cycle (plus
+             * continuations if the capture budget is exceeded).
+             */
+            autosave_markResidentBankDirty();
+        }
         op_phase = op_autosave_writer.have_winner ? 50u : 30u;
         return;
 
@@ -21256,6 +21286,7 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
     fs_autosave_recovery_pending = 1u;
     fs_autosave_writer_boot_ready = 1u;
     autosave_setMutationTrackingEnabled(1u);
+    autosave_markResidentBankDirty();
     return 1u;
 }
 

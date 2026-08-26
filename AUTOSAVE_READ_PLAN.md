@@ -110,7 +110,51 @@ concrete implementation consequence.
 
 ---
 
-## 2. Ground truth about the wire format (unchanged from Rev 1, compressed)
+## 2a. Record format v2 — per-section CRCs (new, see `S058_AUTOSAVE_CRC_SPLIT.md`)
+
+The v1 wire format uses one CRC32C over all 34,768 bytes. This forces the
+writer to stream the entire file for any change, making Bank-session
+transitions ~17 seconds (5 full-file cycles at ~2 s each) and preventing
+the reader from validating individual Scenes independently.
+
+v2 replaces the single CRC with **17 per-section CRCs** (1 Bank + 16
+Scenes) stored in a CRC table in the header, plus an XOR aggregate.
+Each section is self-contained: its own mutation mask slice embedded
+directly before its data, covered by its own CRC. The mask is no longer a
+monolithic region — it is distributed, with each section carrying exactly
+the mask bits that describe its own data.
+
+Section boundaries:
+
+| Section | Mask | Data | Total |
+|---------|------|------|-------|
+| Bank | 16 B | 128 B | 144 B |
+| Scene 0–15 (each) | 240 B | 1,920 B | 2,160 B |
+
+Record size: **34,832 bytes** (+64 from v1). Header grows from 64 to 128
+bytes to accommodate the CRC table (17 × 4 = 68 bytes) and aggregate (4
+bytes). Payload content and per-section relative offsets are unchanged.
+
+**Why this matters for the reader:**
+- Per-section validation: a corrupt Scene 7 does not prevent reading
+  Scene 3. This directly supports the per-Scene Case 1/2/3 architecture
+  (§5) — the reader validates only the Scenes it needs.
+- Embedded mask per section: the reader can check a section's mask without
+  reading the full file. A section with all mask bits clear is known to
+  contain only initial/inherited values, not captured live state.
+- Surgical writes (Phase 2 of S058): one Scene update is ~17 ms instead
+  of ~2 s per cycle. Bank identity patch is ~2 ms. Full Bank transition
+  is ~280 ms. This eliminates the regeneration-vs-mismatch performance
+  problem entirely.
+
+The v2 format is a prerequisite for the reader. It must land before or
+alongside the apply-side payload reader (§11.1), since the reader's
+per-section validation depends on it. Full design and implementation
+plan: `S058_AUTOSAVE_CRC_SPLIT.md`.
+
+---
+
+## 2b. Ground truth about the wire format (unchanged from Rev 1, compressed)
 
 - Payload: 128B Bank + 16×1,920B Scenes (name 8B, settings 120B/40 live,
   Effect 512B/**0 live today**, Kit 1,280B: name 8B + 2 live params + 6×192B
@@ -520,7 +564,7 @@ current names. Which do you want?
 
 ---
 
-## 14. Implementation order (revised)
+## 14. Implementation order (revised, Rev 3)
 
 1. **Deferred dirty-mark + notice latch (§7)**, wired to the whole-Bank
    fallback outcome only. Test: force settings.cfg/generation disagreement,
@@ -533,16 +577,23 @@ current names. Which do you want?
    short-circuiting).
 3. **`.hcnames` format extension — Instrument type field (§6)** — can
    proceed in parallel with 1-2; needed before any Case 2 Instrument work.
-4. **Apply-side payload reader (§11.1)** — largest single piece, unit-
+4. **Record format v2 — per-section CRC split (§2a,
+   `S058_AUTOSAVE_CRC_SPLIT.md`)** — can proceed in parallel with 3.
+   Must land before or alongside step 5. Delivers the v2 format (header
+   CRC table, embedded per-section masks, 34,832-byte records) and adapts
+   the writer's streaming copy and validation. The reader (step 5) depends
+   on per-section validation and the v2 layout.
+5. **Apply-side payload reader (§11.1)** — largest single piece, unit-
    tested off the boot path against synthetic record buffers, including
-   the Choke slot-6 exception.
-5. **`.hcnames` regeneration, binary Case 1/Case 3 only (§4)** — depends on
-   4.
-6. **Per-Scene independent Case 1/2/3 with narrow single-level parsers
-   (§5)** — depends on 3, 4, and the narrow parsers (§11.5).
-7. **Post-boot notice sequencer (§8)** — depends on 1 (the latch already
+   the Choke slot-6 exception. Depends on 4 for per-section validation
+   and v2 offsets.
+6. **`.hcnames` regeneration, binary Case 1/Case 3 only (§4)** — depends on
+   5.
+7. **Per-Scene independent Case 1/2/3 with narrow single-level parsers
+   (§5)** — depends on 3, 5, and the narrow parsers (§11.5).
+8. **Post-boot notice sequencer (§8)** — depends on 1 (the latch already
    carries the notice queue content) and can otherwise proceed
-   independently of 4-6.
+   independently of 5-7.
 
 (`scene_isEmpty()` / Bank Save guard is explicitly not part of this
 sequence — §10.)
