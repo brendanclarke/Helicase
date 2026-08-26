@@ -1,6 +1,6 @@
-# Empty-Scene Overwrite Guard — Initial Plan
+# Empty-Scene Overwrite Guard — Implementation Plan (Rev 1)
 
-Status: **initial plan, not yet implemented.** No code yet. Depends on P1
+Status: **implemented.** Depends on P1
 (`S057_AUTOSAVE_WRITER_WRAP.md` §2) — the guard proposed here reads
 `bank_scenePresentMask()` as its "is this Scene real" signal, and P1 is
 what makes that mask trustworthy again after a partial Bank Save.
@@ -14,19 +14,38 @@ question, since it's the current (UI-level) line of defense.
 
 ---
 
+## 0. What changed since the initial plan
+
+- **Q1 resolved (§3):** silently exclude empty Scenes from the save mask,
+  don't refuse the whole Bank Save. Empty scenes are already shown by
+  non-lit LEDs on the SEQ buttons during save, so the user can see which
+  ones are excluded. The mask is filtered before any delete or write phase.
+- **Q3 resolved (§3):** root Scene Save silently fails (`FS_STATUS_ERROR`)
+  when the source Scene is empty. This is defense-in-depth — the UI should
+  eventually make it impossible to even attempt this, but the filesystem
+  guard is there regardless.
+- **Q4 resolved (§3):** guard is limited to the Scene level only.
+  KitMrp/InstrumentMrp-style partial/morph saves are out of scope — they
+  don't create/replace a Scene identity.
+- **Q2 resolved (§1.2):** boot-seeded Scene 0 is treated as empty. Both
+  guards also check `bank_hasResidentBank()` — until a real Bank Load or
+  Save completes, the boot-seeded present-bit on Scene 0 is not trusted.
+
+---
+
 ## 1. What "empty" means today — there is no formal definition
 
 Confirmed (also noted in `AUTOSAVE_READ_PLAN.md §10`): there is no
 `scene_isEmpty()` or equivalently-named helper anywhere in `SceneData.h/.c`
 or `filesystem.c`. The closest existing proxy is `bank_scenePresentMask()`
-(`BankData.c:165-192`), and it turns out to be a reasonably principled
+(`BankData.c:192`), and it turns out to be a reasonably principled
 signal, not an arbitrary one — its only setters are:
 
-- `filesystem.c:10753` — Bank Load, unioned in for every successfully
+- `filesystem.c:10837` — Bank Load, unioned in for every successfully
   loaded child (correct).
-- `filesystem.c:10601` — Bank Load's empty-Bank branch, preserves the
+- `filesystem.c:10685` — Bank Load's empty-Bank branch, preserves the
   existing mask unchanged.
-- `filesystem.c:14028` — Bank Save, **the P1 bug**: assigns the save
+- `filesystem.c:14126` — Bank Save, **the P1 bug**: assigns the save
   subset directly instead of unioning.
 - `presetManager.c:104` (`preset_markRequestedScenesPresentOnSuccessfulLoad()`)
   — Kit/Scene/Instrument loads mark their destination Scene present, gated
@@ -44,13 +63,50 @@ it, both must be resolved before treating it as authoritative:
 1. **P1** (see wrap doc §2) — Bank Save can currently *clear* present-bits
    for Scenes that are still genuinely resident, corrupting the very signal
    this guard would depend on. Must be fixed first.
-2. **Boot-time seed** — per `SCOPING_TARGETS.md`'s P1 discussion,
-   `bank_init()` seeds the present mask to `1` (Scene 0 only) at boot,
-   before any real load has necessarily happened. Whether a freshly-booted,
-   never-loaded Scene 0 with factory/default content should count as
-   "empty" or "not empty" for this guard's purposes is a product decision,
-   not something inferable from the code. **Open question for the
-   implementer/product owner**, flagged, not resolved here.
+2. **Boot-time seed** — see §1.2 below.
+
+### 1.2 Boot-seeded Scene 0 — concrete detail for decision
+
+`bank_init()` (`BankData.c:99-117`) runs at every boot and unconditionally
+sets `bank_scene_mask_present = 1u` — marking Scene 0 as present. At this
+point:
+
+- **Scene 0's SRAM content** is BSS-zero: every field in `scenes[0]`
+  (SceneData.c:5, `scene_t scenes[SCENE_COUNT]`) holds its C static
+  initializer (zeros). No `scene_init()` exists — the array is never
+  explicitly initialized beyond what C gives it.
+- **`bank_has_resident_bank`** is `0` — no Bank has been loaded yet.
+- **The present-bit was not set by a real Load or Instrument commit** — it
+  was set by `bank_init()` as part of the product default non-Bank state
+  (the comment at `BankData.c:101-108` says this explicitly: "so a card
+  with no valid Bank can fall back to root Scene, root Kit, or defaults
+  without pretending a Bank is resident").
+
+**When this state persists into user-reachable Save paths:** only when the
+card has no valid Bank to load at boot (no `/Bank/` on card, or mount
+failure, or the autosave reader's Case-3 invalidation leaves Scene 0 empty
+in a future phase). In normal operation with a valid card, Bank Load
+replaces the boot seed with real present-bits before the user ever reaches
+Save.
+
+**The question for you:** should the guard treat boot-seeded Scene 0 as
+"present" (allowing it to be saved even though it contains only
+zeros/defaults), or should it also check `bank_hasResidentBank()` as a
+secondary gate — refusing any Scene as empty until at least one real
+Load/commit has occurred this session?
+
+The practical difference: without `bank_hasResidentBank()`, a user who
+boots with no card content and immediately saves would write BSS zeros into
+the Library. With it, that save is blocked until something real is loaded.
+The present-bit alone is already the right answer for every case *after*
+boot — this is only about the initial-boot window.
+
+**Decision:** check `bank_hasResidentBank()` as a secondary gate. A Scene
+is non-empty only when both (a) its present-bit is set AND (b)
+`bank_hasResidentBank()` is true. Before a real Bank Load or Save
+completes, every Scene is treated as empty regardless of the boot seed.
+Both guards (Bank Save mask filter and root Scene Save case 0) implement
+this. One extra byte-check, no new complexity.
 
 ---
 
@@ -61,16 +117,16 @@ phase (`case 0`) is followed a few phases later by an **unconditional
 whole-object delete** of whatever currently occupies the target slot,
 which runs *before* any new content is written:
 
-- **`filesystem_saveBankDirectory_tick()`** (`filesystem.c:13594`): `case 0`
-  validates inputs and rejects early; `case 4` calls
+- **`filesystem_saveBankDirectory_tick()`** (`filesystem.c:13692`): `case 0`
+  validates inputs and rejects early; `case 4` (`filesystem.c:13861`) calls
   `filesystem_deleteSlotDirectoryStart(op_slot, 0u)` — deletes the *entire*
   existing target Bank folder (all previously-saved children, confirmed by
-  the code's own comment at `filesystem.c:13890-13891`, "exact replacement
+  the code's own comment at `filesystem.c:13988-13989`, "exact replacement
   already removed the previous Bank tree"). Only *after* that does the
   per-child write loop (`case 11+`) run, writing only the Scenes selected
   in `op_bank_scene_save_mask`.
-- **`filesystem_saveSceneDirectory_tick()`** (`filesystem.c:14157`): same
-  shape — `case 0` validates, `case 4` calls
+- **`filesystem_saveSceneDirectory_tick()`** (`filesystem.c:14255`): same
+  shape — `case 0` validates, `case 4` (`filesystem.c:14320`) calls
   `filesystem_deleteSceneSlotDirectoryStart()` to remove the existing
   same-numbered `/Scene/NNN .../` tree, before any new file is written.
 
@@ -83,7 +139,7 @@ and 4), before the delete is ever reached, for both functions.
 `Save:[Bank]` (fewer than all resident Scenes selected) intentionally
 deletes the unselected Scenes from the on-disk Bank — this is documented,
 deliberate behavior (`filesystem_requestSaveBank()`'s own comment,
-`filesystem.c:21620-21624`: "Save:[Bank] may intentionally save only a
+`filesystem.c:22043-22048`: "Save:[Bank] may intentionally save only a
 subset of resident Scenes"), with `active_scene` relocation logic to match.
 **This plan does not change that.** The mandate here is narrower and
 different: even among the Scenes the user *did* select, none of them may
@@ -91,37 +147,75 @@ be empty when the destination they're about to overwrite is occupied.
 
 ---
 
-## 3. Proposed guard shape
+## 3. Guard shape — resolved
 
-**For `filesystem_saveBankDirectory_tick()` case 0:** before accepting the
-request, for every bit set in `op_bank_scene_save_mask`, confirm the
-corresponding resident Scene is non-empty (once §1's open questions are
-resolved, this reads as "is present in `bank_scenePresentMask()`").
-Open design decision, not resolved here: if one selected Scene is empty
-while others are fine, does the *whole* Bank Save refuse (safest — avoids
-partially applying a whole-tree delete based on a partially-valid
-selection), or does that one Scene get silently excluded from the mask
-before the delete proceeds (keeps the rest of the save working, matches
-"toggle it off" semantics more closely, but is a quieter and easier-to-miss
-correction)? Recommend the former (whole-refuse) as the safer default given
-this is explicitly called an "absolute mandate," but flagging for
-confirmation rather than deciding unilaterally.
+### 3.1 Bank Save: silently exclude empty Scenes from the mask
 
-**For `filesystem_saveSceneDirectory_tick()` case 0:** simpler — this saves
-exactly one resident Scene (`op_kit_save_source_scene`) into exactly one
-target slot. Per the mandate's explicit instruction, if that source Scene
-is empty, the save request should fail at case 0, before `afatfs_chdir`,
-`mkdir`, or the delete step ever run — a true no-op refusal, not a
-partially-completed operation.
+**In `filesystem_requestSaveBank()`** (`filesystem.c:21987`), after
+`op_bank_scene_save_mask` is captured and normalized (line 22007-22009),
+filter the mask against `bank_scenePresentMask()`:
 
-**Silent-fail semantics:** "silently fail" needs a concrete definition at
-implementation time. Proposed: the filesystem operation completes with
-`FS_STATUS_ERROR` (the existing, already-used outcome for a case-0
-rejection in both functions today, e.g. `filesystem.c:14177-14181`'s
-existing `scene`/`kit`/slot/name checks) rather than any new status. What
-Menu does with that — a passive return to the bracketed row versus a
-visible message — is a UI decision out of scope for the filesystem-layer
-guard itself; noted here so it isn't lost, not decided.
+```c
+op_bank_scene_save_mask =
+    (uint16_t)(op_bank_scene_save_mask & bank_scenePresentMask());
+```
+
+This strips any empty (non-present) Scene from the save mask before the
+state machine even starts. The existing per-child loop
+(`case 11` at `filesystem.c:13969`) will simply never visit an excluded
+Scene. If the resulting mask is `0u` (every selected Scene was empty), the
+existing `case 11` already handles this: `op_bank_scene_save_mask == 0u`
+skips the child loop and proceeds directly to finalization at `case 45`.
+
+**Why this location, not `case 0`:** the mask is already being normalized
+at the request-capture site (line 22007-22009 bounds it to
+`STORAGE_BANK_SCENE_MAX_SLOTS` bits). Adding the present-mask filter here
+keeps all mask conditioning in one place, before the state machine runs,
+and before the `active_scene` relocation logic (line 22037-22058) that
+also depends on the mask. Filtering *after* the active_scene relocation
+would let an empty Scene become the active_scene, which is wrong.
+
+**The user sees this:** empty Scenes are already shown by non-lit LEDs on
+the SEQ buttons during save (via `menu_loadSaveSelectableSceneMask()` →
+`bank_scenePresentMask()`). The filesystem-layer filter is defense-in-depth
+— it ensures the same exclusion holds even if a future caller constructs a
+mask that bypasses the Menu-side gate.
+
+**Relationship to P1:** the present-mask filter is only correct once P1
+lands. If P1 hasn't fixed the mask, a Scene that is genuinely resident
+could be falsely excluded. **P1 must land first.**
+
+### 3.2 Root Scene Save: silent fail
+
+**In `filesystem_saveSceneDirectory_tick()` case 0** (`filesystem.c:14276`),
+add one check after the existing `!scene || !kit` validation:
+
+```c
+if (!bank_scenePresent(op_kit_save_source_scene)) {
+    filesystem_finish(FS_STATUS_ERROR);
+    return;
+}
+```
+
+This uses the existing single-Scene accessor `bank_scenePresent()`
+(`BankData.c:197-201`) rather than the full mask, since root Scene Save
+operates on exactly one source Scene.
+
+**Silent-fail semantics:** `FS_STATUS_ERROR` is the existing, already-used
+outcome for a case-0 rejection in both functions today (e.g., the
+`!scene || !kit || op_slot >= ...` checks at `filesystem.c:14277-14281`
+already return this). No new status code, no new error path. Menu receives
+the same `FS_STATUS_ERROR` it would for any other case-0 rejection.
+
+**Defense-in-depth:** this guard exists so that even if the UI is
+eventually changed to prevent attempting the save, the filesystem layer
+independently refuses. It cannot be bypassed by a different caller.
+
+### 3.3 Not applied to: KitMrp/InstrumentMrp partial/morph saves
+
+Per decision: the guard is limited to the Scene level. Morph-only saves
+don't create or replace a Scene identity — they write into an existing
+Scene's component slots. Out of scope.
 
 ---
 
@@ -178,35 +272,113 @@ gap.
 
 ---
 
-## 6. Open questions to resolve before implementation
+## 6. Open questions — all resolved
 
-1. Whole-Bank-refuse vs. silently-exclude-one-Scene when only some selected
-   Bank Scenes are empty (§3).
-2. Whether a never-loaded, boot-seeded Scene 0 counts as "empty" for this
-   guard (§1).
-3. What Menu should show the user on a silent-fail root Scene Save refusal
-   (§3) — nothing, or a brief message.
-4. Whether the guard should also apply to KitMrp/InstrumentMrp-style
-   partial/morph saves, or is scoped to whole-Scene/whole-Bank saves only
-   (this plan assumes the latter; morph-only saves don't create/replace a
-   Scene identity the way full Scene/Bank saves do, so they're likely out
-   of scope, but worth confirming explicitly).
+All four original open questions are resolved (see §0). No remaining open
+questions.
 
 ---
 
-## 7. Test plan (for the implementation session)
+## 7. Implementation — done
 
-- Attempt a root Scene Save from a genuinely empty resident Scene (never
-  loaded since boot) into both an empty and an occupied target slot;
-  confirm refusal in both cases, confirm the occupied target is untouched.
-- Attempt `Save:[Bank]` with one selected Scene empty and others real;
-  confirm whichever policy is chosen in §6.1 behaves as decided, and that
-  no partial whole-tree delete happens when the policy calls for refusal.
-- Confirm a normal, fully-populated `Save:[Bank]` and root Scene Save are
-  unaffected (no false-positive refusals).
-- Confirm SEQ LED toggle/light behavior is unaffected — this plan changes
-  nothing in `menu.c` beyond what P1 already corrects upstream.
-- Re-run once P1 lands: confirm a Scene dropped from a prior partial Bank
-  Save's on-disk tree, but still resident in SRAM, is correctly toggleable
-  again for the next save (this is the direct, testable proof P1 fixed the
-  mask this guard depends on).
+**Prerequisite:** P1 (`S057_AUTOSAVE_WRITER_WRAP.md` §2) must land first.
+The present-mask this guard depends on is untrustworthy until P1 fixes the
+Bank Save assignment bug at `filesystem.c:14126`.
+
+### 7.1 `filesystem_requestSaveBank()` — mask filter (done)
+
+At `filesystem.c:22052-22055`, after the existing mask bounds-clamp at
+`filesystem.c:22027-22029`, added:
+
+```c
+bank_scene_save_mask =
+    (uint16_t)(bank_scene_save_mask &
+               (bank_hasResidentBank()
+                    ? bank_scenePresentMask() : 0u));
+```
+
+This filters the mask before `filesystem_start()` and before the
+active_scene relocation logic. When `bank_hasResidentBank()` is false
+(boot state, no real Bank loaded), the entire mask is zeroed — the
+boot-seeded present-bit on Scene 0 is not trusted.
+
+### 7.2 `filesystem_saveSceneDirectory_tick()` case 0 — present check (done)
+
+At `filesystem.c:14298-14302`, after the existing `!scene || !kit ||
+op_slot >= ...` validation, added:
+
+```c
+if (!bank_hasResidentBank() ||
+    !bank_scenePresent(op_kit_save_source_scene)) {
+    filesystem_finish(FS_STATUS_ERROR);
+    return;
+}
+```
+
+Uses the same dual gate: `bank_hasResidentBank()` for boot-seed safety,
+`bank_scenePresent()` for per-Scene emptiness.
+
+### 7.3 Include for `bank_scenePresent()` / `bank_scenePresentMask()`
+
+`filesystem.c` already includes `BankData.h` (confirmed by the existing
+`bank_setScenePresentMask()` calls at lines 10685, 10837, 14126). No new
+include needed.
+
+### 7.4 No `menu.c` changes
+
+The SEQ LED toggle mechanism is already correct (§4). The only thing that
+fixes its behavior is P1 fixing the mask it reads — that's a Bank Save
+change, not a Menu change.
+
+### 7.5 Coverage of all entry paths — confirmed
+
+- **Root Scene Save:** enters via `filesystem_requestSaveSceneDirectory()`
+  → `filesystem_saveSceneDirectory_tick()` case 0. Guarded by §7.2.
+- **Bank Save children:** enter via `filesystem_requestSaveBank()`. The
+  mask is filtered by §7.1 before the state machine starts. The per-child
+  writer enters `filesystem_saveSceneDirectory_tick()` at case 8 (not
+  case 0), so §7.2 is not reached — but the mask filter at §7.1 already
+  ensures no non-present Scene is visited.
+- **No other entry points** for `FS_INTERNAL_OP_SAVE_SCENE` or
+  `FS_INTERNAL_OP_SAVE_BANK` exist — confirmed by searching for both
+  enum values in filesystem.c.
+
+---
+
+## 8. Test plan
+
+1. **Root Scene Save from empty Scene → occupied slot:** boot with a valid
+   Bank loaded, navigate away from Scene 0 to a Scene that was never loaded
+   (its present-bit is 0). Attempt root Scene Save into an occupied library
+   slot. Confirm: save returns `FS_STATUS_ERROR`, target slot is untouched.
+
+2. **Root Scene Save from empty Scene → empty slot:** same setup, target an
+   empty slot. Confirm: still refused — the mandate is about empty *source*,
+   not empty *target*.
+
+3. **Save:[Bank] with mixed present/empty Scenes:** load a Bank with
+   Scenes 0, 1, 2 present. Toggle SEQ LEDs to select Scenes 0, 1, 2, 3
+   (if Scene 3's LED can't be toggled because the Menu-side gate already
+   prevents it, confirm that behavior, then bypass the Menu gate by calling
+   `filesystem_requestSaveBank()` directly with bit 3 set in the mask).
+   Confirm: the saved Bank contains only Scenes 0, 1, 2 — Scene 3 was
+   silently excluded from the mask.
+
+4. **Save:[Bank] with all-empty mask:** if possible, construct a save
+   request where every selected Scene is empty. Confirm: Bank Save still
+   completes (the `case 11` `op_bank_scene_save_mask == 0u` path runs),
+   producing a Bank with bankset.bcg but no child Scene directories.
+
+5. **Normal, fully-populated Save:[Bank]:** confirm no false-positive
+   refusals — all present Scenes are saved as before.
+
+6. **Normal root Scene Save:** confirm no false-positive refusal — a
+   present Scene saves normally.
+
+7. **SEQ LED behavior unchanged:** confirm toggle/light behavior matches
+   pre-change behavior — this plan changes nothing in `menu.c`.
+
+8. **Post-P1 regression:** after P1 lands, confirm a Scene dropped from a
+   prior partial Bank Save's on-disk tree but still resident in SRAM is
+   correctly toggleable again for the next save, and that the guard does
+   not falsely exclude it.

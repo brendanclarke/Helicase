@@ -14280,6 +14280,26 @@ static void filesystem_saveSceneDirectory_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        /*
+         * Refuse to save a non-present source Scene.
+         *
+         * Inputs: resident Scene index captured by the save request and the
+         * current present mask from BankData. Output: FS_STATUS_ERROR when
+         * the source Scene's present-bit is clear or no Bank has been loaded
+         * this session (boot-seeded present-bits are not considered
+         * trustworthy — bank_hasResidentBank() is false until a real Bank
+         * Load or Save completes). Why: an empty Scene must never overwrite
+         * an occupied on-disk Scene in the library; this is the filesystem-
+         * layer guard that cannot be bypassed by a different caller, even if
+         * the UI eventually prevents the attempt. The check runs before any
+         * directory creation or deletion. Affiliates: bank_scenePresent(),
+         * bank_hasResidentBank(), and S057_SCENE_OVERWRITE_SAFE.md §3.2.
+         */
+        if (!bank_hasResidentBank() ||
+            !bank_scenePresent(op_kit_save_source_scene)) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         if (!afatfs_chdir(NULL))
             return;
         op_phase = 1u;
@@ -22007,6 +22027,32 @@ bool filesystem_requestSaveBank(uint16_t slot,
     bank_scene_save_mask =
         (uint16_t)(bank_scene_save_mask &
                    (uint16_t)((1u << STORAGE_BANK_SCENE_MAX_SLOTS) - 1u));
+    /*
+     * Exclude non-present Scenes from the Bank Save mask.
+     *
+     * Inputs: bounds-clamped caller mask above, the current resident present
+     * mask from BankData, and the resident-Bank flag. Output: any bit whose
+     * Scene has never been loaded or committed this session is cleared before
+     * the state machine runs — the per-child write loop will never visit an
+     * excluded Scene. When no Bank has been loaded this session
+     * (bank_hasResidentBank() false), the boot-seeded present-bit on Scene 0
+     * is not considered trustworthy and the entire mask is zeroed. Why: an
+     * empty (non-present) Scene must never overwrite an occupied on-disk
+     * Scene inside the target Bank tree; the delete phase removes the entire
+     * previous Bank folder before any child is written, so filtering must
+     * happen here, not inside the state machine. The SEQ LED surface already
+     * prevents toggling non-present Scenes, but this is the filesystem-layer
+     * defense-in-depth that cannot be bypassed by a different caller. Depends
+     * on P1 (Bank Save present-mask union fix) for the present mask to be
+     * trustworthy after a partial Bank Save. Affiliates:
+     * bank_scenePresentMask(), bank_hasResidentBank(),
+     * filesystem_saveBankDirectory_tick() case 11 child loop, and
+     * S057_SCENE_OVERWRITE_SAFE.md §3.1.
+     */
+    bank_scene_save_mask =
+        (uint16_t)(bank_scene_save_mask &
+                   (bank_hasResidentBank()
+                        ? bank_scenePresentMask() : 0u));
     if (!filesystem_start(FS_INTERNAL_OP_SAVE_BANK, FS_FILE_BANK, slot, cb))
         return false;
 
