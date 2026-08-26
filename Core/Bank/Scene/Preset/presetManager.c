@@ -86,6 +86,7 @@ static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_U
 /* The selected Instrument row can be any of the shared cache's 1,000 entries. */
 static volatile uint16_t         pm_instrument_request_index = 0u;
 static volatile uint16_t         pm_kit_request_scene_mask = 0u;
+static uint16_t                  pm_bank_load_failed_scene_mask = 0u;
 
 static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
 {
@@ -532,6 +533,7 @@ static void on_bank_load_complete(void)
      */
     if (filesystem_status() == FS_STATUS_DONE) {
         completed_scene_mask = filesystem_lastBankLoadSceneMask();
+        pm_bank_load_failed_scene_mask = filesystem_lastBankLoadFailedSceneMask();
         for (scene_index = 0u;
              scene_index < SCENE_COUNT && scene_index < 16u;
              scene_index++) {
@@ -2274,6 +2276,11 @@ uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
 uint8_t preset_completedBankLoadedScene(void)
 {
     return filesystem_lastBankLoadLoadedScene();
+}
+
+uint16_t preset_bankLoadFailedSceneMask(void)
+{
+    return pm_bank_load_failed_scene_mask;
 }
 
 uint8_t preset_loadFirstAvailableSceneOrKit(void)

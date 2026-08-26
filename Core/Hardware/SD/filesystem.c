@@ -1086,11 +1086,23 @@ static char op_save_bank_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_save_bank_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
 static uint16_t op_bank_child_present_mask = 0u;
 static uint16_t op_bank_scene_load_mask = 0u;
+static uint16_t op_bank_scene_failed_mask = 0u;
 static uint16_t op_bank_scene_save_mask = 0u;
 static uint8_t op_bank_active_scene = 0u;
 static uint8_t op_bank_child_cursor = 0u;
 static uint8_t op_bank_loaded_scene = 0u;
 static uint8_t op_bank_payload_active = 0u;
+typedef enum {
+    FS_LOAD_INVALID_NONE = 0u,
+    FS_LOAD_INVALID_SCENE,
+    FS_LOAD_INVALID_KIT,
+} fs_load_invalid_layer_t;
+/* Classify which content layer a load-time failure belongs to.  Set alongside
+ * op_close_status = FS_STATUS_ERROR at each site that proves the failure is a
+ * content defect; consumed at the shared terminal phase to decide quarantine
+ * eligibility.  Reset per-operation in filesystem_start() and per-child in the
+ * Bank loader's child dispatch. */
+static fs_load_invalid_layer_t op_load_invalid_layer = FS_LOAD_INVALID_NONE;
 static uint8_t op_rename_done = 0u;
 /* Result paired with rename completion; open-name output is trusted only on OK. */
 static afatfsResultCode_t op_rename_result = AFATFS_RESULT_OK;
@@ -1198,19 +1210,9 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
                                                uint16_t row);
 static void filesystem_repairNames_tick(void);
 static uint8_t filesystem_repairBuildCandidate(void);
-typedef enum {
-    FS_KIT_VALIDATION_VALID = 0u,
-    FS_KIT_VALIDATION_INVALID_CONTENT,
-    FS_KIT_VALIDATION_IO_ABORT,
-} fs_kit_validation_result_t;
-
-typedef enum {
-    FS_KIT_QUARANTINE_OK = 0u,
-    FS_KIT_QUARANTINE_IO_ABORT,
-} fs_kit_quarantine_result_t;
-
-static fs_kit_quarantine_result_t filesystem_quarantineKitLibraryBlocking(void);
 static uint8_t filesystem_kitMemberNameIsCanonical(const char *name);
+static void filesystem_makeQuarantineName(char *dst, uint16_t capacity,
+                                          const char *old_name);
 static void filesystem_bootLoggingSetBankDetail(const char suffix[3]);
 static void filesystem_bootLoggingSetBankSceneDetail(char family);
 static uint8_t filesystem_bankPayloadDetailActive(void);
@@ -8560,7 +8562,7 @@ static void filesystem_loadKitDirectory_tick(void)
             filesystem_setPresetNameEmpty();
             filesystem_makeNamedErrorCode("KDir", op_phase);
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 28;
+            op_phase = 22;
             return;
         }
         op_kit_slot_dir = op_file;
@@ -8607,7 +8609,8 @@ static void filesystem_loadKitDirectory_tick(void)
             filesystem_setPresetNameInvalid();
             filesystem_makeNamedErrorCode("KSet", op_phase);
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 28;
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
+            op_phase = 22;
             return;
         }
         op_phase = 13;
@@ -8622,11 +8625,7 @@ static void filesystem_loadKitDirectory_tick(void)
             filesystem_setPresetNameInvalid();
             filesystem_makeNamedErrorCode("KSet", op_phase);
             op_close_status = FS_STATUS_ERROR;
-            /*
-             * A read error can occur after kitset.kcg is open. Route through
-             * case 14 so afatfs_fclose() is actually requested; case 15 only
-             * waits for a close callback and would hang if entered directly.
-             */
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
             op_phase = 14;
             return;
         }
@@ -8637,10 +8636,7 @@ static void filesystem_loadKitDirectory_tick(void)
                 filesystem_setPresetNameInvalid();
                 filesystem_makeNamedErrorCode("KSet", op_phase);
                 op_close_status = FS_STATUS_ERROR;
-                /*
-                 * Malformed kitset data still owns an open file handle. Close
-                 * first, then let the wait-close phase surface FS_STATUS_ERROR.
-                 */
+                op_load_invalid_layer = FS_LOAD_INVALID_KIT;
                 op_phase = 14;
             }
             return;
@@ -8651,6 +8647,7 @@ static void filesystem_loadKitDirectory_tick(void)
                 filesystem_setPresetNameInvalid();
                 filesystem_makeNamedErrorCode("KSet", op_phase);
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_KIT;
             } else {
                 op_close_status = FS_STATUS_DONE;
             }
@@ -8668,7 +8665,7 @@ static void filesystem_loadKitDirectory_tick(void)
         if (!op_close_done) return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
-            op_phase = 28;
+            op_phase = 22;
             return;
         }
         op_instrument_slot = 0u;
@@ -8750,7 +8747,7 @@ static void filesystem_loadKitDirectory_tick(void)
                        op_scene_display_name, 8u);
             }
             op_close_status = FS_STATUS_DONE;
-            op_phase = 28;
+            op_phase = 22;
             return;
         }
         storage_instrumentStateInit(&op_instrument_state,
@@ -8800,7 +8797,8 @@ static void filesystem_loadKitDirectory_tick(void)
             filesystem_setPresetNameInvalid();
             filesystem_makeNamedErrorCode("KIns", op_phase);
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 28;
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
+            op_phase = 22;
             return;
         }
         op_phase = 19;
@@ -8815,6 +8813,7 @@ static void filesystem_loadKitDirectory_tick(void)
             filesystem_setPresetNameInvalid();
             filesystem_makeNamedErrorCode("KIns", op_phase);
             op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
             op_phase = 20;
             return;
         }
@@ -8827,6 +8826,7 @@ static void filesystem_loadKitDirectory_tick(void)
                 filesystem_setPresetNameInvalid();
                 filesystem_makeNamedErrorCode("KIns", op_phase);
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_KIT;
                 op_phase = 20;
             }
             return;
@@ -8837,6 +8837,7 @@ static void filesystem_loadKitDirectory_tick(void)
                 filesystem_setPresetNameInvalid();
                 filesystem_makeNamedErrorCode("KIns", op_phase);
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_KIT;
             } else {
                 if (op_instrument_state.seen_morph_count == 0u) {
                     storage_instrumentCopyMainToMorphFallback(
@@ -8860,11 +8861,49 @@ static void filesystem_loadKitDirectory_tick(void)
         if (!op_close_done) return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
-            op_phase = 28;
+            op_phase = 22;
             return;
         }
         op_instrument_slot++;
         op_phase = 16;
+        return;
+
+    case 22: /* DECIDE: quarantine-eligible? */
+        if (op_close_status != FS_STATUS_ERROR ||
+            op_load_invalid_layer != FS_LOAD_INVALID_KIT ||
+            afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY) {
+            op_phase = 28u;
+            return;
+        }
+        {
+            afatfsOperationStatus_e ast = afatfs_chdirParent();
+            if (ast == AFATFS_OPERATION_IN_PROGRESS) return;
+            if (ast == AFATFS_OPERATION_FAILURE) { op_phase = 28u; return; }
+        }
+        op_phase = 23u;
+        return;
+
+    case 23: /* BUILD quarantine name + START rename */
+        strncpy(op_repair_old_name, op_root_open_name,
+                sizeof(op_repair_old_name) - 1u);
+        op_repair_old_name[sizeof(op_repair_old_name) - 1u] = '\0';
+        filesystem_makeQuarantineName(op_repair_new_name,
+                                      sizeof(op_repair_new_name),
+                                      op_repair_old_name);
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0, sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(op_repair_old_name, op_repair_new_name,
+                                     AFATFS_MATCH_CASE_INSENSITIVE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 24u;
+        return;
+
+    case 24: /* WAIT rename */
+        if (!op_rename_done) return;
+        op_phase = 28u;
         return;
 
     case 28: /* RETURN TO ROOT + FINISH */
@@ -8876,7 +8915,7 @@ static void filesystem_loadKitDirectory_tick(void)
     default:
         filesystem_setPresetNameInvalid();
         op_close_status = FS_STATUS_ERROR;
-        op_phase = 28;
+        op_phase = 22;
         return;
     }
 }
@@ -9007,7 +9046,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameEmpty();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_phase = 62;
             return;
         }
         op_kit_slot_dir = op_file;
@@ -9033,6 +9072,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
             op_phase = 10;
             return;
         }
@@ -9091,7 +9131,8 @@ static void filesystem_loadSceneDirectory_tick(void)
             op_scene_effect_open_name[0] == '\0') {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 62;
             return;
         }
         op_phase = 12;
@@ -9117,7 +9158,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 62;
             return;
         }
         op_phase = 14;
@@ -9131,6 +9173,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
             op_phase = 15;
             return;
         }
@@ -9142,6 +9185,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
                 op_phase = 15;
             }
             return;
@@ -9151,8 +9195,10 @@ static void filesystem_loadSceneDirectory_tick(void)
             op_close_status = (st == STORAGE_STATUS_OK)
                 ? FS_STATUS_DONE
                 : FS_STATUS_ERROR;
-            if (st != STORAGE_STATUS_OK)
+            if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
+                op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            }
             op_phase = 15;
         }
         return;
@@ -9167,7 +9213,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_close_done) return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
-            op_phase = 72;
+            op_phase = 62;
             return;
         }
         op_phase = 17;
@@ -9188,7 +9234,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
+            op_phase = 62;
             return;
         }
         op_kit_slot_dir = op_file;
@@ -9232,7 +9279,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
+            op_phase = 62;
             return;
         }
         op_phase = 24;
@@ -9246,6 +9294,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
             op_phase = 25;
             return;
         }
@@ -9255,6 +9304,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_KIT;
                 op_phase = 25;
             }
             return;
@@ -9379,6 +9429,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             } else {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_KIT;
             }
             op_phase = 25;
         }
@@ -9396,7 +9447,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_close_done) return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
-            op_phase = 72;
+            op_phase = 62;
             return;
         }
         op_instrument_slot = 0u;
@@ -9469,7 +9520,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
+            op_phase = 62;
             return;
         }
         op_phase = 29;
@@ -9483,6 +9535,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_KIT;
             op_phase = 30;
             return;
         }
@@ -9494,6 +9547,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_KIT;
                 op_phase = 30;
             }
             return;
@@ -9503,6 +9557,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_KIT;
             } else {
                 if (op_instrument_state.seen_morph_count == 0u) {
                     storage_instrumentCopyMainToMorphFallback(
@@ -9528,7 +9583,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_close_done) return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
-            op_phase = 72;
+            op_phase = 62;
             return;
         }
         op_instrument_slot++;
@@ -9570,7 +9625,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             if (ast == AFATFS_OPERATION_FAILURE) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
-                op_phase = 72;
+                op_phase = 62;
                 return;
             }
             op_phase = 44;
@@ -9594,7 +9649,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_phase = 62;
             return;
         }
         op_kit_root_dir = op_file;
@@ -9648,7 +9703,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 62;
             return;
         }
         op_kit_slot_dir = op_file;
@@ -9688,7 +9744,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 62;
             return;
         }
         op_stream_index = 0u;
@@ -9714,6 +9771,7 @@ static void filesystem_loadSceneDirectory_tick(void)
                 if (n == 0u && afatfs_feof(op_file)) {
                     filesystem_setPresetNameInvalid();
                     op_close_status = FS_STATUS_ERROR;
+                    op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
                     op_phase = 54;
                 }
                 return;
@@ -9733,6 +9791,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         (void)n;
         filesystem_setPresetNameInvalid();
         op_close_status = FS_STATUS_ERROR;
+        op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
         op_phase = 54;
         return;
     }
@@ -9950,6 +10009,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
             op_phase = 54;
             return;
         }
@@ -9960,26 +10020,20 @@ static void filesystem_loadSceneDirectory_tick(void)
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
                 op_phase = 54;
             }
             return;
         }
         if (eof) {
-            /*
-             * Text pattern completion.
-             *
-             * Inputs: parser seen bits plus any v2 track rows already applied
-             * into the direct final Scene PatternSet. Output: success accepts either a
-             * guarded v1 placeholder or a complete seven-track draft payload;
-             * failure rejects the whole Scene before resident memory is
-             * touched.
-             */
             st = storage_patternStubFinalize(&op_pattern_stub_state);
             op_close_status = (st == STORAGE_STATUS_OK)
                 ? FS_STATUS_DONE
                 : FS_STATUS_ERROR;
-            if (st != STORAGE_STATUS_OK)
+            if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
+                op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            }
             op_phase = 54;
         }
         return;
@@ -9996,7 +10050,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_close_done) return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
-            op_phase = 72;
+            op_phase = 62;
             return;
         }
         op_phase = 56;
@@ -10019,7 +10073,8 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
-            op_phase = 72;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 62;
             return;
         }
         op_phase = 58;
@@ -10033,6 +10088,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (st != STORAGE_STATUS_OK) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
             op_phase = 59;
             return;
         }
@@ -10041,6 +10097,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
+                op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
                 op_phase = 59;
             }
             return;
@@ -10050,8 +10107,10 @@ static void filesystem_loadSceneDirectory_tick(void)
             op_close_status = (st == STORAGE_STATUS_OK)
                 ? FS_STATUS_DONE
                 : FS_STATUS_ERROR;
-            if (st != STORAGE_STATUS_OK)
+            if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
+                op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            }
             op_phase = 59;
         }
         return;
@@ -10068,7 +10127,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         if (!op_close_done) return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
-            op_phase = 72;
+            op_phase = 62;
             return;
         }
         op_phase = 61;
@@ -10123,9 +10182,123 @@ static void filesystem_loadSceneDirectory_tick(void)
             filesystem_cacheCurrentBankSceneNameBlock(op_bank_child_cursor);
         }
         op_close_status = FS_STATUS_DONE;
-        op_phase = 72;
+        op_phase = 62;
         return;
     }
+
+    case 62: /* DECIDE: quarantine-eligible, and which rename(s)? */
+        if (op_close_status != FS_STATUS_ERROR ||
+            op_load_invalid_layer == FS_LOAD_INVALID_NONE ||
+            afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY) {
+            op_phase = 72u;
+            return;
+        }
+        if (current_op == FS_INTERNAL_OP_LOAD_BANK) {
+            if (op_load_invalid_layer != FS_LOAD_INVALID_KIT) {
+                op_phase = 72u;
+                return;
+            }
+            op_phase = 65u;
+            return;
+        }
+        op_phase = (op_load_invalid_layer == FS_LOAD_INVALID_KIT) ? 63u : 68u;
+        return;
+
+    case 63: /* ROOT SCENE + KIT: chdirParent to owning Scene folder */
+    {
+        afatfsOperationStatus_e ast = afatfs_chdirParent();
+        if (ast == AFATFS_OPERATION_IN_PROGRESS) return;
+        if (ast == AFATFS_OPERATION_FAILURE) { op_phase = 72u; return; }
+    }
+        op_phase = 64u;
+        return;
+
+    case 64: /* BUILD embedded-Kit quarantine name + START rename */
+        op_repair_old_name[0] = 'K'; op_repair_old_name[1] = 'i';
+        op_repair_old_name[2] = 't'; op_repair_old_name[3] = ' ';
+        strncpy(&op_repair_old_name[4], op_scene_child_display_name,
+                sizeof(op_repair_old_name) - 5u);
+        op_repair_old_name[sizeof(op_repair_old_name) - 1u] = '\0';
+        filesystem_makeQuarantineName(op_repair_new_name,
+                                      sizeof(op_repair_new_name),
+                                      op_repair_old_name);
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0, sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(op_repair_old_name, op_repair_new_name,
+                                     AFATFS_MATCH_CASE_INSENSITIVE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 66u;
+        return;
+
+    case 65: /* BANK-LOCAL + KIT: chdirParent then rename embedded Kit only */
+    {
+        afatfsOperationStatus_e ast = afatfs_chdirParent();
+        if (ast == AFATFS_OPERATION_IN_PROGRESS) return;
+        if (ast == AFATFS_OPERATION_FAILURE) { op_phase = 72u; return; }
+    }
+        op_repair_old_name[0] = 'K'; op_repair_old_name[1] = 'i';
+        op_repair_old_name[2] = 't'; op_repair_old_name[3] = ' ';
+        strncpy(&op_repair_old_name[4], op_scene_child_display_name,
+                sizeof(op_repair_old_name) - 5u);
+        op_repair_old_name[sizeof(op_repair_old_name) - 1u] = '\0';
+        filesystem_makeQuarantineName(op_repair_new_name,
+                                      sizeof(op_repair_new_name),
+                                      op_repair_old_name);
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0, sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(op_repair_old_name, op_repair_new_name,
+                                     AFATFS_MATCH_CASE_INSENSITIVE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 67u;
+        return;
+
+    case 66: /* WAIT embedded-Kit rename (root Scene path) */
+        if (!op_rename_done) return;
+        op_phase = 68u;
+        return;
+
+    case 67: /* WAIT embedded-Kit rename (Bank-local path) — done */
+        if (!op_rename_done) return;
+        op_phase = 72u;
+        return;
+
+    case 68: /* ROOT SCENE RENAME: chdirParent to Scene's own parent */
+    {
+        afatfsOperationStatus_e ast = afatfs_chdirParent();
+        if (ast == AFATFS_OPERATION_IN_PROGRESS) return;
+        if (ast == AFATFS_OPERATION_FAILURE) { op_phase = 72u; return; }
+    }
+        op_phase = 69u;
+        return;
+
+    case 69: /* BUILD Scene quarantine name + START rename */
+        strncpy(op_repair_old_name, op_root_open_name,
+                sizeof(op_repair_old_name) - 1u);
+        op_repair_old_name[sizeof(op_repair_old_name) - 1u] = '\0';
+        filesystem_makeQuarantineName(op_repair_new_name,
+                                      sizeof(op_repair_new_name),
+                                      op_repair_old_name);
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0, sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(op_repair_old_name, op_repair_new_name,
+                                     AFATFS_MATCH_CASE_INSENSITIVE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 70u;
+        return;
+
+    case 70: /* WAIT Scene rename */
+        if (!op_rename_done) return;
+        op_phase = 72u;
+        return;
 
     case 72: /* RETURN ROOT + FINISH */
         if (filesystem_bankPayloadDetailActive())
@@ -10190,7 +10363,7 @@ static void filesystem_loadSceneDirectory_tick(void)
     default:
         filesystem_setPresetNameInvalid();
         op_close_status = FS_STATUS_ERROR;
-        op_phase = 72;
+        op_phase = 62;
         return;
     }
 }
@@ -10784,6 +10957,7 @@ static void filesystem_loadBankDirectory_tick(void)
          * because a directory could be opened.
          */
         op_bank_payload_active = 1u;
+        op_load_invalid_layer = FS_LOAD_INVALID_NONE;
         op_phase = 8u;
         return;
 
@@ -10792,8 +10966,17 @@ static void filesystem_loadBankDirectory_tick(void)
         uint8_t child_slot;
 
         if (op_close_status != FS_STATUS_DONE) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
+            if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            op_bank_scene_load_mask =
+                (uint16_t)(op_bank_scene_load_mask &
+                          ~(uint16_t)(1u << op_bank_child_cursor));
+            op_bank_scene_failed_mask =
+                (uint16_t)(op_bank_scene_failed_mask |
+                          (uint16_t)(1u << op_bank_child_cursor));
+            filesystem_makeNamedErrorCode("BKKit", op_phase);
         }
         for (child_slot = (uint8_t)(op_bank_child_cursor + 1u);
              child_slot < STORAGE_BANK_SCENE_MAX_SLOTS;
@@ -10834,8 +11017,9 @@ static void filesystem_loadBankDirectory_tick(void)
          * preservation rules. This is a metadata merge only; the payload loop
          * above remains the sole writer of selected SceneData.
          */
-        if (!bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
-                                                 op_bank_scene_load_mask))) {
+        if (!bank_setScenePresentMask(
+                (uint16_t)((bank_scenePresentMask() | op_bank_scene_load_mask) &
+                           ~op_bank_scene_failed_mask))) {
             /*
              * Guarantee a fresh present-mask capture when the Bank Load union
              * is a no-op against the already-resident mask.
@@ -17613,120 +17797,6 @@ static uint8_t filesystem_kitMemberNameIsCanonical(const char *name)
     return (uint8_t)(stem_len > 0u && name[stem_len] == '.');
 }
 
-/*
- * Validate one current Kit directory without confusing content faults with
- * interrupted filesystem work.
- *
- * Inputs: currentDirectory is the selected Kit and kit_slot is its already
- * parsed numbered coordinate. Output: INVALID_CONTENT permits the established
- * err... quarantine; IO_ABORT stops traversal because no parser conclusion was
- * reached. Why: a timeout or lost FAT-ready state is not evidence that user
- * data is malformed and must never authorize a rename.
- */
-static fs_kit_validation_result_t filesystem_validateCurrentKitBlocking(
-    uint16_t kit_slot)
-{
-    storage_kitset_t kitset;
-    kit_t scratch_kit;
-    afatfsFilePtr_t file;
-    char line[128];
-    uint16_t line_len = 0u;
-    uint8_t byte;
-    uint8_t line_too_long = 0u;
-    uint8_t saw_line_too_long = 0u;
-    storage_status_t st;
-
-    memset(&scratch_kit, 0, sizeof(scratch_kit));
-    storage_kitsetInit(&kitset);
-    filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
-    filesystem_reportBootSubstep(30u); /* open kitset.kcg */
-    file = filesystem_blockOpen(STORAGE_KITSET_FILENAME);
-    if (!file) {
-        return filesystem_blockFsOk()
-            ? FS_KIT_VALIDATION_INVALID_CONTENT
-            : FS_KIT_VALIDATION_IO_ABORT;
-    }
-    filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
-    filesystem_reportBootSubstep(31u); /* stream/parse kitset.kcg */
-    while (filesystem_blockRead(file, &byte, 1u) == 1u) {
-        if (byte == '\r')
-            continue;
-        if (byte == '\n') {
-            line[line_len] = '\0';
-            if (!line_too_long) {
-                st = storage_kitsetParseLine(&kitset, line, &scratch_kit);
-                if (st != STORAGE_STATUS_OK) {
-                    filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
-                    if (!filesystem_blockClose(file))
-                        return FS_KIT_VALIDATION_IO_ABORT;
-                    return FS_KIT_VALIDATION_INVALID_CONTENT;
-                }
-            }
-            line_len = 0u;
-            line_too_long = 0u;
-            continue;
-        }
-        if (line_len + 1u < sizeof(line)) {
-            line[line_len++] = (char)byte;
-        } else {
-            line_too_long = 1u;
-            saw_line_too_long = 1u;
-        }
-    }
-    if (!afatfs_feof(file)) {
-        filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
-        (void)filesystem_blockClose(file);
-        return FS_KIT_VALIDATION_IO_ABORT;
-    }
-    if (line_len != 0u && !line_too_long) {
-        line[line_len] = '\0';
-        st = storage_kitsetParseLine(&kitset, line, &scratch_kit);
-        if (st != STORAGE_STATUS_OK) {
-            filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
-            if (!filesystem_blockClose(file))
-                return FS_KIT_VALIDATION_IO_ABORT;
-            return FS_KIT_VALIDATION_INVALID_CONTENT;
-        }
-    }
-    filesystem_bootLoggingSetKitDetail(kit_slot, "KST");
-    filesystem_reportBootSubstep(32u); /* close kitset.kcg */
-    if (!filesystem_blockClose(file))
-        return FS_KIT_VALIDATION_IO_ABORT;
-    if (line_too_long ||
-        saw_line_too_long ||
-        storage_kitsetFinalize(&kitset) != STORAGE_STATUS_OK)
-        return FS_KIT_VALIDATION_INVALID_CONTENT;
-    for (uint8_t i = 0u; i < STORAGE_KIT_SLOT_COUNT; i++) {
-        if (!filesystem_kitMemberNameIsCanonical(kitset.instrument_file[i]))
-            return FS_KIT_VALIDATION_INVALID_CONTENT;
-        {
-            char instrument_suffix[3] = {
-                'I', '0', (char)('0' + i)
-            };
-
-            filesystem_bootLoggingSetKitDetail(kit_slot, instrument_suffix);
-        }
-        filesystem_reportBootSubstep((uint8_t)(40u + i));
-        file = filesystem_blockOpenLfn(kitset.instrument_file[i]);
-        if (!file) {
-            return filesystem_blockFsOk()
-                ? FS_KIT_VALIDATION_INVALID_CONTENT
-                : FS_KIT_VALIDATION_IO_ABORT;
-        }
-        {
-            char instrument_suffix[3] = {
-                'I', '0', (char)('0' + i)
-            };
-
-            filesystem_bootLoggingSetKitDetail(kit_slot, instrument_suffix);
-        }
-        filesystem_reportBootSubstep((uint8_t)(50u + i));
-        if (!filesystem_blockClose(file))
-            return FS_KIT_VALIDATION_IO_ABORT;
-    }
-    return FS_KIT_VALIDATION_VALID;
-}
-
 static void filesystem_makeQuarantineName(char *dst,
                                           uint16_t capacity,
                                           const char *old_name)
@@ -17907,139 +17977,6 @@ static uint8_t filesystem_nextResidentNameLine(char *dst,
     return filesystem_formatResidentNameLine(
         dst, cap, NULL, 0u,
         fs_resident_source[row + 1u], (uint16_t)(row + 1u));
-}
-
-/*
- * Quarantine only Kits proven invalid by the selected-content validator.
- *
- * Inputs: mounted root Kit namespace. Output: OK after a complete traversal or
- * IO_ABORT after any interrupted FAT operation. Why: an I/O abort cannot prove
- * a Kit is malformed, so it must leave the original directory intact rather
- * than reaching the err... rename path.
- */
-static fs_kit_quarantine_result_t filesystem_quarantineKitLibraryBlocking(void)
-{
-    afatfsFilePtr_t root;
-    afatfsFilePtr_t kit_dir;
-    afatfsObjectFinder_t finder;
-    afatfsObjectInfo_t object;
-    afatfsOperationStatus_e st;
-    char old_name[AFATFS_LONG_FILENAME_MAX + 1u];
-    char err_name[AFATFS_LONG_FILENAME_MAX + 1u];
-    uint16_t slot;
-    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-    fs_kit_validation_result_t validation;
-
-restart:
-    filesystem_bootLoggingSetDetail("KQROOT  ");
-    if (!filesystem_blockChdir(NULL))
-        return FS_KIT_QUARANTINE_IO_ABORT;
-    filesystem_bootLoggingSetDetail("KQROOT  ");
-    root = filesystem_blockOpenDirLfn(STORAGE_ROOT_KIT);
-    if (!root) {
-        return filesystem_blockFsOk()
-            ? FS_KIT_QUARANTINE_OK
-            : FS_KIT_QUARANTINE_IO_ABORT;
-    }
-    filesystem_bootLoggingSetDetail("KQROOT  ");
-    if (!filesystem_blockChdir(root)) {
-        (void)filesystem_blockClose(root);
-        return FS_KIT_QUARANTINE_IO_ABORT;
-    }
-    afatfs_findFirstObject(root, &finder);
-    while (1) {
-        filesystem_bootLoggingSetDetail("KQSCAN  ");
-        st = filesystem_blockFindNextObject(root, &finder, &object);
-        if (st == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLastObject(root, &finder);
-            (void)filesystem_blockClose(root);
-            return FS_KIT_QUARANTINE_IO_ABORT;
-        }
-        if (object.id.kind == AFATFS_OBJECT_NONE) {
-            afatfs_findLastObject(root, &finder);
-            break;
-        }
-        if (object.id.kind != AFATFS_OBJECT_DIRECTORY ||
-            !storage_parseNumberedFolder(object.id.displayName,
-                                         &slot,
-                                         display) ||
-            slot >= STORAGE_KIT_MAX_SLOTS) {
-            continue;
-        }
-        filesystem_copyLongComponent(old_name, sizeof(old_name),
-                                     object.id.displayName);
-        filesystem_bootLoggingSetKitDetail(slot, "DIR");
-        kit_dir = filesystem_blockOpenDirLfn(old_name);
-        if (!kit_dir) {
-            afatfs_findLastObject(root, &finder);
-            (void)filesystem_blockClose(root);
-            return FS_KIT_QUARANTINE_IO_ABORT;
-        }
-        filesystem_bootLoggingSetKitDetail(slot, "DIR");
-        if (!filesystem_blockChdir(kit_dir)) {
-            (void)filesystem_blockClose(kit_dir);
-            afatfs_findLastObject(root, &finder);
-            (void)filesystem_blockClose(root);
-            return FS_KIT_QUARANTINE_IO_ABORT;
-        }
-        validation = filesystem_validateCurrentKitBlocking(slot);
-        if (validation == FS_KIT_VALIDATION_IO_ABORT) {
-            afatfs_findLastObject(root, &finder);
-            (void)filesystem_blockClose(kit_dir);
-            (void)filesystem_blockClose(root);
-            return FS_KIT_QUARANTINE_IO_ABORT;
-        }
-        if (validation == FS_KIT_VALIDATION_INVALID_CONTENT) {
-            /*
-             * Quarantine root Kit folders before `.hcindex` publication.
-             *
-             * Inputs: a numbered Kit directory whose kitset references a long
-             * or missing member filename. Output: the folder is renamed to an
-             * `errNNN ...` component in Kit/, so the normal slot scanner will
-             * not publish a loadable row for data the firmware cannot
-             * reconstruct from bounded resident names.
-             */
-            afatfs_findLastObject(root, &finder);
-            filesystem_bootLoggingSetKitDetail(slot, "REN");
-            if (!filesystem_blockChdir(root)) {
-                (void)filesystem_blockClose(kit_dir);
-                (void)filesystem_blockClose(root);
-                return FS_KIT_QUARANTINE_IO_ABORT;
-            }
-            filesystem_bootLoggingSetKitDetail(slot, "REN");
-            if (!filesystem_blockClose(kit_dir)) {
-                (void)filesystem_blockClose(root);
-                return FS_KIT_QUARANTINE_IO_ABORT;
-            }
-            if (!filesystem_blockClose(root))
-                return FS_KIT_QUARANTINE_IO_ABORT;
-            filesystem_makeQuarantineName(err_name, sizeof(err_name), old_name);
-            filesystem_bootLoggingSetKitDetail(slot, "REN");
-            if (!filesystem_blockRename(old_name, err_name))
-                return FS_KIT_QUARANTINE_IO_ABORT;
-            goto restart;
-        }
-        filesystem_bootLoggingSetKitDetail(slot, "DIR");
-        if (!filesystem_blockChdir(root)) {
-            afatfs_findLastObject(root, &finder);
-            (void)filesystem_blockClose(kit_dir);
-            (void)filesystem_blockClose(root);
-            return FS_KIT_QUARANTINE_IO_ABORT;
-        }
-        filesystem_bootLoggingSetKitDetail(slot, "DIR");
-        if (!filesystem_blockClose(kit_dir)) {
-            afatfs_findLastObject(root, &finder);
-            (void)filesystem_blockClose(root);
-            return FS_KIT_QUARANTINE_IO_ABORT;
-        }
-    }
-    filesystem_bootLoggingSetDetail("KQROOT  ");
-    if (!filesystem_blockClose(root))
-        return FS_KIT_QUARANTINE_IO_ABORT;
-    filesystem_bootLoggingSetDetail("KQROOT  ");
-    return filesystem_blockChdir(NULL)
-        ? FS_KIT_QUARANTINE_OK
-        : FS_KIT_QUARANTINE_IO_ABORT;
 }
 
 #if 0
@@ -21006,6 +20943,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_slot = slot;
     op_file_type = type;
     memset(fs_error_code, 0, sizeof(fs_error_code));
+    op_load_invalid_layer = FS_LOAD_INVALID_NONE;
     op_file = NULL;
     op_file_ready = false;
     op_close_done = false;
@@ -21072,6 +21010,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     memset(op_save_bank_dir_open_name, 0, sizeof(op_save_bank_dir_open_name));
     op_bank_child_present_mask = 0u;
     op_bank_scene_load_mask = 0u;
+    op_bank_scene_failed_mask = 0u;
     op_bank_scene_save_mask = 0u;
     op_bank_active_scene = 0u;
     op_bank_child_cursor = 0u;
@@ -21572,41 +21511,6 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
      */
     if (!filesystem_repairLibraryNamesBlocking(kind))
         return 0u;
-    if (kind == FS_LIBRARY_INDEX_KIT) {
-        fs_kit_quarantine_result_t quarantine_result;
-
-        /*
-         * Kit quarantine uses raw blocking FAT helpers after name repair has
-         * completed, so no filesystem_start() boundary exists to classify it.
-         * Input is the mounted `/Kit` namespace; output is a KITQUAR deadline
-         * covering validation/quarantine. Why: without this explicit arm the
-         * completed NAMEREPR code could be blamed for a later raw-loop stall.
-         * Affiliate: filesystem_blockPoll().
-         */
-        /*
-         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
-         * It must never print anything to the screen or otherwise delay
-         * operations unnecessarily since logging may be used to assess timing
-         * failures in other modules that might otherwise be obscured by screen
-         * write delays.
-         */
-        filesystem_bootLoggingArm("KITQUAR ");
-        quarantine_result = filesystem_quarantineKitLibraryBlocking();
-        filesystem_bootLoggingOperationDone();
-        if (quarantine_result != FS_KIT_QUARANTINE_OK) {
-            /*
-             * A failed Kit quarantine cannot be represented as a valid empty
-             * library.
-             *
-             * Inputs: a retained KITQUAR detail label and an interrupted raw
-             * FAT traversal. Output: this wrapper returns failure before cache
-             * publication. Why: the boot caller must not mistake partial
-             * traversal for a completed index or erase the evidence by moving
-             * on to later scans.
-             */
-            return 0u;
-        }
-    }
     filesystem_clearNameCacheStorage();
 
     if (fs_list_cache_kind != internal_kind) {
@@ -23341,6 +23245,11 @@ uint16_t filesystem_lastBankLoadSceneMask(void)
      * load phases 16/17 and filesystem.h's operation-lifetime contract.
      */
     return op_bank_scene_load_mask;
+}
+
+uint16_t filesystem_lastBankLoadFailedSceneMask(void)
+{
+    return op_bank_scene_failed_mask;
 }
 
 uint8_t filesystem_instrumentTargetExists(instrument_type_t type,

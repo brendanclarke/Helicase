@@ -1,7 +1,7 @@
 # Boot Kit-Directory Sanitizer Refactor — Planning Doc (Rev 2)
 
-Status: **planning — §4a decided (option 2, generalized), fully detailed
-implementation plan below, no code changed yet.**
+Status: **implemented — all §5 code changes landed and build-verified.
+Awaiting hardware test (§6).**
 Companion to `S057_AUTOSAVE_WRITER_WRAP.md` §8 (diagnosis) and the deferred
 refactor target already scoped in `SCOPING_TARGETS.md:211-246` (Session
 052). This is the last remaining code-change item before the AutoSave boot
@@ -1156,3 +1156,79 @@ free when the active scene's slot is the failed one).
     the old boot-time quarantine (before this refactor shipped) is still
     correctly skipped by every scan post-refactor (§4d — no regression, no
     reverse-quarantine expected either).
+
+## 7. Implementation notes (Rev 3)
+
+All §5 code changes implemented and build-verified. Three issues found
+during assessment were fixed during implementation rather than carried
+forward as known bugs:
+
+### 7a. Critical fix: routing into quarantine sub-machines
+
+The plan's §5.2/§5.3 pseudocode inserted new phases 22-27 (Kit) and 62-71
+(Scene) "before existing case 28/72" but never stated that existing
+`op_phase = 28` / `op_phase = 72` assignments must change to route through
+the new decision gates. Without this change the quarantine sub-machines
+would be unreachable dead code — every error path would skip straight to
+the existing finish phase.
+
+**Fix applied:** all `op_phase = 28` assignments in
+`filesystem_loadKitDirectory_tick()` were changed to `op_phase = 22`
+(except phases 0/2 which call `filesystem_finish()` directly and correctly
+bypass the terminal phase). All `op_phase = 72` assignments in
+`filesystem_loadSceneDirectory_tick()` were changed to `op_phase = 62`.
+The gates at 22/62 handle non-quarantine-eligible cases (success,
+unclassified failures, FS not READY) by skipping straight to 28/72.
+
+### 7b. Critical fix: per-child reset of op_load_invalid_layer
+
+For Bank loads with multiple children, each child enters the Scene tick at
+phase 8 (skipping phase 0). `op_load_invalid_layer` was only reset in
+`filesystem_start()`, once per Bank Load. If child #1 failed with
+`FS_LOAD_INVALID_KIT` and child #2 failed at an unclassified phase, the
+stale KIT classification from child #1 would leak into child #2's
+quarantine decision.
+
+**Fix applied:** `op_load_invalid_layer = FS_LOAD_INVALID_NONE` is now
+reset alongside `op_bank_payload_active = 1u` in the Bank loader's
+per-child dispatch, immediately before entering the Scene tick at phase 8.
+
+### 7c. Missing classification: Scene loader phase 35
+
+Phase 35 (root Scene/ reopen failure) routes to the terminal phase with
+`FS_STATUS_ERROR` but was omitted from the plan's §5.3 classification
+table. This is a directory-reopen failure after a prior successful open —
+same ambiguous "could be transient" category as phase 7.
+
+**Resolution:** excluded (leave `op_load_invalid_layer` at NONE),
+consistent with phase 7's exclusion rationale. Rerouted to phase 62 so the
+decision gate can skip it through to 72.
+
+### 7d. Build fixups
+
+Two forward-reference issues resolved during implementation:
+- `fs_load_invalid_layer_t` enum moved before its first use in the static
+  variable declarations (was after the forward-declaration block).
+- Added forward declaration for `filesystem_makeQuarantineName()` since
+  the Kit loader's new phase 23 calls it before its definition.
+
+### 7e. Deleted code
+
+- `filesystem_validateCurrentKitBlocking()` — deleted (zero remaining
+  callers).
+- `filesystem_quarantineKitLibraryBlocking()` — deleted (zero remaining
+  callers).
+- `fs_kit_validation_result_t` and `fs_kit_quarantine_result_t` enums —
+  deleted (only consumed by the two deleted functions above).
+- Boot call site in `filesystem_createLibraryIndexBlocking()` — deleted,
+  including the `KITQUAR` arm/disarm pair.
+
+### 7f. Files changed
+
+| File | Lines |
+|---|---|
+| `Core/Hardware/SD/filesystem.c` | enum, static, resets, classifications, phases 22-24/62-70, Bank case 20 rewrite, present-mask, accessor, deletions |
+| `Core/Hardware/SD/filesystem.h` | `filesystem_lastBankLoadFailedSceneMask()` declaration |
+| `Core/Bank/Scene/Preset/presetManager.c` | `pm_bank_load_failed_scene_mask` static, read in `on_bank_load_complete()`, `preset_bankLoadFailedSceneMask()` accessor |
+| `Core/Bank/Scene/Preset/presetManager.h` | `preset_bankLoadFailedSceneMask()` declaration |
+| `Core/Menu/menu.c` | Two `preset_bankLoadFailedSceneMask()` calls in `PRESET_OP_BANK_LOAD` |

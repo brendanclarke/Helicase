@@ -8164,6 +8164,8 @@ void menu_pollPresetStatus(void)
                     menu_repaintAll();
                 }
             }
+            if (preset_bankLoadFailedSceneMask() != 0u)
+                menu_showFilesystemErrorOverlay();
             return;
         }
 
@@ -8174,6 +8176,8 @@ void menu_pollPresetStatus(void)
             menu_startSoundApply(1u, reset_save, 1u, 0u, 1u, 0u, 1u, 0u,
                                  FS_STALE_WARNING_NONE);
         }
+        if (preset_bankLoadFailedSceneMask() != 0u)
+            menu_showFilesystemErrorOverlay();
         break;
     }
 

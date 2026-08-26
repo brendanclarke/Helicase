@@ -946,6 +946,10 @@ uint8_t     filesystem_lastBankLoadLoadedScene(void);
  * filesystem_lastBankLoadLoadedScene() and on_bank_load_complete().
  */
 uint16_t    filesystem_lastBankLoadSceneMask(void);
+/* Bank Load children that failed with provably-invalid content.  Nonzero
+ * signals Menu to show the existing filesystem error overlay after an
+ * otherwise-successful FS_STATUS_DONE Bank Load. */
+uint16_t    filesystem_lastBankLoadFailedSceneMask(void);
 /*
  * Query whether a root Instrument save target already exists.
  *
