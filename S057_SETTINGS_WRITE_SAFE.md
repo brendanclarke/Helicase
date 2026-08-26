@@ -1069,3 +1069,51 @@ Image: `build/LXRV2_lxr02.img` (382516 bytes).
 
 RAM delta: +4 bytes `.bss` (recovery scratch), as declared in §11.2.
 No changes to `filesystem.h` or any other file.
+
+---
+
+## 13. Recovery-Promotion Hardware Test — 2026-08-26
+
+**Test shim:** temporary 3-line short-circuit at `filesystem_saveGlobals_tick()`
+phase 6 (REMOVE_OLD) that called `filesystem_finish(FS_STATUS_DONE)` and
+returned, skipping remove/rename so settings.tmp remained on the card alongside
+settings.cfg. Shim was reverted after boot 1.
+
+**Procedure and results:**
+
+| Boot | Firmware | Card before boot | Card after boot | Result |
+|------|----------|-----------------|-----------------|--------|
+| 1 | Test shim (phase 6 short-circuit) | `settings.cfg` only | `settings.cfg` + `settings.tmp` (both 277 bytes, identical content) | Save phases 0-5 ran: temp file created, written, synced durable. Phase 6 shim prevented promote. Both files present. |
+| 2 | Clean (shim reverted) | `settings.tmp` only (`settings.cfg` deleted manually) | `settings.cfg` only (`settings.tmp` consumed by rename) | Recovery prelude found settings.tmp, validated it (18 lines, terminator `lines=17` matched 17 preceding data lines), promoted via remove+rename. Pass B loaded the promoted file normally. |
+
+**Content verification — all three files byte-identical:**
+
+```
+format=helicase.settings
+version=1
+active_bank=15
+bpm=125
+ext_sync=4
+quantisation=2
+midi_chan_global=1
+midi_filt_tx=0
+midi_filt_rx=0
+midi_routing=0
+screensaver_on_off=1
+bar_reset_mode=1
+prescaler_clock_in=0
+prescaler_clock_out1=0
+follow=0
+osc_wave_interp=1
+autosave=1
+lines=17
+```
+
+**Confirmed:**
+- Terminator line (`lines=17`) emitted correctly by `case 17u`.
+- Recovery prelude validation passed (terminator present, N=17 == line_count-1).
+- Promote path executed: remove old (tolerated not-found), rename succeeded.
+- Post-promote load read the promoted file and applied all settings correctly.
+- No settings.tmp remained after the promote — rename consumed it.
+
+**Status: PASS.** Test shim reverted, clean firmware is the current build.
