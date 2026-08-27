@@ -4,8 +4,8 @@ type=drm
 
 [params]
 osc1_wave=0
-osc1_pitch_coarse=36
-osc1_pitch_fine=126
+osc1_pitch_coarse=37
+osc1_pitch_fine=127
 osc2_wave=0
 osc2_pitch_coarse=61
 osc2_mod_amount=0

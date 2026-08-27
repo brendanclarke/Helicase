@@ -648,6 +648,23 @@ typedef enum {
 static fs_delete_slot_phase_t op_delete_slot_phase = FS_DELETE_SLOT_IDLE;
 static afatfsFilePtr_t op_delete_slot_dir = NULL;
 static uint8_t op_delete_slot_allow_short_alias = 0u;
+/*
+ * Bank-local child scan mode for the delete-slot state machine.
+ *
+ * What: when nonzero, the SCAN_NEXT phase matches two-digit Bank-local Scene
+ * children (00..15) via storage_parseBankSceneFolder() instead of three-digit
+ * root-library directories via storage_parseNumberedFolder(). Why: Bank Save's
+ * per-child safe replacement needs to delete individual Bank-local Scene
+ * children by their two-digit slot prefix before writing replacements, using
+ * the same proven scan+delete mechanism that root Kit Save and root Scene Save
+ * use for three-digit slots. Inputs: set by
+ * filesystem_deleteBankChildSlotDirectoryStart(); cleared by
+ * filesystem_deleteSlotDirectoryStart(). Outputs: changes only the match
+ * predicate in SCAN_NEXT. Affiliates: storage_parseBankSceneFolder(),
+ * filesystem_objectMatchesSlot(), filesystem_saveBankDirectory_tick() per-child
+ * loop.
+ */
+static uint8_t op_delete_slot_bank_local = 0u;
 static uint16_t op_delete_slot_number = 0u;
 /* Complete scan result copied for one exact delete; no display re-lookup. */
 static afatfsObjectInfo_t op_delete_slot_target;
@@ -1092,6 +1109,16 @@ static uint8_t op_bank_active_scene = 0u;
 static uint8_t op_bank_child_cursor = 0u;
 static uint8_t op_bank_loaded_scene = 0u;
 static uint8_t op_bank_payload_active = 0u;
+/*
+ * Bank Save per-child safe-replacement state.
+ *
+ * op_bank_existing_dir_found: nonzero when the Bank-directory scan (phase 4)
+ * found an existing `NNN Name` directory at op_slot. Controls whether phase 54
+ * issues a rename (different name) or skips directly to mkdir_lfn (phase 49).
+ * Reset at phase 4 entry. Affiliates: filesystem_saveBankDirectory_tick()
+ * phases 4/51-55/49.
+ */
+static uint8_t op_bank_existing_dir_found = 0u;
 typedef enum {
     FS_LOAD_INVALID_NONE = 0u,
     FS_LOAD_INVALID_SCENE,
@@ -1183,11 +1210,13 @@ static void filesystem_autosaveParameterDrain_tick(void);
  */
 static void filesystem_devIwdgFeed(void);
 #endif
+#if DEV_STALL_DETECTION
 /* Shared edge-triggered stall detector used by the foreground state machines. */
 static uint8_t filesystem_pollPhaseStall(uint8_t phase,
                                          uint8_t *last_phase,
                                          uint32_t *stall_ticks,
                                          uint32_t threshold_ticks);
+#endif
 static void filesystem_autosaveTraceFlush_tick(void);
 static void filesystem_settingsWriterSchedule_tick(void);
 static void filesystem_settingsWriterCompleted(void);
@@ -3364,6 +3393,17 @@ static void filesystem_complete(fs_status_t final_status)
     }
 }
 
+#if DEV_STALL_DETECTION
+/*
+ * Flush Finish stall detector state. Declared here (before filesystem_finish)
+ * because filesystem_finish() resets them when entering FLUSH_FINISH mode.
+ * Consumed by filesystem_flushFinish_tick() below. Affiliates:
+ * filesystem_pollPhaseStall(), filesystem_flushFinish_tick().
+ */
+static uint8_t op_flush_stall_last_phase = 0u;
+static uint32_t op_flush_stall_ticks = 0u;
+#endif
+
 static void filesystem_finish(fs_status_t final_status)
 {
     uint8_t flush_before_complete = (uint8_t)(final_status == FS_STATUS_DONE);
@@ -3418,6 +3458,20 @@ static void filesystem_finish(fs_status_t final_status)
             finished_op == FS_INTERNAL_OP_LOAD_BANK ? "BKFLUSH " : "FSFLUSH ");
         current_op = FS_INTERNAL_OP_FLUSH_FINISH;
         op_phase = 0u;
+#if DEV_STALL_DETECTION
+        /*
+         * Rearm the Flush Finish stall detector for this new flush.
+         *
+         * What: forces filesystem_pollPhaseStall()'s first call in the flush
+         * to see a phase change so the counter starts from zero. Why: op_phase
+         * is 0 during the entire flush, so without this reset a stale counter
+         * from a prior flush entry (that completed normally before the threshold)
+         * would carry forward and cause a premature stall detection. Inputs:
+         * none. Outputs: two statics. Affiliates: filesystem_flushFinish_tick().
+         */
+        op_flush_stall_last_phase = 0xffu;
+        op_flush_stall_ticks = 0u;
+#endif
         return;
     }
 
@@ -3563,6 +3617,41 @@ static void filesystem_startLibraryIndexRebuild(void)
 
 static void filesystem_flushFinish_tick(void)
 {
+#if DEV_STALL_DETECTION
+    /*
+     * Detect and abort a Flush Finish stall.
+     *
+     * What: fires once after afatfs_sync() fails to complete within 50,000
+     * consecutive polls, writes a named error code `Flsh 00`, records one
+     * PHASE_STALL trace entry, and calls filesystem_complete(ERROR) to unblock
+     * the menu. Why: Flush Finish is the final gate between every successful
+     * Save/Load operation and its completion callback — if afatfs_sync()
+     * never returns true (dirty sector write stuck, DMA timeout, card
+     * removal), the menu stays frozen on "..." indefinitely. The 50,000-tick
+     * threshold is higher than foreground operation detectors because sync
+     * legitimately pumps many small sector writes and a slow card may take
+     * several seconds. op_phase is always 0 during Flush Finish (set by
+     * filesystem_finish()), so the detector uses that constant phase and the
+     * counters are reset when entering FLUSH_FINISH. Inputs: op_phase (always
+     * 0 here). Outputs: named error code `Flsh 00`, one trace record, ERROR
+     * completion that bypasses the normal flush-then-complete path. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_makeNamedErrorCode(),
+     * filesystem_complete(), filesystem_finish() (entry point, resets
+     * counters).
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_flush_stall_last_phase,
+                                  &op_flush_stall_ticks,
+                                  50000u)) {
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_FLUSH,
+                             0u);
+        filesystem_makeNamedErrorCode("Flsh", op_phase);
+        filesystem_complete(FS_STATUS_ERROR);
+        return;
+    }
+#endif
+
     /*
      * Final save/load persistence gate.
      *
@@ -5700,12 +5789,15 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 ** transformed copy calculates CRC from the exact staged bytes, then publishes
 ** durable CRC and the final commit marker in separate post-copy steps.
 ** ----------------------------------------------------------------------- */
+#if DEV_STALL_DETECTION
 /* Diagnostic-only phase observer for the runtime AutoSave drain. */
 static uint8_t op_autosave_drain_last_phase = 0u;
 static uint32_t op_autosave_drain_stall_ticks = 0u;
+#endif
 
 static void filesystem_autosaveParameterDrain_tick(void)
 {
+#if DEV_STALL_DETECTION
     /*
      * Observe and recover a true cooperative drain stall.
      *
@@ -5730,9 +5822,11 @@ static void filesystem_autosaveParameterDrain_tick(void)
         autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                              AUTOSAVE_TRACE_PHASE_STALL_SITE_DRAIN,
                              value);
+        filesystem_makeNamedErrorCode("DrSt", op_phase);
         filesystem_autosaveWriterFinishError();
         return;
     }
+#endif
 
     switch (op_phase) {
     case 0: /* INITIALIZE ONE OPERATION-LOCAL A/B VALIDATION PASS */
@@ -8460,11 +8554,50 @@ static void filesystem_loadKit_tick(void)
 ** menu.c initiates those requests from the Load page. asyncfatfs current
 ** directory is restored to root before finishing.
 ** ----------------------------------------------------------------------- */
+#if DEV_STALL_DETECTION
+static uint8_t op_kit_load_stall_last_phase = 0u;
+static uint32_t op_kit_load_stall_ticks = 0u;
+#endif
+
 static void filesystem_loadKitDirectory_tick(void)
 {
     uint8_t line_ready;
     uint8_t eof;
     storage_status_t st;
+
+#if DEV_STALL_DETECTION
+    /*
+     * Detect and abort a Kit Load phase stall.
+     *
+     * What: fires once after op_phase stays unchanged for 20,000 consecutive
+     * polls, writes a named error code `KtLd NN` encoding the stalled phase,
+     * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
+     * to unblock the menu. Why: Kit Load phases perform open/chdir/close/read
+     * work with no non-cancellable native handle ownership, so aborting is
+     * safe. Without this detector a Kit Load that stalls on an asyncfatfs
+     * retry loop hangs the menu indefinitely. Inputs: op_phase (current Kit
+     * Load phase), op_slot (target Kit slot). Outputs: named error code
+     * `KtLd NN`, one trace record, ERROR completion. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_makeNamedErrorCode(),
+     * filesystem_finish(), filesystem_requestLoadKitForScenes() (resets
+     * counters), filesystem_requestLoadKitMorphForScenes() (resets counters).
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_kit_load_stall_last_phase,
+                                  &op_kit_load_stall_ticks,
+                                  20000u)) {
+        uint32_t value = (uint32_t)op_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        value |= (uint32_t)op_slot << AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT;
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_KIT_LOAD,
+                             value);
+        filesystem_makeNamedErrorCode("KtLd", op_phase);
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+#endif
 
     switch (op_phase) {
     case 0: /* VALIDATE CAPTURED KEY + CHDIR ROOT */
@@ -8937,11 +9070,53 @@ static void filesystem_loadKitDirectory_tick(void)
 ** displayed Scene name comes from the Scene folder scan/sceneset, while the
 ** embedded Kit name comes only from the "Kit <name>" child directory.
 ** ----------------------------------------------------------------------- */
+#if DEV_STALL_DETECTION
+static uint8_t op_scene_load_stall_last_phase = 0u;
+static uint32_t op_scene_load_stall_ticks = 0u;
+#endif
+
 static void filesystem_loadSceneDirectory_tick(void)
 {
     uint8_t line_ready;
     uint8_t eof;
     storage_status_t st;
+
+#if DEV_STALL_DETECTION
+    /*
+     * Detect and abort a Scene Load phase stall.
+     *
+     * What: fires once after op_phase stays unchanged for 20,000 consecutive
+     * polls, writes a named error code `ScLd NN` encoding the stalled phase,
+     * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
+     * to unblock the menu. Why: Scene Load phases perform open/chdir/close/
+     * read work with no non-cancellable native handle ownership, so aborting
+     * is safe. This detector covers both standalone root Scene Loads and
+     * Bank Load delegated Scene reads (entered via op_bank_payload_active),
+     * closing the coverage gap where the Bank Load entry stall detector does
+     * not fire when op_bank_payload_active == 1. Inputs: op_phase (current
+     * Scene Load phase), op_slot (target Scene slot). Outputs: named error
+     * code `ScLd NN`, one trace record, ERROR completion. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_makeNamedErrorCode(),
+     * filesystem_finish(), filesystem_loadBankDirectory_tick() (delegated),
+     * filesystem_requestLoadSceneForScenes() (resets counters),
+     * filesystem_requestLoadBank() (resets counters for delegated path).
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_scene_load_stall_last_phase,
+                                  &op_scene_load_stall_ticks,
+                                  20000u)) {
+        uint32_t value = (uint32_t)op_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        value |= (uint32_t)op_slot << AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT;
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_SCENE_LOAD,
+                             value);
+        filesystem_makeNamedErrorCode("ScLd", op_phase);
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+#endif
 
     switch (op_phase) {
     case 0: /* VALIDATE CAPTURED KEY + INIT STAGING + CHDIR ROOT */
@@ -10194,11 +10369,23 @@ static void filesystem_loadSceneDirectory_tick(void)
             return;
         }
         if (current_op == FS_INTERNAL_OP_LOAD_BANK) {
-            if (op_load_invalid_layer != FS_LOAD_INVALID_KIT) {
-                op_phase = 72u;
-                return;
-            }
-            op_phase = 65u;
+            /*
+             * Skip quarantine rename for Bank-local Kit failures.
+             *
+             * What: Bank-local Kit failures no longer rename the embedded Kit
+             * directory to `errKit Name`. The partial-failure contract (clearing
+             * the present-mask bit + error overlay) is sufficient for Bank-local
+             * children. Why: renaming `Kit Name` to `errKit Name` inside a
+             * Bank-local Scene child made the child tree un-deletable by
+             * subsequent Bank Save's per-child replacement, because
+             * afatfs_deleteTree() failed when scanning the renamed directory's
+             * rewritten LFN entries (the root cause of ErrS05). Root Kit and
+             * root Scene quarantine (phases 22-24, 63-70) are unaffected — they
+             * operate in `/Kit/` and `/Scene/` where deleteTree never encounters
+             * them during save. Affiliates: S057_TESTING.md §8.3.5 option A,
+             * filesystem_saveBankDirectory_tick() per-child loop.
+             */
+            op_phase = 72u;
             return;
         }
         op_phase = (op_load_invalid_layer == FS_LOAD_INVALID_KIT) ? 63u : 68u;
@@ -10368,6 +10555,11 @@ static void filesystem_loadSceneDirectory_tick(void)
     }
 }
 
+#if DEV_STALL_DETECTION
+static uint8_t op_bank_load_entry_stall_last_phase = 0u;
+static uint32_t op_bank_load_entry_stall_ticks = 0u;
+#endif
+
 static void filesystem_loadBankDirectory_tick(void)
 {
     uint8_t line_ready;
@@ -10379,6 +10571,41 @@ static void filesystem_loadBankDirectory_tick(void)
         filesystem_loadSceneDirectory_tick();
         return;
     }
+
+#if DEV_STALL_DETECTION
+    /*
+     * Detect and abort a Bank Load entry/container phase stall.
+     *
+     * What: fires once after op_phase stays unchanged for 20,000 consecutive
+     * polls, writes a named error code `BkLd NN` encoding the stalled phase,
+     * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
+     * to unblock the menu. Why: Bank Load container phases (0..18) perform
+     * open/chdir/close/read/scan work with no non-cancellable native handle
+     * ownership, so aborting is safe. The delegated Scene payload (entered via
+     * op_bank_payload_active) is excluded from this detector and is covered by
+     * the Scene Load's own stall detector instead. Inputs: op_phase (current
+     * Bank Load phase), op_slot (target Bank slot). Outputs: named error code
+     * `BkLd NN`, one trace record, ERROR completion. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_makeNamedErrorCode(),
+     * filesystem_finish(), filesystem_loadSceneDirectory_tick() (delegated),
+     * filesystem_requestLoadBank() (resets counters).
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_bank_load_entry_stall_last_phase,
+                                  &op_bank_load_entry_stall_ticks,
+                                  20000u)) {
+        uint32_t value = (uint32_t)op_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        value |= (uint32_t)op_slot << AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT;
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_LOAD_ENTRY,
+                             value);
+        filesystem_makeNamedErrorCode("BkLd", op_phase);
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+#endif
 
     /*
      * Load one root Bank, then optionally one Bank-local Scene.
@@ -13153,7 +13380,7 @@ static uint8_t filesystem_objectMatchesSlot(
      * rejects files as a same-slot conflict.
      *
      * Bank-local two-digit children are deliberately outside this resolver;
-     * Bank Save replaces the root Bank tree as one exact object.
+     * Bank Save uses per-child replacement inside the root Bank directory.
      *
      * Why the short-alias flag exists: root Kit Save historically had to clean
      * host/firmware aliases such as "001SLA~1" whose visible component may not
@@ -13186,6 +13413,37 @@ static uint8_t filesystem_objectMatchesSlot(
     return 0u;
 }
 
+static uint8_t filesystem_bankChildObjectMatchesSlot(
+        const afatfsObjectInfo_t *object,
+        uint16_t slot)
+{
+    uint8_t parsed_slot;
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+
+    /*
+     * Decide whether one Bank-local child directory matches a two-digit slot.
+     *
+     * Inputs: asyncfatfs object info from the current Bank directory and the
+     * requested Bank-local Scene slot (0..15). Output: nonzero for any
+     * immediate object whose visible name parses as a two-digit Bank-local
+     * Scene via storage_parseBankSceneFolder(). Why: the three-digit
+     * filesystem_objectMatchesSlot() deliberately excludes Bank-local children
+     * (see its comment); per-child Bank Save needs this two-digit counterpart
+     * to scan for and delete individual Scene children before writing
+     * replacements. Affiliates: storage_parseBankSceneFolder(),
+     * filesystem_objectMatchesSlot(), filesystem_deleteSlotDirectory_tick().
+     */
+    if (!object || object->id.kind == AFATFS_OBJECT_NONE)
+        return 0u;
+    if (storage_parseBankSceneFolder(object->id.displayName,
+                                     &parsed_slot,
+                                     display) &&
+        parsed_slot == (uint8_t)slot) {
+        return 1u;
+    }
+    return 0u;
+}
+
 static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
                                                     uint16_t morph,
                                                     uint8_t amount)
@@ -13212,6 +13470,7 @@ static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
     return (uint16_t)(numerator / 255);
 }
 
+#if DEV_STALL_DETECTION
 /*
  * Detect a cooperative state-machine phase that stops advancing.
  *
@@ -13240,6 +13499,7 @@ static uint8_t filesystem_pollPhaseStall(uint8_t phase,
     (*stall_ticks)++;
     return (uint8_t)(*stall_ticks == threshold_ticks + 1u);
 }
+#endif
 
 static void filesystem_deleteSlotDirectoryStart(uint16_t slot,
                                                 uint8_t allow_short_alias)
@@ -13264,6 +13524,7 @@ static void filesystem_deleteSlotDirectoryStart(uint16_t slot,
     op_delete_slot_dir = NULL;
     op_delete_slot_number = slot;
     op_delete_slot_allow_short_alias = allow_short_alias;
+    op_delete_slot_bank_local = 0u;
     op_delete_slot_match_count = 0u;
     op_delete_slot_scan_error = 0u;
     op_delete_slot_timeout_observed = 0u;
@@ -13299,11 +13560,36 @@ static void filesystem_deleteSceneSlotDirectoryStart(void)
     filesystem_deleteSlotDirectoryStart(op_slot, 0u);
 }
 
+static void filesystem_deleteBankChildSlotDirectoryStart(uint8_t child_slot)
+{
+    /*
+     * Start Bank-local child Scene cleanup in the current Bank directory.
+     *
+     * Inputs: caller must already be chdir'd inside the target Bank directory
+     * (e.g. `/Bank/009 LoadTst/`). child_slot is the two-digit Bank-local
+     * Scene number (0..15). Output: the shared delete-slot state machine scans
+     * for a matching `SS Name` child using storage_parseBankSceneFolder() and
+     * recursively deletes only that child if found. Why: Bank Save's per-child
+     * safe replacement deletes individual Bank-local children before writing
+     * replacements, instead of deleting the entire Bank tree. Short-alias
+     * fallback is disabled because Bank-local children are always created by
+     * this firmware with proper LFN entries. Affiliates:
+     * filesystem_deleteSlotDirectory_tick(),
+     * filesystem_bankChildObjectMatchesSlot(),
+     * filesystem_saveBankDirectory_tick() per-child loop.
+     */
+    filesystem_deleteSlotDirectoryStart((uint16_t)child_slot, 0u);
+    op_delete_slot_bank_local = 1u;
+}
+
+#if DEV_STALL_DETECTION
 static uint32_t op_delete_slot_stall_ticks = 0u;
 static uint8_t op_delete_slot_last_phase = 0u;
+#endif
 
 static fs_status_t filesystem_deleteSlotDirectory_tick(void)
 {
+#if DEV_STALL_DETECTION
     if (filesystem_pollPhaseStall((uint8_t)op_delete_slot_phase,
                                   &op_delete_slot_last_phase,
                                   &op_delete_slot_stall_ticks,
@@ -13346,6 +13632,7 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
         else
             op_delete_slot_phase = FS_DELETE_SLOT_ERROR;
     }
+#endif
 
     /* A timed-out open/close remains the owner of its native handle. Once the
      * callback publishes that handle, close it before returning failure; never
@@ -13445,10 +13732,12 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
                 op_delete_slot_phase = FS_DELETE_SLOT_CLOSE_SCAN;
                 break;
             }
-            if (filesystem_objectMatchesSlot(
-                    &op_object,
-                    op_delete_slot_number,
-                    op_delete_slot_allow_short_alias)) {
+            if (op_delete_slot_bank_local
+                    ? filesystem_bankChildObjectMatchesSlot(
+                          &op_object, op_delete_slot_number)
+                    : filesystem_objectMatchesSlot(
+                          &op_object, op_delete_slot_number,
+                          op_delete_slot_allow_short_alias)) {
                 /*
                  * Distinguish which eligibility check rejected this match.
                  * Kept as separate branches (rather than the equivalent
@@ -13552,11 +13841,50 @@ static fs_status_t filesystem_deleteSlotDirectory_tick(void)
     }
 }
 
+#if DEV_STALL_DETECTION
+static uint8_t op_kit_save_stall_last_phase = 0u;
+static uint32_t op_kit_save_stall_ticks = 0u;
+#endif
+
 static void filesystem_saveKitDirectory_tick(void)
 {
     const scene_t *scene = scene_getConst(op_kit_save_source_scene);
     const kit_t *kit = scene ? &scene->kit : NULL;
     fs_status_t delete_status;
+
+#if DEV_STALL_DETECTION
+    /*
+     * Detect and abort a Kit Save phase stall.
+     *
+     * What: fires once after op_phase stays unchanged for 20,000 consecutive
+     * polls, writes a named error code `KtSv NN` encoding the stalled phase,
+     * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
+     * to unblock the menu. Why: Kit Save phases perform open/chdir/close/
+     * write work with no non-cancellable native handle ownership, so aborting
+     * is safe. Without this detector a Kit Save that stalls on an asyncfatfs
+     * retry loop (handle exhaustion, I/O stall) hangs the menu indefinitely.
+     * Inputs: op_phase (current Kit Save phase), op_slot (target Kit slot).
+     * Outputs: named error code `KtSv NN`, one trace record, ERROR completion.
+     * Affiliates: filesystem_pollPhaseStall(), filesystem_makeNamedErrorCode(),
+     * filesystem_finish(), menu_showFilesystemErrorOverlay(),
+     * filesystem_requestSaveKitDirectory() (resets counters).
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_kit_save_stall_last_phase,
+                                  &op_kit_save_stall_ticks,
+                                  20000u)) {
+        uint32_t value = (uint32_t)op_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        value |= (uint32_t)op_slot << AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT;
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_KIT_SAVE,
+                             value);
+        filesystem_makeNamedErrorCode("KtSv", op_phase);
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+#endif
 
     switch (op_phase) {
     case 0:
@@ -13869,9 +14197,11 @@ static void filesystem_saveKitDirectory_tick(void)
     }
 }
 
+#if DEV_STALL_DETECTION
 /* Diagnostic-only phase observer for Bank Save's non-payload phases. */
 static uint8_t op_bank_save_entry_last_phase = 0u;
 static uint32_t op_bank_save_entry_stall_ticks = 0u;
+#endif
 
 static void filesystem_saveBankDirectory_tick(void)
 {
@@ -13880,6 +14210,7 @@ static void filesystem_saveBankDirectory_tick(void)
         return;
     }
 
+#if DEV_STALL_DETECTION
     /*
      * Observe Bank Save entry/metadata phases without changing the writer.
      *
@@ -13902,17 +14233,40 @@ static void filesystem_saveBankDirectory_tick(void)
         autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                              AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY,
                              value);
+        /*
+         * Abort Bank Save on a detected entry/metadata phase stall.
+         *
+         * What: writes a diagnostic named error code encoding the stalled
+         * phase, then terminates the operation with FS_STATUS_ERROR so Menu
+         * can show the ERR overlay instead of hanging on `...` indefinitely.
+         * Why: phases 0-49 perform only open/chdir/close/scan work with no
+         * native-delete ownership, so aborting is safe — unlike the
+         * delete-slot observer, no asyncfatfs handle is waiting for a
+         * non-cancellable deleteTree callback. The old observe-only policy
+         * left the menu frozen with no visible feedback. Inputs: op_phase
+         * at detection time. Outputs: named error code `BkSt NN` where NN
+         * is the decimal phase. Affiliates: filesystem_finish(),
+         * filesystem_makeNamedErrorCode(), menu_showFilesystemErrorOverlay().
+         */
+        filesystem_makeNamedErrorCode("BkSt", op_phase);
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
     }
+#endif
 
     /*
-     * Save one root Bank in the initial one-Scene bridge form.
+     * Save one root Bank using per-child safe replacement.
      *
-     * Phases 0..12 create/open root Bank containers and write bankset.bcg.
-     * Then the state jumps into the existing Scene payload writer at phase 8,
-     * while still chdir'd inside `Bank/NNN Name/`. That writer creates the
-     * Bank-local child `00 <scene>/` and writes sceneset, embedded Kit,
-     * pattern, and effects. No phase here deletes root Bank or untoggled child
-     * Scenes.
+     * Phases 0/80-82 preload HCNAMES. Phases 1-3 open/chdir into `/Bank/`.
+     * Phases 4/51-55 scan for an existing Bank directory at op_slot and rename
+     * it if the display name differs. Phase 49 creates or opens the Bank
+     * directory via mkdir_lfn. Phases 6-10 write bankset.bcg. Phase 11 enters
+     * the per-child loop: for each bit in op_bank_scene_save_mask, phase 20
+     * deletes any existing child at that slot (phases 20-21), then phase 22
+     * delegates to the Scene payload writer (phase 8). Non-masked children are
+     * never touched and survive from previous saves. This replaces the former
+     * total-tree-delete at phases 4-5 which destroyed ALL children and failed
+     * when the tree contained quarantined directories (ErrS05).
      */
     switch (op_phase) {
     case 0:
@@ -14043,35 +14397,164 @@ static void filesystem_saveBankDirectory_tick(void)
         return;
 
     case 4:
+        /*
+         * Scan `/Bank/` for an existing directory at op_slot.
+         *
+         * What: opens the current directory (Bank/) to find an existing Bank
+         * folder whose three-digit prefix matches op_slot. Why: Bank Save now
+         * reuses the existing Bank directory instead of deleting the entire tree,
+         * so per-child Scene replacement can preserve non-masked children.
+         * Inputs: current directory is `/Bank/` from phase 3. Outputs:
+         * op_bank_existing_dir_found and op_repair_old_name record whether an
+         * existing directory was found and its display name. Affiliates: phases
+         * 51-55 continue the scan; phase 49 creates or opens the Bank directory.
+         */
         if (!op_close_done)
             return;
         op_kit_root_dir = NULL;
-        /* Prove zero/one exact root Bank candidate before creating anything. */
-        filesystem_deleteSlotDirectoryStart(op_slot, 0u);
-        op_phase = 5u;
+        op_bank_existing_dir_found = 0u;
+        op_repair_old_name[0] = '\0';
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen(".", "r", on_file_opened))
+            return;
+        op_phase = 51u;
         return;
 
-    case 5:
-    {
-        fs_status_t delete_status = filesystem_deleteSlotDirectory_tick();
-        if (delete_status == FS_STATUS_BUSY)
+    case 51: /* WAIT BANK DIR SCAN OPEN */
+        if (!op_file_ready)
             return;
-        if (delete_status == FS_STATUS_ERROR) {
+        if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_delete_slot_dir = op_file;
+        afatfs_findFirstObject(op_delete_slot_dir, &op_object_finder);
+        op_phase = 52u;
+        return;
+
+    case 52: /* SCAN FOR EXISTING BANK DIR AT op_slot */
+    {
+        /*
+         * Iterate `/Bank/` entries for a three-digit slot match.
+         *
+         * What: each poll checks one directory entry using
+         * storage_parseNumberedFolder(). The first matching directory's display
+         * name is captured in op_repair_old_name for later comparison against
+         * op_save_bank_dir_display_name. Why: if the name differs, phase 54
+         * renames the directory before phase 49's mkdir_lfn opens it; if the
+         * name matches, mkdir_lfn opens the existing directory as-is. Inputs:
+         * op_delete_slot_dir from phase 51, op_slot from the save request.
+         * Outputs: op_bank_existing_dir_found flag and op_repair_old_name.
+         * Affiliates: storage_parseNumberedFolder(),
+         * filesystem_displayNameMatchesCaseInsensitive().
+         */
+        afatfsOperationStatus_e st = afatfs_findNextObject(
+            op_delete_slot_dir, &op_object_finder, &op_object);
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_delete_slot_dir, &op_object_finder);
+            op_phase = 53u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_delete_slot_dir, &op_object_finder);
+            op_phase = 53u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY &&
+            !op_object.lfnMalformed) {
+            uint16_t parsed_slot;
+            char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+
+            if (storage_parseNumberedFolder(op_object.id.displayName,
+                                             &parsed_slot, display) &&
+                parsed_slot == op_slot &&
+                !op_bank_existing_dir_found) {
+                strncpy(op_repair_old_name, op_object.id.displayName,
+                        sizeof(op_repair_old_name) - 1u);
+                op_repair_old_name[sizeof(op_repair_old_name) - 1u] = '\0';
+                op_bank_existing_dir_found = 1u;
+            }
+        }
+        return;
+    }
+
+    case 53: /* CLOSE BANK DIR SCAN */
+        op_close_done = false;
+        if (afatfs_fclose(op_delete_slot_dir, on_file_closed))
+            op_phase = 54u;
+        return;
+
+    case 54: /* DECIDE: rename existing Bank dir or proceed to create/open */
+        /*
+         * Route based on the scan result from phases 51-52.
+         *
+         * What: if an existing Bank directory was found with a different display
+         * name than op_save_bank_dir_display_name, rename it so phase 49's
+         * mkdir_lfn finds the directory under the correct name. If the name
+         * already matches, or no directory was found, mkdir_lfn handles both
+         * cases (open existing or create new). Why: renaming preserves the
+         * directory's children instead of deleting the entire tree. The old
+         * total-tree-delete at this phase was the root cause of ErrS05 when the
+         * tree contained a quarantined errKit directory. Inputs:
+         * op_bank_existing_dir_found, op_repair_old_name,
+         * op_save_bank_dir_display_name. Outputs: optional rename request.
+         * Affiliates: afatfs_renameObject_lfn(), phase 49 mkdir_lfn.
+         */
+        if (!op_close_done)
+            return;
+        op_delete_slot_dir = NULL;
+        if (op_bank_existing_dir_found &&
+            !filesystem_displayNameMatchesCaseInsensitive(
+                op_repair_old_name, op_save_bank_dir_display_name)) {
+            op_rename_done = 0u;
+            op_rename_result = AFATFS_RESULT_OK;
+            memset(op_repair_rename_open_name, 0,
+                   sizeof(op_repair_rename_open_name));
+            if (!afatfs_renameObject_lfn(op_repair_old_name,
+                                         op_save_bank_dir_display_name,
+                                         AFATFS_MATCH_CASE_INSENSITIVE,
+                                         op_repair_rename_open_name,
+                                         on_rename_complete))
+                return;
+            op_phase = 55u;
             return;
         }
         op_phase = 49u;
         return;
-    }
+
+    case 55: /* WAIT BANK DIR RENAME COMPLETE */
+        /*
+         * Wait for the Bank directory rename to finish.
+         *
+         * What: rename of the existing Bank directory from its old display name
+         * to op_save_bank_dir_display_name. A failed rename is non-fatal:
+         * phase 49's mkdir_lfn will create a new directory, leaving the old one
+         * as an orphan at the original name. The new directory receives all
+         * children; the orphan retains non-masked children from prior saves.
+         * This is strictly better than the old total-tree-delete failure mode
+         * which left the Bank partially deleted. Inputs: rename callback.
+         * Outputs: op_rename_result. Affiliates: on_rename_complete().
+         */
+        if (!op_rename_done)
+            return;
+        op_phase = 49u;
+        return;
 
     case 49:
         /*
-         * Create the final numbered Bank directory after exact deletion.
+         * Create or open the target Bank directory.
          *
-         * Inputs: current directory is `/Bank/`; the old exact slot has already
-         * been removed by the singular resolver. Output: phases 5..12 write
-         * bankset.bcg and selected Bank-local Scenes directly into this fresh
-         * final tree. No temporary-root or old-name promotion exists.
+         * Inputs: current directory is `/Bank/`; phases 4/51-55 have scanned
+         * for an existing directory at op_slot and renamed it if the display
+         * name differed. Output: afatfs_mkdir_lfn creates the directory if it
+         * does not exist, or opens the existing one if it does. This preserves
+         * Bank-local Scene children from previous saves that are not in the
+         * current op_bank_scene_save_mask. Affiliates: phases 6-11 write
+         * bankset.bcg, then the per-child loop (phases 20-22) safe-replaces
+         * individual Scene children.
          */
         op_file_ready = false;
         op_file = NULL;
@@ -14162,15 +14645,13 @@ static void filesystem_saveBankDirectory_tick(void)
             if ((op_bank_scene_save_mask &
                  (uint16_t)(1u << op_bank_child_cursor)) != 0u) {
                 /*
-                 * Write the selected Scene into the freshly-created final
-                 * Bank folder.
+                 * Safe-replace one selected Scene child in the Bank folder.
                  *
                  * Input: op_bank_child_cursor is both resident Scene index and
                  * two-digit Bank-local child number. Output: phase 20 prepares
-                 * the per-child Scene writer and delegates to the existing
-                 * Scene payload save. No recursive child cleanup is needed
-                 * here because exact replacement already removed the previous
-                 * Bank tree.
+                 * the per-child Scene writer, deletes any existing child at
+                 * this slot (phases 20-21), then delegates to the Scene payload
+                 * writer (phase 22). Non-masked children are never touched.
                  */
                 op_phase = 20u;
                 return;
@@ -14235,10 +14716,10 @@ static void filesystem_saveBankDirectory_tick(void)
         op_file_ready = false;
         op_file = NULL;
         /*
-         * Reopen the just-created Bank directory by its short open component.
+         * Reopen the target Bank directory by its short open component.
          *
          * Inputs: op_save_bank_dir_open_name was captured from mkdir_lfn() when
-         * the final Bank folder was created/opened. Output: the final Bank
+         * the Bank folder was created or opened at phase 49. Output: the Bank
          * directory handle is restored after a child Scene payload returned to
          * root.
          * This must use afatfs_opendir(), not afatfs_opendir_lfn(): the LFN
@@ -14282,23 +14763,77 @@ static void filesystem_saveBankDirectory_tick(void)
     case 20:
     {
         /*
-         * Prepare and write one Bank-local child into the final Bank folder.
+         * Prepare one Bank-local child and delete any existing child at this
+         * slot before writing the replacement.
          *
-         * Inputs: current directory is the unique final Bank directory and
-         * op_bank_child_cursor selects the resident Scene slot. Output: the
-         * existing Scene writer starts at phase 8 and creates `SS Name/` with
-         * sceneset, embedded Kit, pattern, and effects. Exact replacement
-         * completed first, so this path cannot merge stale Instrument files
-         * into the child.
+         * Inputs: current directory is the Bank directory and
+         * op_bank_child_cursor selects the resident Scene slot. Output:
+         * prepareBankSceneSaveSource() captures the `SS Name` child directory
+         * display name, then filesystem_deleteBankChildSlotDirectoryStart()
+         * initiates a scan+delete of any existing child directory at the same
+         * two-digit slot. Phase 21 waits for the delete to complete before
+         * phase 22 enters the Scene writer to create the replacement child.
+         * Why: per-child delete-then-write replaces the old total-tree-delete
+         * that destroyed ALL children including non-masked ones. Each child is
+         * independently deleted and rewritten, so a failure affects only that
+         * one child, not the entire Bank. Affiliates:
+         * filesystem_prepareBankSceneSaveSource(),
+         * filesystem_deleteBankChildSlotDirectoryStart(),
+         * filesystem_deleteSlotDirectory_tick().
          */
         if (!filesystem_prepareBankSceneSaveSource(op_bank_child_cursor)) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        filesystem_deleteBankChildSlotDirectoryStart(op_bank_child_cursor);
+        op_phase = 21u;
+        return;
+    }
+
+    case 21:
+    {
+        /*
+         * Wait for per-child old-slot deletion to complete.
+         *
+         * What: ticks the shared delete-slot state machine in Bank-local mode
+         * until the existing `SS Name` child (if any) is fully removed.
+         * Inputs: filesystem_deleteBankChildSlotDirectoryStart() armed the
+         * scanner at phase 20. Outputs: FS_STATUS_DONE when no match was found
+         * or the match was successfully deleted; FS_STATUS_ERROR on scan or
+         * delete failure. Why: the old child must be removed before the Scene
+         * writer's mkdir_lfn at phase 8 can create a clean replacement
+         * directory at the same name. A delete failure is fatal for this child
+         * and the Bank Save. Affiliates: filesystem_deleteSlotDirectory_tick(),
+         * filesystem_bankChildObjectMatchesSlot().
+         */
+        fs_status_t delete_status = filesystem_deleteSlotDirectory_tick();
+        if (delete_status == FS_STATUS_BUSY)
+            return;
+        if (delete_status == FS_STATUS_ERROR) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 22u;
+        return;
+    }
+
+    case 22:
+        /*
+         * Enter the Scene writer to create the replacement Bank-local child.
+         *
+         * What: sets op_bank_payload_active and enters the shared Scene payload
+         * writer at its phase 8 (directory creation). Inputs: per-child scratch
+         * was prepared by prepareBankSceneSaveSource() at phase 20; the old
+         * child was deleted by phases 20-21. Outputs: the Scene writer creates
+         * `SS Name/` with sceneset.scg, embedded Kit directory, instruments,
+         * pattern.pat, and effects.fx. When the Scene writer completes, it
+         * returns to Bank Save phase 12 to advance the cursor. Affiliates:
+         * filesystem_saveSceneDirectory_tick() phase 8..37,
+         * op_bank_payload_active dispatch at top of this function.
+         */
         op_bank_payload_active = 1u;
         op_phase = 8u;
         return;
-    }
 
     case 45:
         /* The final directory is already openable through its captured alias. */
@@ -14414,7 +14949,7 @@ static void filesystem_saveBankDirectory_tick(void)
          * a previously staged load source becomes clean only after this close. */
         filesystem_clearResidentSourceDirtyFlags();
         /*
-         * Bank Save has now completed its direct delete/recreate tree. Park the
+         * Bank Save has now completed its per-child replacement tree. Park the
          * original callback and run the same boot-equivalent Bank rescan plus
          * `/Bank/.hcindex` rewrite used by Kit, root Scene, and Bank. This is required
          * for newly-created, renamed, or removed root Bank folders to become
@@ -14437,11 +14972,53 @@ static void filesystem_saveBankDirectory_tick(void)
     }
 }
 
+#if DEV_STALL_DETECTION
+static uint8_t op_scene_save_stall_last_phase = 0u;
+static uint32_t op_scene_save_stall_ticks = 0u;
+#endif
+
 static void filesystem_saveSceneDirectory_tick(void)
 {
     const scene_t *scene = scene_getConst(op_kit_save_source_scene);
     const kit_t *kit = scene ? &scene->kit : NULL;
     fs_status_t delete_status;
+
+#if DEV_STALL_DETECTION
+    /*
+     * Detect and abort a Scene Save phase stall.
+     *
+     * What: fires once after op_phase stays unchanged for 20,000 consecutive
+     * polls, writes a named error code `ScSv NN` encoding the stalled phase,
+     * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
+     * to unblock the menu. Why: Scene Save phases perform open/chdir/close/
+     * write work with no non-cancellable native handle ownership, so aborting
+     * is safe. This detector covers both standalone root Scene Saves and
+     * Bank Save delegated Scene writes (entered via op_bank_payload_active),
+     * closing the coverage gap where the Bank Save entry stall detector does
+     * not fire when op_bank_payload_active == 1. Inputs: op_phase (current
+     * Scene Save phase), op_slot (target Scene slot). Outputs: named error
+     * code `ScSv NN`, one trace record, ERROR completion. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_makeNamedErrorCode(),
+     * filesystem_finish(), filesystem_saveBankDirectory_tick() (delegated),
+     * filesystem_requestSaveSceneDirectory() (resets counters),
+     * filesystem_requestSaveBank() (resets counters for delegated path).
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_scene_save_stall_last_phase,
+                                  &op_scene_save_stall_ticks,
+                                  20000u)) {
+        uint32_t value = (uint32_t)op_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        value |= (uint32_t)op_slot << AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT;
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_SCENE_SAVE,
+                             value);
+        filesystem_makeNamedErrorCode("ScSv", op_phase);
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+#endif
 
     /*
      * Save one complete root Scene directory.
@@ -16578,8 +17155,48 @@ static void filesystem_loadGlobals_tick(void)
 ** final flush. Affiliates: filesystem_settingsWriterSchedule_tick(),
 ** filesystem_loadGlobals_tick()'s recovery prelude, S057 design §2/§5.
 ** ----------------------------------------------------------------------- */
+#if DEV_STALL_DETECTION
+static uint8_t op_settings_stall_last_phase = 0u;
+static uint32_t op_settings_stall_ticks = 0u;
+#endif
+
 static void filesystem_saveGlobals_tick(void)
 {
+#if DEV_STALL_DETECTION
+    /*
+     * Detect and abort a Settings write phase stall.
+     *
+     * What: fires once after op_phase stays unchanged for 30,000 consecutive
+     * polls, writes a named error code `StWr NN` encoding the stalled phase,
+     * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
+     * to release the facade. Why: the settings writer is autonomous and its
+     * errors are not displayed on screen, but a stall here keeps
+     * status == FS_STATUS_BUSY indefinitely, blocking all foreground Load/Save
+     * requests until power cycle. The 30,000-tick threshold (vs. 20,000 for
+     * foreground operations) is higher because the settings writer serializes
+     * a multi-line file and legitimate writes can take longer. Inputs: op_phase
+     * (current settings write phase). Outputs: named error code `StWr NN`, one
+     * trace record, ERROR completion. Affiliates: filesystem_pollPhaseStall(),
+     * filesystem_makeNamedErrorCode(), filesystem_finish(),
+     * filesystem_settingsWriterSchedule_tick() (schedules this operation),
+     * filesystem_settingsWriterCompleted() (receives ERROR completion).
+     */
+    if (filesystem_pollPhaseStall(op_phase,
+                                  &op_settings_stall_last_phase,
+                                  &op_settings_stall_ticks,
+                                  30000u)) {
+        uint32_t value = (uint32_t)op_phase <<
+                         AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
+
+        autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                             AUTOSAVE_TRACE_PHASE_STALL_SITE_SETTINGS,
+                             value);
+        filesystem_makeNamedErrorCode("StWr", op_phase);
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+#endif
+
     switch (op_phase) {
     case 0: /* OPEN temp file */
         /*
@@ -20009,6 +20626,22 @@ static void filesystem_settingsWriterSchedule_tick(void)
     now = time_sysTick;
     if ((uint16_t)(now - fs_settings_next_due_tick) >= 0x8000u)
         return;
+    /*
+     * Rearm the Settings write stall detector before starting.
+     *
+     * What: forces filesystem_pollPhaseStall()'s first call to see a "changed"
+     * phase so the stall counter starts from zero. Why: the settings writer is
+     * autonomous and restarts after each debounce cycle. Without resetting,
+     * a stale near-threshold counter from a prior settings write could cause
+     * premature stall detection on the next write. Reset is unconditional
+     * before filesystem_start() because if start fails the detector never
+     * runs. Inputs: none. Outputs: two statics; no file I/O. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_saveGlobals_tick().
+     */
+#if DEV_STALL_DETECTION
+    op_settings_stall_last_phase = 0xffu;
+    op_settings_stall_ticks = 0u;
+#endif
     (void)filesystem_start(FS_INTERNAL_OP_SAVE_GLOBALS,
                            FS_FILE_SETTINGS, 0u,
                            filesystem_settingsWriterCompleted);
@@ -20273,8 +20906,10 @@ static void filesystem_autosaveWriterSchedule_tick(void)
          * statics; no file I/O. Affiliates: filesystem_pollPhaseStall(),
          * filesystem_autosaveParameterDrain_tick().
          */
+#if DEV_STALL_DETECTION
         op_autosave_drain_last_phase = 0xffu;
         op_autosave_drain_stall_ticks = 0u;
+#endif
         /*
          * Retain active transform ownership across the later generic FLUSH op.
          * Input: accepted drain start. Output: OFF defers mask discard until
@@ -20963,6 +21598,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_write_line_offset = 0u;
     op_write_line_index = 0u;
     op_remove_done = 0u;
+    op_bank_payload_active = 0u;
     /* A new request is ordinary until its dedicated temp request opts in. */
     op_instrument_load_temporary = 0u;
     op_instrument_save_temporary = 0u;
@@ -21612,6 +22248,18 @@ bool filesystem_requestLoadKitForScenes(uint16_t slot, uint16_t scene_mask,
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_KIT, FS_FILE_KIT, slot, cb))
         return false;
     /*
+     * Rearm the Kit Load stall detector for this fresh request.
+     *
+     * What: forces filesystem_pollPhaseStall()'s first call to see a "changed"
+     * phase so the stall counter starts from zero. Inputs: none. Outputs: two
+     * statics; no file I/O. Affiliates: filesystem_pollPhaseStall(),
+     * filesystem_loadKitDirectory_tick().
+     */
+#if DEV_STALL_DETECTION
+    op_kit_load_stall_last_phase = 0xffu;
+    op_kit_load_stall_ticks = 0u;
+#endif
+    /*
      * Capture the selected Kit key before typed staging begins.
      *
      * Why: this keeps the request immutable even though the independent cache
@@ -21642,6 +22290,20 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
         return false;
     if (!filesystem_start(FS_INTERNAL_OP_SAVE_KIT, FS_FILE_KIT, slot, cb))
         return false;
+
+    /*
+     * Rearm the Kit Save stall detector for this fresh request.
+     *
+     * What: forces filesystem_pollPhaseStall()'s first call to see a "changed"
+     * phase so the stall counter starts from zero. Why: without this, a stale
+     * counter from a prior Kit Save could carry a near-threshold count into
+     * this new request. Inputs: none. Outputs: two statics; no file I/O.
+     * Affiliates: filesystem_pollPhaseStall(), filesystem_saveKitDirectory_tick().
+     */
+#if DEV_STALL_DETECTION
+    op_kit_save_stall_last_phase = 0xffu;
+    op_kit_save_stall_ticks = 0u;
+#endif
 
     op_kit_save_source_scene = source_scene;
     op_kit_save_mode = morph_projection ? STORAGE_INSTRUMENT_SAVE_MORPH
@@ -21694,6 +22356,20 @@ bool filesystem_requestSaveSceneDirectory(uint16_t slot,
                           cb)) {
         return false;
     }
+
+    /*
+     * Rearm the Scene Save stall detector for this fresh request.
+     *
+     * What: forces filesystem_pollPhaseStall()'s first call to see a "changed"
+     * phase so the stall counter starts from zero. Why: without this, a stale
+     * counter from a prior Scene Save could carry forward. Inputs: none.
+     * Outputs: two statics; no file I/O. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_saveSceneDirectory_tick().
+     */
+#if DEV_STALL_DETECTION
+    op_scene_save_stall_last_phase = 0xffu;
+    op_scene_save_stall_ticks = 0u;
+#endif
 
     op_kit_save_source_scene = source_scene;
     op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
@@ -21763,6 +22439,17 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
     }
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_KIT_MORPH, FS_FILE_KIT, slot, cb))
         return false;
+    /*
+     * Rearm the Kit Load stall detector for this morph request.
+     *
+     * What: same reset as filesystem_requestLoadKitForScenes(). KitMrp shares
+     * filesystem_loadKitDirectory_tick() and its stall detector. Inputs: none.
+     * Outputs: two statics. Affiliates: filesystem_loadKitDirectory_tick().
+     */
+#if DEV_STALL_DETECTION
+    op_kit_load_stall_last_phase = 0xffu;
+    op_kit_load_stall_ticks = 0u;
+#endif
     /*
      * Preserve the selected source key in the existing operation scratch.
      *
@@ -21837,6 +22524,18 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
     if (!filesystem_start(FS_INTERNAL_OP_LOAD_SCENE, FS_FILE_SCENE, slot, cb))
         return false;
     /*
+     * Rearm the Scene Load stall detector for this fresh request.
+     *
+     * What: forces filesystem_pollPhaseStall()'s first call to see a "changed"
+     * phase so the stall counter starts from zero. Inputs: none. Outputs: two
+     * statics; no file I/O. Affiliates: filesystem_pollPhaseStall(),
+     * filesystem_loadSceneDirectory_tick().
+     */
+#if DEV_STALL_DETECTION
+    op_scene_load_stall_last_phase = 0xffu;
+    op_scene_load_stall_ticks = 0u;
+#endif
+    /*
      * Preserve the selected Scene key before Scene parsing starts.
      *
      * Why: phases 6 and 39 must reopen the selected root folder after parsing
@@ -21891,6 +22590,23 @@ bool filesystem_requestLoadBank(uint16_t slot,
      */
     if (!filesystem_startRepairBankNames(slot, cb))
         return false;
+    /*
+     * Rearm Bank Load entry and delegated Scene Load stall detectors.
+     *
+     * What: forces filesystem_pollPhaseStall()'s first call to see a "changed"
+     * phase for both the Bank container reader and the Scene payload reader
+     * (entered later via op_bank_payload_active). Why: the Bank Load delegates
+     * to filesystem_loadSceneDirectory_tick() for each child, so both detectors
+     * must be armed. Inputs: none. Outputs: four statics; no file I/O.
+     * Affiliates: filesystem_loadBankDirectory_tick(),
+     * filesystem_loadSceneDirectory_tick().
+     */
+#if DEV_STALL_DETECTION
+    op_bank_load_entry_stall_last_phase = 0xffu;
+    op_bank_load_entry_stall_ticks = 0u;
+    op_scene_load_stall_last_phase = 0xffu;
+    op_scene_load_stall_ticks = 0u;
+#endif
     op_bank_scene_load_mask = valid_mask;
     op_scene_load_scene_mask = valid_mask;
     /*
@@ -21943,9 +22659,9 @@ bool filesystem_requestSaveBank(uint16_t slot,
      * (bank_hasResidentBank() false), the boot-seeded present-bit on Scene 0
      * is not considered trustworthy and the entire mask is zeroed. Why: an
      * empty (non-present) Scene must never overwrite an occupied on-disk
-     * Scene inside the target Bank tree; the delete phase removes the entire
-     * previous Bank folder before any child is written, so filtering must
-     * happen here, not inside the state machine. The SEQ LED surface already
+     * Scene inside the target Bank tree; the per-child delete-then-write loop
+     * removes only masked children, so filtering must still happen here, not
+     * inside the state machine. The SEQ LED surface already
      * prevents toggling non-present Scenes, but this is the filesystem-layer
      * defense-in-depth that cannot be bypassed by a different caller. Depends
      * on P1 (Bank Save present-mask union fix) for the present mask to be
@@ -21978,8 +22694,24 @@ bool filesystem_requestSaveBank(uint16_t slot,
      * statics; no file I/O. Affiliates: filesystem_pollPhaseStall(),
      * filesystem_saveBankDirectory_tick().
      */
+#if DEV_STALL_DETECTION
     op_bank_save_entry_last_phase = 0xffu;
     op_bank_save_entry_stall_ticks = 0u;
+    /*
+     * Rearm the delegated Scene Save stall detector for Bank Save children.
+     *
+     * What: forces filesystem_pollPhaseStall()'s first call inside the Scene
+     * writer to see a "changed" phase so the stall counter starts from zero.
+     * Why: Bank Save delegates to filesystem_saveSceneDirectory_tick() for
+     * each child in the save mask via op_bank_payload_active. The Bank Save
+     * entry detector does not cover those phases (it returns early when
+     * op_bank_payload_active == 1), so the Scene Save's own detector provides
+     * coverage for the delegated writes. Inputs: none. Outputs: two statics.
+     * Affiliates: filesystem_saveSceneDirectory_tick().
+     */
+    op_scene_save_stall_last_phase = 0xffu;
+    op_scene_save_stall_ticks = 0u;
+#endif
 
     op_kit_save_source_scene = source_scene;
     op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;

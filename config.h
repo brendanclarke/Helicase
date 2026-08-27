@@ -88,6 +88,29 @@
 #define DEV_MODE_LOGGING    1
 
 /*
+ * DEV_STALL_DETECTION enables cooperative stall detectors inside every
+ * foreground filesystem state machine. Each detector fires once after its
+ * phase stays unchanged for a site-specific tick threshold (20,000 to 50,000),
+ * writes a diagnostic named error code visible in the menu error overlay,
+ * records one AUTOSAVE_TRACE_STAGE_PHASE_STALL trace record (when
+ * DEV_MODE_LOGGING is also 1), and aborts the operation with FS_STATUS_ERROR
+ * so the menu is not frozen indefinitely.
+ *
+ * What: value 1 compiles all filesystem_pollPhaseStall() call sites, the
+ * per-state-machine stall counter statics, and the counter resets in request
+ * functions. Value 0 removes them entirely so no operation is ever aborted
+ * on a tick-count basis. Why: during bench testing an operation may need to
+ * run well beyond its normal threshold without being killed (e.g. a slow
+ * card or a diagnostic pause), and stall detectors that abort would mask the
+ * actual completion behavior. Inputs: none (compile-time only). Outputs:
+ * when 1, each state machine can produce one bounded error-abort per request.
+ * Affiliates: filesystem_pollPhaseStall(), every _tick function's stall
+ * detector block, every request function's counter reset, AutosaveTrace.h
+ * PHASE_STALL site constants.
+ */
+#define DEV_STALL_DETECTION 1
+
+/*
  * Fixed boot-time AutoSave-ensure failure capsule geometry.
  *
  * What: reserves eight fixed eight-byte records only in a logging build.

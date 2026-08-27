@@ -145,16 +145,25 @@ typedef enum {
 } autosave_trace_stage_t;
 
 /*
- * X (PHASE_STALL) flags/value layout. Bits 0..2 select the observer; bit 3
- * identifies a stall inside native recursive delete. value32 stores phase in
- * bits 0..7, numbered slot in bits 8..17, and site-specific extra data in
- * bits 18..31.
+ * X (PHASE_STALL) flags/value layout. Bits 0..3 select the observer site;
+ * bit 4 identifies a stall inside native recursive delete. value32 stores
+ * phase in bits 0..7, numbered slot in bits 8..17, and site-specific extra
+ * data in bits 18..31. Why widened from 3 to 4 bits: §8.7 stall evidence
+ * policy requires every state machine to carry its own stall detector, and
+ * 3 bits (8 values) was insufficient for the full set of observers.
  */
-#define AUTOSAVE_TRACE_PHASE_STALL_SITE_MASK 0x07u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_MASK 0x0Fu
 #define AUTOSAVE_TRACE_PHASE_STALL_SITE_DELETE_SLOT 0u
 #define AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY 1u
 #define AUTOSAVE_TRACE_PHASE_STALL_SITE_DRAIN 2u
-#define AUTOSAVE_TRACE_PHASE_STALL_FLAG_IN_NATIVE_DELETE (1u << 3u)
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_KIT_SAVE 3u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_SCENE_SAVE 4u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_KIT_LOAD 5u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_SCENE_LOAD 6u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_LOAD_ENTRY 7u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_SETTINGS 8u
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_FLUSH 9u
+#define AUTOSAVE_TRACE_PHASE_STALL_FLAG_IN_NATIVE_DELETE (1u << 4u)
 #define AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT 0u
 #define AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT 8u
 #define AUTOSAVE_TRACE_PHASE_STALL_EXTRA_SHIFT 18u
