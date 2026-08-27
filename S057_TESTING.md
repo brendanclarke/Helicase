@@ -1075,3 +1075,118 @@ constant additions).
 | `Core/Bank/Scene/AutosaveTrace.h` | Widened PHASE_STALL site mask from 3 to 4 bits, moved native-delete flag from bit 3 to bit 4, added 7 new site constants |
 | `SD_CARD_TESTING/Kit/007 Chip/chiph1.hat` | Deleted (Kit corruption test) |
 | `SD_CARD_TESTING/Bank/009 LoadTst/` | Restored 08 KitWool, 03 Pop; renamed errKit→Kit in 15 Pop |
+
+### 8.9 Stall detection compile-time toggle (`DEV_STALL_DETECTION`)
+
+Implemented 2026-08-27. Changes in `config.h` and
+`Core/Hardware/SD/filesystem.c`.
+
+#### 8.9.1 Motivation
+
+All stall detectors added in §8.7–§8.8 are safety mechanisms that
+prevent indefinite menu hangs. However, during bench testing a developer
+may need to let an operation run well beyond its normal threshold without
+being killed — for example, observing a slow card's actual completion
+behavior, diagnosing a stall's root cause without the abort masking it,
+or deliberately pausing the filesystem to inspect intermediate state.
+The existing `DEV_MODE_LOGGING` flag already gates the
+`autosaveTrace_record()` trace records (AutosaveTrace.c provides no-op
+stubs when `DEV_MODE_LOGGING == 0`), but the detection + abort mechanism
+(`filesystem_pollPhaseStall()`, `filesystem_makeNamedErrorCode()`,
+`filesystem_finish(ERROR)`) had no toggle.
+
+#### 8.9.2 Design
+
+A new compile-time flag `DEV_STALL_DETECTION` was added to `config.h`
+(line 111) alongside the existing `DEV_MODE_DIAGNOSTIC` and
+`DEV_MODE_LOGGING` flags. It defaults to 1 (all stall detectors active).
+
+When `DEV_STALL_DETECTION` is set to 0, the following are compiled out
+entirely:
+
+1. **`filesystem_pollPhaseStall()` function** — forward declaration
+   (line ~1215) and definition (line ~13489). No stall polling occurs.
+
+2. **All stall counter static variables** — every `_stall_last_phase`
+   (uint8_t) and `_stall_ticks` (uint32_t) pair across all 10 detector
+   sites. No SRAM consumed.
+
+3. **All stall detector blocks** — the `if (filesystem_pollPhaseStall())`
+   blocks at the top of each `_tick` function, including the trace
+   record, named error code, and abort/escalation logic inside them.
+   No per-tick overhead.
+
+4. **All counter resets** — the `last_phase = 0xFF; ticks = 0;` pairs
+   in every request function. No setup cost.
+
+When `DEV_STALL_DETECTION` is 1 (default), behavior is identical to
+the pre-toggle build — all detectors active, all thresholds enforced.
+
+#### 8.9.3 Relationship to `DEV_MODE_LOGGING`
+
+The two flags are independent. The four combinations produce:
+
+| `DEV_STALL_DETECTION` | `DEV_MODE_LOGGING` | Behavior |
+|-----------------------|--------------------|----------|
+| 1 | 1 | Full stall detection: polling, abort, named error code, AND trace record. Default configuration. |
+| 1 | 0 | Stall detection active with abort and named error code, but `autosaveTrace_record()` is a no-op — no trace record captured. The menu still shows the error overlay. |
+| 0 | 1 | No stall detection at all. Operations can run indefinitely without being killed. Trace infrastructure exists but no PHASE_STALL records are ever produced (no call site exists to emit them). |
+| 0 | 0 | No stall detection, no trace infrastructure. Minimal production build. |
+
+#### 8.9.4 Gated sites in `filesystem.c`
+
+Every `#if DEV_STALL_DETECTION` / `#endif` pair in filesystem.c,
+listed in file order:
+
+| Line (approx) | What is gated |
+|---------------|---------------|
+| 1213–1218 | Forward declaration of `filesystem_pollPhaseStall()` |
+| 3400–3405 | Flush stall statics (`op_flush_stall_last_phase`, `_ticks`) |
+| 3470–3474 | Flush counter reset inside `filesystem_finish()` (FLUSH_FINISH entry) |
+| 3641–3652 | Flush stall detector block in `filesystem_flushFinish_tick()` |
+| 5792–5796 | Drain stall statics (`op_autosave_drain_last_phase`, `_ticks`) |
+| 5810–5830 | Drain stall detector block in `filesystem_autosaveParameterDrain_tick()` |
+| 8557–8560 | Kit Load stall statics |
+| 8583–8599 | Kit Load stall detector block in `filesystem_loadKitDirectory_tick()` |
+| 9073–9076 | Scene Load stall statics |
+| 9102–9115 | Scene Load stall detector block in `filesystem_loadSceneDirectory_tick()` |
+| 10558–10561 | Bank Load entry stall statics |
+| 10590–10606 | Bank Load entry stall detector block in `filesystem_loadBankDirectory_tick()` |
+| 13485–13501 | `filesystem_pollPhaseStall()` definition |
+| 13585–13588 | Delete-slot stall statics |
+| 13590–13658 | Delete-slot stall detector block in `filesystem_deleteSlotDirectory_tick()` |
+| 13844–13847 | Kit Save stall statics |
+| 13870–13890 | Kit Save stall detector block in `filesystem_saveKitDirectory_tick()` |
+| 14200–14204 | Bank Save entry stall statics |
+| 14222–14253 | Bank Save entry stall detector block in `filesystem_saveBankDirectory_tick()` |
+| 14975–14978 | Scene Save stall statics |
+| 15004–15020 | Scene Save stall detector block in `filesystem_saveSceneDirectory_tick()` |
+| 17158–17161 | Settings stall statics |
+| 17182–17198 | Settings stall detector block in `filesystem_saveGlobals_tick()` |
+| 20641–20643 | Settings counter reset in `filesystem_settingsWriterSchedule_tick()` |
+| 20909–20912 | Drain counter reset in `filesystem_autosaveWriterSchedule_tick()` |
+| 22258–22261 | Kit Load counter reset in `filesystem_requestLoadKitForScenes()` |
+| 22303–22306 | Kit Save counter reset in `filesystem_requestSaveKitDirectory()` |
+| 22369–22372 | Scene Save counter reset in `filesystem_requestSaveSceneDirectory()` |
+| 22449–22452 | Kit Load counter reset in `filesystem_requestLoadKitMorphForScenes()` |
+| 22534–22537 | Scene Load counter reset in `filesystem_requestLoadSceneForScenes()` |
+| 22603–22609 | Bank Load entry + Scene Load counter resets in `filesystem_requestLoadBank()` |
+| 22697–22714 | Bank Save entry + Scene Save counter resets in `filesystem_requestSaveBank()` |
+
+Total: 30 `#if`/`#endif` pairs gating 10 detector sites, 10 static
+variable declarations, 1 function definition, 1 forward declaration,
+and 9 counter-reset sites (some with multiple variable pairs).
+
+#### 8.9.5 Build verification
+
+| Configuration | Text size | BSS | Notes |
+|---------------|-----------|-----|-------|
+| `DEV_STALL_DETECTION 1` (default) | 380,380 | 94,848 | Identical to pre-toggle build — no code generation change |
+| `DEV_STALL_DETECTION 0` | 379,540 | 94,792 | 840 bytes text + 56 bytes BSS removed (stall function, 10 detector blocks, 20 static variables) |
+
+#### Files changed
+
+| File | Change |
+|------|--------|
+| `config.h` | Added `DEV_STALL_DETECTION` flag (line 111, default 1) with full comment block describing what/why/inputs/outputs/affiliates |
+| `Core/Hardware/SD/filesystem.c` | Wrapped all stall detection code (function, statics, detector blocks, counter resets) in `#if DEV_STALL_DETECTION` / `#endif` — 30 guard pairs across the file |
