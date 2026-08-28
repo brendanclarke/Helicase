@@ -1190,3 +1190,77 @@ and 9 counter-reset sites (some with multiple variable pairs).
 |------|--------|
 | `config.h` | Added `DEV_STALL_DETECTION` flag (line 111, default 1) with full comment block describing what/why/inputs/outputs/affiliates |
 | `Core/Hardware/SD/filesystem.c` | Wrapped all stall detection code (function, statics, detector blocks, counter resets) in `#if DEV_STALL_DETECTION` / `#endif` — 30 guard pairs across the file |
+
+### 8.10 Bank operation screen freeze diagnosis and remediation
+
+#### 8.10.1 Symptom
+
+Hardware test: Kit and Scene load/save work correctly. Bank Load and Bank
+Save on slot 009 (16-scene bank "LoadTst") produce a screen freeze — the
+LCD shows `...` indefinitely. LEDs, playback, and mode switching still
+work, ruling out a CPU hard lock. User must hard-reboot.
+
+#### 8.10.2 Root cause analysis
+
+Exhaustive code trace of the entire bank save/load state machine,
+per-child loop, stall detectors, completion callback chain, and menu
+foreground path. Findings:
+
+1. **No menu livelock**: `menu_pollPresetStatus()` correctly reaches
+   `menu_repaint()` on every foreground pass during bank operations
+   (line 7910). The `...` IS being repainted — it is not a stall in the
+   menu path.
+
+2. **No single-phase bug**: Every phase transition in the bank save
+   per-child loop (phases 11→20→21→22→scene 8-37→12→13-19→repeat) is
+   correctly bounded and advances properly. The cursor `op_bank_child_cursor`
+   advances monotonically through `op_bank_scene_save_mask` bits.
+
+3. **Stall detectors functional but scoped to single phases**: Per-phase
+   stall detectors fire after 20,000-50,000 consecutive ticks on the
+   SAME phase. During normal multi-child bank operations, phases change
+   frequently (each child cycles through ~40 phases), so no individual
+   stall is detected.
+
+4. **Missing total-duration watchdog**: A 16-scene bank save involves
+   ~640 phase transitions, each requiring SD card I/O. On a slow or
+   fragmented card, individual phases complete just under the stall
+   threshold but the total operation takes minutes. The former `...`
+   indicator provided zero progress feedback — identical appearance
+   whether making progress or genuinely stuck.
+
+5. **SD card evidence**: Scenes 10 and 13 in Bank/009 were incomplete on
+   disk (scene 10: Kit with only kitset.kcg, zero instruments; scene 13:
+   partial Kit, no effects/pattern). Consistent with user rebooting
+   mid-save after interpreting the long operation as frozen.
+
+#### 8.10.3 Remediations applied
+
+**R1 — Bank child progress indicator** (`Core/Menu/menu.c`):
+`menu_paintLoadSaveConfirmation()` now queries `filesystem_bankChildCursor()`
+during bank operations and displays the current child slot as `NN.`
+(e.g. `05.`) instead of the static `...`. The number advances as each
+child scene completes, giving the user visible proof the operation is
+progressing. Non-bank operations retain the original `...` indicator.
+
+**R2 — Bank progress query API** (`Core/Hardware/SD/filesystem.c`,
+`filesystem.h`): New public function `filesystem_bankChildCursor()`
+returns `op_bank_child_cursor` (0-15) when a Bank Save or Bank Load is
+active, or 0xFF otherwise. Pure read of existing state — no new
+variables.
+
+**R3 — Total-duration watchdog** (`Core/Hardware/SD/filesystem.c`):
+New counter `op_bank_total_ticks` incremented once per `filesystem_tick()`
+while `FS_INTERNAL_OP_SAVE_BANK` or `FS_INTERNAL_OP_LOAD_BANK` is the
+active owner. Aborts with error code `BkTo` and a trace record if the
+operation exceeds `FS_BANK_TOTAL_TICK_LIMIT` (300,000 ticks ≈ 1-5
+minutes depending on main loop rate). Counter reset in both
+`filesystem_requestSaveBank()` and `filesystem_requestLoadBank()`.
+Complements the per-phase stall detectors by catching operations that
+progress through phases very slowly without any single phase stalling.
+
+#### 8.10.4 Build verification
+
+| Configuration | Text size | BSS | Notes |
+|---------------|-----------|-----|-------|
+| Post-remediation | 380,364 | 94,856 | +8 BSS (one `uint32_t` watchdog counter) |

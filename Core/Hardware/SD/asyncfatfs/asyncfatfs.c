@@ -53,8 +53,17 @@
  * this pool from three to five consumes 656 additional zero-initialized SRAM1
  * bytes. All allocation, polling, shutdown, and diagnostic loops below use
  * this constant, so no independent loop bound may be introduced.
+ *
+ * Raised from 5 to 8 (Session 057): Bank Save stalled after exactly 5
+ * children — the same number as the former pool size. Exhaustive code
+ * review found no provable single-handle leak, but the 5-for-5 match is
+ * too precise to dismiss. Three additional slots (984 bytes BSS) give
+ * the 16-child Bank Save enough headroom to complete even if one handle
+ * per child is lost to an as-yet-unidentified path. The accompanying
+ * afatfs_countOpenHandles() diagnostic will confirm or rule out pool
+ * exhaustion on the next hardware test.
  */
-#define AFATFS_MAX_OPEN_FILES 5
+#define AFATFS_MAX_OPEN_FILES 8
 
 #define AFATFS_DEFAULT_FILE_DATE FAT_MAKE_DATE(2015, 12, 01)
 #define AFATFS_DEFAULT_FILE_TIME FAT_MAKE_TIME(00, 00, 00)
@@ -3074,6 +3083,26 @@ static afatfsFilePtr_t afatfs_allocateFileHandle()
     }
 
     return NULL;
+}
+
+/*
+ * Count how many file handles in the pool are currently allocated.
+ *
+ * Returns the number of openFiles[] entries whose type is not NONE.
+ * Called by filesystem.c's Bank Save diagnostic to detect whether
+ * handles accumulate across per-child iterations. A count > 0 at the
+ * top of a new child cycle (when no handle should be in use) proves a
+ * leak; the value itself shows how many children have leaked so far.
+ * Pure read-only snapshot — no state change, no I/O, no allocation.
+ */
+uint8_t afatfs_countOpenHandles(void)
+{
+    uint8_t count = 0u;
+    for (int i = 0; i < AFATFS_MAX_OPEN_FILES; i++) {
+        if (afatfs.openFiles[i].type != AFATFS_FILE_TYPE_NONE)
+            count++;
+    }
+    return count;
 }
 
 /**

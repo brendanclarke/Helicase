@@ -550,3 +550,10 @@ uint8_t afatfs_getDeleteTreePhase(void);
  * it there, before starting another delete, since that resets it.
  */
 uint8_t afatfs_getDeleteTreeFailureSite(void);
+
+/*
+ * Count allocated (non-NONE) entries in the open-file pool. Diagnostic
+ * only — no I/O, no side effects. Bank Save calls this at per-child
+ * boundaries to detect handle accumulation.
+ */
+uint8_t afatfs_countOpenHandles(void);

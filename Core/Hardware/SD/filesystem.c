@@ -1119,6 +1119,22 @@ static uint8_t op_bank_payload_active = 0u;
  * phases 4/51-55/49.
  */
 static uint8_t op_bank_existing_dir_found = 0u;
+/*
+ * Bank operation total-duration watchdog.
+ *
+ * Incremented once per filesystem_tick() call while a Bank Save or Bank
+ * Load is the active owner. Aborts with error code "BkTo" if the
+ * operation exceeds FS_BANK_TOTAL_TICK_LIMIT without completing. The
+ * per-phase stall detectors catch single-phase hangs but cannot detect
+ * an operation that progresses through phases very slowly (slow SD card,
+ * 16-scene Bank, each phase completes just under the per-phase threshold).
+ * This watchdog provides the missing total-duration backstop. Reset by
+ * filesystem_requestSaveBank() and filesystem_requestLoadBank().
+ * Affiliates: filesystem_saveBankDirectory_tick(),
+ * filesystem_loadBankDirectory_tick(), filesystem_tick().
+ */
+#define FS_BANK_TOTAL_TICK_LIMIT 300000u
+static uint32_t op_bank_total_ticks = 0u;
 typedef enum {
     FS_LOAD_INVALID_NONE = 0u,
     FS_LOAD_INVALID_SCENE,
@@ -14781,6 +14797,32 @@ static void filesystem_saveBankDirectory_tick(void)
          * filesystem_deleteBankChildSlotDirectoryStart(),
          * filesystem_deleteSlotDirectory_tick().
          */
+
+        /*
+         * Handle-pool census before starting a new Bank child cycle.
+         *
+         * What: calls afatfs_countOpenHandles() to count allocated entries
+         * in the AFATFS openFiles[] pool. At this point — after navigation
+         * closed its handles (phases 13-19) and before the delete scanner
+         * opens one — the count must be zero. A nonzero count proves that
+         * a prior child leaked one or more handles and tells us exactly how
+         * many have accumulated. Why: Session 057 showed Bank Save stalling
+         * after exactly AFATFS_MAX_OPEN_FILES children; this census turns
+         * the next hardware test into a definitive confirmation or refutation
+         * of the handle-exhaustion hypothesis. The count is packed into the
+         * named error code visible on the LCD (e.g. "Bk20" if 2 handles are
+         * leaked at child 0) so no trace analysis is needed for a first read.
+         */
+        {
+            uint8_t open_handles = afatfs_countOpenHandles();
+            if (open_handles != 0u) {
+                filesystem_makeNamedErrorCode(
+                    "BkHd", open_handles);
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+        }
+
         if (!filesystem_prepareBankSceneSaveSource(op_bank_child_cursor)) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -15163,13 +15205,41 @@ static void filesystem_saveSceneDirectory_tick(void)
     case 9:
         if (!op_file_ready)
             return;
-        autosaveTrace_record(
-            AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
-            (uint8_t)((AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_CREATE_RESULT <<
-                       AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
-                      AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE |
-                      (!op_file ? AUTOSAVE_TRACE_SAVE_LIFECYCLE_FLAG_FAILED : 0u)),
-            (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
+        {
+            /*
+             * Record CREATE_RESULT with Bank-child diagnostics when applicable.
+             *
+             * What: the existing slot field (bits 0..9) is unchanged. For Bank
+             * Save children only, bits 10..13 now carry op_bank_child_cursor
+             * (the Bank-local Scene number 0..15 being processed) and bits
+             * 14..15 carry a saturating open-handle count from
+             * afatfs_countOpenHandles(). Why: Session 057 showed five
+             * CREATE_RESULTs per bank attempt but no way to tell (a) whether
+             * the cursor actually advanced 0-1-2-3-4 or stayed at 0, and
+             * (b) whether AFATFS pool handles accumulated across children.
+             * Both answers are now embedded in the existing O record without
+             * adding a new record type. The handle count should be exactly 1
+             * (the just-created child directory handle still held at
+             * op_kit_slot_dir); any higher value proves a leak.
+             */
+            uint32_t value =
+                (uint32_t)op_slot << AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT;
+            if (current_op == FS_INTERNAL_OP_SAVE_BANK) {
+                uint8_t handles = afatfs_countOpenHandles();
+                if (handles > 3u) handles = 3u;
+                value |= (uint32_t)(op_bank_child_cursor & 0x0Fu)
+                         << AUTOSAVE_TRACE_SAVE_LIFECYCLE_BANK_CHILD_SHIFT;
+                value |= (uint32_t)handles
+                         << AUTOSAVE_TRACE_SAVE_LIFECYCLE_BANK_HANDLES_SHIFT;
+            }
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
+                (uint8_t)((AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_CREATE_RESULT <<
+                           AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SHIFT) |
+                          AUTOSAVE_TRACE_SAVE_LIFECYCLE_TYPE_SCENE |
+                          (!op_file ? AUTOSAVE_TRACE_SAVE_LIFECYCLE_FLAG_FAILED : 0u)),
+                value);
+        }
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -21378,6 +21448,15 @@ void filesystem_tick(void)
         filesystem_loadSceneDirectory_tick();
         break;
     case FS_INTERNAL_OP_LOAD_BANK:
+        if (++op_bank_total_ticks >= FS_BANK_TOTAL_TICK_LIMIT) {
+            filesystem_makeNamedErrorCode("BkTo", 0u);
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                                 AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY,
+                                 (uint32_t)op_phase <<
+                                     AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT);
+            filesystem_finish(FS_STATUS_ERROR);
+            break;
+        }
         filesystem_loadBankDirectory_tick();
         break;
     case FS_INTERNAL_OP_SAVE_KIT:
@@ -21387,6 +21466,15 @@ void filesystem_tick(void)
         filesystem_saveSceneDirectory_tick();
         break;
     case FS_INTERNAL_OP_SAVE_BANK:
+        if (++op_bank_total_ticks >= FS_BANK_TOTAL_TICK_LIMIT) {
+            filesystem_makeNamedErrorCode("BkTo", 0u);
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
+                                 AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY,
+                                 (uint32_t)op_phase <<
+                                     AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT);
+            filesystem_finish(FS_STATUS_ERROR);
+            break;
+        }
         filesystem_saveBankDirectory_tick();
         break;
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:
@@ -21533,6 +21621,26 @@ void filesystem_setBootSubstepDiagnostic(fs_boot_substep_diag_cb_t cb)
 const char *filesystem_errorCode(void)
 {
     return fs_error_code;
+}
+
+uint8_t filesystem_bankChildCursor(void)
+{
+    /*
+     * Return the live Bank-local child cursor during a Bank operation.
+     *
+     * Inputs: current_op selects Bank Save or Bank Load; op_bank_child_cursor
+     * holds the zero-based child slot index currently being processed by the
+     * per-child loop. Output: 0..15 when a Bank operation is in progress,
+     * 0xFF otherwise. Why: the Menu's three-character command indicator needs
+     * a progress value to distinguish "processing child 05" from a static
+     * "..." that looks identical whether the operation is working or stuck.
+     * Affiliates: menu_paintLoadSaveConfirmation(),
+     * filesystem_saveBankDirectory_tick(), filesystem_loadBankDirectory_tick().
+     */
+    if (current_op == FS_INTERNAL_OP_SAVE_BANK ||
+        current_op == FS_INTERNAL_OP_LOAD_BANK)
+        return op_bank_child_cursor;
+    return 0xFFu;
 }
 
 void filesystem_ack(void)
@@ -22607,6 +22715,7 @@ bool filesystem_requestLoadBank(uint16_t slot,
     op_scene_load_stall_last_phase = 0xffu;
     op_scene_load_stall_ticks = 0u;
 #endif
+    op_bank_total_ticks = 0u;
     op_bank_scene_load_mask = valid_mask;
     op_scene_load_scene_mask = valid_mask;
     /*
@@ -22676,6 +22785,7 @@ bool filesystem_requestSaveBank(uint16_t slot,
                         ? bank_scenePresentMask() : 0u));
     if (!filesystem_start(FS_INTERNAL_OP_SAVE_BANK, FS_FILE_BANK, slot, cb))
         return false;
+    op_bank_total_ticks = 0u;
 
     /*
      * Rearm the Bank Save entry stall observer for this fresh request.

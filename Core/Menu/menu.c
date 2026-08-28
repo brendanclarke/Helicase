@@ -236,7 +236,34 @@ static void menu_paintLoadSaveConfirmation(uint8_t overwrite,
      * busy presentation rule.
      */
     if (menu_loadSaveCommandActive) {
-        memcpy(&editDisplayBuffer[1][13], "...", 3u);
+        uint8_t child = filesystem_bankChildCursor();
+
+        if (child != 0xFFu && child < 100u) {
+            /*
+             * Show Bank child progress instead of static "...".
+             *
+             * Inputs: filesystem_bankChildCursor() returns the zero-based
+             * Bank-local Scene slot (0..15) currently being processed by
+             * a Bank Save or Bank Load. Output: the three-character command
+             * surface shows the two-digit child number plus a trailing dot
+             * (e.g. "05."), giving the user visible proof that the multi-
+             * child operation is progressing — the number advances as each
+             * child completes. Why: a 16-scene Bank operation can take
+             * 30-120+ seconds on a slow SD card; the former static "..."
+             * was indistinguishable from a frozen operation, causing users
+             * to hard-reboot mid-save and corrupt Bank data. Affiliates:
+             * filesystem_bankChildCursor(),
+             * filesystem_saveBankDirectory_tick(),
+             * filesystem_loadBankDirectory_tick().
+             */
+            editDisplayBuffer[1][13] =
+                (char)('0' + (child / 10u));
+            editDisplayBuffer[1][14] =
+                (char)('0' + (child % 10u));
+            editDisplayBuffer[1][15] = '.';
+        } else {
+            memcpy(&editDisplayBuffer[1][13], "...", 3u);
+        }
         return;
     }
     if (overwrite)

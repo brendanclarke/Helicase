@@ -391,6 +391,19 @@ const char *filesystem_errorCode(void);
 void        filesystem_ack(void);
 
 /*
+ * Bank operation child-progress query.
+ *
+ * Returns the zero-based Bank-local Scene slot currently being processed
+ * by a Bank Save or Bank Load, or 0xFF when no Bank operation is active.
+ * Inputs: current_op and op_bank_child_cursor. Output: the live child
+ * cursor or the sentinel. Why: the Menu needs progress feedback during
+ * long multi-child Bank operations so the LCD can distinguish "working"
+ * from "stuck". Affiliates: menu_paintLoadSaveConfirmation(),
+ * filesystem_saveBankDirectory_tick(), filesystem_loadBankDirectory_tick().
+ */
+uint8_t filesystem_bankChildCursor(void);
+
+/*
  * Queue keyed settings persistence without taking filesystem ownership.
  *
  * filesystem_markSettingsDirty() records one changed Global value or durable

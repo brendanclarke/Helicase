@@ -188,6 +188,20 @@ typedef enum {
 #define AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT 0u
 #define AUTOSAVE_TRACE_SAVE_LIFECYCLE_CRC16_SHIFT 16u
 
+/*
+ * CREATE_RESULT Bank-child diagnostic fields in value32 bits 10..15.
+ * These bits are unused by the slot number (0..999 fits in 10 bits) and
+ * sit below the CRC16 at bits 16..31. Populated only for Bank Save's
+ * per-child CREATE_RESULT records; zero for Kit/Scene/Instrument saves.
+ * Child cursor (4 bits, 0..15) identifies which Bank-local Scene child
+ * was just created. Handle count (2 bits, 0..3 displayed; saturates at
+ * 3 so any nonzero value at this point proves a leak) is the number of
+ * allocated AFATFS pool entries at CREATE_RESULT time — it should be
+ * exactly 1 (the just-created child directory handle).
+ */
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_BANK_CHILD_SHIFT 10u
+#define AUTOSAVE_TRACE_SAVE_LIFECYCLE_BANK_HANDLES_SHIFT 14u
+
 /* Menu-only branch tags reuse O/REQUEST's otherwise-unused value high word. */
 #define AUTOSAVE_TRACE_SAVE_LIFECYCLE_MENU_BRANCH_SHIFT 16u
 
