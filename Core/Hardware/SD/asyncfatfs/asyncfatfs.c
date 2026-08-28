@@ -49,21 +49,20 @@
  * continuing asynchronous I/O. Five provides that concurrency without making
  * path depth itself dictate handle lifetime.
  *
- * SRAM effect on the STM32F765 build: afatfsFile_t is 328 bytes, so raising
- * this pool from three to five consumes 656 additional zero-initialized SRAM1
- * bytes. All allocation, polling, shutdown, and diagnostic loops below use
- * this constant, so no independent loop bound may be introduced.
+ * SRAM effect on the current STM32F765 build: afatfsFile_t is 188 bytes, so
+ * raising this pool from three to five consumes 376 additional zero-initialized
+ * SRAM1 bytes. All allocation, polling, shutdown, and diagnostic loops below
+ * use this constant, so no independent loop bound may be introduced.
  *
- * Raised from 5 to 8 (Session 057): Bank Save stalled after exactly 5
- * children — the same number as the former pool size. Exhaustive code
- * review found no provable single-handle leak, but the 5-for-5 match is
- * too precise to dismiss. Three additional slots (984 bytes BSS) give
- * the 16-child Bank Save enough headroom to complete even if one handle
- * per child is lost to an as-yet-unidentified path. The accompanying
- * afatfs_countOpenHandles() diagnostic will confirm or rule out pool
- * exhaustion on the next hardware test.
+ * Five handles are sufficient for the serialized filesystem facade. Session
+ * 057 temporarily raised this to eight while testing the apparent five-child
+ * Bank Save stop, but the handle census proved zero retained handles between
+ * children and exactly one expected handle after each child mkdir. Restoring
+ * five must remain paired with that ownership model: it reclaims the three
+ * unneeded 188-byte handles (564 bytes of handle payload) instead of masking a
+ * leak or spending Pattern-reserved memory on disproved headroom.
  */
-#define AFATFS_MAX_OPEN_FILES 8
+#define AFATFS_MAX_OPEN_FILES 5
 
 #define AFATFS_DEFAULT_FILE_DATE FAT_MAKE_DATE(2015, 12, 01)
 #define AFATFS_DEFAULT_FILE_TIME FAT_MAKE_TIME(00, 00, 00)

@@ -1119,22 +1119,6 @@ static uint8_t op_bank_payload_active = 0u;
  * phases 4/51-55/49.
  */
 static uint8_t op_bank_existing_dir_found = 0u;
-/*
- * Bank operation total-duration watchdog.
- *
- * Incremented once per filesystem_tick() call while a Bank Save or Bank
- * Load is the active owner. Aborts with error code "BkTo" if the
- * operation exceeds FS_BANK_TOTAL_TICK_LIMIT without completing. The
- * per-phase stall detectors catch single-phase hangs but cannot detect
- * an operation that progresses through phases very slowly (slow SD card,
- * 16-scene Bank, each phase completes just under the per-phase threshold).
- * This watchdog provides the missing total-duration backstop. Reset by
- * filesystem_requestSaveBank() and filesystem_requestLoadBank().
- * Affiliates: filesystem_saveBankDirectory_tick(),
- * filesystem_loadBankDirectory_tick(), filesystem_tick().
- */
-#define FS_BANK_TOTAL_TICK_LIMIT 300000u
-static uint32_t op_bank_total_ticks = 0u;
 typedef enum {
     FS_LOAD_INVALID_NONE = 0u,
     FS_LOAD_INVALID_SCENE,
@@ -14250,23 +14234,19 @@ static void filesystem_saveBankDirectory_tick(void)
                              AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY,
                              value);
         /*
-         * Abort Bank Save on a detected entry/metadata phase stall.
+         * Observation must not be promoted to asynchronous cancellation.
          *
-         * What: writes a diagnostic named error code encoding the stalled
-         * phase, then terminates the operation with FS_STATUS_ERROR so Menu
-         * can show the ERR overlay instead of hanging on `...` indefinitely.
-         * Why: phases 0-49 perform only open/chdir/close/scan work with no
-         * native-delete ownership, so aborting is safe — unlike the
-         * delete-slot observer, no asyncfatfs handle is waiting for a
-         * non-cancellable deleteTree callback. The old observe-only policy
-         * left the menu frozen with no visible feedback. Inputs: op_phase
-         * at detection time. Outputs: named error code `BkSt NN` where NN
-         * is the decimal phase. Affiliates: filesystem_finish(),
-         * filesystem_makeNamedErrorCode(), menu_showFilesystemErrorOverlay().
+         * What: after the one edge-triggered trace above, leave the Bank
+         * writer and its current phase untouched. Why: entry/metadata phases
+         * can still own a pending open, chdir, close, or scan callback;
+         * filesystem_finish(ERROR) releases the shared facade but does not
+         * cancel or drain that lower-layer operation. A late callback can then
+         * overwrite the next owner's global op_file and redirect its writes.
+         * The state machine must therefore receive subsequent polls until its
+         * callback advances it or reports a native error. Inputs/outputs: no
+         * additional state; the trace is diagnostic only. Affiliates:
+         * filesystem_tick(), on_file_opened(), and filesystem_finish().
          */
-        filesystem_makeNamedErrorCode("BkSt", op_phase);
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
     }
 #endif
 
@@ -15027,23 +15007,19 @@ static void filesystem_saveSceneDirectory_tick(void)
 
 #if DEV_STALL_DETECTION
     /*
-     * Detect and abort a Scene Save phase stall.
+     * Observe a Scene Save phase stall without aborting its async owner.
      *
      * What: fires once after op_phase stays unchanged for 20,000 consecutive
-     * polls, writes a named error code `ScSv NN` encoding the stalled phase,
-     * records one PHASE_STALL trace entry, and calls filesystem_finish(ERROR)
-     * to unblock the menu. Why: Scene Save phases perform open/chdir/close/
-     * write work with no non-cancellable native handle ownership, so aborting
-     * is safe. This detector covers both standalone root Scene Saves and
-     * Bank Save delegated Scene writes (entered via op_bank_payload_active),
-     * closing the coverage gap where the Bank Save entry stall detector does
-     * not fire when op_bank_payload_active == 1. Inputs: op_phase (current
-     * Scene Save phase), op_slot (target Scene slot). Outputs: named error
-     * code `ScSv NN`, one trace record, ERROR completion. Affiliates:
-     * filesystem_pollPhaseStall(), filesystem_makeNamedErrorCode(),
-     * filesystem_finish(), filesystem_saveBankDirectory_tick() (delegated),
-     * filesystem_requestSaveSceneDirectory() (resets counters),
-     * filesystem_requestSaveBank() (resets counters for delegated path).
+     * polls and records one PHASE_STALL trace entry. Why: Scene Save phases can
+     * own pending open, chdir, close, or write callbacks, so
+     * filesystem_finish(ERROR) is not cancellation and can let a late callback
+     * overwrite the next operation's shared op_file. This observer covers both
+     * standalone root Scene Saves and Bank Save delegated Scene writes
+     * (entered via op_bank_payload_active), but it must leave the owner alive
+     * for native completion or error. Inputs: op_phase and op_slot. Output: one
+     * existing trace record and no state-machine mutation. Affiliates:
+     * filesystem_pollPhaseStall(), filesystem_saveBankDirectory_tick(),
+     * filesystem_requestSaveSceneDirectory(), and filesystem_requestSaveBank().
      */
     if (filesystem_pollPhaseStall(op_phase,
                                   &op_scene_save_stall_last_phase,
@@ -15056,9 +15032,6 @@ static void filesystem_saveSceneDirectory_tick(void)
         autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                              AUTOSAVE_TRACE_PHASE_STALL_SITE_SCENE_SAVE,
                              value);
-        filesystem_makeNamedErrorCode("ScSv", op_phase);
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
     }
 #endif
 
@@ -21448,15 +21421,17 @@ void filesystem_tick(void)
         filesystem_loadSceneDirectory_tick();
         break;
     case FS_INTERNAL_OP_LOAD_BANK:
-        if (++op_bank_total_ticks >= FS_BANK_TOTAL_TICK_LIMIT) {
-            filesystem_makeNamedErrorCode("BkTo", 0u);
-            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
-                                 AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY,
-                                 (uint32_t)op_phase <<
-                                     AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT);
-            filesystem_finish(FS_STATUS_ERROR);
-            break;
-        }
+        /*
+         * Pump Bank Load until its state machine reports a native result.
+         *
+         * What: deliberately applies no total foreground-poll deadline. Why:
+         * filesystem_tick() runs about 7,600 times per second on hardware, so
+         * the removed 300,000-poll "five minute" guard fired near 39 seconds.
+         * A poll count is not wall time, and filesystem_finish(ERROR) cannot
+         * safely cancel the callbacks/handles which a Bank operation may own.
+         * Affiliates: filesystem_loadBankDirectory_tick() and
+         * filesystem_finish().
+         */
         filesystem_loadBankDirectory_tick();
         break;
     case FS_INTERNAL_OP_SAVE_KIT:
@@ -21466,15 +21441,18 @@ void filesystem_tick(void)
         filesystem_saveSceneDirectory_tick();
         break;
     case FS_INTERNAL_OP_SAVE_BANK:
-        if (++op_bank_total_ticks >= FS_BANK_TOTAL_TICK_LIMIT) {
-            filesystem_makeNamedErrorCode("BkTo", 0u);
-            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
-                                 AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_ENTRY,
-                                 (uint32_t)op_phase <<
-                                     AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT);
-            filesystem_finish(FS_STATUS_ERROR);
-            break;
-        }
+        /*
+         * Pump all selected children and the final durability/index chain.
+         *
+         * What: deliberately applies no total foreground-poll deadline. Why:
+         * a normal 16-child Save needs roughly 125--135 seconds on the tested
+         * card, while the removed 300,000-poll guard aborted every run near
+         * 39 seconds. Finishing ERROR mid-open left provisional 32 KiB files
+         * and live callbacks able to corrupt the next filesystem operation.
+         * Only the Bank state machine's native result followed by its normal
+         * final sync may release this owner. Affiliates:
+         * filesystem_saveBankDirectory_tick() and filesystem_finish().
+         */
         filesystem_saveBankDirectory_tick();
         break;
     case FS_INTERNAL_OP_LOAD_INSTRUMENT:
@@ -22715,7 +22693,6 @@ bool filesystem_requestLoadBank(uint16_t slot,
     op_scene_load_stall_last_phase = 0xffu;
     op_scene_load_stall_ticks = 0u;
 #endif
-    op_bank_total_ticks = 0u;
     op_bank_scene_load_mask = valid_mask;
     op_scene_load_scene_mask = valid_mask;
     /*
@@ -22785,8 +22762,6 @@ bool filesystem_requestSaveBank(uint16_t slot,
                         ? bank_scenePresentMask() : 0u));
     if (!filesystem_start(FS_INTERNAL_OP_SAVE_BANK, FS_FILE_BANK, slot, cb))
         return false;
-    op_bank_total_ticks = 0u;
-
     /*
      * Rearm the Bank Save entry stall observer for this fresh request.
      *
