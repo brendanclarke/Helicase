@@ -663,15 +663,17 @@ def decode_trace(data: bytes) -> list[str]:
 
 
 def decode_capsule(capsule: bytes) -> list[str]:
-    """Decode the frozen 64-byte HCPRMS ensure capsule (stages E0..E7)."""
+    """Decode HCPRMS schemas 1/2; E7 is retry_count/wait_ms respectively."""
     if len(capsule) != CAPSULE_BYTES:
         raise ValueError("capsule must be exactly 64 bytes")
     rows = [capsule[offset:offset + 8] for offset in range(0, 64, 8)]
     expected = list(range(0xE0, 0xE8))
-    if [row[0] for row in rows] != expected or rows[0][1] != 1:
+    schema = rows[0][1]
+    if [row[0] for row in rows] != expected or schema not in (1, 2):
         return ["unknown HCPRMS capsule schema; raw:", capsule.hex(" ")]
 
     context, progress, chunk, cursor, allocation, owner, cache, transport = rows
+    wait_name = "retry_count" if schema == 1 else "wait_ms"
     flags = context[7]
     allocation_flags = allocation[7]
     cluster_bytes = allocation[5] * 512
@@ -682,7 +684,7 @@ def decode_capsule(capsule: bytes) -> list[str]:
     else:
         target = "unknown"
     return [
-        "HCPRMS capsule schema: 1",
+        f"HCPRMS capsule schema: {schema}",
         f"E0 context: target={target}, ensure_phase={context[3]}, "
         f"facade_status={context[4]}, file_operation={context[5]}, "
         f"append_phase={context[6]}, active={bool(flags & 0x80)}, "
@@ -707,7 +709,7 @@ def decode_capsule(capsule: bytes) -> list[str]:
         f"active_index={'none' if cache[6] == 0xFF else cache[6]}, "
         f"full={cache[7]}",
         f"E7 SD transport: state={transport[1]}, operation={transport[2]}, "
-        f"offset={u16(transport[3:5])}, retry_count={u16(transport[5:7])}, "
+        f"offset={u16(transport[3:5])}, {wait_name}={u16(transport[5:7])}, "
         f"callback_pending={transport[7]}",
     ]
 

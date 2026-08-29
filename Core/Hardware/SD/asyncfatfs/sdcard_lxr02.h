@@ -54,13 +54,17 @@ uint8_t sdcard_getState(void);
 /*
  * Read-only SD transport copy used by boot-time failure forensics.
  *
- * What: reports the current private transfer coordinates without exposing the
- * private state-machine object. Why: AsyncFATFS may be correctly waiting for
- * an SD command that has stopped advancing, and aborting that command clears
- * the only evidence. Input: none; output: scalar copy valid until the next
- * poll/abort. This getter never clocks SPI, invokes callbacks, or changes
- * retries, chip-select, or transfer ownership; filesystem.c copies it before
- * sdcard_abortTransferForBootLog().
+ * What: reports transfer state, operation, callback ownership, block/offset,
+ * and elapsed milliseconds in an active token/busy wait without exposing the
+ * private state machine. Why: timeout policy is real-time based, so diagnostics
+ * must expose the same coordinate rather than the retired caller-poll count.
+ * Input: caller-owned snapshot passed to sdcard_getTransportSnapshot(). Output:
+ * scalar copy valid until the next poll/abort; wait_ms is zero unless state is
+ * READING_WAIT_TOKEN or WRITING_WAIT_BUSY. Side effects: none - no SPI clock,
+ * callback, deadline, CS, buffer, or transfer mutation. The member rename
+ * preserves type, order, struct size, and HCPRMS E7 byte width. Affiliates:
+ * sdcard_lxr02.c's elapsed-time waits, TIM6 time_sysTick,
+ * filesystem_hcprmsCapsuleFreeze(), HCPRMS schema 2, and both host decoders.
  */
 typedef struct {
     uint8_t state;
@@ -68,7 +72,7 @@ typedef struct {
     uint8_t callback_pending;
     uint32_t block;
     uint16_t offset;
-    uint16_t retry_count;
+    uint16_t wait_ms;
 } sdcardTransportSnapshot_t;
 
 void sdcard_getTransportSnapshot(sdcardTransportSnapshot_t *snapshot);

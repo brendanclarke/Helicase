@@ -56,19 +56,46 @@
  * from one context at a time (main loop OR ISR, never both).
  */
 
+/*
+ * Transfer work remains cooperative: one sdcard_poll() clocks one bounded
+ * token/busy byte or SDCARD_BURST_SIZE data bytes. Response-wait abandonment,
+ * however, is measured against TIM6 milliseconds rather than poll calls.
+ *
+ * Why: callers may legally change foreground poll density, including S058's
+ * four consecutive AsyncFATFS polls while audio is suspended. Inputs are the
+ * foreground poll stream and the interrupt-owned time_sysTick observer.
+ * Outputs are unchanged SD callbacks and transfer states; extra polls advance
+ * useful SPI work but cannot shorten a protocol deadline. Affiliates:
+ * filesystem_tick(), afatfs_poll(), timebase.h, and SDCARD_BURST_SIZE.
+ */
+
 #include "sdcard_lxr02.h"
 #include "spi_sd.h"
 #include "sd_routines.h"   /* SDHC_flag, CMD defines */
 #include "config.h"
+#include "timebase.h"
 #include <stdint.h>
 #include <stddef.h>
 
 /* -----------------------------------------------------------------------
 ** Configuration
 ** ----------------------------------------------------------------------- */
-#define SDCARD_BURST_SIZE       16      /* bytes per sdcard_poll() call    */
-#define SDCARD_TOKEN_TIMEOUT    5000    /* polls waiting for 0xFE token    */
-#define SDCARD_BUSY_TIMEOUT     50000   /* polls waiting for card ready    */
+/*
+ * Bound asynchronous SD response phases in real milliseconds.
+ *
+ * What: allows up to 1 s for a CMD17 data token and 5 s for CMD24 program-busy
+ * release while retaining the existing 16-byte data burst. Why: token/busy
+ * latency belongs to the card, whereas poll density belongs to the caller;
+ * coupling them made stopped-playback fast drain reject healthy writes.
+ * Inputs: TIM6's 1 kHz time_sysTick and the state-entry timestamp. Outputs:
+ * the existing success or null-buffer completion path after a stable elapsed
+ * deadline. Both intervals remain below the project's 32,768 ms safe
+ * uint16_t comparison range. Affiliates: sdcard_waitTimedOut(),
+ * READING_WAIT_TOKEN, WRITING_WAIT_BUSY, and filesystem fast drain.
+ */
+#define SDCARD_BURST_SIZE       16u
+#define SDCARD_TOKEN_TIMEOUT_MS 1000u
+#define SDCARD_BUSY_TIMEOUT_MS  5000u
 
 /* -----------------------------------------------------------------------
 ** State machine
@@ -89,19 +116,56 @@ static sdcard_state_t state = SDCARD_STATE_IDLE;
 static uint8_t       *xfer_buffer;
 static uint32_t       xfer_block;
 static uint16_t       xfer_offset;
-static uint16_t       retry_count;
+/*
+ * Start time for the one currently active asynchronous SD response wait.
+ *
+ * Writer/lifetime: read admission owns it through READING_WAIT_TOKEN; an
+ * accepted write-data response owns it through WRITING_WAIT_BUSY. Every exit
+ * from either wait and boot-log abort clears it before invoking a callback.
+ * Input is time_sysTick at wait entry; consumers produce timeout decisions or
+ * diagnostic elapsed milliseconds. It has no meaning in data/CRC/idle states.
+ * This repurposes retry_count's existing two bytes and adds no SRAM. Affiliates:
+ * sdcard_waitTimedOut(), sdcard_getTransportSnapshot(), and the two wait states.
+ */
+static uint16_t       wait_started_tick;
 static sdcard_operationCompleteCallback_c xfer_callback;
 static uint32_t       xfer_callbackData;
 static sdcardBlockOperation_e xfer_operation;
 
+/*
+ * Test one active SD response wait against foreground-independent time.
+ *
+ * What: subtracts the saved wait-entry tick from TIM6's wrapping millisecond
+ * counter. Why: poll frequency changes when audio is suspended and can change
+ * with any future drain budget, while a protocol deadline must retain one
+ * real-time duration. Input: timeout_ms, nonzero and below 32,768 ms; the
+ * current wait_started_tick and time_sysTick are private affiliates. Output:
+ * one when elapsed time has reached the limit, otherwise zero. Side effects:
+ * none - this function sends no clocks and changes no state, callback, buffer,
+ * deadline, or chip select. Affiliates: READING_WAIT_TOKEN,
+ * WRITING_WAIT_BUSY, timebase.h, and sdcard_getTransportSnapshot().
+ */
+static uint8_t sdcard_waitTimedOut(uint16_t timeout_ms)
+{
+    return (uint8_t)((uint16_t)(time_sysTick - wait_started_tick) >=
+                     timeout_ms);
+}
+
 void sdcard_getTransportSnapshot(sdcardTransportSnapshot_t *snapshot)
 {
     /*
-     * Copy, rather than expose, the live SD transfer before boot recovery
-     * aborts it. Input: the shim's private scalar state; output: a caller
-     * owned snapshot with no pointer into driver state. Why: this observer
-     * must distinguish card-busy/transfer stalls from an AsyncFATFS allocator
-     * stall without sending clocks, invoking a callback, or changing retries.
+     * Copy the live SD transfer for boot-time failure forensics.
+     *
+     * What: reports scalar transfer coordinates and elapsed milliseconds only
+     * for an active read-token or write-busy wait. Why: boot recovery destroys
+     * the transport state, and a real-time timeout must be diagnosed in its own
+     * unit rather than as the retired number of caller polls. Input: caller-
+     * owned, non-null snapshot plus private driver state. Output: a copy valid
+     * until the next poll/abort; wait_ms is zero outside READING_WAIT_TOKEN and
+     * WRITING_WAIT_BUSY. Side effects: none - no SPI clock, callback, allocation,
+     * chip-select change, deadline reset, or ownership mutation. Affiliates:
+     * sdcardTransportSnapshot_t, wait_started_tick, time_sysTick,
+     * filesystem_hcprmsCapsuleFreeze(), and HCPRMS schema 2.
      */
     if (!snapshot)
         return;
@@ -110,7 +174,10 @@ void sdcard_getTransportSnapshot(sdcardTransportSnapshot_t *snapshot)
     snapshot->callback_pending = (xfer_callback != NULL) ? 1u : 0u;
     snapshot->block = xfer_block;
     snapshot->offset = xfer_offset;
-    snapshot->retry_count = retry_count;
+    snapshot->wait_ms =
+        (state == SDCARD_STATE_READING_WAIT_TOKEN ||
+         state == SDCARD_STATE_WRITING_WAIT_BUSY)
+        ? (uint16_t)(time_sysTick - wait_started_tick) : 0u;
 }
 
 void sdcard_abortTransferForBootLog(void)
@@ -130,6 +197,14 @@ void sdcard_abortTransferForBootLog(void)
      * following dirty afatfs_destroy() invalidates that callback's cache
      * descriptor. Affiliates: sdcard_poll(), filesystem boot-log recovery, and
      * the subsequent full SD_init() protocol reset.
+     *
+     * The abort also retires any active response-wait timestamp before
+     * discarding the callback. Input may be any transfer state; output is an
+     * idle transport with no live deadline. Why: the diagnostic snapshot is
+     * frozen before this call, and the recovery mount must not inherit timing
+     * ownership from the destroyed operation. Affiliates:
+     * sdcard_getTransportSnapshot(), wait_started_tick, afatfs_destroy(true),
+     * and boot-log remount recovery.
      */
 #if DEV_MODE_LOGGING
     SD_CS_DEASSERT;
@@ -138,7 +213,7 @@ void sdcard_abortTransferForBootLog(void)
     xfer_buffer = NULL;
     xfer_block = 0u;
     xfer_offset = 0u;
-    retry_count = 0u;
+    wait_started_tick = 0u;
     xfer_callback = NULL;
     xfer_callbackData = 0u;
     xfer_operation = SDCARD_BLOCK_OPERATION_READ;
@@ -204,7 +279,17 @@ bool sdcard_readBlock(uint32_t blockIndex, uint8_t *buffer,
     xfer_callbackData = callbackData;
     xfer_operation    = SDCARD_BLOCK_OPERATION_READ;
     xfer_offset       = 0;
-    retry_count       = 0;
+    /*
+     * Arm the read-token deadline only after CMD17 has been accepted.
+     *
+     * Inputs: accepted R1 response and current time_sysTick. Output: the
+     * transfer owns wait_started_tick while entering READING_WAIT_TOKEN;
+     * command transport and callback data remain unchanged. Why: command
+     * transmission must not consume the card's token-response allowance, and
+     * subsequent caller poll density must not alter it. Affiliates:
+     * sdcard_waitTimedOut(), sdcard_poll(), and afatfs_sdcardReadComplete().
+     */
+    wait_started_tick = time_sysTick;
     state             = SDCARD_STATE_READING_WAIT_TOKEN;
 
     return true;
@@ -255,13 +340,29 @@ bool sdcard_poll(void)
     case SDCARD_STATE_READING_WAIT_TOKEN:
     {
         uint8_t r = SPI_receive();
+        /*
+         * Poll one read-token response byte and bound only the wait in
+         * milliseconds.
+         *
+         * Inputs: current SPI byte, wait_started_tick, and time_sysTick.
+         * Outputs: 0xFE advances to READING_DATA; elapsed expiry releases CS
+         * and reports the existing null-buffer read completion; any other byte
+         * remains in this state. Why: S058 may call this state four times per
+         * filesystem pass, so caller polls are not a valid duration. On either
+         * terminal transition, clear the timestamp before any callback can
+         * admit another transfer. Affiliates: sdcard_waitTimedOut(),
+         * SDCARD_TOKEN_TIMEOUT_MS, SPI_receive(), and
+         * afatfs_sdcardReadComplete().
+         */
         if (r == 0xFE) {
             state = SDCARD_STATE_READING_DATA;
             xfer_offset = 0;
-        } else if (++retry_count > SDCARD_TOKEN_TIMEOUT) {
+            wait_started_tick = 0u;
+        } else if (sdcard_waitTimedOut(SDCARD_TOKEN_TIMEOUT_MS)) {
             SD_CS_DEASSERT;
             SPI_transmit(0xFF);
             state = SDCARD_STATE_IDLE;
+            wait_started_tick = 0u;
             if (xfer_callback)
                 xfer_callback(SDCARD_BLOCK_OPERATION_READ,
                               xfer_block, NULL, xfer_callbackData);
@@ -327,27 +428,58 @@ bool sdcard_poll(void)
                 return true;
             }
         }
+        /*
+         * Arm program-busy timing only after the card accepts the complete
+         * block.
+         *
+         * Inputs: accepted data-response token and current time_sysTick.
+         * Output: WRITING_WAIT_BUSY owns a fresh wait_started_tick. Why:
+         * transmitting the start token, 512-byte payload, and CRC is
+         * cooperative transfer work and must not consume the card's separate
+         * internal-programming allowance. Rejected responses keep their
+         * existing immediate failure callback and never enter or arm the busy
+         * wait. Affiliates: WRITING_CRC, WRITING_WAIT_BUSY,
+         * SDCARD_BUSY_TIMEOUT_MS, and afatfs_sdcardWriteComplete().
+         */
+        wait_started_tick = time_sysTick;
         state = SDCARD_STATE_WRITING_WAIT_BUSY;
-        retry_count = 0;
         return false;
 
     case SDCARD_STATE_WRITING_WAIT_BUSY:
     {
         uint8_t r = SPI_receive();
+        /*
+         * Poll one program-busy byte and bound only the busy wait in
+         * milliseconds.
+         *
+         * Inputs: current SPI byte, wait_started_tick, and time_sysTick.
+         * Outputs: the first nonzero byte releases CS and reports the existing
+         * successful buffer; elapsed expiry releases CS and reports the existing
+         * null buffer; zero before expiry remains busy. Why: fast foreground
+         * polling previously consumed a count ceiling before a healthy card
+         * completed internal programming, after which AsyncFATFS re-dirtied and
+         * retried the same sector indefinitely. Clear the timestamp before
+         * either callback so a callback-admitted successor owns its own deadline.
+         * Affiliates: sdcard_waitTimedOut(), SDCARD_BUSY_TIMEOUT_MS,
+         * afatfs_sdcardWriteComplete(), cache retry policy, and
+         * filesystem_tick() fast drain.
+         */
         if (r != 0x00) {
             /* Card is ready */
             SD_CS_DEASSERT;
             SPI_transmit(0xFF);
             state = SDCARD_STATE_IDLE;
+            wait_started_tick = 0u;
             if (xfer_callback)
                 xfer_callback(SDCARD_BLOCK_OPERATION_WRITE,
                               xfer_block, xfer_buffer, xfer_callbackData);
             return true;
         }
-        if (++retry_count > SDCARD_BUSY_TIMEOUT) {
+        if (sdcard_waitTimedOut(SDCARD_BUSY_TIMEOUT_MS)) {
             SD_CS_DEASSERT;
             SPI_transmit(0xFF);
             state = SDCARD_STATE_IDLE;
+            wait_started_tick = 0u;
             if (xfer_callback)
                 xfer_callback(SDCARD_BLOCK_OPERATION_WRITE,
                               xfer_block, NULL, xfer_callbackData);

@@ -57,4 +57,48 @@ void bank_toggleSceneMaskVoiceEdit(uint8_t scene_index);
 void bank_setHasResidentBank(uint8_t present);
 uint8_t bank_hasResidentBank(void);
 
+/*
+ * Session-scoped card-verified clean-Scene authority (Option 2).
+ *
+ * What: four volatile bytes retained for the current boot and current mounted
+ * card only. `bank_scene_sd_clean_mask` holds one bit per resident Scene that
+ * has been proven equal to that Scene's child folder inside one identified
+ * root Bank; `bank_scene_sd_clean_slot` is that root Bank slot, with
+ * `BANK_SD_CLEAN_SLOT_NONE` (0xffff) meaning no card authority exists. This
+ * state is never serialized to settings, HCNAMES, a Bank, or Autosave.
+ *
+ * Why: firmware cannot know whether a removable card was edited while power
+ * was off, so a Scene is clean only when I/O on the current mounted card
+ * established the equality during this powered session. Skipping writes for
+ * these bits is therefore a correctness-preserving speedup, not a cached
+ * assumption that survives a remount.
+ *
+ * Inputs/outputs: bank_init() and every fresh mount clear all authority;
+ * mutation funnels invalidate one affected Scene bit; Bank Load/Save publish
+ * only the completed effective child mask after the final sync/index chain.
+ * Affiliates: filesystem Bank Load/Save request and completion paths,
+ * SceneData/PatternData/Preset mutation boundaries, and
+ * filesystem_initAfterCardReady().
+ */
+#define BANK_SD_CLEAN_SLOT_NONE 0xffffu
+void bank_clearSdCleanAuthority(void);
+void bank_invalidateSdCleanScene(uint8_t scene_index);
+void bank_publishSdCleanAuthority(uint16_t slot, uint16_t proven_mask);
+uint16_t bank_sdCleanMask(void);
+uint16_t bank_sdCleanSlot(void);
+uint8_t bank_sdCleanSlotIsValid(void);
+/*
+ * Option 2 operation-scoped mutation window helpers.
+ *
+ * The filesystem Bank Save owns a mutation window from request acceptance to
+ * final index completion. Any resident-data mutation in that window sets a
+ * per-Scene bit through bank_invalidateSdCleanScene(); filesystem resets the
+ * window at request, clears one Scene's bit immediately before that child's
+ * writer starts, and reads the surviving mask at completion so a Scene edited
+ * while its candidate write was in flight stays non-clean.
+ */
+void bank_resetSdSaveMutationWindow(void);
+void bank_resetSdSaveMutationScene(uint8_t scene_index);
+uint16_t bank_sdSaveMutatedMask(void);
+
 #endif /* BANK_DATA_H_ */

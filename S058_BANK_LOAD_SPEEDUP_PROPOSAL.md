@@ -662,6 +662,315 @@ The payload is already tiny; cluster and metadata count dominate. Compression
 would add CPU and format complexity without removing the legacy directory and
 file transactions that dominate this operation.
 
+## Option 1 implementation review (Session 058)
+
+The following review was produced by reading every code location referenced by
+Option 1 against the current source on branch `dev-ph3-autosave-ph4` at commit
+`a870189`. Line numbers below reference the current `filesystem.c`; some differ
+slightly from the proposal's snapshot.
+
+### SRAM allocation: approved
+
+The proposed 1,320-byte SRAM1 reservation (1,161-byte HCNAMES mirror,
+144-byte Bank-child display names, 1-byte validity, ~8 bytes buffered-reader
+state) has been reviewed and approved by the user.
+
+### 1A assessment: one-pass child-name capture
+
+The existing scan at phases 15–17 (`filesystem.c:10963–11011`) already calls
+`storage_parseBankSceneFolder()` and `filesystem_displayPrecedesCached()` for
+every child directory. Moving the display-name capture into this scan is
+mechanically straightforward: the same `display` local that the scan already
+produces must be stored into `bank_child_display[child_slot]` under the same
+lexical-winner rule already used at line 11490–11500 in the per-child rescan
+(phase 29).
+
+**Unmentioned risk — error-path stale rows.** The proposal says "clear all
+sixteen rows before phase 15", which is correct. But if a Bank Load errors out
+at any point after the scan but before completion (e.g. a failed bankset read at
+phase 13, an SD transport error at phase 15, or a child Scene failure that
+cancels the whole Bank), the 144-byte buffer retains partial data from that
+attempt. No other operation reads it outside of `FS_INTERNAL_OP_LOAD_BANK`
+phases, so the residual data is harmless in practice — but the implementation
+must ensure that phase 27's name lookup is gated on both the child-present bit
+_and_ a nonblank captured row (as the proposal says: "treat
+`op_bank_child_present_mask` plus a nonblank captured row as the paired result
+of the same scan"). The zero-init before phase 15 is the safety net; no
+additional cleanup on error paths is required provided phase 27 checks both
+conditions. This is already stated but is worth flagging as a review point.
+
+**Resolved: no ambiguity.** The `filesystem_displayPrecedesCached()` comparison
+uses `fat_compareDisplayNameCasefoldThenCase()` (line 7526), which is the
+same deterministic casefold-first/raw-case tiebreak used by Kit, root Scene,
+and Bank directory scanners. The proposal correctly identifies this as the
+winner to replicate. No behavioral change is needed.
+
+### 1B assessment: parent CWD retention
+
+This is the highest-value and most implementation-sensitive part.
+
+**Bank Load side.** Scene phase 72 (line 10490–10509) currently executes
+`afatfs_chdir(NULL)` then hands back to Bank phase 20. The change replaces
+this with `afatfs_chdirParent()` when `op_bank_payload_active` is set. The
+reference pattern at phase 63 (line 10394–10400) shows correct three-way
+handling:
+
+```c
+afatfsOperationStatus_e ast = afatfs_chdirParent();
+if (ast == AFATFS_OPERATION_IN_PROGRESS) return;
+if (ast == AFATFS_OPERATION_FAILURE) { /* error path */ }
+/* SUCCESS falls through */
+```
+
+**Bank Save side.** Scene phase 37 (line 15513–15531) similarly returns to root
+via `afatfs_chdir(NULL)` before handing back to Bank phase 12. The same
+`afatfs_chdirParent()` replacement applies when `op_bank_payload_active` is set.
+The save-side child loop at phase 12 (line 14659–14674) then advances the
+cursor and continues directly to phase 20 (delete/write) without reopening
+`/Bank/` through phases 13–19.
+
+**Risk: CWD depth contract after `chdirParent`.** The Scene writer's internal
+navigation is `root → Bank → selected Bank dir → SS child dir → (Kit subdir)`.
+At the end of a successful Scene Save (phase 37) or Scene Load (phase 72), the
+CWD is inside the `SS child` directory (save) or has already returned through
+the Kit subdir to the Scene subdir (load). A single `afatfs_chdirParent()` must
+land exactly at the selected Bank directory in both cases.
+
+For **Save phase 37**: the Scene writer at phase 36 closes `effects.fx` and the
+CWD is the `SS Name/` child directory. One `chdirParent()` goes to the Bank
+directory. Correct.
+
+For **Load phase 72**: the Scene loader's preceding phases have already returned
+from the Kit subdir to the Scene subdir (via the phase 63 `chdirParent` call
+for quarantine-eligible Kit loads, or via phase 62 which stays in the Scene
+dir). At phase 72, CWD is the `SS Name/` child directory. One `chdirParent()`
+goes to the Bank directory. Correct.
+
+**Unmentioned risk — standalone Scene Load/Save must not change.** The proposal
+says "standalone Scene Load/Save must retain their current root-return
+contract." This is correct but needs an explicit implementation note: the
+branching condition at phase 72 (load) and phase 37 (save) is
+`current_op == FS_INTERNAL_OP_LOAD_BANK` / `FS_INTERNAL_OP_SAVE_BANK` AND
+`op_bank_payload_active`. The existing code already checks both. However,
+there is a subtle gap: after `chdirParent()` succeeds but the _next_ child
+fails to open, the Bank state machine must still have a recovery path to root.
+The current phases 21–26 (load) and 13–19 (save) already exist as that fallback
+— the proposal says "phases 21–26 remain only as recovery/fallback entry paths"
+and "phases 13–19 remain as recovery." This is correct, but the happy path
+must skip those phases entirely (entering phase 27 directly for load, phase 20
+directly for save), and the entry condition to phases 21/13 must be reachable
+from the error path at phase 20 (load) or phase 12 (save) when a `chdirParent`
+failure forces a root return.
+
+**Recommendation:** Add explicit documented phase-postcondition comments at
+the two Scene return branches (load 72, save 37) and at the Bank child-advance
+entries (load 20, save 12) stating the expected CWD. A `chdirParent` failure
+at phase 72/37 should fall through to the existing `afatfs_chdir(NULL)` root
+return as the error/cleanup path.
+
+### 1C assessment: HCNAMES mirror
+
+The proposal is clear. The key coherency mechanism is the 1-byte validity
+flag. The existing `fs_resident_source[]` dirty-flag pattern
+(`FS_RESIDENT_SOURCE_DIRTY_FLAG` at `filesystem.c:4749,4837,4871`) provides the
+template for the source register; the name mirror needs an analogous single-bit
+validity gate.
+
+**Unmentioned detail — which callers currently read HCNAMES through the shared
+cache?** The function `filesystem_prepareResidentNamesCache()` (line 4730–4753)
+currently clears the shared cache and tags it `FS_NAME_CACHE_HCNAMES`. Its
+downstream callers use `fs_list_cache_name[row]` directly. The mirror replaces
+only this borrowing path; the source register (`fs_resident_source[]`) is
+already separate and needs no change. The mirror is populated during the
+HCNAMES read loop at `filesystem_cacheResidentRecord()` (line 4792–4839),
+which writes to `fs_list_cache_name[row]`. The implementation change routes
+those writes to the new `hcnames_name_mirror[row]` instead. The overlay
+(`filesystem_cacheResidentName()` at line 4842–4857) and the
+identity-copy path (`filesystem_cacheCurrentResidentInstrumentNames()` at line
+4875) must also target the mirror.
+
+**Unmentioned risk — post-Save `.hcindex` direct update.** The proposal says
+"update the known target slot in the retained slot-ordered Bank cache and
+invoke the index writer directly. A physical `/Bank/` rescan is needed only if
+the Bank cache was not valid." This is where the most care is needed. The
+current code at phase 86 (line 14964–14988) unconditionally sets
+`op_library_index_rebuild_kind = FS_NAME_CACHE_BANK` and the subsequent chain
+does a physical `/Bank/` scan plus full index rewrite. The direct-update
+optimization must:
+
+1. check that `fs_list_cache_kind == FS_NAME_CACHE_BANK` (the Bank index is
+   still resident and was not disposed during the save);
+2. update only the known saved slot's row in `fs_list_cache_name[]`;
+3. invoke the index writer (not the scanner-then-writer chain); and
+4. fall back to the full scan-then-write chain if the cache was invalidated.
+
+The risk here is moderate because Bank Save changes the on-card directory tree:
+if the Bank folder was freshly created or renamed, the index _must_ reflect
+that. The direct-update path can only be safe when the Bank folder already
+existed and was not renamed during this save. The implementation should
+conservatively fall back to the full scan for any save that created or renamed
+the Bank directory, and use the direct path only for an overwrite of an
+existing, name-unchanged Bank. This narrows the benefit somewhat, but it is the
+safe approach.
+
+### 1D assessment: buffered text reads
+
+The proposal is sound. The 512-byte `staging_buf` at line 443 is mutually
+exclusive with Pattern/Autosave streaming via facade operation ownership.
+
+**Unmentioned interaction — `staging_buf` and background writers.** The
+autosave CRC path, trace flush, and settings writer also use `staging_buf`, but
+only while the facade is `FS_STATUS_IDLE` or during their own internal
+operations. A text file read happens only during active typed operations
+(Kit/Scene/Bank/Instrument load, HCNAMES read, settings read, index read).
+These are mutually exclusive with the background writers by the existing
+single-operation facade design. There is no real conflict, but the
+implementation comment should state that `staging_buf` ownership during text
+reads is guaranteed by the same facade exclusivity that makes Pattern/Autosave
+streaming safe.
+
+**Unmentioned detail — reader state reset points.** The proposal says "every
+caller that switches `op_file` must reset the read window." The current
+`filesystem_readTextLine()` has no persistent state between calls — the `budget`
+counter resets each call, and the `len`/`buf` state is caller-owned. The new
+buffered reader would add persistent cursor state (`buf_pos`, `buf_len`, perhaps
+as `uint16_t` fields). These must be reset at every file open, not just at
+every `op_file` switch. The natural reset point is immediately after a
+successful `afatfs_fopen()` callback returns a valid handle — every existing
+text-reading path transitions through `op_file_ready` and then begins
+reading. A single reset call at the moment `op_file` is assigned from the
+open callback covers all paths without per-caller resets. This is simpler and
+safer than the proposal's per-caller-audited approach.
+
+**Clarification — can `staging_buf` be used as the read-ahead buffer?** The
+proposal says "make one block read into the existing `staging_buf`." This works
+during Kit/Scene/Instrument/HCNAMES reads because those operations do not
+simultaneously write to `staging_buf`. However, the `settings.cfg` reader at
+phase ~4034 also calls `filesystem_readTextLine()` — and settings recovery
+(`.tmp` → `.cfg` promotion) uses `staging_buf` at the same operation level. The
+implementation must verify that text-reader buffering into `staging_buf` does
+not overlap with the settings recovery path's own `staging_buf` use within the
+same `filesystem_tick()` call. In practice this is safe because the text read
+and the recovery copy are sequential phases, never concurrent within one tick,
+but the assertion should be stated.
+
+### Line-number reconciliation
+
+The proposal's line references were written against a pre-session snapshot.
+Several have shifted slightly in the current source. Current reference lines:
+
+| Proposal reference | Current line (±) | Status |
+|---|---|---|
+| `filesystem.c:888-923` (shared cache declaration) | 888–927 | Match |
+| `filesystem.c:1414-1478` (cache clear/retag) | 1414–1479 | Match |
+| `filesystem.c:4730-4753` (HCNAMES cache prep) | 4730–4753 | Exact |
+| `filesystem.c:4792-4872` (HCNAMES parse/cache) | 4792–4873 | Match |
+| `filesystem.c:10953-11010` (Bank child scan) | 10953–11011 | Match |
+| `filesystem.c:11191-11550` (child advance/rescan) | 11191–11551 | Match |
+| `filesystem.c:10343-10360` (Bank child commit) | 10343–10361 | Match |
+| `filesystem.c:10490-10509` (Scene phase 72) | 10490–10509 | Exact |
+| `filesystem.c:14659-14757` (Save reopen phases) | 14659–14757 | Exact |
+| `filesystem.c:15513-15531` (Save phase 37 return) | 15513–15531 | Exact |
+| `asyncfatfs.c:5506-5584` (chdirParent) | 5506–5585 | Match |
+| `filesystem.c:14964-14988` (post-Save Bank rescan) | 14964–14988 | Exact |
+| `filesystem.c:7197-7239` (index rebuild) | 7197–7239 | Exact |
+| `filesystem.c:8365-8416` (readTextLine) | 8365–8417 | Match |
+
+All proposal line references are within ±2 lines of the current source. No
+structural changes invalidate any of the proposal's cited locations.
+
+### Resolved design decisions
+
+All three open questions from the implementation review have been resolved.
+The decisions below are binding for the Session 058 implementation.
+
+**1. 1B error recovery contract — RESOLVED.**
+
+`afatfs_chdirParent()` failure modes were traced through the full call chain
+including `afatfs_cacheSector()`. FAILURE indicates one of three structural
+conditions, none of which are transient:
+
+- CWD is type NONE or NORMAL (not a directory) — programming error.
+- `afatfs_cacheSector()` internal assertion — AsyncFATFS corruption.
+- The `..` entry in the child directory's first sector is missing, misnamed,
+  or lacks the directory attribute — on-card FAT corruption.
+
+The `IN_PROGRESS` return already covers the normal async case (cache miss
+needing an SD read), which the three-way pattern handles by returning without
+advancing `op_phase`. No retry of a `FAILURE` return is useful.
+
+**Error recovery rule:** The granularity follows the existing Bank operation
+error contract:
+
+- **Bank Load:** a `chdirParent` failure at Scene phase 72 invalidates that
+  one child Scene (the Scene loads empty). Other child Scenes continue. The
+  implementation falls back to `afatfs_chdir(NULL)` root return, then enters
+  the existing root-reopen phases (21–26) for the next child. If the root
+  return itself fails, the subsequent phase will fail to open `/Bank/` and
+  `filesystem_finish(FS_STATUS_ERROR)` terminates the whole Bank Load.
+
+- **Bank Save:** a `chdirParent` failure at Scene phase 37 invalidates the
+  whole Bank Save. The implementation routes to the Bank Save error path
+  (`filesystem_finish(FS_STATUS_ERROR)`). No partial Bank Save continues.
+
+This introduces no silent failure mode (the Scene/Bank error paths are the
+same ones used for any other child failure), no stall loop (FAILURE is a
+one-shot decision, not a retry), and no retry of the `chdirParent` call
+itself (since the failure conditions are structural, not transient).
+
+**2. 1C direct `.hcindex` update — DEFERRED.**
+
+The direct index cache update (bypassing the full scan-then-write chain after
+Bank Save) is deferred. The initial implementation will always use the
+existing full `/Bank/` scan chain at phase 86. This keeps the initial change
+smaller and lets the scan-chain correctness serve as the baseline. The direct
+update can be added as a separate, lower-risk follow-on after Stage 1 is
+hardware-verified.
+
+**3. 1D reader state location — RESOLVED.**
+
+Two `uint16_t` fields (`staging_buf_pos`, `staging_buf_len`) as `static`
+module-scope variables in `filesystem.c` alongside the other `op_*` state.
+Reset in a single helper called at the `on_file_opened` transition — every
+text-reading path transitions through `op_file_ready`, so a single reset
+point at file-open covers all callers without per-caller auditing.
+
+### Clarified points (no decision needed)
+
+- The `staging_buf` ownership during text reads is guaranteed by facade
+  exclusivity — the same guarantee that makes Pattern/Autosave streaming safe.
+- The reader state reset uses a single reset point at file-open rather than
+  per-caller auditing — simpler than the proposal's description.
+
+### Residual risks (identified and manageable)
+
+- **Medium risk:** 1B's CWD postcondition is the highest-stakes change. A bug
+  here would strand the Bank operation in the wrong directory with no visible
+  error until a later phase opens or scans the wrong parent. Mitigated by
+  explicit postcondition comments and the fallback to root-reopen phases.
+  The existing Bank stall-detection instrumentation (`BkSt`/`ScLd`/`BkLd`
+  phase-stall detectors from Session 057) would catch any infinite loop.
+- **Low risk:** 1A's error-path stale rows. Mitigated by the pre-scan
+  zero-init and the dual-check (present bit + nonblank row) at phase 27.
+- **Low risk:** 1C's coherency. The one-byte validity flag is a simpler
+  mechanism than the per-row dirty flags already in use for sources.
+- **Low risk:** 1D's `staging_buf` sharing. Guaranteed safe by facade
+  exclusivity, which is the same guarantee that makes Pattern/Autosave
+  streaming safe.
+
+### Recommended implementation order within Option 1
+
+1. **1A first** — purely additive, no behavioral change to existing phases,
+   easy to verify by logging the captured names.
+2. **1D second** — self-contained refactor of one function, easy to verify by
+   build-size comparison (fewer function calls) and behavioral identity (same
+   16-character budget).
+3. **1C third** — adds the HCNAMES mirror, removes the cache-destruction side
+   effect, but defer the direct `.hcindex` update to a follow-on.
+4. **1B last** — the highest-value and highest-risk change, implemented on top
+   of the other three so that testing of 1B is not confounded by 1A/1C/1D
+   issues.
+
 ## Recommended implementation sequence
 
 ### Stage 1: low-risk, legacy-compatible speedup
@@ -761,3 +1070,208 @@ hardware-peripheral path, or increase CPU burst budgets for this work. The
 active sequence is Options 1, 2, and 3: first remove redundant traversal;
 second, skip only card-verified clean Scenes within the current boot/mount; and
 third, add a conservative retained-one-cluster overwrite fast path.
+
+---
+
+## Option 1 implementation notes (Session 058)
+
+Implemented 2026-08-29 in order 1A → 1D → 1C → 1B as recommended.
+
+### 1A implementation
+
+- `op_bank_child_display[16][9]` declared at filesystem.c alongside
+  `op_bank_child_present_mask`.  Cleared via `memset` in the operation start
+  reset function.
+- Phase 15 modified to capture display names using the lexical-winner rule
+  (`filesystem_displayPrecedesCached`) during the existing single Bank child
+  scan.  Both presence bit and display name are captured in the same loop
+  iteration.
+- Phases 27-30 (the per-child rescan) replaced entirely.  Phase 27 now copies
+  the cached name from `op_bank_child_display[op_bank_child_cursor]` into
+  `op_scene_display_name`, sets `op_close_done = true` and
+  `op_close_status = FS_STATUS_DONE` to satisfy phase 31's guards, and jumps
+  directly to phase 31.  Phases 28, 29, and 30 are removed (dead code).
+- Phase 17's comment updated to reflect the new cached-name flow.
+
+### 1D implementation
+
+- Two `uint16_t` cursors (`text_buf_pos`, `text_buf_len`) declared as static
+  module-scope variables beside `filesystem_readTextLine()`.
+- `filesystem_resetTextReader()` helper clears both cursors.  A forward
+  declaration before `on_file_opened` allows the callback to call it.
+- `on_file_opened` calls `filesystem_resetTextReader()` on every file open,
+  covering all text-reading paths (kitset, instrument, HCNAMES, settings,
+  index) without per-caller reset audits.
+- `filesystem_readTextLine()` rewritten to read through `staging_buf`: when the
+  window is exhausted, one `afatfs_fread(file, staging_buf, budget)` refills
+  it.  The 16-character per-tick parse budget is unchanged.  Leftover bytes
+  after a newline carry over to the next tick automatically.
+
+### 1C implementation
+
+- `hcnames_name_mirror[129][9]` (1,161 bytes) and `hcnames_mirror_valid`
+  (1 byte) declared beside `fs_resident_source[]`.
+- `filesystem_prepareResidentNamesCache()` no longer calls
+  `filesystem_clearNameCacheStorage()` or tags `fs_list_cache_kind`.  Instead
+  it clears the mirror and sets `hcnames_mirror_valid = 0u`.
+- `filesystem_cacheResidentRecord()` and `filesystem_cacheResidentName()` write
+  to `hcnames_name_mirror[row]` instead of `fs_list_cache_name[row]`.  The
+  `fs_list_cache_kind` guard is removed (mirror is dedicated, row check
+  suffices).
+- `filesystem_cachedResidentName()` and the three public accessors
+  (`filesystem_residentInstrumentName`, `filesystem_residentKitName`,
+  `filesystem_residentSceneName`) check `hcnames_mirror_valid` instead of
+  `fs_list_cache_kind` and read from `hcnames_name_mirror[row]`.
+- Bank Load phase 85, Bank Save phase 85, and runtime update phase 5 stream
+  from `hcnames_name_mirror[op_item_offset]`.
+- Validity is set to 1 at seven successful completion points:
+  `filesystem_residentNames_tick()` phases 3 (read-only) and 6 (write close);
+  Bank Load phases 82 and 86; Bank Save phases 82 and 86;
+  `filesystem_ensureAutosaveFiles_tick()` phase 3 (recovery read);
+  `filesystem_ensureAutosaveFiles_tick()` phase 33.
+- `filesystem_initAfterCardReady()` invalidates the mirror on card mount.
+
+### 1B implementation
+
+- `op_bank_cwd_at_parent` flag (1 byte) declared beside
+  `op_bank_payload_active`.  Cleared at operation start.
+- Scene Load phase 72: for Bank-delegated loads, replaces `afatfs_chdir(NULL)`
+  with `afatfs_chdirParent()` using the three-way `afatfsOperationStatus_e`
+  handling pattern from phase 63.  On SUCCESS, sets
+  `op_bank_cwd_at_parent = 1u`.  On FAILURE, falls back to
+  `afatfs_chdir(NULL)` and sets `op_bank_cwd_at_parent = 0u`.  Standalone
+  Scene Load retains `afatfs_chdir(NULL)` root-return contract.
+- Scene Save phase 37: same chdirParent/fallback pattern for Bank-delegated
+  saves.  Standalone Scene Save retains root-return contract.
+- Bank Load phase 20: checks `op_bank_cwd_at_parent` to choose between
+  phase 27 (fast path, CWD at Bank) and phase 21 (reopen path, CWD at root).
+  Sets `op_close_done = true` and `op_close_status = FS_STATUS_DONE` for the
+  fast path so phase 27's guard passes.
+- Bank Save phase 12: checks `op_bank_cwd_at_parent` to choose between
+  phase 20 (fast path) and phase 13 (reopen path).
+
+### SRAM1 budget
+
+| Allocation | Bytes | Sub-option |
+|---|---:|---|
+| `hcnames_name_mirror[129][9]` | 1,161 | 1C |
+| `hcnames_mirror_valid` | 1 | 1C |
+| `op_bank_child_display[16][9]` | 144 | 1A |
+| `text_buf_pos` + `text_buf_len` | 4 | 1D |
+| `op_bank_cwd_at_parent` | 1 | 1B |
+| **Total** | **1,311** | **within 1,320 budget** |
+
+Compile-time `_Static_assert` checks verify each array size and the total
+against the approved 1,320-byte reservation.
+
+### Build result
+
+`make clean && make && make img` — no errors, no new warnings.
+`.bss` section: 96,152 bytes.
+
+### Hardware verification result
+
+Tested on hardware 2026-08-29.
+
+- **Bank Load**: noticeably faster.  Consistent with the expected removal of the
+  O(n²) per-child rescan and the elimination of root/Bank reopen cycles between
+  children.
+- **Bank Save**: only slightly faster.  Consistent with the proposal's
+  assessment — the dominant Save cost is creating/truncating 161 individual
+  files, which Option 1 does not address.  Options 2 and 3 target Save
+  specifically.
+- **No unexpected errors** encountered during load or save operations.
+- No audio, UI, or stability regressions observed.
+
+---
+
+## Option 2 implementation notes (Session 058)
+
+Implemented 2026-08-29 after Option 1 hardware confirmation.
+
+### State ownership
+
+- Persistent volatile authority lives in `Core/Bank/BankData.c`:
+  `bank_scene_sd_clean_mask` (2 B), `bank_scene_sd_clean_slot` (2 B,
+  `0xffff` = none), and `bank_sd_save_mutated_mask` (2 B operation-scoped
+  mutation-during-save tracking).
+- Operation-scoped candidate state lives in `filesystem.c`:
+  `op_bank_sd_clean_candidate_mask` (2 B) and
+  `op_bank_sd_clean_candidate_slot` (2 B). The candidate slot is retained
+  because the deferred `.hcindex` rebuild re-enters `filesystem_start()` and
+  overwrites `op_slot` before clean publication.
+
+### Authority lifecycle
+
+- `bank_init()` and `filesystem_initAfterCardReady()` clear all authority, so a
+  boot, remount, or reinsertion of the same physical card starts non-clean.
+- `bank_invalidateSdCleanScene()` clears one persistent clean bit and also sets
+  the matching mutation-during-save bit. Every resident-data mutation funnel
+  calls it: Scene/Kit scalar setters in `SceneData.c`, Instrument endpoint
+  store in `presetManager.c`, Pattern mutators in `PatternData.c`, and the
+  whole-object commit paths for root Kit/Scene/Instrument Load.
+- Bank Load's commit is a direct struct copy that intentionally does **not**
+  invalidate clean; `on_bank_load_complete()` publishes the completed effective
+  child mask through `bank_publishSdCleanAuthority()`. Same-slot loads OR into
+  existing bits; a different slot replaces the old authority.
+
+### Bank Save skip and publication
+
+- `filesystem_requestSaveBank()` computes `skip_mask` only when the target slot
+  equals the retained clean slot and the request is not a force-save. The
+  effective child write mask is `full & ~skip`; the candidate mask equals that
+  effective mask.
+- `bank_resetSdSaveMutationWindow()` is called at request acceptance;
+  `bank_resetSdSaveMutationScene()` clears one child's bit immediately before
+  its Scene writer starts.
+- `filesystem_completeLibraryIndexRebuild()` publishes candidates only after
+  the whole operation (primary write, final `afatfs_sync()`, and the deferred
+  `.hcindex` chain) succeeds, and excludes any child whose mutation-during-save
+  bit survived to completion. A failed/cancelled save publishes nothing.
+- `preset_saveBank()`/`filesystem_requestSaveBank()` gained a `force_save`
+  selector; the current Menu caller passes `0u` (normal).
+
+### Documented deviation
+
+The proposal's "about eight bytes" table listed four two-byte fields but did
+not include the operation-scoped candidate-slot retention required because the
+deferred index rebuild clobbers `op_slot`. The actual volatile cost is
+**10 bytes** (6 B BankData + 4 B filesystem), not 8 B. This is surfaced here and
+in the post-review rather than folded silently into the existing budget.
+
+### Build result
+
+`make clean && make -j4` — no errors, no new warnings.
+`text=381,108 data=408 bss=96,160` (net +8 B `.bss` and +4 B initialized data
+for the two non-zero candidate/clean slots).
+
+### Hardware verification
+
+Pending. Required fixtures: repeated same-Bank saves in one mount (skips),
+cold-boot before a save (no skips), remount in one power cycle (no skips),
+root Scene/Kit/Instrument/Pattern mutation (bit clears), and mutation while a
+Bank Save is in flight (child stays non-clean).
+
+---
+
+## Option 3 implementation notes (Session 058) — REVERTED
+
+Implemented and then reverted 2026-08-29.
+
+The retained-cluster in-place Scene rewrite (`afatfs_finalizeRetainedSize()`,
+the 11 x 13 alias table, and `filesystem_saveBankSceneInPlace_tick()`) was
+fully removed after hardware testing showed a Bank Save roughly **15 s slower**
+than the Option 2 baseline, not faster. The regression is consistent with the
+canonical-tree proof frequently rejecting the existing child and adding a full
+Scene + embedded-Kit directory scan plus a root/Bank reopen cycle before the
+ordinary delete/recreate path ran. That extra scan/reopen overhead dominated
+the intended cluster-retention saving on this bit-banged SD path.
+
+The Option 2 code and the Option 1 work are retained and build-verified. The
+reverted Option 3 code is not in the working tree; a future attempt needs
+hardware-trace evidence for why the canonical proof rejects saved trees before
+the rewrite is re-introduced, and should skip the proof entirely for a child
+that is already provably clean (Option 2) rather than scanning it.
+
+Build result after revert: `make -j4 && make img` — no errors, no new warnings;
+`text=381,108 data=408 bss=96,160`, matching the Option 2-only build.

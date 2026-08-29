@@ -184,7 +184,8 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
  * source state.
  */
 uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask);
-uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask);
+uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask,
+                        uint8_t force_save);
 uint8_t preset_completedBankLoadedScene(void);
 uint16_t preset_bankLoadFailedSceneMask(void);
 uint8_t preset_loadFirstAvailableSceneOrKit(void);

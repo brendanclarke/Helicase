@@ -111,18 +111,21 @@
 #define DEV_STALL_DETECTION 1
 
 /*
- * Fixed boot-time AutoSave-ensure failure capsule geometry.
+ * Fixed boot-time AutoSave-ensure failure capsule geometry and schema.
  *
- * What: reserves eight fixed eight-byte records only in a logging build.
- * Why: an ASENSURE timeout destroys the live AsyncFATFS state before the
- * existing boot logger remounts, so the otherwise-ephemeral write/allocator
- * coordinates must be copied into a bounded SRAM image first. Inputs: the
- * logging-only snapshot producers; output: a 64-byte suffix after the normal
- * eight-byte boot token. Ownership: filesystem.c; lifetime: one boot attempt.
- * No file is opened and no storage exists when DEV_MODE_LOGGING is zero.
+ * What: reserves eight fixed eight-byte records only in a logging build;
+ * schema 2 changes E7 bytes 5..6 from schema 1's SD retry_count to elapsed
+ * wait_ms. Why: SD response abandonment is now time-based and old captures
+ * must remain distinguishable from new evidence. Inputs are logging-only
+ * AsyncFATFS/SD snapshot producers. Output is the unchanged 64-byte suffix
+ * after the eight-byte ASENSURE token. Ownership: filesystem.c; lifetime: one
+ * boot attempt. No file is opened and no storage exists when logging is off.
+ * Record size/count, linker placement, and product on-card formats do not
+ * change. Affiliates: sdcardTransportSnapshot_t, DEV_MODES.md,
+ * decode_devlogs.py, and devlog_unpack.py.
  */
 #if DEV_MODE_LOGGING
-#define HCPRMS_BOOT_CAPSULE_SCHEMA_VERSION 1u
+#define HCPRMS_BOOT_CAPSULE_SCHEMA_VERSION 2u
 #define HCPRMS_BOOT_CAPSULE_RECORD_BYTES   8u
 #define HCPRMS_BOOT_CAPSULE_RECORD_COUNT   8u
 #define HCPRMS_BOOT_CAPSULE_BYTES \

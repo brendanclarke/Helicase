@@ -152,6 +152,23 @@ static inline uint32_t dsp_maskLowPriorityIrqs(void)
 
 static void audio_check_and_render(void)
 {
+    /*
+     * Freeze foreground audio work while codec hardware is deliberately offline.
+     *
+     * Input: authoritative codec suspension. Output: when suspended, return
+     * before querying/filling the queue, draining pending triggers, advancing
+     * DSP/control blocks, or committing a buffer; when live, preserve the
+     * complete render loop.
+     *
+     * Why: suspend leaves the queue empty, so without this guard main would
+     * still calculate/commit unused slots, and DSP/trigger time must not advance
+     * without a DMA consumer. Resume zeroes/restarts hardware and later calls
+     * refill it. Affiliates: codec accessor/mutators,
+     * voiceControl_processPending(), mixer, and Menu's no-playback lifecycle.
+     */
+    if (audioCodec_isSuspended())
+        return;
+
     /* Audio render.
     ** Hardware DMA halves stay large enough for scheduling slack, while the
     ** legacy DSP advances in OUTPUT_DMA_SIZE chunks. This keeps EG/LFO/control

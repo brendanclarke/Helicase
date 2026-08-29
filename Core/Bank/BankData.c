@@ -8,6 +8,27 @@ static uint16_t bank_scene_mask_present;
 static uint16_t bank_scene_mask_voice_edit;
 static uint8_t bank_active_scene_slot;
 static uint8_t bank_has_resident_bank;
+/*
+ * Option 2: session-scoped card-verified clean-Scene authority.
+ *
+ * Four volatile bytes owned by BankData and cleared at every cold boot plus
+ * every fresh card mount. The mask bit means "resident Scene N equals child N
+ * of the identified Bank on the card that is mounted now", based solely on
+ * I/O completed during this powered session. 0xffff slot means no authority.
+ *
+ * Never serialize these bytes. They survive only for the life of one
+ * boot+mount and are rebuilt by successful Bank Load/Save completion paths,
+ * while every resident-data mutation clears the matching bit.
+ */
+static uint16_t bank_scene_sd_clean_mask = 0u;
+static uint16_t bank_scene_sd_clean_slot = BANK_SD_CLEAN_SLOT_NONE;
+/*
+ * Option 2 operation-scoped mutation-during-save mask. Set by every resident
+ * mutation (through bank_invalidateSdCleanScene), cleared at Bank Save request
+ * acceptance, and read by the filesystem completion path so a Scene edited
+ * while its candidate write was in flight is not published clean.
+ */
+static uint16_t bank_sd_save_mutated_mask = 0u;
 
 static uint16_t bank_sceneBit(uint8_t scene_index)
 {
@@ -114,6 +135,15 @@ void bank_init(void)
     bank_scene_mask_voice_edit = 1u;
     bank_active_scene_slot = 0u;
     bank_has_resident_bank = 0u;
+    /*
+     * Option 2: no card authority exists until this boot+mount proves it.
+     *
+     * Inputs: none. Output: clean mask zero and slot 0xffff, so a Bank Save
+     * immediately after boot can never skip a child as "clean".
+     */
+    bank_scene_sd_clean_mask = 0u;
+    bank_scene_sd_clean_slot = BANK_SD_CLEAN_SLOT_NONE;
+    bank_sd_save_mutated_mask = 0u;
 }
 
 void bank_setDisplayName(const char name[BANK_DISPLAY_NAME_LEN])
@@ -332,4 +362,108 @@ void bank_setHasResidentBank(uint8_t present)
 uint8_t bank_hasResidentBank(void)
 {
     return bank_has_resident_bank;
+}
+
+void bank_clearSdCleanAuthority(void)
+{
+    /*
+     * Option 2: drop every card-clean bit and the identified Bank slot.
+     *
+     * Inputs: none. Output: mask zero and slot BANK_SD_CLEAN_SLOT_NONE. Used
+     * at cold boot, fresh mount/remount, and whenever a different Bank or a
+     * non-Bank source replaces resident data. This is the conservative reset:
+     * no Scene may be skipped until a successful Bank Load/Save on this mount
+     * proves it equal to an on-card child.
+     */
+    bank_scene_sd_clean_mask = 0u;
+    bank_scene_sd_clean_slot = BANK_SD_CLEAN_SLOT_NONE;
+    bank_sd_save_mutated_mask = 0u;
+}
+
+void bank_invalidateSdCleanScene(uint8_t scene_index)
+{
+    /*
+     * Option 2: clear one Scene's card-clean bit after a resident mutation.
+     *
+     * Input: zero-based resident Scene index. Output: bit N removed from the
+     * mask; the identified slot is left intact so the other Scenes remain
+     * proven. Called from the Scene/Kit/Instrument/Pattern mutation funnels and
+     * from whole-object commit paths whose source is not the exact Bank child.
+     * Invalid indices are no-ops. Equal-value setters never reach this helper.
+     * The matching mutation-during-save bit is also set here so filesystem can
+     * exclude a Scene edited while its candidate write was in flight.
+     */
+    bank_scene_sd_clean_mask =
+        (uint16_t)(bank_scene_sd_clean_mask & ~bank_sceneBit(scene_index));
+    bank_sd_save_mutated_mask =
+        (uint16_t)(bank_sd_save_mutated_mask | bank_sceneBit(scene_index));
+}
+
+void bank_publishSdCleanAuthority(uint16_t slot, uint16_t proven_mask)
+{
+    /*
+     * Option 2: establish or merge card-clean authority after Bank completion.
+     *
+     * Inputs: root Bank slot and a completed effective child mask (Load) or
+     * the candidate mask that crossed final sync (Save). Output: when the slot
+     * differs from the retained slot, the old authority is replaced with only
+     * the new proven bits; when it matches, proven bits are ORed in so
+     * unselected-but-still-clean Scenes survive. This is the only place a
+     * clean bit becomes set: Autosave recovery never calls it.
+     */
+    if (slot != bank_scene_sd_clean_slot) {
+        bank_scene_sd_clean_mask = bank_normalizeSceneMask(proven_mask);
+    } else {
+        bank_scene_sd_clean_mask =
+            (uint16_t)(bank_scene_sd_clean_mask |
+                       bank_normalizeSceneMask(proven_mask));
+    }
+    bank_scene_sd_clean_slot = slot;
+}
+
+uint16_t bank_sdCleanMask(void)
+{
+    return bank_scene_sd_clean_mask;
+}
+
+uint16_t bank_sdCleanSlot(void)
+{
+    return bank_scene_sd_clean_slot;
+}
+
+uint8_t bank_sdCleanSlotIsValid(void)
+{
+    return (uint8_t)(bank_scene_sd_clean_slot != BANK_SD_CLEAN_SLOT_NONE);
+}
+
+void bank_resetSdSaveMutationWindow(void)
+{
+    /*
+     * Option 2: begin a fresh Bank Save mutation window.
+     *
+     * Inputs: none. Output: the mutation-during-save mask is zeroed so only
+     * mutations after request acceptance are considered. Called once by
+     * filesystem_requestSaveBank().
+     */
+    bank_sd_save_mutated_mask = 0u;
+}
+
+void bank_resetSdSaveMutationScene(uint8_t scene_index)
+{
+    /*
+     * Option 2: clear one Scene's mutation bit before its writer starts.
+     *
+     * Input: zero-based child Scene index. Output: bit N removed from the
+     * mutation mask. Any mutation that occurred before this point is already
+     * captured by the child's serialization; only mutations after this point
+     * (while the writer and final completion are still in flight) must keep the
+     * Scene non-clean. Called from Bank Save phase 20.
+     */
+    bank_sd_save_mutated_mask =
+        (uint16_t)(bank_sd_save_mutated_mask & ~bank_sceneBit(scene_index));
+}
+
+uint16_t bank_sdSaveMutatedMask(void)
+{
+    return bank_sd_save_mutated_mask;
 }

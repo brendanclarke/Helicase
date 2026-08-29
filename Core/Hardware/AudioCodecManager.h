@@ -79,10 +79,28 @@ extern volatile int16_t dma_buffer2 [AUDIO_DMA_FRAMES * 8];
 ** Call once from main() before the main loop. */
 void audioCodec_init(void);
 
-/* Modal stop/start helpers for operations that cannot run concurrently with
-** audio, such as internal flash erase/program during sample install. */
+/*
+ * Suspend, resume, and observe the complete external-codec hardware path.
+ *
+ * What: suspend stops I2S, both DMA streams/IRQs, and PLLI2S and clears the
+ * render queue; resume zeroes DMA/render buffers, rebuilds hardware, and starts
+ * with an empty queue. Both mutators are idempotent, void-returning, and not
+ * reference-counted. audioCodec_isSuspended() reads the existing hardware flag.
+ *
+ * Why: sample installation and eligible stopped-transport Load/Save must
+ * remove audio ISR/render cost, while main and Menu need one authoritative
+ * observation instead of duplicate state.
+ *
+ * Inputs: none; the caller must own the foreground audio lifecycle. Outputs:
+ * isSuspended returns 1 only after suspend completes and until resume completes;
+ * it returns 0 before audioCodec_init(). No function changes transport.
+ *
+ * Affiliates: menu.c's sample and no-playback storage owners, main.c's render
+ * guard, audio_hw_suspended, and Menu-paired filesystem fast drain.
+ */
 void audioCodec_suspend(void);
 void audioCodec_resume(void);
+uint8_t audioCodec_isSuspended(void);
 
 /* Legacy buffer-reset wrapper, retained for DSP source compatibility.
 ** Does not touch hardware. Prefer audioCodec_init() for a full reset. */

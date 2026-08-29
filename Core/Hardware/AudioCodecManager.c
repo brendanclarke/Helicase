@@ -230,6 +230,16 @@ static volatile uint8_t ready_count     = 0;
 static volatile uint8_t render_slot     = 0;
 static volatile uint8_t last_played_slot = 0;
 static volatile uint8_t audio_hw_initialized = 0;
+/*
+ * Authoritative codec-hardware suspension state; no S058 allocation.
+ *
+ * Writers: init/resume clear it only after hardware is live; suspend sets it
+ * only after I2S/DMA/PLLI2S stop and queue reset. Readers:
+ * audioCodec_isSuspended(), main's renderer, and Menu storage ownership.
+ * Volatile preserves observation across the foreground/IRQ hardware boundary.
+ * This is a boolean, not a reference count; callers must not resume a state
+ * they do not own.
+ */
 static volatile uint8_t audio_hw_suspended = 0;
 
 volatile uint32_t audioCodec_underrunCount = 0;
@@ -620,6 +630,20 @@ void audioCodec_init(void)
     i2s_init();
     audio_hw_initialized = 1;
     audio_hw_suspended = 0;
+}
+
+/*
+ * Report whether the codec manager completed a hardware suspend.
+ *
+ * What/why: expose audio_hw_suspended so foreground clients can suppress DSP
+ * and verify ownership without duplicating state. Input: none. Output: 0 before
+ * init/while live, 1 after suspend until resume completes. Side effects: none;
+ * no IRQ, register, queue, or transport change. Affiliates: suspend/resume,
+ * main.c audio_check_and_render(), and Menu's no-playback lifecycle.
+ */
+uint8_t audioCodec_isSuspended(void)
+{
+    return audio_hw_suspended;
 }
 
 void audioCodec_suspend(void)

@@ -169,15 +169,19 @@ def decode_trace_compact(data: bytes) -> list[str]:
 
 
 def decode_capsule_compact(capsule: bytes) -> list[str]:
+    """Compact-decode HCPRMS schemas 1/2 without changing E0..E7 geometry."""
     if len(capsule) != CAPSULE_BYTES:
         return ["bad capsule length"]
     rows = [capsule[o:o + 8] for o in range(0, 64, 8)]
-    if [r[0] for r in rows] != list(range(0xE0, 0xE8)) or rows[0][1] != 1:
+    schema = rows[0][1]
+    if [r[0] for r in rows] != list(range(0xE0, 0xE8)) or schema not in (1, 2):
         return ["unknown capsule schema: " + capsule.hex(" ")]
     context, progress, chunk, cursor, allocation, owner, cache, transport = rows
     flags = context[7]
     target = {0: "A", 1: "B"}.get(context[2], "?")
+    wait_name = "retry_count" if schema == 1 else "wait_ms"
     return [
+        f"HCPRMS schema={schema}",
         f"E0 target={target} ensure_phase={context[3]} status={context[4]} "
         f"fileop={context[5]} append_phase={context[6]} "
         f"active={bool(flags & 0x80)} frozen={bool(flags & 1)}",
@@ -193,7 +197,7 @@ def decode_capsule_compact(capsule: bytes) -> list[str]:
         f"writing={cache[4]} flush={cache[5]} "
         f"active_idx={'none' if cache[6] == 0xFF else cache[6]} full={cache[7]}",
         f"E7 sd_state={transport[1]} op={transport[2]} "
-        f"off={dd.u16(transport[3:5])} retry={dd.u16(transport[5:7])} "
+        f"off={dd.u16(transport[3:5])} {wait_name}={dd.u16(transport[5:7])} "
         f"cb_pending={transport[7]}",
     ]
 

@@ -6,6 +6,7 @@
 
 #include "PatternData.h"
 #include "SceneData.h"
+#include "BankData.h"
 
 #include <string.h>
 
@@ -113,8 +114,17 @@ void pat_setStepActive(uint8_t scene_index, uint8_t track, uint8_t step,
      * trigger bit changes. Sequencer recording/live erase, button UI, and
      * Euclidean transfer share this operation; invalid scenes are ignored.
      */
-    if (scene)
+    if (scene) {
         (void)pat_patternSetSetStep(&scene->pattern, track, step, on);
+        /*
+         * Option 2: a live Pattern edit invalidates the owning Scene's
+         * card-clean bit. Pattern is deliberately omitted from Autosave's
+         * current whole-Scene scope, so this is the only retained-data funnel
+         * that can observe the mutation. Affiliates:
+         * bank_invalidateSdCleanScene(), filesystem Bank Save skip logic.
+         */
+        bank_invalidateSdCleanScene(scene_index);
+    }
 }
 
 void pat_toggleStep(uint8_t track, uint8_t step, uint8_t scene_index)
@@ -122,10 +132,13 @@ void pat_toggleStep(uint8_t track, uint8_t step, uint8_t scene_index)
     scene_t *scene = scene_get(scene_index);
 
     /* Toggle one resident bit while keeping bit ordering private to this API. */
-    if (scene && pat_trackValid(track) && pat_stepValid(step))
+    if (scene && pat_trackValid(track) && pat_stepValid(step)) {
         (void)pat_patternSetSetStep(&scene->pattern, track, step,
                                     (uint8_t)!pat_patternSetGetStep(
                                         &scene->pattern, track, step));
+        /* Option 2: same retained-data mutation boundary as pat_setStepActive. */
+        bank_invalidateSdCleanScene(scene_index);
+    }
 }
 
 void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step)
@@ -161,8 +174,11 @@ void pat_clearTrack(uint8_t scene_index, uint8_t track)
     scene_t *scene = scene_get(scene_index);
 
     /* Clear one 16-byte track bitmap; no removed automation lanes are touched. */
-    if (scene && pat_trackValid(track))
+    if (scene && pat_trackValid(track)) {
         memset(scene->pattern.step_on[track], 0, PATTERN_TRACK_BYTES);
+        /* Option 2: a cleared track is a resident Pattern mutation. */
+        bank_invalidateSdCleanScene(scene_index);
+    }
 }
 
 void pat_clearPattern(uint8_t scene_index)
@@ -170,8 +186,11 @@ void pat_clearPattern(uint8_t scene_index)
     scene_t *scene = scene_get(scene_index);
 
     /* Clear only the PatternSet of one Scene, preserving its kit and settings. */
-    if (scene)
+    if (scene) {
         pat_initPatternSet(&scene->pattern);
+        /* Option 2: a cleared pattern invalidates the Scene's card-clean bit. */
+        bank_invalidateSdCleanScene(scene_index);
+    }
 }
 
 void pat_copyTrack(uint8_t scene_index, uint8_t src_track, uint8_t dst_track)
@@ -179,9 +198,12 @@ void pat_copyTrack(uint8_t scene_index, uint8_t src_track, uint8_t dst_track)
     scene_t *scene = scene_get(scene_index);
 
     /* Copy precisely one track's 16-byte trigger bitmap within a Scene. */
-    if (scene && pat_trackValid(src_track) && pat_trackValid(dst_track))
+    if (scene && pat_trackValid(src_track) && pat_trackValid(dst_track)) {
         memcpy(scene->pattern.step_on[dst_track],
                scene->pattern.step_on[src_track], PATTERN_TRACK_BYTES);
+        /* Option 2: copied track data is a resident Pattern mutation. */
+        bank_invalidateSdCleanScene(scene_index);
+    }
 }
 
 void pat_copyPattern(uint8_t src_scene, uint8_t dst_scene)
@@ -190,8 +212,12 @@ void pat_copyPattern(uint8_t src_scene, uint8_t dst_scene)
     scene_t *dst = scene_get(dst_scene);
 
     /* Copy the full 112-byte bitmap between Scenes, not Scene settings or kit. */
-    if (src && dst)
+    if (src && dst) {
         memcpy(&dst->pattern, &src->pattern, sizeof(dst->pattern));
+        /* Option 2: the destination Scene's pattern changed from a non-Bank
+         * source, so its card-clean bit must clear. */
+        bank_invalidateSdCleanScene(dst_scene);
+    }
 }
 
 void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
@@ -215,6 +241,8 @@ void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
     dst_byte = (uint8_t)(dst_bar * 2u);
     memcpy(&scene->pattern.step_on[track][dst_byte],
            &scene->pattern.step_on[track][src_byte], 2u);
+    /* Option 2: a copied bar is a resident Pattern mutation. */
+    bank_invalidateSdCleanScene(scene_index);
 }
 
 /* Legacy menu bridge calls are intentionally storage-free while menus migrate. */

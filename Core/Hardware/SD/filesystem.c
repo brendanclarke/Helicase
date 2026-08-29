@@ -160,11 +160,10 @@
  * The generalized browser cache has one physical name array for every
  * numbered or typed library. Kit, root Scene, and root Bank indexes use the
  * slot number as the array index, while an Instrument index uses the first N
- * sorted rows. Runtime HCNAMES access temporarily borrows the first 129 rows;
- * Menu copies its selected resident name before the typed index replaces them.
- * Keeping this maximum at the largest numbered library lets the same SRAM
- * object be disposed and reused instead of allocating one name array per
- * library or per Instrument type.
+ * sorted rows. HCNAMES now has its own 129-row mirror, so this allocation can
+ * remain a valid Bank index across resident-name transactions. Keeping this
+ * maximum at the largest numbered library lets one SRAM object be disposed and
+ * reused instead of allocating one name array per library or Instrument type.
  */
 typedef enum {
     FS_NAME_CACHE_NONE = 0u,
@@ -172,8 +171,11 @@ typedef enum {
     FS_NAME_CACHE_KIT,
     FS_NAME_CACHE_SCENE,
     FS_NAME_CACHE_BANK,
-    /* Temporary 129-row root register image; never a second allocation. */
+    /* Legacy tag retained for compatibility checks; HCNAMES storage is now dedicated. */
     FS_NAME_CACHE_HCNAMES,
+    /* Rebuild-chain selector only: write the retained Bank cache directly.
+     * This value never tags fs_list_cache_kind or exposes another cache domain. */
+    FS_NAME_CACHE_BANK_DIRECT_WRITE,
 } fs_name_cache_kind_t;
 
 /* -----------------------------------------------------------------------
@@ -894,6 +896,34 @@ static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
  * belongs to playable Scene/Kit data or Menu scratch.
  */
 static uint16_t fs_resident_source[FS_RESIDENT_NAMES_ROW_COUNT];
+/*
+ * Option 1C: dedicated HCNAMES name mirror.
+ *
+ * 129 rows x 9 bytes = 1,161 bytes.  HCNAMES readers and writers use this
+ * mirror instead of borrowing fs_list_cache_name, so a normal Bank Load/Save
+ * no longer destroys a valid .hcindex cache in the 9,000-byte shared storage.
+ *
+ * Coherency: hcnames_mirror_valid gates all reads. It is cleared at card mount,
+ * before physical reload, and before every write-capable HCNAMES open. A
+ * read-only load becomes VALID after close; a rewrite becomes PUBLISH_PENDING
+ * after close and VALID only after the facade's final afatfs_sync(). A failed
+ * write/sync leaves it invalid and forces a later physical reload, so no second
+ * name image or rollback allocation is needed.
+ *
+ * The fs_resident_source[] register is already separate and needs no change;
+ * this mirror replaces only the name-row borrowing path.
+ */
+static char hcnames_name_mirror[FS_RESIDENT_NAMES_ROW_COUNT]
+                               [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+/* Reuse the approved one-byte validity allocation as a three-state durability
+ * gate. INVALID is unreadable; PUBLISH_PENDING means a complete HCNAMES handle
+ * closed but the facade's mandatory final afatfs_sync() has not succeeded;
+ * VALID is the only state public/internal readers may trust. This closes the
+ * power/card-error window without adding a transaction byte or rollback image. */
+#define FS_HCNAMES_MIRROR_INVALID         0u
+#define FS_HCNAMES_MIRROR_VALID           1u
+#define FS_HCNAMES_MIRROR_PUBLISH_PENDING 2u
+static uint8_t hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
 static filesystem_stage_workspace_t fs_stage_workspace;
 static filesystem_autosave_parameter_cache_t fs_autosave_parameter_cache;
 
@@ -921,6 +951,8 @@ _Static_assert(sizeof(fs_list_cache_name) ==
                "the index/HCNAMES cache must remain exactly 9000 bytes");
 _Static_assert(sizeof(fs_resident_source) == 258u,
                "HCNAMES provenance register must remain 129 x uint16_t");
+_Static_assert(sizeof(hcnames_name_mirror) == 1161u,
+               "Option 1C: HCNAMES mirror must remain exactly 129 x 9 bytes");
 _Static_assert(sizeof(fs_identity_name) + BANK_DISPLAY_NAME_LEN + 1u == 81u,
                "one Bank plus one Scene, Kit, and six Instrument names is 81 bytes");
 _Static_assert(INSTRUMENT_SLOT_COUNT * INSTRUMENT_PARAM_COUNT <=
@@ -1102,6 +1134,24 @@ static char op_bank_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static char op_save_bank_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_save_bank_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
 static uint16_t op_bank_child_present_mask = 0u;
+/*
+ * Option 1A: cache every Bank child's lexical-winning display name during the
+ * single phase 15 scan.  144 bytes (16 slots x 9 bytes).
+ *
+ * Why: the previous code rescanned the entire Bank directory once per child
+ * (phases 27-30) to rediscover one display name, producing an O(n^2) traversal
+ * for a full 16-Scene Bank.  Capturing names during the existing phase 15 scan
+ * and looking them up at phase 27 reduces that to O(n).
+ *
+ * Inputs: each directory object visited during the Bank child scan at phase 15.
+ * Outputs: one eight-cell display name per valid 00..15 slot.  Cleared before
+ * the scan; paired with op_bank_child_present_mask as the combined result.
+ * The lexical-winner rule matches filesystem_displayPrecedesCached(): for two
+ * directories at the same slot, the casefold-first/raw-case tiebreak selects
+ * the same deterministic representative used by Kit, Scene, and Bank scanners.
+ */
+static char op_bank_child_display[STORAGE_BANK_SCENE_MAX_SLOTS]
+                                  [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 static uint16_t op_bank_scene_load_mask = 0u;
 static uint16_t op_bank_scene_failed_mask = 0u;
 static uint16_t op_bank_scene_save_mask = 0u;
@@ -1110,14 +1160,43 @@ static uint8_t op_bank_child_cursor = 0u;
 static uint8_t op_bank_loaded_scene = 0u;
 static uint8_t op_bank_payload_active = 0u;
 /*
+ * Option 2: Bank Save operation-scoped card-clean bookkeeping.
+ *
+ * op_bank_sd_clean_candidate_mask accumulates children written by the active
+ * Bank Save but not yet published; it becomes durable clean only after the
+ * whole operation crosses afatfs_sync() and the deferred `.hcindex` chain.
+ * op_bank_sd_clean_candidate_slot is the root Bank slot being saved; it must
+ * survive the deferred index rebuild because that rebuild re-enters
+ * filesystem_start() and clobbers op_slot. These two fields are initialized at
+ * Bank Save request acceptance and consumed only at Bank Save completion.
+ */
+static uint16_t op_bank_sd_clean_candidate_mask = 0u;
+static uint16_t op_bank_sd_clean_candidate_slot = BANK_SD_CLEAN_SLOT_NONE;
+/*
+ * Option 1B: set when afatfs_chdirParent() returns the CWD to the selected
+ * Bank directory after a successful child Scene Load/Save.  Bank phase 20
+ * (load) and phase 12 (save) check this to skip the /Bank/ reopen phases
+ * (21-26 load, 13-19 save) and proceed directly to the next child.  Cleared
+ * when a chdirParent failure forces a root return, or at operation start.
+ */
+static uint8_t op_bank_cwd_at_parent = 0u;
+/*
  * Bank Save per-child safe-replacement state.
  *
- * op_bank_existing_dir_found: nonzero when the Bank-directory scan (phase 4)
- * found an existing `NNN Name` directory at op_slot. Controls whether phase 54
- * issues a rename (different name) or skips directly to mkdir_lfn (phase 49).
- * Reset at phase 4 entry. Affiliates: filesystem_saveBankDirectory_tick()
- * phases 4/51-55/49.
+ * op_bank_existing_dir_found reuses one byte as a saturated scan result. Its
+ * low bits count zero, one, or multiple target-slot directories; the high bit
+ * records an interrupted scan or malformed LFN anywhere in the namespace. The
+ * first valid candidate is still captured in op_repair_old_name so phase 54
+ * preserves existing rename/create behavior. The post-Save direct-index gate
+ * accepts only a complete, non-ambiguous zero/one result with an exact known
+ * final identity. This adds no retained RAM. Reset at phase 4 entry. Affiliates:
+ * filesystem_saveBankDirectory_tick() phases 4/51-55/49/86.
  */
+#define FS_BANK_DIR_SCAN_MATCH_MASK     0x03u
+#define FS_BANK_DIR_SCAN_NONE           0u
+#define FS_BANK_DIR_SCAN_ONE            1u
+#define FS_BANK_DIR_SCAN_MULTIPLE       2u
+#define FS_BANK_DIR_SCAN_AMBIGUOUS_FLAG 0x80u
 static uint8_t op_bank_existing_dir_found = 0u;
 typedef enum {
     FS_LOAD_INVALID_NONE = 0u,
@@ -1551,12 +1630,34 @@ static uint8_t op_test_verify_seen_fold = 0u;
 #define FS_TEST_LOOKUP_CREATE 2u
 #endif
 
+/*
+ * Lower-layer polls per busy facade pass while Menu proves that an eligible
+ * stopped-playback command owns a suspended codec.
+ *
+ * Input: fs_fast_drain_active selects this instead of one. Output: at most four
+ * afatfs_poll() calls before one operation-state-machine tick. Four gives an
+ * initial 64-byte SD-burst ceiling without changing driver/idle/callback
+ * behavior. Tune only from hardware evidence. Affiliates: filesystem_tick(),
+ * SDCARD_BURST_SIZE, and Menu's no-playback lifecycle.
+ */
+#define FS_FAST_DRAIN_POLL_PASSES 4u
 #define FS_IDLE_POLL_MS 5u
 /* .all still carries the old raw meta prefix until that container is rebuilt.
  * settings.cfg does not use this compatibility span: root settings now persist
  * as keyed text and the former raw globals filename is deliberately ignored. */
 #define FS_GLOBALS_LEGACY_LEN_22  22u
 static uint16_t fs_last_idle_poll_tick = 0;
+/*
+ * Runtime fast-drain selector (+1 byte normal SRAM1 .bss; approval required).
+ *
+ * Writer: filesystem_setFastDrain(), called only by Menu after verified codec
+ * suspend and before resume. Readers: filesystem_tick() chooses one/four polls;
+ * the accessor makes Menu transitions idempotent. Lifetime: process-wide,
+ * meaningful only during one eligible accepted command. It owns no payload,
+ * FAT handle, name, callback, or transport state and is not volatile because
+ * all access is foreground-only.
+ */
+static uint8_t fs_fast_drain_active = 0u;
 /*
  * Debounced settings.cfg persistence state.
  *
@@ -1675,6 +1776,9 @@ static uint8_t fs_autosave_page_suppressed = 0u;
  */
 extern uint8_t parameters2[END_OF_SOUND_PARAMETERS];
 
+/* Option 1D forward declaration — defined beside filesystem_readTextLine(). */
+static void filesystem_resetTextReader(void);
+
 /* -----------------------------------------------------------------------
 ** fopen callback - asyncfatfs fires this when file open completes
 ** ----------------------------------------------------------------------- */
@@ -1682,6 +1786,16 @@ static void on_file_opened(afatfsFilePtr_t file)
 {
     op_file = file;
     op_file_ready = true;
+    /*
+     * Option 1D: reset the buffered text reader on every file open.
+     *
+     * Any bytes remaining in the staging_buf read-ahead window belong to the
+     * previous file and must not carry over.  Resetting here — at the single
+     * point where every text-reading path acquires its handle — covers all
+     * callers (kitset, instrument, HCNAMES, settings, index) without
+     * per-caller reset audits.
+     */
+    filesystem_resetTextReader();
 }
 
 /* -----------------------------------------------------------------------
@@ -2852,7 +2966,18 @@ static void filesystem_hcprmsCapsuleFreeze(void)
     transport[1] = sd_snapshot.state;
     transport[2] = sd_snapshot.operation;
     filesystem_hcprmsCapsulePut16(transport + 3u, sd_snapshot.offset);
-    filesystem_hcprmsCapsulePut16(transport + 5u, sd_snapshot.retry_count);
+    /*
+     * Freeze the SD wait coordinate using the schema-2 elapsed-time meaning.
+     *
+     * Input: read-only sd_snapshot.wait_ms, already zero outside the two
+     * response waits. Output: the same little-endian E7 bytes 5..6 in the
+     * fixed 64-byte capsule. Why: the driver no longer owns a retry counter,
+     * and serializing its raw start tick would be both mislabeled and dependent
+     * on boot uptime. Geometry, stage tags, callback-pending byte, and product
+     * storage are unchanged. Affiliates: sdcard_getTransportSnapshot(),
+     * HCPRMS_BOOT_CAPSULE_SCHEMA_VERSION, DEV_MODES.md, and the host decoders.
+     */
+    filesystem_hcprmsCapsulePut16(transport + 5u, sd_snapshot.wait_ms);
     transport[7] = sd_snapshot.callback_pending;
 }
 
@@ -3329,6 +3454,16 @@ static uint8_t filesystem_hcnamesProbeIsScanning(void)
 
 static void filesystem_complete(fs_status_t final_status)
 {
+    /* A complete HCNAMES handle is not durable authority until the shared
+     * final-sync owner promotes PUBLISH_PENDING. If that owner reports an
+     * error/stall, discard trust in the one in-RAM image so the next consumer
+     * must reload physical HCNAMES. Read-only VALID mirrors are unaffected by
+     * unrelated operation errors. */
+    if (final_status == FS_STATUS_ERROR &&
+        hcnames_mirror_valid == FS_HCNAMES_MIRROR_PUBLISH_PENDING) {
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+    }
+
     /*
      * Acknowledge a complete settings snapshot only after the shared flush.
      *
@@ -3520,6 +3655,24 @@ static void filesystem_completeLibraryIndexRebuild(fs_status_t final_status)
             ((uint32_t)op_slot <<
                  AUTOSAVE_TRACE_OPERATION_ERROR_SLOT_SHIFT));
     }
+    /*
+     * Option 2: publish Bank Save card-clean candidates only after the complete
+     * operation (primary write, final afatfs_sync(), and this deferred
+     * `.hcindex` chain) has succeeded. A failed/cancelled save leaves the mask
+     * unpublished. Scenes mutated while their candidate write was in flight are
+     * excluded so they are rewritten on the next Save rather than skipped.
+     * op_library_index_rebuild_kind still identifies the Bank rebuild at this
+     * point because it is reset just below.
+     */
+    if (final_status == FS_STATUS_DONE &&
+        (op_library_index_rebuild_kind == FS_NAME_CACHE_BANK ||
+         op_library_index_rebuild_kind == FS_NAME_CACHE_BANK_DIRECT_WRITE)) {
+        uint16_t publish_mask =
+            (uint16_t)(op_bank_sd_clean_candidate_mask &
+                       ~bank_sdSaveMutatedMask());
+        bank_publishSdCleanAuthority(op_bank_sd_clean_candidate_slot,
+                                     publish_mask);
+    }
     op_library_index_rebuild_callback = NULL;
     op_library_index_rebuild_kind = FS_NAME_CACHE_NONE;
     op_library_index_rebuild_pending = 0u;
@@ -3570,16 +3723,17 @@ static bool filesystem_startInstrumentIndexRebuildScan(fs_completion_cb_t cb)
                             FS_FILE_KIT, 0u, cb);
 }
 
-/* Start the boot-equivalent physical rescan/index rewrite after a save flush.
+/* Start the selected scan/index or direct-index chain after a save flush.
  *
- * What: replaces the old cache-row-only save update with a real Kit/Scene/Bank
- * directory scan. Why: a save can create, rename, or remove a numbered folder;
- * only scanning the parent directory observes the complete resulting set.
- * Inputs: op_library_index_rebuild_kind and the parked original callback.
- * Output: numbered-root kinds are rescanned before their full `.hcindex`
- * writer; Instrument Save already refreshed its typed cache, so its selected
- * registry `.hcindex` is written directly. No additional operation scratch is
- * allocated for the distinction.
+ * What: ordinary Kit/Scene/Bank kinds use the boot-equivalent physical scan;
+ * FS_NAME_CACHE_BANK_DIRECT_WRITE skips only that scan and starts the same
+ * complete Bank `.hcindex` writer from a precondition-validated retained cache.
+ * Why: Save can create, rename, duplicate, or otherwise make a cache uncertain,
+ * so physical scan remains the default and the direct selector is admitted only
+ * by filesystem_savedBankIndexCanWriteDirectly(). Inputs: rebuild selector and
+ * parked original callback. Output: either path retains the same index close,
+ * final sync, error propagation, and one-callback boundary. No retained state
+ * is added; the private enum selector reuses op_library_index_rebuild_kind.
  */
 static void filesystem_startLibraryIndexRebuild(void)
 {
@@ -3589,9 +3743,23 @@ static void filesystem_startLibraryIndexRebuild(void)
     op_library_index_rebuild_pending = 0u;
     op_library_index_rebuild_callback = completion_callback;
     completion_callback = NULL;
-    op_library_index_kind = kind;
+    op_library_index_kind = (kind == FS_NAME_CACHE_BANK_DIRECT_WRITE)
+        ? FS_NAME_CACHE_BANK : kind;
     status = FS_STATUS_IDLE;
     current_op = FS_INTERNAL_OP_NONE;
+
+    if (kind == FS_NAME_CACHE_BANK_DIRECT_WRITE) {
+        /* The Bank cache row was updated before the primary Save flush. Start
+         * the ordinary full index writer directly; its completion callback
+         * still owns the rebuild chain's final durable/error boundary. */
+        if (!filesystem_start(FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
+                              FS_FILE_BANK, 0u,
+                              filesystem_libraryIndexRebuildWriteComplete)) {
+            filesystem_makeNamedErrorCode("Idx", 4u);
+            filesystem_completeLibraryIndexRebuild(FS_STATUS_ERROR);
+        }
+        return;
+    }
 
     if (kind == FS_NAME_CACHE_INSTRUMENT) {
         if (!filesystem_startInstrumentIndexRebuildScan(
@@ -3664,6 +3832,14 @@ static void filesystem_flushFinish_tick(void)
      */
     if (!afatfs_sync())
         return;
+
+    /* Promote a fully streamed/closed HCNAMES mirror only after every dirty
+     * FAT/data sector has crossed the facade's mandatory sync gate. Do this
+     * before an optional index rebuild starts: HCNAMES is already durable even
+     * if the subsequent `.hcindex` scan/write fails independently. */
+    if (hcnames_mirror_valid == FS_HCNAMES_MIRROR_PUBLISH_PENDING) {
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_VALID;
+    }
 
     if (op_library_index_rebuild_pending) {
         filesystem_startLibraryIndexRebuild();
@@ -4626,19 +4802,18 @@ static uint16_t filesystem_residentSceneRow(uint8_t scene_index)
 static const char *filesystem_cachedResidentName(uint16_t row)
 {
     /*
-     * Borrow one HCNAMES cell while the general cache is in register mode.
+     * Option 1C: read one HCNAMES cell from the dedicated mirror.
      *
-     * Inputs: fixed resident row. Output: a NUL-terminated eight-cell cache
-     * value, or eight spaces when the row/cache domain is unavailable. Bank
-     * Save uses this to write Scene and Kit directory display components from
-     * the card authority, rather than from a duplicate SceneData Scene name.
-     * The returned pointer is cache-owned and only valid until the next cache
-     * transition. Affiliates: filesystem_prepareBankSceneSaveSource().
+     * Inputs: fixed resident row. Output: a NUL-terminated eight-cell mirror
+     * value, or eight spaces when the mirror is invalid or the row is out of
+     * range. Bank Save uses this to write Scene and Kit directory display
+     * components from the card authority. The returned pointer is mirror-owned
+     * and valid until the next HCNAMES transaction prepares a new read.
      */
-    if (fs_list_cache_kind != FS_NAME_CACHE_HCNAMES ||
+    if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID ||
         row >= FS_RESIDENT_NAMES_ROW_COUNT)
         return "        ";
-    return fs_list_cache_name[row];
+    return hcnames_name_mirror[row];
 }
 
 /* Validate one unflagged source value against the fixed HCNAMES row class. */
@@ -4732,16 +4907,19 @@ static void filesystem_prepareResidentNamesCache(void)
     uint16_t row;
 
     /*
-     * Borrow the existing generalized cache for the complete root register.
+     * Option 1C: prepare the dedicated HCNAMES mirror for a physical reload.
      *
-     * What: clears the previous `.hcindex` view, tags the same physical
-     * fs_list_cache_name allocation as HCNAMES, and exposes exactly 129 rows.
-     * Why: variable-length lines prevent safe in-place growth of one row, so a
-     * targeted update must preserve the other rows while rewriting the text
-     * file. Reusing the 9,000-byte cache adds no SRAM allocation; Menu copies
-     * its selected eight cells before the cache is replaced by `.hcindex`.
+     * Clears the mirror and invalidates it for readers.  The shared
+     * fs_list_cache_name storage is no longer touched, so a valid .hcindex
+     * or library cache survives an HCNAMES read/write cycle.  The mirror
+     * becomes valid again only after a successful close in the HCNAMES
+     * state machine, Bank Load phase 86, or Bank Save phase 86. Callers that
+     * can consume an already-valid mounted-card image (notably Bank Save) must
+     * test hcnames_mirror_valid before calling this reload primitive; clearing
+     * a valid image here would defeat the persistent-mirror contract.
      */
-    filesystem_clearNameCacheStorage();
+    memset(hcnames_name_mirror, 0, sizeof(hcnames_name_mirror));
+    hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
     /* A short/legacy register cannot retain source words from a prior cache
      * use.  Keep only caller-staged dirty values until this transaction writes
      * them through the normal durable HCNAMES path. */
@@ -4749,8 +4927,6 @@ static void filesystem_prepareResidentNamesCache(void)
         if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_DIRTY_FLAG) == 0u)
             fs_resident_source[row] = FS_RESIDENT_SOURCE_UNKNOWN;
     }
-    fs_list_cache_kind = FS_NAME_CACHE_HCNAMES;
-    fs_list_cache_count = FS_RESIDENT_NAMES_ROW_COUNT;
 }
 
 static uint8_t filesystem_parseResidentSourceToken(const char *token,
@@ -4802,8 +4978,7 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
      * row must contain exactly one tab and a valid source token.  A caller's
      * staged source wins over old card content until the rewrite is durable.
      */
-    if (row >= FS_RESIDENT_NAMES_ROW_COUNT ||
-        fs_list_cache_kind != FS_NAME_CACHE_HCNAMES || !line) {
+    if (row >= FS_RESIDENT_NAMES_ROW_COUNT || !line) {
         return 0u;
     }
     tab = strchr(line, '\t');
@@ -4830,10 +5005,11 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
         }
         name[name_len] = '\0';
     }
-    memset(fs_list_cache_name[row], 0, sizeof(fs_list_cache_name[row]));
+    /* Option 1C: write to the dedicated HCNAMES mirror. */
+    memset(hcnames_name_mirror[row], 0, sizeof(hcnames_name_mirror[row]));
     if (name[0] != '\0')
-        storage_copyDisplayName(fs_list_cache_name[row], name);
-    fs_list_cache_name[row][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        storage_copyDisplayName(hcnames_name_mirror[row], name);
+    hcnames_name_mirror[row][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_DIRTY_FLAG) == 0u)
         fs_resident_source[row] = source;
     return 1u;
@@ -4842,19 +5018,19 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
 static void filesystem_cacheResidentName(uint16_t row, const char *name)
 {
     /*
-     * Overlay only a committed display name while retaining its paired source.
+     * Option 1C: overlay a display name in the dedicated HCNAMES mirror.
+     *
      * Callers that change provenance use filesystem_setResidentSource() before
      * the rewrite; this helper deliberately cannot manufacture an implicit
      * source from a UI string.
      */
-    if (row >= FS_RESIDENT_NAMES_ROW_COUNT ||
-        fs_list_cache_kind != FS_NAME_CACHE_HCNAMES) {
+    if (row >= FS_RESIDENT_NAMES_ROW_COUNT) {
         return;
     }
-    memset(fs_list_cache_name[row], 0, sizeof(fs_list_cache_name[row]));
+    memset(hcnames_name_mirror[row], 0, sizeof(hcnames_name_mirror[row]));
     if (name && name[0] != '\0')
-        storage_copyDisplayName(fs_list_cache_name[row], name);
-    fs_list_cache_name[row][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        storage_copyDisplayName(hcnames_name_mirror[row], name);
+    hcnames_name_mirror[row][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
 }
 
 static void filesystem_clearResidentSourceDirtyFlags(void)
@@ -5133,6 +5309,9 @@ static void filesystem_residentNames_tick(void)
             return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE || !update) {
+            /* Option 1C: read-only success validates the mirror for readers. */
+            if (op_close_status == FS_STATUS_DONE)
+                hcnames_mirror_valid = FS_HCNAMES_MIRROR_VALID;
             filesystem_finish(op_close_status);
             return;
         }
@@ -5165,10 +5344,10 @@ static void filesystem_residentNames_tick(void)
         op_phase = 5u;
         return;
 
-    case 5: /* STREAM THE PRESERVED REGISTER */
+    case 5: /* STREAM THE PRESERVED REGISTER (1C: mirror) */
         if (op_item_offset < FS_RESIDENT_NAMES_ROW_COUNT) {
             if (op_bytes_done == 0u) {
-                const char *name = fs_list_cache_name[op_item_offset];
+                const char *name = hcnames_name_mirror[op_item_offset];
                 op_line_len = filesystem_formatResidentNameLine(
                     op_line_buf,
                     sizeof(op_line_buf),
@@ -5195,13 +5374,16 @@ static void filesystem_residentNames_tick(void)
             op_phase = 6u;
         return;
 
-    case 6: /* WAIT DESTINATION CLOSE + FLUSH */
+    case 6: /* WAIT DESTINATION CLOSE + ARM FINAL-SYNC PUBLICATION */
         if (!op_close_done)
             return;
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
         filesystem_clearResidentSourceDirtyFlags();
+        /* The closed register matches the mirror, but only the shared final
+         * sync may promote this pending image to reader-visible validity. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_PUBLISH_PENDING;
         /*
          * Finish only the requested resident-name transaction.
          *
@@ -5474,6 +5656,8 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             filesystem_finish(op_close_status);
             return;
         }
+        /* Option 1C: successful HCNAMES read validates the mirror. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_VALID;
         op_stream_index = 0u;
         op_phase = 4u;
         return;
@@ -5586,7 +5770,11 @@ static void filesystem_ensureAutosaveFiles_tick(void)
                 op_stream_index, op_bytes_done, crc_bytes,
                 filesystem_autosaveCreatedTargetGeneration(),
                 bank_restoreBankSlot(), bank_displayName(),
-                (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
+                /* Option 1C gives HCNAMES a dedicated image.  CRC calculation
+                 * and the later byte formatter must consume that same image;
+                 * fs_list_cache_name may now retain an unrelated .hcindex. */
+                (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])
+                    hcnames_name_mirror);
             op_bytes_done += crc_bytes;
             return;
         }
@@ -5650,7 +5838,10 @@ static void filesystem_ensureAutosaveFiles_tick(void)
                 staging_buf, op_bytes_done, op_write_line_len,
                 filesystem_autosaveCreatedTargetGeneration(),
                 bank_restoreBankSlot(), op_stream_index, bank_displayName(),
-                (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
+                /* Keep emitted name bytes paired with the dedicated mirror
+                 * used to calculate this record's CRC in phase 9. */
+                (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])
+                    hcnames_name_mirror);
         }
         requested = (uint16_t)(op_write_line_len - op_write_line_offset);
         written = afatfs_fwrite(op_file, staging_buf + op_write_line_offset,
@@ -6687,6 +6878,8 @@ static void filesystem_autosaveParameterDrain_tick(void)
             filesystem_autosaveWriterFinishError();
             return;
         }
+        /* Option 1C: successful HCNAMES read validates the mirror. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_VALID;
         op_autosave_writer.recovery_target_index = 1u;
         op_autosave_writer.target_crc32c = autosave_recordCrcBegin();
         op_autosave_writer.stream_offset = 0u;
@@ -6716,8 +6909,10 @@ static void filesystem_autosaveParameterDrain_tick(void)
                     op_autosave_writer.stream_offset, crc_bytes,
                     filesystem_autosaveRecoveryGeneration(),
                     bank_restoreBankSlot(), bank_displayName(),
+                    /* Recovery just populated the dedicated HCNAMES mirror;
+                     * the shared library cache is deliberately untouched. */
                     (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])
-                        fs_list_cache_name);
+                        hcnames_name_mirror);
             op_autosave_writer.stream_offset += crc_bytes;
             return;
         }
@@ -6819,7 +7014,10 @@ static void filesystem_autosaveParameterDrain_tick(void)
             filesystem_autosaveRecoveryGeneration(),
             bank_restoreBankSlot(), op_autosave_writer.target_crc32c,
             bank_displayName(),
-            (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])fs_list_cache_name);
+            /* Emit exactly the dedicated name image used by recovery CRC
+             * preparation, never whichever .hcindex remains shared. */
+            (const char (*)[AUTOSAVE_HCNAMES_ROW_BYTES])
+                hcnames_name_mirror);
         op_autosave_writer.stream_offset += op_autosave_writer.chunk_bytes;
         op_autosave_writer.chunk_written = 0u;
         return;
@@ -7776,6 +7974,54 @@ static void filesystem_recordSavedBankDirectory(const char *display_name,
     (void)open_name;
 }
 
+/* Decide whether Bank Save may bypass the post-write physical root scan.
+ *
+ * Inputs: the still-retained slot-ordered Bank cache, the complete phase-52
+ * physical preflight result, the exact requested/found root components, and
+ * whether phase 54 attempted a rename. Output: nonzero only when updating
+ * fs_list_cache_name[op_slot] is an exact representation of the final physical
+ * namespace. New slots are safe after a complete zero-match scan; existing
+ * slots are safe only when exactly one component parses to the same case-aware
+ * eight-cell display row that Save will publish. Parsing both sides avoids a
+ * false fallback caused only by FAT trimming of trailing display spaces, while
+ * still rejecting case-only differences. Any duplicate, malformed/failed scan,
+ * rename, or cache-domain change retains the boot-equivalent scan fallback.
+ * Why: direct `.hcindex` writing is a speed optimization, never a substitute
+ * for physical namespace authority. Affiliates: Bank Save phases 45/86 and
+ * filesystem_startLibraryIndexRebuild().
+ */
+static uint8_t filesystem_savedBankIndexCanWriteDirectly(void)
+{
+    uint8_t match_count = (uint8_t)(op_bank_existing_dir_found &
+                                    FS_BANK_DIR_SCAN_MATCH_MASK);
+
+    if (fs_list_cache_kind != FS_NAME_CACHE_BANK ||
+        fs_list_cache_count != STORAGE_BANK_MAX_SLOTS ||
+        op_slot >= STORAGE_BANK_MAX_SLOTS ||
+        (op_bank_existing_dir_found & FS_BANK_DIR_SCAN_AMBIGUOUS_FLAG) != 0u ||
+        match_count >= FS_BANK_DIR_SCAN_MULTIPLE ||
+        op_rename_done != 0u) {
+        return 0u;
+    }
+    if (match_count == FS_BANK_DIR_SCAN_ONE) {
+        uint16_t found_slot;
+        uint16_t requested_slot;
+        char found_display[STORAGE_KIT_DISPLAY_NAME_LEN];
+        char requested_display[STORAGE_KIT_DISPLAY_NAME_LEN];
+
+        if (!storage_parseNumberedFolder(op_repair_old_name,
+                                         &found_slot, found_display) ||
+            !storage_parseNumberedFolder(op_save_bank_dir_display_name,
+                                         &requested_slot, requested_display) ||
+            found_slot != op_slot || requested_slot != op_slot ||
+            memcmp(found_display, requested_display,
+                   STORAGE_KIT_DISPLAY_NAME_LEN) != 0) {
+            return 0u;
+        }
+    }
+    return 1u;
+}
+
 static int8_t filesystem_compareInstrumentDisplayName(const char *a,
                                                        const char *b)
 {
@@ -8362,13 +8608,54 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
     filesystem_recordInstrumentFile(display_name, open_name);
 }
 
+/*
+ * Option 1D: buffered text reader state.
+ *
+ * text_buf_pos and text_buf_len track a read-ahead window inside staging_buf.
+ * When the window is exhausted, one bounded afatfs_fread() refills it — at most
+ * the remaining per-tick budget — replacing up to sixteen individual one-byte
+ * read calls with one coalesced call.  Leftover bytes (e.g. after a newline is
+ * found mid-window) carry over to the next tick automatically.
+ *
+ * staging_buf ownership during text reads is guaranteed by the same facade
+ * exclusivity that makes Pattern/Autosave streaming safe: only one typed
+ * operation is active at a time, and background writers (autosave CRC, trace
+ * flush, settings writer) run only while the facade is idle or within their
+ * own internal operations.
+ *
+ * Reset: filesystem_resetTextReader() must be called before the first read from
+ * any newly opened file.  The on_file_opened callback handles this for every
+ * path that transitions through op_file_ready.
+ */
+static uint16_t text_buf_pos = 0u;
+static uint16_t text_buf_len = 0u;
+
+_Static_assert(sizeof(op_bank_child_display) == 144u,
+               "Option 1A: Bank child display cache must remain exactly 16 x 9 bytes");
+_Static_assert(sizeof(text_buf_pos) + sizeof(text_buf_len) == 4u,
+               "Option 1D: buffered reader cursors must remain exactly 4 bytes");
+_Static_assert(sizeof(hcnames_name_mirror) + sizeof(hcnames_mirror_valid) +
+               sizeof(op_bank_child_display) +
+               sizeof(text_buf_pos) + sizeof(text_buf_len) +
+               sizeof(op_bank_cwd_at_parent) == 1311u,
+               "Option 1 total SRAM1 must be exactly 1311 bytes (within 1320-byte reservation)");
+
+static void filesystem_resetTextReader(void)
+{
+    text_buf_pos = 0u;
+    text_buf_len = 0u;
+}
+
 /* Read one text line from an asyncfatfs file without blocking the pump.
  *
  * Inputs: open file handle, caller-owned line buffer, current length pointer,
  * capacity, and result flags. Outputs: line_ready with a NUL-terminated line,
  * eof when no more data remains, WAIT when the per-tick byte budget is spent,
  * or LINE_TOO_LONG for malformed text. Clients: the directory kit loader for
- * kitset.kcg and instrument files.
+ * kitset.kcg and instrument files, HCNAMES reader, settings reader.
+ *
+ * Option 1D: reads through a staging_buf window instead of one-byte-at-a-time
+ * afatfs_fread() calls.  The 16-character per-tick parse budget is unchanged.
  */
 static storage_status_t filesystem_readTextLine(afatfsFilePtr_t file,
                                                 char *buf,
@@ -8382,35 +8669,43 @@ static storage_status_t filesystem_readTextLine(afatfsFilePtr_t file,
     *line_ready = 0u;
     *eof = 0u;
 
-    while (budget-- > 0u) {
-        uint8_t c;
-        uint32_t n = afatfs_fread(file, &c, 1u);
-
-        if (n == 0u) {
-            if (afatfs_feof(file)) {
-                if (*len > 0u) {
-                    buf[*len] = '\0';
-                    *len = 0u;
-                    *line_ready = 1u;
-                } else {
-                    *eof = 1u;
+    while (budget > 0u) {
+        if (text_buf_pos >= text_buf_len) {
+            uint32_t n = afatfs_fread(file, staging_buf, (uint32_t)budget);
+            if (n == 0u) {
+                if (afatfs_feof(file)) {
+                    if (*len > 0u) {
+                        buf[*len] = '\0';
+                        *len = 0u;
+                        *line_ready = 1u;
+                    } else {
+                        *eof = 1u;
+                    }
                 }
+                return STORAGE_STATUS_OK;
             }
-            return STORAGE_STATUS_OK;
+            text_buf_pos = 0u;
+            text_buf_len = (uint16_t)n;
         }
 
-        if (c == '\r')
-            continue;
-        if (c == '\n') {
-            buf[*len] = '\0';
-            *len = 0u;
-            *line_ready = 1u;
-            return STORAGE_STATUS_OK;
+        {
+            uint8_t c = staging_buf[text_buf_pos];
+            text_buf_pos++;
+            budget--;
+
+            if (c == '\r')
+                continue;
+            if (c == '\n') {
+                buf[*len] = '\0';
+                *len = 0u;
+                *line_ready = 1u;
+                return STORAGE_STATUS_OK;
+            }
+            if (*len >= (uint8_t)(cap - 1u))
+                return STORAGE_STATUS_LINE_TOO_LONG;
+            buf[*len] = (char)c;
+            *len = (uint8_t)(*len + 1u);
         }
-        if (*len >= (uint8_t)(cap - 1u))
-            return STORAGE_STATUS_LINE_TOO_LONG;
-        buf[*len] = (char)c;
-        *len = (uint8_t)(*len + 1u);
     }
 
     return STORAGE_STATUS_WAIT;
@@ -8873,6 +9168,16 @@ static void filesystem_loadKitDirectory_tick(void)
                         scene_t *target_scene = scene_get(scene_index);
                         if (target_scene) {
                             target_scene->kit = op_staged_kit;
+                            /*
+                             * Option 2: a root Kit Load replaces the resident
+                             * Kit from a root `Kit/` folder, not from the
+                             * identified Bank child, so this Scene's
+                             * card-clean bit clears. Direct assignment bypasses
+                             * the scalar Scene/Kit setters, hence the explicit
+                             * invalidation. Affiliate:
+                             * bank_invalidateSdCleanScene().
+                             */
+                            bank_invalidateSdCleanScene(scene_index);
                         }
                     }
                 }
@@ -10487,27 +10792,53 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 72u;
         return;
 
-    case 72: /* RETURN ROOT + FINISH */
+    case 72: /* RETURN PARENT OR ROOT + FINISH */
         if (filesystem_bankPayloadDetailActive())
             filesystem_bootLoggingSetBankSceneDetail('P');
-        if (!afatfs_chdir(NULL))
-            return;
         if (current_op == FS_INTERNAL_OP_LOAD_BANK &&
             op_bank_payload_active) {
             /*
-             * Return control to the Bank child loop instead of completing the
-             * public operation.
+             * Option 1B: retain the selected Bank parent only after a
+             * successfully completed child.
              *
-             * The Scene loader has restored the filesystem root after one
-             * child payload. The Bank loader will reopen the selected Bank
-             * folder, advance op_bank_child_cursor, and either load the next
-             * selected child or atomically commit BankData once the mask is
-             * exhausted.
+             * CWD postcondition: the selected Bank directory.  One
+             * afatfs_chdirParent() climbs from the `SS Name/` child directory
+             * (the Scene loader's preceding phases have already returned from
+             * any Kit subdir) to the Bank parent.  On success, Bank phase 20
+             * can advance the cursor and proceed directly to phase 27 without
+             * reopening /Bank/.  On failure, fall back to root via
+             * afatfs_chdir(NULL) and let phases 21-26 reopen normally.
+             *
+             * A failed embedded Kit is different: phases 22-31 can reach this
+             * terminal while CWD is still `SS Name/Kit Name/`.  One parent
+             * step would then land in the Scene, not the Bank, and falsely
+             * arming op_bank_cwd_at_parent would make the next sibling open
+             * relative to the wrong directory (or write final HCNAMES there).
+             * Every failed child therefore restores root unconditionally;
+             * only the successful Pattern/Effects path may use parent retain.
              */
+            if (op_close_status != FS_STATUS_DONE) {
+                op_bank_cwd_at_parent = 0u;
+                if (!afatfs_chdir(NULL))
+                    return;
+            } else {
+                afatfsOperationStatus_e ast = afatfs_chdirParent();
+                if (ast == AFATFS_OPERATION_IN_PROGRESS)
+                    return;
+                if (ast == AFATFS_OPERATION_FAILURE) {
+                    op_bank_cwd_at_parent = 0u;
+                    if (!afatfs_chdir(NULL))
+                        return;
+                } else {
+                    op_bank_cwd_at_parent = 1u;
+                }
+            }
             op_bank_payload_active = 0u;
             op_phase = 20u;
             return;
         }
+        if (!afatfs_chdir(NULL))
+            return;
         if (op_close_status == FS_STATUS_DONE &&
             current_op == FS_INTERNAL_OP_LOAD_SCENE) {
             /*
@@ -10723,6 +11054,10 @@ static void filesystem_loadBankDirectory_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        /* This preload is input to a Bank-owned targeted rewrite, not a
+         * read-only publication. Keep the mirror invalid while child rows are
+         * overlaid so readers cannot observe names that HCNAMES has not yet
+         * closed and flushed. Phase 86 alone publishes the final image. */
         op_phase = 1u;
         return;
 
@@ -10990,15 +11325,21 @@ static void filesystem_loadBankDirectory_tick(void)
             char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 
             /*
-             * Bank child discovery records occupancy only.
+             * Option 1A: capture presence AND the lexical-winning display name
+             * for every Bank child in a single pass.
              *
-             * Inputs: public child directory names inside the selected Bank.
-             * Output: one bit in op_bank_child_present_mask for each valid
-             * 00..15 child. Why: retaining all display names and aliases here
-             * consumed a non-authoritative 368-byte Bank-local cache. The
-             * selected child is rescanned below immediately before opening,
-             * so duplicate ordering and an open key need exist for one child
-             * only in existing operation scratch.
+             * Inputs: each public child directory inside the selected Bank.
+             * Outputs: one bit in op_bank_child_present_mask and one
+             * eight-char display name in op_bank_child_display[child_slot]
+             * for each valid 00..15 child.  The lexical-winner rule mirrors
+             * filesystem_displayPrecedesCached(): for duplicate directories at
+             * the same slot, the casefold-first / raw-case tiebreak selects
+             * the same deterministic representative.
+             *
+             * Why: the previous code deferred name capture to a per-child
+             * rescan (phases 27-30), producing an O(n^2) directory traversal
+             * for a full 16-Scene Bank.  Capturing here during the existing
+             * single scan reduces that to O(n).
              */
             if (storage_parseBankSceneFolder(op_object.id.displayName,
                                              &child_slot,
@@ -11006,6 +11347,14 @@ static void filesystem_loadBankDirectory_tick(void)
                 op_bank_child_present_mask =
                     (uint16_t)(op_bank_child_present_mask |
                                (uint16_t)(1u << child_slot));
+                display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+                if (op_bank_child_display[child_slot][0] == '\0' ||
+                    filesystem_displayPrecedesCached(
+                        display,
+                        op_bank_child_display[child_slot])) {
+                    memcpy(op_bank_child_display[child_slot], display,
+                           STORAGE_SCENE_DISPLAY_NAME_LEN + 1u);
+                }
             }
         }
         return;
@@ -11153,12 +11502,9 @@ static void filesystem_loadBankDirectory_tick(void)
         }
         op_bank_child_cursor = child_slot;
         /*
-         * The first selected child can be rediscovered immediately because
-         * the parent Bank directory remains the current directory after phase
-         * 16 closes its scan handle. Inputs: selected slot bit only. Output:
-         * phases 27..31 retain one display name long enough to rebuild/open
-         * that child; the shared Scene stage is initialized only after the
-         * matching on-card directory has been found.
+         * The first selected child's display name is already cached from the
+         * phase 15 scan (Option 1A).  Phase 27 copies it directly into
+         * op_scene_display_name and proceeds to phase 31 to format/open.
          */
         op_phase = 27u;
         return;
@@ -11211,7 +11557,23 @@ static void filesystem_loadBankDirectory_tick(void)
             if ((op_bank_scene_load_mask &
                  (uint16_t)(1u << child_slot)) != 0u) {
                 op_bank_child_cursor = child_slot;
-                op_phase = 21u;
+                /*
+                 * Option 1B: if CWD is still at the selected Bank directory
+                 * (chdirParent succeeded at phase 72), skip the /Bank/ reopen
+                 * phases (21-26) and proceed directly to phase 27 which uses
+                 * the cached name from Option 1A.  If CWD is at root (failure
+                 * fallback), phases 21-26 reopen /Bank/ normally.
+                 *
+                 * Set op_close_done and op_close_status for the fast path so
+                 * phase 27's guard passes without a pending close.
+                 */
+                if (op_bank_cwd_at_parent) {
+                    op_close_done = true;
+                    op_close_status = FS_STATUS_DONE;
+                    op_phase = 27u;
+                } else {
+                    op_phase = 21u;
+                }
                 return;
             }
         }
@@ -11419,95 +11781,25 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         op_kit_slot_dir = NULL;
         /*
-         * Rescan the current selected Bank parent for just one child slot.
+         * Option 1A: look up the cached display name instead of rescanning.
          *
-         * Inputs: op_bank_child_cursor and the parent CWD restored by phases
-         * 21..26 (or retained after phase 16 for the first child). Output:
-         * op_scene_display_name is the sole transient child name. Opening
-         * `.` gives findNextObject() a handle without allocating the former
-         * 16-name/16-alias Bank cache; phase 31 turns that one name into the
-         * exact directory component used by the shared Scene loader.
+         * Replaces the former phases 27-30 per-child rescan.  The previous
+         * code reopened "." on the Bank parent, iterated every directory entry
+         * a second time, and retained only the one matching child_cursor —
+         * O(n) work repeated up to 16 times.
+         *
+         * Inputs: op_bank_child_display[op_bank_child_cursor], populated once
+         * during the phase 15 scan.  Output: op_scene_display_name receives
+         * the cached name.  op_close_done and op_close_status are set to
+         * satisfy phase 31's guards without a real close, since no file was
+         * opened.
          */
-        op_scene_display_name[0] = '\0';
-        filesystem_bootLoggingSetBankSceneDetail('O');
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(".", "r", on_file_opened))
-            return;
-        op_phase = 28u;
-        return;
-
-    case 28:
-        if (!op_file_ready)
-            return;
-        if (!op_file) {
-            filesystem_setPresetNameInvalid();
-            if (!afatfs_chdir(NULL))
-                return;
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_kit_slot_dir = op_file;
-        afatfs_findFirstObject(op_kit_slot_dir, &op_object_finder);
-        op_phase = 29u;
-        return;
-
-    case 29:
-    {
-        afatfsOperationStatus_e ast =
-            afatfs_findNextObject(op_kit_slot_dir,
-                                  &op_object_finder,
-                                  &op_object);
-        if (ast == AFATFS_OPERATION_IN_PROGRESS)
-            return;
-        if (ast == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 30u;
-            return;
-        }
-        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
-            afatfs_findLastObject(op_kit_slot_dir, &op_object_finder);
-            op_close_status = (op_scene_display_name[0] != '\0')
-                ? FS_STATUS_DONE
-                : FS_STATUS_ERROR;
-            op_phase = 30u;
-            return;
-        }
-        if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY) {
-            uint8_t child_slot;
-            char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
-
-            /*
-             * Retain the lexical winner for this one requested child slot.
-             *
-             * Inputs: one directory object and op_bank_child_cursor. Output:
-             * the pre-existing nine-byte op_scene_display_name scratch. This
-             * preserves the old duplicate policy while replacing the former
-             * sixteen-entry name/alias arrays; no filename key is stored,
-             * because storage_formatBankSceneDir() derives it in phase 31.
-             */
-            if (storage_parseBankSceneFolder(op_object.id.displayName,
-                                             &child_slot,
-                                             display) &&
-                child_slot == op_bank_child_cursor) {
-                display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-                if (op_scene_display_name[0] == '\0' ||
-                    filesystem_displayPrecedesCached(display,
-                                                     op_scene_display_name)) {
-                    memcpy(op_scene_display_name, display,
-                           STORAGE_SCENE_DISPLAY_NAME_LEN + 1u);
-                }
-            }
-        }
-        return;
-    }
-
-    case 30:
-        filesystem_bootLoggingSetBankSceneDetail('O');
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_slot_dir, on_file_closed))
-            op_phase = 31u;
+        memcpy(op_scene_display_name,
+               op_bank_child_display[op_bank_child_cursor],
+               STORAGE_SCENE_DISPLAY_NAME_LEN + 1u);
+        op_close_done = true;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 31u;
         return;
 
     case 31:
@@ -11562,6 +11854,10 @@ static void filesystem_loadBankDirectory_tick(void)
     case 83: /* OPEN HCNAMES DESTINATION AFTER BANK METADATA COMMIT */
         /* The final merged register is Bank-owned; retain this label across
          * open, streaming, close, and root return without changing errors. */
+        /* A write-capable open can truncate before the state machine reaches
+         * its close gate. Keep the public mirror invalid across that entire
+         * window; any error then forces the next consumer to reload the card. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
         filesystem_bootLoggingSetDetail("BKHCWRIT");
         op_file_ready = false;
         op_file = NULL;
@@ -11588,14 +11884,14 @@ static void filesystem_loadBankDirectory_tick(void)
         op_phase = 85u;
         return;
 
-    case 85: /* STREAM PRESERVED + SELECTED-BANK HCNAMES ROWS */
+    case 85: /* STREAM PRESERVED + SELECTED-BANK HCNAMES ROWS (1C: mirror) */
         if (op_item_offset < FS_RESIDENT_NAMES_ROW_COUNT) {
             if (op_bytes_done == 0u) {
                 op_line_len = filesystem_formatResidentNameLine(
                     op_line_buf, sizeof(op_line_buf),
-                    fs_list_cache_name[op_item_offset],
+                    hcnames_name_mirror[op_item_offset],
                     (uint8_t)!filesystem_residentNameIsBlank(
-                        fs_list_cache_name[op_item_offset]),
+                        hcnames_name_mirror[op_item_offset]),
                     fs_resident_source[op_item_offset], op_item_offset);
                 if (op_line_len == 0u) {
                     filesystem_finish(FS_STATUS_ERROR);
@@ -11616,7 +11912,7 @@ static void filesystem_loadBankDirectory_tick(void)
             op_phase = 86u;
         return;
 
-    case 86: /* CLOSE AND FLUSH HCNAMES */
+    case 86: /* CLOSE HCNAMES + ARM FINAL-SYNC PUBLICATION */
         if (!op_close_done)
             return;
         op_file = NULL;
@@ -11625,6 +11921,9 @@ static void filesystem_loadBankDirectory_tick(void)
         /* This Bank-owned writer bypasses the generic HCNAMES transaction, so
          * it must publish its staged source words at the same durable close. */
         filesystem_clearResidentSourceDirtyFlags();
+        /* Defer reader-visible validity until filesystem_flushFinish_tick()
+         * confirms that the complete Bank-owned register is durable. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_PUBLISH_PENDING;
         /*
          * Complete Bank Load after its resident identity is durable.
          *
@@ -12669,6 +12968,16 @@ static void filesystem_commitSceneStage(void)
         target->settings = fs_stage_workspace.scene_stage.settings;
         target->kit = fs_stage_workspace.scene_stage.kit;
         pat_initPatternSet(&target->pattern);
+        /*
+         * Option 2: only a standalone root Scene Load clears this Scene's
+         * card-clean bit. A delegated Bank Load also reaches this commit, but
+         * that is exactly the I/O that will later establish the clean bit in
+         * on_bank_load_complete(); invalidating here would erase it before it
+         * is published. Root Scene Load's source is `Scene/NNN`, not the
+         * identified Bank child, so its destinations become non-clean.
+         */
+        if (current_op == FS_INTERNAL_OP_LOAD_SCENE)
+            bank_invalidateSdCleanScene(scene_index);
     }
 }
 
@@ -14273,16 +14582,22 @@ static void filesystem_saveBankDirectory_tick(void)
             return;
         }
         /*
-         * Borrow the full resident name register before constructing the Bank
-         * tree. Inputs: accepted Save request and current root `/.hcnames`.
-         * Output: Scene/Kit directory display components come from the cache
-         * while Instrument member filenames retain their required 16-character
-         * source stems from SceneData. This replaces no new SRAM: the 129 rows
-         * occupy the already-existing generalized cache until Bank index
-         * restoration after direct replacement. Affiliates:
-         * prepareBankSceneSaveSource
-         * and final Bank HCNAMES writer.
+         * Acquire the full resident-name authority before constructing Bank
+         * children.
+         *
+         * Option 1C makes hcnames_name_mirror persistent for one mounted-card
+         * session. A valid mirror already matches the last successfully closed
+         * HCNAMES image, so Bank Save can use it immediately and preserve the
+         * shared Bank `.hcindex` without another root file open/read/close. If
+         * invalid (fresh mount or any failed HCNAMES transaction), clear the
+         * partial image and run the existing physical preload below. Outputs:
+         * filesystem_prepareBankSceneSaveSource() receives stable Scene/Kit
+         * names; the final Bank-owned HCNAMES writer remains mandatory.
          */
+        if (hcnames_mirror_valid == FS_HCNAMES_MIRROR_VALID) {
+            op_phase = 1u;
+            return;
+        }
         filesystem_prepareResidentNamesCache();
         if (!afatfs_chdir(NULL))
             return;
@@ -14357,6 +14672,9 @@ static void filesystem_saveBankDirectory_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        /* Option 1C: validate the mirror after successful HCNAMES preload so
+         * that internal callers can read rows during the save sequence. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_VALID;
         op_phase = 1u;
         return;
 
@@ -14451,6 +14769,10 @@ static void filesystem_saveBankDirectory_tick(void)
             return;
         if (st == AFATFS_OPERATION_FAILURE) {
             afatfs_findLastObject(op_delete_slot_dir, &op_object_finder);
+            /* Preserve existing Save fallback behavior, but make the later
+             * direct-index gate reject a namespace scan that did not finish. */
+            op_bank_existing_dir_found |=
+                FS_BANK_DIR_SCAN_AMBIGUOUS_FLAG;
             op_phase = 53u;
             return;
         }
@@ -14459,6 +14781,13 @@ static void filesystem_saveBankDirectory_tick(void)
             op_phase = 53u;
             return;
         }
+        if (op_object.lfnMalformed) {
+            /* A malformed visible object may conceal a duplicate/product
+             * identity. It need not abort the established Save path, but only
+             * a later physical rescan may authoritatively rebuild the index. */
+            op_bank_existing_dir_found |=
+                FS_BANK_DIR_SCAN_AMBIGUOUS_FLAG;
+        }
         if (op_object.id.kind == AFATFS_OBJECT_DIRECTORY &&
             !op_object.lfnMalformed) {
             uint16_t parsed_slot;
@@ -14466,12 +14795,27 @@ static void filesystem_saveBankDirectory_tick(void)
 
             if (storage_parseNumberedFolder(op_object.id.displayName,
                                              &parsed_slot, display) &&
-                parsed_slot == op_slot &&
-                !op_bank_existing_dir_found) {
-                strncpy(op_repair_old_name, op_object.id.displayName,
-                        sizeof(op_repair_old_name) - 1u);
-                op_repair_old_name[sizeof(op_repair_old_name) - 1u] = '\0';
-                op_bank_existing_dir_found = 1u;
+                parsed_slot == op_slot) {
+                uint8_t match_count = (uint8_t)(
+                    op_bank_existing_dir_found & FS_BANK_DIR_SCAN_MATCH_MASK);
+
+                if (match_count == FS_BANK_DIR_SCAN_NONE) {
+                    strncpy(op_repair_old_name, op_object.id.displayName,
+                            sizeof(op_repair_old_name) - 1u);
+                    op_repair_old_name[sizeof(op_repair_old_name) - 1u] = '\0';
+                    op_bank_existing_dir_found = (uint8_t)(
+                        (op_bank_existing_dir_found &
+                         FS_BANK_DIR_SCAN_AMBIGUOUS_FLAG) |
+                        FS_BANK_DIR_SCAN_ONE);
+                } else {
+                    /* Saturate after the second same-slot directory; the first
+                     * remains available to the legacy rename/open path while
+                     * direct index publication is permanently disqualified. */
+                    op_bank_existing_dir_found = (uint8_t)(
+                        (op_bank_existing_dir_found &
+                         FS_BANK_DIR_SCAN_AMBIGUOUS_FLAG) |
+                        FS_BANK_DIR_SCAN_MULTIPLE);
+                }
             }
         }
         return;
@@ -14502,7 +14846,8 @@ static void filesystem_saveBankDirectory_tick(void)
         if (!op_close_done)
             return;
         op_delete_slot_dir = NULL;
-        if (op_bank_existing_dir_found &&
+        if ((op_bank_existing_dir_found & FS_BANK_DIR_SCAN_MATCH_MASK) !=
+                FS_BANK_DIR_SCAN_NONE &&
             !filesystem_displayNameMatchesCaseInsensitive(
                 op_repair_old_name, op_save_bank_dir_display_name)) {
             op_rename_done = 0u;
@@ -14666,7 +15011,14 @@ static void filesystem_saveBankDirectory_tick(void)
             if ((op_bank_scene_save_mask &
                  (uint16_t)(1u << child_slot)) != 0u) {
                 op_bank_child_cursor = child_slot;
-                op_phase = 13u;
+                /*
+                 * Option 1B: if CWD is still at the selected Bank directory
+                 * (chdirParent succeeded at Scene Save phase 37), skip the
+                 * /Bank/ reopen phases (13-19) and proceed directly to
+                 * phase 20 (per-child delete/write).  If CWD is at root
+                 * (failure fallback), phases 13-19 reopen /Bank/ normally.
+                 */
+                op_phase = op_bank_cwd_at_parent ? 20u : 13u;
                 return;
             }
         }
@@ -14853,6 +15205,13 @@ static void filesystem_saveBankDirectory_tick(void)
          * filesystem_saveSceneDirectory_tick() phase 8..37,
          * op_bank_payload_active dispatch at top of this function.
          */
+        /*
+         * Option 2: begin this child's mutation window immediately before its
+         * Scene writer starts. Any mutation before this point is already
+         * captured by the upcoming serialization; a mutation after this point
+         * sets the Scene's mutation bit again and keeps it non-clean.
+         */
+        bank_resetSdSaveMutationScene(op_bank_child_cursor);
         op_bank_payload_active = 1u;
         op_phase = 8u;
         return;
@@ -14861,8 +15220,14 @@ static void filesystem_saveBankDirectory_tick(void)
         /* The final directory is already openable through its captured alias. */
         if (!afatfs_chdir(NULL))
             return;
-        filesystem_recordSavedBankDirectory(op_save_bank_dir_display_name,
-                                            op_save_bank_dir_open_name);
+        /* Update only an actually retained slot-ordered Bank cache. If another
+         * cache domain replaced it, leave that storage untouched and let the
+         * mandatory phase-86 physical-scan fallback reconstruct Bank rows. */
+        if (fs_list_cache_kind == FS_NAME_CACHE_BANK &&
+            fs_list_cache_count == STORAGE_BANK_MAX_SLOTS) {
+            filesystem_recordSavedBankDirectory(op_save_bank_dir_display_name,
+                                                op_save_bank_dir_open_name);
+        }
         bank_setDisplayName(op_bank_display_name);
         bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
                                              op_bank_scene_save_mask));
@@ -14887,6 +15252,10 @@ static void filesystem_saveBankDirectory_tick(void)
          * Kit, and Instrument rows were copied from HCNAMES into the just
          * written Bank tree and remain unchanged in resident memory.
         */
+        /* The mirror now diverges from the last closed HCNAMES image. Invalidate
+         * it before overlaying row zero and before the write-capable open, so a
+         * reset/error cannot publish the intended-but-uncommitted name image. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
         filesystem_cacheResidentName(0u, op_bank_display_name);
         /*
          * Stage the newly committed Bank's direct root provenance.
@@ -14909,6 +15278,10 @@ static void filesystem_saveBankDirectory_tick(void)
         return;
 
     case 83: /* OPEN ROOT HCNAMES FOR DIRECT-REPLACEMENT REGISTER WRITE */
+        /* Defensive repetition of phase 45's validity transition: every entry
+         * to the write-capable Bank HCNAMES open must leave failure/retry paths
+         * with an invalid mirror until phase 86 closes the complete rewrite. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
@@ -14933,14 +15306,14 @@ static void filesystem_saveBankDirectory_tick(void)
         op_phase = 85u;
         return;
 
-    case 85: /* STREAM BANK-SAVE HCNAMES REGISTER */
+    case 85: /* STREAM BANK-SAVE HCNAMES REGISTER (1C: mirror) */
         if (op_item_offset < FS_RESIDENT_NAMES_ROW_COUNT) {
             if (op_bytes_done == 0u) {
                 op_line_len = filesystem_formatResidentNameLine(
                     op_line_buf, sizeof(op_line_buf),
-                    fs_list_cache_name[op_item_offset],
+                    hcnames_name_mirror[op_item_offset],
                     (uint8_t)!filesystem_residentNameIsBlank(
-                        fs_list_cache_name[op_item_offset]),
+                        hcnames_name_mirror[op_item_offset]),
                     fs_resident_source[op_item_offset], op_item_offset);
                 if (op_line_len == 0u) {
                     filesystem_finish(FS_STATUS_ERROR);
@@ -14970,14 +15343,24 @@ static void filesystem_saveBankDirectory_tick(void)
         /* Bank Save preserves source pairs while rewriting the full register;
          * a previously staged load source becomes clean only after this close. */
         filesystem_clearResidentSourceDirtyFlags();
+        /* Defer reader-visible validity until the primary Bank Save's shared
+         * final sync succeeds; index rebuild begins only after that gate. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_PUBLISH_PENDING;
         /*
-         * Bank Save has now completed its per-child replacement tree. Park the
-         * original callback and run the same boot-equivalent Bank rescan plus
-         * `/Bank/.hcindex` rewrite used by Kit, root Scene, and Bank. This is required
-         * for newly-created, renamed, or removed root Bank folders to become
-         * visible immediately without a restart.
+         * Select direct Bank-index publication only when physical preflight
+         * and retained-cache ownership make the final slot row exact.
+         *
+         * The direct selector skips only the redundant `/Bank/` scan; it still
+         * runs the complete `.hcindex` writer and final sync through the normal
+         * rebuild callback chain. Duplicate/malformed/failed scans, any rename
+         * attempt, case-only identity mismatch, or cache-domain loss selects
+         * FS_NAME_CACHE_BANK and therefore the existing boot-equivalent scan
+         * fallback. This makes speed conditional on proof, never on assumption.
          */
-        op_library_index_rebuild_kind = FS_NAME_CACHE_BANK;
+        op_library_index_rebuild_kind =
+            filesystem_savedBankIndexCanWriteDirectly()
+                ? FS_NAME_CACHE_BANK_DIRECT_WRITE
+                : FS_NAME_CACHE_BANK;
         op_library_index_rebuild_pending = 1u;
         autosaveTrace_record(
             AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
@@ -15514,22 +15897,34 @@ static void filesystem_saveSceneDirectory_tick(void)
         if (!op_close_done)
             return;
         op_file = NULL;
-        if (!afatfs_chdir(NULL))
-            return;
         if (current_op == FS_INTERNAL_OP_SAVE_BANK) {
             /*
-             * Return one completed Bank-local Scene payload to the Bank loop.
+             * Option 1B: return to the selected Bank directory, not root.
              *
-             * Inputs: we just wrote `Bank/NNN Name/SS Scene/...` for the
-             * current op_bank_child_cursor. Output: the root filesystem is
-             * restored, op_bank_payload_active is cleared, and op_phase moves
-             * to the Bank save cursor. Bank cache/identity are committed only
-             * after every selected child has succeeded.
+             * CWD postcondition: the selected Bank directory.  One
+             * afatfs_chdirParent() climbs from the `SS Name/` child directory
+             * to the Bank parent.  On success, Bank phase 12 can advance the
+             * cursor and proceed directly to phase 20 without reopening.
+             * On failure, fall back to root and let phases 13-19 reopen.
              */
+            {
+                afatfsOperationStatus_e ast = afatfs_chdirParent();
+                if (ast == AFATFS_OPERATION_IN_PROGRESS)
+                    return;
+                if (ast == AFATFS_OPERATION_FAILURE) {
+                    op_bank_cwd_at_parent = 0u;
+                    if (!afatfs_chdir(NULL))
+                        return;
+                } else {
+                    op_bank_cwd_at_parent = 1u;
+                }
+            }
             op_bank_payload_active = 0u;
             op_phase = 12u;
             return;
-        } else {
+        }
+        if (!afatfs_chdir(NULL))
+            return; else {
             /*
              * Publish the one renamed/saved resident Scene through HCNAMES
              * before rebuilding `/Scene/.hcindex`.
@@ -20334,6 +20729,18 @@ void filesystem_initAfterCardReady(void)
          source_row++) {
         fs_resident_source[source_row] = FS_RESIDENT_SOURCE_UNKNOWN;
     }
+    /* Option 1C: invalidate the dedicated HCNAMES mirror on card mount. */
+    hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+    /*
+     * Option 2: every fresh mount/remount clears card-verified clean authority.
+     *
+     * Input: none beyond the mount boundary. Output: no resident Scene is
+     * considered equal to an on-card Bank child until a successful Bank
+     * Load/Save on this exact mounted card proves it. This includes reinserting
+     * the same physical card, which may have been edited externally while
+     * removed. Affiliates: bank_clearSdCleanAuthority(), BankData.h.
+     */
+    bank_clearSdCleanAuthority();
     autosave_setMutationTrackingEnabled(0u);
     afatfs_init();
 }
@@ -21304,6 +21711,32 @@ void filesystem_devIwdgBootCheck(void)
 }
 #endif /* DEV_MODE_LOGGING && DEV_LOGGING_IWDG */
 
+/*
+ * Normalize the foreground filesystem drain policy.
+ *
+ * Input: zero for one poll, nonzero for bounded fast drain. Output: only the
+ * selector changes; no SD/FAT work, status transition, callback, or scheduler
+ * admission occurs. Why: Menu pairs audio and storage without teaching
+ * AsyncFATFS about UI/transport. Affiliates: accessor, filesystem_tick(), and
+ * Menu's begin/end helpers.
+ */
+void filesystem_setFastDrain(uint8_t on)
+{
+    fs_fast_drain_active = on ? 1u : 0u;
+}
+
+/*
+ * Read normalized fast-drain ownership.
+ *
+ * Input: none. Output: 0 ordinary or 1 fast. Side effects: none. Why: this is
+ * Menu's sole proof that S058, not Samples, owns the matching codec suspension
+ * and may resume it. Affiliates: setter, filesystem_tick(), and Menu lifecycle.
+ */
+uint8_t filesystem_fastDrainActive(void)
+{
+    return fs_fast_drain_active;
+}
+
 void filesystem_tick(void)
 {
 #if DEV_MODE_LOGGING && DEV_LOGGING_IWDG
@@ -21320,14 +21753,27 @@ void filesystem_tick(void)
     if (filesystem_bootLoggingPollDeadline())
         return;
 
-    /* Busy operations poll asyncfatfs every pass so reads/writes make progress
-    ** whenever the main loop has slack. When the public filesystem facade is
-    ** idle, poll only every FS_IDLE_POLL_MS; that removes steady background SD
-    ** housekeeping from the audio foreground budget without changing active
-    ** transfer behavior. asyncfatfs must still be polled from one context only. */
+    /*
+     * Pump the one AsyncFATFS context with a mode-dependent lower-layer budget.
+     *
+     * Inputs: facade BUSY, AsyncFATFS readiness, and fast-drain state. Output:
+     * one ordinary poll or four consecutive polls during eligible stopped
+     * playback. Why: turn released audio CPU/priority-4 ISR time into
+     * bit-banged SD progress without moving FAT work into an ISR.
+     *
+     * Only AsyncFATFS/SD internals repeat. The `_tick()` switch below still runs
+     * once, so phase-stall cadence, callbacks, watchdog/deadline, autonomous
+     * admission, and idle rate limiting are not multiplied. Affiliates: private
+     * pass constant, setter, operation switch, and sdcard_poll().
+     */
     if (status == FS_STATUS_BUSY ||
         afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY) {
-        afatfs_poll();
+        uint8_t passes = fs_fast_drain_active
+            ? FS_FAST_DRAIN_POLL_PASSES : 1u;
+        uint8_t pass;
+
+        for (pass = 0u; pass < passes; pass++)
+            afatfs_poll();
     } else {
         uint16_t now = time_sysTick;
         if ((uint16_t)(now - fs_last_idle_poll_tick) >= FS_IDLE_POLL_MS) {
@@ -21685,6 +22131,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_write_line_index = 0u;
     op_remove_done = 0u;
     op_bank_payload_active = 0u;
+    op_bank_cwd_at_parent = 0u;
     /* A new request is ordinary until its dedicated temp request opts in. */
     op_instrument_load_temporary = 0u;
     op_instrument_save_temporary = 0u;
@@ -21731,6 +22178,7 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
            sizeof(op_save_bank_dir_display_name));
     memset(op_save_bank_dir_open_name, 0, sizeof(op_save_bank_dir_open_name));
     op_bank_child_present_mask = 0u;
+    memset(op_bank_child_display, 0, sizeof(op_bank_child_display));
     op_bank_scene_load_mask = 0u;
     op_bank_scene_failed_mask = 0u;
     op_bank_scene_save_mask = 0u;
@@ -22715,8 +23163,12 @@ bool filesystem_requestSaveBank(uint16_t slot,
                                 uint8_t source_scene,
                                 const char display_name[8],
                                 uint16_t bank_scene_save_mask,
+                                uint8_t force_save,
                                 fs_completion_cb_t cb)
 {
+    uint16_t full_save_mask;
+    uint16_t skip_mask = 0u;
+
     /*
      * Capture one Bank Save request.
      *
@@ -22760,6 +23212,23 @@ bool filesystem_requestSaveBank(uint16_t slot,
         (uint16_t)(bank_scene_save_mask &
                    (bank_hasResidentBank()
                         ? bank_scenePresentMask() : 0u));
+    full_save_mask = bank_scene_save_mask;
+    /*
+     * Option 2: compute which children may skip their on-card rewrite.
+     *
+     * A Scene is skipped only when the target Bank slot equals the retained
+     * clean slot and the requested/present Scene bit is already proven clean
+     * on this exact mounted card. A different target, an invalid clean slot,
+     * or an explicit force-save leaves skip_mask zero so every selected Scene
+     * is written. The effective write mask and the candidate mask are both
+     * `full & ~skip`: skipped children stay clean and are not re-candidates.
+     * Affiliates: bank_sdCleanSlotIsValid(), bank_sdCleanSlot(),
+     * bank_sdCleanMask(), bank_publishSdCleanAuthority().
+     */
+    if (!force_save && bank_sdCleanSlotIsValid() &&
+        bank_sdCleanSlot() == slot) {
+        skip_mask = (uint16_t)(full_save_mask & bank_sdCleanMask());
+    }
     if (!filesystem_start(FS_INTERNAL_OP_SAVE_BANK, FS_FILE_BANK, slot, cb))
         return false;
     /*
@@ -22800,10 +23269,13 @@ bool filesystem_requestSaveBank(uint16_t slot,
 
     op_kit_save_source_scene = source_scene;
     op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
-    op_bank_scene_save_mask = bank_scene_save_mask;
+    op_bank_scene_save_mask = (uint16_t)(full_save_mask & ~skip_mask);
+    op_bank_sd_clean_candidate_mask = op_bank_scene_save_mask;
+    op_bank_sd_clean_candidate_slot = slot;
+    bank_resetSdSaveMutationWindow();
     op_bank_active_scene = bank_activeSceneSlot();
-    if (op_bank_scene_save_mask != 0u &&
-        (op_bank_scene_save_mask &
+    if (full_save_mask != 0u &&
+        (full_save_mask &
          (uint16_t)(1u << op_bank_active_scene)) == 0u) {
         uint8_t scene_index;
 
@@ -22818,7 +23290,7 @@ bool filesystem_requestSaveBank(uint16_t slot,
         for (scene_index = 0u;
              scene_index < STORAGE_BANK_SCENE_MAX_SLOTS;
              scene_index++) {
-            if ((op_bank_scene_save_mask &
+            if ((full_save_mask &
                  (uint16_t)(1u << scene_index)) != 0u) {
                 op_bank_active_scene = scene_index;
                 break;
@@ -24116,21 +24588,20 @@ const char *filesystem_residentInstrumentName(uint8_t scene_index,
                                                     instrument_slot);
 
     /*
-     * Borrow one Instrument name from the temporary HCNAMES cache view.
+     * Option 1C: read one Instrument name from the dedicated HCNAMES mirror.
      *
      * Inputs must match the completed resident-name read/update request.
-     * Output is the selected eight-character, NUL-terminated cache cell, or
-     * `Empty   ` when the coordinates/cache domain are invalid or the file row
-     * is blank. The pointer becomes invalid as soon as the typed `.hcindex`
-     * loader reuses the generalized cache, so Menu copies it immediately into
-     * its existing edit/display buffer instead of retaining this pointer.
+     * Output is the eight-character, NUL-terminated mirror cell, or `Empty   `
+     * when the mirror is invalid, the row is out of range, or the file row is
+     * blank. The pointer is mirror-owned and valid until the next HCNAMES
+     * transaction; Menu copies it immediately into its edit/display buffer.
      */
-    if (fs_list_cache_kind != FS_NAME_CACHE_HCNAMES ||
+    if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID ||
         row >= FS_RESIDENT_NAMES_ROW_COUNT ||
-        filesystem_residentNameIsBlank(fs_list_cache_name[row])) {
+        filesystem_residentNameIsBlank(hcnames_name_mirror[row])) {
         return "Empty   ";
     }
-    return fs_list_cache_name[row];
+    return hcnames_name_mirror[row];
 }
 
 const char *filesystem_residentKitName(uint8_t scene_index)
@@ -24138,21 +24609,19 @@ const char *filesystem_residentKitName(uint8_t scene_index)
     uint16_t row = filesystem_residentKitRow(scene_index);
 
     /*
-     * Borrow one Kit name from the temporary HCNAMES cache view.
+     * Option 1C: read one Kit name from the dedicated HCNAMES mirror.
      *
      * Input must match the completed resident-Kit-name read/update request.
-     * Output is the eight-character, NUL-terminated cache cell, or `Empty   `
-     * when the Scene/cache domain is invalid or the file row is blank. The
-     * pointer becomes invalid as soon as `/Kit/.hcindex` reuses the generalized
-     * cache, so Menu copies it into preset_currentName before requesting that
-     * index and never retains the pointer.
+     * Output is the eight-character, NUL-terminated mirror cell, or `Empty   `
+     * when the mirror is invalid, the row is out of range, or blank. The
+     * pointer is mirror-owned and valid until the next HCNAMES transaction.
      */
-    if (fs_list_cache_kind != FS_NAME_CACHE_HCNAMES ||
+    if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID ||
         row >= FS_RESIDENT_NAMES_ROW_COUNT ||
-        filesystem_residentNameIsBlank(fs_list_cache_name[row])) {
+        filesystem_residentNameIsBlank(hcnames_name_mirror[row])) {
         return "Empty   ";
     }
-    return fs_list_cache_name[row];
+    return hcnames_name_mirror[row];
 }
 
 const char *filesystem_residentSceneName(uint8_t scene_index)
@@ -24160,20 +24629,18 @@ const char *filesystem_residentSceneName(uint8_t scene_index)
     uint16_t row = filesystem_residentSceneRow(scene_index);
 
     /*
-     * Borrow one Scene identity after filesystem_requestLoadResidentSceneName.
+     * Option 1C: read one Scene name from the dedicated HCNAMES mirror.
      *
      * Input: resident Scene coordinate. Output: HCNAMES' eight-cell text or
-     * the normal `Empty` fallback for a blank/invalid row. The pointer belongs
-     * to the shared cache and becomes invalid when Menu loads `/Scene/.hcindex`;
-     * callers must copy it into their sole operation-scoped Scene scratch.
-     * Affiliates: Core/Menu/menu.c Scene Save entry.
+     * the normal `Empty` fallback for an invalid/blank row. The pointer is
+     * mirror-owned and valid until the next HCNAMES transaction.
      */
-    if (fs_list_cache_kind != FS_NAME_CACHE_HCNAMES ||
+    if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID ||
         row >= FS_RESIDENT_NAMES_ROW_COUNT ||
-        filesystem_residentNameIsBlank(fs_list_cache_name[row])) {
+        filesystem_residentNameIsBlank(hcnames_name_mirror[row])) {
         return "Empty   ";
     }
-    return fs_list_cache_name[row];
+    return hcnames_name_mirror[row];
 }
 
 uint16_t filesystem_instrumentCount(instrument_type_t type)

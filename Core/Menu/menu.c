@@ -103,14 +103,16 @@ static uint8_t menu_storageBusy = 0;
 #define MENU_PENDING_PAGE_NONE 0u
 static uint8_t menu_pendingPageSwitch;
 /*
- * Explicit OK/OW command presentation state (+1 B SRAM1).
- *
- * Inputs: only an accepted Load/Save confirmation request may set this flag.
- * Outputs: the renderer shows `...` without selection markers until the one
- * command reaches its filesystem/apply terminal path, then restores the type
- * row. Why: menu_storageBusy also covers background browser/index work, so it
- * cannot decide whether an OK/OW affordance is actively executing. This flag
- * owns presentation/final-reset only; it retains no payload or cache data.
+ * Accepted OK/OW presentation/ownership state (existing Menu byte; no S058
+ * allocation). Inputs: only an accepted Load/Save confirmation request may set
+ * this flag. Outputs: `...`, cursor/input gating, and terminal reset. S058 uses
+ * it as one input to a derived predicate; eligibility and codec ownership are
+ * not packed here because Instrument and Samples share this lifecycle but are
+ * excluded. Why: menu_storageBusy also covers background browser/index work,
+ * so it cannot decide whether an OK/OW affordance is actively executing. This
+ * flag owns presentation/final-reset only; it retains no payload or cache data.
+ * Affiliates: command begin/finish, menu_updateNoPlaybackStorage(), and all
+ * completion paths.
  */
 static uint8_t menu_loadSaveCommandActive = 0u;
 static uint8_t menu_deferSelectionRequest = 0;
@@ -190,6 +192,9 @@ static uint8_t menu_loadSaveCursorVisible(void)
     return (uint8_t)!menu_loadSaveCommandActive;
 }
 
+static void menu_updateNoPlaybackStorage(void);
+static void menu_endNoPlaybackStorage(void);
+
 static void menu_beginLoadSaveCommand(void)
 {
     /*
@@ -202,6 +207,15 @@ static void menu_beginLoadSaveCommand(void)
      */
     menu_loadSaveCommandActive = 1u;
     menu_storageBusy = 1u;
+    /*
+     * Reconcile no-playback storage immediately after accepted ownership exists.
+     * Inputs: immutable accepted page/type/session and current transport. Output:
+     * eligible stopped work suspends before the next render opportunity; running
+     * and excluded workflows are unchanged. Centralizing covers all accepted
+     * callers while the predicate excludes Instrument and Samples. Affiliate:
+     * menu_updateNoPlaybackStorage().
+     */
+    menu_updateNoPlaybackStorage();
     menu_repaintAll();
 }
 
@@ -218,6 +232,16 @@ static void menu_finishLoadSaveCommand(void)
      */
     if (!menu_loadSaveCommandActive)
         return;
+    /*
+     * Release no-playback resources before command/input ownership.
+     * Input: active command at true success/error/modal/apply/final-index
+     * terminal boundary. Output: ordinary drain first, then codec resume if
+     * S058 owns it; existing flag/UI reset follows. Why: one hook covers every
+     * terminal caller and prevents stranded audio on errors/rejected final
+     * reload. Affiliate: menu_endNoPlaybackStorage() and every existing finish
+     * caller.
+     */
+    menu_endNoPlaybackStorage();
     menu_loadSaveCommandActive = 0u;
     menu_storageBusy = 0u;
     menu_resetSaveParameters();
@@ -1200,6 +1224,99 @@ static volatile struct {
     unsigned what  :3;
     unsigned state :4;
 } menu_saveOptions;
+
+/*
+ * Classify the accepted command for stopped-playback acceleration.
+ *
+ * Inputs: active page, SAVE_TYPE, and nested Instrument-session flag; command
+ * and transport are checked by the caller. Output: 1 only for top-level Save
+ * Kit/KitMrp/Scene/Bank or Load Scene/Bank; otherwise 0.
+ *
+ * Why the Instrument guard is mandatory: nested Instrument Save also begins
+ * an accepted command while entry commonly resets `what` to SAVE_TYPE_KIT.
+ * Page/type alone would misclassify it. Affiliates: policy updater, top-level
+ * dispatch, and menu_instrumentSaveRequestSelection().
+ */
+static uint8_t menu_loadSaveCommandInNoPlaybackScope(void)
+{
+    if (menu_instrumentLoadActive)
+        return 0u;
+    if (menu_activePage == SAVE_PAGE) {
+        return (uint8_t)(menu_saveOptions.what == SAVE_TYPE_KIT ||
+                         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH ||
+                         menu_saveOptions.what == SAVE_TYPE_SCENE ||
+                         menu_saveOptions.what == SAVE_TYPE_BANK);
+    }
+    if (menu_activePage == LOAD_PAGE) {
+        return (uint8_t)(menu_saveOptions.what == SAVE_TYPE_SCENE ||
+                         menu_saveOptions.what == SAVE_TYPE_BANK);
+    }
+    return 0u;
+}
+
+/*
+ * Enter codec-offline/fast-filesystem state for one eligible command.
+ *
+ * Inputs: both ownership states must be clear. Output: suspend codec first;
+ * only after the authoritative accessor confirms it is fast drain enabled.
+ * Existing/failed suspension changes no ownership and schedules no resume.
+ *
+ * Why: enabling fast drain while audio is live competes with audio; claiming a
+ * foreign suspension would later resume hardware Menu did not stop. Transport
+ * is unchanged and no Menu state is allocated. Affiliates: codec manager,
+ * filesystem setter, Samples' independent owner, and the exit helper.
+ */
+static void menu_beginNoPlaybackStorage(void)
+{
+    if (filesystem_fastDrainActive() || audioCodec_isSuspended())
+        return;
+    audioCodec_suspend();
+    if (!audioCodec_isSuspended())
+        return;
+    filesystem_setFastDrain(1u);
+}
+
+/*
+ * Leave only S058-owned offline storage state.
+ *
+ * Input: fastDrainActive is the ownership token; bare codec suspension is not,
+ * because Samples has an independent owner. Output: clear fast drain before
+ * restarting codec DMA/I2S/PLL; resume only if still suspended. Repeated calls
+ * no-op. Why: ordinary scheduling must return before audio demand, and foreign
+ * owners must not be resumed. Transport is unchanged. Affiliates: command
+ * finish, dynamic restart, entry helper, and Samples.
+ */
+static void menu_endNoPlaybackStorage(void)
+{
+    if (!filesystem_fastDrainActive())
+        return;
+    filesystem_setFastDrain(0u);
+    if (audioCodec_isSuspended())
+        audioCodec_resume();
+}
+
+/*
+ * Reconcile command, scope, and transport every Menu pass.
+ *
+ * Inputs: command-active, exact predicate, seq_isRunning(), and subsystem
+ * states. Output: stopped eligible commands enter; running/ineligible/ended
+ * commands leave. Stop/start/stop works without a latch or Sequencer change.
+ *
+ * Why: transport can change through front-panel or MIDI/TIM3 while Menu input
+ * is storage-gated. A start must restore audio rather than advance sequencing
+ * against frozen DSP. Affiliates: command begin, Menu poll, command finish,
+ * and seq_isRunning().
+ */
+static void menu_updateNoPlaybackStorage(void)
+{
+    if (!menu_loadSaveCommandActive ||
+        !menu_loadSaveCommandInNoPlaybackScope() ||
+        seq_isRunning()) {
+        menu_endNoPlaybackStorage();
+        return;
+    }
+    menu_beginNoPlaybackStorage();
+}
 
 /* -----------------------------------------------------------------------
 ** Forward declarations (static)
@@ -6115,6 +6232,50 @@ void menu_repaint(void)
     sendDisplayBuffer();
 }
 
+/*
+ * Refresh the visible Bank child counter when its filesystem cursor advances.
+ *
+ * What: compares the live zero-based Bank child with the three command cells
+ * last queued to the LCD and requests one ordinary incremental repaint only
+ * when `00.`..`15.` differs. Why: the renderer already formats Bank progress,
+ * but the asynchronous child transition does not otherwise invalidate the
+ * Load/Save frame; the count therefore stayed at its first value until an
+ * unrelated full repaint, such as screensaver exit. Inputs: accepted command
+ * ownership, active Load/Save page, filesystem_bankChildCursor(), LCD shadow,
+ * screensaver state, and the existing queue-retry latch. Output: at most one
+ * edge-triggered menu_repaint(); no filesystem, transport, command, or cursor
+ * state changes. A pending frame is left to the existing queue-space retry,
+ * and an active screensaver remains the sole LCD owner. This reuses display
+ * state and allocates no progress byte. Affiliates: menu_paintLoadSaveConfirmation(),
+ * sendDisplayBuffer(), menu_lcdRefreshPending, and menu_pollPresetStatus().
+ */
+static void menu_refreshBankChildProgress(void)
+{
+    uint8_t child;
+    char tens;
+    char ones;
+
+    if (!menu_loadSaveCommandActive ||
+        (menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        screensaver_isActive() || menu_lcdRefreshPending) {
+        return;
+    }
+
+    child = filesystem_bankChildCursor();
+    if (child == 0xFFu || child >= 100u)
+        return;
+
+    tens = (char)('0' + (child / 10u));
+    ones = (char)('0' + (child % 10u));
+    if (currentDisplayBuffer[1][13] == tens &&
+        currentDisplayBuffer[1][14] == ones &&
+        currentDisplayBuffer[1][15] == '.') {
+        return;
+    }
+
+    menu_repaint();
+}
+
 /* -----------------------------------------------------------------------
 ** menu_repaintLoadSavePage — close port of original
 ** ----------------------------------------------------------------------- */
@@ -7209,7 +7370,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         AUTOSAVE_TRACE_SAVE_LIFECYCLE_SLOT_SHIFT);
                     if (preset_saveBank(
                             menu_currentPresetNr[SAVE_TYPE_BANK],
-                            menu_kitLoadSceneMask))
+                            menu_kitLoadSceneMask,
+                            0u))
                         commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_GLO:     commandAccepted = preset_saveGlobals(); break;
@@ -7830,6 +7992,26 @@ void menu_pollPresetStatus(void)
 {
     uint8_t retrySelectionAfterAck = 0;
     uint8_t retrySelectionLoadKit = 0;
+
+    /*
+     * Observe front-panel/MIDI transport before early-return-capable Menu work.
+     * Input: accepted command and seq_isRunning(). Output: STOP enters and
+     * START leaves on the first observing Menu poll. Why here: apply/retry
+     * workers can return for many passes and must not starve transition.
+     * Affiliates: transport owners and menu_updateNoPlaybackStorage().
+    */
+    menu_updateNoPlaybackStorage();
+
+    /*
+     * Publish Bank child progress before any worker below can return early.
+     * Input: the filesystem cursor may have advanced in the preceding main-loop
+     * filesystem_tick(). Output: only a changed `NN.` indicator is repainted;
+     * unchanged children cost no LCD traffic. Why: filesystem progress and Menu
+     * rendering are separate foreground phases, so the latter needs this
+     * observer boundary to invalidate its frame. Affiliates:
+     * menu_refreshBankChildProgress(), filesystem_tick(), and screensaver exit.
+     */
+    menu_refreshBankChildProgress();
 
     /*
      * Give a queued physical Load/Save exit priority over new browser work.

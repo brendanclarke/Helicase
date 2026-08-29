@@ -540,6 +540,17 @@ static void on_bank_load_complete(void)
             if ((completed_scene_mask & (uint16_t)(1u << scene_index)) != 0u)
                 autosave_markSceneWithoutPatternDirty(scene_index);
         }
+        /*
+         * Option 2: publish card-clean authority for the completed effective
+         * child mask. The Bank Load slot is bank_restoreBankSlot(), set by the
+         * Bank phase-20 metadata commit. Publishing here (not during the commit)
+         * keeps the clean bit separate from the Autosave whole-Scene marker that
+         * the loop above also issues: the marker tracks persistence, while the
+         * clean bit tracks equality to the on-card child. Same-slot loads OR
+         * into existing bits; a different slot replaces the old authority.
+         */
+        bank_publishSdCleanAuthority(bank_restoreBankSlot(),
+                                     completed_scene_mask);
     }
     preset_completeFilesystemOp(PRESET_OP_BANK_LOAD);
 }
@@ -849,6 +860,15 @@ static void preset_storeInstrumentEndpoint(uint8_t scene_index,
     if (*storage == value)
         return;
     *storage = value;
+    /*
+     * Option 2: a committed Instrument normal/Morph byte invalidates the owning
+     * Scene's card-clean bit. This is the Instrument-side complement of
+     * SceneData's scalar funnels; an equal-value no-op was already rejected, so
+     * this line runs only for real retained-data change. It stays separate from
+     * the Autosave normal/Morph marker for the same source/authority reason.
+     * Affiliates: bank_invalidateSdCleanScene(), filesystem Bank Save skip.
+     */
+    bank_invalidateSdCleanScene(scene_index);
     if (image == INSTRUMENT_IMAGE_MORPH) {
         autosave_markInstrumentMorphParameterDirty(
             scene_index, slot, descriptor_index);
@@ -1652,8 +1672,16 @@ static uint8_t preset_commitStagedKitNormalToMorph(void)
                  * autosave_markInstrumentMorphDirty(),
                  * presetMorph_requestVoice(), and the staged Kit lifetime
                  * established by on_kit_morph_load_complete().
-                 */
+                */
                 autosave_markInstrumentMorphDirty(scene_index, slot);
+                /*
+                 * Option 2: KitMrp changed the resident Morph endpoint image,
+                 * so the owning Scene can no longer be skipped as card-clean.
+                 * The slot-6 generated decay below invalidates through
+                 * SceneData; this covers the direct instrument-image copy that
+                 * otherwise bypasses the scalar funnels.
+                 */
+                bank_invalidateSdCleanScene(scene_index);
                 if (scene_index == scene_getActiveIndex()) {
                     presetMorph_requestVoice(scene_index, slot);
                     active_queued = 1u;
@@ -1740,8 +1768,15 @@ void preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
          * runtime interpolation did not change. This remains outside the
          * active-Scene branch because inactive resident Scene data still needs
          * persistence even though it requires no immediate audible refresh.
-         */
+        */
         autosave_markInstrumentMorphDirty(scene_index, slot);
+        /*
+         * Option 2: InstrumentMrp changed the resident Morph image. The
+         * destination Scene's card-clean bit clears because its saved payload
+         * no longer equals the on-card Bank child. Affiliate:
+         * bank_invalidateSdCleanScene().
+         */
+        bank_invalidateSdCleanScene(scene_index);
         if (scene_index == scene_getActiveIndex()) {
             presetMorph_requestVoice(scene_index, slot);
             instrument_apply_active = 1u;
@@ -1816,6 +1851,13 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
         bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
                                             (uint16_t)(1u << target_scene_index)));
         scene->kit.instruments[slot] = *staged;
+        /*
+         * Option 2: a root Instrument Load or reversible kit restore replaces
+         * the resident instrument image from a source other than the exact Bank
+         * child, so this Scene's card-clean bit must clear. Direct assignment
+         * bypasses preset_storeInstrumentEndpoint(), hence the explicit call.
+         */
+        bank_invalidateSdCleanScene(target_scene_index);
         {
             uint8_t trace_flags = mark_autosave_whole_instrument
                 ? AUTOSAVE_TRACE_INSTRUMENT_COMMIT_FLAG_REQUESTED : 0u;
@@ -2234,18 +2276,20 @@ uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask)
     return 0u;
 }
 
-uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
+uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask,
+                        uint8_t force_save)
 {
     uint8_t source_scene = scene_getActiveIndex();
 
     /*
      * Post a multi-Scene Bank Save.
      *
-     * Inputs: root Bank slot plus edited preset_currentName as the Bank
-     * directory name and the caller-selected resident Scene mask. Output:
+     * Inputs: root Bank slot, edited preset_currentName as the Bank directory
+     * name, the caller-selected resident Scene mask, and force_save. Output:
      * filesystem writes bankset.bcg and one Bank-local child folder per
-     * selected bit. source_scene remains the active Scene for compatibility
-     * validation, but the mask determines the actual child set.
+     * selected bit (or fewer when Option 2 skips card-clean children and
+     * force_save is zero). source_scene remains the active Scene for
+     * compatibility validation, but the mask determines the actual child set.
      */
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
@@ -2266,6 +2310,7 @@ uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
                                    source_scene,
                                    preset_currentName,
                                    scene_mask,
+                                   force_save,
                                    on_bank_save_complete)) {
         return 1u;
     }

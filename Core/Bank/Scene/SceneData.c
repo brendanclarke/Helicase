@@ -1,5 +1,6 @@
 #include "SceneData.h"
 #include "Autosave.h"
+#include "BankData.h"
 #include <string.h>
 
 scene_t scenes[SCENE_COUNT];
@@ -41,6 +42,18 @@ static void scene_storeParameterByte(uint8_t scene_index,
         return;
     *storage = value;
     autosave_markSceneParameterDirty(scene_index, parameter_index);
+    /*
+     * Option 2: a committed Scene byte invalidates that Scene's card-clean bit.
+     *
+     * Input: owning Scene index, after an equal-value no-op was already
+     * rejected. Output: the Scene may no longer be skipped by a subsequent Bank
+     * Save until a successful Bank Load/Save on this mount proves it again.
+     * This is intentionally beside the Autosave marker, not folded into it:
+     * Autosave tracks byte persistence for another file, while card-clean
+     * tracks equality to an on-card Bank child. Affiliates:
+     * bank_invalidateSdCleanScene(), filesystem Bank Save skip logic.
+     */
+    bank_invalidateSdCleanScene(scene_index);
 }
 
 /*
@@ -61,6 +74,12 @@ static void scene_storeKitParameterByte(uint8_t scene_index,
         return;
     *storage = value;
     autosave_markKitParameterDirty(scene_index, parameter_index);
+    /*
+     * Option 2: a committed Kit byte invalidates the owning Scene's card-clean
+     * bit, mirroring the Scene-settings funnel above. Same source/authority
+     * separation from Autosave; an equal-value no-op never reaches this line.
+     */
+    bank_invalidateSdCleanScene(scene_index);
 }
 
 uint8_t scene_indexValid(uint8_t scene_index)

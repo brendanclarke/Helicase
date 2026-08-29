@@ -391,6 +391,28 @@ const char *filesystem_errorCode(void);
 void        filesystem_ack(void);
 
 /*
+ * Select and observe the bounded runtime fast-drain policy.
+ *
+ * What: setFastDrain normalizes `on` to one facade-owned boolean. While set,
+ * the BUSY/non-READY branch of filesystem_tick() performs the private fast
+ * poll count instead of one. fastDrainActive returns that boolean.
+ *
+ * Why: after Menu suspends codec DMA/ISR/DSP work, released foreground time
+ * can advance bit-banged SD while preserving AsyncFATFS's one-context rule and
+ * the operation state machine's once-per-tick cadence.
+ *
+ * Inputs: zero selects ordinary drain; nonzero selects fast drain. Outputs:
+ * accessor returns 0/1. Neither call polls, starts/acks an operation, changes
+ * status, or invokes a callback. Foreground-only and not reference-counted.
+ *
+ * Ownership: Menu is the sole setter; it enables only after verified codec
+ * suspend and clears before resume. Affiliates: filesystem_tick(), Menu's
+ * no-playback helpers, and AudioCodecManager's suspended accessor.
+ */
+void        filesystem_setFastDrain(uint8_t on);
+uint8_t     filesystem_fastDrainActive(void);
+
+/*
  * Bank operation child-progress query.
  *
  * Returns the zero-based Bank-local Scene slot currently being processed
@@ -548,15 +570,16 @@ uint16_t filesystem_bankChildSceneMask(void);
  * Save one root Bank directory from resident Scene memory.
  *
  * Inputs: root Bank slot, source Scene, eight-cell Bank display name, future
- * Bank-local Scene save mask, and completion callback. Output: bankset.bcg
- * plus selected two-digit child Scene folders. This first implementation
- * passes mask bit 0 only, but the writer loops over the mask boundary so
- * future 16-Scene toggles do not need a new public contract.
+ * Bank-local Scene save mask, force-save selector, and completion callback.
+ * Output: bankset.bcg plus selected two-digit child Scene folders. The force
+ * selector bypasses card-clean child skipping; zero selects normal reuse.
+ * This declaration matches the operation-scoped save policy in filesystem.c.
  */
 bool filesystem_requestSaveBank(uint16_t slot,
                                 uint8_t source_scene,
                                 const char display_name[8],
                                 uint16_t bank_scene_save_mask,
+                                uint8_t force_save,
                                 fs_completion_cb_t cb);
 bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
