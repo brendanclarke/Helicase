@@ -1,9 +1,9 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware through the Session 056
-AsyncFATFS duplicate-fix, cluster-boundary file-size fix, and autosave
-page-exit expedite update. It includes the
+reference for the Helicase/LXR-02 firmware through the Session 057
+settings.cfg safe write, empty-Scene/Bank overwrite guard, lazy
+load-time Kit/Scene quarantine, and per-Scene Bank Save update. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
 velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
@@ -379,9 +379,18 @@ Unknown or out-of-scope keys are not a way to restore Scene state. In
 particular, Morph, per-voice Morph, and Scene decimation belong to Scene
 payloads, not global settings.
 
-There is no implemented `.settings.cfg` backer or power-loss transaction for
-`settings.cfg`. Its existing one-second revision/debounce writer rewrites the
-live file; do not claim atomic replacement.
+`settings.cfg` has a safe-write backer as of Session 057: the one-second
+revision/debounce writer serializes to a plainly-visible sibling temp file
+(`settings.tmp`, `STORAGE_SETTINGS_TEMP_FILENAME`), calls `afatfs_sync()` to
+make it durable, then removes the old `settings.cfg` and renames the temp
+file into place. A boot-time recovery prelude runs before the normal settings
+load: a leftover `settings.tmp` is validated with the same
+`filesystem_parseSettingsLine()` parser plus a self-checking terminator line
+(`lines=17`, the 18th emitted line) and either promoted (valid) or discarded
+(invalid), leaving the prior `settings.cfg` untouched either way. Hardware-
+tested via a deliberate mid-promotion power-cut simulation
+(`057_SESSION_HANDOFF_LOG.md` §6). This is the same temp+sync+promote pattern
+AutoSave's `.hcprms1/2` already use.
 
 Root-level entries outside the recognized list are ignored by normal
 loader/browser code.
@@ -455,10 +464,40 @@ both repair and typed index insertion.
 
 `/.hcrepair` roll-forward was planned but is not implemented. Current repair is
 ordered rename/sync behavior, not a journal or power-loss recovery protocol.
-Root Kit and selected Bank embedded-Kit quarantine additionally reject trees
-whose `kitset.kcg` references cannot be validated/opened. Root Scene blocking
-quarantine was removed and must be redesigned as a foreground-pumped operation
-before reintroduction.
+
+**Kit/Scene/Bank content validation is lazy, not boot-blocking (Session 057).**
+Boot no longer opens or parses any Kit/Instrument payload; it only
+canonicalizes names and generates `.hcindex` (the old
+`filesystem_quarantineKitLibraryBlocking()` full-content boot scan — 7
+blocking file operations per Kit sharing one 10-second deadline for the whole
+traversal — was deleted, closing a false-boot-failure risk that scaled with
+library size). Content is validated only at the point of an actual Load
+attempt, which already re-parses `kitset.kcg`/instrument files independently
+of boot. A folder proven invalid by a real Load failure (not an I/O abort) is
+renamed `err...` at that point instead of at boot:
+
+- **Root Kit Load**: a bad Kit renames only that Kit's own folder.
+- **Root Scene Load**: a bad *embedded Kit* renames both the Kit folder and
+  the owning Scene folder (a Scene whose Kit cannot load is not usable); a
+  bad *Scene-layer* failure (bad `sceneset.scg`, missing child) renames only
+  the Scene folder.
+- **Bank Load, Bank-local child**: never renames the Bank-local `SS Name`
+  Scene folder (its identity is positional, not browsable — renaming would
+  corrupt the Bank's slot mapping). An embedded Kit failure still renames the
+  Kit folder. Only that one child is excluded from the load — the operation
+  as a whole still completes `FS_STATUS_DONE`; a Bank-wide `FS_STATUS_ERROR`
+  here would fail the entire boot when the boot Bank happens to include one
+  bad child. The failed child(s) are surfaced via
+  `filesystem_lastBankLoadFailedSceneMask()` / `preset_bankLoadFailedSceneMask()`,
+  shown through the existing filesystem error overlay from Menu's normal
+  `PRESET_OP_BANK_LOAD` success path — not through the completion status.
+
+A previously-quarantined `errNNN ...` folder from the old boot-time
+quarantine is untouched by this change and stays permanently inert; there is
+no reverse-quarantine step. Full design, implementation deviations from the
+original plan, and hardware-test coverage (partial — the actual
+quarantine-rename/cascade/partial-failure behaviors are not yet
+hardware-verified) are in `057_SESSION_HANDOFF_LOG.md` §8-§9.
 
 ## Bank
 
@@ -1554,8 +1593,19 @@ Implemented:
   names are directory-owned.
 - Bank Save writes bankset.bcg version 2 and one local `SS <scene name>/`
   payload for every selected Scene bit. A zero child-scene mask is valid and
-  creates an empty Bank. The previous root Bank is deleted exactly before the
-  final numbered directory is created.
+  creates an empty Bank. **As of Session 057, the root Bank directory itself
+  is scanned and reused (opened directly if the same slot/name already
+  exists, renamed-then-opened if the name changed, created only if absent)
+  rather than deleted and recreated, and each selected child is individually
+  deleted-then-written in place** — replacing the earlier design where the
+  entire target Bank tree was deleted before any replacement child was
+  written. This closes two bugs: an `afatfs_deleteTree()` failure on a
+  quarantined `errKit` directory's rewritten LFN entries could previously
+  abort mid-delete and leave the Bank partially destroyed (`ErrS05`), and a
+  partial `Save:[Bank]` (fewer than all resident Scenes selected) previously
+  deleted every **non-selected** child along with the rest of the tree.
+  Non-masked children are now never touched. Full detail in
+  `057_SESSION_HANDOFF_LOG.md` §10.
 - After Kit, root Scene, or root Bank Save completes its physical directory
   write and final FAT flush, firmware rescans that parent directory and
   rewrites the complete slot-ordered `.hcindex`. The original Save completion
@@ -1599,8 +1649,27 @@ that parse as the exact Scene slot, preventing the root Scene wipe class of
 bug. The resolver continues scanning to reject duplicate directories, same-slot
 files, malformed product objects, and scan failures before deleting. Native
 deletion receives the complete captured `afatfsObjectInfo_t`, avoiding a second
-ambiguous LFN lookup. Bank Save uses the same direct root delete/recreate flow
-and does not claim power-loss atomicity or preserve unselected old children.
+ambiguous LFN lookup. Root Kit and root Scene Save still use direct delete/
+recreate of the one target slot and do not claim power-loss atomicity. **Bank
+Save is the exception (Session 057): it deletes and rewrites only each
+selected child in place, leaving non-selected resident children untouched**
+(see the Bank section above) — it still does not claim power-loss atomicity
+for the child it is actively replacing.
+
+**Empty-Scene/Bank overwrite guard (Session 057).** An empty (never
+successfully loaded) Scene can never overwrite an occupied Library slot,
+enforced at this save layer, not only by the SEQ LED selection UI.
+`filesystem_requestSaveBank()` filters the save mask against
+`bank_scenePresentMask()` (itself zeroed entirely when
+`bank_hasResidentBank()` is false, so the boot-seeded Scene-0 present bit is
+never trusted) before the state machine starts and before active-scene
+relocation; empty Scenes are silently excluded rather than causing a refusal.
+Root Scene Save's `case 0` additionally refuses (`FS_STATUS_ERROR`) outright
+if the source Scene itself is not present. Both gates depend on the Bank Save
+present-mask union fix landing first (`bank_scenePresentMask()` was
+previously untrustworthy after any partial Bank Save — see
+`057_SESSION_HANDOFF_LOG.md` §2). Not hardware-tested as of Session 057's
+close; see that log's §7 and §17.
 
 All four Save paths (Kit, Scene, Bank, root Instrument) stage their HCNAMES
 row's `source` alongside its name, mirroring the equivalent Load path exactly

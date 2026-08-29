@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through the Session 056 AsyncFATFS
-duplicate-fix and autosave page-exit expedite build,
+Session 030 baseline, updated through the Session 057 Bank Save per-Scene
+rewrite, boot Kit-sanitizer refactor, and stall-detection expansion build,
 for the one-pattern bridge,
 STEP track-settings front page, per-track shuffle, LED blink idempotence,
 descriptor-owned instrument files, Scene-owned instrument parameter images, and
@@ -451,7 +451,8 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_saveInstrument(scene, slot, display_name)` | Post one root Instrument Save request from a resident Scene/voice slot. The display stem is captured at request acceptance and filesystem writes `Instrument/<stem.ext>`. | Instrument Save nested Save-page OK |
 | `preset_saveInstrumentMorph(scene, slot, display_name)` | Post one root InstrumentMrp Save request. The writer uses the normal Instrument schema but writes the current interpolated values into both endpoint sections and does not rename resident source metadata. | Instrument Save `<Type>Mrp` OK |
 | `preset_loadSceneForScenes(presetNr, scene_mask)` / `preset_saveScene(presetNr, source_scene)` | Load/save root Scene library folders through the non-Pattern Scene stage and direct Pattern phase. | Load/Save Scene |
-| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr, scene_mask)` | Load/save root Bank folders with a 16-bit local-Scene mask. Load validates bankset.bcg v2, preserves unselected resident Scenes/HCNAMES rows, and can report a valid empty Bank; Save writes selected child payloads through a temporary sibling then promotes it. | Load/Save Bank, boot |
+| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr, scene_mask)` | Load/save root Bank folders with a 16-bit local-Scene mask. Load validates bankset.bcg v2, preserves unselected resident Scenes/HCNAMES rows, and can report a valid empty Bank; a child proven invalid by content (not I/O abort) is excluded from the load rather than failing the whole operation (Session 057). Save deletes and rewrites only each selected child in place — non-selected children are left untouched (Session 057; previously a total-tree delete/recreate that destroyed every child regardless of selection). | Load/Save Bank, boot |
+| `preset_bankLoadFailedSceneMask()` (Session 057) | Read `pm_bank_load_failed_scene_mask`, populated from `filesystem_lastBankLoadFailedSceneMask()` in `on_bank_load_complete()`. Nonzero after an otherwise-successful (`FS_STATUS_DONE`) Bank Load means Menu still needs to show the filesystem error overlay once for the excluded child(ren). | Menu `PRESET_OP_BANK_LOAD` success path (both the empty-Bank fallback and normal sound-apply branches) |
 | `preset_loadFirstAvailableSceneOrKit()` | Fallback after absent/empty Bank: lowest root Scene, then lowest root Kit, then defaults. | boot, Bank Load completion |
 | `preset_sendDrumsetParameters()` | Synchronous pre-audio clear plus six-slot tagged reset/routing/descriptor-image apply. It intentionally leaves target installation to the exact ordinary Scene worker started after audio initialization. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
@@ -713,6 +714,8 @@ filesystem API output, musical identity, or permission to restore the old
 diagnostics.
 | `filesystem_lastMountResult()` / `filesystem_bootDetectedUnsupportedCard()` | Boot/card status. | main/Menu |
 | `filesystem_takeStaleGlobalsWarning()` | One-shot stale globals warning source. | Menu |
+| `filesystem_bankChildCursor()` (Session 057) | Live 0-based Bank-local child slot (0-15) during an active Bank Load/Save, or `0xFF` otherwise. Pure read accessor of `op_bank_child_cursor`; drives the `NN.` Load/Save progress indicator. | Menu Bank progress display |
+| `filesystem_lastBankLoadFailedSceneMask()` (Session 057) | Bitmask of Bank Load children that failed with provably-invalid content (not I/O abort) during the just-completed, still-`FS_STATUS_DONE` Bank Load. Nonzero is the sole signal that the existing filesystem error overlay still needs to be shown once. Cleared at the start of every new Bank Load request. | `preset_bankLoadFailedSceneMask()` (below), Menu `PRESET_OP_BANK_LOAD` success path |
 
 Important private Phase 2 kit helpers:
 
@@ -744,10 +747,18 @@ Important private Phase 2 kit helpers:
 - `filesystem_saveSceneDirectory_tick()` writes the current Scene folder shape:
   `sceneset.scg`, embedded Kit without `audio_out`, six instruments, thin
   `pattern.pat`, and placeholder `effects.fx`.
-- `filesystem_saveBankDirectory_tick()` promotes the staged Bank tree, then
-  parks the original callback while the root Bank directory is rescanned and
-  `/Bank/.hcindex` is rewritten. The same Save-owned rebuild chain is used for Kit and
-  root Scene saves.
+- `filesystem_saveBankDirectory_tick()` (rewritten Session 057): scans and
+  reuses the root Bank directory itself (open-or-rename-then-open if a match
+  for the target slot exists, create only if absent) rather than deleting and
+  recreating it, then for each Scene bit in the save mask deletes only that
+  one Bank-local child (`filesystem_deleteBankChildSlotDirectoryStart()`)
+  before writing its replacement — non-masked children are never scanned,
+  deleted, or written. This replaced an earlier total-tree-delete design that
+  destroyed every child, selected or not, and that could itself fail mid-scan
+  on a quarantined `errKit` directory's rewritten LFN entries (`ErrS05`).
+  After the per-child loop, it parks the original callback while the root
+  Bank directory is rescanned and `/Bank/.hcindex` is rewritten, the same
+  Save-owned rebuild chain used for Kit and root Scene saves.
 - `filesystem_loadLibraryIndex_tick()` reads one slot-preserving Kit, root
   Scene, or root Bank `.hcindex` into the shared cache. It never compacts blank
   rows and never retains per-slot aliases.

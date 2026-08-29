@@ -17,13 +17,19 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 056 close-out, on branch
-`dev-ph3-autosave-ph4`. Commits `509115b` (LFN duplicate fix) and `7108a00`
-(cluster-boundary fix) are pushed; `filesystem.c` page-exit expedite is
-uncommitted. The durable closeout is
-`knowledge_files/log_archive/056_SESSION_HANDOFF_LOG.md` (LFN duplicate-
-creation fix, cluster-boundary file-size fix, autosave page-exit expedite);
-verify the actual commit/worktree before making the next source change.
+**Current working source**: Session 057 close-out, on branch
+`dev-ph3-autosave-ph4`, commits `ad9b026`..`f99329c` (the fix commit is
+`f99329c`, "bank load/save speedup planning" — a misleading message; its
+actual content is the Bank Save stall fix, not Session 058 speedup work).
+Working tree otherwise clean. Verified directly against source: build is
+`text=380,436 data=408 bss=94,848`, matching `build/LXRV2_lxr02.img`
+(380,860 bytes) already committed at `f99329c`. The durable closeout is
+`knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md` (Bank Save
+present-mask union, AutoSave Bank-mismatch copy-forward, settings.cfg safe
+write, empty-Scene/Bank overwrite guard, boot Kit-sanitizer lazy-quarantine
+refactor, Bank Save per-Scene rewrite, ten-site stall detection, Bank Save
+stall root-cause and fix); verify the actual commit/worktree before making
+the next source change.
 
 ## RAM Allocation Approval Policy
 
@@ -511,6 +517,98 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
   - Root-directory working docs `S056_AFATFS_DUPLICATE_CORRECTION.md` and
     `S056_AFATFS_FILE_CLUSTER_CORRECTION.md` are superseded by
     `056_SESSION_HANDOFF_LOG.md` and may be deleted.
+- Session 057 closed the wrap-session punch list (P1 Bank Save present-mask
+  union; P2 redundant settings write accepted as-is; the AutoSave writer's
+  Bank-identity-mismatch case now copy-forwards instead of forcing full
+  regeneration), then implemented and mostly-tested three larger items and
+  root-caused a live Bank Save screen freeze:
+  - **`settings.cfg` safe write** (temp file `settings.tmp` + `afatfs_sync()`
+    + remove-old/rename-promote, plus a boot recovery prelude and a
+    self-checking `lines=17` terminator) — hardware-tested with a deliberate
+    mid-promotion power-cut simulation, PASS. The only fully closed-loop
+    hardware-verified item from this session.
+  - **Empty-Scene/Bank overwrite guard** — `filesystem_requestSaveBank()`
+    filters the save mask against `bank_scenePresentMask()`
+    (`bank_hasResidentBank()`-gated) before the state machine starts; root
+    Scene Save's case 0 refuses outright if the source isn't present. Code
+    landed, build-verified, **not hardware-tested**.
+  - **Boot Kit-directory sanitizer replaced with lazy quarantine-on-failed-
+    load.** Boot no longer opens/parses any Kit payload (closes a real
+    false-boot-failure risk that scaled with library size — 308 blocking ops
+    on the 44-Kit test card, one shared 10 s deadline); a folder is renamed
+    `err...` only when an actual Load attempt proves it invalid. Root Scene
+    Load cascades a Kit-layer failure to the owning Scene; Bank Load never
+    renames a Bank-local Scene folder (positional identity) and never fails
+    the whole Bank for one bad child — `filesystem_lastBankLoadFailedSceneMask()`/
+    `preset_bankLoadFailedSceneMask()` surface it through the existing error
+    overlay instead. Build-verified; hardware-tested only for
+    boot-timing/regression (checklist items 1/2/4/5/6). **The behavioral
+    tests — including the single most important one, the boot-safety
+    regression test — were not run.** Treat the false-boot-failure fix as
+    verified by code review only, not by hardware evidence, until that test
+    runs.
+  - **Bank Save rebuilt as per-Scene delete-then-write**, replacing
+    total-tree-delete-then-recreate. Fixes `ErrS05` (a quarantined
+    `errKit` directory's rewritten LFN entries broke `afatfs_deleteTree()`'s
+    scan on the next Bank Save) and an independent, previously-undocumented
+    bug: a partial `Save:[Bank]` (subset mask) used to silently delete every
+    **non-selected** resident child too. Hardware-tested via a full 16-Scene
+    Bank Save producing a byte-identical, uncorrupted 161-file tree.
+  - **Bank Save/Load screen freeze — root-caused and closed.** A user-visible
+    freeze (static `...`, no recovery short of hard reboot) was first
+    misdiagnosed as AsyncFATFS handle exhaustion (the operation reliably
+    stalled after exactly 5 children, matching `AFATFS_MAX_OPEN_FILES`);
+    built out into a full diagnostic build (pool bumped 5->8, a handle
+    census accessor, a phase-20 hard check) that then **disproved its own
+    hypothesis** — handle count stayed at exactly 1 per child, never
+    accumulating. Actual cause: a total-duration watchdog
+    (`op_bank_total_ticks`/`FS_BANK_TOTAL_TICK_LIMIT`) counted
+    `filesystem_tick()` foreground polls and treated the count as an
+    elapsed-millisecond budget; at the measured ~7,600 polls/second its
+    300,000-poll limit fired at a fixed ~39.5s regardless of Bank size,
+    aborting otherwise-healthy operations mid-write (the 32,768-byte all-
+    `0xFF` "corrupt" instrument files from earlier hardware tests were this
+    watchdog's provisional-write artifact, not an oversized serializer).
+    Fix: removed the watchdog outright (no replacement counter/timer of any
+    kind — see the CRITICAL REMINDERS in `057_SESSION_HANDOFF_LOG.md`), made
+    the two stall detectors whose abort could fire mid-callback during a Bank
+    operation (`BkSt` Bank Save entry, `ScSv` Scene Save)
+    **trace-only**, and reverted the handle-pool bump. **Verified directly
+    against current source, not merely restated from the closeout document**:
+    six sibling stall detectors added the same session (`KtSv`, `KtLd`,
+    `ScLd`, `BkLd`, `StWr`, `Flsh`) were *not* reverted and still abort on a
+    stall; a handle-census hard-abort (`BkHd`) at Bank Save's per-child entry
+    also remains permanently live, ungated by the new `DEV_STALL_DETECTION`
+    toggle. Hardware-accepted: full 16-Scene Bank Save now completes in
+    ~2.5 minutes with no corruption (latency itself is deferred to Session
+    058, `S058_BANK_LOAD_SPEEDUP_PROPOSAL.md`).
+  - `sizeof(afatfsFile_t)` is corrected to **188 bytes** (was recorded as 328
+    in `ASYNCFATFS_REFERENCE.md`; the old figure predated moving expanded
+    delete state out of every handle). Final build, independently re-verified
+    this logging pass by running `arm-none-eabi-size` directly:
+    `text=380,436 data=408 bss=94,848`, a net -832 text/+8 data/+48 bss versus
+    the Session 056 close-out build.
+  - **The Session 056 page-exit expedite was never re-verified on hardware
+    this session**, despite being first on this session's own priority list
+    at the outset. Still exactly where Session 056 left it: code-complete,
+    not hardware-tested.
+  - Still open, not touched this session: the sequencer chaselight
+    disappearing bug (traced but not root-caused — top hypothesis connects to
+    the still-open "single-source-of-truth Pattern/Scene index" item below);
+    an HCNAMES-row-0-vs-`settings.cfg` Bank-identity discrepancy on the
+    current test card (no trace evidence exists to root-cause it); the
+    `bootlog.bin`/`asavetrc.bin` duplicate-name re-verification (plausibly
+    narrowed by the Session 056 LFN fix, but not actually re-checked); the
+    name-cache ownership interlock; the top-level Load/Save entry trace gap;
+    `AUTOSAVE_TRACE_RECORD_COUNT` (still 2048, deferred again).
+  - Full detail, including every point above independently re-verified
+    against current source rather than only summarized from the session's own
+    planning documents:
+    `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`. The six
+    `S057_*.md` root planning documents this session produced are superseded
+    by that log and by the `specification_reference/` updates it made
+    (`FILESYSTEM_SPEC.md`, `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`,
+    `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`) and may be deleted.
 
 ---
 
@@ -850,11 +948,17 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
 - 8-sector LRU cache (4KB) between filesystem logic and SD card. Cache hits are free (no SPI traffic).
 - `sdcard_lxr02.c` implements `sdcard_readBlock`/`sdcard_writeBlock`/`sdcard_poll` on top of `SPI/spi_sd.c`. Each `sdcard_poll()` call clocks a burst of 16 SPI bytes (~9µs). A 512-byte sector completes in 32 polls.
 - `filesystem.c` serializes operations — one SD operation at a time. Request functions return immediately; completion is signalled via callback/status.
-- Asyncfatfs has five 328-byte open-file slots. The increase from three slots
-  costs 656 bytes. `afatfs_chdir()` copies directory state into
-  `currentDirectory`, so callers must close explicit parent/child directory
-  handles after entering them; handle capacity is not a substitute for correct
-  lifetimes.
+- Asyncfatfs has five open-file slots (`AFATFS_MAX_OPEN_FILES`). Each
+  `afatfsFile_t` is **188 bytes** (corrected Session 057; previously recorded
+  as 328 bytes — that figure predated moving expanded delete state out of
+  every handle), so the increase from three slots costs 376 bytes.
+  `afatfs_chdir()` copies directory state into `currentDirectory`, so callers
+  must close explicit parent/child directory handles after entering them;
+  handle capacity is not a substitute for correct lifetimes. **Do not raise
+  this pool to fix a stall without new evidence** — a Session 057 Bank Save
+  freeze looked exactly like handle exhaustion (stalled after precisely 5
+  children) and was disproven by trace evidence after bumping the pool to 8;
+  the real cause was unrelated (`057_SESSION_HANDOFF_LOG.md` §13-§14).
 - `filesystem.c` owns the filetype registry and add-a-filetype checklist. Non-SD clients include `filesystem.h` only.
 - Authoritative filesystem and instrument-file spec lives in
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`. The former
@@ -897,9 +1001,13 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
 - Dot-prefixed files/directories are real filesystem objects. asyncfatfs
   exposes them; product scanners filter only after object iteration. In
   particular `.hctmp.<ext>` is excluded from Instrument indexes and repair.
-- Filesystem-level exact-object recursive delete/recreate now exists for Kit,
-  root Scene, and root Bank replacement. It is non-atomic; no old/temporary
-  promotion or power-loss-safe commit is claimed.
+- Filesystem-level exact-object recursive delete/recreate now exists for Kit
+  and root Scene replacement. It is non-atomic; no old/temporary promotion or
+  power-loss-safe commit is claimed. **Root Bank replacement is different as
+  of Session 057**: the Bank directory itself is scanned/reused (not deleted
+  and recreated), and each selected child is individually deleted-then-
+  written in place — non-selected resident children are never touched. See
+  `057_SESSION_HANDOFF_LOG.md` §10.
   Hidden AutoSave A/B publication uses its separate commit-last contract in
   `AUTOSAVE.md`; it is not the abandoned per-library-file dot-backer design.
 - Root `Instrument/` is a separately scanned, type-filtered source pool.
@@ -1146,10 +1254,14 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - **Bank Load persistence is implemented and hardware-verified (Session 052).**
   `settings.cfg active_bank` follows the committed restore slot and the AutoSave
   Bank scene-present mask equals the effective selected-child union (re-marked
-  on a no-op). Deferred refactor targets are in `SCOPING_TARGETS.md`: Bank Save
-  still overwrites the present mask (union pending), the boot settings mark
-  writes settings.cfg once per boot, and the boot Kit-quarantine pass
-  (KQ019KST) should be refactored. See `052_SESSION_HANDOFF_LOG.md`.
+  on a no-op). See `052_SESSION_HANDOFF_LOG.md`. The three refactor targets
+  this bullet used to list as deferred in `SCOPING_TARGETS.md` are now all
+  **resolved in Session 057**: Bank Save present-mask union (P1) is fixed, the
+  once-per-boot settings mark is accepted deliberately (P2, not gated), and
+  the boot Kit-quarantine pass (`KQ019KST`) was replaced with lazy
+  quarantine-on-failed-load. See `057_SESSION_HANDOFF_LOG.md` §2-§3, §8-§9 —
+  note the boot-safety regression test for the quarantine replacement was not
+  yet hardware-run.
 - The current diagnostic build retains 2,048 trace records (16,384 B) and
   64-record/512-B append batches. This is temporary approved logging-only RAM.
   The Session 052 B-witness diagnosis is complete; restore the 64-record default

@@ -234,9 +234,14 @@ The current implementation has five application file-handle slots:
 #define AFATFS_MAX_OPEN_FILES 5
 ```
 
-The linked `afatfsFile_t` size is 328 bytes. Raising the pool from three to five
-therefore added exactly 656 bytes to the zero-initialized asyncfatfs state; the
-current complete `afatfs` symbol is 7,344 bytes.
+**Corrected Session 057** (a target-ABI debug compile plus GDB type
+inspection found the true value): the linked `afatfsFile_t` size is **188
+bytes**, not the 328 bytes previously recorded here — the 328-byte figure
+predates an earlier change that moved expanded delete state out of every
+handle. Raising the pool from three to five therefore added 376 bytes, not
+656, to the zero-initialized asyncfatfs state. The `afatfs` symbol's exact
+current total size was not re-measured this session; do not cite the old
+7,344-byte figure without regenerating it.
 
 Five slots are concurrency headroom, not a reason to retain redundant
 directory handles. Session 042 boot diagnostics proved that retaining Bank
@@ -246,6 +251,21 @@ the selected Bank and closes the explicit Kit handle after chdir, leaving slots
 for `kitset.kcg` and Instrument member files. `currentDirectory` remains usable
 because it is stored outside the application handle pool.
 
+**Session 057 case study — do not repeat this experiment without new
+evidence.** A Bank Save screen freeze was initially hypothesized to be handle
+exhaustion (the operation reliably stalled after exactly 5 children, matching
+`AFATFS_MAX_OPEN_FILES`). The pool was bumped to 8 and a read-only census
+helper, `afatfs_countOpenHandles()`, was added to test the hypothesis. Hardware
+evidence disproved it outright: the open-handle count stayed at exactly 1 (the
+just-created child directory handle) at every child boundary and never
+accumulated, and the per-phase stall detector never fired even once across
+three failed attempts — the operation was progressing normally throughout. The
+real cause was an unrelated foreground-poll counter misread as an elapsed-time
+budget (`057_SESSION_HANDOFF_LOG.md` §12-§14). The pool was reverted to 5.
+`afatfs_countOpenHandles()` was kept as a permanent read-only diagnostic (no
+retained SRAM) since it disproves rather than proves a leak at a glance, but
+the pool size itself must stay 5 until new, different evidence appears.
+
 Caller rule:
 
 - calculate the maximum simultaneously live handles for the state, including
@@ -253,7 +273,9 @@ Caller rule:
 - release an explicit directory handle after chdir unless a later API
   specifically requires that handle;
 - treat an unaccepted open as backpressure/failure according to that API;
-- never solve a lifetime leak only by increasing `AFATFS_MAX_OPEN_FILES`.
+- never solve a lifetime leak only by increasing `AFATFS_MAX_OPEN_FILES` — see
+  the Session 057 case study above for a concrete instance where the pool size
+  was never the actual problem.
 
 ## Removal
 

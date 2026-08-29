@@ -8,9 +8,11 @@ own AutoSave format/writer behavior, product filesystem layout, or low-level
 AsyncFATFS semantics; those belong to `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, and
 `ASYNCFATFS_REFERENCE.md` respectively.
 
-This document describes the Session 048 logging baseline plus the current
-2026-08-17 Session 051 Scene-follow-up build. Plans and failed working-tree
-experiments that mention a unified `/devlog.bin` are not implemented state.
+This document describes the Session 048 logging baseline, the Session 051
+Scene-follow-up build, and the Session 057 stall-detection expansion
+(`DEV_STALL_DETECTION`, ten `X`/`PHASE_STALL` sites). Plans and failed
+working-tree experiments that mention a unified `/devlog.bin` are not
+implemented state.
 
 The build has exactly two development modes:
 
@@ -28,7 +30,15 @@ The current `config.h` baseline is:
 ```c
 #define DEV_MODE_DIAGNOSTIC 0
 #define DEV_MODE_LOGGING 1
+#define DEV_STALL_DETECTION 1
 ```
+
+`DEV_STALL_DETECTION` (added Session 057) is a third compile-time flag but is
+**not** a third development mode in the sense above — it governs whether the
+cooperative stall detectors described under "Stall detection" below can
+terminate a stuck state machine at all, independent of whether diagnostics
+are visible (`DEV_MODE_DIAGNOSTIC`) or logged (`DEV_MODE_LOGGING`). See that
+section for the full site list and current behavior per site.
 
 ## `DEV_MODE_DIAGNOSTIC`
 
@@ -206,16 +216,17 @@ session once its root cause was fixed outright — its layout stays documented
 below only so any `asavetrc.bin` already captured during that window still
 decodes; it has no live producer.
 
-`X` (`PHASE_STALL`) is a purely diagnostic, edge-triggered "this cooperative
-state machine's phase stopped advancing" observer
-(`filesystem_pollPhaseStall()`), used at three sites: the delete-slot
-resolver (site 0, 50,000-poll threshold), Bank Save's own entry/metadata
-phases (site 1, 20,000 polls), and the runtime AutoSave parameter drain
-(site 2, 30,000 polls — the one site where a stall also forces a real
-`FS_STATUS_ERROR` completion instead of only observing, since a wedged drain
-previously had no bounded escape at all). `flags` bits 0-2 select the site;
-`value` packs the stalled phase, the numbered slot, and (site 0 only, when
-inside native delete) the asyncfatfs subphase.
+`X` (`PHASE_STALL`) is an edge-triggered "this cooperative state machine's
+phase stopped advancing" observer (`filesystem_pollPhaseStall()`). Through
+Session 056 it existed at three sites; **Session 057 widened the site field
+from 3 bits (8 values) to 4 bits (16 values) and added seven more sites**, and
+**changed whether a stall trips an abort or only a trace record at two of the
+original sites**. `flags` bits 0-3 select the site; `value` packs the stalled
+phase, the numbered slot, and (site 0 only, when inside native delete) the
+asyncfatfs subphase. Full table, current as of Session 057 and verified
+directly against `filesystem.c` (not merely restated from that session's own
+planning documents), is in the "Stall detection" section below, including one
+confirmed asymmetry that session's own closeout document does not mention.
 
 `O` (`SAVE_LIFECYCLE`) is an ordered per-save-type timeline —
 `REQUEST`/`DELETE_RESULT`/`CREATE_RESULT`/`SOURCE_STAGED`/`FINISH` — for Kit,
@@ -295,6 +306,87 @@ command-active `F`, one page-suppression `W`, then `A/V/M/C/P/T`; `P` reported
 generation 6. The final root-index callback must acknowledge its captured
 terminal result before Menu teardown, otherwise these RAM records and the
 AutoSave writer remain blocked behind a non-idle filesystem facade.
+
+## Stall detection (`DEV_STALL_DETECTION`)
+
+Ten sites currently exist. Each follows the same shape: poll for
+`op_phase` staying unchanged across a threshold count of ticks, then either
+only record one `X` trace entry ("observe"), or additionally write a named
+error code via `filesystem_makeNamedErrorCode()` and call
+`filesystem_finish(FS_STATUS_ERROR)` ("abort"). `DEV_STALL_DETECTION` (default
+1, `config.h`) compiles every detector, its statics, and its counter resets
+out of the build entirely when set to 0 — useful for bench-testing a
+genuinely slow card without a detector killing the operation mid-test. Build
+delta when disabled: -840 bytes text, -56 bytes BSS.
+
+| Site | State machine | Threshold | Named code | Behavior |
+|---|---|---|---|---|
+| Delete-slot resolver | `filesystem_deleteSlotDirectory_tick()` | 50,000 polls | `TDel`/`TOut` | Partial abort — cannot abort a native `deleteTree()` in progress; only the pre-delete scan phases can abort |
+| Bank Save entry/metadata | `filesystem_saveBankDirectory_tick()` | 20,000 polls | `BkSt` | **Observe only (Session 057)** — see below |
+| AutoSave parameter drain | `filesystem_autosaveParameterDrain_tick()` | 30,000 polls | `DrSt` | Abort |
+| Kit Save | `filesystem_saveKitDirectory_tick()` | 20,000 polls | `KtSv` | Abort (added Session 057) |
+| Scene Save | `filesystem_saveSceneDirectory_tick()` | 20,000 polls | `ScSv` | **Observe only (Session 057)** — see below |
+| Kit Load | `filesystem_loadKitDirectory_tick()` | 20,000 polls | `KtLd` | Abort (added Session 057) |
+| Scene Load | `filesystem_loadSceneDirectory_tick()` | 20,000 polls | `ScLd` | Abort (added Session 057) |
+| Bank Load entry | `filesystem_loadBankDirectory_tick()` | 20,000 polls | `BkLd` | Abort (added Session 057) |
+| Settings write | `filesystem_saveGlobals_tick()` | 30,000 polls | `StWr` | Abort (added Session 057) |
+| Flush Finish | `filesystem_flushFinish_tick()` | 50,000 polls | `Flsh` | Abort (added Session 057) — shared completion gate for every successful operation |
+
+The Scene Save and Scene Load detectors each cover both their standalone
+root operation and the equivalent path delegated from Bank Save/Load
+(entered via `op_bank_payload_active`), since the Bank container-level
+detectors do not fire while a child is delegated.
+
+**Why Bank Save entry and Scene Save are observe-only.** Both were originally
+implemented as abort sites in the same Session 057 that added the other seven
+(`S057_TESTING.md` §8.6.8/§8.8), then reverted specifically for these two
+after hardware evidence showed `filesystem_finish(FS_STATUS_ERROR)` aborting
+a phase that still owns a pending AsyncFATFS callback is not safe
+cancellation — it releases the shared facade without draining that callback,
+letting it later fire and overwrite the next operation's shared `op_file`
+(observed: trace-flush bytes landed inside an orphaned Bank instrument file).
+Bank Save's own container phases and the per-child Scene writer delegated
+during a Bank Save are the two places this was directly observed. **The other
+six new sites (`KtSv`, `KtLd`, `ScLd`, `BkLd`, `StWr`, `Flsh`) were not
+reverted and still abort** — confirmed by reading current source, not merely
+restated from `S057_BANK_STALL_FIX.md`, whose own implementation record names
+only `BkSt`/`ScSv`. Whether `BkLd`/`ScLd` share the same corruption risk as
+`BkSt`/`ScSv` (the observed evidence was specifically about a *write*
+redirecting into the wrong file; a stalled *Load* only reads) was not
+investigated. Treat the current split as a real, deliberate-but-unproven
+asymmetry, not an oversight to silently "fix" by symmetry — see
+`057_SESSION_HANDOFF_LOG.md` §15 item 1.
+
+**`BkHd` — a permanent, un-gated exception, not in the table above.** A
+handle-pool census hard-check remains live at the entry to every Bank Save
+per-child cycle, calling `afatfs_countOpenHandles()` and aborting
+(`filesystem_finish(FS_STATUS_ERROR)`, named code `BkHd` + handle count) if
+the count is nonzero. Unlike every detector above, it is **not** gated by
+`DEV_STALL_DETECTION`. It was added during the Session 057 Bank Save freeze
+investigation to test (and, per the trace evidence, disprove) a
+handle-exhaustion hypothesis; it is safe by construction — the phase it
+guards is reached only after navigation has already closed its own handles
+and before the delete scanner opens one, so no callback can be pending — and
+in practice can never fire on correct code, since the count it checks is
+provably always zero at that point. It now functions as a permanent,
+zero-cost regression guard rather than an active diagnostic.
+
+**`BkTo` — historical only, do not reintroduce.** A total-duration watchdog
+(`op_bank_total_ticks` / `FS_BANK_TOTAL_TICK_LIMIT`, 300,000) existed briefly
+within Session 057 and was fully removed before the session closed; it is not
+present in current code. It counted `filesystem_tick()` foreground polls and
+treated the count as an elapsed-millisecond budget, which is invalid — poll
+rate is workload- and build-dependent (measured ~7,600/s on this build), so
+the limit fired at a fixed ~39.5 seconds of wall time regardless of Bank
+size, aborting otherwise-healthy operations mid-write. Any future
+total-duration safeguard must use an actual wall-clock/tick16 time source,
+never a call counter, and must not abort a phase that may still own a
+pending callback (see the `BkSt`/`ScSv` reasoning above) without first
+implementing real cancellation (draining callbacks, closing handles,
+returning to root, syncing) — AsyncFATFS currently exposes no primitive for
+that. `asavetrc.bin` captures made during the brief window this existed may
+still contain `BkTo`/site-`BANK_ENTRY` records from that build; they do not
+indicate a currently-reachable code path.
 
 ## Current duplicate-name limitation
 

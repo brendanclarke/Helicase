@@ -65,6 +65,7 @@
 | 054 | 2026-08-20/21 | commits `b9bdb92`, `0827b40` on `dev-ph3-autosave-ph3` | Recursive-delete root cause found and fixed (Bugs #1-#5: spurious timeout error, then a descend/ascend identity invariant broken across two intermediate fixes); HCNAMES source-on-save staged for all four element types; Scene-Pattern playback/UI desync fix; self-introduced-and-fixed IWDG boot-hang regression; extensive new trace diagnostics (`'X'`/`'O'`/`'E'`) |
 | 055 | 2026-08-21 | uncommitted `Core/Menu/menu.c` on `dev-ph3-autosave-ph3` (338 insertions/2 deletions vs `0827b40`) | Hardware-confirmed Session 054's recursive-delete/HCNAMES fixes via full round-trip testing; Load-menu freeze root-caused and closed (missing `filesystem_ack()` in the shared error overlay, plus two self-deadlocking retry helpers); Load: Instrument `kit`-row restore permanent-failure fix; stale Bank/Scene/Kit name-on-entry race fix |
 | 056 | 2026-08-24 | commits `509115b`, `7108a00` plus uncommitted `filesystem.c` on `dev-ph3-autosave-ph4` | AsyncFATFS LFN duplicate-creation fix (latch-and-continue scan replaces early free-run exit); `afatfs_fseekAtomic()` cluster-boundary file-size fix (missing `afatfs_fileUpdateFilesize()` call left `logicalSize` at 0); autosave writer page-exit expedite (`fs_autosave_page_suppressed` flag resets deadline to 250 ms on Load/Save exit); hardware-verified duplicate and file-size fixes, page-exit expedite pending verification |
+| 057 | 2026-08-28 | commits `ad9b026`..`f99329c` on `dev-ph3-autosave-ph4` | AutoSave writer wrap (Bank Save present-mask union, Bank-identity-mismatch copy-forward instead of regeneration); settings.cfg safe write (temp+sync+promote, hardware-verified); empty-Scene/Bank overwrite guard; boot Kit-directory sanitizer replaced with lazy quarantine-on-failed-load (Kit→Scene cascade, Bank never-fails-whole-operation contract); Bank Save rebuilt as per-Scene delete-then-write (fixes `ErrS05`, stops deleting non-selected children); Bank Save/Load screen-freeze root-caused to a foreground-poll counter misread as milliseconds and removed, hardware-accepted full 16-Scene Bank Save |
 
 
 ---
@@ -437,6 +438,10 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | `/.hcnames` is the sole 129-row resident identity/provenance register: paired `name<TAB>source` records use `-`, `?`, `000..999`, or `@`; its filesystem-owned 258-B source cache replaces the retired 32-B SceneData source array. `settings.cfg` is now a 17-line source-free schema and accepts old `scene_source_NN` keys only to ignore them during migration | 048 |
 | Successful root Instrument Load immediately marks type plus owned Normal/Morphable Morph payload; compatible InstrumentMrp marks only Morphable Morph payload. Hardware accepted `J=0x03`, `I=0x07`, 76/76 root bytes, and generation-3 A/B proof of a Drum-2 Morph-only change. HCPRMS names are not identity authority; HCNAMES is | 048 |
 | Session 049 scope is only normal Kit Load, root Scene Load without Pattern, and selective Bank Load mutation marks, one owner boundary and hardware fixture at a time. Do not combine it with writer exclusion, boot reader, Save-side marking, KitMrp, recursive delete, or active-Scene Bank behavior | 048 |
+| A foreground-poll count is not a time budget — `filesystem_tick()` runs ~7,600×/second on this build; a 300,000-poll Bank Save/Load watchdog fired at a fixed ~39.5 s regardless of Bank size or card speed, aborting mid-write. Removed outright, not replaced with a corrected counter | 057 |
+| `filesystem_finish(FS_STATUS_ERROR)` is not cancellation — it releases the shared facade without draining in-flight AsyncFATFS callbacks/handles. Aborting a stall detector while a callback may still be live let a later callback overwrite the next operation's shared `op_file` (observed: trace bytes written into an orphaned Bank instrument file). Only abort a phase proven to own no pending callback | 057 |
+| `AFATFS_MAX_OPEN_FILES` must stay 5 — bumping to 8 to test a handle-exhaustion hypothesis was disproven by trace evidence (handle count 0 between Bank Save children, 1 immediately after each child-directory create) and reverted. `sizeof(afatfsFile_t)` is 188 bytes on this target, not the historical 328 | 057 |
+| Bank Save is per-Scene delete-then-write, not total-tree-delete-then-recreate — a partial `Save:[Bank]` (subset mask) no longer deletes non-selected resident children | 057 |
 
 ---
 
@@ -793,3 +798,71 @@ cost (~12 s) but removes the variable gap between cycles.
 
 - **Find here**: [056_SESSION_HANDOFF_LOG.md](056_SESSION_HANDOFF_LOG.md),
   `ASYNCFATFS_REFERENCE.md`, `AUTOSAVE.md`, and `FILESYSTEM_SPEC.md`.
+
+### 057 — AutoSave Writer Wrap-Up, Boot Kit-Sanitizer Refactor, And Bank Save Stall Root-Cause Fix (2026-08-28)
+
+Closed out the AutoSave writer punch list from `S057_AUTOSAVE_WRITER_WRAP.md`,
+then chased a user-reported Bank Save screen freeze through three escalating
+diagnostic rounds to its actual root cause. Fixed Bank Save's present-mask
+overwrite (unions instead of replacing, matching Bank Load — P1) and accepted
+the redundant per-boot settings write as harmless now that the write itself is
+safe (P2). Confirmed the AutoSave writer's Bank-identity-mismatch path already
+landed correctly in an earlier commit this session: a valid winner whose Bank
+identity differs from the resident Bank now gets a transformed copy-forward
+(marks the whole Bank payload dirty, phase 50) instead of full regeneration
+(phase 30), which is reserved for genuinely invalid records. Added a
+`settings.cfg` safe write — temp file (`settings.tmp`) + `afatfs_sync()` +
+remove-old/rename-promote, with a boot-time recovery prelude and a
+self-checking `lines=N` terminator — closing the same power-loss class of bug
+AutoSave's `.hcprms1/2` already guard against; hardware-verified with a
+deliberate mid-promotion power-cut simulation. Added an empty-Scene/Bank
+overwrite guard (`bank_hasResidentBank()` + `bank_scenePresentMask()`/
+`bank_scenePresent()`) so an unloaded Scene can never overwrite occupied
+Library data, gated on the P1 fix landing first. Replaced the boot-time
+blocking Kit-quarantine scan (308 blocking file operations sharing one
+10-second deadline on the 44-Kit test card — a live false-boot-failure risk as
+the library grows) with lazy quarantine-on-failed-load: a Kit/Scene folder is
+renamed `err...` only when an actual Load attempt proves its content invalid,
+with a Kit-failure-cascades-to-owning-Scene rule for root Scene Load and a
+never-fails-the-whole-operation partial-failure contract for Bank Load (one
+bad child is excluded from the present mask and shown via the existing error
+overlay; the operation still completes `FS_STATUS_DONE`, since a Bank-wide
+`FS_STATUS_ERROR` here would fail the whole boot). Testing that refactor
+surfaced `ErrS05`: a quarantined Bank-local Kit folder's rewritten LFN entries
+broke `afatfs_deleteTree()`'s directory scan on the next Bank Save, so Bank
+Save's old total-tree-delete-then-recreate was replaced with per-Scene
+delete-then-write — which also fixes an independent, previously-undocumented
+bug: a partial `Save:[Bank]` (subset mask) no longer silently deletes every
+non-selected resident child. That work then uncovered a genuine screen freeze
+during Bank Save. Ten new per-state-machine stall detectors and a
+`DEV_STALL_DETECTION` compile toggle were added first as general hardening;
+the freeze's actual cause, found only after a wrong first hypothesis
+(AsyncFATFS handle exhaustion — built out into a full diagnostic build with
+the handle pool bumped 5→8, then disproven by that same build's own trace
+evidence), was a leftover total-duration watchdog counting `filesystem_tick()`
+foreground polls and treating the count as elapsed milliseconds: at the
+measured ~7,600 polls/second, its 300,000-poll limit fired at a fixed ~39.5s
+regardless of Bank size, aborting mid-write and leaving provisional/corrupt
+files (a 32,768-byte all-`0xFF` instrument file; trace bytes misdirected into
+an orphaned Bank instrument file by a still-live callback after the abort).
+Fix: removed the watchdog outright (not replaced with a corrected one), made
+the two stall observers whose abort could fire mid-callback during a Bank
+operation (`BkSt`, `ScSv`) trace-only, and reverted the diagnostic handle-pool
+bump. Hardware-accepted: a full 16-Scene Bank Save now completes in
+~2.5 minutes (~137s trace-measured) with a byte-identical, uncorrupted output
+tree; that latency is a known, separately-deferred Session 058 target. Six
+other per-state-machine stall detectors added the same session (`KtSv`,
+`KtLd`, `ScLd`, `BkLd`, `StWr`, `Flsh`) were **not** reverted and still call
+`filesystem_finish(FS_STATUS_ERROR)` on a 20-30k-poll stall — confirmed by
+reading the current source, not assumed from the closeout document, which
+names only `BkSt`/`ScSv`. A handle-census hard-abort at Bank Save's per-child
+entry (`BkHd`) also remains live and unmentioned in the closeout. The Session
+056 page-exit expedite, first item on this session's own priority list, was
+never re-verified on hardware in any of this session's records.
+
+- **Find here**: `S057_AUTOSAVE_WRITER_WRAP.md`, `S057_SETTINGS_WRITE_SAFE.md`,
+  `S057_SCENE_OVERWRITE_SAFE.md`, `S057_BOOT_KIT_SANITIZE_REFACTOR.md`,
+  `S057_TESTING.md`, `S057_BANK_STALL.md`, `S057_BANK_STALL_FIX.md`,
+  [057_SESSION_HANDOFF_LOG.md](057_SESSION_HANDOFF_LOG.md), `FILESYSTEM_SPEC.md`,
+  `AUTOSAVE.md`, `DEV_MODES.md`, `ASYNCFATFS_REFERENCE.md`, and
+  `SCOPING_TARGETS.md`.

@@ -139,6 +139,37 @@ shrank 12 B (net -8 B RAM). The four initialized bytes must still be
 identified to their owner under the allocation policy even though total RAM
 shrank.
 
+## 2026-08-28 Session 057 net allocation note
+
+Independently re-verified against the current working tree (not copied from a
+planning document): `arm-none-eabi-size build/lxr02.elf` reports
+`text=380,436 B`, `data=408 B`, `bss=94,848 B` (`dec=475,692`). Compared
+against the Session 056 close-out build (`text=381,268 B`, `data=400 B`,
+`bss=94,800 B`, per `056_SESSION_HANDOFF_LOG.md` §5): **net -832 B text,
++8 B data, +48 B bss** across the whole session.
+
+The net bss figure is small because it nets two much larger opposing changes,
+not because little changed. Additions, all normal SRAM1 `.bss`, `filesystem.c`
+unless noted: 4 bytes of settings-recovery scratch (§6 of
+`057_SESSION_HANDOFF_LOG.md`); `op_load_invalid_layer`, `op_bank_scene_failed_mask`,
+`op_bank_existing_dir_found`, `op_delete_slot_bank_local` (Bank/Scene
+quarantine and per-child Bank Save state, a few bytes each); `pm_bank_load_failed_scene_mask`
+in `presetManager.c`; and seven new stall-detector site pairs (`_last_phase`
+uint8_t + `_ticks` uint32_t each, gated `#if DEV_STALL_DETECTION`, default on).
+Removals: three reverted `afatfsFile_t` slots at the corrected 188 bytes each
+(564 bytes, `asyncfatfs.c` — see the `ASYNCFATFS_REFERENCE.md` handle-pool
+correction from the same session) and the 4-byte `op_bank_total_ticks`
+counter, added and then fully removed within the session (net zero
+contribution to the final image, but real churn along the way).
+
+This note states the verified before/after totals and the qualitative set of
+additions/removals; it does not claim a byte-exact per-symbol reconciliation
+(that would need an `arm-none-eabi-nm -S --size-sort` diff against a rebuilt
+Session 056 baseline, not performed this pass). No RAM allocation this
+session drew against either reserved pool (DTCM delay-line headroom, SRAM1
+Pattern-data headroom) — every new static above is a handful of bytes of
+operation-scoped scratch, not a new buffer/cache/pool.
+
 ## 2026-08-16 Scene-Load record-publication allocation
 
 The current logging-on image carries the approved temporary
