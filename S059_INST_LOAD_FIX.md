@@ -666,10 +666,11 @@ only after switching voices/types repeatedly is not acceptance.
 
 ## Direct `.hcindex` fast-path correction — remove the unconditional directory prescan
 
-Status: implementation recipe only. The line numbers below identify the
-current `Core/Hardware/SD/filesystem.c` as inspected on 2026-08-30. They will
-shift when the edits are applied, so the named function, phase labels, and
-quoted current blocks are the authoritative anchors.
+Status: implemented; focused static/build verification complete. Hardware
+media tracing and product acceptance remain pending. The line numbers below
+identify the `Core/Hardware/SD/filesystem.c` revision inspected on 2026-08-30;
+they may shift again, so the named function, phase labels, and quoted blocks
+are the authoritative anchors.
 
 ### Code-file scope
 
@@ -1053,3 +1054,32 @@ to be added.
 7. Build and static acceptance: clean build/image, `git diff --check`, unchanged
    `bss`, no new symbols/state, and no changes outside the one source file plus
    the normal documentation/verification record written after testing.
+
+### Direct fast-path implementation record
+
+- 2026-08-30: Implemented all three changes in
+  `filesystem_loadInstrumentIndex_tick()` in
+  `Core/Hardware/SD/filesystem.c`. The function contract now documents direct
+  `.hcindex` opening; phases 9–15 no longer prescan the selected directory and
+  instead close the copied directory handle, open `.hcindex` directly, and
+  classify nonfatal NULL versus fatal open completion; the shared phases 18–23
+  comment and phase-20 label now describe only real opened-index close paths.
+- 2026-08-30: Confirmed the load FSM contains no
+  `afatfs_findFirstObject()`, `afatfs_findNextObject()`,
+  `afatfs_findLastObject()`, `op_object_finder`, or `op_object` reference and
+  no cases 12, 13, or 15. The intended healthy path is therefore
+  `8 -> 9 -> 10 -> 11 -> 17`, with the existing recovery/error branches
+  preserved.
+- 2026-08-30: `make clean && make -j2 && make img` passed. The resulting
+  `build/lxr02.elf` reports `text=385,580`, `data=404`, `bss=96,176`,
+  `dec=482,160`, `hex=75b70`; section total is `483,759`, the binary is
+  `385,984` bytes, and `build/LXRV2_lxr02.img` is `386,000` bytes.
+- 2026-08-30: `git diff --check` passed. No header or other production/test
+  source was changed for this correction; the adjacent block-comment
+  descriptions are in the changed C source as required by the exact
+  code-file scope above. The requested on-card and hardware trace matrix
+  remains pending because it requires media/device execution.
+- 2026-08-30: The unchanged fixture validator was run against
+  `SD_CARD_LOAD_SAVE_TEST_RESULT` and returned the expected status 1 for its
+  four deliberate defects: the Drum all-space row and missing Snare, Cymbal,
+  and HiHat `.hcindex` files. No validator source was changed.

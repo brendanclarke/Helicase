@@ -4215,19 +4215,34 @@ static void filesystem_createBootIndex_tick(void)
 /*
  * Load or repair one registry-defined Instrument `.hcindex`.
  *
- * What: the fast path proves that the selected type owns a real `.hcindex`,
- * reads and validates its compact sorted rows, and returns DONE only for a
- * complete valid file. Missing, empty, or structurally corrupt metadata is
- * closed and handed to the existing selected-type scan -> index-write chain;
- * a fatal FAT/SD condition closes/returns ERROR without recovery.
+ * What: the fast path enters the selected type directory, releases the
+ * redundant opened-directory handle, and opens `.hcindex` directly. A valid
+ * file is read into the compact sorted typed cache. A nonfatal NULL open,
+ * empty file, or structurally invalid row transfers the same accepted request
+ * into the existing selected-type scan -> index-write -> sync chain. A fatal
+ * FAT/SD condition returns ERROR without starting recovery.
  *
- * Why: a missing index is recoverable metadata, whereas a read/scan failure is
- * evidence that replacing metadata could destroy a good card. The FSM uses
- * distinct phase identities for valid, recovery, and error close paths, so an
- * asynchronous close cannot collapse all outcomes into the old unconditional
- * DONE phase. Inputs: op_instrument_index_type and one shared cache. Outputs:
- * one complete typed cache or one final callback result, with no new retained
- * state. Clients: Menu's normal and Morph Instrument entry paths.
+ * Why: `.hcindex` exists to avoid enumerating every physical Instrument during
+ * normal Menu entry and voice/type/mode transitions. The former preliminary
+ * presence scan made every healthy load O(directory entries), duplicating the
+ * expensive work that belongs only to missing/corrupt recovery. Direct open
+ * restores the intended O(index bytes) fast path while the existing fatal
+ * snapshot preserves the boundary between missing metadata and real I/O
+ * failure.
+ *
+ * Inputs: op_instrument_index_type, the registry-owned directory name, the
+ * single shared name cache, and the accepted request's completion callback.
+ * Outputs/effects: exactly one complete typed cache or one final ERROR
+ * callback. Successful direct read and selected-type recovery still invoke the
+ * original callback exactly once; no Scene, DSP, HCNAMES, or retained-state
+ * ownership changes.
+ *
+ * Affiliates: filesystem_requestLoadInstrumentIndex(),
+ * filesystem_validateInstrumentIndexRow(),
+ * filesystem_instrumentIndexFATFatal(),
+ * filesystem_beginInstrumentIndexRecovery(),
+ * filesystem_completeLibraryIndexRebuild(), and
+ * menu_instrumentIndexLoadComplete().
  */
 static void filesystem_loadInstrumentIndex_tick(void)
 {
@@ -4319,62 +4334,42 @@ static void filesystem_loadInstrumentIndex_tick(void)
         op_phase = 9u;
         return;
 
-    case 9: /* START .hcindex presence scan */
+    case 9: /* CLOSE type-directory handle before direct index open */
         /*
-         * Prove missing versus I/O before opening the index.
+         * Use `.hcindex` as the actual typed-browser fast path.
          *
-         * A NULL callback from `fopen_lfn()` is not absence proof: it can be a
-         * lookup miss or a lower-layer failure. The already-open type
-         * directory is therefore enumerated first; a found regular `.hcindex`
-         * authorizes the strict open, while a clean scan with no such object
-         * enters recovery. This consumes no cache or retained state.
+         * What: After afatfs_chdir() copied the selected type directory into
+         * AsyncFATFS' current-directory object, release the original opened
+         * directory handle. The next phase opens the exact `.hcindex`
+         * component directly; no physical directory-object enumeration occurs
+         * before that open.
+         *
+         * Why: The index exists specifically to avoid scanning every
+         * Instrument file during Menu entry and voice/type/mode transitions.
+         * Enumerating the directory merely to prove `.hcindex` exists made
+         * every healthy request O(directory entries) and made the roughly
+         * 100-file Drum directory the worst normal case. The copied current
+         * directory remains valid after this redundant handle is closed.
+         *
+         * Inputs: op_kit_root_dir from the completed selected-type open,
+         * AsyncFATFS' current-directory copy established by phase 8, and the
+         * existing on_file_closed callback.
+         *
+         * Outputs/effects: the redundant directory handle is asynchronously
+         * released and op_close_done becomes the only gate to the direct file
+         * open. No cache row, recovery callback, Instrument payload, or card
+         * directory entry changes.
+         *
+         * Affiliates: afatfs_chdir(), afatfs_fclose(),
+         * on_file_closed(), afatfs_fopen_lfn(), and the direct-open result
+         * phase below.
          */
-        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
-        op_phase = 10u;
-        return;
-
-    case 10: /* FIND .hcindex */
-    {
-        afatfsOperationStatus_e scan_status =
-            afatfs_findNextObject(op_kit_root_dir,
-                                  &op_object_finder,
-                                  &op_object);
-        if (scan_status == AFATFS_OPERATION_IN_PROGRESS)
-            return;
-        if (scan_status == AFATFS_OPERATION_FAILURE ||
-            filesystem_instrumentIndexFATFatal()) {
-            /* Scan failure is a real error; phase 20 closes without recovery. */
-            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
-            op_phase = 20u;
-            return;
-        }
-        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
-            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
-            op_phase = 12u;
-            return;
-        }
-        if (op_object.id.kind == AFATFS_OBJECT_FILE &&
-            fat_compareDisplayName(op_object.id.displayName,
-                                   ".hcindex", true) == 0) {
-            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
-            op_phase = 11u;
-        }
-        return;
-    }
-
-    case 11: /* CLOSE type-directory handle, index present */
         op_close_done = false;
         if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 13u;
+            op_phase = 10u;
         return;
 
-    case 12: /* CLOSE type-directory handle, index absent */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 14u;
-        return;
-
-    case 13: /* WAIT type close, then open proven index */
+    case 10: /* WAIT type close + OPEN .hcindex DIRECTLY */
         if (!op_close_done) {
             if (filesystem_instrumentIndexFATFatal())
                 filesystem_finish(FS_STATUS_ERROR);
@@ -4387,16 +4382,54 @@ static void filesystem_loadInstrumentIndex_tick(void)
                               AFATFS_MATCH_CASE_SENSITIVE,
                               NULL, on_file_opened))
             return;
-        op_phase = 15u;
+        op_phase = 11u;
         return;
 
-    case 14: /* WAIT type close, then return root for recovery */
-        if (!op_close_done) {
-            if (filesystem_instrumentIndexFATFatal())
-                filesystem_finish(FS_STATUS_ERROR);
+    case 11: /* WAIT direct .hcindex open */
+        if (!op_file_ready)
+            return;
+        if (op_file == NULL) {
+            /*
+             * Classify direct index-open completion without a prescan.
+             *
+             * What: A NULL handle with a ready/nonfatal AsyncFATFS volume is
+             * missing metadata and enters the existing selected-type recovery
+             * path. A NULL handle with AFATFS_FILESYSTEM_STATE_FATAL enters a
+             * separate terminal-error phase and never starts a scan or writer.
+             * A non-NULL handle continues into the existing validated reader.
+             *
+             * Why: Missing `.hcindex` is the recoverable condition proven by
+             * the supplied card, while a fatal FAT/SD state is not authority
+             * to overwrite potentially good metadata. The read-only fatal
+             * snapshot separates those outcomes without paying an
+             * unconditional directory walk on every healthy request.
+             *
+             * Inputs: op_file_ready/op_file from on_file_opened() and the
+             * observational filesystem_instrumentIndexFATFatal() result.
+             *
+             * Outputs/effects: phase 14 for return-to-root recovery, phase 16
+             * for return-to-root terminal error, or validated read phase 17.
+             * The accepted request retains exactly one eventual completion
+             * callback on all branches.
+             *
+             * Affiliates: on_file_opened(),
+             * filesystem_instrumentIndexFATFatal(),
+             * filesystem_beginInstrumentIndexRecovery(),
+             * filesystem_finish(), and menu_instrumentIndexLoadComplete().
+             */
+            op_phase = filesystem_instrumentIndexFATFatal() ? 16u : 14u;
             return;
         }
-        op_kit_root_dir = NULL;
+
+        /* Initialize only after a real index handle exists. Partial rows from
+         * an earlier request are never a valid prefix for this typed cache. */
+        op_item_offset = 0u;
+        fs_list_cache_count = 0u;
+        op_line_len = 0u;
+        op_phase = 17u;
+        return;
+
+    case 14: /* DIRECT OPEN MISSING: RETURN ROOT + RECOVER */
         if (!afatfs_chdir(NULL)) {
             if (filesystem_instrumentIndexFATFatal())
                 filesystem_finish(FS_STATUS_ERROR);
@@ -4405,25 +4438,33 @@ static void filesystem_loadInstrumentIndex_tick(void)
         filesystem_beginInstrumentIndexRecovery();
         return;
 
-    case 15: /* WAIT proven .hcindex open */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            /* The presence proof succeeded, so this is not metadata absence. */
-            if (!afatfs_chdir(NULL) &&
-                !filesystem_instrumentIndexFATFatal())
-                return;
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
+    case 16: /* DIRECT OPEN FATAL: RETURN ROOT + ERROR */
         /*
-         * Initialize the typed reader only after the index handle opens.
-         * Partial rows from a prior request are not a valid prefix; every
-         * accepted row below is validated before it mutates the cache.
+         * Complete a fatal direct-open result without authorizing recovery.
+         *
+         * What: Attempt to normalize the working directory when AsyncFATFS
+         * can still make progress, then publish FS_STATUS_ERROR. If the
+         * filesystem is already fatal, do not wait forever for chdir; finish
+         * the accepted request immediately through its normal callback/error-
+         * overlay path.
+         *
+         * Why: The missing-index branch may scan and rewrite metadata, but a
+         * fatal lower-layer state must never do so. A distinct phase preserves
+         * that decision across foreground polls and cannot fall through to the
+         * recovery handoff.
+         *
+         * Inputs: current AsyncFATFS working directory and the fatal-state
+         * snapshot. Outputs/effects: root when available and one terminal
+         * FS_STATUS_ERROR; no scan, index writer, or cache publication.
+         *
+         * Affiliates: afatfs_chdir(),
+         * filesystem_instrumentIndexFATFatal(), filesystem_finish(), and the
+         * Menu terminal callback.
          */
-        op_item_offset = 0u;
-        fs_list_cache_count = 0u;
-        op_line_len = 0u;
-        op_phase = 17u;
+        if (!afatfs_chdir(NULL) &&
+            !filesystem_instrumentIndexFATFatal())
+            return;
+        filesystem_finish(FS_STATUS_ERROR);
         return;
 
     case 17: /* READ AND VALIDATE COMPACT ROWS */
@@ -4470,22 +4511,29 @@ static void filesystem_loadInstrumentIndex_tick(void)
     }
 
     /*
-     * Preserve the reason the typed-index reader is leaving the fast path.
+     * Close only an `.hcindex` file which was successfully opened.
      *
-     * What: uses separate resumable close/return phases for a valid index,
-     * recoverable metadata corruption, and a real I/O failure. Why: async
-     * close and chdir can require multiple foreground polls, but their eventual
-     * terminal action must remain stable. The former shared phase always
-     * finished DONE, silently publishing a partial/empty cache after read
-     * errors. Inputs: open result, line-reader status, structural validation,
-     * EOF, and asynchronous close/chdir completion. Outputs: exactly one of
-     * ordinary success, recovery handoff, or terminal error. Affiliates:
-     * filesystem_readTextLine(), filesystem_finish(),
-     * filesystem_beginInstrumentIndexRecovery(), and Menu's callback.
+     * What: Valid EOF, structural corruption/empty metadata, and a real index
+     * read error use separate phase identities while sharing one asynchronous
+     * op_file close. After close, the phase offset selects DONE, recovery, or
+     * ERROR through phases 21, 22, and 23 respectively.
+     *
+     * Why: Direct open handles absence before phase 17, so directory discovery
+     * and missing-file results can never enter this group. This guarantees
+     * op_file is a real opened index on every shared-close branch and preserves
+     * the validated reader's outcome across an asynchronous fclose.
+     *
+     * Inputs: op_file from the successful direct open and the outcome selected
+     * by phase 17. Outputs/effects: one scheduled close followed by exactly one
+     * of valid completion, selected-type recovery, or terminal read error.
+     *
+     * Affiliates: filesystem_readTextLine(), afatfs_fclose(),
+     * on_file_closed(), filesystem_beginInstrumentIndexRecovery(), and
+     * filesystem_finish().
      */
     case 18: /* CLOSE valid index */
     case 19: /* CLOSE corrupt/empty index for recovery */
-    case 20: /* CLOSE after real read/scan I/O error */
+    case 20: /* CLOSE after real opened-index read I/O error */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = (uint8_t)(op_phase + 3u);
