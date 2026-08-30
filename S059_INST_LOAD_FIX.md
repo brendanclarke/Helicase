@@ -1083,3 +1083,12 @@ to be added.
   `SD_CARD_LOAD_SAVE_TEST_RESULT` and returned the expected status 1 for its
   four deliberate defects: the Drum all-space row and missing Snare, Cymbal,
   and HiHat `.hcindex` files. No validator source was changed.
+- 2026-08-30: Final read-only review found no functional defect in the direct-
+  open correction. The healthy path is `8 -> 9 -> 10 -> 11 -> 17`; missing and
+  fatal opens remain distinct; phases 18–20 are reached only with a real index
+  handle; and no stale prescan or removed-phase reference remains. One comment
+  overstated the result as O(index bytes), although `afatfs_fopen_lfn()` still
+  performs the necessary name lookup. Only that wording was corrected to say
+  the change removes the redundant preliminary directory walk. The correction
+  is behavior-neutral and `git diff --check` passes. Hardware/on-card
+  acceptance remains pending.

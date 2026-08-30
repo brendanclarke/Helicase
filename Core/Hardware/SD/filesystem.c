@@ -4226,7 +4226,7 @@ static void filesystem_createBootIndex_tick(void)
  * normal Menu entry and voice/type/mode transitions. The former preliminary
  * presence scan made every healthy load O(directory entries), duplicating the
  * expensive work that belongs only to missing/corrupt recovery. Direct open
- * restores the intended O(index bytes) fast path while the existing fatal
+ * removes the redundant preliminary directory walk while the existing fatal
  * snapshot preserves the boundary between missing metadata and real I/O
  * failure.
  *
