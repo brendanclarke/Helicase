@@ -1321,6 +1321,50 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   record-selection identity. The current live-Bank validator boundary still
   needs reconciliation before Phase-2 whole-object Bank publication.
 
+### Session 059 AsyncFATFS Phase One record (2026-08-30)
+
+- Gate-A terminator-aware create/LFN-create/rename placement is implemented in
+  `asyncfatfs.c`: scans stop at the first `0x00`, the first sufficient
+  sector-local `0xE5` run is latched without ending collision scanning, and
+  terminator-owned runs publish a replacement marker. Moved runs traverse the
+  logical FAT chain, zero the complete target sector, wait for target media
+  persistence, then retire the old marker-to-sector-end tail.
+- Gate B remains deferred. `afatfs_extendSubdirectoryContinue()` still
+  zero-fills complete appended clusters and writes `.`/`..` before mkdir
+  completion. No public caller contract changed; the header addition is
+  comment-only documentation.
+- The target build passes `_Static_assert(sizeof(...))` checks for
+  `afatfsCreateFile_t=144`, `afatfsFile_t=188`, and
+  `afatfsRenameObject_t=552`. The clean logging-on link retains the
+  `afatfs` symbol at 6,984 B. Hardware/media fixtures, reboot/remount, FAT
+  checker, and Bank timing acceptance remain pending and must not be claimed.
+
+### Session 059 Instrument Load repair record (2026-08-30)
+
+- Typed Instrument `.hcindex` rows are now compact validated keys: blank,
+  non-printable, over-eight-character, reserved-temporary, duplicate, and
+  unsorted rows are rejected. Physical scans apply the same invariant before
+  changing the shared cache, and exclude `.hctmp.<ext>` case-insensitively in
+  both LFN/display and generated `HCTMP.EXT` / `HCTMP~N.EXT` alias forms.
+- Missing, empty, or structurally invalid selected-type indexes now perform a
+  transparent one-type physical scan and durable rewrite through the existing
+  rebuild chain. The original callback is transferred through that chain once;
+  genuine FAT/SD read, scan, close, or write faults complete as ERROR. Menu
+  acknowledges both terminal results before releasing the filesystem facade,
+  and an error cannot dispatch a deferred Instrument payload.
+- The read-only `tools/verify_instrument_indexes.py` validator reproduces the
+  supplied `SD_CARD_LOAD_SAVE_TEST_RESULT/` baseline's four expected defects:
+  Drum row 1 is blank and Snare/Cymbal/HiHat indexes are missing. It performs
+  no card writes and checks exact physical typed-file correspondence when an
+  index is present.
+- The final clean logging-on link reports `text=385,380 B`, `data=404 B`,
+  `bss=96,176 B`; `.text=372,448 B`, normal `.bss=89,504 B`, and
+  `build/lxr02.bin=385,784 B`. Linked owner sizes remain `afatfs=6,984 B` and
+  `fs_list_cache_name=9,000 B`; no new retained name array, cache, or
+  operation-state allocation was added. Hardware/media, reboot/remount,
+  injected-failure, product workflow, and logging-off acceptance remain
+  pending and are not claimed by this source/build verification.
+
 ### Resolved / Changed in Session 048
 
 - HCNAMES is now the paired name/source authority. The filesystem-owned 258-B

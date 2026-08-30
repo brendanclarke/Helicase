@@ -460,7 +460,10 @@ When the canonical target collides, decimal suffix digits replace the shortest
 possible tail inside the eight-character display stem.
 
 `Instrument/<type>/.hctmp.<ext>` is reserved product scratch and is ignored by
-both repair and typed index insertion.
+both repair and typed index insertion, including case-folded LFN/display and
+generated short-alias representations. Typed index recovery is the runtime
+repair path for absent/corrupt metadata; the existing boot scan remains the
+publication path for valid physical namespaces and does not change HCNAMES.
 
 `/.hcrepair` roll-forward was planned but is not implemented. Current repair is
 ordered rename/sync behavior, not a journal or power-loss recovery protocol.
@@ -1515,6 +1518,25 @@ Initial recognized instrument types:
 .cym
 .hat
 ```
+
+Typed Instrument indexes are compact browser keys, not slot registers: each
+nonblank row is one usable one-to-eight-character stem, rows are strictly
+unique and sorted by ASCII case-folded text followed by raw display case, and
+there are no meaningful blank positions. Firmware excludes the reserved
+`.hctmp.<ext>` source from both its preserved LFN/display spelling and the
+generated `HCTMP.EXT` / `HCTMP~N.EXT` short-alias family. It also rejects a
+blank or otherwise unusable derived stem before the shared cache is changed.
+
+The `.hcindex` file is the fast path. When the selected type's index is absent,
+empty, or structurally invalid, runtime Instrument Load, InstrumentMrp, and
+Instrument Save entry performs a selected-type physical scan, rewrites the
+typed index, and leaves the rebuilt rows resident in the same shared cache.
+The original asynchronous callback runs once after either the ordinary read or
+the scan/write/sync recovery chain. A genuine FAT/SD read, scan, close, or
+write failure reports `FS_STATUS_ERROR` and does not replace metadata with an
+empty list. Menu acknowledges both terminal outcomes before changing its
+filesystem/UI state; an error clears the unusable cache, suppresses deferred
+payload dispatch, and uses the existing filesystem error overlay.
 
 ## Current Load/Save Menu Reachability
 

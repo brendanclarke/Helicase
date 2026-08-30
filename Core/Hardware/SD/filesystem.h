@@ -734,14 +734,16 @@ bool filesystem_requestUpdateResidentSceneNames(
 /* Borrow the requested Scene row while HCNAMES owns the shared cache. */
 const char *filesystem_residentSceneName(uint8_t scene_index);
 /*
- * Load one registered Instrument type's `.hcindex` asynchronously.
+ * Load or repair one registered Instrument type's browser index.
  *
- * Inputs: a registered type and optional completion callback. Output: the
- * single shared Instrument name cache is replaced from that type's own
- * directory index. Clients call this when either nested Instrument Load or
- * nested Instrument Save is entered, and whenever its type changes. The
- * request never performs blocking SD work and returns false when the
- * filesystem is already busy or the type is not present in the registry.
+ * Inputs: registered type and optional completion callback. Output: the one
+ * shared cache contains that type's compact sorted stems. The fast path reads
+ * `.hcindex`; a missing or structurally invalid file transparently performs a
+ * selected-type physical scan and durable rewrite. The callback runs exactly
+ * once after either path and observes ERROR for genuine read/scan/write faults.
+ * The request performs no blocking runtime SD work and is refused only for an
+ * invalid type or busy facade. Clients: nested Instrument Load, InstrumentMrp,
+ * and Instrument Save entry/type transitions.
  */
 bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
                                            fs_completion_cb_t cb);

@@ -532,6 +532,16 @@ Documentation contract:
 - **Affiliates:** `MEMORY.md`, source/header comments, Sessions 040/056
   boundaries, and all current filesystem consumers.
 
+### Related Instrument Load regression follow-up
+
+The captured Drum blank row and missing Snare/Cymbal/HiHat indexes were
+confirmed as a filesystem index producer/consumer issue, not an AsyncFATFS
+allocation or Gate-A terminator-placement issue. The repair is tracked in
+`S059_INST_LOAD_FIX.md`: it filters `.hctmp` LFN/SFN aliases, validates compact
+typed rows, and reuses the existing selected-type scan/write chain for runtime
+metadata recovery. This follow-up leaves the Phase One/Gate B boundary,
+AsyncFATFS state model, and Bank timing scope unchanged.
+
 ### 11. `knowledge_files/specification_reference/SRAM_MANIFEST.md`
 
 After linking, update this document only with measured retained-memory results.
@@ -767,3 +777,19 @@ The refactor is complete only when:
 - new public AsyncFATFS move/copy/replace/unlink APIs; and
 - claiming crash-transactional rename/create semantics beyond the ordering and
   final-sync guarantees already described.
+
+## 2026-08-30 implementation record
+
+Gate A is implemented in `Core/Hardware/SD/asyncfatfs/asyncfatfs.c`. The
+private reservation state is reused at the existing byte/pointer budget;
+`afatfsCreateFile_t`, `afatfsFile_t`, and `afatfsRenameObject_t` remain 144,
+188, and 552 bytes, and the linked `afatfs` symbol remains 6,984 bytes. The
+clean logging-on link reports `text=383,956`, `data=404`, and `bss=96,160`.
+Gate B remains deferred: appended directory clusters still receive complete
+zero-fill and `.`/`..` initialization.
+
+The implementation has passed the clean ARM build, static assertions,
+`git diff --check`, and source-order review. Native/media fixtures, reboot and
+remount checks, host FAT checking, product compatibility, and repeatable Bank
+timing have not been run in this workspace, so Gate-A acceptance is not being
+claimed yet. Do not treat the projected timing reductions as measurements.

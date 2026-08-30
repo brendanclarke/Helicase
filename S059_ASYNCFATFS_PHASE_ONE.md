@@ -2,8 +2,10 @@
 
 Date: 2026-08-30
 
-Status: implementation recipe only. No production source was changed while
-preparing this document.
+Status: implementation complete; static verification complete; media/product
+acceptance pending. Functional source changes remain confined to
+`Core/Hardware/SD/asyncfatfs/asyncfatfs.c`; the public header change is
+comment-only and behaviorally unchanged.
 
 ## Decision
 
@@ -1070,3 +1072,57 @@ media barrier, and old-tail ordering. Its implementation diff should then be
 limited principally to `afatfs_extendSubdirectoryContinue()`, its private
 comments/phases, the public header's mkdir guarantee wording, reference
 documentation, and a second full compatibility run.
+
+## Implementation notes / verification record
+
+- 2026-08-30: Read `MEMORY.md`, this phase schedule, the broader
+  `S059_ASYNCFATFS_SPEEDUP.md`, the full AsyncFATFS reference, and the
+  archived Session 040 AsyncFATFS boundary. The current baseline source is
+  commit `53a7676`; the working tree was clean before implementation.
+- 2026-08-30: The pre-implementation build artifact reported `text=380,436`,
+  `data=408`, `bss=94,848`, with `afatfs` linked at `6,984` bytes. That
+  artifact predates a clean dependency rebuild, so its whole-image totals are
+  not used as a retained-state comparison; the `afatfs` symbol is the direct
+  owner comparison.
+- 2026-08-30: Implemented the shared reservation state, deleted-run
+  latch-and-continue scan, first-marker stop, short/LFN selected-run writers,
+  logical next-sector preparation, target persistence barrier, old-marker-tail
+  retirement, and the equivalent rename flow. The former single-entry
+  allocator and old free-run helpers are removed. Gate B remains explicitly
+  deferred: `afatfs_extendSubdirectoryContinue()` and its full-cluster
+  zero-fill loop were not functionally changed.
+- 2026-08-30: Clean `make` and `make img` pass. The final logging-on link
+  reports `text=383,956`, `data=404`, `bss=96,160`, `.text=371,024`,
+  `.bss=89,488`, and `afatfs=6,984` bytes. The compile-time state checks pass
+  at 144/188/552 bytes. `git diff --check` passes and no new compiler warning
+  was observed beyond the existing asyncfatfs/cache, unused-function, nano
+  syscall, and LTO warnings.
+- 2026-08-30: Changed functions include the create/rename private phase enums
+  and state lifecycle, `afatfs_resetDirectoryRunReservation()`,
+  `afatfs_noteDeletedDirectoryEntry()`, `afatfs_selectDirectoryRunAtTerminator()`,
+  `afatfs_prepareDirectoryRunTarget()`,
+  `afatfs_directoryRunTargetPersistence()`,
+  `afatfs_retireDirectoryTerminatorTail()`,
+  `afatfs_createShortDirectoryEntry()`, the LFN writer, and the create/rename
+  continuations. The public header has only the adjacent component-contract
+  comment requested for this change.
+- 2026-08-30: Native FAT/media fixtures, FAT16/FAT32 card runs, reboot/remount,
+  host FAT checking, product compatibility, and repeatable Bank timing remain
+  unrun in this workspace. Phase One is therefore source/build complete but
+  not hardware-acceptance complete; no timing improvement or payload result is
+  claimed.
+
+### Related Instrument Load regression follow-up
+
+- 2026-08-30: The supplied load/save capture exposed a separate product-layer
+  defect while Phase One was being integrated: a case-sensitive display-only
+  `.hctmp` filter and byte-count-only typed-index reader admitted a blank Drum
+  row, while three missing typed indexes were treated as successful empty
+  lists. This is recorded here as a compatibility finding only; it does not
+  change Gate A's AsyncFATFS scope or its deferred Gate B decision.
+- 2026-08-30: `S059_INST_LOAD_FIX.md` now fixes that finding in the
+  filesystem/Menu layer. The producer rejects reserved aliases and unusable
+  stems before shared-cache mutation; the consumer validates compact typed
+  rows and transparently scans/rewrites only the selected type on missing or
+  corrupt metadata. No AsyncFATFS reservation state, create semantics, or
+  Phase One timing claim is changed.

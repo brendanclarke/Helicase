@@ -3466,19 +3466,56 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
 
 static void menu_instrumentIndexLoadComplete(void)
 {
+    /*
+     * Complete one typed Instrument index request, including transparent
+     * rebuild.
+     *
+     * What: snapshots the terminal filesystem result before changing Menu
+     * state, releases the direct filesystem facade, and publishes the
+     * rebuilt/read cache only on success. Failure discards the unusable cache,
+     * cancels deferred payload selection, releases Menu input, and opens the
+     * existing filesystem error overlay.
+     *
+     * Why: this callback bypasses Preset's normal acknowledgement owner.
+     * Leaving DONE/ERROR parked blocks the idle-only AutoSave and trace
+     * schedulers, while the previous unconditional clamp/deferred path could
+     * attempt an Instrument load from a partial or empty cache after
+     * `.hcindex` failed.
+     *
+     * Inputs: the terminal filesystem result, current nested Load/Save mode,
+     * selected voice/type/source, and menu_deferSelectionRequest. Outputs: on
+     * success, one safe typed browser and optional coalesced selection; on
+     * failure, no payload request and one visible error with the filesystem
+     * facade returned to IDLE.
+     * Affiliates: menu_requestInstrumentIndexLoad(),
+     * menu_instrumentLoadRequestSelection(), menu_instrumentLoadClampIndex(),
+     * menu_showFilesystemErrorOverlay(), filesystem_ack(), and both
+     * Instrument Load render paths.
+     */
+    /* Snapshot the terminal result before acknowledgement can change it. */
+    uint8_t index_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+
+    filesystem_ack();
     menu_traceInstrumentEntry(
         AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_COMPLETE,
-        (uint8_t)(filesystem_status() != FS_STATUS_DONE));
-    /*
-     * Finish one typed Instrument index load for either nested Load or Save.
-     * The filesystem has replaced the selected type's general name cache;
-     * clamping now makes a previously selected browser index safe when the
-     * card contains fewer entries than the old cache. For nested Load, it also
-     * copies the selected typed-index name into the existing display buffer
-     * before any Instrument payload request is posted. Save deliberately keeps
-     * its HCNAMES-derived editable resident name. The same callback is shared
-     * by every registry type so Drum has no special browser contract left.
-     */
+        (uint8_t)!index_ok);
+    if (!index_ok) {
+        /*
+         * Preserve the nested session while making a failed list inert.
+         * Clearing only the shared cache prevents a partial index from being
+         * selected; retaining voice/type, the resident `kit` label, and the
+         * hidden temporary snapshot leaves the existing retry/exit workflow
+         * available after the overlay is dismissed. No deferred payload may
+         * be posted from an error result.
+         */
+        filesystem_clearNameCache();
+        menu_deferSelectionRequest = 0u;
+        menu_storageBusy = 0u;
+        menu_showFilesystemErrorOverlay();
+        return;
+    }
+
+    /* The shared cache is valid again; reconcile the existing browser cursor. */
     menu_instrumentLoadClampIndex();
     if (menu_instrumentLoadActive &&
         !menu_instrumentSaveMode &&

@@ -1340,6 +1340,27 @@ static uint8_t filesystem_hcnamesProbeIsScanning(void);
 static void filesystem_libraryIndexRebuildScanComplete(void);
 static void filesystem_libraryIndexRebuildWriteComplete(void);
 static void filesystem_loadInstrumentIndex_tick(void);
+/*
+ * Typed Instrument index repair helpers.
+ *
+ * What: keep the reserved-name, usable-stem, row-validation, fatal-I/O, and
+ * recovery-handoff contracts beside the existing index producer/consumer
+ * declarations. Why: one shared cache and one selected-type rebuild chain are
+ * the complete repair surface; no retained list or recovery byte is allowed.
+ * Inputs/outputs: helpers consume one scanned name, one index row, or the
+ * current operation state and return validation/status decisions only.
+ * Affiliates: filesystem_recordInstrumentFile(),
+ * filesystem_loadInstrumentIndex_tick(), and the Menu terminal callback.
+ */
+static uint8_t filesystem_isReservedInstrumentTemporaryName(
+    instrument_type_t type, const char *name);
+static uint8_t filesystem_instrumentStemIsUsable(const char stem[9]);
+static uint8_t filesystem_instrumentStemIsReservedTemporary(
+    instrument_type_t type, const char stem[9]);
+static uint8_t filesystem_validateInstrumentIndexRow(const char *field,
+                                                     uint8_t field_len);
+static uint8_t filesystem_instrumentIndexFATFatal(void);
+static void filesystem_beginInstrumentIndexRecovery(void);
 static void filesystem_loadLibraryIndex_tick(void);
 static uint16_t filesystem_cachedInstrumentCount(instrument_type_t type);
 static const char *filesystem_cachedInstrumentName(instrument_type_t type,
@@ -3723,6 +3744,43 @@ static bool filesystem_startInstrumentIndexRebuildScan(fs_completion_cb_t cb)
                             FS_FILE_KIT, 0u, cb);
 }
 
+/*
+ * Replace an unusable typed `.hcindex` through the existing one-type rebuild.
+ *
+ * What: Transfers the accepted LOAD_INDEX request's callback into the library
+ * rebuild owner, releases the current operation without completing it, scans
+ * the selected Instrument directory, rewrites `.hcindex`, and lets the normal
+ * rebuild completion publish one final result.
+ *
+ * Why: Missing boot metadata and structurally corrupt indexes must not become
+ * an empty browser, but a caller must still see one asynchronous request and
+ * one callback. Reusing the Save rebuild chain preserves physical rescan,
+ * durable close/sync, error propagation, and the single 9,000-byte cache.
+ *
+ * Inputs: op_instrument_index_type, the partially consumed shared cache, and
+ * completion_callback from filesystem_requestLoadInstrumentIndex(). Outputs:
+ * either a busy one-type scan with the original callback parked, or one final
+ * ERROR callback if recovery cannot start. No Scene/DSP/HCNAMES state changes.
+ * Affiliates: filesystem_startInstrumentIndexRebuildScan(),
+ * filesystem_libraryIndexRebuildScanComplete(),
+ * filesystem_createBootIndex_tick(), filesystem_completeLibraryIndexRebuild(),
+ * and filesystem_loadInstrumentIndex_tick().
+ */
+static void filesystem_beginInstrumentIndexRecovery(void)
+{
+    op_library_index_rebuild_callback = completion_callback;
+    completion_callback = NULL;
+    op_library_index_rebuild_kind = FS_NAME_CACHE_INSTRUMENT;
+    op_library_index_rebuild_pending = 0u;
+    status = FS_STATUS_IDLE;
+    current_op = FS_INTERNAL_OP_NONE;
+    if (!filesystem_startInstrumentIndexRebuildScan(
+            filesystem_libraryIndexRebuildScanComplete)) {
+        filesystem_makeNamedErrorCode("Idx", 2u);
+        filesystem_completeLibraryIndexRebuild(FS_STATUS_ERROR);
+    }
+}
+
 /* Start the selected scan/index or direct-index chain after a save flush.
  *
  * What: ordinary Kit/Scene/Bank kinds use the boot-equivalent physical scan;
@@ -3859,13 +3917,15 @@ static void filesystem_flushFinish_tick(void)
 ** All directory/file work remains foreground-pumped and asynchronous after
 ** the initial request, with filesystem_finish() providing the final flush gate.
 ** Parent directories are opened read-only during boot indexing. Missing
-** Instrument roots or type folders are treated as empty namespaces; save paths
-** are responsible for creating directories when the user actually writes data.
+** Instrument roots or type folders are treated as empty namespaces during boot;
+** the runtime selected-type recovery path is the only index writer allowed to
+** create a missing empty Instrument namespace, while Save paths create folders
+** when the user actually writes data.
 **
 ** Phases: 0..3 enter /Instrument/, 4 selects a registry row, 5..8 enter its
 ** subdirectory, 9..12 write one `.hcindex`, and 14 returns to root and
-** completes. Phase 13 is intentionally unused so the close/parent transition
-** remains distinct from the line-reader phase numbers used by index loading.
+** completes. Phases 13/15 are the separate failed-write close/return path so
+** a full or fatal card cannot be retried as a successful empty index.
 ** ----------------------------------------------------------------------- */
 static void filesystem_createBootIndex_tick(void)
 {
@@ -3890,14 +3950,30 @@ static void filesystem_createBootIndex_tick(void)
             return;
         if (op_file == NULL) {
             /*
-             * Do not create Instrument/ during boot index generation.
+             * Create Instrument/ only for a runtime typed-index recovery.
              *
-             * A missing root means there are no Instrument indexes to refresh.
-             * Creating folders during a cache rebuild can duplicate damaged
-             * host-created LFNs; Instrument Save owns the directory-creation
-             * path because it has a concrete file to write.
+             * A missing root means there are no Instrument indexes to refresh
+             * during boot, but a runtime recovery request must be able to
+             * materialize the selected type's legitimate empty namespace and
+             * its empty `.hcindex`. The recovery path has already proven the
+             * missing metadata through a clean directory/open result; the
+             * existing one-shot mkdir retry therefore does not authorize a
+             * duplicate create after an I/O failure.
              */
-            filesystem_finish(FS_STATUS_DONE);
+            if (op_library_index_rebuild_kind != FS_NAME_CACHE_INSTRUMENT) {
+                filesystem_finish(FS_STATUS_DONE);
+                return;
+            }
+            if (op_create_dir_retry != 0u) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            op_create_dir_retry = 1u;
+            op_file_ready = false;
+            if (!afatfs_mkdir_lfn(STORAGE_ROOT_INSTRUMENT,
+                                  AFATFS_MATCH_CASE_INSENSITIVE,
+                                  NULL, on_file_opened))
+                return;
             return;
         }
         op_kit_root_dir = op_file;
@@ -3920,6 +3996,8 @@ static void filesystem_createBootIndex_tick(void)
         if (!op_close_done)
             return;
         op_kit_root_dir = NULL;
+        /* The one-shot root-create guard is scoped separately to the type. */
+        op_create_dir_retry = 0u;
         if (op_instrument_index_type == INSTRUMENT_TYPE_UNKNOWN) {
             op_instrument_scan_registry_index = 0u;
         } else {
@@ -3964,15 +4042,28 @@ static void filesystem_createBootIndex_tick(void)
             return;
         if (op_file == NULL) {
             /*
-             * Do not create type folders while writing `.hcindex`.
+             * Create a missing type folder only during runtime recovery.
              *
-             * Boot indexing is a publication pass over existing physical
-             * Instrument directories. If `Drum/` or `Snare/` is absent, the
-             * matching typed cache is empty and no index file is needed. This
-             * also prevents duplicate type directories on cards with damaged
-             * or host-created LFN entries.
+             * Boot indexing remains a publication pass over existing physical
+             * Instrument directories. Recovery, however, must complete the
+             * selected-type scan -> index-write contract even for a genuinely
+             * empty type namespace, so it performs one guarded mkdir and then
+             * writes the empty typed index in that directory.
              */
-            filesystem_finish(FS_STATUS_DONE);
+            if (op_library_index_rebuild_kind != FS_NAME_CACHE_INSTRUMENT) {
+                filesystem_finish(FS_STATUS_DONE);
+                return;
+            }
+            if (op_create_dir_retry != 0u) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            op_create_dir_retry = 1u;
+            op_file_ready = false;
+            if (!afatfs_mkdir_lfn(entry->storage_directory,
+                                  AFATFS_MATCH_CASE_INSENSITIVE,
+                                  NULL, on_file_opened))
+                return;
             return;
         }
         op_kit_root_dir = op_file;
@@ -4041,6 +4132,16 @@ static void filesystem_createBootIndex_tick(void)
                 op_line_len - op_bytes_done);
             
             op_bytes_done += written;
+
+            /* A sticky full/fatal result is a write error, not back-pressure.
+             * Close the index before the rebuild callback observes ERROR so a
+             * failed recovery cannot leave an orphaned writer handle owned by
+             * the next Menu request. */
+            if (written == 0u &&
+                (afatfs_isFull() || filesystem_instrumentIndexFATFatal())) {
+                op_phase = 13u;
+                return;
+            }
             
             if (op_bytes_done == op_line_len) {
                 op_item_offset++;
@@ -4082,19 +4183,51 @@ static void filesystem_createBootIndex_tick(void)
         filesystem_finish(FS_STATUS_DONE);
         return;
 
+    case 13: /* CLOSE failed typed index write */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 15u;
+        else if (filesystem_instrumentIndexFATFatal())
+            filesystem_finish(FS_STATUS_ERROR);
+        return;
+
+    case 15: /* WAIT failed close + RETURN ROOT + ERROR */
+        if (!op_close_done) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_file = NULL;
+        if (!afatfs_chdir(NULL)) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+
     default:
         filesystem_finish(FS_STATUS_ERROR);
         return;
     }
 }
 
-/* Load one registry-defined Instrument `.hcindex` into the typed name cache.
+/*
+ * Load or repair one registry-defined Instrument `.hcindex`.
  *
- * Inputs: op_instrument_index_type captured by
- * filesystem_requestLoadInstrumentIndex(). Outputs: only that type's general
- * name/count cache is replaced; all Scene/DSP state and other Instrument lists
- * remain untouched. Clients: Menu requests this when entering either nested
- * Instrument Load or Instrument Save for a selected type.
+ * What: the fast path proves that the selected type owns a real `.hcindex`,
+ * reads and validates its compact sorted rows, and returns DONE only for a
+ * complete valid file. Missing, empty, or structurally corrupt metadata is
+ * closed and handed to the existing selected-type scan -> index-write chain;
+ * a fatal FAT/SD condition closes/returns ERROR without recovery.
+ *
+ * Why: a missing index is recoverable metadata, whereas a read/scan failure is
+ * evidence that replacing metadata could destroy a good card. The FSM uses
+ * distinct phase identities for valid, recovery, and error close paths, so an
+ * asynchronous close cannot collapse all outcomes into the old unconditional
+ * DONE phase. Inputs: op_instrument_index_type and one shared cache. Outputs:
+ * one complete typed cache or one final callback result, with no new retained
+ * state. Clients: Menu's normal and Morph Instrument entry paths.
  */
 static void filesystem_loadInstrumentIndex_tick(void)
 {
@@ -4121,7 +4254,12 @@ static void filesystem_loadInstrumentIndex_tick(void)
     case 2: /* WAIT Instrument/ */
         if (!op_file_ready) return;
         if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_ERROR);
+            /* A proven missing root is metadata recovery; a fatal open is I/O. */
+            if (filesystem_instrumentIndexFATFatal()) {
+                filesystem_finish(FS_STATUS_ERROR);
+            } else {
+                filesystem_beginInstrumentIndexRecovery();
+            }
             return;
         }
         op_kit_root_dir = op_file;
@@ -4140,7 +4278,11 @@ static void filesystem_loadInstrumentIndex_tick(void)
         return;
 
     case 5: /* WAIT CLOSE Instrument/ */
-        if (!op_close_done) return;
+        if (!op_close_done) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         op_kit_root_dir = NULL;
         op_phase = 6u;
         return;
@@ -4160,7 +4302,12 @@ static void filesystem_loadInstrumentIndex_tick(void)
     case 7: /* WAIT type directory */
         if (!op_file_ready) return;
         if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_ERROR);
+            /* Missing selected type directory is an empty namespace repair. */
+            if (filesystem_instrumentIndexFATFatal()) {
+                filesystem_finish(FS_STATUS_ERROR);
+            } else {
+                op_phase = 24u;
+            }
             return;
         }
         op_kit_root_dir = op_file;
@@ -4172,87 +4319,232 @@ static void filesystem_loadInstrumentIndex_tick(void)
         op_phase = 9u;
         return;
 
-    case 9: /* CLOSE type-directory handle */
-        op_close_done = false;
-        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
-            op_phase = 10u;
+    case 9: /* START .hcindex presence scan */
+        /*
+         * Prove missing versus I/O before opening the index.
+         *
+         * A NULL callback from `fopen_lfn()` is not absence proof: it can be a
+         * lookup miss or a lower-layer failure. The already-open type
+         * directory is therefore enumerated first; a found regular `.hcindex`
+         * authorizes the strict open, while a clean scan with no such object
+         * enters recovery. This consumes no cache or retained state.
+         */
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
+        op_phase = 10u;
         return;
 
-    case 10: /* WAIT CLOSE type-directory handle */
-        if (!op_close_done) return;
-        op_kit_root_dir = NULL;
-        op_phase = 11u;
-        return;
-
-    case 11: /* OPEN .hcindex */
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen_lfn(".hcindex", "r", AFATFS_MATCH_CASE_SENSITIVE, NULL, on_file_opened))
-            return;
-        op_phase = 12u;
-        return;
-
-    case 12: /* WAIT OPEN */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_item_offset = 0u;
-        fs_list_cache_count = 0u;
-        op_line_len = 0u;
-        op_phase = 13u;
-        return;
-
-    case 13: /* READ LINES */
+    case 10: /* FIND .hcindex */
     {
-        uint8_t line_ready = 0, eof = 0;
-        storage_status_t st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len, sizeof(op_line_buf), &line_ready, &eof);
-
-        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
-            op_close_done = false;
-            if (afatfs_fclose(op_file, on_file_closed))
-                op_phase = 14u;
+        afatfsOperationStatus_e scan_status =
+            afatfs_findNextObject(op_kit_root_dir,
+                                  &op_object_finder,
+                                  &op_object);
+        if (scan_status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (scan_status == AFATFS_OPERATION_FAILURE ||
+            filesystem_instrumentIndexFATFatal()) {
+            /* Scan failure is a real error; phase 20 closes without recovery. */
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_phase = 20u;
             return;
         }
-
-        if (line_ready) {
-            uint8_t actual_len = (uint8_t)strlen(op_line_buf);
-            uint8_t field_len = 0u;
-            while (field_len < actual_len && op_line_buf[field_len] != ',')
-                field_len++;
-            if (field_len > 0u &&
-                op_item_offset < FS_LIBRARY_NAME_CACHE_MAX) {
-                op_line_buf[field_len] = '\0';
-                storage_copyDisplayName(
-                    fs_list_cache_name[op_item_offset],
-                    op_line_buf);
-                fs_list_cache_name[op_item_offset]
-                    [STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-
-                fs_list_cache_count++;
-                op_item_offset++;
-            }
-            op_line_len = 0u;
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_phase = 12u;
+            return;
         }
-
-        if (eof) {
-            op_close_done = false;
-            if (afatfs_fclose(op_file, on_file_closed))
-                op_phase = 14u;
+        if (op_object.id.kind == AFATFS_OBJECT_FILE &&
+            fat_compareDisplayName(op_object.id.displayName,
+                                   ".hcindex", true) == 0) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_phase = 11u;
         }
         return;
     }
 
-    case 14: /* WAIT CLOSE */
-        if (!op_close_done) return;
+    case 11: /* CLOSE type-directory handle, index present */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 13u;
+        return;
+
+    case 12: /* CLOSE type-directory handle, index absent */
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 14u;
+        return;
+
+    case 13: /* WAIT type close, then open proven index */
+        if (!op_close_done) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = NULL;
+        op_file_ready = false;
         op_file = NULL;
+        if (!afatfs_fopen_lfn(".hcindex", "r",
+                              AFATFS_MATCH_CASE_SENSITIVE,
+                              NULL, on_file_opened))
+            return;
         op_phase = 15u;
         return;
 
-    case 15: /* RETURN ROOT */
-        if (!afatfs_chdir(NULL)) return;
+    case 14: /* WAIT type close, then return root for recovery */
+        if (!op_close_done) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_kit_root_dir = NULL;
+        if (!afatfs_chdir(NULL)) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        filesystem_beginInstrumentIndexRecovery();
+        return;
+
+    case 15: /* WAIT proven .hcindex open */
+        if (!op_file_ready) return;
+        if (op_file == NULL) {
+            /* The presence proof succeeded, so this is not metadata absence. */
+            if (!afatfs_chdir(NULL) &&
+                !filesystem_instrumentIndexFATFatal())
+                return;
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /*
+         * Initialize the typed reader only after the index handle opens.
+         * Partial rows from a prior request are not a valid prefix; every
+         * accepted row below is validated before it mutates the cache.
+         */
+        op_item_offset = 0u;
+        fs_list_cache_count = 0u;
+        op_line_len = 0u;
+        op_phase = 17u;
+        return;
+
+    case 17: /* READ AND VALIDATE COMPACT ROWS */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t read_status = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (filesystem_instrumentIndexFATFatal()) {
+            /* A fatal read never authorizes the metadata recovery writer. */
+            op_phase = 20u;
+            return;
+        }
+        if (read_status != STORAGE_STATUS_OK &&
+            read_status != STORAGE_STATUS_WAIT) {
+            /* LINE_TOO_LONG and similar results are structural corruption. */
+            op_phase = 19u;
+            return;
+        }
+        if (line_ready) {
+            uint8_t actual_len = (uint8_t)strlen(op_line_buf);
+            uint8_t field_len = 0u;
+
+            while (field_len < actual_len && op_line_buf[field_len] != ',')
+                field_len++;
+            op_line_buf[field_len] = '\0';
+            if (!filesystem_validateInstrumentIndexRow(op_line_buf,
+                                                       field_len)) {
+                /* The complete index is corrupt; discard its accepted prefix. */
+                fs_list_cache_count = 0u;
+                op_phase = 19u;
+                return;
+            }
+            op_item_offset = fs_list_cache_count;
+            op_line_len = 0u;
+        }
+        if (eof) {
+            /* Empty EOF is a recovery candidate, not a published empty list. */
+            op_phase = (fs_list_cache_count == 0u) ? 19u : 18u;
+        }
+        return;
+    }
+
+    /*
+     * Preserve the reason the typed-index reader is leaving the fast path.
+     *
+     * What: uses separate resumable close/return phases for a valid index,
+     * recoverable metadata corruption, and a real I/O failure. Why: async
+     * close and chdir can require multiple foreground polls, but their eventual
+     * terminal action must remain stable. The former shared phase always
+     * finished DONE, silently publishing a partial/empty cache after read
+     * errors. Inputs: open result, line-reader status, structural validation,
+     * EOF, and asynchronous close/chdir completion. Outputs: exactly one of
+     * ordinary success, recovery handoff, or terminal error. Affiliates:
+     * filesystem_readTextLine(), filesystem_finish(),
+     * filesystem_beginInstrumentIndexRecovery(), and Menu's callback.
+     */
+    case 18: /* CLOSE valid index */
+    case 19: /* CLOSE corrupt/empty index for recovery */
+    case 20: /* CLOSE after real read/scan I/O error */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = (uint8_t)(op_phase + 3u);
+        else if (filesystem_instrumentIndexFATFatal())
+            filesystem_finish(FS_STATUS_ERROR);
+        return;
+
+    case 21: /* WAIT valid close + RETURN ROOT */
+        if (!op_close_done) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_file = NULL;
+        if (!afatfs_chdir(NULL)) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 22: /* WAIT recovery close + RETURN ROOT */
+        if (!op_close_done) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_file = NULL;
+        if (!afatfs_chdir(NULL)) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        filesystem_beginInstrumentIndexRecovery();
+        return;
+
+    case 23: /* WAIT error close + RETURN ROOT + ERROR */
+        if (!op_close_done) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_file = NULL;
+        if (!afatfs_chdir(NULL)) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+
+    case 24: /* Missing type directory: RETURN ROOT + RECOVER */
+        if (!afatfs_chdir(NULL)) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        filesystem_beginInstrumentIndexRecovery();
         return;
 
     default:
@@ -8105,6 +8397,13 @@ static void filesystem_copyInstrumentStemDisplay(char dst[9],
      * characters, padded and NUL-terminated. The extension is not displayed
      * because the top row already shows the selected instrument type.
      */
+    /* A missing source cannot produce a load key; return the padded blank
+     * sentinel so the producer-side usability guard rejects it. */
+    if (!filename) {
+        memset(dst, ' ', STORAGE_KIT_DISPLAY_NAME_LEN);
+        dst[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        return;
+    }
     while (i < STORAGE_KIT_DISPLAY_NAME_LEN &&
            filename[i] != '\0' &&
            filename[i] != '.') {
@@ -8145,6 +8444,210 @@ static void filesystem_makeInstrumentTemporaryFilename(
     destination[pos] = '\0';
 }
 
+/*
+ * Recognize the firmware-owned reversible Instrument temporary object.
+ *
+ * What: Compares one scanned FAT display/open component with the selected
+ * registry type's `.hctmp.<ext>` name using FAT-style ASCII case folding. If
+ * AsyncFATFS exposes only the generated short alias, the reserved alias family
+ * is recognized as the same implementation object.
+ *
+ * Why: `.hctmp` is the durable source for returning to the nested Load `kit`
+ * row, not a pool Instrument. A case-sensitive display-name-only test allowed
+ * that object to enter Drum's `.hcindex`, where its dot-leading stem collapsed
+ * to eight spaces and later selected `none.drm`.
+ *
+ * Inputs: one component and the already classified registry Instrument type.
+ * Outputs: nonzero only for the reserved temporary object; no cache or
+ * filesystem state changes. Affiliates: filesystem_makeInstrumentTemporaryFilename(),
+ * filesystem_recordInstrumentFile(), the one-type Instrument scanner, and
+ * filesystem_requestSave/LoadInstrumentTemp().
+ */
+static uint8_t filesystem_isReservedInstrumentTemporaryName(
+    instrument_type_t type, const char *name)
+{
+    char reserved[AFATFS_LONG_FILENAME_MAX + 1u];
+    const char *extension;
+    uint8_t base_len = 0u;
+    uint8_t i;
+
+    if (!name || type >= INSTRUMENT_TYPE_UNKNOWN)
+        return 0u;
+    extension = storage_instrumentTypeExtension(type);
+    if (!extension)
+        return 0u;
+
+    filesystem_makeInstrumentTemporaryFilename(reserved, type);
+    if (fat_compareDisplayName(name, reserved, false) == 0)
+        return 1u;
+
+    /* A short alias has no leading dot: HCTMP.EXT or HCTMP~N.EXT. */
+    if (name[0] == '.')
+        return 0u;
+    while (name[base_len] != '\0' && name[base_len] != '.')
+        base_len++;
+    if (name[base_len] != '.' || base_len < 5u)
+        return 0u;
+    for (i = 0u; i < 5u; i++) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c + ('a' - 'A'));
+        if (c != "hctmp"[i])
+            return 0u;
+    }
+    if (base_len != 5u) {
+        if (name[5] != '~' || base_len == 6u)
+            return 0u;
+        for (i = 6u; i < base_len; i++) {
+            if (name[i] < '0' || name[i] > '9')
+                return 0u;
+        }
+    }
+    return (uint8_t)(fat_compareDisplayName(name + base_len + 1u,
+                                             extension,
+                                             false) == 0);
+}
+
+/*
+ * Reject an Instrument object which has no usable browser/load key.
+ *
+ * What: Examines the fixed eight-character display stem after
+ * filesystem_copyInstrumentStemDisplay() and requires at least one printable
+ * non-space character.
+ *
+ * Why: Typed indexes are compact key lists; blank rows have no slot meaning.
+ * This is the final producer-side guard for dot-prefixed implementation files
+ * or unexpected FAT name representations and prevents the filename builder's
+ * intentional `none` fallback from becoming a selectable pool filename.
+ *
+ * Inputs: one padded, NUL-terminated nine-byte stem. Output: validity only;
+ * invalid input is ignored before cache kind/count/order can change.
+ * Affiliates: filesystem_copyInstrumentStemDisplay(),
+ * filesystem_recordInstrumentFile(), filesystem_createBootIndex_tick(), and
+ * filesystem_loadInstrumentIndex_tick()'s matching consumer validation.
+ */
+static uint8_t filesystem_instrumentStemIsUsable(const char stem[9])
+{
+    uint8_t i;
+
+    if (!stem)
+        return 0u;
+    for (i = 0u; i < STORAGE_KIT_DISPLAY_NAME_LEN && stem[i] != '\0'; i++) {
+        uint8_t c = (uint8_t)stem[i];
+        if (c >= 0x21u && c <= 0x7eu)
+            return 1u;
+    }
+    return 0u;
+}
+
+/*
+ * Match an index stem against the reserved temporary alias family.
+ *
+ * What: removes only fixed-width display padding, appends the selected type's
+ * extension, and reuses the exact reserved-component predicate above. Why:
+ * `.hcindex` stores stems rather than full filenames, so a corrupted `HCTMP`
+ * or `HCTMP~1` row must be rejected even when its physical dot-prefixed name
+ * is no longer available to the reader. Inputs are one normalized nine-byte
+ * stem and a registered type; output is validation only and adds no state.
+ */
+static uint8_t filesystem_instrumentStemIsReservedTemporary(
+    instrument_type_t type, const char stem[9])
+{
+    char candidate[AFATFS_LONG_FILENAME_MAX + 1u];
+    const char *extension = storage_instrumentTypeExtension(type);
+    uint8_t len = 0u;
+
+    if (!stem || !extension)
+        return 0u;
+    while (len < STORAGE_KIT_DISPLAY_NAME_LEN && stem[len] != '\0') {
+        candidate[len] = stem[len];
+        len++;
+    }
+    while (len > 0u && candidate[len - 1u] == ' ')
+        len--;
+    if (len == 0u)
+        return 0u;
+    candidate[len++] = '.';
+    while (*extension != '\0' && len + 1u < sizeof(candidate))
+        candidate[len++] = *extension++;
+    candidate[len] = '\0';
+    return filesystem_isReservedInstrumentTemporaryName(type, candidate);
+}
+
+/*
+ * Validate one compact typed-Instrument index row before publishing it.
+ *
+ * What: Accepts a usable one-to-eight-character stem, normalizes it into the
+ * fixed display cell, and requires strict sorted/unique order against the
+ * preceding accepted row. Blank, overlong, duplicate, unsorted, or otherwise
+ * unusable rows classify the complete `.hcindex` as corrupt.
+ *
+ * Why: Instrument rows are keys, not numbered placeholders. The previous
+ * `field_len > 0` test accepted eight spaces, exposed that row as pool 000,
+ * and turned it into `none.<ext>` at payload-open time. Rejecting only that
+ * single spelling would leave the same failure available through another
+ * malformed key.
+ *
+ * Inputs: the text field, its physical length, the selected Instrument type,
+ * and the active shared-cache count. Outputs: one normalized cache row and
+ * incremented compact count on success, or a corruption result without
+ * publishing the current row.
+ * Affiliates: filesystem_readTextLine(), storage_copyDisplayName(),
+ * filesystem_compareInstrumentDisplayName(), filesystem_recordInstrumentFile(),
+ * and the recovery handoff below.
+ */
+static uint8_t filesystem_validateInstrumentIndexRow(const char *field,
+                                                     uint8_t field_len)
+{
+    char normalized[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+    uint16_t count = fs_list_cache_count;
+    uint8_t i;
+
+    if (!field || field_len == 0u ||
+        field_len > STORAGE_KIT_DISPLAY_NAME_LEN ||
+        count >= FS_LIBRARY_NAME_CACHE_MAX)
+        return 0u;
+    for (i = 0u; i < field_len; i++) {
+        uint8_t c = (uint8_t)field[i];
+        if (c < 0x20u || c > 0x7eu)
+            return 0u;
+    }
+    storage_copyDisplayName(normalized, field);
+    normalized[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    if (!filesystem_instrumentStemIsUsable(normalized) ||
+        filesystem_instrumentStemIsReservedTemporary(
+            fs_list_cache_type, normalized))
+        return 0u;
+    if (count > 0u &&
+        (filesystem_compareInstrumentDisplayName(
+             fs_list_cache_name[count - 1u], normalized) >= 0 ||
+         fat_compareDisplayName(fs_list_cache_name[count - 1u],
+                                normalized, false) == 0))
+        return 0u;
+    memcpy(fs_list_cache_name[count], normalized,
+           sizeof(fs_list_cache_name[count]));
+    fs_list_cache_count = (uint16_t)(count + 1u);
+    return 1u;
+}
+
+/*
+ * Detect a fatal lower-layer read/close condition without adding filesystem
+ * state. What: snapshots AsyncFATFS' existing global state and returns true
+ * only for its terminal FAT/SD fatal state. Why: `afatfs_fread()` returns zero
+ * both while a sector is pending and at EOF, so the typed-index reader must
+ * not turn a card fault into an empty/corrupt metadata repair. Inputs: none;
+ * output: one observational boolean. Affiliates: filesystem_readTextLine(),
+ * typed-index close phases, and the existing diagnostic snapshot API.
+ */
+static uint8_t filesystem_instrumentIndexFATFatal(void)
+{
+    afatfsDiagnosticSnapshot_t snapshot;
+
+    afatfs_getDiagnosticSnapshot(NULL, &snapshot);
+    return (uint8_t)(snapshot.filesystem_state ==
+                     AFATFS_FILESYSTEM_STATE_FATAL);
+}
+
 static uint8_t filesystem_instrumentCacheStemMatches(
         instrument_type_t type,
         uint16_t index,
@@ -8173,6 +8676,7 @@ static void filesystem_recordInstrumentFile(const char *display_name,
 {
     instrument_type_t type =
         filesystem_instrumentTypeFromFilename(display_name);
+    const char *stem_source;
     uint16_t count;
     uint16_t pos;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
@@ -8192,22 +8696,33 @@ static void filesystem_recordInstrumentFile(const char *display_name,
         type >= INSTRUMENT_TYPE_UNKNOWN)
         return;
     /*
-     * Hide the reversible Instrument Load file from every typed browser index.
+     * Filter implementation state and unusable derived keys before touching
+     * the shared cache.
      *
-     * Inputs: one on-card Instrument subdirectory entry. Output: a hidden
-     * `.hctmp.<ext>` is ignored before its stem could consume a pool row.
-     * Why: the file is an implementation-owned `kit` restore source, never a
-     * user-selectable Instrument. Affiliates: temporary save/load requests and
-     * Menu's three-digit pool cursor.
+     * What: tests both the LFN/display component and the open/SFN alias for
+     * the selected type's reserved `.hctmp.<ext>` identity, derives the same
+     * eight-cell stem the browser uses, and rejects a stem with no printable
+     * non-space character. Why: the hidden reversible source must never become
+     * a pool row, and every rejection must occur before cache retagging,
+     * clearing, sorting, or count mutation. Inputs are object metadata from
+     * afatfs_findNextObject(); output is either no cache effect or one normal
+     * typed row. Affiliates: filesystem_isReservedInstrumentTemporaryName(),
+     * filesystem_instrumentStemIsUsable(), filesystem_createBootIndex_tick(),
+     * and the post-save cache replacement path.
      */
-    if (strncmp(display_name, ".hctmp.", 7u) == 0)
+    if (filesystem_isReservedInstrumentTemporaryName(type, display_name) ||
+        filesystem_isReservedInstrumentTemporaryName(type, open_name))
+        return;
+    stem_source = (display_name && display_name[0] != '\0')
+        ? display_name : open_name;
+    filesystem_copyInstrumentStemDisplay(display, stem_source);
+    if (!filesystem_instrumentStemIsUsable(display))
         return;
     if (fs_list_cache_kind != FS_NAME_CACHE_INSTRUMENT ||
         fs_list_cache_type != type)
         filesystem_clearNameCacheStorage();
     fs_list_cache_kind = FS_NAME_CACHE_INSTRUMENT;
     fs_list_cache_type = type;
-    filesystem_copyInstrumentStemDisplay(display, display_name);
     /*
      * Suppress same-casefold Instrument browser duplicates.
      *
@@ -8458,23 +8973,27 @@ static uint8_t filesystem_repairBuildCandidate(void)
     if (op_repair_scope == FS_REPAIR_SCOPE_INSTRUMENT) {
         if (op_object.id.kind != AFATFS_OBJECT_FILE)
             return 0u;
+        type = filesystem_instrumentTypeFromFilename(op_object.id.displayName);
+        if (type == INSTRUMENT_TYPE_UNKNOWN)
+            type = filesystem_instrumentTypeFromFilename(op_object.id.shortName);
         /*
          * Reserve the hidden reversible Load source before filename repair.
          *
          * Input: one file discovered in an Instrument type directory during
-         * boot's canonical-name pass. Output: `.hctmp.<ext>` produces no
-         * rename candidate. Why: this product-owned file is deliberately
-         * dot-prefixed and therefore cannot satisfy the normal eight-character
-         * stem policy; repairing it would rename or repeatedly collide with a
-         * user Instrument before boot can proceed. Affiliates: the matching
-         * typed-index exclusion in filesystem_recordInstrumentFile() and Menu
-         * temp save/load requests.
+         * boot's canonical-name pass. Output: `.hctmp.<ext>` or its generated
+         * short-alias family produces no rename candidate. Why: this
+         * product-owned file is deliberately dot-prefixed and therefore cannot
+         * satisfy the normal eight-character stem policy; repairing it would
+         * rename or repeatedly collide with a user Instrument before boot can
+         * proceed. Affiliates: filesystem_isReservedInstrumentTemporaryName(),
+         * filesystem_recordInstrumentFile(), and Menu temp save/load requests.
          */
-        if (strncmp(op_object.id.displayName, ".hctmp.", 7u) == 0)
+        if (type == INSTRUMENT_TYPE_UNKNOWN ||
+            filesystem_isReservedInstrumentTemporaryName(
+                type, op_object.id.displayName) ||
+            filesystem_isReservedInstrumentTemporaryName(
+                type, op_object.id.shortName))
             return 0u;
-        type = filesystem_instrumentTypeFromFilename(op_object.id.displayName);
-        if (type == INSTRUMENT_TYPE_UNKNOWN)
-            type = filesystem_instrumentTypeFromFilename(op_object.id.shortName);
         if (type != op_repair_instrument_type)
             return 0u;
         filesystem_copyInstrumentStemDisplay(op_repair_base_display,
@@ -8550,6 +9069,7 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
 {
     instrument_type_t type =
         filesystem_instrumentTypeFromFilename(display_name);
+    const char *stem_source;
     uint16_t i;
     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 
@@ -8575,13 +9095,29 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
         type = filesystem_instrumentTypeFromFilename(open_name);
     if (type == INSTRUMENT_TYPE_UNKNOWN || type >= INSTRUMENT_TYPE_UNKNOWN)
         return;
+    /*
+     * Apply the same producer invariant before removing/re-tagging a cached
+     * row after Save. What: reject a reserved temporary component or a blank
+     * derived stem before any cache mutation. Why: the post-save path delegates
+     * insertion to filesystem_recordInstrumentFile(), but its duplicate-removal
+     * prelude also mutates the cache and must not erase a valid row for an
+     * unusable implementation filename. Inputs: the completed save's display
+     * and open names; output: either no cache effect or the normal replacement
+     * flow. Affiliate: filesystem_recordInstrumentFile().
+     */
+    if (filesystem_isReservedInstrumentTemporaryName(type, display_name) ||
+        filesystem_isReservedInstrumentTemporaryName(type, open_name))
+        return;
+    stem_source = (display_name && display_name[0] != '\0')
+        ? display_name : open_name;
+    filesystem_copyInstrumentStemDisplay(display, stem_source);
+    if (!filesystem_instrumentStemIsUsable(display))
+        return;
     if (fs_list_cache_kind != FS_NAME_CACHE_INSTRUMENT ||
         fs_list_cache_type != type)
         filesystem_clearNameCacheStorage();
     fs_list_cache_kind = FS_NAME_CACHE_INSTRUMENT;
     fs_list_cache_type = type;
-
-    filesystem_copyInstrumentStemDisplay(display, display_name);
 
     for (i = 0u; i < fs_list_cache_count; ) {
         uint8_t remove = 0u;
@@ -18202,7 +18738,9 @@ static void filesystem_scanInstruments_tick(void)
     case 2: /* WAIT_OPEN Instrument/ */
         if (!op_file_ready) return;
         if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_DONE);
+            /* A missing root is an empty scan; a fatal open is a real error. */
+            filesystem_finish(filesystem_instrumentIndexFATFatal()
+                                  ? FS_STATUS_ERROR : FS_STATUS_DONE);
             return;
         }
         op_kit_root_dir = op_file;
@@ -18264,7 +18802,16 @@ static void filesystem_scanInstruments_tick(void)
     case 7: /* WAIT_OPEN SUBDIRECTORY */
         if (!op_file_ready) return;
         if (op_file == NULL) {
-            /* Missing subdir, skip to next type */
+            /*
+             * Missing type directories are empty namespaces, but a lower-layer
+             * fatal state must abort the scan so recovery cannot write a false
+             * empty `.hcindex` over genuine I/O failure.
+             */
+            if (filesystem_instrumentIndexFATFatal()) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            /* Missing subdir, skip to next type. */
             if (op_instrument_scan_one_type) {
                 op_phase = 12;
             } else {
@@ -18292,7 +18839,21 @@ static void filesystem_scanInstruments_tick(void)
                                   &op_object);
         if (st == AFATFS_OPERATION_IN_PROGRESS)
             return;
-        if (st == AFATFS_OPERATION_FAILURE || op_object.id.kind == AFATFS_OBJECT_NONE) {
+        /*
+         * Distinguish a clean end-of-directory from a failed physical scan.
+         * What: only AFATFS_OBJECT_NONE advances the successful scan; an
+         * explicit iterator failure is carried through the existing close and
+         * root-return phases as FS_STATUS_ERROR. Why: index recovery may
+         * repair absent/corrupt metadata, but it must never replace a valid
+         * index after a card read failure. Inputs: object-iterator status;
+         * output: op_close_status and the normal one-type scan terminal path.
+         */
+        if (st == AFATFS_OPERATION_FAILURE ||
+            filesystem_instrumentIndexFATFatal() ||
+            op_object.id.kind == AFATFS_OBJECT_NONE) {
+            op_close_status = (st == AFATFS_OPERATION_FAILURE ||
+                               filesystem_instrumentIndexFATFatal())
+                ? FS_STATUS_ERROR : FS_STATUS_DONE;
             afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
             op_phase = 10;
             return;
@@ -18330,7 +18891,9 @@ static void filesystem_scanInstruments_tick(void)
         if (st == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (st == AFATFS_OPERATION_FAILURE) {
-            op_phase = 12; // Force exit on severe filesystem error
+            /* A failed parent return is I/O failure, never an empty scan. */
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 12;
             return;
         }
         
@@ -18349,7 +18912,8 @@ static void filesystem_scanInstruments_tick(void)
     case 12: /* CHDIR root + FINISH */
         if (!afatfs_chdir(NULL))
             return;
-        filesystem_finish(FS_STATUS_DONE);
+        /* Publish the scan's native terminal status without masking failure. */
+        filesystem_finish(op_close_status);
         return;
 
     default:
@@ -23619,14 +24183,17 @@ bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
                                            fs_completion_cb_t cb)
 {
     /*
-     * Start loading one registry-owned Instrument index from the SD card.
+     * Start loading or repairing one registry-owned Instrument index.
      *
      * Inputs: registered type and optional completion callback. Outputs: the
      * one shared cache is cleared immediately, tagged with the selected type,
-     * then repopulated by the foreground-pumped `.hcindex` reader. Keeping the
-     * clear at request time prevents the Menu from displaying stale names
-     * while the new index is in flight; invalid types and a busy queue fail
-     * before any filesystem state is changed.
+     * then populated by the foreground-pumped `.hcindex` reader or, when the
+     * metadata is absent/structurally invalid, the selected-type physical scan
+     * and durable rewrite chain. Keeping the clear at request time prevents
+     * the Menu from displaying stale names while the request is in flight;
+     * invalid types and a busy queue fail before filesystem state changes.
+     * Genuine read/scan/write faults reach the same callback as ERROR exactly
+     * once. No second cache or recovery state is retained.
      */
     if (type >= INSTRUMENT_TYPE_UNKNOWN ||
         !instrumentManager_storageDirectory(type) ||

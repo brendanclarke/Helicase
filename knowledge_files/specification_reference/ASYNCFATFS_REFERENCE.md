@@ -376,36 +376,59 @@ overwrite do not rely on rename: they use exact delete/recreate. The current
 AutoSave design is the root A/B record pair specified in `AUTOSAVE.md`, not a
 per-product-file dot-backer transaction.
 
+Rename uses the same terminator-aware reservation rules as create: it scans
+live entries through the first `0x00`, keeps the first sufficient sector-local
+deleted run as a candidate, and does not retire the source name while scanning.
+Placement prefers a validated in-place rewrite, then the deleted candidate,
+then a terminator-owned run with a replacement marker, and finally a moved run
+in the next logical sector. The new name is written before the old complete
+name run is retired; this ordering is not a power-loss transaction.
+
 ## Directory Terminators And LFN Creation
 
-VFAT LFN creation may need multiple contiguous directory entries. If a directory
-terminator (`0x00`) is encountered where there is not enough room for the full
-LFN/SFN run, asyncfatfs retires the skipped terminator into an ordinary deleted
-entry before scanning onward. Otherwise future directory scans would stop before
-the newly-created object.
+What: Records the implemented Gate-A persistent end-marker model for all
+directory-entry writers. Why: future create/rename/delete work must distinguish
+`0xE5` reusable holes from the `0x00` namespace boundary and preserve
+target-before-exposure ordering. Inputs: the source collision/placement phases
+and the existing asynchronous FAT/cache contract. Outputs/effects: a
+maintainer contract that retains whole-cluster initialization and does not
+describe the deferred Gate-B lazy-sector behavior. Affiliates: source comments,
+Sessions 040/056, `filesystem.c` consumers, and Gate B.
 
-When a subdirectory is extended to create space, the create state machine resets
-the entry index so the fresh cluster is scanned from entry 0 instead of
-skipping its first sector.
+Every raw create, LFN create/open, and rename collision scan stops at the first
+directory terminator (`0x00`). Deleted entries (`0xE5`) are reusable holes, not
+proof that the requested display name is absent: the first sufficient
+sector-local deleted run is latched while all later live entries continue to be
+collision-checked. A later hole cannot replace that first candidate. The marker
+itself is never dirtied during observation.
 
-The LFN creation scan now uses a latch-and-continue approach (Session 056). The
-first viable free run of deleted (`0xE5`) entries is latched but does not
-immediately branch to the create phase. Scanning continues through the remainder
-of the directory. If a matching existing entry is found later, it is opened
-normally and the latch is unused. Only at directory exhaustion (`entry == NULL`)
-does the latched position get used for creation. This prevents duplicate
-directory entries when deleted-entry free runs appear before an existing file
-with the same name.
+At the marker, placement prefers the latched deleted run. Otherwise the run
+starts at the marker only when the requested LFN/SFN count plus one complete
+replacement marker fits in the same sector. The writer clears that following
+entry to publish a new `0x00`. If the run does not fit, the complete run moves
+to entry zero of the next logical directory sector. Movement uses
+`currentDirectory` and `afatfs_fseekAtomic()` through the FAT chain; no physical
+sector increment is valid across a cluster link. An allocated-EOF target is
+extended through the existing full-cluster initializer, then the target sector
+is zeroed and written before the target cache descriptor is allowed to reach
+media. Only after that persistence barrier is the original marker sector
+read/modified so every entry from the old marker through sector end is marked
+`0xE5`.
 
-The earlier code exited the scan the moment a viable free run was found,
-which created duplicates in any directory that had deleted entries before
-the target file's position. The SFN-only path and the rename path were never
-affected — they create only at the `0x00` terminator or at physical directory
-end respectively.
+A legacy directory with no terminator uses the first sufficient deleted run, or
+extends an extendable subdirectory and selects entry zero of its already fully
+zeroed new cluster. A fixed FAT16 root cannot extend and fails normally. A
+deleted-run writer never clears the entry after its run, and no LFN/SFN run
+crosses a directory sector.
+
+Newly-created directories still allocate their first cluster, zero-fill the
+complete cluster, write `.` and `..`, and invoke the callback only after that
+initialization. Lazy later-sector initialization remains deferred to Gate B.
 
 These are internal details, but callers should understand the consequence:
-LFN creation is a multi-step directory mutation, and callers must wait for the
-callback/flush boundary before assuming a host or later scan can see the file.
+LFN creation and rename are multi-step directory mutations, and callers must
+wait for the callback/final-flush boundary before assuming a host or later scan
+can see the complete result.
 
 ## Caller Do/Don't Checklist
 

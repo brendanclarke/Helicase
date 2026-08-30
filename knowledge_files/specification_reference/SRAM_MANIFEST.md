@@ -72,7 +72,7 @@ boundary `0x08080000`. `build/lxr02.bin` is 376,992 B.
 | `fs_list_cache_name` | 9,000 B | Shared library-name/HCNAMES cache |
 | `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved filesystem-owned source cache |
 | `menu_pendingPageSwitch` | 1 B | Approved normal-SRAM1 queued non-Load destination while a busy Load/Save owner drains; page-plus-one encoding, no payload/name storage |
-| `afatfs` | 7,344 B | Async FAT filesystem state |
+| `afatfs` | 6,984 B | Async FAT filesystem state |
 | `runtime_slots` | 7,056 B | Six tagged engine slots, 1,176 B reserve each |
 | `sample_info_cache` | 1,440 B | Sample-information cache |
 | `sample_name_cache` | 1,080 B | Sample-name cache |
@@ -138,6 +138,55 @@ Session 050 build: text grew 1,360 B, initialized `.data` grew 4 B, and bss
 shrank 12 B (net -8 B RAM). The four initialized bytes must still be
 identified to their owner under the allocation policy even though total RAM
 shrank.
+
+## 2026-08-30 Session 059 AsyncFATFS Phase One retained-state note
+
+The Gate-A terminator-aware reservation refactor reuses the existing
+`afatfsCreateFile_t` byte/pointer slots and embeds no additional state in the
+five-handle pool, `currentDirectory`, `afatfs_t`, or the cache. The target
+build's compile-time checks remain `afatfsCreateFile_t=144 B`,
+`afatfsFile_t=188 B`, and `afatfsRenameObject_t=552 B`; the linked `afatfs`
+symbol is 6,984 B. Compared with the pre-implementation linked artifact, the
+`afatfs` symbol delta is **0 B**. The clean post-change logging-on link reports
+`text=383,956 B`, `data=404 B`, and `bss=96,160 B`; the prior checked-in build
+artifact reported `text=380,436 B`, `data=408 B`, and `bss=94,848 B`, so those
+whole-image totals are not treated as a retained-state delta because the
+artifact predates the clean dependency rebuild. No RAM approval is requested
+for Phase One. Hardware/media and logging-off confirmation remain pending.
+
+What: Records the measured retained-state result of the resumable reservation
+refactor. Why: create state is multiplied through the handle pool and embedded
+again in rename, so source field counts are not authoritative. Inputs: target-
+ABI sizeof checks, linked nm/map symbol sizes, and the logging-on build.
+Outputs/effects: exact verified zero delta for the `afatfs` owner with no new
+allocation. Affiliates: `AFATFS_MAX_OPEN_FILES`, `afatfsCreateFile_t`,
+`afatfsFile_t`, `afatfsRenameObject_t`, `afatfs_t`, and this policy.
+
+## 2026-08-30 Session 059 Instrument Load repair retained-state note
+
+The Instrument Load repair adds no retained name array, cache, payload stage,
+or recovery-specific static storage. It reuses `fs_list_cache_name` (9,000 B),
+the existing operation phase/handle/callback fields, and the existing
+selected-type scan/index rebuild chain. The clean logging-on link reports
+`text=385,380 B`, `data=404 B`, and `bss=96,176 B`; `arm-none-eabi-size -A`
+reports normal SRAM1 `.bss=89,504 B`, `.dtcmz=3,572 B`, and
+`.dma_nocache=3,100 B`. Linked owners remain `afatfs=6,984 B` and
+`fs_list_cache_name=9,000 B`; Menu's existing `menu_storageBusy`,
+`menu_deferSelectionRequest`, `menu_instrumentLoadIndex`, and
+`menu_instrumentTempName` retain their existing 1/1/8/9-byte shapes. No new
+retained allocation was introduced by this repair. The whole-image `.bss`
+comparison to the earlier dirty Phase-One artifact is not used as a repair
+delta because the prerequisite source tree already contained unrelated
+Session 059 changes; owner-symbol and source-allocation checks are the
+authoritative result. Hardware and logging-off measurements remain pending.
+
+What: records the selected-type index validator/recovery and terminal Menu
+callback memory result. Why: the repair must not spend the SRAM reserved for
+future Pattern data on per-type names or recovery flags. Inputs: clean linked
+map/nm output and the source allocation audit. Outputs/effects: the existing
+9,000-byte cache remains the only typed browser-name storage. Affiliates:
+`filesystem.c`, `filesystem.h`, `menu.c`, `fs_list_cache_name`, and this
+manifest.
 
 ## 2026-08-28 Session 057 net allocation note
 

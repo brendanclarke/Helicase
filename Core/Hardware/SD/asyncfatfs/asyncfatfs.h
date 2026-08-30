@@ -356,6 +356,22 @@ afatfsOperationStatus_e afatfs_fseek(afatfsFilePtr_t file, int32_t offset, afatf
 bool afatfs_ftell(afatfsFilePtr_t file, uint32_t *position);
 
 /*
+ * Phase-One public contract remains component-only and declaration-stable.
+ *
+ * What: The private create/rename implementation now preserves the FAT 0x00
+ * namespace boundary, reserves sector-local runs, and initializes any newly
+ * exposed directory sector before publishing it. The public callback, handle,
+ * alias, and result contract below is unchanged.
+ * Why: Callers need only a directory that is safe to enter and populate; run
+ * reservation, logical-sector traversal, target persistence, and old-tail
+ * retirement are internal asynchronous details. Gate B is deferred, so the
+ * first cluster remains fully zero-filled.
+ * Inputs: the same component name, mode/match policy, alias buffer, and
+ * completion callback as before. Outputs/effects: the same handle/result and
+ * callback timing, with no new caller responsibility. Affiliates:
+ * asyncfatfs.c create/rename phases, afatfs_chdir(), filesystem.c, and
+ * ASYNCFATFS_REFERENCE.md.
+ *
  * Directory create/open contract.
  *
  * The callback receives either NULL or a directory handle that is immediately
