@@ -66,6 +66,7 @@
 | 055 | 2026-08-21 | uncommitted `Core/Menu/menu.c` on `dev-ph3-autosave-ph3` (338 insertions/2 deletions vs `0827b40`) | Hardware-confirmed Session 054's recursive-delete/HCNAMES fixes via full round-trip testing; Load-menu freeze root-caused and closed (missing `filesystem_ack()` in the shared error overlay, plus two self-deadlocking retry helpers); Load: Instrument `kit`-row restore permanent-failure fix; stale Bank/Scene/Kit name-on-entry race fix |
 | 056 | 2026-08-24 | commits `509115b`, `7108a00` plus uncommitted `filesystem.c` on `dev-ph3-autosave-ph4` | AsyncFATFS LFN duplicate-creation fix (latch-and-continue scan replaces early free-run exit); `afatfs_fseekAtomic()` cluster-boundary file-size fix (missing `afatfs_fileUpdateFilesize()` call left `logicalSize` at 0); autosave writer page-exit expedite (`fs_autosave_page_suppressed` flag resets deadline to 250 ms on Load/Save exit); hardware-verified duplicate and file-size fixes, page-exit expedite pending verification |
 | 057 | 2026-08-28 | commits `ad9b026`..`f99329c` on `dev-ph3-autosave-ph4` | AutoSave writer wrap (Bank Save present-mask union, Bank-identity-mismatch copy-forward instead of regeneration); settings.cfg safe write (temp+sync+promote, hardware-verified); empty-Scene/Bank overwrite guard; boot Kit-directory sanitizer replaced with lazy quarantine-on-failed-load (Kit→Scene cascade, Bank never-fails-whole-operation contract); Bank Save rebuilt as per-Scene delete-then-write (fixes `ErrS05`, stops deleting non-selected children); Bank Save/Load screen-freeze root-caused to a foreground-poll counter misread as milliseconds and removed, hardware-accepted full 16-Scene Bank Save |
+| 058 | 2026-08-29/30 | commits `9da35c7`, `124a6cf` on `dev-ph3-autosave-ph4` | Bank Load/Save speedup: Option 1 (one-pass Bank child-name capture, parent-CWD retention, dedicated HCNAMES mirror, buffered text reader) implemented + hardware-confirmed faster Bank Load; Option 2 (session-scoped card-verified clean-Scene skip) implemented, hardware pending; Option 3 (retained-cluster rewrite) implemented then reverted as ~15 s slower; Option 3B rejected; stopped-playback Load/Save fast drain + codec suspend + renderer guard; SD response-timeout root-cause fix (poll-count → elapsed TIM6 ms, hardware-accepted full stopped Bank Save); Bank progress `NN.` repaint fix; AsyncFATFS directory-create inefficiency deferred to Session 059 |
 
 
 ---
@@ -866,3 +867,46 @@ never re-verified on hardware in any of this session's records.
   [057_SESSION_HANDOFF_LOG.md](057_SESSION_HANDOFF_LOG.md), `FILESYSTEM_SPEC.md`,
   `AUTOSAVE.md`, `DEV_MODES.md`, `ASYNCFATFS_REFERENCE.md`, and
   `SCOPING_TARGETS.md`.
+
+### 058 — Bank Save/Load Speedup, Stopped-Playback Load/Save, And SD Timeout Fix (2026-08-29/30)
+
+Implemented and kept the Bank speedup work from
+`S058_BANK_LOAD_SPEEDUP_PROPOSAL.md`: Option 1 removed Bank Load's O(n²)
+per-child directory rescan (one-pass child-name capture into a 144-byte
+`op_bank_child_display` table, successful-child-only parent-CWD retention via
+`afatfs_chdirParent()`, a dedicated 1,161-byte HCNAMES mirror with a tri-state
+validity gate, and a buffered text reader over the existing 512-byte staging
+buffer at the unchanged 16-char/tick budget). Option 2 added session-scoped,
+card-verified clean-Scene skipping for Bank Save: four volatile BankData bytes
+plus two filesystem candidate bytes, published only by a completed Bank
+Load/Save on the current boot+mount and invalidated by every Scene/Kit/
+Instrument/Pattern mutation funnel; `preset_saveBank()` gained a `force_save`
+selector. Option 3 (in-place retained-cluster rewrite) was implemented then
+reverted because hardware showed it ~15 s slower (the canonical-proof scan +
+reopen overhead dominated the cluster saving), and Option 3B was rejected as
+useless on the fresh-boot first save. The static Option 1 review's five
+findings were addressed except two deliberate open items: Save-side
+`afatfs_chdirParent()` FAILURE is still masked to a root-return fallback
+(Finding 4), and the SRAM-manifest/interface closeout deferred to this logging
+pass. In parallel, the stopped-playback Load/Save feature (`S058_LOAD_SAVE_NOPLAYBACK.md`)
+added codec suspend + a four-pass `afatfs_poll()` fast drain for eligible
+stopped top-level commands (`audioCodec_isSuspended()`, `fs_fast_drain_active`,
+Menu predicate/lifecycle, renderer early return). Hardware then exposed that a
+stopped Bank Save livelocked because the SD shim's read-token/write-busy
+"timeouts" were raw `sdcard_poll()` call counts; the fix repurposed
+`retry_count` into a TIM6 `wait_started_tick` and switched both waits to
+elapsed-millisecond deadlines (1,000 ms token / 5,000 ms busy), bumping the
+HCPRMS boot capsule to schema 2 (`retry_count` → `wait_ms`, dual-schema
+decoders). A hardware-accepted full stopped Bank Save (~30 s, byte-identical
+slot 046 tree) closed the livelock. A final `menu_refreshBankChildProgress()`
+fix made the `00.`..`15.` child counter repaint as the asynchronous cursor
+advances. Final build `text=382,700 data=404 bss=96,160`; AsyncFATFS
+directory-create inefficiency deferred to `S059_ASYNCFATFS_SPEEDUP.md`.
+
+- **Find here**: `S058_BANK_LOAD_SPEEDUP_PROPOSAL.md`,
+  `S058_BANK_SPEEDUP_REVIEW.md`, `S058_LOAD_SAVE_NOPLAYBACK.md`,
+  `S058_SPEEDUP_FINAL_CHECK.md`,
+  [058_SESSION_HANDOFF_LOG.md](058_SESSION_HANDOFF_LOG.md),
+  `FILESYSTEM_SPEC.md`, `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`,
+  `SRAM_MANIFEST.md`, `MODULE_INTERCHANGE_SPEC.md`, and
+  `S059_ASYNCFATFS_SPEEDUP.md`.

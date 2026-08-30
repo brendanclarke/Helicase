@@ -19,6 +19,41 @@ is:
 - `storageTypes.c/h` parses or formats text schemas.
 - asyncfatfs performs component-level FAT/VFAT operations.
 
+## SD response timeouts are real-time (Session 058)
+
+The SD transport shim (`sdcard_lxr02.c`) pumps one bounded token/busy byte or a
+16-byte data burst per `sdcard_poll()` call. Its two asynchronous response
+waits — the read-data token wait (`READING_WAIT_TOKEN`) and the
+write-program-busy wait (`WRITING_WAIT_BUSY`) — abandon on **elapsed TIM6
+milliseconds**, not on a count of caller polls:
+
+```c
+#define SDCARD_TOKEN_TIMEOUT_MS 1000u
+#define SDCARD_BUSY_TIMEOUT_MS  5000u
+static uint8_t sdcard_waitTimedOut(uint16_t timeout_ms) {
+    return (uint8_t)((uint16_t)(time_sysTick - wait_started_tick) >= timeout_ms);
+}
+```
+
+`wait_started_tick` (a two-byte `uint16_t` that repurposes the retired
+`retry_count`) is armed on accepted CMD17 before entering
+`READING_WAIT_TOKEN` and on the accepted write data-response before entering
+`WRITING_WAIT_BUSY`; command/payload/CRC transmission does not consume the
+card's response allowance. Every timeout/success branch clears the timestamp
+before invoking its callback so an admitted successor owns its own deadline.
+
+The rule exists because callers legitimately change foreground poll density:
+the Session 058 stopped-playback fast drain calls `afatfs_poll()` four times
+per facade pass while codec DMA/I2S/DSP are suspended. A poll-count ceiling
+would then expire in far less wall time and make a healthy busy card time out,
+which AsyncFATFS turns into an endless DIRTY -> WRITING -> timeout -> DIRTY
+retry cycle. Never reintroduce a poll-count deadline for either wait.
+
+The forensic transport snapshot reflects the same unit: its member is now
+`wait_ms` (elapsed milliseconds in `READING_WAIT_TOKEN` or
+`WRITING_WAIT_BUSY`, zero elsewhere), and the boot HCPRMS capsule is schema 2.
+See `DEV_MODES.md` for the capsule and decoder rules.
+
 ## Pumping And Completion
 
 asyncfatfs operations are asynchronous unless specifically documented as a
@@ -359,7 +394,10 @@ allocator/cache, and transport fields taken immediately before existing boot
 recovery abandons the failed operation. They must not poll, allocate, issue
 I/O, change cache/handle ownership, alter callbacks/retries, or drive product
 control flow. Their result is diagnostic evidence, not an AsyncFATFS recovery
-API; the fixed 72-byte bootlog envelope is specified in `DEV_MODES.md`.
+API; the fixed 72-byte bootlog envelope is specified in `DEV_MODES.md`. The
+transport snapshot's `wait_ms` field (Session 058, schema 2) reports elapsed
+wait milliseconds only while an SD read-token or write-busy wait is active and
+zero otherwise; it does not publish the retired poll-count value.
 
 ## Rename
 
@@ -376,59 +414,36 @@ overwrite do not rely on rename: they use exact delete/recreate. The current
 AutoSave design is the root A/B record pair specified in `AUTOSAVE.md`, not a
 per-product-file dot-backer transaction.
 
-Rename uses the same terminator-aware reservation rules as create: it scans
-live entries through the first `0x00`, keeps the first sufficient sector-local
-deleted run as a candidate, and does not retire the source name while scanning.
-Placement prefers a validated in-place rewrite, then the deleted candidate,
-then a terminator-owned run with a replacement marker, and finally a moved run
-in the next logical sector. The new name is written before the old complete
-name run is retired; this ordering is not a power-loss transaction.
-
 ## Directory Terminators And LFN Creation
 
-What: Records the implemented Gate-A persistent end-marker model for all
-directory-entry writers. Why: future create/rename/delete work must distinguish
-`0xE5` reusable holes from the `0x00` namespace boundary and preserve
-target-before-exposure ordering. Inputs: the source collision/placement phases
-and the existing asynchronous FAT/cache contract. Outputs/effects: a
-maintainer contract that retains whole-cluster initialization and does not
-describe the deferred Gate-B lazy-sector behavior. Affiliates: source comments,
-Sessions 040/056, `filesystem.c` consumers, and Gate B.
+VFAT LFN creation may need multiple contiguous directory entries. If a directory
+terminator (`0x00`) is encountered where there is not enough room for the full
+LFN/SFN run, asyncfatfs retires the skipped terminator into an ordinary deleted
+entry before scanning onward. Otherwise future directory scans would stop before
+the newly-created object.
 
-Every raw create, LFN create/open, and rename collision scan stops at the first
-directory terminator (`0x00`). Deleted entries (`0xE5`) are reusable holes, not
-proof that the requested display name is absent: the first sufficient
-sector-local deleted run is latched while all later live entries continue to be
-collision-checked. A later hole cannot replace that first candidate. The marker
-itself is never dirtied during observation.
+When a subdirectory is extended to create space, the create state machine resets
+the entry index so the fresh cluster is scanned from entry 0 instead of
+skipping its first sector.
 
-At the marker, placement prefers the latched deleted run. Otherwise the run
-starts at the marker only when the requested LFN/SFN count plus one complete
-replacement marker fits in the same sector. The writer clears that following
-entry to publish a new `0x00`. If the run does not fit, the complete run moves
-to entry zero of the next logical directory sector. Movement uses
-`currentDirectory` and `afatfs_fseekAtomic()` through the FAT chain; no physical
-sector increment is valid across a cluster link. An allocated-EOF target is
-extended through the existing full-cluster initializer, then the target sector
-is zeroed and written before the target cache descriptor is allowed to reach
-media. Only after that persistence barrier is the original marker sector
-read/modified so every entry from the old marker through sector end is marked
-`0xE5`.
+The LFN creation scan now uses a latch-and-continue approach (Session 056). The
+first viable free run of deleted (`0xE5`) entries is latched but does not
+immediately branch to the create phase. Scanning continues through the remainder
+of the directory. If a matching existing entry is found later, it is opened
+normally and the latch is unused. Only at directory exhaustion (`entry == NULL`)
+does the latched position get used for creation. This prevents duplicate
+directory entries when deleted-entry free runs appear before an existing file
+with the same name.
 
-A legacy directory with no terminator uses the first sufficient deleted run, or
-extends an extendable subdirectory and selects entry zero of its already fully
-zeroed new cluster. A fixed FAT16 root cannot extend and fails normally. A
-deleted-run writer never clears the entry after its run, and no LFN/SFN run
-crosses a directory sector.
-
-Newly-created directories still allocate their first cluster, zero-fill the
-complete cluster, write `.` and `..`, and invoke the callback only after that
-initialization. Lazy later-sector initialization remains deferred to Gate B.
+The earlier code exited the scan the moment a viable free run was found,
+which created duplicates in any directory that had deleted entries before
+the target file's position. The SFN-only path and the rename path were never
+affected — they create only at the `0x00` terminator or at physical directory
+end respectively.
 
 These are internal details, but callers should understand the consequence:
-LFN creation and rename are multi-step directory mutations, and callers must
-wait for the callback/final-flush boundary before assuming a host or later scan
-can see the complete result.
+LFN creation is a multi-step directory mutation, and callers must wait for the
+callback/flush boundary before assuming a host or later scan can see the file.
 
 ## Caller Do/Don't Checklist
 
