@@ -1,8 +1,12 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware through the Session 057
-settings.cfg safe write, empty-Scene/Bank overwrite guard, lazy
+reference for the Helicase/LXR-02 firmware through the Session 058 Bank
+Load/Save speedup (one-pass Bank child-name capture, successful-child
+parent-CWD retention, a dedicated HCNAMES mirror, a buffered text reader,
+session-scoped card-verified clean-Scene skipping), the stopped-playback
+Load/Save fast drain, the SD real-time response-timeout correction, the
+Session 057 settings.cfg safe write, empty-Scene/Bank overwrite guard, lazy
 load-time Kit/Scene quarantine, and per-Scene Bank Save update. It includes the
 full Session 032 instrument/kit file specification formerly kept in
 `INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
@@ -569,27 +573,40 @@ Current behavior:
   bits remain unchanged.
 - An empty Bank containing only valid `bankset.bcg` is valid; it completes Bank
   selection and then falls back to root Scene, root Kit, then defaults.
-- Bank Save writes bankset.bcg and every child selected by the 16-bit mask.
-  If the active Scene is outside a nonempty save mask, the saved manifest
-  selects the first saved child so it never points to an absent payload.
+- Bank Save writes bankset.bcg and every child selected by the 16-bit mask,
+  minus any child skipped as card-verified clean by Option 2's session-scoped
+  authority (see the clean-Scene skip note below). If the active Scene is
+  outside a nonempty save mask, the saved manifest selects the first saved
+  child so it never points to an absent payload.
 - Save scans `/Bank/` to prove zero or one exact same-slot directory and rejects
   duplicates, same-slot files, malformed product objects, and scan failures.
-  It deletes the one captured directory through native recursive delete, then
-  creates the final numbered Bank directly. There are no temporary or `old*`
-  promotion names; failure is non-atomic and publishes no replacement metadata.
+  Since Session 057 it reuses the root Bank directory itself (open-or-rename-
+  then-open, create only if absent) and deletes/recreates only each selected
+  child in place; the whole target Bank tree is never deleted at once. There
+  are no temporary or `old*` promotion names; failure is non-atomic and
+  publishes no replacement metadata.
 - A full Bank Load resets Scene child discovery for every delegated child.
   Filenames discovered in one local folder must never be reused for another.
-- Bank Load retains no 16-child name or alias arrays. It keeps only a 16-bit
-  occupancy mask, rescans the selected Bank parent for each requested child,
-  resolves one lexical `SS Name` component into operation scratch, stages that
-  child, and discards the component before advancing.
-- Bank Load borrows the HCNAMES image once, overlays exactly eight name/source
-  pairs for each successfully committed selected child, updates the Bank row on successful
-  metadata commit, and writes once. A child counts as loaded only after the
-  shared Scene reader validates and commits it, not when its directory merely
-  opens. The completed result reaches Preset/Menu before any later filesystem
-  request resets operation scratch; after DSP apply, Menu reloads the unchanged
-  `/Bank/.hcindex` read-only.
+- Bank Load retains a 144-byte `op_bank_child_display[16][9]` name table
+  (Session 058, Option 1A) captured during the one existing Bank child scan,
+  alongside the 16-bit occupancy mask. The same object visit sets the presence
+  bit and stores the lexical-winning display name under the existing
+  `filesystem_displayPrecedesCached()` duplicate winner; the old per-child
+  rescan (former phases 27-30) is removed.
+- Bank Load retains the selected Bank directory as parent CWD between
+  successful delegated children (Session 058, Option 1B). Scene Load phase 72
+  calls `afatfs_chdirParent()` only after a **successful** child and sets
+  `op_bank_cwd_at_parent`; a failed child restores root first. Bank Load phase
+  20 then advances directly to the next child (phase 27) instead of reopening
+  `/Bank/`. Standalone Scene Load keeps its root-return contract.
+- Bank Load borrows the dedicated HCNAMES mirror (Session 058, Option 1C), not
+  the shared 9,000-byte library cache, overlays exactly eight name/source pairs
+  for each successfully committed selected child, updates the Bank row on
+  successful metadata commit, and writes once. A child counts as loaded only
+  after the shared Scene reader validates and commits it, not when its
+  directory merely opens. The completed result reaches Preset/Menu before any
+  later filesystem request resets operation scratch; after DSP apply, Menu
+  reloads the unchanged `/Bank/.hcindex` read-only.
 
 Both successful Bank Load and Bank Save commits mark the existing one-second
 debounced `settings.cfg` writer immediately after updating the resident
@@ -597,6 +614,15 @@ restore slot. The writer later serializes `active_bank` from that live slot;
 the completion mark performs no synchronous file I/O. Bank Load's resident
 Scene-present mask is the OR of the retained mask and effective selected-child
 mask, and an equal union is explicitly re-marked for AutoSave capture.
+
+**Session 058 clean-Scene skip (Option 2).** A Bank Save skips a selected child
+only when the target Bank slot equals the retained clean slot and the child's
+clean bit is set; the effective write mask is `full & ~skip`. A clean bit is
+established only by a completed Bank Load/Save on the current boot+mount (never
+by Autosave recovery), is cleared at boot/remount, and is cleared by every
+resident Scene/Kit/Instrument/Pattern mutation funnel. `force_save` bypasses
+the skip. See `058_SESSION_HANDOFF_LOG.md` §5 and the BankData API in
+`MODULE_INTERCHANGE_SPEC.md`.
 
 ## Scene
 
@@ -1592,8 +1618,9 @@ Implemented:
   `pattern.pat`, and writes placeholder `effects.fx`. Scene and embedded Kit
   names are directory-owned.
 - Bank Save writes bankset.bcg version 2 and one local `SS <scene name>/`
-  payload for every selected Scene bit. A zero child-scene mask is valid and
-  creates an empty Bank. **As of Session 057, the root Bank directory itself
+  payload for every selected Scene bit, minus any Option 2 clean-Scene skip
+  (Session 058). A zero child-scene mask is valid and creates an empty Bank.
+  **As of Session 057, the root Bank directory itself
   is scanned and reused (opened directly if the same slot/name already
   exists, renamed-then-opened if the name changed, created only if absent)
   rather than deleted and recreated, and each selected child is individually
@@ -1698,6 +1725,32 @@ Deletion is non-transactional: partial media mutation is possible after an
 I/O/layout failure, and no caller may mkdir, publish HCNAMES, or rebuild an
 index after a non-OK result. No current path claims power-loss-safe commit
 semantics.
+
+## Stopped-playback fast drain and SD response timeouts (Session 058)
+
+For eligible top-level Load/Save commands while sequencer playback is stopped,
+Menu suspends codec hardware (stopping DMA/I2S/DSP) and the filesystem facade
+performs four consecutive `afatfs_poll()` calls per busy `filesystem_tick()`
+pass instead of one. The filesystem selector is `filesystem_setFastDrain()`
+/`filesystem_fastDrainActive()` (private `FS_FAST_DRAIN_POLL_PASSES = 4`,
+one-byte `fs_fast_drain_active`); codec observation is
+`audioCodec_isSuspended()`. Eligibility is the Menu predicate
+`menu_loadSaveCommandInNoPlaybackScope()`: stopped top-level Save
+Kit/KitMrp/Scene/Bank and Load Scene/Bank. Load Kit/KitMrp, Settings/test,
+Samples (own independent suspend), and nested Instrument Load/Save are
+excluded. The renderer returns early while the codec is suspended. Detail and
+ownership rules are in `MODULE_INTERCHANGE_SPEC.md` and
+`058_SESSION_HANDOFF_LOG.md` §8.
+
+The SD transport shim's read-token and write-program-busy abandonment is
+real-time, not caller-poll-count, based (Session 058): `sdcard_lxr02.c` keeps a
+two-byte `wait_started_tick` (repurposed from the old `retry_count`) and
+compares against TIM6 `time_sysTick` with `SDCARD_TOKEN_TIMEOUT_MS = 1000` and
+`SDCARD_BUSY_TIMEOUT_MS = 5000`. This is required precisely because the
+stopped-playback fast drain changes foreground poll density; a poll-count
+ceiling would time out a healthy busy card and make AsyncFATFS re-dirty/retry
+the same sector forever. The low-level rule is authoritative in
+`ASYNCFATFS_REFERENCE.md`.
 
 ## Verification Anchors
 

@@ -146,6 +146,30 @@ does not recreate a generic bridge or duplicate resident names.
   live shuffle storage, and final migration/backfill is expected to happen in
   external Python converters once storage settles.
 
+## Core/Bank/BankData
+
+Affiliate modules: filesystem, Preset, SceneData, PatternData, Menu, AutoSave.
+
+Purpose: owns the 16-Scene resident Bank workspace (present/edit masks, active
+Scene, restore slot, resident-Bank flag) and, since Session 058, the
+session-scoped card-verified clean-Scene authority used to skip Bank Save
+children that are provably unchanged on the current mounted card.
+
+| API | Use | Usual callers / clients |
+| --- | --- | --- |
+| `bank_init()` | Zero present/edit masks, active Scene, resident-Bank flag, and all Session 058 clean authority. | boot |
+| `bank_setScenePresentMask()` / `bank_scenePresentMask()` / `bank_scenePresent()` | Present-mask get/set; the setter reports whether it changed (Session 052). | filesystem Bank Load/Save, AutoSave, Preset |
+| `bank_hasResidentBank()` / `bank_setHasResidentBank()` | Resident-Bank presence flag; the empty-Scene/Bank overwrite guard (Session 057) depends on it. | filesystem |
+| `bank_clearSdCleanAuthority()` | Drop every card-clean bit and the identified Bank slot (`BANK_SD_CLEAN_SLOT_NONE = 0xffff`). Called at cold boot and every fresh mount/remount. | filesystem `initAfterCardReady` |
+| `bank_invalidateSdCleanScene(scene_index)` | Clear one resident Scene's card-clean bit and set its mutation-during-save bit. Called by every retained-data mutation funnel (Scene/Kit scalar setters, Instrument endpoint store, KitMrp/InstrumentMrp/whole-Instrument commit, Pattern mutators). Equal-value no-ops never reach it. | SceneData, presetManager, PatternData |
+| `bank_publishSdCleanAuthority(slot, proven_mask)` | Establish/merge clean authority after a completed Bank Load/Save. Same-slot ORs into existing bits; a different slot replaces the old authority. Autosave recovery never calls it. | presetManager `on_bank_load_complete`; filesystem Save completion |
+| `bank_sdCleanMask()` / `bank_sdCleanSlot()` / `bank_sdCleanSlotIsValid()` | Read the clean mask/slot/validity. | filesystem Bank Save skip |
+| `bank_resetSdSaveMutationWindow()` / `bank_resetSdSaveMutationScene()` / `bank_sdSaveMutatedMask()` | Own the operation-scoped mutation window across a Bank Save so a child edited while its write was in flight stays non-clean. | filesystem Bank Save |
+
+The clean authority is **never serialized** (not in settings, HCNAMES, Bank, or
+AutoSave): it survives only for one boot+mount and is rebuilt by successful
+Bank Load/Save completion paths. See `058_SESSION_HANDOFF_LOG.md` §5.
+
 ## Core/Bank/Scene/Pattern/PatternData
 
 ### Session 043 current contract
@@ -451,7 +475,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_saveInstrument(scene, slot, display_name)` | Post one root Instrument Save request from a resident Scene/voice slot. The display stem is captured at request acceptance and filesystem writes `Instrument/<stem.ext>`. | Instrument Save nested Save-page OK |
 | `preset_saveInstrumentMorph(scene, slot, display_name)` | Post one root InstrumentMrp Save request. The writer uses the normal Instrument schema but writes the current interpolated values into both endpoint sections and does not rename resident source metadata. | Instrument Save `<Type>Mrp` OK |
 | `preset_loadSceneForScenes(presetNr, scene_mask)` / `preset_saveScene(presetNr, source_scene)` | Load/save root Scene library folders through the non-Pattern Scene stage and direct Pattern phase. | Load/Save Scene |
-| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr, scene_mask)` | Load/save root Bank folders with a 16-bit local-Scene mask. Load validates bankset.bcg v2, preserves unselected resident Scenes/HCNAMES rows, and can report a valid empty Bank; a child proven invalid by content (not I/O abort) is excluded from the load rather than failing the whole operation (Session 057). Save deletes and rewrites only each selected child in place — non-selected children are left untouched (Session 057; previously a total-tree delete/recreate that destroyed every child regardless of selection). | Load/Save Bank, boot |
+| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr, scene_mask, force_save)` | Load/save root Bank folders with a 16-bit local-Scene mask. Load validates bankset.bcg v2, preserves unselected resident Scenes/HCNAMES rows, can report a valid empty Bank, and publishes Session 058 card-clean authority for the completed effective child mask; a child proven invalid by content (not I/O abort) is excluded from the load rather than failing the whole operation (Session 057). Save deletes and rewrites only each selected child in place, skipping Option 2 card-verified clean children unless `force_save` is set; non-selected children are left untouched (Session 057; previously a total-tree delete/recreate that destroyed every child regardless of selection). | Load/Save Bank, boot |
 | `preset_bankLoadFailedSceneMask()` (Session 057) | Read `pm_bank_load_failed_scene_mask`, populated from `filesystem_lastBankLoadFailedSceneMask()` in `on_bank_load_complete()`. Nonzero after an otherwise-successful (`FS_STATUS_DONE`) Bank Load means Menu still needs to show the filesystem error overlay once for the excluded child(ren). | Menu `PRESET_OP_BANK_LOAD` success path (both the empty-Bank fallback and normal sound-apply branches) |
 | `preset_loadFirstAvailableSceneOrKit()` | Fallback after absent/empty Bank: lowest root Scene, then lowest root Kit, then defaults. | boot, Bank Load completion |
 | `preset_sendDrumsetParameters()` | Synchronous pre-audio clear plus six-slot tagged reset/routing/descriptor-image apply. It intentionally leaves target installation to the exact ordinary Scene worker started after audio initialization. | Menu boot/load path |
@@ -668,7 +692,8 @@ stay in `storageTypes.c/h`.
 |---|---|---|
 | `filesystem_initCardAndMountBlocking()` / `filesystem_initAfterCardReady()` | Boot card init/mount. | `main.c` |
 | `filesystem_bootLoggingBegin()` / `filesystem_bootLoggingArm()` / `filesystem_bootLoggingTimedOut()` / `filesystem_writeBootFailureLogBlocking()` / `filesystem_bootLoggingEnd()` | Own the pre-audio ten-second filesystem deadline and one bounded best-effort retained-code recovery write. Private detail hooks may change only the label inside an armed deadline. | `main.c`; filesystem boot operations under `DEV_MODE_LOGGING` |
-| `filesystem_tick()` | Pump asyncfatfs work. | main loop |
+| `filesystem_tick()` | Pump asyncfatfs work. While the Session 058 fast drain is active, the BUSY/non-READY branch runs four consecutive `afatfs_poll()` calls instead of one; idle polling keeps its rate limit. | main loop |
+| `filesystem_setFastDrain(on)` / `filesystem_fastDrainActive()` | Select/observe the Session 058 foreground fast-drain policy. Foreground-only, not reference-counted, no retained payload. Menu is the sole setter: it enables only after verified codec suspend and clears before resume. | Menu no-playback lifecycle |
 | `filesystem_status()` / `filesystem_ack()` | Operation status protocol. A direct Menu callback must snapshot its terminal result before acknowledging it; if it does not immediately post another filesystem request, it must acknowledge `DONE`/`ERROR` before releasing its UI owner so autonomous idle-only schedulers can run. | Preset/Menu |
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is `Kit/NNN Name/kitset.kcg` plus instruments and save routes to the new Kit directory writer. For `FS_FILE_MORPH`, load/save remains legacy `.SND`. | Preset |
 | `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one direct Kit library slot `000..999` into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
@@ -881,6 +906,13 @@ Relevant interchange points:
 - Pre-audio loading establishes a coherent six-slot image synchronously.
   Immediately after `audioCodec_init()`, `preset_startDrumsetApply()` starts the
   same live clear/image/all-source-rebind worker used by a manual Scene switch.
+- `audio_check_and_render()` returns immediately while
+  `audioCodec_isSuspended()` is true (Session 058): suspend empties the DMA/
+  render queue, so the renderer must not advance queue, trigger, DSP/control,
+  or buffer commit without a DMA consumer. `audioCodec_isSuspended()` is a
+  side-effect-free observer of the existing `audio_hw_suspended` hardware flag;
+  Menu pairs it with `filesystem_setFastDrain()` for eligible stopped-playback
+  Load/Save commands.
 - `timebase_holdPreAudioMs()` is used only for the current SD pre-init,
   post-mount, and pre-Bank pacing experiment. It must not be used after audio
   startup, from an ISR, or as runtime filesystem pacing. The intermittent hang

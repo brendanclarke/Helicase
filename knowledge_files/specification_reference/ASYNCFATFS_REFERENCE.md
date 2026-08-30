@@ -19,6 +19,41 @@ is:
 - `storageTypes.c/h` parses or formats text schemas.
 - asyncfatfs performs component-level FAT/VFAT operations.
 
+## SD response timeouts are real-time (Session 058)
+
+The SD transport shim (`sdcard_lxr02.c`) pumps one bounded token/busy byte or a
+16-byte data burst per `sdcard_poll()` call. Its two asynchronous response
+waits — the read-data token wait (`READING_WAIT_TOKEN`) and the
+write-program-busy wait (`WRITING_WAIT_BUSY`) — abandon on **elapsed TIM6
+milliseconds**, not on a count of caller polls:
+
+```c
+#define SDCARD_TOKEN_TIMEOUT_MS 1000u
+#define SDCARD_BUSY_TIMEOUT_MS  5000u
+static uint8_t sdcard_waitTimedOut(uint16_t timeout_ms) {
+    return (uint8_t)((uint16_t)(time_sysTick - wait_started_tick) >= timeout_ms);
+}
+```
+
+`wait_started_tick` (a two-byte `uint16_t` that repurposes the retired
+`retry_count`) is armed on accepted CMD17 before entering
+`READING_WAIT_TOKEN` and on the accepted write data-response before entering
+`WRITING_WAIT_BUSY`; command/payload/CRC transmission does not consume the
+card's response allowance. Every timeout/success branch clears the timestamp
+before invoking its callback so an admitted successor owns its own deadline.
+
+The rule exists because callers legitimately change foreground poll density:
+the Session 058 stopped-playback fast drain calls `afatfs_poll()` four times
+per facade pass while codec DMA/I2S/DSP are suspended. A poll-count ceiling
+would then expire in far less wall time and make a healthy busy card time out,
+which AsyncFATFS turns into an endless DIRTY -> WRITING -> timeout -> DIRTY
+retry cycle. Never reintroduce a poll-count deadline for either wait.
+
+The forensic transport snapshot reflects the same unit: its member is now
+`wait_ms` (elapsed milliseconds in `READING_WAIT_TOKEN` or
+`WRITING_WAIT_BUSY`, zero elsewhere), and the boot HCPRMS capsule is schema 2.
+See `DEV_MODES.md` for the capsule and decoder rules.
+
 ## Pumping And Completion
 
 asyncfatfs operations are asynchronous unless specifically documented as a
@@ -359,7 +394,10 @@ allocator/cache, and transport fields taken immediately before existing boot
 recovery abandons the failed operation. They must not poll, allocate, issue
 I/O, change cache/handle ownership, alter callbacks/retries, or drive product
 control flow. Their result is diagnostic evidence, not an AsyncFATFS recovery
-API; the fixed 72-byte bootlog envelope is specified in `DEV_MODES.md`.
+API; the fixed 72-byte bootlog envelope is specified in `DEV_MODES.md`. The
+transport snapshot's `wait_ms` field (Session 058, schema 2) reports elapsed
+wait milliseconds only while an SD read-token or write-busy wait is active and
+zero otherwise; it does not publish the retired poll-count value.
 
 ## Rename
 

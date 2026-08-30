@@ -105,7 +105,18 @@ through `0xE7`, all integers are little-endian, and it exists only when
 | `E4` | search cluster `u32`, sectors/cluster, wrapped flag, flags | flags: full, file available, `bytes_done` at cluster boundary |
 | `E5` | append previous cluster `u32`, cursor cluster `u24` | allocator ownership |
 | `E6` | dirty, locked, reading, writing, flush, active-cache-index, full | cache summary; cache index `0xff` means none |
-| `E7` | SD state, operation, offset `u16`, retry count `u16`, callback-pending | transport state before abort |
+| `E7` | SD state, operation, offset `u16`, `retry_count`/`wait_ms` `u16`, callback-pending | transport state before abort; the 5..6 bytes are schema-1 `retry_count` or schema-2 elapsed `wait_ms` (see below) |
+
+**HCPRMS capsule schema.** The first E0 record byte is the schema version,
+currently **2** (`HCPRMS_BOOT_CAPSULE_SCHEMA_VERSION` in `config.h`). Schema 2's
+only semantic change is the E7 field: the two transport bytes that schema 1
+called `retry_count` are now elapsed wait milliseconds (`wait_ms`), populated
+only while the SD shim is in `READING_WAIT_TOKEN` or `WRITING_WAIT_BUSY` and
+zero otherwise. The 64-byte geometry, byte order, and every other field are
+unchanged. `tools/decode_devlogs.py` and `tools/devlog_unpack.py` both accept
+schemas 1 and 2 and label E7 `retry_count` for schema 1 and `wait_ms` for
+schema 2, preserving raw fallback for unknown versions so historical captures
+still decode correctly.
 
 The file is forensic evidence only. Failure to create it must not prevent boot
 from continuing to the firmware's existing failure handling. Conversely, an

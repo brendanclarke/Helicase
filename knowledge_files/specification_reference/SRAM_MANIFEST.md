@@ -1,20 +1,21 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-08-17 logging-on Session 051 Scene-follow-up build. `make -j2 && make
-img` produced `text=377,956`, `data=400`, and `bss=95,176`;
-`build/lxr02.bin` is 378,356 B. The approved 258-byte
-`fs_resident_source` cache replaces the retired 32-byte SceneData source
-array, and the approved one-byte `menu_pendingPageSwitch` shares normal SRAM1.
-This remains a linked-image inventory: sizes come from
-`arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
-estimates. The earlier Session 048 figures retained below are historical
-baseline notes, not the current allocation total.
+2026-08-30 logging-on Session 058 build (HEAD `124a6cf`).
+`arm-none-eabi-size build/lxr02.elf` reports `text=382,700`, `data=404`, and
+`bss=96,160`; `build/lxr02.bin` is 383,104 B and `build/LXRV2_lxr02.img` is
+383,120 B. The approved 258-byte `fs_resident_source` cache, the one-byte
+`menu_pendingPageSwitch`, and the Session 058 allocations listed in the
+"2026-08-30 Session 058 net allocation note" all share normal SRAM1. This
+remains a linked-image inventory: sizes come from `arm-none-eabi-size -A` and
+`arm-none-eabi-nm -S --size-sort`, not source estimates. Earlier session
+figures retained below are historical baseline notes, not the current total.
 
-Session 052 adds no retained allocation: the Bank present-mask witness reuses
-the existing eight-byte trace record/ring, and the no-op dirty-mark fallback
-uses only the existing canonical mutation mask. The linked totals below remain
-the Session 051 baseline until the ARM toolchain is available for regeneration.
+Session 052 adds no retained allocation (Bank present-mask witness reuses the
+existing eight-byte trace record/ring; the no-op dirty-mark fallback uses only
+the existing canonical mutation mask). Session 057 added a handful of
+operation-scoped scratch bytes (see its note below). Session 058 adds the
+Option 1/2 and fast-drain allocations documented in its note below.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -40,12 +41,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 88,912 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **92,012 B** | **284,820 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **104,292 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 89,892 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **92,992 B** | **283,840 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **105,272 B** | — |
 
-The image contains 396 B of initialized SRAM1 data and 95,188 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 88,516 B in normal SRAM1
+The image contains 404 B of initialized SRAM1 data and 96,160 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 89,488 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -53,16 +54,16 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 363,664 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 369,768 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
-| `.data` | `0x20020c1c` | 396 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020da8` | 88,516 B | SRAM1 | Normal zero-initialized globals |
+| `.data` | `0x20020c1c` | 404 B | SRAM1 | Initialized writable globals |
+| `.bss` | `0x20020da8` | 89,488 B | SRAM1 | Normal zero-initialized globals |
 
 The final FLASH load image remains safely before the reserved sample-FLASH
-boundary `0x08080000`. `build/lxr02.bin` is 376,992 B.
+boundary `0x08080000`. `build/lxr02.bin` is 383,104 B.
 
 ## Primary SRAM1 owners
 
@@ -71,6 +72,15 @@ boundary `0x08080000`. `build/lxr02.bin` is 376,992 B.
 | `scenes` | 20,992 B | 16 resident `scene_t` values; each holds one 112-B bitmap `PatternSet` |
 | `fs_list_cache_name` | 9,000 B | Shared library-name/HCNAMES cache |
 | `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved filesystem-owned source cache |
+| `hcnames_name_mirror` | 1,161 B | Session 058 Option 1C dedicated 129-by-9 HCNAMES name mirror (replaces HCNAMES borrowing of `fs_list_cache_name`) |
+| `hcnames_mirror_valid` | 1 B | Session 058 Option 1C tri-state mirror validity gate |
+| `op_bank_child_display` | 144 B | Session 058 Option 1A 16-by-9 Bank-local child display names, captured in one scan |
+| `text_buf_pos` + `text_buf_len` | 4 B | Session 058 Option 1D buffered text-reader cursors |
+| `op_bank_cwd_at_parent` | 1 B | Session 058 Option 1B Bank-delegated parent-CWD retention flag |
+| `bank_scene_sd_clean_mask` + `bank_scene_sd_clean_slot` + `bank_sd_save_mutated_mask` | 6 B | Session 058 Option 2 card-verified clean-Scene authority (2 B BSS mask, 2 B `.data` slot, 2 B BSS mutation-during-save) |
+| `op_bank_sd_clean_candidate_mask` + `op_bank_sd_clean_candidate_slot` | 4 B | Session 058 Option 2 operation-scoped save candidate (2 B BSS + 2 B `.data`) |
+| `fs_fast_drain_active` | 1 B | Session 058 foreground-only fast-drain selector |
+| `wait_started_tick` | 2 B | Session 058 SD response-wait start timestamp; repurposed from the retired `retry_count` (no net new SRAM) |
 | `menu_pendingPageSwitch` | 1 B | Approved normal-SRAM1 queued non-Load destination while a busy Load/Save owner drains; page-plus-one encoding, no payload/name storage |
 | `afatfs` | 7,344 B | Async FAT filesystem state |
 | `runtime_slots` | 7,056 B | Six tagged engine slots, 1,176 B reserve each |
@@ -128,7 +138,7 @@ arm-none-eabi-readelf -l -W build/lxr02.elf
 ```
 
 For the current logging-on image, conventional `arm-none-eabi-size` reports
-`text=377,956 B`, `data=400 B`, and `bss=95,176 B`. The latter is the combined
+`text=382,700 B`, `data=404 B`, and `bss=96,160 B`. The latter is the combined
 zero-init total across memory regions; `size -A` provides the section split
 above. Regenerate both configurations before a future change that alters
 logging-gated allocations.
@@ -138,6 +148,43 @@ Session 050 build: text grew 1,360 B, initialized `.data` grew 4 B, and bss
 shrank 12 B (net -8 B RAM). The four initialized bytes must still be
 identified to their owner under the allocation policy even though total RAM
 shrank.
+
+## 2026-08-30 Session 058 net allocation note
+
+Independently re-verified against the current working tree at HEAD `124a6cf`
+(not copied from a planning document): `arm-none-eabi-size build/lxr02.elf`
+reports `text=382,700 B`, `data=404 B`, `bss=96,160 B` (`dec=479,264`).
+Section split (`size -A`): `.dma_nocache=3,100`, `.data=404`, normal SRAM1
+`.bss=89,488`, `.dtcm=8,708`, `.dtcmz=3,572`, `.itcm=3,768`,
+`.devwdg_noinit=0`. Compared against the Session 057 close-out build
+(`text=380,436 B`, `data=408 B`, `bss=94,848 B` per `MEMORY.md` and the note
+below): **net +2,264 B text, -4 B data, +1,312 B bss**.
+
+The Session 058 additions are all normal SRAM1 and named in the primary-owners
+table above:
+
+- Option 1 (1A/1B/1C/1D): `hcnames_name_mirror` 1,161 B, `hcnames_mirror_valid`
+  1 B, `op_bank_child_display` 144 B, `text_buf_pos` + `text_buf_len` 4 B,
+  `op_bank_cwd_at_parent` 1 B — **1,311 B**, within the approved 1,320-byte
+  reservation.
+- Option 2: `bank_scene_sd_clean_mask` 2 B + `bank_sd_save_mutated_mask` 2 B +
+  `op_bank_sd_clean_candidate_mask` 2 B in `.bss`, and
+  `bank_scene_sd_clean_slot` 2 B + `op_bank_sd_clean_candidate_slot` 2 B in
+  `.data` (non-zero `BANK_SD_CLEAN_SLOT_NONE = 0xffff` initializers) — **10 B**
+  (the proposal's "about eight bytes" omitted the candidate-slot retention).
+- Fast drain: `fs_fast_drain_active` 1 B.
+- SD real-time timeout: `wait_started_tick` 2 B repurposed from the retired
+  `retry_count` — net zero.
+
+Net new retained RAM = 1,311 + 10 + 1 = **1,322 B**. The source-level symbol
+sizes above are exact; the linked `.data`/`.bss` aggregates can differ slightly
+from a source sum because of section alignment. None of the Session 058
+allocations draws against either reserved pool (DTCM delay-line headroom,
+SRAM1 Pattern-data headroom). The two 2-byte `.data` slot fields
+(`bank_scene_sd_clean_slot`, `op_bank_sd_clean_candidate_slot`) are
+initialized non-zero globals, not a new buffer/cache/pool, and the `-4 B data`
+net versus Session 057 is a session aggregate, not an indication those fields
+were removed — they are present and accounted above.
 
 ## 2026-08-28 Session 057 net allocation note
 

@@ -17,18 +17,30 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 057 close-out, on branch
-`dev-ph3-autosave-ph4`, commits `ad9b026`..`f99329c` (the fix commit is
-`f99329c`, "bank load/save speedup planning" — a misleading message; its
-actual content is the Bank Save stall fix, not Session 058 speedup work).
-Working tree otherwise clean. Verified directly against source: build is
-`text=380,436 data=408 bss=94,848`, matching `build/LXRV2_lxr02.img`
-(380,860 bytes) already committed at `f99329c`. The durable closeout is
-`knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md` (Bank Save
-present-mask union, AutoSave Bank-mismatch copy-forward, settings.cfg safe
-write, empty-Scene/Bank overwrite guard, boot Kit-sanitizer lazy-quarantine
-refactor, Bank Save per-Scene rewrite, ten-site stall detection, Bank Save
-stall root-cause and fix); verify the actual commit/worktree before making
+**Current working source**: Session 058 close-out, on branch
+`dev-ph3-autosave-ph4`, commits `9da35c7` ("session 058 complete, fs speedups,
+document and planning in flight" — the Session 058 code) and `124a6cf` ("s058
+task logs complete" — doc trim + the S059 plan + this logging pass). Working
+tree otherwise clean. Verified directly against source/build:
+`arm-none-eabi-size build/lxr02.elf` reports `text=382,700 data=404 bss=96,160`
+(`dec=479,264`);
+`build/lxr02.bin` is 383,104 bytes and `build/LXRV2_lxr02.img` is 383,120
+bytes. Config: `DEV_MODE_DIAGNOSTIC=0`, `DEV_MODE_LOGGING=1`,
+`DEV_STALL_DETECTION=1`, `HCPRMS_BOOT_CAPSULE_SCHEMA_VERSION=2`,
+`DEV_LOGGING_IWDG=0`. The durable closeout is
+`knowledge_files/log_archive/058_SESSION_HANDOFF_LOG.md` (Option 1 one-pass
+Bank child-name capture + parent-CWD retention + dedicated HCNAMES mirror +
+buffered text reads, hardware-confirmed faster Bank Load; Option 2
+session-scoped card-verified clean-Scene skip, hardware pending; Option 3
+retained-cluster rewrite reverted, Option 3B rejected; stopped-playback
+Load/Save fast drain + codec suspend; SD read-token/write-busy poll-count
+"timeouts" replaced with elapsed TIM6 milliseconds — hardware-accepted full
+stopped Bank Save; Bank progress `NN.` repaint fix; AsyncFATFS directory-create
+inefficiency deferred to `S059_ASYNCFATFS_SPEEDUP.md`). The four disposable
+S058 documents (`S058_BANK_LOAD_SPEEDUP_PROPOSAL.md`,
+`S058_BANK_SPEEDUP_REVIEW.md`, `S058_LOAD_SAVE_NOPLAYBACK.md`,
+`S058_SPEEDUP_FINAL_CHECK.md`) are superseded by that handoff and the spec
+references and may be deleted. Verify the actual commit/worktree before making
 the next source change.
 
 ## RAM Allocation Approval Policy
@@ -54,6 +66,19 @@ This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
 
+- Session 058 closed the Bank Load/Save speedup and the stopped-playback
+  Load/Save work. Read `knowledge_files/log_archive/058_SESSION_HANDOFF_LOG.md`
+  before changing Bank Load/Save traversal, the dedicated HCNAMES mirror
+  (`hcnames_name_mirror`), the card-verified clean-Scene authority
+  (`bank_scene_sd_clean_*`), the fast-drain policy (`fs_fast_drain_active`),
+  or the SD shim's elapsed-time response waits. Bank Load is correct and out of
+  scope for further speedup; Option 3 and Option 3B are closed; SD read-token/
+  write-busy timeouts are real-time (TIM6 milliseconds), never poll-counts.
+  Option 2 clean-skip hardware matrix is still pending; review Finding 4
+  (Scene Save phase 37 still masks an `afatfs_chdirParent()` FAILURE to a
+  root-return fallback instead of failing the Bank Save) remains open. The
+  AsyncFATFS directory-create speedup lives in `S059_ASYNCFATFS_SPEEDUP.md`
+  (next session).
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified
   Session 040 implementation, the Bank Load fix, and archived root notes.
