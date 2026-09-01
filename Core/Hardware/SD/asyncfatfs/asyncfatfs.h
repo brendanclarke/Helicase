@@ -356,38 +356,44 @@ afatfsOperationStatus_e afatfs_fseek(afatfsFilePtr_t file, int32_t offset, afatf
 bool afatfs_ftell(afatfsFilePtr_t file, uint32_t *position);
 
 /*
- * Phase-One public contract remains component-only and declaration-stable.
+ * Persistent-marker and lazy directory-initialization public contract.
  *
- * What: The private create/rename implementation now preserves the FAT 0x00
- * namespace boundary, reserves sector-local runs, and initializes any newly
- * exposed directory sector before publishing it. The public callback, handle,
- * alias, and result contract below is unchanged.
- * Why: Callers need only a directory that is safe to enter and populate; run
- * reservation, logical-sector traversal, target persistence, and old-tail
- * retirement are internal asynchronous details. Gate B is deferred, so the
- * first cluster remains fully zero-filled.
- * Inputs: the same component name, mode/match policy, alias buffer, and
- * completion callback as before. Outputs/effects: the same handle/result and
- * callback timing, with no new caller responsibility. Affiliates:
- * asyncfatfs.c create/rename phases, afatfs_chdir(), filesystem.c, and
+ * What: Create and rename preserve the first FAT 0x00 namespace boundary.
+ * Newly created directories have an allocated first cluster, a completely
+ * initialized first sector, correct "." / ".." entries, and a valid
+ * terminator before their callback. Additional directory sectors are cleared
+ * internally before the marker can move into them.
+ *
+ * Why: Callers need a handle that is immediately safe for afatfs_chdir() and
+ * child creation; they do not require every unused sector in the allocated
+ * cluster to be written. The on-disk terminator, rather than retained RAM, is
+ * sufficient to hide uninitialized sectors across close and remount.
+ *
+ * Inputs: the existing component name, mode or match policy, optional alias
+ * output buffer, and completion callback accepted by the declarations below.
+ *
+ * Outputs/effects: public handles, aliases, results, and callback timing are
+ * unchanged. No caller initializes sectors. Final removable-media persistence
+ * remains the caller-visible afatfs_sync()/flush boundary.
+ *
+ * Accessors/APIs: afatfs_fopen[_lfn](), afatfs_mkdir[_lfn](),
+ * afatfs_opendir[_lfn](), afatfs_renameObject_lfn(), afatfs_chdir(), and
+ * afatfs_sync().
+ *
+ * Affiliates: asyncfatfs.c create/rename reservation, directory extension,
+ * target-sector preparation, filesystem.c component workflows, and
  * ASYNCFATFS_REFERENCE.md.
  *
- * Directory create/open contract.
+ * Directory create/open details:
+ * The callback receives NULL or a directory handle immediately safe for
+ * afatfs_chdir(). A new child has its firstCluster fields written back to the
+ * parent SFN entry and its first sector initialized before callback. Ordinary
+ * files may still allocate their first cluster lazily on first fwrite().
  *
- * The callback receives either NULL or a directory handle that is immediately
- * safe to pass to afatfs_chdir(). For newly-created subdirectories that means
- * asyncfatfs has already allocated the first cluster, written the firstCluster
- * fields back into the parent SFN entry, zero-filled the cluster, and created
- * "." / ".." entries. Regular files may still allocate their first cluster
- * lazily on first fwrite(); directories may not because callers create children
- * through currentDirectory immediately after chdir().
- *
- * The *_lfn variants take one visible component in the current directory. They
- * sanitize unsupported UI characters to '_', strip trailing spaces/periods,
- * optionally match case-insensitively, and return an 8.3 alias in openNameOut
- * when the object is opened or created. Product code should store that alias
- * only as a reopen/chdir implementation detail; visible schemas such as
- * kitset.kcg should store the display component.
+ * The *_lfn variants continue to accept one visible current-directory
+ * component, sanitize unsupported characters, strip trailing spaces/periods,
+ * apply matchMode, and optionally return an 8.3 alias. That alias remains an
+ * operation detail; user-visible schemas store the display component.
  */
 bool afatfs_mkdir(const char *filename, afatfsFileCallback_t complete);
 bool afatfs_opendir(const char *filename, afatfsFileCallback_t complete);

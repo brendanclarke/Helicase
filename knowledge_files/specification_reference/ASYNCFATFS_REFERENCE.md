@@ -6,7 +6,7 @@ the low-level async FAT/VFAT API contract and the rules callers must follow.
 
 ## Role
 
-asyncfatfs is a single-context, foreground-pumped FAT32/VFAT layer. It owns SD
+asyncfatfs is a single-context, foreground-pumped FAT16/FAT32/VFAT layer. It owns SD
 sector cache access, FAT chain traversal, directory-entry parsing, file reads
 and writes, VFAT long filename entry construction, and object iteration.
 
@@ -172,8 +172,16 @@ For newly-created directories, asyncfatfs must:
 
 - allocate the first cluster;
 - write the parent directory entry's first-cluster fields;
-- zero-fill the new cluster;
-- create `.` and `..` entries.
+- clear the complete first sector;
+- write `.` and `..` entries with the existing cluster values;
+- retain a zero entry immediately after the dot entries; and
+- complete mkdir only after this visible first sector is queued successfully.
+
+Later sectors in the allocated cluster remain hidden and untouched until
+marker advance clears each complete target sector. The FAT chain and
+`physicalSize` still cover the entire cluster even when only its first sector
+has been initialized. The existing final `afatfs_sync()`/flush boundary remains
+the persistence guarantee.
 
 This differs from ordinary files, which can allocate their first cluster lazily
 on first write.
@@ -181,6 +189,26 @@ on first write.
 The LFN variants return the generated/current short alias in `alias_out` when
 requested. Use that alias only to reopen or chdir later; do not put it in
 user-facing text schemas.
+
+What: This contract exposes a callback-ready directory with its allocated
+first cluster, initialized first sector, dot entries, and end marker while
+keeping later sectors hidden until needed.
+
+Why: Callers need to enter and populate the directory immediately, but unused
+sectors in a cluster do not need redundant writes while the persistent marker
+still protects remounts.
+
+Inputs: the component name, match mode, optional alias buffer, and completion
+callback accepted by the APIs above.
+
+Outputs: a usable directory handle or `NULL`, unchanged alias/result behavior,
+and the existing final `afatfs_sync()`/flush persistence boundary.
+
+Accessors/APIs: `afatfs_mkdir[_lfn]()`, `afatfs_opendir[_lfn]()`,
+`afatfs_chdir()`, and `afatfs_sync()`.
+
+Affiliates: the AsyncFATFS extension and create handoff, Gate-A target-sector
+preparation, and filesystem.c component workflows.
 
 ## File Create/Open
 
@@ -269,14 +297,11 @@ The current implementation has five application file-handle slots:
 #define AFATFS_MAX_OPEN_FILES 5
 ```
 
-**Corrected Session 057** (a target-ABI debug compile plus GDB type
-inspection found the true value): the linked `afatfsFile_t` size is **188
-bytes**, not the 328 bytes previously recorded here — the 328-byte figure
-predates an earlier change that moved expanded delete state out of every
-handle. Raising the pool from three to five therefore added 376 bytes, not
-656, to the zero-initialized asyncfatfs state. The `afatfs` symbol's exact
-current total size was not re-measured this session; do not cite the old
-7,344-byte figure without regenerating it.
+**Current linked sizes (Session 059):** `afatfsFile_t` is 188 bytes and the
+five-slot `afatfs` owner is 6,984 bytes. The 328-byte handle and 7,344-byte
+owner figures in older notes are obsolete. Session 059 asserts
+`afatfsCreateFile_t=144`, `afatfsFile_t=188`, and
+`afatfsRenameObject_t=552`; its two directory gates added no retained SRAM.
 
 Five slots are concurrency headroom, not a reason to retain redundant
 directory handles. Session 042 boot diagnostics proved that retaining Bank
@@ -416,34 +441,60 @@ per-product-file dot-backer transaction.
 
 ## Directory Terminators And LFN Creation
 
-VFAT LFN creation may need multiple contiguous directory entries. If a directory
-terminator (`0x00`) is encountered where there is not enough room for the full
-LFN/SFN run, asyncfatfs retires the skipped terminator into an ordinary deleted
-entry before scanning onward. Otherwise future directory scans would stop before
-the newly-created object.
+The first `0x00` filename byte ends the live namespace, and directory scanning
+stops there. `0xE5` marks a reusable deleted entry but does not prove absence:
+the first sufficiently large sector-local deleted run is latched while
+collision scanning continues. A deleted-run writer touches only its selected
+entries and never clears the following entry.
 
-When a subdirectory is extended to create space, the create state machine resets
-the entry index so the fresh cluster is scanned from entry 0 instead of
-skipping its first sector.
+A local terminator-owned run must fit the complete SFN or LFN/SFN run plus one
+replacement zero entry in the same 16-entry sector. If it does not fit, the
+whole run moves to entry zero of the next logical directory sector; no LFN/SFN
+run crosses a sector. The next sector is reached through the cursor and FAT
+chain. If allocated EOF is reached, a non-FAT16-root directory appends a
+cluster.
 
-The LFN creation scan now uses a latch-and-continue approach (Session 056). The
-first viable free run of deleted (`0xE5`) entries is latched but does not
-immediately branch to the create phase. Scanning continues through the remainder
-of the directory. If a matching existing entry is found later, it is opened
-normally and the latch is unused. Only at directory exhaustion (`entry == NULL`)
-does the latched position get used for creation. This prevents duplicate
-directory entries when deleted-entry free runs appear before an existing file
-with the same name.
+The complete target sector is cleared, the new run and replacement marker are
+written, and that target is allowed to reach media before the old marker's
+old-sector tail is retired to `0xE5`. Gate B initializes only an appended
+cluster's first sector. All later stale sectors remain invisible until this
+target-publication step initializes one.
 
-The earlier code exited the scan the moment a viable free run was found,
-which created duplicates in any directory that had deleted entries before
-the target file's position. The SFN-only path and the rename path were never
-affected — they create only at the `0x00` terminator or at physical directory
-end respectively.
+A directory with no terminator remains compatible: asyncfatfs uses a proven
+deleted run or extends at logical exhaustion; a full FAT16 fixed root fails
+normally. Short create, LFN create, and same-parent rename share these
+reservation and publication rules. This ordering does not make create/rename
+fully power-loss transactional; it prevents exposure of stale post-marker
+entries and preserves the final sync guarantee.
 
-These are internal details, but callers should understand the consequence:
-LFN creation is a multi-step directory mutation, and callers must wait for the
-callback/flush boundary before assuming a host or later scan can see the file.
+What: This contract describes the persistent-marker boundary, sector-local
+SFN/LFN placement, lazy appended-cluster initialization, and target-before-tail
+publication ordering.
+
+Why: It permits unused appended-cluster sectors to retain arbitrary media bytes
+while ensuring that no stale bytes become visible and that mkdir still returns
+a usable directory.
+
+Inputs: the current-directory component, match policy, existing directory
+cursor/FAT chain, requested SFN/LFN run, and optional parent cluster for a new
+child directory.
+
+Outputs: a collision-checked object run, a fully initialized exposed target
+sector, correct marker/dot entries, and the unchanged callback/final-sync
+boundaries.
+
+Accessors: `afatfs_findNextObject()`, create/rename reservation state,
+`afatfs_extendSubdirectory()`, `afatfs_prepareDirectoryRunTarget()`,
+`afatfs_chdir()`, and `afatfs_sync()`.
+
+Affiliates: `asyncfatfs.c` create/rename phases, FAT-chain traversal, directory
+extension, filesystem.c component workflows, and host/remount verification.
+
+Session 059 status: Gate A was exercised through Kit, Scene, Bank, and
+Instrument saves; a stopped-playback Bank Save took about 10 seconds. Gate B
+passed source review and a forced ARM build but hardware/media testing was
+deliberately deferred. No defect is expected from the reviewed ordering, but
+hardware acceptance is not claimed. Neither gate is power-loss transactional.
 
 ## Caller Do/Don't Checklist
 
@@ -484,17 +535,19 @@ Don't:
   same-slot replacement through captured identities, and text schemas in
   `storageTypes`.
 - Bank scan/load/save uses object iteration, namespace-aware root/two-digit
-  child matching, captured identities for cleanup, direct exact delete/recreate
-  for root Bank Save, and text schemas in `storageTypes`. Bank Load rescans one selected
-  child at a time and retains no 16-child name/alias table.
+  child matching, captured identities, and text schemas in `storageTypes`.
+  Bank Save reuses the selected root Bank and deletes/rewrites only selected
+  child Scenes. Bank Load captures all 16 child display names in one scan and
+  retains the selected Bank as the parent CWD across successful children.
 - Root Instrument scan/load/save uses object iteration, registry-owned typed
   directories, one shared generalized browser-name cache with up to 1,000
   sorted rows, LFN file writes, and descriptor-keyed text schemas. Product
   scan/repair policy excludes `.hctmp.<ext>`; asyncfatfs itself still exposes
   the dot-prefixed object normally.
-- Kit/Scene/Bank `.hcindex` rows and HCNAMES reuse one 1,000-by-9-byte cache in
-  `filesystem.c`; that cache is above the asyncfatfs layer and does not alter
-  object iteration semantics.
+- Kit/Scene/Bank `.hcindex` rows and typed Instrument rows reuse one
+  1,000-by-9-byte cache in `filesystem.c`. HCNAMES uses its dedicated
+  129-by-9 mirror. Both are above asyncfatfs and do not alter object iteration
+  semantics.
 - File/Dir/sDir diagnostic menu entries and their list caches are retired.
   Compatibility facade calls perform no asyncfatfs operation. A total of 107
   unreachable Menu bytes (two 49-byte editor/result strings plus nine result

@@ -793,3 +793,31 @@ The implementation has passed the clean ARM build, static assertions,
 remount checks, host FAT checking, product compatibility, and repeatable Bank
 timing have not been run in this workspace, so Gate-A acceptance is not being
 claimed yet. Do not treat the projected timing reductions as measurements.
+
+### Gate B implementation record — 2026-08-30
+
+Gate B is implemented in `Core/Hardware/SD/asyncfatfs/asyncfatfs.c` and
+`asyncfatfs.h` within the planned isolated scope. The private extension phase
+now initializes one complete first sector after appending a directory cluster;
+the former full-cluster loop, physical-sector increment, and cursor rewind were
+removed. New child first clusters still receive `.`/`..` and a `0x00` marker;
+later appended clusters receive an entry-zero marker, while Gate-A target
+preparation still clears each later sector before publication. No public
+declaration, result enum, caller obligation, FAT allocation size, regular-file
+path, or product workflow was changed.
+
+The clean logging-on ARM link reports `text=385,420 B`, `data=404 B`,
+`bss=96,176 B`, `.text=372,488 B`, `.bss=89,504 B`, and
+`afatfs=6,984 B (0x1b48)`. The retained-state assertions remain
+`afatfsCreateFile_t=144 B`, `afatfsFile_t=188 B`, and
+`afatfsRenameObject_t=552 B`; Phase One and Phase Two add zero retained SRAM.
+The generated `lxr02.bin` is 385,824 B and the packaged image is 385,840 B.
+
+The implementation/build checks and `git diff --check` pass. No hardware card
+or raw-sector fixture was available for the required FAT16/FAT32, small-cluster,
+fragmented-chain, stale-post-marker, reboot/remount, product load/save,
+future-pattern, host-FAT-checker, or two-trial Bank timing tests. Card format,
+cluster size, measured stopped/running playback times, payload counts/hashes,
+and filesystem-check results are consequently unrun. Gate B is source/build
+complete but hardware/media acceptance is pending; the projected 2,000 avoided
+initialization sectors and timing reduction are not measurements.

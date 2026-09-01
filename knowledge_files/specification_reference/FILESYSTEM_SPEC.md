@@ -1,24 +1,10 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference for the Helicase/LXR-02 firmware through the Session 058 Bank
-Load/Save speedup (one-pass Bank child-name capture, successful-child
-parent-CWD retention, a dedicated HCNAMES mirror, a buffered text reader,
-session-scoped card-verified clean-Scene skipping), the stopped-playback
-Load/Save fast drain, the SD real-time response-timeout correction, the
-Session 057 settings.cfg safe write, empty-Scene/Bank overwrite guard, lazy
-load-time Kit/Scene quarantine, and per-Scene Bank Save update. It includes the
-full Session 032 instrument/kit file specification formerly kept in
-`INSTRUMENT_FILE_SPEC.md`, plus the Session 033-039 runtime decisions for LFO,
-velocity modulation, Morph, per-voice Morph, Scene modulation targets, Choke
-behavior, Instrument Load, Kit/Instrument Morph Load, Kit/Instrument Morph
-Save, Kit Save, root Instrument Save, Scene/Bank directory load/save, draft
-Scene/Bank pattern persistence, storage-only LFO `self` routing, the
-generalized `.hcindex` cache, root `/.hcnames`, canonical name repair, the
-hidden Instrument Load temporary source, and the cold-boot tagged-runtime plus
-final Scene/Bank Load index-ordering contracts. Low-level asyncfatfs API contracts
-and caller rules now live in
-`ASYNCFATFS_REFERENCE.md`.
+reference through Session 059. It includes the Session 058 Bank I/O and
+stopped-playback speedups and the Session 059 typed Instrument-index repair.
+Low-level FAT directory reservation and lazy directory-cluster initialization
+are authoritative in `ASYNCFATFS_REFERENCE.md`.
 
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
@@ -54,7 +40,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented through the inherited Session 046/047 baseline plus Session 048:
+Implemented through Session 059:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -75,7 +61,10 @@ Implemented through the inherited Session 046/047 baseline plus Session 048:
 - Root `Instrument/<type>/` is scanned one type at a time with asyncfatfs object
   iteration into the one shared 1,000-row alphanumeric browser cache. The cache
   is disposed between boot types; entering or changing the nested menu type
-  reloads that type's `.hcindex` before browsing. During a combined
+  opens that type's `.hcindex` directly, without a preliminary physical
+  directory scan. Missing, empty, or structurally invalid metadata rebuilds
+  only the selected type; fatal FAT/SD/read/scan/write errors remain errors.
+  During a combined
   Kit/Instrument menu session the applicable index remains resident while
   payload validation uses a separate stage. Instrument rows use sorted
   positions; the cache is never multiplied by registry type.
@@ -281,18 +270,23 @@ Scene/.hcindex
 Bank/.hcindex
 ```
 
-Instrument indexes contain alphabetically ordered display stems, one per line,
-and can contain up to 1,000 rows. Kit, root Scene, and root Bank indexes are
-slot ordered from 000 through 999; each line contains only the eight-character
-display name, including blank lines for absent slots. The line number supplies
-the three-digit slot prefix when Load/Save reconstructs `NNN Name`.
+Instrument indexes contain 1..1,000 compact, strictly increasing display stems,
+one per line. A valid stem is 1..8 printable characters, contains at least one
+non-space character, is unique, and is not the selected type's reserved
+`.hctmp.<ext>` display or generated short-alias form. Blank, non-printable,
+overlength, duplicate, unsorted, and reserved rows invalidate the complete
+typed index. Kit, root Scene, and root Bank indexes are slot ordered from 000
+through 999; each line contains only the eight-character display name,
+including blank lines for absent slots. The line number supplies the
+three-digit slot prefix when Load/Save reconstructs `NNN Name`.
 
-There is exactly one SRAM list/register array:
-`fs_list_cache_name[1000][9]`, 9,000 bytes. Its active domain tag and count
-are separate small fields. It contains one `.hcindex` domain or the 129-row
-HCNAMES image, never both. No per-instrument-type, per-library, presence, or
-open-alias name cache is permitted. The legacy `kitBrowser` compatibility map
-was retired in Session 042; Kit occupancy is the active slot cache/index row.
+`fs_list_cache_name[1000][9]` is the one 9,000-byte browser-index cache. Its
+active domain tag and count are separate small fields; it contains one typed
+Instrument or numbered-library `.hcindex` domain. HCNAMES uses the dedicated
+`hcnames_name_mirror[129][9]`, not this browser cache. No per-instrument-type,
+per-library, presence, or open-alias cache is permitted. The legacy
+`kitBrowser` compatibility map was retired in Session 042; Kit occupancy is
+the active slot cache/index row.
 
 The cache and payload stage are independent. An accepted Kit, Instrument, or
 Scene payload may parse into the 2,048-byte `fs_stage_workspace` while the
@@ -307,6 +301,17 @@ initial Bank. A successful Kit, Scene, or Bank Save performs the same physical
 directory rescan and complete index rewrite before invoking the original Save
 completion callback, so a newly created or renamed directory is immediately
 visible without restarting.
+
+Runtime Instrument browsing opens the selected type's `.hcindex` directly.
+A valid file publishes its compact cache without a physical prescan. A missing,
+empty, or structurally invalid file transfers the accepted request into the
+existing selected-type physical scan -> index write -> sync chain, then invokes
+the original callback once. Fatal FAT/SD state and real read, scan, close, or
+write failures publish `FS_STATUS_ERROR` and never authorize repair. Menu
+acknowledges either terminal result before releasing its storage owner; failure
+clears the unusable cache and cancels any deferred Instrument payload request.
+`tools/verify_instrument_indexes.py <card-root>` is the read-only host check for
+the four registered typed directories and exact row/file correspondence.
 
 ### Root resident-name register: `/.hcnames`
 
@@ -1188,6 +1193,9 @@ request. Filesystem copies the selected typed-index key into immutable
 operation scratch, validates the file into the one Instrument stage, and
 publishes its display stem through the active identity row only after success.
 Asynchronous parsing never resets or alters the live destination Scene slot.
+The browser request first obtains a validated selected-type index through the
+direct-open/recovery contract above; a failed index completion cannot dispatch
+an Instrument payload load.
 
 For an inactive destination Scene, Preset commits the slot image only. For the
 active Scene, the ordered transaction is:
@@ -1504,8 +1512,8 @@ sequence. Effects and effect file formats are future DSP work.
 
 ## Instrument
 
-Status: root browser, one-slot load, Instrument Morph Load, and standalone
-root Instrument Save are implemented.
+Status: root browser with selected-type metadata repair, one-slot load,
+Instrument Morph Load, and standalone root Instrument Save are implemented.
 
 `Instrument/` is a root-level pool of instrument files:
 
@@ -1544,7 +1552,7 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status retained through the Session 051 baseline:
+Status through Session 059:
 
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
@@ -1577,10 +1585,11 @@ Status retained through the Session 051 baseline:
 - Root Scene and Bank Load do not use that Save rebuild. After payload/HCNAMES
   completion and shared DSP activation, Menu performs one read-only reload of
   the unchanged selected root index and only then terminates the command.
-- Combined Kit/Instrument entry first borrows HCNAMES for one Scene's Kit plus
-  six Instrument identity rows, then replaces the cache with the requested
-  index. Normal actions mark rows dirty; Scene Load actions accumulate their
-  destination mask; leaving the family performs at most one HCNAMES rewrite.
+- Combined Kit/Instrument entry loads one Scene's Kit plus six Instrument
+  identity rows into the dedicated HCNAMES mirror, then loads the requested
+  browser index into `fs_list_cache_name`. Normal actions mark rows dirty;
+  Scene Load actions accumulate their destination mask; leaving the family
+  performs at most one HCNAMES rewrite.
 
 Still compiled but intentionally gated from the normal type cycler:
 
@@ -1776,6 +1785,13 @@ instrument runtime propagation:
 - Confirm Instrument Load starts at `kit <stem>`, does not load while changing
   type, loads immediately only from lower-row pool movement, and respects the
   two-Advanced limit.
+- Confirm a healthy typed `.hcindex` opens directly without a preliminary
+  physical Instrument-directory scan. Confirm missing, empty, blank-row,
+  overlength, non-printable, reserved-temporary, duplicate, and unsorted
+  indexes rebuild only the selected type and then publish a scrollable cache.
+  Confirm fatal/read/scan/close/write faults report ERROR, do not start a
+  metadata writer, clear partial cache state, and cannot dispatch a deferred
+  Instrument load.
 - Confirm Instrument entry writes `.hctmp.<ext>`, neither repair nor
   `.hcindex` publishes it, decrementing `000 -> kit` restores the original
   parameters/name, repeated negative detents remain clamped, and a rapid
@@ -1801,9 +1817,9 @@ instrument runtime propagation:
   HCNAMES rows from a partial resident snapshot.
 - Confirm entering each top-level Kit, Scene, and Bank Load/Save type reloads
   only its selected index into the one shared 9,000-byte name cache. Confirm
-  combined Kit/Instrument entry borrows one HCNAMES block, payload parsing uses
-  the independent 2,048-byte stage, and dirty family exit performs one
-  preserve/overlay/rewrite.
+  combined Kit/Instrument entry uses the dedicated HCNAMES mirror, payload
+  parsing uses the independent 2,048-byte stage, and dirty family exit performs
+  one preserve/overlay/rewrite.
 - Confirm entering Load:Bank without turning the initially highlighted number
   chains index completion into its selected-Bank child preview, gates input
   until the physical mask is resident, and never submits a zero-mask request.

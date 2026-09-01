@@ -2,8 +2,8 @@
 
 Date: 2026-08-30
 
-Status: complete implementation schedule for Gate B. No production source was
-changed while preparing or expanding this document.
+Status: implementation schedule executed for Gate B; source/build verification
+is complete and hardware/media acceptance remains pending.
 
 Line numbers below refer to the current pre-Phase-Two worktree on 2026-08-30.
 Use the named symbol and quoted current text as the durable edit anchor if an
@@ -1059,3 +1059,49 @@ initialization witness.
 Profile after Gate B before selecting any of these. The next plan must identify
 whether remaining time is deletion, FAT allocation, directory lookup, payload
 writing, metadata, or final flush rather than assuming another cause.
+
+## Implementation notes / verification record
+
+- 2026-08-30: Phase Two work started from commit `0c90434` on a clean
+  `dev-ph3-autosave-ph5` worktree. The baseline logging-on build completed with
+  `text=385,580`, `data=404`, `bss=96,176`, `.text=372,648`, `.bss=89,504`,
+  and `build/lxr02.bin=385,984` bytes. The linked `afatfs` symbol was
+  `6,984` bytes (`0x1b48`); the source assertions target
+  `afatfsCreateFile_t=144`, `afatfsFile_t=188`, and
+  `afatfsRenameObject_t=552`. No hardware/media fixture or Bank timing result
+  is available yet.
+- 2026-08-30: Implemented the scheduled Gate B source scope. Changed symbols
+  are `afatfsExtendSubdirectoryPhase_e`,
+  `afatfsExtendSubdirectory_t`'s adjacent retained-state contract,
+  `afatfs_appendRegularFreeClusterContinue()`'s allocation handoff comment,
+  `afatfs_extendSubdirectoryContinue()`,
+  `afatfs_extendSubdirectory()`'s contract comment,
+  `afatfs_prepareDirectoryRunTarget()`'s contract comment,
+  `afatfs_handoffCreatedDirectoryToInitializer()`'s contract comment, and the
+  no-terminator create comment. The obsolete
+  `afatfs_fileGetCursorClusterAndSector()` was deleted. The public
+  `asyncfatfs.h` directory contract and the AsyncFATFS reference now describe
+  the final Gate A+B marker/initialization model; no declaration changed.
+- 2026-08-30: Clean `make` and `make img` pass. The final logging-on link
+  reports `text=385,420`, `data=404`, `bss=96,176`, `.text=372,488`,
+  `.bss=89,504`, `build/lxr02.bin=385,824`, and
+  `build/LXRV2_lxr02.img=385,840` bytes. The three retained-state assertions
+  pass at 144/188/552 bytes and `afatfs` remains 6,984 bytes, so the measured
+  retained-RAM delta is zero. `git diff --check` and forbidden-token/source
+  review pass; only the pre-existing compiler/linker warnings remain.
+- 2026-08-30: No physical card or disposable FAT image was available. The
+  required first-child, later-appended, one-sector, fragmented-chain,
+  allocated-EOF, FAT16 fixed-root, legacy no-terminator, stale-post-marker,
+  interruption, reboot/remount, product compatibility, host-checker, and
+  two-trial Bank timing fixtures were not run. The approximately 20 KiB per
+  Scene future-pattern fixture was also not run, so there is no measured card
+  format/cluster size, playback-stopped/running time, payload/hash result, or
+  filesystem-check result to report.
+- 2026-08-30: Final Gate B decision for this workspace: source/build complete
+  and implementation retained in the working tree; hardware/media acceptance
+  is pending. No projected sector or timing reduction is recorded as a
+  measurement, and no claim is made that the full acceptance criteria have
+  passed.
+- 2026-08-31: The user deliberately deferred Gate B hardware/media testing.
+  Source review and the forced ARM build found no expected problem; hardware
+  acceptance is not claimed.

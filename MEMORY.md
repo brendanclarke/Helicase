@@ -9,7 +9,7 @@ Update it whenever something is confirmed, fixed, or decided.
 ## Quick Start
 
 ```
-# Repository root is the working tree root (branch: dev-phase2-filesys)
+# Repository root is the working tree root
 
 # Build
 make && make img   →   build/LXRV2_lxr02.img
@@ -17,19 +17,13 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 057 close-out, on branch
-`dev-ph3-autosave-ph4`, commits `ad9b026`..`f99329c` (the fix commit is
-`f99329c`, "bank load/save speedup planning" — a misleading message; its
-actual content is the Bank Save stall fix, not Session 058 speedup work).
-Working tree otherwise clean. Verified directly against source: build is
-`text=380,436 data=408 bss=94,848`, matching `build/LXRV2_lxr02.img`
-(380,860 bytes) already committed at `f99329c`. The durable closeout is
-`knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md` (Bank Save
-present-mask union, AutoSave Bank-mismatch copy-forward, settings.cfg safe
-write, empty-Scene/Bank overwrite guard, boot Kit-sanitizer lazy-quarantine
-refactor, Bank Save per-Scene rewrite, ten-site stall detection, Bank Save
-stall root-cause and fix); verify the actual commit/worktree before making
-the next source change.
+**Current working source**: Session 059 closeout on branch
+`dev-ph3-autosave-ph5`: commits `53a7676`, `3dc9a4b`, `d28f8f9`, `4067099`,
+and `0c90434`, plus the uncommitted Gate B and documentation closeout. The
+forced logging-on Gate B build reports `text=385,420`, `data=404`,
+`bss=96,176`; `build/LXRV2_lxr02.img` is 385,840 bytes. The durable record is
+`knowledge_files/log_archive/059_SESSION_HANDOFF_LOG.md`. Verify the actual
+commit/worktree before the next source change.
 
 ## RAM Allocation Approval Policy
 
@@ -66,12 +60,15 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter records the Session 050 logging-on linked
+  `SRAM_MANIFEST.md`; the latter records the Session 059 logging-on linked
   allocation and totals. AutoSave format/writer authority is `AUTOSAVE.md`;
   development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live
   memory manifest, module map, and oscillator-interpolation document.
+- The hardware has no real-time clock. FAT timestamps may retain fixed/default
+  values and must not be used to order or validate device operations. Use file
+  contents, CRC/generation fields, structural comparison, and trace order.
 - Source layout is now `Core/Bank/Scene/` and `Core/Bank/BankData.*`, not
   `Core/Scene/`.
 - Scene/Bank saves persist compact v3 `pattern.pat`: seven 32-hex-character
@@ -186,11 +183,6 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   Menu poll consumes it via the ordinary page-switch exit path before any
   browser retry. This prevents a physical mode-button exit from being silently
   dropped during Instrument I/O/apply; it owns no payload or name data.
-- **Deferred UI bug — InstrumentMrp `kit` row is blank.** Its browser must
-  snapshot the selected slot's current Morphable endpoints and show that
-  slot's HCNAMES name beside `kit`; selecting it must restore only those Morph
-  endpoints, never the normal type/image/name/source. `SCOPING_TARGETS.md`
-  owns this later UI-parity task.
 - Every create-capable HCNAMES path first completes and closes a
   case-insensitive root absence proof. A NULL read open is not absence; one
   folded match permits one read retry, while duplicate matches and every
@@ -205,7 +197,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `/Bank/.hcindex` before initial Bank selection because Instrument generation
   disposes the shared cache. Kit/Scene/Bank Save performs a physical parent
   rescan and complete `.hcindex` rewrite before releasing its callback, then
-  refreshes the current Save slot display.
+  refreshes the current Save slot display. Runtime Instrument entry opens the
+  selected type's index directly and repairs only missing/empty/corrupt
+  metadata; it does not regenerate every index.
 - A pure root Scene/Bank Load does not use the Save rebuild. It commits
   payload/HCNAMES, publishes the completed result, applies the active Scene
   through the shared runtime worker, then reloads the unchanged selected
@@ -237,12 +231,11 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   compatibility bridge and its 1,000-entry `kb_map`, releasing the linked
   2,004-byte SRAM allocation. Kit browsing now uses only the filesystem-owned
   slot cache/index accessors.
-- The former Bank child name/alias/presence arrays, 64-entry File/Dir list
-  caches, and firmware recursive-delete stacks are also gone. Bank discovery
-  retains only a 16-bit child occupancy mask and rescans one selected child at
-  a time. Two unreachable 49-byte File/Dir Menu editor/result strings plus nine
-  result bytes still link (107 bytes total); do not describe all diagnostic UI
-  state as disposed.
+- The former Bank child alias/presence arrays, 64-entry File/Dir list caches,
+  and firmware recursive-delete stacks are gone. Session 058 added one bounded
+  16-by-9 display-name capture so Bank Load scans the selected Bank once.
+  Two unreachable 49-byte File/Dir Menu strings plus nine result bytes still
+  link (107 bytes total).
 - Never add object self-name fields to `sceneset.scg`, `bankset.bcg`, or
   instrument files. Object identity comes from directory/file names.
 - For overwrite code, enter the correct parent root first, parse visible child
@@ -255,7 +248,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   filesystem/Preset calls do no work, although residual Menu display code and
   the two 49-byte strings remain linked. There are exactly two development
   flags: `DEV_MODE_DIAGNOSTIC` is screen-only and `DEV_MODE_LOGGING` is
-  file-only; trace is logging. The current Session 051 configuration is
+  file-only; trace is logging. The current configuration is
   diagnostic 0 and logging 1, with the temporarily approved 2,048-record
   trace ring (normal default: 64). Current file outputs are `/bootlog.bin` and
   `/asavetrc.bin`; there is no implemented `/devlog.bin`. A timed-out
@@ -636,9 +629,9 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
 │   │   ├── DEV_MODES.md                ← authoritative screen-diagnostic versus file-logging policy and current log formats
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 050
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 059
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
-│   │   └── SRAM_MANIFEST.md           ← current Session 050 linked snapshot and binding reservation policy
+│   │   └── SRAM_MANIFEST.md           ← current Session 059 linked snapshot and binding reservation policy
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -767,14 +760,14 @@ and may contain historical snapshots as noted below.
 
 | File | What it contains | Use it when |
 |------|------------------|------------|
-| `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, sanitization, LFN/SFN display-vs-alias identity, object iteration, navigation, removal, rename, flush boundaries, production users, and unfinished APIs. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
+| `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, LFN/SFN identity, object iteration, removal, terminator-aware directory-entry publication, lazy directory-cluster initialization, and flush boundaries. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
 | `AUTOSAVE.md` | Implemented hidden A/B wire format, ownership, canonical dirty mask, writer lifecycle, power-loss behavior, CRC limitation, and accepted scalar validation status. | Changing AutoSave format, dirty hooks, capture, scheduling, or recovery. |
 | `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
 | `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
-| `FILESYSTEM_SPEC.md` | Current product storage specification: root layout, numbered Kit/Scene/Bank folders, `kitset.kcg`, instrument schemas/keys, Scene-owned state, Morph/modulation, Pattern/Sample/Wavetable/Effect targets, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map for Pattern, UI, sequencer, Preset, ParameterArray, instruments, modulation, MIDI, filesystem, storageTypes, and boot; also records removed front-panel protocol surfaces. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 059: root layout, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
+| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 059 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `SRAM_MANIFEST.md` | Current Session 050 logging-on linked snapshot, AutoSave/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
+| `SRAM_MANIFEST.md` | Current Session 059 logging-on linked snapshot, AutoSave/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
 
 ---
 
@@ -1321,49 +1314,40 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   record-selection identity. The current live-Bank validator boundary still
   needs reconciliation before Phase-2 whole-object Bank publication.
 
-### Session 059 AsyncFATFS Phase One record (2026-08-30)
+### Session 059 closeout (2026-08-31)
 
-- Gate-A terminator-aware create/LFN-create/rename placement is implemented in
-  `asyncfatfs.c`: scans stop at the first `0x00`, the first sufficient
-  sector-local `0xE5` run is latched without ending collision scanning, and
-  terminator-owned runs publish a replacement marker. Moved runs traverse the
-  logical FAT chain, zero the complete target sector, wait for target media
-  persistence, then retire the old marker-to-sector-end tail.
-- Gate B remains deferred. `afatfs_extendSubdirectoryContinue()` still
-  zero-fills complete appended clusters and writes `.`/`..` before mkdir
-  completion. No public caller contract changed; the header addition is
-  comment-only documentation.
-- The target build passes `_Static_assert(sizeof(...))` checks for
-  `afatfsCreateFile_t=144`, `afatfsFile_t=188`, and
-  `afatfsRenameObject_t=552`. The clean logging-on link retains the
-  `afatfs` symbol at 6,984 B. Hardware/media fixtures, reboot/remount, FAT
-  checker, and Bank timing acceptance remain pending and must not be claimed.
-
-### Session 059 Instrument Load repair record (2026-08-30)
-
-- Typed Instrument `.hcindex` rows are now compact validated keys: blank,
-  non-printable, over-eight-character, reserved-temporary, duplicate, and
-  unsorted rows are rejected. Physical scans apply the same invariant before
-  changing the shared cache, and exclude `.hctmp.<ext>` case-insensitively in
-  both LFN/display and generated `HCTMP.EXT` / `HCTMP~N.EXT` alias forms.
-- Missing, empty, or structurally invalid selected-type indexes now perform a
-  transparent one-type physical scan and durable rewrite through the existing
-  rebuild chain. The original callback is transferred through that chain once;
-  genuine FAT/SD read, scan, close, or write faults complete as ERROR. Menu
-  acknowledges both terminal results before releasing the filesystem facade,
-  and an error cannot dispatch a deferred Instrument payload.
-- The read-only `tools/verify_instrument_indexes.py` validator reproduces the
-  supplied `SD_CARD_LOAD_SAVE_TEST_RESULT/` baseline's four expected defects:
-  Drum row 1 is blank and Snare/Cymbal/HiHat indexes are missing. It performs
-  no card writes and checks exact physical typed-file correspondence when an
-  index is present.
-- The final clean logging-on link reports `text=385,380 B`, `data=404 B`,
-  `bss=96,176 B`; `.text=372,448 B`, normal `.bss=89,504 B`, and
-  `build/lxr02.bin=385,784 B`. Linked owner sizes remain `afatfs=6,984 B` and
-  `fs_list_cache_name=9,000 B`; no new retained name array, cache, or
-  operation-state allocation was added. Hardware/media, reboot/remount,
-  injected-failure, product workflow, and logging-off acceptance remain
-  pending and are not claimed by this source/build verification.
+- Gate A makes short create, LFN create, and same-parent rename reserve a full
+  sector-local `0xE5`/`0x00` run. A moved terminator run clears and persists its
+  target sector before retiring the old tail. A stopped-playback Bank Save was
+  about 10 seconds; Kit Load/Save, Scene Load/Save, and Instrument Save were
+  reported working.
+- Gate B initializes only the first sector of an appended directory cluster.
+  Later sectors remain hidden behind `0x00` until Gate A clears one before
+  exposure. A future roughly 20 KiB Scene Pattern uses the regular-file path
+  and does not change this directory rule.
+- Typed Instrument indexes reject blank/nonprintable/overlength, temporary,
+  duplicate, and unsorted rows. Missing, empty, or corrupt metadata rebuilds
+  only the selected type; real FAT/SD/read/scan/close/write faults remain
+  errors. Menu acknowledges failure and cannot dispatch a deferred payload.
+- Healthy Instrument index loads now open `.hcindex` directly without the
+  former physical directory prescan. The repair and direct-open path were not
+  hardware-retested. `tools/verify_instrument_indexes.py` remains the read-only
+  card-copy validator.
+- Gate B was subsequently hardware-tested through a failed-child Bank Load,
+  full `04x Full` Bank Load, and full save as `Bank/050 Full`. The copied card
+  passes Bank-tree, root-index, HCNAMES, settings, and AutoSave CRC/generation
+  checks; see `059_SESSION_HANDOFF_LOG.md` section 13. Raw-sector/FAT16/
+  fragmented-chain coverage remains unrun. One nonreproducible Kit-list error
+  after rapid scrolling remains explicitly deferred.
+- That capture has a valid 99-row Drum `.hcindex`, but Snare, Cymbal, and HiHat
+  `.hcindex` files remain absent. The Bank path is accepted; the documented
+  all-types boot refresh and runtime recovery for those three Instrument types
+  remain unverified.
+- Final build: `text=385,420`, `data=404`, `bss=96,176`, image 385,840 bytes;
+  `afatfs=6,984`, `fs_list_cache_name=9,000`. Both gates add zero retained
+  SRAM and use no Pattern-reserved SRAM1 or delay-line-reserved DTCM.
+- Durable detail: `knowledge_files/log_archive/059_SESSION_HANDOFF_LOG.md`.
+  The four root `S059_*` working documents are superseded and may be deleted.
 
 ### Resolved / Changed in Session 048
 
@@ -1456,19 +1440,19 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - `/.hcnames` is the authoritative fixed-row name register. Runtime identity is
   one Bank + one Scene + one Kit + six Instrument names (81 bytes), never
   per-Scene arrays or retained keys.
-- `.hcindex` and HCNAMES share one 9,000-byte cache; non-Pattern load validation
-  uses a separate 2,048-byte aligned stage. Do not recombine them: the attempted
-  shared union erased browser rows and produced blank indexes, `KitL00`, and
-  scroll-time load errors.
+- Session 042 separated the 9,000-byte browser cache from the 2,048-byte
+  non-Pattern validation stage; do not recombine them. Session 058 later gave
+  HCNAMES its own 1,161-byte mirror, so HCNAMES no longer borrows the browser
+  cache.
 - Scene/Kit/Instrument share that stage; Scene Pattern reads directly into the
   final Scene after settings+Kit commit. Pattern load is intentionally
   non-atomic for now.
-- Bank Load preserves every unselected Scene and HCNAMES block. Bank
-  child-name/key arrays were replaced by one-child rescans plus a 16-bit mask.
+- Bank Load preserves every unselected Scene and HCNAMES block. Session 058
+  replaced the former one-child rescans with one bounded 16-name capture.
 - Instrument Load's original `kit` source is an on-card `.hctmp.<ext>` plus one
   nine-byte label, not a second staged Instrument. A prior two-image preview
   design was removed.
-- Five asyncfatfs handles are linked (+656 bytes versus three), but directory
+- Five asyncfatfs handles are linked (+376 bytes versus three), but directory
   handles must still be closed after `chdir`.
 - Final rapid-backspin boundary handling was build-verified but was not
   hardware-retested before Session 042 closed.

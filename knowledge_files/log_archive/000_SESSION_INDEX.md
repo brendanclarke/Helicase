@@ -67,6 +67,7 @@
 | 056 | 2026-08-24 | commits `509115b`, `7108a00` plus uncommitted `filesystem.c` on `dev-ph3-autosave-ph4` | AsyncFATFS LFN duplicate-creation fix (latch-and-continue scan replaces early free-run exit); `afatfs_fseekAtomic()` cluster-boundary file-size fix (missing `afatfs_fileUpdateFilesize()` call left `logicalSize` at 0); autosave writer page-exit expedite (`fs_autosave_page_suppressed` flag resets deadline to 250 ms on Load/Save exit); hardware-verified duplicate and file-size fixes, page-exit expedite pending verification |
 | 057 | 2026-08-28 | commits `ad9b026`..`f99329c` on `dev-ph3-autosave-ph4` | AutoSave writer wrap (Bank Save present-mask union, Bank-identity-mismatch copy-forward instead of regeneration); settings.cfg safe write (temp+sync+promote, hardware-verified); empty-Scene/Bank overwrite guard; boot Kit-directory sanitizer replaced with lazy quarantine-on-failed-load (Kit→Scene cascade, Bank never-fails-whole-operation contract); Bank Save rebuilt as per-Scene delete-then-write (fixes `ErrS05`, stops deleting non-selected children); Bank Save/Load screen-freeze root-caused to a foreground-poll counter misread as milliseconds and removed, hardware-accepted full 16-Scene Bank Save |
 | 058 | 2026-08-29/30 | commits `9da35c7`, `124a6cf` on `dev-ph3-autosave-ph4` | Bank Load/Save speedup: Option 1 (one-pass Bank child-name capture, parent-CWD retention, dedicated HCNAMES mirror, buffered text reader) implemented + hardware-confirmed faster Bank Load; Option 2 (session-scoped card-verified clean-Scene skip) implemented, hardware pending; Option 3 (retained-cluster rewrite) implemented then reverted as ~15 s slower; Option 3B rejected; stopped-playback Load/Save fast drain + codec suspend + renderer guard; SD response-timeout root-cause fix (poll-count → elapsed TIM6 ms, hardware-accepted full stopped Bank Save); Bank progress `NN.` repaint fix; AsyncFATFS directory-create inefficiency deferred to Session 059 |
+| 059 | 2026-08-30/31 | commits `53a7676`, `3dc9a4b`, `d28f8f9`, `4067099`, `0c90434` plus Phase Two/doc closeout on `dev-ph3-autosave-ph5` | AsyncFATFS terminator-aware create/rename and first-sector-only directory initialization; stopped Bank Save reduced to about 10 s; typed Instrument `.hcindex` validation, recovery, and direct-open fast path; zero retained-SRAM growth; Phase Two hardware testing deliberately deferred with no problem expected from source/build review |
 
 
 ---
@@ -910,3 +911,30 @@ directory-create inefficiency deferred to `S059_ASYNCFATFS_SPEEDUP.md`.
   `FILESYSTEM_SPEC.md`, `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`,
   `SRAM_MANIFEST.md`, `MODULE_INTERCHANGE_SPEC.md`, and
   `S059_ASYNCFATFS_SPEEDUP.md`.
+
+### 059 — AsyncFATFS Directory Speedup And Instrument Index Repair (2026-08-30/31)
+
+Implemented shared `0x00`/`0xE5` directory-run reservation for short create,
+LFN create, and same-parent rename, including logical-sector rollover,
+target-before-tail persistence, and legacy no-terminator handling. Then changed
+directory-cluster extension from full-cluster zero-fill to first-sector-only
+initialization; later sectors remain hidden behind `0x00` and are cleared by
+the reservation path before exposure. A stopped-playback Bank Save was observed
+at about 10 seconds after Gate A. Phase Two passed source review and clean ARM
+builds; its hardware/media matrix was deliberately deferred, with no defect
+expected from the reviewed implementation.
+
+The same session repaired Instrument Load metadata: reserved `.hctmp.<ext>` and
+blank stems cannot enter typed indexes; typed rows are validated as compact,
+sorted, unique keys; missing, empty, or corrupt indexes rebuild only the
+selected type through the existing scan/write/sync chain; genuine FAT/SD errors
+remain errors; Menu acknowledges the terminal result before releasing its
+owner. A follow-up removed the redundant physical directory prescan so a valid
+`.hcindex` is opened directly. The supplied failing card capture remains the
+four-defect validator fixture. No Session 059 change added retained SRAM.
+
+- **Find here**: [059_SESSION_HANDOFF_LOG.md](059_SESSION_HANDOFF_LOG.md),
+  `S059_ASYNCFATFS_SPEEDUP.md`, `S059_ASYNCFATFS_PHASE_ONE.md`,
+  `S059_INST_LOAD_FIX.md`, `S059_ASYNCFATFS_PHASE_TWO.md`,
+  `ASYNCFATFS_REFERENCE.md`, `FILESYSTEM_SPEC.md`,
+  `MODULE_INTERCHANGE_SPEC.md`, and `SRAM_MANIFEST.md`.

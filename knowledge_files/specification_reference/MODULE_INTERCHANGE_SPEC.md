@@ -1,23 +1,9 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through the Session 057 Bank Save per-Scene
-rewrite, boot Kit-sanitizer refactor, and stall-detection expansion build,
-for the one-pattern bridge,
-STEP track-settings front page, per-track shuffle, LED blink idempotence,
-descriptor-owned instrument files, Scene-owned instrument parameter images, and
-dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
-descriptor Morph, per-voice Morph, Scene modulation targets, asyncfatfs
-LFN/case expansion, restored Kit load/save, root Instrument Save, and
-Kit/Instrument Morph Save, root Scene Load/Save, and the 16-Scene Bank
-Load/Save workspace. This spec records the live module API boundaries
-after `frontPanelParser.c/h` removal, the PatternData storage-ownership pass,
-the `Core/Preset` -> `Core/Bank/Scene/Preset` folder move, the first Phase 2
-directory-kit filesystem boundary, the HCNAMES/identity ownership pass,
-independent filesystem payload staging, and the current bridge pattern
-behavior, cold-boot tagged-runtime activation, accepted OK/OW command
-ownership, and final Scene/Bank Load index restoration. The goal is to make
-the direct-call ownership clear so future work
-does not recreate a generic bridge or duplicate resident names.
+This is the current direct-call ownership and API-boundary map through Session
+059, including typed Instrument-index repair and AsyncFATFS directory
+publication. Historical migrations belong in session logs; this document states
+which live module owns each call, state transition, and retained object.
 
 ## Rules
 
@@ -51,11 +37,13 @@ does not recreate a generic bridge or duplicate resident names.
 - Instrument, Kit, root Scene, and root Bank browser names use one physical
   shared SRAM cache of 1,000 nine-byte rows. Kit/Scene/Bank rows are direct
   slot positions; Instrument rows are sorted browser positions. Type changes
-  replace the cache domain, and entering a type loads its `.hcindex`.
+  replace the cache domain. Entering an Instrument type opens its `.hcindex`
+  directly; missing/empty/corrupt metadata rebuilds only that type, while
+  genuine FAT/SD failures remain terminal errors.
 - Root `/.hcnames` is the authoritative fixed-order resident identity and
-  provenance register. The 9,000-byte cache borrows its 129 names only during
-  a name transaction; a filesystem-owned 258-byte source register retains the
-  matching `inherit`/`unknown`/direct source tokens between transactions.
+  provenance register. A dedicated 1,161-byte name mirror and the
+  filesystem-owned 258-byte source register retain its 129 rows independently
+  of the browser cache.
   The sole active identity block is 81 bytes: BankData's Bank row plus
   filesystem's Scene, Kit, and six Instrument rows. SceneData stores no name or
   filename text.
@@ -90,11 +78,10 @@ does not recreate a generic bridge or duplicate resident names.
   identities once and family exit performs at most one HCNAMES rewrite. Bank
   Load/Save own a full-register transaction; selective Bank Load overlays only
   requested/present children.
-- Root Scene completion also accumulates its committed Kit-family identity mask,
-  but the current physical Load/Save exit predicate fails to run that existing
-  family rewrite for Scene/Bank sessions. This is a known deferred defect: do
-  not claim that a changed root Scene row means its embedded Kit/six-Instrument
-  rows are registered until the existing exit boundary is widened.
+- Root Scene completion accumulates its committed Kit-family identity mask.
+  The physical Load/Save exit and later Kit-family boundary flush that mask
+  before operation scratch can be replaced, so embedded Kit and Instrument
+  HCNAMES rows are published with the Scene row.
 - asyncfatfs owns exact-case filename behavior. Product code should use
   filesystem/asyncfatfs object/LFN APIs instead of local FAT/LFN reconstruction.
   Dot-prefixed files are ordinary filesystem objects and must not be hidden by
@@ -683,10 +670,11 @@ SceneData, AutoSave, AutoSaveTrace, and development-mode boot logging.
 Purpose: public typed async filesystem facade. It serializes pattern data
 through PatternData accessors after Session 028. Normal kit load/save scans,
 opens, and writes root `Kit/NNN Name/` directory-format data, root Instrument
-Load/Save operates on registry-owned `Instrument/<type>/` pools, HCNAMES owns
-resident display identity, and the retired File/Dir compatibility surface
-performs no work. Storage text parsing/formatting and descriptor-key validation
-stay in `storageTypes.c/h`.
+Load/Save operates on registry-owned `Instrument/<type>/` pools, typed index
+loading owns validation and selected-type repair, HCNAMES owns resident display
+identity, and the retired File/Dir compatibility surface performs no work.
+Storage text parsing/formatting and descriptor-key validation stay in
+`storageTypes.c/h`.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
@@ -701,6 +689,7 @@ stay in `storageTypes.c/h`.
 | `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
 | `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit into the independent non-Pattern stage, commit them after validation, then read Pattern directly into final Scene SRAM and validate the Effect placeholder. Pattern is intentionally non-atomic. On successful terminal root completion, Preset marks the implemented Scene-without-Pattern AutoSave scope before reporting `PRESET_OP_SCENE_LOAD`. | Preset/Menu Scene Load, boot |
 | `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, thin `pattern.pat`, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
+| `filesystem_requestLoadInstrumentIndex(type, cb)` | Directly open and validate the registered type's `.hcindex` into the shared compact cache. Missing, empty, or structurally invalid metadata transfers the same accepted request into selected-type scan/write/sync recovery; fatal FAT/SD/read/scan/close/write faults return ERROR. The callback runs once. | Nested Instrument Load, InstrumentMrp, and Instrument Save type transitions |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the single shared 1,000-entry root Instrument browser cache for the currently loaded type. | Menu Instrument Load; boot uses one type-at-a-time scan/index passes |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Capture one typed index selection into immutable operation scratch and validate it into the one Instrument candidate stage without mutating live SceneData. | Preset Instrument request |
 | `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` / `filesystem_requestSaveInstrumentMorph(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. The Morph variant writes current interpolated values into both endpoint sections and preserves resident source naming. | Preset Instrument Save |
@@ -755,6 +744,13 @@ Important private Phase 2 kit helpers:
   `kit_instrument_slot_t` candidate staging. It must never reset a live Scene
   slot during asynchronous I/O; Preset owns the post-completion transaction and
   identity publication is separate.
+- `filesystem_loadInstrumentIndex_tick()` opens the selected type's
+  `.hcindex` directly after changing CWD and closing the redundant directory
+  handle. It validates compact printable 1..8-character, nonblank,
+  non-temporary, unique, sorted rows. Missing/empty/corrupt metadata hands the
+  original callback to `filesystem_beginInstrumentIndexRecovery()`; genuine
+  lower-layer faults never start the writer. Menu snapshots and acknowledges
+  the terminal status before publishing the cache or showing an error.
 - `filesystem_saveInstrument_tick()` writes one resident Scene/voice slot into
   root `Instrument/` with `afatfs_mkdir_lfn()` plus `afatfs_fopen_lfn()`,
   streams `storage_formatInstrumentLine()`, and updates the Instrument browser
@@ -793,11 +789,11 @@ Important private Phase 2 kit helpers:
   not infer whether a root namespace changed: Scene Save declares its own
   rebuild, while Scene/Bank Load defers read-only browser restoration until
   after DSP apply.
-- Bank Load retains only a child-present mask. It rescans the selected Bank
-  parent for each requested child and keeps one display/open component in
-  operation scratch; it never rebuilds a 16-child name or alias cache. Its
-  completed loaded-Scene result becomes true only after shared Scene validation
-  and commit and is consumed before the later index-reload request.
+- Bank Load captures the selected Bank's 16 child display names in one scan.
+  Successful children return to and retain the selected Bank as parent CWD;
+  only recovery paths reopen from root. Its completed loaded-Scene result
+  becomes true only after shared Scene validation and commit and is consumed
+  before the later index-reload request.
 - Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
   fallback for FAT aliases like `000INI~1` or `001SLA~1`.
 
@@ -810,11 +806,15 @@ asyncfatfs boundary:
 - Dot-prefixed files/directories are ordinary objects. Product scanners filter
   after object iteration.
 - Native `afatfs_deleteTree()` provides filesystem-level recursive cleanup for
-  one captured object, but its present recursive replacement behavior is a
-  known defect: an overwrite may leave the old Bank, root Scene, or Kit
-  directory. Repair that primitive; do not add temporary/old sibling promotion
-  or boot cleanup as a workaround. Atomic/journaled replace is also missing,
-  so no flow may be described as power-loss recoverable.
+  one captured object and releases each FAT chain before retiring its complete
+  name run. Replacement flows still are not atomic/journaled and must not be
+  described as power-loss recoverable.
+- Short create, LFN create, and same-parent rename share a sector-local
+  deleted/terminator run reservation. A moved `0x00` run initializes and
+  persists its target sector before retiring the old tail. Directory extension
+  initializes only the new cluster's first sector; later sectors remain hidden
+  until that publication path clears them. FAT16 fixed-root exhaustion still
+  fails normally.
 - `afatfs_getDiagnosticSnapshot()` and `sdcard_getTransportSnapshot()` are
   logging-only, read-only observation helpers for a frozen boot-time
   `ASENSURE` failure capsule. They copy live allocator/cache/file and SD

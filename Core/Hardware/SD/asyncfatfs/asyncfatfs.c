@@ -426,13 +426,40 @@ typedef struct afatfsAppendFreeCluster_t {
 typedef enum {
     AFATFS_EXTEND_SUBDIRECTORY_PHASE_INITIAL = 0,
     AFATFS_EXTEND_SUBDIRECTORY_PHASE_ADD_FREE_CLUSTER = 0,
-    AFATFS_EXTEND_SUBDIRECTORY_PHASE_WRITE_SECTORS,
+    AFATFS_EXTEND_SUBDIRECTORY_PHASE_INITIALIZE_FIRST_SECTOR,
     AFATFS_EXTEND_SUBDIRECTORY_PHASE_SUCCESS,
     AFATFS_EXTEND_SUBDIRECTORY_PHASE_FAILURE
 } afatfsExtendSubdirectoryPhase_e;
 
 typedef struct afatfsExtendSubdirectory_t {
-    // We need to call this as a sub-operation so we have it as our first member to be compatible with its memory layout:
+    /*
+     * Retained state for one asynchronous directory-cluster extension.
+     *
+     * What: Reuses afatfsAppendFreeCluster_t as the leading sub-operation, then
+     * retains only the extension phase, the parent cluster needed for a new
+     * child's ".." entry, and the original completion callback.
+     *
+     * Why: Gate B changes how much of an appended cluster is initialized, not
+     * the allocation or callback state machine. Keeping appendFreeCluster first
+     * preserves the required compatible union layout and avoids any retained-
+     * SRAM growth.
+     *
+     * Inputs: the prior cursor cluster supplied to the append sub-operation,
+     * the parent directory cluster for a first child cluster, and the caller
+     * callback.
+     *
+     * Outputs/effects: resumable append/initialize/success/failure state only;
+     * no sector buffer, initialized-sector witness, or additional cluster
+     * coordinate is retained here.
+     *
+     * Accessors: afatfs_appendRegularFreeClusterContinue() consumes the
+     * leading member; afatfs_fileGetCursorPhysicalSector() derives the
+     * initialized sector from the directory cursor when needed.
+     *
+     * Affiliates: afatfs_extendSubdirectoryContinue(),
+     * afatfs_extendSubdirectory(), afatfsFileOperation_t, AFATFS_MAX_OPEN_FILES,
+     * and the S059 retained-state static assertions.
+     */
     afatfsAppendFreeCluster_t appendFreeCluster;
 
     afatfsExtendSubdirectoryPhase_e phase;
@@ -844,23 +871,32 @@ typedef struct afatfs_t {
 } afatfs_t;
 
 /*
- * Retained-state ceiling for the terminator-aware reservation refactor.
+ * Retained-state ceiling for the S059 directory optimizations.
  *
- * What: Verifies the target ABI still gives the create state, each file
- * handle, and the global rename state their accepted pre-Phase-One sizes.
+ * What: Verifies that the target ABI still gives the create state, each file
+ * handle, and the global rename state their accepted pre-S059 sizes.
+ *
  * Why: afatfsCreateFile_t is the largest per-handle operation-union member,
- * so casual growth multiplies through five open handles and currentDirectory
- * and also enlarges rename's embedded newNameState. Inputs are the compiler's
- * completed private type layouts. Output is a build failure instead of an
- * unapproved normal-SRAM1 increase. Affiliates are AFATFS_MAX_OPEN_FILES,
- * afatfsFileOperation_t, afatfs_t, and SRAM_MANIFEST.md.
+ * so growth multiplies through five open handles and currentDirectory and
+ * also enlarges rename's embedded newNameState. Gate B must reuse the existing
+ * extension state and sector cache rather than consume Pattern-reserved SRAM1.
+ *
+ * Inputs: the compiler's completed private type layouts.
+ *
+ * Outputs/effects: a build failure instead of an unapproved retained-RAM
+ * increase; no runtime code or storage is emitted by passing assertions.
+ *
+ * Accessors: sizeof() is the sole compile-time accessor.
+ *
+ * Affiliates: AFATFS_MAX_OPEN_FILES, afatfsFileOperation_t, afatfs_t,
+ * afatfsExtendSubdirectory_t, and SRAM_MANIFEST.md.
  */
 _Static_assert(sizeof(afatfsCreateFile_t) == 144u,
-               "Phase One create state must remain 144 bytes");
+               "S059 create state must remain 144 bytes");
 _Static_assert(sizeof(afatfsFile_t) == 188u,
-               "Phase One file handle must remain 188 bytes");
+               "S059 file handle must remain 188 bytes");
 _Static_assert(sizeof(afatfsRenameObject_t) == 552u,
-               "Phase One rename state must remain 552 bytes");
+               "S059 rename state must remain 552 bytes");
 
 static afatfs_t afatfs;
 
@@ -1267,20 +1303,6 @@ static uint32_t afatfs_fileGetCursorPhysicalSector(afatfsFilePtr_t file)
     } else {
         uint32_t cursorSectorInCluster = afatfs_sectorIndexInCluster(file->cursorOffset);
         return afatfs_fileClusterToPhysical(file->cursorCluster, cursorSectorInCluster);
-    }
-}
-
-/**
- * Sector here is the sector index within the cluster.
- */
-static void afatfs_fileGetCursorClusterAndSector(afatfsFilePtr_t file, uint32_t *cluster, uint16_t *sector)
-{
-    *cluster = file->cursorCluster;
-
-    if (file->type == AFATFS_FILE_TYPE_FAT16_ROOT_DIRECTORY) {
-        *sector = file->cursorOffset / AFATFS_SECTOR_SIZE;
-    } else {
-        *sector = afatfs_sectorIndexInCluster(file->cursorOffset);
     }
 }
 
@@ -1936,14 +1958,35 @@ static afatfsOperationStatus_e afatfs_appendRegularFreeClusterContinue(afatfsFil
                     afatfs.lastClusterAllocated = opState->searchCluster;
 
                     /*
-                     * Assign the new cluster to the active cursor before the
-                     * FAT and directory entry are fully committed. Directory
-                     * initialization relies on this exactly like fwrite(): the
-                     * following zero-fill phase needs a physical sector to
-                     * write. When previousCluster is zero this is also the
-                     * first cluster of the file/directory, so
-                     * saveDirectoryEntry() must publish it in firstClusterHigh
-                     * and firstClusterLow before mkdir reports success.
+                     * Publish the newly allocated cluster through the active
+                     * cursor.
+                     *
+                     * What: Records the allocated cluster as the cursor
+                     * cluster, expands physicalSize by one complete cluster,
+                     * and records firstCluster when this is the file or
+                     * directory's first allocation.
+                     *
+                     * Why: The following directory-extension phase derives
+                     * the first physical sector from this cursor and
+                     * initializes that sector before mkdir or marker advance
+                     * can expose it. FAT allocation remains cluster-sized even
+                     * though Gate B no longer initializes every sector
+                     * immediately.
+                     *
+                     * Inputs: the successful free-cluster search result and
+                     * previousCluster.
+                     *
+                     * Outputs/effects: updated cursorCluster, physicalSize,
+                     * and possibly firstCluster; the following FAT-link and
+                     * directory-entry publication phases are unchanged.
+                     *
+                     * Accessors: afatfs_clusterSize() supplies the allocation
+                     * increment; afatfs_saveDirectoryEntry() later writes
+                     * firstClusterHigh/Low for a first allocation.
+                     *
+                     * Affiliates: afatfs_extendSubdirectoryContinue(),
+                     * regular-file fwrite allocation, FAT1/FAT2 update phases,
+                     * and the mkdir callback boundary.
                      */
                     file->cursorCluster = opState->searchCluster;
                     file->physicalSize += afatfs_clusterSize();
@@ -2947,8 +2990,7 @@ static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *d
     afatfsExtendSubdirectory_t *opState = &directory->operation.state.extendSubdirectory;
     afatfsOperationStatus_e status;
     uint8_t *sectorBuffer;
-    uint32_t clusterNumber, physicalSector;
-    uint16_t sectorInCluster;
+    uint32_t physicalSector;
 
     doMore:
     switch (opState->phase) {
@@ -2956,73 +2998,86 @@ static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *d
             status = afatfs_appendRegularFreeClusterContinue(directory);
 
             if (status == AFATFS_OPERATION_SUCCESS) {
-                opState->phase = AFATFS_EXTEND_SUBDIRECTORY_PHASE_WRITE_SECTORS;
+                opState->phase =
+                    AFATFS_EXTEND_SUBDIRECTORY_PHASE_INITIALIZE_FIRST_SECTOR;
                 goto doMore;
             } else if (status == AFATFS_OPERATION_FAILURE) {
                 opState->phase = AFATFS_EXTEND_SUBDIRECTORY_PHASE_FAILURE;
                 goto doMore;
             }
         break;
-        case AFATFS_EXTEND_SUBDIRECTORY_PHASE_WRITE_SECTORS:
-            // Now, zero out that cluster
-            afatfs_fileGetCursorClusterAndSector(directory, &clusterNumber, &sectorInCluster);
+        case AFATFS_EXTEND_SUBDIRECTORY_PHASE_INITIALIZE_FIRST_SECTOR:
+            /*
+             * Initialize only the first visible sector of the appended
+             * directory cluster.
+             *
+             * What: Obtains the sector at the appended-cluster cursor with
+             * WRITE-only cache ownership, clears all 512 bytes, writes "." and
+             * ".." only for a new child directory's first cluster, and leaves
+             * the first unused entry as 0x00. Later sectors in the allocated
+             * cluster remain untouched and logically invisible.
+             *
+             * Why: FAT allocation is cluster-sized, but a valid end marker
+             * makes bytes after it outside the live namespace. Clearing every
+             * sector caused 64 writes per child directory on the tested card.
+             * Gate A now guarantees that any later sector is fully cleared
+             * before the marker moves into it.
+             *
+             * Inputs: directory->cursorCluster/cursorOffset after append
+             * completion, directory->firstCluster, directoryEntryPos to
+             * distinguish a non-root child, and
+             * opState->parentDirectoryCluster for the first-cluster ".."
+             * entry.
+             *
+             * Outputs/effects: one dirty, fully initialized sector; correct
+             * dot entries for a first child cluster; a zero terminator at
+             * entry 2 for that cluster or entry 0 for a later appended cluster;
+             * unchanged FAT chain and physicalSize; and no cursor seek across
+             * the untouched remainder of the cluster.
+             *
+             * Accessors: afatfs_fileGetCursorPhysicalSector() maps the logical
+             * cursor to media; afatfs_cacheSector(..., AFATFS_CACHE_WRITE, ...)
+             * obtains and marks the cache sector dirty without reading stale
+             * media; memset() establishes the complete hidden-to-visible
+             * sector invariant.
+             *
+             * Affiliates: afatfs_appendRegularFreeClusterContinue(),
+             * afatfs_prepareDirectoryRunTarget(),
+             * afatfs_handoffCreatedDirectoryToInitializer(), afatfs_findNext(),
+             * FAT16-root no-extension handling, and the final afatfs_sync()
+             * boundary.
+             */
             physicalSector = afatfs_fileGetCursorPhysicalSector(directory);
+            status = afatfs_cacheSector(physicalSector,
+                                        &sectorBuffer,
+                                        AFATFS_CACHE_WRITE,
+                                        0);
+            if (status != AFATFS_OPERATION_SUCCESS)
+                return status;
 
-            while (1) {
-                status = afatfs_cacheSector(physicalSector, &sectorBuffer, AFATFS_CACHE_WRITE, 0);
+            memset(sectorBuffer, 0, AFATFS_SECTOR_SIZE);
 
-                if (status != AFATFS_OPERATION_SUCCESS) {
-                    return status;
-                }
+            if (directory->directoryEntryPos.sectorNumberPhysical != 0u &&
+                directory->cursorOffset == 0u) {
+                fatDirectoryEntry_t *dirEntries =
+                    (fatDirectoryEntry_t *)sectorBuffer;
 
-                /*
-                 * Zero every sector in the newly-appended cluster. FAT
-                 * directory scans stop at empty entries, so clearing the whole
-                 * cluster prevents stale card data from looking like child
-                 * files. sectorInCluster is compared against
-                 * sectorsPerCluster - 1 because both values are zero-based
-                 * within the new cluster.
-                 */
-                memset(sectorBuffer, 0, AFATFS_SECTOR_SIZE);
+                memset(dirEntries[0].filename, ' ', sizeof(dirEntries[0].filename));
+                dirEntries[0].filename[0] = '.';
+                dirEntries[0].firstClusterHigh = directory->firstCluster >> 16;
+                dirEntries[0].firstClusterLow = directory->firstCluster & 0xffffu;
+                dirEntries[0].attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
 
-                /*
-                 * The first sector of a non-root subdirectory must start with
-                 * "." and "..". directory->firstCluster points "." back at
-                 * this directory; parentDirectory supplied by mkdir/create
-                 * points ".." back at the directory that contained the
-                 * newly-created entry. Later directory extensions pass
-                 * parentDirectory == NULL and skip this block because
-                 * cursorOffset is no longer zero.
-                 */
-                if (directory->directoryEntryPos.sectorNumberPhysical != 0 && directory->cursorOffset == 0) {
-                    fatDirectoryEntry_t *dirEntries = (fatDirectoryEntry_t *) sectorBuffer;
-
-                    memset(dirEntries[0].filename, ' ', sizeof(dirEntries[0].filename));
-                    dirEntries[0].filename[0] = '.';
-                    dirEntries[0].firstClusterHigh = directory->firstCluster >> 16;
-                    dirEntries[0].firstClusterLow = directory->firstCluster & 0xFFFF;
-                    dirEntries[0].attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
-
-                    memset(dirEntries[1].filename, ' ', sizeof(dirEntries[1].filename));
-                    dirEntries[1].filename[0] = '.';
-                    dirEntries[1].filename[1] = '.';
-                    dirEntries[1].firstClusterHigh = opState->parentDirectoryCluster >> 16;
-                    dirEntries[1].firstClusterLow = opState->parentDirectoryCluster & 0xFFFF;
-                    dirEntries[1].attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
-                }
-
-                if (sectorInCluster < afatfs.sectorsPerCluster - 1) {
-                    // Move to next sector
-                    afatfs_assert(afatfs_fseekAtomic(directory, AFATFS_SECTOR_SIZE));
-                    sectorInCluster++;
-                    physicalSector++;
-                } else {
-                    break;
-                }
+                memset(dirEntries[1].filename, ' ', sizeof(dirEntries[1].filename));
+                dirEntries[1].filename[0] = '.';
+                dirEntries[1].filename[1] = '.';
+                dirEntries[1].firstClusterHigh =
+                    opState->parentDirectoryCluster >> 16;
+                dirEntries[1].firstClusterLow =
+                    opState->parentDirectoryCluster & 0xffffu;
+                dirEntries[1].attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
             }
 
-            // Seek back to the beginning of the cluster
-            afatfs_assert(afatfs_fseekAtomic(directory, -AFATFS_SECTOR_SIZE * (afatfs.sectorsPerCluster - 1)));
             opState->phase = AFATFS_EXTEND_SUBDIRECTORY_PHASE_SUCCESS;
             goto doMore;
         break;
@@ -3048,16 +3103,36 @@ static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *d
     return AFATFS_OPERATION_IN_PROGRESS;
 }
 
-/**
- * Queue an operation to add a cluster to a sub-directory.
+/*
+ * Queue asynchronous extension of one non-FAT16-root directory.
  *
- * Tthe new cluster is zero-filled. "." and ".." entries are added if it is the first cluster of a new subdirectory.
+ * What: Appends one FAT cluster and initializes its first sector immediately.
+ * For a new child directory, that sector contains ".", "..", and a valid
+ * terminator. For a later extension, entry 0 is the terminator. Remaining
+ * sectors are initialized individually by marker-advance preparation before
+ * they can enter the live namespace.
  *
- * The directory must not be busy, otherwise AFATFS_OPERATION_FAILURE is returned immediately.
+ * Why: Callers need a directory that is safe to enter or continue scanning,
+ * not an eagerly zero-filled allocation unit. Keeping later sectors hidden
+ * removes redundant I/O while the persistent marker preserves remount safety.
  *
- * The directory's cursor must lie at the end of the directory file (i.e. isEndOfAllocatedFile() would return true).
+ * Inputs: directory must be idle with its cursor at allocated EOF;
+ * parentDirectory is required only for the first cluster of a new child and
+ * supplies the ".." cluster; callback may be NULL for an internal extension.
  *
- * You must provide parentDirectory if this is the first extension to the subdirectory, otherwise pass NULL for that argument.
+ * Outputs/effects: returns SUCCESS, IN_PROGRESS, or FAILURE through the
+ * existing asynchronous contract; appends one cluster, initializes one sector,
+ * and invokes callback with directory or NULL on the existing terminal path.
+ * FAT16 fixed root and busy handles fail before any operation is queued.
+ *
+ * Accessors: afatfs_fileIsBusy() enforces ownership;
+ * afatfs_appendRegularFreeClusterInitOperationState() seeds allocation from
+ * cursorPreviousCluster; afatfs_extendSubdirectoryContinue() performs the
+ * work.
+ *
+ * Affiliates: mkdir create handoff, Gate A next-sector preparation,
+ * afatfs_fileOperationContinue(), FAT allocation, directory scans, and
+ * afatfs_sync().
  */
 static afatfsOperationStatus_e afatfs_extendSubdirectory(afatfsFile_t *directory, afatfsFilePtr_t parentDirectory, afatfsFileCallback_t callback)
 {
@@ -3736,17 +3811,34 @@ static bool afatfs_selectDirectoryRunAtTerminator(
 }
 
 /*
- * Prepare a next logical directory sector before moving the end marker.
+ * Prepare a later logical directory sector before moving the end marker.
  *
- * What: Uses currentDirectory's cursor/FAT chain, extends an extendable
- * directory when the cursor reaches allocated EOF, obtains the resulting
- * sector with write ownership, clears all 512 bytes, and selects entry zero.
- * Why: Physical sectors are not a directory-ordering primitive, and bytes
- * after 0x00 may be stale. Inputs are currentDirectory and an already-selected
- * moved/local origin. Outputs/effects are a dirty zeroed target or the normal
- * asynchronous/FAT failure status. Affiliates: afatfs_fseekAtomic(),
- * afatfs_extendSubdirectory(), afatfs_cacheSector(AFATFS_CACHE_WRITE),
- * create/rename phases, and the unchanged Gate-A full-cluster initializer.
+ * What: Uses currentDirectory's logical cursor and FAT chain, extends the
+ * directory if the cursor has reached allocated EOF, obtains the target sector
+ * with WRITE ownership, clears all 512 bytes, and selects entry zero for the
+ * pending SFN or LFN/SFN run.
+ *
+ * Why: Under Gate B, sectors after 0x00 may intentionally contain stale media
+ * bytes. The complete target must therefore be initialized immediately before
+ * the marker can move. Physical adjacency is not a valid substitute for FAT
+ * traversal, and an appended cluster's initialized first sector is cleared
+ * again here deliberately so this helper has one unconditional publication
+ * contract.
+ *
+ * Inputs: afatfs.currentDirectory at the next logical sector and a
+ * TERMINATOR_MOVED or end-of-allocated-directory reservation.
+ *
+ * Outputs/effects: a dirty fully zeroed target sector, selectedRunStart at
+ * entry zero, or the existing asynchronous/FAT failure status. No old marker
+ * byte is changed here.
+ *
+ * Accessors: afatfs_fileIsBusy(), afatfs_isEndOfAllocatedFile(),
+ * afatfs_extendSubdirectory(), afatfs_fileGetCursorPhysicalSector(), and
+ * afatfs_cacheSector(..., AFATFS_CACHE_WRITE, ...).
+ *
+ * Affiliates: create and rename target phases, target-media persistence,
+ * old-terminator-tail retirement, the lazy first-sector initializer, and the
+ * FAT16 fixed-root no-extension rule.
  */
 static afatfsOperationStatus_e afatfs_prepareDirectoryRunTarget(
         afatfsCreateFile_t *opState)
@@ -4088,21 +4180,32 @@ static void afatfs_handoffCreatedDirectoryToInitializer(
     afatfsFileCallback_t callback)
 {
     /*
-     * Newly-created directories cannot complete through the ordinary
-     * empty-file success path.
+     * Transfer a newly named directory from create state to initialization
+     * state.
      *
-     * CREATE_FILE is still active when the parent directory entry has just
-     * been written, so afatfs_extendSubdirectory() would reject the handle as
-     * busy and its operation union would overwrite createFile state. The
-     * handoff is deliberate: preserve the original callback, clear
-     * CREATE_FILE, then let EXTEND_SUBDIRECTORY own the handle until it has
-     * allocated the first cluster and initialized "." / "..".
+     * What: Preserves the original mkdir callback, clears the CREATE_FILE
+     * union owner, and starts EXTEND_SUBDIRECTORY so the child's first cluster
+     * and first sector are ready before completion.
      *
-     * Inputs: file is the newly-created directory entry; callback is the
-     * original afatfs_mkdir()/afatfs_mkdir_lfn() completion. Output: callback
-     * is invoked by EXTEND_SUBDIRECTORY with file or NULL. Affiliates:
-     * afatfs_createFileContinue(), afatfs_extendSubdirectory(),
-     * afatfs_appendRegularFreeClusterContinue(), afatfs_saveDirectoryEntry().
+     * Why: A directory entry initially has firstCluster == 0 and cannot be
+     * entered. The operation union also cannot hold create and extension state
+     * at once. Gate B still requires the visible first sector, dot entries, and
+     * terminator before callback; only the unused remainder of the cluster is
+     * deferred.
+     *
+     * Inputs: the newly created directory handle and the original
+     * afatfs_mkdir()/afatfs_mkdir_lfn() callback.
+     *
+     * Outputs/effects: create reservation/LFN scan state is cleared; extension
+     * owns the handle; the callback is later invoked with a usable directory or
+     * NULL.
+     *
+     * Accessors: afatfs_resetDirectoryRunReservation(), afatfs_lfnScanReset(),
+     * and afatfs_extendSubdirectory().
+     *
+     * Affiliates: short/LFN create success phases,
+     * afatfs_appendRegularFreeClusterContinue(), afatfs_saveDirectoryEntry(),
+     * afatfs_chdir(), and the public mkdir contract.
      */
     afatfs_resetDirectoryRunReservation(&file->operation.state.createFile);
     afatfs_lfnScanReset(&file->operation.state.createFile);
@@ -4172,10 +4275,14 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                 goto doMore;
                             }
 
-                            /* A no-terminator directory either extends at its
-                             * logical EOF or fails normally for a fixed root.
-                             * The unchanged extension initializer makes entry
-                             * zero a local terminator-owned run.
+                            /*
+                             * A legacy directory with no 0x00 either uses a
+                             * previously proven deleted run or advances to
+                             * logical allocated EOF. An extendable directory
+                             * then appends a cluster whose initialized first
+                             * sector exposes entry zero as a local
+                             * terminator-owned run; a full FAT16 fixed root
+                             * fails normally.
                              */
                             opState->reservationOrigin =
                                 AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL;
