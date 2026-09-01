@@ -78,6 +78,8 @@
 
 #include "memtest.h"
 #include <stdint.h>
+/* Boot discovery copies one fixed Bank identity into stack-local storage. */
+#include <string.h>
 
 
 #define SCB_VTOR (*(volatile uint32_t*)0xE000ED08UL)
@@ -407,11 +409,213 @@ static void boot_showFilesystemSubstep(uint8_t substep)
 #define BOOT_SUBSTEP_DIAGNOSTIC_CALLBACK NULL
 #endif
 
+static uint8_t boot_hcnamesNameMatches(const char expected[8],
+                                       const char *settled)
+{
+    uint8_t i;
+
+    /* Compare one fixed HCNAMES identity with a root-index/payload identity.
+     * Trailing spaces/NULs are padding; ASCII case is FAT-insensitive. */
+    if (!expected || !settled)
+        return 0u;
+    for (i = 0u; i < AUTOSAVE_NAME_BYTES; i++) {
+        char lhs = expected[i];
+        char rhs = (i < AUTOSAVE_NAME_BYTES) ? settled[i] : '\0';
+
+        if (lhs == '\0') lhs = ' ';
+        if (rhs == '\0') rhs = ' ';
+        if (lhs >= 'A' && lhs <= 'Z') lhs = (char)(lhs + ('a' - 'A'));
+        if (rhs >= 'A' && rhs <= 'Z') rhs = (char)(rhs + ('a' - 'A'));
+        if (lhs != rhs)
+            return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t boot_waitFilesystemOperation(void)
+{
+    /* Drain one already accepted index operation and leave its facade idle. */
+    while (filesystem_status() == FS_STATUS_BUSY) {
+        if (filesystem_bootLoggingTimedOut())
+            return 0u;
+        filesystem_tick();
+    }
+    if (filesystem_bootLoggingTimedOut() ||
+        filesystem_status() != FS_STATUS_DONE)
+        return 0u;
+    filesystem_ack();
+    return 1u;
+}
+
+static uint8_t boot_waitPresetOperation(void)
+{
+    uint8_t completed_ok = 1u;
+
+    /* Pump Preset completion, Menu's pre-audio apply, and any stable HCNAMES
+     * tail until both public owners have returned to idle. */
+    while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS ||
+           preset_getStatus() == PRESET_UPDATE_READY ||
+           filesystem_status() == FS_STATUS_BUSY) {
+        if (filesystem_bootLoggingTimedOut())
+            return 0u;
+        if (preset_getStatus() == PRESET_UPDATE_READY) {
+            completed_ok = preset_getCompletedOk();
+            menu_pollPresetStatus();
+        } else {
+            filesystem_tick();
+        }
+    }
+    return (uint8_t)(completed_ok && !filesystem_bootLoggingTimedOut());
+}
+
+static uint8_t boot_loadRootIndex(fs_library_index_kind_t kind)
+{
+    uint8_t accepted;
+
+    /* Reuse the one shared browser cache to prove the source slot/name pair. */
+    if (kind == FS_LIBRARY_INDEX_SCENE)
+        accepted = filesystem_requestLoadSceneIndex(NULL);
+    else if (kind == FS_LIBRARY_INDEX_KIT)
+        accepted = filesystem_requestLoadKitIndex(NULL);
+    else if (kind == FS_LIBRARY_INDEX_BANK)
+        accepted = filesystem_requestLoadBankIndex(NULL);
+    else
+        accepted = 0u;
+    return (uint8_t)(accepted && boot_waitFilesystemOperation());
+}
+
+static void boot_resetHcnamesScene(uint8_t scene_index, uint8_t component)
+{
+    /* A source mismatch discards only this Scene and its Bank-present bit. */
+    scene_resetOne(scene_index);
+    (void)bank_setScenePresentMask(
+        (uint16_t)(bank_scenePresentMask() &
+                   (uint16_t)~(1u << scene_index)));
+    filesystem_noteBootHcnamesComponentFailure(scene_index, component);
+}
+
+static uint8_t boot_reconstructHcnames(void)
+{
+    uint8_t scene_index;
+    uint16_t failed_mask = preset_bankLoadFailedSceneMask();
+
+    /* The baseline Bank loader already proved inherited child identities. */
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((failed_mask & (uint16_t)(1u << scene_index)) != 0u)
+            boot_resetHcnamesScene(scene_index, 0u);
+    }
+
+    /* Reconcile each resident Scene top-down. Operation scratch is reused by
+     * the existing async loaders; no per-Scene name/source array is retained. */
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        const uint16_t scene_bit = (uint16_t)(1u << scene_index);
+        const uint16_t scene_row = (uint16_t)(1u + scene_index);
+        uint16_t source = filesystem_residentSource(scene_row);
+        uint8_t scene_loaded_from_root = 0u;
+        uint8_t scene_failed = 0u;
+
+        if (source <= FS_RESIDENT_SOURCE_DIRECT_MAX) {
+            if (!boot_loadRootIndex(FS_LIBRARY_INDEX_SCENE) ||
+                !filesystem_sceneSlotExists(source) ||
+                !boot_hcnamesNameMatches(
+                    filesystem_residentName(scene_row),
+                    filesystem_sceneSlotName(source)) ||
+                !preset_loadSceneForScenes(source, scene_bit) ||
+                !boot_waitPresetOperation()) {
+                boot_resetHcnamesScene(scene_index, 0u);
+                scene_failed = 1u;
+            } else {
+                scene_loaded_from_root = 1u;
+            }
+        } else if (source == FS_RESIDENT_SOURCE_INHERIT &&
+                   !bank_scenePresent(scene_index)) {
+            boot_resetHcnamesScene(scene_index, 0u);
+            scene_failed = 1u;
+        }
+        if (scene_failed)
+            continue;
+
+        source = filesystem_residentSource(
+            (uint16_t)(FS_RESIDENT_NAMES_KIT_BASE + scene_index));
+        if (source <= FS_RESIDENT_SOURCE_DIRECT_MAX) {
+            const char *name = filesystem_residentName(
+                (uint16_t)(FS_RESIDENT_NAMES_KIT_BASE + scene_index));
+
+            if (!boot_loadRootIndex(FS_LIBRARY_INDEX_KIT) ||
+                !filesystem_kitSlotExists(source) ||
+                !boot_hcnamesNameMatches(name,
+                                         filesystem_kitSlotName(source)) ||
+                !preset_loadKitForScenes(source, scene_bit) ||
+                !boot_waitPresetOperation()) {
+                boot_resetHcnamesScene(scene_index, 1u);
+                continue;
+            }
+            scene_loaded_from_root = 1u;
+        } else if (source == FS_RESIDENT_SOURCE_INHERIT &&
+                   !bank_scenePresent(scene_index)) {
+            boot_resetHcnamesScene(scene_index, 1u);
+            continue;
+        } else if (source == FS_RESIDENT_SOURCE_INHERIT &&
+                   scene_loaded_from_root &&
+                   !boot_hcnamesNameMatches(
+                       filesystem_residentName(
+                           (uint16_t)(FS_RESIDENT_NAMES_KIT_BASE + scene_index)),
+                       filesystem_identityName(FS_IDENTITY_KIT_ROW))) {
+            boot_resetHcnamesScene(scene_index, 1u);
+            continue;
+        }
+
+        for (uint8_t slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+            uint16_t row = (uint16_t)(FS_RESIDENT_NAMES_INSTRUMENT_BASE +
+                                      scene_index * INSTRUMENT_SLOT_COUNT + slot);
+            source = filesystem_residentSource(row);
+            if (source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT) {
+                instrument_type_t type;
+                uint16_t browser_index;
+
+                if (!filesystem_residentInstrumentType(row, &type) ||
+                    !filesystem_requestLoadInstrumentIndex(type, NULL) ||
+                    !boot_waitFilesystemOperation() ||
+                    !filesystem_findExactInstrumentStem(
+                        type, filesystem_residentName(row), &browser_index) ||
+                    !preset_loadInstrument(scene_index, slot, type,
+                                           browser_index) ||
+                    !boot_waitPresetOperation()) {
+                    boot_resetHcnamesScene(scene_index, 2u);
+                    scene_failed = 1u;
+                    break;
+                }
+                scene_loaded_from_root = 1u;
+            } else if (source == FS_RESIDENT_SOURCE_INHERIT &&
+                       !bank_scenePresent(scene_index)) {
+                boot_resetHcnamesScene(scene_index, 2u);
+                scene_failed = 1u;
+                break;
+            } else if (source == FS_RESIDENT_SOURCE_INHERIT &&
+                       scene_loaded_from_root &&
+                       !boot_hcnamesNameMatches(
+                           filesystem_residentName(row),
+                           filesystem_identityName((uint8_t)(
+                               FS_IDENTITY_INSTRUMENT_ROW_0 + slot)))) {
+                boot_resetHcnamesScene(scene_index, 2u);
+                scene_failed = 1u;
+                break;
+            }
+        }
+    }
+    return 1u;
+}
+
 int main(void)
 {
     #define EXTI_IMR (*((volatile uint32_t *)0x40013C00UL))
     #define EXTI_PR  (*((volatile uint32_t *)0x40013C14UL))
     uint8_t show_unsupported_card_warning = 0;
+    uint8_t boot_hcnames_preserve = 0u;
 
     EXTI_PR  = 0xFFFFFFFFUL;
     EXTI_IMR = 0x00000000UL;
@@ -755,6 +959,7 @@ int main(void)
              */
             {
                 uint16_t boot_bank_slot = bank_restoreBankSlot();
+                char boot_bank_name[AUTOSAVE_NAME_BYTES + 1u];
 
                 /*
                  * Instrument index generation above intentionally disposed
@@ -790,6 +995,45 @@ int main(void)
                 if (filesystem_status() != FS_STATUS_DONE)
                     goto boot_filesystem_failure;
                 filesystem_ack();
+
+                /*
+                 * Prove the mounted v2 source exactly once before Bank payload
+                 * I/O. The result is captured locally because Bank Load may
+                 * rebuild HCNAMES after this point; a rebuilt register must
+                 * never be mistaken for the discovered recovery image. This
+                 * uses stack lifetime only and adds no retained boot state.
+                 */
+                if (!filesystem_bankSlotExists(boot_bank_slot))
+                    boot_bank_slot = filesystem_firstBankSlot();
+                if (filesystem_bankSlotExists(boot_bank_slot)) {
+                    memcpy(boot_bank_name,
+                           filesystem_bankSlotName(boot_bank_slot),
+                           AUTOSAVE_NAME_BYTES);
+                    boot_bank_name[AUTOSAVE_NAME_BYTES] = '\0';
+                    if (filesystem_autosaveEnabled()) {
+                        /* A/B setup status and HCNAMES recovery are separate
+                         * authorities: preserve a safe matching register
+                         * even when hidden peers need later recovery. */
+                        (void)filesystem_discoverAutosaveBlocking(
+                            boot_bank_slot, boot_bank_name);
+                        boot_hcnames_preserve =
+                            filesystem_hcnamesRecoveryAvailable(
+                                boot_bank_slot, boot_bank_name);
+                    }
+                    /* A duplicate/terminal probe is neither preserve nor
+                     * rebuild authority. A safe matching HCNAMES image remains
+                     * preserved even if A/B setup failed; otherwise keep the
+                     * ordinary Bank path but suppress physical HCNAMES writes. */
+                    /* Keep the boot gate active for both preserve and rebuild
+                     * modes; the filesystem setter distinguishes them from
+                     * the discovery result and suppresses unsafe writes. */
+                    filesystem_setBootHcnamesReconstruction(
+                        filesystem_autosaveEnabled());
+                } else {
+                    /* No effective Bank means no hidden-record discovery or
+                     * HCNAMES recovery instruction is allowed on fallback. */
+                    filesystem_setBootHcnamesReconstruction(0u);
+                }
 
                 /*
                  * boot_bank_slot is the root Bank cache coordinate retained in
@@ -920,6 +1164,16 @@ int main(void)
                 if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
                     break;
             }
+            if (boot_hcnames_preserve &&
+                filesystem_bootHcnamesReconstructionActive()) {
+                /* Matching HCNAMES is the boot source authority: reconcile
+                 * direct Scene/Kit/@ rows after the Bank baseline and before
+                 * the boot-only suppression gate is released. */
+                if (!boot_reconstructHcnames())
+                    goto boot_filesystem_failure;
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+            }
             filesystem_setBootSubstepDiagnostic(NULL);
 
             /*
@@ -951,6 +1205,11 @@ int main(void)
                 if (filesystem_bootLoggingTimedOut())
                     goto boot_filesystem_timeout;
             }
+            /* Keep preserve mode through ensure/recovery: those boot-only
+             * passes must consume the already-proven HCNAMES mirror without
+             * reopening it into the same storage. Runtime requests use
+             * ordinary targeted publication only after this boundary. */
+            filesystem_setBootHcnamesReconstruction(0u);
             /*
              * Release both autonomous writer gates only after blocking boot SD
              * ownership is complete.

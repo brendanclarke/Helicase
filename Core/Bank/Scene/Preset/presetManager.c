@@ -178,6 +178,18 @@ uint8_t preset_getRequestType(void)
     return pm_request_type;
 }
 
+instrument_type_t preset_getInstrumentRequestType(void)
+{
+    /* Return the accepted Instrument type, not the later Menu selector. */
+    return pm_instrument_request_type;
+}
+
+uint16_t preset_getInstrumentRequestIndex(void)
+{
+    /* Return the accepted typed-browser row without adding a second index. */
+    return pm_instrument_request_index;
+}
+
 uint8_t preset_getRequestScene(void)
 {
     /*

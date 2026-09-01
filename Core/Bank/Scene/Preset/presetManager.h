@@ -119,6 +119,14 @@ uint8_t          preset_getCompletedOk(void);
 uint16_t         preset_getRequestSlot(void);
 uint8_t          preset_getRequestType(void);
 /*
+ * Read the immutable typed Instrument coordinates captured at request time.
+ * These accessors expose existing Preset state for boot HCNAMES `@`
+ * reconstruction and coalesced Menu completion; they never follow mutable UI
+ * selection and allocate no additional request storage.
+ */
+instrument_type_t preset_getInstrumentRequestType(void);
+uint16_t         preset_getInstrumentRequestIndex(void);
+/*
  * Read the explicit single Scene retained for an Instrument action or Kit Save.
  *
  * Output: the request-time destination/source Scene while the asynchronous

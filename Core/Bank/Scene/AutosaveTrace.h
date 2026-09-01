@@ -63,6 +63,10 @@ typedef enum {
     AUTOSAVE_TRACE_STAGE_SCHEDULED = 'S',
     AUTOSAVE_TRACE_STAGE_ADMITTED = 'A',
     AUTOSAVE_TRACE_STAGE_VALIDATED = 'V',
+    /* Q is the one boot/runtime mounted-source discovery boundary. */
+    AUTOSAVE_TRACE_STAGE_DISCOVERY = 'Q',
+    /* H records final-sync/source-cache/HCNAMES handoff milestones. */
+    AUTOSAVE_TRACE_STAGE_HANDOFF = 'H',
     AUTOSAVE_TRACE_STAGE_MASK_MERGED = 'M',
     AUTOSAVE_TRACE_STAGE_CAPTURED = 'C',
     AUTOSAVE_TRACE_STAGE_PUBLISHED = 'P',
@@ -143,6 +147,26 @@ typedef enum {
      */
     AUTOSAVE_TRACE_STAGE_BANK_PRESENT = 'B',
 } autosave_trace_stage_t;
+
+/*
+ * V/Q discovery flags: bit 0 means a structurally valid winner exists, bit 1
+ * means that winner is Record B, bit 2 means its Bank identity mismatches the
+ * effective resident Bank, and bit 3 means setup/classification failed. The
+ * value is the selected generation, or zero when no winner was accepted.
+ * H flags: bit 0 means pending HCNAMES rows were present, bit 1 means the
+ * target final sync promoted the mounted source, bit 2 means pending clear is
+ * durable, and bit 3 means clear failed while the pre-clear RAM image remains.
+ * The H value is the promoted generation. These names keep filesystem.c free
+ * of magic trace literals while preserving old trace bytes.
+ */
+#define AUTOSAVE_TRACE_DISCOVERY_FLAG_WINNER_EXISTS   (1u << 0u)
+#define AUTOSAVE_TRACE_DISCOVERY_FLAG_WINNER_IS_B     (1u << 1u)
+#define AUTOSAVE_TRACE_DISCOVERY_FLAG_BANK_MISMATCH   (1u << 2u)
+#define AUTOSAVE_TRACE_DISCOVERY_FLAG_SETUP_ERROR     (1u << 3u)
+#define AUTOSAVE_TRACE_HANDOFF_FLAG_PENDING_ROWS      (1u << 0u)
+#define AUTOSAVE_TRACE_HANDOFF_FLAG_TARGET_PROMOTED   (1u << 1u)
+#define AUTOSAVE_TRACE_HANDOFF_FLAG_PENDING_CLEARED   (1u << 2u)
+#define AUTOSAVE_TRACE_HANDOFF_FLAG_CLEAR_FAILED     (1u << 3u)
 
 /*
  * X (PHASE_STALL) flags/value layout. Bits 0..3 select the observer site;

@@ -1,11 +1,12 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-08-31 logging-on Session 059 Gate B build (HEAD `0c90434` plus the
-uncommitted Phase Two source patch).
-`arm-none-eabi-size build/lxr02.elf` reports `text=385,420`, `data=404`, and
-`bss=96,176`; `build/lxr02.bin` is 385,824 B and `build/LXRV2_lxr02.img` is
-385,840 B. The approved 258-byte `fs_resident_source` cache, the one-byte
+2026-09-01 logging-on Session 060 implementation build.
+`arm-none-eabi-size build/lxr02.elf` reports `text=395,476`, `data=404`, and
+`bss=96,216`; `build/lxr02.bin` is 395,880 B and
+`build/LXRV2_lxr02.img` is 395,896 B. The approved 24-byte mounted
+`fs_autosave_source_cache`, the
+258-byte `fs_resident_source` register, the one-byte
 `menu_pendingPageSwitch`, and the Session 058 allocations listed in the
 "2026-08-30 Session 058 net allocation note" all share normal SRAM1. This
 remains a linked-image inventory: sizes come from `arm-none-eabi-size -A` and
@@ -17,7 +18,11 @@ existing eight-byte trace record/ring; the no-op dirty-mark fallback uses only
 the existing canonical mutation mask). Session 057 added a handful of
 operation-scoped scratch bytes (see its note below). Session 058 adds the
 Option 1/2 and fast-drain allocations documented in its note below. Session 059
-Phase One and Phase Two add no retained allocation.
+Phase One and Phase Two add no retained allocation. Session 060 adds the
+explicitly approved 24-byte mounted AutoSave authorization cache; its 96-byte
+instrument-type snapshot borrows the existing 4,608-byte patch-cache value
+area, and save/discovery continuation scalars remain operation-scoped. No
+retained HCNAMES row/name array was added.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -43,12 +48,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 89,908 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **93,008 B** | **283,824 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **105,288 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 89,948 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **93,048 B** | **283,784 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **105,328 B** | — |
 
-The image contains 404 B of initialized SRAM1 data and 96,176 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 89,504 B in normal SRAM1
+The image contains 404 B of initialized SRAM1 data and 96,216 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 89,544 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -56,16 +61,16 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 372,488 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 382,544 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
 | `.data` | `0x20020c1c` | 404 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020da8` | 89,504 B | SRAM1 | Normal zero-initialized globals |
+| `.bss` | `0x20020db0` | 89,544 B | SRAM1 | Normal zero-initialized globals |
 
 The final FLASH load image remains safely before the reserved sample-FLASH
-boundary `0x08080000`. `build/lxr02.bin` is 385,824 B.
+boundary `0x08080000`. `build/lxr02.bin` is 395,880 B.
 
 ## Primary SRAM1 owners
 
@@ -74,6 +79,7 @@ boundary `0x08080000`. `build/lxr02.bin` is 385,824 B.
 | `scenes` | 20,992 B | 16 resident `scene_t` values; each holds one 112-B bitmap `PatternSet` |
 | `fs_list_cache_name` | 9,000 B | Shared typed-Instrument and numbered-library `.hcindex` browser cache |
 | `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved filesystem-owned source cache |
+| `fs_autosave_source_cache` | 24 B | Session 060 mounted v2 winner generation/CRC, Bank identity, source index/probe, and discovery state; card-mount lifetime |
 | `hcnames_name_mirror` | 1,161 B | Session 058 Option 1C dedicated 129-by-9 HCNAMES name mirror (replaces HCNAMES borrowing of `fs_list_cache_name`) |
 | `hcnames_mirror_valid` | 1 B | Session 058 Option 1C tri-state mirror validity gate |
 | `op_bank_child_display` | 144 B | Session 058 Option 1A 16-by-9 Bank-local child display names, captured in one scan |
@@ -140,7 +146,7 @@ arm-none-eabi-readelf -l -W build/lxr02.elf
 ```
 
 For the current logging-on image, conventional `arm-none-eabi-size` reports
-`text=385,420 B`, `data=404 B`, and `bss=96,176 B`. The latter is the combined
+`text=395,476 B`, `data=404 B`, and `bss=96,216 B`. The latter is the combined
 zero-init total across memory regions; `size -A` provides the section split
 above. Regenerate both configurations before a future change that alters
 logging-gated allocations.
@@ -210,6 +216,32 @@ SD-card fixture, raw-sector inspection, reboot/remount run, host FAT check,
 future-size Pattern fixture, or repeatable Bank timing run was performed.
 Source review and the forced ARM build found no expected problem, but hardware
 acceptance is not claimed.
+
+## 2026-09-01 Session 060 AutoSave boot/source-cache allocation note
+
+The clean logging-on Session 060 link reports `text=395,476 B`, `data=404 B`,
+and `bss=96,216 B` (`dec=492,096`). Compared with the Session 059 close-out
+figures above, the linked image adds 10,112 B of text and 40 B of combined
+zero-initialized RAM; initialized data is unchanged. `size -A` reports
+`.text=382,544`, `.itcm=3,768`, `.dma_nocache=3,100`, `.data=404`,
+`.bss=89,544`, `.dtcm=8,708`, `.dtcmz=3,572`, and `.devwdg_noinit=0`.
+The generated firmware is 395,880 B and the packaged image is 395,896 B.
+
+The only newly retained S060 cache is `fs_autosave_source_cache` at exactly
+24 B in normal SRAM1 (`0x200216b0`), owned by `filesystem.c` for the mounted
+card lifetime. The existing 258-byte `fs_resident_source` register remains
+the packed 129-row source authority; the existing 1,161-byte HCNAMES mirror,
+2,048-byte stage workspace, 4,608-byte AutoSave patch cache, and diagnostic
+trace ring are reused. The 96-byte initial-record Instrument-type snapshot is
+borrowed from the patch-cache value area, and the save/discovery continuation
+fields are operation-scoped. No retained Menu per-row name/dirty array was
+added, and no Pattern-reserved SRAM1 or delay-line-reserved DTCM was used.
+
+The build also regenerated the v2 image with the exact 35,026-byte record and
+258-byte source-table contract. Python syntax checks, verifier CLI smoke check,
+`git diff --check`, and the ARM clean build passed. No SD-card fixture or
+hardware reboot/remount test was available in the repository, so hardware
+acceptance is not claimed here.
 
 ## 2026-08-28 Session 057 net allocation note
 

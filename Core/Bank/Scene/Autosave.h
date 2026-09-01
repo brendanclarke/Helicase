@@ -34,7 +34,7 @@
 #define AUTOSAVE_HEADER_CRC32C_OFFSET        12u
 /* One-byte writer witness; generation, not this wrapping byte, selects A/B. */
 #define AUTOSAVE_HEADER_PROBE_COUNTER_OFFSET 16u
-#define AUTOSAVE_HEADER_FORMAT_VERSION        1u
+#define AUTOSAVE_HEADER_FORMAT_VERSION        2u
 #define AUTOSAVE_HEADER_COMMIT_VALID        0xa5u
 
 /*
@@ -42,9 +42,10 @@
  *
  * The 3,856-byte mutation mask has one bit for each byte in the 30,848-byte
  * payload. Inputs are the requested 128-byte Bank plus sixteen 1,920-byte
- * Scenes. Output is one exact 34,768-byte wire record including the 64-byte
- * header. Initial creation clears every bit and parameter byte; runtime drain
- * copy-forwards the mask while clearing only sampled/nonexistent positions.
+ * Scenes. v2 appends a 258-byte source table, making one exact 35,026-byte
+ * wire record including the 64-byte header. Initial creation writes the
+ * deterministic source/type snapshot; runtime drain copy-forwards the mask
+ * and source table while clearing only sampled/nonexistent positions.
  */
 #define AUTOSAVE_MASK_BYTES                3856u
 #define AUTOSAVE_BANK_SECTION_BYTES         128u
@@ -58,12 +59,34 @@
 #define AUTOSAVE_PAYLOAD_BYTES \
     (AUTOSAVE_BANK_SECTION_BYTES + \
      (AUTOSAVE_SCENE_COUNT * AUTOSAVE_SCENE_SECTION_BYTES))
-#define AUTOSAVE_RECORD_BYTES \
-    (AUTOSAVE_HEADER_BYTES + AUTOSAVE_MASK_BYTES + AUTOSAVE_PAYLOAD_BYTES)
 
 #define AUTOSAVE_NAME_BYTES                   8u
 #define AUTOSAVE_HCNAMES_ROW_COUNT           129u
 #define AUTOSAVE_HCNAMES_ROW_BYTES             9u
+
+/*
+ * v2 appends the compact HCNAMES provenance table after the unchanged
+ * header/mask/payload image. Inputs are logical source values; output is two
+ * little-endian bytes per fixed resident row. Why: the mounted writer keeps
+ * only record identity and CRC in its approved cache while source provenance
+ * remains part of the validated copy-forward stream. Affiliates: filesystem.c
+ * discovery, HCNAMES, and the transform.
+ */
+#define AUTOSAVE_SOURCE_DIRECT_MAX          999u
+#define AUTOSAVE_SOURCE_INHERIT            1000u
+#define AUTOSAVE_SOURCE_UNKNOWN             1001u
+#define AUTOSAVE_SOURCE_INSTRUMENT_DIRECT   1002u
+#define AUTOSAVE_SOURCE_TABLE_ENTRY_BYTES      2u
+#define AUTOSAVE_SOURCE_TABLE_BYTES \
+    (AUTOSAVE_HCNAMES_ROW_COUNT * AUTOSAVE_SOURCE_TABLE_ENTRY_BYTES)
+#define AUTOSAVE_SOURCE_TABLE_OFFSET \
+    (AUTOSAVE_HEADER_BYTES + AUTOSAVE_MASK_BYTES + AUTOSAVE_PAYLOAD_BYTES)
+#define AUTOSAVE_RECORD_BYTES_V1 \
+    (AUTOSAVE_HEADER_BYTES + AUTOSAVE_MASK_BYTES + AUTOSAVE_PAYLOAD_BYTES)
+#define AUTOSAVE_RECORD_BYTES \
+    (AUTOSAVE_SOURCE_TABLE_OFFSET + AUTOSAVE_SOURCE_TABLE_BYTES)
+#define AUTOSAVE_RESIDENT_INSTRUMENT_TYPE_COUNT \
+    (AUTOSAVE_SCENE_COUNT * AUTOSAVE_INSTRUMENTS_PER_KIT)
 
 /* HCNAMES' fixed Bank / Scene / Kit / Instrument row ownership. */
 #define AUTOSAVE_HCNAMES_SCENE_BASE            1u
@@ -192,8 +215,12 @@ _Static_assert(AUTOSAVE_MASK_BYTES * 8u == AUTOSAVE_PAYLOAD_BYTES,
                "autosave mask must cover exactly the Bank/Scene payload");
 _Static_assert(AUTOSAVE_PAYLOAD_BYTES == 30848u,
                "autosave payload size is a fixed wire contract");
-_Static_assert(AUTOSAVE_RECORD_BYTES == 34768u,
-               "autosave record size is a fixed wire contract");
+_Static_assert(AUTOSAVE_RECORD_BYTES_V1 == 34768u,
+               "autosave v1 record size is a fixed wire contract");
+_Static_assert(AUTOSAVE_SOURCE_TABLE_BYTES == 258u,
+               "autosave source table must cover 129 uint16_t rows");
+_Static_assert(AUTOSAVE_RECORD_BYTES == 35026u,
+               "autosave v2 record size is a fixed wire contract");
 _Static_assert(AUTOSAVE_PAYLOAD_BYTES <= UINT16_MAX,
                "autosave patch offsets must fit uint16_t");
 _Static_assert(AUTOSAVE_HEADER_CRC32C_OFFSET + 4u <= AUTOSAVE_HEADER_BYTES,
@@ -246,8 +273,10 @@ _Static_assert(AUTOSAVE_KIT_PARAM_COUNT <=
  * Format one initial sequential record chunk.
  *
  * Inputs: caller-owned destination interval, generation, Bank restore slot,
- * precomputed CRC, Bank name, and complete HCNAMES rows. Output: deterministic
- * header/slot/name bytes with zero mask, parameters, Effects, and padding.
+ * precomputed CRC, Bank name, HCNAMES names, logical sources, present-Scene
+ * mask, and the 96-entry registry type snapshot. Output: deterministic
+ * header, recovery mask, identity payload, source table, and type bytes;
+ * HCNAMES-owned name cells and reserved cells remain clean.
  * `crc32c` must come from a completed autosave_initialRecordCrcUpdate()
  * sequence with identical identity inputs. This helper owns no storage and
  * performs no I/O.
@@ -261,7 +290,11 @@ void autosave_formatInitialChunk(
     uint32_t crc32c,
     const char bank_name[AUTOSAVE_NAME_BYTES],
     const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
-                             [AUTOSAVE_HCNAMES_ROW_BYTES]);
+                             [AUTOSAVE_HCNAMES_ROW_BYTES],
+    const uint16_t sources[AUTOSAVE_HCNAMES_ROW_COUNT],
+    uint16_t present_scene_mask,
+    const uint8_t instrument_types[
+        AUTOSAVE_RESIDENT_INSTRUMENT_TYPE_COUNT]);
 
 /*
  * Update the deterministic creation image's CRC32C by one bounded interval.
@@ -284,14 +317,19 @@ uint32_t autosave_initialRecordCrcUpdate(
     uint16_t bank_slot,
     const char bank_name[AUTOSAVE_NAME_BYTES],
     const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
-                             [AUTOSAVE_HCNAMES_ROW_BYTES]);
+                             [AUTOSAVE_HCNAMES_ROW_BYTES],
+    const uint16_t sources[AUTOSAVE_HCNAMES_ROW_COUNT],
+    uint16_t present_scene_mask,
+    const uint8_t instrument_types[
+        AUTOSAVE_RESIDENT_INSTRUMENT_TYPE_COUNT]);
 
 /*
  * Caller-owned state for validating one sequential record stream.
  *
- * It retains only parsed header/Bank identity and a CRC accumulator. The
- * filesystem writer places it in its operation stage, so validating either
- * 34,768-byte candidate never requires a record-sized SRAM image.
+ * It retains parsed header/Bank identity, source-table values, and a CRC
+ * accumulator. The filesystem writer places it in its existing operation
+ * stage, so validating either 35,026-byte candidate never requires a
+ * record-sized SRAM image.
  */
 typedef struct {
     uint32_t crc32c;
@@ -299,6 +337,7 @@ typedef struct {
     uint32_t generation;
     uint32_t bytes_seen;
     char bank_name[AUTOSAVE_NAME_BYTES];
+    uint16_t sources[AUTOSAVE_HCNAMES_ROW_COUNT];
     uint16_t bank_slot;
     uint8_t probe_counter;
     uint8_t header_valid;
@@ -475,11 +514,12 @@ uint8_t autosave_generationIsNewer(uint32_t candidate, uint32_t reference);
 /*
  * Transform one record chunk for the single parameter-drain output stream.
  *
- * Inputs: source chunk/absolute range, next generation/probe, sorted payload
- * offset/value patches, and a caller-owned patch cursor. Output: header
- * intersections describe the prospective final record with zero CRC and valid
- * commit, mask bytes come from the canonical SRAM record, captured payload
- * values are substituted, and every other payload byte remains copy-forwarded.
+ * Inputs: source chunk/absolute range, next generation/probe, mounted HCNAMES
+ * names/sources, sorted payload offset/value patches, and a caller-owned patch
+ * cursor. Output: header intersections describe the prospective final record
+ * with zero CRC and valid commit, mask bytes come from canonical SRAM,
+ * HCNAMES names/sources are overlaid, captured payload values are substituted,
+ * and every other payload byte remains copy-forwarded.
  * filesystem.c updates CRC from this exact chunk and then physically clears
  * the staged commit byte until post-copy CRC publication is durable.
  */
@@ -489,6 +529,9 @@ void autosave_transformDrainChunk(
     uint16_t byte_count,
     uint32_t generation,
     uint8_t probe_counter,
+    const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
+                             [AUTOSAVE_HCNAMES_ROW_BYTES],
+    const uint16_t sources[AUTOSAVE_HCNAMES_ROW_COUNT],
     const uint16_t *patch_offsets,
     const uint8_t *patch_values,
     uint16_t patch_count,

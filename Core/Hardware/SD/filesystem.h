@@ -45,6 +45,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "Autosave.h"
 #include "InstrumentManager.h"
 #include "SceneData.h"
 
@@ -238,11 +239,12 @@ void        filesystem_initAfterCardReady(void);
  * when no resident Bank exists, return success without card I/O; otherwise
  * read HCNAMES and create only absent `/.hcprms1` or `/.hcprms2` records.
  *
- * New records are exact 34,768-byte baselines: a 64-byte validation header,
- * 3,856-byte mutation mask, 128-byte Bank section, and sixteen 1,920-byte
- * Scenes. Creation writes the current two-byte Bank restore slot plus names,
- * with mask/parameters/Effects/padding zero; `/.hcprms1` begins as the current
- * valid generation. An existing matching object is never opened for write.
+ * New records are exact 35,026-byte v2 baselines: a 64-byte validation header,
+ * 3,856-byte mutation mask, 128-byte Bank section, sixteen 1,920-byte Scenes,
+ * and a 258-byte logical source table. Creation writes the current two-byte
+ * Bank restore slot plus names/sources, with the recovery mask matching the
+ * existing whole-Bank live geometry; `/.hcprms1` begins as the current valid
+ * generation. An existing matching object is never opened for write.
  *
  * A successful return enables retained-owner dirty production and authorizes
  * filesystem_tick()'s private parameter drain. Mutation tracking is disabled
@@ -389,6 +391,17 @@ void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
 const char *filesystem_errorCode(void);
 void        filesystem_ack(void);
+/*
+ * Latch one boot HCNAMES component failure for the existing UI/error path.
+ * What: records the affected Scene/component without allocating a second
+ * failure table. Why: a failed direct/inherited source must reset only its
+ * Scene and remain distinguishable from a global filesystem setup error.
+ * Inputs: bounded Scene index and component selector. Output: existing boot
+ * diagnostic/error state only; no filesystem I/O. Affiliate: main.c's bounded
+ * HCNAMES reconstruction.
+ */
+void        filesystem_noteBootHcnamesComponentFailure(uint8_t scene_index,
+                                                       uint8_t component);
 
 /*
  * Select and observe the bounded runtime fast-drain policy.
@@ -549,7 +562,10 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
  * child Scene was supplied. Runtime Bank Load never recursively quarantines
  * unselected embedded Kits; the shared Scene payload reader validates each
  * selected child before committing it, preserving the single callback and the
- * flexible declared Instrument/LFO payload mapping.
+ * flexible declared Instrument/LFO payload mapping. For a successful Bank
+ * Load, HCNAMES is durably published first, then the existing settings.cfg
+ * writer is chained and synced before this callback is released, so the new
+ * active_bank and Bank-row source cannot be observed in separate boot states.
  */
 bool filesystem_requestLoadBank(uint16_t slot,
                                 uint16_t scene_mask,
@@ -620,6 +636,19 @@ enum {
     FS_IDENTITY_ROW_COUNT = FS_IDENTITY_INSTRUMENT_ROW_0 + 6u,
 };
 
+/* Fixed HCNAMES row geometry shared by the boot reconciler and filesystem.
+ * What: maps Bank/Scene/Kit/Instrument logical coordinates to 129 rows. Why:
+ * source reconstruction must address the dedicated mirror without owning a
+ * second mapping table. Inputs: resident Scene/voice coordinates. Outputs:
+ * stable row indices only; these are not byte offsets. Affiliates: parser,
+ * formatter, source accessors, and main.c boot reconciliation. */
+#define FS_RESIDENT_NAMES_KIT_BASE        (1u + SCENE_COUNT)
+#define FS_RESIDENT_NAMES_INSTRUMENT_BASE \
+    (FS_RESIDENT_NAMES_KIT_BASE + SCENE_COUNT)
+#define FS_RESIDENT_NAMES_ROW_COUNT \
+    (FS_RESIDENT_NAMES_INSTRUMENT_BASE + \
+     (SCENE_COUNT * INSTRUMENT_SLOT_COUNT))
+
 /*
  * Root HCNAMES provenance tokens.
  *
@@ -628,15 +657,86 @@ enum {
  * Bank; UNKNOWN requests ordinary boot fallback; INSTRUMENT_DIRECT uses the
  * row stem plus the committed type rather than an unstable browser index.
  */
-#define FS_RESIDENT_SOURCE_INHERIT           0x7fffu
-#define FS_RESIDENT_SOURCE_UNKNOWN           0x7ffeu
-#define FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT 0x7ffdu
+#define FS_RESIDENT_SOURCE_DIRECT_MAX        AUTOSAVE_SOURCE_DIRECT_MAX
+#define FS_RESIDENT_SOURCE_INHERIT           AUTOSAVE_SOURCE_INHERIT
+#define FS_RESIDENT_SOURCE_UNKNOWN           AUTOSAVE_SOURCE_UNKNOWN
+#define FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT AUTOSAVE_SOURCE_INSTRUMENT_DIRECT
+#define FS_RESIDENT_SOURCE_VALUE_MASK        0x03ffu
+#define FS_RESIDENT_SOURCE_TYPE_SHIFT        10u
+#define FS_RESIDENT_SOURCE_TYPE_MASK         0x1c00u
+#define FS_RESIDENT_SOURCE_RESERVED_FLAG     0x2000u
+#define FS_RESIDENT_SOURCE_PENDING_FLAG      0x4000u
+#define FS_RESIDENT_SOURCE_DIRTY_FLAG        0x8000u
 
-/* Read, stage, or resolve one logical HCNAMES source without direct file I/O. */
+/*
+ * Read, stage, or resolve one logical HCNAMES source without direct file I/O.
+ * Source accessors mask transient rewrite state; compound metadata updates
+ * validate the row class, optional Instrument type, and pending bit as one
+ * word. What: the packed 16-bit resident register contract. Why: source/type/
+ * pending must cross a load/save handoff atomically without a second cache.
+ * Inputs: fixed HCNAMES row and validated logical values. Outputs: masked
+ * logical values or one dirty packed word; no filesystem I/O. Accessors:
+ * these functions and filesystem_residentName(). Affiliates: the HCNAMES
+ * parser/formatter, Autosave v2 source table, Menu, and boot reconciliation.
+ */
 uint16_t filesystem_residentSource(uint16_t row);
 uint8_t filesystem_setResidentSource(uint16_t row, uint16_t source);
+uint8_t filesystem_residentInstrumentType(uint16_t row,
+                                          instrument_type_t *type);
+uint8_t filesystem_residentPendingAutosave(uint16_t row);
+uint8_t filesystem_setResidentMetadata(uint16_t row, uint16_t source,
+                                        uint8_t type_valid,
+                                        instrument_type_t type,
+                                        uint8_t pending);
 uint16_t filesystem_resolveResidentSource(uint16_t row,
                                           uint16_t *resolved_row);
+/* Borrow one generic eight-cell HCNAMES row from the dedicated boot mirror. */
+const char *filesystem_residentName(uint16_t row);
+
+/*
+ * Discover the mounted AutoSave source before audio starts.
+ *
+ * What: performs one blocking root probe/validation pass and publishes the
+ * selected v2 record's generation/CRC and HCNAMES recovery mode into the
+ * filesystem-owned 24-byte mounted cache. Why: normal parameter drains then
+ * begin from that authorization and never re-probe A/B. Inputs: effective
+ * Bank slot/name. Outputs: nonzero when setup is usable; completion/status
+ * accessors distinguish absent/invalid records from terminal I/O failure.
+ * Affiliates: main boot, runtime Q rediscovery, and AutoSave scheduling.
+ */
+uint8_t filesystem_discoverAutosaveBlocking(uint16_t bank_slot,
+                                            const char bank_name[8]);
+uint8_t filesystem_autosaveDiscoveryComplete(void);
+/* Return whether discovery completed with an ambiguous/terminal setup error. */
+uint8_t filesystem_autosaveSetupError(void);
+uint8_t filesystem_autosaveSourceValid(void);
+uint8_t filesystem_autosaveSourceMatchesBank(uint16_t bank_slot,
+                                             const char bank_name[8]);
+/*
+ * Report a valid matching HCNAMES recovery image independently of A/B winner
+ * validity. A true result authorizes boot Scene -> Kit -> typed Instrument
+ * reconstruction; both hidden records may still be recovered later.
+ */
+uint8_t filesystem_hcnamesRecoveryAvailable(uint16_t bank_slot,
+                                             const char bank_name[8]);
+/* Report whether boot currently suppresses normal HCNAMES publication. */
+uint8_t filesystem_bootHcnamesReconstructionActive(void);
+/* Report whether that boot gate is preserving an already valid HCNAMES image. */
+uint8_t filesystem_bootHcnamesPreserveActive(void);
+/* Report whether boot must leave HCNAMES physically untouched after setup error. */
+uint8_t filesystem_bootHcnamesPublicationSuppressed(void);
+/*
+ * Set or clear the boot-only HCNAMES reconstruction gate.
+ *
+ * What: owns the active preserve/rebuild/suppress mode around the baseline
+ * Bank load and its Scene -> Kit -> typed Instrument source reconciliation.
+ * Why: child loads must not publish a second register, and setup-error evidence
+ * must never authorize an ambiguous create/write. Input is nonzero before the
+ * effective Bank load and zero on every terminal boot path; output is compact
+ * mounted-cache state only, with no filesystem I/O. Affiliates: main.c,
+ * filesystem_hcnamesRecoveryAvailable(), and the HCNAMES writer.
+ */
+void filesystem_setBootHcnamesReconstruction(uint8_t active);
 
 void filesystem_setIdentityName(uint8_t row, const char name[8]);
 const char *filesystem_identityName(uint8_t row);
@@ -647,7 +747,7 @@ const char *filesystem_identityName(uint8_t row);
  * before return, or NULL for an invalid selector. Why: character editing must
  * modify the authoritative operation copy directly instead of allocating a
  * second nine-byte edit buffer. Affiliates: menu_instrumentSaveName and the
- * deferred HCNAMES update at menu exit.
+ * targeted stable-selection HCNAMES update after the owning index commit.
  */
 char *filesystem_identityNameMutable(uint8_t row);
 void filesystem_clearIdentityNames(void);
@@ -675,7 +775,20 @@ bool filesystem_requestLoadResidentInstrumentName(uint8_t scene_index,
 bool filesystem_requestUpdateResidentInstrumentNames(
     uint16_t scene_mask,
     uint8_t instrument_slot,
+    const char name[8],
+    instrument_type_t type,
     fs_completion_cb_t cb);
+/*
+ * Resolve one HCNAMES Instrument `@` stem to an exact typed index row.
+ * What: searches only the selected registered Instrument type for one exact
+ * stem. Why: boot reconstruction must not substitute a same-slot or another
+ * type when a durable HCNAMES identity is unavailable. Inputs are the active
+ * typed index, type, and normalized eight-cell stem; output writes
+ * browser_index only for exactly one match and performs no I/O.
+ */
+uint8_t filesystem_findExactInstrumentStem(instrument_type_t type,
+                                           const char stem[8],
+                                           uint16_t *browser_index);
 /*
  * Borrow the selected eight-cell Instrument name after either request above.
  * The pointer is valid only while HCNAMES owns the shared cache; copy it before
@@ -689,21 +802,35 @@ const char *filesystem_residentInstrumentName(uint8_t scene_index,
  * The load request mirrors Instrument menu entry: it borrows the generalized
  * cache for all 129 root HCNAMES rows so Menu can copy one resident Scene's Kit
  * name plus all six Instrument names before `/Kit/.hcindex` replaces that same
- * allocation. Menu retains those seven rows for the complete combined
- * Kit/Instrument session. Loads and saves only update the Menu scratch and an
- * accumulated dirty-Scene mask; they do not reopen HCNAMES. At session exit,
- * one update request replaces exactly the Kit row plus all six Instrument rows
- * for every bit in scene_mask from committed resident state, while preserving
- * every other logical row read from the variable-length file. A successful
- * request makes those seven rows
+ * allocation. Stable load/apply and filesystem Save tails issue targeted
+ * updates directly; Menu retains the seven display rows only for editing and
+ * does not batch them at page exit. Each update request replaces exactly the
+ * Kit row plus all six Instrument rows for every bit in scene_mask from
+ * committed resident state, while preserving every other logical row read from
+ * the variable-length file. A successful request makes those seven rows
  * authoritative even when the source Scene's Bank-present bit is clear; this
  * prevents a valid Kit Save from serializing its new Kit name as a blank row.
- * Both requests are asynchronous, return false for busy/invalid input, and
- * allocate no additional persistent SRAM.
+ * source_slot accepts a direct 0..999 Kit source or
+ * FS_RESIDENT_SOURCE_INHERIT for a root Scene's inherited Kit hierarchy. Both
+ * requests are asynchronous, return false for busy/invalid input, and allocate
+ * no additional persistent SRAM; emitted updates set pending=1.
  */
 bool filesystem_requestLoadResidentKitName(uint8_t scene_index,
                                            fs_completion_cb_t cb);
 bool filesystem_requestUpdateResidentKitNames(uint16_t scene_mask,
+                                              uint16_t source_slot,
+                                              fs_completion_cb_t cb);
+/*
+ * Publish one committed root Bank identity after its `.hcindex` is durable.
+ * What: updates only HCNAMES row zero with the exact Bank name/source and
+ * runs the normal final-sync gate. Why: Bank Save ordering is object -> index
+ * -> HCNAMES -> settings/callback, so the callback cannot expose a half-chain.
+ * Inputs: direct 0..999 Bank source, eight-cell name, callback. Output: one
+ * asynchronous durable update; no browser cache or extra SRAM. Affiliates:
+ * filesystem_completeLibraryIndexRebuild() and Bank Save completion.
+ */
+bool filesystem_requestUpdateResidentBankName(uint16_t source_slot,
+                                              const char name[8],
                                               fs_completion_cb_t cb);
 /*
  * Borrow the selected eight-cell Kit name after either Kit request above.
@@ -730,6 +857,7 @@ bool filesystem_requestLoadResidentSceneName(uint8_t scene_index,
 bool filesystem_requestUpdateResidentSceneNames(
     uint16_t scene_mask,
     const char name[8],
+    uint16_t source_slot,
     fs_completion_cb_t cb);
 /* Borrow the requested Scene row while HCNAMES owns the shared cache. */
 const char *filesystem_residentSceneName(uint8_t scene_index);
@@ -1033,7 +1161,7 @@ const char *filesystem_instrumentName(instrument_type_t type,
  * the filename stem padded and NUL-terminated, never its extension. This
  * derives presentation text from the one `.hcindex` cache row and stores no
  * additional filename/key. Affiliates: nested Instrument Load display and
- * preview finalization before the existing HCNAMES exit-time write.
+ * preview finalization before the targeted stable-selection HCNAMES write.
  */
 void filesystem_copyInstrumentDisplayName(char destination[9],
                                           instrument_type_t type,

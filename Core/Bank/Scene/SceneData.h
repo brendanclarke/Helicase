@@ -238,6 +238,13 @@ extern scene_t scenes[SCENE_COUNT];
  */
 void scene_initAll(void);
 /*
+ * Reset exactly one resident Scene to the same defaults as scene_initAll().
+ * Input is a validated Scene index; invalid indices are ignored. The helper
+ * changes no Bank-present bit and is intended for boot HCNAMES reconstruction,
+ * where mutation tracking is disabled by the caller.
+ */
+void scene_resetOne(uint8_t scene_index);
+/*
  * Validate a resident Scene index.
  *
  * Input: candidate Scene index. Output: nonzero when it is within the current

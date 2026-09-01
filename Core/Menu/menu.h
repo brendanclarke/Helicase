@@ -347,9 +347,10 @@ void menu_loadInstrumentExit(void);
  * context owns the press; Kit/Scene Load toggles the selected-scene mask while
  * Kit Save and Instrument Load/Save select resident source/destination Scenes.
  * A full Kit request locks later presses only through payload commit/runtime
- * apply; its seven resident names are held in Menu scratch until the later
- * family exit. Changing the scratch Scene is itself an exit/entry boundary and
- * flushes any accumulated dirty Scenes before reading the new seven rows.
+ * apply; its seven resident names are held in Menu scratch for browsing while
+ * the accepted request publishes its targeted HCNAMES rows at stable apply.
+ * Changing the scratch Scene discards only that display block before reading
+ * the new seven rows; it never owns a deferred persistence mask.
  * Clients: buttonHandler's foreground press dispatcher.
  * Menu owns this decision because it also owns mode, LCD cursor, and Scene LED
  * state; ButtonHandler remains a gesture router rather than duplicating those

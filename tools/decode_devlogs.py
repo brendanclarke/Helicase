@@ -113,6 +113,8 @@ STAGE_ENUM = {
     "O": "AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE",
     "E": "AUTOSAVE_TRACE_STAGE_OPERATION_ERROR",
     "Y": "AUTOSAVE_TRACE_STAGE_SCAN_PARENT_DIAG",
+    "Q": "AUTOSAVE_TRACE_STAGE_DISCOVERY",
+    "H": "AUTOSAVE_TRACE_STAGE_HANDOFF",
 }
 
 STAGE_PRODUCER = {
@@ -123,7 +125,7 @@ STAGE_PRODUCER = {
     "L": "autosave_markKitDirty() / autosave_markSceneWithoutPatternDirty()",
     "S": "filesystem_autosaveWriterSchedule_tick()",
     "A": "filesystem_autosaveWriterSchedule_tick()",
-    "V": "filesystem_autosaveParameterDrain_tick()",
+    "V": "filesystem_autosaveDiscovery_tick() -- boot discovery",
     "M": "filesystem_autosaveParameterDrain_tick()",
     "C": "filesystem_autosaveTraceCaptured()",
     "P": "filesystem_autosaveParameterDrain_tick()",
@@ -146,7 +148,11 @@ STAGE_PRODUCER = {
          "delete's failure site was SCAN_PARENT_FOR_SELF_EXHAUSTED; that "
          "producer no longer exists (the bug it was diagnosing was fixed "
          "by eliminating the code path), kept only to decode already-"
-         "captured Session 054 evidence",
+                       "captured Session 054 evidence",
+    "Q": "filesystem_autosaveDiscovery_tick() -- one mounted HCNAMES/A/B "
+         "classification pass before runtime drain admission",
+    "H": "filesystem_autosaveParameterDrain_tick() -- post-target "
+         "HCNAMES pending-clear continuation",
 }
 
 PHASE_STALL_SITES = {
@@ -205,6 +211,7 @@ FS_INTERNAL_OPS = [
     "FS_INTERNAL_OP_UPDATE_HCNAMES_KIT",
     "FS_INTERNAL_OP_LOAD_HCNAMES_SCENE",
     "FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE",
+    "FS_INTERNAL_OP_UPDATE_HCNAMES_BANK",
     "FS_INTERNAL_OP_LOAD_KIT",
     "FS_INTERNAL_OP_LOAD_KIT_MORPH",
     "FS_INTERNAL_OP_LOAD_SCENE",
@@ -234,6 +241,7 @@ FS_INTERNAL_OPS = [
     "FS_INTERNAL_OP_LOAD_NAME",
     "FS_INTERNAL_OP_LOAD_INDEX",
     "FS_INTERNAL_OP_LOAD_LIBRARY_INDEX",
+    "FS_INTERNAL_OP_AUTOSAVE_DISCOVERY",
 ]
 # NOTE: keep this list in sync with the fs_internal_op_t enum in
 # filesystem.c by hand -- there is no automatic extraction here. If a
@@ -492,7 +500,10 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         detail = (f"{enum_name} via {producer}: "
                   f"winner_exists={int(has_winner)}, "
                   f"winner={winner if has_winner else 'none'}, "
-                  f"winner generation={value}")
+                  f"winner generation={value}; flags: "
+                  f"WINNER_IS_B={int(bool(flags & 0x02))} "
+                  f"BANK_MISMATCH={int(bool(flags & 0x04))} "
+                  f"SETUP_ERROR={int(bool(flags & 0x08))}")
     elif ch == "M":
         dirty = bool(flags)
         detail = (f"{enum_name} via {producer}: post-merge canonical mask "
@@ -632,6 +643,22 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
             detail += (", last directory candidate matched on BOTH SFN "
                        "pointer and cluster (unexpected at EXHAUSTED -- a "
                        "full match should have retired immediately)")
+    elif ch == "Q":
+        winner_exists = bool(flags & 0x01)
+        winner = "B (.hcprms2)" if (flags & 0x02) else "A (.hcprms1)"
+        detail = (f"{enum_name} via {producer}: winner_exists="
+                  f"{int(winner_exists)}, winner="
+                  f"{winner if winner_exists else 'none'}, "
+                  f"generation={value}; flags: "
+                  f"WINNER_IS_B={int(bool(flags & 0x02))} "
+                  f"BANK_MISMATCH={int(bool(flags & 0x04))} "
+                  f"SETUP_ERROR={int(bool(flags & 0x08))}")
+    elif ch == "H":
+        detail = (f"{enum_name} via {producer}: pending_rows="
+                  f"{int(bool(flags & 0x01))}, target_promoted="
+                  f"{int(bool(flags & 0x02))}, pending_cleared="
+                  f"{int(bool(flags & 0x04))}, clear_failed="
+                  f"{int(bool(flags & 0x08))}, generation={value}")
     else:
         detail = f"{enum_name}: no decoder for this stage"
 

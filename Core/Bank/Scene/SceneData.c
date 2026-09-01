@@ -560,44 +560,50 @@ uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index)
                  : 0u;
 }
 
-void scene_initAll(void)
+static void scene_resetOneInternal(uint8_t scene_index)
 {
-    uint8_t scene_index;
     uint8_t track;
     static const instrument_type_t initial_types[INSTRUMENT_SLOT_COUNT] = {
         INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM,
         INSTRUMENT_TYPE_SNR, INSTRUMENT_TYPE_CYM, INSTRUMENT_TYPE_HAT
     };
 
-    /*
-     * Initialize each complete resident owner.
-     *
-     * Processing clears stale bytes, establishes safe Scene settings, and
-     * resets all six slots through descriptors, then asks PatternData to apply
-     * its step/track defaults inside the same Scene record.
-     */
+    memset(&scenes[scene_index], 0, sizeof(scenes[scene_index]));
+    scenes[scene_index].settings.voice_decimation_all = 127u;
+    for (track = 0u; track < NUM_TRACKS; track++)
+        scenes[scene_index].settings.midi_channel[track] =
+            (uint8_t)(track + 1u);
+    for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++) {
+        /* Scene-owned mix defaults remain independent of Instrument reset. */
+        scenes[scene_index].settings.audio_out[track] =
+            scene_defaultVoiceAudioOut(track);
+        scenes[scene_index].settings.fx_send_amount[track] = 0u;
+        scenes[scene_index].settings.fader_setting[track] = 0u;
+    }
+    for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++)
+        instrumentManager_resetSlot(
+            &scenes[scene_index].kit.instruments[track],
+            initial_types[track]);
+    pat_initScene(scene_index);
+}
+
+void scene_resetOne(uint8_t scene_index)
+{
+    /* Boot reconstruction uses this isolated default reset after one source
+     * component fails; no Bank presence or active-scene state is touched. */
+    if (scene_index >= SCENE_COUNT)
+        return;
+    scene_resetOneInternal(scene_index);
+}
+
+void scene_initAll(void)
+{
+    uint8_t scene_index;
+
+    /* Keep whole-array initialization byte-identical while sharing the
+     * single-Scene reset needed by HCNAMES reconstruction. */
     memset(scenes, 0, sizeof(scenes));
     scene_active_index = 0u;
-    for (scene_index = 0u; scene_index < SCENE_COUNT; scene_index++) {
-        scenes[scene_index].settings.voice_decimation_all = 127u;
-        for (track = 0u; track < NUM_TRACKS; track++)
-            scenes[scene_index].settings.midi_channel[track] =
-                (uint8_t)(track + 1u);
-        for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++) {
-            /*
-             * Initialize Scene-owned per-voice mix settings before any SD
-             * load. These are separate from instrument reset because changing
-             * the instrument type in a slot must not reset Scene mix state.
-             */
-            scenes[scene_index].settings.audio_out[track] =
-                scene_defaultVoiceAudioOut(track);
-            scenes[scene_index].settings.fx_send_amount[track] = 0u;
-            scenes[scene_index].settings.fader_setting[track] = 0u;
-        }
-        for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++)
-            instrumentManager_resetSlot(
-                &scenes[scene_index].kit.instruments[track],
-                initial_types[track]);
-        pat_initScene(scene_index);
-    }
+    for (scene_index = 0u; scene_index < SCENE_COUNT; scene_index++)
+        scene_resetOneInternal(scene_index);
 }

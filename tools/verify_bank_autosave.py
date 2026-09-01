@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Read-only validator for one copied Bank/AutoSave card fixture.
 
-The validator checks the selected Bank tree against /.hcnames, settings.cfg,
-and the newer valid .hcprms A/B record. It never writes the card root. The
-wire offsets intentionally mirror Autosave.h so a failure prints the raw Bank
-section needed to distinguish a bad field from a bad offset.
+The validator checks the selected Bank tree against the v2 /.hcnames source
+register, settings.cfg, and the newer valid .hcprms A/B record. It never writes
+the card root. The wire offsets intentionally mirror Autosave.h so a failure
+prints the raw Bank section needed to distinguish a bad field from a bad
+offset.
 """
 
 from __future__ import annotations
@@ -15,7 +16,9 @@ import sys
 from pathlib import Path
 
 
-RECORD_BYTES = 34768
+RECORD_BYTES = 35026
+SOURCE_TABLE_OFFSET = 34768
+HCNAMES_ROWS = 129
 BANK_OFFSET = 3920
 BANK_SECTION_BYTES = 128
 SCENE_OFFSET = 4048
@@ -23,6 +26,12 @@ SCENE_BYTES = 1920
 SCENE_COUNT = 16
 INSTRUMENTS_PER_KIT = 6
 COMMIT_VALID = 0xA5
+SOURCE_INHERIT = 1000
+SOURCE_UNKNOWN = 1001
+SOURCE_INSTRUMENT_DIRECT = 1002
+SOURCE_TEXT = {"-": SOURCE_INHERIT, "?": SOURCE_UNKNOWN,
+               "@": SOURCE_INSTRUMENT_DIRECT}
+INSTRUMENT_TYPES = {"drm", "snr", "cym", "hat"}
 
 
 def crc32c(data: bytes) -> int:
@@ -59,13 +68,40 @@ def parse_numbered(name: str, width: int) -> tuple[int, str] | None:
     return int(match.group(1)), match.group(2).strip()
 
 
-def parse_hcnames(path: Path) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
+def parse_hcnames(path: Path) -> list[tuple[str, int, str | None, bool]]:
+    """Parse v2 rows while accepting the documented ON compatibility forms."""
+    rows: list[tuple[str, int, str | None, bool]] = []
     for line in path.read_text(encoding="ascii").splitlines():
         fields = line.split("\t")
-        if len(fields) != 2:
+        if len(fields) not in (1, 2, 4):
             raise ValueError(f"HCNAMES malformed row: {line!r}")
-        rows.append((fields[0].strip(), fields[1].strip()))
+        name = fields[0].strip()
+        source_text = fields[1].strip() if len(fields) >= 2 else "?"
+        if source_text in SOURCE_TEXT:
+            source = SOURCE_TEXT[source_text]
+        elif re.fullmatch(r"\d{3}", source_text):
+            source = int(source_text)
+        else:
+            raise ValueError(f"HCNAMES invalid source: {line!r}")
+        type_text: str | None = None
+        pending = False
+        if len(fields) == 2 and source_text == "@":
+            # The firmware deliberately treats an untyped @ row as unavailable.
+            source = SOURCE_UNKNOWN
+        elif len(fields) == 4:
+            type_text = fields[2].strip()
+            if source == SOURCE_INSTRUMENT_DIRECT:
+                if type_text not in INSTRUMENT_TYPES:
+                    raise ValueError(f"HCNAMES invalid @ type: {line!r}")
+            elif type_text != "-":
+                raise ValueError(f"HCNAMES non-@ type: {line!r}")
+            if fields[3].strip() not in ("0", "1"):
+                raise ValueError(f"HCNAMES invalid pending flag: {line!r}")
+            pending = fields[3].strip() == "1"
+        rows.append((name, source, type_text, pending))
+    if len(rows) != HCNAMES_ROWS:
+        raise ValueError(f"HCNAMES row count: expected {HCNAMES_ROWS}, "
+                         f"got {len(rows)}")
     return rows
 
 
@@ -115,7 +151,7 @@ def valid_record(path: Path) -> tuple[int, bytes] | None:
     data = path.read_bytes()
     if len(data) != RECORD_BYTES:
         return None
-    if data[0:4] != b"HCPR" or data[4] != 1 or data[5] != COMMIT_VALID:
+    if data[0:4] != b"HCPR" or data[4] != 2 or data[5] != COMMIT_VALID:
         return None
     expected = int.from_bytes(data[12:16], "little")
     crc_data = data[:12] + b"\0\0\0\0" + data[16:]
@@ -151,8 +187,9 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         add_error(errors, str(exc))
         rows = []
-    if len(rows) != 129:
-        add_error(errors, f"HCNAMES row count: expected 129, got {len(rows)}")
+    if len(rows) != HCNAMES_ROWS:
+        add_error(errors, f"HCNAMES row count: expected {HCNAMES_ROWS}, "
+                 f"got {len(rows)}")
 
     bank_dirs = [
         item for item in (root / "Bank").iterdir()
@@ -216,9 +253,9 @@ def main() -> int:
 
     if rows:
         check_row(0, bank_name, "Bank name")
-        if rows[0][1] != slot_text:
+        if rows[0][1] != args.bank_slot:
             add_error(errors, f"HCNAMES row 0 Bank source: expected "
-                             f"{slot_text!r}, got {rows[0][1]!r}")
+                             f"{args.bank_slot}, got {rows[0][1]}")
         for scene in range(SCENE_COUNT):
             if scene not in expected_scenes:
                 add_error(errors, f"missing Bank child Scene {scene:02d}")
@@ -294,6 +331,19 @@ def main() -> int:
     if record_mask != child_mask:
         add_error(errors, f"{winner_name} scene_present_mask: expected "
                          f"0x{child_mask:04x}, got 0x{record_mask:04x}")
+
+    # v2's 258-byte table is the logical source half of the packed resident
+    # HCNAMES registers. Type and pending bits intentionally do not appear in
+    # this wire table; type remains in each Instrument payload and pending is
+    # a durable HCNAMES handoff marker.
+    if len(record) == RECORD_BYTES and len(rows) == HCNAMES_ROWS:
+        for row, (_, expected_source, _, _) in enumerate(rows):
+            actual_source = u16(record[SOURCE_TABLE_OFFSET + row * 2:
+                                       SOURCE_TABLE_OFFSET + row * 2 + 2])
+            if actual_source != expected_source:
+                add_error(errors, f"{winner_name} source table row {row}: "
+                                 f"expected {expected_source}, got "
+                                 f"{actual_source}")
 
     # Sample the active Scene and the first discovered child against text
     # sources; this keeps the check bounded while still crossing both source

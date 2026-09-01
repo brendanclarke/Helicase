@@ -1,7 +1,47 @@
 # Session 060 — Boot-Time AutoSave Validation and Runtime Winner Tracking
 
-Status: implementation-ready plan. No production code is changed by this
-document revision.
+Status: implementation applied and verified by the final clean build/static
+checks recorded below. Hardware/media acceptance remains unclaimed.
+
+## Implementation notes — 2026-09-01
+
+- The v2 record contract is implemented with the existing 30,848-byte payload,
+  the 258-byte packed source table at offset 34,768, and an exact 35,026-byte
+  record CRC/validation boundary. Initial-record formatting and runtime
+  transforms now receive the mounted source/type snapshots explicitly.
+- The filesystem facade now owns one exact 24-byte mounted authorization cache,
+  one dedicated 129-row HCNAMES mirror, a single blocking V discovery pass, and
+  the runtime Q discovery/revalidation path. Root folded-name duplicates and
+  terminal setup errors are classified before candidate files are opened; the
+  boot gate suppresses HCNAMES publication when setup evidence is unsafe.
+- HCNAMES parsing accepts legacy OFF/name-only and two-field ON rows, while ON
+  four-field rows enforce source/type/pending grammar. Runtime drains validate
+  the selected source stream and target CRC before promotion; pending rows are
+  cleared in a post-promotion HCNAMES continuation and reported with H flags.
+- Boot preserve mode now reconstructs Scene -> Kit -> typed Instrument sources
+  before ordinary payload loading can overwrite the resident state. Normal
+  Load/Save completion uses the durable object -> index -> HCNAMES -> callback
+  sequence, with settings.cfg following Bank HCNAMES publication.
+- Menu exit-time resident-name batching was removed. Stable Kit/Scene/Instrument
+  publication is targeted from the accepted request coordinates after bounded
+  runtime apply, without adding a retained per-row cache.
+- Final verification passed on 2026-09-01: `make clean`, `make -j2`, and
+  `make img` succeeded. The logging-on link reports `text=395,476`,
+  `data=404`, `bss=96,216`; the firmware binary is 395,880 bytes and the
+  packaged image is 395,896 bytes. The map confirms the exact 24-byte mounted
+  cache, 258-byte source register, 1,161-byte HCNAMES mirror, 2,048-byte stage
+  workspace, 4,608-byte patch cache, and 16,384-byte DEV trace ring.
+- Source contradictions now preserve the existing valid HCNAMES mirror through
+  one folded singleton proof and one queued Q result; disappearance or root
+  ambiguity remains a setup error and cannot trigger an identity-changing
+  rebuild. Runtime contradictions enter Q directly, while boot ensure/recovery
+  consumes the preserved mirror without rereading it into the same storage;
+  captured payload offsets still roll back before any clear-pending failure is
+  reported.
+- `PYTHONPYCACHEPREFIX=/private/tmp/helicase_pycache python3 -m py_compile`
+  passed for the decoder, verifier, and image builder; the verifier CLI smoke
+  check and `git diff --check` passed. No card fixture or hardware reboot/
+  remount test exists in this checkout, so those acceptance gates remain open.
 
 ## 0. How to use this plan
 

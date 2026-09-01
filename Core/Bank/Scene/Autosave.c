@@ -207,13 +207,202 @@ static uint8_t autosave_nameByte(const char name[AUTOSAVE_NAME_BYTES],
 }
 
 /*
- * Resolve one byte of a deterministic name-only baseline record.
+ * Classify one v2 baseline payload byte without rereading mutable geometry.
  *
- * Inputs: absolute record offset, generation, Bank slot, CRC, Bank name, and
- * complete HCNAMES image. Output: the exact byte written during boot creation
- * or no-valid-record recovery. Mask/parameter/Effect/padding cells remain zero
- * by design; this milestone does not claim that a regenerated baseline is a
- * complete Bank snapshot.
+ * Inputs: payload offset, captured Scene-present mask, and captured registry
+ * type snapshot. Output: nonzero only for a live non-HCNAMES owner. Why: the
+ * bounded formatter/CRC pass must use one immutable boot image, while its
+ * recovery mask must exactly match autosave_markResidentBankDirty().
+ * Affiliates: initial formatting, source discovery, and the canonical live
+ * getter/marker contract.
+ */
+static uint8_t autosave_initialPayloadIsLive(
+    uint16_t payload_offset,
+    uint16_t present_scene_mask,
+    const uint8_t instrument_types[
+        AUTOSAVE_RESIDENT_INSTRUMENT_TYPE_COUNT])
+{
+    uint16_t relative;
+    uint8_t scene_index;
+
+    if (payload_offset < AUTOSAVE_BANK_SECTION_BYTES) {
+        return (uint8_t)((payload_offset < 2u) ||
+                         (payload_offset >= 10u && payload_offset < 15u));
+    }
+    relative = (uint16_t)(payload_offset - AUTOSAVE_BANK_SECTION_BYTES);
+    scene_index = (uint8_t)(relative / AUTOSAVE_SCENE_SECTION_BYTES);
+    relative = (uint16_t)(relative % AUTOSAVE_SCENE_SECTION_BYTES);
+    if (scene_index >= AUTOSAVE_SCENE_COUNT ||
+        (present_scene_mask & (uint16_t)(1u << scene_index)) == 0u) {
+        return 0u;
+    }
+    if (relative >= AUTOSAVE_SCENE_PARAMETERS_OFFSET &&
+        relative < AUTOSAVE_SCENE_PARAMETERS_OFFSET +
+                   AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES) {
+        return 1u;
+    }
+    if (relative >= AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_PARAMETERS_OFFSET &&
+        relative < AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_PARAMETERS_OFFSET +
+                   AUTOSAVE_KIT_PARAMETER_LIVE_BYTES) {
+        return 1u;
+    }
+    if (relative < AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_INSTRUMENTS_OFFSET) {
+        return 0u;
+    }
+    relative = (uint16_t)(relative - AUTOSAVE_KIT_OFFSET -
+                          AUTOSAVE_KIT_INSTRUMENTS_OFFSET);
+    {
+        uint8_t slot = (uint8_t)(relative / AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+        uint8_t field = (uint8_t)(relative % AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+        instrument_type_t type;
+        const instrument_registry_entry_t *entry;
+
+        if (slot >= AUTOSAVE_INSTRUMENTS_PER_KIT || !instrument_types)
+            return 0u;
+        type = (instrument_type_t)instrument_types[
+            (uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT + slot];
+        entry = instrumentManager_registryEntry(type);
+        if (!entry)
+            return 0u;
+        if (field < AUTOSAVE_INSTRUMENT_TYPE_BYTES)
+            return 1u;
+        if (field >= AUTOSAVE_INSTRUMENT_NORMAL_OFFSET &&
+            field < AUTOSAVE_INSTRUMENT_NORMAL_OFFSET +
+                    entry->descriptor_count)
+            return 1u;
+        if (field >= AUTOSAVE_INSTRUMENT_MORPH_OFFSET &&
+            field < AUTOSAVE_INSTRUMENT_MORPH_OFFSET +
+                    entry->descriptor_count &&
+            (entry->descriptors[field - AUTOSAVE_INSTRUMENT_MORPH_OFFSET].flags &
+             INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u)
+            return 1u;
+    }
+    return 0u;
+}
+
+/* Return a canonical three-byte registry type token for an initial image. */
+static uint8_t autosave_initialInstrumentTypeByte(uint8_t type,
+                                                   uint8_t byte_index)
+{
+    static const char type_text[][3] = { "drm", "snr", "cym", "hat" };
+
+    if (type >= (uint8_t)INSTRUMENT_TYPE_UNKNOWN || byte_index >= 3u)
+        return 0u;
+    return (uint8_t)type_text[type][byte_index];
+}
+
+/* Return nonzero when a payload byte is owned by HCNAMES rather than SRAM. */
+static uint8_t autosave_payloadIsNameByte(uint16_t payload_offset)
+{
+    uint16_t relative;
+    uint8_t scene_index;
+
+    if (payload_offset >= 2u && payload_offset < 2u + AUTOSAVE_NAME_BYTES)
+        return 1u;
+    if (payload_offset < AUTOSAVE_BANK_SECTION_BYTES)
+        return 0u;
+    relative = (uint16_t)(payload_offset - AUTOSAVE_BANK_SECTION_BYTES);
+    scene_index = (uint8_t)(relative / AUTOSAVE_SCENE_SECTION_BYTES);
+    relative = (uint16_t)(relative % AUTOSAVE_SCENE_SECTION_BYTES);
+    if (scene_index >= AUTOSAVE_SCENE_COUNT)
+        return 0u;
+    if (relative < AUTOSAVE_SCENE_NAME_OFFSET + AUTOSAVE_NAME_BYTES)
+        return 1u;
+    if (relative >= AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_NAME_OFFSET &&
+        relative < AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_NAME_OFFSET +
+                   AUTOSAVE_NAME_BYTES)
+        return 1u;
+    if (relative >= AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_INSTRUMENTS_OFFSET) {
+        uint16_t instrument_relative = (uint16_t)(relative -
+            AUTOSAVE_KIT_OFFSET - AUTOSAVE_KIT_INSTRUMENTS_OFFSET);
+        uint8_t slot = (uint8_t)(instrument_relative /
+                                 AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+        uint8_t field = (uint8_t)(instrument_relative %
+                                  AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+
+        return (uint8_t)(slot < AUTOSAVE_INSTRUMENTS_PER_KIT &&
+                         field >= AUTOSAVE_INSTRUMENT_NAME_OFFSET &&
+                         field < AUTOSAVE_INSTRUMENT_NAME_OFFSET +
+                                 AUTOSAVE_NAME_BYTES);
+    }
+    return 0u;
+}
+
+/* Read the logical ten-bit source portion from a packed HCNAMES register. */
+static uint16_t autosave_sourceWireValue(uint16_t source)
+{
+    return (uint16_t)(source & 0x03ffu);
+}
+
+/* Resolve one HCNAMES-owned payload byte from the caller's stable mirror. */
+static uint8_t autosave_residentNameRecordByte(
+    uint32_t record_offset,
+    const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
+                             [AUTOSAVE_HCNAMES_ROW_BYTES],
+    uint8_t *value)
+{
+    uint16_t payload_offset;
+    uint16_t relative;
+    uint8_t scene_index;
+
+    if (!resident_names || !value || record_offset < AUTOSAVE_PAYLOAD_OFFSET ||
+        record_offset >= AUTOSAVE_SOURCE_TABLE_OFFSET)
+        return 0u;
+    payload_offset = (uint16_t)(record_offset - AUTOSAVE_PAYLOAD_OFFSET);
+    if (!autosave_payloadIsNameByte(payload_offset))
+        return 0u;
+    if (payload_offset < AUTOSAVE_BANK_SECTION_BYTES) {
+        *value = autosave_nameByte(resident_names[0],
+                                   (uint8_t)(payload_offset - 2u));
+        return 1u;
+    }
+    relative = (uint16_t)(payload_offset - AUTOSAVE_BANK_SECTION_BYTES);
+    scene_index = (uint8_t)(relative / AUTOSAVE_SCENE_SECTION_BYTES);
+    relative = (uint16_t)(relative % AUTOSAVE_SCENE_SECTION_BYTES);
+    if (relative < AUTOSAVE_SCENE_NAME_OFFSET + AUTOSAVE_NAME_BYTES) {
+        *value = autosave_nameByte(
+            resident_names[AUTOSAVE_HCNAMES_SCENE_BASE + scene_index],
+            (uint8_t)relative);
+        return 1u;
+    }
+    if (relative >= AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_NAME_OFFSET &&
+        relative < AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_NAME_OFFSET +
+                   AUTOSAVE_NAME_BYTES) {
+        *value = autosave_nameByte(
+            resident_names[AUTOSAVE_HCNAMES_KIT_BASE + scene_index],
+            (uint8_t)(relative - AUTOSAVE_KIT_OFFSET -
+                      AUTOSAVE_KIT_NAME_OFFSET));
+        return 1u;
+    }
+    relative = (uint16_t)(relative - AUTOSAVE_KIT_OFFSET -
+                          AUTOSAVE_KIT_INSTRUMENTS_OFFSET);
+    {
+        uint8_t slot = (uint8_t)(relative / AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+        uint8_t field = (uint8_t)(relative % AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+        uint16_t row = (uint16_t)(AUTOSAVE_HCNAMES_INSTRUMENT_BASE +
+            ((uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT) + slot);
+
+        if (slot >= AUTOSAVE_INSTRUMENTS_PER_KIT ||
+            field < AUTOSAVE_INSTRUMENT_NAME_OFFSET ||
+            field >= AUTOSAVE_INSTRUMENT_NAME_OFFSET + AUTOSAVE_NAME_BYTES)
+            return 0u;
+        *value = autosave_nameByte(
+            resident_names[row],
+            (uint8_t)(field - AUTOSAVE_INSTRUMENT_NAME_OFFSET));
+        return 1u;
+    }
+}
+
+/*
+ * Resolve one byte of a deterministic v2 baseline record.
+ *
+ * Inputs: absolute record offset, generation, Bank slot, CRC, Bank name, paired
+ * HCNAMES image, packed source rows, present-Scene mask, and type snapshot.
+ * Output: the exact byte written during boot creation or no-valid-record
+ * recovery. The recovery mask identifies current live owners, while their
+ * parameter bytes remain zero until the normal drain captures them; HCNAMES
+ * names/source metadata and reserved cells are deterministic. This milestone
+ * does not claim that a regenerated baseline is a complete Bank snapshot.
  */
 static uint8_t autosave_initialRecordByte(
     uint32_t record_offset,
@@ -222,7 +411,11 @@ static uint8_t autosave_initialRecordByte(
     uint32_t crc32c,
     const char bank_name[AUTOSAVE_NAME_BYTES],
     const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
-                             [AUTOSAVE_HCNAMES_ROW_BYTES])
+                             [AUTOSAVE_HCNAMES_ROW_BYTES],
+    const uint16_t sources[AUTOSAVE_HCNAMES_ROW_COUNT],
+    uint16_t present_scene_mask,
+    const uint8_t instrument_types[
+        AUTOSAVE_RESIDENT_INSTRUMENT_TYPE_COUNT])
 {
     uint8_t scene;
 
@@ -270,6 +463,33 @@ static uint8_t autosave_initialRecordByte(
             bank_name, (uint8_t)(record_offset - AUTOSAVE_BANK_NAME_OFFSET));
     }
 
+    if (record_offset >= AUTOSAVE_MASK_OFFSET &&
+        record_offset < AUTOSAVE_PAYLOAD_OFFSET) {
+        uint16_t payload_offset = (uint16_t)(record_offset -
+                                              AUTOSAVE_PAYLOAD_OFFSET);
+        uint16_t mask_offset = (uint16_t)(record_offset - AUTOSAVE_MASK_OFFSET);
+        uint8_t bit = (uint8_t)(1u << (payload_offset & 7u));
+
+        if (mask_offset < AUTOSAVE_MASK_BYTES &&
+            autosave_initialPayloadIsLive(payload_offset, present_scene_mask,
+                                          instrument_types))
+            return bit;
+        return 0u;
+    }
+
+    if (record_offset >= AUTOSAVE_SOURCE_TABLE_OFFSET &&
+        record_offset < AUTOSAVE_RECORD_BYTES) {
+        uint16_t source_offset = (uint16_t)(record_offset -
+                                            AUTOSAVE_SOURCE_TABLE_OFFSET);
+        uint16_t row = (uint16_t)(source_offset /
+                                  AUTOSAVE_SOURCE_TABLE_ENTRY_BYTES);
+
+        if (sources && row < AUTOSAVE_HCNAMES_ROW_COUNT)
+            return autosave_u16Byte(autosave_sourceWireValue(sources[row]),
+                                    (uint8_t)(source_offset & 1u));
+        return 0u;
+    }
+
     if (!resident_names)
         return 0u;
 
@@ -293,6 +513,23 @@ static uint8_t autosave_initialRecordByte(
             return autosave_nameByte(
                 resident_names[AUTOSAVE_HCNAMES_KIT_BASE + scene],
                 (uint8_t)(record_offset - kit_name_offset));
+        }
+        for (instrument = 0u;
+             instrument < AUTOSAVE_INSTRUMENTS_PER_KIT; instrument++) {
+            uint16_t type_index = (uint16_t)scene *
+                AUTOSAVE_INSTRUMENTS_PER_KIT + instrument;
+            uint32_t instrument_offset = scene_offset + AUTOSAVE_KIT_OFFSET +
+                AUTOSAVE_KIT_INSTRUMENTS_OFFSET +
+                ((uint32_t)instrument * AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+
+            if (record_offset >= instrument_offset &&
+                record_offset < instrument_offset +
+                                AUTOSAVE_INSTRUMENT_TYPE_BYTES &&
+                instrument_types) {
+                return autosave_initialInstrumentTypeByte(
+                    instrument_types[type_index],
+                    (uint8_t)(record_offset - instrument_offset));
+            }
         }
         for (instrument = 0u;
              instrument < AUTOSAVE_INSTRUMENTS_PER_KIT;
@@ -373,6 +610,27 @@ uint32_t autosave_recordCrcFinish(uint32_t crc32c)
     return ~crc32c;
 }
 
+/*
+ * Validate one v2 source-table token against its fixed HCNAMES row class.
+ * Inputs: row number and logical source token. Output: nonzero only for the
+ * grammar permitted by that row. Why: a CRC-valid record with an impossible
+ * provenance value must not become the mounted copy-forward source.
+ * Affiliate: autosave_streamValidationFinish().
+ */
+static uint8_t autosave_sourceValidForRow(uint16_t row, uint16_t source)
+{
+    if (row == 0u)
+        return (uint8_t)(source <= AUTOSAVE_SOURCE_DIRECT_MAX ||
+                         source == AUTOSAVE_SOURCE_UNKNOWN);
+    if (row < AUTOSAVE_HCNAMES_INSTRUMENT_BASE)
+        return (uint8_t)(source <= AUTOSAVE_SOURCE_DIRECT_MAX ||
+                         source == AUTOSAVE_SOURCE_INHERIT ||
+                         source == AUTOSAVE_SOURCE_UNKNOWN);
+    return (uint8_t)(source == AUTOSAVE_SOURCE_INHERIT ||
+                     source == AUTOSAVE_SOURCE_UNKNOWN ||
+                     source == AUTOSAVE_SOURCE_INSTRUMENT_DIRECT);
+}
+
 uint32_t autosave_crc32cByteUpdate(uint32_t crc32c, uint8_t value)
 {
     /* See Autosave.h: this is the raw-byte diagnostic view of the same
@@ -388,7 +646,11 @@ uint32_t autosave_initialRecordCrcUpdate(
     uint16_t bank_slot,
     const char bank_name[AUTOSAVE_NAME_BYTES],
     const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
-                             [AUTOSAVE_HCNAMES_ROW_BYTES])
+                             [AUTOSAVE_HCNAMES_ROW_BYTES],
+    const uint16_t sources[AUTOSAVE_HCNAMES_ROW_COUNT],
+    uint16_t present_scene_mask,
+    const uint8_t instrument_types[
+        AUTOSAVE_RESIDENT_INSTRUMENT_TYPE_COUNT])
 {
     uint16_t i;
 
@@ -402,7 +664,7 @@ uint32_t autosave_initialRecordCrcUpdate(
      * a record-sized image. The stored CRC field is synthesized as zero here,
      * matching autosave_recordCrcUpdate()'s wire exception.
      */
-    if (!bank_name || !resident_names ||
+    if (!bank_name || !resident_names || !sources || !instrument_types ||
         absolute_offset >= AUTOSAVE_RECORD_BYTES)
         return crc32c;
     if (byte_count > AUTOSAVE_CRC_BYTES_PER_TICK)
@@ -413,7 +675,8 @@ uint32_t autosave_initialRecordCrcUpdate(
     for (i = 0u; i < byte_count; i++) {
         uint8_t value = autosave_initialRecordByte(
             absolute_offset + i, generation, bank_slot, 0u,
-            bank_name, resident_names);
+            bank_name, resident_names, sources, present_scene_mask,
+            instrument_types);
 
         crc32c = autosave_recordCrcUpdate(
             crc32c, absolute_offset + i, &value, 1u);
@@ -430,7 +693,11 @@ void autosave_formatInitialChunk(
     uint32_t crc32c,
     const char bank_name[AUTOSAVE_NAME_BYTES],
     const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
-                             [AUTOSAVE_HCNAMES_ROW_BYTES])
+                             [AUTOSAVE_HCNAMES_ROW_BYTES],
+    const uint16_t sources[AUTOSAVE_HCNAMES_ROW_COUNT],
+    uint16_t present_scene_mask,
+    const uint8_t instrument_types[
+        AUTOSAVE_RESIDENT_INSTRUMENT_TYPE_COUNT])
 {
     uint32_t chunk_end;
     uint16_t i;
@@ -451,7 +718,8 @@ void autosave_formatInitialChunk(
     for (i = 0u; i < byte_count; i++) {
         dst[i] = autosave_initialRecordByte(
             absolute_offset + i, generation, bank_slot, crc32c,
-            bank_name, resident_names);
+            bank_name, resident_names, sources, present_scene_mask,
+            instrument_types);
     }
 }
 
@@ -549,6 +817,19 @@ void autosave_streamValidationUpdate(autosave_stream_validation_t *state,
             state->bank_name[record_offset - AUTOSAVE_BANK_NAME_OFFSET] =
                 (char)value;
         }
+        if (record_offset >= AUTOSAVE_SOURCE_TABLE_OFFSET &&
+            record_offset < AUTOSAVE_RECORD_BYTES) {
+            uint16_t source_offset = (uint16_t)(record_offset -
+                                                AUTOSAVE_SOURCE_TABLE_OFFSET);
+            uint16_t row = (uint16_t)(source_offset /
+                                      AUTOSAVE_SOURCE_TABLE_ENTRY_BYTES);
+
+            if (row < AUTOSAVE_HCNAMES_ROW_COUNT) {
+                state->sources[row] = (uint16_t)(
+                    state->sources[row] |
+                    ((uint16_t)value << ((source_offset & 1u) * 8u)));
+            }
+        }
     }
     state->crc32c = autosave_recordCrcUpdate(
         state->crc32c, absolute_offset, src, byte_count);
@@ -567,6 +848,14 @@ uint8_t autosave_streamValidationFinish(
     if (!state || !state->header_valid ||
         state->bytes_seen != AUTOSAVE_RECORD_BYTES) {
         return 0u;
+    }
+    {
+        uint16_t row;
+
+        for (row = 0u; row < AUTOSAVE_HCNAMES_ROW_COUNT; row++) {
+            if (!autosave_sourceValidForRow(row, state->sources[row]))
+                return 0u;
+        }
     }
     return (uint8_t)(autosave_recordCrcFinish(state->crc32c) ==
                      state->stored_crc32c);
@@ -1541,6 +1830,9 @@ void autosave_transformDrainChunk(
     uint16_t byte_count,
     uint32_t generation,
     uint8_t probe_counter,
+    const char resident_names[AUTOSAVE_HCNAMES_ROW_COUNT]
+                             [AUTOSAVE_HCNAMES_ROW_BYTES],
+    const uint16_t sources[AUTOSAVE_HCNAMES_ROW_COUNT],
     const uint16_t *patch_offsets,
     const uint8_t *patch_values,
     uint16_t patch_count,
@@ -1594,6 +1886,39 @@ void autosave_transformDrainChunk(
             chunk[record_offset - absolute_offset] =
                 autosave_dirty_mask[
                     record_offset - AUTOSAVE_MASK_OFFSET];
+            for (uint8_t bit = 0u; bit < 8u; bit++) {
+                uint16_t payload_offset = (uint16_t)(
+                    ((record_offset - AUTOSAVE_MASK_OFFSET) * 8u) + bit);
+
+                if (autosave_payloadIsNameByte(payload_offset)) {
+                    /* Name cells have no SRAM owner and are clean in v2. */
+                    chunk[record_offset - absolute_offset] = (uint8_t)(
+                        chunk[record_offset - absolute_offset] &
+                        (uint8_t)~(1u << bit));
+                }
+            }
+        }
+    }
+
+    /* Overlay HCNAMES identity and the v2 logical source table. */
+    for (uint16_t i = 0u; i < byte_count; i++) {
+        uint32_t record_offset = absolute_offset + i;
+        uint8_t name_value;
+
+        if (autosave_residentNameRecordByte(record_offset, resident_names,
+                                            &name_value)) {
+            chunk[i] = name_value;
+        } else if (sources && record_offset >= AUTOSAVE_SOURCE_TABLE_OFFSET &&
+                   record_offset < AUTOSAVE_RECORD_BYTES) {
+            uint16_t source_offset = (uint16_t)(record_offset -
+                                                AUTOSAVE_SOURCE_TABLE_OFFSET);
+            uint16_t row = (uint16_t)(source_offset /
+                                      AUTOSAVE_SOURCE_TABLE_ENTRY_BYTES);
+
+            if (row < AUTOSAVE_HCNAMES_ROW_COUNT)
+                chunk[i] = autosave_u16Byte(
+                    autosave_sourceWireValue(sources[row]),
+                    (uint8_t)(source_offset & 1u));
         }
     }
 
