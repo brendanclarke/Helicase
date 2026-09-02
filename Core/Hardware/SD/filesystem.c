@@ -1788,6 +1788,35 @@ static uint8_t fs_autosave_transaction_active = 0u;
 static uint8_t fs_autosave_discard_pending = 0u;
 static uint8_t fs_autosave_page_suppressed = 0u;
 
+/*
+ * Winner cache for continuation-cycle validation bypass.
+ *
+ * What: caches the index, generation, and probe of the last successfully
+ * committed autosave target so continuation cycles (250 ms apart within the
+ * same Bank session) can skip full dual-record CRC validation (phases 1-5)
+ * and the on-card mask re-read (phases 50-55).
+ *
+ * Why: dual-record validation consumes roughly 544 CRC ticks plus four file
+ * open/close cycles, the largest per-cycle cost, and is redundant while the
+ * writer itself just committed the target. SD card removal while powered is
+ * outside the product contract.
+ *
+ * Inputs: set by filesystem_autosaveWriterCompleted() on DONE with remaining
+ * dirty bits. Outputs: read by phase 0 to restore winner identity and skip to
+ * mask classification. Invalidated on error, policy transition, boot, remount,
+ * or Bank-session loss. Affiliates: drain phase 0, the writer completion
+ * callback, and all autosave lifecycle reset paths below.
+ *
+ * Lifetime: these statics outlive fs_stage_workspace.autosave_writer, whose
+ * operation-local contents are zeroed at every drain start and reused by
+ * other filesystem operation types. Total retained normal .bss cost is 7
+ * bytes: one flag, one index, one generation, and one probe.
+ */
+static uint8_t  fs_autosave_winner_cached = 0u;
+static uint8_t  fs_autosave_cached_winner_index = 0u;
+static uint32_t fs_autosave_cached_winner_generation = 0u;
+static uint8_t  fs_autosave_cached_winner_probe = 0u;
+
 /* Existing morph destination buffer owned by preset/sound code.
  *
  * Directory kit loading writes primary parameters into parameter_values[] and
@@ -5324,8 +5353,27 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
     tab = strchr(line, '\t');
     if (tab) {
         const char *tail = tab + 1u;
-        if (strchr(tail, '\t') != NULL ||
-            !filesystem_parseResidentSourceToken(tail, row, &source)) {
+        /*
+         * Isolate the source token before any trailing tab-separated fields.
+         *
+         * A prior firmware version wrote extended rows with extra columns
+         * (e.g. name\tsource\t-\tflag). Truncating `tail` at the next tab
+         * lets the source parser see only its own column, and the extra
+         * fields are silently discarded rather than rejecting the row.
+         */
+        const char *second_tab = strchr(tail, '\t');
+        char source_buf[8];
+        if (second_tab) {
+            uint8_t slen = 0u;
+            while (tail + slen < second_tab &&
+                   slen < sizeof(source_buf) - 1u) {
+                source_buf[slen] = tail[slen];
+                slen++;
+            }
+            source_buf[slen] = '\0';
+            tail = source_buf;
+        }
+        if (!filesystem_parseResidentSourceToken(tail, row, &source)) {
             return 0u;
         }
         while (line + name_len < tab) {
@@ -6317,8 +6365,8 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 ** except that existing recovery path. The file mask is ORed into Autosave.c's
 ** single persistent record before classification; an empty canonical mask
 ** completes read-only and never creates another empty generation. One
-** transformed copy calculates CRC from the exact staged bytes, then publishes
-** durable CRC and the final commit marker in separate post-copy steps.
+** transformed copy calculates CRC from the exact staged bytes, then writes the
+** CRC and final commit marker through one open/close/sync publication path.
 ** ----------------------------------------------------------------------- */
 #if DEV_STALL_DETECTION
 /* Diagnostic-only phase observer for the runtime AutoSave drain. */
@@ -6373,8 +6421,60 @@ static void filesystem_autosaveParameterDrain_tick(void)
         memset(&op_autosave_writer, 0, sizeof(op_autosave_writer));
         memset(&fs_autosave_parameter_cache, 0,
                sizeof(fs_autosave_parameter_cache));
-        op_autosave_writer.candidate_index = 0u;
-        op_phase = 1u;
+        if (fs_autosave_winner_cached) {
+            /*
+             * Continuation bypass: skip dual-record CRC validation and the
+             * on-card mask re-read.
+             *
+             * What: restores the committed target identity from the previous
+             * successful drain and jumps directly to mask classification
+             * (phase 56), skipping phases 1-5 and 50-55.
+             *
+             * Why: the writer committed this target 250 ms ago and the card
+             * has not been removed, which is outside the product contract.
+             * The canonical SRAM mask already contains all remaining dirty
+             * bits; the on-card mask only recovers interrupted work from a
+             * prior boot.
+             *
+             * Inputs: the four external statics set by the prior completion
+             * callback. Outputs: workspace fields populated as though full
+             * validation selected this winner. The cache flag is consumed
+             * before any later phase so an error retry must validate fully.
+             * Affiliates: filesystem_autosaveWriterCompleted() and every
+             * lifecycle invalidation path above.
+             */
+            op_autosave_writer.winner_index =
+                fs_autosave_cached_winner_index;
+            op_autosave_writer.winner_generation =
+                fs_autosave_cached_winner_generation;
+            op_autosave_writer.winner_probe =
+                fs_autosave_cached_winner_probe;
+            op_autosave_writer.have_winner = 1u;
+            op_autosave_writer.winner_bank_match = 1u;
+            fs_autosave_winner_cached = 0u;
+            /*
+             * Reuse VALIDATED for trace compatibility. flags bit 3 marks the
+             * cached path; the ordinary full-validation flags retain their
+             * existing meanings for trace readers.
+             */
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_VALIDATED,
+                (uint8_t)(1u |
+                          (op_autosave_writer.winner_index << 1u) |
+                          8u),
+                op_autosave_writer.winner_generation);
+            op_autosave_writer.payload_scan_offset = 0u;
+            op_autosave_writer.patch_count = 0u;
+            op_phase = 56u;
+        } else {
+            /*
+             * No valid continuation cache exists at this transaction start.
+             * Retain the original full A/B validation path and its candidate
+             * ordering so boot/recovery/error retries remain unchanged.
+             */
+            op_autosave_writer.candidate_index = 0u;
+            op_phase = 1u;
+        }
         return;
 
     case 1: /* OPEN CURRENT A/B CANDIDATE FOR A STREAMING VALIDATION READ */
@@ -6994,7 +7094,8 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * Output writes exactly four little-endian bytes at header offset 12,
          * retaining a byte cursor across AsyncFATFS partial writes. The target
          * remains invalid because its commit byte is still zero. Affiliates:
-         * phases 16/57-59 and autosave_recordCrcUpdate().
+         * phase 16, the same-session commit seek/write phases 62-64, and
+         * autosave_recordCrcUpdate().
          */
         staging_buf[0] = (uint8_t)op_autosave_writer.target_crc32c;
         staging_buf[1] = (uint8_t)(op_autosave_writer.target_crc32c >> 8u);
@@ -7011,61 +7112,21 @@ static void filesystem_autosaveParameterDrain_tick(void)
         }
         if (op_autosave_writer.chunk_written < 4u)
             return;
-        op_phase = 57u;
-        return;
-    }
-
-    case 57: /* QUEUE/RETRY CRC-PUBLICATION HANDLE CLOSE */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 58u;
-        return;
-
-    case 58: /* WAIT CRC-PUBLICATION HANDLE CLOSE */
-        if (!op_close_done)
-            return;
-        op_file = NULL;
-        op_phase = 59u;
-        return;
-
-    case 59: /* MAKE THE POST-COPY CRC DURABLE BEFORE VALID COMMIT */
         /*
-         * Persist the CRC independently while commit remains zero.
+         * CRC is staged; seek back to the commit byte in the same open
+         * session. Phases 57-61 used to close, sync, reopen, and wait for this
+         * handle, but that extra cycle provided no benefit: offsets 12 and 5
+         * share the first 512-byte header sector and the commit byte remains
+         * invalid until the final filesystem sync.
          *
-         * Input is a closed target with durable data and a newly written CRC.
-         * Output permits commit publication only after the checksum sector is
-         * durable. Why: combining CRC and commit without this gate could expose
-         * A5 before the checksum it validates has reached the card.
+         * Inputs: the existing r+ op_file handle and four written CRC bytes.
+         * Outputs: phase 62 seeks to offset 5, phase 64 writes A5, and phase
+         * 65 closes before phase 22 performs the final shared sync. Affiliates:
+         * phases 16, 62-65, 22, and filesystem_finish().
          */
-        if (!afatfs_sync())
-            return;
-        op_phase = 60u;
-        return;
-
-    case 60: /* REOPEN CRC-COMPLETE TARGET FOR THE FINAL COMMIT BYTE */
-        if (!afatfs_chdir(NULL))
-            return;
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen_lfn(
-                filesystem_autosaveFilenameForIndex(
-                    (uint8_t)(op_autosave_writer.winner_index ^ 1u)),
-                "r+", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
-            filesystem_autosaveWriterFinishError();
-            return;
-        }
-        op_phase = 61u;
-        return;
-
-    case 61: /* WAIT FINAL-COMMIT TARGET OPEN */
-        if (!op_file_ready)
-            return;
-        if (!op_file) {
-            filesystem_autosaveWriterFinishError();
-            return;
-        }
         op_phase = 62u;
         return;
+    }
 
     case 62: /* START/RETRY ASYNCHRONOUS SEEK TO HEADER COMMIT OFFSET */
     {
@@ -7096,11 +7157,12 @@ static void filesystem_autosaveParameterDrain_tick(void)
         uint32_t n;
 
         /*
-         * Publish validity only after data and CRC have separate durable gates.
-         * Input is a CRC-complete target with commit zero. Output changes only
-         * header byte 5 to A5, making the new generation eligible after the
-         * existing final filesystem flush. Affiliates: stream validation and
-         * A/B generation selection.
+         * Publish validity only after the transformed data has reached the
+         * first durable gate and the calculated CRC has been staged before this
+         * byte. Input is a CRC-complete target with commit zero. Output changes
+         * only header byte 5 to A5; phase 22's one final filesystem sync makes
+         * the CRC and marker durable together. Affiliates: stream validation,
+         * phase 22's filesystem_finish(), and A/B generation selection.
          */
         staging_buf[0] = AUTOSAVE_HEADER_COMMIT_VALID;
         n = afatfs_fwrite(op_file, staging_buf, 1u);
@@ -12443,6 +12505,8 @@ static void filesystem_loadBankDirectory_tick(void)
          * window; any error then forces the next consumer to reload the card. */
         hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
         filesystem_bootLoggingSetDetail("BKHCWRIT");
+        if (!afatfs_chdir(NULL))
+            return;
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
@@ -21272,6 +21336,12 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
     fs_autosave_writer_armed = 0u;
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_recovery_pending = 0u;
+    /*
+     * Card-init failure invalidates the cached winner. The next mounted card
+     * must take the complete A/B validation path rather than restoring an
+     * identity from this abandoned card session.
+     */
+    fs_autosave_winner_cached = 0u;
     fs_autosave_enabled = 1u;
     fs_autosave_runtime_ready = 0u;
     fs_autosave_setup_pending = 0u;
@@ -21335,6 +21405,11 @@ void filesystem_initAfterCardReady(void)
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_writer_armed = 0u;
     fs_autosave_recovery_pending = 0u;
+    /*
+     * A fresh card mount starts a new winner-identity session. Clear the
+     * continuation shortcut before any boot or runtime operation can start.
+     */
+    fs_autosave_winner_cached = 0u;
     /* A remount must never inherit a direct source from the prior card. */
     for (source_row = 0u;
          source_row < FS_RESIDENT_NAMES_ROW_COUNT;
@@ -21450,6 +21525,11 @@ void filesystem_setAutosaveEnabled(uint8_t enabled)
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_armed = 0u;
         fs_autosave_writer_boot_ready = 0u;
+        /*
+         * OFF is a policy boundary: a later ON must establish and validate a
+         * new autosave session instead of trusting a prior continuation.
+         */
+        fs_autosave_winner_cached = 0u;
         if (fs_autosave_transaction_active) {
             fs_autosave_discard_pending = 1u;
         } else {
@@ -21749,19 +21829,72 @@ static void filesystem_autosaveWriterCompleted(void)
         fs_autosave_writer_armed = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_boot_ready = 0u;
+        /*
+         * The terminal OFF path also revokes any shortcut left by an earlier
+         * successful drain before releasing the shared filesystem facade.
+         */
+        fs_autosave_winner_cached = 0u;
         filesystem_ack();
         return;
     }
     if (status == FS_STATUS_DONE) {
         fs_autosave_recovery_pending = 0u;
         if (autosave_maskHasDirty()) {
+            if (op_autosave_writer.have_winner) {
+                /*
+                 * Cache the committed target as the next continuation's
+                 * winner.
+                 *
+                 * What: records the newly published target's A/B index,
+                 * generation, and probe so the next drain can skip dual-record
+                 * CRC validation (phases 1-5) and the on-card mask re-read
+                 * (phases 50-55).
+                 *
+                 * Why: this writer has just committed the target and knows its
+                 * exact identity. Revalidating it 250 ms later costs roughly
+                 * 544 CRC ticks and five file open/close cycles with no
+                 * information gain while the card remains inserted.
+                 *
+                 * Inputs: winner fields from the just-completed drain.
+                 * Outputs: external statics that survive workspace zeroing.
+                 * The cached winner_index is the new TARGET (winner ^ 1), not
+                 * the source; phase 0 consumes the flag before restoring it.
+                 * Affiliates: drain phase 0 and all lifecycle invalidation
+                 * paths.
+                 */
+                fs_autosave_cached_winner_index =
+                    (uint8_t)(op_autosave_writer.winner_index ^ 1u);
+                fs_autosave_cached_winner_generation =
+                    op_autosave_writer.winner_generation + 1u;
+                fs_autosave_cached_winner_probe =
+                    (uint8_t)(op_autosave_writer.winner_probe + 1u);
+                fs_autosave_winner_cached = 1u;
+            } else {
+                /*
+                 * No-valid-record recovery rebuilt B then A without ever
+                 * selecting a source winner. Keep the dirty continuation
+                 * armed, but force its next cycle through full validation so
+                 * no synthetic index/generation/probe tuple is trusted.
+                 */
+                fs_autosave_winner_cached = 0u;
+            }
             fs_autosave_next_due_tick = (uint16_t)(
                 time_sysTick + AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS);
             fs_autosave_writer_armed = 1u;
         } else {
+            /*
+             * A clean terminal drain has no continuation consumer. Clear the
+             * cache so a later unrelated mutation cannot reuse an old target.
+             */
+            fs_autosave_winner_cached = 0u;
             fs_autosave_writer_armed = 0u;
         }
     } else {
+        /*
+         * An I/O error makes the cached on-card identity untrustworthy. The
+         * five-second retry must perform complete dual-record validation.
+         */
+        fs_autosave_winner_cached = 0u;
         fs_autosave_next_due_tick = (uint16_t)(
             time_sysTick + AUTOSAVE_WRITER_INTERVAL_MS);
         fs_autosave_writer_armed = 1u;
@@ -21795,6 +21928,11 @@ static void filesystem_autosaveSetupCompleted(void)
         fs_autosave_writer_boot_ready = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_armed = 0u;
+        /*
+         * Setup failure leaves the pair's durable identity unknown. Revoke
+         * the continuation cache along with runtime writer authorization.
+         */
+        fs_autosave_winner_cached = 0u;
         autosave_setMutationTrackingEnabled(0u);
         return;
     }
@@ -21829,6 +21967,11 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         fs_autosave_writer_armed = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_boot_ready = 0u;
+        /*
+         * AutoSave OFF must be idempotently safe even when this scheduler path
+         * is reached without a preceding policy-transition call.
+         */
+        fs_autosave_winner_cached = 0u;
         if (!fs_autosave_transaction_active && fs_autosave_discard_pending) {
             autosave_discardDirtyMask();
             fs_autosave_discard_pending = 0u;
@@ -21852,6 +21995,11 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         fs_autosave_writer_armed = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_boot_ready = 0u;
+        /*
+         * Losing the resident Bank ends the identity session. Any cached
+         * target belongs to the previous Bank and cannot seed a new drain.
+         */
+        fs_autosave_winner_cached = 0u;
         fs_autosave_setup_pending = 0u;
         fs_autosave_setup_failed = 0u;
         if (!fs_autosave_transaction_active)
@@ -22974,6 +23122,11 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_writer_armed = 0u;
     fs_autosave_recovery_pending = 0u;
+    /*
+     * Boot setup starts a new validation epoch. Discard any continuation
+     * identity before create-only ensure work can authorize runtime drains.
+     */
+    fs_autosave_winner_cached = 0u;
     fs_autosave_setup_pending = 0u;
     fs_autosave_setup_failed = 0u;
     fs_autosave_transaction_active = 0u;
