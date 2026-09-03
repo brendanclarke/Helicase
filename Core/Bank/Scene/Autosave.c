@@ -16,6 +16,8 @@
 #include "BankData.h"
 #include "SceneData.h"
 #include "InstrumentManager.h"
+/* Reads the filesystem-owned HCNAMES provenance register without doing I/O. */
+#include "filesystem.h"
 
 #include <string.h>
 
@@ -204,6 +206,32 @@ static uint8_t autosave_nameByte(const char name[AUTOSAVE_NAME_BYTES],
         return 0u;
     }
     return (uint8_t)name[byte_index];
+}
+
+/*
+ * Project one filesystem-owned HCNAMES source word into one record byte.
+ *
+ * Inputs: a fixed HCNAMES row and little-endian byte index 0..1. Output: the
+ * masked 13-bit resident source byte, or zero for an invalid request. Why:
+ * source provenance is not retained in SceneData/KitData/InstrumentManager;
+ * filesystem_residentSource() is the public accessor that removes refreshed,
+ * dirty, and reserved metadata bits. This helper performs no I/O or mutation.
+ * Affiliates: source dispatch in autosave_getLivePayloadByte() and the Phase C
+ * source-field geometry in Autosave.h.
+ */
+static uint8_t autosave_getSourceByte(uint16_t hcnames_row,
+                                      uint8_t byte_index,
+                                      uint8_t *value)
+{
+    uint16_t source;
+
+    if (!value || byte_index >= AUTOSAVE_SOURCE_BYTES ||
+        hcnames_row >= AUTOSAVE_HCNAMES_ROW_COUNT) {
+        return 0u;
+    }
+    source = filesystem_residentSource(hcnames_row);
+    *value = (uint8_t)(source >> ((uint16_t)byte_index * 8u));
+    return 1u;
 }
 
 /*
@@ -751,6 +779,14 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
     if (!scene)
         return 0u;
 
+    /* Scene bytes 8..9 are HCNAMES source; parameters begin at byte 10. */
+    if (relative >= AUTOSAVE_SCENE_SOURCE_OFFSET &&
+        relative < AUTOSAVE_SCENE_SOURCE_OFFSET + AUTOSAVE_SOURCE_BYTES) {
+        return autosave_getSourceByte(
+            (uint16_t)(AUTOSAVE_HCNAMES_SCENE_BASE + scene_index),
+            (uint8_t)(relative - AUTOSAVE_SCENE_SOURCE_OFFSET),
+            value);
+    }
     if (relative >= AUTOSAVE_SCENE_PARAMETERS_OFFSET &&
         relative < AUTOSAVE_SCENE_PARAMETERS_OFFSET +
                    AUTOSAVE_SCENE_PARAMETER_ALLOC_BYTES) {
@@ -784,6 +820,14 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
         return 0u;
 
     relative = (uint16_t)(relative - AUTOSAVE_KIT_OFFSET);
+    /* Kit bytes 8..9 are HCNAMES source; parameters begin at byte 10. */
+    if (relative >= AUTOSAVE_KIT_SOURCE_OFFSET &&
+        relative < AUTOSAVE_KIT_SOURCE_OFFSET + AUTOSAVE_SOURCE_BYTES) {
+        return autosave_getSourceByte(
+            (uint16_t)(AUTOSAVE_HCNAMES_KIT_BASE + scene_index),
+            (uint8_t)(relative - AUTOSAVE_KIT_SOURCE_OFFSET),
+            value);
+    }
     if (relative >= AUTOSAVE_KIT_PARAMETERS_OFFSET &&
         relative < AUTOSAVE_KIT_PARAMETERS_OFFSET +
                    AUTOSAVE_KIT_PARAMETER_ALLOC_BYTES) {
@@ -839,6 +883,18 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
                 return 0u;
             *value = (uint8_t)entry->type_text[field_offset];
             return 1u;
+        }
+
+        /* Instrument bytes 11..12 are HCNAMES source after type and name. */
+        if (field_offset >= AUTOSAVE_INSTRUMENT_SOURCE_OFFSET &&
+            field_offset < AUTOSAVE_INSTRUMENT_SOURCE_OFFSET +
+                           AUTOSAVE_SOURCE_BYTES) {
+            return autosave_getSourceByte(
+                (uint16_t)(AUTOSAVE_HCNAMES_INSTRUMENT_BASE +
+                    ((uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT) +
+                    instrument_index),
+                (uint8_t)(field_offset - AUTOSAVE_INSTRUMENT_SOURCE_OFFSET),
+                value);
         }
 
         /*
@@ -1123,6 +1179,68 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
         AUTOSAVE_EFFECT_PARAMETERS_OFFSET + parameter_index));
 }
 
+/*
+ * Mark the source bytes belonging to one HCNAMES row.
+ *
+ * Input: fixed row 0..128. Output: both source bytes for a present Scene,
+ * Kit, or Instrument are sent through the canonical tracking/range funnel;
+ * Bank row zero and invalid/absent rows are no-ops. Why: source ownership
+ * stays in filesystem.c, while the autosave record needs the same atomic dirty
+ * semantics as retained parameter bytes. The row arithmetic mirrors
+ * autosave_objectFullyCaptured() and the getter's HCNAMES mapping, so a Save
+ * or compound marker cannot dirty a different wire object than the drain reads.
+ * Affiliates: filesystem_setResidentSource(), compound markers, and
+ * autosave_markPayloadOffsetDirty().
+ */
+void autosave_markSourceDirty(uint16_t hcnames_row)
+{
+    uint16_t payload_base;
+    uint8_t byte;
+
+    if (hcnames_row == AUTOSAVE_HCNAMES_BANK_ROW)
+        return;
+    if (hcnames_row >= AUTOSAVE_HCNAMES_SCENE_BASE &&
+        hcnames_row < AUTOSAVE_HCNAMES_KIT_BASE) {
+        uint8_t scene_index = (uint8_t)(
+            hcnames_row - AUTOSAVE_HCNAMES_SCENE_BASE);
+
+        if (!autosave_scenePayloadBase(scene_index, &payload_base))
+            return;
+        payload_base = (uint16_t)(
+            payload_base + AUTOSAVE_SCENE_SOURCE_OFFSET);
+    } else if (hcnames_row >= AUTOSAVE_HCNAMES_KIT_BASE &&
+               hcnames_row < AUTOSAVE_HCNAMES_INSTRUMENT_BASE) {
+        uint8_t scene_index = (uint8_t)(
+            hcnames_row - AUTOSAVE_HCNAMES_KIT_BASE);
+
+        if (!autosave_scenePayloadBase(scene_index, &payload_base))
+            return;
+        payload_base = (uint16_t)(
+            payload_base + AUTOSAVE_KIT_OFFSET +
+            AUTOSAVE_KIT_SOURCE_OFFSET);
+    } else if (hcnames_row >= AUTOSAVE_HCNAMES_INSTRUMENT_BASE &&
+               hcnames_row < AUTOSAVE_HCNAMES_ROW_COUNT) {
+        uint16_t instrument_index = (uint16_t)(
+            hcnames_row - AUTOSAVE_HCNAMES_INSTRUMENT_BASE);
+        uint8_t scene_index = (uint8_t)(
+            instrument_index / AUTOSAVE_INSTRUMENTS_PER_KIT);
+        uint8_t slot = (uint8_t)(
+            instrument_index % AUTOSAVE_INSTRUMENTS_PER_KIT);
+
+        if (!autosave_scenePayloadBase(scene_index, &payload_base))
+            return;
+        payload_base = (uint16_t)(
+            payload_base + AUTOSAVE_KIT_OFFSET +
+            AUTOSAVE_KIT_INSTRUMENTS_OFFSET +
+            ((uint16_t)slot * AUTOSAVE_INSTRUMENT_RECORD_BYTES) +
+            AUTOSAVE_INSTRUMENT_SOURCE_OFFSET);
+    } else {
+        return;
+    }
+    for (byte = 0u; byte < AUTOSAVE_SOURCE_BYTES; byte++)
+        autosave_markPayloadOffsetDirty((uint16_t)(payload_base + byte));
+}
+
 void autosave_markInstrumentNormalDirty(uint8_t scene_index, uint8_t slot)
 {
     const kit_instrument_slot_t *instrument =
@@ -1196,11 +1314,13 @@ void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot)
     /*
      * Mark one committed root-pool whole-Instrument replacement.
      *
-     * Inputs: destination Scene/slot. Output: three type-token bytes plus every
-     * live normal and Morphable endpoint are dirty; the HCNAMES-owned name is
-     * deliberately excluded. Why: type is required to interpret endpoints, but
-     * identity/provenance remain HCNAMES-owned. The marker only records the
-     * already-committed SceneData image; it copies no data and performs no I/O.
+     * Inputs: destination Scene/slot. Output: three type-token bytes, two
+     * source bytes, and every live normal/Morphable endpoint are dirty; the
+     * HCNAMES-owned name is deliberately excluded. Why: type is required to
+     * interpret endpoints, while HCNAMES remains the identity/provenance
+     * authority whose source value is snapshotted into the record. The marker
+     * only records the already-committed SceneData/source image; it copies no
+     * data and performs no I/O.
      * It also emits one RAM-only I summary after every request, including a
      * rejected request, so field traces retain its outcome after D-record
      * wrap. Affiliate: preset_startInstrumentApplyImage() after a root pool
@@ -1210,7 +1330,8 @@ void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot)
                                           &instrument_base);
     if (entry) {
         trace_flags |= AUTOSAVE_TRACE_INSTRUMENT_MARK_FLAG_BASE_VALID;
-        expected_count = AUTOSAVE_INSTRUMENT_TYPE_BYTES;
+        expected_count = (uint8_t)(AUTOSAVE_INSTRUMENT_TYPE_BYTES +
+                                   AUTOSAVE_SOURCE_BYTES);
         for (descriptor_index = 0u;
              descriptor_index < entry->descriptor_count;
              descriptor_index++) {
@@ -1225,6 +1346,12 @@ void autosave_markWholeInstrumentDirty(uint8_t scene_index, uint8_t slot)
             published_count = (uint8_t)(published_count +
                 autosave_markPayloadOffsetDirty((uint16_t)(instrument_base +
                                                            type_byte)));
+        }
+        /* The whole-image marker owns provenance as well as type/endpoints. */
+        for (type_byte = 0u; type_byte < AUTOSAVE_SOURCE_BYTES; type_byte++) {
+            published_count = (uint8_t)(published_count +
+                autosave_markPayloadOffsetDirty((uint16_t)(instrument_base +
+                    AUTOSAVE_INSTRUMENT_SOURCE_OFFSET + type_byte)));
         }
         for (descriptor_index = 0u;
              descriptor_index < entry->descriptor_count;
@@ -1270,9 +1397,10 @@ void autosave_markKitDirty(uint8_t scene_index)
     /*
      * Mark the implemented payload of one committed normal whole-Kit load.
      *
-     * Input: destination Scene. Output: all live Kit settings and six complete
-     * Instrument data regions are dirty; HCNAMES-owned Kit/Instrument names
-     * remain excluded. Why: compound copy/load code needs one post-commit hook.
+     * Input: destination Scene. Output: the Kit source, all live Kit settings,
+     * and six complete Instrument data regions including their source fields
+     * are dirty; HCNAMES-owned Kit/Instrument names remain excluded. Why:
+     * compound copy/load code needs one post-commit hook.
      * Affiliates: normal Kit Load completion, future Kit copy, and the six
      * complete Instrument scopes below.
      */
@@ -1284,6 +1412,9 @@ void autosave_markKitDirty(uint8_t scene_index)
          parameter_index++) {
         autosave_markKitParameterDirty(scene_index, parameter_index);
     }
+    /* A whole Kit commit changes the Kit's source before its six members. */
+    autosave_markSourceDirty(
+        (uint16_t)(AUTOSAVE_HCNAMES_KIT_BASE + scene_index));
     for (slot = 0u; slot < AUTOSAVE_INSTRUMENTS_PER_KIT; slot++)
         autosave_markWholeInstrumentDirty(scene_index, slot);
 
@@ -1323,11 +1454,12 @@ void autosave_markSceneWithoutPatternDirty(uint8_t scene_index)
     /*
      * Mark the implemented non-Pattern payload of one committed Scene load.
      *
-     * Input: destination Scene. Output: all Scene settings, Effect scope, and
-     * Kit scope become dirty; Scene name and Pattern are excluded. Why: direct
-     * Scene replacements bypass scalar setters but must not imply Pattern
-     * persistence. Affiliates: successful root Scene completion, exact-mask
-     * Bank completion, future Scene copy, Effect stub, and Kit marker.
+     * Input: destination Scene. Output: the Scene source, all Scene settings,
+     * Effect scope, and Kit scope become dirty; Scene name and Pattern are
+     * excluded. Why: direct Scene replacements bypass scalar setters but must
+     * not imply Pattern persistence. Affiliates: successful root Scene
+     * completion, exact-mask Bank completion, future Scene copy, Effect stub,
+     * and Kit marker.
      */
     /* Pack the outer terminal LOAD_MARK in locals only; no persistent state is added. */
     uint8_t trace_flags = 0u;
@@ -1337,6 +1469,9 @@ void autosave_markSceneWithoutPatternDirty(uint8_t scene_index)
          parameter_index++) {
         autosave_markSceneParameterDirty(scene_index, parameter_index);
     }
+    /* Scene replacement also changes the source at the front of its header. */
+    autosave_markSourceDirty(
+        (uint16_t)(AUTOSAVE_HCNAMES_SCENE_BASE + scene_index));
     autosave_markEffectDirty(scene_index);
     autosave_markKitDirty(scene_index);
 
@@ -1431,6 +1566,64 @@ uint8_t autosave_maskHasDirty(void)
             return 1u;
     }
     return 0u;
+}
+
+uint8_t autosave_objectFullyCaptured(uint16_t hcnames_row)
+{
+    uint32_t payload_start;
+    uint32_t payload_end;
+    uint32_t payload_offset;
+
+    /*
+     * Map one HCNAMES identity row to its complete current autosave scope.
+     *
+     * Inputs: the fixed Bank/Scene/Kit/Instrument row coordinate and the
+     * canonical mask owned by this module. Output: nonzero only when every
+     * byte in that object's reserved wire interval is clean. The intervals
+     * intentionally include reserved bytes: current marker APIs never set
+     * those cells, and a future owner can only make this test more
+     * conservative without adding a second object bitmap or SRAM allocation.
+     * Affiliates: filesystem.c's post-drain refreshed-bit publication.
+     */
+    if (hcnames_row == AUTOSAVE_HCNAMES_BANK_ROW) {
+        payload_start = 0u;
+        payload_end = AUTOSAVE_BANK_SECTION_BYTES;
+    } else if (hcnames_row < AUTOSAVE_HCNAMES_KIT_BASE) {
+        payload_start = AUTOSAVE_BANK_SECTION_BYTES +
+            ((uint32_t)(hcnames_row - AUTOSAVE_HCNAMES_SCENE_BASE) *
+             AUTOSAVE_SCENE_SECTION_BYTES);
+        payload_end = payload_start + AUTOSAVE_SCENE_SECTION_BYTES;
+    } else if (hcnames_row < AUTOSAVE_HCNAMES_INSTRUMENT_BASE) {
+        payload_start = AUTOSAVE_BANK_SECTION_BYTES +
+            ((uint32_t)(hcnames_row - AUTOSAVE_HCNAMES_KIT_BASE) *
+             AUTOSAVE_SCENE_SECTION_BYTES) + AUTOSAVE_KIT_OFFSET;
+        payload_end = payload_start + AUTOSAVE_KIT_SECTION_BYTES;
+    } else if (hcnames_row < AUTOSAVE_HCNAMES_ROW_COUNT) {
+        uint16_t instrument_index = (uint16_t)(
+            hcnames_row - AUTOSAVE_HCNAMES_INSTRUMENT_BASE);
+        uint16_t scene_index = (uint16_t)(
+            instrument_index / AUTOSAVE_INSTRUMENTS_PER_KIT);
+        uint16_t slot = (uint16_t)(
+            instrument_index % AUTOSAVE_INSTRUMENTS_PER_KIT);
+
+        payload_start = AUTOSAVE_BANK_SECTION_BYTES +
+            ((uint32_t)scene_index * AUTOSAVE_SCENE_SECTION_BYTES) +
+            AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_INSTRUMENTS_OFFSET +
+            ((uint32_t)slot * AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+        payload_end = payload_start + AUTOSAVE_INSTRUMENT_RECORD_BYTES;
+    } else {
+        return 0u;
+    }
+
+    for (payload_offset = payload_start;
+         payload_offset < payload_end;
+         payload_offset++) {
+        if ((autosave_dirty_mask[payload_offset >> 3u] &
+             (uint8_t)(1u << (payload_offset & 7u))) != 0u) {
+            return 0u;
+        }
+    }
+    return 1u;
 }
 
 uint8_t autosave_maskBitTake(uint16_t payload_offset)

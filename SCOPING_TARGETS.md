@@ -522,6 +522,16 @@ dirty-bit path.
   plus `-include $(OBJS:.o=.d)`. Until then, always `make clean` after any
   header edit.
 
+### Session 060 observations (2026-09-03)
+
+- **Menu name retention glitch after Bank Load/Save.** After completing a
+  Bank Load or Save, the displayed name on the Load/Save page occasionally
+  shows stale or incorrect text. Minor cosmetic; does not affect the
+  underlying data or HCNAMES register.
+- **Menu scrolling glitch on Load/Save page.** Minor visual artifact when
+  scrolling through items on the Load or Save page after a Bank operation.
+  Does not affect operation selection or data integrity.
+
 ---
 
 ## Phase 1 — Foundation Refactors

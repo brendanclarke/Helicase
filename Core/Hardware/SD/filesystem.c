@@ -104,6 +104,15 @@
 #define FS_KIT_LFN_MAX 80u
 #define FS_RESIDENT_NAMES_FILENAME ".hcnames"
 /*
+ * Safe-write companion for the firmware-owned HCNAMES singleton.
+ *
+ * Every rewrite is streamed to this distinct root name, synced, and promoted
+ * only after the old singleton has been retired. Keeping the temp name
+ * separate prevents a power loss during truncation from destroying the last
+ * complete register; boot recovery validates this file before promotion.
+ */
+#define FS_RESIDENT_NAMES_TEMP_FILENAME ".hcnamtmp"
+/*
  * `/.hcnames` is one firmware-owned root singleton in FAT's case-insensitive
  * namespace. Every read, rewrite, and first-use creation must therefore use
  * folded display-name lookup: a host-created case variant is the same register
@@ -135,14 +144,12 @@
  * One compact provenance word accompanies each logical HCNAMES row.
  *
  * Direct numbered-library sources occupy 0..999; the row class determines the
- * library.  The three high values are non-library tokens.  Bit 15 is retained
- * only while an asynchronous HCNAMES rewrite has a caller-staged source
- * update: it lets the reader preserve a new source while it streams the old
- * register into the shared name cache, with no second dirty bitmap allocation.
+ * library. The three high values are non-library tokens. Bit 13 records a
+ * completed library refresh and bit 15 is retained only while an asynchronous
+ * HCNAMES rewrite has a caller-staged source update. The value field therefore
+ * excludes both flags without adding a parallel status array.
  */
 #define FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT 1000u
-#define FS_RESIDENT_SOURCE_DIRTY_FLAG        0x8000u
-#define FS_RESIDENT_SOURCE_VALUE_MASK        0x7fffu
 /*
  * Text line buffer for storageTypes schemas.
  *
@@ -906,9 +913,10 @@ static uint16_t fs_resident_source[FS_RESIDENT_NAMES_ROW_COUNT];
  * Coherency: hcnames_mirror_valid gates all reads. It is cleared at card mount,
  * before physical reload, and before every write-capable HCNAMES open. A
  * read-only load becomes VALID after close; a rewrite becomes PUBLISH_PENDING
- * after close and VALID only after the facade's final afatfs_sync(). A failed
- * write/sync leaves it invalid and forces a later physical reload, so no second
- * name image or rollback allocation is needed.
+ * only after close, sync, remove, and rename, then VALID after the facade's
+ * final afatfs_sync(). A failed write/sync leaves it invalid and forces a
+ * later physical reload, so no second name image or rollback allocation is
+ * needed.
  *
  * The fs_resident_source[] register is already separate and needs no change;
  * this mirror replaces only the name-row borrowing path.
@@ -916,10 +924,11 @@ static uint16_t fs_resident_source[FS_RESIDENT_NAMES_ROW_COUNT];
 static char hcnames_name_mirror[FS_RESIDENT_NAMES_ROW_COUNT]
                                [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 /* Reuse the approved one-byte validity allocation as a three-state durability
- * gate. INVALID is unreadable; PUBLISH_PENDING means a complete HCNAMES handle
- * closed but the facade's mandatory final afatfs_sync() has not succeeded;
- * VALID is the only state public/internal readers may trust. This closes the
- * power/card-error window without adding a transaction byte or rollback image. */
+ * gate. INVALID is unreadable; PUBLISH_PENDING means a complete HCNAMES temp
+ * file closed and was renamed, but the facade's mandatory final afatfs_sync()
+ * has not succeeded; VALID is the only state public/internal readers may trust.
+ * This closes the power/card-error window without adding a transaction byte or
+ * rollback image. */
 #define FS_HCNAMES_MIRROR_INVALID         0u
 #define FS_HCNAMES_MIRROR_VALID           1u
 #define FS_HCNAMES_MIRROR_PUBLISH_PENDING 2u
@@ -1306,6 +1315,11 @@ static void filesystem_autosaveTraceFlushCompleted(void);
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
 static void filesystem_autosaveSetupCompleted(void);
 static void filesystem_clearResidentSourceDirtyFlags(void);
+static void filesystem_setResidentRefreshed(uint16_t row);
+static void filesystem_setResidentSceneRefreshed(uint8_t scene_index);
+static uint8_t filesystem_autosaveDrainHasRefreshWork(void);
+static void filesystem_clearResidentRefreshedCaptured(void);
+static void filesystem_autosaveDrainAfterCommit(void);
 static uint8_t filesystem_residentNameIsBlank(const char *name);
 static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t cap,
@@ -4790,7 +4804,8 @@ static void filesystem_writeResidentNames_tick(void)
      * not sufficient evidence. The proof borrows only operation-local finder
      * scratch; the writer still serializes the existing SRAM fields and
      * finishes through filesystem_finish() so asyncfatfs flushes before boot
-     * continues.
+     * continues. The physical write uses `.hcnamtmp`: close, sync, remove the
+     * former live singleton, rename the temp file, then enter the final flush.
      */
     switch (op_phase) {
     case 0: /* PROVE ROOT HCNAMES ABSENT/UNIQUE, THEN OPEN FOR WRITE */
@@ -4818,11 +4833,13 @@ static void filesystem_writeResidentNames_tick(void)
          * refresh writer to reopen the one proven existing register. */
         if (!afatfs_chdir(NULL))
             return;
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
         op_file_ready = false;
         op_file = NULL;
         op_item_offset = 0u;
         op_bytes_done = 0u;
-        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+        op_close_status = FS_STATUS_DONE;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
                               "w",
                               FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
@@ -4831,7 +4848,7 @@ static void filesystem_writeResidentNames_tick(void)
         op_phase = 1u;
         return;
 
-    case 1: /* WAIT .hcnames OPEN */
+    case 1: /* WAIT .hcnamtmp OPEN */
         if (!op_file_ready)
             return;
         if (!op_file) {
@@ -4847,14 +4864,30 @@ static void filesystem_writeResidentNames_tick(void)
                 op_line_len = filesystem_nextResidentNameLine(
                     op_line_buf, sizeof(op_line_buf), op_item_offset);
                 if (op_line_len == 0u) {
-                    filesystem_finish(FS_STATUS_ERROR);
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 3u;
                     return;
                 }
             }
-            op_bytes_done += afatfs_fwrite(
-                op_file,
-                (const uint8_t *)op_line_buf + op_bytes_done,
-                op_line_len - op_bytes_done);
+            {
+                uint32_t written = afatfs_fwrite(
+                    op_file,
+                    (const uint8_t *)op_line_buf + op_bytes_done,
+                    op_line_len - op_bytes_done);
+                op_bytes_done += written;
+                /* A sticky full-card result cannot make this temp stream
+                 * progress. Close the partial temp and leave live HCNAMES
+                 * untouched for boot recovery. */
+                if (written == 0u && afatfs_isFull()) {
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 3u;
+                    return;
+                }
+            }
             if (op_bytes_done >= op_line_len) {
                 op_item_offset++;
                 op_bytes_done = 0u;
@@ -4866,14 +4899,64 @@ static void filesystem_writeResidentNames_tick(void)
             op_phase = 3u;
         return;
 
-    case 3: /* WAIT CLOSE + FINISH THROUGH FLUSH GATE */
+    case 3: /* WAIT TEMP CLOSE, THEN SYNC BEFORE RETIRING THE LIVE FILE */
         if (!op_close_done)
             return;
         op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            /* A formatter or write failure may have closed a partial temp
+             * file. Do not remove the intact live register or publish the
+             * incomplete replacement. */
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
         if (!afatfs_chdir(NULL))
             return;
-        /* Initial/recovery serialization also emits paired source tokens;
-         * make any staged values clean only after its register close. */
+        op_phase = 4u;
+        return;
+
+    case 4: /* SYNC TEMP, THEN REMOVE THE OLD LIVE REGISTER */
+        if (!afatfs_sync())
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 5u;
+        return;
+
+    case 5: /* WAIT LIVE-REGISTER REMOVE, THEN RENAME THE TEMP REGISTER */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
+                                     FS_RESIDENT_NAMES_FILENAME,
+                                     FS_RESIDENT_NAMES_MATCH_MODE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 6u;
+        return;
+
+    case 6: /* WAIT TEMP-TO-LIVE RENAME */
+        if (!op_rename_done)
+            return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /* Initial/recovery serialization emits paired source tokens; make
+         * staged values clean only after the live name has been replaced. */
         filesystem_clearResidentSourceDirtyFlags();
         filesystem_finish(FS_STATUS_DONE);
         return;
@@ -5214,19 +5297,25 @@ uint16_t filesystem_residentSource(uint16_t row)
 
 uint8_t filesystem_setResidentSource(uint16_t row, uint16_t source)
 {
+    uint16_t refreshed;
+
     /*
      * Stage one source update for the next ordinary HCNAMES rewrite.
      *
      * The dirty flag survives the subsequent read of the old register, so an
      * asynchronous preserve/overlay update cannot overwrite a just-committed
-     * load source with stale on-card provenance.  The physical file changes
-     * only through the existing close/sync state machine.
+     * load source with stale on-card provenance. The physical file changes
+     * only through the existing close/sync state machine. An existing refresh
+     * witness belongs to the resident payload, so source replacement retains
+     * it until autosave proves that payload clean.
      */
     if (!filesystem_residentSourceValid(row, source))
         return 0u;
+    refreshed = (uint16_t)(fs_resident_source[row] &
+                           FS_RESIDENT_SOURCE_REFRESHED_FLAG);
     fs_resident_source[row] = (uint16_t)(
         (source & FS_RESIDENT_SOURCE_VALUE_MASK) |
-        FS_RESIDENT_SOURCE_DIRTY_FLAG);
+        refreshed | FS_RESIDENT_SOURCE_DIRTY_FLAG);
     return 1u;
 }
 
@@ -5280,9 +5369,10 @@ static void filesystem_prepareResidentNamesCache(void)
      *
      * Clears the mirror and invalidates it for readers.  The shared
      * fs_list_cache_name storage is no longer touched, so a valid .hcindex
-     * or library cache survives an HCNAMES read/write cycle.  The mirror
-     * becomes valid again only after a successful close in the HCNAMES
-     * state machine, Bank Load phase 86, or Bank Save phase 86. Callers that
+     * or library cache survives an HCNAMES read/write cycle. A read-only
+     * reload becomes valid after close; a rewrite reaches its
+     * publish-pending tail only after close/sync/remove/rename in the HCNAMES
+     * state machine, Bank Load phase 94, or Bank Save phase 91. Callers that
      * can consume an already-valid mounted-card image (notably Bank Save) must
      * test hcnames_mirror_valid before calling this reload primitive; clearing
      * a valid image here would defeat the persistent-mirror contract.
@@ -5293,8 +5383,11 @@ static void filesystem_prepareResidentNamesCache(void)
      * use.  Keep only caller-staged dirty values until this transaction writes
      * them through the normal durable HCNAMES path. */
     for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
-        if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_DIRTY_FLAG) == 0u)
-            fs_resident_source[row] = FS_RESIDENT_SOURCE_UNKNOWN;
+        if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_DIRTY_FLAG) == 0u) {
+            fs_resident_source[row] = (uint16_t)(
+                FS_RESIDENT_SOURCE_UNKNOWN |
+                (fs_resident_source[row] & FS_RESIDENT_SOURCE_REFRESHED_FLAG));
+        }
     }
 }
 
@@ -5340,6 +5433,7 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
     char name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
     uint16_t source = FS_RESIDENT_SOURCE_UNKNOWN;
     uint8_t name_len = 0u;
+    uint8_t refreshed = 0u;
 
     /*
      * Parse one physical HCNAMES line into its paired name/source cache cells.
@@ -5359,12 +5453,22 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
          * A prior firmware version wrote extended rows with extra columns
          * (e.g. name\tsource\t-\tflag). Truncating `tail` at the next tab
          * lets the source parser see only its own column, and the extra
-         * fields are silently discarded rather than rejecting the row.
+         * fields are silently discarded rather than rejecting the row. The
+         * first optional field after the source is the Phase B2 refreshed
+         * witness: exactly `R` (before NUL, another tab, or the line ending)
+         * restores bit 13 on the resident source word.
          */
         const char *second_tab = strchr(tail, '\t');
         char source_buf[8];
         if (second_tab) {
+            const char *refresh_field = second_tab + 1u;
             uint8_t slen = 0u;
+
+            if (refresh_field[0] == 'R' &&
+                (refresh_field[1] == '\0' || refresh_field[1] == '\t' ||
+                 refresh_field[1] == '\r' || refresh_field[1] == '\n')) {
+                refreshed = 1u;
+            }
             while (tail + slen < second_tab &&
                    slen < sizeof(source_buf) - 1u) {
                 source_buf[slen] = tail[slen];
@@ -5399,7 +5503,8 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
         storage_copyDisplayName(hcnames_name_mirror[row], name);
     hcnames_name_mirror[row][STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_DIRTY_FLAG) == 0u)
-        fs_resident_source[row] = source;
+        fs_resident_source[row] = (uint16_t)(
+            source | (refreshed ? FS_RESIDENT_SOURCE_REFRESHED_FLAG : 0u));
     return 1u;
 }
 
@@ -5427,13 +5532,45 @@ static void filesystem_clearResidentSourceDirtyFlags(void)
 
     /*
      * Publish staged source values only after the enclosing HCNAMES file has
-     * closed through the normal flush gate.  Before this point the dirty flag
+     * closed through the normal flush gate. Before this point the dirty flag
      * intentionally protects a newly committed load source from the old file
-     * image being streamed into the cache.
+     * image being streamed into the cache. Clear only bit 15 here: bit 13 is
+     * durable refresh state and must survive every HCNAMES rewrite.
      */
     for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
-        fs_resident_source[row] &= FS_RESIDENT_SOURCE_VALUE_MASK;
+        fs_resident_source[row] &= (uint16_t)~FS_RESIDENT_SOURCE_DIRTY_FLAG;
     }
+}
+
+static void filesystem_setResidentRefreshed(uint16_t row)
+{
+    /*
+     * Mark one committed resident object as refreshed in the existing source
+     * register. Inputs: a fixed HCNAMES row after a successful library
+     * Load/Save commit. Output: bit 13 is set while the source and dirty
+     * metadata remain unchanged; invalid rows are ignored. This is RAM-only,
+     * and the bit reaches the card through the next safe HCNAMES rewrite.
+     */
+    if (row < FS_RESIDENT_NAMES_ROW_COUNT)
+        fs_resident_source[row] |= FS_RESIDENT_SOURCE_REFRESHED_FLAG;
+}
+
+static void filesystem_setResidentSceneRefreshed(uint8_t scene_index)
+{
+    uint8_t slot;
+
+    /*
+     * Mark the Scene identity and its complete embedded Kit hierarchy together.
+     * Inputs: one successfully committed resident Scene Load/Save. Output:
+     * Scene, Kit, and six Instrument rows carry the same refresh witness, so
+     * autosave can clear each flag independently only after its own payload
+     * interval has become clean. No additional row list or bitmap is retained.
+     */
+    filesystem_setResidentRefreshed(filesystem_residentSceneRow(scene_index));
+    filesystem_setResidentRefreshed(filesystem_residentKitRow(scene_index));
+    for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++)
+        filesystem_setResidentRefreshed(
+            filesystem_residentInstrumentRow(scene_index, slot));
 }
 
 static void filesystem_cacheCurrentResidentInstrumentNames(void)
@@ -5709,8 +5846,11 @@ static void filesystem_residentNames_tick(void)
             filesystem_cacheCurrentResidentSceneNames();
         else
             filesystem_cacheCurrentResidentInstrumentNames();
+        /* The source image was read successfully, but the writer below must
+         * never advertise it while its replacement temp file is incomplete. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
         op_file_ready = false;
-        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
                               "w",
                               FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
@@ -5743,14 +5883,29 @@ static void filesystem_residentNames_tick(void)
                     (uint8_t)!filesystem_residentNameIsBlank(name),
                     fs_resident_source[op_item_offset], op_item_offset);
                 if (op_line_len == 0u) {
-                    filesystem_finish(FS_STATUS_ERROR);
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 10u;
                     return;
                 }
             }
-            op_bytes_done += afatfs_fwrite(
-                op_file,
-                (const uint8_t *)op_line_buf + op_bytes_done,
-                op_line_len - op_bytes_done);
+            {
+                uint32_t written = afatfs_fwrite(
+                    op_file,
+                    (const uint8_t *)op_line_buf + op_bytes_done,
+                    op_line_len - op_bytes_done);
+                op_bytes_done += written;
+                /* A sticky full-card result cannot make the temp stream
+                 * progress; close it without removing the live register. */
+                if (written == 0u && afatfs_isFull()) {
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 10u;
+                    return;
+                }
+            }
             if (op_bytes_done >= op_line_len) {
                 op_item_offset++;
                 op_bytes_done = 0u;
@@ -5759,29 +5914,76 @@ static void filesystem_residentNames_tick(void)
         }
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 6u;
+            op_phase = 10u;
         return;
 
-    case 6: /* WAIT DESTINATION CLOSE + ARM FINAL-SYNC PUBLICATION */
+    case 10: /* WAIT TEMP CLOSE, THEN SYNC BEFORE RETIRING LIVE HCNAMES */
         if (!op_close_done)
             return;
         op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 11u;
+        return;
+
+    case 11: /* SYNC COMPLETE TEMP REGISTER */
+        if (!afatfs_sync())
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 12u;
+        return;
+
+    case 12: /* WAIT LIVE-REGISTER REMOVE, THEN RENAME TEMP */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
+                                     FS_RESIDENT_NAMES_FILENAME,
+                                     FS_RESIDENT_NAMES_MATCH_MODE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 13u;
+        return;
+
+    case 13: /* WAIT TEMP-TO-LIVE RENAME */
+        if (!op_rename_done)
+            return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 14u;
+        return;
+
+    case 14: /* PUBLISH REGISTER AFTER RENAME, THEN ENTER FINAL FLUSH */
         if (!afatfs_chdir(NULL))
             return;
         filesystem_clearResidentSourceDirtyFlags();
-        /* The closed register matches the mirror, but only the shared final
-         * sync may promote this pending image to reader-visible validity. */
+        /* The mirror matches the renamed live file; only the shared final sync
+         * may promote this pending image to reader-visible validity. */
         hcnames_mirror_valid = FS_HCNAMES_MIRROR_PUBLISH_PENDING;
-        /*
-         * Finish only the requested resident-name transaction.
-         *
-         * Inputs: the complete HCNAMES cache and a closed root file. Output:
-         * HCNAMES is flushed without inferring whether `/Scene/` changed.
-         * Scene Save explicitly owns the namespace-rebuild flag before it
-         * enters this shared writer; pure Scene Load instead lets Menu reload
-         * the unchanged `.hcindex` after DSP apply. This keeps a metadata
-         * writer from selecting either caller's browser policy.
-         */
+        /* Finish only the requested resident-name transaction. Scene Save's
+         * already-armed index rebuild remains owned by its caller; a plain
+         * Scene Load does not infer a browser-index policy from this register
+         * publication. */
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -5814,6 +6016,10 @@ static void filesystem_residentNames_tick(void)
         /* Only an empty, successfully closed root scan reaches this create.
          * Start with blank preserved rows, then publish the completed action's
          * identity block as the first authoritative HCNAMES content. */
+        /* An absent register has no untouched rows to preserve. Reset the
+         * dedicated mirror before overlaying the completed identity block so
+         * a stale mounted-card image cannot leak into the first bootstrap. */
+        filesystem_prepareResidentNamesCache();
         if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
             filesystem_cacheCurrentResidentKitNames();
         else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
@@ -5822,7 +6028,9 @@ static void filesystem_residentNames_tick(void)
             filesystem_cacheCurrentResidentInstrumentNames();
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+        /* Bootstrap uses the same temp target as normal updates; even though
+         * the live register is absent, truncation must remain recoverable. */
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
                               "w",
                               FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
@@ -5961,6 +6169,29 @@ static void filesystem_ensureAutosaveFiles_tick(void)
 {
     switch (op_phase) {
     case 0: /* RETURN ROOT + OPEN AUTHORITATIVE HCNAMES */
+        /*
+         * Recover a durable HCNAMES temp file before reading the live file.
+         *
+         * Inputs: the optional synced `.hcnamtmp` left by an interrupted
+         * rewrite. Output: a temp containing exactly 129 parseable rows is
+         * promoted with remove-old/rename; an invalid temp is removed; a
+         * missing temp falls through to the existing live-register read. The
+         * row counter and parser use operation scratch, so boot recovery adds
+         * no SRAM or filesystem handle. `op_file_version` is borrowed only as
+         * the one-bit prelude state until normal A/B ensure begins.
+         */
+        if (op_file_version == 0u) {
+            if (!afatfs_chdir(NULL))
+                return;
+            op_file_ready = false;
+            op_file = NULL;
+            if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME, "r",
+                                  FS_RESIDENT_NAMES_MATCH_MODE, NULL,
+                                  on_file_opened))
+                return;
+            op_phase = 15u;
+            return;
+        }
 #if DEV_MODE_LOGGING
         /* Begin the RAM-only capsule before this ensure transaction owns FAT. */
         if (!filesystem_hcprmsCapsuleIsActive())
@@ -6290,6 +6521,124 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         filesystem_finish(FS_STATUS_ERROR);
         return;
 
+    case 15: /* WAIT OPTIONAL HCNAMES TEMP OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            /* A NULL temp read is an ordinary absent-temp outcome. Continue
+             * with the established live HCNAMES reader and its normal parser. */
+            op_file_version = 1u;
+            op_phase = 0u;
+            return;
+        }
+        op_item_offset = 0u;
+        op_line_len = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_file_version = 2u;
+        op_phase = 16u;
+        return;
+
+    case 16: /* VALIDATE ALL 129 TEMP HCNAMES ROWS */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t read_status = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (read_status != STORAGE_STATUS_OK &&
+            read_status != STORAGE_STATUS_WAIT) {
+            op_file_version = 0u;
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 17u;
+            return;
+        }
+        if (line_ready) {
+            if (op_item_offset >= FS_RESIDENT_NAMES_ROW_COUNT ||
+                !filesystem_cacheResidentRecord(op_item_offset,
+                                                op_line_buf)) {
+                op_file_version = 0u;
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 17u;
+                return;
+            }
+            op_item_offset++;
+            op_line_len = 0u;
+        }
+        if (eof) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 17u;
+        }
+        return;
+    }
+
+    case 17: /* CLOSE TEMP BEFORE VALIDATED PROMOTION OR DISCARD */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        /* A complete row count is necessary but not sufficient: a parser or
+         * close error must also force discard, otherwise a partial temp can be
+         * promoted merely because its last readable row happened to be 129. */
+        op_stream_index = (uint32_t)(
+            op_file_version == 2u &&
+            op_item_offset == FS_RESIDENT_NAMES_ROW_COUNT &&
+            op_close_status == FS_STATUS_DONE);
+        op_file_version = 1u;
+        if (!afatfs_chdir(NULL))
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(
+                op_stream_index != 0u
+                    ? FS_RESIDENT_NAMES_FILENAME
+                    : FS_RESIDENT_NAMES_TEMP_FILENAME,
+                FS_RESIDENT_NAMES_MATCH_MODE, AFATFS_REMOVE_FILES_ONLY,
+                on_remove_complete))
+            return;
+        op_phase = 18u;
+        return;
+
+    case 18: /* WAIT OLD/TEMP REMOVE */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (op_stream_index == 0u) {
+            op_phase = 0u;
+            return;
+        }
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
+                                     FS_RESIDENT_NAMES_FILENAME,
+                                     FS_RESIDENT_NAMES_MATCH_MODE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 19u;
+        return;
+
+    case 19: /* WAIT VALIDATED TEMP PROMOTION */
+        if (!op_rename_done)
+            return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            /* The old live entry was removed only after temp validation; leave
+             * the temp evidence in place for the next boot and report error. */
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 0u;
+        return;
+
     default:
         filesystem_finish(FS_STATUS_ERROR);
         return;
@@ -6320,6 +6669,10 @@ static void filesystem_autosaveWriterFinishErrorNow(void)
     autosave_maskRestoreCaptured(
         fs_autosave_parameter_cache.payload_offsets,
         op_autosave_writer.patch_count);
+    /* The existing operation byte suppresses R only while the autosave
+     * HCNAMES temp stream is pending. Never leak that mode into a retry or a
+     * later non-autosave formatter call. */
+    op_file_version = 0u;
     filesystem_finish(FS_STATUS_ERROR);
 }
 
@@ -6341,6 +6694,74 @@ static void filesystem_autosaveWriterFinishError(void)
         return;
     }
     filesystem_autosaveWriterFinishErrorNow();
+}
+
+static uint8_t filesystem_autosaveDrainHasRefreshWork(void)
+{
+    uint16_t row;
+
+    /*
+     * Find refreshed rows whose complete autosave object is now clean.
+     *
+     * Inputs: the durable in-session HCNAMES mirror, bit-13 refresh witnesses,
+     * and Autosave.c's canonical dirty mask. Output: one boolean deciding
+     * whether this successful drain needs a full 129-row HCNAMES rewrite.
+     * Invalid mirror state fails closed: a stale/empty image must never be
+     * serialized over the physical register. The scan is bounded and uses no
+     * additional SRAM.
+     */
+    if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID)
+        return 0u;
+    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+        if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_REFRESHED_FLAG) !=
+                0u && autosave_objectFullyCaptured(row)) {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+static void filesystem_clearResidentRefreshedCaptured(void)
+{
+    uint16_t row;
+
+    /*
+     * Retire only refresh witnesses whose own object stayed clean through the
+     * completed temp-file publication and final sync. Inputs are the
+     * post-rename source register and canonical autosave mask; output clears
+     * bit 13 while source values and any still-dirty object's witness remain
+     * intact. This is the
+     * final in-RAM half of the autosave convergence boundary and allocates no
+     * per-row bookkeeping.
+     */
+    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+        if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_REFRESHED_FLAG) !=
+                0u && autosave_objectFullyCaptured(row)) {
+            fs_resident_source[row] &= (uint16_t)~
+                FS_RESIDENT_SOURCE_REFRESHED_FLAG;
+        }
+    }
+}
+
+static void filesystem_autosaveDrainAfterCommit(void)
+{
+    /*
+     * Start the optional post-drain HCNAMES convergence transaction.
+     *
+     * Inputs: a closed successful autosave target and the existing HCNAMES
+     * mirror. Output: either the ordinary autosave completion or phase 70's
+     * temp-file writer. The existing op_file_version byte is a transient
+     * formatter mode that suppresses R only for clean object rows; refreshed
+     * bits are not cleared until the terminal callback confirms final sync.
+     */
+    if (!filesystem_autosaveDrainHasRefreshWork()) {
+        op_file_version = 0u;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+    }
+    op_file_version = 1u;
+    hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+    op_phase = 70u;
 }
 
 static uint32_t filesystem_autosaveRecoveryGeneration(void)
@@ -6743,7 +7164,10 @@ static void filesystem_autosaveParameterDrain_tick(void)
         autosaveTrace_record(AUTOSAVE_TRACE_STAGE_MASK_MERGED, has_dirty,
                              (uint32_t)op_autosave_writer.mask_bytes_read);
         if (!has_dirty) {
-            filesystem_complete(FS_STATUS_DONE);
+            /* A clean canonical record can still have freshly loaded object
+             * identities. Give the post-drain HCNAMES convergence hook the
+             * same successful boundary as the normal copy-forward path. */
+            filesystem_autosaveDrainAfterCommit();
             return;
         }
         op_autosave_writer.payload_scan_offset = 0u;
@@ -7205,6 +7629,133 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * remains in Autosave.c; the completion callback reads it directly and
          * no transaction-local scalar replaces or clears it.
          */
+        /* The autosave target is committed; now converge any refreshed
+         * HCNAMES rows before the shared final sync acknowledges the drain. */
+        filesystem_autosaveDrainAfterCommit();
+        return;
+
+    case 70: /* OPEN TEMP HCNAMES FOR POST-DRAIN REFRESH CONVERGENCE */
+        /* The mirror was made unreadable by filesystem_autosaveDrainAfterCommit;
+         * it becomes reader-visible only after this replacement is renamed and
+         * the shared final sync completes. */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME, "w",
+                              FS_RESIDENT_NAMES_MATCH_MODE, NULL,
+                              on_file_opened))
+            return;
+        op_phase = 71u;
+        return;
+
+    case 71: /* WAIT POST-DRAIN HCNAMES TEMP OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_autosaveWriterFinishError();
+            return;
+        }
+        op_item_offset = 0u;
+        op_bytes_done = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 72u;
+        return;
+
+    case 72: /* STREAM ALL HCNAMES ROWS WITH CLEAN REFRESHES SUPPRESSED */
+    {
+        uint32_t written;
+
+        if (op_item_offset < FS_RESIDENT_NAMES_ROW_COUNT) {
+            if (op_bytes_done == 0u) {
+                op_line_len = filesystem_formatResidentNameLine(
+                    op_line_buf, sizeof(op_line_buf),
+                    hcnames_name_mirror[op_item_offset],
+                    (uint8_t)!filesystem_residentNameIsBlank(
+                        hcnames_name_mirror[op_item_offset]),
+                    fs_resident_source[op_item_offset], op_item_offset);
+                if (op_line_len == 0u) {
+                    filesystem_autosaveWriterFinishError();
+                    return;
+                }
+            }
+            written = afatfs_fwrite(
+                op_file, (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+            op_bytes_done += written;
+            if (written == 0u && afatfs_isFull()) {
+                filesystem_autosaveWriterFinishError();
+                return;
+            }
+            if (op_bytes_done >= op_line_len) {
+                op_item_offset++;
+                op_bytes_done = 0u;
+            }
+            return;
+        }
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 73u;
+        return;
+    }
+
+    case 73: /* WAIT POST-DRAIN TEMP CLOSE, THEN SYNC */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_autosaveWriterFinishErrorNow();
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 74u;
+        return;
+
+    case 74: /* SYNC POST-DRAIN TEMP REGISTER */
+        if (!afatfs_sync())
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 75u;
+        return;
+
+    case 75: /* WAIT LIVE REMOVE, THEN RENAME POST-DRAIN TEMP */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_autosaveWriterFinishErrorNow();
+            return;
+        }
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
+                                     FS_RESIDENT_NAMES_FILENAME,
+                                     FS_RESIDENT_NAMES_MATCH_MODE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 76u;
+        return;
+
+    case 76: /* WAIT POST-DRAIN TEMP-TO-LIVE RENAME */
+        if (!op_rename_done)
+            return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            filesystem_autosaveWriterFinishErrorNow();
+            return;
+        }
+        /* The physical register now contains R only for objects that were
+         * still dirty at their serialization point. Keep the in-RAM witnesses
+         * until filesystem_autosaveWriterCompleted() confirms final sync. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_PUBLISH_PENDING;
         filesystem_finish(FS_STATUS_DONE);
         return;
 
@@ -9815,6 +10366,23 @@ static void filesystem_loadKitDirectory_tick(void)
                         if (target_scene) {
                             target_scene->kit = op_staged_kit;
                             /*
+                             * The validated normal Kit now owns the resident
+                             * Kit payload. Mark only that Kit and its six
+                             * Instrument rows refreshed; Scene settings were
+                             * not replaced by this operation. Autosave clears
+                             * these witnesses later, after their own scopes
+                             * drain and the HCNAMES rewrite publishes.
+                             */
+                            filesystem_setResidentRefreshed(
+                                filesystem_residentKitRow(scene_index));
+                            for (uint8_t refreshed_slot = 0u;
+                                 refreshed_slot < STORAGE_KIT_SLOT_COUNT;
+                                 refreshed_slot++) {
+                                filesystem_setResidentRefreshed(
+                                    filesystem_residentInstrumentRow(
+                                        scene_index, refreshed_slot));
+                            }
+                            /*
                              * Option 2: a root Kit Load replaces the resident
                              * Kit from a root `Kit/` folder, not from the
                              * identified Bank child, so this Scene's
@@ -11292,6 +11860,21 @@ static void filesystem_loadSceneDirectory_tick(void)
             }
         }
         memcpy(preset_currentName, op_scene_display_name, 8u);
+        /*
+         * All Scene payload layers, including Pattern and Effect, have now
+         * completed. Mark each selected Scene plus its Kit and six Instruments
+         * refreshed only at this successful terminal boundary; an earlier
+         * staging commit could otherwise leave an R witness after a later
+         * Pattern/Effect failure.
+         */
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((op_scene_load_scene_mask &
+                 (uint16_t)(1u << scene_index)) != 0u) {
+                filesystem_setResidentSceneRefreshed(scene_index);
+            }
+        }
         if (current_op == FS_INTERNAL_OP_LOAD_BANK) {
             /*
              * Mark one Bank-local child Scene payload as loaded.
@@ -11703,7 +12286,7 @@ static void filesystem_loadBankDirectory_tick(void)
         /* This preload is input to a Bank-owned targeted rewrite, not a
          * read-only publication. Keep the mirror invalid while child rows are
          * overlaid so readers cannot observe names that HCNAMES has not yet
-         * closed and flushed. Phase 86 alone publishes the final image. */
+         * closed and flushed. Phase 94 alone publishes the final image. */
         op_phase = 1u;
         return;
 
@@ -12065,18 +12648,22 @@ static void filesystem_loadBankDirectory_tick(void)
              * can initialize audible Scene data from root Scene, root Kit, or
              * SRAM defaults. The restore slot is still updated because the
              * Bank itself was successfully loaded.
-        */
-        bank_setDisplayName(op_bank_display_name);
-        /* The root Bank directory selected by this completed load is the
-         * direct top-level fallback for every child that inherits upward. */
-        (void)filesystem_setResidentSource(0u, op_slot);
+             */
+            bank_setDisplayName(op_bank_display_name);
+            /* The root Bank directory selected by this completed load is the
+             * direct top-level fallback for every child that inherits upward. */
+            (void)filesystem_setResidentSource(0u, op_slot);
+            /* An empty Bank still replaces the resident Bank metadata. Retain
+             * its refresh witness until the autosave drain captures row-zero
+             * bytes and publishes the matching HCNAMES source pair. */
+            filesystem_setResidentRefreshed(FS_IDENTITY_BANK_ROW);
             /*
              * No requested child exists in this Bank. Preserve the existing
              * resident Scene availability rather than clearing it: the caller
              * asked for a selective Bank identity/load operation, not a reset
              * of every unselected playable Scene. HCNAMES rows remain the
              * preloaded register values for the same reason.
-            */
+             */
             if (!bank_setScenePresentMask(bank_scenePresentMask())) {
                 /*
                  * Guarantee a fresh present-mask capture for an empty Bank.
@@ -12242,6 +12829,10 @@ static void filesystem_loadBankDirectory_tick(void)
          * an obsolete UNKNOWN token after a normal child load.
          */
         (void)filesystem_setResidentSource(FS_IDENTITY_BANK_ROW, op_slot);
+        /* Bank Load completed its metadata and every selected child. Keep the
+         * root Bank refresh witness with the row-zero source until autosave
+         * captures the Bank-owned bytes and publishes HCNAMES. */
+        filesystem_setResidentRefreshed(FS_IDENTITY_BANK_ROW);
         /*
          * Retain availability for resident Scenes outside this Bank request.
          *
@@ -12509,7 +13100,7 @@ static void filesystem_loadBankDirectory_tick(void)
             return;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
                               "w",
                               FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
@@ -12528,6 +13119,7 @@ static void filesystem_loadBankDirectory_tick(void)
         }
         op_item_offset = 0u;
         op_bytes_done = 0u;
+        op_close_status = FS_STATUS_DONE;
         filesystem_bootLoggingSetDetail("BKHCWRIT");
         op_phase = 85u;
         return;
@@ -12542,13 +13134,28 @@ static void filesystem_loadBankDirectory_tick(void)
                         hcnames_name_mirror[op_item_offset]),
                     fs_resident_source[op_item_offset], op_item_offset);
                 if (op_line_len == 0u) {
-                    filesystem_finish(FS_STATUS_ERROR);
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 90u;
                     return;
                 }
             }
-            op_bytes_done += afatfs_fwrite(
-                op_file, (const uint8_t *)op_line_buf + op_bytes_done,
-                op_line_len - op_bytes_done);
+            {
+                uint32_t written = afatfs_fwrite(
+                    op_file, (const uint8_t *)op_line_buf + op_bytes_done,
+                    op_line_len - op_bytes_done);
+                op_bytes_done += written;
+                /* A sticky full-card result cannot make the temp stream
+                 * progress; close it without removing the live register. */
+                if (written == 0u && afatfs_isFull()) {
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 90u;
+                    return;
+                }
+            }
             if (op_bytes_done >= op_line_len) {
                 op_item_offset++;
                 op_bytes_done = 0u;
@@ -12557,17 +13164,70 @@ static void filesystem_loadBankDirectory_tick(void)
         }
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 86u;
+            op_phase = 90u;
         return;
 
-    case 86: /* CLOSE HCNAMES + ARM FINAL-SYNC PUBLICATION */
+    case 90: /* WAIT TEMP CLOSE, THEN SYNC BEFORE RETIRING LIVE HCNAMES */
         if (!op_close_done)
             return;
         op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 91u;
+        return;
+
+    case 91: /* SYNC COMPLETE TEMP REGISTER */
+        if (!afatfs_sync())
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 92u;
+        return;
+
+    case 92: /* WAIT LIVE-REGISTER REMOVE, THEN RENAME TEMP */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
+                                     FS_RESIDENT_NAMES_FILENAME,
+                                     FS_RESIDENT_NAMES_MATCH_MODE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 93u;
+        return;
+
+    case 93: /* WAIT TEMP-TO-LIVE RENAME */
+        if (!op_rename_done)
+            return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 94u;
+        return;
+
+    case 94: /* PUBLISH REGISTER AFTER RENAME, THEN FINISH BANK LOAD */
         if (!afatfs_chdir(NULL))
             return;
         /* This Bank-owned writer bypasses the generic HCNAMES transaction, so
-         * it must publish its staged source words at the same durable close. */
+         * it publishes staged source words only after temp rename. */
         filesystem_clearResidentSourceDirtyFlags();
         /* Defer reader-visible validity until filesystem_flushFinish_tick()
          * confirms that the complete Bank-owned register is durable. */
@@ -13032,6 +13692,17 @@ static void filesystem_loadInstrument_tick(void)
     case 16: /* RETURN ROOT + FINISH */
         if (!afatfs_chdir(NULL))
             return;
+        if (op_close_status == FS_STATUS_DONE &&
+            !op_instrument_load_temporary) {
+            /* The normal Instrument payload is now past its close boundary
+             * and is about to be handed to the completion callback. Morph and
+             * hidden temporary restores deliberately remain identity-neutral.
+             */
+            filesystem_setResidentRefreshed(
+                filesystem_residentInstrumentRow(
+                    op_instrument_load_destination_scene,
+                    op_instrument_load_destination_slot));
+        }
         filesystem_finish(op_close_status);
         return;
 
@@ -13426,6 +14097,20 @@ static void filesystem_saveInstrument_tick(void)
                     op_instrument_save_source_scene,
                     op_instrument_save_source_slot),
                 FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT);
+            /* Phase C: the saved provenance word has two autosave payload
+             * bytes; pair this source-register mutation with its mask update.
+             */
+            autosave_markSourceDirty(
+                filesystem_residentInstrumentRow(
+                    op_instrument_save_source_scene,
+                    op_instrument_save_source_slot));
+            /* The streamed normal Instrument Save completed its payload
+             * boundary; retain the refresh witness until autosave captures it.
+             * Morph projection remains identity-neutral and is excluded. */
+            filesystem_setResidentRefreshed(
+                filesystem_residentInstrumentRow(
+                    op_instrument_save_source_scene,
+                    op_instrument_save_source_slot));
             op_kit_load_scene_mask = (uint16_t)(1u <<
                                                 op_instrument_save_source_scene);
             op_slot = op_instrument_save_source_slot;
@@ -15114,6 +15799,11 @@ static void filesystem_saveKitDirectory_tick(void)
             (void)filesystem_setResidentSource(
                 filesystem_residentKitRow(op_kit_save_source_scene),
                 op_slot);
+            /* Phase C: mark the Kit source field immediately after staging its
+             * new root-library provenance so the next drain cannot retain the
+             * old source bytes. */
+            autosave_markSourceDirty(
+                filesystem_residentKitRow(op_kit_save_source_scene));
             for (instrument_slot = 0u;
                  instrument_slot < STORAGE_KIT_SLOT_COUNT;
                  instrument_slot++) {
@@ -15121,6 +15811,23 @@ static void filesystem_saveKitDirectory_tick(void)
                     filesystem_residentInstrumentRow(
                         op_kit_save_source_scene, instrument_slot),
                     FS_RESIDENT_SOURCE_INHERIT);
+                /* Each inherited member has its own two-byte source field. */
+                autosave_markSourceDirty(
+                    filesystem_residentInstrumentRow(
+                        op_kit_save_source_scene, instrument_slot));
+            }
+            /* Normal Kit Save replaces the Kit payload and all six member
+             * Instrument payloads in this resident Scene. Mark those seven
+             * rows refreshed; the Scene settings row is not part of this save.
+             */
+            filesystem_setResidentRefreshed(
+                filesystem_residentKitRow(op_kit_save_source_scene));
+            for (instrument_slot = 0u;
+                 instrument_slot < STORAGE_KIT_SLOT_COUNT;
+                 instrument_slot++) {
+                filesystem_setResidentRefreshed(
+                    filesystem_residentInstrumentRow(
+                        op_kit_save_source_scene, instrument_slot));
             }
             autosaveTrace_record(
                 AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
@@ -15916,6 +16623,9 @@ static void filesystem_saveBankDirectory_tick(void)
          * Affiliates: Bank Load's symmetric staging and phase 85.
          */
         (void)filesystem_setResidentSource(FS_IDENTITY_BANK_ROW, op_slot);
+        /* The saved Bank identity is a refreshed row-zero object; its witness
+         * is cleared only by the post-autosave HCNAMES publication boundary. */
+        filesystem_setResidentRefreshed(FS_IDENTITY_BANK_ROW);
         autosaveTrace_record(
             AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
             (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SOURCE_STAGED <<
@@ -15928,11 +16638,11 @@ static void filesystem_saveBankDirectory_tick(void)
     case 83: /* OPEN ROOT HCNAMES FOR DIRECT-REPLACEMENT REGISTER WRITE */
         /* Defensive repetition of phase 45's validity transition: every entry
          * to the write-capable Bank HCNAMES open must leave failure/retry paths
-         * with an invalid mirror until phase 86 closes the complete rewrite. */
+         * with an invalid mirror until phase 94 completes the safe-write tail. */
         hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_FILENAME,
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
                               "w",
                               FS_RESIDENT_NAMES_MATCH_MODE,
                               NULL,
@@ -15951,6 +16661,7 @@ static void filesystem_saveBankDirectory_tick(void)
         }
         op_item_offset = 0u;
         op_bytes_done = 0u;
+        op_close_status = FS_STATUS_DONE;
         op_phase = 85u;
         return;
 
@@ -15964,13 +16675,28 @@ static void filesystem_saveBankDirectory_tick(void)
                         hcnames_name_mirror[op_item_offset]),
                     fs_resident_source[op_item_offset], op_item_offset);
                 if (op_line_len == 0u) {
-                    filesystem_finish(FS_STATUS_ERROR);
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 87u;
                     return;
                 }
             }
-            op_bytes_done += afatfs_fwrite(
-                op_file, (const uint8_t *)op_line_buf + op_bytes_done,
-                op_line_len - op_bytes_done);
+            {
+                uint32_t written = afatfs_fwrite(
+                    op_file, (const uint8_t *)op_line_buf + op_bytes_done,
+                    op_line_len - op_bytes_done);
+                op_bytes_done += written;
+                /* A sticky full-card result cannot make the temp stream
+                 * progress; close it without removing the live register. */
+                if (written == 0u && afatfs_isFull()) {
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 87u;
+                    return;
+                }
+            }
             if (op_bytes_done >= op_line_len) {
                 op_item_offset++;
                 op_bytes_done = 0u;
@@ -15979,17 +16705,70 @@ static void filesystem_saveBankDirectory_tick(void)
         }
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 86u;
+            op_phase = 87u;
         return;
 
-    case 86: /* CLOSE REGISTER, THEN RESTORE ROOT BANK INDEX */
+    case 87: /* WAIT TEMP CLOSE, THEN SYNC BEFORE RETIRING LIVE HCNAMES */
         if (!op_close_done)
             return;
         op_file = NULL;
         if (!afatfs_chdir(NULL))
             return;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 88u;
+        return;
+
+    case 88: /* SYNC COMPLETE TEMP REGISTER */
+        if (!afatfs_sync())
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 89u;
+        return;
+
+    case 89: /* WAIT LIVE-REGISTER REMOVE, THEN RENAME TEMP */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
+                                     FS_RESIDENT_NAMES_FILENAME,
+                                     FS_RESIDENT_NAMES_MATCH_MODE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 90u;
+        return;
+
+    case 90: /* WAIT TEMP-TO-LIVE RENAME */
+        if (!op_rename_done)
+            return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 91u;
+        return;
+
+    case 91: /* PUBLISH REGISTER AFTER RENAME, THEN RESTORE ROOT BANK INDEX */
+        if (!afatfs_chdir(NULL))
+            return;
         /* Bank Save preserves source pairs while rewriting the full register;
-         * a previously staged load source becomes clean only after this close. */
+         * a previously staged load source becomes clean only after rename. */
         filesystem_clearResidentSourceDirtyFlags();
         /* Defer reader-visible validity until the primary Bank Save's shared
          * final sync succeeds; index rebuild begins only after that gate. */
@@ -16604,9 +17383,15 @@ static void filesystem_saveSceneDirectory_tick(void)
             (void)filesystem_setResidentSource(
                 filesystem_residentSceneRow(op_kit_save_source_scene),
                 op_slot);
+            /* Phase C: the Scene Save changes all three identity layers; its
+             * source bytes are marked beside the source-register staging. */
+            autosave_markSourceDirty(
+                filesystem_residentSceneRow(op_kit_save_source_scene));
             (void)filesystem_setResidentSource(
                 filesystem_residentKitRow(op_kit_save_source_scene),
                 FS_RESIDENT_SOURCE_INHERIT);
+            autosave_markSourceDirty(
+                filesystem_residentKitRow(op_kit_save_source_scene));
             {
                 uint8_t instrument_slot;
                 for (instrument_slot = 0u;
@@ -16616,8 +17401,16 @@ static void filesystem_saveSceneDirectory_tick(void)
                         filesystem_residentInstrumentRow(
                             op_kit_save_source_scene, instrument_slot),
                         FS_RESIDENT_SOURCE_INHERIT);
+                    autosave_markSourceDirty(
+                        filesystem_residentInstrumentRow(
+                            op_kit_save_source_scene, instrument_slot));
                 }
             }
+            /* Scene Save replaces the Scene payload and its embedded Kit
+             * hierarchy. Mark the complete seven-row Scene identity block only
+             * after the directory payload has reached its successful handoff.
+             */
+            filesystem_setResidentSceneRefreshed(op_kit_save_source_scene);
             autosaveTrace_record(
                 AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
                 (AUTOSAVE_TRACE_SAVE_LIFECYCLE_CHECKPOINT_SOURCE_STAGED <<
@@ -19607,15 +20400,26 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t row)
 {
     uint8_t len = 0u;
+    uint8_t refreshed;
     const char *token;
 
     /*
      * Format one fixed-order name-register row.
      *
      * Inputs: a resident eight-cell display field, presence predicate, paired
-     * source word, and row class. Output: one `name<TAB>source` record. Empty
-     * names still emit a token, so fixed logical row identity is never lost.
+     * source word, and row class. Output: one `name<TAB>source[<TAB>R]`
+     * record. Empty names still emit a token, so fixed logical row identity is
+     * never lost. The raw refresh bit is captured before the value mask removes
+     * the register's metadata bits.
      */
+    refreshed = (uint8_t)((source & FS_RESIDENT_SOURCE_REFRESHED_FLAG) != 0u);
+    /* Autosave's drain uses this existing operation byte to serialize the
+     * pre-clear image while keeping refreshed bits pending until rename. */
+    if (current_op == FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN &&
+        op_file_version != 0u &&
+        autosave_objectFullyCaptured(row)) {
+        refreshed = 0u;
+    }
     source = (uint16_t)(source & FS_RESIDENT_SOURCE_VALUE_MASK);
     if (!dst || cap < 4u || !filesystem_residentSourceValid(row, source))
         return 0u;
@@ -19651,6 +20455,14 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
         dst[len++] = (char)('0' + (source / 100u));
         dst[len++] = (char)('0' + ((source / 10u) % 10u));
         dst[len++] = (char)('0' + (source % 10u));
+        if (refreshed) {
+            if (len + 4u > cap)
+                return 0u;
+            dst[len++] = '\t';
+            dst[len++] = 'R';
+        }
+        if (len + 1u >= cap)
+            return 0u;
         dst[len++] = '\n';
         dst[len] = '\0';
         return len;
@@ -19658,6 +20470,14 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
     if (len + 2u >= cap)
         return 0u;
     dst[len++] = token[0];
+    if (refreshed) {
+        if (len + 4u > cap)
+            return 0u;
+        dst[len++] = '\t';
+        dst[len++] = 'R';
+    }
+    if (len + 1u >= cap)
+        return 0u;
     dst[len++] = '\n';
     dst[len] = '\0';
     return len;
@@ -21752,6 +22572,23 @@ static void filesystem_settingsWriterSchedule_tick(void)
     uint16_t now;
 
     /*
+     * Reserve the one filesystem facade for a foreground Load/Save command.
+     *
+     * Input: menu_isLoadSaveCommandActive(), true from command acceptance
+     * through the post-apply root-index restore.
+     * Output: retain the dirty flag and its existing deadline without starting
+     * a SAVE_GLOBALS operation. Why: the settings writer previously could
+     * start between Bank payload completion and Menu's final read-only
+     * `.hcindex` request, making that foreground request fail with generic
+     * FsErr solely because the shared facade was busy. The narrower
+     * command-active predicate also permits writing while the user remains
+     * on the page after the command completes; no settings data is discarded
+     * and no foreground filesystem operation is delayed.
+     */
+    if (menu_isLoadSaveCommandActive())
+        return;
+
+    /*
      * Start one debounced settings stream only from an idle mounted facade.
      *
      * Inputs: runtime gate, dirty/deadline state, and ready AsyncFATFS volume.
@@ -21811,6 +22648,14 @@ static void filesystem_autosaveWriterCompleted(void)
      */
     autosaveTrace_record(AUTOSAVE_TRACE_STAGE_TERMINAL,
                          (uint8_t)(status == FS_STATUS_DONE ? 1u : 0u), 0u);
+    /* Retire refreshed witnesses only after the shared final sync has
+     * acknowledged the complete autosave plus HCNAMES publication. The
+     * post-drain formatter leaves op_file_version nonzero until this callback;
+     * an ERROR therefore preserves the witness for the next retry. */
+    if (status == FS_STATUS_DONE && op_file_version != 0u) {
+        filesystem_clearResidentRefreshedCaptured();
+        op_file_version = 0u;
+    }
     fs_autosave_transaction_active = 0u;
     /*
      * OFF takes ownership at the first safe post-transform boundary.

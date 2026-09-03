@@ -1349,6 +1349,24 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - Durable detail: `knowledge_files/log_archive/059_SESSION_HANDOFF_LOG.md`.
   The four root `S059_*` working documents are superseded and may be deleted.
 
+### Session 060 Phase C source fields (2026-09-03)
+
+- Implemented the zero-growth Scene/Kit/Instrument HCNAMES source projection:
+  two little-endian source bytes are routed from the filesystem-owned masked
+  source register and marked through the canonical AutoSave dirty mask. Scene
+  and Kit parameter starts move from 8 to 10; Instrument normal starts from
+  11 to 13; section, payload, mask, and record sizes remain unchanged.
+- Whole Instrument, Kit, and Scene-without-Pattern commit markers now include
+  source bytes while HCNAMES-owned names remain excluded. Instrument, Kit, and
+  Scene Save completions pair source-register staging with one, seven, and
+  eight source dirty marks respectively; Bank row zero remains source-free.
+- Clean build and image packaging passed: `text=389,036`, `data=400`,
+  `bss=96,192`; firmware payload 389,436 bytes and packaged image 389,452
+  bytes. The approved RAM impact is about 20 bytes of automatic foreground
+  stack only, with no persistent allocation or wire-record growth.
+- Card/hardware round-trip validation of source-byte contents and old-record
+  first-drain upgrade behavior remains pending.
+
 ### Resolved / Changed in Session 048
 
 - HCNAMES is now the paired name/source authority. The filesystem-owned 258-B

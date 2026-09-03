@@ -61,11 +61,28 @@
 #define AUTOSAVE_RECORD_BYTES \
     (AUTOSAVE_HEADER_BYTES + AUTOSAVE_MASK_BYTES + AUTOSAVE_PAYLOAD_BYTES)
 
+/*
+ * Phase C source-field geometry.
+ *
+ * What: each Scene, Kit, and Instrument sub-object carries one 2-byte
+ * little-endian HCNAMES provenance value immediately after its name. Why:
+ * the future boot reader must compare autosaved contents with the source
+ * recorded by the filesystem. The bytes are absorbed from existing reserved
+ * header/tail space, so section boundaries, mask size, payload size, and
+ * record size remain unchanged. Affiliates: filesystem_residentSource(),
+ * autosave_getLivePayloadByte(), and autosave_markSourceDirty().
+ */
 #define AUTOSAVE_NAME_BYTES                   8u
+#define AUTOSAVE_SOURCE_BYTES                  2u
+#define AUTOSAVE_SCENE_SOURCE_OFFSET           8u
+#define AUTOSAVE_KIT_SOURCE_OFFSET             8u
+#define AUTOSAVE_INSTRUMENT_SOURCE_OFFSET     11u
 #define AUTOSAVE_HCNAMES_ROW_COUNT           129u
 #define AUTOSAVE_HCNAMES_ROW_BYTES             9u
 
 /* HCNAMES' fixed Bank / Scene / Kit / Instrument row ownership. */
+/* Row zero is the Bank object; rows 1..128 cover its Scene hierarchy. */
+#define AUTOSAVE_HCNAMES_BANK_ROW            0u
 #define AUTOSAVE_HCNAMES_SCENE_BASE            1u
 #define AUTOSAVE_HCNAMES_KIT_BASE \
     (AUTOSAVE_HCNAMES_SCENE_BASE + AUTOSAVE_SCENE_COUNT)
@@ -106,13 +123,14 @@
 /*
  * One Scene's relative regions and explicit parameter allocation.
  *
- * Scene parameters occupy bytes 8..127, of which indices 0..39 currently
- * exist. Effects reserve 512 bytes without a live owner. Kit begins at 640 so
- * its 128-byte header plus six 192-byte Instruments ends exactly at 1,920.
+ * Scene source occupies bytes 8..9; parameters occupy bytes 10..127, of
+ * which indices 0..39 currently exist. Effects reserve 512 bytes without a
+ * live owner. Kit begins at 640: source at 8..9, parameters at 10..127, then
+ * six 192-byte Instruments, ending at 1,920.
  */
 #define AUTOSAVE_SCENE_NAME_OFFSET              0u
-#define AUTOSAVE_SCENE_PARAMETERS_OFFSET        8u
-#define AUTOSAVE_SCENE_PARAMETER_ALLOC_BYTES  120u
+#define AUTOSAVE_SCENE_PARAMETERS_OFFSET       10u
+#define AUTOSAVE_SCENE_PARAMETER_ALLOC_BYTES  118u
 #define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    40u
 #define AUTOSAVE_EFFECT_OFFSET                128u
 #define AUTOSAVE_EFFECT_TYPE_OFFSET             0u
@@ -122,8 +140,8 @@
 #define AUTOSAVE_EFFECT_PARAM_COUNT              0u
 #define AUTOSAVE_KIT_OFFSET                   640u
 #define AUTOSAVE_KIT_NAME_OFFSET                0u
-#define AUTOSAVE_KIT_PARAMETERS_OFFSET          8u
-#define AUTOSAVE_KIT_PARAMETER_ALLOC_BYTES    120u
+#define AUTOSAVE_KIT_PARAMETERS_OFFSET         10u
+#define AUTOSAVE_KIT_PARAMETER_ALLOC_BYTES   118u
 #define AUTOSAVE_KIT_PARAMETER_LIVE_BYTES       2u
 #define AUTOSAVE_KIT_INSTRUMENTS_OFFSET        128u
 
@@ -173,14 +191,15 @@ typedef enum {
 /*
  * One Instrument's fixed 192-byte relative layout.
  *
- * Type text and name are followed by separate descriptor-indexed normal and
- * Morph images. Indices without a live descriptor (and non-Morphable Morph
- * indices) are reserved cells rather than compacting later descriptors.
+ * Type text and name are followed by a 2-byte source field, then separate
+ * descriptor-indexed normal and Morph images. Indices without a live
+ * descriptor (and non-Morphable Morph indices) are reserved cells rather than
+ * compacting later descriptors.
  */
 #define AUTOSAVE_INSTRUMENT_TYPE_OFFSET          0u
 #define AUTOSAVE_INSTRUMENT_TYPE_BYTES           3u
 #define AUTOSAVE_INSTRUMENT_NAME_OFFSET          3u
-#define AUTOSAVE_INSTRUMENT_NORMAL_OFFSET       11u
+#define AUTOSAVE_INSTRUMENT_NORMAL_OFFSET       13u
 #define AUTOSAVE_INSTRUMENT_MORPH_OFFSET \
     (AUTOSAVE_INSTRUMENT_NORMAL_OFFSET + \
      AUTOSAVE_INSTRUMENT_PARAMETER_BYTES)
@@ -225,6 +244,21 @@ _Static_assert(AUTOSAVE_KIT_INSTRUMENTS_OFFSET +
 _Static_assert(AUTOSAVE_INSTRUMENT_PADDING_OFFSET <=
                    AUTOSAVE_INSTRUMENT_RECORD_BYTES,
                "Instrument type/name/endpoint images must fit its record");
+/* The new source cells must be contiguous with the following live region. */
+_Static_assert(AUTOSAVE_SCENE_SOURCE_OFFSET + AUTOSAVE_SOURCE_BYTES ==
+                   AUTOSAVE_SCENE_PARAMETERS_OFFSET,
+               "Scene source must end at parameters");
+_Static_assert(AUTOSAVE_KIT_SOURCE_OFFSET + AUTOSAVE_SOURCE_BYTES ==
+                   AUTOSAVE_KIT_PARAMETERS_OFFSET,
+               "Kit source must end at parameters");
+_Static_assert(AUTOSAVE_INSTRUMENT_SOURCE_OFFSET + AUTOSAVE_SOURCE_BYTES ==
+                   AUTOSAVE_INSTRUMENT_NORMAL_OFFSET,
+               "Instrument source must end at normal endpoints");
+/* The Kit header remains exactly 128 bytes after absorbing its source field. */
+_Static_assert(AUTOSAVE_KIT_PARAMETERS_OFFSET +
+                   AUTOSAVE_KIT_PARAMETER_ALLOC_BYTES ==
+                   AUTOSAVE_KIT_INSTRUMENTS_OFFSET,
+               "Kit parameter allocation must end at Instruments");
 _Static_assert(AUTOSAVE_HCNAMES_INSTRUMENT_BASE +
                    (AUTOSAVE_SCENE_COUNT * AUTOSAVE_INSTRUMENTS_PER_KIT) ==
                    AUTOSAVE_HCNAMES_ROW_COUNT,
@@ -379,6 +413,15 @@ void autosave_maskMergeChunk(uint16_t mask_byte_offset,
                              uint16_t byte_count);
 uint8_t autosave_maskHasDirty(void);
 uint8_t autosave_maskBitTake(uint16_t payload_offset);
+/*
+ * Report whether one HCNAMES object's current autosave payload scope is clean.
+ *
+ * Input: HCNAMES row 0..128. Output: nonzero only when no canonical dirty bit
+ * remains in that Bank, Scene, Kit, or Instrument wire scope. This is a
+ * read-only post-drain query; it allocates no storage and never clears work.
+ * Filesystem.c uses it before clearing the matching HCNAMES refreshed flag.
+ */
+uint8_t autosave_objectFullyCaptured(uint16_t hcnames_row);
 
 /*
  * Mark one logical retained parameter dirty without exposing wire arithmetic.
@@ -406,18 +449,32 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
                                        uint16_t parameter_index);
 
 /*
+ * Mark one HCNAMES-addressed 2-byte source field dirty.
+ *
+ * Input: HCNAMES row 0..128. Output: the corresponding Scene, Kit, or
+ * Instrument source bytes become dirty when mutation tracking is enabled;
+ * Bank row zero is intentionally a no-op because the autosave Bank section
+ * has no source field. Why: source provenance is filesystem-owned, but its
+ * serialized bytes must join the same canonical mask as owner parameters.
+ * Affiliates: filesystem_setResidentSource(), compound object markers, and
+ * autosave_getLivePayloadByte().
+ */
+void autosave_markSourceDirty(uint16_t hcnames_row);
+
+/*
  * Preserve named dirty scopes for validated copy/paste and whole-object
  * commits; these functions mark data but never copy it.
  *
  * Inputs: destination Scene/slot after a successful retained commit. Outputs:
  * currently gettable cells in that scope become dirty. A successful root-pool
  * Instrument Load calls Whole Instrument immediately after each retained
- * destination commit, adding type plus Normal/Morph endpoints but not its
- * HCNAMES-owned name. A successful InstrumentMrp Load calls the Morph scope
- * only after its compatible endpoint commit. Endpoint-only copies require
- * matching types before calling their marker. Kit includes all six Instruments;
- * Scene includes settings, the Effect stub, and Kit. SceneWithPattern is
- * intentionally only the non-Pattern alias until Pattern persistence exists.
+ * destination commit, adding type, source, and Normal/Morph endpoints but not
+ * its HCNAMES-owned name. A successful InstrumentMrp Load calls the Morph
+ * scope only after its compatible endpoint commit. Endpoint-only copies
+ * require matching types before calling their marker. Kit includes its source
+ * and all six Instruments; Scene includes its source, settings, the Effect
+ * stub, and Kit. SceneWithPattern is intentionally only the non-Pattern alias
+ * until Pattern persistence exists.
  *
  * Current load affiliates are intentionally asymmetric: successful normal Kit
  * completion calls autosave_markKitDirty() for each target; successful root

@@ -627,10 +627,16 @@ enum {
  * from the fixed HCNAMES row.  INHERIT walks Instrument -> Kit -> Scene ->
  * Bank; UNKNOWN requests ordinary boot fallback; INSTRUMENT_DIRECT uses the
  * row stem plus the committed type rather than an unstable browser index.
+ * The value field is limited to 13 bits so bit 13 can record that the object
+ * was refreshed by a completed library Load/Save while bit 15 remains the
+ * asynchronous HCNAMES dirty marker.
  */
-#define FS_RESIDENT_SOURCE_INHERIT           0x7fffu
-#define FS_RESIDENT_SOURCE_UNKNOWN           0x7ffeu
-#define FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT 0x7ffdu
+#define FS_RESIDENT_SOURCE_INHERIT           0x1fffu
+#define FS_RESIDENT_SOURCE_UNKNOWN           0x1ffeu
+#define FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT 0x1ffdu
+#define FS_RESIDENT_SOURCE_REFRESHED_FLAG    0x2000u
+#define FS_RESIDENT_SOURCE_DIRTY_FLAG        0x8000u
+#define FS_RESIDENT_SOURCE_VALUE_MASK        0x1fffu
 
 /* Read, stage, or resolve one logical HCNAMES source without direct file I/O. */
 uint16_t filesystem_residentSource(uint16_t row);

@@ -1203,13 +1203,51 @@ All should preserve the refreshed flag through an HCNAMES write.
 
 ---
 
+## Implementation work log
+
+- 2026-09-02: Read `MEMORY.md`, the Phase 042 handoff, and the current
+  filesystem/autosave sources. The written line references are stale, so the
+  implementation follows the current state-machine phases rather than those
+  numbers.
+- 2026-09-02: Confirmed the existing special source tokens (`0x7ffd..0x7fff`)
+  overlap the proposed refreshed bit. Chosen representation is Option C:
+  direct slots `0..999`, refreshed `0x2000`, dirty `0x8000`, value mask
+  `0x1fff`, with special tokens moved to `0x1ffd..0x1fff`.
+- 2026-09-02: Confirmed the five AsyncFATFS handles, the 1,161-byte dedicated
+  HCNAMES mirror, and the existing operation scratch are the applicable SRAM
+  boundary. The change will not add a handle, cache, bitmap, or other SRAM
+  allocation.
+- 2026-09-02: Safe publication will be implemented as temp close → sync →
+  remove live → rename temp to live → final facade sync. The mirror becomes
+  `PUBLISH_PENDING` only after the rename succeeds, and refreshed bits are
+  cleared only after a successful autosave-triggered HCNAMES publication.
+- 2026-09-02: Implemented the safe-write tails in the current state machines:
+  boot HCNAMES phases 3–6, runtime targeted-update phases 10–14, boot recovery
+  phases 15–19, Bank Load phases 90–94, and Bank Save phases 87–91. All five
+  physical HCNAMES write opens now target `.hcnamtmp`; no direct live-file
+  truncate remains. Malformed rows, formatter failures, close failures, and
+  sticky full-card writes close the temp file without publishing it.
+- 2026-09-02: Added optional `name<TAB>source<TAB>R` parsing/formatting and
+  completion-boundary refresh marking. Scene/Kit/Instrument rows are marked at
+  successful payload boundaries; Morph-only and hidden temporary Instrument
+  paths remain identity-neutral. Bank Load marks the root Bank row and each
+  successfully loaded selected Scene hierarchy.
+- 2026-09-02: Added the zero-allocation HCNAMES-row-to-autosave-scope query in
+  `Autosave.c/.h`. After a committed autosave, clean refreshed scopes are
+  serialized without `R`; the refreshed bits are retired only from the
+  terminal callback after final sync succeeds, so a failed facade flush keeps
+  them available for retry.
+- 2026-09-02: Verification completed with `make -j2` and `git diff --check`.
+  The firmware links as `build/lxr02.elf` (`text=388868`, `data=400`,
+  `bss=96180`); no automated hardware/card tests are present in the repo.
+
 ## What This Does NOT Change
 
 - The `.hcprms` record format, dirty mask, or autosave drain phases
   (except the Phase B2 post-commit addition).
 - The asyncfatfs driver.
 - The settings.cfg writer or its recovery prelude.
-- The boot Bank Load flow (other than converting its phase 83 write target).
+- The boot Bank Load flow (other than its HCNAMES safe-write target/tail).
 - The Phase A winner cache or any autosave validation logic.
 - The probe mechanism or SFN/LFN matching.
 - SRAM reservation policy (everything fits in existing allocations).

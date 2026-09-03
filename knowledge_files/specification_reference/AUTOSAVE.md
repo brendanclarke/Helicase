@@ -23,12 +23,15 @@ state into two hidden root records. It does not modify root `Bank/`, `Scene/`,
 Save operations.
 
 Implemented through the Session 048 AutoSave baseline, plus Session 056
-page-exit expedite and the underlying AsyncFATFS file-size fix:
+page-exit expedite, the underlying AsyncFATFS file-size fix, and Session 060
+Phase C source fields:
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
 - scalar dirty hooks for Scene, Kit, Instrument normal, and morphable
   Instrument Morph values, plus the format's implemented Bank fields;
+- two-byte little-endian HCNAMES source fields for every Scene, Kit, and
+  Instrument sub-object, with source-byte routing and dirty marking;
 - successful normal Kit Load, root Scene Load without Pattern, and selective
   Bank Load whole-object markers; a root Scene marker runs only after its
   complete Scene/HCNAMES filesystem transaction reports success;
@@ -48,8 +51,8 @@ Not implemented and not to be inferred from the A/B writer:
 ## Ownership
 
 - `Core/Bank/Scene/Autosave.c/.h` owns the binary format, live-byte projection,
-  CRC32C helpers, one canonical dirty mask, and typed dirty-marker API. It owns
-  no file handle or scheduler.
+  CRC32C helpers, one canonical dirty mask, typed dirty-marker API, and the
+  HCNAMES-row source-field projection. It owns no file handle or scheduler.
 - Retained owners mark their own changes: `BankData`, `SceneData`, and Preset's
   descriptor-aware Instrument path call typed marker functions only after the
   retained value changes. `on_scene_load_complete()` owns the root Scene
@@ -83,15 +86,21 @@ N describes payload-relative byte N. It never describes a header byte.
 Each Scene region reserves:
 
 - eight name bytes;
-- 120 Scene-parameter bytes, currently 40 live;
+- two HCNAMES source bytes immediately after the name;
+- 118 Scene-parameter bytes, currently 40 live;
 - 512 Effect bytes, currently no live parameters;
-- 1,280 Kit bytes containing two live Kit values and six fixed 192-byte
-  Instrument records.
+- 1,280 Kit bytes containing eight name bytes, a two-byte HCNAMES source
+  field, 118 parameter/reserve bytes, and six fixed 192-byte Instrument
+  records.
 
-Instrument records retain a three-byte type token, eight identity bytes,
-72 descriptor-indexed normal cells, 72 descriptor-indexed Morph cells, and
-reserved padding. A Morph cell is live only when its descriptor is Morphable.
-C structs are never copied as the wire format.
+Instrument records retain a three-byte type token, eight identity bytes, a
+two-byte HCNAMES source field, 72 descriptor-indexed normal cells, 72
+descriptor-indexed Morph cells, and reserved padding. A Morph cell is live
+only when its descriptor is Morphable. C structs are never copied as the wire
+format. The Scene and Kit source fields occupy relative bytes 8..9; the
+Instrument source field occupies relative bytes 11..12, with normal cells
+starting at 13. The source field is absorbed from previously reserved
+parameter/tail bytes, so every containing section remains the same size.
 
 The Bank `scene_present_mask` occupies payload bytes 10..11 (absolute record
 offsets 3930..3931) and is the effective resident Scene availability union.
@@ -120,9 +129,14 @@ Header requirements:
 - one-byte probe counter as a writer witness. Generation, not probe, selects
   the newer record. Equal valid generations deterministically select A.
 
-Changing offsets, widths, ordering, or interpretation requires a format-version
-change and an explicit migration/rejection policy. New fields must not silently
-reuse reserved cells whose meaning has already shipped.
+Phase C is the documented exception to the general reserved-cell rule: its
+source fields use previously reserved bytes without a version bump because the
+record, mask, payload, section boundaries, and validation size are unchanged.
+The first complete drain rewrites all present resident payload scopes in the
+new internal layout, upgrading old-format parameter positions in place. Any
+future change to offsets, widths, ordering, or interpretation outside this
+explicit Phase C migration still requires a format-version decision and an
+explicit migration/rejection policy.
 
 ## Boot and policy lifecycle
 
@@ -162,18 +176,21 @@ Use only the typed API:
 - `autosave_markKitParameterDirty()`;
 - `autosave_markInstrumentNormalParameterDirty()`;
 - `autosave_markInstrumentMorphParameterDirty()`;
+- `autosave_markSourceDirty()` for one HCNAMES-addressed Scene, Kit, or
+  Instrument source field;
 - future Effect marker functions only after Effect ownership exists.
 
 Whole-object helpers mark currently gettable cells but do not copy data.
 Successful root Instrument Load is the first admitted whole-object load hook:
 immediately after every retained destination-slot commit it marks that slot's
-three type bytes, all owned Normal endpoints, and all owned Morphable Morph
-endpoints. Successful InstrumentMrp Load marks only the committed destination's
-Morphable Morph endpoints. Hidden temporary `kit` restore, failed loads,
-identity/HCNAMES source, and names remain excluded. The reversible InstrumentMrp
-`kit` restore uses a Morph-only hidden snapshot but follows the same
-non-normalizing rule: only the restored Morphable Morph endpoint cells are
-marked. These are writer-side
+three type bytes, its two source bytes, all owned Normal endpoints, and all
+owned Morphable Morph endpoints. Successful InstrumentMrp Load marks only the
+committed destination's Morphable Morph endpoints. Hidden temporary `kit`
+restore, failed loads, and HCNAMES names remain excluded; source bytes are
+included only when the committed operation changes or owns that provenance.
+The reversible InstrumentMrp `kit` restore uses a Morph-only hidden snapshot
+but follows the same non-normalizing rule: only the restored Morphable Morph
+endpoint cells are marked. These are writer-side
 marks only; they do not implement an AutoSave boot reader.
 `autosave_markSceneWithPatternDirty()` is presently the non-Pattern alias and
 must not be described as Pattern persistence. The complete-Bank helper is used
@@ -350,6 +367,7 @@ For each new retained scalar:
 
 1. identify the owning Bank/Scene/Kit/Instrument/Effect domain;
 2. append or explicitly version its format identifier and live-count contract;
+   Phase C source fields are the one documented reserved-space migration;
 3. add the live-byte getter mapping;
 4. call the typed marker from every retained setter after mutation;
 5. include it in the appropriate whole-object marker;
