@@ -17,13 +17,15 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 059 closeout on branch
-`dev-ph3-autosave-ph5`: commits `53a7676`, `3dc9a4b`, `d28f8f9`, `4067099`,
-and `0c90434`, plus the uncommitted Gate B and documentation closeout. The
-forced logging-on Gate B build reports `text=385,420`, `data=404`,
-`bss=96,176`; `build/LXRV2_lxr02.img` is 385,840 bytes. The durable record is
-`knowledge_files/log_archive/059_SESSION_HANDOFF_LOG.md`. Verify the actual
-commit/worktree before the next source change.
+**Current working source**: Session 060 Phase D close-out on branch
+`dev-ph3-autosave-pre-overscope-apply` at commit `fe0eedc`; only the Phase D
+and MEMORY note edits in this session are uncommitted. Phase D's re-dirty
+lifecycle is provided entirely by the Phase B2 refreshed-flag/post-drain
+HCNAMES convergence code and Phase C source marking already in that commit;
+the audit in `S060PHASE_D_RE_DIRTY.md` was re-verified with no source change
+required. Clean logging-on build reports `text=389,036`, `data=400`,
+`bss=96,192`; `build/LXRV2_lxr02.img` is 389,452 bytes. Hardware tests 1-4
+in `S060PHASE_D_RE_DIRTY.md` Section 5 remain the outstanding Phase D work.
 
 ## RAM Allocation Approval Policy
 
@@ -1364,8 +1366,33 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   `bss=96,192`; firmware payload 389,436 bytes and packaged image 389,452
   bytes. The approved RAM impact is about 20 bytes of automatic foreground
   stack only, with no persistent allocation or wire-record growth.
-- Card/hardware round-trip validation of source-byte contents and old-record
-  first-drain upgrade behavior remains pending.
+- Card round-trip evidence from the 2026-09-03 Phase C hardware pass is
+  recorded in `S060PHASE_C_AUTOSAVE_SOURCE.md`: source bytes verified at the
+  wire offsets (Scene +8, Kit +8, Instrument +11), INHERIT/direct tokens
+  correct, record sizes unchanged, and an in-place first-drain upgrade
+  observed. Phase D's dedicated load/save-to-convergence fixtures (Section 5
+  tests 1-4 in `S060PHASE_D_RE_DIRTY.md`) remain pending on hardware.
+
+### Session 060 Phase D re-dirty audit (2026-09-03)
+
+- `S060PHASE_D_RE_DIRTY.md` was re-verified against commit `fe0eedc`: every
+  inventory site in its Section 4a exists and is wired as claimed (immediate
+  compound load markers, save-completion source marking, refreshed-flag set
+  at all load/save terminal boundaries, post-drain
+  `objectFullyCaptured()` gating, phases 70-76 `.hcnamtmp` → `.hcnames`
+  safe rewrite, and terminal-callback witness clearing).
+- No source change was required and none was made; Phase D adds zero
+  persistent SRAM and zero wire-format growth. The deferred re-dirty request
+  mask from the parent plan is unnecessary because load/save completions
+  run while the filesystem facade owns the operation, so their immediate
+  atomic dirty marks cannot race an active drain.
+- Clean rebuild and image packaging reproduced the Phase C linked sizes
+  (`text=389,036`, `data=400`, `bss=96,192`; 389,452-byte image).
+- Remaining Phase D work is hardware verification only: Section 5 tests 1-4
+  (load-to-convergence, save-to-convergence, load-during-drain race, and
+  overlapping loads), each ending with a card-copy check of `.hcnames`
+  sources, missing `R` suffixes after convergence, and matching autosave
+  source bytes.
 
 ### Resolved / Changed in Session 048
 

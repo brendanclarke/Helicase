@@ -762,3 +762,81 @@ by the combination of Phase B2 (refreshed flag lifecycle, post-drain
 HCNAMES convergence) and Phase C (source dirty marking at save completions).
 The remaining work is verification testing of the end-to-end lifecycle
 described in Section 5.
+
+---
+
+## 10. Implementation close-out — 2026-09-03 (session notes)
+
+### Result
+
+Phase D is code-complete in the current tree at commit `fe0eedc` (working
+tree clean before this session's note edits). No `.c` or `.h` change was
+required: this session re-verified, against the committed source, every
+code site listed in the Section 4a inventory, and found the claimed
+implementations present and wired as described:
+
+- Immediate compound load markers still funnel through
+  `autosave_markPayloadOffsetDirty()`; load completions run while the
+  filesystem facade still owns the operation, so they cannot interleave
+  with a drain scan.
+- Instrument/Kit/Scene Save completions pair
+  `filesystem_setResidentSource()` with `autosave_markSourceDirty()` for
+  one, seven, and eight HCNAMES rows respectively; Bank row zero remains
+  source-free by design.
+- Refreshed witnesses (`FS_RESIDENT_SOURCE_REFRESHED_FLAG`) are set by the
+  same load/save completion families and retired only by
+  `filesystem_clearResidentRefreshedCaptured()` after a successful
+  post-drain `.hcnamtmp` → `.hcnames` publication plus final sync.
+- `filesystem_autosaveDrainAfterCommit()` is reached from both drain
+  completion boundaries (clean-mask phase 55 and post-commit phase 22), and
+  phases 70–76 perform the temp-file safe rewrite with the `R` suffix
+  suppressed for fully captured rows during serialization.
+
+### Build verification
+
+`make clean && make` completed with the existing only diagnostics (unused
+functions and toolchain-library notes; no new warning or error):
+
+```
+text=389,036 data=400 bss=96,192
+```
+
+`make img` produced `build/LXRV2_lxr02.img` at 389,452 bytes (389,436-byte
+firmware payload plus the 16-byte package envelope), byte-identical in
+linked sizes to the Phase C verification build. Because the Makefile has no
+header dependency tracking, a clean rebuild was used rather than trusting an
+incremental build.
+
+### Hardware verification status
+
+Tests 1–4 in Section 5 remain the only outstanding Phase D work and require
+a hardware/card fixture:
+
+1. Load → drain → refreshed cleared → HCNAMES rewritten (Scene Load).
+2. Save → drain → refreshed cleared → HCNAMES rewritten (Scene/Kit/
+   Instrument Save).
+3. Load during an active drain (race).
+4. Multiple overlapping loads.
+
+Existing card copies from the Phase B/C hardware passes (`SD_CARD_B_PHASE*`,
+`SD_CARD_C_PHASE`) are consistent with the convergence machinery having run
+(B-phase copies show `name<TAB>source<TAB>R` rows and the C-phase copy holds
+a 1,412-byte `.hcnamtmp` from a post-drain rewrite), but none of them is a
+dedicated Phase D fixture for the four tests above. Those tests should be
+run on hardware, the card copied only after 2–3 full idle drain cycles, and
+the copy checked with the Section 5 expectations plus the existing
+read-only card tools.
+
+### RAM and wire-format statement
+
+Phase D adds zero persistent SRAM, zero record growth, and no new wire
+fields; it reuses the Phase B2 refreshed bit and Phase C source geometry.
+No RAM allocation approval is therefore needed.
+
+### Session note on in-place documentation
+
+Because no source change was necessary, there are no adjacent comment-block
+edits to land in `.c`/`.h` files. If a future change reopens Phase D's
+deferred-mask question, any new state or call must carry the detailed
+why/inputs/outputs/affiliates block used throughout `Autosave.c/h` and
+`filesystem.c/h` and must obtain RAM approval if it allocates.
