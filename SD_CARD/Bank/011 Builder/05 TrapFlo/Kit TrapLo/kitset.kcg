@@ -1,0 +1,28 @@
+format=helicase.kitset
+version=1
+slot6_track7_amp_envelope_decay=0
+slot6_track7_morph_amp_envelope_decay=0
+
+[slot1]
+type=drm
+file=kick808x 1.drm
+
+[slot2]
+type=drm
+file=kickSub 2.drm
+
+[slot3]
+type=drm
+file=percClk 3.drm
+
+[slot4]
+type=snr
+file=808cbs1 4.snr
+
+[slot5]
+type=cym
+file=cymDark 5.cym
+
+[slot6]
+type=hat
+file=hatMetal 6.hat
