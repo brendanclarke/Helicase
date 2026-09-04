@@ -9657,8 +9657,36 @@ static uint8_t filesystem_repairBuildCandidate(void)
             return 0u;
         if (type != op_repair_instrument_type)
             return 0u;
+        /*
+         * Skip foreign metadata files whose stems are unusable.
+         *
+         * What: extracts the eight-character display stem from the scanned
+         * filename and rejects it when filesystem_instrumentStemIsUsable()
+         * returns false. Why: macOS creates hidden AppleDouble resource-fork
+         * files named `._<instrument>.<ext>` on FAT volumes. These files
+         * carry a valid instrument extension (`.drm`, `.snr`, `.cym`,
+         * `.hat`) so they pass the type classification above, but their
+         * display names start with `.`, which causes
+         * filesystem_copyInstrumentStemDisplay() to produce an empty stem.
+         * Without this guard the canonical-name builder falls back to the
+         * default stem `inst`, tries to rename the AppleDouble file to
+         * `inst.<ext>`, and either creates a bogus instrument from macOS
+         * metadata or collides with an earlier rename — both of which can
+         * fail the entire repair pass and prevent any Instrument .hcindex
+         * from being generated. The scan cache path
+         * (filesystem_recordInstrumentFile(), line 9380) already applies
+         * this guard; repair must match. Inputs: one LFN display component
+         * from afatfs_findNextObject(). Output: the unusable-stem file is
+         * left untouched on disk — it is invisible to the Instrument
+         * browser and harmless on the card. Affiliates:
+         * filesystem_instrumentStemIsUsable(),
+         * filesystem_recordInstrumentFile(), and the scan tick's object
+         * filter.
+         */
         filesystem_copyInstrumentStemDisplay(op_repair_base_display,
                                              op_object.id.displayName);
+        if (!filesystem_instrumentStemIsUsable(op_repair_base_display))
+            return 0u;
         filesystem_makeSuffixedDisplay(suffixed,
                                        op_repair_base_display,
                                        op_repair_retry,
@@ -23903,6 +23931,36 @@ uint8_t filesystem_createBootIndexBlocking(void)
             return 0u;
         }
         filesystem_ack();
+
+        /*
+         * Settle the asyncfatfs layer between iterations so each type's
+         * scan + index-write starts from the same clean filesystem state
+         * that the first iteration (Drum) sees after mount.
+         *
+         * What: resets CWD to the volume root and spins afatfs_poll() /
+         * afatfs_sync() until every dirty cache sector from the previous
+         * type's .hcindex creation is confirmed written with no in-flight
+         * DMA or pending file operations remaining. Why: the preceding
+         * index-write created, wrote, closed, and flushed a .hcindex file
+         * whose lifecycle dirtied directory-entry, FAT, and data sectors.
+         * Although filesystem_finish(DONE) gates on afatfs_sync(), the
+         * subsequent filesystem_ack() and filesystem_start() cycle may
+         * re-enter the state machine before all asyncfatfs-internal
+         * bookkeeping (cache eviction state, sector lock counts, file-
+         * operation continuations) has fully quiesced. Without this
+         * explicit barrier only the first type succeeds — all remaining
+         * types fail silently because main.c:727 discards the return
+         * value. Inputs: a completed and acked index-write operation.
+         * Outputs: root CWD, a fully synced sector cache, and no pending
+         * asyncfatfs continuations — identical to the state the first
+         * iteration inherits from the mount/repair sequence. Affiliates:
+         * afatfs_chdir(NULL), afatfs_sync(), afatfs_poll(), and the
+         * per-iteration filesystem_start() that follows.
+         */
+        while (!afatfs_chdir(NULL))
+            afatfs_poll();
+        while (!afatfs_sync())
+            afatfs_poll();
     }
 
     op_instrument_scan_one_type = 0u;

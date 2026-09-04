@@ -532,6 +532,77 @@ dirty-bit path.
   scrolling through items on the Load or Save page after a Bank operation.
   Does not affect operation selection or data integrity.
 
+### Session 060 resolved defects and remaining refactor targets
+
+- **Boot Instrument `.hcindex` generation for Snare/Cymbal/HiHat —
+  RESOLVED.** Only `Instrument/Drum/.hcindex` was ever generated at boot;
+  the other three typed indexes were silently missing across every SD card
+  capture, with the failure return value discarded at `main.c:727`. Root
+  cause: macOS creates hidden `._<name>.<ext>` AppleDouble resource-fork
+  files on FAT volumes, and the boot repair step
+  (`filesystem_repairBuildCandidate()`, `filesystem.c:9615`) had no
+  unusable-stem guard, unlike the scan step. Every `._` file passed type
+  classification (suffix-only match) but produced an empty display stem,
+  so repair fell back to a collision-prone canonical name `inst.<ext>`,
+  aborting the entire instrument repair pass before any scan/index could
+  run. Fixed at two layers: an unusable-stem guard added to the repair step
+  (`filesystem.c:9660`, defense-in-depth) and a system-wide `._` prefix
+  filter added to `afatfs_findNextObject()` itself
+  (`asyncfatfs.c:2972-3004`), making AppleDouble files invisible to every
+  directory consumer — repair, scan, index, save, load — not just this one
+  call site. See `S060_HCINDEX_FIXUP.md` and
+  `ASYNCFATFS_REFERENCE.md` Object Iteration section.
+- **Deferred, not applied this session:** normalizing the scan tick's
+  `/Instrument/` open from `AFATFS_MATCH_CASE_SENSITIVE` to
+  `AFATFS_MATCH_CASE_INSENSITIVE` (`filesystem.c:19636`, matches every
+  other caller) and checking `filesystem_createBootIndexBlocking()`'s
+  return value at `main.c:727` to make a future boot-index failure
+  observable. Both are independent hygiene improvements; neither was the
+  root cause and the D1 asyncfatfs-level filter already fixes the actual
+  failure, so these are low priority.
+- **`op_close_status` staleness hazard — general pattern, worth watching.**
+  Phase B's HCNAMES safe-write tail depends on `op_close_status`
+  (a shared, operation-scoped static) being accurate at the temp-file
+  close-wait phase. Bank Load's child Scene-loading sub-phases set this
+  same static to `FS_STATUS_ERROR` on recoverable per-child failures
+  (scene not found, etc.) long before the HCNAMES write phase runs later
+  in the same operation, and nothing re-initialized it in between. The fix
+  was three explicit `op_close_status = FS_STATUS_DONE;` insertions right
+  after each write path's temp-file open succeeds. The general lesson:
+  any new multi-phase state machine that reuses this shared static across
+  a long phase range must explicitly reinitialize it before the phase that
+  trusts it, not assume the previous phase left it correct. See
+  `S060PHASE_B_POST_FIX.md`.
+- **Settings-writer/Load-Save-command race — pattern now has two instances.**
+  Session 060 found a second occurrence of the class of bug first fixed for
+  the autosave trace flush scheduler: `filesystem_settingsWriterSchedule_tick()`
+  could start `SAVE_GLOBALS` and take the filesystem facade in the gap
+  between an accepted Load/Save command's payload completion and Menu's
+  final read-only `.hcindex` restore, producing a generic `FsErr` overlay
+  even though nothing actually failed. Fixed by adding the same
+  `menu_isLoadSaveCommandActive()` guard the trace flush scheduler already
+  had (`filesystem.c:22563`). **Any future idle/background filesystem
+  scheduler must carry this same guard** — it is not automatic, and this is
+  the second scheduler that shipped without it. See `S060PHASE_B_POST_FIX.md`
+  Hardware Test 2/3.
+- **Phase D hardware verification — still outstanding.** Phase D added no
+  code (Phases B2 and C already implement every requirement), but its
+  four end-to-end lifecycle tests (Load->drain->refreshed-cleared->HCNAMES
+  rewritten; Save->drain->refreshed-cleared; load-during-active-drain race;
+  multiple overlapping loads) have not been run as dedicated fixtures —
+  only incidentally exercised through the Phase B/C hardware passes. See
+  `S060PHASE_D_RE_DIRTY.md` §5 for the exact test procedures.
+- **Autosave record name bytes are stale after a mid-session load —
+  deliberate, not a bug.** Phase C's source-field dirty markers
+  intentionally exclude the 8-byte name field in each Scene/Kit/Instrument
+  autosave record header; `autosave_getLivePayloadByte()` has no name
+  getter and never will unless a future reader requirement demands one.
+  The future boot reader (Phase E) is specified to use `.hcnames` for
+  identity, not autosave record names, so this is safe by design. Documented
+  here so a future session doesn't "fix" it by adding a name getter that
+  reverses the current one-way `filesystem.c` -> `Autosave.h` dependency for
+  no benefit. See `S060PHASE_D_RE_DIRTY.md` §3.
+
 ---
 
 ## Phase 1 — Foundation Refactors

@@ -2969,6 +2969,38 @@ afatfsOperationStatus_e afatfs_findNextObject(afatfsFilePtr_t directory,
             object->id.displayName[i] = '\0';
         }
 
+        /*
+         * Skip macOS AppleDouble resource-fork files.
+         *
+         * What: rejects any directory object whose resolved display name
+         * begins with the two-character sequence `._` and continues the
+         * scan to the next physical entry. Why: macOS creates hidden
+         * `._<filename>` shadow files on FAT/exFAT volumes to store
+         * extended attributes and resource forks. These files carry the
+         * same extension as their companion data file (e.g. `._kick.drm`
+         * alongside `kick.drm`), so every higher-layer classifier that
+         * matches by extension — instrument type, library scan, filename
+         * repair — would misidentify them as user content. Filtering at
+         * this level makes AppleDouble files invisible to all directory
+         * consumers: repair, scan, index, save, load, and any future
+         * enumerator. The two-byte `._` prefix is the canonical
+         * AppleDouble signature defined by Apple's legacy resource-fork
+         * transport; no user-created content on this product uses it.
+         * Inputs: the finalized display name from any of the three
+         * preceding resolution paths (verified LFN, malformed-LFN
+         * fallback, or bare SFN). Output: the object is discarded and
+         * the finder advances to the next raw entry. Affiliates:
+         * afatfs_isStructuralDotEntry() (analogous structural filter),
+         * filesystem_instrumentStemIsUsable() (backup guard retained in
+         * filesystem_repairBuildCandidate), and
+         * filesystem_recordInstrumentFile().
+         */
+        if (object->id.displayName[0] == '.' &&
+            object->id.displayName[1] == '_') {
+            afatfs_objectScanReset(finder);
+            continue;
+        }
+
         afatfs_objectScanReset(finder);
         return AFATFS_OPERATION_SUCCESS;
     }

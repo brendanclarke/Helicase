@@ -1,10 +1,13 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 059. It includes the Session 058 Bank I/O and
-stopped-playback speedups and the Session 059 typed Instrument-index repair.
-Low-level FAT directory reservation and lazy directory-cluster initialization
-are authoritative in `ASYNCFATFS_REFERENCE.md`.
+reference through Session 060. It includes the Session 058 Bank I/O and
+stopped-playback speedups, the Session 059 typed Instrument-index repair, and
+Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot Instrument
+`.hcindex` generation fix, and system-wide macOS AppleDouble (`._<name>`)
+file filtering. Low-level FAT directory reservation and lazy
+directory-cluster initialization, and the AppleDouble filter itself, are
+authoritative in `ASYNCFATFS_REFERENCE.md`.
 
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
@@ -200,6 +203,19 @@ Implemented through Session 059:
   loaded. Menu immediately scans the highlighted Bank's immediate `00..15`
   children and holds input until that callback publishes the selectable mask.
   Only an accepted explicit OK request enters `...`.
+- All four typed Instrument `.hcindex` files (`Drum`, `Snare`, `Cymbal`,
+  `HiHat`) are generated at boot, not only `Drum`. The previous silent
+  failure and its fix are described under "Slot-ordered `.hcindex` name
+  indexes" below.
+- macOS AppleDouble resource-fork files (`._<name>.<ext>`) are filtered at
+  the lowest filesystem layer, `afatfs_findNextObject()`
+  (`ASYNCFATFS_REFERENCE.md`), and are invisible to every directory
+  consumer in the system — repair, scan, index, save, and load.
+- `/.hcnames` writes use the same atomic temp-file safe-write pattern as
+  `settings.cfg` and the `.hcprms` A/B pair, and rows carry an optional
+  third `\tR` column (the AutoSave "refreshed" witness). See "Root
+  resident-name register" below and `AUTOSAVE.md` for the flag's
+  AutoSave-side semantics.
 
 Current bridges and limitations:
 
@@ -313,6 +329,29 @@ clears the unusable cache and cancels any deferred Instrument payload request.
 `tools/verify_instrument_indexes.py <card-root>` is the read-only host check for
 the four registered typed directories and exact row/file correspondence.
 
+**Boot Instrument `.hcindex` fix (Session 060).** Before Session 060, only
+`Instrument/Drum/.hcindex` was ever generated at boot; the same
+`filesystem_createBootIndexBlocking()` loop (`filesystem.c:23830`) iterates
+all four registry types in order (Drum, Snare, Cymbal, HiHat) but bailed
+silently after the first failure because its return value was discarded at
+`main.c:727`. Root cause: macOS AppleDouble files (`._<name>.<ext>`, see
+`ASYNCFATFS_REFERENCE.md`) passed the boot repair step's suffix-only type
+classification but produced an empty display stem, causing the repair's
+fallback canonical-name builder to collide and abort the entire instrument
+repair pass before any scan or index write could run for any type. The fix
+is layered: `afatfs_findNextObject()` now filters `._`-prefixed objects
+system-wide (the primary fix — see `ASYNCFATFS_REFERENCE.md`), and the
+repair step's stem-usability guard (`filesystem_repairBuildCandidate()`,
+already present in the scan step) closes the same gap as defense-in-depth.
+Two independent hygiene items from the same investigation were **not**
+applied this session and remain open: normalizing the scan tick's
+`/Instrument/` open from `AFATFS_MATCH_CASE_SENSITIVE` to
+`AFATFS_MATCH_CASE_INSENSITIVE` (`filesystem.c:19636`), and checking
+`filesystem_createBootIndexBlocking()`'s return value at `main.c:727` so a
+future boot-index failure is observable instead of silent. See
+`S060_HCINDEX_FIXUP.md` for the full candidate-elimination trail and
+`SCOPING_TARGETS.md` Session 060 notes.
+
 ### Root resident-name register: `/.hcnames`
 
 HCNAMES is resident identity, not a directory browser. It has 129 fixed
@@ -326,15 +365,19 @@ rows 33..128 six Instruments per Scene
               row = 33 + scene * 6 + voice
 ```
 
-Rows use fixed-order `name<TAB>source\n` text. `name` is at most eight
+Rows use fixed-order `name<TAB>source[<TAB>R]\n` text. `name` is at most eight
 printable characters and may be empty; `source` is `-` (inherit), `?`
 (unknown), `000` through `999` (direct root slot), or `@` (direct root
-Instrument stem). The fixed row class supplies the namespace for a numeric
-slot. The 129-by-`uint16_t` filesystem-owned source register follows
-Instrument -> Kit -> Scene -> Bank until it finds a direct source or reaches
-ordinary boot fallback. A legacy name-only line remains readable as unknown;
-malformed extended records fail the read rather than silently inheriting. The
-name cache remains space-padded and NUL-terminated.
+Instrument stem). The optional third field is exactly the byte `R`; its
+presence marks the row "refreshed" — see `AUTOSAVE.md` "HCNAMES atomic
+safe-write and the refreshed flag" for what sets and clears it and why. Its
+absence is backward compatible with every pre-Session-060 file. The fixed
+row class supplies the namespace for a numeric slot. The 129-by-`uint16_t`
+filesystem-owned source register follows Instrument -> Kit -> Scene -> Bank
+until it finds a direct source or reaches ordinary boot fallback. A legacy
+name-only line remains readable as unknown; malformed extended records fail
+the read rather than silently inheriting. The name cache remains
+space-padded and NUL-terminated.
 
 Changing a row can change its physical byte length. Every targeted update
 therefore reads all 129 name/source pairs into the shared cache/register,
@@ -347,6 +390,20 @@ case-insensitive root scan has proved zero matching HCNAMES entries. A NULL
 read-open result is not proof of absence: one folded match permits one read
 retry; multiple matches or any root-open/finder/close/FAT failure return an
 error and authorize no creation or automatic repair.
+
+As of Session 060, "rewrites the complete file" means the same atomic
+temp-file safe-write `settings.cfg` and `.hcprms1/2` already use: stream all
+129 rows to `.hcnamtmp` (`FS_RESIDENT_NAMES_TEMP_FILENAME`), close, sync the
+temp durable, remove the old live `.hcnames`, rename the temp into place,
+then take the final flush-gate sync. Every write path was converted — boot
+full-write, runtime targeted update, Bank Load, Bank Save, and the new
+AutoSave-driven post-drain convergence write (`AUTOSAVE.md`) — so a power
+loss during any HCNAMES rewrite leaves either the intact prior register or a
+recoverable `.hcnamtmp`. A boot recovery prelude inside
+`filesystem_ensureAutosaveFiles_tick()` runs before any code path opens
+`.hcnames` for read: it validates a leftover `.hcnamtmp` (exactly 129
+parseable rows) and either promotes or discards it, mirroring the
+`settings.tmp` recovery prelude below.
 
 Normal boot does not regenerate HCNAMES from resident SRAM. Scene identity is
 not stored in `scene_t`, so a snapshot after a mask-selective Bank Load would
@@ -1860,9 +1917,14 @@ Status: the hidden A/B scalar writer and the accepted root-Instrument /
 InstrumentMrp mutation boundaries are implemented through the Session 048
 baseline. Session 056 added a page-exit expedite that resets the writer
 deadline to 250 ms after the user leaves the Load/Save page, eliminating
-wasted debounce time. Its complete format, ownership, scheduling, power-loss
-behavior, bounded CRC contract, duplicate rules, and extension process live
-only in `AUTOSAVE.md`.
+wasted debounce time. Session 060 added a continuation-cycle winner cache
+(Phase A, roughly 3.1s -> 2.2s steady-state drain), the `.hcnames` atomic
+safe-write and per-row "refreshed" witness with AutoSave-driven post-drain
+convergence (Phase B/B2), and 2-byte HCNAMES source fields for every Scene,
+Kit, and Instrument autosave sub-object absorbed into existing reserved
+space with zero record growth (Phase C). Its complete format, ownership,
+scheduling, power-loss behavior, bounded CRC contract, duplicate rules, and
+extension process live only in `AUTOSAVE.md`.
 
 The obsolete per-Instrument/Scene dot-backer proposal formerly in this section
 was never implemented and is removed to prevent two competing AutoSave

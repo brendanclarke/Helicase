@@ -23,11 +23,15 @@ state into two hidden root records. It does not modify root `Bank/`, `Scene/`,
 Save operations.
 
 Implemented through the Session 048 AutoSave baseline, plus Session 056
-page-exit expedite, the underlying AsyncFATFS file-size fix, and Session 060
-Phase C source fields:
+page-exit expedite, the underlying AsyncFATFS file-size fix, Session 060
+Phase A writer-speedup, Phase B/B2 HCNAMES atomic safe-write and refreshed
+flag, and Phase C source fields:
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
+- a continuation-cycle winner cache that skips dual-record CRC validation
+  and the on-card mask re-read when the writer itself committed the last
+  target and the card has not been removed (Session 060 Phase A);
 - scalar dirty hooks for Scene, Kit, Instrument normal, and morphable
   Instrument Morph values, plus the format's implemented Bank fields;
 - two-byte little-endian HCNAMES source fields for every Scene, Kit, and
@@ -38,6 +42,11 @@ Phase C source fields:
 - one canonical mutation mask, bounded dirty scanning and value capture, A/B
   transformed copy, CRC32C, commit-last runtime publication, retry, and
   continuation scheduling;
+- a post-drain HCNAMES convergence step that clears a per-row "refreshed"
+  witness once that row's autosave object is fully captured, and safe-
+  rewrites `/.hcnames` through the same temp-file pattern as the A/B
+  records (Session 060 Phase B/B2; see "HCNAMES atomic safe-write and the
+  refreshed flag" below);
 - an AutoSave lifecycle trace when `DEV_MODE_LOGGING` is enabled.
 
 Not implemented and not to be inferred from the A/B writer:
@@ -276,6 +285,30 @@ restore every captured offset to the canonical mask and retry after the normal
 five-second interval. An empty merged mask completes read-only and must not
 advance generation, probe, or target contents.
 
+**Continuation-cycle winner cache (Session 060 Phase A).** Steps 1 and 2 above
+are skipped on a continuation cycle when a four-static winner cache
+(`fs_autosave_winner_cached` plus the cached index/generation/probe) is
+populated from the previous transaction's own commit. The writer just wrote
+that target and knows its exact identity; re-validating it 250 ms later via
+full CRC streaming cost roughly 544 ticks and four file open/close cycles —
+the dominant per-cycle expense — for no information gain while the card
+remains inserted (SD removal while powered is not part of the product
+contract). The cache is populated only when the completed drain used the
+normal copy-forward path (`have_winner` true); a no-valid-record recovery
+that rebuilt both records from HCNAMES baseline data leaves the cache clear
+so the next cycle re-validates fully. It is invalidated at every lifecycle
+boundary that could change on-card state or Bank identity: card
+failure/remount, boot ensure, AutoSave OFF (both the policy-setter and
+scheduler paths, plus a completion-callback OFF-during-active-transaction
+path found during implementation), writer error, and Bank-session loss. The
+cache is consumed (cleared) the moment a drain reads it, so an error on a
+cached-path drain always falls through to full validation on retry, never a
+second use of a stale cached identity. Measured effect: steady-state drain
+time dropped from about 3.1 s to about 2.2 s per cycle (Section
+"Autosave drain timing" cross-reference in `S060PHASE_A_POST_FIXES.md`); the
+~2.0-2.2 s file-write phase itself is unchanged and dominates the remaining
+time.
+
 The live-Bank match in step 1 is implemented by
 `autosave_streamValidationMatchesBank()`. A mismatch no longer forces
 regeneration: when a valid winner exists but its Bank identity differs from
@@ -302,6 +335,76 @@ Do not add a blind one-millisecond interval or sleep between unbounded work.
 That failed experiment slowed Bank operations dramatically and merely delayed
 the audio glitches; it was rolled back. The controlled reimplementation order
 is recorded in `SETTINGS_BANK_LOAD_REIMPLEMENT.md`.
+
+## HCNAMES atomic safe-write and the refreshed flag (Session 060 Phase B/B2)
+
+`/.hcnames` is authoritative in `FILESYSTEM_SPEC.md`, but its safe-write
+mechanics and its interaction with AutoSave's dirty mask are specified here
+because the writer that clears the flag is the AutoSave drain itself.
+
+**Atomic safe-write.** Every HCNAMES rewrite — boot full-write, runtime
+targeted update, Bank Load, Bank Save, and the drain post-commit convergence
+below — now follows the same temp-file pattern already used for
+`settings.cfg` and the `.hcprms` pair: open `.hcnamtmp`
+(`FS_RESIDENT_NAMES_TEMP_FILENAME`), stream all 129 rows, close, `afatfs_sync()`
+to make the temp durable, remove the old live `.hcnames`, rename the temp
+into place, then take the final flush-gate sync. The live file is untouched
+until the remove step; a power loss at any point leaves either the intact old
+register or a recoverable `.hcnamtmp` that a boot recovery prelude in
+`filesystem_ensureAutosaveFiles_tick()` validates (129 parseable rows) and
+either promotes or discards before any code path opens `.hcnames` for read.
+`hcnames_mirror_valid` is demoted to `INVALID` before every write-capable
+open, set to `PUBLISH_PENDING` only after the rename succeeds (not after
+close — the file is not authoritative until renamed), and promoted to `VALID`
+only by the shared final sync.
+
+**Refreshed flag.** Bit 13 of the existing `fs_resident_source[]` register
+(`FS_RESIDENT_SOURCE_REFRESHED_FLAG`, `0x2000`) marks a row whose object was
+just loaded or saved from the library and whose autosave record has not yet
+fully re-captured it. It is serialized as an optional third `.hcnames` column:
+`name<TAB>source<TAB>R\n`. Absence of the `R` suffix means not-refreshed
+(backward compatible with pre-Phase-B2 files). Adding this bit required
+narrowing `FS_RESIDENT_SOURCE_VALUE_MASK` from `0x7fff` to `0x1fff` and moving
+the three special source tokens into 13 bits: `FS_RESIDENT_SOURCE_INHERIT =
+0x1fff`, `_UNKNOWN = 0x1ffe`, `_INSTRUMENT_DIRECT = 0x1ffd`. Numbered library
+slots (0..999) are unaffected. Any code computing or comparing a source token
+must use these post-Phase-B2 13-bit values, not the older 15-bit ones that
+appear in pre-Session-060 planning documents.
+
+Every load/save completion that replaces a Scene/Kit/Instrument's resident
+identity sets the refreshed flag on that object's row(s) via
+`filesystem_setResidentRefreshed()` / `filesystem_setResidentSceneRefreshed()`,
+immediately alongside the existing HCNAMES source staging and the Phase C
+`autosave_markSourceDirty()` call. `autosave_objectFullyCaptured(hcnames_row)`
+(`Autosave.c`) is the cleanliness query: it maps one HCNAMES row (Bank / Scene
+1..16 / Kit 17..32 / Instrument 33..128) to its complete wire interval in the
+canonical dirty mask and returns true only when every byte in that interval is
+clean. After every drain completion boundary (both the clean-mask exit and the
+post-commit exit), `filesystem_autosaveDrainAfterCommit()` calls
+`filesystem_autosaveDrainHasRefreshWork()` to check whether any refreshed row
+is now fully captured; if so it invalidates the mirror, safe-rewrites
+`.hcnames` (suppressing the `R` suffix for rows that will become clean once
+this write commits), and only after the write's own final sync succeeds does
+`filesystem_clearResidentRefreshedCaptured()` actually clear bit 13 for those
+rows. An error preserves the refreshed witness for retry on the next drain.
+
+This is why the immediate (not deferred) load/save marking approach works
+without a separate re-dirty request mask: `autosave_markPayloadOffsetDirty()`
+already uses IRQ-safe atomic bit-OR, so a mark that lands mid-scan is either
+captured in the current drain cycle or survives cleanly into the next one, and
+`objectFullyCaptured()` keeps the refreshed flag set until every byte is
+actually clean either way. Session 060 Phase D audited this against the
+original parent-plan design (a deferred `uint16_t` per-Scene re-dirty mask)
+and found the immediate approach strictly better — lower latency, zero extra
+SRAM, no new ordering dependency — so the deferred mask was never implemented.
+See `S060PHASE_D_RE_DIRTY.md` for the full call-site audit.
+
+Name bytes (the 8-byte name field in each Scene/Kit/Instrument autosave
+record header) are deliberately excluded from source/refreshed re-dirtying:
+`autosave_getLivePayloadByte()` has no name getter, compound markers skip the
+name byte range by design, and the future boot reader is specified to use
+`.hcnames` for identity, not autosave record names. Do not add a name getter
+to "fix" staleness there; see `SCOPING_TARGETS.md` Session 060 notes.
 
 ## Power-loss behavior
 

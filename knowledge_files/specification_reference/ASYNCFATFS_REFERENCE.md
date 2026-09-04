@@ -260,8 +260,49 @@ object with a malformed-run flag; destructive clients must return
 directory clusters.
 
 Use object iteration for production scans. It sees dot-prefixed files and
-directories as real objects. Product code may filter names by schema, but
-asyncfatfs must not hide them.
+directories as real objects, **except** the one filter below. Product code
+may filter names further by schema, but asyncfatfs must not otherwise hide
+objects.
+
+### macOS AppleDouble (`._<name>`) filtering (Session 060)
+
+`afatfs_findNextObject()` filters one specific two-byte-prefixed pattern at
+the object-iteration layer itself, after the display name is fully resolved
+(whichever of the three resolution paths — verified LFN, malformed-LFN
+fallback, or bare SFN — produced it) and before the function returns: any
+object whose resolved display name begins with `._` is skipped and the scan
+continues to the next raw entry, using the same reset-and-continue pattern
+already used for structural dot entries, deleted entries, LFN fragments, and
+volume labels.
+
+This is the one deliberate exception to "asyncfatfs must not hide dot-prefixed
+objects." The `._` two-character prefix is the canonical macOS AppleDouble
+resource-fork signature: macOS creates hidden `._<filename>` shadow files
+alongside real files on FAT/exFAT volumes to carry extended attributes and
+resource-fork data (`com.apple.quarantine`, etc.) whenever a user copies files
+onto the card from a Mac. These shadow files carry the same extension as
+their companion data file (`._kick.drm` alongside `kick.drm`), so every
+higher-layer classifier that matches by extension — Instrument type
+classification, library scans, filename repair — would otherwise misidentify
+them as real user content. No product-owned file uses this prefix: `.hcindex`,
+`.hcnames`, `.hcprms1`, `.hcprms2`, `.hcnamtmp`, and `.hctmp.<ext>` all begin
+with `.hc` or `.ht`, never `._`.
+
+Filtering at this layer, rather than in each higher-layer consumer, makes
+AppleDouble files invisible system-wide in one place: repair, scan, index,
+save, load, and any future enumerator all inherit the filter automatically.
+This was the fix for a boot defect where AppleDouble files broke Instrument
+`.hcindex` generation for every type after the first — see
+`FILESYSTEM_SPEC.md` "Boot Instrument `.hcindex` fix" and
+`S060_HCINDEX_FIXUP.md` for the full root-cause investigation. A narrower
+guard was also added at the repair-step call site
+(`filesystem_repairBuildCandidate()`, `filesystem.c:9660`) as defense-in-depth,
+but the asyncfatfs-level filter is the primary, system-wide fix.
+
+Do not extend this filter to any other prefix without equally strong
+evidence that a third-party OS creates it unconditionally on FAT media; a
+single hardcoded two-byte pattern is deliberately narrow so it cannot
+accidentally hide a legitimate future product file.
 
 The old raw `afatfs_findFirst()` / `afatfs_findNext()` APIs expose raw directory
 entries and are appropriate only for legacy code that explicitly wants raw FAT

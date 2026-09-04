@@ -68,6 +68,7 @@
 | 057 | 2026-08-28 | commits `ad9b026`..`f99329c` on `dev-ph3-autosave-ph4` | AutoSave writer wrap (Bank Save present-mask union, Bank-identity-mismatch copy-forward instead of regeneration); settings.cfg safe write (temp+sync+promote, hardware-verified); empty-Scene/Bank overwrite guard; boot Kit-directory sanitizer replaced with lazy quarantine-on-failed-load (Kit→Scene cascade, Bank never-fails-whole-operation contract); Bank Save rebuilt as per-Scene delete-then-write (fixes `ErrS05`, stops deleting non-selected children); Bank Save/Load screen-freeze root-caused to a foreground-poll counter misread as milliseconds and removed, hardware-accepted full 16-Scene Bank Save |
 | 058 | 2026-08-29/30 | commits `9da35c7`, `124a6cf` on `dev-ph3-autosave-ph4` | Bank Load/Save speedup: Option 1 (one-pass Bank child-name capture, parent-CWD retention, dedicated HCNAMES mirror, buffered text reader) implemented + hardware-confirmed faster Bank Load; Option 2 (session-scoped card-verified clean-Scene skip) implemented, hardware pending; Option 3 (retained-cluster rewrite) implemented then reverted as ~15 s slower; Option 3B rejected; stopped-playback Load/Save fast drain + codec suspend + renderer guard; SD response-timeout root-cause fix (poll-count → elapsed TIM6 ms, hardware-accepted full stopped Bank Save); Bank progress `NN.` repaint fix; AsyncFATFS directory-create inefficiency deferred to Session 059 |
 | 059 | 2026-08-30/31 | commits `53a7676`, `3dc9a4b`, `d28f8f9`, `4067099`, `0c90434` plus Phase Two/doc closeout on `dev-ph3-autosave-ph5` | AsyncFATFS terminator-aware create/rename and first-sector-only directory initialization; stopped Bank Save reduced to about 10 s; typed Instrument `.hcindex` validation, recovery, and direct-open fast path; zero retained-SRAM growth; Phase Two hardware testing deliberately deferred with no problem expected from source/build review |
+| 060 | 2026-09-01/04 | commits `3ff43e4`..`eca4271` on `dev-ph3-autosave-pre-overscope-apply`, plus uncommitted `Core/Hardware/SD/filesystem.c` and `Core/Hardware/SD/asyncfatfs/asyncfatfs.c` (Instrument `.hcindex` boot fix and system-wide AppleDouble filter, applied after the last commit) | Autosave writer continuation-cycle speedup (winner cache, ~3.1s->2.2s drain); `.hcnames` atomic safe-write + refreshed-flag/HCNAMES-convergence reader prep (Phase B/B2); zero-growth 2-byte HCNAMES source fields in every autosave sub-object (Phase C); Phase D audited as already-implemented (no code change); boot Instrument `.hcindex` generation fixed (macOS AppleDouble `._` files filtered system-wide in asyncfatfs) |
 
 
 ---
@@ -938,3 +939,58 @@ four-defect validator fixture. No Session 059 change added retained SRAM.
   `S059_INST_LOAD_FIX.md`, `S059_ASYNCFATFS_PHASE_TWO.md`,
   `ASYNCFATFS_REFERENCE.md`, `FILESYSTEM_SPEC.md`,
   `MODULE_INTERCHANGE_SPEC.md`, and `SRAM_MANIFEST.md`.
+
+### 060 — AutoSave Writer Speedup, HCNAMES Safe-Write/Refreshed Flag, Source Fields, And Boot Instrument `.hcindex` Fix (2026-09-01/04)
+
+Five-phase session preparing AutoSave for a future boot reader, plus one
+independent boot-defect investigation and fix. **Phase A** added a
+four-static winner cache so continuation drain cycles (250 ms apart within
+one Bank session) skip dual-record CRC validation and the on-card mask
+re-read entirely, since the writer itself just committed the last target and
+SD removal while powered is not a product contract; combined with merging
+the CRC and commit-byte reopens into one open/close/sync cycle,
+steady-state drain time dropped from about 3.1 s to about 2.2 s. A
+follow-up boot failure (`.hcnames` written by prior firmware in a 4-column
+format) was root-caused and fixed by isolating the source token at the
+second tab instead of rejecting the row outright. **Phase B** converted all
+five `.hcnames` write paths (boot full-write, runtime targeted update, Bank
+Load, Bank Save, and the new AutoSave drain post-commit convergence) to the
+same atomic temp-file (`.hcnamtmp`) safe-write pattern `settings.cfg` and
+`.hcprms1/2` already use, with a boot recovery prelude that validates or
+discards a leftover temp file before any `.hcnames` read. **Phase B2** added
+a per-row "refreshed" witness (bit 13 of `fs_resident_source[]`, serialized
+as an optional `\tR` third column) that load/save completions set and the
+AutoSave drain clears only after that row's object is fully captured in the
+canonical dirty mask, narrowing `FS_RESIDENT_SOURCE_VALUE_MASK` from
+`0x7fff` to `0x1fff` to make room. A post-implementation hardware pass found
+and fixed a stale-`op_close_status` bug that made Bank Load's HCNAMES
+safe-write abort (cascading into `HNkL01`/`HNsL01` on subsequent Kit/Scene
+operations) and a settings-writer/Load-Save-command race that produced a
+spurious `FsErr` after Bank Load, fixed with the same
+`menu_isLoadSaveCommandActive()` guard the trace-flush scheduler already
+carried. Both fixes were hardware-confirmed clean across three full test
+passes. **Phase C** absorbed a 2-byte HCNAMES source field into each Scene,
+Kit, and Instrument autosave record header from existing reserved padding
+with zero record/mask growth, verified on hardware against `.hcnames`
+side-by-side. **Phase D**'s parent-plan requirements (deferred re-dirty
+mask, load/save re-dirtying, refreshed-flag lifecycle) were audited against
+the already-landed Phase B2/C code and found fully satisfied by the
+existing immediate-marking design; no code change was needed, only four
+hardware verification tests remain outstanding. Separately, a five-SD-card-capture
+investigation found that only `Instrument/Drum/.hcindex` was ever generated
+at boot — the other three typed indexes failed silently because macOS
+AppleDouble (`._<name>.<ext>`) resource-fork files broke the boot repair
+step's fallback canonical-name builder. Fixed at the lowest layer:
+`afatfs_findNextObject()` now filters `._`-prefixed objects system-wide, so
+every directory consumer (repair, scan, index, save, load) is affected
+automatically, with a narrower repair-step guard retained as
+defense-in-depth. Two independent hygiene items (case-sensitivity
+normalization, boot-index return-value check) were identified but
+deliberately left unapplied this session.
+
+- **Find here**: [060_SESSION_HANDOFF_LOG.md](060_SESSION_HANDOFF_LOG.md),
+  `S060_AUTOSAVE_UPDATE_READER_PREP.md`, `S060PHASE_A_WRITER_SPEEDUP.md`,
+  `S060PHASE_A_POST_FIXES.md`, `S060PHASE_B_B2_HCNAMES.md`,
+  `S060PHASE_B_POST_FIX.md`, `S060PHASE_C_AUTOSAVE_SOURCE.md`,
+  `S060PHASE_D_RE_DIRTY.md`, `S060_HCINDEX_FIXUP.md`, `AUTOSAVE.md`,
+  `FILESYSTEM_SPEC.md`, and `ASYNCFATFS_REFERENCE.md`.
