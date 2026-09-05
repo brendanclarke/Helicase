@@ -509,6 +509,27 @@ void autosave_markSceneWithPatternDirty(uint8_t scene_index);
 void autosave_markResidentBankDirty(void);
 
 /*
+ * Payload-to-resident apply functions (boot reader, §10).
+ *
+ * What: inverse of autosave_getLivePayloadByte() — writes winner-record
+ * payload bytes into live BankData/SceneData. Inputs: pointers into
+ * validated winner record payload sections. Outputs: BankData and SceneData
+ * updated. applyInstrumentPayload returns 0 if type token unrecognized
+ * (P1: invalidate the Scene). These run during boot with tracking OFF.
+ * Affiliates: filesystem_autosaveBootReaderBlocking().
+ */
+void autosave_applyBankPayload(const uint8_t *bank_section);
+void autosave_applyScenePayload(uint8_t scene_index,
+                                const uint8_t *scene_section);
+void autosave_applyKitPayload(uint8_t scene_index,
+                              const uint8_t *kit_section);
+uint8_t autosave_applyInstrumentPayload(uint8_t scene_index,
+                                        uint8_t instrument_slot,
+                                        const uint8_t *instrument_record);
+uint16_t autosave_extractPayloadSource(const uint8_t *section,
+                                       uint8_t source_offset);
+
+/*
  * Restore captured live offsets after an unsuccessful target transaction.
  *
  * Inputs: the sorted transaction-local patch offsets and valid count. Output:

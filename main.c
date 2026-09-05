@@ -792,6 +792,27 @@ int main(void)
                 filesystem_ack();
 
                 /*
+                 * Stage 10b: validate autosave winner before Bank Load decision.
+                 *
+                 * What: streaming CRC32C validation of .hcprms1/.hcprms2 to
+                 * determine if a valid Bank-matching autosave winner exists.
+                 * Inputs: BankData with active_bank from settings.cfg (stage 2),
+                 * mounted card with index files (stages 3-10). Outputs: internal
+                 * filesystem winner state consulted by stage 11. Why: winner
+                 * must be known before the Bank Load decision; the existing
+                 * ensureAutosaveFilesBlocking (post-stage-12) only creates
+                 * files, never validates. Affiliates: §4 S061_AUTOSAVE_READER.md,
+                 * filesystem_validateAutosaveWinnerBlocking(),
+                 * filesystem_autosaveBootReaderBlocking().
+                 */
+                if (filesystem_autosaveEnabled()) {
+                    boot_showFilesystemStage(10u);
+                    (void)filesystem_validateAutosaveWinnerBlocking();
+                    if (filesystem_bootLoggingTimedOut())
+                        goto boot_filesystem_timeout;
+                }
+
+                /*
                  * boot_bank_slot is the root Bank cache coordinate retained in
                  * BankData. It is read once so the existence check and load
                  * request use the same value. The Bank loader receives an
@@ -817,6 +838,24 @@ int main(void)
                  * assess in-situ file procedures.
                 */
                 boot_showFilesystemStage(11u);
+                /*
+                 * Stage 11: autosave winner path or canonical library Bank Load.
+                 *
+                 * What: when the Phase 5 boot reader lands, a valid
+                 * Bank-slot-matching winner (stage 10b) makes this stage call
+                 * filesystem_autosaveBootReaderBlocking() to populate resident
+                 * SRAM from the winner record and .hcnames; otherwise the
+                 * canonical preset_loadBank() path runs and latches the
+                 * whole-Bank dirty mark (§8) so it replays once mutation
+                 * tracking enables — preserving today's unconditional
+                 * ensure-time Bank re-mark. Phases 1-4 interim: the boot
+                 * reader is not yet implemented, so every boot (winner or not)
+                 * takes the canonical path below and the latch is set after a
+                 * canonical Bank Load is accepted. Inputs: fs_boot_winner from
+                 * stage 10b, boot_bank_slot. Outputs: resident Scenes
+                 * populated; boot latch (§8) populated. Affiliates: §4
+                 * S061_AUTOSAVE_READER.md.
+                 */
                 if (filesystem_bankSlotExists(boot_bank_slot)) {
                     /*
                      * A rejected Bank Load has no callback to report it later.
@@ -829,6 +868,25 @@ int main(void)
                      */
                     if (!preset_loadBank(boot_bank_slot, 0xffffu))
                         goto boot_filesystem_failure;
+                    /*
+                     * The canonical Bank Load fallback path was used.
+                     *
+                     * What: stage 11 restored through preset_loadBank(), so the
+                     * whole-Bank dirty mark is deferred through the §8 latch
+                     * and replayed by ensureAutosaveFilesBlocking() once
+                     * mutation tracking enables. Inputs: an accepted Bank Load
+                     * request with AutoSave policy enabled (an OFF session has
+                     * no autosave context and a later runtime ON re-marks the
+                     * whole Bank itself). Outputs: fs_boot_latch.bank_fallback
+                     * set. Why: marker calls during boot are documented no-ops,
+                     * and this preserves the former unconditional ensure-time
+                     * Bank re-mark until the Phase 5 winner reader replaces
+                     * this path for Bank-matching winners. Affiliates:
+                     * filesystem_setBootLatchBankFallback(),
+                     * filesystem_replayBootLatch().
+                     */
+                    if (filesystem_autosaveEnabled())
+                        filesystem_setBootLatchBankFallback();
                 } else {
                     /* No Bank is available: load the root Scene index before
                      * asking the existing fallback ladder to choose Scene/Kit.

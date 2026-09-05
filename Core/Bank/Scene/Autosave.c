@@ -946,6 +946,240 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
     return 0u;
 }
 
+/*
+ * Apply a validated winner record's Bank section to resident BankData.
+ *
+ * What: the inverse of the Bank portion of autosave_getLivePayloadByte().
+ * Reads payload bytes 0..14 and writes them into BankData via the same
+ * setters the runtime mutation path uses. Inputs: pointer to the 128-byte
+ * Bank section (payload-relative offset 0). Outputs: bank_setRestoreBankSlot,
+ * bank_setDisplayName, bank_setScenePresentMask, bank_setActiveSceneSlot,
+ * bank_setSceneMaskVoiceEdit all updated. Reserved bytes 15..127 ignored.
+ * Why: Case 1 restore populates BankData from the winner with tracking OFF.
+ * Affiliates: autosave_getLivePayloadByte() lines 707-759, BankData.h,
+ * §10 S061_AUTOSAVE_READER.md.
+ */
+void autosave_applyBankPayload(const uint8_t *bank_section)
+{
+    uint16_t bank_value;
+    char name_buf[AUTOSAVE_NAME_BYTES + 1u];
+    uint8_t i;
+
+    if (!bank_section)
+        return;
+    bank_value = (uint16_t)(bank_section[0u] |
+                            ((uint16_t)bank_section[1u] << 8u));
+    bank_setRestoreBankSlot(bank_value);
+    for (i = 0u; i < AUTOSAVE_NAME_BYTES; i++)
+        name_buf[i] = (char)bank_section[2u + i];
+    name_buf[AUTOSAVE_NAME_BYTES] = '\0';
+    bank_setDisplayName(name_buf);
+    bank_value = (uint16_t)(bank_section[10u] |
+                            ((uint16_t)bank_section[11u] << 8u));
+    bank_setScenePresentMask(bank_value);
+    bank_setActiveSceneSlot(bank_section[12u]);
+    bank_value = (uint16_t)(bank_section[13u] |
+                            ((uint16_t)bank_section[14u] << 8u));
+    bank_setSceneMaskVoiceEdit(bank_value);
+}
+
+/*
+ * Apply a validated winner record's Scene parameters to resident SceneData.
+ *
+ * What: the inverse of autosave_getSceneParameter(). Reads the 40 live
+ * Scene-parameter bytes from the payload and writes them into
+ * scene->settings through SceneData's change-aware setters (their dirty
+ * notifications no-op while boot tracking is disabled). Inputs: scene_index
+ * (0..15), pointer to the 1920-byte Scene section. Outputs: morph_amount,
+ * voice_morph_amount[6], voice_decimation_all, audio_out[6], fx_send_amount[6],
+ * fader_setting[6], midi_channel[7], midi_note[7] all updated in
+ * scene_get(scene_index)->settings. Why: each field's payload index must
+ * mirror the getter's autosave_scene_parameter_t enum chain. Affiliates:
+ * autosave_getSceneParameter() line 634, autosave_scene_parameter_t,
+ * SceneData.h scene_settings_t.
+ */
+void autosave_applyScenePayload(uint8_t scene_index,
+                                const uint8_t *scene_section)
+{
+    uint8_t parameter_index;
+
+    if (!scene_section || scene_index >= AUTOSAVE_SCENE_COUNT)
+        return;
+    for (parameter_index = 0u;
+         parameter_index < AUTOSAVE_SCENE_PARAM_COUNT;
+         parameter_index++) {
+        uint8_t value = scene_section[AUTOSAVE_SCENE_PARAMETERS_OFFSET +
+                                      parameter_index];
+
+        if (parameter_index == AUTOSAVE_SCENE_PARAM_MORPH_AMOUNT) {
+            scene_setMorphAmount(scene_index, value);
+        } else if (parameter_index >=
+                       AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE &&
+                   parameter_index < AUTOSAVE_SCENE_PARAM_DECIMATION_ALL) {
+            scene_setVoiceMorphAmount(
+                scene_index,
+                (uint8_t)(parameter_index -
+                          AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE),
+                value);
+        } else if (parameter_index ==
+                   AUTOSAVE_SCENE_PARAM_DECIMATION_ALL) {
+            scene_setVoiceDecimationAll(scene_index, value);
+        } else if (parameter_index < AUTOSAVE_SCENE_PARAM_FX_SEND_BASE) {
+            scene_setVoiceAudioOut(
+                scene_index,
+                (uint8_t)(parameter_index -
+                          AUTOSAVE_SCENE_PARAM_AUDIO_OUT_BASE),
+                value);
+        } else if (parameter_index < AUTOSAVE_SCENE_PARAM_FADER_BASE) {
+            scene_setVoiceFxSendAmount(
+                scene_index,
+                (uint8_t)(parameter_index -
+                          AUTOSAVE_SCENE_PARAM_FX_SEND_BASE),
+                value);
+        } else if (parameter_index <
+                   AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE) {
+            scene_setVoiceFaderSetting(
+                scene_index,
+                (uint8_t)(parameter_index -
+                          AUTOSAVE_SCENE_PARAM_FADER_BASE),
+                value);
+        } else if (parameter_index <
+                   AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE) {
+            scene_setTrackMidiChannel(
+                scene_index,
+                (uint8_t)(parameter_index -
+                          AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE),
+                value);
+        } else {
+            scene_setTrackMidiNote(
+                scene_index,
+                (uint8_t)(parameter_index -
+                          AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE),
+                value);
+        }
+    }
+}
+
+/*
+ * Apply a validated winner record's Kit parameters to resident SceneData.
+ *
+ * What: the inverse of the Kit portion of autosave_getLivePayloadByte().
+ * Reads the 2 live Kit-parameter bytes. Inputs: scene_index, pointer to
+ * the Kit sub-section (scene_section + AUTOSAVE_KIT_OFFSET). Outputs:
+ * slot6_track7_amp_envelope_decay and slot6_track7_morph_amp_envelope_decay.
+ * Why: these two Choke-related Kit parameters are the only live Kit-level
+ * payload bytes. Affiliates: autosave_getLivePayloadByte() lines 831-854,
+ * autosave_kit_parameter_t, SceneData.h kit_settings_t.
+ */
+void autosave_applyKitPayload(uint8_t scene_index,
+                              const uint8_t *kit_section)
+{
+    if (!kit_section || scene_index >= AUTOSAVE_SCENE_COUNT)
+        return;
+    scene_setSlot6Track7AmpEnvelopeDecay(
+        scene_index,
+        kit_section[AUTOSAVE_KIT_PARAMETERS_OFFSET +
+                    AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_DECAY]);
+    scene_setSlot6Track7MorphAmpEnvelopeDecay(
+        scene_index,
+        kit_section[AUTOSAVE_KIT_PARAMETERS_OFFSET +
+                    AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY]);
+}
+
+/*
+ * Apply a validated winner record's Instrument parameters to SceneData.
+ *
+ * What: the inverse of the Instrument portion of
+ * autosave_getLivePayloadByte(). Resolves the 3-byte type token via
+ * instrumentManager_typeFromText(), then copies descriptor-indexed Normal
+ * and Morph endpoint bytes. Inputs: scene_index, slot (0..5), pointer to
+ * the 192-byte Instrument record. Outputs: instrument->type set from type
+ * text; Normal endpoints copied for indices 0..descriptor_count-1; Morph
+ * endpoints copied only for Morphable descriptors. Returns nonzero on
+ * success, zero if type token unrecognized (P1: caller invalidates Scene).
+ * Why: type resolved by extension text, not enum ordinal (§10.1 forward
+ * compatibility). The Choke slot-6 rule is implicit: the type's descriptor
+ * layout determines which cells are live. Affiliates:
+ * autosave_getLivePayloadByte() lines 856-945,
+ * instrumentManager_typeFromText(), instrumentManager_registryEntry(),
+ * SceneData.h kit_instrument_slot_t/instrument_parameter_images_t.
+ */
+uint8_t autosave_applyInstrumentPayload(uint8_t scene_index,
+                                        uint8_t instrument_slot,
+                                        const uint8_t *instrument_record)
+{
+    char type_buf[AUTOSAVE_INSTRUMENT_TYPE_BYTES + 1u];
+    instrument_type_t type;
+    const instrument_registry_entry_t *entry;
+    kit_instrument_slot_t *instrument;
+    scene_t *scene;
+    uint8_t descriptor_index;
+
+    if (!instrument_record ||
+        scene_index >= AUTOSAVE_SCENE_COUNT ||
+        instrument_slot >= AUTOSAVE_INSTRUMENTS_PER_KIT) {
+        return 0u;
+    }
+    type_buf[0u] = (char)instrument_record[AUTOSAVE_INSTRUMENT_TYPE_OFFSET +
+                                           0u];
+    type_buf[1u] = (char)instrument_record[AUTOSAVE_INSTRUMENT_TYPE_OFFSET +
+                                           1u];
+    type_buf[2u] = (char)instrument_record[AUTOSAVE_INSTRUMENT_TYPE_OFFSET +
+                                           2u];
+    type_buf[AUTOSAVE_INSTRUMENT_TYPE_BYTES] = '\0';
+    type = instrumentManager_typeFromText(type_buf);
+    if (type == INSTRUMENT_TYPE_UNKNOWN)
+        return 0u;
+    entry = instrumentManager_registryEntry(type);
+    if (!entry)
+        return 0u;
+    scene = scene_get(scene_index);
+    if (!scene)
+        return 0u;
+    instrument = &scene->kit.instruments[instrument_slot];
+    instrument->type = type;
+    for (descriptor_index = 0u;
+         descriptor_index < entry->descriptor_count &&
+         descriptor_index < INSTRUMENT_PARAM_COUNT;
+         descriptor_index++) {
+        instrument->parameter_images.instrument_parameters[descriptor_index] =
+            (instrument_param_value_t)instrument_record[
+                AUTOSAVE_INSTRUMENT_NORMAL_OFFSET + descriptor_index];
+        if ((entry->descriptors[descriptor_index].flags &
+             INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
+            instrument->parameter_images
+                .morph_instrument_parameters[descriptor_index] =
+                (instrument_param_value_t)instrument_record[
+                    AUTOSAVE_INSTRUMENT_MORPH_OFFSET + descriptor_index];
+        }
+    }
+    return 1u;
+}
+
+/*
+ * Extract the embedded Phase C source value from a payload section.
+ *
+ * What: reads the 2-byte LE source field at a known offset within a Scene,
+ * Kit, or Instrument sub-section. Inputs: pointer to section start,
+ * section-relative source offset (AUTOSAVE_SCENE_SOURCE_OFFSET = 8,
+ * AUTOSAVE_KIT_SOURCE_OFFSET = 8, or AUTOSAVE_INSTRUMENT_SOURCE_OFFSET
+ * = 11). Output: 16-bit source value (value bits only; flag bits are not
+ * stored in the payload). Why: boot reader cross-checks this against
+ * .hcnames' live source column for Case 1 defense-in-depth (§5.2).
+ * Affiliates: autosave_getSourceByte() (the getter inverse), Phase C
+ * source geometry in Autosave.h.
+ */
+uint16_t autosave_extractPayloadSource(const uint8_t *section,
+                                       uint8_t source_offset)
+{
+    if (!section || source_offset >=
+        (uint8_t)(AUTOSAVE_INSTRUMENT_RECORD_BYTES - AUTOSAVE_SOURCE_BYTES)) {
+        return FS_RESIDENT_SOURCE_UNKNOWN;
+    }
+    return (uint16_t)(section[source_offset] |
+                      ((uint16_t)section[source_offset + 1u] << 8u));
+}
+
 void autosave_setMutationTrackingEnabled(uint8_t enabled)
 {
     uint32_t primask;

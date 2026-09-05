@@ -267,6 +267,61 @@ void        filesystem_initAfterCardReady(void);
  */
 uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
 /*
+ * Boot-time .hcprms candidate validation and winner selection.
+ *
+ * Returns nonzero when a valid winner matching the resident Bank exists.
+ * Must be called after preset_loadGlobals() (active_bank known) and
+ * before preset_loadBank() (reader needs the result). Inputs: mounted
+ * card, BankData with active_bank set. Outputs: internal winner statics.
+ * Affiliates: filesystem_autosaveBootReaderBlocking(), main.c.
+ */
+uint8_t filesystem_validateAutosaveWinnerBlocking(void);
+/*
+ * Query boot-time winner validation result.
+ *
+ * What: returns nonzero when validateAutosaveWinnerBlocking() found a valid
+ * winner whose Bank slot agrees with settings.cfg's active_bank. Inputs:
+ * internal boot-reader winner statics. Output: boolean used by main.c's
+ * stage-11 decision gate. Affiliates: main.c, §4 S061_AUTOSAVE_READER.md.
+ */
+uint8_t filesystem_hasBootWinner(void);
+/*
+ * Record that the canonical Bank Load fallback path was taken at boot.
+ *
+ * What: sets the bank_fallback flag in the boot latch so the replay
+ * function calls autosave_markResidentBankDirty() after tracking enables.
+ * Inputs: called from main.c when stage 11 restores through the canonical
+ * preset_loadBank() ladder instead of the autosave winner. Outputs: latch
+ * flag consumed by filesystem_replayBootLatch(). Affiliates: §8
+ * S061_AUTOSAVE_READER.md, filesystem_ensureAutosaveFilesBlocking().
+ */
+void filesystem_setBootLatchBankFallback(void);
+/*
+ * Boot-reader notice mask for the Menu post-boot sequencer (§9).
+ *
+ * What: returns the Case-3 Scene invalidation mask and bank-fallback flag.
+ * Inputs: the boot latch populated by the boot reader. Outputs: 16-bit
+ * Scene mask (each set bit = one post-boot overlay) and bank_fallback byte
+ * (1 = root notice for canonical Bank Load fallback). Why: Menu must not
+ * access filesystem internal state directly. Affiliates:
+ * menu_drainAutosaveBootNotices(), fs_boot_latch.
+ */
+uint16_t filesystem_bootReaderNoticeSceneMask(void);
+uint8_t  filesystem_bootReaderNoticeBankFallback(void);
+/*
+ * Regenerate .hcnames from a validated winner record's identity fields.
+ *
+ * Boot-blocking recovery for a present-but-corrupt/absent .hcnames while a
+ * valid .hcprms winner exists (§5.1, S061_AUTOSAVE_READER.md). Outputs:
+ * nonzero after the register is rewritten via the atomic temp/rename
+ * pattern with every row derived from the winner record (names, Phase C
+ * sources, Instrument type text) and all refreshed flags set, and
+ * fs_resident_source[]/hcnames_name_mirror[] repopulated to match.
+ * Affiliates: filesystem_validateAutosaveWinnerBlocking(), the Phase 5
+ * boot reader, filesystem_formatResidentNameLine().
+ */
+uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void);
+/*
  * Flush the currently pending autosave lifecycle trace before a deliberate
  * bench-test power cycle.
  *

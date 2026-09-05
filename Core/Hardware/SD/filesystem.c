@@ -263,6 +263,29 @@ typedef enum {
      */
     FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
     /*
+     * Boot-blocking .hcprms A/B candidate validation and winner selection.
+     *
+     * The runtime drain performs the same dual-record validation inside its
+     * writer state machine (phases 1-5); boot needs a synchronous one-shot
+     * pass that completes before preset_loadBank() decides the Bank Load
+     * path (§4, S061_AUTOSAVE_READER.md). It validates only — it creates
+     * nothing and touches no writer flags — and leaves its result in the
+     * retained fs_boot_winner statics for main.c's stage-11 gate and the
+     * Phase 5 boot reader.
+     */
+    FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER,
+    /*
+     * Boot-blocking .hcnames regeneration from a validated winner record.
+     *
+     * Rebuilds the register through the normal temp/rename pattern when the
+     * live file is absent/corrupt while a valid winner exists (§5.1,
+     * S061_AUTOSAVE_READER.md). Reads the winner payload once in bounded
+     * chunks, populating fs_resident_source[]/hcnames_name_mirror[] and the
+     * resident Instrument types from record identity, then streams the
+     * rewritten register rows to .hcnamtmp before the atomic swap.
+     */
+    FS_INTERNAL_OP_REGENERATE_HCNAMES_FROM_WINNER,
+    /*
      * Runtime reader/update operations borrow the generalized name cache.
      * Instrument operations address one voice row per selected Scene. Kit
      * operations address the Kit row plus all six Instrument rows because a
@@ -853,6 +876,29 @@ typedef struct {
 } filesystem_autosave_writer_state_t;
 
 /*
+ * Boot-only .hcnames regeneration scan state (workspace union member).
+ *
+ * What: cursors and one open multi-byte field for the winner-record
+ * identity scan in filesystem_regenerateHcnamesFromWinner_tick(). Inputs:
+ * the winner record streamed from AUTOSAVE_PAYLOAD_OFFSET. Outputs:
+ * fs_resident_source[], hcnames_name_mirror[], and resident Instrument
+ * types populated for every Scene present in the record's Bank mask.
+ * Why: the scan can span foreground ticks and a read may split a two- or
+ * three-byte field, so partial assembly must survive between passes. This
+ * is a union member of the existing 2,048-byte operation stage and adds
+ * no new SRAM. Affiliates: filesystem_regenerateHcnamesFromWinner_tick().
+ */
+typedef struct {
+    uint32_t scan_offset;      /* next absolute winner-file byte to read    */
+    uint16_t present_mask;     /* assembled Bank scene-present mask (0xffff
+                                * until the payload Bank section arrives)   */
+    uint16_t open_row;         /* coordinate of the open multi-byte field   */
+    uint8_t  open_kind;        /* 0 none, 1 source, 2 type, 3 Bank mask     */
+    uint8_t  open_byte_index;  /* next expected byte index inside the field */
+    uint32_t open_value;       /* partial little-endian field value         */
+} filesystem_hcnames_regen_state_t;
+
+/*
  * Dedicated stable live-byte patch cache.
  *
  * What: holds at most the configured number of sorted uint16 payload offsets
@@ -900,6 +946,7 @@ typedef union {
     kit_instrument_slot_t instrument_stage;
     filesystem_scene_stage_t scene_stage;
     filesystem_autosave_writer_state_t autosave_writer;
+    filesystem_hcnames_regen_state_t regen_state;
 } filesystem_stage_workspace_t;
 
 /*
@@ -1034,6 +1081,7 @@ _Static_assert(SETTINGS_AUTOWRITE_DEBOUNCE_MS > 0u &&
 #define op_staged_kit        (fs_stage_workspace.kit_stage)
 #define op_staged_instrument (fs_stage_workspace.instrument_stage)
 #define op_autosave_writer   (fs_stage_workspace.autosave_writer)
+#define op_regen             (fs_stage_workspace.regen_state)
 
 void filesystem_clearIdentityNames(void)
 {
@@ -1305,6 +1353,9 @@ static void filesystem_writeBootLog_tick(void);
 static void filesystem_residentNames_tick(void);
 static void filesystem_ensureAutosaveFiles_tick(void);
 static void filesystem_autosaveParameterDrain_tick(void);
+/* Boot-reader machine ticks; the wrappers live beside the machines below. */
+static void filesystem_validateAutosaveWinner_tick(void);
+static void filesystem_regenerateHcnamesFromWinner_tick(void);
 #if DEV_MODE_LOGGING && DEV_LOGGING_IWDG
 /*
  * Declared ahead of its definition because both foreground pumps feed the
@@ -1848,6 +1899,47 @@ static uint8_t  fs_autosave_winner_cached = 0u;
 static uint8_t  fs_autosave_cached_winner_index = 0u;
 static uint32_t fs_autosave_cached_winner_generation = 0u;
 static uint8_t  fs_autosave_cached_winner_probe = 0u;
+
+/*
+ * Boot-reader deferred-mark and notice latch (§8, S061_AUTOSAVE_READER.md).
+ *
+ * What: 5-byte boot-scratch structure capturing the reader's decision for
+ * each Scene before mutation tracking is enabled. Inputs: the per-Scene
+ * Case 1/2/3 evaluation in filesystem_autosaveBootReaderBlocking(). Outputs:
+ * replayed via autosave_markResidentBankDirty / markSceneWithoutPatternDirty
+ * immediately after ensureAutosaveFilesBlocking enables tracking; Case-3
+ * bits also feed the Menu post-boot notice sequencer. Cleared on every
+ * reset/remount path. Lifetime: boot-scratch, static SRAM1, 5 bytes.
+ * Approved 2026-09-05. Affiliates: autosave_setMutationTrackingEnabled(),
+ * filesystem_ensureAutosaveFilesBlocking(), menu_drainAutosaveBootNotices().
+ */
+typedef struct {
+    uint8_t  bank_fallback;      /* 1 = canonical Bank Load used, not winner */
+    uint16_t case2_scene_mask;   /* Scenes needing dirty-mark replay only   */
+    uint16_t case3_scene_mask;   /* Scenes invalidated under P1             */
+} fs_autosave_boot_latch_t;
+
+static fs_autosave_boot_latch_t fs_boot_latch;
+
+/*
+ * Boot-reader notice mask for the Menu post-boot sequencer (§9).
+ *
+ * What: returns the Case-3 Scene invalidation mask and bank-fallback flag.
+ * Inputs: the boot latch populated by the boot reader. Outputs: 16-bit
+ * Scene mask (each set bit = one post-boot overlay) and bank_fallback byte
+ * (1 = root notice for canonical Bank Load fallback). Why: Menu must not
+ * access filesystem internal state directly. Affiliates:
+ * menu_drainAutosaveBootNotices(), fs_boot_latch.
+ */
+uint16_t filesystem_bootReaderNoticeSceneMask(void)
+{
+    return fs_boot_latch.case3_scene_mask;
+}
+
+uint8_t filesystem_bootReaderNoticeBankFallback(void)
+{
+    return fs_boot_latch.bank_fallback;
+}
 
 /* Existing morph destination buffer owned by preset/sound code.
  *
@@ -2856,6 +2948,9 @@ static const char *filesystem_bootLogCodeForOperation(
     case FS_INTERNAL_OP_CREATE_LIBRARY_INDEX: return "LIBINDEX";
     case FS_INTERNAL_OP_WRITE_HCNAMES:        return "HCNAMES ";
     case FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES:return "ASENSURE";
+    case FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER: return "ASWINDR ";
+    case FS_INTERNAL_OP_REGENERATE_HCNAMES_FROM_WINNER:
+        return "HCNAMRG ";
     case FS_INTERNAL_OP_LOAD_KIT:
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:       return "KITLOAD ";
     case FS_INTERNAL_OP_LOAD_SCENE:           return "SCNELOAD";
@@ -3321,6 +3416,10 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_WRITE_BOOT_LOG:        return "BLog";
     case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN: return "ASv";
     case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:  return "AST";
+    case FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER:
+        return "ASvV";
+    case FS_INTERNAL_OP_REGENERATE_HCNAMES_FROM_WINNER:
+        return "HNRg";
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:return "HNrL";
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:return "HNrU";
     case FS_INTERNAL_OP_LOAD_HCNAMES_KIT:      return "HNkL";
@@ -23050,6 +23149,15 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
      * identity from this abandoned card session.
      */
     fs_autosave_winner_cached = 0u;
+    /*
+     * Card-init failure also abandons the boot reader's deferred latch.
+     *
+     * Inputs: an abandoned boot facade before remount. Output: no pending
+     * bank-fallback or Case 2/3 Scene decision survives into the recovery
+     * mount, whose own boot decisions must start from an empty latch.
+     * Affiliates: fs_boot_latch and filesystem_initAfterCardReady().
+     */
+    memset(&fs_boot_latch, 0, sizeof(fs_boot_latch));
     fs_autosave_enabled = 1u;
     fs_autosave_runtime_ready = 0u;
     fs_autosave_setup_pending = 0u;
@@ -23118,6 +23226,15 @@ void filesystem_initAfterCardReady(void)
      * continuation shortcut before any boot or runtime operation can start.
      */
     fs_autosave_winner_cached = 0u;
+    /*
+     * A fresh mount also clears the boot reader's deferred latch.
+     *
+     * Inputs: a newly mounted card facade. Output: no bank-fallback or
+     * Case 2/3 Scene decision from a prior card session can replay into
+     * this mount's first drain. Affiliates: fs_boot_latch and the boot
+     * reader's per-reset ownership.
+     */
+    memset(&fs_boot_latch, 0, sizeof(fs_boot_latch));
     /* A remount must never inherit a direct source from the prior card. */
     for (source_row = 0u;
          source_row < FS_RESIDENT_NAMES_ROW_COUNT;
@@ -24338,6 +24455,12 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_ENSURE_AUTOSAVE_FILES:
         filesystem_ensureAutosaveFiles_tick();
         break;
+    case FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER:
+        filesystem_validateAutosaveWinner_tick();
+        break;
+    case FS_INTERNAL_OP_REGENERATE_HCNAMES_FROM_WINNER:
+        filesystem_regenerateHcnamesFromWinner_tick();
+        break;
     case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN:
         filesystem_autosaveParameterDrain_tick();
         break;
@@ -24859,6 +24982,273 @@ uint8_t filesystem_autosaveTraceFlushBlocking(void)
     return 1u;
 }
 
+/*
+ * Boot-time .hcprms winner record identity (boot-scratch).
+ *
+ * What: result of the boot-blocking candidate validation, retained between
+ * main.c's stage-10b validation and the stage-11 winner gate/Phase 5 boot
+ * reader. Inputs: filesystem_validateAutosaveWinnerBlocking(). Outputs:
+ * filesystem_hasBootWinner() and the Phase 5 reader's record selection.
+ * Lifetime: boot-scratch, static SRAM1, 8 bytes. Owner: autosave boot
+ * reader (§16, S061_AUTOSAVE_READER.md); approved allocation 2026-09-05.
+ * Cleared with the enclosing validation pass; every reset/remount path
+ * relies on a fresh validation run before hasBootWinner() is consulted.
+ * Affiliates: filesystem_validateAutosaveWinnerBlocking(), main.c stage
+ * 11, filesystem_regenerateHcnamesFromWinnerBlocking().
+ */
+static struct {
+    uint8_t  valid;
+    uint8_t  record_index;       /* 0 = .hcprms1, 1 = .hcprms2 */
+    uint32_t generation;
+    uint8_t  bank_match;
+} fs_boot_winner;
+
+/*
+ * Query boot-time winner validation result.
+ *
+ * What: returns nonzero when a valid Bank-matching winner was found.
+ * Inputs: fs_boot_winner populated by validateAutosaveWinnerBlocking().
+ * Outputs: boolean. Affiliates: main.c stage 11 decision gate.
+ */
+uint8_t filesystem_hasBootWinner(void)
+{
+    return (uint8_t)(fs_boot_winner.valid && fs_boot_winner.bank_match);
+}
+
+/*
+ * Record that the canonical Bank Load fallback path was taken.
+ *
+ * What: sets the bank_fallback flag in the boot latch so the replay
+ * function calls autosave_markResidentBankDirty() after tracking enables.
+ * Inputs: called from main.c when no valid winner exists. Outputs:
+ * fs_boot_latch.bank_fallback = 1. Affiliates: filesystem_replayBootLatch().
+ */
+void filesystem_setBootLatchBankFallback(void)
+{
+    fs_boot_latch.bank_fallback = 1u;
+}
+
+/*
+ * Replay deferred dirty marks after mutation tracking enables.
+ *
+ * What: drains the boot latch into the canonical autosave marker API so the
+ * first runtime drain captures every boot-loaded component. Inputs: the
+ * populated latch from the boot reader's Case 1/2/3 evaluation. Outputs:
+ * autosave_markResidentBankDirty() for the bank-fallback flag;
+ * autosave_markSceneWithoutPatternDirty() for every set bit in the
+ * case2_scene_mask | case3_scene_mask union. Clears the dirty-mark
+ * portion of the latch; preserves case3_scene_mask for Menu notice
+ * consumption. Why: marker calls during boot are documented no-ops because
+ * tracking is off; skipping the replay would leave the dirty mask clean for
+ * rows the drain has never captured, causing objectFullyCaptured to
+ * prematurely clear the refreshed flag. Affiliates: §8.3
+ * S061_AUTOSAVE_READER.md, autosave_markResidentBankDirty(),
+ * autosave_markSceneWithoutPatternDirty().
+ */
+static void filesystem_replayBootLatch(void)
+{
+    uint16_t combined;
+    uint8_t i;
+
+    if (fs_boot_latch.bank_fallback) {
+        autosave_markResidentBankDirty();
+        fs_boot_latch.bank_fallback = 0u;
+    }
+    combined = (uint16_t)(fs_boot_latch.case2_scene_mask |
+                          fs_boot_latch.case3_scene_mask);
+    for (i = 0u; i < AUTOSAVE_SCENE_COUNT; i++) {
+        if (combined & (uint16_t)(1u << i))
+            autosave_markSceneWithoutPatternDirty(i);
+    }
+    fs_boot_latch.case2_scene_mask = 0u;
+    /* case3_scene_mask preserved for Menu notice drain */
+}
+
+/*
+ * Boot-blocking .hcprms candidate validation and winner selection.
+ *
+ * What: validates .hcprms1 and .hcprms2 via streaming CRC32C and selects a
+ * winner using the same generation/Bank-match rules as the runtime drain
+ * (autosaveParameterDrain_tick phases 1-5). Inputs: mounted SD card with
+ * both .hcprms files potentially present; BankData with active_bank from
+ * settings.cfg. Outputs: fs_boot_winner statics (valid, record_index,
+ * generation, bank_match). Why: the runtime drain's validation runs inside
+ * the asynchronous writer state machine; boot needs a synchronous one-shot
+ * pass that completes before preset_loadBank() decides the Bank Load path.
+ * This function validates only — creates nothing, touches no writer flags.
+ * Uses the same streaming CRC bounded-chunk pattern as the drain phases
+ * 1-3. Bank agreement here is slot-only: BankData's display name is not yet
+ * loaded at this boot point (the canonical Bank Load has not run), so the
+ * runtime name+slot MatchesBank comparison cannot apply; §4's root gate is
+ * defined by the settings.cfg slot alone. Affiliates:
+ * autosave_streamValidationBegin/Update/Finish(),
+ * autosave_generationIsNewer(), filesystem_autosaveFilenameForIndex(),
+ * main.c boot sequence (stage 10b).
+ */
+static void filesystem_validateAutosaveWinner_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* INITIALIZE ONE OPERATION-LOCAL A/B VALIDATION PASS */
+        memset(&op_autosave_writer, 0, sizeof(op_autosave_writer));
+        fs_boot_winner.valid = 0u;
+        fs_boot_winner.record_index = 0u;
+        fs_boot_winner.generation = 0u;
+        fs_boot_winner.bank_match = 0u;
+        op_autosave_writer.candidate_index = 0u;
+        op_phase = 1u;
+        return;
+
+    case 1: /* OPEN CURRENT A/B CANDIDATE FOR A STREAMING VALIDATION READ */
+        if (!afatfs_chdir(NULL))
+            return;
+        autosave_streamValidationBegin(&op_autosave_writer.validation);
+        op_autosave_writer.candidate_valid = 0u;
+        op_autosave_writer.candidate_bank_match = 0u;
+        op_bytes_done = 0u;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    op_autosave_writer.candidate_index),
+                "r", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            /* A missing/unopenable candidate is simply invalid. */
+            op_phase = 5u;
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2: /* WAIT CANDIDATE OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            op_phase = 5u;
+            return;
+        }
+        op_phase = 3u;
+        return;
+
+    case 3: /* STREAM ONE BOUNDED CANDIDATE INTERVAL THROUGH VALIDATION */
+    {
+        uint16_t read_bytes;
+        uint32_t n;
+
+        read_bytes = (op_bytes_done < AUTOSAVE_RECORD_BYTES)
+            ? filesystem_autosaveCrcChunkBytes(
+                  AUTOSAVE_RECORD_BYTES - op_bytes_done)
+            : 1u;
+        n = afatfs_fread(op_file, staging_buf, read_bytes);
+        if (n != 0u) {
+            autosave_streamValidationUpdate(&op_autosave_writer.validation,
+                                            op_bytes_done, staging_buf,
+                                            (uint16_t)n);
+            op_bytes_done += n;
+            return;
+        }
+        if (!afatfs_feof(op_file))
+            return;
+        op_autosave_writer.candidate_valid =
+            autosave_streamValidationFinish(&op_autosave_writer.validation);
+        /* Boot gate: slot agreement only (BankData name not yet loaded). */
+        op_autosave_writer.candidate_bank_match = (uint8_t)(
+            op_autosave_writer.candidate_valid &&
+            op_autosave_writer.validation.bank_slot ==
+                bank_restoreBankSlot());
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 4u;
+        return;
+    }
+
+    case 4: /* WAIT CANDIDATE CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_phase = 5u;
+        return;
+
+    case 5: /* RECORD BEST VALID CANDIDATE, THEN ADVANCE A -> B */
+        if (op_autosave_writer.candidate_valid &&
+            (!op_autosave_writer.have_winner ||
+             (op_autosave_writer.candidate_bank_match &&
+              !op_autosave_writer.winner_bank_match) ||
+             (op_autosave_writer.candidate_bank_match ==
+              op_autosave_writer.winner_bank_match &&
+              autosave_generationIsNewer(
+                  op_autosave_writer.validation.generation,
+                  op_autosave_writer.winner_generation)))) {
+            op_autosave_writer.have_winner = 1u;
+            op_autosave_writer.winner_bank_match =
+                op_autosave_writer.candidate_bank_match;
+            op_autosave_writer.winner_index =
+                op_autosave_writer.candidate_index;
+            op_autosave_writer.winner_generation =
+                op_autosave_writer.validation.generation;
+            op_autosave_writer.winner_probe =
+                op_autosave_writer.validation.probe_counter;
+        }
+        if (op_autosave_writer.candidate_index + 1u <
+            AUTOSAVE_RECORD_FILE_COUNT) {
+            op_autosave_writer.candidate_index++;
+            op_phase = 1u;
+            return;
+        }
+        /*
+         * VALIDATED mirrors the drain's trace: bit 0 says a winner exists,
+         * bit 1 is its A/B index, bit 2 marks a winner whose Bank slot does
+         * not match settings.cfg's active_bank.
+         */
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_VALIDATED,
+            (uint8_t)((op_autosave_writer.have_winner ? 1u : 0u) |
+                      (op_autosave_writer.have_winner
+                           ? (uint8_t)(op_autosave_writer.winner_index << 1u)
+                           : 0u) |
+                      (op_autosave_writer.have_winner &&
+                       !op_autosave_writer.winner_bank_match ? 4u : 0u)),
+            op_autosave_writer.have_winner
+                ? op_autosave_writer.winner_generation : 0u);
+        fs_boot_winner.valid = op_autosave_writer.have_winner;
+        fs_boot_winner.bank_match = op_autosave_writer.winner_bank_match;
+        fs_boot_winner.record_index = op_autosave_writer.winner_index;
+        fs_boot_winner.generation = op_autosave_writer.winner_generation;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+/*
+ * Boot-time blocking .hcprms candidate validation and winner selection.
+ *
+ * What: synchronous wrapper for FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER.
+ * Inputs: mounted card and BankData active_bank (post settings.cfg).
+ * Outputs: fs_boot_winner statics plus a nonzero return when a valid
+ * winner matching the active Bank slot exists. Why: main.c must know the
+ * winner before preset_loadBank() chooses the restore path. Affiliates:
+ * filesystem_hasBootWinner(), main.c stage 10b, §4
+ * S061_AUTOSAVE_READER.md.
+ */
+uint8_t filesystem_validateAutosaveWinnerBlocking(void)
+{
+    if (status == FS_STATUS_BUSY ||
+        !filesystem_start(FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER,
+                          FS_FILE_SETTINGS, 0u, NULL)) {
+        return 0u;
+    }
+    while (status == FS_STATUS_BUSY)
+        filesystem_tick();
+    if (status != FS_STATUS_DONE) {
+        filesystem_ack();
+        return 0u;
+    }
+    filesystem_ack();
+    return filesystem_hasBootWinner();
+}
+
 uint8_t filesystem_ensureAutosaveFilesBlocking(void)
 {
     /*
@@ -24944,7 +25334,21 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
     fs_autosave_recovery_pending = 1u;
     fs_autosave_writer_boot_ready = 1u;
     autosave_setMutationTrackingEnabled(1u);
-    autosave_markResidentBankDirty();
+    /*
+     * Replay the boot latch now that tracking is live.
+     *
+     * Inputs: the boot reader's deferred-mark latch (bank fallback and
+     * Case 2/3 Scene masks) and newly enabled mutation tracking. Output:
+     * the same whole-Bank or per-Scene dirty marks every load path used to
+     * issue immediately at this boundary — the former unconditional
+     * autosave_markResidentBankDirty() call is now the latch's
+     * bank_fallback replay — so the first runtime drain captures every
+     * boot-restored component. Why: marker calls before this point are
+     * documented no-ops while tracking is disabled (§8,
+     * S061_AUTOSAVE_READER.md). Affiliates:
+     * filesystem_replayBootLatch(), autosave_setMutationTrackingEnabled().
+     */
+    filesystem_replayBootLatch();
     return 1u;
 }
 
@@ -25161,6 +25565,569 @@ uint8_t filesystem_writeResidentNamesBlocking(
      */
     if (diagnostic_cb)
         diagnostic_cb(5u, op_item_offset);
+    filesystem_ack();
+    return 1u;
+}
+
+/*
+ * Classify one payload-relative winner-record byte for register rebuild.
+ *
+ * What: maps an absolute winner-file byte inside the 30,848-byte payload to
+ * the HCNAMES identity cell it owns: Bank slot/source bytes (payload 0..1),
+ * Bank name (2..9), Bank scene-present mask (10..11), and per-Scene name,
+ * source, and Instrument type text. Inputs: payload-relative offset, the
+ * record's assembled scene-present mask, and outputs for the destination
+ * row/coordinate plus the byte index inside its field. Outputs: a field
+ * kind code (0 none, 1 name, 2 source, 3 Instrument type text, 4 Bank
+ * present mask) or zero for reserved/padding bytes. Scene-family bytes
+ * whose Scene is absent from the present mask return zero so stale record
+ * sections can never overwrite the blank/UNKNOWN rows pre-seeded for them.
+ * Why: regeneration derives .hcnames content from the record identity
+ * fields alone; the arithmetic must mirror autosave_objectFullyCaptured()'s
+ * row mapping so the rebuilt register means the same thing the getter's
+ * source fields did. Affiliates: the Phase C geometry in Autosave.h and
+ * filesystem_regenerateHcnamesFromWinner_tick().
+ */
+static uint8_t filesystem_regenClassifyPayloadByte(uint32_t payload_relative,
+                                                   uint16_t present_mask,
+                                                   uint16_t *row,
+                                                   uint8_t *byte_index)
+{
+    uint32_t q;
+    uint16_t scene_index;
+    uint16_t r;
+
+    if (!row || !byte_index)
+        return 0u;
+    *row = 0u;
+    *byte_index = 0u;
+    if (payload_relative < AUTOSAVE_BANK_SECTION_BYTES) {
+        /* Bank section: slot, name, then the two scene-present-mask bytes. */
+        if (payload_relative < 2u) {
+            *row = 0u;
+            *byte_index = (uint8_t)payload_relative;
+            return 2u; /* Bank slot doubles as row-0's source value */
+        }
+        if (payload_relative < 2u + AUTOSAVE_NAME_BYTES) {
+            *row = 0u;
+            *byte_index = (uint8_t)(payload_relative - 2u);
+            return 1u;
+        }
+        if (payload_relative < 12u) {
+            *byte_index = (uint8_t)(payload_relative - 10u);
+            return 4u;
+        }
+        return 0u;
+    }
+    q = payload_relative - AUTOSAVE_BANK_SECTION_BYTES;
+    if (q >= AUTOSAVE_PAYLOAD_BYTES - AUTOSAVE_BANK_SECTION_BYTES)
+        return 0u;
+    scene_index = (uint16_t)(q / AUTOSAVE_SCENE_SECTION_BYTES);
+    if (scene_index >= AUTOSAVE_SCENE_COUNT)
+        return 0u;
+    if (present_mask != 0xffffu &&
+        (present_mask & (uint16_t)(1u << scene_index)) == 0u) {
+        /* Rows of a Scene outside the record's resident mask stay blank. */
+        return 0u;
+    }
+    r = (uint16_t)(q % AUTOSAVE_SCENE_SECTION_BYTES);
+    if (r < 10u) {
+        if (r < AUTOSAVE_NAME_BYTES) {
+            *row = (uint16_t)(1u + scene_index);
+            *byte_index = (uint8_t)r;
+            return 1u;
+        }
+        *row = (uint16_t)(1u + scene_index);
+        *byte_index = (uint8_t)(r - AUTOSAVE_NAME_BYTES);
+        return 2u;
+    }
+    if (r >= AUTOSAVE_KIT_OFFSET &&
+        r < AUTOSAVE_KIT_OFFSET + 10u) {
+        r = (uint16_t)(r - AUTOSAVE_KIT_OFFSET);
+        if (r < AUTOSAVE_NAME_BYTES) {
+            *row = (uint16_t)(FS_RESIDENT_NAMES_KIT_BASE + scene_index);
+            *byte_index = (uint8_t)r;
+            return 1u;
+        }
+        *row = (uint16_t)(FS_RESIDENT_NAMES_KIT_BASE + scene_index);
+        *byte_index = (uint8_t)(r - AUTOSAVE_NAME_BYTES);
+        return 2u;
+    }
+    if (r >= AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_INSTRUMENTS_OFFSET) {
+        uint16_t instrument_relative = (uint16_t)(
+            r - AUTOSAVE_KIT_OFFSET - AUTOSAVE_KIT_INSTRUMENTS_OFFSET);
+        uint16_t slot = (uint16_t)(
+            instrument_relative / AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+        uint16_t field_offset = (uint16_t)(
+            instrument_relative % AUTOSAVE_INSTRUMENT_RECORD_BYTES);
+
+        if (slot >= AUTOSAVE_INSTRUMENTS_PER_KIT)
+            return 0u;
+        if (field_offset < AUTOSAVE_INSTRUMENT_TYPE_BYTES) {
+            *row = (uint16_t)((scene_index << 8u) | slot);
+            *byte_index = (uint8_t)field_offset;
+            return 3u;
+        }
+        if (field_offset <
+            AUTOSAVE_INSTRUMENT_TYPE_BYTES + AUTOSAVE_NAME_BYTES) {
+            *row = (uint16_t)(FS_RESIDENT_NAMES_INSTRUMENT_BASE +
+                              ((uint16_t)scene_index *
+                               AUTOSAVE_INSTRUMENTS_PER_KIT) + slot);
+            *byte_index = (uint8_t)(field_offset -
+                                    AUTOSAVE_INSTRUMENT_TYPE_BYTES);
+            return 1u;
+        }
+        if (field_offset <
+            AUTOSAVE_INSTRUMENT_TYPE_BYTES + AUTOSAVE_NAME_BYTES +
+                AUTOSAVE_SOURCE_BYTES) {
+            *row = (uint16_t)(FS_RESIDENT_NAMES_INSTRUMENT_BASE +
+                              ((uint16_t)scene_index *
+                               AUTOSAVE_INSTRUMENTS_PER_KIT) + slot);
+            *byte_index = (uint8_t)(field_offset -
+                                    AUTOSAVE_INSTRUMENT_TYPE_BYTES -
+                                    AUTOSAVE_NAME_BYTES);
+            return 2u;
+        }
+    }
+    return 0u;
+}
+
+/*
+ * Regenerate .hcnames from a validated winner record's identity fields.
+ *
+ * What: rebuilds all 129 rows of .hcnames using the winner record's
+ * embedded name bytes and Phase C source fields, plus the Bank identity
+ * from the record's Bank section. The #types header is emitted first via
+ * filesystem_formatHcnamesHeader(). Inputs: the validated winner record,
+ * read in bounded chunks from the card. Outputs: a new .hcnames written
+ * via the existing atomic safe-write pattern (temp file → rename);
+ * fs_resident_source[] and hcnames_name_mirror[] populated from written
+ * content. All refreshed flags SET (worst-case safe: every row treated
+ * as unproven until the drain proves otherwise). Why: if .hcnames is
+ * absent or corrupt while a valid winner exists, the reader must not
+ * fall back to a full canonical Bank Load — the winner record contains
+ * enough identity data to reconstruct the register. Affiliates: §5.1
+ * S061_AUTOSAVE_READER.md, filesystem_writeResidentNamesBlocking(),
+ * autosave_extractPayloadSource(), filesystem_formatResidentNameLine(),
+ * filesystem_formatHcnamesHeader().
+ *
+ * Record reading strategy: the payload is streamed sequentially from
+ * AUTOSAVE_PAYLOAD_OFFSET in bounded chunks; only identity cells are
+ * extracted: Bank slot/name/mask, per-Scene name (payload +0) and source
+ * (payload +8), Kit name (scene_base + 640) and source (+8), and per
+ * Instrument the 3-byte type text (+0), name (+3), and source (+11),
+ * where scene_base = 128 + N*1920 and instruments follow the Kit header.
+ * Scene rows outside the record's scene-present mask stay blank/UNKNOWN.
+ * Instrument type text is applied to the resident slot's type so the
+ * formatter below emits the record's own type tokens; later Case 1/2
+ * payload applies or narrow reloads overwrite both type and endpoints.
+ */
+static void filesystem_regenerateHcnamesFromWinner_tick(void)
+{
+    switch (op_phase) {
+    case 0: /* RESET REGISTER IMAGE AND OPEN THE WINNER RECORD */
+        if (!fs_boot_winner.valid) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_prepareResidentNamesCache();
+        {
+            uint16_t row;
+
+            for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+                /* Every rebuilt row is unproven until a drain captures it. */
+                fs_resident_source[row] = (uint16_t)(
+                    FS_RESIDENT_SOURCE_UNKNOWN |
+                    FS_RESIDENT_SOURCE_REFRESHED_FLAG);
+            }
+        }
+        memset(&op_regen, 0, sizeof(op_regen));
+        op_regen.present_mask = 0xffffu; /* not yet read from the Bank section */
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(
+                filesystem_autosaveFilenameForIndex(
+                    fs_boot_winner.record_index),
+                "r", AFATFS_MATCH_CASE_INSENSITIVE, NULL, on_file_opened)) {
+            return;
+        }
+        op_phase = 1u;
+        return;
+
+    case 1: /* WAIT WINNER OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2: /* START/RETRY ASYNCHRONOUS SEEK TO THE PAYLOAD START */
+    {
+        afatfsOperationStatus_e seek = afatfs_fseek(
+            op_file, AUTOSAVE_PAYLOAD_OFFSET, AFATFS_SEEK_SET);
+
+        if (seek == AFATFS_OPERATION_SUCCESS) {
+            op_regen.scan_offset = AUTOSAVE_PAYLOAD_OFFSET;
+            op_phase = 4u;
+        } else if (seek == AFATFS_OPERATION_IN_PROGRESS) {
+            op_phase = 3u;
+        }
+        return;
+    }
+
+    case 3: /* WAIT QUEUED PAYLOAD SEEK BY OBSERVING THE FILE CURSOR */
+        if (!afatfs_ftell(op_file, &op_regen.scan_offset))
+            return;
+        if (op_regen.scan_offset != AUTOSAVE_PAYLOAD_OFFSET) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 4u;
+        return;
+
+    case 4: /* STREAM ONE BOUNDED PAYLOAD CHUNK AND EXTRACT IDENTITY */
+    {
+        uint32_t payload_end = (uint32_t)(AUTOSAVE_PAYLOAD_OFFSET +
+                                          AUTOSAVE_PAYLOAD_BYTES);
+        uint32_t remaining = (op_regen.scan_offset < payload_end)
+            ? payload_end - op_regen.scan_offset : 0u;
+        uint32_t request;
+        uint32_t n;
+        uint32_t i;
+
+        if (remaining == 0u) {
+            /* Normalize the mirror, then close the winner and write. */
+            {
+                uint16_t row;
+
+                for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+                    hcnames_name_mirror[row][STORAGE_KIT_DISPLAY_NAME_LEN] =
+                        '\0';
+                }
+            }
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 5u;
+            return;
+        }
+        request = (remaining > sizeof(staging_buf)) ? sizeof(staging_buf)
+                                                    : remaining;
+        n = afatfs_fread(op_file, staging_buf, request);
+        if (n == 0u) {
+            if (!afatfs_feof(op_file))
+                return;
+            /* A short winner payload is corrupt by definition. */
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 20u;
+            return;
+        }
+        for (i = 0u; i < n; i++) {
+            uint16_t row = 0u;
+            uint8_t byte_index = 0u;
+            uint8_t kind = filesystem_regenClassifyPayloadByte(
+                op_regen.scan_offset - AUTOSAVE_PAYLOAD_OFFSET + i,
+                op_regen.present_mask, &row, &byte_index);
+
+            if (kind == 0u)
+                continue;
+            if (kind == 1u) {
+                /* Name cells write one byte straight into the mirror. */
+                if (row < FS_RESIDENT_NAMES_ROW_COUNT &&
+                    byte_index < STORAGE_KIT_DISPLAY_NAME_LEN) {
+                    hcnames_name_mirror[row][byte_index] =
+                        (char)staging_buf[i];
+                }
+                continue;
+            }
+            if (op_regen.open_kind != kind || op_regen.open_row != row) {
+                /* A byte stream must begin each field at its first byte. */
+                if (byte_index != 0u) {
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 20u;
+                    return;
+                }
+                op_regen.open_kind = kind;
+                op_regen.open_row = row;
+                op_regen.open_value = staging_buf[i];
+                op_regen.open_byte_index = 1u;
+                continue;
+            }
+            if (byte_index != op_regen.open_byte_index) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 20u;
+                return;
+            }
+            op_regen.open_value |= (uint32_t)staging_buf[i] <<
+                                   ((uint32_t)byte_index * 8u);
+            op_regen.open_byte_index++;
+            if (kind == 4u && op_regen.open_byte_index == 2u) {
+                op_regen.present_mask = (uint16_t)op_regen.open_value;
+                op_regen.open_kind = 0u;
+            } else if (kind == 2u && op_regen.open_byte_index == 2u) {
+                if (row < FS_RESIDENT_NAMES_ROW_COUNT) {
+                    fs_resident_source[row] = (uint16_t)(
+                        (op_regen.open_value &
+                         FS_RESIDENT_SOURCE_VALUE_MASK) |
+                        FS_RESIDENT_SOURCE_REFRESHED_FLAG);
+                }
+                op_regen.open_kind = 0u;
+            } else if (kind == 3u && op_regen.open_byte_index == 3u) {
+                char type_buf[AUTOSAVE_INSTRUMENT_TYPE_BYTES + 1u];
+                uint8_t scene_index = (uint8_t)(row >> 8u);
+                uint8_t slot = (uint8_t)(row & 0xffu);
+                instrument_type_t type;
+                scene_t *scene;
+
+                type_buf[0u] = (char)(op_regen.open_value & 0xffu);
+                type_buf[1u] = (char)((op_regen.open_value >> 8u) & 0xffu);
+                type_buf[2u] = (char)((op_regen.open_value >> 16u) & 0xffu);
+                type_buf[AUTOSAVE_INSTRUMENT_TYPE_BYTES] = '\0';
+                type = instrumentManager_typeFromText(type_buf);
+                if (type == INSTRUMENT_TYPE_UNKNOWN ||
+                    scene_index >= AUTOSAVE_SCENE_COUNT ||
+                    slot >= AUTOSAVE_INSTRUMENTS_PER_KIT) {
+                    /* An unrecognized type token means the record cannot
+                     * describe its own register; fail closed. */
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 20u;
+                    return;
+                }
+                scene = scene_get(scene_index);
+                if (!scene) {
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 20u;
+                    return;
+                }
+                scene->kit.instruments[slot].type = type;
+                op_regen.open_kind = 0u;
+            }
+        }
+        op_regen.scan_offset += n;
+        return;
+    }
+
+    case 5: /* WAIT WINNER CLOSE, THEN OPEN THE TEMP DESTINATION */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
+                              "w",
+                              FS_RESIDENT_NAMES_MATCH_MODE,
+                              NULL,
+                              on_file_opened)) {
+            return;
+        }
+        op_phase = 6u;
+        return;
+
+    case 6: /* WAIT TEMP OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_item_offset = 0u;
+        op_bytes_done = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 7u;
+        return;
+
+    case 7: /* WRITE THE #types HEADER LINE BEFORE DATA ROW 0 */
+        if (op_bytes_done == 0u) {
+            op_line_len = (uint8_t)filesystem_formatHcnamesHeader(
+                op_line_buf, sizeof(op_line_buf));
+            if (op_line_len == 0u) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 10u;
+                return;
+            }
+        }
+        {
+            uint32_t written = afatfs_fwrite(
+                op_file, (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+            op_bytes_done += written;
+            if (written == 0u && afatfs_isFull()) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 10u;
+                return;
+            }
+        }
+        if (op_bytes_done >= op_line_len) {
+            op_bytes_done = 0u;
+            op_phase = 8u;
+        }
+        return;
+
+    case 8: /* STREAM THE REBUILT REGISTER ROWS FROM THE MIRROR */
+        if (op_item_offset < FS_RESIDENT_NAMES_ROW_COUNT) {
+            if (op_bytes_done == 0u) {
+                op_line_len = filesystem_formatResidentNameLine(
+                    op_line_buf, sizeof(op_line_buf),
+                    hcnames_name_mirror[op_item_offset],
+                    (uint8_t)!filesystem_residentNameIsBlank(
+                        hcnames_name_mirror[op_item_offset]),
+                    fs_resident_source[op_item_offset], op_item_offset);
+                if (op_line_len == 0u) {
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 10u;
+                    return;
+                }
+            }
+            {
+                uint32_t written = afatfs_fwrite(
+                    op_file, (const uint8_t *)op_line_buf + op_bytes_done,
+                    op_line_len - op_bytes_done);
+                op_bytes_done += written;
+                if (written == 0u && afatfs_isFull()) {
+                    op_close_status = FS_STATUS_ERROR;
+                    op_close_done = false;
+                    if (afatfs_fclose(op_file, on_file_closed))
+                        op_phase = 10u;
+                    return;
+                }
+            }
+            if (op_bytes_done >= op_line_len) {
+                op_item_offset++;
+                op_bytes_done = 0u;
+            }
+            return;
+        }
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 10u;
+        return;
+
+    case 10: /* WAIT TEMP CLOSE, THEN SYNC BEFORE RETIRING LIVE HCNAMES */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 11u;
+        return;
+
+    case 11: /* SYNC COMPLETE TEMP REGISTER, THEN REMOVE THE LIVE FILE */
+        if (!afatfs_sync())
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 12u;
+        return;
+
+    case 12: /* WAIT LIVE-REGISTER REMOVE, THEN RENAME THE TEMP REGISTER */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_rename_done = 0u;
+        op_rename_result = AFATFS_RESULT_OK;
+        memset(op_repair_rename_open_name, 0,
+               sizeof(op_repair_rename_open_name));
+        if (!afatfs_renameObject_lfn(FS_RESIDENT_NAMES_TEMP_FILENAME,
+                                     FS_RESIDENT_NAMES_FILENAME,
+                                     FS_RESIDENT_NAMES_MATCH_MODE,
+                                     op_repair_rename_open_name,
+                                     on_rename_complete))
+            return;
+        op_phase = 13u;
+        return;
+
+    case 13: /* WAIT TEMP-TO-LIVE RENAME, THEN PUBLISH THE REGISTER */
+        if (!op_rename_done)
+            return;
+        if (op_rename_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_clearResidentSourceDirtyFlags();
+        /* The mirror matches the renamed live file; only the shared final
+         * sync may promote this pending image to reader-visible validity. */
+        hcnames_mirror_valid = FS_HCNAMES_MIRROR_PUBLISH_PENDING;
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 20: /* WAIT ERROR-PATH CLOSE BEFORE REPORTING FAILURE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+/*
+ * Regenerate .hcnames from a validated winner record's identity fields.
+ *
+ * What: blocking wrapper for FS_INTERNAL_OP_REGENERATE_HCNAMES_FROM_WINNER.
+ * Inputs: a validated, Bank-slot-matching winner (fs_boot_winner) and an
+ * idle mounted facade. Outputs: nonzero only after the rebuilt register has
+ * closed, synced, replaced the live file, and passed filesystem_finish()'s
+ * normal flush gate; fs_resident_source[] and hcnames_name_mirror[] match
+ * the written rows. Returns zero without card I/O when no winner exists.
+ * Affiliates: §5.1 S061_AUTOSAVE_READER.md and the Phase 5 boot reader.
+ */
+uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void)
+{
+    if (!fs_boot_winner.valid || status == FS_STATUS_BUSY ||
+        !filesystem_start(FS_INTERNAL_OP_REGENERATE_HCNAMES_FROM_WINNER,
+                          FS_FILE_SETTINGS, 0u, NULL)) {
+        return 0u;
+    }
+    while (status == FS_STATUS_BUSY)
+        filesystem_tick();
+    if (status != FS_STATUS_DONE) {
+        filesystem_ack();
+        return 0u;
+    }
     filesystem_ack();
     return 1u;
 }

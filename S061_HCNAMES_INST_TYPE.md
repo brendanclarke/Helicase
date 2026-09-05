@@ -540,3 +540,134 @@ against the on-disk Bank directory, not the live SRAM state):**
   issue from commit 95e6410 — the on-card file state may differ from the
   repo copy.
 - **Verdict: unrelated to hcnames changes.**
+
+---
+
+### Session notes — AutoSave boot reader Phases 1-4 (2026-09-05, continuing in this file)
+
+Implemented Phases 1-4 of the code-site schedule in
+S061_AUTOSAVE_READER.md section 16 on branch dev-ph3-autosave-ph6 after
+planning commit cebcc02. All changes are uncommitted. Every new/changed
+code block carries its comment description adjacent in the .c file and
+every new public prototype carries one in the .h file.
+
+**Phase 1 — deferred dirty-mark + notice latch (section 8):**
+- filesystem.c: fs_autosave_boot_latch_t/fs_boot_latch (5 bytes SRAM1,
+  boot-scratch, owner: autosave boot reader — the plan's approved
+  2026-09-05 allocation) beside the winner-cache statics; zeroed in
+  filesystem_resetFacadeForBootLogRecovery() and
+  filesystem_initAfterCardReady(); filesystem_replayBootLatch() (static)
+  placed before filesystem_ensureAutosaveFilesBlocking(); the ensure tail
+  now calls filesystem_replayBootLatch() instead of the unconditional
+  autosave_markResidentBankDirty() (behavior preserved for Phases 1-4:
+  every autosave-enabled canonical Bank boot sets the latch's
+  bank_fallback bit). Public notice accessors
+  filesystem_bootReaderNoticeSceneMask() /
+  filesystem_bootReaderNoticeBankFallback() implemented beside the latch.
+
+**Phase 2 — root-level case + main.c boot reorder (section 4):**
+- New internal op FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER +
+  filesystem_validateAutosaveWinner_tick() (drain-phases-1-5 logic,
+  VALIDATED trace included) and blocking wrapper
+  filesystem_validateAutosaveWinnerBlocking(); 8-byte boot-scratch
+  fs_boot_winner static (section 16 allocation, flagged for sign-off
+  below); filesystem_hasBootWinner() / filesystem_setBootLatchBankFallback()
+  helpers. Boot-log code ASWINDR, error prefix ASvV added.
+- main.c: stage 10b (winner validation, only when
+  filesystem_autosaveEnabled()) between the stage-10 Bank-index ack and
+  stage 11; stage-11 comment documents the Phase-5 reader gate; the latch
+  is set after the canonical preset_loadBank() is accepted, only when
+  autosave is enabled (an OFF boot has no autosave context; runtime ON
+  later re-marks the whole Bank through the existing setup completion).
+
+**Phase 3 — payload-to-resident apply functions (section 10):**
+- Autosave.h: five public prototypes with adjacent comment (3.6) after
+  the mark-dirty group.
+- Autosave.c: autosave_applyBankPayload() (slot/name/mask/active/
+  voice-edit via BankData setters), autosave_applyScenePayload() (40 live
+  bytes via SceneData's change-aware setters, mirroring the getter enum
+  chain), autosave_applyKitPayload() (two slot-6/track-7 decays),
+  autosave_applyInstrumentPayload() (type resolved by 3-byte extension
+  text via instrumentManager_typeFromText(), never enum ordinal; Normal
+  copied for descriptor-owned indices, Morph only for Morphable — the
+  Choke slot-6 rule is implicit in the descriptor layout; returns 0 for an
+  unknown type so P1 can fire), autosave_extractPayloadSource(). Setters'
+  dirty notifications no-op while boot tracking is disabled.
+
+**Phase 4 — .hcnames regeneration from winner (section 5.1):**
+- New internal op FS_INTERNAL_OP_REGENERATE_HCNAMES_FROM_WINNER +
+  filesystem_regenerateHcnamesFromWinner_tick() and blocking wrapper
+  filesystem_regenerateHcnamesFromWinnerBlocking() (public). The machine
+  streams the winner payload once in bounded chunks from
+  AUTOSAVE_PAYLOAD_OFFSET, classifies identity cells with
+  filesystem_regenClassifyPayloadByte() (Bank slot/name/mask, Scene/Kit
+  name+source, Instrument type/name/source), repopulates
+  fs_resident_source[] (value | REFRESHED) and hcnames_name_mirror[],
+  then writes .hcnamtmp (header + 129 mirror rows via
+  filesystem_formatResidentNameLine()), syncs, removes the live file,
+  renames, and publishes (PUBLISH_PENDING → VALID through the normal flush
+  gate). Scan state lives in a new member of the existing 2,048-byte
+  fs_stage_workspace union (op_regen) — zero new SRAM.
+
+**Flagged deviations from the plan text (all conservative):**
+1. Boot winner Bank matching is slot-only (section 4's stated gate), not
+   autosave_streamValidationMatchesBank(), because BankData's display
+   name is not yet loaded at stage 10b (the canonical Bank Load has not
+   run); a name comparison would make the winner path permanently dead.
+   The embedded name is still available to Phase 5's Bank apply.
+2. Change 2.4's winner branch cannot call
+   filesystem_autosaveBootReaderBlocking() yet (Phase 5). Interim: both
+   winner/no-winner boots take the canonical Bank Load and the latch is
+   set (autosave enabled only). Stage-11 comments mark exactly where the
+   Phase-5 gate replaces this.
+3. Change 4.1's step 5 ("use formatResidentNameLine") cannot reproduce
+   the record's Instrument type tokens at regeneration time because
+   SceneData is not authoritative pre-apply. The machine therefore sets
+   each present Scene's slot type from the record's 3-byte type text
+   before formatting (later Case-1 applies / Case-2 narrow loads overwrite
+   both type and endpoints), and rows for Scenes outside the record's
+   present mask stay blank + UNKNOWN. An unrecognized type token fails the
+   whole regeneration (falls back to the canonical Bank Load).
+4. The stage-11 latch is gated on filesystem_autosaveEnabled() (plan
+   Change 2.4 set it unconditionally in the else branch) so an OFF-at-boot
+   session cannot leave a stale bank-fallback bit for the Phase 7 notice
+   sequencer.
+5. Regeneration/validation are new internal ops with boot-log codes
+   (ASWINDR, HCNAMRG) and error prefixes (ASvV, HNRg) so the pre-audio
+   deadline/watchdog contract applies to them like every other boot op.
+
+**RAM-allocation sign-off:** Phases 1-4 add exactly 13 bytes of static
+SRAM1: fs_boot_latch (5, approved in-plan 2026-09-05) and fs_boot_winner
+(8, listed in section 16's table with boot-scratch lifetime/owner but
+without the latch's explicit approval sentence — flagged here for the
+user's sign-off before this lands in a release build). op_regen is a union
+member of the existing stage workspace (zero new allocation). No heap, no
+stack-budget change beyond the existing automatic foreground stack.
+
+**Build state (clean, logging-on):** text=395,756 data=404 bss=96,184,
+image build/LXRV2_lxr02.img 396,176 bytes. New symbols confirmed present
+after LTO (fs_boot_latch, fs_boot_winner).
+
+**Open items for later phases (noted here so they are not lost):**
+- Hardware verification once Phase 5 lands: stage-10b validation adds two
+  full-record streaming passes to every autosave-enabled boot (~544 bounded
+  reads) — measure boot time with autosave ON/OFF before accepting the
+  reorder; confirm the ensure-time whole-Bank re-mark still fires on the
+  first drain after a normal boot (latch replay path), including a
+  settings.cfg/record generation-disagreement boot.
+- Phase 5 must call filesystem_regenerateHcnamesFromWinnerBlocking() from
+  its Step-1 .hcnames failure path and gate stage 11 on
+  filesystem_hasBootWinner(); it also decides the .hcnames
+  read/prelude ordering the plan's section 5.1 assigns to ensure phases
+  15-19.
+- Phase 7 notice-seeding conflict to resolve: filesystem_replayBootLatch()
+  (Change 1.3) clears fs_boot_latch.bank_fallback after replaying, but
+  Change 7.3 expects filesystem_bootReaderNoticeBankFallback() to still
+  report the root notice after boot. Phase 7 must either capture the
+  bank-notice bit before replay or preserve it in the latch until the Menu
+  sequencer drains it (the plan's section 8.3 wording says notice content
+  persists until displayed — Change 1.3's clear contradicts that).
+- Phase 4's regeneration currently never runs (no caller until Phase 5);
+  its parser/formatter round trip therefore awaits a Phase-5 fixture.
+- SRAM_MANIFEST.md and MEMORY.md still record pre-Phase-1-4 state; refresh
+  them when the reader phases land or on the user's request.
