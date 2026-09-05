@@ -96,8 +96,8 @@ file, not a standalone `Instrument/<type>/` file.
 reader changes only what ends up in resident SRAM at boot. It does not
 modify, extend, or reformat anything the writer produces — not the
 `.hcprms1`/`.hcprms2` wire format, not the `.hcnames` row format (except
-the §6 Instrument type-field extension, which is a reader prerequisite
-added to the existing writer), not the A/B validation or winner-selection
+the §6 Instrument type-field extension and `#types` header row, which are
+reader prerequisites added to the existing writer), not the A/B validation or winner-selection
 logic, not the dirty mask, not the capture pipeline, not the drain
 scheduling. If implementation reveals an apparent need to change what any
 writer writes into any file, or to change any file writer's behavior beyond
@@ -518,6 +518,26 @@ its own descriptor, not a second generated Kit value).
 This function only ever runs against a row this reader has already decided
 is Case 1 (not refreshed) for a Bank/winner-matched record — it is not
 itself responsible for any of the proof logic in §5.
+
+### 10.1 Instrument type matching by extension text, not enum ordinal
+
+The autosave payload stores each Instrument's type as a 3-byte ASCII
+extension token (`drm`, `snr`, `cym`, `hat`) sourced from the instrument
+registry's `type_text`, not the raw `instrument_type_t` enum ordinal
+(`Autosave.c:874-885`). The payload-to-resident apply function must
+resolve the type by matching that text against the firmware's current
+registry — via `storage_instrumentTypeFromText()` or equivalent — never
+by casting the ordinal position to `instrument_type_t`. This ensures
+forward compatibility: if a future firmware revision reorders the enum
+or adds a fifth instrument type, the 3-byte text token in an existing
+autosave record still resolves correctly (or fails cleanly) rather than
+silently mapping to the wrong type.
+
+**If the 3-byte extension text does not match any known instrument type,
+the Instrument is a failed child.** P1 fires: invalidate and empty the
+entire Scene that contains this Instrument. This is the same disposition
+as Case 3 (§5.2) — an unresolvable instrument is structurally equivalent
+to an unresolvable source.
 
 ---
 
