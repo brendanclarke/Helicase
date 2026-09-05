@@ -5,15 +5,15 @@ slot6_track7_morph_amp_envelope_decay=0
 
 [slot1]
 type=drm
-file=kickTite 1.drm
+file=kickTit1.drm
 
 [slot2]
 type=drm
-file=tomFlor 2.drm
+file=tomFlor2.drm
 
 [slot3]
 type=drm
-file=percCly 3.drm
+file=percCly3.drm
 
 [slot4]
 type=snr
@@ -25,4 +25,4 @@ file=hardc1 5.cym
 
 [slot6]
 type=hat
-file=hatTight 6.hat
+file=hatTigh6.hat

@@ -5,24 +5,24 @@ slot6_track7_morph_amp_envelope_decay=0
 
 [slot1]
 type=drm
-file=voidThud 1.drm
+file=voidThu1.drm
 
 [slot2]
 type=drm
-file=alienPng 2.drm
+file=alienPn2.drm
 
 [slot3]
 type=drm
-file=zapPulse 3.drm
+file=zapPuls3.drm
 
 [slot4]
 type=snr
-file=snrGated 4.snr
+file=snrGate4.snr
 
 [slot5]
 type=cym
-file=cymSplsh 5.cym
+file=cymSpls5.cym
 
 [slot6]
 type=hat
-file=hatShort 6.hat
+file=hatShor6.hat

@@ -9,11 +9,11 @@ file=tomMid 1.drm
 
 [slot2]
 type=drm
-file=tomHigh 2.drm
+file=tomHigh2.drm
 
 [slot3]
 type=drm
-file=percShk 3.drm
+file=percShk3.drm
 
 [slot4]
 type=snr
@@ -25,4 +25,4 @@ file=erisc1 5.cym
 
 [slot6]
 type=hat
-file=rollinh1 6.hat
+file=rollinh6.hat
