@@ -676,3 +676,1041 @@ sequence — §11.)
   Scene Load/Save/Bank Load each produce a correctly-typed 4-field
   Instrument row; a malformed or missing type field fails the read per §6's
   no-tolerance rule.
+
+---
+
+## 16. Code-site implementation schedule
+
+This section specifies every code change required to implement the autosave
+boot reader. Each change lists file, line, operation (ADD/MODIFY/REMOVE),
+the descriptive comment block to include, and all affiliates. Changes are
+grouped by implementation phase per §14's order. §6 (`.hcnames` Instrument
+type field) is omitted — it shipped in commit `bc73206`.
+
+Line numbers reference the code as of commit `95e6410`.
+
+---
+
+### Phase 1 — Deferred dirty-mark + notice latch (§8)
+
+#### Change 1.1: Latch struct and static instance
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Line:** after line 1847 (after `fs_autosave_winner_cached`)
+- **Operation:** ADD
+
+```c
+/*
+ * Boot-reader deferred-mark and notice latch (§8, S061_AUTOSAVE_READER.md).
+ *
+ * What: 5-byte boot-scratch structure capturing the reader's decision for
+ * each Scene before mutation tracking is enabled. Inputs: the per-Scene
+ * Case 1/2/3 evaluation in filesystem_autosaveBootReaderBlocking(). Outputs:
+ * replayed via autosave_markResidentBankDirty / markSceneWithoutPatternDirty
+ * immediately after ensureAutosaveFilesBlocking enables tracking; Case-3
+ * bits also feed the Menu post-boot notice sequencer. Cleared on every
+ * reset/remount path. Lifetime: boot-scratch, static SRAM1, 5 bytes.
+ * Approved 2026-09-05. Affiliates: autosave_setMutationTrackingEnabled(),
+ * ensureAutosaveFilesBlocking() line 24946, menu_autosaveBootNotice*().
+ */
+typedef struct {
+    uint8_t  bank_fallback;      /* 1 = canonical Bank Load used, not winner */
+    uint16_t case2_scene_mask;   /* Scenes needing dirty-mark replay only   */
+    uint16_t case3_scene_mask;   /* Scenes invalidated under P1             */
+} fs_autosave_boot_latch_t;
+
+static fs_autosave_boot_latch_t fs_boot_latch;
+```
+
+#### Change 1.2: Clear latch on reset/remount
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Line:** ~23045 (inside `filesystem_resetState()` or equivalent init, near
+  where `fs_autosave_writer_boot_ready = 0u` is cleared)
+- **Operation:** ADD after the existing autosave flag clears
+
+```c
+    memset(&fs_boot_latch, 0, sizeof(fs_boot_latch));
+```
+
+Also at ~23113 (inside `filesystem_initAfterCardReady()` or the remount
+path, same pattern).
+
+#### Change 1.3: Latch replay function
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Line:** before `filesystem_ensureAutosaveFilesBlocking()` (~24860)
+- **Operation:** ADD
+
+```c
+/*
+ * Replay deferred dirty marks after mutation tracking enables.
+ *
+ * What: drains the boot latch into the canonical autosave marker API so the
+ * first runtime drain captures every boot-loaded component. Inputs: the
+ * populated latch from the boot reader's Case 1/2/3 evaluation. Outputs:
+ * autosave_markResidentBankDirty() for the bank-fallback flag;
+ * autosave_markSceneWithoutPatternDirty() for every set bit in the
+ * case2_scene_mask | case3_scene_mask union. Clears the dirty-mark
+ * portion of the latch; preserves case3_scene_mask for Menu notice
+ * consumption. Why: marker calls during boot are documented no-ops because
+ * tracking is off; skipping the replay would leave the dirty mask clean for
+ * rows the drain has never captured, causing objectFullyCaptured to
+ * prematurely clear the refreshed flag. Affiliates: §8.3
+ * S061_AUTOSAVE_READER.md, autosave_markResidentBankDirty(),
+ * autosave_markSceneWithoutPatternDirty().
+ */
+static void filesystem_replayBootLatch(void)
+{
+    uint16_t combined;
+    uint8_t i;
+
+    if (fs_boot_latch.bank_fallback) {
+        autosave_markResidentBankDirty();
+        fs_boot_latch.bank_fallback = 0u;
+    }
+    combined = (uint16_t)(fs_boot_latch.case2_scene_mask |
+                          fs_boot_latch.case3_scene_mask);
+    for (i = 0u; i < AUTOSAVE_SCENE_COUNT; i++) {
+        if (combined & (1u << i))
+            autosave_markSceneWithoutPatternDirty(i);
+    }
+    fs_boot_latch.case2_scene_mask = 0u;
+    /* case3_scene_mask preserved for Menu notice drain */
+}
+```
+
+#### Change 1.4: Call replay after tracking enables
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Line:** 24946 (inside `filesystem_ensureAutosaveFilesBlocking()`, after
+  `autosave_setMutationTrackingEnabled(1u)` and before
+  `autosave_markResidentBankDirty()`)
+- **Operation:** MODIFY — insert replay call, remove the existing
+  unconditional `autosave_markResidentBankDirty()`
+
+Replace:
+```c
+    autosave_setMutationTrackingEnabled(1u);
+    autosave_markResidentBankDirty();
+```
+With:
+```c
+    autosave_setMutationTrackingEnabled(1u);
+    filesystem_replayBootLatch();
+```
+
+The replay function already calls `markResidentBankDirty()` when the
+bank_fallback flag is set. When the boot reader's winner path ran
+instead, the latch's per-Scene masks handle per-Scene replay; the
+Bank itself is Case 1 (validated by the winner) and does not need a
+whole-Bank dirty mark.
+
+#### Change 1.5: Public accessors for Menu notice mask
+
+- **File:** `Core/Hardware/SD/filesystem.h`, after
+  `filesystem_ensureAutosaveFilesBlocking()` (~line 268)
+- **Operation:** ADD
+
+```c
+/*
+ * Boot-reader notice mask for the Menu post-boot sequencer (§9).
+ *
+ * What: returns the Case-3 Scene invalidation mask and bank-fallback flag.
+ * Inputs: the boot latch populated by the boot reader. Outputs: 16-bit
+ * Scene mask (each set bit = one post-boot overlay) and bank_fallback byte
+ * (1 = root notice for canonical Bank Load fallback). Why: Menu must not
+ * access filesystem internal state directly. Affiliates:
+ * menu_drainAutosaveBootNotices(), fs_boot_latch.
+ */
+uint16_t filesystem_bootReaderNoticeSceneMask(void);
+uint8_t  filesystem_bootReaderNoticeBankFallback(void);
+```
+
+- **File:** `Core/Hardware/SD/filesystem.c`, near the latch definition
+- **Operation:** ADD implementations
+
+```c
+uint16_t filesystem_bootReaderNoticeSceneMask(void)
+{
+    return fs_boot_latch.case3_scene_mask;
+}
+
+uint8_t filesystem_bootReaderNoticeBankFallback(void)
+{
+    return fs_boot_latch.bank_fallback;
+}
+```
+
+---
+
+### Phase 2 — Root-level case + main.c boot reorder (§4)
+
+#### Change 2.1: Boot-time blocking validation/winner-selection function
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Line:** before `filesystem_ensureAutosaveFilesBlocking()` (~24860)
+- **Operation:** ADD
+
+```c
+/*
+ * Boot-time blocking .hcprms candidate validation and winner selection.
+ *
+ * What: validates .hcprms1 and .hcprms2 via streaming CRC32C, selects
+ * a winner using the same generation/Bank-match rules as the runtime
+ * drain (autosaveParameterDrain_tick phases 1-5, line 7325-7466).
+ * Returns nonzero if a Bank-matching winner exists. Inputs: mounted
+ * SD card with both .hcprms files potentially present; BankData
+ * populated with active_bank from settings.cfg. Outputs: populates
+ * fs_boot_winner statics (valid, record_index, generation,
+ * bank_match). Why: the runtime drain's validation runs inside the
+ * asynchronous state machine; boot needs a synchronous one-shot pass
+ * that completes before preset_loadBank() decides the Bank Load path.
+ * This function validates only — creates nothing, touches no writer
+ * flags. Uses the same streaming CRC bounded-chunk pattern and
+ * staging_buf as the drain phases 1-3. Affiliates:
+ * autosave_streamValidationBegin/Update/Finish/MatchesBank(),
+ * autosave_generationIsNewer(), filesystem_autosaveFilenameForIndex(),
+ * main.c boot sequence (Change 2.3).
+ */
+static struct {
+    uint8_t  valid;
+    uint8_t  record_index;       /* 0 = .hcprms1, 1 = .hcprms2 */
+    uint32_t generation;
+    uint8_t  bank_match;
+} fs_boot_winner;
+
+uint8_t filesystem_validateAutosaveWinnerBlocking(void)
+```
+
+Implementation: for candidate_index 0 then 1:
+1. `afatfs_chdir(NULL)` to volume root
+2. `autosave_streamValidationBegin(&validation)`
+3. Open via `afatfs_fopen_lfn(filesystem_autosaveFilenameForIndex(i), "r", ...)`
+   — if NULL (file absent), candidate is invalid, advance to next
+4. Blocking read loop: `afatfs_fread(op_file, staging_buf, chunk)` →
+   `autosave_streamValidationUpdate()` until EOF, using
+   `filesystem_autosaveCrcChunkBytes()` for chunk sizing
+5. `autosave_streamValidationFinish()` → candidate_valid
+6. `autosave_streamValidationMatchesBank(&validation,
+   bank_restoreBankSlot(), bank_displayName())` → candidate_bank_match
+7. `afatfs_fclose()`, blocking wait
+8. Winner selection (identical to drain phase 5, line 7409-7427):
+   - candidate beats current winner if: no winner yet, OR candidate
+     matches Bank but winner doesn't, OR same match level and
+     candidate's generation is newer per `autosave_generationIsNewer()`
+
+Return `fs_boot_winner.valid && fs_boot_winner.bank_match`.
+
+Since this runs pre-audio, single-threaded, the blocking loop pattern
+`while (!ready) { afatfs_poll(); }` is safe — identical to every other
+boot-blocking filesystem function (e.g. `createBootIndexBlocking` line
+24718, `ensureAutosaveFilesBlocking` line 24862).
+
+#### Change 2.2: Public declaration
+
+- **File:** `Core/Hardware/SD/filesystem.h`, near
+  `filesystem_ensureAutosaveFilesBlocking()` (~line 268)
+- **Operation:** ADD
+
+```c
+/*
+ * Boot-time .hcprms candidate validation and winner selection.
+ *
+ * Returns nonzero when a valid winner matching the resident Bank exists.
+ * Must be called after preset_loadGlobals() (active_bank known) and
+ * before preset_loadBank() (reader needs the result). Inputs: mounted
+ * card, BankData with active_bank set. Outputs: internal winner statics.
+ * Affiliates: filesystem_autosaveBootReaderBlocking(), main.c.
+ */
+uint8_t filesystem_validateAutosaveWinnerBlocking(void);
+```
+
+#### Change 2.3: main.c — insert winner validation before Bank Load
+
+- **File:** `Core/main.c`
+- **Line:** between ~792 (after Bank index load ack, end of stage 10) and
+  ~819 (stage 11, before `preset_loadBank`)
+- **Operation:** ADD new stage
+
+```c
+            /*
+             * Stage 10b: validate autosave winner before Bank Load decision.
+             *
+             * What: streaming CRC32C validation of .hcprms1/.hcprms2 to
+             * determine if a valid Bank-matching autosave winner exists.
+             * Inputs: BankData with active_bank from settings.cfg (stage 2),
+             * mounted card with index files (stages 3-10). Outputs: internal
+             * filesystem winner state consulted by stage 11. Why: winner
+             * must be known before the Bank Load decision; the existing
+             * ensureAutosaveFilesBlocking (post-stage-12) only creates
+             * files, never validates. Affiliates: §4 S061_AUTOSAVE_READER.md,
+             * filesystem_validateAutosaveWinnerBlocking(),
+             * filesystem_autosaveBootReaderBlocking().
+             */
+            if (filesystem_autosaveEnabled()) {
+                boot_showFilesystemStage(10u);
+                (void)filesystem_validateAutosaveWinnerBlocking();
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+            }
+```
+
+#### Change 2.4: main.c — gate preset_loadBank vs boot reader
+
+- **File:** `Core/main.c`
+- **Line:** ~819-830 (stage 11, the existing `preset_loadBank` call)
+- **Operation:** MODIFY — wrap existing code in a conditional
+
+```c
+            boot_showFilesystemStage(11u);
+            /*
+             * Stage 11: autosave winner path or canonical library Bank Load.
+             *
+             * What: if a valid Bank-matching winner was found in stage 10b,
+             * the boot reader populates resident SRAM from the winner record
+             * and .hcnames. Otherwise the canonical preset_loadBank path
+             * runs. Inputs: fs_boot_winner from stage 10b, boot_bank_slot.
+             * Outputs: resident Scenes populated; boot latch (§8) populated.
+             * Affiliates: §4 S061_AUTOSAVE_READER.md.
+             */
+            if (filesystem_hasBootWinner()) {
+                if (!filesystem_autosaveBootReaderBlocking())
+                    goto boot_filesystem_failure;
+                while (filesystem_status() == FS_STATUS_BUSY &&
+                       !filesystem_bootLoggingTimedOut())
+                    filesystem_tick();
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+            } else {
+                /* existing preset_loadBank block, unchanged */
+                if (filesystem_bankSlotExists(boot_bank_slot)) {
+                    ...
+                }
+                filesystem_setBootLatchBankFallback();
+            }
+```
+
+#### Change 2.5: Helper functions
+
+- **File:** `Core/Hardware/SD/filesystem.c` and `filesystem.h`
+- **Operation:** ADD
+
+```c
+/* filesystem.h */
+uint8_t filesystem_hasBootWinner(void);
+void filesystem_setBootLatchBankFallback(void);
+
+/* filesystem.c */
+/*
+ * Query boot-time winner validation result.
+ *
+ * What: returns nonzero when a valid Bank-matching winner was found.
+ * Inputs: fs_boot_winner populated by validateAutosaveWinnerBlocking().
+ * Outputs: boolean. Affiliates: main.c stage 11 decision gate.
+ */
+uint8_t filesystem_hasBootWinner(void)
+{
+    return fs_boot_winner.valid && fs_boot_winner.bank_match;
+}
+
+/*
+ * Record that the canonical Bank Load fallback path was taken.
+ *
+ * What: sets the bank_fallback flag in the boot latch so the replay
+ * function calls autosave_markResidentBankDirty() after tracking enables.
+ * Inputs: called from main.c when no valid winner exists. Outputs:
+ * fs_boot_latch.bank_fallback = 1. Affiliates: filesystem_replayBootLatch().
+ */
+void filesystem_setBootLatchBankFallback(void)
+{
+    fs_boot_latch.bank_fallback = 1u;
+}
+```
+
+---
+
+### Phase 3 — Payload-to-resident apply functions (§10)
+
+#### Change 3.1: Bank payload apply
+
+- **File:** `Core/Bank/Scene/Autosave.c`
+- **Line:** after `autosave_getLivePayloadByte()` (~line 947)
+- **Operation:** ADD
+
+```c
+/*
+ * Apply a validated winner record's Bank section to resident BankData.
+ *
+ * What: the inverse of the Bank portion of autosave_getLivePayloadByte().
+ * Reads payload bytes 0..14 and writes them into BankData via the same
+ * setters the runtime mutation path uses. Inputs: pointer to the 128-byte
+ * Bank section (payload-relative offset 0). Outputs: bank_setRestoreBankSlot,
+ * bank_setDisplayName, bank_setScenePresentMask, bank_setActiveSceneSlot,
+ * bank_setSceneMaskVoiceEdit all updated. Reserved bytes 15..127 ignored.
+ * Why: Case 1 restore populates BankData from the winner with tracking OFF.
+ * Affiliates: autosave_getLivePayloadByte() lines 707-759, BankData.h,
+ * §10 S061_AUTOSAVE_READER.md.
+ */
+void autosave_applyBankPayload(const uint8_t *bank_section)
+```
+
+Implementation reads:
+- bytes 0..1: LE uint16 → `bank_setRestoreBankSlot()`
+- bytes 2..9: 8-byte name → `bank_setDisplayName()`
+- bytes 10..11: LE uint16 → `bank_setScenePresentMask()`
+- byte 12: → `bank_setActiveSceneSlot()`
+- bytes 13..14: LE uint16 → `bank_setSceneMaskVoiceEdit()`
+
+#### Change 3.2: Scene parameters apply
+
+- **File:** `Core/Bank/Scene/Autosave.c`
+- **Line:** after Change 3.1
+- **Operation:** ADD
+
+```c
+/*
+ * Apply a validated winner record's Scene parameters to resident SceneData.
+ *
+ * What: the inverse of autosave_getSceneParameter(). Reads the 40 live
+ * Scene-parameter bytes from the payload and writes them into
+ * scene->settings. Inputs: scene_index (0..15), pointer to the 1920-byte
+ * Scene section. Outputs: morph_amount, voice_morph_amount[6],
+ * voice_decimation_all, audio_out[6], fx_send_amount[6], fader_setting[6],
+ * midi_channel[7], midi_note[7] all updated in scene_get(scene_index)->
+ * settings. Why: each field's payload index must mirror the getter's
+ * autosave_scene_parameter_t enum chain. Affiliates:
+ * autosave_getSceneParameter() line 634, autosave_scene_parameter_t,
+ * SceneData.h scene_settings_t.
+ */
+void autosave_applyScenePayload(uint8_t scene_index,
+                                const uint8_t *scene_section)
+```
+
+Implementation reads `scene_section[AUTOSAVE_SCENE_PARAMETERS_OFFSET + i]`
+for i = 0..39, dispatching by the same `autosave_scene_parameter_t` enum
+ordering as the getter to write each field.
+
+#### Change 3.3: Kit parameters apply
+
+- **File:** `Core/Bank/Scene/Autosave.c`
+- **Line:** after Change 3.2
+- **Operation:** ADD
+
+```c
+/*
+ * Apply a validated winner record's Kit parameters to resident SceneData.
+ *
+ * What: the inverse of the Kit portion of autosave_getLivePayloadByte().
+ * Reads the 2 live Kit-parameter bytes. Inputs: scene_index, pointer to
+ * the Kit sub-section (scene_section + AUTOSAVE_KIT_OFFSET). Outputs:
+ * slot6_track7_amp_envelope_decay and slot6_track7_morph_amp_envelope_decay.
+ * Why: these two Choke-related Kit parameters are the only live Kit-level
+ * payload bytes. Affiliates: autosave_getLivePayloadByte() lines 831-854,
+ * autosave_kit_parameter_t, SceneData.h kit_settings_t.
+ */
+void autosave_applyKitPayload(uint8_t scene_index,
+                              const uint8_t *kit_section)
+```
+
+#### Change 3.4: Instrument parameters apply
+
+- **File:** `Core/Bank/Scene/Autosave.c`
+- **Line:** after Change 3.3
+- **Operation:** ADD
+
+```c
+/*
+ * Apply a validated winner record's Instrument parameters to SceneData.
+ *
+ * What: the inverse of the Instrument portion of
+ * autosave_getLivePayloadByte(). Resolves the 3-byte type token via
+ * storage_instrumentTypeFromText(), then copies descriptor-indexed Normal
+ * and Morph endpoint bytes. Inputs: scene_index, slot (0..5), pointer to
+ * the 192-byte Instrument record. Outputs: instrument->type set from type
+ * text; Normal endpoints copied for indices 0..descriptor_count-1; Morph
+ * endpoints copied only for Morphable descriptors. Returns nonzero on
+ * success, zero if type token unrecognized (P1: caller invalidates Scene).
+ * Why: type resolved by extension text, not enum ordinal (§10.1 forward
+ * compatibility). The Choke slot-6 rule is implicit: the type's descriptor
+ * layout determines which cells are live. Affiliates:
+ * autosave_getLivePayloadByte() lines 856-945,
+ * storage_instrumentTypeFromText(), instrumentManager_registryEntry(),
+ * SceneData.h kit_instrument_slot_t/instrument_parameter_images_t.
+ */
+uint8_t autosave_applyInstrumentPayload(uint8_t scene_index,
+                                        uint8_t instrument_slot,
+                                        const uint8_t *instrument_record)
+```
+
+Implementation:
+1. Read bytes 0..2: 3-byte type text, NUL-terminate for lookup
+2. `storage_instrumentTypeFromText(type_text)` → if UNKNOWN, return 0
+3. `instrumentManager_registryEntry(type)` → entry with descriptor_count
+4. Set `instrument->type = type`
+5. Copy Normal: for each i < entry->descriptor_count and i < 64,
+   `instrument->parameter_images.instrument_parameters[i] =
+   instrument_record[AUTOSAVE_INSTRUMENT_NORMAL_OFFSET + i]`
+6. Copy Morph: for each i < entry->descriptor_count and i < 64 where
+   `(entry->descriptors[i].flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)`,
+   `instrument->parameter_images.morph_instrument_parameters[i] =
+   instrument_record[AUTOSAVE_INSTRUMENT_MORPH_OFFSET + i]`
+
+#### Change 3.5: Source cross-check helper
+
+- **File:** `Core/Bank/Scene/Autosave.c`
+- **Line:** after Change 3.4
+- **Operation:** ADD
+
+```c
+/*
+ * Extract the embedded Phase C source value from a payload section.
+ *
+ * What: reads the 2-byte LE source field at a known offset within a Scene,
+ * Kit, or Instrument sub-section. Inputs: pointer to section start,
+ * section-relative source offset (AUTOSAVE_SCENE_SOURCE_OFFSET = 8,
+ * AUTOSAVE_KIT_SOURCE_OFFSET = 8, or AUTOSAVE_INSTRUMENT_SOURCE_OFFSET
+ * = 11). Output: 16-bit source value (value bits only; flag bits are not
+ * stored in the payload). Why: boot reader cross-checks this against
+ * .hcnames' live source column for Case 1 defense-in-depth (§5.2).
+ * Affiliates: autosave_getSourceByte() (the getter inverse), Phase C
+ * source geometry in Autosave.h.
+ */
+uint16_t autosave_extractPayloadSource(const uint8_t *section,
+                                       uint8_t source_offset)
+```
+
+#### Change 3.6: Public declarations in Autosave.h
+
+- **File:** `Core/Bank/Scene/Autosave.h`
+- **Line:** after the mark-dirty function group (~line 509)
+- **Operation:** ADD
+
+```c
+/*
+ * Payload-to-resident apply functions (boot reader, §10).
+ *
+ * What: inverse of autosave_getLivePayloadByte() — writes winner-record
+ * payload bytes into live BankData/SceneData. Inputs: pointers into
+ * validated winner record payload sections. Outputs: BankData and SceneData
+ * updated. applyInstrumentPayload returns 0 if type token unrecognized
+ * (P1: invalidate the Scene). These run during boot with tracking OFF.
+ * Affiliates: filesystem_autosaveBootReaderBlocking().
+ */
+void autosave_applyBankPayload(const uint8_t *bank_section);
+void autosave_applyScenePayload(uint8_t scene_index,
+                                const uint8_t *scene_section);
+void autosave_applyKitPayload(uint8_t scene_index,
+                              const uint8_t *kit_section);
+uint8_t autosave_applyInstrumentPayload(uint8_t scene_index,
+                                        uint8_t instrument_slot,
+                                        const uint8_t *instrument_record);
+uint16_t autosave_extractPayloadSource(const uint8_t *section,
+                                       uint8_t source_offset);
+```
+
+---
+
+### Phase 4 — .hcnames regeneration from winner record (§5.1)
+
+#### Change 4.1: Regeneration function
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Line:** near `filesystem_writeResidentNamesBlocking()` (~25088)
+- **Operation:** ADD
+
+```c
+/*
+ * Regenerate .hcnames from a validated winner record's identity fields.
+ *
+ * What: rebuilds all 129 rows of .hcnames using the winner record's
+ * embedded name bytes and Phase C source fields, plus the Bank identity
+ * from BankData. The #types header is emitted first via
+ * filesystem_formatHcnamesHeader(). Inputs: the validated winner record,
+ * read in bounded chunks from the card. Outputs: a new .hcnames written
+ * via the existing atomic safe-write pattern (temp file → rename);
+ * fs_resident_source[] and hcnames_name_mirror[] populated from written
+ * content. All refreshed flags SET (worst-case safe: every row treated
+ * as unproven until the drain proves otherwise). Why: if .hcnames is
+ * absent or corrupt while a valid winner exists, the reader must not
+ * fall back to a full canonical Bank Load — the winner record contains
+ * enough identity data to reconstruct the register. Affiliates: §5.1
+ * S061_AUTOSAVE_READER.md, filesystem_writeResidentNamesBlocking(),
+ * autosave_extractPayloadSource(), filesystem_formatResidentNameLine(),
+ * filesystem_formatHcnamesHeader().
+ *
+ * Record reading strategy: the 34,768-byte record is read in bounded
+ * chunks, extracting only the name (8 bytes) and source (2 bytes) fields
+ * from each section. For Instruments, the type text (3 bytes) is also
+ * extracted. The relevant offsets are:
+ *   Bank:       name at payload+2, slot at payload+0 (2 bytes LE)
+ *   Scene N:    name at scene_base+0, source at scene_base+8
+ *   Kit N:      name at kit_offset+0, source at kit_offset+8
+ *   Inst N/S:   type at inst_offset+0, name at inst_offset+3,
+ *               source at inst_offset+11
+ * where scene_base = 128 + N*1920, kit_offset = scene_base + 640,
+ * inst_offset = kit_offset + 128 + S*192.
+ */
+uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void)
+```
+
+Implementation:
+1. Open the winner record file for reading
+2. Seek/read through the record extracting identity fields per section
+3. Populate `fs_resident_source[]` with extracted sources, all with
+   `FS_RESIDENT_SOURCE_REFRESHED_FLAG` set
+4. Populate `hcnames_name_mirror[]` with extracted names
+5. Write .hcnames via temp-file-rename using `formatHcnamesHeader()`
+   and `formatResidentNameLine()` for each row
+6. Close and return
+
+#### Change 4.2: Public declaration
+
+- **File:** `Core/Hardware/SD/filesystem.h`
+- **Operation:** ADD
+
+```c
+uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void);
+```
+
+---
+
+### Phase 5 — Per-Scene Case 1/2/3 evaluation + boot reader (§5.2)
+
+#### Change 5.1: Boot reader orchestration function
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Line:** before `filesystem_ensureAutosaveFilesBlocking()` (~24860)
+- **Operation:** ADD
+
+```c
+/*
+ * Boot-time autosave reader: populate resident SRAM from the winner record.
+ *
+ * What: the central orchestrator (§4-§10, S061_AUTOSAVE_READER.md). Called
+ * from main.c stage 11 when a valid Bank-matching winner exists. Reads
+ * .hcnames and the winner record, then evaluates each of up to 8 identity
+ * rows per Scene independently:
+ *
+ *   Case 1 (not refreshed): trust the winner's payload. Apply via
+ *     autosave_apply*() functions. Cross-check embedded source vs .hcnames;
+ *     log mismatch but use autosave payload regardless.
+ *   Case 2 (refreshed, source resolvable): narrow single-level reload from
+ *     resolved source (§7). Set case2_scene_mask in boot latch.
+ *   Case 3 (refreshed, source unresolvable): P1. Empty/invalidate entire
+ *     Scene. Set case3_scene_mask in boot latch. Break inner loop.
+ *
+ * Inputs: fs_boot_winner from validateAutosaveWinnerBlocking(); .hcnames on
+ * card (regenerated via §5.1 if corrupt); BankData with active_bank set.
+ * Outputs: resident SceneData/BankData/fs_resident_source[]/
+ * hcnames_name_mirror[] populated; fs_boot_latch populated for deferred
+ * replay. Returns nonzero on success.
+ *
+ * Why: replaces canonical preset_loadBank() when a valid winner exists,
+ * restoring the user's last-known parameter state. The boot latch (§8)
+ * defers all dirty marks until ensureAutosaveFilesBlocking enables tracking.
+ *
+ * Affiliates: main.c stage 11, validateAutosaveWinnerBlocking(),
+ * replayBootLatch(), autosave_apply*(), filesystem_resolveResidentSource(),
+ * filesystem_bootReaderNarrowLoad*().
+ *
+ * SRAM: uses a 1920-byte stack buffer for one Scene section at a time
+ * (boot-only, stack not contended). No new static SRAM beyond the 5-byte
+ * latch.
+ */
+uint8_t filesystem_autosaveBootReaderBlocking(void)
+```
+
+Implementation:
+
+**Step 1 — Read .hcnames.** Blocking open + validate `#types` header +
+parse all rows via `cacheResidentRecord()`. Reuse the same pattern as
+`ensureAutosaveFiles_tick` phases 0-3 (line 6458) but synchronously.
+On failure → attempt `regenerateHcnamesFromWinnerBlocking()`.
+On regeneration failure → set `bank_fallback = 1`, return 0.
+
+**Step 2 — Apply Bank payload.** Open winner record
+(`filesystem_autosaveFilenameForIndex(fs_boot_winner.record_index)`),
+read the 128-byte Bank section (absolute offset =
+`AUTOSAVE_PAYLOAD_OFFSET`, payload bytes 0..127). Call
+`autosave_applyBankPayload()`. Set `bank_setHasResidentBank(1)`.
+
+**Step 3 — Per-Scene evaluation.** For scene_index = 0..15:
+  - If `!(bank_scenePresentMask() & (1u << scene_index))`: skip
+  - Read the 1920-byte Scene section from the winner record
+    (absolute offset = `AUTOSAVE_PAYLOAD_OFFSET +
+    AUTOSAVE_BANK_SECTION_BYTES + scene_index *
+    AUTOSAVE_SCENE_SECTION_BYTES`) into a stack buffer
+  - Evaluate 8 identity rows in order: Scene (row = 1+scene_index),
+    Kit (row = 17+scene_index), Instruments (rows = 33 +
+    scene_index*6 + 0..5):
+
+    For each row:
+    - `source = fs_resident_source[row]`
+    - If `!(source & FS_RESIDENT_SOURCE_REFRESHED_FLAG)`: **Case 1**
+      - Apply the appropriate payload section via autosave_apply*()
+      - Cross-check: `embedded = autosave_extractPayloadSource(section, offset)`
+        vs `live = source & FS_RESIDENT_SOURCE_VALUE_MASK`.
+        If mismatch, log to trace; still Case 1.
+    - Else: `filesystem_resolveResidentSource(row, &resolved_row)`
+      - If resolved source is a loadable slot (0..999 or
+        `FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT`): **Case 2**
+        - Call the appropriate narrow loader (Change 6.*)
+        - `fs_boot_latch.case2_scene_mask |= (1u << scene_index)`
+      - Else: **Case 3** — P1
+        - Empty/invalidate the Scene (zero SceneData, clear sources)
+        - `fs_boot_latch.case3_scene_mask |= (1u << scene_index)`
+        - Break inner loop
+
+**Step 4 — Conditional .hcnames rewrite.** If any Case 1 row's embedded
+source differed from .hcnames, update `fs_resident_source[row]` with the
+record's source value and rewrite .hcnames via the temp-file-rename
+pattern.
+
+**Step 5 — Close winner record file, return 1.**
+
+The winner record file remains open throughout the per-Scene loop
+(positioned via seek/sequential read). Each Scene section is read into
+the 1920-byte stack buffer, processed, then the buffer is reused for
+the next Scene.
+
+#### Change 5.2: Public declaration
+
+- **File:** `Core/Hardware/SD/filesystem.h`
+- **Operation:** ADD
+
+```c
+uint8_t filesystem_autosaveBootReaderBlocking(void);
+```
+
+---
+
+### Phase 6 — Case 2 narrow single-level loaders (§7)
+
+These are new boot-time non-cascading load functions that read one level
+of the hierarchy from disk without touching sibling/child `.hcnames`
+sources. They reuse the existing text parsers (storage_scenesetInit/
+ParseLine/Finalize, etc.) but do NOT call the existing Load request state
+machines (which cascade sources to INHERIT).
+
+#### Change 6.1: Narrow Scene loader
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Line:** before `filesystem_autosaveBootReaderBlocking()`
+- **Operation:** ADD
+
+```c
+/*
+ * Boot-time narrow Scene-level reload (Case 2, §7).
+ *
+ * What: loads only Scene-own fields (sceneset.scg settings) from the
+ * resolved library source without cascading Kit or Instrument sources
+ * to INHERIT. Inputs: scene_index (destination), source_slot (resolved
+ * library Scene number from resolveResidentSource). Outputs:
+ * scene->settings populated from sceneset.scg; NO .hcnames source
+ * writes, NO Kit/Instrument source changes. Why: P2 requires that a
+ * child carrying its own defined source must not be overwritten by a
+ * parent reload. The existing loadSceneDirectory_tick (line 11153)
+ * cascades all child sources to INHERIT at line 11664-11676 — the
+ * narrow loader skips this entirely. Affiliates: §7
+ * S061_AUTOSAVE_READER.md, storage_scenesetInit/ParseLine/Finalize(),
+ * scene_get(), filesystem_resolveResidentSource().
+ *
+ * Path construction: opens Scene/NNN Name/sceneset.scg using the same
+ * filesystem_makeNumberedDir() pattern as loadSceneDirectory_tick phase 6
+ * (line 11266), but synchronously. Uses blocking afatfs_fopen/fread/fclose.
+ */
+static uint8_t filesystem_bootReaderNarrowLoadScene(
+    uint8_t scene_index, uint16_t source_slot)
+```
+
+#### Change 6.2: Narrow Kit loader
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Operation:** ADD
+
+```c
+/*
+ * Boot-time narrow Kit-level reload (Case 2, §7).
+ *
+ * What: loads Kit settings (kitset.kcg) and all 6 Instrument files from
+ * the resolved library Kit source without cascading Instrument sources
+ * to INHERIT. Inputs: scene_index, source_slot (resolved Kit library
+ * number), resolved_row (the ancestor level that supplied the source, from
+ * resolveResidentSource). Outputs: scene->kit.settings and
+ * scene->kit.instruments[] populated; NO Instrument .hcnames source
+ * writes. Why: the existing loadKitDirectory_tick cascades Instrument
+ * sources to INHERIT at line 10913 — the narrow loader preserves each
+ * Instrument's .hcnames source.
+ *
+ * Inheritance sub-case: when resolved_row is a Scene row (Kit inherits
+ * from Scene), the Kit lives inside Scene/NNN Name/Kit <name>/. When
+ * resolved_row is the Bank row, the Kit lives inside the Bank's child
+ * Scene directory. The resolved_row output from resolveResidentSource()
+ * tells the loader which directory structure to navigate. Affiliates: §7
+ * S061_AUTOSAVE_READER.md, storage_kitsetInit/ParseLine/Finalize(),
+ * storage_instrumentInit/ParseLine/Finalize(), scene_get().
+ */
+static uint8_t filesystem_bootReaderNarrowLoadKit(
+    uint8_t scene_index, uint16_t source_slot, uint16_t resolved_row)
+```
+
+Implementation:
+1. Navigate to the Kit directory (standalone or embedded, based on
+   resolved_row telling which ancestor level supplied the source)
+2. Open and parse kitset.kcg → kit_settings, instrument types/filenames
+3. For each of 6 slots: open and parse the instrument file
+4. Apply all to `scene_get(scene_index)->kit`
+5. Do NOT write to `fs_resident_source[]` for any Instrument row
+
+#### Change 6.3: Narrow Instrument loader
+
+- **File:** `Core/Hardware/SD/filesystem.c`
+- **Operation:** ADD
+
+```c
+/*
+ * Boot-time narrow Instrument-level reload (Case 2, §7).
+ *
+ * What: loads a single Instrument from its resolved library source.
+ * Equivalent to loadInstrument_tick (line 14115) but blocking, boot-only,
+ * no .hcnames write. Inputs: scene_index, instrument_slot, type (from
+ * .hcnames Instrument row type field), source (direct library slot or
+ * FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT, with resolved_row identifying
+ * the ancestor directory). Outputs: scene->kit.instruments[slot]
+ * populated with type and parameter images. Why: Instrument Load is
+ * already single-level (no cascade) but runs through the async Menu
+ * state machine unavailable during boot. Affiliates: §7
+ * S061_AUTOSAVE_READER.md, loadInstrument_tick line 14115,
+ * storage_instrumentInit/ParseLine/Finalize().
+ *
+ * Inheritance sub-cases: an Instrument inheriting from a Kit loads
+ * from that Kit's bundled member file; inheriting from a Scene loads
+ * from that Scene's embedded Kit's member file; inheriting from a Bank
+ * loads from the Bank's child Scene's embedded Kit's member file. The
+ * resolved_row output drives the path decision.
+ *
+ * Source FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT: the Instrument was loaded
+ * directly from Instrument/<type>/NNN, not from a Kit/Scene/Bank bundle.
+ * The browser_index for the standalone directory is needed; it is already
+ * stored in .hcnames (not applicable — INSTRUMENT_DIRECT is a sentinel,
+ * the actual slot is not recoverable from .hcnames row format). In this
+ * case, the Instrument's own on-disk data is the only source. The narrow
+ * loader must locate the file by matching the .hcnames name against the
+ * boot index (filesystem_instrumentSlotForName or equivalent).
+ */
+static uint8_t filesystem_bootReaderNarrowLoadInstrument(
+    uint8_t scene_index, uint8_t instrument_slot,
+    instrument_type_t type, uint16_t source_slot,
+    uint16_t resolved_row)
+```
+
+---
+
+### Phase 7 — Post-boot notice sequencer (§9)
+
+#### Change 7.1: Menu-side notice state
+
+- **File:** `Core/Menu/menu.c`
+- **Line:** near `menu_staleWarningActive` (~line 153)
+- **Operation:** ADD
+
+```c
+/*
+ * Post-boot autosave notice sequencer state (§9, S061_AUTOSAVE_READER.md).
+ *
+ * What: 6 bytes of transient Menu runtime state for draining the boot
+ * latch's Case-3 Scene mask and bank-fallback flag as sequential
+ * non-blocking LCD overlays. Inputs: filesystem_bootReaderNoticeSceneMask()
+ * and filesystem_bootReaderNoticeBankFallback() read once after boot.
+ * Outputs: up to 17 sequential ~2-second overlays using the same timer-
+ * comparison pattern as menu_showStaleSettingsWarning() (line 374). Why:
+ * boot must never block on notices; audio starts on schedule regardless.
+ * Affiliates: menu_showStaleSettingsWarning(), time_sysTick, fs_boot_latch.
+ */
+static uint16_t menu_bootNoticeSceneMask = 0u;
+static uint8_t  menu_bootNoticeBankFlag = 0u;
+static uint8_t  menu_bootNoticeActive = 0u;
+static uint16_t menu_bootNoticeStart = 0u;
+#define MENU_BOOT_NOTICE_MS 2000u
+```
+
+#### Change 7.2: Notice sequencer tick function
+
+- **File:** `Core/Menu/menu.c`
+- **Line:** after `menu_showStaleSettingsWarning()` (~line 395)
+- **Operation:** ADD
+
+```c
+/*
+ * Drain one pending autosave boot notice per tick.
+ *
+ * What: shows sequential non-blocking LCD overlays for each Case-3
+ * invalidated Scene and the bank-fallback event. Bank notice first (if
+ * pending), then each Scene in index order. Each overlay runs ~2 seconds
+ * and auto-advances. Inputs: menu_bootNotice* state, time_sysTick.
+ * Outputs: LCD overlays, menu_storageBusy toggled. No early-dismiss, no
+ * input suppression beyond storageBusy. Affiliates: §9
+ * S061_AUTOSAVE_READER.md, menu_showStaleSettingsWarning() (same pattern).
+ */
+static void menu_drainAutosaveBootNotices(void)
+{
+    if (menu_bootNoticeActive) {
+        if ((uint16_t)(time_sysTick - menu_bootNoticeStart) >=
+            MENU_BOOT_NOTICE_MS) {
+            menu_bootNoticeActive = 0u;
+            menu_storageBusy = 0u;
+            menu_repaintAll();
+        }
+        return;
+    }
+    if (menu_bootNoticeBankFlag) {
+        lcd_waitForIdle();
+        lcd_clear();
+        lcd_home();
+        lcd_string("AutoSave");
+        lcd_setcursor(0, 2);
+        lcd_string("bank load");
+        lcd_waitForIdle();
+        menu_storageBusy = 1u;
+        menu_bootNoticeActive = 1u;
+        menu_bootNoticeStart = time_sysTick;
+        menu_bootNoticeBankFlag = 0u;
+        return;
+    }
+    if (menu_bootNoticeSceneMask != 0u) {
+        uint8_t i;
+        char line2[16];
+
+        for (i = 0u; i < 16u; i++) {
+            if (menu_bootNoticeSceneMask & (1u << i))
+                break;
+        }
+        menu_bootNoticeSceneMask &= (uint16_t)~(1u << i);
+        /* Format "Sc NN empty" */
+        lcd_waitForIdle();
+        lcd_clear();
+        lcd_home();
+        lcd_string("AutoSave");
+        lcd_setcursor(0, 2);
+        /* scene index display */
+        lcd_string("Sc ");
+        lcd_number(i);
+        lcd_string(" empty");
+        lcd_waitForIdle();
+        menu_storageBusy = 1u;
+        menu_bootNoticeActive = 1u;
+        menu_bootNoticeStart = time_sysTick;
+        return;
+    }
+}
+```
+
+#### Change 7.3: Initialize notice state after boot
+
+- **File:** `Core/Menu/menu.c`
+- **Line:** in post-boot initialization, after
+  `filesystem_ensureAutosaveFilesBlocking()` returns in main.c
+  (call from `menu_init()` or `menu_pollPresetStatus()` at line 919)
+- **Operation:** ADD
+
+```c
+    menu_bootNoticeSceneMask = filesystem_bootReaderNoticeSceneMask();
+    menu_bootNoticeBankFlag = filesystem_bootReaderNoticeBankFallback();
+```
+
+#### Change 7.4: Call sequencer from menu tick
+
+- **File:** `Core/Menu/menu.c`
+- **Line:** in `menu_tick()`, near the existing `menu_staleWarningActive`
+  check (~line 8143)
+- **Operation:** ADD — insert before the stale-warning check
+
+```c
+    if (menu_bootNoticeActive ||
+        menu_bootNoticeBankFlag ||
+        menu_bootNoticeSceneMask) {
+        menu_drainAutosaveBootNotices();
+        return;
+    }
+```
+
+---
+
+### Phase 8 — Documentation updates
+
+#### Change 8.1: FILESYSTEM_SPEC.md
+
+- **File:** `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`
+- **Operation:** ADD — document the boot reader decision tree (Cases 1/2/3),
+  the deferred latch, narrow loaders, and the relationship to the existing
+  .hcprms create-only and drain validation paths.
+
+#### Change 8.2: AUTOSAVE.md
+
+- **File:** `knowledge_files/specification_reference/AUTOSAVE.md`
+- **Operation:** ADD — document the `autosave_apply*()` family and their
+  relationship to the existing `getLivePayloadByte()` getter.
+
+---
+
+### Summary: all new/modified files
+
+| File | Changes | Nature |
+|------|---------|--------|
+| `Core/Hardware/SD/filesystem.c` | 1.1-1.5, 2.1, 2.5, 4.1, 5.1, 6.1-6.3 | ADD ~800-1200 lines |
+| `Core/Hardware/SD/filesystem.h` | 1.5, 2.2, 2.5, 4.2, 5.2 | ADD ~35 lines |
+| `Core/Bank/Scene/Autosave.c` | 3.1-3.5 | ADD ~250 lines |
+| `Core/Bank/Scene/Autosave.h` | 3.6 | ADD ~20 lines |
+| `Core/main.c` | 2.3, 2.4 | MODIFY ~40 lines |
+| `Core/Menu/menu.c` | 7.1-7.4 | ADD ~60 lines |
+| `FILESYSTEM_SPEC.md` | 8.1 | ADD documentation |
+| `AUTOSAVE.md` | 8.2 | ADD documentation |
+
+### New static SRAM
+
+| Item | Size | Lifetime | Location |
+|------|------|----------|----------|
+| `fs_boot_latch` | 5 bytes | boot-scratch | `filesystem.c` |
+| `fs_boot_winner` | 8 bytes | boot-scratch | `filesystem.c` |
+| `menu_bootNotice*` | 6 bytes | transient runtime | `menu.c` |
+| **Total** | **19 bytes** | | |
+
+No new heap. The 1920-byte Scene-section buffer in the boot reader is
+stack-allocated (boot-only, not contended).
+
+### Payload geometry reference (from Autosave.h)
+
+```
+Record (34,768 bytes):
+  Header:  0..63    (64 bytes: magic/version/commit/generation/CRC/probe)
+  Mask:    64..3919  (3,856 bytes: 1 bit per payload byte)
+  Payload: 3920..34767 (30,848 bytes)
+
+Payload (30,848 bytes, offset = AUTOSAVE_PAYLOAD_OFFSET = 3920):
+  Bank:    +0..+127    (128 bytes)
+    slot:           +0   (2 bytes LE)
+    name:           +2   (8 bytes)
+    present_mask:   +10  (2 bytes LE)
+    active_scene:   +12  (1 byte)
+    voice_edit:     +13  (2 bytes LE)
+    reserved:       +15..+127
+
+  Scene N: +128 + N*1920  (1,920 bytes each, N=0..15)
+    name:           +0   (8 bytes)
+    source:         +8   (2 bytes LE)
+    parameters:     +10  (118 alloc, 40 live)
+    Effect:         +128 (512 bytes: type+name+params; 0 live params)
+    Kit:            +640 (1,280 bytes)
+      name:         +0   (8 bytes)
+      source:       +8   (2 bytes LE)
+      parameters:   +10  (118 alloc, 2 live)
+      Instruments:  +128 (6 × 192 bytes)
+        Instrument:
+          type_text: +0  (3 bytes ASCII)
+          name:      +3  (8 bytes)
+          source:    +11 (2 bytes LE)
+          normal:    +13 (72 bytes, descriptor-indexed)
+          morph:     +85 (72 bytes, descriptor-indexed, Morphable only)
+          padding:   +157..+191
+```
