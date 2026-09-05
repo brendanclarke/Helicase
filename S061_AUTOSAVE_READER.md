@@ -5,17 +5,104 @@ after Session 060 (Phases A/B/B2/C/D). Supersedes
 `knowledge_files/drafts/AUTOSAVE_READ_PLAN.md`, which was designed before
 the refreshed flag and source fields existed and independently invented a
 mechanism (per-name mutation-bit inspection) that those two Phase B2/C
-features now provide directly, in a durable and simpler form. Explicitly
-rejects `knowledge_files/drafts/S060_AUTOSAVE_CRC_SPLIT_DO_NOT_USE.md` as a
-prerequisite — see §3. `knowledge_files/drafts/AUTOSAVE_EXTENSION.md`
-(Pattern/Effect extension guidance) is unaffected by this rewrite and stays
-current.
+features now provide directly, in a durable and simpler form.
+`knowledge_files/drafts/AUTOSAVE_EXTENSION.md` (Pattern/Effect extension
+guidance) is unaffected by this rewrite and stays current.
 
 This document is a general plan and overview, not a line-numbered
 implementation schedule. When implementation actually starts, expand each
 numbered work item below into an exact-code-site plan the way Session 060's
 `S060PHASE_*.md` documents did, per the project's standing planning
 practice.
+
+---
+
+## 0. Reader case structure (reference summary)
+
+The reader's job is to decide, for each resident component, whether the
+autosave winner record's payload is trustworthy for that component, and if
+not, how to repair it. Every decision bottoms out in one of three cases.
+
+### Root-level gate (§4)
+
+Before per-Scene evaluation begins:
+
+- **No valid winner**, or the winner's Bank slot disagrees with
+  `settings.cfg`'s `active_bank`: proceed with the canonical
+  `preset_loadBank()` exactly as today. Defer the dirty-mark through the §8
+  latch so it replays once mutation tracking enables.
+- **Valid winner whose Bank slot agrees with `active_bank`**: proceed to
+  per-Scene Case 1/2/3 evaluation instead of the canonical Bank Load.
+
+### `.hcnames` gate (§5.1)
+
+`.hcnames` must be trustworthy before the per-Scene case logic means
+anything:
+
+- **Loaded successfully** (including via `.hcnamtmp` crash-recovery
+  prelude): proceed to per-Scene evaluation.
+- **Present-but-corrupt** while a valid winner exists: regenerate
+  `.hcnames` from the winner record's own identity/source fields, then
+  proceed. (Unimplemented, open work.)
+
+### Per-Scene, per-row cases (§5.2)
+
+For each of up to 8 identity rows per Scene (Scene-own, Kit, 6
+Instruments), evaluate independently:
+
+**Case 1 — Not refreshed (autosave proven caught-up).** The refreshed flag
+(`FS_RESIDENT_SOURCE_REFRESHED_FLAG`, bit 13) is clear, meaning
+`autosave_objectFullyCaptured()` confirmed every byte this component owns
+in the canonical dirty mask was captured since its last load/save. Trust
+the winner record's payload bytes for this row's range. Apply them to
+resident SRAM via the payload-to-resident function (§10). Cross-check the
+record's Phase C embedded source byte against `fs_resident_source[row]`'s
+value bits — a mismatch despite a clear refreshed flag is evidence of a
+bug; log it to `asavetrc.bin` if logging is on, but this remains Case 1:
+autosave is valid, use the autosave payload and rewrite `.hcnames` with the
+record's source.
+
+**Case 2 — Refreshed, but source is resolvable on disk.** The refreshed
+flag is set (autosave has not proven it captured this component), but
+`filesystem_resolveResidentSource(row, &resolved_row)` yields a loadable
+library source. Single-level reload of only this row's own fields from the
+resolved source, using the narrow loaders in §7. No `.hcnames` write
+needed — the row's source already correctly names where the data lives.
+Set the deferred dirty-mark bit (§8 latch) so the next drain re-captures
+it. The refreshed flag stays set (it already is) until that drain proves
+the row clean through the existing Phase B2 convergence pipeline.
+
+**Case 3 — Refreshed, source not resolvable.** The refreshed flag is set
+and the resolved source does not exist on disk (deleted library slot,
+corrupt path, etc.). P1 fires: invalidate and empty the **entire Scene**,
+not just this one row. Stop evaluating other rows in this Scene. Queue a
+post-boot notice (§9) for this Scene.
+
+### Inheritance sub-cases
+
+A row whose `.hcnames` source is `-` (INHERIT) inherits upward via
+`filesystem_resolveResidentSource()`, which walks Instrument → Kit →
+Scene → Bank. The `resolved_row` output tells the caller which ancestor
+level actually supplied a direct source, so the §7 single-level loader
+knows which physical object to open — e.g. an Instrument inheriting a
+Kit's direct source loads from that Kit's bundled `instrument-N` member
+file, not a standalone `Instrument/<type>/` file.
+
+---
+
+## 0.1 Writer and file-format freeze
+
+**The autosave writer and all file formats are complete and frozen.** This
+reader changes only what ends up in resident SRAM at boot. It does not
+modify, extend, or reformat anything the writer produces — not the
+`.hcprms1`/`.hcprms2` wire format, not the `.hcnames` row format (except
+the §6 Instrument type-field extension, which is a reader prerequisite
+added to the existing writer), not the A/B validation or winner-selection
+logic, not the dirty mask, not the capture pipeline, not the drain
+scheduling. If implementation reveals an apparent need to change what any
+writer writes into any file, or to change any file writer's behavior beyond
+scheduling order, that change requires explicit approval before
+proceeding — it is not authorized by this plan.
 
 ---
 
@@ -28,8 +115,7 @@ reader:
 - **`.hcprms1`/`.hcprms2` A/B validation and winner selection** — full
   dual-record CRC32C streaming validation, Bank-identity matching, wrapping-
   generation comparison, A-wins-ties. Wire format is v1: one whole-record
-  CRC32C, 34,768 bytes. **This has not changed and this plan does not
-  change it** — see §3.
+  CRC32C, 34,768 bytes.
 - **The continuation-cycle winner cache** (Phase A) — writer-side only, not
   reader-relevant, but establishes the pattern that "the writer knows the
   current winner's identity without re-validating" is an accepted
@@ -115,36 +201,6 @@ single-level loaders — see §7.
 
 ---
 
-## 3. Record format stays v1 — the CRC-split proposal is rejected
-
-`knowledge_files/drafts/S060_AUTOSAVE_CRC_SPLIT_DO_NOT_USE.md` proposed
-replacing the single whole-record CRC32C with 17 independently authenticated
-sections (1 Bank + 16 Scenes), motivated by wanting per-Scene validation
-granularity for exactly this reader. Its own filename says not to use it,
-and no part of Session 060 implemented it — the wire format is still
-34,768 bytes with one whole-record CRC.
-
-**This plan does not need it, and here is why:** the CRC's job is narrower
-than the draft assumed. It answers one question — "was this specific
-34,768-byte file written and stored without corruption" — at the record
-level. The *staleness* question the reader actually cares about per
-component ("does this component's autosave payload currently reflect the
-resident state, or has the object been reloaded since autosave last
-captured it") is answered by the refreshed flag (§1, §5), which lives in
-`.hcnames` and is completely independent of the winning record's CRC
-granularity. A record either passes whole-record CRC (trust every byte in
-it, then gate per-component on the refreshed flag) or it doesn't (fall back
-to the other A/B candidate, which is a full independent copy — this is
-exactly what the A/B redundancy scheme exists for). Partial corruption
-*within* the one winning record, while the other full copy is fine, is the
-one scenario per-section CRC would additionally catch, and it is a
-narrow edge case the existing two-full-copies-in-different-files redundancy
-already covers at a coarser but sufficient level.
-
-If a future session decides record-level redundancy is insufficient
-evidence in practice, revisit the CRC-split proposal on its own merits then.
-It is not a dependency of this reader and should not block it.
-
 ---
 
 ## 4. Root-level case: settings.cfg vs. `.hcprms` winner generation
@@ -203,10 +259,15 @@ handles a crashed write via the `.hcnamtmp` recovery prelude — that part
 needs no new work. What's new: if `.hcnames` is present-but-generically-
 unreadable (not a temp-file recovery case, just genuinely absent or
 corrupt) while a valid `.hcprms` winner exists, the reader needs a
-regeneration path that rebuilds `.hcnames` from the winner record's own
-identity fields (names + Phase C source fields) rather than falling all the
-way back to a canonical library Bank Load. This is the "Case 2" root-level
-outcome from the original draft's §4 and is still open, unimplemented work.
+regeneration path that rebuilds `.hcnames` wholesale from the winner
+record's own identity fields (names + Phase C source fields) rather than
+falling all the way back to a canonical library Bank Load. This
+regeneration is safe regardless of whether the record's embedded source
+bytes are truly correct and present on disk: source can only potentially
+change resident data at boot, and on *this* boot the reader is populating
+SRAM from the autosave payload, not from the library. It is then incumbent
+on the user to re-save the Bank or its components, which resets sources in
+any case. This is still open, unimplemented work.
 
 ### 5.2 Per-Scene, per-row evaluation — now driven by the refreshed flag
 
@@ -219,10 +280,11 @@ for each row (scene-own, kit, instrument[0..5]):
     if not refreshed:
         # Case 1: autosave already proven caught-up for this component.
         # Trust the winner record's payload bytes for this row's range.
-        # Optionally cross-check the record's own Phase C source byte
-        # against fs_resident_source[row]'s value bits -- a mismatch here
-        # (despite a clear refreshed flag) indicates a defense-in-depth
-        # failure worth treating the same as "refreshed" (see 5.3).
+        # Cross-check the record's Phase C source byte against
+        # fs_resident_source[row]'s value bits -- a mismatch is evidence
+        # of a bug: log it to asavetrc.bin if logging is on, but this is
+        # still Case 1. Use the autosave payload and rewrite .hcnames
+        # with the record's source.
     else:
         # unproven -- Case 2 or Case 3:
         resolved_source = filesystem_resolveResidentSource(row, &resolved_row)
@@ -313,29 +375,29 @@ of those call sites. `FILESYSTEM_SPEC.md`'s row-format table needs the
 matching update, in the same change, per this project's standing practice
 of never letting that document drift from the code.
 
-**Open question carried forward from the original draft, still
-unresolved:** the one-time cutover mechanics for the existing dev-card
-`.hcnames` once the writer changes — regenerate via the bootstrap writer
-(simplest, but it currently writes blank rows, not a full re-derivation of
-current names, so it would lose the card's current identity data) versus a
-small forced one-time rewrite that reads the current file, keeps every
-name/source, and fills in type from current resident state. Needs a
-decision before this lands, not a default assumption.
+**Cutover — resolved:** delete the existing `.hcnames` from the dev card
+and allow the bootstrap writer to regenerate it on the next boot. No
+migration code needed.
 
 ---
 
-## 7. New single-level component loaders (P2 consequence)
+## 7. Case 2 component reloading (P2 consequence)
 
 The reader's Case 2 repair must not reuse the bundled Bank/Scene/Kit Load
-transactions (§2, P2) because they cascade child sources to `-`. New,
-narrow read paths are needed that pull only one level's own fields from a
-resolved source and write nothing to `.hcnames`:
+transactions (§2, P2) because they cascade child sources to `-`. The rule
+is universal and simple: within a given Scene's Case 2 rows, if a child's
+resolved source differs from its parent's resolved source, load the parent
+first, then load the child over the top. This does not require a new
+partial parser or a "settings-only" read mode — it uses the existing
+full-object load paths but applied per-level without cascading `.hcnames`
+writes:
 
-- **Scene-settings-only**, from a resolved `Scene/NNN Name/sceneset.scg`,
-  ignoring its embedded Kit/Pattern/Effect.
-- **Kit-fields-and-name-only**, from a resolved `Kit/NNN Name/` folder,
-  ignoring its bundled six Instruments.
-- **Instrument** load is already effectively single-level
+- **Scene**: load from its resolved `Scene/NNN Name/` source using the
+  existing Scene payload reader. Do not cascade Kit or Instrument sources.
+- **Kit**: load from its resolved `Kit/NNN Name/` source (or the parent
+  Scene's embedded Kit if inheriting) using the existing Kit payload
+  reader. Do not cascade Instrument sources.
+- **Instrument**: load is already effectively single-level
   (`filesystem_requestLoadInstrument()` loads one Instrument given an
   explicit type) — no new work needed at this level, only a boot-time
   (non-Menu-transaction) entry point into the same underlying read.
@@ -382,11 +444,13 @@ a cosmetic one.
 | Case-3 Scene mask | 2 bytes (16 bits) | Scenes invalidated/emptied under P1. Needs both the dirty-mark replay (so the writer captures the now-empty state) and a post-boot notice (§9). |
 
 Total 5 bytes, static SRAM1, boot-scratch lifetime, cleared on every
-reset/remount path. This is the same shape the Session 052 "deferred
-boot-fallback scope" note in `SCOPING_TARGETS.md` already anticipated (its
-own words: "fallback type enum, destination Scene mask, ... a few bytes
-total") — this plan refines that sketch into an exact layout and should be
-treated as its concrete implementation, not a second, parallel mechanism.
+reset/remount path. **Approved** (2026-09-05, 5 bytes SRAM1, boot-scratch
+lifetime, owner: autosave reader). This is the same shape the Session 052
+"deferred boot-fallback scope" note in `SCOPING_TARGETS.md` already
+anticipated (its own words: "fallback type enum, destination Scene mask,
+... a few bytes total") — this plan refines that sketch into an exact
+layout and should be treated as its concrete implementation, not a second,
+parallel mechanism.
 
 Over-marking (replaying a whole-Scene compound marker even when only one
 sub-row actually needed repair) is explicitly sanctioned by this project's
@@ -476,10 +540,6 @@ itself responsible for any of the proof logic in §5.
   cleanup sub-phase** (this reader is large enough on its own), but this
   should be re-flagged as higher priority once the reader ships, not left
   at its current low-urgency framing in `SCOPING_TARGETS.md`.
-- **Record-format v2 / CRC split** — explicitly rejected as a prerequisite,
-  §3. `SCOPING_TARGETS.md` has no existing entry pinning this as required;
-  none needs to be added or removed.
-
 ---
 
 ## 12. New code required (consolidated)
@@ -499,8 +559,8 @@ itself responsible for any of the proof logic in §5.
 5. Row-class-aware `.hcnames` parser/formatter extended to a 4-field
    Instrument row (type), plus updates to every existing Instrument-row
    writer (§6).
-6. Narrow single-level Scene-settings-only and Kit-fields-only readers,
-   distinct from the existing bundled Load transactions (§7).
+6. Boot-time non-cascading per-level component reload paths using existing
+   full-object load readers without `.hcnames` cascade side effects (§7).
 7. Deferred dirty-mark + notice latch (5 bytes) and its replay/drain logic
    (§8).
 8. Menu-side post-boot notice sequencer, reusing the
@@ -514,23 +574,20 @@ guard — deferred, §11, but re-flag priority once this reader ships.
 
 ---
 
-## 13. Open questions
+## 13. Resolved questions
 
-**A. `.hcnames` type-field cutover mechanics** (carried forward from the
-original draft, still unresolved) — regenerate the dev-card file via the
-existing bootstrap writer (loses current names, since that writer emits
-blank rows) or a small forced one-time rewrite that preserves current
-name/source and derives type from resident state. See §6.
+**A. `.hcnames` type-field cutover mechanics** — **Resolved (2026-09-05):**
+delete the existing `.hcnames` from the dev card and allow the bootstrap
+writer to regenerate it on the next boot. No migration code needed. See §6.
 
-**B. Case 1 restore and the Phase C source-byte cross-check** — should a
-mismatch between the winner record's embedded Phase C source byte and
-`.hcnames`'s live source column (despite a clear refreshed flag) hard-fail
-the component into Case 3, or only log/flag it? §5.2 suggests treating it
-the same as "refreshed" (fail closed toward Case 2/3) since it should never
-happen if the refreshed-flag lifecycle is working correctly, and any
-observed disagreement is itself evidence of a bug worth surfacing rather
-than silently trusting one side. Needs an explicit decision before
-implementation, not a default.
+**B. Case 1 restore and the Phase C source-byte cross-check** —
+**Resolved (2026-09-05):** a mismatch between the winner record's embedded
+Phase C source byte and `.hcnames`'s live source column (despite a clear
+refreshed flag) remains Case 1. Autosave is valid; use the autosave payload
+and rewrite `.hcnames` with the record's source. Log the mismatch to
+`asavetrc.bin` if logging is on — it is evidence of a bug in the
+refreshed-flag lifecycle that should be investigated, but it does not
+change the case disposition.
 
 ---
 
