@@ -365,19 +365,31 @@ rows 33..128 six Instruments per Scene
               row = 33 + scene * 6 + voice
 ```
 
-Rows use fixed-order `name<TAB>source[<TAB>R]\n` text. `name` is at most eight
-printable characters and may be empty; `source` is `-` (inherit), `?`
-(unknown), `000` through `999` (direct root slot), or `@` (direct root
-Instrument stem). The optional third field is exactly the byte `R`; its
-presence marks the row "refreshed" — see `AUTOSAVE.md` "HCNAMES atomic
-safe-write and the refreshed flag" for what sets and clears it and why. Its
-absence is backward compatible with every pre-Session-060 file. The fixed
-row class supplies the namespace for a numeric slot. The 129-by-`uint16_t`
-filesystem-owned source register follows Instrument -> Kit -> Scene -> Bank
-until it finds a direct source or reaches ordinary boot fallback. A legacy
-name-only line remains readable as unknown; malformed extended records fail
-the read rather than silently inheriting. The name cache remains
-space-padded and NUL-terminated.
+The first line is a header declaring the instrument type vocabulary:
+`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat\n`. The tokens are instrument file
+extensions in instrument_type_t enum order. If the header does not match the
+firmware's registry, the file is invalid and must be regenerated.
+
+Data rows follow (129 rows, 0..128):
+Bank/Scene/Kit rows (0..32) use `name<TAB>source[<TAB>R]\n`.
+Instrument rows (33..128) use `name<TAB>source<TAB>type[<TAB>R]\n`,
+where `type` is a mandatory three-character token (drm/snr/cym/hat)
+identifying the Instrument's typed directory. A missing or unrecognized
+type token on an Instrument row fails the read.
+
+`name` is at most eight printable characters and may be empty; `source` is
+`-` (inherit), `?` (unknown), `000` through `999` (direct root slot), or `@`
+(direct root Instrument stem). The refresh witness is the optional field
+immediately after the source column (third field for Bank/Scene/Kit rows,
+fourth field for Instrument rows): exactly the byte `R`; its presence marks
+the row "refreshed" — see `AUTOSAVE.md` "HCNAMES atomic safe-write and the
+refreshed flag" for what sets and clears it and why. Its absence is backward
+compatible with every pre-Session-060 file. The fixed row class supplies the
+namespace for a numeric slot. The 129-by-`uint16_t` filesystem-owned source
+register follows Instrument -> Kit -> Scene -> Bank until it finds a direct
+source or reaches ordinary boot fallback. A legacy name-only line remains
+readable as unknown; malformed extended records fail the read rather than
+silently inheriting. The name cache remains space-padded and NUL-terminated.
 
 Changing a row can change its physical byte length. Every targeted update
 therefore reads all 129 name/source pairs into the shared cache/register,
@@ -404,6 +416,10 @@ recoverable `.hcnamtmp`. A boot recovery prelude inside
 `.hcnames` for read: it validates a leftover `.hcnamtmp` (exactly 129
 parseable rows) and either promotes or discards it, mirroring the
 `settings.tmp` recovery prelude below.
+
+A `.hcnamtmp` is current only when it starts with the `#types` header line
+declared above; a pre-header temp or one with fewer/more vocabulary tokens
+is discarded like any malformed temp.
 
 Normal boot does not regenerate HCNAMES from resident SRAM. Scene identity is
 not stored in `scene_t`, so a snapshot after a mask-selective Bank Load would

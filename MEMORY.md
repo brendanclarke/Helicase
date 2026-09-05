@@ -17,15 +17,17 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 060 Phase D close-out on branch
-`dev-ph3-autosave-pre-overscope-apply` at commit `fe0eedc`; only the Phase D
-and MEMORY note edits in this session are uncommitted. Phase D's re-dirty
-lifecycle is provided entirely by the Phase B2 refreshed-flag/post-drain
-HCNAMES convergence code and Phase C source marking already in that commit;
-the audit in `S060PHASE_D_RE_DIRTY.md` was re-verified with no source change
-required. Clean logging-on build reports `text=389,036`, `data=400`,
-`bss=96,192`; `build/LXRV2_lxr02.img` is 389,452 bytes. Hardware tests 1-4
-in `S060PHASE_D_RE_DIRTY.md` Section 5 remain the outstanding Phase D work.
+**Current working source**: Session 061 `.hcnames` instrument-type field
+implementation on branch `dev-ph3-autosave-ph6` (planning commits `919cfcc`
+and `ce796ae`); the code and documentation edits for
+`S061_HCNAMES_INST_TYPE.md` are uncommitted and await hardware card
+verification. Clean logging-on build reports `text=392,148`, `data=404`,
+`bss=96,184` (no new RAM; the header/type work reuses existing scratch).
+`.hcnames` now opens with a `#types` header line and Instrument rows
+(33..128) carry a mandatory third column with the typed-directory token.
+Hardware tests 1-4 in `S060PHASE_D_RE_DIRTY.md` Section 5 remain the
+outstanding Session 060 Phase D work; Session 061 verification steps are
+listed at the end of `S061_HCNAMES_INST_TYPE.md`.
 
 ## RAM Allocation Approval Policy
 
@@ -604,6 +606,17 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     by that log and by the `specification_reference/` updates it made
     (`FILESYSTEM_SPEC.md`, `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`,
     `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`) and may be deleted.
+
+- Session 061 (`.hcnames` instrument-type field) is implemented but
+  unverified on hardware: `.hcnames` now has a `#types` header line and
+  Instrument rows 33..128 serialize/validate `name<TAB>source<TAB>type`
+  (`drm|snr|cym|hat`) before any optional `R`. A header or type mismatch
+  invalidates the register: readers close/remove it and the next
+  write-capable pass (Bank Load at boot, update rewrites) regenerates it.
+  Authority: `S061_HCNAMES_INST_TYPE.md`; verify its steps 1-7 on the card,
+  and expect the old dev-card `/.hcnames` to be deleted and rebuilt at the
+  next boot. `tools/verify_bank_autosave.py` now skips the header and
+  cross-checks Instrument row types against kitset members.
 
 ---
 

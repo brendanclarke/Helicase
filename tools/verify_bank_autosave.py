@@ -59,13 +59,29 @@ def parse_numbered(name: str, width: int) -> tuple[int, str] | None:
     return int(match.group(1)), match.group(2).strip()
 
 
-def parse_hcnames(path: Path) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
+def parse_hcnames(path: Path) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    header_seen = False
     for line in path.read_text(encoding="ascii").splitlines():
+        if not line:
+            continue
         fields = line.split("\t")
-        if len(fields) != 2:
-            raise ValueError(f"HCNAMES malformed row: {line!r}")
-        rows.append((fields[0].strip(), fields[1].strip()))
+        if not header_seen:
+            if not fields[0].startswith("#types"):
+                raise ValueError(f"HCNAMES missing #types header: {line!r}")
+            header_seen = True
+            continue  # the #types vocabulary header line
+        if fields[0].startswith("#"):
+            raise ValueError(f"HCNAMES unexpected header row: {line!r}")
+        row_index = len(rows)
+        if not 2 <= len(fields) <= 4:
+            raise ValueError(f"HCNAMES malformed row {row_index}: {line!r}")
+        if row_index >= 33 and len(fields) == 2:
+            raise ValueError(f"HCNAMES Instrument row {row_index} lacks a type column: {line!r}")
+        name = fields[0].strip()
+        source = fields[1].strip()
+        type_text = fields[2].strip() if row_index >= 33 else ""
+        rows.append((name, source, type_text))
     return rows
 
 
@@ -232,6 +248,10 @@ def main() -> int:
                 row = 33 + scene * INSTRUMENTS_PER_KIT + instrument
                 check_row(row, expected_name,
                          f"Instrument {scene:02d}/{instrument + 1}")
+                instrument_type = members.get(instrument, ("", ""))[0]
+                if (filename and row < len(rows) and
+                        rows[row][2] != instrument_type):
+                    add_error(errors, "HCNAMES row %d Instrument type: expected %s, got %s" % (row, instrument_type, rows[row][2]))
 
     settings: dict[str, str] = {}
     try:

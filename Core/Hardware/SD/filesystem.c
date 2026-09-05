@@ -131,7 +131,9 @@
  * Why: runtime Instrument lookup/update must compute one stable Scene/slot
  * coordinate without retaining another mapping table. The physical text rows
  * remain trimmed and variable length; these constants describe row identity,
- * not byte offsets.
+ * not byte offsets. The physical file also carries one `#types` header line
+ * before row 0 (see FS_RESIDENT_NAMES_TYPE_HEADER), so a complete register
+ * has 130 lines while FS_RESIDENT_NAMES_ROW_COUNT stays 129: data rows only.
  */
 #define FS_RESIDENT_NAMES_INSTRUMENT_BASE \
     (1u + STORAGE_BANK_SCENE_MAX_SLOTS + STORAGE_BANK_SCENE_MAX_SLOTS)
@@ -140,6 +142,21 @@
 #define FS_RESIDENT_NAMES_ROW_COUNT \
     (FS_RESIDENT_NAMES_INSTRUMENT_BASE + \
      (STORAGE_BANK_SCENE_MAX_SLOTS * STORAGE_KIT_SLOT_COUNT))
+/*
+ * Instrument-type vocabulary header on the first `.hcnames` line.
+ *
+ * What: line 0 of the physical file is `#types` followed by one tab and the
+ * three-character instrument file extensions in instrument_type_t enum order
+ * (drm, snr, cym, hat). Why: a reader can detect an `.hcnames` written by a
+ * firmware whose instrument_type_t layout differs (a type added, removed, or
+ * reordered) and invalidate the register instead of misreading every
+ * Instrument row's type field. No data row name starts with `#`, so the
+ * marker cannot collide with row text. Inputs/outputs: only the file format;
+ * the registry tokens come from storage_instrumentTypeToText(). Affiliates:
+ * filesystem_validateHcnamesHeader(), filesystem_formatHcnamesHeader(), and
+ * every full-file HCNAMES reader/writer below.
+ */
+#define FS_RESIDENT_NAMES_TYPE_HEADER_PREFIX "#types"
 /*
  * One compact provenance word accompanies each logical HCNAMES row.
  *
@@ -1327,6 +1344,7 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint8_t present,
                                                  uint16_t source,
                                                  uint16_t row);
+static uint16_t filesystem_formatHcnamesHeader(char *dst, uint16_t cap);
 static uint8_t filesystem_nextResidentNameLine(char *dst,
                                                uint16_t cap,
                                                uint16_t row);
@@ -4855,7 +4873,43 @@ static void filesystem_writeResidentNames_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        op_phase = 2u;
+        /* The bootstrap register also begins with the #types header. */
+        op_phase = 7u;
+        return;
+
+    case 7: /* WRITE THE #types HEADER LINE BEFORE DATA ROW 0 */
+        if (op_bytes_done == 0u) {
+            op_line_len = (uint8_t)filesystem_formatHcnamesHeader(
+                op_line_buf, sizeof(op_line_buf));
+            if (op_line_len == 0u) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 3u;
+                return;
+            }
+        }
+        {
+            uint32_t written = afatfs_fwrite(
+                op_file,
+                (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+            op_bytes_done += written;
+            /* A sticky full-card result cannot make this temp stream
+             * progress. Close the partial temp and leave live HCNAMES
+             * untouched for boot recovery. */
+            if (written == 0u && afatfs_isFull()) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 3u;
+                return;
+            }
+        }
+        if (op_bytes_done >= op_line_len) {
+            op_bytes_done = 0u;
+            op_phase = 2u;
+        }
         return;
 
     case 2: /* WRITE FIXED-ORDER RESIDENT NAME ROWS */
@@ -5427,6 +5481,75 @@ static uint8_t filesystem_parseResidentSourceToken(const char *token,
     return 1u;
 }
 
+/*
+ * Validate the .hcnames instrument-type header against the firmware registry.
+ *
+ * What: the first line of .hcnames must be a #types header listing the
+ * instrument file extensions in enum order. Why: if the firmware's
+ * instrument_type_t enum has changed since the file was written (a type
+ * added, removed, or reordered), every Instrument row's type field is
+ * potentially wrong; regenerating the file from SceneData is the only
+ * safe recovery. Inputs: the first line of the physical file and the
+ * instrument registry (via storage_instrumentTypeToText). Outputs:
+ * success (proceed to data rows) or failure (invalidate and regenerate).
+ * Affiliates: storage_instrumentTypeToText(), the bootstrap writer
+ * (emits the header), filesystem_cacheResidentRecord() (reads data
+ * rows after the header).
+ */
+static uint8_t filesystem_validateHcnamesHeader(const char *line)
+{
+    const char *p;
+    uint8_t type_index = 0u;
+
+    if (!line)
+        return 0u;
+    /* The marker itself is fixed text followed by one tab. */
+    for (p = FS_RESIDENT_NAMES_TYPE_HEADER_PREFIX; *p; p++, line++) {
+        if (*line != *p)
+            return 0u;
+    }
+    if (*line != '\t')
+        return 0u;
+    p = line + 1u;
+    /*
+     * Walk the instrument_type_t enum in order, comparing every registered
+     * token against the corresponding tab field.  The enum walk ends when
+     * storage_instrumentTypeToText() returns NULL, so a header that lists
+     * fewer types than the current enum mismatches on the first missing
+     * token, while a header listing more tokens fails the trailing check
+     * below instead of being silently truncated.
+     */
+    for (;;) {
+        const char *token = storage_instrumentTypeToText(
+            (storage_instrument_type_t)type_index);
+
+        if (!token)
+            break;
+        if (p[0] != token[0] || p[1] != token[1] || p[2] != token[2])
+            return 0u;
+        type_index++;
+        p += 3u;
+        if (*p == '\t') {
+            p++;
+            continue;
+        }
+        if (*p == '\n' || *p == '\r' || *p == '\0')
+            break;
+        return 0u;
+    }
+    if (type_index == 0u)
+        return 0u;
+    /*
+     * Reject trailing tokens beyond the registry as well as a short header:
+     * both mean the vocabulary count differs, which is exactly the mismatch
+     * the header exists to detect.
+     */
+    if (*p != '\n' && *p != '\r' && *p != '\0')
+        return 0u;
+    return (storage_instrumentTypeToText(
+        (storage_instrument_type_t)type_index) == NULL) ? 1u : 0u;
+}
+
 static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
 {
     const char *tab;
@@ -5437,9 +5560,12 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
 
     /*
      * Parse one physical HCNAMES line into its paired name/source cache cells.
-     * A legacy name-only line is accepted as UNKNOWN provenance; a new-format
-     * row must contain exactly one tab and a valid source token.  A caller's
-     * staged source wins over old card content until the rewrite is durable.
+     * A legacy name-only line is accepted as UNKNOWN provenance; an extended
+     * row must carry a valid source token. Instrument rows (33..128) must also
+     * carry a recognized type field, which is validated here but not stored:
+     * SceneData owns the authoritative type for each resident slot. A
+     * caller's staged source wins over old card content until the rewrite is
+     * durable.
      */
     if (row >= FS_RESIDENT_NAMES_ROW_COUNT || !line) {
         return 0u;
@@ -5447,6 +5573,9 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
     tab = strchr(line, '\t');
     if (tab) {
         const char *tail = tab + 1u;
+        const char *second_tab = strchr(tail, '\t');
+        const char *refresh_field;
+        char source_buf[8];
         /*
          * Isolate the source token before any trailing tab-separated fields.
          *
@@ -5456,19 +5585,61 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
          * fields are silently discarded rather than rejecting the row. The
          * first optional field after the source is the Phase B2 refreshed
          * witness: exactly `R` (before NUL, another tab, or the line ending)
-         * restores bit 13 on the resident source word.
+         * restores bit 13 on the resident source word. For Instrument rows
+         * that field position is the mandatory type column instead; the
+         * refresh witness, if present, moves to the fourth field.
          */
-        const char *second_tab = strchr(tail, '\t');
-        char source_buf[8];
+        if (row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE) {
+            /*
+             * Validate the Instrument type field from HCNAMES rows (33..128).
+             *
+             * What: after the source column, an Instrument row carries a
+             * mandatory type token (drm/snr/cym/hat) as its third
+             * tab-separated field. The optional R refresh flag, if present,
+             * follows as the fourth field. Why: the boot reader needs durable
+             * type provenance independent of the autosave payload; a missing
+             * or unrecognized type token on an Instrument row is a malformed
+             * record and fails the read. Inputs: the physical text line and
+             * the logical row number. Outputs: validated (the type is
+             * confirmed present and recognized) or failed parse.
+             * Affiliates: filesystem_formatResidentNameLine() (serializes the
+             * same field), storage_instrumentTypeFromText() (validates the
+             * token).
+             */
+            const char *third_tab;
+
+            if (!second_tab)
+                return 0u; /* a source column without a type is corruption */
+            third_tab = strchr(second_tab + 1u, '\t');
+            {
+                const char *type_text = second_tab + 1u;
+                char type_buf[8];
+                uint8_t tlen = 0u;
+
+                while ((third_tab ? (type_text + tlen) < third_tab
+                                  : type_text[tlen] != '\0') &&
+                       tlen < sizeof(type_buf) - 1u) {
+                    type_buf[tlen] = type_text[tlen];
+                    tlen++;
+                }
+                type_buf[tlen] = '\0';
+                if (storage_instrumentTypeFromText(type_buf) ==
+                    INSTRUMENT_TYPE_UNKNOWN) {
+                    return 0u;
+                }
+            }
+            refresh_field = third_tab ? third_tab + 1u : NULL;
+        } else {
+            refresh_field = second_tab ? second_tab + 1u : NULL;
+        }
+        if (refresh_field && refresh_field[0] == 'R' &&
+            (refresh_field[1] == '\0' || refresh_field[1] == '\t' ||
+             refresh_field[1] == '\r' || refresh_field[1] == '\n')) {
+            refreshed = 1u;
+        }
         if (second_tab) {
-            const char *refresh_field = second_tab + 1u;
             uint8_t slen = 0u;
 
-            if (refresh_field[0] == 'R' &&
-                (refresh_field[1] == '\0' || refresh_field[1] == '\t' ||
-                 refresh_field[1] == '\r' || refresh_field[1] == '\n')) {
-                refreshed = 1u;
-            }
             while (tail + slen < second_tab &&
                    slen < sizeof(source_buf) - 1u) {
                 source_buf[slen] = tail[slen];
@@ -5791,7 +5962,8 @@ static void filesystem_residentNames_tick(void)
         op_item_offset = 0u;
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
-        op_phase = 2u;
+        /* Line 0 is the instrument-type header; validate it before rows. */
+        op_phase = 15u;
         return;
 
     case 2: /* READ EVERY LOGICAL ROW INTO THE SHARED CACHE */
@@ -5869,7 +6041,42 @@ static void filesystem_residentNames_tick(void)
         }
         op_item_offset = 0u;
         op_bytes_done = 0u;
-        op_phase = 5u;
+        /* Every full-file rewrite begins with the #types header line. */
+        op_phase = 18u;
+        return;
+
+    case 18: /* WRITE THE #types HEADER LINE BEFORE DATA ROW 0 */
+        if (op_bytes_done == 0u) {
+            op_line_len = (uint8_t)filesystem_formatHcnamesHeader(
+                op_line_buf, sizeof(op_line_buf));
+            if (op_line_len == 0u) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 10u;
+                return;
+            }
+        }
+        {
+            uint32_t written = afatfs_fwrite(
+                op_file,
+                (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+            op_bytes_done += written;
+            /* A sticky full-card result cannot make the temp stream
+             * progress; close it without removing the live register. */
+            if (written == 0u && afatfs_isFull()) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 10u;
+                return;
+            }
+        }
+        if (op_bytes_done >= op_line_len) {
+            op_bytes_done = 0u;
+            op_phase = 5u;
+        }
         return;
 
     case 5: /* STREAM THE PRESERVED REGISTER (1C: mirror) */
@@ -6066,7 +6273,90 @@ static void filesystem_residentNames_tick(void)
         op_item_offset = 0u;
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
-        op_phase = 2u;
+        /* The retried register also begins with its #types header. */
+        op_phase = 15u;
+        return;
+
+    case 15: /* READ + VALIDATE THE ONE #types HEADER LINE */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t st = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            /* A physical read failure is not a header mismatch: close with
+             * an error and never delete the register over an I/O fault. */
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 3u;
+            return;
+        }
+        if (line_ready && !filesystem_validateHcnamesHeader(op_line_buf)) {
+            /*
+             * The register was written under a different instrument-type
+             * vocabulary or is otherwise corrupt. Retract any mirror image,
+             * close the handle, delete the live register, and restart so the
+             * ordinary absent-register path regenerates (update mode) or
+             * reports the failure (read-only mode) without ever parsing rows
+             * whose type meaning may have changed.
+             */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 16u;
+            return;
+        }
+        if (line_ready) {
+            /* Header is current; consume it and parse data rows next. */
+            op_item_offset = 0u;
+            op_line_len = 0u;
+            op_phase = 2u;
+            return;
+        }
+        if (eof) {
+            /* An empty register has no header line: invalidate as above. */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 16u;
+            return;
+        }
+        return;
+    }
+
+    case 16: /* WAIT INVALID-REGISTER CLOSE, THEN REMOVE LIVE HCNAMES */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 17u;
+        return;
+
+    case 17: /* WAIT LIVE-REGISTER REMOVE, THEN RE-ENTER ABSENCE SEMANTICS */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_makeNamedErrorCode("HNHdr", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /* A removed invalid register re-enters the open phase: update mode
+         * regenerates through its proven-absence bootstrap and read-only mode
+         * reports the absent file exactly as it does today. */
+        op_phase = 0u;
         return;
 
     default:
@@ -6178,7 +6468,9 @@ static void filesystem_ensureAutosaveFiles_tick(void)
          * missing temp falls through to the existing live-register read. The
          * row counter and parser use operation scratch, so boot recovery adds
          * no SRAM or filesystem handle. `op_file_version` is borrowed only as
-         * the one-bit prelude state until normal A/B ensure begins.
+         * the one-bit prelude state until normal A/B ensure begins. A temp is
+         * current only when it begins with the #types header line (validated
+         * in phase 21) followed by exactly 129 parseable data rows.
          */
         if (op_file_version == 0u) {
             if (!afatfs_chdir(NULL))
@@ -6226,8 +6518,61 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         op_item_offset = 0u;
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
-        op_phase = 2u;
+        /* Line 0 is the instrument-type header; validate it before rows. */
+        op_phase = 20u;
         return;
+
+    case 20: /* READ + VALIDATE THE LIVE REGISTER #types HEADER */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t st = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            /* A physical read failure is not a header mismatch: close with
+             * an error and never delete the register over an I/O fault. */
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 3u;
+            return;
+        }
+        if (line_ready && !filesystem_validateHcnamesHeader(op_line_buf)) {
+            /*
+             * A live register whose header no longer matches the firmware's
+             * instrument vocabulary is corrupt by definition: retract the
+             * mirror, delete the register, and re-enter the open phase so the
+             * normal absent-register outcome applies. Autosave setup then
+             * fails this boot without touching a register a future write can
+             * regenerate.
+             */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 22u;
+            return;
+        }
+        if (line_ready) {
+            /* Header is current; consume it and parse data rows next. */
+            op_item_offset = 0u;
+            op_line_len = 0u;
+            op_phase = 2u;
+            return;
+        }
+        if (eof) {
+            /* An empty register has no header line: invalidate as above. */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 22u;
+            return;
+        }
+        return;
+    }
 
     case 2: /* STREAM ALL HCNAMES ROWS INTO THE EXISTING SHARED CACHE */
     {
@@ -6535,10 +6880,60 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
         op_file_version = 2u;
-        op_phase = 16u;
+        /* A promoted candidate must also begin with a valid #types header. */
+        op_phase = 21u;
         return;
 
-    case 16: /* VALIDATE ALL 129 TEMP HCNAMES ROWS */
+    case 21: /* READ + VALIDATE THE TEMP REGISTER #types HEADER */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t st = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            /* A temp that cannot be read is discarded like any malformed
+             * temp; the intact live register remains the fallback. */
+            op_file_version = 0u;
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 17u;
+            return;
+        }
+        if (line_ready && !filesystem_validateHcnamesHeader(op_line_buf)) {
+            /* A header mismatch means this temp was written by a firmware
+             * with a different instrument vocabulary (or is truncated before
+             * its first full line). Treat it exactly like an unparseable
+             * row: discard the temp and fall through to the live register. */
+            op_file_version = 0u;
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 17u;
+            return;
+        }
+        if (line_ready) {
+            /* Header is current; consume it and validate data rows next. */
+            op_item_offset = 0u;
+            op_line_len = 0u;
+            op_phase = 16u;
+            return;
+        }
+        if (eof) {
+            /* An empty temp has no header line: discard as above. */
+            op_file_version = 0u;
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 17u;
+            return;
+        }
+        return;
+    }
+
+    case 16: /* VALIDATE ALL 129 TEMP HCNAMES DATA ROWS AFTER THE HEADER */
     {
         uint8_t line_ready = 0u;
         uint8_t eof = 0u;
@@ -6636,6 +7031,35 @@ static void filesystem_ensureAutosaveFiles_tick(void)
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
+        op_phase = 0u;
+        return;
+
+    case 22: /* WAIT INVALID LIVE-REGISTER CLOSE, THEN REMOVE IT */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 23u;
+        return;
+
+    case 23: /* WAIT LIVE-REGISTER REMOVE, THEN RE-ENTER THE OPEN PHASE */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /* Re-opening the now-absent register runs the ordinary NULL-open
+         * outcome (error here), so autosave setup never fabricates names
+         * from a register it could not validate. */
         op_phase = 0u;
         return;
 
@@ -7659,7 +8083,34 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_item_offset = 0u;
         op_bytes_done = 0u;
         op_close_status = FS_STATUS_DONE;
-        op_phase = 72u;
+        /* Every full-file rewrite begins with the #types header line. */
+        op_phase = 77u;
+        return;
+
+    case 77: /* WRITE THE #types HEADER LINE BEFORE DATA ROW 0 */
+        if (op_bytes_done == 0u) {
+            op_line_len = (uint8_t)filesystem_formatHcnamesHeader(
+                op_line_buf, sizeof(op_line_buf));
+            if (op_line_len == 0u) {
+                filesystem_autosaveWriterFinishError();
+                return;
+            }
+        }
+        {
+            uint32_t written = afatfs_fwrite(
+                op_file, (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+
+            op_bytes_done += written;
+            if (written == 0u && afatfs_isFull()) {
+                filesystem_autosaveWriterFinishError();
+                return;
+            }
+        }
+        if (op_bytes_done >= op_line_len) {
+            op_bytes_done = 0u;
+            op_phase = 72u;
+        }
         return;
 
     case 72: /* STREAM ALL HCNAMES ROWS WITH CLEAN REFRESHES SUPPRESSED */
@@ -7785,8 +8236,60 @@ static void filesystem_autosaveParameterDrain_tick(void)
         op_item_offset = 0u;
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
-        op_phase = 32u;
+        /* Line 0 is the instrument-type header; validate it before rows. */
+        op_phase = 44u;
         return;
+
+    case 44: /* READ + VALIDATE THE RECOVERY REGISTER #types HEADER */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t st = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            /* A physical read failure is not a header mismatch: close with
+             * an error and never delete the register over an I/O fault. */
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 33u;
+            return;
+        }
+        if (line_ready && !filesystem_validateHcnamesHeader(op_line_buf)) {
+            /*
+             * Recovery refuses to build a replacement AutoSave baseline from
+             * a register whose instrument vocabulary no longer matches the
+             * firmware: the record would preserve types .hcnames itself
+             * disowns. Retract the mirror, delete the register, and report
+             * the writer error so a later write-capable pass regenerates.
+             */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 45u;
+            return;
+        }
+        if (line_ready) {
+            /* Header is current; consume it and parse data rows next. */
+            op_item_offset = 0u;
+            op_line_len = 0u;
+            op_phase = 32u;
+            return;
+        }
+        if (eof) {
+            /* An empty register has no header line: invalidate as above. */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 45u;
+            return;
+        }
+        return;
+    }
 
     case 32: /* STREAM HCNAMES INTO THE EXISTING TEMPORARY CACHE */
     {
@@ -8034,6 +8537,31 @@ static void filesystem_autosaveParameterDrain_tick(void)
             return;
         op_autosave_writer.target_file = NULL;
         filesystem_autosaveWriterFinishErrorNow();
+        return;
+
+    case 45: /* WAIT INVALID RECOVERY-REGISTER CLOSE, THEN REMOVE IT */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 46u;
+        return;
+
+    case 46: /* WAIT LIVE-REGISTER REMOVE, THEN PUBLISH THE WRITER ERROR */
+        if (!op_remove_done)
+            return;
+        /* Removal failure leaves the invalid register in place, which is the
+         * same failed-recovery outcome: the runtime writer never builds a
+         * baseline from a register it could not validate. */
+        filesystem_autosaveWriterFinishError();
         return;
 
     default:
@@ -12262,8 +12790,63 @@ static void filesystem_loadBankDirectory_tick(void)
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
         filesystem_bootLoggingSetDetail("BKHCREAD");
-        op_phase = 81u;
+        /* Line 0 is the instrument-type header; validate it before rows. */
+        op_phase = 86u;
         return;
+
+    case 86: /* READ + VALIDATE THE PRELOAD #types HEADER */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t st = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            /* A physical read failure is not a header mismatch: close with
+             * an error and never delete the register over an I/O fault. */
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 82u;
+            return;
+        }
+        if (line_ready && !filesystem_validateHcnamesHeader(op_line_buf)) {
+            /*
+             * A preload register whose header no longer matches the firmware's
+             * instrument vocabulary cannot supply row provenance: retract the
+             * mirror, delete the register, and re-enter the open phase, where
+             * the proven-absence path lets this Bank Load continue and its
+             * final writer regenerate a register in the current vocabulary.
+             */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            filesystem_bootLoggingSetDetail("BKHCBAD ");
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 95u;
+            return;
+        }
+        if (line_ready) {
+            /* Header is current; consume it and parse data rows next. */
+            op_item_offset = 0u;
+            op_line_len = 0u;
+            filesystem_bootLoggingSetDetail("BKHCREAD");
+            op_phase = 81u;
+            return;
+        }
+        if (eof) {
+            /* An empty register has no header line: invalidate as above. */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            filesystem_bootLoggingSetDetail("BKHCBAD ");
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 95u;
+            return;
+        }
+        return;
+    }
 
     case 81: /* READ HCNAMES REGISTER BEFORE MASKED OVERLAY */
     {
@@ -12384,7 +12967,8 @@ static void filesystem_loadBankDirectory_tick(void)
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
         filesystem_bootLoggingSetDetail("BKHCREAD");
-        op_phase = 81u;
+        /* The retried register also begins with its #types header. */
+        op_phase = 86u;
         return;
 
     case 1:
@@ -13149,7 +13733,41 @@ static void filesystem_loadBankDirectory_tick(void)
         op_bytes_done = 0u;
         op_close_status = FS_STATUS_DONE;
         filesystem_bootLoggingSetDetail("BKHCWRIT");
-        op_phase = 85u;
+        /* Every full-file rewrite begins with the #types header line. */
+        op_phase = 97u;
+        return;
+
+    case 97: /* WRITE THE #types HEADER LINE BEFORE DATA ROW 0 */
+        if (op_bytes_done == 0u) {
+            op_line_len = (uint8_t)filesystem_formatHcnamesHeader(
+                op_line_buf, sizeof(op_line_buf));
+            if (op_line_len == 0u) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 90u;
+                return;
+            }
+        }
+        {
+            uint32_t written = afatfs_fwrite(
+                op_file, (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+            op_bytes_done += written;
+            /* A sticky full-card result cannot make the temp stream
+             * progress; close it without removing the live register. */
+            if (written == 0u && afatfs_isFull()) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 90u;
+                return;
+            }
+        }
+        if (op_bytes_done >= op_line_len) {
+            op_bytes_done = 0u;
+            op_phase = 85u;
+        }
         return;
 
     case 85: /* STREAM PRESERVED + SELECTED-BANK HCNAMES ROWS (1C: mirror) */
@@ -13271,6 +13889,36 @@ static void filesystem_loadBankDirectory_tick(void)
          * active Scene has passed through the shared DSP apply worker.
          */
         filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 95: /* WAIT INVALID PRELOAD-REGISTER CLOSE, THEN REMOVE IT */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 96u;
+        return;
+
+    case 96: /* WAIT LIVE-REGISTER REMOVE, THEN RE-ENTER THE OPEN PHASE */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_makeNamedErrorCode("BKHdr", op_phase);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /* Re-entering phase 0 runs the proven-absence scan and lets Bank Load
+         * continue with its blank preload; the final writer regenerates the
+         * register in the current instrument vocabulary after commit. */
+        op_phase = 0u;
         return;
 
     default:
@@ -16006,7 +16654,90 @@ static void filesystem_saveBankDirectory_tick(void)
         op_item_offset = 0u;
         op_line_len = 0u;
         op_close_status = FS_STATUS_DONE;
-        op_phase = 81u;
+        /* Line 0 is the instrument-type header; validate it before rows. */
+        op_phase = 56u;
+        return;
+
+    case 56: /* READ + VALIDATE THE PRELOAD #types HEADER */
+    {
+        uint8_t line_ready = 0u;
+        uint8_t eof = 0u;
+        storage_status_t st = filesystem_readTextLine(
+            op_file, op_line_buf, &op_line_len, sizeof(op_line_buf),
+            &line_ready, &eof);
+
+        if (st != STORAGE_STATUS_OK && st != STORAGE_STATUS_WAIT) {
+            /* A physical read failure is not a header mismatch: close with
+             * an error and never delete the register over an I/O fault. */
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 82u;
+            return;
+        }
+        if (line_ready && !filesystem_validateHcnamesHeader(op_line_buf)) {
+            /*
+             * A preload register whose header no longer matches the firmware
+             * instrument vocabulary cannot supply the Scene/Kit/Instrument
+             * names this Save writes into its children. Retract the mirror,
+             * delete the register, and re-enter the open phase, where the
+             * ordinary NULL-open outcome reports the failure; the next
+             * write-capable pass regenerates the register.
+             */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 58u;
+            return;
+        }
+        if (line_ready) {
+            /* Header is current; consume it and parse data rows next. */
+            op_item_offset = 0u;
+            op_line_len = 0u;
+            op_phase = 81u;
+            return;
+        }
+        if (eof) {
+            /* An empty register has no header line: invalidate as above. */
+            hcnames_mirror_valid = FS_HCNAMES_MIRROR_INVALID;
+            op_close_status = FS_STATUS_DONE;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 58u;
+            return;
+        }
+        return;
+    }
+
+    case 58: /* WAIT INVALID PRELOAD-REGISTER CLOSE, THEN REMOVE IT */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        op_remove_done = 0u;
+        op_remove_result = AFATFS_RESULT_OK;
+        if (!afatfs_removeObjects_lfn(FS_RESIDENT_NAMES_FILENAME,
+                                      FS_RESIDENT_NAMES_MATCH_MODE,
+                                      AFATFS_REMOVE_FILES_ONLY,
+                                      on_remove_complete))
+            return;
+        op_phase = 59u;
+        return;
+
+    case 59: /* WAIT LIVE-REGISTER REMOVE, THEN RE-ENTER THE OPEN PHASE */
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /* Re-entering phase 0 with the mirror still invalid makes the next
+         * attempt either use a fresh physical preload or fail again; this
+         * Save never fabricates child names from a register it could not
+         * validate, and a later write-capable pass regenerates the file. */
+        op_phase = 0u;
         return;
 
     case 81: /* READ SAVED-IDENTITY REGISTER */
@@ -16690,7 +17421,41 @@ static void filesystem_saveBankDirectory_tick(void)
         op_item_offset = 0u;
         op_bytes_done = 0u;
         op_close_status = FS_STATUS_DONE;
-        op_phase = 85u;
+        /* Every full-file rewrite begins with the #types header line. */
+        op_phase = 60u;
+        return;
+
+    case 60: /* WRITE THE #types HEADER LINE BEFORE DATA ROW 0 */
+        if (op_bytes_done == 0u) {
+            op_line_len = (uint8_t)filesystem_formatHcnamesHeader(
+                op_line_buf, sizeof(op_line_buf));
+            if (op_line_len == 0u) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 87u;
+                return;
+            }
+        }
+        {
+            uint32_t written = afatfs_fwrite(
+                op_file, (const uint8_t *)op_line_buf + op_bytes_done,
+                op_line_len - op_bytes_done);
+            op_bytes_done += written;
+            /* A sticky full-card result cannot make the temp stream
+             * progress; close it without removing the live register. */
+            if (written == 0u && afatfs_isFull()) {
+                op_close_status = FS_STATUS_ERROR;
+                op_close_done = false;
+                if (afatfs_fclose(op_file, on_file_closed))
+                    op_phase = 87u;
+                return;
+            }
+        }
+        if (op_bytes_done >= op_line_len) {
+            op_bytes_done = 0u;
+            op_phase = 85u;
+        }
         return;
 
     case 85: /* STREAM BANK-SAVE HCNAMES REGISTER (1C: mirror) */
@@ -20420,6 +21185,94 @@ static uint8_t filesystem_residentNameIsBlank(const char *name)
     return 1u;
 }
 
+/*
+ * Emit the Instrument type field for HCNAMES rows (33..128).
+ *
+ * What: Instrument rows serialize as
+ * name<TAB>source<TAB>type[<TAB>R]\n. The type token is read from the
+ * resident SceneData (scene_instrumentSlotConst()->type), which is always
+ * authoritative for the current session's instrument layout. Why: the boot
+ * reader requires durable type provenance in .hcnames; the formatter must
+ * round-trip what the parser validates. Inputs: the row number (to decide
+ * whether a type field applies), decomposed into scene_index and slot to
+ * access SceneData, plus the destination line cursor. Outputs: the type
+ * token appended to the line buffer between source and the optional refresh
+ * flag, or zero when an unknown resident type makes the row unformattable.
+ * Affiliates: filesystem_cacheResidentRecord() (the parser half),
+ * scene_instrumentSlotConst() (the type source),
+ * storage_instrumentTypeToText() (the token producer).
+ */
+static uint8_t filesystem_appendInstrumentTypeField(char *dst,
+                                                    uint16_t cap,
+                                                    uint8_t *len,
+                                                    uint16_t row)
+{
+    uint16_t offset;
+    const kit_instrument_slot_t *inst;
+    const char *token;
+
+    if (row < FS_RESIDENT_NAMES_INSTRUMENT_BASE)
+        return 1u; /* Bank/Scene/Kit rows carry no type field */
+    offset = (uint16_t)(row - FS_RESIDENT_NAMES_INSTRUMENT_BASE);
+    inst = scene_instrumentSlotConst(
+        (uint8_t)(offset / STORAGE_KIT_SLOT_COUNT),
+        (uint8_t)(offset % STORAGE_KIT_SLOT_COUNT));
+    token = storage_instrumentTypeToText((storage_instrument_type_t)
+        (inst ? inst->type : INSTRUMENT_TYPE_DRM));
+    if (!token || *len + 4u >= cap)
+        return 0u; /* unknown type or a full destination buffer */
+    dst[*len] = '\t';
+    dst[*len + 1u] = token[0];
+    dst[*len + 2u] = token[1];
+    dst[*len + 3u] = token[2];
+    *len = (uint8_t)(*len + 4u);
+    return 1u;
+}
+
+/*
+ * Emit the .hcnames instrument-type header before data rows.
+ *
+ * What: the first line of every .hcnames file is a #types header listing
+ * the firmware's instrument file extensions in enum order. Why: a reader can
+ * detect and safely regenerate an .hcnames file written by a firmware with a
+ * different instrument_type_t layout, rather than silently misinterpreting
+ * type fields. Inputs: the instrument registry via
+ * storage_instrumentTypeToText(). Outputs: one text line written to the
+ * file before data row 0. Affiliates:
+ * filesystem_validateHcnamesHeader() (the reader half), the bootstrap
+ * writer, and every full-file rewrite.
+ */
+static uint16_t filesystem_formatHcnamesHeader(char *dst, uint16_t cap)
+{
+    uint16_t len = 0u;
+    uint8_t type_index;
+
+    for (type_index = 0u;
+         FS_RESIDENT_NAMES_TYPE_HEADER_PREFIX[type_index] != '\0';
+         type_index++) {
+        if (len >= cap)
+            return 0u;
+        dst[len++] = FS_RESIDENT_NAMES_TYPE_HEADER_PREFIX[type_index];
+    }
+    for (type_index = 0u; ; type_index++) {
+        const char *token = storage_instrumentTypeToText(
+            (storage_instrument_type_t)type_index);
+
+        if (!token)
+            break;
+        if (len + 4u >= cap)
+            return 0u;
+        dst[len++] = '\t';
+        dst[len++] = token[0];
+        dst[len++] = token[1];
+        dst[len++] = token[2];
+    }
+    if (len + 1u >= cap)
+        return 0u;
+    dst[len++] = '\n';
+    return len;
+}
+
 static uint8_t filesystem_formatResidentNameLine(char *dst,
                                                  uint16_t cap,
                                                  const char *name,
@@ -20435,10 +21288,13 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
      * Format one fixed-order name-register row.
      *
      * Inputs: a resident eight-cell display field, presence predicate, paired
-     * source word, and row class. Output: one `name<TAB>source[<TAB>R]`
-     * record. Empty names still emit a token, so fixed logical row identity is
-     * never lost. The raw refresh bit is captured before the value mask removes
-     * the register's metadata bits.
+     * source word, and row class. Output: one
+     * `name<TAB>source[<TAB>type][<TAB>R]` record: Bank/Scene/Kit rows end
+     * after the optional refresh witness, while Instrument rows insert the
+     * mandatory three-character type token between source and the optional
+     * refresh witness. Empty names still emit a token, so fixed logical row
+     * identity is never lost. The raw refresh bit is captured before the
+     * value mask removes the register's metadata bits.
      */
     refreshed = (uint8_t)((source & FS_RESIDENT_SOURCE_REFRESHED_FLAG) != 0u);
     /* Autosave's drain uses this existing operation byte to serialize the
@@ -20483,6 +21339,8 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
         dst[len++] = (char)('0' + (source / 100u));
         dst[len++] = (char)('0' + ((source / 10u) % 10u));
         dst[len++] = (char)('0' + (source % 10u));
+        if (!filesystem_appendInstrumentTypeField(dst, cap, &len, row))
+            return 0u;
         if (refreshed) {
             if (len + 4u > cap)
                 return 0u;
@@ -20498,6 +21356,8 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
     if (len + 2u >= cap)
         return 0u;
     dst[len++] = token[0];
+    if (!filesystem_appendInstrumentTypeField(dst, cap, &len, row))
+        return 0u;
     if (refreshed) {
         if (len + 4u > cap)
             return 0u;

@@ -346,13 +346,14 @@ because the writer that clears the flag is the AutoSave drain itself.
 targeted update, Bank Load, Bank Save, and the drain post-commit convergence
 below — now follows the same temp-file pattern already used for
 `settings.cfg` and the `.hcprms` pair: open `.hcnamtmp`
-(`FS_RESIDENT_NAMES_TEMP_FILENAME`), stream all 129 rows, close, `afatfs_sync()`
-to make the temp durable, remove the old live `.hcnames`, rename the temp
-into place, then take the final flush-gate sync. The live file is untouched
-until the remove step; a power loss at any point leaves either the intact old
-register or a recoverable `.hcnamtmp` that a boot recovery prelude in
-`filesystem_ensureAutosaveFiles_tick()` validates (129 parseable rows) and
-either promotes or discards before any code path opens `.hcnames` for read.
+(`FS_RESIDENT_NAMES_TEMP_FILENAME`), stream the `#types` header line plus all
+129 rows, close, `afatfs_sync()` to make the temp durable, remove the old live
+`.hcnames`, rename the temp into place, then take the final flush-gate sync.
+The live file is untouched until the remove step; a power loss at any point
+leaves either the intact old register or a recoverable `.hcnamtmp` that a boot
+recovery prelude in `filesystem_ensureAutosaveFiles_tick()` validates (a
+current `#types` header plus 129 parseable rows) and either promotes or
+discards before any code path opens `.hcnames` for read.
 `hcnames_mirror_valid` is demoted to `INVALID` before every write-capable
 open, set to `PUBLISH_PENDING` only after the rename succeeds (not after
 close — the file is not authoritative until renamed), and promoted to `VALID`
@@ -362,7 +363,11 @@ only by the shared final sync.
 (`FS_RESIDENT_SOURCE_REFRESHED_FLAG`, `0x2000`) marks a row whose object was
 just loaded or saved from the library and whose autosave record has not yet
 fully re-captured it. It is serialized as an optional third `.hcnames` column:
-`name<TAB>source<TAB>R\n`. Absence of the `R` suffix means not-refreshed
+`name<TAB>source<TAB>R\n` for Bank/Scene/Kit rows (0..32). Instrument rows
+(33..128) carry a mandatory type column between source and the witness, so
+`R` is their optional fourth column: `name<TAB>source<TAB>type<TAB>R\n`;
+see `FILESYSTEM_SPEC.md` for the row grammar. Absence of the `R` suffix means
+not-refreshed
 (backward compatible with pre-Phase-B2 files). Adding this bit required
 narrowing `FS_RESIDENT_SOURCE_VALUE_MASK` from `0x7fff` to `0x1fff` and moving
 the three special source tokens into 13 bits: `FS_RESIDENT_SOURCE_INHERIT =
