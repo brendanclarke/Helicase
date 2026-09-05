@@ -1,0 +1,130 @@
+#types	drm	snr	cym	hat
+LoadTst2	014
+Barf	-
+Slak	-
+Forest	009
+Forest	009
+Brezel	-
+Rollin	-
+FilMod	-
+SoyEared	-
+KitWool	-
+Forest	009
+Forest	009
+Eris	-
+CasioPop	-
+808ceebe	-
+808cb	-
+Pop	-
+Barf	-
+Slak	-
+Forest	-
+Forest	-
+Brezel	-
+Rollin	-
+FilMod	-
+SoyEared	-
+KitWool	-
+Forest	-
+Forest	-
+Eris	-
+CasioPop	-
+808ceebe	-
+808cb	-
+Pop	-
+barfd1 1	-	drm
+barfd2 2	-	drm
+barfd3 3	-	drm
+barfs1 4	-	snr
+barfc1 5	-	cym
+barfh1 6	-	hat
+slakd1 1	-	drm
+slakd2 2	-	drm
+slakd3 3	-	drm
+slaks1 4	-	snr
+slakc1 5	-	cym
+slakh1 6	-	hat
+forestd1	-	drm
+forestd2	-	drm
+forestd3	-	drm
+forests1	-	snr
+forestc1	-	cym
+foresth1	-	hat
+forestd1	-	drm
+forestd2	-	drm
+forestd3	-	drm
+forests1	-	snr
+forestc1	-	cym
+foresth1	-	hat
+brezeld1	-	drm
+brezeld2	-	drm
+brezeld3	-	drm
+brezels4	-	snr
+brezelc5	-	cym
+brezelh6	-	hat
+rollind1	-	drm
+rollind2	-	drm
+rollind3	-	drm
+rollins4	-	snr
+rollinc5	-	cym
+rollinh6	-	hat
+filmodd1	-	drm
+filmodd2	-	drm
+filmodd3	-	drm
+filmods4	-	snr
+filmodc5	-	cym
+filmodh6	-	hat
+soyeard1	-	drm
+soyeard2	-	drm
+soyeard3	-	drm
+soyears4	-	snr
+soyearc5	-	cym
+soyearh6	-	hat
+kitwood1	-	drm
+kitwood2	-	drm
+kitwood3	-	drm
+kitwoos4	-	snr
+kitwooc5	-	cym
+kitwooh6	-	hat
+forestd1	-	drm
+forestd2	-	drm
+forestd3	-	drm
+forests1	-	snr
+forestc1	-	cym
+foresth1	-	hat
+forestd1	-	drm
+forestd2	-	drm
+forestd3	-	drm
+forests1	-	snr
+forestc1	-	cym
+foresth1	-	hat
+erisd1 1	-	drm
+erisd2 2	-	drm
+erisd3 3	-	drm
+eriss1 4	-	snr
+erisc1 5	-	cym
+erish1 6	-	hat
+casiopd1	-	drm
+casiopd2	-	drm
+casiopd3	-	drm
+casiops4	-	snr
+casiopc5	-	cym
+casioph6	-	hat
+808cbd11	-	drm
+808cbd22	-	drm
+808cbd33	-	drm
+808cbs14	-	snr
+808cbc15	-	cym
+808cbh16	-	hat
+808cbd11	-	drm
+808cbd22	-	drm
+808cbd33	-	drm
+808cbs14	-	snr
+808cbc15	-	cym
+808cbh16	-	hat
+popd1.dr	-	drm
+popd2.dr	-	drm
+popd3.dr	-	drm
+pops1.sn	-	snr
+popc1.cy	-	cym
+poph1.ha	-	hat
