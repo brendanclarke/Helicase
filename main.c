@@ -755,6 +755,7 @@ int main(void)
              */
             {
                 uint16_t boot_bank_slot = bank_restoreBankSlot();
+                uint8_t boot_restored_winner = 0u;
 
                 /*
                  * Instrument index generation above intentionally disposed
@@ -841,22 +842,30 @@ int main(void)
                 /*
                  * Stage 11: autosave winner path or canonical library Bank Load.
                  *
-                 * What: when the Phase 5 boot reader lands, a valid
-                 * Bank-slot-matching winner (stage 10b) makes this stage call
-                 * filesystem_autosaveBootReaderBlocking() to populate resident
-                 * SRAM from the winner record and .hcnames; otherwise the
-                 * canonical preset_loadBank() path runs and latches the
+                 * What: a valid Bank-slot-matching winner (stage 10b) makes
+                 * this stage call filesystem_autosaveBootReaderBlocking() to
+                 * populate resident SRAM from the winner record and .hcnames
+                 * (Cases 1/2/3). When the reader declines (no winner, an
+                 * empty-Bank record, or a restore failure) the canonical
+                 * preset_loadBank() ladder runs instead and latches the
                  * whole-Bank dirty mark (§8) so it replays once mutation
                  * tracking enables — preserving today's unconditional
-                 * ensure-time Bank re-mark. Phases 1-4 interim: the boot
-                 * reader is not yet implemented, so every boot (winner or not)
-                 * takes the canonical path below and the latch is set after a
-                 * canonical Bank Load is accepted. Inputs: fs_boot_winner from
-                 * stage 10b, boot_bank_slot. Outputs: resident Scenes
-                 * populated; boot latch (§8) populated. Affiliates: §4
-                 * S061_AUTOSAVE_READER.md.
+                 * ensure-time Bank re-mark. A boot-deadline timeout during
+                 * the reader takes the timeout path. Inputs: fs_boot_winner
+                 * from stage 10b, boot_bank_slot. Outputs: resident Scenes
+                 * populated either way; boot latch (§8) populated on the
+                 * canonical path. Affiliates: §4 S061_AUTOSAVE_READER.md,
+                 * filesystem_autosaveBootReaderBlocking(),
+                 * filesystem_setBootLatchBankFallback().
                  */
-                if (filesystem_bankSlotExists(boot_bank_slot)) {
+                if (filesystem_hasBootWinner()) {
+                    boot_restored_winner =
+                        filesystem_autosaveBootReaderBlocking();
+                    if (filesystem_bootLoggingTimedOut())
+                        goto boot_filesystem_timeout;
+                }
+                if (!boot_restored_winner &&
+                    filesystem_bankSlotExists(boot_bank_slot)) {
                     /*
                      * A rejected Bank Load has no callback to report it later.
                      *
@@ -887,7 +896,7 @@ int main(void)
                      */
                     if (filesystem_autosaveEnabled())
                         filesystem_setBootLatchBankFallback();
-                } else {
+                } else if (!boot_restored_winner) {
                     /* No Bank is available: load the root Scene index before
                      * asking the existing fallback ladder to choose Scene/Kit.
                      * This cache transition is safe because no Bank payload is

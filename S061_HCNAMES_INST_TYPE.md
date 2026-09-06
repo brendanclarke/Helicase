@@ -671,3 +671,131 @@ after LTO (fs_boot_latch, fs_boot_winner).
   its parser/formatter round trip therefore awaits a Phase-5 fixture.
 - SRAM_MANIFEST.md and MEMORY.md still record pre-Phase-1-4 state; refresh
   them when the reader phases land or on the user's request.
+
+---
+
+### Session notes — AutoSave boot reader Phases 5-7 (2026-09-05, second pass)
+
+Implemented Phases 5-7 of the code-site schedule in
+S061_AUTOSAVE_READER.md section 16 on branch dev-ph3-autosave-ph6 after
+planning commit 2a7170c (Phases 1-4). All changes are uncommitted. Every
+new/changed code block carries its comment description adjacent in the .c
+file and every new public prototype carries one in the .h file.
+
+**Phase 5 — per-Scene Case 1/2/3 evaluation + boot reader (section 5.2):**
+- filesystem_autosaveBootReaderBlocking() (public, filesystem.c, with the
+  filesystem.h prototype): step 1 reads .hcnames through the boot-only
+  blocking helpers — a leftover valid .hcnamtmp crash prelude is parsed and
+  adopted first, then the live register, then
+  filesystem_regenerateHcnamesFromWinnerBlocking() when both fail; step 2
+  applies the winner Bank payload and replicates the Bank Load commit tail
+  (bank_setHasResidentBank, scene_selectActive,
+  seq_alignActivePatternToScene, menu_setShownPattern); step 3 evaluates
+  each present Scene's eight rows with Case 1 (payload apply +
+  Phase-C source cross-check), Case 2 (resolve + narrow loader), Case 3
+  (empty/invalidate the whole Scene, P1); step 4 publishes register
+  corrections; a Q trace summary closes the pass. A zero return makes
+  main.c fall back to the canonical Bank Load ladder.
+- New internal op FS_INTERNAL_OP_PUBLISH_HCNAMES_REGISTER + tick + blocking
+  wrapper streams the RAM mirror/register through the atomic temp/rename
+  pattern without re-reading the card (used by reader step 4 and temp
+  adoption). Boot code HCNAWRG, error prefix HNWr.
+- Reader helpers use the existing private blocking FAT helpers
+  (filesystem_blockOpenLfn/OpenDirLfn/Chdir/Close/Seek/Read) and the shared
+  per-tick text reader wrapped by filesystem_bootReadLineBlocking(), so the
+  reader carries no new state machines for line parsing.
+- main.c stage 11 now calls filesystem_autosaveBootReaderBlocking() when
+  filesystem_hasBootWinner() and only runs the canonical ladder when the
+  reader declines or no winner exists (latch still set on the canonical
+  path, autosave enabled only).
+
+**Phase 6 — Case 2 narrow single-level loaders (section 7):**
+- filesystem_bootReaderNarrowLoadScene(scene_index, source_slot,
+  resolved_row): sceneset.scg settings only, committed over resident
+  defaults; no Kit/Instrument/Pattern side effects.
+- filesystem_bootReaderNarrowLoadKit(scene_index, source_slot,
+  resolved_row): staged kitset.kcg plus all six bundled member files,
+  committed as one resident kit — mirrors the runtime Kit Load image and
+  never touches .hcnames sources or refreshed flags.
+- filesystem_bootReaderNarrowLoadInstrument(scene_index, slot, type,
+  source_slot, resolved_row): '@' direct pool rows open
+  Instrument/<Type>/<stem>.<ext> via storage_makeSavedInstrumentDisplay-
+  Filename(); inherited rows parse the enclosing Kit's kitset.kcg and open
+  the declared member file. Physical containers follow the resolved row:
+  Bank/<slot>/<SS>/ for Bank-row inheritance, root Scene/NNN/Kit <name>/
+  for Scene-row inheritance, root Kit/NNN/ for direct Kit rows.
+- Per-row Instrument types parsed from .hcnames are retained in a 96-byte
+  union member of the existing 2,048-byte operation stage (boot_reader_type,
+  zero new SRAM) so a preceding Case-2 Kit reload cannot change the typed
+  directory a later Instrument row resolves against; the regeneration path
+  seeds the same scratch from SceneData.
+
+**Phase 7 — post-boot notice sequencer (section 9):**
+- menu.c: menu_bootNoticeSceneMask/BankFlag/Active/Start (6 bytes transient
+  runtime state) plus menu_drainAutosaveBootNotices() using the
+  menu_showStaleSettingsWarning() timer pattern; menu_start() seeds the
+  masks once after audio is live via the filesystem accessors; the drain is
+  polled in menu_pollPresetStatus() ahead of the stale-warning block.
+- filesystem_bootReaderNoticeSceneMask()/...BankFallback() are now
+  read-and-clear accessors, and filesystem_replayBootLatch() preserves
+  bank_fallback until the sequencer consumes it (resolves the plan-internal
+  conflict noted in the Phase 1-4 notes).
+
+**Trace:** new AUTOSAVE_TRACE_STAGE_BOOT_READER = 'Q' (flags: bit0
+Case-1 source mismatch, bit1 Case-3 invalidated, bit2 Case-2 reload,
+bit7 summary) plus matching tools/decode_devlogs.py mapping/decoder.
+
+**Flagged deviations from the plan text (all conservative):**
+1. Reader failure falls back to the canonical Bank Load ladder instead of
+   the Change 2.4 snippet's boot_filesystem_failure; only a latched boot
+   deadline takes the timeout path. This keeps the pre-reader boot
+   semantics for every decline case (including a record whose scene-present
+   mask is empty, which keeps the established empty-Bank fallback ladder).
+2. Case-3 empties clear SceneData to scene_initAll-equivalent defaults and
+   reset the Scene's eight register rows to UNKNOWN + refreshed while
+   keeping mirror display names; they are persisted by reader step 4 or by
+   the first post-boot drain convergence rewrite, and the emptied state is
+   then re-captured by autosave, so the Scene stays empty across boots
+   until an explicit Load replaces it (P1-consistent).
+3. Numeric (0..999) sources on Instrument rows are treated as unresolvable
+   (Case 3): no current writer produces them ('@' is the pool token), and a
+   browser index is not a durable physical key.
+4. Case-2 Scene narrow loads restore sceneset.scg settings only; Pattern
+   remains outside the autosave/reader scope exactly as in the wire format
+   (the plan's section 7 "full-object" wording conflicts with Change 6.1's
+   settings-only contract; the latter was implemented).
+5. Reader step-4 publication failure is nonfatal: the drain convergence
+   rewrite persists the same register image on the first runtime capture.
+6. The menu notice state is seeded in menu_start() (post audioCodec_init)
+   rather than menu_init(), so overlays can never block or fight the boot
+   splash; accessors consume the latch on read so nothing replays.
+
+**RAM sign-off:** Phases 5-7 add exactly 6 bytes of static SRAM1 in menu.c
+(menu_bootNotice*, transient runtime, plan section 16's table) — flagged
+for the user's sign-off like the Phase-2 winner record. The reader uses a
+1920-byte boot stack buffer per Scene, an existing workspace union member
+for row types (zero new allocation), and existing op scratch for text
+lines. No heap; no stack-budget change beyond boot-time automatic stack.
+
+**Build state (clean, logging-on):** text=404,740 data=404 bss=96,212
+(bss +28 vs the Phase-4 build: 6 menu bytes plus LTO retention shifts),
+image build/LXRV2_lxr02.img 405,160 bytes.
+
+**Open items for hardware verification (once a card is available):**
+- Winner-path boot: stage-11 ASREADR pass with Q records; expect Case-1
+  restores for a converged card, Case-2/3 behavior for a deliberately
+  refreshed/refreshed-unresolvable card, one or more 2-second AutoSave
+  overlays after menu_start, and a first-drain .hcnames rewrite matching
+  the register.
+- Empty-Bank winner record falls back to the canonical ladder (verify no
+  double Bank-load or stale BankData).
+- Case-3 Scene stays empty across reboots until an explicit Load, then
+  converges (verify R lifecycle and the drain rewrite).
+- Boot timing with autosave on (winner validation plus reader adds one
+  full register read and per-present-Scene section reads pre-audio).
+- UX decision for the user: per section 8.2/9 of the plan, the root
+  "AutoSave bank load" overlay is queued on EVERY autosave-enabled boot
+  that takes the canonical Bank Load path (i.e. whenever no valid winner
+  exists), not only on failures. Confirm that is the desired frequency
+  before shipping; a later session can gate it behind an actual
+  record-presence check.

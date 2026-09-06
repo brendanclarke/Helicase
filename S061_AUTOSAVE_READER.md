@@ -1714,3 +1714,185 @@ Payload (30,848 bytes, offset = AUTOSAVE_PAYLOAD_OFFSET = 3920):
           morph:     +85 (72 bytes, descriptor-indexed, Morphable only)
           padding:   +157..+191
 ```
+
+---
+
+## Phase 5 post-implementation analysis — 2026-09-06
+
+### Symptom
+
+After boot with autosave reader active, all scenes reported as empty and
+nothing was playable. Trace data (decoded from `asavetrc.bin` on the test
+card) showed only scenes 14 and 15 triggered Case 2/3
+(`case3_scene_mask = 0xc000`). Scenes 0–13 were all Case 1 — autosave
+parameters applied successfully. Yet the user observed no playable
+content in any scene.
+
+### Root cause: missing pattern loading
+
+The autosave record captures live parameters (scene settings, kit choke,
+instrument descriptors) but **does not capture pattern data** (the
+112-byte `PatternSet` bitmap per scene). Pattern data lives on card in
+`pattern.pat` files within each scene folder and is loaded by the
+canonical Bank Load (`filesystem_loadBankDirectory_tick` → Scene phase
+44–55). The boot reader replaces the canonical Bank Load but only
+applied autosave-covered parameter payloads, leaving `scene->pattern`
+at its static zero-initialization — every track silent.
+
+The `effects.fx` file is similarly skipped, but effect loading is a
+validation-only placeholder today (scene_t carries no effect field;
+0 live params), so its absence is cosmetic. Pattern data is the
+functional gap.
+
+### Fix applied
+
+1. **New function `filesystem_bootReaderLoadPattern(scene_index)`**:
+   resolves the Scene row's source via `filesystem_resolveResidentSource`,
+   navigates to the corresponding on-card folder (Bank/NNN/SS dir/ for
+   INHERIT, Scene/NNN/ for library source), opens `pattern.pat`, and
+   feeds it through the existing `storage_patternStubParseLine` parser
+   into `scene->pattern`. Returns best-effort: a missing or corrupt
+   pattern leaves the PatternSet at its zeroed state — the scene is
+   still usable (parameters intact, user can re-enter steps or reload).
+
+2. **Orchestrator step 3b**: after the per-scene Case 1/2/3 evaluation
+   loop (step 3) and before the .hcnames publish (step 4), a new loop
+   calls `bootReaderLoadPattern` for every present scene that was NOT
+   emptied by Case 3.
+
+### Secondary fix: narrow-loader CWD safety
+
+The narrow loaders (`bootReaderEnterSceneFolder`, `bootReaderEnterKitFolder`,
+`bootReaderNarrowLoadInstrument` direct-pool path) assumed CWD was at
+the filesystem root. After a successful narrow load for one scene, CWD
+remained inside that scene's folder. A subsequent narrow load for a
+different scene would then fail to open root-level directories like
+`Bank/` or `Scene/`. This was a latent bug — not triggered by the test
+case (only one narrow load succeeded) but certain to fail once multiple
+scenes have Case 2 events in the same boot.
+
+Fix: each folder-entry helper now calls `filesystem_blockChdir(NULL)`
+(return to root) before navigating into the target directory tree.
+
+### Scenes 14–15 Case 3 explanation
+
+The user loaded MochTo into scenes 14 and 15 last, then waited briefly
+before power-off. The autosave drain captures rows sequentially; it had
+not reached all rows of scenes 14–15 before power loss. The original
+`.hcnames` (pre-boot) had `R` (REFRESHED) flags on Kit row 14 and Scene
+row 15, with source `?` (UNKNOWN — the drain hadn't yet proven the
+captured source). The boot reader correctly classified these as
+unresolvable refreshed rows → Case 3, emptying both scenes. The
+current `.hcnames` on card (post-boot, post-drain) shows no `R` flags
+because the drain ran after boot, captured the emptied state, proved all
+rows, and wrote a clean register.
+
+This is correct behavior per the design: unproven, unresolvable rows
+must not be trusted. The user could recover by reloading MochTo into
+those two scene slots.
+
+## Phase 5b — bank-load-then-power-off all-empty bug
+
+### Scenario
+
+Boot → load a Bank from the Load/Save menu → power off without exiting
+the menu → second boot → every scene shows "AutoSave Sc xx empty" and
+nothing is loaded.
+
+### Root cause: instrument-row source guard rejects inherited bank slot
+
+When a Bank is loaded from the Load/Save menu, the firmware updates
+`.hcnames` immediately: the Bank row gets the bank slot number (e.g.
+`023`) plus the `R` (REFRESHED) flag, and all 128 child rows (16 Scenes
+× 8 rows each) get INHERIT (`-`) plus `R`. The autosave writer is held
+by the Load/Save page guard (`AUTOSAVE_TRACE_STAGE_WRITER_SUPPRESSED`,
+record #019313 in the trace) and never publishes, so the autosave record
+retains data from the previous session.
+
+On the next boot:
+
+1. The recovery prelude promotes `settings.tmp` → `settings.cfg`
+   (active bank = 23).
+2. Validation finds the autosave record valid with bank 23 →
+   `bank_match = true`, `hasBootWinner()` returns 1.
+3. The boot reader runs, reads `.hcnames` (all rows REFRESHED).
+4. Per-scene evaluation: every row is REFRESHED → Case 2/3 path.
+5. `filesystem_resolveResidentSource()` walks the INHERIT chain up to
+   the Bank row and returns the bank slot (23), with `resolved_row = 0`
+   (the Bank row).
+
+For Scene rows (index 0) and Kit rows (index 1), the resolved source
+23 is accepted and the narrow loader successfully reloads data from
+`Bank/023 Genesis2/<scene>/`. This works correctly.
+
+For Instrument rows (index ≥ 2), the guard at line 27239 fires:
+
+```c
+if (resolved < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT &&
+    row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE) {
+    resolved = FS_RESIDENT_SOURCE_UNKNOWN;
+}
+```
+
+The guard was intended to catch corrupt instrument rows that directly
+hold a numeric bank/scene slot (no writer ever produces such a value on
+an instrument row). However, it checked the *resolved* source after
+inheritance traversal, not the *direct* source on the instrument row
+itself. A legitimately inherited numeric source (Instrument → Kit →
+Scene → Bank slot 23) was rejected as unresolvable.
+
+With `resolved` overridden to UNKNOWN, the source falls outside both
+`< DIRECT_SLOT_LIMIT` and `== INSTRUMENT_DIRECT`, so Case 3 fires:
+`filesystem_bootReaderEmptyScene()` zeros the scene and marks it in the
+notice mask. Since every scene's first instrument row triggers this, all
+16 scenes are emptied, and the boot reader returns 1 (success with all
+Case 3).
+
+The user then sees "AutoSave Sc xx empty" for every scene, and the
+canonical Bank Load fallback in `main.c` never runs because the boot
+reader returned 1.
+
+### Trace evidence
+
+The SECOND_REBOOT trace shows 6322 dropped records (#021362,
+`AUTOSAVE_TRACE_STAGE_TRACE_DROPPED`), which means the boot-time V and
+Q records were overwritten by the massive flood of dirty marks from the
+drain initializing all 16 empty scenes. The `.hcnames` post-second-boot
+confirms all child rows are `?` (UNKNOWN) — the signature of
+`bootReaderEmptyScene()`.
+
+### Fix
+
+Added `resolved_row == row` to the guard condition:
+
+```c
+if (resolved < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT &&
+    row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE &&
+    resolved_row == row) {
+    resolved = FS_RESIDENT_SOURCE_UNKNOWN;
+}
+```
+
+This distinguishes between:
+
+- **Direct numeric source on instrument row** (`resolved_row == row`):
+  corrupt, still rejected.
+- **Inherited numeric source from a parent row** (`resolved_row` is
+  Bank, Scene, or Kit row): legitimate inheritance — the narrow
+  instrument loader navigates into the parent's folder hierarchy via
+  `filesystem_bootReaderEnterKitFolder()`, parses `kitset.kcg`, and
+  loads each member instrument file. This path already handles all
+  parent-row resolved_row values correctly (Bank row at line 26544,
+  Scene row at line 26545–26546).
+
+### Why the menu-exit path works
+
+When the user exits the Load/Save menu before powering off, the writer
+guard is released and the autosave writer publishes a new generation
+capturing all dirty parameters. The post-drain HCNAMES convergence
+transaction (`filesystem_autosaveDrainAfterCommit`, phase 70) rewrites
+`.hcnames` without `R` flags for rows whose objects are fully captured
+(`autosave_objectFullyCaptured`). On the next boot, rows without
+REFRESHED enter Case 1 (autosave applies directly) instead of hitting
+the inheritance/resolution path. The instrument guard never fires
+because Case 1 skips it entirely.

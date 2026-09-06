@@ -155,6 +155,25 @@ static uint16_t menu_staleWarningStart = 0;
 static uint8_t menu_pendingAllStaleWarning = 0;
 
 #define MENU_STALE_WARNING_MS 2000u
+/*
+ * Post-boot autosave notice sequencer state (§9, S061_AUTOSAVE_READER.md).
+ *
+ * What: 6 bytes of transient Menu runtime state for draining the boot
+ * latch's Case-3 Scene mask and bank-fallback flag as sequential
+ * non-blocking LCD overlays. Inputs: filesystem_bootReaderNoticeSceneMask()
+ * and filesystem_bootReaderNoticeBankFallback() read once after audio is
+ * live (menu_start()); both accessors clear the filesystem latch fields on
+ * read, so each notice displays exactly once. Outputs: up to 17 sequential
+ * ~2-second overlays using the same timer-comparison pattern as
+ * menu_showStaleSettingsWarning(). Why: boot must never block on notices;
+ * audio starts on schedule regardless. Affiliates:
+ * menu_showStaleSettingsWarning(), time_sysTick, fs_boot_latch.
+ */
+static uint16_t menu_bootNoticeSceneMask = 0u;
+static uint8_t  menu_bootNoticeBankFlag = 0u;
+static uint8_t  menu_bootNoticeActive = 0u;
+static uint16_t menu_bootNoticeStart = 0u;
+#define MENU_BOOT_NOTICE_MS 2000u
 #define MENU_TEST_RESULT_MS 2000u
 #define MENU_INSTRUMENT_SAVE_NAME_LEN 8u
 #define MENU_RESIDENT_NAME_SCRATCH_ROWS 7u
@@ -392,6 +411,79 @@ static void menu_showStaleSettingsWarning(fs_stale_warning_source_t src)
     menu_storageBusy = 1u;
     menu_staleWarningActive = 1u;
     menu_staleWarningStart = time_sysTick;
+}
+
+/*
+ * Drain one pending autosave boot notice per tick.
+ *
+ * What: shows sequential non-blocking LCD overlays for each Case-3
+ * invalidated Scene and the bank-fallback event. Bank notice first (if
+ * pending), then each Scene in index order. Each overlay runs ~2 seconds
+ * and auto-advances. Inputs: menu_bootNotice* state, time_sysTick.
+ * Outputs: LCD overlays, menu_storageBusy toggled. No early-dismiss, no
+ * input suppression beyond storageBusy. Affiliates: §9
+ * S061_AUTOSAVE_READER.md, menu_showStaleSettingsWarning() (same pattern).
+ */
+static void menu_drainAutosaveBootNotices(void)
+{
+    if (menu_bootNoticeActive) {
+        if ((uint16_t)(time_sysTick - menu_bootNoticeStart) >=
+            MENU_BOOT_NOTICE_MS) {
+            menu_bootNoticeActive = 0u;
+            menu_storageBusy = 0u;
+            menu_repaintAll();
+        }
+        return;
+    }
+    if (menu_bootNoticeBankFlag) {
+        lcd_waitForIdle();
+        lcd_clear();
+        lcd_home();
+        lcd_string("AutoSave");
+        lcd_setcursor(0, 2);
+        lcd_string("bank load");
+        lcd_waitForIdle();
+        menu_bootNoticeBankFlag = 0u;
+        menu_storageBusy = 1u;
+        menu_bootNoticeActive = 1u;
+        menu_bootNoticeStart = time_sysTick;
+        return;
+    }
+    if (menu_bootNoticeSceneMask != 0u) {
+        char line2[16];
+        uint8_t i;
+        uint8_t pos = 0u;
+
+        for (i = 0u; i < 16u; i++) {
+            if (menu_bootNoticeSceneMask & (uint16_t)(1u << i))
+                break;
+        }
+        menu_bootNoticeSceneMask &= (uint16_t)~(1u << i);
+        /* Format "Sc NN empty" on the second LCD line. */
+        line2[pos++] = 'S';
+        line2[pos++] = 'c';
+        line2[pos++] = ' ';
+        line2[pos++] = (char)('0' + (i / 10u));
+        line2[pos++] = (char)('0' + (i % 10u));
+        line2[pos++] = ' ';
+        line2[pos++] = 'e';
+        line2[pos++] = 'm';
+        line2[pos++] = 'p';
+        line2[pos++] = 't';
+        line2[pos++] = 'y';
+        line2[pos] = '\0';
+        lcd_waitForIdle();
+        lcd_clear();
+        lcd_home();
+        lcd_string("AutoSave");
+        lcd_setcursor(0, 2);
+        lcd_string(line2);
+        lcd_waitForIdle();
+        menu_storageBusy = 1u;
+        menu_bootNoticeActive = 1u;
+        menu_bootNoticeStart = time_sysTick;
+        return;
+    }
 }
 
 /* Start loaded-sound apply.
@@ -8116,6 +8208,13 @@ void menu_pollPresetStatus(void)
     if (menu_tickGlobalApply())
         return;
 
+    if (menu_bootNoticeActive ||
+        menu_bootNoticeBankFlag ||
+        menu_bootNoticeSceneMask) {
+        menu_drainAutosaveBootNotices();
+        return;
+    }
+
     if (menu_pendingAllStaleWarning) {
         /* ALL loads first finish kit/pattern/global application and allow the
         ** "Loading pattern" UI to settle. Only then show the stale-globals
@@ -9921,4 +10020,19 @@ void menu_start(void)
     menu_switchPage(VOICE1_PAGE);
     lcd_clear();
     menu_repaintAll();
+    /*
+     * Consume pending boot-reader notices only after audio is live.
+     *
+     * What: reads (and clears) the boot latch's Case-3 Scene mask and
+     * bank-fallback flag exactly once, after menu_start() is reached post
+     * audioCodec_init(). Outputs: menu_bootNotice* seeded for the
+     * non-blocking overlay sequencer; the accessors consume the latch so no
+     * notice can replay on a later poll. Why: boot must never block on
+     * notices (§9, S061_AUTOSAVE_READER.md), and these overlays must not
+     * fight the pre-audio splash/menu initialization. Affiliates:
+     * menu_drainAutosaveBootNotices(), filesystem_bootReaderNoticeSceneMask(),
+     * filesystem_bootReaderNoticeBankFallback().
+     */
+    menu_bootNoticeSceneMask = filesystem_bootReaderNoticeSceneMask();
+    menu_bootNoticeBankFlag = filesystem_bootReaderNoticeBankFallback();
 }

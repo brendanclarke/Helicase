@@ -142,6 +142,17 @@ typedef enum {
      * marked, not the mask value at the commit/capture boundary.
      */
     AUTOSAVE_TRACE_STAGE_BANK_PRESENT = 'B',
+    /*
+     * Q: boot-reader decision records (Phases 5/6, S061_AUTOSAVE_READER.md).
+     * flags: bit 0 = Case-1 embedded-source mismatch (defense-in-depth),
+     * bit 1 = Case-3 Scene invalidated/emptied, bit 2 = Case-2 single-level
+     * reload completed, bit 7 = one end-of-reader summary. value32 packs the
+     * Scene in bits 0..3, the HCNAMES row in bits 8..15, and (for mismatch
+     * and reload records) the embedded/resolved source in bits 16..31; the
+     * summary packs the Case-2 mask in bits 0..15 and the Case-3 mask in
+     * bits 16..31.
+     */
+    AUTOSAVE_TRACE_STAGE_BOOT_READER = 'Q',
 } autosave_trace_stage_t;
 
 /*

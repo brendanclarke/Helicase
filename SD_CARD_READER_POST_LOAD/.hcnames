@@ -1,0 +1,130 @@
+#types	drm	snr	cym	hat
+Genesis2	023	R
+Barf	-	R
+Slak	-	R
+Hard	-	R
+RedSnap	-	R
+Brezel	-	R
+Rollin	-	R
+RedSnap	-	R
+SoyEared	-	R
+KitWool	-	R
+Goa	-	R
+Electro	-	R
+Eris	-	R
+CasioPop	-	R
+808ceebe	-	R
+808cb	-	R
+Pop	-	R
+Barf	-	R
+Slak	-	R
+Hard	-	R
+RedSnap	-	R
+Brezel	-	R
+Rollin	-	R
+RedSnap	-	R
+SoyEared	-	R
+KitWool	-	R
+Goa	-	R
+Electro	-	R
+Eris	-	R
+CasioPop	-	R
+808ceebe	-	R
+808cb	-	R
+Pop	-	R
+barfd1 1	-	drm	R
+barfd2 2	-	drm	R
+barfd3 3	-	drm	R
+barfs1 4	-	snr	R
+barfc1 5	-	cym	R
+barfh1 6	-	hat	R
+slakd1 1	-	drm	R
+slakd2 2	-	drm	R
+slakd3 3	-	drm	R
+slaks1 4	-	snr	R
+slakc1 5	-	cym	R
+slakh1 6	-	hat	R
+hardd1 1	-	drm	R
+hardd2 2	-	drm	R
+hardd3 3	-	drm	R
+hards1 4	-	snr	R
+hardc1 5	-	cym	R
+hardh1 6	-	hat	R
+redsnad1	-	drm	R
+redsnad2	-	drm	R
+redsnad3	-	drm	R
+redsnas4	-	snr	R
+redsnac5	-	cym	R
+redsnah6	-	hat	R
+brezeld1	-	drm	R
+brezeld2	-	drm	R
+brezeld3	-	drm	R
+brezels4	-	snr	R
+brezelc5	-	cym	R
+brezelh6	-	hat	R
+rollind1	-	drm	R
+rollind2	-	drm	R
+rollind3	-	drm	R
+rollins4	-	snr	R
+rollinc5	-	cym	R
+rollinh6	-	hat	R
+redsnad1	-	drm	R
+redsnad2	-	drm	R
+redsnad3	-	drm	R
+redsnas4	-	snr	R
+redsnac5	-	cym	R
+redsnah6	-	hat	R
+soyeard1	-	drm	R
+soyeard2	-	drm	R
+soyeard3	-	drm	R
+soyears4	-	snr	R
+soyearc5	-	cym	R
+soyearh6	-	hat	R
+kitwood1	-	drm	R
+kitwood2	-	drm	R
+kitwood3	-	drm	R
+kitwoos4	-	snr	R
+kitwooc5	-	cym	R
+kitwooh6	-	hat	R
+goad1  1	-	drm	R
+goad2  2	-	drm	R
+goad3  3	-	drm	R
+goas1  4	-	snr	R
+goac1  5	-	cym	R
+goah1  6	-	hat	R
+electrd1	-	drm	R
+electrd2	-	drm	R
+electrd3	-	drm	R
+electrs4	-	snr	R
+electrc5	-	cym	R
+electrh6	-	hat	R
+erisd1 1	-	drm	R
+erisd2 2	-	drm	R
+erisd3 3	-	drm	R
+eriss1 4	-	snr	R
+erisc1 5	-	cym	R
+erish1 6	-	hat	R
+casiopd1	-	drm	R
+casiopd2	-	drm	R
+casiopd3	-	drm	R
+casiops4	-	snr	R
+casiopc5	-	cym	R
+casioph6	-	hat	R
+808cbd11	-	drm	R
+808cbd22	-	drm	R
+808cbd33	-	drm	R
+808cbs14	-	snr	R
+808cbc15	-	cym	R
+808cbh16	-	hat	R
+808cbd11	-	drm	R
+808cbd22	-	drm	R
+808cbd33	-	drm	R
+808cbs14	-	snr	R
+808cbc15	-	cym	R
+808cbh16	-	hat	R
+popd1  1	-	drm	R
+beatmsd2	-	drm	R
+popd3  3	-	drm	R
+pops1  4	-	snr	R
+popc1  5	-	cym	R
+poph1  6	-	hat	R

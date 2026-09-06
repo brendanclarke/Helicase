@@ -113,6 +113,7 @@ STAGE_ENUM = {
     "O": "AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE",
     "E": "AUTOSAVE_TRACE_STAGE_OPERATION_ERROR",
     "Y": "AUTOSAVE_TRACE_STAGE_SCAN_PARENT_DIAG",
+    "Q": "AUTOSAVE_TRACE_STAGE_BOOT_READER",
 }
 
 STAGE_PRODUCER = {
@@ -632,6 +633,24 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
             detail += (", last directory candidate matched on BOTH SFN "
                        "pointer and cluster (unexpected at EXHAUSTED -- a "
                        "full match should have retired immediately)")
+    elif ch == "Q":
+        scene = value & 0xF
+        row = (value >> 8) & 0xFF
+        source = (value >> 16) & 0xFFFF
+        case1_mismatch = bool(flags & 0x01)
+        case3 = bool(flags & 0x02)
+        case2 = bool(flags & 0x04)
+        summary = bool(flags & 0x80)
+        if summary:
+            detail = (f"{enum_name} via {producer}: reader summary, "
+                      f"case2_scene_mask=0x{value & 0xFFFF:04x}, "
+                      f"case3_scene_mask=0x{(value >> 16) & 0xFFFF:04x}")
+        else:
+            kind = ("case1 source mismatch" if case1_mismatch else
+                    "case3 scene invalidated" if case3 else
+                    "case2 reload completed" if case2 else "reader event")
+            detail = (f"{enum_name} via {producer}: {kind}, Scene{scene}, "
+                      f"hcnames row {row}, source=0x{source:04x}")
     else:
         detail = f"{enum_name}: no decoder for this stage"
 

@@ -299,12 +299,16 @@ void filesystem_setBootLatchBankFallback(void);
 /*
  * Boot-reader notice mask for the Menu post-boot sequencer (§9).
  *
- * What: returns the Case-3 Scene invalidation mask and bank-fallback flag.
- * Inputs: the boot latch populated by the boot reader. Outputs: 16-bit
- * Scene mask (each set bit = one post-boot overlay) and bank_fallback byte
- * (1 = root notice for canonical Bank Load fallback). Why: Menu must not
- * access filesystem internal state directly. Affiliates:
- * menu_drainAutosaveBootNotices(), fs_boot_latch.
+ * What: returns AND clears the Case-3 Scene invalidation mask and the
+ * bank-fallback flag. Inputs: the boot latch populated by the boot reader
+ * and replay path. Outputs: the 16-bit Scene mask (each set bit = one
+ * post-boot overlay) and the bank_fallback byte (1 = root notice for the
+ * canonical Bank Load fallback); both latch fields clear on read so Menu's
+ * one-shot sequencer drains each notice exactly once. Why: Menu must not
+ * access filesystem internal state directly, and replay deliberately keeps
+ * bank_fallback set until the notice sequencer consumes it (§8.3,
+ * S061_AUTOSAVE_READER.md). Affiliates: menu_drainAutosaveBootNotices(),
+ * fs_boot_latch, filesystem_replayBootLatch().
  */
 uint16_t filesystem_bootReaderNoticeSceneMask(void);
 uint8_t  filesystem_bootReaderNoticeBankFallback(void);
@@ -321,6 +325,21 @@ uint8_t  filesystem_bootReaderNoticeBankFallback(void);
  * boot reader, filesystem_formatResidentNameLine().
  */
 uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void);
+/*
+ * Boot-time autosave reader: populate resident SRAM from the winner record.
+ *
+ * Replaces the canonical preset_loadBank() when stage 10b proved a valid
+ * Bank-matching winner: reads .hcnames (regenerating it from the record
+ * when corrupt), applies the winner's Bank payload, then evaluates each
+ * present Scene's eight identity rows independently — Case 1 applies the
+ * winner payload, Case 2 narrow-loads a resolvable row from its library
+ * source, and Case 3 empties the whole Scene when a refreshed row cannot
+ * be resolved (P1). Returns nonzero when the winner restore completed;
+ * zero falls back to the canonical Bank Load ladder. Affiliates: main.c
+ * stage 11, validateAutosaveWinnerBlocking(), replayBootLatch(),
+ * autosave_apply*(), filesystem_bootReaderNarrowLoad*().
+ */
+uint8_t filesystem_autosaveBootReaderBlocking(void);
 /*
  * Flush the currently pending autosave lifecycle trace before a deliberate
  * bench-test power cycle.
