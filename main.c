@@ -70,6 +70,7 @@
 
 #include "menu.h"
 #include "screensaver.h"
+#include "SplashAnimation.h"
 #include "ParameterArray.h"
 #include "presetManager.h"
 #include "BankData.h"
@@ -118,9 +119,16 @@ static void boot_show_splash(void)
 {
     lcd_clear();
     lcd_setcursor(0, 1);
-    lcd_string("Sonic Potions");
+    lcd_data(2);
+    lcd_data(3);
+    lcd_data(4);
+    lcd_string("      voskomm");
+
     lcd_setcursor(0, 2);
-    lcd_string("LXR Drums V0.37");
+    lcd_data(5);
+    lcd_data(6);
+    lcd_data(7);
+    lcd_string("helicase 0.00");
 }
 
 static inline uint32_t irq_getBasepri(void)
@@ -424,6 +432,7 @@ int main(void)
     lcd_init();
     lcd_tim7_init();
     boot_show_splash();
+    // splashAnimation_play();
     encode_init();
     din_init();
     dout_init();
@@ -861,6 +870,29 @@ int main(void)
                 if (filesystem_hasBootWinner()) {
                     boot_restored_winner =
                         filesystem_autosaveBootReaderBlocking();
+                    if (filesystem_bootLoggingTimedOut())
+                        goto boot_filesystem_timeout;
+                }
+                /*
+                 * HCNAMES-authoritative boot load between reader and canonical fallback.
+                 *
+                 * What: when the winner reader could not restore (no valid winner, Bank
+                 * mismatch, or reader decline), tries the special-case load driven
+                 * entirely by .hcnames — valid only when the register Bank row equals
+                 * the settings.cfg boot Bank and every register row is refreshed. Why:
+                 * that is exactly the state left by "load Bank in menu, power off before
+                 * menu exit", and in it the register fully names every library source;
+                 * proceeding from it respects all Scene/Kit/Instrument overrides that a
+                 * canonical wholesale Bank Load would discard. Inputs:
+                 * boot_restored_winner. Outputs: either the authoritative load
+                 * completes and the canonical ladder is skipped, or the ladder runs
+                 * unchanged. Affiliates:
+                 * filesystem_bootHcnamesAuthoritativeLoad(),
+                 * filesystem_autosaveBootReaderBlocking(), main.c stage 11/12.
+                 */
+                if (!boot_restored_winner && filesystem_autosaveEnabled()) {
+                    boot_restored_winner =
+                        filesystem_bootHcnamesAuthoritativeLoad();
                     if (filesystem_bootLoggingTimedOut())
                         goto boot_filesystem_timeout;
                 }

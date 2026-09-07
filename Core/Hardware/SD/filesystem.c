@@ -6002,6 +6002,74 @@ static void filesystem_cacheCurrentResidentSceneNames(void)
     }
 }
 
+/*
+ * Replace the Kit-and-Instruments block of every Scene a Scene action
+ * committed.
+ *
+ * What: for every destination Scene in op_scene_load_scene_mask, overlays
+ * that Scene's Kit row and its six Instrument rows in the borrowed
+ * HCNAMES cache from the operation-scoped identity store. This is the
+ * Scene-action counterpart of filesystem_cacheCurrentResidentKitNames():
+ * the same seven name cells, selected by the Scene-operation mask instead
+ * of the Kit-operation mask.
+ *
+ * Why: a root Scene Load/Save replaces the entire embedded hierarchy, so
+ * the durable register must name the new Kit and member Instruments
+ * exactly as the physical "Kit <name>" folder and member files were read
+ * or written. The existing Scene update refreshes only Scene-row names,
+ * which leaves stale Kit-row names behind and makes the boot reader's
+ * Case-2 narrow Kit path construct a folder that does not exist (Session
+ * 061, 061_READER_LOADED_SCENES_INVALID.md). Bank, Scene, Kit, and
+ * unselected Instrument rows remain copies of the file that was read.
+ *
+ * Inputs: op_scene_load_scene_mask (request-stable destination mask,
+ * single-bit for Scene Save, arbitrary for multi-destination Scene Load)
+ * and the identity store (FS_IDENTITY_KIT_ROW,
+ * FS_IDENTITY_INSTRUMENT_ROW_0..5) staged by the Scene action's commit
+ * path before this update ran. Outputs: hcnames_name_mirror[] cells for
+ * rows 17..32 and 33..128 of every selected Scene; no file I/O and no
+ * source-cell or refreshed-witness change (sources and R were staged at
+ * commit).
+ *
+ * Accessors: filesystem_residentKitRow(),
+ * filesystem_residentInstrumentRow(), filesystem_identityName(),
+ * filesystem_cacheResidentName(). Affiliates:
+ * filesystem_cacheCurrentResidentSceneNames() (Scene-row names),
+ * filesystem_cacheCurrentResidentKitNames() (the Kit-op model),
+ * filesystem_residentNames_tick() phases 3 and 7,
+ * filesystem_requestSaveSceneDirectory(),
+ * filesystem_prepareBankSceneSaveSource(), and the Scene Load commit
+ * block near filesystem.c:11783.
+ */
+static void filesystem_cacheCurrentResidentSceneChildNames(void)
+{
+    uint8_t scene_index;
+
+    for (scene_index = 0u;
+         scene_index < STORAGE_BANK_SCENE_MAX_SLOTS;
+         scene_index++) {
+        uint16_t row;
+        uint8_t slot;
+        if ((op_scene_load_scene_mask &
+             (uint16_t)(1u << scene_index)) == 0u) {
+            continue;
+        }
+        row = filesystem_residentKitRow(scene_index);
+        if (row < FS_RESIDENT_NAMES_ROW_COUNT) {
+            filesystem_cacheResidentName(
+                row, filesystem_identityName(FS_IDENTITY_KIT_ROW));
+        }
+        for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
+            row = filesystem_residentInstrumentRow(scene_index, slot);
+            if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
+                continue;
+            filesystem_cacheResidentName(
+                row, filesystem_identityName((uint8_t)(
+                    FS_IDENTITY_INSTRUMENT_ROW_0 + slot)));
+        }
+    }
+}
+
 static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
 {
     uint8_t slot;
@@ -6153,11 +6221,29 @@ static void filesystem_residentNames_tick(void)
             filesystem_finish(op_close_status);
             return;
         }
+        /*
+         * Scene actions now publish the complete committed hierarchy.
+         *
+         * What: the Scene-op register overlay runs both existing helpers in
+         * order — Scene-row names first, then the committed Kit and Instrument
+         * rows from the identity store. Why: a Scene Load/Save replaces the
+         * whole embedded hierarchy, and the reader's Case-2 Kit/Instrument
+         * resolution derives physical folder names from these rows; publishing
+         * only the Scene row left the previous Bank-embedded Kit names behind
+         * and invalidated library-sourced Scenes at boot (Session 061). Inputs:
+         * the fully read old register image plus the commit-staged identity
+         * store. Outputs: the complete per-Scene name block in the borrowed
+         * cache before the temp-file writer streams it. Affiliates:
+         * filesystem_cacheCurrentResidentSceneNames(),
+         * filesystem_cacheCurrentResidentSceneChildNames(), the Scene Load/Save
+         * commit paths, and the boot reader's narrow Kit/Instrument loaders.
+         */
         if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
             filesystem_cacheCurrentResidentKitNames();
-        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
+        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE) {
             filesystem_cacheCurrentResidentSceneNames();
-        else
+            filesystem_cacheCurrentResidentSceneChildNames();
+        } else
             filesystem_cacheCurrentResidentInstrumentNames();
         /* The source image was read successfully, but the writer below must
          * never advertise it while its replacement temp file is incomplete. */
@@ -6370,9 +6456,13 @@ static void filesystem_residentNames_tick(void)
         filesystem_prepareResidentNamesCache();
         if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT)
             filesystem_cacheCurrentResidentKitNames();
-        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE)
+        else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE) {
+            /* Phase-7 bootstrap twin of the phase-3 comment: a first register
+             * created by a Scene action must also carry the committed Kit and
+             * six Instrument rows, not only the Scene-row names. */
             filesystem_cacheCurrentResidentSceneNames();
-        else
+            filesystem_cacheCurrentResidentSceneChildNames();
+        } else
             filesystem_cacheCurrentResidentInstrumentNames();
         op_file_ready = false;
         op_file = NULL;
@@ -12392,6 +12482,22 @@ static void filesystem_loadSceneDirectory_tick(void)
     }
 
 #endif
+    /*
+     * Unregistered Scene child (future HCNAMES row).
+     *
+     * What: pattern.pat / effects.fx are committed by this Scene action but
+     * have no /.hcnames identity row today (Pattern format is not final;
+     * Effect is a validation-only placeholder with zero live parameters).
+     * Why: the Session 061 invariant requires every Load/Save to mark all
+     * committed children; these two children cannot be marked until they
+     * gain durable identity rows. When they do, they must join the Scene
+     * action's marked-children block (filesystem_cacheCurrentResidentScene
+     * ChildNames(), the refreshed-witness staging, and the boot reader's
+     * per-Scene evaluation) in the same change that introduces their rows.
+     * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
+     * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
+     * reader's Case-2 narrow loaders.
+     */
     case 53: /* READ text pattern placeholder/draft */
         st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
                                      sizeof(op_line_buf), &line_ready, &eof);
@@ -15398,6 +15504,29 @@ static uint8_t filesystem_prepareBankSceneSaveSource(uint8_t scene_index)
                filesystem_residentSceneRow(scene_index)),
            STORAGE_SCENE_DISPLAY_NAME_LEN);
     op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
+    /*
+     * Stage the child's Kit identity from its own register row.
+     *
+     * What: copies the child Scene's Kit-row name into FS_IDENTITY_KIT_ROW
+     * beside the existing six Instrument-identity captures. Why: the
+     * prepare helper already rebuilds the embedded "Kit <name>" child and
+     * the six member stems from the same register rows it was handed; the
+     * identity store must name the same hierarchy so any later Scene-op
+     * register overlay (filesystem_cacheCurrentResidentSceneChildNames()) or
+     * member-filename derivation agrees with what this child wrote. Without
+     * it the Kit identity can remain stale after a Bank Save while the
+     * Instrument identities are fresh. Inputs: scene_index and the register
+     * mirror. Outputs: the identity store's Kit cell; no file I/O.
+     * Accessors: filesystem_cachedResidentName(), filesystem_residentKitRow(),
+     * filesystem_setIdentityName(). Affiliates:
+     * filesystem_makeSceneEmbeddedKitDir(), filesystem_memberFilename(),
+     * filesystem_saveSceneDirectory_tick() phase 8,
+     * filesystem_cacheCurrentResidentSceneChildNames().
+     */
+    filesystem_setIdentityName(
+        FS_IDENTITY_KIT_ROW,
+        filesystem_cachedResidentName(
+            filesystem_residentKitRow(scene_index)));
     filesystem_makeSceneEmbeddedKitDir(
         op_save_scene_kit_display_name,
         sizeof(op_save_scene_kit_display_name),
@@ -18174,6 +18303,22 @@ static void filesystem_saveSceneDirectory_tick(void)
         return;
     }
 
+    /*
+     * Unregistered Scene child (future HCNAMES row).
+     *
+     * What: pattern.pat / effects.fx are committed by this Scene action but
+     * have no /.hcnames identity row today (Pattern format is not final;
+     * Effect is a validation-only placeholder with zero live parameters).
+     * Why: the Session 061 invariant requires every Load/Save to mark all
+     * committed children; these two children cannot be marked until they
+     * gain durable identity rows. When they do, they must join the Scene
+     * action's marked-children block (filesystem_cacheCurrentResidentScene
+     * ChildNames(), the refreshed-witness staging, and the boot reader's
+     * per-Scene evaluation) in the same change that introduces their rows.
+     * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
+     * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
+     * reader's Case-2 narrow loaders.
+     */
     case 29:
         op_file_ready = false;
         op_file = NULL;
@@ -18213,6 +18358,22 @@ static void filesystem_saveSceneDirectory_tick(void)
             op_phase = 33u;
         return;
 
+    /*
+     * Unregistered Scene child (future HCNAMES row).
+     *
+     * What: pattern.pat / effects.fx are committed by this Scene action but
+     * have no /.hcnames identity row today (Pattern format is not final;
+     * Effect is a validation-only placeholder with zero live parameters).
+     * Why: the Session 061 invariant requires every Load/Save to mark all
+     * committed children; these two children cannot be marked until they
+     * gain durable identity rows. When they do, they must join the Scene
+     * action's marked-children block (filesystem_cacheCurrentResidentScene
+     * ChildNames(), the refreshed-witness staging, and the boot reader's
+     * per-Scene evaluation) in the same change that introduces their rows.
+     * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
+     * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
+     * reader's Case-2 narrow loaders.
+     */
     case 33:
         if (!op_close_done)
             return;
@@ -26556,6 +26717,158 @@ static uint8_t filesystem_bootReaderEnterKitFolder(
 }
 
 /*
+ * Load one Bank container blocking, from its register identity.
+ *
+ * What: enters Bank/NNN <name>/ using the register Bank-row display name,
+ * scans the 00..15 child directories with the blocking finder to build
+ * the Scene-present mask, parses bankset.bcg through the shared
+ * storage_bankset parser, and commits BankData: restore slot, display
+ * name, present mask, active Scene, voice-edit mask, and the
+ * has-resident-bank bit. Why: the HCNAMES-authoritative boot path must
+ * construct the Bank without the .hcprms payload and without the
+ * asynchronous Bank Load state machine (which would also rewrite the
+ * register); the boot reader's own step-2 payload apply is not usable
+ * here. Inputs: bank_slot, the parsed register mirror (Bank row name),
+ * and op_bankset_state scratch. Outputs: committed BankData and a
+ * returned present mask or zero on failure; no .hcnames writes.
+ * The mask is the full 16-bit child presence (an empty Bank commits
+ * and returns zero, which the caller treats as decline). Accessors:
+ * filesystem_blockChdir(),
+ * filesystem_bootReaderEnterDirectory(), filesystem_makeNumberedDir(),
+ * filesystem_blockOpenDirLfn(), afatfs_findFirstObject(),
+ * filesystem_blockFindNextObject(), storage_parseBankSceneFolder(),
+ * storage_banksetInit/ParseLine/Finalize(), bank_set* accessors.
+ * Affiliates: filesystem_quarantineScenesInParentBlocking() (the same
+ * blocking-scan pattern, filesystem.c:21823), the runtime Bank Load
+ * bankset phases (filesystem.c:13305-13376), and
+ * filesystem_bootHcnamesAuthoritativeLoad().
+ */
+static uint16_t filesystem_bootNarrowLoadBank(uint16_t bank_slot)
+{
+    afatfsFilePtr_t bank_dir;
+    afatfsFilePtr_t file;
+    afatfsObjectFinder_t finder;
+    afatfsObjectInfo_t object;
+    afatfsOperationStatus_e ast;
+    char dir_name[40];
+    char display[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+    uint16_t present_mask = 0u;
+    uint8_t active_scene;
+    uint8_t child_slot;
+    uint8_t len = 0u;
+    uint8_t ready = 0u;
+    uint8_t eof_flag = 0u;
+    uint8_t ok = 0u;
+
+    if (bank_slot >= FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT)
+        return 0u;
+    /* Enter Bank/<NNN Name>/ from the register Bank row identity. */
+    if (!filesystem_blockChdir(NULL) ||
+        !filesystem_bootReaderEnterDirectory(STORAGE_ROOT_BANK)) {
+        return 0u;
+    }
+    filesystem_makeNumberedDir(dir_name, bank_slot,
+                               hcnames_name_mirror[FS_IDENTITY_BANK_ROW]);
+    bank_dir = filesystem_blockOpenDirLfn(dir_name);
+    if (!bank_dir)
+        return 0u;
+    if (!filesystem_blockChdir(bank_dir)) {
+        (void)filesystem_blockClose(bank_dir);
+        return 0u;
+    }
+    /* Scan the 00..15 child directories into the presence mask. */
+    afatfs_findFirstObject(bank_dir, &finder);
+    for (;;) {
+        ast = filesystem_blockFindNextObject(bank_dir, &finder, &object);
+        if (ast == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(bank_dir, &finder);
+            (void)filesystem_blockClose(bank_dir);
+            return 0u;
+        }
+        if (object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(bank_dir, &finder);
+            break;
+        }
+        if (object.id.kind == AFATFS_OBJECT_DIRECTORY &&
+            storage_parseBankSceneFolder(object.id.displayName,
+                                         &child_slot, display)) {
+            present_mask = (uint16_t)(
+                present_mask | (uint16_t)(1u << child_slot));
+        }
+    }
+    /* Parse bankset.bcg relative to the current (Bank) directory. */
+    storage_banksetInit(&op_bankset_state);
+    filesystem_resetTextReader();
+    file = filesystem_blockOpenLfn(STORAGE_BANKSET_FILENAME);
+    if (!file) {
+        (void)filesystem_blockClose(bank_dir);
+        return 0u;
+    }
+    for (;;) {
+        storage_status_t st = filesystem_bootReadLineBlocking(
+            file, op_line_buf, &len, sizeof(op_line_buf),
+            &ready, &eof_flag);
+
+        if (st != STORAGE_STATUS_OK)
+            break;
+        if (ready) {
+            st = storage_banksetParseLine(&op_bankset_state,
+                                          op_line_buf);
+            if (st != STORAGE_STATUS_OK)
+                break;
+            ready = 0u;
+            continue;
+        }
+        if (eof_flag) {
+            ok = (uint8_t)(storage_banksetFinalize(&op_bankset_state) ==
+                           STORAGE_STATUS_OK);
+            break;
+        }
+    }
+    (void)filesystem_blockClose(file);
+    (void)filesystem_blockClose(bank_dir);
+    if (!ok)
+        return 0u;
+    /*
+     * Normalize the bankset active Scene against the discovered children,
+     * mirroring the runtime Bank Load's phase-17 choice: an active slot
+     * absent from the present mask falls back to the first present child
+     * (zero for an empty Bank).
+     */
+    active_scene = op_bankset_state.active_scene;
+    if (active_scene >= STORAGE_BANK_SCENE_MAX_SLOTS)
+        active_scene = 0u;
+    if ((present_mask & (uint16_t)(1u << active_scene)) == 0u) {
+        if (present_mask != 0u) {
+            for (child_slot = 0u;
+                 child_slot < STORAGE_BANK_SCENE_MAX_SLOTS;
+                 child_slot++) {
+                if ((present_mask &
+                     (uint16_t)(1u << child_slot)) != 0u) {
+                    active_scene = child_slot;
+                    break;
+                }
+            }
+        } else {
+            active_scene = 0u;
+        }
+    }
+    /* Commit the container metadata from the register/bankset values. */
+    bank_setDisplayName(hcnames_name_mirror[FS_IDENTITY_BANK_ROW]);
+    (void)bank_setScenePresentMask(present_mask);
+    bank_selectActiveSceneForEditMask(active_scene);
+    bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
+    bank_setRestoreBankSlot(bank_slot);
+    bank_setHasResidentBank(1u);
+    /* Reader active-Scene tail: same realignment the winner reader's
+     * step-2 apply performs after committing the Bank. */
+    scene_selectActive(active_scene);
+    seq_alignActivePatternToScene(active_scene);
+    menu_setShownPattern(active_scene);
+    (void)filesystem_blockChdir(NULL);
+    return present_mask;
+}
+/*
  * Parse one kitset.kcg from the current directory, blocking.
  *
  * What: opens kitset.kcg in cwd and streams every line through the shared
@@ -27126,6 +27439,40 @@ static void filesystem_bootReaderEmptyScene(uint8_t scene_index)
 }
 
 /*
+ * Resolve one resident row for boot recovery with the shared guard.
+ *
+ * What: runs filesystem_resolveResidentSource() and applies the
+ * instrument-row numeric-source guard: a numeric token sitting directly
+ * on an Instrument row (resolved_row == row) is corrupt and becomes
+ * UNKNOWN, while a numeric slot inherited from a Bank/Scene/Kit parent
+ * row remains valid. Why: the winner reader's per-Scene evaluation and
+ * the new HCNAMES-authoritative loader must reject the same malformed
+ * register the same way; duplicating the guard risks the two paths
+ * diverging again (Session 061 Phase 5b). Inputs: one HCNAMES row.
+ * Outputs: the resolved source and, via *resolved_row, the row that
+ * supplied the direct source. Accessors:
+ * filesystem_resolveResidentSource(), filesystem_residentSource().
+ * Affiliates: filesystem_bootReaderEvaluateScene() and
+ * filesystem_bootHcnamesAuthoritativeLoad().
+ */
+static uint16_t filesystem_bootReaderResolveResidentRow(
+    uint16_t row, uint16_t *resolved_row)
+{
+    uint16_t resolved = filesystem_resolveResidentSource(
+        row, resolved_row);
+
+    if (resolved < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT &&
+        row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE &&
+        resolved_row && *resolved_row == row) {
+        /* No writer produces numeric Instrument-row sources; a
+         * numeric token directly on an Instrument row (not
+         * inherited from a parent) is unresolvable. */
+        resolved = FS_RESIDENT_SOURCE_UNKNOWN;
+    }
+    return resolved;
+}
+
+/*
  * Evaluate the eight identity rows of one present Scene (Case 1/2/3).
  *
  * What: reads the Scene's 1,920-byte winner payload section once and
@@ -27232,18 +27579,10 @@ static uint8_t filesystem_bootReaderEvaluateScene(
         /* Case 2 or Case 3: resolve the row's durable source. */
         {
             uint16_t resolved_row = FS_RESIDENT_NAMES_ROW_COUNT;
-            uint16_t resolved = filesystem_resolveResidentSource(
+            uint16_t resolved = filesystem_bootReaderResolveResidentRow(
                 row, &resolved_row);
             uint8_t load_ok = 0u;
 
-            if (resolved < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT &&
-                row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE &&
-                resolved_row == row) {
-                /* No writer produces numeric Instrument-row sources; a
-                 * numeric token directly on an Instrument row (not
-                 * inherited from a parent) is unresolvable. */
-                resolved = FS_RESIDENT_SOURCE_UNKNOWN;
-            }
             if (resolved < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT ||
                 resolved == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT) {
                 if (index == 0u) {
@@ -27279,6 +27618,10 @@ static uint8_t filesystem_bootReaderEvaluateScene(
                 fs_boot_latch.case3_scene_mask = (uint16_t)(
                     fs_boot_latch.case3_scene_mask |
                     (uint16_t)(1u << scene_index));
+                /* A watchdog/fail-fast expiry is not an unresolvable source:
+                 * decline instead of mass-emptying. */
+                if (filesystem_bootLoggingTimedOut())
+                    return 0u;
                 filesystem_bootReaderEmptyScene(scene_index);
                 if (rows_changed)
                     *rows_changed = 1u;
@@ -27425,6 +27768,191 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
         AUTOSAVE_TRACE_STAGE_BOOT_READER, 0x80u,
         ((uint32_t)fs_boot_latch.case2_scene_mask) |
         ((uint32_t)fs_boot_latch.case3_scene_mask << 16u));
+    /* Persist this boot's per-row Q records before the post-boot drain's
+     * dirty-mark flood can overflow the retained trace ring. */
+    (void)filesystem_autosaveTraceFlushBlocking();
+    return 1u;
+}
+
+/*
+ * Boot load driven entirely by .hcnames when it is authoritative.
+ *
+ * What: parses .hcnames (temp-file prelude first, then the register),
+ * then requires the two special-case checks — the register Bank row is a
+ * direct numeric slot equal to bank_restoreBankSlot() (the settings.cfg
+ * boot Bank), and all 129 rows carry the refreshed witness. When both
+ * hold, the register is authoritative: this function constructs the
+ * whole resident state from it — the Bank container via
+ * filesystem_bootNarrowLoadBank(), then every present Scene's eight rows
+ * via resolve-plus-narrow-load, Bank-inherited rows from the Bank tree
+ * and direct rows from their Scene/Kit/Instrument libraries, then
+ * pattern.pat per non-emptied Scene. Any unresolvable child of a Scene
+ * applies the unbreakable rule: the Scene is not loaded, it is created
+ * empty and noticed. Returns 1 on a completed authoritative load and 0
+ * when either check fails or a hard failure occurs, in which case the
+ * caller falls through to the canonical Bank Load unchanged.
+ */
+uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
+{
+    afatfsFilePtr_t register_file;
+    uint8_t register_ok = 0u;
+    uint8_t adopted_temp = 0u;
+    uint8_t rows_changed = 0u;
+    uint8_t scene_index;
+    uint16_t present_mask;
+    uint16_t boot_bank_slot = bank_restoreBankSlot();
+
+    if (boot_bank_slot >= FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT)
+        return 0u;
+#if DEV_MODE_LOGGING
+    filesystem_bootLoggingArm("HCAUTH  ");
+#endif
+    /* Step 1: read .hcnames (with its temp-file crash prelude first).
+     * This path never consults .hcprms, so there is no winner-based
+     * regeneration fallback: an unreadable register simply declines. */
+    filesystem_prepareResidentNamesCache();
+    register_file = filesystem_blockOpenLfn(FS_RESIDENT_NAMES_TEMP_FILENAME);
+    if (register_file) {
+        register_ok = filesystem_bootReaderParseRegisterFile(register_file);
+        (void)filesystem_blockClose(register_file);
+        adopted_temp = register_ok;
+    }
+    if (!register_ok) {
+        register_file = filesystem_blockOpenLfn(FS_RESIDENT_NAMES_FILENAME);
+        if (register_file) {
+            register_ok = filesystem_bootReaderParseRegisterFile(
+                register_file);
+            (void)filesystem_blockClose(register_file);
+        }
+    }
+    if (!register_ok)
+        return 0u;
+    hcnames_mirror_valid = FS_HCNAMES_MIRROR_VALID;
+    /* Step 2: the two special-case checks (16.3). Either failure declines;
+     * the caller then runs the canonical Bank Load unchanged. */
+    if ((fs_resident_source[FS_IDENTITY_BANK_ROW] &
+         FS_RESIDENT_SOURCE_VALUE_MASK) != boot_bank_slot) {
+        return 0u;
+    }
+    {
+        uint16_t row;
+        for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+            if ((fs_resident_source[row] &
+                 FS_RESIDENT_SOURCE_REFRESHED_FLAG) == 0u) {
+                return 0u;
+            }
+        }
+    }
+    /* Step 3: construct the Bank container from the register/bankset.
+     * A zero present mask (hard failure or a committed empty Bank)
+     * declines so the canonical ladder keeps its empty-Bank semantics. */
+    present_mask = filesystem_bootNarrowLoadBank(boot_bank_slot);
+    if (present_mask == 0u)
+        return 0u;
+    /* The Bank loader navigated and scanned; reverify root before the
+     * per-Scene narrow loads so a failed return-to-root declines instead of
+     * poisoning every subsequent relative open. */
+    if (!filesystem_blockChdir(NULL))
+        return 0u;
+    /* Step 4: per-Scene resolution of the eight rows in fixed order.
+     * Every row is refreshed by check 2, so this is Case 2/3 only. */
+    for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
+         scene_index++) {
+        uint8_t index;
+
+        if ((present_mask & (uint16_t)(1u << scene_index)) == 0u)
+            continue;
+        for (index = 0u; index < 8u; index++) {
+            uint16_t row;
+            uint16_t resolved_row = FS_RESIDENT_NAMES_ROW_COUNT;
+            uint16_t resolved;
+            uint8_t load_ok = 0u;
+
+            if (index == 0u)
+                row = filesystem_residentSceneRow(scene_index);
+            else if (index == 1u)
+                row = filesystem_residentKitRow(scene_index);
+            else
+                row = filesystem_residentInstrumentRow(
+                    scene_index, (uint8_t)(index - 2u));
+            if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
+                return 0u;
+            resolved = filesystem_bootReaderResolveResidentRow(
+                row, &resolved_row);
+            if (resolved < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT ||
+                resolved == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT) {
+                if (index == 0u) {
+                    load_ok = filesystem_bootReaderNarrowLoadScene(
+                        scene_index, resolved, resolved_row);
+                } else if (index == 1u) {
+                    load_ok = filesystem_bootReaderNarrowLoadKit(
+                        scene_index, resolved, resolved_row);
+                } else {
+                    uint8_t slot = (uint8_t)(index - 2u);
+                    instrument_type_t type = (instrument_type_t)
+                        fs_stage_workspace.boot_reader_type[
+                            (uint16_t)scene_index *
+                                AUTOSAVE_INSTRUMENTS_PER_KIT + slot];
+
+                    load_ok = filesystem_bootReaderNarrowLoadInstrument(
+                        scene_index, slot, type, resolved, resolved_row);
+                }
+            }
+            if (load_ok) {
+                autosaveTrace_record(
+                    AUTOSAVE_TRACE_STAGE_BOOT_READER, 0x04u,
+                    ((uint32_t)scene_index) | ((uint32_t)row << 8u) |
+                    ((uint32_t)resolved << 16u));
+                fs_boot_latch.case2_scene_mask = (uint16_t)(
+                    fs_boot_latch.case2_scene_mask |
+                    (uint16_t)(1u << scene_index));
+            } else {
+                /* Unbreakable rule (16.4): never assemble or keep a
+                 * partially loaded Scene. */
+                autosaveTrace_record(
+                    AUTOSAVE_TRACE_STAGE_BOOT_READER, 0x02u,
+                    ((uint32_t)scene_index) | ((uint32_t)row << 8u));
+                fs_boot_latch.case3_scene_mask = (uint16_t)(
+                    fs_boot_latch.case3_scene_mask |
+                    (uint16_t)(1u << scene_index));
+                /* A watchdog/fail-fast expiry is not an unresolvable source:
+                 * decline instead of mass-emptying. */
+                if (filesystem_bootLoggingTimedOut())
+                    return 0u;
+                filesystem_bootReaderEmptyScene(scene_index);
+                rows_changed = 1u;
+                break; /* stop evaluating this Scene's remaining rows */
+            }
+        }
+    }
+    /* Step 5: pattern.pat per present Scene not emptied by step 4. */
+    for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
+         scene_index++) {
+        if ((present_mask & (uint16_t)(1u << scene_index)) == 0u)
+            continue;
+        if (fs_boot_latch.case3_scene_mask &
+            (uint16_t)(1u << scene_index)) {
+            continue;
+        }
+        (void)filesystem_bootReaderLoadPattern(scene_index);
+    }
+    /* Step 6: persist register changes and any adopted crash prelude.
+     * Successfully resolved rows keep their existing correct cells; only
+     * emptied Scenes diverged from the parsed register image. */
+    if (rows_changed || adopted_temp) {
+        (void)filesystem_publishHcnamesRegisterBlocking();
+    }
+    /* Step 7: whole-Bank dirty replay latch plus the shared summary.
+     * The bank_fallback replay marks the constructed Bank dirty so the
+     * first drain captures it and clears the refreshed witnesses. */
+    filesystem_setBootLatchBankFallback();
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_BOOT_READER, 0x80u,
+        ((uint32_t)fs_boot_latch.case2_scene_mask) |
+        ((uint32_t)fs_boot_latch.case3_scene_mask << 16u));
+    /* Persist this boot's per-row Q records before the post-boot drain's
+     * dirty-mark flood can overflow the retained trace ring. */
+    (void)filesystem_autosaveTraceFlushBlocking();
     return 1u;
 }
 
@@ -27718,6 +28246,39 @@ bool filesystem_requestSaveSceneDirectory(uint16_t slot,
      * Affiliates: filesystem_cacheCurrentResidentSceneNames() and Menu exit.
      */
     filesystem_setIdentityName(FS_IDENTITY_SCENE_ROW, display_name);
+    /*
+     * Capture the source Scene's Kit and Instrument names before writing.
+     *
+     * What: seeds FS_IDENTITY_KIT_ROW and the six Instrument identity cells
+     * from the source Scene's own register rows. Why: Scene Save writes the
+     * embedded "Kit <name>" folder from the Kit identity and derives every
+     * member filename from the Instrument identities
+     * (filesystem_memberFilename()), then the post-save HCNAMES update
+     * republishes those same identity cells. Save:[Scene] must therefore be
+     * correct even when the user never traversed the Kit/Instrument menu,
+     * whose entry read would otherwise be the only place these identities
+     * were seeded. Inputs: source_scene (request-stable) and the current
+     * register mirror. Outputs: the identity store names the exact Kit and
+     * member stems this save is about to write; no new storage.
+     * Accessors: filesystem_residentKitName(),
+     * filesystem_residentInstrumentName(), filesystem_setIdentityName().
+     * Affiliates: filesystem_makeSceneEmbeddedKitDir(),
+     * filesystem_memberFilename(),
+     * filesystem_cacheCurrentResidentSceneChildNames(),
+     * filesystem_prepareBankSceneSaveSource(), and Menu's entry-time
+     * identity seeding (menu.c:3840-3846).
+     */
+    filesystem_setIdentityName(
+        FS_IDENTITY_KIT_ROW,
+        filesystem_residentKitName(source_scene));
+    {
+        uint8_t voice;
+        for (voice = 0u; voice < STORAGE_KIT_SLOT_COUNT; voice++) {
+            filesystem_setIdentityName(
+                (uint8_t)(FS_IDENTITY_INSTRUMENT_ROW_0 + voice),
+                filesystem_residentInstrumentName(source_scene, voice));
+        }
+    }
     filesystem_makeSceneEmbeddedKitDir(
         op_save_scene_kit_display_name,
         sizeof(op_save_scene_kit_display_name),
@@ -28377,11 +28938,15 @@ bool filesystem_requestUpdateResidentSceneNames(
      *
      * Inputs: one or more destination Scene bits, the captured directory/save
      * name, and callback. Output: the reader preserves every unrelated
-     * HCNAMES row, then replaces only selected Scene rows and rewrites the
-     * variable-length register through its normal flush gate. A multi-target
-     * root Scene Load legitimately assigns one source name to all destinations.
-     * No additional SRAM array is allocated; the supplied name uses existing
-     * operation scratch and the file uses fs_list_cache_name temporarily.
+     * HCNAMES row, then overlays the selected Scene rows and rewrites the
+     * variable-length register through its normal flush gate. The overlay also
+     * publishes the committed Kit and six Instrument rows of every selected
+     * Scene from the identity store (Session 061): callers that stage a Scene
+     * action must have seeded those identity cells at commit, exactly as the
+     * root Scene Load/Save paths do. A multi-target root Scene Load
+     * legitimately assigns one source name to all destinations. No additional
+     * SRAM array is allocated; the supplied name uses existing operation
+     * scratch and the file uses fs_list_cache_name temporarily.
      */
     if (!name || status == FS_STATUS_BUSY)
         return false;

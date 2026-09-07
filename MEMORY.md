@@ -17,17 +17,37 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 061 `.hcnames` instrument-type field
-implementation on branch `dev-ph3-autosave-ph6` (planning commits `919cfcc`
-and `ce796ae`); the code and documentation edits for
-`S061_HCNAMES_INST_TYPE.md` are uncommitted and await hardware card
-verification. Clean logging-on build reports `text=392,148`, `data=404`,
-`bss=96,184` (no new RAM; the header/type work reuses existing scratch).
-`.hcnames` now opens with a `#types` header line and Instrument rows
-(33..128) carry a mandatory third column with the typed-directory token.
+**Current working source**: Session 061 boot-reader follow-up fix on branch
+`dev-ph3-autosave-ph6` (HEAD `a9fd88d`, the reader implementation and the
+`061_READER_LOADED_SCENES_INVALID.md` analysis). The Option-A fix from that
+document is implemented and build-verified but **uncommitted**, awaiting
+hardware fixtures 1-7 (§14 of the document): Scene-op HCNAMES updates now
+publish the complete committed hierarchy (Scene + Kit + six Instrument name
+cells from the identity store, via new static
+`filesystem_cacheCurrentResidentSceneChildNames()` at both register-update
+dispatch phases), Scene Save request seeds the Kit/Instrument identities from
+the source Scene's register rows, and Bank Save's per-child preparation
+stages the child Kit identity. The Scene Load refreshed witness needs no new
+code: it is already staged at the shared loader's terminal boundary (case 61,
+Session 060 Phase C). Build: `text=405,084`, `data=404`, `bss=96,212`; no new
+RAM (the fix reuses the existing mirror, identity store, and op-scratch).
 Hardware tests 1-4 in `S060PHASE_D_RE_DIRTY.md` Section 5 remain the
 outstanding Session 060 Phase D work; Session 061 verification steps are
-listed at the end of `S061_HCNAMES_INST_TYPE.md`.
+listed in `061_READER_LOADED_SCENES_INVALID.md` §14.
+
+Phase 2 of that document (HCNAMES-authoritative boot load, §16-17) is
+implemented and build-verified but uncommitted, awaiting hardware
+fixtures 16.8: `filesystem_bootHcnamesAuthoritativeLoad()` (public,
+main.c stage 11) runs between the winner reader and the canonical
+ladder when the register Bank row equals settings.cfg's boot Bank and
+all 129 register rows carry `R`; `filesystem_bootNarrowLoadBank()`
+commits the Bank container from the register/bankset.bcg, per-Scene
+resolution reuses `filesystem_bootReaderResolveResidentRow()` (C7,
+shared with `filesystem_bootReaderEvaluateScene()`) and the narrow
+loaders, and unresolvable children empty the whole Scene (unbreakable
+rule). No new RAM. Note: the tree also carries unrelated in-progress
+user splash/branding edits (`SplashAnimation.*`, `lcd.c`, `Makefile`);
+do not fold those into the Phase-2 commit.
 
 ## RAM Allocation Approval Policy
 

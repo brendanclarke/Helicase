@@ -119,16 +119,6 @@ static void delay_us(uint32_t us)
 /* -----------------------------------------------------------------------
 ** char definitions — custom CGRAM defined characters {lcd_string(0x00-0x08)}
 ** ----------------------------------------------------------------------- */
-static const uint8_t lcd_char_bell[8] = {
-    0b00100, //    #
-    0b01110, //   ###
-    0b01110, //   ###
-    0b01110, //   ###
-    0b11111, //  #####
-    0b00000, //  
-    0b00100, //    #
-    0b00000  //  
-};
 
 static const uint8_t lcd_char_pop[8] = {
     0b00000, //    
@@ -141,28 +131,6 @@ static const uint8_t lcd_char_pop[8] = {
     0b00000  //  
 };
 
-static const uint8_t lcd_char_check[8] = {
-    0b00000,
-    0b00000,
-    0b00001,
-    0b00011,
-    0b10110,
-    0b11100,
-    0b01000,
-    0b00000
-};
-
-static const uint8_t lcd_char_heart[8] = {
-    0b00000, 
-    0b01010, 
-    0b11111, 
-    0b11111, 
-    0b01110, 
-    0b00100, 
-    0b00000, 
-    0b00000
-};
-
 static const uint8_t lcd_char_ellipsis[8] = {
     0b00000, 
     0b00000, 
@@ -173,6 +141,13 @@ static const uint8_t lcd_char_ellipsis[8] = {
     0b10101, 
     0b00000
 };
+
+static const uint8_t lcd_splash_char_1[8] = { 0x0e, 0x0e, 0x06, 0x07, 0x03, 0x03, 0x01, 0x00 }; /* top-left */
+static const uint8_t lcd_splash_char_2[8] = { 0x00, 0x1f, 0x00, 0x00, 0x0f, 0x00, 0x10, 0x1e }; /* top-mid */
+static const uint8_t lcd_splash_char_3[8] = { 0x02, 0x02, 0x02, 0x04, 0x04, 0x08, 0x10, 0x00 }; /* top-right */
+static const uint8_t lcd_splash_char_4[8] = { 0x00, 0x00, 0x00, 0x01, 0x02, 0x04, 0x04, 0x09 }; /* bottom-left */
+static const uint8_t lcd_splash_char_5[8] = { 0x07, 0x01, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x1f }; /* bottom-mid */
+static const uint8_t lcd_splash_char_6[8] = { 0x00, 0x10, 0x18, 0x1c, 0x0c, 0x0e, 0x06, 0x06 }; /* bottom-right */
 
 
 /* -----------------------------------------------------------------------
@@ -356,10 +331,13 @@ void lcd_init(void)
     lcd_command_blocking(LCD_CLEAR_DISPLAY);
     lcd_define_char(0, lcd_char_ellipsis);
     lcd_define_char(1, lcd_char_pop);
-    lcd_define_char(2, lcd_char_check);
-    lcd_define_char(3, lcd_char_heart);
-    lcd_define_char(4, lcd_char_bell);
-    delay_ms(2);
+    lcd_define_char(2, lcd_splash_char_1);
+    lcd_define_char(3, lcd_splash_char_2);
+    lcd_define_char(4, lcd_splash_char_3);
+    lcd_define_char(5, lcd_splash_char_4);
+    lcd_define_char(6, lcd_splash_char_5);
+    lcd_define_char(7, lcd_splash_char_6);
+    delay_ms(20);
 }
 
 /* -----------------------------------------------------------------------

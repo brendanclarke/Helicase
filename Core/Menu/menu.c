@@ -33,7 +33,6 @@
 #include "copyClearTools.h"
 #include "menuPages.h"
 #include "MenuText.h"
-// #include "Parameters.h"
 #include "ParameterArray.h"
 #include "buttonHandler.h"
 #include "lcd.h"

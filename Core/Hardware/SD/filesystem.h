@@ -341,6 +341,40 @@ uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void);
  */
 uint8_t filesystem_autosaveBootReaderBlocking(void);
 /*
+ * Boot load driven entirely by .hcnames when it is authoritative.
+ *
+ * What: parses .hcnames (temp-file prelude first, then the register),
+ * then requires the two special-case checks — the register Bank row is a
+ * direct numeric slot equal to bank_restoreBankSlot() (the settings.cfg
+ * boot Bank), and all 129 rows carry the refreshed witness. When both
+ * hold, the register is authoritative: this function constructs the
+ * whole resident state from it — the Bank container via
+ * filesystem_bootNarrowLoadBank(), then every present Scene's eight rows
+ * via resolve-plus-narrow-load, Bank-inherited rows from the Bank tree
+ * and direct rows from their Scene/Kit/Instrument libraries, then
+ * pattern.pat per non-emptied Scene. Any unresolvable child of a Scene
+ * applies the unbreakable rule: the Scene is not loaded, it is created
+ * empty and noticed. Returns 1 on a completed authoritative load and 0
+ * when either check fails or a hard failure occurs, in which case the
+ * caller falls through to the canonical Bank Load unchanged.
+ *
+ * Why: after a menu Bank Load plus further Load/Save actions, a power
+ * off before menu exit leaves every register row REFRESHED while the
+ * autosave payload is still the pre-session capture (the page guard
+ * holds the writer). The register is the freshest durable truth, so the
+ * boot must not discard it: every correctly defined sub-child source —
+ * Scene, Kit, and every single Instrument — must be respected, and a
+ * partially loaded Scene must never be assembled for a later Save
+ * (Session 061 Phase 2, SD_CARD_READER_4/5).
+ *
+ * Outputs: committed BankData and per-row resident SceneData;
+ * case2/case3 latch masks, Q trace records, notice state; register
+ * publication only for emptied Scenes. No new RAM. Affiliates: main.c
+ * stage 11, filesystem_autosaveBootReaderBlocking() (the
+ * winner-matching sibling), 061_READER_LOADED_SCENES_INVALID.md §16.
+ */
+uint8_t filesystem_bootHcnamesAuthoritativeLoad(void);
+/*
  * Flush the currently pending autosave lifecycle trace before a deliberate
  * bench-test power cycle.
  *
@@ -566,7 +600,12 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
  * directory save succeeds. After the directory is durable, the filesystem
  * rescans all of /Scene/ and rewrites the complete slot-ordered `.hcindex`
  * before invoking cb, so the index reflects the actual folder set rather than
- * only the selected save slot.
+ * only the selected save slot. The request first seeds the Kit and six
+ * Instrument identity cells from the source Scene's own register rows (the
+ * embedded "Kit <name>" folder and every member stem are then written from
+ * those identities), so a Save entered without any prior Kit/Instrument menu
+ * traversal still publishes a register that names exactly what was written
+ * (Session 061, 061_READER_LOADED_SCENES_INVALID.md).
  */
 bool filesystem_requestSaveSceneDirectory(uint16_t slot,
                                           uint8_t source_scene,
@@ -597,7 +636,11 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
  * the UI, unlike Kit Load's instant-on-scroll behavior. Its selected index row
  * is copied into existing operation scratch before separate Scene staging,
  * providing the two later directory opens and targeted HCNAMES source. The
- * name cache remains independently available throughout validation.
+ * name cache remains independently available throughout validation. After the
+ * payload commits, the targeted HCNAMES update publishes the complete
+ * committed hierarchy for every destination — the Scene row plus the embedded
+ * Kit row and its six Instrument rows from the identity store — with the
+ * refreshed witness staged at the same terminal boundary (Session 061).
  */
 bool filesystem_requestLoadSceneForScenes(uint16_t slot,
                                           uint16_t scene_mask,
@@ -796,14 +839,20 @@ const char *filesystem_residentKitName(uint8_t scene_index);
  * Resident Scene name-register access.
  *
  * What: reads one requested Scene identity from root `/.hcnames`, or replaces
- * only Scene rows selected by scene_mask with one fixed eight-cell name. Why:
- * SceneData deliberately has no per-Scene display-name mirror; Menu needs one
- * name for one Scene Load/Save editor, while a multi-target Scene Load must
- * publish the one loaded directory name for every destination. Inputs: Scene
- * coordinate/mask, eight-cell display name for update, optional callback.
- * Outputs: async operations borrowing the existing 1,000-row general cache;
- * no additional cache or retained Scene-name SRAM is allocated. Affiliates:
- * Menu Scene entry and filesystem root Scene/Bank load-save state machines.
+ * only Scene rows selected by scene_mask with one fixed eight-cell name. As of
+ * Session 061 a Scene-op update (root Scene Load or Scene Save) additionally
+ * overlays the committed Kit row and six Instrument rows of every destination
+ * from the identity store, so the register names the complete hierarchy the
+ * action just read or wrote; the boot reader's Case-2 Kit/Instrument narrow
+ * paths build physical folder names from exactly these rows. Read-only load
+ * requests are unchanged. Why: SceneData deliberately has no per-Scene
+ * display-name mirror; Menu needs one name for one Scene Load/Save editor,
+ * while a multi-target Scene Load must publish the one loaded directory name
+ * for every destination. Inputs: Scene coordinate/mask, eight-cell display
+ * name for update, optional callback. Outputs: async operations borrowing the
+ * existing 1,000-row general cache; no additional cache or retained Scene-name
+ * SRAM is allocated. Affiliates: Menu Scene entry, filesystem root Scene/Bank
+ * load-save state machines, and filesystem_cacheCurrentResidentSceneChildNames().
  */
 bool filesystem_requestLoadResidentSceneName(uint8_t scene_index,
                                              fs_completion_cb_t cb);

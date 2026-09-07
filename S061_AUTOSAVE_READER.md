@@ -246,6 +246,17 @@ plan — treat it as its own reviewable unit, per this project's boot-hang
 history (`SCOPING_TARGETS.md` has several prior boot-pacing/timeout
 investigations).
 
+**Session 061 Phase 2 middle path:** between the winner reader and the
+canonical fallback, main.c stage 11 now tries
+`filesystem_bootHcnamesAuthoritativeLoad()` when the reader did not
+restore. It is a special case, not a general reconciliation: it proceeds
+only when the register Bank row equals the settings.cfg boot Bank and
+every register row is refreshed, and it never consults the `.hcprms`
+payload — `.hcnames` alone drives the Bank container, per-Scene
+resolve-plus-narrow-load, and pattern loading, with the unbreakable
+rule applied to unresolvable children. Either check failing (or any
+hard failure) returns 0 so the canonical ladder runs unchanged. See
+`061_READER_LOADED_SCENES_INVALID.md` §16-17.
 ---
 
 ## 5. `.hcnames` validity, then per-Scene Case 1/2/3
@@ -382,6 +393,11 @@ migration code needed.
 ---
 
 ## 7. Case 2 component reloading (P2 consequence)
+
+**Session 061 follow-up:** the Scene-op HCNAMES update now publishes the
+complete committed hierarchy (Scene + Kit + six Instruments), so the reader's
+Case-2 Kit path can trust the Kit-row name; effect/pattern rows remain future
+work. See `061_READER_LOADED_SCENES_INVALID.md`.
 
 The reader's Case 2 repair must not reuse the bundled Bank/Scene/Kit Load
 transactions (§2, P2) because they cascade child sources to `-`. The rule

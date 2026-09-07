@@ -438,6 +438,86 @@ payload result after HCNAMES is durable; Menu applies the selected Scene and
 only then reloads the unchanged `/Bank/.hcindex` read-only as the explicit
 command's final step.
 
+**Session 061 invariant: every committed Load or Save must mark, in
+`/.hcnames`, the object it committed and every child it committed, for every
+destination.**
+
+- **Bank Load/Save** — the Bank row and, for every child Scene, the Scene
+  row, its Kit row, and all six Instrument rows.
+- **Scene Load/Save** — the Scene row, its Kit row, and all six Instrument
+  rows of every destination Scene. Its Effect and Pattern children have no
+  `.hcnames` rows today; they are noted as future work below.
+- **Kit Load/Save** — the Kit row and all six Instrument rows of every
+  destination Scene.
+- **Instrument Load/Save** — its own Instrument row.
+
+"Mark" means three things at once:
+
+1. the **name cell** carries the committed object's true display name (the
+   name the physical directory/file was just read from or written under);
+2. the **source cell** carries the committed provenance (direct numbered
+   slot, `-` INHERIT, or `@` INSTRUMENT_DIRECT);
+3. the **refreshed witness** (`R`) is set on every marked row so the
+   autosave writer treats the freshly committed payload as unproven until
+   the drain captures it.
+
+All three are staged before the one deferred HCNAMES rewrite so the old
+register image cannot overwrite them (`FS_RESIDENT_SOURCE_DIRTY_FLAG`
+protection in `filesystem_cacheResidentRecord()`), and they are published
+through the single shared register writer. Scene actions publish the
+complete committed hierarchy: the Scene-op register overlay
+(`filesystem_cacheCurrentResidentSceneNames()` plus
+`filesystem_cacheCurrentResidentSceneChildNames()`) replaces the Scene row
+and, from the commit-staged identity store, the Kit row and six Instrument
+rows of every selected destination. Scene Load stages the refreshed witness
+at the shared loader's successful terminal boundary after Pattern/Effect
+(alongside the Bank per-child equivalent); Scene Save stages it with its
+source staging. This closes the Session 061 failure in which a root Scene
+Load published only Scene-row names, leaving a previous Bank-embedded Kit
+name in the Kit row; the boot reader's Case-2 narrow Kit path then built a
+folder that did not exist in the library Scene and invalidated it
+(`061_READER_LOADED_SCENES_INVALID.md`). Effect/Pattern rows remain future
+work: `pattern.pat` and `effects.fx` are committed by every Scene action but
+cannot be marked until they gain durable identity rows (Pattern format is
+not final; Effect is a validation-only placeholder with zero live
+parameters). When they do, they must join the Scene action's
+marked-children block in the same change that introduces their rows.
+
+**Session 061 Phase 2: the HCNAMES-authoritative boot load.** Boot stage
+11 has a middle path between the winner reader and the canonical
+wholesale Bank Load: when no Bank-matching `.hcprms` winner restored,
+`filesystem_bootHcnamesAuthoritativeLoad()` (main.c) parses `.hcnames`
+and uses it to construct the entire resident state, but only when both
+special-case checks hold:
+
+1. **Bank agreement:** the register Bank row (row 0) carries a direct
+   numeric slot equal to the settings.cfg boot Bank (`bank_restoreBankSlot()`).
+2. **All refreshed:** every one of the 129 register rows carries the `R`
+   witness.
+
+This is the state "load a Bank in the menu, load more library items into
+it, power off before exiting the menu" leaves behind (the page guard
+holds the autosave writer, so `.hcprms` stays stale while `.hcnames` is
+rewritten synchronously by every completed action). The authoritative
+path never consults `.hcprms`. It narrow-loads the Bank container
+(`filesystem_bootNarrowLoadBank()`: child scan builds the 00..15 present
+mask, `bankset.bcg` supplies active Scene and voice-edit mask, BankData
+is committed), then resolves every present Scene's eight rows in order
+(Scene -> Kit -> six Instruments) with the same shared resolver the
+winner reader uses (`filesystem_bootReaderResolveResidentRow()`): a row
+whose source lands on the Bank row loads from `Bank/NNN/NN name/`, any
+other direct source loads from its Scene/Kit/Instrument library
+container through the single-level narrow loaders, and an unresolvable
+child applies the unbreakable rule — the whole Scene is emptied
+(`filesystem_bootReaderEmptyScene()`), noticed, and never partially
+assembled. Patterns load per non-emptied present Scene; the register is
+rewritten only when a Scene was emptied (or a `.hcnamtmp` prelude was
+adopted); and the whole-Bank dirty replay latch plus the standard `Q`
+trace summary are emitted. If either check fails or any hard I/O failure
+occurs, the function returns 0 and the canonical ladder runs unchanged
+(including its empty-Bank and no-Bank Scene/Kit fallback semantics).
+`SD_CARD_READER_4/5` are the Phase-2 evidence cards; the implementation
+record is `061_READER_LOADED_SCENES_INVALID.md` §16-17.
 `settings.cfg` replaces legacy `GLO.CFG`/`glo.cfg` as the current system-settings
 file. It stores allowlisted system-level settings and the active Bank number,
 not the Bank display name. At boot, the current firmware reads this numbered
