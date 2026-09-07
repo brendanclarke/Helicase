@@ -27496,9 +27496,30 @@ static uint8_t filesystem_bootReaderEvaluateScene(
     uint8_t scene_index, afatfsFilePtr_t record, uint8_t *rows_changed)
 {
     uint8_t scene_section[AUTOSAVE_SCENE_SECTION_BYTES];
+    uint8_t instrument_types[AUTOSAVE_INSTRUMENTS_PER_KIT];
     uint8_t index;
+    uint8_t type_slot;
     uint32_t scene_offset = (uint32_t)(AUTOSAVE_SCENES_OFFSET +
         ((uint32_t)scene_index * AUTOSAVE_SCENE_SECTION_BYTES));
+
+    /*
+     * Snapshot this Scene's durable Instrument types before any row load.
+     *
+     * What: copies boot_reader_type[scene*6..+5] into stack locals. Why:
+     * the type scratch is a member of the shared 2,048-byte staging union,
+     * and the Case-2 narrow Scene/Kit/Instrument loads below write
+     * kit_stage/instrument_stage/scene_stage over the same memory; reading
+     * the scratch after a Kit reload returns staged payload bytes instead
+     * of the parsed .hcnames types (Session 061 Phase 2, the zero-tick
+     * Case-3 rows in the SD_CARD_READER_7 trace). Inputs: parsed scratch.
+     * Outputs: stack locals owned by this Scene evaluation. Affiliates:
+     * filesystem_bootReaderApplyRowType(), the narrow loaders.
+     */
+    for (type_slot = 0u; type_slot < AUTOSAVE_INSTRUMENTS_PER_KIT;
+         type_slot++) {
+        instrument_types[type_slot] = fs_stage_workspace.boot_reader_type[
+            (uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT + type_slot];
+    }
 
     if (!filesystem_blockSeek(record, scene_offset) ||
         filesystem_blockRead(record, scene_section,
@@ -27594,9 +27615,7 @@ static uint8_t filesystem_bootReaderEvaluateScene(
                 } else {
                     uint8_t slot = (uint8_t)(index - 2u);
                     instrument_type_t type = (instrument_type_t)
-                        fs_stage_workspace.boot_reader_type[
-                            (uint16_t)scene_index *
-                                AUTOSAVE_INSTRUMENTS_PER_KIT + slot];
+                        instrument_types[slot];
 
                     load_ok = filesystem_bootReaderNarrowLoadInstrument(
                         scene_index, slot, type, resolved, resolved_row);
@@ -27859,9 +27878,25 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
     for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
          scene_index++) {
         uint8_t index;
+        uint8_t instrument_types[AUTOSAVE_INSTRUMENTS_PER_KIT];
+        uint8_t type_slot;
 
         if ((present_mask & (uint16_t)(1u << scene_index)) == 0u)
             continue;
+        /*
+         * Snapshot this Scene's durable Instrument types before any row
+         * load writes the shared staging union (see the identical note in
+         * filesystem_bootReaderEvaluateScene): the narrow Scene/Kit loads
+         * overwrite boot_reader_type's union memory, so the Instrument rows
+         * must resolve types from this stack copy instead.
+         */
+        for (type_slot = 0u; type_slot < AUTOSAVE_INSTRUMENTS_PER_KIT;
+             type_slot++) {
+            instrument_types[type_slot] =
+                fs_stage_workspace.boot_reader_type[
+                    (uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT +
+                    type_slot];
+        }
         for (index = 0u; index < 8u; index++) {
             uint16_t row;
             uint16_t resolved_row = FS_RESIDENT_NAMES_ROW_COUNT;
@@ -27890,9 +27925,7 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
                 } else {
                     uint8_t slot = (uint8_t)(index - 2u);
                     instrument_type_t type = (instrument_type_t)
-                        fs_stage_workspace.boot_reader_type[
-                            (uint16_t)scene_index *
-                                AUTOSAVE_INSTRUMENTS_PER_KIT + slot];
+                        instrument_types[slot];
 
                     load_ok = filesystem_bootReaderNarrowLoadInstrument(
                         scene_index, slot, type, resolved, resolved_row);

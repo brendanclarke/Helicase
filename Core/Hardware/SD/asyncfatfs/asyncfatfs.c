@@ -6149,7 +6149,25 @@ bool afatfs_chdir(afatfsFilePtr_t directory)
         // Root directories don't have a directory entry to represent themselves:
         afatfs.currentDirectory.directoryEntryPos.sectorNumberPhysical = 0;
 
-        afatfs_fseek(&afatfs.currentDirectory, 0, AFATFS_SEEK_SET);
+        /*
+         * Complete the root seek synchronously before reporting success.
+         *
+         * What: afatfs_fseek(..., 0, SEEK_SET) normally completes inline,
+         * but any caller-visible pending state on currentDirectory is
+         * eliminated here by polling the just-queued work to a terminal
+         * result. Why: blocking boot consumers (Bank/Scene/Kit narrow
+         * loaders) treat a successful chdir(NULL) as "root, idle, ready
+         * for relative opens"; returning with a queued operation let the
+         * next opendir scan race the cursor state (Session 061 Phase 2).
+         * Inputs/outputs: currentDirectory reinitialized to the root
+         * cluster and idle before the return. Affiliates:
+         * filesystem_blockChdir(), afatfs_poll(),
+         * afatfs_fileIsBusy().
+         */
+        (void)afatfs_fseek(&afatfs.currentDirectory, 0, AFATFS_SEEK_SET);
+        while (afatfs_fileIsBusy(&afatfs.currentDirectory)) {
+            afatfs_poll();
+        }
 
         return true;
     }

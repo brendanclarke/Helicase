@@ -1303,4 +1303,42 @@ narrow Bank loader's commit is equivalent to the payload apply's.
    (407,312 bytes). This review covers the Phase-2 change only; confirm
    the splash edits are intended before hardware runs.
 
+## 19. Phase 2 root cause found — staging-union aliasing of boot_reader_type
+
+The SD_CARD_READER_7 trace (captured with the §18 synchronous flush) named
+the exact failure: every Scene's Scene row and Kit row resolved fine, then
+one Instrument row failed with a **zero-tick** Case 3 — a RAM-only failure,
+not I/O.
+
+Root cause: `fs_stage_workspace.boot_reader_type[96]` is a member of the
+shared 2,048-byte **staging union** alongside `kit_stage`
+(`op_staged_kit`), `instrument_stage` (`op_staged_instrument`), and
+`scene_stage`. The narrow Case-2 loaders write those union members during
+the per-Scene evaluation — `filesystem_bootReaderNarrowLoadKit()` even
+`memset`s the whole `op_staged_kit` — so by the time the Instrument rows
+read their durable types from `boot_reader_type`, the scratch holds staged
+payload bytes instead of the parsed `.hcnames` type tokens. Garbage types
+then fail the `type >= INSTRUMENT_TYPE_UNKNOWN` or
+`op_kitset.instrument_type[slot] != type` checks instantly, and the
+unbreakable rule empties the Scene. This also explains why Scene/Kit rows
+never failed (they do not read the type scratch) and why the failures
+looked random per slot (whatever bytes the previous loader left at offset
+0). The defect was latent since Phase 1: the winner reader's Case-2 path
+had never actually run on hardware before (the READER_3-era trace only
+shows a Case-1 summary), so the aliasing was never exercised.
+
+Fix (zero new RAM): both `filesystem_bootReaderEvaluateScene()` and the
+Phase-2 authoritative per-Scene loop now snapshot the six durable types
+for the Scene into stack locals *before* any narrow load runs, and the
+Instrument rows resolve their type from that snapshot. The type scratch
+remains the union member seeded by
+`filesystem_bootReaderApplyRowType()`/`filesystem_bootReaderSeedInstrumentTypes()`,
+which is correct because those seeders run before any load for their scope.
+Build: clean, `bss=96,212` unchanged; image `build/LXRV2_lxr02.img`
+(payload 407,504).
+
+Expected re-test of `SD_CARD_READER_4`: all 16 Scenes load — the four
+Rollin (008) Scenes from `Scene/008 Rollin`, the twelve from the Bank tree
+— summary `Q 0x80` value `0xffff0000` (`case2=0xffff`, `case3=0x0000`),
+no notices, `.hcnames` untouched.
 
