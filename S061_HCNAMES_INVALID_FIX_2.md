@@ -241,7 +241,10 @@ lifetime invariant:
 > Scenes. Normal Bank Load may reuse the scratch only after the boot reader
 > returns; `filesystem_start()` resets it before the Bank-child scan.
 
-No public header or file-format change is needed.
+No public API signature or file-format change is needed.  The existing public
+header comments receive the lifetime-guarantee clarification scheduled in
+§9.3; the private scratch type and all storage access remain in
+`filesystem.c`.
 
 ## 6. Scope exclusions
 
@@ -326,3 +329,346 @@ Also run one matching-winner mixed Case-1/Case-2 fixture. It must prove the
 same stable 96-byte scratch view is used by
 `filesystem_autosaveBootReaderBlocking()`, not only by the
 HCNAMES-authoritative path exercised by `SD_CARD_READER_4`.
+
+## 9. Full implementation schedule (deep-dive baseline: `ff767e8`)
+
+This section is the implementation checklist.  All line references are to the
+clean current tree at `ff767e8`; use the named declaration/function anchors if
+an earlier edit shifts a later line.  No new allocation, file-format field,
+public API, state-machine phase, or `main.c` call order is authorized by this
+schedule.
+
+### 9.1 `Core/Hardware/SD/filesystem.c` — private storage and invariants
+
+1. **Lines 952-977, `filesystem_stage_workspace_t`: remove only the
+   `boot_reader_type[96]` union member and its now-false comment.**
+
+   The typed stage must return to being exclusively a destructive payload
+   workspace (`kit_stage`, `instrument_stage`, `scene_stage`, writer, and
+   regeneration state).  The removal is necessary because each Case-2 narrow
+   loader legitimately writes that union, whereas the HCNAMES types must remain
+   readable until the final Scene has been evaluated.  There are no inputs or
+   outputs at this declaration; its effect is to make accidental aliasing
+   impossible at the storage-ownership boundary.  Common stage accessors are
+   `op_staged_kit`, `op_staged_instrument`, and
+   `filesystem_initSceneStage()`.  Affiliates are all three narrow loaders and
+   the two boot-reader traversal functions in items 6-7 below.
+
+   Adjacent replacement comment text for the remaining stage declaration:
+
+   ```c
+   /*
+    * The payload stage is destructive parser/commit storage only.  It must not
+    * retain boot-reader HCNAMES metadata: Case-2 Scene, Kit, and Instrument
+    * loads overwrite these union views before later rows are evaluated.
+    * Durable per-row boot metadata belongs to a separate operation scratch.
+    */
+   ```
+
+2. **Lines 1235-1255, replace `op_bank_child_display` with the explicitly
+   shared `filesystem_bank_child_scratch_t` union and add the count macro next
+   to it.**
+
+   Define `FS_BOOT_READER_INSTRUMENT_TYPE_COUNT` as
+   `AUTOSAVE_SCENE_COUNT * AUTOSAVE_INSTRUMENTS_PER_KIT`; then declare:
+
+   ```c
+   typedef union {
+       char bank_child_display[STORAGE_BANK_SCENE_MAX_SLOTS]
+                              [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+       uint8_t boot_reader_type[FS_BOOT_READER_INSTRUMENT_TYPE_COUNT];
+   } filesystem_bank_child_scratch_t;
+
+   static filesystem_bank_child_scratch_t op_bank_child_scratch;
+   ```
+
+   This preserves the existing 144-byte `.bss` object while giving its first
+   96 bytes a stable boot-reader view.  Its input is mutually exclusive owner
+   activity, not data passed through an API: the boot reader fills all 96
+   entries from parsed HCNAMES rows (or winner-reconstructed `SceneData`), and
+   normal Bank Load fills all 16 display cells during its child scan.  Its
+   outputs are respectively a type selected by `[scene * 6 + slot]` and a
+   Bank-child name selected by `[child_slot]`.  The relevant common accessors
+   are `filesystem_bootReaderApplyRowType()`,
+   `filesystem_bootReaderSeedInstrumentTypes()`,
+   `filesystem_bootReaderEvaluateScene()`,
+   `filesystem_bootHcnamesAuthoritativeLoad()`,
+   `storage_parseBankSceneFolder()`, and
+   `filesystem_displayPrecedesCached()`.  Affiliates are the runtime Bank
+   scan/child-dispatch phases (items 4-5) and both blocking boot readers
+   (items 6-7).
+
+   Adjacent declaration comment text:
+
+   ```c
+   /*
+    * One 144-byte operation scratch with strictly non-overlapping views.
+    * `boot_reader_type` is owned from complete HCNAMES parsing (or winner
+    * regeneration) through the final Stage-11 Scene evaluation; its 96
+    * entries must not share payload-stage storage because an earlier Case-2
+    * load destroys types still needed by later Scenes.  `bank_child_display`
+    * is owned only by asynchronous Bank Load from its child scan through the
+    * delegated child opens.  A reader returns before canonical Bank Load can
+    * begin, and filesystem_start() clears this whole object for each request.
+    */
+   ```
+
+3. **Lines 10617-10625, replace the old single-view assertion and retain the
+   aggregate SRAM assertion through `sizeof(op_bank_child_scratch)`.**
+
+   Add one assertion for the 96-byte type image and one for the unchanged
+   144-byte union; change the Option-1 aggregate calculation to reference the
+   union object.  These checks take no runtime input or output.  They prevent
+   an enum/count change from silently shortening the boot image, and prevent a
+   later added union member from consuming RAM reserved for Pattern data.  The
+   common compile-time inputs are `AUTOSAVE_SCENE_COUNT`,
+   `AUTOSAVE_INSTRUMENTS_PER_KIT`, `STORAGE_BANK_SCENE_MAX_SLOTS`, and
+   `STORAGE_SCENE_DISPLAY_NAME_LEN`; the output is a build failure on a broken
+   contract.  Affiliates are the RAM policy in `MEMORY.md`, the primary-owner
+   table in `SRAM_MANIFEST.md`, and the two runtime views in item 2.
+
+   Adjacent assertion comment text:
+
+   ```c
+   /* Keep the shared operation scratch within the already-approved Option-1A
+    * 144-byte reservation: 16 x 6 HCNAMES type bytes fit without growing the
+    * normal-SRAM1 peak, while Bank Load still retains 16 x 9 display cells. */
+   ```
+
+4. **Lines 13415-13445 and 13879-13895, redirect all normal Bank Load display
+   accesses to `op_bank_child_scratch.bank_child_display`.**
+
+   In phase 15, test/copy the lexical-winning child name through the display
+   member.  In phase 27, copy the selected member into `op_scene_display_name`.
+   This is a mechanical member qualification; the scan's duplicate-winner rule,
+   selection mask, folder parsing, and child-loading behavior do not change.
+   Inputs are the Bank directory objects and `op_bank_child_cursor`; outputs
+   remain `op_bank_child_present_mask` plus one selected Scene display name.
+   The common parser/accessor pair is `storage_parseBankSceneFolder()` and
+   `filesystem_displayPrecedesCached()`; the consumer is
+   `filesystem_loadSceneDirectory_tick()`.  Affiliates are
+   `filesystem_requestLoadBank()` and `filesystem_start()`.
+
+   Adjacent phase-15/phase-27 comment text:
+
+   ```c
+   /* Use the Bank-child view only during the asynchronous Bank Load lifetime.
+    * It is the same 144-byte object the boot reader uses earlier for types,
+    * but no blocking Stage-11 reader is active while these phases scan or
+    * consume child names. */
+   ```
+
+5. **Line 25003, `filesystem_start()`: clear the complete union with
+   `memset(&op_bank_child_scratch, 0, sizeof(op_bank_child_scratch))`.**
+
+   This replaces the display-array reset and makes request admission the
+   explicit handoff from a completed boot reader (or prior Bank Load) to a new
+   normal operation.  The input is every newly accepted asynchronous request;
+   the output is a zeroed scratch before the Bank scan can populate names.  It
+   does not reset the scratch during delegated Bank children, so names remain
+   available until phase 27 consumes each one.  The common owner is
+   `filesystem_start()`; its immediate Bank Load affiliate is
+   `filesystem_requestLoadBank()`, while blocking readers never call this
+   reset inside their traversal.  Preserve the surrounding rule that generic
+   setup must not clear `fs_stage_workspace` or `fs_list_cache_name`.
+
+   Adjacent reset comment text:
+
+   ```c
+   /* Reset the shared Bank-child/boot-reader scratch only at a new async
+    * request boundary.  This releases a finished reader's immutable type
+    * image before Bank Load writes names, without clearing payload stage or
+    * the library cache whose lifetimes are independently owned. */
+   ```
+
+### 9.2 `Core/Hardware/SD/filesystem.c` — type producers and boot consumers
+
+6. **Lines 27240-27298, `filesystem_bootReaderApplyRowType()`; lines
+   27354-27382, `filesystem_bootReaderSeedInstrumentTypes()`; and lines
+   27301-27315, the register-parser comment: redirect both producers to the
+   shared type view and correct their lifetime documentation.**
+
+   `filesystem_bootReaderApplyRowType()` continues to parse a mandatory third
+   HCNAMES Instrument field and writes the decoded token to
+   `op_bank_child_scratch.boot_reader_type[scene * 6 + slot]`.  The regeneration
+   producer continues to copy `scene->kit.instruments[slot].type` to that same
+   coordinate for all 16 Scenes.  Their inputs remain `(row, line)` and
+   `SceneData`, respectively; their output is the full immutable 96-entry image
+   required by subsequent Case-2 row loads.  Row-coordinate helpers/constants
+   are `FS_RESIDENT_NAMES_INSTRUMENT_BASE`, `STORAGE_KIT_SLOT_COUNT`,
+   `AUTOSAVE_SCENE_COUNT`, and `AUTOSAVE_INSTRUMENTS_PER_KIT`; type conversion
+   remains `storage_instrumentTypeFromText()`.  Affiliates are
+   `filesystem_bootReaderParseRegisterFile()`,
+   `filesystem_regenerateHcnamesFromWinnerBlocking()`, and both readers below.
+   Do not alter HCNAMES parsing, header validation, formatter, or the type
+   token itself.
+
+   Adjacent producer comment text:
+
+   ```c
+   /* Store every parsed/regenerated HCNAMES type in the non-stage shared
+    * scratch.  The index is the fixed resident Scene/slot coordinate and must
+    * remain valid through all later Case-2 loads, including loads for other
+    * Scenes that overwrite fs_stage_workspace. */
+   ```
+
+7. **Lines 27495-27621, `filesystem_bootReaderEvaluateScene()`: remove the
+   six-byte `instrument_types` local and its copy loop, then read the Case-2
+   Instrument type directly from the full shared image.**
+
+   Preserve the 1,920-byte `scene_section` automatic buffer, row order, Case
+   1 behavior, source resolution, narrow-loader call signature, Case-3 P1
+   handling, and trace packing.  For `index >= 2`, calculate `slot = index -
+   2` exactly as today and pass `(instrument_type_t)` from the shared image at
+   `scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT + slot`.  Inputs are the
+   destination Scene coordinate, winner record, parsed/reconstructed 96 types,
+   and row provenance; outputs remain committed payload/Case masks and the
+   `rows_changed` result.  Common accessors are
+   `filesystem_residentInstrumentRow()`,
+   `filesystem_bootReaderResolveResidentRow()`, and
+   `filesystem_bootReaderNarrowLoadInstrument()`.  Affiliates are
+   `autosave_applyInstrumentPayload()`, `filesystem_bootReaderEmptyScene()`,
+   and the type producers in item 6.
+
+   Adjacent traversal comment text:
+
+   ```c
+   /* Case-2 Instrument selection reads the complete immutable HCNAMES type
+    * image, not a per-Scene stack copy.  Earlier narrow loaders may overwrite
+    * fs_stage_workspace, but cannot affect this separate scratch; later
+    * Scenes therefore receive their original row types as well. */
+   ```
+
+8. **Lines 27655-27688 and 27705-27764,
+   `filesystem_autosaveBootReaderBlocking()`: amend the orchestrator comment
+   to name the borrowed shared scratch, but do not change its control flow.**
+
+   The register parse already fills all 96 entries; the winner-regeneration
+   branch already calls the seeder.  This item is a comment-only correction
+   adjacent to those two existing producer paths, documenting that the image
+   survives from Step 1 through the Step-3 loop.  Inputs/outputs stay as stated
+   in the public contract: a matching winner plus HCNAMES produce resident
+   Bank/Scene state, boot-latch masks, and optional HCNAMES publication.
+   Common accessors are `filesystem_bootReaderParseRegisterFile()`,
+   `filesystem_bootReaderSeedInstrumentTypes()`, and
+   `filesystem_bootReaderEvaluateScene()`; affiliates are main.c Stage 11 and
+   the HCNAMES-authoritative sibling.  The comment must explicitly say that the
+   144-byte object is pre-existing and borrowed, rather than claiming the
+   reader has no relevant static scratch.
+
+9. **Lines 27876-27932, `filesystem_bootHcnamesAuthoritativeLoad()`: remove
+   the per-Scene six-byte local/copy loop and select Case-2 Instrument types
+   directly from `op_bank_child_scratch.boot_reader_type`.  Amend the function
+   comment at lines 27797-27812 to state the same full-traversal invariant.**
+
+   This is the path exercised by `SD_CARD_READER_4`; it must use precisely the
+   same index expression as item 7.  Inputs are the 129 parsed refreshed rows,
+   current boot Bank slot, `bankset.bcg` presence mask, and the full type image;
+   outputs are constructed Bank/Scene state, Case-2/Case-3 latches, notices,
+   and only the established publication for emptied Scenes.  Common accessors
+   are `filesystem_bootNarrowLoadBank()`,
+   `filesystem_residentInstrumentRow()`,
+   `filesystem_bootReaderResolveResidentRow()`, and
+   `filesystem_bootReaderNarrowLoadInstrument()`.  Affiliates are main.c
+   Stage 11, the matching-winner reader, and P1's
+   `filesystem_bootReaderEmptyScene()`.  Do not derive the type from
+   `op_kitset`, `SceneData` after the Kit load, or an Instrument file: a direct
+   child source may validly differ from its parent Kit.
+
+   Adjacent authoritative-loop comment text:
+
+   ```c
+   /* All 96 type entries were captured before filesystem_bootNarrowLoadBank()
+    * and any narrow child load.  Read this Scene/slot directly from the
+    * shared boot-reader view so Scene 0 cannot corrupt the type provenance
+    * needed for Scenes 1..15. */
+   ```
+
+### 9.3 `Core/Hardware/SD/filesystem.h` — contract comment only
+
+10. **Lines 329-375, public comments for
+    `filesystem_autosaveBootReaderBlocking()` and
+    `filesystem_bootHcnamesAuthoritativeLoad()`: add the common 16-by-6
+    HCNAMES-type preservation guarantee; change neither declaration nor
+    signature.**
+
+    This header change records the externally meaningful guarantee shared by
+    both Stage-11 readers: before a Case-2 narrow loader can alter staged
+    payload state, all mandatory Instrument-row types are retained for the
+    entire traversal.  Inputs are the parsed register (or winner-regenerated
+    row image) and row coordinates; output is correct type-directed narrow
+    Instrument selection for every present Scene.  The caller-facing accessors
+    remain the two existing public functions; internal affiliates are the
+    producer/parser functions in item 6 and the consumers in items 7 and 9.
+    Do not expose `filesystem_bank_child_scratch_t`, add a header macro, or
+    give callers access to either scratch view: allocation and lifetime remain
+    private to `filesystem.c`.
+
+    Adjacent header comment text:
+
+    ```c
+    /* Before any Case-2 narrow load, the reader preserves the complete
+     * 16-by-6 HCNAMES Instrument-type image for the whole traversal.  Later
+     * payload staging may not change the type used to resolve any remaining
+     * Instrument row.  This is an internal zero-growth lifetime guarantee;
+     * the public API and on-card format are unchanged. */
+    ```
+
+### 9.4 Authoritative documentation and explicit non-changes
+
+11. **`knowledge_files/specification_reference/FILESYSTEM_SPEC.md:746-753`: amend
+    the Bank Load scratch rule.**  Rename the implementation object to
+    `op_bank_child_scratch.bank_child_display[16][9]`, retain the single-scan
+    O(n) behavior, and add that its alternative 96-byte type view is private
+    to a completed-before-Bank-Load Stage-11 reader.  Inputs/outputs for Bank
+    Load remain directory objects -> presence/name cells; the new statement
+    documents the non-overlap with HCNAMES rows -> type cells.  Affiliates are
+    `filesystem_start()`, the phase-15/27 code, and the two boot readers.
+
+12. **`knowledge_files/specification_reference/SRAM_MANIFEST.md:79` and
+    `165-171`: replace the old owner name with `op_bank_child_scratch` and
+    describe both views while retaining 144 B and the 1,311-B Option-1 total.**
+    This is an accounting correction, not an allocation request: input is the
+    static union definition; output is an unambiguous owner/lifetime record for
+    the RAM policy and future linked-size audit.  Affiliate references are the
+    `_Static_assert`s in item 3 and the filesystem-spec entry in item 11.
+
+13. **`MEMORY.md:20-50`, only after source build verification and hardware
+    acceptance: add the concise confirmed Session-061 outcome and measured
+    linked sizes.**  Record zero persistent growth, the shared 144-byte owner,
+    the completed fixtures, and any remaining hardware work.  Do not edit the
+    historical Session-058 handoff or session index: those correctly describe
+    what the object was at that time and are archival, not current authority.
+
+14. **Deliberate non-changes, checked against the current tree:**
+
+    - `main.c:852-898` remains unchanged: Stage 11 already orders matching
+      winner reader, authoritative HCNAMES reader, then canonical Bank ladder.
+    - `storageTypes.c/.h`, HCNAMES header/parser/formatter
+      (`filesystem.c:5624-5692`, `5694-5805`, `21490-21674`), and the on-card
+      `#types`/third-column schema remain unchanged; they already validate and
+      serialize the required tokens.
+    - `filesystem_bootNarrowLoadBank()` (`filesystem.c:26746-26869`) remains
+      unchanged: it uses only a local `display[9]`, proving it cannot overlap
+      the new union view during Stage 11.
+    - No AutoSave wire offsets, trace record layout, HCNAMES rewrite policy,
+      P1 Case-3 rule, type-validation guard, cache/stage ownership, or public
+      API is changed.
+
+### 9.5 Implementation order and verification gate
+
+Implement in this order: item 1; item 2; item 3; items 4-5; item 6; items
+7-9; item 10; then items 11-12.  Before building, use `rg` to prove no
+`op_bank_child_display`, `fs_stage_workspace.boot_reader_type`,
+`instrument_types[AUTOSAVE_INSTRUMENTS_PER_KIT]`, or stale union-lifetime
+comment remains outside intentional historical documents.  Build with `make &&
+make img`; inspect `arm-none-eabi-size build/lxr02.elf` and require unchanged
+`.data`/`.bss` versus the pre-edit linked image (text may move).  The compile
+assertions must pass without changing the 1,311-B reservation.
+
+Then run §8's fresh `SD_CARD_READER_4` fixture and preserve a new post-boot
+card capture.  Verify Q records, summary `0x0000ffff`, preserved sources, and
+absence of the empty notices.  Finally run the matching-winner mixed Case-1/
+Case-2 fixture.  Only after both hardware paths pass may item 13 update
+`MEMORY.md` and this plan's status from diagnosis/schedule to implemented and
+verified.
