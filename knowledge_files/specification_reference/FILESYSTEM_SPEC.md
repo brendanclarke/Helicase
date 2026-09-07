@@ -745,12 +745,15 @@ Current behavior:
   publishes no replacement metadata.
 - A full Bank Load resets Scene child discovery for every delegated child.
   Filenames discovered in one local folder must never be reused for another.
-- Bank Load retains a 144-byte `op_bank_child_display[16][9]` name table
-  (Session 058, Option 1A) captured during the one existing Bank child scan,
-  alongside the 16-bit occupancy mask. The same object visit sets the presence
-  bit and stores the lexical-winning display name under the existing
-  `filesystem_displayPrecedesCached()` duplicate winner; the old per-child
-  rescan (former phases 27-30) is removed.
+- Bank Load retains the `bank_child_display[16][9]` view of the 144-byte
+  `op_bank_child_scratch` union (Session 058, Option 1A), captured during the
+  one existing Bank child scan alongside the 16-bit occupancy mask. The same
+  object visit sets the presence bit and stores the lexical-winning display
+  name under the existing `filesystem_displayPrecedesCached()` duplicate
+  winner; the old per-child rescan (former phases 27-30) is removed. The
+  union's alternative 96-byte `boot_reader_type` view is private to the
+  completed-before-Bank-Load Stage-11 readers and retains all 16-by-6 HCNAMES
+  Instrument types while payload staging is overwritten by narrow loads.
 - Bank Load retains the selected Bank directory as parent CWD between
   successful delegated children (Session 058, Option 1B). Scene Load phase 72
   calls `afatfs_chdirParent()` only after a **successful** child and sets

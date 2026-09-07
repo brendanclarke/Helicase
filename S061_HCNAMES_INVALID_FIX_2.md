@@ -2,9 +2,10 @@
 
 Status: diagnosis confirmed from `SD_CARD_READER_4` as the input fixture and
 `SD_CARD_READER_8` as the post-boot capture made with the current working-tree
-image. The files are not invalid. The HCNAMES-authoritative boot path is
-passing corrupted in-RAM Instrument types to otherwise valid files. The current
-per-Scene six-type snapshot is too late for Scenes 1..15.
+image. Source implementation is complete and build-verified; hardware
+acceptance remains pending. The files are not invalid. The HCNAMES-authoritative
+boot path was passing corrupted in-RAM Instrument types to otherwise valid
+files. The current per-Scene six-type snapshot was too late for Scenes 1..15.
 
 ## 1. Verdict
 
@@ -672,3 +673,102 @@ absence of the empty notices.  Finally run the matching-winner mixed Case-1/
 Case-2 fixture.  Only after both hardware paths pass may item 13 update
 `MEMORY.md` and this plan's status from diagnosis/schedule to implemented and
 verified.
+
+## 10. Implementation log
+
+### 2026-09-07 — source implementation and documentation pass
+
+- Confirmed the clean working tree matched the scheduled defect: all parsed
+  Instrument types were still stored in `fs_stage_workspace`, and both readers
+  still made a six-byte per-Scene snapshot.
+- Removed `boot_reader_type[]` from the destructive payload-staging union and
+  overlaid its 96-byte image on the existing 144-byte Bank-child scratch as
+  `op_bank_child_scratch.boot_reader_type[]`. The Bank Load display users now
+  use `op_bank_child_scratch.bank_child_display[]`, and `filesystem_start()`
+  clears the complete union at each new asynchronous request boundary.
+- Redirected both type producers and both Stage-11 traversal paths to the
+  stable full image. Added compile-time checks for the 96-byte type view, the
+  unchanged 144-byte union, and the unchanged 1,311-byte Option-1 accounting.
+- Added adjacent lifetime/ownership comments in the changed `.c` code and the
+  public `.h` contracts. Updated `FILESYSTEM_SPEC.md` and `SRAM_MANIFEST.md`
+  to describe the shared owner without changing the file format or API.
+- `make && make img` passed. The linked image reports
+  `text=407,060`, `data=404`, `bss=96,212`; `.data`/`.bss` are unchanged from
+  the pre-edit Session-061 image. Static audit found no stale old symbol or
+  staging-union type access in active `.c`/`.h` source, and `git diff --check`
+  passed.
+- Hardware fixtures are not available in this workspace, so the fresh
+  `SD_CARD_READER_4` authoritative-path fixture and mixed matching-winner
+  fixture remain pending before this document can be marked hardware-verified.
+
+## 11. Independent post-implementation assessment
+
+### 2026-09-07 — source review verdict
+
+**No blocking source-level finding.** The implementation matches the targeted
+zero-growth fix and closes the demonstrated cross-Scene aliasing path. No
+further code change is indicated before hardware acceptance.
+
+The dataflow is now correct:
+
+- the staging union no longer contains `boot_reader_type[]`;
+- the HCNAMES parser and winner-regeneration seeder are the only semantic
+  producers of the `op_bank_child_scratch.boot_reader_type[]` image;
+- the matching-winner and HCNAMES-authoritative traversals read each Case-2
+  Instrument type from that complete 96-byte image;
+- both six-byte per-Scene arrays and their too-late copy loops are gone; and
+- active C/header source contains no stale
+  `fs_stage_workspace.boot_reader_type`, local
+  `instrument_types[AUTOSAVE_INSTRUMENTS_PER_KIT]`, or standalone
+  `op_bank_child_display` access.
+
+The shared-scratch lifetime is also sound. The Stage-11 narrow Bank loader uses
+its own local display cell, and the Scene/Kit/Instrument/pattern loaders use the
+blocking filesystem helpers rather than `filesystem_start()`. They therefore
+cannot reset or claim the Bank-child view during row evaluation. The
+asynchronous starts reachable from the readers occur on safe sides of the
+lifetime: winner regeneration starts before
+`filesystem_bootReaderSeedInstrumentTypes()` repopulates all 96 entries, while
+HCNAMES publication and trace flushing start only after every Scene row has
+been evaluated.
+
+Failure handoff remains valid. A partial temp/live HCNAMES parse is never
+consumed: a successful replacement parse overwrites all 96 mandatory
+Instrument rows, successful regeneration starts with a scratch reset and then
+seeds all entries, and total failure returns without evaluating a row. After a
+reader decline, `main.c` performs `filesystem_bankSlotExists()` against the
+separate library-name cache. An accepted canonical Bank request then enters
+`filesystem_start()`, which clears the complete union before Bank Load scans or
+consumes `bank_child_display[][]`. Stale boot types therefore cannot affect
+fallback, and the Bank index needed to select fallback was not borrowed.
+
+Independent build and linked-size verification against clean `HEAD` baseline
+`3756b78` produced:
+
+| Image | text | data | bss |
+|---|---:|---:|---:|
+| baseline | 407,100 B | 404 B | 96,212 B |
+| implementation | 407,060 B | 404 B | 96,212 B |
+| change | -40 B | 0 B | 0 B |
+
+The linked symbols remain exactly 2,048 bytes for `fs_stage_workspace` and 144
+bytes for the renamed `op_bank_child_scratch`. LTO disassembly also confirms
+that removing the local six-byte arrays reduced the compiler's local stack
+reservation by eight aligned bytes in each affected frame:
+`filesystem_bootReaderEvaluateScene()` is 1,996 -> 1,988 bytes and
+`filesystem_bootHcnamesAuthoritativeLoad()` is 60 -> 52 bytes.
+
+`make -j2`, `make img`, and `git diff --check` pass. The generated
+`build/LXRV2_lxr02.img` is 407,480 bytes with SHA-256
+`5732e821d256f521e48814d2cf255c895b1fbb7fdfa9f006b43f5ae293fb8c62`.
+The build retains unrelated existing unused-function and bare-metal syscall
+stub warnings; none names or originates in the changed scratch accesses.
+
+The remaining gate is hardware evidence, not another source edit. Run a fresh
+copy of `SD_CARD_READER_4` and require the authoritative-path results in
+section 8, especially no Case-3 `Q` record and raw summary `0x0000ffff`. Then
+run the mixed matching-winner Case-1/Case-2 fixture. Until both pass, this fix
+is source-reviewed and build-verified, but not hardware-verified. The captured
+`SD_CARD_READER_4` directory is present in the workspace; what is unavailable
+here is execution of the rebuilt image on the target hardware, rather than the
+input data itself.

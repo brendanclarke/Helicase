@@ -949,6 +949,12 @@ typedef struct {
 #define FS_STAGE_EFFECT_RESERVE_BYTES 384u
 #define FS_STAGE_CACHE_BYTES          2048u
 
+/*
+ * The payload stage is destructive parser/commit storage only.  It must not
+ * retain boot-reader HCNAMES metadata: Case-2 Scene, Kit, and Instrument
+ * loads overwrite these union views before later rows are evaluated.
+ * Durable per-row boot metadata belongs to a separate operation scratch.
+ */
 typedef union {
     uint8_t raw[FS_STAGE_CACHE_BYTES];
     kit_t kit_stage;
@@ -958,22 +964,6 @@ typedef union {
     filesystem_scene_stage_t scene_stage;
     filesystem_autosave_writer_state_t autosave_writer;
     filesystem_hcnames_regen_state_t regen_state;
-    /*
-     * Boot-reader per-row Instrument types (workspace union member).
-     *
-     * What: one instrument_type_t per resident Scene/slot (96 entries),
-     * populated from the parsed .hcnames type tokens (or, after a winner
-     * regeneration, from the record-derived SceneData types) before the
-     * per-Scene evaluation starts. Why: a Case-2 Kit reload later in the
-     * same Scene replaces slot types with the Kit's member types, which
-     * must not change the typed directory a still-unproven Instrument row
-     * resolves against (§6, S061_AUTOSAVE_READER.md). This is a union
-     * member of the existing 2,048-byte operation stage and adds no new
-     * SRAM. Affiliates: filesystem_bootReaderApplyRowType(),
-     * filesystem_bootReaderEvaluateScene().
-     */
-    uint8_t boot_reader_type[AUTOSAVE_INSTRUMENTS_PER_KIT *
-                             AUTOSAVE_SCENE_COUNT];
 } filesystem_stage_workspace_t;
 
 /*
@@ -1236,23 +1226,44 @@ static char op_save_bank_dir_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_save_bank_dir_open_name[AFATFS_SHORT_FILENAME_MAX];
 static uint16_t op_bank_child_present_mask = 0u;
 /*
- * Option 1A: cache every Bank child's lexical-winning display name during the
- * single phase 15 scan.  144 bytes (16 slots x 9 bytes).
- *
- * Why: the previous code rescanned the entire Bank directory once per child
- * (phases 27-30) to rediscover one display name, producing an O(n^2) traversal
- * for a full 16-Scene Bank.  Capturing names during the existing phase 15 scan
- * and looking them up at phase 27 reduces that to O(n).
- *
- * Inputs: each directory object visited during the Bank child scan at phase 15.
- * Outputs: one eight-cell display name per valid 00..15 slot.  Cleared before
- * the scan; paired with op_bank_child_present_mask as the combined result.
- * The lexical-winner rule matches filesystem_displayPrecedesCached(): for two
- * directories at the same slot, the casefold-first/raw-case tiebreak selects
- * the same deterministic representative used by Kit, Scene, and Bank scanners.
+ * One 144-byte operation scratch with strictly non-overlapping views.
+ * `boot_reader_type` is owned from complete HCNAMES parsing (or winner
+ * regeneration) through the final Stage-11 Scene evaluation; its 96
+ * entries must not share payload-stage storage because an earlier Case-2
+ * load destroys types still needed by later Scenes.  `bank_child_display`
+ * is owned only by asynchronous Bank Load from its child scan through the
+ * delegated child opens.  A reader returns before canonical Bank Load can
+ * begin, and filesystem_start() clears this whole object for each request.
  */
-static char op_bank_child_display[STORAGE_BANK_SCENE_MAX_SLOTS]
-                                  [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+#define FS_BOOT_READER_INSTRUMENT_TYPE_COUNT \
+    (AUTOSAVE_SCENE_COUNT * AUTOSAVE_INSTRUMENTS_PER_KIT)
+
+typedef union {
+    /*
+     * Option 1A: cache every Bank child's lexical-winning display name during
+     * the single phase 15 scan.  144 bytes (16 slots x 9 bytes).
+     *
+     * Why: the previous code rescanned the entire Bank directory once per
+     * child (phases 27-30) to rediscover one display name, producing an O(n^2)
+     * traversal for a full 16-Scene Bank.  Capturing names during the existing
+     * phase 15 scan and looking them up at phase 27 reduces that to O(n).
+     *
+     * Inputs: each directory object visited during the Bank child scan at
+     * phase 15. Outputs: one eight-cell display name per valid 00..15 slot.
+     * Cleared before the scan; paired with op_bank_child_present_mask as the
+     * combined result. The lexical-winner rule matches
+     * filesystem_displayPrecedesCached(): for two directories at the same
+     * slot, the casefold-first/raw-case tiebreak selects the same deterministic
+     * representative used by Kit, Scene, and Bank scanners.
+     */
+    char bank_child_display[STORAGE_BANK_SCENE_MAX_SLOTS]
+                           [STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
+    /* Session 061: retain all 16-by-6 HCNAMES Instrument types outside the
+     * destructive payload stage until the final Stage-11 Scene evaluation. */
+    uint8_t boot_reader_type[FS_BOOT_READER_INSTRUMENT_TYPE_COUNT];
+} filesystem_bank_child_scratch_t;
+
+static filesystem_bank_child_scratch_t op_bank_child_scratch;
 static uint16_t op_bank_scene_load_mask = 0u;
 static uint16_t op_bank_scene_failed_mask = 0u;
 static uint16_t op_bank_scene_save_mask = 0u;
@@ -10614,12 +10625,18 @@ static void filesystem_updateInstrumentCacheAfterSave(const char *display_name,
 static uint16_t text_buf_pos = 0u;
 static uint16_t text_buf_len = 0u;
 
-_Static_assert(sizeof(op_bank_child_display) == 144u,
-               "Option 1A: Bank child display cache must remain exactly 16 x 9 bytes");
+/* Keep the shared operation scratch within the already-approved Option-1A
+ * 144-byte reservation: 16 x 6 HCNAMES type bytes fit without growing the
+ * normal-SRAM1 peak, while Bank Load still retains 16 x 9 display cells. */
+_Static_assert(
+    sizeof(op_bank_child_scratch.boot_reader_type) == 96u,
+    "boot reader must retain exactly 16 x 6 Instrument types");
+_Static_assert(sizeof(op_bank_child_scratch) == 144u,
+               "shared Bank-child/boot-reader scratch must remain 144 bytes");
 _Static_assert(sizeof(text_buf_pos) + sizeof(text_buf_len) == 4u,
                "Option 1D: buffered reader cursors must remain exactly 4 bytes");
 _Static_assert(sizeof(hcnames_name_mirror) + sizeof(hcnames_mirror_valid) +
-               sizeof(op_bank_child_display) +
+               sizeof(op_bank_child_scratch) +
                sizeof(text_buf_pos) + sizeof(text_buf_len) +
                sizeof(op_bank_cwd_at_parent) == 1311u,
                "Option 1 total SRAM1 must be exactly 1311 bytes (within 1320-byte reservation)");
@@ -13415,10 +13432,15 @@ static void filesystem_loadBankDirectory_tick(void)
             /*
              * Option 1A: capture presence AND the lexical-winning display name
              * for every Bank child in a single pass.
+             * Use the Bank-child view only during the asynchronous Bank Load
+             * lifetime. It is the same 144-byte object the boot reader uses
+             * earlier for types, but no blocking Stage-11 reader is active
+             * while these phases scan or consume child names.
              *
              * Inputs: each public child directory inside the selected Bank.
              * Outputs: one bit in op_bank_child_present_mask and one
-             * eight-char display name in op_bank_child_display[child_slot]
+             * eight-char display name in
+             * op_bank_child_scratch.bank_child_display[child_slot]
              * for each valid 00..15 child.  The lexical-winner rule mirrors
              * filesystem_displayPrecedesCached(): for duplicate directories at
              * the same slot, the casefold-first / raw-case tiebreak selects
@@ -13436,11 +13458,13 @@ static void filesystem_loadBankDirectory_tick(void)
                     (uint16_t)(op_bank_child_present_mask |
                                (uint16_t)(1u << child_slot));
                 display[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
-                if (op_bank_child_display[child_slot][0] == '\0' ||
+                if (op_bank_child_scratch.bank_child_display[child_slot][0] ==
+                        '\0' ||
                     filesystem_displayPrecedesCached(
                         display,
-                        op_bank_child_display[child_slot])) {
-                    memcpy(op_bank_child_display[child_slot], display,
+                        op_bank_child_scratch.bank_child_display[child_slot])) {
+                    memcpy(op_bank_child_scratch.bank_child_display[child_slot],
+                           display,
                            STORAGE_SCENE_DISPLAY_NAME_LEN + 1u);
                 }
             }
@@ -13878,20 +13902,23 @@ static void filesystem_loadBankDirectory_tick(void)
         op_kit_slot_dir = NULL;
         /*
          * Option 1A: look up the cached display name instead of rescanning.
+         * The Bank-child view is valid here because the asynchronous Bank
+         * Load owns the shared scratch after the Stage-11 reader has returned.
          *
          * Replaces the former phases 27-30 per-child rescan.  The previous
          * code reopened "." on the Bank parent, iterated every directory entry
          * a second time, and retained only the one matching child_cursor —
          * O(n) work repeated up to 16 times.
          *
-         * Inputs: op_bank_child_display[op_bank_child_cursor], populated once
-         * during the phase 15 scan.  Output: op_scene_display_name receives
+         * Inputs: op_bank_child_scratch.bank_child_display[
+         * op_bank_child_cursor], populated once during the phase 15 scan.
+         * Output: op_scene_display_name receives
          * the cached name.  op_close_done and op_close_status are set to
          * satisfy phase 31's guards without a real close, since no file was
          * opened.
          */
         memcpy(op_scene_display_name,
-               op_bank_child_display[op_bank_child_cursor],
+               op_bank_child_scratch.bank_child_display[op_bank_child_cursor],
                STORAGE_SCENE_DISPLAY_NAME_LEN + 1u);
         op_close_done = true;
         op_close_status = FS_STATUS_DONE;
@@ -25000,7 +25027,11 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
            sizeof(op_save_bank_dir_display_name));
     memset(op_save_bank_dir_open_name, 0, sizeof(op_save_bank_dir_open_name));
     op_bank_child_present_mask = 0u;
-    memset(op_bank_child_display, 0, sizeof(op_bank_child_display));
+    /* Reset the shared Bank-child/boot-reader scratch only at a new async
+     * request boundary.  This releases a finished reader's immutable type
+     * image before Bank Load writes names, without clearing payload stage or
+     * the library cache whose lifetimes are independently owned. */
+    memset(&op_bank_child_scratch, 0, sizeof(op_bank_child_scratch));
     op_bank_scene_load_mask = 0u;
     op_bank_scene_failed_mask = 0u;
     op_bank_scene_save_mask = 0u;
@@ -27242,13 +27273,13 @@ static uint8_t filesystem_bootReaderLoadPattern(uint8_t scene_index)
  *
  * What: re-extracts the mandatory third tab field of an Instrument
  * .hcnames row (33..128) and stores the resolved instrument_type_t in the
- * boot reader's per-row scratch. Inputs: logical row and the physical text
+ * shared boot-reader type view. Inputs: logical row and the physical text
  * line (already validated by filesystem_cacheResidentRecord()). Outputs:
  * nonzero after the row type is captured; this is the durable type the
  * Case-2 evaluation passes to the narrow Instrument loader. Why: the
  * reader must know a row's typed directory before it can resolve a
- * Case-2 Instrument, and the scratch survives later Case-2 Kit reloads
- * that replace resident slot types. Affiliates:
+ * Case-2 Instrument, and the separate scratch survives later Case-2 Kit
+ * reloads that replace resident slot types. Affiliates:
  * filesystem_cacheResidentRecord(), the boot reader .hcnames parse,
  * storage_instrumentTypeFromText(), §6 S061_AUTOSAVE_READER.md.
  */
@@ -27292,7 +27323,7 @@ static uint8_t filesystem_bootReaderApplyRowType(uint16_t row,
     slot = (uint8_t)(offset % STORAGE_KIT_SLOT_COUNT);
     if (scene_index >= AUTOSAVE_SCENE_COUNT)
         return 0u;
-    fs_stage_workspace.boot_reader_type[
+    op_bank_child_scratch.boot_reader_type[
         (uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT + slot] =
         (uint8_t)type;
     return 1u;
@@ -27304,7 +27335,7 @@ static uint8_t filesystem_bootReaderApplyRowType(uint16_t row,
  * What: blocking version of the register read used by the runtime
  * machines: validates the #types header, streams every data row through
  * filesystem_cacheResidentRecord(), and captures each Instrument row's
- * type token in the reader's per-row scratch. Inputs: an open blocking
+ * type token in the shared boot-reader scratch. Inputs: an open blocking
  * .hcnames (or .hcnamtmp) handle. Outputs: nonzero only for a header plus
  * exactly FS_RESIDENT_NAMES_ROW_COUNT parseable rows; fs_resident_source[]
  * and hcnames_name_mirror[] then match the parsed image. Why: the boot
@@ -27352,14 +27383,16 @@ static uint8_t filesystem_bootReaderParseRegisterFile(afatfsFilePtr_t file)
 }
 
 /*
- * Seed the reader's per-row Instrument type scratch from SceneData.
+ * Seed the reader's full Instrument type image from SceneData.
  *
- * What: copies every resident Scene/slot type into boot_reader_type[].
- * Inputs: none (SceneData). Outputs: scratch populated. Why: the winner
+ * What: copies every resident Scene/slot type into the shared
+ * boot_reader_type[] view. Inputs: none (SceneData). Outputs: scratch
+ * populated. Why: the winner
  * regeneration path (filesystem_regenerateHcnamesFromWinnerBlocking())
  * leaves the record-derived types in SceneData rather than in the reader
  * scratch, and the per-Scene evaluation must read one durable image that
- * later Case-2 Kit reloads cannot change. Affiliates:
+ * later Case-2 Kit reloads cannot change. The image remains outside the
+ * destructive payload stage for the entire traversal. Affiliates:
  * filesystem_autosaveBootReaderBlocking() step 1, the regeneration
  * wrapper, filesystem_bootReaderEvaluateScene().
  */
@@ -27373,7 +27406,7 @@ static void filesystem_bootReaderSeedInstrumentTypes(void)
         const scene_t *scene = scene_getConst(scene_index);
 
         for (slot = 0u; slot < AUTOSAVE_INSTRUMENTS_PER_KIT; slot++) {
-            fs_stage_workspace.boot_reader_type[
+            op_bank_child_scratch.boot_reader_type[
                 (uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT + slot] =
                 scene ? (uint8_t)scene->kit.instruments[slot].type
                       : (uint8_t)INSTRUMENT_TYPE_UNKNOWN;
@@ -27496,31 +27529,18 @@ static uint8_t filesystem_bootReaderEvaluateScene(
     uint8_t scene_index, afatfsFilePtr_t record, uint8_t *rows_changed)
 {
     uint8_t scene_section[AUTOSAVE_SCENE_SECTION_BYTES];
-    uint8_t instrument_types[AUTOSAVE_INSTRUMENTS_PER_KIT];
     uint8_t index;
-    uint8_t type_slot;
     uint32_t scene_offset = (uint32_t)(AUTOSAVE_SCENES_OFFSET +
         ((uint32_t)scene_index * AUTOSAVE_SCENE_SECTION_BYTES));
 
     /*
-     * Snapshot this Scene's durable Instrument types before any row load.
-     *
-     * What: copies boot_reader_type[scene*6..+5] into stack locals. Why:
-     * the type scratch is a member of the shared 2,048-byte staging union,
-     * and the Case-2 narrow Scene/Kit/Instrument loads below write
-     * kit_stage/instrument_stage/scene_stage over the same memory; reading
-     * the scratch after a Kit reload returns staged payload bytes instead
-     * of the parsed .hcnames types (Session 061 Phase 2, the zero-tick
-     * Case-3 rows in the SD_CARD_READER_7 trace). Inputs: parsed scratch.
-     * Outputs: stack locals owned by this Scene evaluation. Affiliates:
-     * filesystem_bootReaderApplyRowType(), the narrow loaders.
+     * Case-2 Instrument selection reads the complete immutable HCNAMES type
+     * image, not a per-Scene stack copy. Earlier narrow loaders may overwrite
+     * fs_stage_workspace, but cannot affect this separate scratch; later
+     * Scenes therefore receive their original row types as well. The image
+     * was populated before this evaluation began by the register parser or
+     * winner regeneration.
      */
-    for (type_slot = 0u; type_slot < AUTOSAVE_INSTRUMENTS_PER_KIT;
-         type_slot++) {
-        instrument_types[type_slot] = fs_stage_workspace.boot_reader_type[
-            (uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT + type_slot];
-    }
-
     if (!filesystem_blockSeek(record, scene_offset) ||
         filesystem_blockRead(record, scene_section,
                              sizeof(scene_section)) !=
@@ -27615,7 +27635,9 @@ static uint8_t filesystem_bootReaderEvaluateScene(
                 } else {
                     uint8_t slot = (uint8_t)(index - 2u);
                     instrument_type_t type = (instrument_type_t)
-                        instrument_types[slot];
+                        op_bank_child_scratch.boot_reader_type[
+                            (uint16_t)scene_index *
+                            AUTOSAVE_INSTRUMENTS_PER_KIT + slot];
 
                     load_ok = filesystem_bootReaderNarrowLoadInstrument(
                         scene_index, slot, type, resolved, resolved_row);
@@ -27678,6 +27700,11 @@ static uint8_t filesystem_bootReaderEvaluateScene(
  * defers all dirty marks until ensureAutosaveFilesBlocking enables tracking.
  * A zero return means main.c falls back to the canonical Bank Load ladder
  * (or, when the boot deadline latched, to the timeout path).
+ * The reader borrows the pre-existing 144-byte Bank-child operation scratch:
+ * the register parser or winner regeneration fills its complete 96-byte type
+ * view before any Case-2 load, and filesystem_bootReaderEvaluateScene() uses
+ * that view through the final Scene row. This borrowed storage is separate
+ * from the destructive payload stage and adds no static allocation.
  *
  * Affiliates: main.c stage 11, validateAutosaveWinnerBlocking(),
  * replayBootLatch(), autosave_apply*(), filesystem_resolveResidentSource(),
@@ -27702,7 +27729,9 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
 #if DEV_MODE_LOGGING
     filesystem_bootLoggingArm("ASREADR ");
 #endif
-    /* Step 1: read .hcnames (with its temp-file crash prelude first). */
+    /* Step 1: read .hcnames (with its temp-file crash prelude first). The
+     * parser fills the borrowed shared scratch's complete 96-byte type image
+     * before any Stage-11 narrow payload load can overwrite staging. */
     filesystem_prepareResidentNamesCache();
     register_file = filesystem_blockOpenLfn(FS_RESIDENT_NAMES_TEMP_FILENAME);
     if (register_file) {
@@ -27721,7 +27750,8 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
     if (register_ok) {
         hcnames_mirror_valid = FS_HCNAMES_MIRROR_VALID;
     } else if (filesystem_regenerateHcnamesFromWinnerBlocking()) {
-        /* Regeneration populated mirror/register with record identity. */
+        /* Regeneration populated mirror/register with record identity and
+         * the seeder fills the same borrowed 96-byte type image. */
         filesystem_bootReaderSeedInstrumentTypes();
         register_ok = 1u;
     } else {
@@ -27810,6 +27840,10 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
  * empty and noticed. Returns 1 on a completed authoritative load and 0
  * when either check fails or a hard failure occurs, in which case the
  * caller falls through to the canonical Bank Load unchanged.
+ * All 96 Instrument-row type tokens are retained in the shared boot-reader
+ * scratch before filesystem_bootNarrowLoadBank() and remain authoritative
+ * through the final Scene evaluation; payload staging is allowed to be
+ * overwritten by each narrow load without changing later type selection.
  */
 uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
 {
@@ -27874,29 +27908,14 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
     if (!filesystem_blockChdir(NULL))
         return 0u;
     /* Step 4: per-Scene resolution of the eight rows in fixed order.
-     * Every row is refreshed by check 2, so this is Case 2/3 only. */
+     * Every row is refreshed by check 2, so this is Case 2/3 only. The full
+     * immutable type image was captured before the Bank or child loads. */
     for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
          scene_index++) {
         uint8_t index;
-        uint8_t instrument_types[AUTOSAVE_INSTRUMENTS_PER_KIT];
-        uint8_t type_slot;
 
         if ((present_mask & (uint16_t)(1u << scene_index)) == 0u)
             continue;
-        /*
-         * Snapshot this Scene's durable Instrument types before any row
-         * load writes the shared staging union (see the identical note in
-         * filesystem_bootReaderEvaluateScene): the narrow Scene/Kit loads
-         * overwrite boot_reader_type's union memory, so the Instrument rows
-         * must resolve types from this stack copy instead.
-         */
-        for (type_slot = 0u; type_slot < AUTOSAVE_INSTRUMENTS_PER_KIT;
-             type_slot++) {
-            instrument_types[type_slot] =
-                fs_stage_workspace.boot_reader_type[
-                    (uint16_t)scene_index * AUTOSAVE_INSTRUMENTS_PER_KIT +
-                    type_slot];
-        }
         for (index = 0u; index < 8u; index++) {
             uint16_t row;
             uint16_t resolved_row = FS_RESIDENT_NAMES_ROW_COUNT;
@@ -27925,7 +27944,9 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
                 } else {
                     uint8_t slot = (uint8_t)(index - 2u);
                     instrument_type_t type = (instrument_type_t)
-                        instrument_types[slot];
+                        op_bank_child_scratch.boot_reader_type[
+                            (uint16_t)scene_index *
+                            AUTOSAVE_INSTRUMENTS_PER_KIT + slot];
 
                     load_ok = filesystem_bootReaderNarrowLoadInstrument(
                         scene_index, slot, type, resolved, resolved_row);

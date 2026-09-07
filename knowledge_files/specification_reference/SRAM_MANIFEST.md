@@ -76,7 +76,7 @@ boundary `0x08080000`. `build/lxr02.bin` is 385,824 B.
 | `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved filesystem-owned source cache |
 | `hcnames_name_mirror` | 1,161 B | Session 058 Option 1C dedicated 129-by-9 HCNAMES name mirror (replaces HCNAMES borrowing of `fs_list_cache_name`) |
 | `hcnames_mirror_valid` | 1 B | Session 058 Option 1C tri-state mirror validity gate |
-| `op_bank_child_display` | 144 B | Session 058 Option 1A 16-by-9 Bank-local child display names, captured in one scan |
+| `op_bank_child_scratch` | 144 B | Shared Session 058 Option 1A 16-by-9 Bank-child display view and zero-growth Session 061 16-by-6 boot-reader Instrument-type view; lifetimes are mutually exclusive |
 | `text_buf_pos` + `text_buf_len` | 4 B | Session 058 Option 1D buffered text-reader cursors |
 | `op_bank_cwd_at_parent` | 1 B | Session 058 Option 1B Bank-delegated parent-CWD retention flag |
 | `bank_scene_sd_clean_mask` + `bank_scene_sd_clean_slot` + `bank_sd_save_mutated_mask` | 6 B | Session 058 Option 2 card-verified clean-Scene authority (2 B BSS mask, 2 B `.data` slot, 2 B BSS mutation-during-save) |
@@ -166,9 +166,11 @@ The Session 058 additions are all normal SRAM1 and named in the primary-owners
 table above:
 
 - Option 1 (1A/1B/1C/1D): `hcnames_name_mirror` 1,161 B, `hcnames_mirror_valid`
-  1 B, `op_bank_child_display` 144 B, `text_buf_pos` + `text_buf_len` 4 B,
+  1 B, `op_bank_child_scratch` 144 B, `text_buf_pos` + `text_buf_len` 4 B,
   `op_bank_cwd_at_parent` 1 B — **1,311 B**, within the approved 1,320-byte
-  reservation.
+  reservation. The scratch's 144-byte size is unchanged; its alternative
+  `boot_reader_type[96]` view is borrowed only by the pre-audio Stage-11
+  readers before any normal Bank Load.
 - Option 2: `bank_scene_sd_clean_mask` 2 B + `bank_sd_save_mutated_mask` 2 B +
   `op_bank_sd_clean_candidate_mask` 2 B in `.bss`, and
   `bank_scene_sd_clean_slot` 2 B + `op_bank_sd_clean_candidate_slot` 2 B in

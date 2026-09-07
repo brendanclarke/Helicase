@@ -338,6 +338,11 @@ uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void);
  * zero falls back to the canonical Bank Load ladder. Affiliates: main.c
  * stage 11, validateAutosaveWinnerBlocking(), replayBootLatch(),
  * autosave_apply*(), filesystem_bootReaderNarrowLoad*().
+ * Before any Case-2 narrow load, the reader preserves the complete 16-by-6
+ * HCNAMES Instrument-type image for the whole traversal. Later payload
+ * staging may not change the type used to resolve any remaining Instrument
+ * row. This is an internal zero-growth lifetime guarantee; the public API and
+ * on-card format are unchanged.
  */
 uint8_t filesystem_autosaveBootReaderBlocking(void);
 /*
@@ -372,6 +377,11 @@ uint8_t filesystem_autosaveBootReaderBlocking(void);
  * publication only for emptied Scenes. No new RAM. Affiliates: main.c
  * stage 11, filesystem_autosaveBootReaderBlocking() (the
  * winner-matching sibling), 061_READER_LOADED_SCENES_INVALID.md §16.
+ * Before any Case-2 narrow load, the reader preserves the complete 16-by-6
+ * HCNAMES Instrument-type image for the whole traversal. Later payload
+ * staging may not change the type used to resolve any remaining Instrument
+ * row. This is an internal zero-growth lifetime guarantee; the public API and
+ * on-card format are unchanged.
  */
 uint8_t filesystem_bootHcnamesAuthoritativeLoad(void);
 /*
