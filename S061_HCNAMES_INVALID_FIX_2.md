@@ -772,3 +772,125 @@ is source-reviewed and build-verified, but not hardware-verified. The captured
 `SD_CARD_READER_4` directory is present in the workspace; what is unavailable
 here is execution of the rebuilt image on the target hardware, rather than the
 input data itself.
+
+## 12. `SD_CARD_READER_9` post-boot hardware assessment
+
+### 2026-09-08 — authoritative-path verdict: pass
+
+`SD_CARD_READER_9` is the post-boot capture made by running the fixed image on
+the `SD_CARD_READER_4` input. It passes the section 8 acceptance criteria for
+the HCNAMES-authoritative path and directly demonstrates that the
+cross-Scene Instrument-type corruption is fixed.
+
+The fixture provenance is sound:
+
+- `SD_CARD_READER_9/LXRV2_lxr02.img` is byte-identical to the reviewed build
+  image. Both have SHA-256
+  `5732e821d256f521e48814d2cf255c895b1fbb7fdfa9f006b43f5ae293fb8c62`.
+- The complete `Bank`, `Scene`, `Kit`, and `Instrument` library trees are
+  byte-identical between Readers 4 and 9. `settings.cfg` is also
+  byte-identical and still selects `active_bank=1` with `autosave=1`.
+- There is one live `.hcnames`, both `.hcprms` records, and no residual
+  `/.hcnamtmp` transaction file.
+
+The boot trace is conclusive. Record `#015346` validates the old generation-8
+winner in `.hcprms2`, after which records `#015347..#015474` contain exactly
+128 successful Case-2 row completions: eight rows for every one of the 16
+Scenes. All have flags `0x04`; there is no Case-3 (`0x02`) row. The four
+overlaid resident Scenes 0, 1, 14, and 15 resolve their Scene, Kit, and six
+Instrument rows through effective source 8. The remaining Bank children
+resolve through effective source 1. Summary record `#015475` is exactly:
+
+```text
+case2_scene_mask=0xffff, case3_scene_mask=0x0000
+raw value=0x0000ffff
+```
+
+There is no `E` operation-error or `X` phase-stall record. The trace's `Q`
+total is 129, exactly the 128 row results plus the one summary. Consequently,
+all 16 Scenes were accepted and none was emptied by P1. This is the precise
+hardware result that the earlier six-byte snapshots failed to produce.
+
+The resulting HCNAMES register is also correct:
+
+- it has the required `#types` header and exactly 129 data rows;
+- it contains no unknown (`?`) source;
+- resident Scenes 0, 1, 14, and 15 are all named `Rollin` with direct source
+  `008`; their Kits and Instruments retain inherited source `-` and the six
+  required types `drm, drm, drm, snr, cym, hat`; and
+- compared with Reader 4, identities and sources were preserved. The only
+  changes are the expected removal of `R` witnesses as autosave objects became
+  fully captured.
+
+Both updated autosave records are exact-size, committed, CRC-valid format-v1
+records with valid reserved bytes:
+
+| Record | Generation | Probe | CRC32C | Dirty bits | Bank | Present | Active / VOICE |
+|---|---:|---:|---:|---:|---|---:|---|
+| `.hcprms1` | 9 | 8 | `0x2449f3fb` | 6,671 | `001 Full` | `0xffff` | Scene 6 / `0x0040` |
+| `.hcprms2` | 10 | 9 | `0x12caa3b9` | 5,138 | `001 Full` | `0xffff` | Scene 0 / `0x0001` |
+
+Generation 10 in `.hcprms2` is the unambiguous current winner. Its coherent
+Scene-0 active and VOICE masks describe a later live selection than Bank
+001's saved Scene-6/`0x0040` startup values retained in generation 9; this is
+consistent with selecting the first recovered Rollin Scene while checking the
+result. If no such post-boot selection was made, that UI-state change is a
+separate fact to investigate, but it is not evidence of a wrong Bank or failed
+Scene recovery.
+
+Most importantly, the generation-10 file-carried dirty mask and the physical
+HCNAMES register agree for every one of the 129 object rows: there are **zero
+`R`-versus-object-mask mismatches**. Every autosave source/type mismatch is
+confined to an object that is still dirty and still carries `R`; there is no
+mismatch in any clean object. That is the required power-loss invariant: a
+later matching-winner boot may trust clean Case-1 objects and must Case-2
+reload the still-refreshed objects from their authoritative HCNAMES sources.
+
+The capture was taken during normal continuation convergence, not after the
+entire Bank became clean. HCNAMES has 46 clean rows and 83 rows still carrying
+`R`. The clean frontier includes the Bank, complete Scenes 0..4 and their
+children, plus Instruments 0..4 of Scene 5. In particular:
+
+- autosave Scenes 0 and 1 are fully clean; both carry Scene source 8,
+  inherited Kit/Instrument sources, and the correct six Instrument types;
+  after excluding the deliberately stale embedded name bytes, their complete
+  1,920-byte autosave sections are identical, as expected from loading the
+  same `Scene/008 Rollin` source;
+- Scenes 14 and 15 still carry `R`, so their older record payload/source bytes
+  are correctly not authoritative yet; their HCNAMES rows retain direct
+  source 8 and will force Case 2 if power is lost before later drains capture
+  them; and
+- stale embedded Scene/Kit/Instrument names in `.hcprms` are expected by the
+  documented format. Those name bytes are deliberately not dirtied or
+  refreshed; HCNAMES is the boot identity authority.
+
+The trace file ends with the generation-9 terminal record, while the card also
+contains the later valid generation-10 commit and the HCNAMES convergence
+state matching its mask. This only means the later lifecycle trace records
+had not themselves reached the low-priority trace file before capture; the
+generation-10 commit byte and whole-record CRC prove that the autosave
+publication completed.
+
+`tools/verify_bank_autosave.py SD_CARD_READER_9 1` is not a valid pass/fail
+oracle for this mixed-source fixture: by design it requires all resident
+identities and sampled payloads to equal the unchanged `Bank/001 Full` library
+tree. It therefore reports the four intentional `Rollin` overlays (and the
+later active-Scene selection) as failures, even though it correctly selects
+`.hcprms2` and reports `present_mask=0xffff`. The row-aware HCNAMES/source/type
+and dirty-mask checks above are the applicable validation.
+
+Fixture hashes for later comparison are:
+
+```text
+.hcnames   7d54c7f4a4a1cdf6d362ad4cfb019fc298007186a18f3ec7dea38c1ecd23ed02
+.hcprms1   5d641b94252acb184d4965d5b087336c69dd21e3ac492ff799ecda432c8b4ea2
+.hcprms2   cc83be68bf8024d64833ef0b917ac92db2a713b3645cf934ebf46b0a6ea14639
+asavetrc   3d45f11ac6ad9ae7be2784ae8c4a1cb4880bebb64dec989ba458c2b939fb0696
+```
+
+The fix can therefore be marked **hardware-verified for the original
+HCNAMES-authoritative failure**. The overall section 9.5 gate is not yet fully
+closed: boot Reader 9 once more and capture the result to exercise the
+matching-winner mixed Case-1/Case-2 path. Reader 9 is a particularly strong
+fixture for that test because its HCNAMES `R` rows and generation-10 dirty mask
+are already in exact agreement.

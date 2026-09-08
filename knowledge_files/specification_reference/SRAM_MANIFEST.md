@@ -1,23 +1,29 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-08-31 logging-on Session 059 Gate B build (HEAD `0c90434` plus the
-uncommitted Phase Two source patch).
-`arm-none-eabi-size build/lxr02.elf` reports `text=385,420`, `data=404`, and
-`bss=96,176`; `build/lxr02.bin` is 385,824 B and `build/LXRV2_lxr02.img` is
-385,840 B. The approved 258-byte `fs_resident_source` cache, the one-byte
-`menu_pendingPageSwitch`, and the Session 058 allocations listed in the
-"2026-08-30 Session 058 net allocation note" all share normal SRAM1. This
-remains a linked-image inventory: sizes come from `arm-none-eabi-size -A` and
-`arm-none-eabi-nm -S --size-sort`, not source estimates. Earlier session
-figures retained below are historical baseline notes, not the current total.
+2026-09-08 logging-on Session 061 build at HEAD `6642f4c`.
+`arm-none-eabi-size build/lxr02.elf` reports `text=407,060`, `data=404`, and
+`bss=96,212`; `build/lxr02.bin` is 407,464 B and `build/LXRV2_lxr02.img` is
+407,480 B with SHA-256
+`5732e821d256f521e48814d2cf255c895b1fbb7fdfa9f006b43f5ae293fb8c62`.
+The approved 258-byte `fs_resident_source` cache, the one-byte
+`menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
+This remains a linked-image inventory: sizes come from
+`arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
+estimates. Earlier session figures retained below are historical baseline
+notes, not the current total.
 
 Session 052 adds no retained allocation (Bank present-mask witness reuses the
 existing eight-byte trace record/ring; the no-op dirty-mark fallback uses only
 the existing canonical mutation mask). Session 057 added a handful of
 operation-scoped scratch bytes (see its note below). Session 058 adds the
 Option 1/2 and fast-drain allocations documented in its note below. Session 059
-Phase One and Phase Two add no retained allocation.
+Phase One and Phase Two add no retained allocation. Session 061's HCNAMES type
+schema uses existing SceneData and operation scratch. Session 061 adds a
+five-byte set of filesystem boot-latch fields, seven bytes of boot-winner
+fields, and six Menu notice bytes; linked LTO symbols are 6, 12, and 6 bytes
+respectively because of structure alignment. The final 96-Instrument-type
+lifetime fix adds no BSS: it aliases the existing 144-byte Bank-child scratch.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -43,12 +49,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 89,908 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **93,008 B** | **283,824 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **105,288 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 89,944 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **93,044 B** | **283,788 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **105,324 B** | — |
 
-The image contains 404 B of initialized SRAM1 data and 96,176 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 89,504 B in normal SRAM1
+The image contains 404 B of initialized SRAM1 data and 96,212 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 89,540 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -56,16 +62,16 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 372,488 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 394,128 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
 | `.data` | `0x20020c1c` | 404 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020da8` | 89,504 B | SRAM1 | Normal zero-initialized globals |
+| `.bss` | `0x20020db0` | 89,540 B | SRAM1 | Normal zero-initialized globals |
 
 The final FLASH load image remains safely before the reserved sample-FLASH
-boundary `0x08080000`. `build/lxr02.bin` is 385,824 B.
+boundary `0x08080000`. `build/lxr02.bin` is 407,464 B.
 
 ## Primary SRAM1 owners
 
@@ -77,6 +83,9 @@ boundary `0x08080000`. `build/lxr02.bin` is 385,824 B.
 | `hcnames_name_mirror` | 1,161 B | Session 058 Option 1C dedicated 129-by-9 HCNAMES name mirror (replaces HCNAMES borrowing of `fs_list_cache_name`) |
 | `hcnames_mirror_valid` | 1 B | Session 058 Option 1C tri-state mirror validity gate |
 | `op_bank_child_scratch` | 144 B | Shared Session 058 Option 1A 16-by-9 Bank-child display view and zero-growth Session 061 16-by-6 boot-reader Instrument-type view; lifetimes are mutually exclusive |
+| `fs_boot_latch` | 6 B linked / 5 B logical | Boot-only Bank-fallback byte plus 16-bit Case-2 and Case-3 masks; replayed after tracking enables, with notice fields cleared by Menu accessors |
+| `fs_boot_winner` | 12 B linked / 7 B fields | Stage-10b/11 validated winner identity: valid byte, record index, generation, Bank-match byte |
+| Menu boot-notice state | 6 B | Post-audio one-shot Scene mask, Bank flag, active flag, and 16-bit start tick; no payload or filesystem ownership |
 | `text_buf_pos` + `text_buf_len` | 4 B | Session 058 Option 1D buffered text-reader cursors |
 | `op_bank_cwd_at_parent` | 1 B | Session 058 Option 1B Bank-delegated parent-CWD retention flag |
 | `bank_scene_sd_clean_mask` + `bank_scene_sd_clean_slot` + `bank_sd_save_mutated_mask` | 6 B | Session 058 Option 2 card-verified clean-Scene authority (2 B BSS mask, 2 B `.data` slot, 2 B BSS mutation-during-save) |
@@ -128,6 +137,26 @@ all of them.
 | Pattern representation | `scenes` is 20,992 B; pattern payload is 16 x 112 B = 1,792 B. No `Step[7][128]` symbol is linked. |
 | Slider LUT | `slider_lut` is 4,096 B: 1,024 `float` values, four ADC codes per non-interpolated node. |
 | Instrument runtime ownership | Exactly one `runtime_slots` symbol is linked at 7,056 B. No native drum/snare/cymbal/hat object or per-engine expansion pool is linked. |
+
+## 2026-09-08 Session 061 AutoSave reader allocation note
+
+The reader's declared semantic fields total 18 bytes: five bytes in the
+filesystem boot latch, seven in the winner record, and six in the Menu notice
+sequencer. LTO alignment makes the linked symbols 6, 12, and 6 bytes (24 bytes
+of named objects); the measured Session-061 `.bss` increase from the 96,184-B
+pre-reader build was 28 bytes after whole-layout alignment. This is boot/notice
+control state only, not payload storage. Earlier plans calling the winner
+"8 bytes" and the total "19 bytes" were source estimates, not linked sizes.
+
+The originally considered standalone 96-byte Instrument-type snapshot was not
+allocated. Both boot readers instead own the 96-byte view of
+`op_bank_child_scratch` from complete HCNAMES parse/regeneration through the
+last Scene. Canonical Bank Load owns the mutually exclusive 144-byte 16x9 name
+view after the reader returns and `filesystem_start()` clears the object. The
+9,000-byte list cache remains untouched because canonical fallback still needs
+the Bank index. Final type-lifetime comparison against the pre-fix build was
+`text -40`, `data 0`, `bss 0`; two six-byte per-Scene local snapshots were also
+removed, reducing their aligned stack frames by eight bytes each.
 | Transient PCM ROM | `transientData` is 26,460 B at `0x0805b3a0` in FLASH. DTCM `.dtcm` is 8,708 B, down exactly 26,460 B from the preceding image. |
 
 ## Verification commands

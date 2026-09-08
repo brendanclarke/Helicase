@@ -316,7 +316,13 @@ APIs:
 - `afatfs_chdir(NULL)`
 - `afatfs_chdirParent()`
 
-`afatfs_chdir(NULL)` returns to root.
+`afatfs_chdir(NULL)` reinitializes `afatfs.currentDirectory` to root and starts
+its seek to offset zero. Since Session 061 it polls any queued seek to
+completion before returning true. A successful return therefore means root is
+both selected and idle, ready for the next relative open; this is required by
+the boot-only blocking Bank/Scene/Kit narrow loaders. A false return still means
+the current-directory object was busy and the caller must retry. Do not weaken
+this to an early success unless every blocking caller is changed with it.
 
 `afatfs_chdir(handle)` copies the selected directory state into
 `afatfs.currentDirectory`. The explicit application handle is not the current
@@ -338,7 +344,7 @@ The current implementation has five application file-handle slots:
 #define AFATFS_MAX_OPEN_FILES 5
 ```
 
-**Current linked sizes (Session 059):** `afatfsFile_t` is 188 bytes and the
+**Current linked sizes (verified again Session 061):** `afatfsFile_t` is 188 bytes and the
 five-slot `afatfs` owner is 6,984 bytes. The 328-byte handle and 7,344-byte
 owner figures in older notes are obsolete. Session 059 asserts
 `afatfsCreateFile_t=144`, `afatfsFile_t=188`, and
@@ -564,7 +570,8 @@ Don't:
   choose/delete one of multiple case-folded matches.
 - Start deletion from a display name after a scan already selected a concrete
   object; retain and use the captured object identity instead.
-- Hide dot-prefixed objects in asyncfatfs; filtering belongs in product scans.
+- Extend the asyncfatfs hidden-object policy beyond the narrow macOS
+  AppleDouble `._*` filter without a separately justified on-media rule.
 - Persist returned short aliases into user-facing schemas.
 
 ## Current Production Users
@@ -583,8 +590,8 @@ Don't:
 - Root Instrument scan/load/save uses object iteration, registry-owned typed
   directories, one shared generalized browser-name cache with up to 1,000
   sorted rows, LFN file writes, and descriptor-keyed text schemas. Product
-  scan/repair policy excludes `.hctmp.<ext>`; asyncfatfs itself still exposes
-  the dot-prefixed object normally.
+  scan/repair policy excludes `.hctmp.<ext>`; asyncfatfs exposes ordinary dot
+  files but filters `._*` AppleDouble entries before callbacks.
 - Kit/Scene/Bank `.hcindex` rows and typed Instrument rows reuse one
   1,000-by-9-byte cache in `filesystem.c`. HCNAMES uses its dedicated
   129-by-9 mirror. Both are above asyncfatfs and do not alter object iteration

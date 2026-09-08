@@ -9,8 +9,9 @@ AsyncFATFS semantics; those belong to `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, and
 `ASYNCFATFS_REFERENCE.md` respectively.
 
 This document describes the Session 048 logging baseline, the Session 051
-Scene-follow-up build, and the Session 057 stall-detection expansion
-(`DEV_STALL_DETECTION`, ten `X`/`PHASE_STALL` sites). Plans and failed
+Scene-follow-up build, the Session 057 stall-detection expansion
+(`DEV_STALL_DETECTION`, ten `X`/`PHASE_STALL` sites), and Session 061's
+`Q` AutoSave boot-reader decisions. Plans and failed
 working-tree experiments that mention a unified `/devlog.bin` are not
 implemented state.
 
@@ -87,8 +88,11 @@ The path abandons the dirty filesystem state, remounts, opens `/bootlog.bin`
 with direct write/create/truncate mode, writes the payload, closes, and flushes
 on a bounded best-effort deadline.
 
-Examples include `BANKLOAD`, `KITQUAR `, and `HCNAMES `. The record has no NUL
-and no newline.
+Examples include `BANKLOAD`, `KITQUAR `, `HCNAMES `, `ASREADR ` (matching
+AutoSave winner reader), and `HCAUTH  ` (HCNAMES-authoritative reader). The
+record has no NUL and no newline. Current `tools/decode_devlogs.py` decodes the
+raw eight bytes but does not yet give `ASREADR ` or `HCAUTH  ` a descriptive
+lookup entry; this is a diagnostic-label gap, not a boot-format or reader gap.
 
 For every ordinary failure, the payload is exactly the eight-byte token. A
 frozen `ASENSURE` timeout appends a 64-byte, eight-record HCPRMS capsule, so
@@ -218,7 +222,7 @@ stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
 Integer fields are little-endian. Stage bytes are uppercase
-`D I J N L R W F G B S A V M C P T X O E` and their meanings/values are owned
+`D I J N L R W F G B S A V M C P T X O E Q` and their meanings/values are owned
 by `AutosaveTrace.h`. `X`, `O`, and `E` were added in Session 054 while
 chasing the recursive-delete `ScnS05` defect (see
 `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`); a fourth stage,
@@ -309,6 +313,20 @@ records the resident mask at Bank Load metadata commit and packs the effective
 selected-child load mask in value bits 0..15. With bit 0 set it records the
 resident mask at the AutoSave drain's first present-mask byte and packs the
 payload offset (10) in bits 0..15. It is diagnostic-only and uses no new RAM.
+
+`Q` is the Session 061 AutoSave boot-reader decision. Flags bit 0 (`0x01`) is a
+Case-1 embedded-source mismatch, bit 1 (`0x02`) is a Case-3 whole-Scene
+invalidation, bit 2 (`0x04`) is a completed Case-2 narrow load, and bit 7
+(`0x80`) is the one reader summary. A non-summary value packs resident Scene
+in bits 0..3, HCNAMES row in bits 8..15, and embedded/resolved source in bits
+16..31 when applicable. The summary packs Case-2 Scene mask in bits 0..15 and
+Case-3 mask in bits 16..31; all Case 2 with no Case 3 is therefore raw
+`0x0000ffff`. Both boot readers request a synchronous trace flush after the
+summary so later dirty replay cannot wrap this evidence.
+
+The accepted `SD_CARD_READER_9` example contains 128 Q/`0x04` row records and
+one Q/`0x80` summary (`case2=0xffff`, `case3=0`), with no `E` or `X`. It is the
+reference signature for the HCNAMES-authoritative Bank-plus-four-Scene restore.
 
 The 2026-08-16 root-Scene hardware fixture is the reference example for the
 terminal publication chain: Scene 15 loaded root Scene 024 and produced

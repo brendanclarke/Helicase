@@ -17,37 +17,25 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 061 boot-reader follow-up fix on branch
-`dev-ph3-autosave-ph6` (HEAD `a9fd88d`, the reader implementation and the
-`061_READER_LOADED_SCENES_INVALID.md` analysis). The Option-A fix from that
-document is implemented and build-verified but **uncommitted**, awaiting
-hardware fixtures 1-7 (§14 of the document): Scene-op HCNAMES updates now
-publish the complete committed hierarchy (Scene + Kit + six Instrument name
-cells from the identity store, via new static
-`filesystem_cacheCurrentResidentSceneChildNames()` at both register-update
-dispatch phases), Scene Save request seeds the Kit/Instrument identities from
-the source Scene's register rows, and Bank Save's per-child preparation
-stages the child Kit identity. The Scene Load refreshed witness needs no new
-code: it is already staged at the shared loader's terminal boundary (case 61,
-Session 060 Phase C). Build: `text=405,084`, `data=404`, `bss=96,212`; no new
-RAM (the fix reuses the existing mirror, identity store, and op-scratch).
-Hardware tests 1-4 in `S060PHASE_D_RE_DIRTY.md` Section 5 remain the
-outstanding Session 060 Phase D work; Session 061 verification steps are
-listed in `061_READER_LOADED_SCENES_INVALID.md` §14.
+**Current working source**: Session 061 is closed on branch
+`dev-ph3-autosave-ph6`, firmware HEAD `6642f4c`. The final image rebuilds
+byte-identically to the hardware-tested Reader 9 image: SHA-256
+`5732e821d256f521e48814d2cf255c895b1fbb7fdfa9f006b43f5ae293fb8c62`,
+`text=407,060`, `data=404`, `bss=96,212`. Typed HCNAMES and both AutoSave
+boot readers are implemented. The Bank-plus-four-`Rollin`-Scene failure is
+hardware-closed: Reader 9 produced 128 Case-2 successes, summary
+`case2=0xffff/case3=0`, correct Bank/all sixteen Scenes, valid HCPR generations
+9/10, and zero HCNAMES-R/object-mask mismatches.
 
-Phase 2 of that document (HCNAMES-authoritative boot load, §16-17) is
-implemented and build-verified but uncommitted, awaiting hardware
-fixtures 16.8: `filesystem_bootHcnamesAuthoritativeLoad()` (public,
-main.c stage 11) runs between the winner reader and the canonical
-ladder when the register Bank row equals settings.cfg's boot Bank and
-all 129 register rows carry `R`; `filesystem_bootNarrowLoadBank()`
-commits the Bank container from the register/bankset.bcg, per-Scene
-resolution reuses `filesystem_bootReaderResolveResidentRow()` (C7,
-shared with `filesystem_bootReaderEvaluateScene()`) and the narrow
-loaders, and unresolvable children empty the whole Scene (unbreakable
-rule). No new RAM. Note: the tree also carries unrelated in-progress
-user splash/branding edits (`SplashAnimation.*`, `lcd.c`, `Makefile`);
-do not fold those into the Phase-2 commit.
+**Next feature**: implement Pattern data storage in AutoSave with an explicit
+format/version, owner, bounded snapshot/read plan, dirty API, and recovery
+rules. Load/Save is usable enough and its later refactor/test matrix is
+consolidated in `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; defer that pass
+unless a severe issue blocks Pattern work. One useful but non-blocking reader
+test remains: reboot `SD_CARD_READER_9` and capture the mixed matching-winner
+Case-1/Case-2 result. Permanent Session 061 detail is in
+`knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md`; the five root
+Session-061 planning/analysis documents are superseded and may be deleted.
 
 ## RAM Allocation Approval Policy
 
@@ -84,12 +72,23 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter records the Session 059 logging-on linked
-  allocation and totals. AutoSave format/writer authority is `AUTOSAVE.md`;
+  `SRAM_MANIFEST.md`; the latter records the Session 061 logging-on linked
+  allocation and totals. AutoSave format/reader/writer authority is `AUTOSAVE.md`;
   development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live
   memory manifest, module map, and oscillator-interpolation document.
+- Session 061 permanent authority is
+  `knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md` plus the updated
+  specs. HCNAMES is one exact `#types drm snr cym hat` header plus 129 rows;
+  Instrument rows require their type field. Boot uses matching HCPR winner,
+  all-refreshed settings-Bank-matching HCNAMES, then canonical fallback in that
+  order. Case 3 always empties the whole Scene. Preserve all 96 HCNAMES types
+  outside destructive payload staging for the full traversal.
+- `SD_CARD_READER_9/` is the strong post-boot fixture for the completed
+  HCNAMES-authoritative path and the outstanding matching-winner mixed-path
+  reboot. Its generation-10 mask and HCNAMES R flags agree exactly. Do not use
+  static-Bank-tree comparison alone to judge its intentional Rollin overlays.
 - The hardware has no real-time clock. FAT timestamps may retain fixed/default
   values and must not be used to order or validate device operations. Use file
   contents, CRC/generation fields, structural comparison, and trace order.
@@ -119,7 +118,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   active_scene and a 16-bit scene_mask_voice_edit; Bank-local Scene folders
   are 00..15. Bank Load delegates each selected local payload through the
   shared Scene loader, and Bank Save serializes the selected children through
-  direct exact-root delete/recreate. This is not a crash-recoverable
+  root-Bank reuse plus per-selected-child delete/rewrite. This is not a crash-recoverable
   transaction; temporary/old promotion names are not used.
 - Instrument membership is fully dynamic at boot and runtime. SceneData must
   initialize before InstrumentManager constructs tagged members. Scene
@@ -137,18 +136,22 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Instrument, Kit, root Scene, and root Bank Load/Save now share exactly one
   `fs_list_cache_name[1000][9]` display-name cache (9,000 bytes). Instrument
   rows are sorted; numbered-library rows are direct `000..999` slot rows with
-  blank rows preserved. Root `/.hcnames` temporarily borrows its first 129
-  rows. Menu entry/type changes and exit dispose or reload the same cache; no
-  per-instrument or per-library name cache is allowed.
+  blank rows preserved. HCNAMES has its separate 129-by-9 mirror and never
+  borrows this disposable browser cache. Menu entry/type changes and exit
+  dispose or reload the same browser cache; no per-instrument or per-library
+  name cache is allowed.
 - Root `/.hcnames` is the authoritative active identity **and provenance**
   register: row 0 Bank; rows 1..16 Scene; rows 17..32 Kit; rows 33..128 six
-  Instruments per Scene. Every row is `name<TAB>source`; `-`, `?`, `000..999`,
-  and `@` are its only source tokens. The 258-byte filesystem-owned source
+  Instruments per Scene. Its physical schema is one
+  `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 129 rows.
+  Bank/Scene/Kit rows are `name<TAB>source[<TAB>R]`; Instrument rows are
+  `name<TAB>source<TAB>type[<TAB>R]`. `-`, `?`, `000..999`, and `@` are its
+  only source tokens. The 258-byte filesystem-owned source
   register survives name-cache reuse and replaces the retired 32-byte
   SceneData source array. Runtime holds exactly 81 bytes of musical identity:
   one Bank, one Scene, one Kit, and six Instrument names. `scene_t` and `kit_t`
   contain no display names or retained filename stems. Because text rows have
-  variable length, a targeted update reads all 129 paired rows, overlays only
+  variable length, a targeted update reads the header and all 129 paired rows, overlays only
   its owned rows, and rewrites the file.
 - HCNAMES paired source correction: a successful non-empty root Bank Load must
   stage row 0 to its direct `op_slot` before the Bank-owned HCNAMES close gate,
@@ -235,11 +238,12 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   suppress every cursor, and retain input locking until true terminal work
   finishes. Preparatory index/preview work may use `menu_storageBusy` without
   showing `...`. Every completion resets to the bracketed type row.
-- Sessions 045–048's committed AutoSave implementation is the
+- Sessions 045–061's committed AutoSave implementation is the
   accepted baseline, not rejected work: exact 34,768-byte A/B records, one 3,856-byte
   canonical mutation mask, bounded mask/value capture with atomic
   take/re-dirty behavior, typed scalar markers, source-free v1 settings, and
-  the AutoSave lifecycle trace. Available scalar controls are accepted as
+  the AutoSave lifecycle trace, typed HCNAMES, and the two boot readers.
+  Available scalar controls are accepted as
   hardware tested: Scene; Kit/Instrument; and MIDI channel/note, which are
   Scene values. There is no user-changeable Bank scalar control for another UI
   test. Do not reopen this as a vague coverage matrix. Authority:
@@ -627,16 +631,17 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     (`FILESYSTEM_SPEC.md`, `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`,
     `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`) and may be deleted.
 
-- Session 061 (`.hcnames` instrument-type field) is implemented but
-  unverified on hardware: `.hcnames` now has a `#types` header line and
-  Instrument rows 33..128 serialize/validate `name<TAB>source<TAB>type`
-  (`drm|snr|cym|hat`) before any optional `R`. A header or type mismatch
-  invalidates the register: readers close/remove it and the next
-  write-capable pass (Bank Load at boot, update rewrites) regenerates it.
-  Authority: `S061_HCNAMES_INST_TYPE.md`; verify its steps 1-7 on the card,
-  and expect the old dev-card `/.hcnames` to be deleted and rebuilt at the
-  next boot. `tools/verify_bank_autosave.py` now skips the header and
-  cross-checks Instrument row types against kitset members.
+- Session 061 typed HCNAMES and AutoSave boot restore are implemented and the
+  original HCNAMES-authoritative failure is hardware-verified. `.hcnames` has
+  the exact `#types` header and Instrument rows 33..128 serialize/validate
+  `name<TAB>source<TAB>type[<TAB>R]`. The matching-winner reader applies clean
+  HCPR objects and narrow-loads refreshed rows; the all-refreshed special path
+  loads entirely from HCNAMES/library sources. Direct numeric Instrument
+  sources are invalid only when the Instrument row itself supplied them.
+  Pattern files are loaded best effort at boot but are not stored in HCPR;
+  Effects remain absent. All 96 parsed types live in the alternate view of the
+  existing 144-byte Bank-child scratch through the final Scene. See
+  `knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md` and `AUTOSAVE.md`.
 
 ---
 
@@ -660,13 +665,13 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 │   ├── OSC_INTERP_AUDIT.md         ← oscillator interpolation audit
 │   ├── specification_reference/
 │   │   ├── ASYNCFATFS_REFERENCE.md    ← low-level async FAT/VFAT API contracts, pumping, LFN/object identity, deletion, and caller rules
-│   │   ├── AUTOSAVE.md                 ← authoritative hidden A/B format, dirty ownership, writer lifecycle, limitations, and validation status
+│   │   ├── AUTOSAVE.md                 ← authoritative hidden A/B format, boot readers, dirty ownership, writer lifecycle, limitations, and validation status
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
 │   │   ├── DEV_MODES.md                ← authoritative screen-diagnostic versus file-logging policy and current log formats
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 059
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 061
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
-│   │   └── SRAM_MANIFEST.md           ← current Session 059 linked snapshot and binding reservation policy
+│   │   └── SRAM_MANIFEST.md           ← current Session 061 linked snapshot and binding reservation policy
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -796,13 +801,13 @@ and may contain historical snapshots as noted below.
 | File | What it contains | Use it when |
 |------|------------------|------------|
 | `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, LFN/SFN identity, object iteration, removal, terminator-aware directory-entry publication, lazy directory-cluster initialization, and flush boundaries. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
-| `AUTOSAVE.md` | Implemented hidden A/B wire format, ownership, canonical dirty mask, writer lifecycle, power-loss behavior, CRC limitation, and accepted scalar validation status. | Changing AutoSave format, dirty hooks, capture, scheduling, or recovery. |
+| `AUTOSAVE.md` | Implemented hidden A/B wire format, matching-winner and HCNAMES-authoritative boot readers, ownership, canonical dirty mask, writer lifecycle, power-loss behavior, and validation status. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
 | `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
 | `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
-| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 059: root layout, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 059 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 061: root layout, typed HCNAMES, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
+| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 061 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `SRAM_MANIFEST.md` | Current Session 059 logging-on linked snapshot, AutoSave/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
+| `SRAM_MANIFEST.md` | Current Session 061 logging-on linked snapshot, AutoSave reader/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
 
 ---
 
@@ -1750,6 +1755,22 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ## Failed Approaches — Do Not Retry
 
+- **Boot-reader Instrument types in `fs_stage_workspace`, or six-type snapshots
+  taken one Scene at a time**: Case-2 payload loads overwrite the shared union.
+  Scene 0 may pass while later Scenes consume corrupt types. Retain all 96 in
+  `op_bank_child_scratch.boot_reader_type` before the first load and through the
+  last Scene. Do not borrow `fs_list_cache_name`; canonical fallback still
+  needs its Bank index.
+- **Reader-side scanning to hide stale HCNAMES child names**: durable identity
+  must be corrected at the Load/Save commit boundary. Every hierarchy commit
+  publishes all committed Scene/Kit/Instrument name, source, and `R` fields;
+  the reader does not guess around an inconsistent register.
+- **Rejecting all numeric Instrument resolutions**: only a numeric token
+  directly on the Instrument row is invalid. A numeric slot inherited from its
+  Kit, Scene, or Bank ancestor is valid; check the resolver's `resolved_row`.
+- **Weakening the embedded-Kit filename contract to accept overlength stems**:
+  `file=` stems are at most eight characters. Repair data explicitly with a
+  collision-safe rename/reference update; never silently truncate.
 - **Blind one-millisecond filesystem runtime pacing**: slowed Bank operations
   to tens of seconds/about a minute and delayed rather than eliminated two
   audible glitches. Bound the actual CRC/work loop by bytes across retained

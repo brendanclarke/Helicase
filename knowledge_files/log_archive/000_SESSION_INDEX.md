@@ -69,6 +69,7 @@
 | 058 | 2026-08-29/30 | commits `9da35c7`, `124a6cf` on `dev-ph3-autosave-ph4` | Bank Load/Save speedup: Option 1 (one-pass Bank child-name capture, parent-CWD retention, dedicated HCNAMES mirror, buffered text reader) implemented + hardware-confirmed faster Bank Load; Option 2 (session-scoped card-verified clean-Scene skip) implemented, hardware pending; Option 3 (retained-cluster rewrite) implemented then reverted as ~15 s slower; Option 3B rejected; stopped-playback Load/Save fast drain + codec suspend + renderer guard; SD response-timeout root-cause fix (poll-count → elapsed TIM6 ms, hardware-accepted full stopped Bank Save); Bank progress `NN.` repaint fix; AsyncFATFS directory-create inefficiency deferred to Session 059 |
 | 059 | 2026-08-30/31 | commits `53a7676`, `3dc9a4b`, `d28f8f9`, `4067099`, `0c90434` plus Phase Two/doc closeout on `dev-ph3-autosave-ph5` | AsyncFATFS terminator-aware create/rename and first-sector-only directory initialization; stopped Bank Save reduced to about 10 s; typed Instrument `.hcindex` validation, recovery, and direct-open fast path; zero retained-SRAM growth; Phase Two hardware testing deliberately deferred with no problem expected from source/build review |
 | 060 | 2026-09-01/04 | commits `3ff43e4`..`eca4271` on `dev-ph3-autosave-pre-overscope-apply`, plus uncommitted `Core/Hardware/SD/filesystem.c` and `Core/Hardware/SD/asyncfatfs/asyncfatfs.c` (Instrument `.hcindex` boot fix and system-wide AppleDouble filter, applied after the last commit) | Autosave writer continuation-cycle speedup (winner cache, ~3.1s->2.2s drain); `.hcnames` atomic safe-write + refreshed-flag/HCNAMES-convergence reader prep (Phase B/B2); zero-growth 2-byte HCNAMES source fields in every autosave sub-object (Phase C); Phase D audited as already-implemented (no code change); boot Instrument `.hcindex` generation fixed (macOS AppleDouble `._` files filtered system-wide in asyncfatfs) |
+| 061 | 2026-09-05/08 | commit `6642f4c` on `dev-ph3-autosave-ph6`, plus documentation closeout and `SD_CARD_READER_9` capture | Typed 130-line HCNAMES; matching-winner and all-refreshed HCNAMES-authoritative AutoSave boot readers; complete hierarchy publication; Pattern fallback; zero-growth 96-type lifetime fix; Reader 9 hardware acceptance; deferred Load/Save test matrix |
 
 
 ---
@@ -994,3 +995,55 @@ deliberately left unapplied this session.
   `S060PHASE_B_POST_FIX.md`, `S060PHASE_C_AUTOSAVE_SOURCE.md`,
   `S060PHASE_D_RE_DIRTY.md`, `S060_HCINDEX_FIXUP.md`, `AUTOSAVE.md`,
   `FILESYSTEM_SPEC.md`, and `ASYNCFATFS_REFERENCE.md`.
+
+### 061 — Typed HCNAMES And AutoSave Boot Restore (2026-09-05/08)
+
+Completed the AutoSave boot reader and the HCNAMES schema it needs. HCNAMES
+now has a mandatory `#types\tdrm\tsnr\tcym\that` header, 129 fixed data rows,
+and a mandatory `drm|snr|cym|hat` field on Instrument rows 33..128; every
+writer, temp-file recovery path, parser, and verifier uses that contract. A
+separate `Err BKKit14` investigation proved the firmware was correctly
+rejecting fixture kitsets whose `file=` stems exceeded the canonical
+eight-character contract; the SD corpus was renamed consistently rather than
+weakening the Bank parser.
+
+Boot stage 10b now validates the HCPR A/B pair and stage 11 selects among
+three restore paths: the matching-winner reader, a narrowly gated
+HCNAMES-authoritative reader for an all-refreshed register matching
+`settings.cfg`, or the existing canonical Bank/Scene/Kit ladder. Both readers
+apply Bank/Scene/Kit/Instrument scalar payloads, resolve refreshed rows with
+single-level non-cascading loads, empty an entire Scene when any child cannot
+be resolved, replay deferred dirty marks after tracking becomes live, and
+show non-blocking post-boot notices. Pattern data is not in HCPR, so each
+accepted Scene gets a best-effort `pattern.pat` library load; Effects remain
+unimplemented. `Q` trace records expose Case 1 source mismatches, Case 2
+loads, Case 3 invalidations, and the two 16-bit Scene summaries.
+
+Several defects found by power-cycle fixtures were fixed: boot restore now
+loads Patterns; a direct numeric Instrument source is rejected only when the
+Instrument row itself supplied it (numeric sources inherited from Bank/Scene/
+Kit are valid); Scene and Bank Load/Save publication now stages the complete
+committed child identity/source/refreshed hierarchy; root `chdir(NULL)` waits
+until the reset root handle is actually idle; and all 96 parsed Instrument
+types survive the full reader traversal by aliasing the existing 144-byte
+Bank-child scratch instead of the destructive payload-stage union. The final
+change added no BSS and reduced text by 40 bytes. `SD_CARD_READER_9`, booted
+from the Bank-plus-four-`Rollin`-Scene fixture with image SHA-256
+`5732e821d256f521e48814d2cf255c895b1fbb7fdfa9f006b43f5ae293fb8c62`,
+hardware-accepted the HCNAMES-authoritative path: 128 Case-2 successes,
+`case2=0xffff`, `case3=0`, no `E`/`X`, correct Bank and all 16 Scenes, valid
+generation-9/10 HCPR records, and zero HCNAMES-R/object-mask disagreements.
+One bounded follow-up remains: reboot Reader 9 to exercise its mixed
+matching-winner Case-1/Case-2 state.
+
+The later Load/Save refactor backlog was consolidated into
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`: Kit/Instrument HCNAMES
+checkpoint timing, visible menu-exit stalls, blank-vs-`Empty` readiness,
+uniform latest-selection preview scheduling, and the explicit AutoSave /
+HCNAMES / `settings.cfg` edge-case matrix. Pattern storage is the next feature;
+the refactor is intentionally deferred unless a blocker appears.
+
+- **Find here**: [061_SESSION_HANDOFF_LOG.md](061_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`, `AUTOSAVE.md`,
+  `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`,
+  `DEV_MODES.md`, `ASYNCFATFS_REFERENCE.md`, and `SD_CARD_READER_9/`.

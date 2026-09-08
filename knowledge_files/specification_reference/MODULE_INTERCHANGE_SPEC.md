@@ -1,8 +1,8 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-059, including typed Instrument-index repair and AsyncFATFS directory
-publication. Historical migrations belong in session logs; this document states
+061, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+repair, and AsyncFATFS directory publication. Historical migrations belong in session logs; this document states
 which live module owns each call, state transition, and retained object.
 
 ## Rules
@@ -44,6 +44,10 @@ which live module owns each call, state transition, and retained object.
   provenance register. A dedicated 1,161-byte name mirror and the
   filesystem-owned 258-byte source register retain its 129 rows independently
   of the browser cache.
+  Its physical file is a mandatory `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat`
+  header plus 129 rows; Instrument rows carry a mandatory three-byte type
+  column. Load/Save commits publish name, source, and refreshed state for the
+  complete hierarchy they committed.
   The sole active identity block is 81 bytes: BankData's Bank row plus
   filesystem's Scene, Kit, and six Instrument rows. SceneData stores no name or
   filename text.
@@ -54,9 +58,15 @@ which live module owns each call, state transition, and retained object.
   2,048-byte union stages one Kit, one Instrument candidate, or Scene settings
   plus embedded Kit. Pattern is excluded and reads directly into final Scene
   SRAM after the non-Pattern commit.
+- Boot reader Instrument types never alias that destructive stage. All 96 are
+  retained through the final Scene in the alternate view of the existing
+  144-byte Bank-child scratch; its 16x9 Bank-name view is used only after a
+  reader returns and canonical Bank Load starts.
 - Boot writes `/Kit/.hcindex`, `/Scene/.hcindex`, `/Bank/.hcindex`, and each
   registry-owned Instrument index. After Instrument index generation disposes
-  the shared cache, boot reloads `/Bank/.hcindex` before initial Bank load.
+  the shared cache, boot reloads `/Bank/.hcindex`, validates AutoSave candidates
+  when enabled, then selects the matching-winner reader, gated
+  HCNAMES-authoritative reader, or canonical library ladder.
 - Successful Kit, root Scene, and root Bank saves perform a physical parent
   rescan and complete `.hcindex` rewrite before the original save callback is
   released; Menu then refreshes the current Save slot display.
@@ -78,14 +88,19 @@ which live module owns each call, state transition, and retained object.
   identities once and family exit performs at most one HCNAMES rewrite. Bank
   Load/Save own a full-register transaction; selective Bank Load overlays only
   requested/present children.
-- Root Scene completion accumulates its committed Kit-family identity mask.
-  The physical Load/Save exit and later Kit-family boundary flush that mask
-  before operation scratch can be replaced, so embedded Kit and Instrument
-  HCNAMES rows are published with the Scene row.
+- Root Scene completion accumulates and publishes its Scene, Kit, and six
+  Instrument identity/source/refreshed rows as one committed hierarchy. Scene
+  Save seeds the child identity store from the source register before writing;
+  Bank Save child preparation stages the Kit identity too.
+- Known deferred UI boundary: Kit/Instrument HCNAMES publication normally waits
+  for family/page exit even though a browser item/type switch may dispose the
+  `.hcindex` cache. A later revision must queue the HCNAMES checkpoint without
+  blocking page repaint; see `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 - asyncfatfs owns exact-case filename behavior. Product code should use
   filesystem/asyncfatfs object/LFN APIs instead of local FAT/LFN reconstruction.
-  Dot-prefixed files are ordinary filesystem objects and must not be hidden by
-  asyncfatfs. Product scans explicitly exclude `.hctmp.<ext>`.
+  Dot-prefixed files are ordinary filesystem objects except macOS AppleDouble
+  `._*` entries, which `afatfs_findNextObject()` filters system-wide. Product
+  scans explicitly exclude `.hctmp.<ext>` where required.
 - Filesystem shape, instrument file shape, descriptor tables, Scene storage,
   menu layout, and DSP propagation are specified in
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
@@ -649,16 +664,19 @@ Affiliate modules: BankData, SceneData, Preset, filesystem, config.
 
 Purpose: `Autosave.c/.h` owns the hidden-record wire contract, live-byte
 projection, one canonical dirty mask, atomic dirty operations, typed scalar and
-whole-region marker vocabulary, and CRC helpers. It owns no file handle or
-scheduler. `AutosaveTrace.c/.h` is a logging-only observer with no filesystem
+whole-region marker vocabulary, CRC helpers, and the boot-only inverse
+payload-to-resident projection. It owns no file handle or scheduler.
+`AutosaveTrace.c/.h` is a logging-only observer with no filesystem
 ownership. Exact format and trace-field semantics remain authoritative in
 `AUTOSAVE.md` and `DEV_MODES.md` rather than being duplicated here.
 
 | API family | Interchange rule | Usual callers / clients |
 | --- | --- | --- |
-| `autosave_mark*Dirty(...)` | Retained owners store/commit first, then mark typed coordinates. Producers perform SRAM-only work and never calculate wire offsets. | BankData, SceneData, Preset; future successful whole-object commits |
+| `autosave_mark*Dirty(...)` | Retained owners store/commit first, then mark typed coordinates. Producers perform SRAM-only work and never calculate wire offsets. | BankData, SceneData, Preset, successful whole-object commits |
 | `autosave_maskHasDirty()` / atomic take and merge helpers | One canonical mask coordinates foreground capture and interrupt-reachable producers; filesystem may consume through the documented API but never owns a second mask. | filesystem AutoSave scheduler/writer |
 | `autosave_getLivePayloadByte()` and format/CRC helpers | Project final resident bytes and serialize/validate v1 records without copying C structs as the wire format. | filesystem AutoSave setup/validation/copy |
+| `autosave_applyBankPayload()` / `autosave_applyScenePayload()` / `autosave_applyKitPayload()` / `autosave_applyInstrumentPayload()` | Inverse-project validated winner bytes into retained boot state while tracking is off. Instrument apply rejects unknown three-byte type text. | filesystem matching-winner reader |
+| `autosave_extractPayloadSource()` | Read the two-byte source field used for Case-1 payload/HCNAMES cross-check. | filesystem matching-winner reader |
 | `autosave_setMutationTrackingEnabled()` / complete-resident dirty boundary | Filesystem policy enables tracking only after successful setup; AutoSave OFF/new-session transitions preserve active-transaction safety. | filesystem policy lifecycle |
 | `autosaveTrace_record()` and ring read/ack APIs | Producers append bounded RAM records; only filesystem may append them to the diagnostic file and acknowledge them after durable sync. | AutoSave and filesystem under `DEV_MODE_LOGGING` |
 
@@ -672,7 +690,8 @@ through PatternData accessors after Session 028. Normal kit load/save scans,
 opens, and writes root `Kit/NNN Name/` directory-format data, root Instrument
 Load/Save operates on registry-owned `Instrument/<type>/` pools, typed index
 loading owns validation and selected-type repair, HCNAMES owns resident display
-identity, and the retired File/Dir compatibility surface performs no work.
+identity/provenance/type authority, boot readers restore the resident Bank, and
+the retired File/Dir compatibility surface performs no work.
 Storage text parsing/formatting and descriptor-key validation stay in
 `storageTypes.c/h`.
 
@@ -697,6 +716,12 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_requestSaveInstrumentMorphTemp(scene, slot, cb)` / `filesystem_requestLoadInstrumentMorphTemp(scene, slot, type, cb)` | Write/read the Morph-only `.hctmp.<ext>` projection: one parser anchor plus every Morphable `[morph]` endpoint. The load sets the morph-temporary origin flag so Preset can choose the Morph-to-Morph restore commit. | Preset/Menu InstrumentMrp reversible row |
 | `filesystem_loadedInstrumentWasMorphTemporary()` | Query whether the staged hidden Instrument load is the InstrumentMrp Morph-only baseline, valid beside the staged Instrument until the next request reuses operation scratch. | Preset Morph-apply origin dispatch |
 | `filesystem_ensureAutosaveFilesBlocking()` / `filesystem_setAutosaveEnabled(enabled)` / `filesystem_autosaveEnabled()` | Establish the hidden pair at boot, apply runtime policy, and authorize mutation tracking/background work only after successful setup. Format and failure rules are in `AUTOSAVE.md`. | `main.c`, Menu/settings policy |
+| `filesystem_validateAutosaveWinnerBlocking()` / `filesystem_hasBootWinner()` | Stream-validate both HCPR candidates after settings/index boot and expose only a valid active-Bank match to stage 11. | `main.c` boot stage 10b/11 |
+| `filesystem_autosaveBootReaderBlocking()` | Apply a validated matching winner and evaluate each Scene row as Case 1 payload, Case 2 narrow load, or Case 3 whole-Scene invalidation; Pattern loads best effort from its Scene source. | `main.c` boot stage 11 |
+| `filesystem_regenerateHcnamesFromWinnerBlocking()` | Atomically rebuild absent/corrupt typed HCNAMES from a validated winner before its reader proceeds. | boot reader orchestration |
+| `filesystem_bootHcnamesAuthoritativeLoad()` | Load the settings-Bank-matching, all-129-rows-refreshed special state entirely from HCNAMES/library sources; decline on failed gates/hard error. | `main.c` boot stage 11 |
+| `filesystem_setBootLatchBankFallback()` | Record a canonical or HCNAMES-authoritative Bank restore whose dirty mark must replay after tracking enables. | `main.c`, HCNAMES-authoritative reader |
+| `filesystem_bootReaderNoticeSceneMask()` / `filesystem_bootReaderNoticeBankFallback()` | Read and clear Case-3/Bank one-shot notice state after audio starts. | Menu boot-notice sequencer |
 | `filesystem_autosaveTraceFlushBlocking()` | Bench-only durable boundary for currently pending lifecycle records; ordinary runtime trace flushing is autonomous and lower priority. | temporary test harness only |
 | `filesystem_markSettingsDirty()` | Increment the keyed-settings change revision; the one-second writer acknowledges only the revision it actually serialized and synced. | Menu settings policy |
 | `filesystem_loadedInstrumentSlot()` | Borrow the validated candidate payload for Preset's ordered commit. Names are exchanged through identity rows, not staged filename/stem accessors. | Preset only |
@@ -706,10 +731,10 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_createLibraryIndexBlocking(kind)` | Boot-only repair/scan and slot-ordered `.hcindex` rebuild for one root library. Runtime numbered-root Saves use the common asynchronous scan/rebuild continuation instead. | boot |
 | `filesystem_clearNameCache()` / `filesystem_libraryNameCacheLoaded(kind)` | Dispose/query the one active Instrument/Kit/Scene/Bank browser-name cache. | Menu lifecycle and index gating |
 | `filesystem_setIdentityName(row, name)` / `filesystem_identityName(row)` / `filesystem_identityNameMutable(row)` / `filesystem_clearIdentityNames()` | Own the logical Bank/Scene/Kit/six-Instrument identity interface. Bank aliases BankData; the other eight rows occupy 72 bytes. | Menu and filesystem HCNAMES/load/save completion |
-| `filesystem_residentSource(row)` / `filesystem_setResidentSource(row, source)` / `filesystem_resolveResidentSource(row, resolved_row)` | Read, stage, and resolve the paired HCNAMES provenance token. The resolver follows Instrument -> Kit -> Scene -> Bank and does no I/O; the future AutoSave reader owns target-open/fallback retries. | filesystem successful-load boundaries; future AutoSave boot reader |
+| `filesystem_residentSource(row)` / `filesystem_setResidentSource(row, source)` / `filesystem_resolveResidentSource(row, resolved_row)` | Read, stage, and resolve the paired HCNAMES provenance token. The resolver follows Instrument -> Kit -> Scene -> Bank and does no I/O; boot readers own target opens and Case-2/3 decisions. | filesystem successful-load boundaries and AutoSave boot readers |
 | `filesystem_requestLoadResidentKitName()` / `filesystem_requestUpdateResidentKitNames()` | Borrow HCNAMES for one Scene's Kit-plus-six block or preserve/overlay full seven-row blocks for a dirty Scene mask. | combined Kit/Instrument Menu session |
 | `filesystem_requestLoadResidentInstrumentName()` / `filesystem_requestUpdateResidentInstrumentNames()` | Legacy/narrow one-Instrument HCNAMES row operations; the combined Menu entry normally loads the seven-row Kit block. | Menu/filesystem compatibility paths |
-| `filesystem_requestLoadResidentSceneName()` / `filesystem_requestUpdateResidentSceneNames()` | Borrow or update only selected Scene identity rows. | Scene menu and Scene completion |
+| `filesystem_requestLoadResidentSceneName()` / `filesystem_requestUpdateResidentSceneNames()` | Borrow selected Scene identity for menu use; Scene completion overlays the Scene plus its committed Kit/six-Instrument hierarchy before publication. | Scene menu and Scene completion |
 | `filesystem_repairLibraryNamesBlocking()` / `filesystem_repairInstrumentNamesBlocking()` / `filesystem_requestRepairBankNames()` | Canonicalize one namespace with one-candidate rename/sync/rescan before index publication or Bank payload load. No `.hcrepair` journal exists. | boot index wrappers and Bank Load |
 | `filesystem_installSamplesBlocking()` / `filesystem_installLoopsBlocking()` | Blocking sample/loop install under audio suspend. | Menu |
 | `filesystem_loadedName()` | Read loaded name buffer. | Preset |
@@ -783,7 +808,8 @@ Important private Phase 2 kit helpers:
 - `filesystem_loadLibraryIndex_tick()` reads one slot-preserving Kit, root
   Scene, or root Bank `.hcindex` into the shared cache. It never compacts blank
   rows and never retains per-slot aliases.
-- `filesystem_residentNames_tick()` reads the 129-row fixed HCNAMES register,
+- `filesystem_residentNames_tick()` reads the typed HCNAMES register (mandatory
+  `#types` header plus 129 fixed data rows),
   optionally overlays exactly the action-owned rows, rewrites the complete
   variable-length file, and finishes only that metadata transaction. It does
   not infer whether a root namespace changed: Scene Save declares its own
@@ -803,8 +829,10 @@ asyncfatfs boundary:
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`.
   Module-level code should reuse `filesystem.c` or those documented
   component/object primitives instead of creating one-off FAT writers.
-- Dot-prefixed files/directories are ordinary objects. Product scanners filter
-  after object iteration.
+- Dot-prefixed files/directories are ordinary objects except macOS AppleDouble
+  `._*` entries, which object iteration filters before product scanners see
+  them. Product-specific hidden files such as `.hctmp.<ext>` remain explicit
+  scanner exclusions.
 - Native `afatfs_deleteTree()` provides filesystem-level recursive cleanup for
   one captured object and releases each FAT chain before retiring its complete
   name run. Replacement flows still are not atomic/journaled and must not be

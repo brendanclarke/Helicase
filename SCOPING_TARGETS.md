@@ -21,12 +21,12 @@ scan/load/save bridge, Bank-first boot fallback, and draft Scene/Bank
 `pattern.pat` persistence. Sessions 040-044 completed the real 16-Scene Bank
 workspace, compact bitmap Pattern bridge, bounded identity/cache ownership,
 cold-boot tagged-runtime activation, and harmonized root Scene/Bank Load
-completion. The remaining Phase 3 emphasis is descriptor-aware automation,
-Effect placeholders, and the remaining isolated AutoSave Phase-2 owner
-boundaries. The earlier AutoSave prototype was rejected, but the current A/B
-writer, scalar hooks, and Session 048 root-Instrument/InstrumentMrp mutation
-boundaries are accepted baseline work; Kit, root Scene without Pattern, and
-selective Bank Load marking remain next.
+completion. Sessions 045-061 completed the accepted AutoSave A/B scalar
+reader/writer, typed HCNAMES provenance, committed Load/Save publication, and
+boot restore. Pattern and Effect data are not yet in HCPR. The remaining Phase
+3 emphasis is descriptor-aware automation and Effect placeholders; Pattern
+storage is the next feature, while the consolidated Load/Save refactor follows
+under `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 Phase 4 is the dynamic stack Pattern implementation that used to be scoped as
 Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup, copy/clear
 helpers, and menu controls. Phase 6 is DSP expansion.
@@ -42,6 +42,12 @@ Within each phase, features are grouped by **where they live in the codebase**, 
 
 Every phase ends with **Open Engineering Questions** (things that need a decision or a measurement before/during implementation) and **Suggested Complementary Features** (ideas adjacent to what you asked for, flagged clearly as suggestions, not commitments).
 
+The open Load/Save, AutoSave, HCNAMES, `settings.cfg`, browser-cache, and
+related hardware-test backlog has been moved to
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. That document is the sole
+forward-work list for the deferred post-Pattern Load/Save bugfix/refactor pass;
+historical resolved-session material below remains background only.
+
 ---
 
 ## Pinned filesystem correctness target — duplicate-slot overwrite
@@ -55,12 +61,6 @@ fixes). Session 055 hardware-confirmed the fix: a full Kit-modify-save,
 Instrument-modify, Scene-modify-save, and Bank-save-then-load round trip
 reported no errors. Full round-by-round diagnostic trail:
 `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`.
-
-**Still open:** the dedicated low-level acceptance matrix below (malformed
-LFN, cyclic/broken-parent layout, injected FAT/cache error, exhausted handle
-pool, cross-sector LFN runs) has never been exercised as its own fixture
-set — only encountered incidentally through ordinary product use. Do not
-claim that matrix closed from product-level testing alone.
 
 The duplicate-folder defect in Bank, root Scene, and Kit overwrites is an
 AsyncFATFS recursive-delete correctness problem. Its solution is to repair
@@ -90,21 +90,6 @@ record; it contains no implementation plan that overrides this pinned target.
   054, hardware-confirmed Session 055.** See the pinned target above. Do not
   reintroduce an `old*`-rename scheme, boot-time cleanup, or a silent
   best-effort fallback; the fixed design is exact-object delete/recreate.
-- **Runtime Bank Load may switch the playing Scene while playback is active.**
-  This is not a bounded-CRC or logging problem. Preserve the pre-load active
-  Scene only after ordinary Bank Load/Save behavior is stable enough to test
-  that one request-time contract in isolation. Boot must continue to restore
-  the Bank's saved default Scene.
-- **InstrumentMrp shows a blank `kit` row at the top of its browser.** Normal
-  Instrument Load first snapshots the selected slot's current instrument so
-  the `kit` row can show its authoritative HCNAMES name and restore that
-  image. InstrumentMrp must provide the equivalent Morph-only snapshot: cache
-  the selected slot's current Morph endpoint values while entering the browser,
-  display the current instrument name beside `kit`, and restore only those
-  Morphable endpoints when that row is selected. Do not reuse a normal
-  Instrument restore, overwrite the slot's type/Normal image/name/source, or
-  make HCPRMS a name authority. This is a deferred UI/temporary-snapshot
-  parity fix, not part of the completed Instrument Load AutoSave work.
 - **Pinned AutoSave reader rule — resolve Instrument type before reading its
   parameter matrix.** The future HCPRMS reader must use each stored three-byte
   Instrument type token (`drm`, `snr`, `cym`, or `hat`) to select the registry
@@ -208,49 +193,21 @@ This confirms the Session 052 settings and present-mask corrections. The
 unchanged eight-byte `bootlog.bin` is stale failure evidence: a successful
 boot does not delete the previous boot-failure record.
 
-### Deferred refactor target — boot sanitation versus load validation
+### Resolved historical target — boot sanitation versus load validation
 
-**Status: scoped for a later filesystem refactor; do not implement as part of
-the current session.**
-
-Boot sanitation should establish only that every browser/menu member can be
-reconstructed from its `.hcindex` display row, then generate the indexes. It
-must not parse or open every Kit payload merely to decide whether boot may
-continue.
-
-The later refactor should:
-
-1. Remove root Kit `kitset.kcg` parsing, six-member opens, and Kit quarantine
-   from the boot path. Full Kit/content validation moves to the actual load
-   attempt, whether reached through root Kit Load, root Scene Load's embedded
-   Kit, or Bank Load's selected child Scene/Kit.
-2. For root `/Kit`, `/Scene`, and `/Bank`, canonicalize every numbered folder to
-   `NNN Name`, preserving the three-digit slot and truncating the display name
-   to the eight cells that `.hcindex` and resident identity can represent.
-3. For root `/Instrument/<type>/`, canonicalize every eligible instrument
-   filename to an eight-cell stem plus its registered extension. The existing
-   product-owned `.hctmp.*` files remain excluded from this pass.
-4. Generate each `.hcindex` from the post-sanitization physical scan, retaining
-   blank slot rows and the existing shared-cache ownership rules.
-
-The sanitizer must retain the existing one-object-at-a-time rename, duplicate
-target detection/retry, sync, and rescan behavior. Truncation must not create
-an ambiguous visible entry or silently map a file to a different slot. Bank
-local `00..15 Name` child repair remains a load-time concern; it is not a new
-root-library boot pass.
-
-The refactor must also preserve the failure distinction: a malformed or
-unreadable payload discovered during an explicit load fails that load and must
-not be converted into a successful empty library. Any future quarantine or
-repair-on-load policy is a separate decision and should not be reintroduced as
-an implicit boot-wide content scan.
+Session 057 removed broad Kit-content validation from boot and moved validation
+to explicit Load. The still-unverified corrupt/partial-object behavior and the
+unimplemented over-eight-character canonicalization policy have moved to
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; the resolution ledger near the
+end of this file retains the historical implementation summary.
 
 
-### Deferred refactor targets — Bank Save present-mask union and settings boot mark
+### Resolved historical targets — Bank Save present-mask union and settings boot mark
 
-**Status: deferred to a later refactor session; do not implement as part of the
-current session.** These are the two items from `SESSION_052_POST_ANALYSIS.md`
-Section 8 (P1 and P2).
+**Historical status: both resolved in Session 057.** These are the two items
+from `SESSION_052_POST_ANALYSIS.md` Section 8 (P1 and P2); the detailed text
+below records the pre-fix analysis, and the resolution ledger near the end of
+this file records their closeout.
 
 #### P1 — Bank Save still overwrites the resident Scene-present mask
 
@@ -312,101 +269,17 @@ Bank fell back to a different slot than the stored one, it reconciles
 `settings.cfg`), but it is an extra SD write plus one foreground filesystem
 operation per power-on. The Session 052 pre-plan explicitly chose the
 unconditional mark ("the unconditional mark so both paths share one authority")
-rather than gating it on `fs_settings_runtime_ready`. That tradeoff should be
-accepted deliberately, or the mark should be gated, as part of the refactor
-session.
+rather than gating it on `fs_settings_runtime_ready`. Session 057 deliberately
+accepted that tradeoff; this is no longer an open decision.
 
-### Deferred refactor target — AutoSave boot-load durability and read model
+### Resolved historical target — AutoSave boot reader
 
-**Status: deferred until the AutoSave reader is implemented; do not fix the
-current boot Bank Load write now.** The present boot Bank Load AutoSave write is
-known-incorrect, but changing it before the reader exists would only move the
-divergence around. It is accepted as-is for now.
-
-#### Known-incorrect boot Bank Load write
-
-On a boot that loads Bank 008, `/.hcprms1/2` are created, but the Bank section
-is written with `scene_present_mask=0x0000`, `active_scene=0`,
-`scene_mask_voice_edit=0x0000`, and the Scene payloads are absent. Root cause:
-`autosave_setMutationTrackingEnabled(1)` is only called at the end of
-`filesystem_ensureAutosaveFilesBlocking()`, after the boot Bank Load has
-already run, so every boot-load marker is rejected
-(`autosave_markPayloadOffsetDirty()` returns zero while tracking is off) and the
-canonical mask stays empty (`post-merge canonical mask dirty=0`).
-
-This is deliberate in the current design ("boot population must not be mistaken
-for user mutation"), but it means the boot Bank Load resident state is not
-captured into AutoSave. The reader milestone below is what makes this matter.
-
-#### Correct boot-load model for AutoSave read
-
-When the AutoSave reader lands, boot order becomes:
-
-1. Validate `/.hcprms1` / `/.hcprms2`, select the newest valid generation, and
-   restore the resident Bank/Scenes/Kits/Instruments from it. This is the
-   primary boot path.
-2. Only when the records are missing, corrupt, or fail validation does boot fall
-   back to loading from `Bank`, `Scene`, `Kit`, or `Instrument` (the current
-   path).
-
-Boot fallback loads must not be captured live (tracking is still off). Instead,
-record a small deferred boot-fallback scope and bulk-apply it after boot.
-
-#### Deferred boot-fallback scope
-
-- **Latch location:** a small retained record in the filesystem/AutoSave layer,
-  not the transient `pm_request_*` state in Menu. Contents: fallback type enum
-  (Bank / Scene / Kit / Instrument), the destination Scene mask, and (for Bank)
-  the 16-bit child mask. A few bytes total.
-- **Set it synchronously** at fallback load commit, even though the dirty-marking
-  is deferred.
-- **Apply it once**, immediately after `filesystem_ensureAutosaveFilesBlocking()`
-  enables tracking and before the first drain, then clear it.
-- **Clear it** in every reset/remount path so a stale "fallback happened" bit
-  cannot force a spurious full drain on the next boot.
-- **Arm only on actual fallback.** A clean AutoSave restore must not arm it, or
-  every normal boot would re-dirty the whole record.
-- **Granularity:** at least instrument-level, using the existing
-  `autosave_markWholeInstrumentDirty()`, `autosave_markKitDirty()`,
-  `autosave_markSceneWithoutPatternDirty()`, and `autosave_markBankFieldDirty()`.
-  Over-marking is safe (the drain reads live RAM); under-marking is the bug.
-
-#### Durability model
-
-- `/.hcnames` is the synchronous identity/provenance guard. A load does not
-  report completion until its HCNAMES update is written and flushed, so "load a
-  thing and immediately switch off" preserves *what* was loaded (name + source).
-- `/.hcprms1/2` are the all-or-nothing value guard. A drain copies the winner +
-  taken patches into the inactive record, CRCs it, and only then commits the
-  generation (`0xa5` commit byte). Power-off before commit leaves the previous
-  winner intact; the partial inactive record is discarded.
-- The 3,856-byte canonical mask is RAM-only and is the sole uncommitted marker.
-  `autosave_maskBitTake()` clears a bit before capturing its live value; a
-  concurrent mutation re-sets the bit, and a clean write error restores taken
-  bits via `autosave_maskRestoreCaptured()`. Power-off between take and commit
-  is not recoverable and is equivalent to a never-drained change.
-- Therefore fallback loads are RAM-only-deferrable without data loss: their
-  identity is already durable in `/.hcnames`, and their values are recoverable
-  by re-loading from the library on the next fallback. Unsaved parameter edits
-are the only AutoSave-critical class and continue through the normal immediate
-dirty-bit path.
-
-### Deferred targets folded from Session 053 pre-planning
-
-**Status: not implemented this session; carried into SCOPING_TARGETS for later.**
-
-- **AUTOSAVE Phase-2 Step 6 (Load/Save exclusion).** Two isolated sub-changes:
-  (a) prevent a new AutoSave writer start while a Load/Save page owns the
-  filesystem facade, while still draining dirty bits that existed before the
-  page opened; (b) defer physical Load/Save entry while an AutoSave transaction
-  is mid-flight. The `A/V/M/C/P/T` trace already exists to prove the chosen path.
-- **AUTOSAVE Phase-2 Step 3 remaining hardware evidence.** Independent fixtures
-  for root Scene Load/Save provenance, partial Bank Load/Save provenance, and
-  AutoSave OFF-to-ON lifecycle (idle re-arm; in-flight transaction reaches its
-  close boundary).
-- **AUTOSAVE Phase-2 Step 5.4 regression check.** Prove Menu preview/selection
-  alone never produces an AutoSave dirty mark (only a publicly completed Scene
-  load does).
+The pre-reader durability plan formerly recorded here is implemented and has
+been superseded by the authoritative reader contract in
+`knowledge_files/specification_reference/AUTOSAVE.md` and the Session 061
+reader work. Its remaining interaction and regression tests now live in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; do not use the former
+pre-implementation assumptions here as current behavior.
 
 ### Session 053 test-report defects (status after Sessions 054-055)
 
@@ -420,98 +293,23 @@ dirty-bit path.
   timeout-to-error gate, then a descend/ascend identity invariant broken
   across two intermediate fixes). See the pinned target above and
   `054_SESSION_HANDOFF_LOG.md`.
-- **Kit Save does not materialize a library Kit — believed resolved as a
-  side effect of the `ScnS05` root-cause fix**, but not individually
-  re-confirmed against the `'O'` `CREATE_RESULT` trace bit added for exactly
-  this purpose. Session 055's full Kit-modify-save round trip reported no
-  problem. Worth one explicit trace check next time Kit Save is touched, not
-  worth a dedicated session on its own.
-- **Kit Save menu empty — not individually re-confirmed, plausibly resolved
-  as a side effect of the Session 055 facade/livelock fixes** (a stuck facade
-  or a destructive cache-clearing retry would produce exactly this symptom).
-  Diagnostic instrumentation exists (`menu_requestKitEntryNames()`'s
-  branch-tag `'O'` records, `SESSION_054_PLAN_DEFECT_EVIDENCE_FIX.md` §3.5)
-  if it recurs.
 - **Bank Save entry freeze — almost certainly the same defect as, and fixed
   by, the Session 055 Load-menu freeze investigation** (identical signature:
   no forensic evidence, only the ordinary Load/Save-page writer-suppression
   record). Not a separate open item; watch for a recurrence rather than
   re-investigating from scratch.
-- **Boot Bank Load timeout `B012S09I` — still open, untouched.** The boot Bank
-  Load embedded-instrument stall still exceeds even a 20 s budget. This is
-  separate from the boot Kit-quarantine (`KQ...`) gate (itself still
-  unimplemented, see the deferred refactor target above) and separate from
-  the AutoSave/HCNAMES work. Session 054 added per-instrument timing
-  breadcrumbs (reused `'N'` stage) so the next attempt can compute real
-  per-instrument load duration from `asavetrc.bin` instead of guessing.
-- **Boot freeze with `.hcprms2` truncated at 32 KiB — still open, untouched.**
-  Session 054 added a bounded stall-and-fail safety net to the runtime
-  AutoSave drain (30,000-poll threshold, forces `FS_STATUS_ERROR` instead of
-  hanging forever) so a repeat of this class of freeze will now recover
-  instead of wedging silently, but the specific root cause of this
-  32,768-byte truncation (suspected FAT cluster-size boundary interaction
-  with the delete-tree work's changed allocation-hint search) was never
-  confirmed.
+- **Boot freeze with `.hcprms2` truncated at 32 KiB — RESOLVED Session 056.**
+  `afatfs_fseekAtomic()` failed to update logical file size, leaving the FAT
+  entry at one 32 KiB physical cluster. The fix and 34,768-byte hardware
+  result are recorded in `knowledge_files/specification_reference/AUTOSAVE.md`.
 
-### Session 054-055 deferred targets
+### Session 054-055 remaining non-Load/Save deferred targets
 
-- **Name-cache ownership interlock.** The AutoSave writer reads the shared
-  9,000-byte name cache (`fs_list_cache_name`) live while serializing its
-  record, and Menu calls `filesystem_clearNameCache()` directly — bypassing
-  facade arbitration entirely — from 18 call sites. The writer's page guard
-  only blocks *admission* while the user is on Load/Save; nothing stops Menu
-  from clearing the cache out from under a transaction admitted just before
-  the page was entered. Session 055 closed the two hottest callers with a
-  non-destructive early busy-check; the general hazard remains. Consequence
-  if it fires is a torn AutoSave record, not a hang. Proper fix: refuse or
-  defer the clear while `fs_autosave_transaction_active` borrows the cache.
-  Deliberately not attempted as part of a freeze fix that needed clean
-  verification.
-- **Top-level Load/Save entry trace coverage.** `menu_traceInstrumentEntry()`
-  ('N') is gated on `menu_instrumentLoadActive`, so every refusal/entry
-  record on the *top-level* Kit/Scene/Bank row is silently suppressed, and
-  `menu_requestSceneEntryName()` has no trace producer at all. Cost real
-  investigation time twice in Session 055 (an absent record looked like proof
-  nothing happened, when the request was simply unrecordable from that
-  context). Add a top-level equivalent before the next Load/Save-family
-  investigation.
 - **`AUTOSAVE_TRACE_RECORD_COUNT` reversion decision.** Currently 2,048
   records (`config.h:255`), a session-scoped approved expansion for the
   recursive-delete investigation; normal default is 64. Needs an explicit
   decision — revert now that the pinned target is hardware-confirmed closed,
   or keep it while further Save-path work is plausible.
-- **Recursive-delete low-level acceptance matrix.** Still never exercised as
-  dedicated fixtures (malformed LFN, cyclic/broken-parent, injected FAT/cache
-  error, exhausted handle pool, cross-sector LFN runs) — see
-  `ASYNCFATFS_REFERENCE.md`.
-- **Scene Save partial-write hardening.** Session 054 repaired six
-  structurally-damaged root Scene folders found on the test card (missing
-  `effects.fx` and/or embedded Kit contents), root-caused to Scene Save's
-  non-atomic ~12-phase write sequence (old tree deleted first;
-  `effects.fx` written last) combined with Load's current all-or-nothing
-  child-completeness check. Four ranked hardening options recorded in
-  `054_SESSION_HANDOFF_LOG.md`, none implemented: (1) tolerate a missing
-  `.fx` on Load — cheapest, removes the most common failure mode; (2) write
-  `effects.fx` right after `sceneset.scg` instead of last; (3) clean up the
-  partial directory on a failed save; (4) real atomic commit (reopens the
-  Session 053 tmp/old-promotion decision — needs its own scoping).
-- **Scene Load error-code granularity.** Every `filesystem_loadSceneDirectory_tick()`
-  failure reports the identical `ScnL48`, because the code is built from the
-  terminal phase rather than the failing one; the `'E'` trace record shares
-  the same blind spot. Worth capturing the failing phase at the point of
-  failure.
-- **Phase-33 re-entrancy note.** `filesystem_commitSceneStage()`'s
-  `pat_initPatternSet()` zeroing re-runs on every `afatfs_chdir(NULL)` retry
-  tick at phase 33. Harmless today only because the pattern read happens
-  later (phases 44+); would silently destroy data if phases were ever
-  reordered. Hoist behind a completed-once guard when that area is next
-  touched.
-- **Single-source-of-truth Pattern/Scene index.** The Scene-Pattern desync
-  fix (`seq_alignActivePatternToScene()`) patches the one reachable seam
-  (Bank Load); retiring `seq_activePattern`/`menu_shownPattern` in favor of
-  `scene_getActiveIndex()` directly would remove this whole class of desync
-  permanently. Rejected for Session 054 because it changes PERF queued-Scene
-  -change semantics — a larger behavioral change than the reported defect.
 - **`DEV_LOGGING_IWDG` hardware validation.** Ships disabled by default
   (Session 054 fixed a boot-hang regression in it, and a second hazard where
   it would have reset the modal sample install mid-`sampleFlash`
@@ -521,16 +319,6 @@ dirty-bit path.
   editing `config.h` alone triggers no rebuild. Add `-MMD -MP` to `CFLAGS`
   plus `-include $(OBJS:.o=.d)`. Until then, always `make clean` after any
   header edit.
-
-### Session 060 observations (2026-09-03)
-
-- **Menu name retention glitch after Bank Load/Save.** After completing a
-  Bank Load or Save, the displayed name on the Load/Save page occasionally
-  shows stale or incorrect text. Minor cosmetic; does not affect the
-  underlying data or HCNAMES register.
-- **Menu scrolling glitch on Load/Save page.** Minor visual artifact when
-  scrolling through items on the Load or Save page after a Bank operation.
-  Does not affect operation selection or data integrity.
 
 ### Session 060 resolved defects and remaining refactor targets
 
@@ -552,14 +340,6 @@ dirty-bit path.
   directory consumer — repair, scan, index, save, load — not just this one
   call site. See `S060_HCINDEX_FIXUP.md` and
   `ASYNCFATFS_REFERENCE.md` Object Iteration section.
-- **Deferred, not applied this session:** normalizing the scan tick's
-  `/Instrument/` open from `AFATFS_MATCH_CASE_SENSITIVE` to
-  `AFATFS_MATCH_CASE_INSENSITIVE` (`filesystem.c:19636`, matches every
-  other caller) and checking `filesystem_createBootIndexBlocking()`'s
-  return value at `main.c:727` to make a future boot-index failure
-  observable. Both are independent hygiene improvements; neither was the
-  root cause and the D1 asyncfatfs-level filter already fixes the actual
-  failure, so these are low priority.
 - **`op_close_status` staleness hazard — general pattern, worth watching.**
   Phase B's HCNAMES safe-write tail depends on `op_close_status`
   (a shared, operation-scoped static) being accurate at the temp-file
@@ -585,24 +365,6 @@ dirty-bit path.
   scheduler must carry this same guard** — it is not automatic, and this is
   the second scheduler that shipped without it. See `S060PHASE_B_POST_FIX.md`
   Hardware Test 2/3.
-- **Phase D hardware verification — still outstanding.** Phase D added no
-  code (Phases B2 and C already implement every requirement), but its
-  four end-to-end lifecycle tests (Load->drain->refreshed-cleared->HCNAMES
-  rewritten; Save->drain->refreshed-cleared; load-during-active-drain race;
-  multiple overlapping loads) have not been run as dedicated fixtures —
-  only incidentally exercised through the Phase B/C hardware passes. See
-  `S060PHASE_D_RE_DIRTY.md` §5 for the exact test procedures.
-- **Autosave record name bytes are stale after a mid-session load —
-  deliberate, not a bug.** Phase C's source-field dirty markers
-  intentionally exclude the 8-byte name field in each Scene/Kit/Instrument
-  autosave record header; `autosave_getLivePayloadByte()` has no name
-  getter and never will unless a future reader requirement demands one.
-  The future boot reader (Phase E) is specified to use `.hcnames` for
-  identity, not autosave record names, so this is safe by design. Documented
-  here so a future session doesn't "fix" it by adding a name getter that
-  reverses the current one-way `filesystem.c` -> `Autosave.h` dependency for
-  no benefit. See `S060PHASE_D_RE_DIRTY.md` §3.
-
 ---
 
 ## Phase 1 — Foundation Refactors
@@ -1441,7 +1203,9 @@ That division range was originally expressed in **sub-step** terms (64 sub-steps
 
 ### 5.7 Load/save UI rework
 
-The original `putting it together` draft proposed a specific knob remapping for the load/save menus (knob 1 = type, knob 2 = number/cursor, knobs 3/4 = character entry with capitals/numbers/lowercase split across them). Per your note, this is superseded — "we have bigger file changes in mind" — because the whole load/save menu needs rebuilding around the Phase 3 file model: banks, scenes, kits, patterns, samples, wavetables, effects, instruments, and root `settings.cfg`. The specific knob assignment idea is worth keeping as a starting point for that rebuild, but the menu structure itself (what "type" even means, what "auto-load" means per type) needs designing fresh against the authoritative filesystem spec rather than patched onto the current flat slot menu.
+Deferred until after Pattern data storage. The current revision risks, UI
+behavioral contract, and explicit test matrix are tracked in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 
 ### 5.8 External MIDI sequencing tracks
 
@@ -1611,11 +1375,8 @@ valid. Full detail: `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`.
   proven Load failure, not a boot-time canonicalize/validate pass) but
   satisfies its stated constraint that a malformed payload found during an
   explicit load must fail that load, not silently become a successful empty
-  library. **Hardware-tested only for boot-timing/regression; the actual
-  quarantine-rename/cascade/partial-failure behaviors, including the
-  boot-safety regression test, are not yet hardware-verified** — do not
-  treat the false-boot-failure risk this section describes as closed by
-  evidence, only by code review, until that test runs.
+  library. Remaining hardware verification is tracked in
+  `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 - **P1 — Bank Save present-mask union** (above) — **RESOLVED**, exactly as
   this section's own "Candidate C, one line" prescribed.
 - **P2 — redundant settings-mark boot write** (above) — **RESOLVED as
@@ -1624,8 +1385,9 @@ valid. Full detail: `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`.
 - New, not previously scoped anywhere in this file: **`settings.cfg` safe
   write** (temp file + sync + validated promote, mirroring `.hcprms1/2`'s own
   pattern) — implemented and hardware-verified. **Empty-Scene/Bank overwrite
-  guard** — implemented, not hardware-verified. **Bank Save rewritten from
-  total-tree-delete to per-Scene delete-then-write** — fixes a Kit-quarantine/
+  guard** — implemented, with remaining verification moved to the dedicated
+  revision document. **Bank Save rewritten from total-tree-delete to per-Scene
+  delete-then-write** — fixes a Kit-quarantine/
   `afatfs_deleteTree()` interaction bug (`ErrS05`) and an independent,
   previously-undocumented data-loss bug where a partial `Save:[Bank]` deleted
   every non-selected resident child. Hardware-tested. **A Bank Save/Load
@@ -1633,110 +1395,26 @@ valid. Full detail: `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`.
   plausible-looking hypothesis, built into a full diagnostic and disproven by
   its own trace evidence), but a foreground-poll counter misread as an
   elapsed-time budget. Hardware-accepted.
-- Cross-reference correction: the "Session 053 test-report defects" section's
-  "Boot Bank Load timeout `B012S09I`" bullet (above) describes itself as
-  separate from "the boot Kit-quarantine (`KQ...`) gate (itself still
-  unimplemented, see the deferred refactor target above)" — that
-  parenthetical is now stale; the boot Kit-quarantine gate referenced there
-  is the one resolved by this section. Whether `B012S09I` itself is affected
-  by that refactor was not investigated this session.
-- Everything not marked resolved above is still open. See the dedicated
-  "Session 057 open items" section immediately below for the full list,
-  including several new items this session raised and did not answer.
+- Load/Save-family verification gaps and design questions that remain open
+  have moved to `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. The short list
+  immediately below now retains only unrelated open items.
 
 ---
 
-## Session 057 open items (not resolved this session)
+## Session 057 remaining open items outside the Load/Save revision backlog
 
-Appended for the same line-number-safety reason as the resolutions section
-above. Full detail on every item: `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`
-§17 (the six source `S057_*.md` documents this pulls from are deleted).
+Full historical detail: `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`
+§17. The Load/Save, AutoSave, HCNAMES, `settings.cfg`, and browser-cache
+items formerly in this section now live in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 
-### Hardware verification gaps — code landed, behavior unproven
-
-**Status: needs a dedicated hardware test pass before treating the
-underlying fix as proven; no further code change implied.**
-
-1. **Boot Kit-sanitizer refactor's behavioral tests never ran.**
-   `S057_TESTING.md`'s checklist items 3, 7-14 are unchecked, most
-   importantly #12 — booting with a resident Bank whose mask includes a
-   corrupted embedded Kit and confirming the device still boots. That is the
-   literal failure mode the whole refactor exists to close (see "Deferred
-   refactor target — boot sanitation versus load validation," now marked
-   resolved above). Until #12 runs, treat that fix as verified by code
-   review only, not by hardware evidence.
-2. **Empty-Scene/Bank overwrite guard has no hardware test at all.** The
-   8-item test plan in the (deleted) `S057_SCENE_OVERWRITE_SAFE.md` §8 was
-   written but never executed.
-3. **Bank Save per-Scene rewrite was hardware-tested only with a full 16/16
-   mask.** A partial-mask save (subset selected, confirm the rest survive on
-   card) and a same-slot-rename-preserves-children case were not
-   independently re-run.
-4. **Session 056's page-exit expedite (`fs_autosave_page_suppressed`) is
-   still not hardware-verified**, for a second consecutive session — it was
-   explicitly first on Session 057's own priority list at the outset and was
-   never actually re-checked.
-
-### New design questions this session raised, not answered
-
-5. **`BkLd`/`ScLd` stall-detector abort-safety symmetry with `BkSt`/`ScSv`
-   is an open question, not a settled asymmetry.** Session 057 reverted
-   `BkSt` (Bank Save entry) and `ScSv` (Scene Save) to trace-only after
-   finding that aborting mid-callback let a later callback redirect a write
-   into the wrong file. Six sibling detectors added the same session
-   (`KtSv`, `KtLd`, `ScLd`, `BkLd`, `StWr`, `Flsh`) were left aborting. The
-   observed corruption evidence was specifically about a *write* redirecting
-   into the wrong file; a stalled *Load* (`BkLd`/`ScLd`) only reads, so it is
-   not certain the same risk applies — but it was never actually
-   investigated either way. Needs an explicit, evidence-based decision
-   before the next time any of these six sites is touched.
-6. **§4g "truncate any over-8-character object name to 8 on sight,
-   everywhere" is a recorded rule with no implementation.** The (deleted)
-   `S057_BOOT_KIT_SANITIZE_REFACTOR.md` itself flagged this as "a follow-up
-   detailing pass," not resolved. It needs its own small design pass (a
-   truncate-and-rename sub-machine) before landing, since it changes how the
-   Kit-quarantine classification table treats an over-length Bank-embedded
-   member name — currently quarantined as invalid content; under the new
-   rule it should instead be silently repaired in place.
-
-### Newly observed this session, not root-caused
-
-7. **HCNAMES row 0 disagrees with `settings.cfg`/AutoSave on the current
-   test card's Bank identity.** `settings.cfg` and the winning AutoSave
-   record agree (Bank 15, `"LoadTst!"`); `.hcnames` row 0 still names Bank 12
-   (`"012 LoadTst"`). No `/bootlog.bin` or `/asavetrc.bin` exists on that
-   card copy, so there is no trace evidence to root-cause it from yet — a
-   genuine publish gap, a later reversion, and test-session artifact are all
-   still open explanations. Needs a dedicated logging-enabled boot+Bank-Load
-   capture before assuming which.
-8. **Sequencer chaselight LED can disappear** (user-reported, not yet
-   reproduced under logging). Both the rendering side
-   (`led_updateCurrentStep()`) and the producer side
-   (`seq_ledState.chaseStep`) were traced but not root-caused. The leading
-   hypothesis is the same known-incomplete class of bug as the "Single-
-   source-of-truth Pattern/Scene index" item below, not a new mechanism.
-   Recommend reproducing with `DEV_MODE_DIAGNOSTIC` on before assuming a
-   cause.
-
-### Pre-existing items, re-flagged this session but still not touched
-
-9. **`bootlog.bin`/`asavetrc.bin` duplicate-name limitation** — tracked in
-   `DEV_MODES.md`, not this file. Session 057 flagged, for a second
-   consecutive session, that the Session 056 LFN early-free-run-exit fix
-   plausibly narrows or closes the specific mechanism this describes, but
-   the deliberate hardware re-check needed to confirm that has still not
-   been performed.
-10. Every item already listed under "Session 054-055 deferred targets"
-    above remains open and untouched this session: name-cache ownership
-    interlock, top-level Load/Save entry trace coverage,
-    `AUTOSAVE_TRACE_RECORD_COUNT` reversion (deferred again — every session
-    since it was first raised has chosen "not yet"), recursive-delete
-    low-level acceptance matrix, Scene Save partial-write hardening, Scene
-    Load error-code granularity, the phase-33 re-entrancy note,
-    `DEV_LOGGING_IWDG` hardware validation, and the Makefile
-    header-dependency-tracking gap.
-11. **AutoSave boot-load durability/read model and its deferred
-    boot-fallback scope** (above, under Session 052) — unchanged this
-    session, but now more directly load-bearing than before: it is an
-    explicit prerequisite for the AutoSave boot reader's own implementation
-    order, not only a background inconsistency to fix eventually.
+- **Sequencer chaselight LED can disappear** (user-reported, not yet
+  reproduced under logging). Both the rendering side
+  (`led_updateCurrentStep()`) and producer side (`seq_ledState.chaseStep`)
+  were traced but not root-caused.
+- **`bootlog.bin`/`asavetrc.bin` duplicate-name limitation** remains tracked
+  in `DEV_MODES.md`. The Session 056 LFN early-free-run-exit fix may have
+  narrowed or closed its mechanism, but the deliberate hardware re-check has
+  not run.
+- The trace-record-count, diagnostic-watchdog, and Makefile dependency items
+  remain in the Session 054-055 non-Load/Save list above.
