@@ -231,6 +231,29 @@
 // TODO DSP_PORT - should be declared in sequencer.h, some oscillator junk needs this defined for now.
 #define SEQ_DEFAULT_NOTE 63
 
+/*
+ * Session-062 dynamic Pattern storage sizing and playback defaults.
+ *
+ * PAT_STACK_SIZE is the number of 32-byte bitmap-tracking units reserved for
+ * one Scene's future dynamic event pool. The pool therefore occupies
+ * PAT_STACK_SIZE * 32 bytes, while PatternData keeps its free bitmap at the
+ * full 512-byte width for the complete 14-bit address space. The initial 256
+ * units provide an 8,192-byte pool; changing this to 512 later expands the
+ * pool without changing the address-entry or bitmap representation.
+ *
+ * PAT_DEFAULT_NOTE and PAT_DEFAULT_VELOCITY are Pattern-owned values used by
+ * the sequencer when a triggered step has no corresponding special. They are
+ * intentionally separate from the legacy MIDI and roll constants even though
+ * their initial numeric values match them.
+ *
+ * Inputs: compile-time configuration only. Outputs: PatternData region size,
+ * bitmap initialization, and the Step-B½ sequencer trigger defaults.
+ * Affiliates: PatternData.c and sequencer.c.
+ */
+#define PAT_STACK_SIZE           256u
+#define PAT_DEFAULT_NOTE          63u
+#define PAT_DEFAULT_VELOCITY     100u
+
 
 #define EG_SPEED 	1;//0.04125f
 #define PITCH_AMOUNT_FACTOR 32

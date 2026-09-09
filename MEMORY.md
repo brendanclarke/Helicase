@@ -17,22 +17,22 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 061 is closed on branch
-`dev-ph3-autosave-ph6`, firmware HEAD `6642f4c`. The final image rebuilds
-byte-identically to the hardware-tested Reader 9 image: SHA-256
-`5732e821d256f521e48814d2cf255c895b1fbb7fdfa9f006b43f5ae293fb8c62`,
-`text=407,060`, `data=404`, `bss=96,212`. Typed HCNAMES and both AutoSave
-boot readers are implemented. The Bank-plus-four-`Rollin`-Scene failure is
+**Current working source**: Session 062 B/B½ is in progress on branch
+`dev-ph3-autosave-ph6`. The static Pattern address-array port clean-links at
+`text=406,396`, `data=404`, `bss=262,468`; `pat_regions` is 167,936 bytes in
+SRAM1 and the legacy v3 bridge retains a separate 112-byte PatternSet discard.
+The hardware checkpoint is still pending. Typed HCNAMES and both AutoSave boot
+readers remain implemented. The Bank-plus-four-`Rollin`-Scene failure is
 hardware-closed: Reader 9 produced 128 Case-2 successes, summary
 `case2=0xffff/case3=0`, correct Bank/all sixteen Scenes, valid HCPR generations
 9/10, and zero HCNAMES-R/object-mask mismatches.
 
-**Next feature**: implement Pattern data storage in AutoSave with an explicit
-format/version, owner, bounded snapshot/read plan, dirty API, and recovery
-rules. Load/Save is usable enough and its later refactor/test matrix is
-consolidated in `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; defer that pass
-unless a severe issue blocks Pattern work. One useful but non-blocking reader
-test remains: reboot `SD_CARD_READER_9` and capture the mixed matching-winner
+**Next feature step**: continue Pattern storage with the dynamic pool allocator
+and specials read/write (S062 Steps C/D). Load/Save is usable enough and its
+later refactor/test matrix is consolidated in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; defer that pass unless a severe
+issue blocks Pattern work. One useful but non-blocking reader test remains:
+reboot `SD_CARD_READER_9` and capture the mixed matching-winner
 Case-1/Case-2 result. Permanent Session 061 detail is in
 `knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md`; the five root
 Session-061 planning/analysis documents are superseded and may be deleted.

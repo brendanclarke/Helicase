@@ -544,6 +544,57 @@ This session implements a subset of Phase 4.1 (step/bar model) and Phase 4.2
 | 4.10 Triplet mode | Not implemented. |
 | 4.11 LED consolidation | Not implemented. |
 
+---
+
+## 8. Implementation status
+
+### Steps A+B — completed 2026-09-09
+
+Static address array allocation, trigger-bitmap port, and filesystem
+bridge disconnection are implemented and link-verified. The full change
+set is documented in `S062_DYNAMIC_PATTERN_B_IMPLEMENT.md` with per-file,
+per-function detail.
+
+**What shipped:**
+- `config.h`: `PAT_STACK_SIZE 256`, `PAT_DEFAULT_NOTE 63`,
+  `PAT_DEFAULT_VELOCITY 100`.
+- `PatternData.h`: address-entry constants (`PAT_ADDR_SENTINEL`,
+  `PAT_ADDR_TRIGGER_BIT`, `PAT_ADDR_SPECIALS_BIT`, `PAT_ADDR_OFFSET_MASK`,
+  `PAT_STEPS_PER_SCENE`). `PatternSet` type and helpers retained for v3
+  bridge.
+- `PatternData.c`: `pat_scene_region_t` (10,496 B per Scene) ×
+  `SCENE_COUNT` = 167,936 B in SRAM1. `pat_initScene()` writes sentinel
+  entries, zeros pool, marks bitmap split. All nine Scene-indexed functions
+  ported to address-array bit-15 operations. Copy functions stubbed as
+  no-ops (deferred to Phase 4.5).
+- `SceneData.h`: `PatternSet pattern` removed from `scene_t` (−112 B per
+  Scene).
+- `filesystem.c`: static `PatternSet` discard bridge. Scene Load commit
+  calls `pat_initScene()`. Fan-out disconnected. Save writes empty discard.
+  Boot reader returns 0 (pattern files not loaded).
+- `sequencer.c`: trigger call uses `PAT_DEFAULT_VELOCITY` /
+  `PAT_DEFAULT_NOTE`.
+- `sequencer.h`: `seq_recordTrigger` comment updated.
+
+**Link output:** `text=406,396`, `data=404`, `bss=262,468`.
+`pat_regions` = 167,936 B, `scenes` = 19,200 B (down from 20,992 B).
+Image: 406,816 bytes.
+
+**Independent review** confirmed all scheduled changes match the live
+source, with five quality improvements beyond the schedule (type-safe `u`
+suffixes, `PAT_STACK_SIZE` range assert, `__attribute__((unused))` on
+disconnected accessor, per-file-phase discard reset, enriched comment
+blocks).
+
+### Step B½ — hardware checkpoint pending
+
+The firmware has not yet been flashed or exercised. The verification
+checklist (toggle, playback, clear, generators, Scene independence,
+recording, image size) is in `S062_DYNAMIC_PATTERN_B_IMPLEMENT.md`
+Section 16.
+
+---
+
 ### Future sessions to complete Phase 4
 
 - **File format v4:** serialize address arrays and pool content to

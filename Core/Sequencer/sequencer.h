@@ -118,7 +118,9 @@ void seq_setRollRate(uint8_t rate);
 /*
  * Record a live MIDI/roll event as one quantized fixed-grid trigger bit.
  * Input is the track; output is an on-bit only when recording is active.
- * Note and velocity are intentionally absent because PatternSet stores neither.
+ * Note and velocity are not recorded here; they are assigned separately as
+ * per-step specials through the step editor. The live address array can carry
+ * those future values, but B/B½ records only bit 15.
  */
 void seq_recordTrigger(uint8_t trackNr);
 void seq_setRecordingMode(uint8_t active);

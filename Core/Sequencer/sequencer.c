@@ -56,6 +56,7 @@
 #include "ledHandler.h"
 #include "menu.h"
 #include "SceneData.h"
+#include "config.h"
 
 
 #define SEQ_INTERNAL_PPQ	96u
@@ -360,10 +361,11 @@ static void seq_advanceTrackStep(uint8_t track)
 	/*
 	 * Advance and service one fixed-grid step for one track.
 	 *
-	 * Input: track index at a sixteenth-note scheduler boundary. Output: its
-	 * cursor advances modulo 16 and an active bitmap bit triggers at velocity 100
-	 * and MIDI_DEFAULT_TRIGGER_NOTE. No probability, note, automation, length,
-	 * scale, shuffle, or rotation data is read from PatternData.
+     * Input: track index at a sixteenth-note scheduler boundary. Output: its
+     * cursor advances modulo 16 and an active address-array bit triggers with
+     * PAT_DEFAULT_VELOCITY and PAT_DEFAULT_NOTE. Step B½ has no dynamic-pool
+     * reader yet, so no probability, special note, automation, length, scale,
+     * shuffle, or rotation data is read from PatternData.
 	 */
 	seq_stepIndex[track]++;
 	if (seq_stepIndex[track] >= (int16_t)NUM_STEPS_PER_BAR)
@@ -382,7 +384,7 @@ static void seq_advanceTrackStep(uint8_t track)
 				              menu_getActiveVoice(),
 				              (uint8_t)seq_stepIndex[track]);
 			} else {
-				seq_triggerVoice(track, ROLL_VOLUME, MIDI_DEFAULT_TRIGGER_NOTE);
+				seq_triggerVoice(track, PAT_DEFAULT_VELOCITY, PAT_DEFAULT_NOTE);
 			}
 		}
 	}
@@ -855,9 +857,10 @@ void seq_recordTrigger(uint8_t trackNr)
 	/*
 	 * Record a live event as one trigger bit when recording is active.
 	 *
-	 * Input: target track from MIDI or roll performance. Output: the quantized
-	 * fixed-grid bit is set and visible STEP feedback is dirtied. MIDI note and
-	 * velocity intentionally have no storage destination in the bitmap model.
+     * Input: target track from MIDI or roll performance. Output: the quantized
+     * fixed-grid address entry's bit 15 is set and visible STEP feedback is
+     * dirtied. MIDI note and velocity are future special values assigned by
+     * the step editor, not live-recorded by this B/B½ trigger-only path.
 	 * Affiliates: MidiParser, roll handling, PatternData, and LED record state.
 	 */
 	//only record notes when seq is running and recording

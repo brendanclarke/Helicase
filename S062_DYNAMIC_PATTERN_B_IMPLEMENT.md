@@ -1194,3 +1194,135 @@ After all changes compile and link:
 | `storageTypes.c` | NO CHANGE | — |
 | `STM32F765VIHx_FLASH.ld` | VERIFY (no change) | B½ |
 | `SRAM_MANIFEST.md` | UPDATE measured sizes | B½ |
+
+---
+
+## 17. Implementation notes
+
+### 2026-09-09 — implementation start
+
+- Read `MEMORY.md`, `S062_DYNAMIC_PATTERN.md`, and this schedule before
+  changing source. The requested allocation is the schedule's permanent
+  `pat_regions[16]`: 167,936 bytes in normal SRAM1, owned by
+  `PatternData.c` for the firmware lifetime.
+- The live tree still embeds the 112-byte `PatternSet` in `scene_t`. The
+  legacy `PatternSet` type and helpers must remain for `storageTypes.c`'s v3
+  text bridge, but all resident Scene pattern access will move to the new
+  address-array regions.
+- The current filesystem still fans a parsed `PatternSet` into selected
+  Scenes and the Session-061 boot reader parses `pattern.pat`. Both paths
+  will be disconnected for this scope; Scene pattern regions will initialize
+  empty and the v3 save path will write through a discard `PatternSet`.
+- No dynamic pool allocator or special-value read/write is being added in
+  B/B½. The per-Scene pool and full-width free bitmap are allocated and
+  initialized now so the later C/D work has its defined memory topology.
+
+### 2026-09-09 — source implementation and clean link
+
+- Added `PAT_STACK_SIZE=256`, `PAT_DEFAULT_NOTE=63`, and
+  `PAT_DEFAULT_VELOCITY=100` to `config.h`, plus named address-entry masks and
+  `PAT_STEPS_PER_SCENE` in `PatternData.h`.
+- Added `pat_scene_region_t` and `pat_regions[SCENE_COUNT]` in
+  `PatternData.c`. Each region is 10,496 bytes: 1,792-byte address array,
+  8,192-byte pool reservation, and 512-byte bitmap. Initialization writes
+  `PAT_ADDR_SENTINEL`, zeros the pool, and marks the backed/unbacked bitmap
+  split. The static assert and ARM symbol report both confirm the budget.
+- Removed the embedded `PatternSet` field from `scene_t`. The legacy type and
+  helpers remain available only to `storageTypes.c` and the filesystem discard
+  bridge, as required by the schedule.
+- Ported active-step read/set/toggle/erase, active-step scan, track/pattern
+  clear, and copy stubs to the address array. Toggle preserves bits 14..0;
+  erase and clear return entries to the sentinel. Sequencer B½ playback now
+  uses the Pattern-owned default note and velocity.
+- Disconnected Scene Load fan-out and boot `pattern.pat` application. Scene
+  commits call `pat_initScene()`, Scene Save writes a reset discard PatternSet,
+  and the v3 text parser remains validation-compatible. The discard accessor
+  initially reset on every parsed line; this was corrected to reset once at
+  text-parser entry so all seven track rows survive validation.
+- Clean `make -j2` passed after the header edit. The linked result is
+  `text=406,396`, `data=404`, `bss=262,468`; `pat_regions` is `0x29000`
+  (167,936 bytes), `scenes` is `0x4b00` (19,200 bytes), and the discard bridge
+  is 112 bytes. `make img` produced a 406,816-byte image with SHA-256
+  `fcae86d0f49a48e02bd5def9eafe39ff3ab84d42c3404b51e7cbc8ff03de356e`.
+- Hardware B½ checks remain pending: this session has source/link evidence only
+  and has not flashed or exercised toggle, playback, clear, generators, Scene
+  independence, or recording on the device.
+
+### 2026-09-09 — independent code review (post-implementation)
+
+Verified every scheduled change against the live source tree. Assessment:
+
+**config.h (Section 1):** Three defines present after line 232 with a
+detailed comment block. Values use the `u` suffix consistently (minor
+improvement over the schedule's bare literals). Matches schedule.
+
+**PatternData.h (Section 2):** All four address constants (2.1),
+`PAT_STEPS_PER_SCENE` (2.2), retained `PatternSet` type (2.3), and
+unchanged API declarations (2.4) verified. Comment blocks are richer than
+the schedule specified — each section is now self-documenting.
+
+**PatternData.c (Section 3):** All 16 subsections verified:
+- `config.h` included (3.1). Region struct, two `_Static_assert`s, static
+  array (3.2) — bonus range assert on `PAT_STACK_SIZE` itself.
+  `pat_addrPtr` helper (3.3). `pat_initScene` rewritten with sentinel loop,
+  pool zero, bitmap split (3.4). `pat_isStepActive` reads bit 15 (3.5).
+  `pat_setStepActive` sets/clears bit 15, preserves 14–0 (3.6).
+  `pat_toggleStep` XORs bit 15 (3.7). `pat_eraseStep` writes
+  `PAT_ADDR_SENTINEL` with invalidation (3.8). `pat_sceneHasActiveSteps`
+  scans for trigger bit (3.9). `pat_clearTrack` writes sentinel × 128
+  (3.10). `pat_clearPattern` delegates to `pat_initScene` (3.11). Three
+  copy functions are no-ops with `(void)` casts and deferral comments
+  (3.12–3.14). Legacy helpers and stubs unchanged (3.15). No remaining
+  `scene_get`/`scene_getConst` pattern-data dependencies (3.16).
+
+**SceneData.h (Section 4):** `PatternSet pattern;` removed from `scene_t`.
+Struct comment updated to explain pattern data lives in `PatternData.c`.
+`kit_t kit` follows `settings` directly. Matches schedule.
+
+**SceneData.c (Section 5):** No changes, as scheduled. `scene_initAll()`
+still calls `pat_initScene()` at the correct point.
+
+**filesystem.c (Section 6):** All six subsections verified:
+- `filesystem_pattern_discard` at file scope outside `#if 0` (6.1).
+  `filesystem_directPatternTarget` returns `&filesystem_pattern_discard`
+  with `__attribute__((unused))` to suppress warnings from retired callers
+  inside `#if 0` — good defensive addition not in the schedule (6.2).
+  Pattern fan-out replaced with a disconnect comment; case 61 no longer
+  copies `PatternSet` data (6.3). Scene Load commit calls
+  `pat_initScene(scene_index)` (6.4). Save writer passes
+  `&filesystem_pattern_discard` after a `pat_initPatternSet` reset (6.5).
+  Boot reader returns `0u` immediately (6.6).
+- Extra: the v3 text parse entry (line 12298) resets the discard once at
+  file-phase entry rather than per-line. This was noted in the
+  implementation log as a correction — the schedule's `directPatternTarget`
+  originally cleared per call; the actual code correctly clears once so all
+  seven track rows survive parsing.
+
+**sequencer.c (Section 7):** `PAT_DEFAULT_VELOCITY, PAT_DEFAULT_NOTE` at
+the trigger call site (7.2). `config.h` included.
+
+**sequencer.h (Section 7.3):** Comment updated from "intentionally absent
+because PatternSet stores neither" to the new formulation about specials
+assigned through the step editor.
+
+**No-change files (Sections 8–14):** `buttonHandler.c`, `ledHandler.c`,
+`EuklidGenerator.c`, `SomGenerator.c`, `menu.c`, `copyClearTools.c`,
+`storageTypes.c`, linker script — all confirmed unchanged, matching
+schedule expectations.
+
+**Link output:** `bss=262,468` with `pat_regions` at `0x29000` (167,936 B)
+and `scenes` at `0x4b00` (19,200 B). The scene reduction is 112 × 16 =
+1,792 B (from previous `scenes` size of 20,992 B). Net new SRAM1 = 166,144
+B, matching Section 15's predicted budget within rounding. Total SRAM1
+static use is within the 376,832-byte capacity.
+
+**Quality improvements beyond schedule:**
+1. `u` suffix on all config defines (type safety).
+2. `PAT_STACK_SIZE` range assert in the region struct block.
+3. `__attribute__((unused))` on the disconnected accessor.
+4. Per-file-phase discard reset instead of per-line (correctness fix).
+5. Comment blocks throughout are richer than the schedule's description
+   text, providing full what/why/inputs/outputs/affiliates documentation.
+
+**No issues found.** Implementation matches the schedule precisely on all
+structural and behavioral points. Ready for Step B½ hardware verification.

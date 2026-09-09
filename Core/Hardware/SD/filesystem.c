@@ -103,6 +103,21 @@
 #define FS_CONTAINER_PAD_BYTE 0xffu
 #define FS_KIT_LFN_MAX 80u
 #define FS_RESIDENT_NAMES_FILENAME ".hcnames"
+
+/*
+ * Disconnected legacy PatternSet bridge target.
+ *
+ * The live Scene no longer embeds PatternSet: PatternData.c owns the
+ * Scene-indexed address array, reserved dynamic pool, and free bitmap. The v3
+ * text parser/writer still has a PatternSet-shaped interface, so all legacy
+ * pattern file traffic is directed here and deliberately discarded. Load
+ * parsing may populate this record for validation compatibility; save writes
+ * its empty state. Lifetime is the filesystem module lifetime and no live
+ * Scene owns or reads this object. Affiliates: filesystem_directPatternTarget,
+ * the Scene Load bridge, and the Scene Save pattern writer.
+ */
+static PatternSet filesystem_pattern_discard;
+
 /*
  * Safe-write companion for the firmware-owned HCNAMES singleton.
  *
@@ -12280,6 +12295,10 @@ static void filesystem_loadSceneDirectory_tick(void)
             staging_buf[2] == 'r' && staging_buf[3] == 'm' &&
             staging_buf[4] == 'a' && staging_buf[5] == 't' &&
             staging_buf[6] == '=') {
+            /* Reset the discard once per parsed file. The active text parser
+             * requests the target once per line, so resetting in the accessor
+             * would erase previously parsed track rows. */
+            pat_initPatternSet(&filesystem_pattern_discard);
             storage_patternStubStateInit(&op_pattern_stub_state);
             memcpy(op_line_buf, "format=", 7u);
             op_line_len = 7u;
@@ -12647,38 +12666,18 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 61;
         return;
 
-    case 61: /* MIRROR direct Pattern to additional selected Scene slots */
+    case 61: /* Pattern bridge remains disconnected for Session 062 */
     {
         uint8_t scene_index;
 
         /*
-         * Complete the direct Pattern fan-out without staging PatternSet.
-         *
-         * Inputs are the directly parsed first destination PatternSet and the
-         * request-time destination mask. General settings and Kit were already
-         * committed in phase 33. Output mirrors only Pattern data to additional
-         * destinations; no Pattern payload has occupied the typed stage.
-         *
-         * Scene identity remains outside the copied payload because sceneset.scg
-         * never stores its own name. Inputs: op_scene_display_name was captured
-         * from the selected root/Bank directory, while
-         * op_scene_child_display_name was copied into the staged embedded Kit
-         * after validation. Output: SceneData receives only playable data;
-         * root Scene Load later publishes the one directory name to selected
-         * HCNAMES rows, and Bank Load overlays only its selected child block.
-         * This keeps mask-unselected Scene data and names paired and unchanged.
+         * Leave live Pattern regions empty instead of fanning out a legacy
+         * PatternSet. Each selected Scene was initialized by
+         * filesystem_commitSceneStage() through pat_initScene(), and the v3
+         * bridge is intentionally not converted to the new address/pool
+         * format in B/B½. Scene identity and the selected mask remain handled
+         * by the following HCNAMES publication path.
          */
-        PatternSet *direct = filesystem_directPatternTarget();
-        for (scene_index = 0u;
-             scene_index < SCENE_COUNT && scene_index < 16u;
-             scene_index++) {
-            if ((op_scene_load_scene_mask &
-                 (uint16_t)(1u << scene_index)) != 0u) {
-                scene_t *target = scene_get(scene_index);
-                if (target && direct && &target->pattern != direct)
-                    target->pattern = *direct;
-            }
-        }
         memcpy(preset_currentName, op_scene_display_name, 8u);
         /*
          * All Scene payload layers, including Pattern and Effect, have now
@@ -15232,9 +15231,9 @@ static void filesystem_commitSceneStage(void)
      *
      * Why: Pattern is intentionally non-atomic for the current format work;
      * excluding PatternSet from staging keeps validation inside the separate
-     * typed stage. Inputs: fully parsed stage image and the
-     * immutable destination mask. Outputs: final Scene settings/Kit plus a
-     * default final PatternSet ready for direct streaming.
+     * typed stage. Inputs: fully parsed stage image and the immutable
+     * destination mask. Outputs: final Scene settings/Kit plus an empty live
+     * PatternData region ready for the future address/pool loader.
      *
      * Affiliates: filesystem_directPatternTarget(), Scene Pattern phases, and
      * the later Pattern transactional redesign.
@@ -15250,7 +15249,7 @@ static void filesystem_commitSceneStage(void)
             continue;
         target->settings = fs_stage_workspace.scene_stage.settings;
         target->kit = fs_stage_workspace.scene_stage.kit;
-        pat_initPatternSet(&target->pattern);
+        pat_initScene(scene_index);
         /*
          * Option 2: only a standalone root Scene Load clears this Scene's
          * card-clean bit. A delegated Bank Load also reaches this commit, but
@@ -15264,28 +15263,19 @@ static void filesystem_commitSceneStage(void)
     }
 }
 
-static PatternSet *filesystem_directPatternTarget(void)
+static PatternSet *__attribute__((unused)) filesystem_directPatternTarget(void)
 {
-    uint8_t scene_index;
-
     /*
-     * Choose the first committed destination as the direct Pattern parse sink.
+     * Return the disconnected legacy PatternSet parse sink.
      *
-     * Inputs: current Scene destination mask. Output: final Scene PatternSet
-     * or NULL. The final commit phase mirrors this completed PatternSet to any
-     * additional selected destinations without ever allocating a Pattern stage.
-     * Affiliates: every binary/text Pattern parser phase and Scene phase 61.
+     * Inputs: none. Output: the caller-independent PatternSet reset once when
+     * the active text parser enters its file phase. The accessor is called for
+     * each line and therefore must not clear the record itself. Pattern data is
+     * never copied into a Scene's live address array; the B/B½ format boundary
+     * remains disconnected. Affiliates: legacy parser compatibility and the
+     * future v4 bridge.
      */
-    for (scene_index = 0u;
-         scene_index < SCENE_COUNT && scene_index < 16u;
-         scene_index++) {
-        if ((op_scene_load_scene_mask & (uint16_t)(1u << scene_index)) != 0u) {
-            scene_t *target = scene_get(scene_index);
-            if (target)
-                return &target->pattern;
-        }
-    }
-    return NULL;
+    return &filesystem_pattern_discard;
 }
 
 static void filesystem_resetSceneLoadChildDiscovery(void)
@@ -18369,12 +18359,18 @@ static void filesystem_saveSceneDirectory_tick(void)
         op_write_line_index = 0u;
         op_write_line_len = 0u;
         op_write_line_offset = 0u;
+        /*
+         * Scene Save retains the v3 file shape but must not serialize a stale
+         * parsed PatternSet from a previous operation. The live PatternData
+         * region is intentionally not connected until the future v4 format.
+         */
+        pat_initPatternSet(&filesystem_pattern_discard);
         op_phase = 31u;
         return;
 
     case 31:
         if (filesystem_writeTextLine(filesystem_nextPatternStubLine,
-                                     (void *)&scene->pattern))
+                                     (void *)&filesystem_pattern_discard))
             return;
         op_phase = 32u;
         return;
@@ -27197,75 +27193,20 @@ static uint8_t filesystem_bootReaderNarrowLoadInstrument(
 }
 
 /*
- * Boot-time pattern loading for one Scene.
+ * Boot-time Pattern bridge disconnect for Session 062.
  *
- * What: loads pattern.pat from the Scene's resolved source folder.
- * Autosave captures live parameters but NOT pattern data, and the boot
- * reader replaces the canonical Bank Load which would have loaded
- * patterns from disk. Without this step, scenes restored by Case 1
- * (autosave payload) have zeroed PatternSets — audibly empty.
- *
- * Inputs: scene_index of a present, non-Case3 Scene whose .hcnames
- * source is resolvable. Outputs: scene->pattern populated from the
- * on-card pattern.pat file. Returns nonzero on success; a zero return
- * leaves the PatternSet at its prior state (caller treats as non-fatal).
- *
- * Affiliates: filesystem_bootReaderEnterSceneFolder(),
- * storage_patternStubParseLine(), the orchestrator step 3b,
- * S061_AUTOSAVE_READER.md.
+ * What: skip the legacy pattern.pat v3 reader. Why: v3 stores PatternSet
+ * bitmap data, while live PatternData now owns address entries and the
+ * reserved dynamic pool; converting the old file would silently create a
+ * partial representation. Inputs: Scene index supplied by the boot reader.
+ * Output: zero, which the caller treats as a non-fatal absent Pattern load;
+ * pat_initScene() has already left the resident region empty. Affiliates:
+ * boot-reader orchestration and the future v4 Pattern serializer.
  */
 static uint8_t filesystem_bootReaderLoadPattern(uint8_t scene_index)
 {
-    uint16_t scene_row = filesystem_residentSceneRow(scene_index);
-    uint16_t resolved_row = FS_RESIDENT_NAMES_ROW_COUNT;
-    uint16_t source;
-    scene_t *scene;
-    afatfsFilePtr_t file;
-    uint8_t ok = 0u;
-
-    if (scene_row >= FS_RESIDENT_NAMES_ROW_COUNT)
-        return 0u;
-    source = filesystem_resolveResidentSource(scene_row, &resolved_row);
-    if (source >= FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT)
-        return 0u;
-    if (!filesystem_bootReaderEnterSceneFolder(
-            scene_index, source, resolved_row)) {
-        return 0u;
-    }
-    scene = scene_get(scene_index);
-    if (!scene)
-        return 0u;
-    pat_initPatternSet(&scene->pattern);
-    filesystem_resetTextReader();
-    file = filesystem_blockOpenLfn("pattern.pat");
-    if (!file)
-        return 0u;
-    storage_patternStubStateInit(&op_pattern_stub_state);
-    for (;;) {
-        uint8_t len = 0u;
-        uint8_t ready = 0u;
-        uint8_t eof_flag = 0u;
-        storage_status_t st = filesystem_bootReadLineBlocking(
-            file, op_line_buf, &len, sizeof(op_line_buf),
-            &ready, &eof_flag);
-
-        if (st != STORAGE_STATUS_OK)
-            break;
-        if (ready) {
-            st = storage_patternStubParseLine(
-                &op_pattern_stub_state, op_line_buf, &scene->pattern);
-            if (st != STORAGE_STATUS_OK)
-                break;
-            continue;
-        }
-        if (eof_flag) {
-            ok = (uint8_t)(storage_patternStubFinalize(
-                &op_pattern_stub_state) == STORAGE_STATUS_OK);
-            break;
-        }
-    }
-    (void)filesystem_blockClose(file);
-    return ok;
+    (void)scene_index;
+    return 0u;
 }
 
 /*

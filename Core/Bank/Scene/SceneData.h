@@ -195,8 +195,10 @@ typedef struct {
     /*
      * Resident Scene record.
      *
-     * settings holds Scene-level performance/settings data, pattern holds the
-     * current bridge PatternSet, and kit holds the embedded six-slot Kit.
+     * settings holds Scene-level performance/settings data and kit holds the
+     * embedded six-slot Kit. Pattern data is owned by PatternData.c's static
+     * Scene-indexed address/pool/bitmap regions; it is not embedded in
+     * scene_t.
      *
      * A Scene display name is intentionally absent. It is card-resident
      * metadata owned by fixed rows 1..16 of root `/.hcnames`, rather than
@@ -206,8 +208,8 @@ typedef struct {
      * operation; Bank operations borrow the existing general-purpose cache for
      * their complete 129-row transaction.
      *
-     * Inputs: filesystem loaders copy validated settings, PatternSet, and Kit
-     * payload. Outputs: Menu and Bank name writers use filesystem HCNAMES
+     * Inputs: filesystem loaders copy validated settings and Kit payload;
+     * PatternData owns the separate live Pattern region. Outputs: Menu and Bank name writers use filesystem HCNAMES
      * helpers. Affiliates: filesystem.c and Core/Menu/menu.c.
      */
     scene_settings_t settings;
@@ -222,7 +224,6 @@ typedef struct {
      * region stub and must not require writer redesign later. Affiliates:
      * Autosave Effect geometry and the future Effect implementation.
      */
-    PatternSet pattern;
     kit_t kit;
 } scene_t;
 

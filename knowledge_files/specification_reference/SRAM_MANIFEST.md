@@ -1,11 +1,11 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-09-08 logging-on Session 061 build at HEAD `6642f4c`.
-`arm-none-eabi-size build/lxr02.elf` reports `text=407,060`, `data=404`, and
-`bss=96,212`; `build/lxr02.bin` is 407,464 B and `build/LXRV2_lxr02.img` is
-407,480 B with SHA-256
-`5732e821d256f521e48814d2cf255c895b1fbb7fdfa9f006b43f5ae293fb8c62`.
+2026-09-09 Session 062 B/B½ build.
+`arm-none-eabi-size build/lxr02.elf` reports `text=406,396`, `data=404`, and
+`bss=262,468`; `build/lxr02.bin` is 406,800 B and
+`build/LXRV2_lxr02.img` is 406,816 B with SHA-256
+`fcae86d0f49a48e02bd5def9eafe39ff3ab84d42c3404b51e7cbc8ff03de356e`.
 The approved 258-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
 This remains a linked-image inventory: sizes come from
@@ -24,6 +24,9 @@ five-byte set of filesystem boot-latch fields, seven bytes of boot-winner
 fields, and six Menu notice bytes; linked LTO symbols are 6, 12, and 6 bytes
 respectively because of structure alignment. The final 96-Instrument-type
 lifetime fix adds no BSS: it aliases the existing 144-byte Bank-child scratch.
+Session 062 B/B½ adds the permanent `pat_regions` Pattern allocation and
+removes the embedded Scene bridge bitmap; the legacy v3 filesystem bridge keeps
+one 112-byte discard `PatternSet` in normal SRAM1.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -49,12 +52,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 89,944 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **93,044 B** | **283,788 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **105,324 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 256,200 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **259,300 B** | **117,532 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **271,580 B** | — |
 
-The image contains 404 B of initialized SRAM1 data and 96,212 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 89,540 B in normal SRAM1
+The image contains 404 B of initialized SRAM1 data and 262,468 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 255,796 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -62,22 +65,24 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 394,128 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 393,464 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
 | `.data` | `0x20020c1c` | 404 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020db0` | 89,540 B | SRAM1 | Normal zero-initialized globals |
+| `.bss` | `0x20020db0` | 255,796 B | SRAM1 | Normal zero-initialized globals, including `pat_regions` |
 
 The final FLASH load image remains safely before the reserved sample-FLASH
-boundary `0x08080000`. `build/lxr02.bin` is 407,464 B.
+boundary `0x08080000`. `build/lxr02.bin` is 406,800 B.
 
 ## Primary SRAM1 owners
 
 | Symbol | Size | Purpose |
 | --- | ---: | --- |
-| `scenes` | 20,992 B | 16 resident `scene_t` values; each holds one 112-B bitmap `PatternSet` |
+| `scenes` | 19,200 B | 16 resident `scene_t` values; Pattern storage is external to each Scene |
+| `pat_regions` | 167,936 B | 16 × 10,496-B Scene Pattern regions: address array, 8,192-B pool, 512-B bitmap |
+| `filesystem_pattern_discard` | 112 B | Legacy v3 `PatternSet` parser/writer sink; never live Scene data |
 | `fs_list_cache_name` | 9,000 B | Shared typed-Instrument and numbered-library `.hcindex` browser cache |
 | `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved filesystem-owned source cache |
 | `hcnames_name_mirror` | 1,161 B | Session 058 Option 1C dedicated 129-by-9 HCNAMES name mirror (replaces HCNAMES borrowing of `fs_list_cache_name`) |
@@ -134,7 +139,7 @@ all of them.
 
 | Change | Current linked result |
 | --- | --- |
-| Pattern representation | `scenes` is 20,992 B; pattern payload is 16 x 112 B = 1,792 B. No `Step[7][128]` symbol is linked. |
+| Pattern representation | `scenes` is 19,200 B; `pat_regions` is 16 x 10,496 B = 167,936 B; the 112-B bridge is a separate discard sink. No `Step[7][128]` symbol is linked. |
 | Slider LUT | `slider_lut` is 4,096 B: 1,024 `float` values, four ADC codes per non-interpolated node. |
 | Instrument runtime ownership | Exactly one `runtime_slots` symbol is linked at 7,056 B. No native drum/snare/cymbal/hat object or per-engine expansion pool is linked. |
 
@@ -168,11 +173,23 @@ arm-none-eabi-nm -S --size-sort build/lxr02.elf
 arm-none-eabi-readelf -l -W build/lxr02.elf
 ```
 
-For the current logging-on image, conventional `arm-none-eabi-size` reports
-`text=385,420 B`, `data=404 B`, and `bss=96,176 B`. The latter is the combined
-zero-init total across memory regions; `size -A` provides the section split
-above. Regenerate both configurations before a future change that alters
-logging-gated allocations.
+For the current Session-062 B/B½ image, conventional
+`arm-none-eabi-size` reports `text=406,396 B`, `data=404 B`, and
+`bss=262,468 B`. The latter is the combined zero-init total across memory
+regions; `size -A` provides the section split above. Regenerate both
+configurations before a future change that alters logging-gated allocations.
+
+## 2026-09-09 Session 062 B/B½ allocation note
+
+The clean ARM link adds the permanent `pat_regions` symbol at exactly 167,936
+bytes (`0x29000`): 16 Scene regions of 10,496 bytes each, in normal SRAM1,
+owned by `PatternData.c` for the firmware lifetime. Each region contains the
+1,792-byte address array, the 8,192-byte `PAT_STACK_SIZE=256` pool reservation,
+and the 512-byte full-width free bitmap. Removing `scene_t.pattern` reduces
+`scenes` from 20,992 to 19,200 bytes. The disconnected legacy v3 bridge adds a
+112-byte `filesystem_pattern_discard` in normal SRAM1, so the measured SRAM1
+total is 259,300 bytes and 117,532 bytes remain reserved for future Pattern
+expansion. No DTCM or logging-only allocation changed.
 
 Session 051 moved no allocated region, but the linked totals shifted from the
 Session 050 build: text grew 1,360 B, initialized `.data` grew 4 B, and bss
