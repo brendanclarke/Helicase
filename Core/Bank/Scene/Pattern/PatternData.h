@@ -22,7 +22,7 @@
  * Address-array encoding for the live Session-062 Pattern representation.
  *
  * Every 16-bit entry owns one track/step: bit 15 is the trigger state, bit 14
- * announces a future dynamic block with specials, and bits 13..0 are a
+ * announces a dynamic block with specials, and bits 13..0 are a
  * 4-byte-aligned pool byte offset. PAT_ADDR_SENTINEL is the reserved no-data
  * value; it cannot be a valid aligned offset. These constants are shared by
  * PatternData and future Sequencer/pool readers so no caller repeats masks.
@@ -32,6 +32,36 @@
 #define PAT_ADDR_TRIGGER_BIT  (1u << 15)
 #define PAT_ADDR_SPECIALS_BIT (1u << 14)
 #define PAT_ADDR_OFFSET_MASK  0x3FFFu
+
+/*
+ * Special-flags byte assignments for one dynamic pool block.
+ *
+ * Bit 0 stores a note override, bit 1 stores a velocity override, and bit 2
+ * stores a probability override. Bits 3..7 remain reserved and are kept clear
+ * by this session's writer. Inputs/outputs are compile-time masks only;
+ * PatternData.c and the Sequencer use them to agree on value-byte ordering.
+ * Affiliates: pat_blockRead(), pat_blockWrite(), and pat_readStepSpecials().
+ */
+#define PAT_SPECIAL_NOTE_BIT     (1u << 0)
+#define PAT_SPECIAL_VEL_BIT      (1u << 1)
+#define PAT_SPECIAL_PROB_BIT     (1u << 2)
+#define PAT_SPECIAL_FLAGS_MASK   (PAT_SPECIAL_NOTE_BIT | \
+                                  PAT_SPECIAL_VEL_BIT | \
+                                  PAT_SPECIAL_PROB_BIT)
+
+/*
+ * Dynamic pool block header encoding.
+ *
+ * The first two bytes carry a 10-bit `track * NUM_STEPS + step` back-reference
+ * in bits 15..6 and a six-bit automation count in bits 5..0. Automation is
+ * zero for Session 062, but retaining the field shape keeps future block
+ * readers compatible. Inputs/outputs are compile-time constants used by the
+ * allocator's block-size and read/write helpers. Affiliate: PatternData.c.
+ */
+#define PAT_BLOCK_HEADER_BYTES    2u
+#define PAT_BLOCK_STEP_ID_SHIFT   6u
+#define PAT_BLOCK_STEP_ID_MASK    0xFFC0u
+#define PAT_BLOCK_AUTO_COUNT_MASK 0x003Fu
 
 /* Total live address entries in one resident Scene: 7 tracks x 128 steps. */
 #define PAT_STEPS_PER_SCENE   (NUM_TRACKS * NUM_STEPS)
@@ -94,6 +124,25 @@ void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step);
 uint8_t pat_sceneHasActiveSteps(uint8_t scene_index);
 
 /*
+ * Resolved values read from one dynamic step block.
+ *
+ * `note`, `velocity`, and `probability` always contain usable values: absent
+ * specials are filled with PAT_DEFAULT_NOTE, PAT_DEFAULT_VELOCITY, and 127.
+ * `flags` reports which of those values were explicitly stored. Inputs are a
+ * Scene/track/step coordinate; invalid or unallocated steps return defaults.
+ * Affiliates: Sequencer playback and the STEP menu display/edit path.
+ */
+typedef struct {
+    uint8_t note;
+    uint8_t velocity;
+    uint8_t probability;
+    uint8_t flags;
+} pat_step_specials_t;
+
+pat_step_specials_t pat_readStepSpecials(uint8_t scene_index,
+                                         uint8_t track, uint8_t step);
+
+/*
  * Range operations for UI and generators. Clear operations reset address
  * entries; copy operations are deliberate no-ops in Session 062 because
  * duplicating pool blocks is deferred to the later copy-operations design.
@@ -109,10 +158,11 @@ void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
 
 /*
  * Transitional UI compatibility entry points retain no legacy PatternSet
- * state. The step-special setters remain no-ops until Step D wires the pool.
- * Inputs from stale menu cells are ignored (apart from active-step cursor
- * selection); outputs are fixed defaults. They exist only until the menu ID
- * table is compacted and must never be used by playback, persistence, or UI.
+ * state. Track/global compatibility setters remain storage-free, while the
+ * three Step-062 special setters now read/write the dynamic pool. Inputs from
+ * stale menu cells are ignored; outputs for pat_applyStepToMenu() are resolved
+ * defaults or stored specials. They exist until the menu ID table is compacted
+ * and must never be used by persistence.
  */
 #define TRACK_SCALE_OFF 10u
 void pat_applyPatternSettingsToMenu(uint8_t scene_index);

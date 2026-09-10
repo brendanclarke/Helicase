@@ -58,6 +58,13 @@
 #include "SceneData.h"
 #include "config.h"
 
+/*
+ * Pattern probability uses the existing hardware RNG without new state.
+ * Inputs/outputs: compile-time declaration only; seq_advanceTrackStep() owns
+ * the probability gate and calls GetRngValue() at trigger time.
+ */
+#include "random.h"
+
 
 #define SEQ_INTERNAL_PPQ	96u
 #define SEQ_MIDI_PPQ        24u
@@ -203,10 +210,10 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 	/*
 	 * Trigger one fixed-grid event.
 	 *
-	 * Inputs: valid voice plus caller-selected default velocity/note. Outputs:
-	 * synth, trigger jack, and MIDI note-on are driven. PatternData supplies
-	 * only the preceding on-bit decision; no Step snapshot or automation node
-	 * is parsed here, so playback cannot recreate removed pattern storage.
+	 * Inputs: valid voice plus caller-selected velocity/note. Outputs: synth,
+	 * trigger jack, and MIDI note-on are driven. seq_advanceTrackStep() resolves
+	 * PatternData defaults/specials before calling this owner; this function
+	 * retains responsibility for the track MIDI-note override and voice trigger.
 	 */
 
 	//turn the trigger off before sending the next one
@@ -361,11 +368,12 @@ static void seq_advanceTrackStep(uint8_t track)
 	/*
 	 * Advance and service one fixed-grid step for one track.
 	 *
-     * Input: track index at a sixteenth-note scheduler boundary. Output: its
-     * cursor advances modulo 16 and an active address-array bit triggers with
-     * PAT_DEFAULT_VELOCITY and PAT_DEFAULT_NOTE. Step B½ has no dynamic-pool
-     * reader yet, so no probability, special note, automation, length, scale,
-     * shuffle, or rotation data is read from PatternData.
+	 * Input: track index at a sixteenth-note scheduler boundary. Output: its
+	 * cursor advances modulo 16 and an active address-array bit triggers with
+	 * the step's pool-stored velocity and note (or defaults if no specials are
+	 * assigned). Probability gates whether the trigger fires at all.
+	 * Automation entries, length, scale, shuffle, and rotation are not yet read
+	 * from PatternData.
 	 */
 	seq_stepIndex[track]++;
 	if (seq_stepIndex[track] >= (int16_t)NUM_STEPS_PER_BAR)
@@ -384,7 +392,19 @@ static void seq_advanceTrackStep(uint8_t track)
 				              menu_getActiveVoice(),
 				              (uint8_t)seq_stepIndex[track]);
 			} else {
-				seq_triggerVoice(track, PAT_DEFAULT_VELOCITY, PAT_DEFAULT_NOTE);
+				pat_step_specials_t sp = pat_readStepSpecials(
+				    seq_activePattern, track,
+				    (uint8_t)seq_stepIndex[track]);
+				uint8_t should_trigger = 1u;
+
+				if (sp.probability < 127u) {
+					uint8_t rnd = (uint8_t)(((uint16_t)(GetRngValue() & 0x7FFFu) *
+					                         127u) / 32767u);
+					if (rnd >= sp.probability)
+						should_trigger = 0u;
+				}
+				if (should_trigger)
+					seq_triggerVoice(track, sp.velocity, sp.note);
 			}
 		}
 	}
@@ -859,8 +879,8 @@ void seq_recordTrigger(uint8_t trackNr)
 	 *
      * Input: target track from MIDI or roll performance. Output: the quantized
      * fixed-grid address entry's bit 15 is set and visible STEP feedback is
-     * dirtied. MIDI note and velocity are future special values assigned by
-     * the step editor, not live-recorded by this B/B½ trigger-only path.
+     * dirtied. MIDI note and velocity are special values assigned by the step
+     * editor; this trigger-only recording path still does not record them.
 	 * Affiliates: MidiParser, roll handling, PatternData, and LED record state.
 	 */
 	//only record notes when seq is running and recording

@@ -70,6 +70,7 @@
 | 059 | 2026-08-30/31 | commits `53a7676`, `3dc9a4b`, `d28f8f9`, `4067099`, `0c90434` plus Phase Two/doc closeout on `dev-ph3-autosave-ph5` | AsyncFATFS terminator-aware create/rename and first-sector-only directory initialization; stopped Bank Save reduced to about 10 s; typed Instrument `.hcindex` validation, recovery, and direct-open fast path; zero retained-SRAM growth; Phase Two hardware testing deliberately deferred with no problem expected from source/build review |
 | 060 | 2026-09-01/04 | commits `3ff43e4`..`eca4271` on `dev-ph3-autosave-pre-overscope-apply`, plus uncommitted `Core/Hardware/SD/filesystem.c` and `Core/Hardware/SD/asyncfatfs/asyncfatfs.c` (Instrument `.hcindex` boot fix and system-wide AppleDouble filter, applied after the last commit) | Autosave writer continuation-cycle speedup (winner cache, ~3.1s->2.2s drain); `.hcnames` atomic safe-write + refreshed-flag/HCNAMES-convergence reader prep (Phase B/B2); zero-growth 2-byte HCNAMES source fields in every autosave sub-object (Phase C); Phase D audited as already-implemented (no code change); boot Instrument `.hcindex` generation fixed (macOS AppleDouble `._` files filtered system-wide in asyncfatfs) |
 | 061 | 2026-09-05/08 | commit `6642f4c` on `dev-ph3-autosave-ph6`, plus documentation closeout and `SD_CARD_READER_9` capture | Typed 130-line HCNAMES; matching-winner and all-refreshed HCNAMES-authoritative AutoSave boot readers; complete hierarchy publication; Pattern fallback; zero-growth 96-type lifetime fix; Reader 9 hardware acceptance; deferred Load/Save test matrix |
+| 062 | 2026-09-09/10 | commit `7b3254b` on `dev-ph3-autosave-ph6` | Phase 4 dynamic Pattern storage: 16-Scene address array + 256-chunk pool + free bitmap (167,936 B), first-fit allocator, per-step note/velocity/probability specials, block read/write, hardware RNG probability gating in Sequencer, step-edit menu bridge, PatternSet removal from scene_t; hardware-verified |
 
 
 ---
@@ -1047,3 +1048,53 @@ the refactor is intentionally deferred unless a blocker appears.
   `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`, `AUTOSAVE.md`,
   `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`,
   `DEV_MODES.md`, `ASYNCFATFS_REFERENCE.md`, and `SD_CARD_READER_9/`.
+
+### 062 — Phase 4 Dynamic Pattern Storage (2026-09-09/10)
+
+Replaced the bitmap-only Pattern representation with a three-part per-Scene
+dynamic storage system: a 1,792-byte static address array (896 × uint16_t),
+an 8,192-byte event pool (PAT_STACK_SIZE=256 × 32-byte chunks), and a
+512-byte free-tracking bitmap. Each 16-bit address entry encodes trigger
+(bit 15), has-specials (bit 14), and a 14-bit pool byte offset (sentinel
+0x3FFF). Pool blocks carry a 2-byte header (10-bit step-ID, 6-bit reserved
+automation count), a 1-byte special-flags byte (bit 0 = note, bit 1 =
+velocity, bit 2 = probability), and value bytes in ascending bit order.
+Chunk sizing: 1 special → 1 chunk (4 bytes), 2–3 specials → 2 chunks
+(8 bytes). The first-fit linear allocator is menu-paced with no
+defragmentation.
+
+Session 062 Step A designed the memory budget and architecture. Step B/B½
+implemented the address array and pool structures, removed `PatternSet` from
+`scene_t` (reducing `scenes` from 20,992 to 19,200 bytes), added the
+permanent `pat_regions` symbol at 167,936 bytes, and retained a 112-byte
+`filesystem_pattern_discard` for the disconnected v3 bridge. Step C
+implemented the bitmap allocator internals (`pat_bitmapGet/Set/Clear`,
+`pat_poolAlloc`, `pat_poolFree`), block read/write (`pat_blockChunks`,
+`pat_blockWrite`, `pat_blockRead`), the public `pat_readStepSpecials()` API,
+pool offset validation (`pat_poolOffsetValid`), and wired the step-edit menu
+bridge (`pat_applyStepToMenu` reads real pool data, `pat_setStepNote/Volume/
+Probability` do read-modify-write via `pat_writeSpecials`). Step D integrated
+Sequencer playback: `seq_advanceTrackStep` reads `pat_readStepSpecials()` for
+each triggered step, applies probability gating with `GetRngValue()` hardware
+RNG (`(rng & 0x7FFF) * 127 / 32767`, suppress if rnd >= probability), and
+triggers with the step's stored velocity and note. Roll triggers remain
+independent fixed-note events.
+
+The step-edit menu fix from prior context (Step B½) had two iterations:
+first `menu_showStepEditPage()` was created to set the subpage and apply step
+data, then a missing `menu_repaintAll()` call was added. Both were confirmed
+working on hardware at the start of this session.
+
+Hardware testing confirmed: note override, velocity override, probability
+gating, multi-scene independence, value persistence across scene switches,
+step erase/clear freeing pool blocks, and pool reuse after free. Copy
+operations (pat_copyTrack, pat_copyPattern, pat_copyBar) remain deliberate
+no-ops deferred to Phase 4.5. The filesystem bridge returns 0 on boot read
+and writes an empty discard PatternSet on save; fan-out is disconnected.
+
+Final link: text=408,220, data=404, bss=262,468. Image 408,640 bytes,
+SHA-256 `412ca5b21509e1e2a787d7f82f15a4946f0c92489eb3ed0f422056c87f58eee9`.
+
+- **Find here**: [062_SESSION_HANDOFF_LOG.md](062_SESSION_HANDOFF_LOG.md),
+  `PATTERN_DYNAMIC_STACK.md`, `SRAM_MANIFEST.md`,
+  `MODULE_INTERCHANGE_SPEC.md`.

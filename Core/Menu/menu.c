@@ -9909,6 +9909,23 @@ void menu_showStepTrackSettingsFirstHalf(void)
     menu_endlessPotMappingChanged();
 }
 
+void menu_showStepEditPage(void)
+{
+    /*
+     * Switch to the per-step edit subpage (SEQ_PAGE subpage 1).
+     *
+     * Inputs: caller has already set PAR_ACTIVE_STEP. Output: menuIndex
+     * selects SEQ_PAGE subpage 1 parameter 0 (velocity column), step
+     * values are loaded from PatternData, endless-pot snapshots refresh,
+     * and the LCD is repainted. Affiliate: buttonHandler_selectActiveStep.
+     */
+    menuIndex = (uint8_t)(1u << PAGE_SHIFT);
+    pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(),
+                        parameter_values[PAR_ACTIVE_STEP]);
+    menu_endlessPotMappingChanged();
+    menu_repaintAll();
+}
+
 void menu_toggleStepTrackSettingsHalf(void)
 {
     /*

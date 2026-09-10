@@ -1,7 +1,7 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 061. It includes the Session 058 Bank I/O and
+reference through Session 062. It includes the Session 058 Bank I/O and
 stopped-playback speedups, the Session 059 typed Instrument-index repair, and
 Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot Instrument
 `.hcindex` generation fix, and system-wide macOS AppleDouble (`._<name>`)
@@ -33,10 +33,12 @@ Use this document to distinguish three things:
   Instrument, and `settings.cfg` filesystem layout.
 - Not implemented yet: AutoSave Pattern/Effect persistence,
   crash-recoverable promotion into explicit
-  Bank library files, real Effect load/save, final dynamic Pattern storage, descriptor-backed step
-  automation playback, versioned/recoverable HCNAMES, and `/.hcrepair`
-  roll-forward. The legacy `kitBrowser` map and File/Dir diagnostic caches are
-  retired.
+  Bank library files, real Effect load/save, v4 Pattern file format (the live
+  dynamic address-array/pool/bitmap storage from Session 062 is not yet
+  serialized — the v3 bridge persists only the 112-byte trigger bitmap),
+  descriptor-backed step automation playback, versioned/recoverable HCNAMES,
+  and `/.hcrepair` roll-forward. The legacy `kitBrowser` map and File/Dir
+  diagnostic caches are retired.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -223,8 +225,11 @@ Current bridges and limitations:
 - `SCENE_COUNT` is 16. There is no second full resident Scene. Filesystem owns
   a 2,048-byte non-Pattern stage containing either one Kit, one Instrument
   candidate, or Scene settings plus embedded Kit.
-- Pattern/container storage remains a bridge shape and will be replaced by the
-  later dynamic stack Pattern implementation.
+- Live Pattern storage is the Session 062 dynamic address-array/pool/bitmap
+  system (`pat_regions`, 167,936 B). The filesystem v3 bridge still persists
+  only the 112-byte trigger bitmap via `filesystem_pattern_discard`; a v4
+  format serializing pool blocks is needed to persist note/velocity/
+  probability specials across Scene/Bank save/load cycles.
 - `FS_FILE_KIT` save now routes to the new Kit directory writer. The old flat
   `.snd` Kit writer is no longer the normal Kit Save path.
 - `FS_FILE_MORPH` load/save still uses the legacy `.SND` morph-kit path.

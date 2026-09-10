@@ -1326,3 +1326,89 @@ static use is within the 376,832-byte capacity.
 
 **No issues found.** Implementation matches the schedule precisely on all
 structural and behavioral points. Ready for Step B½ hardware verification.
+
+### 2026-09-10 — B½ hardware test: step-edit submenu not shown (fixed)
+
+**Symptom:** STEP mode track-settings page (subpage 0) shows correctly.
+Pressing a SEQ button selects the step (LED blinks), but the LCD stays
+on the track-settings page instead of switching to the per-step edit
+page (subpage 1: velocity, note, probability, automation destinations).
+
+**Root cause:** `buttonHandler_selectActiveStep()` in `buttonHandler.c`
+updates `PAR_ACTIVE_STEP` and refreshes LEDs but never switches
+`menuIndex` from SEQ_PAGE subpage 0 to subpage 1. The step-edit subpage
+is fully defined in `menuPages.h` line 84 (`PAR_STEP_VOLUME`,
+`PAR_STEP_NOTE`, `PAR_STEP_PROB`, `PAR_P1_DEST`, `PAR_P1_VAL`,
+`PAR_P2_DEST`, `PAR_P2_VAL`) — it just was never navigated to.
+
+The `PAR_ACTIVE_STEP` dispatch in `menu_parseParameter()` (line 9741)
+calls `pat_applyStepToMenu()` to load step values into menu parameters,
+but that dispatch is only reached when the menu *writes* `PAR_ACTIVE_STEP`
+through the normal encoder path. `buttonHandler_selectActiveStep()`
+directly writes `parameter_values[PAR_ACTIVE_STEP]` without triggering
+the dispatch, so `pat_applyStepToMenu()` was also never called from the
+button path.
+
+**Fix (applied):**
+
+1. Added `menu_showStepEditPage()` in `menu.c` — sets `menuIndex` to
+   `(1 << PAGE_SHIFT)` (subpage 1, parameter 0), calls
+   `pat_applyStepToMenu()` to load step values, and refreshes
+   endless-pot mappings. Declared in `menu.h`.
+
+2. `buttonHandler_selectActiveStep()` now calls `menu_showStepEditPage()`
+   after setting `PAR_ACTIVE_STEP` and before `buttonHandler_updateSubSteps()`.
+
+**Return paths verified:**
+- VOICE button press in STEP mode calls `menu_showStepTrackSettingsFirstHalf()`
+  (menuIndex = 0, back to subpage 0). Line 961.
+- MODE STEP button re-press calls `buttonHandler_enterSeqModeStepMode()`
+  which calls `menu_showStepTrackSettingsFirstHalf()`. Line 313.
+- Both correctly return to the track-settings front page.
+
+**Build:** clean `make -j2`. `text=406,412` (+16 B from the new helper),
+`data=404`, `bss=262,468` (unchanged).
+
+**Note:** `pat_applyStepToMenu()` is still a no-op stub. The submenu
+will display but all values (velocity, note, probability) will read as
+zero / default until Step D wires pool reads into that function. The
+`PAR_STEP_*` setters are also stubs. This is expected — the menu is
+visible and navigable, but data is not populated until the pool
+allocator and block reader exist.
+
+**Second fix:** The first attempt was still missing `menu_repaintAll()`
+in `menu_showStepEditPage()`. The LCD is demand-driven (painted on
+explicit repaint calls, not polled), so changing `menuIndex` without
+requesting a repaint left the old track-settings frame on screen.
+Added `menu_repaintAll()` after `menu_endlessPotMappingChanged()`.
+Clean build: `text=406,444`, `data=404`, `bss=262,468`.
+
+**Hardware confirmed:** Step-edit submenu now displays on hardware when a
+SEQ button is pressed in STEP mode. The LCD switches from the
+track-settings page (subpage 0) to the per-step edit page (subpage 1)
+showing velocity, note, probability, and automation parameter slots.
+All values display as zero/default — expected, since `pat_applyStepToMenu()`
+is still a no-op stub pending Step D pool reader implementation.
+Navigation back to track-settings via VOICE button or MODE STEP re-press
+works correctly.
+
+### 2026-09-10 — PatternSet removal verification
+
+Exhaustive search confirmed the old 112-byte `PatternSet` is completely
+removed from `scene_t` and from all live pattern storage paths:
+
+- `scene_t` contains only `{ scene_settings_t settings; kit_t kit; }` —
+  no `PatternSet pattern` field.
+- Zero `scene->pattern` or `target->pattern` field accesses remain in any
+  source file.
+- The sole surviving `PatternSet` allocation is `filesystem_pattern_discard`
+  (112 bytes) in `filesystem.c`, used as a write-through sink for the v3
+  text bridge. It is never read back into live pattern state.
+- Linker symbol sizes confirm: `scenes` = 0x4b00 (19,200 B, down from
+  20,992 B — the 1,792 B reduction is exactly 112 × 16 Scenes),
+  `pat_regions` = 0x29000 (167,936 B), `filesystem_pattern_discard` =
+  0x70 (112 B).
+
+All live pattern storage is the new `pat_regions` array: 896 two-byte
+address entries per scene (bit 15 trigger, bit 14 specials flag, bits
+13–0 pool byte offset) plus the reserved pool and free-tracking bitmap.

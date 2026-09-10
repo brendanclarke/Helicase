@@ -17,25 +17,23 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 062 B/B½ is in progress on branch
-`dev-ph3-autosave-ph6`. The static Pattern address-array port clean-links at
-`text=406,396`, `data=404`, `bss=262,468`; `pat_regions` is 167,936 bytes in
-SRAM1 and the legacy v3 bridge retains a separate 112-byte PatternSet discard.
-The hardware checkpoint is still pending. Typed HCNAMES and both AutoSave boot
-readers remain implemented. The Bank-plus-four-`Rollin`-Scene failure is
-hardware-closed: Reader 9 produced 128 Case-2 successes, summary
-`case2=0xffff/case3=0`, correct Bank/all sixteen Scenes, valid HCPR generations
-9/10, and zero HCNAMES-R/object-mask mismatches.
+**Current working source**: Session 062 complete and hardware-verified on
+branch `dev-ph3-autosave-ph6`. The Phase 4 dynamic Pattern storage system is
+fully operational: 16-Scene address-array + pool + bitmap, first-fit
+allocator, per-step note/velocity/probability specials, Sequencer probability
+gating, and step-edit menu bridge. Link: `text=408,220`, `data=404`,
+`bss=262,468`; `pat_regions` = 167,936 B, `scenes` = 19,200 B,
+`filesystem_pattern_discard` = 112 B. Image SHA-256
+`412ca5b21509e1e2a787d7f82f15a4946f0c92489eb3ed0f422056c87f58eee9`.
+Typed HCNAMES and both AutoSave boot readers remain implemented.
 
-**Next feature step**: continue Pattern storage with the dynamic pool allocator
-and specials read/write (S062 Steps C/D). Load/Save is usable enough and its
-later refactor/test matrix is consolidated in
-`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; defer that pass unless a severe
-issue blocks Pattern work. One useful but non-blocking reader test remains:
-reboot `SD_CARD_READER_9` and capture the mixed matching-winner
-Case-1/Case-2 result. Permanent Session 061 detail is in
-`knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md`; the five root
-Session-061 planning/analysis documents are superseded and may be deleted.
+**Next feature step**: Phase 4.5 copy operations (pat_copyTrack/Pattern/Bar
+with pool block duplication), then v4 Pattern file format for Scene/Bank
+persistence. The v3 bridge currently persists only trigger bits; specials
+are lost on save/load. Load/Save refactor/test matrix is consolidated in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; defer unless a severe issue
+blocks. One useful reader test remains: reboot `SD_CARD_READER_9` for
+mixed matching-winner Case-1/Case-2 capture.
 
 ## RAM Allocation Approval Policy
 
@@ -72,9 +70,10 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter records the Session 061 logging-on linked
-  allocation and totals. AutoSave format/reader/writer authority is `AUTOSAVE.md`;
-  development-mode and logging authority is `DEV_MODES.md`. Read
+  `SRAM_MANIFEST.md`; the latter records the Session 062 hardware-verified
+  linked allocation and totals. Dynamic Pattern storage is in
+  `PATTERN_DYNAMIC_STACK.md`. AutoSave format/reader/writer authority is
+  `AUTOSAVE.md`; development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live
   memory manifest, module map, and oscillator-interpolation document.
@@ -95,15 +94,21 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Source layout is now `Core/Bank/Scene/` and `Core/Bank/BankData.*`, not
   `Core/Scene/`.
 - Scene/Bank saves persist compact v3 `pattern.pat`: seven 32-hex-character
-  rows representing the exact 112-byte 128-step x 7-track on/off bitmap. v1
-  placeholders remain accepted and v2 imports its final bit field only;
-  length/scale and all other former Pattern fields are disposed. This is not
-  the final dynamic Pattern format.
+  rows representing the 112-byte trigger bitmap only. Specials (note,
+  velocity, probability) stored in the dynamic pool are **not persisted** by
+  the v3 bridge. A v4 format is needed to serialize pool blocks.
+- Session 062 completed the Phase 4 dynamic Pattern storage system.
+  PatternData now owns a three-part per-Scene allocation: address array,
+  event pool, and free bitmap in `pat_regions` (167,936 B). Read
+  `062_SESSION_HANDOFF_LOG.md` and `PATTERN_DYNAMIC_STACK.md` before changing
+  PatternData internals, pool block format, or allocator behavior. Copy
+  operations are deliberate no-ops pending Phase 4.5.
 - Session 043 completed the bitmap Pattern/LUT/tagged-runtime/transient-ROM
-  storage pass. Read `043_SESSION_HANDOFF_LOG.md` before changing PatternData,
-  slider conversion, InstrumentManager runtime ownership, DTCM placement, or
-  the RAM-allocation approval policy. `transientData` is FLASH-resident;
-  target-audio stress validation of that placement remains pending.
+  storage pass (now superseded by Session 062 for Pattern storage). Read
+  `043_SESSION_HANDOFF_LOG.md` before changing slider conversion,
+  InstrumentManager runtime ownership, DTCM placement, or the RAM-allocation
+  approval policy. `transientData` is FLASH-resident; target-audio stress
+  validation of that placement remains pending.
 - Session 044 completed the cold-boot tagged-runtime/LFO activation and runtime
   Scene/Bank Load terminal ordering. Read
   `044_SESSION_HANDOFF_LOG.md` before changing Scene activation,

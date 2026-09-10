@@ -465,6 +465,7 @@ static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPress
 
     led_setBlinkLed(ledNr, 1);
 
+    menu_showStepEditPage();
     buttonHandler_updateSubSteps();
 }
 

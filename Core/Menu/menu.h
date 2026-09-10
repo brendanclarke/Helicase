@@ -386,6 +386,7 @@ void menu_setVoiceModeShowMorph(uint8_t onOff);
  */
 void menu_toggleStepTrackSettingsHalf(void);
 void menu_showStepTrackSettingsFirstHalf(void);
+void menu_showStepEditPage(void);
 void menu_resetActiveParameter(void);
 uint8_t menu_getSubPage(void);
 /*

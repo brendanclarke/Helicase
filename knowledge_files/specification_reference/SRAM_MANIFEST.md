@@ -1,11 +1,11 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-09-09 Session 062 B/B½ build.
-`arm-none-eabi-size build/lxr02.elf` reports `text=406,396`, `data=404`, and
-`bss=262,468`; `build/lxr02.bin` is 406,800 B and
-`build/LXRV2_lxr02.img` is 406,816 B with SHA-256
-`fcae86d0f49a48e02bd5def9eafe39ff3ab84d42c3404b51e7cbc8ff03de356e`.
+2026-09-10 Session 062 C/D build.
+`arm-none-eabi-size build/lxr02.elf` reports `text=408,220`, `data=404`, and
+`bss=262,468`; `build/lxr02.bin` is 408,624 B and
+`build/LXRV2_lxr02.img` is 408,640 B with SHA-256
+`412ca5b21509e1e2a787d7f82f15a4946f0c92489eb3ed0f422056c87f58eee9`.
 The approved 258-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
 This remains a linked-image inventory: sizes come from
@@ -65,7 +65,7 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 393,464 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 395,288 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
@@ -74,7 +74,7 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 | `.bss` | `0x20020db0` | 255,796 B | SRAM1 | Normal zero-initialized globals, including `pat_regions` |
 
 The final FLASH load image remains safely before the reserved sample-FLASH
-boundary `0x08080000`. `build/lxr02.bin` is 406,800 B.
+boundary `0x08080000`. `build/lxr02.bin` is 408,624 B.
 
 ## Primary SRAM1 owners
 
@@ -173,8 +173,8 @@ arm-none-eabi-nm -S --size-sort build/lxr02.elf
 arm-none-eabi-readelf -l -W build/lxr02.elf
 ```
 
-For the current Session-062 B/B½ image, conventional
-`arm-none-eabi-size` reports `text=406,396 B`, `data=404 B`, and
+For the current Session-062 C/D image, conventional
+`arm-none-eabi-size` reports `text=408,220 B`, `data=404 B`, and
 `bss=262,468 B`. The latter is the combined zero-init total across memory
 regions; `size -A` provides the section split above. Regenerate both
 configurations before a future change that alters logging-gated allocations.
@@ -190,6 +190,18 @@ and the 512-byte full-width free bitmap. Removing `scene_t.pattern` reduces
 112-byte `filesystem_pattern_discard` in normal SRAM1, so the measured SRAM1
 total is 259,300 bytes and 117,532 bytes remain reserved for future Pattern
 expansion. No DTCM or logging-only allocation changed.
+
+## 2026-09-10 Session 062 C/D implementation note
+
+Steps C/D add no retained RAM: the allocator, block reader/writer, menu
+specials bridge, and Sequencer probability path are code only. The forced full
+ARM rebuild reports `text=408,220 B`, `data=404 B`, `bss=262,468 B`; section
+`.text` is 395,288 B and normal SRAM1 `.bss` remains 255,796 B. The linked
+`pat_regions` symbol remains 167,936 B (`0x29000`), `scenes` remains 19,200 B,
+and `filesystem_pattern_discard` remains 112 B. `make -B -j2`, `make img`, and
+`git diff --check` passed. Step E hardware verification passed: note override,
+velocity override, probability gating, multi-scene independence, value
+persistence across scene switches, and pool reuse after erase/clear.
 
 Session 051 moved no allocated region, but the linked totals shifted from the
 Session 050 build: text grew 1,360 B, initialized `.data` grew 4 B, and bss

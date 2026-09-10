@@ -1,8 +1,9 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-061, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
-repair, and AsyncFATFS directory publication. Historical migrations belong in session logs; this document states
+062, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+repair, AsyncFATFS directory publication, and the Phase 4 dynamic Pattern
+storage system. Historical migrations belong in session logs; this document states
 which live module owns each call, state transition, and retained object.
 
 ## Rules
@@ -143,10 +144,12 @@ which live module owns each call, state transition, and retained object.
   `Core/Bank/Scene/SceneModTargets.c/h`. The first target set is `1vm..6vm` plus
   Scene Decimation `srt`; future FX parameters join that namespace instead of
   being inserted into per-instrument descriptor tables.
-- Pattern/container storage is still a Phase 2 bridge shape. It does not
-  preserve the old single/global shuffle byte; per-track shuffle is the only
-  live shuffle storage, and final migration/backfill is expected to happen in
-  external Python converters once storage settles.
+- Live Pattern storage is the Session 062 dynamic address-array + pool +
+  bitmap system in `pat_regions`. The v3 filesystem bridge still persists
+  only the 112-byte trigger bitmap; dynamic specials (note, velocity,
+  probability) are not yet serialized. Per-track shuffle is the only live
+  shuffle storage; final migration/backfill remains deferred to external
+  converters.
 
 ## Core/Bank/BankData
 
@@ -174,25 +177,32 @@ Bank Load/Save completion paths. See `058_SESSION_HANDOFF_LOG.md` §5.
 
 ## Core/Bank/Scene/Pattern/PatternData
 
-### Session 043 current contract
+### Session 062 current contract
 
-The API roster below records the retired pre-Session-043 bridge and is not a
-current implementation contract. `PatternData` now owns only one 112-byte
-`PatternSet` bitmap per resident Scene: `step_on[7][16]`, with one bit per
-chronological step. `pat_patternSetGetStep`/`pat_patternSetSetStep` are the
-staged-or-resident representation boundary; `pat_isStepActive`,
-`pat_setStepActive`, `pat_toggleStep`, clear/copy-track/copy-pattern/copy-bar,
-and `pat_sceneHasActiveSteps` are the live Scene-indexed operations.
+PatternData owns a three-part dynamic storage system per resident Scene:
+a 1,792-byte static address array (896 × uint16_t), an 8,192-byte event
+pool (PAT_STACK_SIZE=256 × 32-byte chunks), and a 512-byte free-tracking
+bitmap. These live in the permanent `pat_regions` symbol (167,936 bytes
+total across 16 Scenes). Each address entry encodes trigger (bit 15),
+has-specials (bit 14), and a 14-bit pool byte offset (sentinel 0x3FFF).
+Pool blocks carry a 2-byte header, a 1-byte special-flags byte, and value
+bytes for note, velocity, and probability in ascending bit order.
 
-`pat_initPatternSet` and `pat_initScene` clear only bits. The remaining
-menu-shaped setters are deliberately storage-free compatibility no-ops while
-the menu ID table is compacted. There is no live `Step`, track timing,
-automation, note, velocity, probability, pattern-next, main-step shadow, or
-separate Pattern staging allocation. Filesystem v3 persistence reads/writes
-the same seven sixteen-byte rows through this contract. Affiliates are
-SceneData, Sequencer, UI/LED/copy-clear, Euklid/SOM, and filesystem; none may
-add a parallel Pattern owner. See `SRAM_MANIFEST.md` for the linked 1,792-B
-sixteen-Scene Pattern payload and the SRAM1 Pattern reservation.
+`pat_readStepSpecials()` is the unified read path for Sequencer playback
+and step-edit menu display; it returns resolved defaults for absent
+specials. `pat_setStepNote/Volume/Probability` perform real pool
+read-modify-write through `pat_writeSpecials`, which handles in-place
+rewrite, reallocation, free, and graceful degradation on alloc failure.
+`pat_eraseStep` and `pat_clearTrack` free pool blocks before clearing
+address entries. Copy operations remain deliberate no-ops pending pool
+block duplication design.
+
+The legacy `PatternSet` (112-byte bitmap) is retained only for the v3
+filesystem bridge; one discard instance lives in `filesystem.c`. `scene_t`
+no longer contains a PatternSet. Affiliates are SceneData, Sequencer,
+UI/LED/copy-clear, Euklid/SOM, and filesystem; none may add a parallel
+Pattern owner. See `SRAM_MANIFEST.md` for linked sizes and
+`PATTERN_DYNAMIC_STACK.md` for the complete specification.
 
 Affiliate modules: Menu, buttonHandler, ledHandler, copyClearTools, filesystem,
 Sequencer, EuklidGenerator, Preset/MidiParser indirectly through Sequencer
