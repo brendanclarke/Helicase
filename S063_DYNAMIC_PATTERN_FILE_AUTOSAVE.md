@@ -182,6 +182,7 @@ partial recovery.
 ```
 Offset  Size          Content
 ──────  ────          ───────
+── Fixed header (32 bytes) ──
 0       4             Magic: "PAT4" (0x50 0x41 0x54 0x34)
 4       2             Format version: 1 (uint16_t LE)
 6       2             PAT_STACK_SIZE used when writing (uint16_t LE)
@@ -190,42 +191,46 @@ Offset  Size          Content
 10      4             Generation counter (uint32_t LE) — library saves
                       write 0; AutoSave (Session 064) increments from 1;
                       boot takes the highest valid generation
-14      2             Reserved (zero)
+14      4             CRC32C (uint32_t LE) — treated as zero during
+                      computation
+18      14            Reserved (zero-padded to 32)
 
 ── Pattern-level parameters (16 bytes, padded for future use) ──
-16      1             pattern_change_bar
-17      1             pattern_next
-18      14            Reserved pattern params (zero-padded)
+32      1             pattern_change_bar
+33      1             pattern_next
+34      14            Reserved pattern params (zero-padded)
 
 ── Per-track parameters (7 tracks × 16-byte block, padded for future use) ──
-32      7 × 16 = 112  Per-track block:
+48      7 × 16 = 112  Per-track block:
                         [0] uint8_t  length
                         [1] uint8_t  scale
                         [2] uint8_t  shuffle
                         [3..15]      Reserved (13 bytes, zero-padded)
 
-── Header padding ──
-144     -             (no gap — header boundary is at next power-of-two
-                      or chosen round number, see note below)
-
 ═══════════════════════════════════════════════════════
-FIXED HEADER END = 144 bytes
-(16 fixed + 16 pattern params + 7 × 16 per-track)
+TOTAL HEADER = 160 bytes
+(32 fixed + 16 pattern params + 7 × 16 per-track)
 ═══════════════════════════════════════════════════════
 
 ── Static address array (fixed size, never changes) ──
-144     1,792         uint16_t address[7][128], native LE byte order
+160     1,792         uint16_t address[7][128], native LE byte order
 
 ── Occupancy bitmap (fixed size, never changes) ──
-1,936   512           bitmap[512], stored as-is
+1,952   512           bitmap[512], stored as-is
 
 ── Dynamic pool (variable based on PAT_STACK_SIZE) ──
-2,448   PAT_STACK_SIZE × 4    Pool bytes for all addressable chunks
-                              (currently 256 × 4 = 1,024 bytes)
+2,464   PAT_STACK_SIZE × 32   Pool bytes for all addressable chunks
+                              (currently 256 × 32 = 8,192 bytes)
 ```
 
-**Total file size**: 144 + 1,792 + 512 + (PAT_STACK_SIZE × 4) bytes.
-At PAT_STACK_SIZE=256: **3,472 bytes**.
+**Corrected pool size**: the bitmap is bit-packed (one bit per 4-byte
+chunk, not one byte), so each PAT_STACK_SIZE bitmap byte covers 8
+chunks × 4 bytes = 32 pool bytes. The addressable pool is therefore
+`PAT_STACK_SIZE × 32`, not `× 4`. Code confirms: `pat_poolAlloc`
+scans `PAT_STACK_SIZE * 8` chunks; `pool[PAT_STACK_SIZE * 32]`.
+
+**Total file size**: 160 + 1,792 + 512 + (PAT_STACK_SIZE × 32) bytes.
+At PAT_STACK_SIZE=256: **10,656 bytes** (~21 SD sectors).
 
 ### A.2 Compatibility
 
@@ -241,13 +246,14 @@ At PAT_STACK_SIZE=256: **3,472 bytes**.
 
 A CRC32C covers the entire file (treating its own 4-byte field as zero
 during computation). This validates the AutoSave A/B pair selection and
-catches truncated/corrupt files. The CRC field can live in the reserved
-bytes at offset 14 (2 bytes currently reserved → expand to hold the 4-byte
-CRC, adjusting surrounding layout).
+catches truncated/corrupt files. The CRC field lives at fixed header
+offset 14, inside a 32-byte fixed header (expanded from 16 to fit the
+4-byte CRC with reserved padding to byte 32).
 
-**Open question for implementation**: exact placement of CRC in header.
-The reserved space is sufficient; final byte offsets will be settled when
-writing the struct.
+**Resolved**: CRC32C (Castagnoli, 0x82F63B78 reflected), same software
+byte-at-a-time implementation as `.hcprms` AutoSave records
+(`autosave_crc32cByteUpdate()` in Autosave.c). Hardware CRC32C
+acceleration deferred to SCOPING_TARGETS.md.
 
 ---
 
@@ -276,10 +282,12 @@ The Scene writer currently opens `pattern.pat` and writes v3 text. After
 v3 removal:
 
 1. Create/overwrite `<name>.pat` in the Scene directory.
-2. Write 128-byte header (including track settings from
-   `pat_regions[scene]`).
-3. Write address array (1,792 B), bitmap (512 B), pool (PAT_STACK_SIZE × 4).
-4. Write CRC.
+2. Write 160-byte header (32B fixed + 16B pattern params + 7×16B
+   per-track, including track settings from `pat_regions[scene]`).
+3. Write address array (1,792 B), bitmap (512 B), pool
+   (PAT_STACK_SIZE × 32 = 8,192 B).
+4. CRC32C computed over the full file (CRC field zeroed during
+   computation), written into the header at offset 14.
 5. Update HCNAMES pattern row.
 6. The writer serializes directly from `pat_regions[scene]` (R5 — no
    snapshot needed during Save because input is disabled).
@@ -449,12 +457,13 @@ Same approach — expand the row count, regenerate on first boot.
 
 | Allocation | Size | Region |
 |------------|-----:|--------|
-| Per-track settings in `pat_scene_region_t` (17 scenes) | 357 B | SRAM1 `.bss` (inside `pat_regions`) |
+| Per-track settings in `pat_scene_region_t` (16 scenes × 23 B) | 368 B | SRAM1 `.bss` (inside `pat_regions`) |
 | `fs_resident_source` growth (129→145 rows) | +32 B | SRAM1 `.bss` |
 | `hcnames_name_mirror` growth (129→145 rows) | +144 B | SRAM1 `.bss` |
-| **Total Session 063** | **533 B** | SRAM1 |
+| **Total Session 063** | **544 B** | SRAM1 |
 | **Removed**: `filesystem_pattern_discard` | −112 B | SRAM1 `.bss` |
-| **Net Session 063** | **~421 B** | SRAM1 Pattern reservation |
+| **Removed**: `op_pattern_stub_state` | −5 B | SRAM1 `.bss` |
+| **Net Session 063** | **~427 B** | SRAM1 Pattern reservation |
 
 SRAM1 remaining after: 117,532 − 421 = **~117,111 B** (114.4 KB).
 

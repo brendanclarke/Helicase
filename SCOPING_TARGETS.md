@@ -1418,3 +1418,17 @@ items formerly in this section now live in
   not run.
 - The trace-record-count, diagnostic-watchdog, and Makefile dependency items
   remain in the Session 054-055 non-Load/Save list above.
+
+---
+
+## Session 063 deferred items (2026-09-11)
+
+- **Hardware CRC32C acceleration**: the STM32F765 CRC peripheral uses the
+  Ethernet polynomial (0x04C11DB7), not Castagnoli (0x1EDC6F41). All current
+  CRC32C users (AutoSave `.hcprms` A/B records, v4 Pattern file, Instrument
+  save content CRC) use the software byte-at-a-time loop in Autosave.c.
+  The hardware unit could be configured with a custom polynomial on parts
+  that support it (F7 does via CRC_POL), or a 256-entry lookup table would
+  give ~4× throughput at +1 KB ROM. Not a performance concern at current
+  payload sizes (≤35 KB) but may matter if AutoSave or file payloads grow.
+  Evaluate when a CRC caller becomes latency-sensitive.
