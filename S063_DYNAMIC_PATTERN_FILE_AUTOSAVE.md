@@ -1,28 +1,183 @@
-# Session 063 — Dynamic Pattern File Format, Load/Save, and AutoSave
+# Session 063 — Dynamic Pattern File Format and Load/Save
+
+**Scope**: File format, Scene/Bank/Pattern load/save, boot restore.
+**Deferred to Session 064**: 17th-Scene snapshot allocation, AutoSave
+pattern drain, AutoSave boot restore.
 
 ## Goal
 
 Wire the Session 062 dynamic pattern storage to persistent media:
 
-1. Define a binary v4 `pattern.pat` file format that serializes the address
-   array, pool blocks, and track settings.
-2. Integrate Pattern load/save into the existing Scene and Bank filesystem
-   paths, replacing the v3 text stub.
-3. Add root `/Pattern/` library load/save for standalone patterns.
-4. Add per-pattern AutoSave with 16 pairs of hidden root files, using a
-   17th-Scene snapshot region as the coherent serialization source.
-5. Update boot restore to handle v4 pattern files in Scene/Bank/AutoSave.
+1. Define the v4 binary `<name>.pat` file format that serializes the address
+   array, pool, bitmap, pattern parameters, and per-track settings.
+2. Integrate v4 Pattern load/save into Scene and Bank filesystem paths,
+   fully removing the v3 text stub (reader and writer).
+3. Add root `/Pattern/` library load/save with `.hcindex` and HCNAMES
+   Pattern rows (source tracking, refreshed, names).
+4. Update boot restore to handle v4 pattern files.
+
+---
+
+## Resolved Decisions
+
+These were open questions in the initial planning pass. The user's answers
+are recorded here; no further discussion is needed.
+
+### R1 — Track Settings Storage
+
+Track length, scale, and shuffle are **pattern parameters** (per-track,
+stored in the pattern file and in `pat_scene_region_t`). MIDI channel and
+MIDI note are **scene parameters** (per-track, stored in `scene_settings_t`
+or scene-level pattern metadata).
+
+Pattern params: 3 bytes × 7 tracks × 17 scenes = **357 bytes** in
+`pat_regions`. Scene params (MIDI channel/note) are stored in the scene
+struct, not in the pattern region.
+
+**Decision**: Store the 3 per-track pattern params in
+`pat_scene_region_t` (as a `uint8_t track_params[7][3]` or similar) —
+no padding in SRAM, only the bytes actually used. The file format pads
+each track's block to 16 bytes and the pattern-level block to 16 bytes
+so future parameters can be added without a format version bump (but
+those would require a corresponding SRAM allocation when implemented).
+The no-op setters in PatternData.c become real storage writers.
+`parameter_values[]` remains the Menu display buffer; the setters copy
+through to the region storage.
+
+**parameter_values[] status**: still used by Menu for display, MIDI CC
+dispatch, encoder editing, Euklid, screensaver, morph, and other UI. It is
+not retired this session. `parameters2[]` is the morph endpoint buffer
+and is also still active (morph interpolation, morph-kit save/load,
+SHIFT+VOICE endpoint editing).
+
+### R2 — 17th Scene Allocation
+
+**Deferred to Session 064.** The 17th Scene is for AutoSave snapshot and
+future background Bank Load. It is not needed for the Session 063 file
+format and load/save work.
+
+When allocated: if a separate `scene_temp` of the same struct type is
+simpler than bumping `SCENE_COUNT`, that is acceptable. The implementation
+will choose the simpler approach.
+
+### R3 — File Count in Directories
+
+The 32 AutoSave files in root are not a concern for FAT32 (unlimited root
+directory entries). `.pat00a` etc. fit 8.3 format (7 chars, no LFN needed).
+
+**Broader risk noted**: the `/Pattern/`, `/Kit/`, `/Scene/`, `/Bank/`, and
+`/Instrument/<type>/` library directories each need to support 1,000+
+files. If total file count per directory is a real FAT limitation, it will
+surface there first. This is not a Session 063 blocker but should be tested
+at some point — if asyncfatfs directory iteration performance degrades at
+high entry counts, that's a platform issue independent of pattern storage.
+
+### R4 — Snapshot Timing and TIM3
+
+**Deferred to Session 064** (snapshot is AutoSave-only).
+
+For reference, the analysis: TIM3 runs `seq_tick()` at priority 2 (4 kHz).
+The existing main-loop BASEPRI mask (`irq_setBasepri(6u << 4)`) leaves
+TIM3 **unmasked** — it only blocks priority ≥ 6. To mask TIM3 during the
+snapshot memcpy, the code would either:
+- Set BASEPRI to `2u << 4` (blocks priority ≥ 2), which masks TIM3
+  but leaves SysTick (priority 0) and TIM1 encoder capture (priority 1)
+  running. This **delays** one or more 250 µs sequencer ticks for the ~50 µs
+  memcpy duration. The ticks are not lost — TIM3's update interrupt flag
+  latches and fires immediately when unmasked. At 4 kHz, a single delayed
+  tick shifts the sequencer by ≤ 50 µs, which is inaudible.
+- Or disable TIM3 via NVIC_ICER (targeted, no BASEPRI change). Same
+  timing effect but more surgical.
+
+**The sequencer does not lose ticks. Timing is delayed by the memcpy
+duration (~50 µs), not skipped.** This is safe for musical timing. The
+decision on which masking approach to use will be made in Session 064.
+
+### R5 — Scene Save Coherency
+
+**Not a concern.** Entering the Load/Save menu disables live recording and
+MIDI parameter input. Nothing can mutate Scene state while the user is
+interacting with the menu. The v4 writer serializes directly from the live
+`pat_regions[scene]` during Scene Save without a snapshot. This may be
+revisited when the live recorder and MIDI input are fully wired, but for
+now it is correct.
+
+### R6 — v3 Format Removal
+
+**v3 is completely removed.** No v3 reader, no v3 writer, no fallback, no
+probe. The v4 binary format is the sole authority for both internal storage
+and file format. All v3 text pattern code (reader phases 46/53, writer
+phases, `storage_patternStub*` helpers, `filesystem_pattern_discard`, the
+`PatternSet` typedef and its helpers) is deleted. If existing Scene/Bank
+libraries contain v3 `pattern.pat` files, they are treated as invalid/
+missing and the Scene loads with an empty pattern.
+
+**Consequence**: `PatternSet`, `pat_initPatternSet()`,
+`pat_patternSetGetStep()`, `pat_patternSetSetStep()` are all removed from
+PatternData.h/c. `filesystem_pattern_discard` is removed from
+filesystem.c. The `storageTypes.c` pattern stub parser is removed.
+
+### R7 — Pattern Names, HCNAMES, and .hcindex
+
+Patterns get names like every other file type. They are **not** stored as
+`pattern.pat` inside Scene directories. Instead:
+
+- **In a Scene directory**: `<name>.pat` (e.g., `intro.pat`). The name is
+  the pattern's identity.
+- **In `/Pattern/` library**: `NNN <name>.pat` (e.g., `000 init.pat`).
+  Numbered library slot format, same as Kit/Scene/Bank.
+- **In a Bank child directory**: `<name>.pat` inside each `NN/` child,
+  same as the Scene directory case.
+
+**HCNAMES expansion**: add 16 Pattern rows to `.hcnames`, one per resident
+Scene's pattern. Row layout matches existing rows: `name<TAB>source[<TAB>R]`.
+Pattern rows follow Kit rows (or follow Instrument rows — exact placement
+TBD during implementation).
+
+- `FS_RESIDENT_NAMES_ROW_COUNT` increases from 129 to 145.
+- `fs_resident_source` grows from 258 to 290 bytes.
+- `hcnames_name_mirror` grows from 1,161 to 1,305 bytes.
+
+Source tracking: patterns get `@` (AutoSave provenance), `000..999`
+(library source), and `-` (no source / default) tokens, same as other
+object types. `R` (refreshed) flag works identically.
+
+**`/Pattern/.hcindex`**: a new `.hcindex` file in the `/Pattern/` directory,
+generated at boot and refreshed on Pattern Save, same as Kit/Scene/Bank
+indexes. The existing `FS_FILE_PATTERN` slot in the filesystem type
+registry is reused.
+
+### R8 — Session Split
+
+**Session 063**: v4 file format definition, v3 removal, per-track pattern
+params in `pat_scene_region_t`, Scene Save/Load with v4, Bank Save/Load with v4,
+root `/Pattern/` library load/save, Pattern HCNAMES rows, `/Pattern/
+.hcindex`, boot restore with v4, and hardware verification.
+
+**Session 064**: 17th-Scene allocation (snapshot or `scene_temp`), AutoSave
+dirty tracking, AutoSave pattern drain with snapshot, AutoSave `.patNNx`
+pair writer, AutoSave pattern boot restore, and hardware verification.
+
+### R9 — v3 Removal Thoroughness
+
+The v3 format is fully nuked. After Session 063, there should be zero
+references to the v3 text pattern format in live code. If the load/save
+state machine flow has redundant or sloppy patterns exposed by the removal,
+a refactor session can be taken before Session 064's AutoSave work.
+
+### R10 — Pattern Error Invalidates Scene
+
+A pattern read error (PAT_STACK_SIZE mismatch, corrupt file, missing file)
+**invalidates the entire Scene load**. This is a deliberate choice: if the
+user is changing allocation sizes, they accept the risk. A future offline
+Python tool may resize pattern files, but the firmware does not attempt
+partial recovery.
 
 ---
 
 ## Part A — v4 Pattern File Format
 
-### A.1 Design
-
-One binary file per Scene pattern: `pattern.pat` inside each Scene or Bank
-child directory, or `NNN Name.pat` in the root `/Pattern/` library.
-
-### A.2 Layout
+### A.1 Layout
 
 ```
 Offset  Size          Content
@@ -32,547 +187,276 @@ Offset  Size          Content
 6       2             PAT_STACK_SIZE used when writing (uint16_t LE)
 8       2             Header total size in bytes (uint16_t LE) — for
                       forward-compatible skipping
-10      2             Reserved (zero)
+10      4             Generation counter (uint32_t LE) — library saves
+                      write 0; AutoSave (Session 064) increments from 1;
+                      boot takes the highest valid generation
+14      2             Reserved (zero)
 
-── Pattern parameters (padded to fixed size) ──
-12      1             pattern_change_bar
-13      1             pattern_next
-14      14            Reserved pattern params (zero-padded, future use)
+── Pattern-level parameters (16 bytes, padded for future use) ──
+16      1             pattern_change_bar
+17      1             pattern_next
+18      14            Reserved pattern params (zero-padded)
 
-── Per-track parameters (7 tracks × fixed block) ──
-28      7 × 8 = 56    Per-track block:
+── Per-track parameters (7 tracks × 16-byte block, padded for future use) ──
+32      7 × 16 = 112  Per-track block:
                         [0] uint8_t  length
                         [1] uint8_t  scale
                         [2] uint8_t  shuffle
-                        [3] uint8_t  midi_channel
-                        [4] uint8_t  midi_note
-                        [5..7]       reserved (3 bytes, zero-padded)
+                        [3..15]      Reserved (13 bytes, zero-padded)
 
 ── Header padding ──
-84      44            Reserved (zero-padded to header boundary)
+144     -             (no gap — header boundary is at next power-of-two
+                      or chosen round number, see note below)
 
 ═══════════════════════════════════════════════════════
-FIXED HEADER END = 128 bytes
+FIXED HEADER END = 144 bytes
+(16 fixed + 16 pattern params + 7 × 16 per-track)
 ═══════════════════════════════════════════════════════
 
 ── Static address array (fixed size, never changes) ──
-128     1,792         uint16_t address[7][128], stored as-is (LE byte order,
-                      native ARM layout — these are already LE in SRAM)
+144     1,792         uint16_t address[7][128], native LE byte order
 
 ── Occupancy bitmap (fixed size, never changes) ──
-1,920   512           bitmap[512], stored as-is
+1,936   512           bitmap[512], stored as-is
 
 ── Dynamic pool (variable based on PAT_STACK_SIZE) ──
-2,432   PAT_STACK_SIZE × 4    Pool bytes for all addressable chunks
+2,448   PAT_STACK_SIZE × 4    Pool bytes for all addressable chunks
                               (currently 256 × 4 = 1,024 bytes)
 ```
 
-**Total file size**: 128 + 1,792 + 512 + (PAT_STACK_SIZE × 4) bytes.
-At PAT_STACK_SIZE=256: **3,456 bytes**.
+**Total file size**: 144 + 1,792 + 512 + (PAT_STACK_SIZE × 4) bytes.
+At PAT_STACK_SIZE=256: **3,472 bytes**.
 
-### A.3 Compatibility Rules
+### A.2 Compatibility
 
-- **Reader opens a file with the same or smaller PAT_STACK_SIZE**: load
-  succeeds, extra bitmap/pool slots remain at their initialized (free) state.
-- **Reader opens a file with a larger PAT_STACK_SIZE than firmware**: return
-  error. The file references pool offsets the firmware cannot address.
-- **Magic/version mismatch**: return error (do not attempt v3 fallback in
-  the same path; v3 is a text file and is visually distinguishable).
-- **Header size field**: the reader skips to `header_size` before reading
-  the address array, so a future v1.x revision can add header fields
-  without bumping the version.
+- **Same or smaller PAT_STACK_SIZE in file vs firmware**: load succeeds;
+  extra firmware-side bitmap/pool slots stay at init state.
+- **Larger PAT_STACK_SIZE in file than firmware**: **error — Scene
+  invalidated** (R10).
+- **Magic/version mismatch or missing file**: error — Scene invalidated.
+- **Header size field**: reader skips to `header_size` before the address
+  array, so a future v1.x can add header fields without version bump.
 
-### A.4 Relationship to v3
+### A.3 CRC32C
 
-The v3 `pattern.pat` text format (seven 32-hex-character rows = 112-byte
-trigger bitmap) remains the fallback **reader** for existing Scene/Bank
-libraries. The v4 binary format becomes the sole **writer**. On load, the
-reader probes the first four bytes: `PAT4` → v4 binary path; otherwise →
-existing v3 text path. The v3 reader continues to populate only trigger bits
-(no specials, no track settings from v3 sources).
+A CRC32C covers the entire file (treating its own 4-byte field as zero
+during computation). This validates the AutoSave A/B pair selection and
+catches truncated/corrupt files. The CRC field can live in the reserved
+bytes at offset 14 (2 bytes currently reserved → expand to hold the 4-byte
+CRC, adjusting surrounding layout).
 
-### A.5 Track Settings Source
-
-Track length, scale, shuffle, MIDI channel, and MIDI note are currently
-stored in `parameter_values[]` (Menu parameter buffer) and serviced by
-no-op PatternData setters. **Decision point**: Session 063 must give these
-values a real per-Scene per-track home.
-
-Options:
-1. **Store in the pattern file and in `pat_scene_region_t`**: add a
-   per-track settings struct to the region. This is the cleanest long-term
-   answer but adds `7 × 8 = 56 bytes × 16 scenes = 896 bytes` to
-   `pat_regions`.
-2. **Store in the pattern file and read into `parameter_values[]` at Scene
-   switch**: no RAM growth, but settings are lost if the user edits track
-   settings before a save. This is the current behavior.
-3. **Store in `scene_settings_t`**: these are really Scene-level settings,
-   not Pattern-level. But they travel with the pattern in the file.
-
-**Recommendation**: Option 1 — add a small per-track settings block to the
-region. The 896-byte cost is within the Pattern reservation. Track settings
-are Pattern data (they describe how the pattern plays) and should live with
-the pattern. The alternative keeps the current fragile
-`parameter_values[]` dependency.
-
-**Risk**: This is a structural change to `pat_scene_region_t` and increases
-`pat_regions` by 896 bytes. Needs explicit RAM approval.
+**Open question for implementation**: exact placement of CRC in header.
+The reserved space is sufficient; final byte offsets will be settled when
+writing the struct.
 
 ---
 
 ## Part B — Load/Save Integration
 
-### B.1 Scene Load Path
+### B.1 Scene Load
 
-The existing Scene loader in `filesystem.c` handles `pattern.pat` as a
-child file of each Scene directory. Currently it enters the v3 text
-reader (phase 46/53) which populates `filesystem_pattern_discard` and then
-applies trigger bits to the target Scene's address array.
+The Scene loader currently opens `pattern.pat` relative to the Scene
+directory and enters the v3 text reader. After v3 removal:
 
-**Changes**:
-1. Phase 46 probes magic bytes: if `PAT4`, branch to new v4 binary reader
-   phases; otherwise continue to existing v3 text parser.
-2. v4 reader loads header → validates version and PAT_STACK_SIZE → reads
-   track settings → reads address array directly into target
-   `pat_regions[scene].address` → reads bitmap into
-   `pat_regions[scene].bitmap` → reads pool into
-   `pat_regions[scene].pool`.
-3. On PAT_STACK_SIZE mismatch (file > firmware), set error and skip pattern
-   (Scene loads with empty pattern rather than aborting entirely).
-4. `pat_initScene()` must be called **before** the pattern reader starts, to
-   clear any prior state. This is already the case for Scene Load.
+1. Scan the Scene directory for a `*.pat` file (the pattern's name is the
+   filename stem, not a fixed `pattern.pat`).
+2. Open and read the v4 binary file.
+3. Validate magic, version, PAT_STACK_SIZE, CRC. On any failure → Scene
+   invalidated.
+4. Read header → apply track settings to `pat_regions[scene]` and any
+   scene-level per-track settings.
+5. Read address array → `pat_regions[scene].address`.
+6. Read bitmap → `pat_regions[scene].bitmap`.
+7. Read pool → `pat_regions[scene].pool`.
+8. Register the pattern name in HCNAMES.
 
-### B.2 Scene Save Path
+### B.2 Scene Save
 
-The existing Scene writer opens `pattern.pat` and writes v3 text rows.
+The Scene writer currently opens `pattern.pat` and writes v3 text. After
+v3 removal:
 
-**Changes**:
-1. Replace v3 text writer with v4 binary writer.
-2. Write header (128 bytes) → address array (1,792 bytes) → bitmap
-   (512 bytes) → pool (PAT_STACK_SIZE × 4 bytes).
-3. The writer can serialize directly from the live `pat_regions[scene]`
-   because Scene Save does not run concurrently with live playback edits
-   to the saved Scene. (The active Scene is always the one being saved,
-   and the user cannot edit steps while Save is in progress because the
-   Menu is in Save-command mode.)
+1. Create/overwrite `<name>.pat` in the Scene directory.
+2. Write 128-byte header (including track settings from
+   `pat_regions[scene]`).
+3. Write address array (1,792 B), bitmap (512 B), pool (PAT_STACK_SIZE × 4).
+4. Write CRC.
+5. Update HCNAMES pattern row.
+6. The writer serializes directly from `pat_regions[scene]` (R5 — no
+   snapshot needed during Save because input is disabled).
 
-### B.3 Bank Load Path
+### B.3 Bank Load/Save
 
-Bank Load iterates selected local children, each delegating through the
-shared Scene loader. The pattern file reader is the same as B.1 — no
-separate Bank-specific pattern reader is needed. Each child Scene gets its
-own `pattern.pat` read via the standard Scene child handler.
+Bank delegates each child through the shared Scene loader/writer. No
+separate Bank-specific pattern handler. Each Bank child's `<name>.pat`
+loads/saves through B.1/B.2.
 
-### B.4 Bank Save Path
+### B.4 Boot Restore
 
-Bank Save iterates selected children and writes each through the Scene
-writer. Same as B.2 — each child Scene gets a v4 `pattern.pat` via the
-standard Scene writer.
+The existing boot path does best-effort pattern loads per accepted Scene.
+Replace the v3 reader call with the v4 reader. Missing or invalid pattern
+files result in an empty pattern for that Scene (via `pat_initScene`
+called before the reader).
 
-### B.5 Boot Restore
+### B.5 Root `/Pattern/` Library
 
-The existing boot path loads `pattern.pat` per accepted Scene from the
-resolved library source (best-effort). The v4/v3 probe at phase 46 handles
-this transparently: boot Scenes with v4 files get full specials, boot
-Scenes with v3 files get trigger-only patterns.
-
-### B.6 Root `/Pattern/` Library
-
-Standalone pattern files in `/Pattern/NNN Name.pat` with the same v4
-format. Load replaces only the target Scene's pattern region (address +
-pool + bitmap + track settings), not Kit/Effect/Scene settings. Save writes
-only the pattern region.
-
-**Implementation**: reuse the existing `FS_FILE_PATTERN` file type slot
-with the v4 binary format. The load page already cycles through Pattern as
-a type; the implementation just needs the reader/writer pair.
-
-**Risk**: The current FS_FILE_PATTERN path uses the retired binary Step
-reader (inside `#if 0`). This needs to be replaced entirely, not revived.
+- `/Pattern/` directory on SD, same as `/Kit/`, `/Scene/`, `/Bank/`.
+- Files are `NNN <name>.pat` (numbered library slots).
+- `/Pattern/.hcindex` generated at boot, refreshed on Save.
+- Load: reads the v4 file into the target Scene's pattern region,
+  replacing its entire pattern (address + pool + bitmap + track settings).
+  Does not touch Kit, Effect, or Scene settings.
+- Save: writes the target Scene's pattern region to the selected library
+  slot.
+- The Load/Save type cycler includes Pattern alongside Kit, Scene, Bank.
+- Pattern gets its own browser cache domain in the shared 9,000-byte
+  cache, same as other file types.
 
 ---
 
-## Part C — 17th Scene Snapshot Region
+## Part C — HCNAMES and Source Tracking
 
-### C.1 Rationale
+### C.1 Row Expansion
 
-AutoSave serializes pattern data to SD while the sequencer may be writing
-pool blocks (live step edits, recording, probability state changes). A
-several-KB file write spans many main-loop ticks. During that window, the
-user or sequencer could modify the address array or pool, creating an
-inconsistent snapshot — e.g., an address entry points to a pool offset
-whose block was freed and reallocated between the address-array write and
-the pool write.
+HCNAMES grows from 129 to 145 data rows (+ 1 header = 146 physical lines):
 
-**Solution**: allocate a 17th Scene slot (both `scene_t` and
-`pat_scene_region_t`) as a coherent snapshot buffer. Before an AutoSave
-pattern drain begins, memcpy the target Scene's pattern region (10,496
-bytes) into the snapshot slot, then serialize from the snapshot at leisure.
+| Rows | Range | Content |
+|------|-------|---------|
+| 0 | 0 | Bank |
+| 1–16 | 1..16 | Scene |
+| 17–32 | 17..32 | Kit |
+| 33–128 | 33..128 | Instrument (6 per Scene × 16) |
+| **129–144** | **129..144** | **Pattern (1 per Scene × 16)** |
 
-### C.2 SRAM Cost
+Pattern rows use the standard `name<TAB>source[<TAB>R]` format. No type
+field (unlike Instrument rows).
 
-| Component | Size |
-|-----------|-----:|
-| `pat_scene_region_t` (17th slot) | 10,496 B |
-| `scene_t` (17th slot) | 1,200 B |
-| **Total** | **11,696 B** |
+### C.2 Source Tokens
 
-Current SRAM1 remaining: 117,532 B. After 17th Scene: **105,836 B**
-(103.4 KB remaining), all still within the Pattern reservation.
+- `-` : no source / empty / default pattern
+- `000..999` : library `/Pattern/NNN` source
+- `@` : AutoSave provenance (Session 064)
 
-### C.3 Implementation
+### C.3 Refreshed Flag
 
-- Change `SCENE_COUNT` from `16u` to `17u` in `SceneData.h`.
-- Change `pat_regions` array size to `SCENE_COUNT` (already uses
-  `SCENE_COUNT`; this is automatic).
-- Define `PAT_SNAPSHOT_SCENE 16u` — the index of the snapshot slot.
-- The snapshot Scene is **never** initialized by `pat_initScene()` at boot
-  (it's scratch). It is never addressed by the sequencer, menu, LED, or
-  copy/clear code.
-- Before AutoSave pattern drain: `memcpy(&pat_regions[16],
-  &pat_regions[target_scene], sizeof(pat_scene_region_t))`.
-- The AutoSave writer then serializes from `pat_regions[16]` exclusively.
+`R` flag works identically to Scene/Kit/Instrument: cleared on mutation,
+set on successful AutoSave drain (Session 064). Library load/save set
+source to slot number and mark refreshed.
 
-### C.4 Future Background Loading
+### C.4 SRAM Impact
 
-The 17th Scene slot is allocated now with the dual purpose of:
-1. **Session 063**: AutoSave coherent snapshot (pattern region only)
-2. **Future session**: background Bank Load staging (full scene_t + pattern
-   region — cache the playing Scene while loading a new Bank)
+- `fs_resident_source`: 129 → 145 × 2 B = 290 B (+32 B)
+- `hcnames_name_mirror`: 129 → 145 × 9 B = 1,305 B (+144 B)
+- Static asserts and row-count constants updated.
 
-These two uses are mutually exclusive: AutoSave does not drain during Bank
-Load, and background loading does not happen during normal AutoSave
-operation. No additional allocation is needed when the background loader is
-eventually implemented.
+### C.5 Publication
 
-### C.5 Guard Rails
-
-- The 17th `scene_t` slot exists but is unused this session (only the
-  pattern region is used for snapshot). Scene activation, UI, and the
-  sequencer must never address Scene index 16.
-- `bank_getActiveScene()` and `scene_get()` already validate against
-  `SCENE_COUNT`; the 17th slot passes validation but is never selected by
-  any user path.
-- HCNAMES has 16 Scene rows (1..16). The 17th Scene has no HCNAMES row.
-- AutoSave dirty mask has 16 Scene slots. The 17th Scene has no dirty slot.
-- Bank `scene_present_mask` is 16 bits. The 17th Scene has no presence bit.
+Scene Load, Scene Save, Bank Load, and Bank Save publication paths include
+the pattern row alongside Scene/Kit/Instrument rows when committing
+HCNAMES. Pattern Load from library sets the source to the library slot.
 
 ---
 
-## Part D — Pattern AutoSave
+## Part D — v3 Removal Checklist
 
-### D.1 File Naming
+All of the following are deleted in Session 063:
 
-16 pairs of hidden root files, one pair per resident Scene's pattern:
-
-```
-/.pat00a  /.pat00b    — Scene 0 pattern
-/.pat01a  /.pat01b    — Scene 1 pattern
-...
-/.pat15a  /.pat15b    — Scene 15 pattern
-```
-
-32 files total. Each file is identical in format to the v4 `pattern.pat`
-(3,456 bytes at PAT_STACK_SIZE=256).
-
-### D.2 Format
-
-Identical to the v4 file format from Part A. The data is already largely
-serialized in the pattern region; the snapshot memcpy + direct write is the
-simplest and most robust approach.
-
-**Why not differential/patch format like HCPR?** The pattern data structure
-(address array + pool) is not a flat parameter array where individual byte
-offsets can be meaningfully patched. A modified address entry and its
-associated pool block are semantically coupled; patching one without the
-other creates inconsistency. The full snapshot is only ~3.5 KB and the
-memcpy from live→snapshot is a single O(10KB) operation completing in
-microseconds.
-
-### D.3 Dirty Tracking
-
-Each Scene's pattern has a single dirty bit. The dirty bit is set by:
-- `pat_toggleStep()`
-- `pat_setStepActive()`
-- `pat_eraseStep()`
-- `pat_clearTrack()` / `pat_clearPattern()`
-- `pat_setStepNote()` / `pat_setStepVolume()` / `pat_setStepProbability()`
-- `pat_setTrackLength()` / `pat_setTrackScale()` / `pat_setTrackShuffle()`
-  (once these become real storage)
-- Pattern load (Scene Load, Bank Load, Pattern Load) — marks dirty to
-  force initial capture
-- `pat_copyTrack()` / `pat_copyPattern()` / `pat_copyBar()` — when
-  eventually implemented
-
-A 16-bit `pat_autosave_dirty_mask` is sufficient (one bit per Scene).
-
-### D.4 Drain Scheduling
-
-The AutoSave drain currently alternates between parameter capture and
-HCNAMES convergence. Pattern drain is a third phase:
-
-**Proposed drain cycle**:
-1. **Parameter scan/capture** (existing HCPR drain)
-2. **Pattern check** — if any dirty bit is set:
-   a. Prioritize non-active dirty Scene (user probably done with it)
-   b. If only the active Scene is dirty, drain it (but expect re-dirtying)
-   c. Snapshot the selected Scene into slot 16
-   d. Write the snapshot to the corresponding `.patNNx` file
-   e. Clear the dirty bit on successful write
-   f. The drain alternation returns to step 1
-
-**Interleaving**: the drain checks one pattern per parameter-drain cycle.
-If multiple Scenes are dirty, they serialize across multiple drain cycles
-(one Scene per cycle, non-active first).
-
-### D.5 Boot Restore
-
-Boot restore already loads `pattern.pat` from resolved Scene library
-sources. The Pattern AutoSave restore would:
-
-1. After the existing HCPR restore selects/accepts Scenes, check for
-   `.patNNa` / `.patNNb` pairs for each accepted Scene.
-2. Select the newer valid pair (by generation or by presence, matching
-   HCPR's A/B selection logic).
-3. If the AutoSave pattern is newer than the library `pattern.pat` that
-   was already loaded, overwrite the Scene's pattern region with the
-   AutoSave version.
-
-**Open question**: How does the reader know the AutoSave pattern is "newer"?
-HCPR has generation counters. Pattern files need a comparable mechanism —
-either a generation field in the v4 header or a timestamp or an HCPR
-cross-reference.
-
-### D.6 Pair Management
-
-Each `.patNNa` / `.patNNb` pair uses the same A/B alternation as HCPR:
-- Write to the non-current file
-- Increment generation counter
-- Validate via header magic + CRC32C
-- On successful write, the new file becomes current
-
-The generation field in the v4 header (Part A reserved bytes) serves this
-purpose. Alternatively, use a separate small sidecar — but since the file
-is already small (3.5 KB), embedding the generation is simpler.
+| Item | File |
+|------|------|
+| `PatternSet` typedef and static assert | PatternData.h |
+| `pat_initPatternSet()` | PatternData.h, PatternData.c |
+| `pat_patternSetGetStep()` | PatternData.h, PatternData.c |
+| `pat_patternSetSetStep()` | PatternData.h, PatternData.c |
+| `filesystem_pattern_discard` | filesystem.c |
+| v3 text reader phases (46, 53, associated) | filesystem.c |
+| v3 text writer phases | filesystem.c |
+| `storage_patternStub*` helpers | storageTypes.c/h |
+| `op_pattern_stub_state` | filesystem.c |
+| `FS_PATTERN_STEP_*` / `FS_PATTERN_MAIN_*` etc. defines | filesystem.c |
+| Retired `#if 0` binary Step reader phases | filesystem.c |
+| Any remaining `PatternSet` references in live code | grep verification |
 
 ---
 
-## Part E — Boot Reader Updates
+## Resolved Open Questions
 
-### E.1 Scene Boot Pattern Loading
+### RQ1 — Pattern Name in Scene Directory
 
-The current boot path does best-effort `pattern.pat` library loads per
-accepted Scene. This path needs:
-1. v4/v3 probe (same as B.1)
-2. v4 binary reader for boot Scenes
-3. Subsequent AutoSave pattern overlay (D.5) if applicable
+**Decided**: scan by extension. A Scene directory contains exactly one
+`*.pat` file; the loader finds it by extension. More than one `.pat` file
+in a Scene directory is an error (reject the Scene load). The save path
+creates it with the user-chosen name; the load path scans for `*.pat`.
 
-### E.2 AutoSave Pattern-Aware Boot
+### RQ2 — Pattern Name Default
 
-After HCPR restore and Scene library pattern loads:
-1. For each present Scene, check for valid `.patNN{a,b}` pairs
-2. Select the valid pair with the higher generation
-3. If its generation is higher than what the library load produced,
-   replace the Scene's pattern region
+**Decided**: inherit from Scene name. A new/empty Scene that has never
+been saved uses the Scene's own name as the default pattern name. This
+sets the initial HCNAMES pattern row content and the filename used on
+first save.
 
-### E.3 Deferred
+### RQ3 — Filesystem Phase Numbering
 
-AutoSave pattern boot restore may be deferred to a later session if the
-file format and save/load integration are already a full session's work.
-The pairs can be written without a boot reader; the reader can follow once
-the format is proven stable.
+The v3 reader occupied phases 46/53 and the v3 writer occupied nearby
+phases. The v4 binary reader/writer needs new phase numbers. The
+filesystem state machine is large (~18,000+ lines). Phase number
+allocation must be carefully chosen to avoid collisions. This is a
+mechanical implementation detail, not a design risk, but it requires
+careful code navigation.
 
----
+### RQ4 — Pattern Identity at Scene Switch
 
-## Risks and Open Questions
+When the user switches Scenes, `pat_applyStepToMenu()` already reads the
+correct Scene's pattern region. But track settings (length, scale, etc.)
+need to be projected from the new Scene's `pat_scene_region_t` into
+`parameter_values[]` so the Menu displays the correct values. This is
+analogous to `pat_applyTrackSettingsToMenu()` and
+`pat_applyPatternSettingsToMenu()` — these must become real projections
+from the new region storage rather than no-ops.
 
-### R1 — Track Settings Home (Decision Required)
+### RQ5 — HCNAMES Row Count Change
 
-Track length, scale, shuffle, MIDI channel, and MIDI note currently live in
-`parameter_values[]` and the PatternData setters are no-ops. The v4 file
-format needs to know where to read/write these values. Options:
-1. Add per-track storage to `pat_scene_region_t` (+896 B to `pat_regions`)
-2. Store in `scene_settings_t` (conceptually odd but zero extra RAM)
-3. Keep in `parameter_values[]` and project from there (fragile)
+**Decided**: not a concern. The existing 9 KB index/names buffer is used
+to serialize HCNAMES; 145 rows fits with plenty of room. The migration
+from 129 to 145 rows is a one-time boot regeneration — the boot path
+already handles missing/invalid `.hcnames`. A row count check in the
+validator catches old-format files.
 
-**Recommendation**: Option 1. The RAM cost is modest and the ownership is
-clean.
-
-### R2 — SCENE_COUNT=17 Ripple
-
-Changing `SCENE_COUNT` from 16 to 17 may ripple through:
-- `scenes[]` array grows by 1,200 B
-- `pat_regions[]` grows by 10,496 B
-- Bank `scene_present_mask` (16-bit) — unaffected (17th Scene has no
-  presence bit)
-- HCNAMES row count (129 rows, 16 Scenes) — unaffected
-- AutoSave HCPR Scene payload (16 × 1,920 B) — unaffected
-- Menu Scene select (0..15) — unaffected (17th is not user-selectable)
-- `scene_get(16)` — currently returns NULL if >= SCENE_COUNT; with
-  SCENE_COUNT=17 it returns the 17th slot, which is correct for internal
-  snapshot use but must never be exposed to normal Scene UI paths
-
-**Risk**: Any code that iterates `0..SCENE_COUNT-1` for UI/Bank/HCNAMES
-purposes will now include the 17th Scene. These loops must be audited and
-gated to iterate only 0..15 for user-visible operations.
-
-**Mitigation**: Define `PAT_USER_SCENE_COUNT 16u` and use it in all
-user-facing loops. `SCENE_COUNT` remains the physical allocation count.
-
-### R3 — AutoSave File Count
-
-32 hidden files in the root directory is a significant number. Combined with
-the existing `.hcprms1`, `.hcprms2`, `.hcnames`, and `settings.cfg`, the
-root directory carries 36 hidden/system files.
-
-**Risk**: FAT root directory entry limits (512 entries for FAT16, unlimited
-for FAT32). At 32-byte entries per LFN (or 32 bytes for 8.3 names), 36
-files is trivially within any limit. The names `.pat00a` etc. fit in 8.3
-format (7 characters), so no LFN entries are needed.
-
-**Risk**: AsyncFATFS file handle pool exhaustion. The writer uses one handle
-at a time (open, write, close, then next). This is safe.
-
-### R4 — Snapshot Timing
-
-The 10,496-byte memcpy from live region → snapshot must happen at a point
-where no concurrent write is possible. The safe window is:
-- Inside the main-loop drain, before posting the filesystem write
-- The sequencer timer ISR (TIM3, priority 2) can fire during memcpy and
-  call `pat_toggleStep` or `pat_setStepActive` from recording
-
-**Mitigation**: Briefly mask TIM3 (BASEPRI) during the snapshot memcpy.
-The memcpy at 216 MHz takes ~50 µs for 10 KB; this is well within the
-4 kHz tick budget (250 µs). Alternatively, use a dirty-generation counter:
-snapshot, check if generation changed, re-snapshot if so (optimistic
-locking).
-
-**Recommendation**: BASEPRI mask during memcpy. It's simpler and the
-duration is negligible.
-
-### R5 — v4 Save Coherency for Scene Save
-
-Scene Save serializes from the live `pat_regions[scene]` (B.2). Is this
-safe? During Save, the menu is in Save-command mode (`menu_storageBusy`),
-which blocks step editing. But the sequencer is still running — probability
-does not modify storage, but recording does. If the user is recording while
-saving, address entries could change mid-write.
-
-**Mitigation**: Use the same snapshot approach as AutoSave: memcpy the
-pattern region to slot 16 at the start of the Scene Save pattern phase,
-then write from the snapshot. This unifies the coherency strategy.
-
-### R6 — v3 Write Retirement
-
-After v4 becomes the sole writer, existing v3 `pattern.pat` files in
-Scene/Bank directories will be overwritten with v4 binary content on the
-next save. This is a one-way migration — the v4 writer will produce files
-that older firmware cannot read.
-
-**Risk**: Users with mixed firmware versions sharing SD cards. This is
-accepted — the port is already incompatible with original LXR firmware at
-the Kit/Scene/Bank level.
-
-### R7 — Pattern AutoSave Generation Cross-Reference
-
-How does boot restore know whether the AutoSave pattern is newer than the
-library pattern? Options:
-1. **Generation counter in v4 header**: AutoSave bumps generation on each
-   write; library saves start at generation 0. Boot compares.
-2. **HCPR cross-reference**: add a per-Scene pattern generation field to
-   the HCPR record. This couples pattern and parameter AutoSave.
-3. **Always prefer AutoSave if valid**: simpler, but loses explicit library
-   saves until the next AutoSave cycle.
-
-**Recommendation**: Option 1 — generation counter in the v4 header. Simple,
-self-contained, no HCPR format change needed. Library saves reset generation
-to 0; AutoSave writes increment from 1. Boot takes the highest generation.
-
-### R8 — Session Scope
-
-This is a large session. The implementation order should be:
-1. v4 file format + Scene Save writer + Scene Load reader (can be tested
-   immediately: save a Scene, reload it, verify specials survive)
-2. Bank Save/Load integration (should be automatic if Scene path works)
-3. Root `/Pattern/` library (lower priority, can defer)
-4. 17th Scene allocation + snapshot memcpy
-5. AutoSave dirty tracking + drain integration + file pair writer
-6. Boot restore for AutoSave patterns
-
-If the session runs long, defer items 5-6 (AutoSave) to Session 064 and
-focus on getting file format + Scene/Bank load/save solid.
-
-### R9 — Existing v3 Text Pattern Reader/Writer
-
-The existing v3 reader (phase 46/53) and writer (phase ~100+) are wired
-into the Scene load/save state machines. The v4 integration must:
-- Add a probe branch at phase 46 (read first 4 bytes)
-- Add new phases for v4 binary reading
-- Replace the v3 writer phases with v4 binary writing
-- Keep the v3 reader alive as a fallback for old files
-
-**Risk**: The filesystem state machine is large and phase numbers are
-dense. Adding new phases requires careful numbering and may interact with
-the existing Scene/Bank phase sequencing.
-
-### R10 — Pattern file during Scene/Bank Load error paths
-
-If the v4 pattern reader returns an error (e.g., PAT_STACK_SIZE mismatch),
-the Scene should still load with an empty pattern rather than failing
-entirely. The Kit, effects, and scene settings should remain valid.
-
-**Current behavior with v3**: a malformed `pattern.pat` results in an empty
-pattern (the discard PatternSet). The v4 path should behave identically —
-`pat_initScene()` before reading, so a read failure leaves a clean slate.
+**Note**: a future session will add another 16 rows for Effects (145→161).
+Same approach — expand the row count, regenerate on first boot.
 
 ---
 
-## Implementation Order
+## Implementation Order (Session 063)
 
 | Step | What | Dependencies |
 |------|------|-------------|
-| 1 | Define v4 format constants, header struct, static asserts | None |
-| 2 | Implement v4 binary writer phases in filesystem.c | Step 1 |
-| 3 | Implement v4 binary reader phases with v3 fallback probe | Step 1 |
-| 4 | Test: Scene Save → Scene Load round-trip with specials | Steps 2, 3 |
-| 5 | Verify Bank Save/Load automatically uses v4 path | Step 4 |
-| 6 | Verify boot restore handles v4 files | Step 4 |
-| 7 | Decide and implement track settings home (R1) | Step 1 |
-| 8 | Allocate 17th Scene (SCENE_COUNT=17, guards) | None |
-| 9 | Implement snapshot memcpy + Scene Save from snapshot | Step 8 |
-| 10 | Add Pattern dirty tracking (16-bit mask) | None |
-| 11 | Add `.patNNx` pair ensure/creation at boot | Step 1 |
-| 12 | Implement AutoSave pattern drain phase | Steps 8, 9, 10, 11 |
-| 13 | Implement AutoSave pattern boot restore | Steps 11, 12 |
-| 14 | Root `/Pattern/` library load/save | Steps 2, 3 |
-| 15 | Hardware verification | All |
+| 1 | Add per-track pattern params (length/scale/shuffle) to `pat_scene_region_t`, make setters real | None |
+| 2 | Define v4 format constants, header struct, static asserts | None |
+| 3 | v3 removal: delete PatternSet, v3 reader/writer, pattern stub | None |
+| 4 | HCNAMES expansion: 145 rows, Pattern row base/accessors | None |
+| 5 | `/Pattern/.hcindex` boot generation and save refresh | Step 4 |
+| 6 | Implement v4 binary writer in filesystem.c (Scene Save path) | Steps 1–3 |
+| 7 | Implement v4 binary reader in filesystem.c (Scene Load path) | Steps 1–3 |
+| 8 | Wire Pattern name into Scene save/load (RQ1 resolution) | Steps 6, 7 |
+| 9 | Wire HCNAMES Pattern row publication in Scene/Bank paths | Steps 4, 8 |
+| 10 | Root `/Pattern/` library load/save with browser | Steps 5–7 |
+| 11 | Update boot pattern loading to v4 | Step 7 |
+| 12 | Bank Save/Load verification | Steps 6, 7 |
+| 13 | Hardware verification: save Scene, load Scene, verify specials | All |
 
 ---
 
-## Decisions From This Planning Pass
-
-| Decision | Detail | Conflict? |
-|----------|--------|-----------|
-| v4 binary format replaces v3 text writer | v3 reader retained as fallback | No |
-| 128-byte fixed header with padding | Forward-compatible via header_size field | No |
-| Address array + bitmap + pool serialized as raw bytes | Native LE layout, no transformation needed | No |
-| PAT_STACK_SIZE mismatch → error, not truncation | Larger file into smaller firmware is rejected | No |
-| 17th Scene allocated for snapshot/staging | 11,696 B from Pattern SRAM1 reservation | No — this is explicitly within the Pattern reservation |
-| AutoSave uses full-file format, not differential | ~3.5 KB per file, 32 files total | No |
-| Drain alternates parameter/pattern phases | Non-active dirty Scene prioritized | No |
-| BASEPRI mask during snapshot memcpy | ~50 µs at 216 MHz | No |
-| `PAT_USER_SCENE_COUNT` (16) vs `SCENE_COUNT` (17) | UI/Bank/HCNAMES iterate 0..15 only | Extends existing SCENE_COUNT; prior code assumed 16 everywhere |
-
----
-
-## RAM Budget Impact
+## RAM Budget Impact (Session 063 Only)
 
 | Allocation | Size | Region |
 |------------|-----:|--------|
-| 17th `scene_t` | 1,200 B | SRAM1 `.bss` |
-| 17th `pat_scene_region_t` | 10,496 B | SRAM1 `.bss` |
-| `pat_autosave_dirty_mask` | 2 B | SRAM1 `.bss` |
-| Per-track settings in region (if R1 Option 1) | 896 B | SRAM1 `.bss` (inside `pat_regions`) |
-| **Total** | **~12,594 B** | SRAM1 Pattern reservation |
+| Per-track settings in `pat_scene_region_t` (17 scenes) | 357 B | SRAM1 `.bss` (inside `pat_regions`) |
+| `fs_resident_source` growth (129→145 rows) | +32 B | SRAM1 `.bss` |
+| `hcnames_name_mirror` growth (129→145 rows) | +144 B | SRAM1 `.bss` |
+| **Total Session 063** | **533 B** | SRAM1 |
+| **Removed**: `filesystem_pattern_discard` | −112 B | SRAM1 `.bss` |
+| **Net Session 063** | **~421 B** | SRAM1 Pattern reservation |
 
-SRAM1 remaining after: 117,532 − 12,594 = **~104,938 B** (102.5 KB).
+SRAM1 remaining after: 117,532 − 421 = **~117,111 B** (114.4 KB).
+
+Session 064 adds the 17th Scene snapshot (~11,696 B) and AutoSave dirty
+mask (2 B), bringing the total down to ~104,818 B (102.4 KB).
