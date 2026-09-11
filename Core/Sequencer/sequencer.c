@@ -895,7 +895,7 @@ void seq_recordTrigger(uint8_t trackNr)
 		 * Pattern-next/repeat is removed, so even late-bar quantized notes that
 		 * land on step 0 stay in seq_activePattern. Future Scene-level switching
 		 * can reintroduce cross-Scene recording explicitly; the sequencer must
-		 * not infer it from retired PatternSetting.changeBar/nextPattern bytes.
+		 * not infer it from unrelated legacy pattern-setting bytes.
 		 */
 		pat_setStepActive(seq_activePattern, trackNr, quantizedStep, 1u);
 

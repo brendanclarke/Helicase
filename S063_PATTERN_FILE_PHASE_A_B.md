@@ -1132,3 +1132,28 @@ Post-S063: ~117,101 B free.
 | Change | Lines | Action | Description |
 |--------|-------|--------|-------------|
 | B.5.4 | TBD | Modify | Add Pattern to Load/Save type cycler |
+
+---
+
+## Implementation notes — 2026-09-12
+
+- Added the resident Pattern region accessors and per-track persistence fields;
+  implemented the fixed v4 `PAT4` header/payload, CRC32C validation, and named
+  Pattern children for Scene/Bank payloads.
+- Added the root `/Pattern/` numbered-file scan, `.hcindex`, asynchronous load,
+  save, rename retirement, menu integration, and Pattern HCNAMES rows 129–144.
+- Added blocking boot restore for both named Scene/Bank Pattern children and
+  direct root Pattern sources. Failed reads reset the resident Pattern region;
+  boot R10 handling additionally invalidates the complete Scene.
+- Removed the retired PatternSet bridge, v3 text reader/writer, generic Pattern
+  stub parser/writer, and related storage compatibility code. v4 CRC validation
+  uses the in-place header CRC field at offset 14; the CRC bytes are zeroed only
+  while feeding the hash.
+- The physical HCNAMES register is now 145 rows, while the S063 AutoSave wire
+  image intentionally remains 129 rows. No 17th Scene allocation was added.
+- RAM impact: +23 bytes per resident Pattern region (16 regions = +368 bytes),
+  +32 bytes for source provenance, +144 bytes for the HCNAMES mirror, and
+  bounded operation-name scratch. The linked image reports `bss=279372`.
+- Verification: `make -j2` succeeds; final image size is `text=423876`,
+  `data=416`, `bss=279372`. Remaining diagnostics are the existing newlib
+  syscall/linker warnings and unrelated unused legacy helpers.

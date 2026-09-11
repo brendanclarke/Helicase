@@ -4801,7 +4801,8 @@ static afatfsFilePtr_t afatfs_createFileInternal(
              * Preserve display case for ordinary 8.3 callers before converting
              * the raw FAT key to uppercase. This is what lets system files
              * created through afatfs_fopen appear as kitset.kcg,
-             * sceneset.scg, pattern.pat, effects.fx, and settings.cfg while
+             * sceneset.scg, named Pattern `.pat` children, effects.fx, and
+             * settings.cfg while
              * keeping existing case-insensitive open behavior.
              */
             opState->shortNameCaseFlags =

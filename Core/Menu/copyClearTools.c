@@ -41,7 +41,7 @@ void copyClear_clearTrackAutom(uint8_t automTrack)
 	 * necessarily the currently playing pattern when follow/performance modes
 	 * diverge.
 	 */
-	/* Automation lanes no longer exist in PatternSet. */
+	/* Automation lanes are not part of the resident v4 Pattern region. */
 	(void)automTrack;
 };
 //-----------------------------------------------------------------------------

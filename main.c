@@ -718,6 +718,39 @@ int main(void)
                 goto boot_filesystem_timeout;
 
             /*
+             * Synchronous Pattern/ scan.
+             *
+             * Inputs: the mounted card and the numbered `/Pattern/` root.
+             * Output: the v4 Pattern library cache/index is ready before the
+             * Load/Save menu is exposed. Pattern files are named
+             * `NNN <name>.pat`; this pass preserves the same slot-ordered
+             * blank rows as Kit, Scene, and Bank without entering any Scene
+             * child directory.
+             */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(9u);
+            filesystem_requestScanPatterns(NULL);
+            while (filesystem_status() == FS_STATUS_BUSY)
+                filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
+            filesystem_ack();
+            if (!filesystem_createLibraryIndexBlocking(
+                    FS_LIBRARY_INDEX_PATTERN)) {
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+                goto boot_filesystem_failure;
+            }
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
+
+            /*
              * Scan and create fresh per-type `.hcindex` files one type at a
              * time. The filesystem owns one shared Instrument name cache, so
              * each scan is written before that cache is disposed for the next
@@ -732,7 +765,7 @@ int main(void)
              * since the diagnostic may be used to assess in-situ file
              * procedures.
              */
-            boot_showFilesystemStage(9u);
+            boot_showFilesystemStage(10u);
             (void)filesystem_createBootIndexBlocking();
             if (filesystem_bootLoggingTimedOut())
                 goto boot_filesystem_timeout;

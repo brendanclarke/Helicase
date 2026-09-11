@@ -232,6 +232,8 @@ enum loadSaveEnum {
     SAVE_TYPE_KIT_MORPH,
     SAVE_TYPE_SCENE,
     SAVE_TYPE_BANK,
+    /* Numbered root Pattern library backed by `/Pattern/` `<name>.pat` v4 files. */
+    SAVE_TYPE_PATTERN,
     SAVE_TYPE_GLO,
     SAVE_TYPE_SAMPLES,
     NUM_SAVE_TYPES

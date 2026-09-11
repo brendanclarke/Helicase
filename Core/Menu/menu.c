@@ -1312,7 +1312,8 @@ static uint8_t  menu_cpuUseAvgPercent = 0;
 static uint16_t menu_cpuUseLastRefresh = 0;
 
 static volatile struct {
-    unsigned what  :3;
+    /* Four bits are required now that Pattern is a numbered root type before GLO. */
+    unsigned what  :4;
     unsigned state :4;
 } menu_saveOptions;
 
@@ -1336,11 +1337,13 @@ static uint8_t menu_loadSaveCommandInNoPlaybackScope(void)
         return (uint8_t)(menu_saveOptions.what == SAVE_TYPE_KIT ||
                          menu_saveOptions.what == SAVE_TYPE_KIT_MORPH ||
                          menu_saveOptions.what == SAVE_TYPE_SCENE ||
-                         menu_saveOptions.what == SAVE_TYPE_BANK);
+                         menu_saveOptions.what == SAVE_TYPE_BANK ||
+                         menu_saveOptions.what == SAVE_TYPE_PATTERN);
     }
     if (menu_activePage == LOAD_PAGE) {
         return (uint8_t)(menu_saveOptions.what == SAVE_TYPE_SCENE ||
-                         menu_saveOptions.what == SAVE_TYPE_BANK);
+                         menu_saveOptions.what == SAVE_TYPE_BANK ||
+                         menu_saveOptions.what == SAVE_TYPE_PATTERN);
     }
     return 0u;
 }
@@ -2992,6 +2995,14 @@ static uint8_t menu_currentSaveWouldOverwrite(void)
         return filesystem_bankSlotExists(
             menu_currentPresetNr[SAVE_TYPE_BANK]);
     }
+    if (menu_saveOptions.what == SAVE_TYPE_PATTERN) {
+        /* Pattern Save replaces one numbered `/Pattern/` file.  Inputs: the
+         * selected 000..999 Pattern slot. Output: the same `OW` affordance
+         * used by the other numbered libraries, without treating the active
+         * Scene's child filename as the root-library identity. */
+        return filesystem_patternSlotExists(
+            menu_currentPresetNr[SAVE_TYPE_PATTERN]);
+    }
     return 0u;
 }
 
@@ -3010,13 +3021,15 @@ static uint8_t menu_loadSaveTypeIsRestored(uint8_t what)
         (what == SAVE_TYPE_KIT ||
          what == SAVE_TYPE_KIT_MORPH ||
          what == SAVE_TYPE_SCENE ||
-         what == SAVE_TYPE_BANK))
+         what == SAVE_TYPE_BANK ||
+         what == SAVE_TYPE_PATTERN))
         return 1u;
     if (menu_activePage == LOAD_PAGE) {
         return (uint8_t)(what == SAVE_TYPE_KIT ||
                          what == SAVE_TYPE_KIT_MORPH ||
                          what == SAVE_TYPE_SCENE ||
-                         what == SAVE_TYPE_BANK);
+                         what == SAVE_TYPE_BANK ||
+                         what == SAVE_TYPE_PATTERN);
     }
     return 0u;
 }
@@ -3033,14 +3046,16 @@ static const uint8_t menu_loadSaveLoadTypes[] = {
     SAVE_TYPE_KIT,
     SAVE_TYPE_KIT_MORPH,
     SAVE_TYPE_SCENE,
-    SAVE_TYPE_BANK
+    SAVE_TYPE_BANK,
+    SAVE_TYPE_PATTERN
 };
 
 static const uint8_t menu_loadSaveSaveTypes[] = {
     SAVE_TYPE_KIT,
     SAVE_TYPE_KIT_MORPH,
     SAVE_TYPE_SCENE,
-    SAVE_TYPE_BANK
+    SAVE_TYPE_BANK,
+    SAVE_TYPE_PATTERN
 };
 
 static uint8_t menu_nextRestoredLoadSaveType(uint8_t current, int8_t inc)
@@ -3347,6 +3362,8 @@ static uint8_t menu_requestLoadCommandFinalIndexRestore(void)
         kind = FS_LIBRARY_INDEX_SCENE;
     else if (menu_saveOptions.what == SAVE_TYPE_BANK)
         kind = FS_LIBRARY_INDEX_BANK;
+    else if (menu_saveOptions.what == SAVE_TYPE_PATTERN)
+        kind = FS_LIBRARY_INDEX_PATTERN;
     else
         return 0u;
 
@@ -3444,6 +3461,11 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         menu_requestLibraryIndexLoad(what);
         return;
     }
+    if (what == SAVE_TYPE_PATTERN &&
+        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_PATTERN)) {
+        menu_requestLibraryIndexLoad(what);
+        return;
+    }
     /*
      * Kit and KitMrp share the same browser slot but have different commit
      * semantics.
@@ -3464,7 +3486,8 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
     if (menu_activePage == LOAD_PAGE && what < SAVE_TYPE_GLO &&
         !loadKitOnLoadPage &&
         what != SAVE_TYPE_SCENE &&
-        what != SAVE_TYPE_BANK) {
+        what != SAVE_TYPE_BANK &&
+        what != SAVE_TYPE_PATTERN) {
         /* Entering Kit/KitMrp Load is browsing, not an implicit payload load.
          * Ensure the seven-name session exists even if `/Kit/.hcindex` happened
          * to remain resident from an earlier browser. Once entry HCNAMES has
@@ -3476,6 +3499,12 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
                 return;
             }
             memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
+            menu_repaintAll();
+        } else if (what == SAVE_TYPE_PATTERN) {
+            /* Pattern browser entry is explicit-OK, so movement only
+             * publishes the selected `/Pattern/.hcindex` row. */
+            memcpy(preset_currentName,
+                   filesystem_patternSlotName(slot), 8u);
             menu_repaintAll();
         }
         return;
@@ -3531,7 +3560,8 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         } else {
             menu_deferSelectionRequest = 1;
         }
-    } else if (what == SAVE_TYPE_SCENE || what == SAVE_TYPE_BANK) {
+    } else if (what == SAVE_TYPE_SCENE || what == SAVE_TYPE_BANK ||
+               what == SAVE_TYPE_PATTERN) {
         /*
          * Scene and Bank folders are explicit-OK operations.
          *
@@ -3541,11 +3571,12 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
          * also posts a read-only child scan so the SEQ LEDs represent only
          * Scene folders present inside the highlighted Bank slot.
          */
-        memcpy(preset_currentName,
-               (what == SAVE_TYPE_BANK)
-                   ? filesystem_bankSlotName(slot)
-                   : filesystem_sceneSlotName(slot),
-               8u);
+        if (what == SAVE_TYPE_BANK)
+            memcpy(preset_currentName, filesystem_bankSlotName(slot), 8u);
+        else if (what == SAVE_TYPE_SCENE)
+            memcpy(preset_currentName, filesystem_sceneSlotName(slot), 8u);
+        else
+            memcpy(preset_currentName, filesystem_patternSlotName(slot), 8u);
         if (menu_activePage == LOAD_PAGE && what == SAVE_TYPE_BANK)
             menu_requestBankLoadPreview(slot);
     } else {
@@ -4406,8 +4437,9 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
     /*
      * Request the only index that can supply the current top-level row.
      *
-     * Inputs: SAVE_TYPE_KIT, SAVE_TYPE_KIT_MORPH, SAVE_TYPE_SCENE, or
-     * SAVE_TYPE_BANK. Output: Kit/KitMrp enters the seven-name session, reading
+     * Inputs: SAVE_TYPE_KIT, SAVE_TYPE_KIT_MORPH, SAVE_TYPE_SCENE,
+     * SAVE_TYPE_BANK, or SAVE_TYPE_PATTERN. Output: Kit/KitMrp enters the
+     * seven-name session, reading
      * HCNAMES once and then loading `/Kit/.hcindex`; every later load in that
      * session uses the retained index without another resident-file traversal.
      * Scene and Bank directly replace the shared cache with their own index. A
@@ -4421,10 +4453,12 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
         menu_requestSceneEntryName();
         return;
     }
-    kind = (what == SAVE_TYPE_SCENE)
-        ? FS_LIBRARY_INDEX_SCENE
-        : (what == SAVE_TYPE_BANK)
+    if (what == SAVE_TYPE_PATTERN) {
+        kind = FS_LIBRARY_INDEX_PATTERN;
+    } else {
+        kind = (what == SAVE_TYPE_BANK)
             ? FS_LIBRARY_INDEX_BANK : FS_LIBRARY_INDEX_KIT;
+    }
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
     /*
@@ -4454,7 +4488,7 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
     }
 }
 
-/* Refresh the Save page's resident display after a Kit/Scene/Bank save.
+/* Refresh the Save page's resident display after a Kit/Scene/Bank/Pattern save.
  *
  * What: copies the name from the just-rebuilt shared `.hcindex` cache into
  * preset_currentName for the slot that remains selected on the Save page.
@@ -4464,7 +4498,7 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
  * current slot appear stale or empty until the user changed type and
  * re-entered it. Pure Loads never use this helper: they read the unchanged
  * index only after runtime apply.
- * Inputs: completed Kit, KitMrp, root Scene, or root Bank save and the unchanged menu
+ * Inputs: completed Kit, KitMrp, root Scene, root Bank, or root Pattern save and the unchanged menu
  * slot. Output: the current Save type/slot stays selected and its visible name
  * matches the newly durable directory. Instrument and other saves do not use
  * this path because their name cache/domain has different lifecycle rules.
@@ -4475,6 +4509,8 @@ static void menu_refreshSavedLibraryName(uint8_t completed_op)
         ? SAVE_TYPE_SCENE
         : (completed_op == PRESET_OP_BANK_SAVE)
             ? SAVE_TYPE_BANK
+            : (completed_op == PRESET_OP_PATTERN_SAVE)
+                ? SAVE_TYPE_PATTERN
             : (completed_op == PRESET_OP_KIT_MORPH_SAVE)
                 ? SAVE_TYPE_KIT_MORPH : SAVE_TYPE_KIT;
     uint16_t slot = menu_currentPresetNr[what];
@@ -4486,6 +4522,9 @@ static void menu_refreshSavedLibraryName(uint8_t completed_op)
     } else if (what == SAVE_TYPE_BANK) {
         if (filesystem_bankSlotExists(slot))
             name = filesystem_bankSlotName(slot);
+    } else if (what == SAVE_TYPE_PATTERN) {
+        if (filesystem_patternSlotExists(slot))
+            name = filesystem_patternSlotName(slot);
     } else if (filesystem_kitSlotExists(slot)) {
         name = filesystem_kitSlotName(slot);
     }
@@ -6656,6 +6695,7 @@ static void menu_repaintLoadSavePage(void)
     case SAVE_TYPE_KIT_MORPH:   toptxt = "KitMrp  "; break;
     case SAVE_TYPE_SCENE:       toptxt = "Scene   "; break;
     case SAVE_TYPE_BANK:        toptxt = "Bank    "; break;
+    case SAVE_TYPE_PATTERN:     toptxt = "Pattern "; break;
     case SAVE_TYPE_GLO:         toptxt = "Settings"; break;
     case SAVE_TYPE_SAMPLES:     toptxt = "Samples "; break;
     }
@@ -6745,6 +6785,9 @@ static void menu_repaintLoadSavePage(void)
             } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
                 displayName = filesystem_sceneSlotName(
                     menu_currentPresetNr[SAVE_TYPE_SCENE]);
+            } else if (menu_saveOptions.what == SAVE_TYPE_PATTERN) {
+                displayName = filesystem_patternSlotName(
+                    menu_currentPresetNr[SAVE_TYPE_PATTERN]);
             } else {
                 /*
                  * Kit numbers and names come from the already-loaded index.
@@ -6801,7 +6844,8 @@ static void menu_repaintLoadSavePage(void)
         /* Load page */
         if (menu_saveOptions.what >= SAVE_TYPE_GLO ||
             menu_saveOptions.what == SAVE_TYPE_SCENE ||
-            menu_saveOptions.what == SAVE_TYPE_BANK) {
+            menu_saveOptions.what == SAVE_TYPE_BANK ||
+            menu_saveOptions.what == SAVE_TYPE_PATTERN) {
             /*
              * Explicit Load commands need a visible confirmation affordance.
              *
@@ -7502,6 +7546,13 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                             0u))
                         commandAccepted = 1u;
                     break;
+                case SAVE_TYPE_PATTERN:
+                    /* Pattern Save exports the active resident Scene's v4
+                     * region into the selected numbered Pattern slot. */
+                    if (preset_savePattern(
+                            menu_currentPresetNr[SAVE_TYPE_PATTERN]))
+                        commandAccepted = 1u;
+                    break;
                 case SAVE_TYPE_GLO:     commandAccepted = preset_saveGlobals(); break;
                 default: break;
                 }
@@ -7528,6 +7579,11 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                             menu_kitLoadSceneMask)) {
                         commandAccepted = 1u;
                     }
+                    break;
+                case SAVE_TYPE_PATTERN:
+                    if (preset_loadPattern(
+                            menu_currentPresetNr[SAVE_TYPE_PATTERN]))
+                        commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_GLO:
                     commandAccepted = preset_loadGlobals();
@@ -7716,7 +7772,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     (menu_saveOptions.what == SAVE_TYPE_KIT ||
                      menu_saveOptions.what == SAVE_TYPE_KIT_MORPH ||
                      menu_saveOptions.what == SAVE_TYPE_SCENE ||
-                     menu_saveOptions.what == SAVE_TYPE_BANK) &&
+                     menu_saveOptions.what == SAVE_TYPE_BANK ||
+                     menu_saveOptions.what == SAVE_TYPE_PATTERN) &&
                     previous_state == SAVE_STATE_EDIT_PRESET_NR &&
                     menu_saveOptions.state == SAVE_STATE_EDIT_NAME1) {
                     /*
@@ -7739,6 +7796,11 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                                filesystem_identityName(
                                    FS_IDENTITY_SCENE_ROW),
                                8u);
+                    } else if (menu_saveOptions.what == SAVE_TYPE_PATTERN) {
+                        memcpy(preset_currentName,
+                               filesystem_residentPatternName(
+                                   menu_loadSaveSourceScene),
+                               8u);
                     } else {
                         /*
                          * The selected source Scene may have changed since
@@ -7757,6 +7819,7 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                         menu_saveOptions.what < SAVE_TYPE_GLO &&
                         menu_saveOptions.what != SAVE_TYPE_SCENE &&
                         menu_saveOptions.what != SAVE_TYPE_BANK &&
+                        menu_saveOptions.what != SAVE_TYPE_PATTERN &&
                         menu_saveOptions.what != SAVE_TYPE_FILE &&
                         menu_saveOptions.what != SAVE_TYPE_DIR)
                         menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
@@ -8909,7 +8972,8 @@ void menu_pollPresetStatus(void)
         */
         menu_storageBusy = 0u;
         if (preset_getCompletedOp() == PRESET_OP_SCENE_SAVE ||
-            preset_getCompletedOp() == PRESET_OP_BANK_SAVE) {
+            preset_getCompletedOp() == PRESET_OP_BANK_SAVE ||
+            preset_getCompletedOp() == PRESET_OP_PATTERN_SAVE) {
             /*
              * The filesystem callback is intentionally delayed until the
              * directory rescan and `.hcindex` rewrite are complete. Keep that

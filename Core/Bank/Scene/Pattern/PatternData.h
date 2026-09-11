@@ -67,48 +67,76 @@
 #define PAT_STEPS_PER_SCENE   (NUM_TRACKS * NUM_STEPS)
 
 /*
- * PatternSet is the retained legacy v3 file-bridge payload, not resident
- * Scene storage. The live Pattern module owns its address array, pool, and
- * free bitmap separately in PatternData.c; storageTypes.c still needs this
- * 112-byte shape while the v4 file format remains out of scope.
+ * Resident Pattern storage owned by one Scene.
  *
- * Each `step_on[track][step >> 3]` byte owns eight chronological steps; bit
- * `step & 7` is the on/off state for that step, with bit zero representing the
- * lowest-numbered step. Inputs/outputs are deliberately only bitmap bits.
- * Filesystem and storageTypes use the bounded helpers below to parse/write the
- * legacy bridge without coupling future live storage to this layout.
+ * What: the live address array, dynamic pool, allocator bitmap, and the small
+ * track/global parameter set persisted by the v4 Pattern file. Why: a Scene
+ * load/save must transfer the complete resident Pattern state without the
+ * legacy trigger-only bridge. Inputs/outputs: PatternData owns the object
+ * and the filesystem streams its fields in the documented v4 order.
  */
-typedef struct PatternSetStruct {
-    uint8_t step_on[NUM_TRACKS][PATTERN_TRACK_BYTES];
-} PatternSet;
+typedef struct __attribute__((packed)) {
+    uint16_t address[NUM_TRACKS][NUM_STEPS];
+    uint8_t pool[PAT_STACK_SIZE * 32u];
+    uint8_t bitmap[512u];
+    uint8_t track_length[NUM_TRACKS];
+    uint8_t track_scale[NUM_TRACKS];
+    uint8_t track_shuffle[NUM_TRACKS];
+    uint8_t pattern_change_bar;
+    uint8_t pattern_next;
+} pat_scene_region_t;
 
-_Static_assert(sizeof(PatternSet) == 112u,
-               "PatternSet must remain seven 16-byte trigger bitmaps");
+_Static_assert(sizeof(pat_scene_region_t) ==
+               (PAT_STEPS_PER_SCENE * 2u) + (PAT_STACK_SIZE * 32u) +
+               512u + 23u,
+               "pat_scene_region_t size must match the Pattern budget");
+
+/*
+ * Fixed v4 Pattern file geometry.
+ *
+ * What: compile-time offsets and lengths for the 160-byte base header and
+ * resident payload. Why: readers/writers must agree on one bounded stream and
+ * may skip a future header extension without moving the payload contract.
+ * Inputs/outputs: PAT_STACK_SIZE and the public resident region above. The
+ * CRC field is four bytes at offset 14 and is treated as zero while hashing.
+ */
+#define PATTERN_FILE_VERSION             1u
+#define PATTERN_FILE_FIXED_HEADER_BYTES  32u
+#define PATTERN_FILE_PARAMETER_BYTES     16u
+#define PATTERN_FILE_TRACK_HEADER_BYTES  16u
+#define PATTERN_FILE_HEADER_BYTES        160u
+#define PATTERN_FILE_CRC_OFFSET          14u
+#define PATTERN_FILE_ADDRESS_BYTES       (PAT_STEPS_PER_SCENE * 2u)
+#define PATTERN_FILE_BITMAP_BYTES        512u
+#define PATTERN_FILE_POOL_BYTES          (PAT_STACK_SIZE * 32u)
+#define PATTERN_FILE_PAYLOAD_BYTES       (PATTERN_FILE_ADDRESS_BYTES + \
+                                          PATTERN_FILE_BITMAP_BYTES + \
+                                          PATTERN_FILE_POOL_BYTES)
+#define PATTERN_FILE_TOTAL_BYTES         (PATTERN_FILE_HEADER_BYTES + \
+                                          PATTERN_FILE_PAYLOAD_BYTES)
+
+_Static_assert(PATTERN_FILE_HEADER_BYTES ==
+               (PATTERN_FILE_FIXED_HEADER_BYTES +
+                PATTERN_FILE_PARAMETER_BYTES +
+                (NUM_TRACKS * PATTERN_FILE_TRACK_HEADER_BYTES) +
+                0u),
+               "Pattern v4 header geometry must remain 160 bytes");
+_Static_assert(PATTERN_FILE_ADDRESS_BYTES == 1792u,
+               "Pattern v4 address payload must remain 1792 bytes");
+_Static_assert(PATTERN_FILE_PAYLOAD_BYTES ==
+               (PAT_STEPS_PER_SCENE * 2u) + 512u + (PAT_STACK_SIZE * 32u),
+               "Pattern v4 payload geometry must match resident storage");
 
 /* Coordinate validation for Scene, track, and fixed-grid step indices. */
 uint8_t pat_trackValid(uint8_t track);
 uint8_t pat_patternValid(uint8_t scene_index);
 uint8_t pat_stepValid(uint8_t step);
 
-/*
- * Read or write one caller-owned legacy PatternSet bit without exposing its
- * layout. Inputs are a PatternSet and bounded track/step coordinates; get
- * returns zero and set returns zero when invalid. These helpers are retained
- * only for the disconnected v3 storage bridge.
- */
-uint8_t pat_patternSetGetStep(const PatternSet *pattern, uint8_t track,
-                              uint8_t step);
-uint8_t pat_patternSetSetStep(PatternSet *pattern, uint8_t track,
-                              uint8_t step, uint8_t on);
-
-/*
- * Initialize one 112-byte legacy PatternSet to silence. The generic helper is
- * used by the filesystem discard bridge; pat_initScene() initializes live
- * Scene-indexed address/pool/bitmap storage. Neither operation creates
- * defaults for note, velocity, probability, timing, or automation fields.
- */
-void pat_initPatternSet(PatternSet *pattern);
 void pat_initScene(uint8_t scene_index);
+
+/* Read-only and mutable access to one initialized resident Scene region. */
+const pat_scene_region_t *pat_sceneRegion(uint8_t scene_index);
+pat_scene_region_t *pat_sceneRegionMut(uint8_t scene_index);
 
 /*
  * Scene-indexed playback and edit operations for address-array trigger bits.
@@ -157,12 +185,12 @@ void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
                  uint8_t dst_bar);
 
 /*
- * Transitional UI compatibility entry points retain no legacy PatternSet
- * state. Track/global compatibility setters remain storage-free, while the
- * three Step-062 special setters now read/write the dynamic pool. Inputs from
- * stale menu cells are ignored; outputs for pat_applyStepToMenu() are resolved
- * defaults or stored specials. They exist until the menu ID table is compacted
- * and must never be used by persistence.
+ * Menu synchronization and resident Pattern parameter setters.
+ *
+ * Inputs are resident Scene/track coordinates and menu values. Outputs update
+ * the region fields that the v4 reader/writer persists; apply helpers repaint
+ * the shared menu parameter buffer. The selected-step special setters below
+ * continue to own their dynamic-pool read/modify/write behavior.
  */
 #define TRACK_SCALE_OFF 10u
 void pat_applyPatternSettingsToMenu(uint8_t scene_index);

@@ -1,9 +1,9 @@
 /*
  * PatternData.c
  *
- * Live Scene Pattern state is a Scene-indexed address array plus the reserved
- * dynamic-pool/bitmap region defined below. The legacy PatternSet helpers are
- * retained only for the disconnected v3 file bridge.
+ * Live Scene Pattern state is a Scene-indexed resident region. The v4
+ * filesystem streams this same region through the public accessors in
+ * PatternData.h; no separate trigger-only file bridge is maintained.
  */
 
 #include "PatternData.h"
@@ -30,16 +30,11 @@
  * Outputs: one fixed region that pat_* functions index by Scene. Affiliates:
  * pat_initScene(), the Session-062 C allocator, and SRAM_MANIFEST.md.
  */
-typedef struct {
-    uint16_t address[NUM_TRACKS][NUM_STEPS];
-    uint8_t  pool[PAT_STACK_SIZE * 32u];
-    uint8_t  bitmap[512u];
-} pat_scene_region_t;
-
 _Static_assert(PAT_STACK_SIZE > 0u && PAT_STACK_SIZE <= 512u,
                "PAT_STACK_SIZE must fit the 14-bit pool bitmap");
 _Static_assert(sizeof(pat_scene_region_t) ==
-               (PAT_STEPS_PER_SCENE * 2u) + (PAT_STACK_SIZE * 32u) + 512u,
+               (PAT_STEPS_PER_SCENE * 2u) + (PAT_STACK_SIZE * 32u) +
+               512u + 23u,
                "pat_scene_region_t size must match the Pattern budget");
 
 /*
@@ -389,60 +384,6 @@ uint8_t pat_stepValid(uint8_t step)
     return (uint8_t)(step < NUM_STEPS);
 }
 
-uint8_t pat_patternSetGetStep(const PatternSet *pattern, uint8_t track,
-                              uint8_t step)
-{
-    /*
-     * Return one legacy bridge trigger bit.
-     *
-     * Inputs: PatternSet plus track/step coordinates. Output: zero or one;
-     * invalid inputs return zero. storageTypes uses this boundary so v3 file
-     * code never depends on a raw-byte layout; live Sequencer/UI reads use the
-     * address-array wrapper below instead.
-     */
-    if (!pattern || !pat_trackValid(track) || !pat_stepValid(step))
-        return 0u;
-    return (uint8_t)((pattern->step_on[track][step >> 3u] >> (step & 7u)) & 1u);
-}
-
-uint8_t pat_patternSetSetStep(PatternSet *pattern, uint8_t track,
-                              uint8_t step, uint8_t on)
-{
-    uint8_t *byte;
-    uint8_t mask;
-
-    /*
-     * Set one legacy bridge trigger bit without allocating live Step data.
-     *
-     * Inputs: PatternSet, bounded coordinate, and boolean on state. Output:
-     * one bitmap bit is updated and success is returned; invalid input leaves
-     * storage untouched. The filesystem v3 parser is the client; generators
-     * and live playback use the address-array API instead.
-     */
-    if (!pattern || !pat_trackValid(track) || !pat_stepValid(step))
-        return 0u;
-    byte = &pattern->step_on[track][step >> 3u];
-    mask = (uint8_t)(1u << (step & 7u));
-    if (on)
-        *byte |= mask;
-    else
-        *byte &= (uint8_t)~mask;
-    return 1u;
-}
-
-void pat_initPatternSet(PatternSet *pattern)
-{
-    /*
-     * Clear a complete legacy PatternSet bridge payload.
-     *
-     * Input: caller-owned 112-byte PatternSet. Output: all seven tracks are
-     * silent. The filesystem discard bridge calls this before parse/save
-     * operations; no live Scene region or default Step record is touched.
-     */
-    if (pattern)
-        memset(pattern, 0, sizeof(*pattern));
-}
-
 void pat_initScene(uint8_t scene_index)
 {
     pat_scene_region_t *region;
@@ -469,6 +410,37 @@ void pat_initScene(uint8_t scene_index)
     memset(region->bitmap, 0, PAT_STACK_SIZE);
     memset(region->bitmap + PAT_STACK_SIZE, 0xFF,
            512u - PAT_STACK_SIZE);
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        region->track_length[track] = NUM_STEPS;
+        region->track_scale[track] = TRACK_SCALE_OFF;
+        region->track_shuffle[track] = 0u;
+    }
+    region->pattern_change_bar = 0u;
+    region->pattern_next = 0u;
+}
+
+/*
+ * Return the resident read-only region for one Scene.
+ *
+ * Inputs: Scene index. Output: the initialized region or NULL for an invalid
+ * index. Filesystem readers use this boundary after pat_initScene() so the
+ * storage owner remains private to PatternData.c.
+ */
+const pat_scene_region_t *pat_sceneRegion(uint8_t scene_index)
+{
+    return scene_indexValid(scene_index) ? &pat_regions[scene_index] : NULL;
+}
+
+/*
+ * Return the resident mutable region for one Scene.
+ *
+ * Inputs: Scene index. Output: writable region or NULL for an invalid index.
+ * The v4 file reader uses this accessor to stream validated bytes directly
+ * into resident storage without a second full-size staging buffer.
+ */
+pat_scene_region_t *pat_sceneRegionMut(uint8_t scene_index)
+{
+    return scene_indexValid(scene_index) ? &pat_regions[scene_index] : NULL;
 }
 
 uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t scene_index)
@@ -698,18 +670,96 @@ void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
     (void)dst_bar;
 }
 
-/* Legacy menu bridge calls are intentionally storage-free while menus migrate. */
-void pat_applyPatternSettingsToMenu(uint8_t s) { (void)s; }
-void pat_applyTrackSettingsToMenu(uint8_t s, uint8_t t) { (void)s; (void)t; }
-void pat_setTrackLength(uint8_t s, uint8_t t, uint8_t v) { (void)s; (void)t; (void)v; }
-void pat_setTrackScale(uint8_t s, uint8_t t, uint8_t v) { (void)s; (void)t; (void)v; }
-void pat_setTrackShuffle(uint8_t s, uint8_t t, uint8_t v) { (void)s; (void)t; (void)v; }
+/*
+ * Repaint the resident global Pattern parameters in the menu buffer.
+ *
+ * Inputs: Scene index. Outputs: PAR_PATTERN_BEAT and PAR_PATTERN_NEXT mirror
+ * the resident v4 fields; invalid Scenes leave the menu untouched.
+ */
+void pat_applyPatternSettingsToMenu(uint8_t scene_index)
+{
+    const pat_scene_region_t *region = pat_sceneRegion(scene_index);
+
+    if (!region)
+        return;
+    parameter_values[PAR_PATTERN_BEAT] = region->pattern_change_bar;
+    parameter_values[PAR_PATTERN_NEXT] = region->pattern_next;
+}
+
+/*
+ * Repaint one resident track's v4 parameters in the menu buffer.
+ *
+ * Inputs: Scene and track. Outputs: length, scale, and shuffle cells mirror
+ * the resident region; invalid coordinates leave the menu untouched.
+ */
+void pat_applyTrackSettingsToMenu(uint8_t scene_index, uint8_t track)
+{
+    const pat_scene_region_t *region = pat_sceneRegion(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    parameter_values[PAR_TRACK_LENGTH] = region->track_length[track];
+    parameter_values[PAR_TRACK_SCALE] = region->track_scale[track];
+    parameter_values[PAR_SHUFFLE] = region->track_shuffle[track];
+}
+
+/* Persist one track-length menu edit in the resident Scene region. */
+void pat_setTrackLength(uint8_t scene_index, uint8_t track, uint8_t value)
+{
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    region->track_length[track] = value;
+    bank_invalidateSdCleanScene(scene_index);
+}
+
+/* Persist one track-scale menu edit in the resident Scene region. */
+void pat_setTrackScale(uint8_t scene_index, uint8_t track, uint8_t value)
+{
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    region->track_scale[track] = value;
+    bank_invalidateSdCleanScene(scene_index);
+}
+
+/* Persist one track-shuffle menu edit in the resident Scene region. */
+void pat_setTrackShuffle(uint8_t scene_index, uint8_t track, uint8_t value)
+{
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    region->track_shuffle[track] = value;
+    bank_invalidateSdCleanScene(scene_index);
+}
 void pat_setActiveAutomationTrack(uint8_t v) { (void)v; }
 void pat_setSelectedStep(uint8_t step) { (void)step; }
 void pat_setStepAutomationDestination(uint8_t s,uint8_t t,uint8_t p,uint8_t l,uint16_t v) {(void)s;(void)t;(void)p;(void)l;(void)v;}
 void pat_setStepAutomationValue(uint8_t s,uint8_t t,uint8_t p,uint8_t l,uint8_t v) {(void)s;(void)t;(void)p;(void)l;(void)v;}
-void pat_setPatternChangeBar(uint8_t s,uint8_t v) {(void)s;(void)v;}
-void pat_setPatternNext(uint8_t s,uint8_t v) {(void)s;(void)v;}
+/* Persist the global Pattern change-bar selection. */
+void pat_setPatternChangeBar(uint8_t scene_index, uint8_t value)
+{
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region)
+        return;
+    region->pattern_change_bar = value;
+    bank_invalidateSdCleanScene(scene_index);
+}
+
+/* Persist the global Pattern-next selection. */
+void pat_setPatternNext(uint8_t scene_index, uint8_t value)
+{
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region)
+        return;
+    region->pattern_next = value;
+    bank_invalidateSdCleanScene(scene_index);
+}
 
 /*
  * Load one selected step's resolved specials into the STEP menu buffer.

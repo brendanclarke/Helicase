@@ -105,20 +105,6 @@
 #define FS_RESIDENT_NAMES_FILENAME ".hcnames"
 
 /*
- * Disconnected legacy PatternSet bridge target.
- *
- * The live Scene no longer embeds PatternSet: PatternData.c owns the
- * Scene-indexed address array, reserved dynamic pool, and free bitmap. The v3
- * text parser/writer still has a PatternSet-shaped interface, so all legacy
- * pattern file traffic is directed here and deliberately discarded. Load
- * parsing may populate this record for validation compatibility; save writes
- * its empty state. Lifetime is the filesystem module lifetime and no live
- * Scene owns or reads this object. Affiliates: filesystem_directPatternTarget,
- * the Scene Load bridge, and the Scene Save pattern writer.
- */
-static PatternSet filesystem_pattern_discard;
-
-/*
  * Safe-write companion for the firmware-owned HCNAMES singleton.
  *
  * Every rewrite is streamed to this distinct root name, synced, and promoted
@@ -142,21 +128,24 @@ static PatternSet filesystem_pattern_discard;
  * Fixed logical row coordinates inside the variable-length `/.hcnames` file.
  *
  * What: the register contains one Bank row, sixteen Scene rows, sixteen Kit
- * rows, and then six Instrument rows for each of sixteen resident Scenes.
- * Why: runtime Instrument lookup/update must compute one stable Scene/slot
- * coordinate without retaining another mapping table. The physical text rows
- * remain trimmed and variable length; these constants describe row identity,
- * not byte offsets. The physical file also carries one `#types` header line
- * before row 0 (see FS_RESIDENT_NAMES_TYPE_HEADER), so a complete register
- * has 130 lines while FS_RESIDENT_NAMES_ROW_COUNT stays 129: data rows only.
+ * rows, six Instrument rows, and one Pattern row for each resident Scene.
+ * Why: runtime Instrument and Pattern lookup/update must compute one stable
+ * Scene/slot coordinate without retaining another mapping table. The physical
+ * text rows remain trimmed and variable length; these constants describe row
+ * identity, not byte offsets. The physical file also carries one `#types`
+ * header line before row 0 (see FS_RESIDENT_NAMES_TYPE_HEADER), so a complete
+ * v4 register has 146 lines while FS_RESIDENT_NAMES_ROW_COUNT stays 145: data
+ * rows only. AutoSave's independent wire image remains 129 rows for S063.
  */
 #define FS_RESIDENT_NAMES_INSTRUMENT_BASE \
     (1u + STORAGE_BANK_SCENE_MAX_SLOTS + STORAGE_BANK_SCENE_MAX_SLOTS)
+#define FS_RESIDENT_NAMES_PATTERN_BASE \
+    (FS_RESIDENT_NAMES_INSTRUMENT_BASE + \
+     (STORAGE_BANK_SCENE_MAX_SLOTS * STORAGE_KIT_SLOT_COUNT))
 #define FS_RESIDENT_NAMES_KIT_BASE \
     (1u + STORAGE_BANK_SCENE_MAX_SLOTS)
 #define FS_RESIDENT_NAMES_ROW_COUNT \
-    (FS_RESIDENT_NAMES_INSTRUMENT_BASE + \
-     (STORAGE_BANK_SCENE_MAX_SLOTS * STORAGE_KIT_SLOT_COUNT))
+    (FS_RESIDENT_NAMES_PATTERN_BASE + STORAGE_BANK_SCENE_MAX_SLOTS)
 /*
  * Instrument-type vocabulary header on the first `.hcnames` line.
  *
@@ -199,7 +188,7 @@ static PatternSet filesystem_pattern_discard;
  * The generalized browser cache has one physical name array for every
  * numbered or typed library. Kit, root Scene, and root Bank indexes use the
  * slot number as the array index, while an Instrument index uses the first N
- * sorted rows. HCNAMES now has its own 129-row mirror, so this allocation can
+ * sorted rows. HCNAMES now has its own 145-row mirror, so this allocation can
  * remain a valid Bank index across resident-name transactions. Keeping this
  * maximum at the largest numbered library lets one SRAM object be disposed and
  * reused instead of allocating one name array per library or Instrument type.
@@ -210,6 +199,7 @@ typedef enum {
     FS_NAME_CACHE_KIT,
     FS_NAME_CACHE_SCENE,
     FS_NAME_CACHE_BANK,
+    FS_NAME_CACHE_PATTERN,
     /* Legacy tag retained for compatibility checks; HCNAMES storage is now dedicated. */
     FS_NAME_CACHE_HCNAMES,
     /* Rebuild-chain selector only: write the retained Bank cache directly.
@@ -224,7 +214,8 @@ typedef enum {
     FS_INTERNAL_OP_NONE,
     FS_INTERNAL_OP_FLUSH_FINISH,
     FS_INTERNAL_OP_CREATE_BOOT_INDEX,
-    /* Boot/runtime writer for slot-ordered Kit/Scene/Bank `.hcindex` rows. */
+    /* Boot/runtime writer for slot-ordered Kit/Scene/Bank/Pattern `.hcindex`
+     * rows. */
     FS_INTERNAL_OP_CREATE_LIBRARY_INDEX,
     /*
      * Boot writer for root `/.hcnames`.
@@ -317,7 +308,8 @@ typedef enum {
      * operations address the Kit row plus all six Instrument rows because a
      * full Kit replacement changes that complete resident identity block.
      * Scene operations borrow/update exactly one Scene row or mask of rows;
-     * they exist because Scene identity no longer lives in scene_t.
+     * Pattern operations update the appended per-Scene Pattern row without
+     * changing the AutoSave wire-format row count.
      */
     FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT,
     FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT,
@@ -325,6 +317,7 @@ typedef enum {
     FS_INTERNAL_OP_UPDATE_HCNAMES_KIT,
     FS_INTERNAL_OP_LOAD_HCNAMES_SCENE,
     FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE,
+    FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN,
     FS_INTERNAL_OP_LOAD_KIT,
     FS_INTERNAL_OP_LOAD_KIT_MORPH,
     FS_INTERNAL_OP_LOAD_SCENE,
@@ -350,6 +343,7 @@ typedef enum {
     FS_INTERNAL_OP_SCAN_KITS,
     FS_INTERNAL_OP_SCAN_SCENES,
     FS_INTERNAL_OP_SCAN_BANKS,
+    FS_INTERNAL_OP_SCAN_PATTERNS,
     /*
      * Preview one selected Bank directory's 00..15 Scene children.
      *
@@ -852,7 +846,7 @@ static void on_delete_tree_complete(afatfsResultCode_t result)
 /*
  * Non-Pattern Scene stage shape.
  *
- * What: one load-time Scene settings image plus its embedded Kit; PatternSet
+ * What: one load-time Scene settings image plus its embedded Kit; PatternData
  * is deliberately absent. Why: Scene settings/Kit validate atomically before
  * Pattern streams directly to final Scene SRAM under the agreed non-atomic
  * Pattern policy. Inputs: sceneset, kitset, and Instrument file parsers.
@@ -1002,7 +996,7 @@ static uint16_t fs_resident_source[FS_RESIDENT_NAMES_ROW_COUNT];
 /*
  * Option 1C: dedicated HCNAMES name mirror.
  *
- * 129 rows x 9 bytes = 1,161 bytes.  HCNAMES readers and writers use this
+ * 145 rows x 9 bytes = 1,305 bytes.  HCNAMES readers and writers use this
  * mirror instead of borrowing fs_list_cache_name, so a normal Bank Load/Save
  * no longer destroys a valid .hcindex cache in the 9,000-byte shared storage.
  *
@@ -1054,10 +1048,10 @@ _Static_assert(sizeof(fs_list_cache_name) ==
                    (FS_LIBRARY_NAME_CACHE_MAX *
                     (STORAGE_KIT_DISPLAY_NAME_LEN + 1u)),
                "the index/HCNAMES cache must remain exactly 9000 bytes");
-_Static_assert(sizeof(fs_resident_source) == 258u,
-               "HCNAMES provenance register must remain 129 x uint16_t");
-_Static_assert(sizeof(hcnames_name_mirror) == 1161u,
-               "Option 1C: HCNAMES mirror must remain exactly 129 x 9 bytes");
+_Static_assert(sizeof(fs_resident_source) == 290u,
+               "HCNAMES provenance register must remain 145 x uint16_t");
+_Static_assert(sizeof(hcnames_name_mirror) == 1305u,
+               "Option 1C: HCNAMES mirror must remain exactly 145 x 9 bytes");
 _Static_assert(sizeof(fs_identity_name) + BANK_DISPLAY_NAME_LEN + 1u == 81u,
                "one Bank plus one Scene, Kit, and six Instrument names is 81 bytes");
 _Static_assert(INSTRUMENT_SLOT_COUNT * INSTRUMENT_PARAM_COUNT <=
@@ -1219,11 +1213,14 @@ static uint16_t op_scene_load_scene_mask = 0u;
 static char op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN + 1u];
 static char op_scene_child_open_name[STORAGE_KIT_FILENAME_MAX];
 static char op_scene_child_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
-static char op_scene_pattern_open_name[STORAGE_KIT_FILENAME_MAX];
+static char op_scene_pattern_open_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_scene_effect_open_name[STORAGE_KIT_FILENAME_MAX];
+/* Pattern identity/source captured while a Scene or root Pattern operation
+ * is in flight; the HCNAMES update uses these bytes after payload close. */
+static char op_pattern_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+static uint16_t op_pattern_source = FS_RESIDENT_SOURCE_UNKNOWN;
 static storage_sceneset_t op_sceneset_state;
 static storage_effect_state_t op_effect_state;
-static storage_pattern_stub_state_t op_pattern_stub_state;
 /*
  * Bank load/save scratch.
  *
@@ -1386,12 +1383,15 @@ static uint8_t op_create_dir_retry = 0u;
  */
 static void filesystem_initSceneStage(filesystem_scene_stage_t *stage);
 static void filesystem_commitSceneStage(void);
-static PatternSet *filesystem_directPatternTarget(void);
 static void filesystem_resetSceneLoadChildDiscovery(void);
 static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot);
 static uint8_t filesystem_nameStartsWithKitSpace(const char *name);
 static uint8_t filesystem_nameHasExtension(const char *name,
                                            const char *extension);
+static void filesystem_copyLongComponent(char *dst, uint16_t cap,
+                                         const char *src);
+static void filesystem_patternDisplayFromFilename(
+    char dst[STORAGE_KIT_DISPLAY_NAME_LEN + 1u], const char *filename);
 static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
                                                     uint16_t morph,
                                                     uint8_t amount);
@@ -1437,6 +1437,9 @@ static void filesystem_autosaveTraceFlushCompleted(void);
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
 static void filesystem_autosaveSetupCompleted(void);
 static void filesystem_clearResidentSourceDirtyFlags(void);
+/* Boot Pattern restore resolves the 145-row HCNAMES hierarchy below. */
+static uint16_t filesystem_bootReaderResolveResidentRow(
+    uint16_t row, uint16_t *resolved_row);
 static void filesystem_setResidentRefreshed(uint16_t row);
 static void filesystem_setResidentSceneRefreshed(uint8_t scene_index);
 static uint8_t filesystem_autosaveDrainHasRefreshWork(void);
@@ -1514,6 +1517,11 @@ static storage_status_t filesystem_readTextLine(afatfsFilePtr_t file,
                                                 uint8_t *line_ready,
                                                 uint8_t *eof);
 static void filesystem_scanBanks_tick(void);
+static void filesystem_scanPatterns_tick(void);
+static void filesystem_loadPattern_tick(void);
+static void filesystem_savePattern_tick(void);
+static void filesystem_startPatternHcnamesUpdate(void);
+static void filesystem_patternHcnamesUpdateComplete(void);
 static void filesystem_scanBankScenes_tick(void);
 static void filesystem_makeNumberedDir(char *dst,
                                        uint16_t slot,
@@ -1547,8 +1555,6 @@ static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
                                            void *raw);
 static uint8_t filesystem_nextEffectPlaceholderLine(char *dst, uint16_t cap,
                                                     void *raw);
-static uint8_t filesystem_nextPatternStubLine(char *dst, uint16_t cap,
-                                              void *raw);
 static uint8_t filesystem_nextBanksetLine(char *dst, uint16_t cap,
                                           void *raw);
 static uint8_t filesystem_appendChar(char *dst, uint16_t cap,
@@ -1558,14 +1564,26 @@ static uint8_t filesystem_appendText(char *dst, uint16_t cap,
 static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
                                                              void *),
                                         void *ctx);
+/* Fixed v4 Pattern header/CRC helpers shared by Scene and library streams. */
+static uint32_t filesystem_patternCrcFeed(uint32_t crc,
+                                          uint32_t offset,
+                                          const uint8_t *src,
+                                          uint16_t length);
+static void filesystem_patternBuildHeader(uint8_t *header,
+                                           const pat_scene_region_t *region);
+static uint8_t filesystem_patternHeaderValid(const uint8_t *header,
+                                             uint16_t *header_size,
+                                             uint16_t *stack_size,
+                                             uint32_t *stored_crc);
 /*
  * Generalized name-index cache.
  *
  * What: stores the currently active library's eight-character display names.
  * Instrument rows occupy the first sorted entries, up to all 1,000 rows;
- * Kit, root Scene, and root Bank rows occupy their direct 000..999 slot
+ * Kit, root Scene, root Bank, and root Pattern rows occupy their direct
+ * 000..999 slot
  * positions so an index line can be turned back into `NNN ` + name without
- * sorting. HCNAMES temporarily occupies its fixed 129 logical rows during
+ * sorting. HCNAMES temporarily occupies its fixed 145 logical rows during
  * Instrument menu entry or targeted post-action update.
  * Why: this is the one SRAM name cache. A type/library transition disposes it
  * and the newly selected `.hcindex` repopulates it, so no per-Instrument,
@@ -1597,8 +1615,9 @@ static fs_name_cache_kind_t op_library_index_kind = FS_NAME_CACHE_NONE;
 /*
  * Durable library-index rebuild chain.
  *
- * What: holds the original completion callback while a physical Kit/Scene/Bank
- * directory scan and its complete slot-ordered `.hcindex` rewrite run after a
+ * What: holds the original completion callback while a physical
+ * Kit/Scene/Bank/Pattern directory scan and its complete slot-ordered
+ * `.hcindex` rewrite run after a
  * flush. Why: a successful numbered-root Save can create, rename, or remove a
  * directory and must not publish completion while `.hcindex` still describes
  * the preceding namespace. Pure Loads never enter this chain: after DSP apply
@@ -1695,6 +1714,8 @@ static void filesystem_prepareLibraryNameCache(fs_name_cache_kind_t kind)
             ? STORAGE_SCENE_MAX_SLOTS
         : (kind == FS_NAME_CACHE_BANK)
             ? STORAGE_BANK_MAX_SLOTS
+        : (kind == FS_NAME_CACHE_PATTERN)
+            ? STORAGE_PATTERN_MAX_SLOTS
             : 0u;
 }
 
@@ -1750,6 +1771,14 @@ static uint8_t filesystem_librarySlotExists(fs_name_cache_kind_t kind,
 static uint32_t op_stream_index = 0;
 /* Also indexes 000..999 `.hcindex` rows, so this must not wrap at 255. */
 static uint16_t op_item_offset = 0;
+/* v4 Pattern stream state: one resident target, one CRC, and bounded offsets. */
+static uint8_t op_pattern_scene = 0u;
+static uint16_t op_pattern_header_size = 0u;
+static uint16_t op_pattern_stack_size = 0u;
+static uint32_t op_pattern_crc = 0u;
+static uint32_t op_pattern_stored_crc = 0u;
+static char op_pattern_filename[AFATFS_LONG_FILENAME_MAX + 1u];
+static uint8_t op_pattern_io_phase = 0u;
 static uint8_t op_loaded_active_pattern_running = 0;
 static uint8_t op_file_version = 0;
 static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
@@ -2708,283 +2737,86 @@ static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint16_t num
     return true;
 }
 
-/* Pattern files are large enough that they must be streamed. These helpers
- * define the on-card byte order explicitly:
- *   name[8]
- *   Step[track-major pattern-major step-major], each Step as 7 bytes
- *   main steps[pattern-major track-major], little-endian uint16_t
- *   pattern settings[pattern], nextPattern then changeBar
- *   track length bytes[pattern-major track-major], optional for old files
- *   track settings extension[pattern-major track-major], optional append-only:
- *     rotate, scale, midiChannel, midiNote
- *   track shuffle extension[pattern-major track-major], optional append-only:
- *     shuffle
- *
- * Phase 2 storage is intentionally not back-compatible with every intermediate
- * bridge experiment. The old single shuffle byte is ignored and no longer
- * written; external Python converters will own migration once the final storage
- * shape settles.
- */
-#define FS_PATTERN_FILE_PATTERN_COUNT 1u
-#define FS_PATTERN_STEP_COUNT     ((uint32_t)NUM_TRACKS * FS_PATTERN_FILE_PATTERN_COUNT * NUM_STEPS)
-#define FS_PATTERN_MAIN_COUNT     ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT * NUM_TRACKS)
-#define FS_PATTERN_SETTINGS_COUNT ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT)
-#define FS_PATTERN_LENGTH_COUNT   ((uint32_t)FS_PATTERN_FILE_PATTERN_COUNT * NUM_TRACKS)
-#define FS_PATTERN_STEP_SIZE      9u
-#define FS_PATTERN_MAIN_SIZE      2u
-#define FS_PATTERN_SETTING_SIZE   2u
-#define FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE 2u
-#define FS_PATTERN_TRACK_SHUFFLE_SIZE 1u
-/*
- * Container version stays at 2 while Phase 2 storage is still provisional.
- * Inputs/clients: saveContainer writes the current bridge payload and optional
- * per-track extensions; loadContainer treats EOF before optional extensions as
- * a valid partial bridge file. Output: runtime code ignores the removed legacy
- * single shuffle byte instead of preserving transitional compatibility.
- */
-#define FS_CONTAINER_VERSION      2u
-
-#if 0 /* Retired binary Step/Pattern/All/Performance bridge; v3 text is below. */
-static void filesystem_patternStepAddress(uint32_t step_index,
-                                          uint8_t *pattern,
-                                          uint8_t *track,
-                                          uint8_t *step)
+/* Feed one bounded v4 Pattern byte range into CRC32C.
+ * Inputs: running CRC, absolute file offset, and accepted file bytes. Output:
+ * the next accumulator, with the four header CRC bytes treated as zero. */
+static uint32_t filesystem_patternCrcFeed(uint32_t crc,
+                                          uint32_t offset,
+                                          const uint8_t *src,
+                                          uint16_t length)
 {
-    uint32_t abs_pat = step_index / NUM_STEPS;
+    uint16_t i;
 
-    *track = (uint8_t)(abs_pat / FS_PATTERN_FILE_PATTERN_COUNT);
-    *pattern = (uint8_t)(abs_pat - ((uint32_t)*track * FS_PATTERN_FILE_PATTERN_COUNT));
-    *step = (uint8_t)(step_index - (abs_pat * NUM_STEPS));
+    if (!src)
+        return crc;
+    for (i = 0u; i < length; i++) {
+        uint32_t absolute = offset + i;
+        uint8_t value = src[i];
+
+        if (absolute >= PATTERN_FILE_CRC_OFFSET &&
+            absolute < PATTERN_FILE_CRC_OFFSET + 4u)
+            value = 0u;
+        crc = autosave_crc32cByteUpdate(crc, value);
+    }
+    return crc;
 }
 
-static void filesystem_patternTrackAddress(uint32_t index,
-                                           uint8_t *pattern,
-                                           uint8_t *track)
+/* Build the fixed 160-byte v4 Pattern header from one resident region. */
+static void filesystem_patternBuildHeader(uint8_t *header,
+                                           const pat_scene_region_t *region)
 {
-    *pattern = (uint8_t)(index / NUM_TRACKS);
-    *track = (uint8_t)(index - ((uint32_t)*pattern * NUM_TRACKS));
-}
+    uint8_t track;
 
-
-/* Legacy pattern-file discard/blank records for bridge slots 1..7.
- *
- * The Phase 2 bridge has one live pattern (slot 0) but still streams the old
- * eight-slot file layout. Save paths read these zeroed records for slots 1..7;
- * load paths write into them so old files can be consumed without creating live
- * pattern slots that Phase 3 will delete. */
-static Step filesystem_discardStep;
-static uint16_t filesystem_discardMainSteps;
-static PatternSetting filesystem_discardPatternSetting;
-static LengthRotate filesystem_discardLengthRotate = {
-    NUM_STEPS, 0u, TRACK_SCALE_OFF, 0u
-};
-
-static uint8_t __attribute__((unused)) filesystem_defaultTrackMidiChannel(
-    uint8_t track)
-{
-    /*
-     * Pattern files can omit the track-settings extension. In that case the
-     * loader supplies a valid PatternData-owned channel in menu form so old
-     * files cannot leave zero in a 1..16 channel field.
-     */
-    return (uint8_t)((track < 15u) ? (track + 1u) : 1u);
-}
-
-static void filesystem_defaultTrackSettings(LengthRotate *lr, uint8_t track)
-{
-    /*
-     * Default all fields that were not present in the legacy one-byte length
-     * stream. The following optional extensions may overwrite rotate, scale,
-     * midiChannel, midiNote, and shuffle for new pattern/container saves.
-     * Legacy single-shuffle storage is intentionally ignored in Phase 2, so a
-     * missing per-track shuffle extension means shuffle defaults to off.
-     */
-    if (!lr)
+    if (!header || !region)
         return;
-    lr->rotate = 0u;
-    lr->scale = TRACK_SCALE_OFF;
-    lr->shuffle = 0u;
-    (void)track;
-}
-static Step *filesystem_patternStepPtr(uint8_t pattern, uint8_t track, uint8_t step)
-{
-    /*
-     * Returns the PatternData Step record used by pattern save/load streaming.
-     *
-     * Why this exists: filesystem serializes pattern files one logical record at
-     * a time and should not know the internal array names. PatternData owns
-     * storage, so filesystem reaches it through pat_stepPtr().
-     *
-     * Running-load rule: if the loaded pattern is the currently playing
-     * seq_activePattern, writes go to PATTERNDATA_STAGING_PATTERN. Sequencer
-     * later commits that staging buffer at a safe pattern boundary.
-     *
-     * Inputs: pattern/track/step coordinates from the file stream. Output:
-     * mutable Step pointer or NULL when coordinates are invalid.
-     *
-     * Risk: save paths also use this helper. During an active-pattern load,
-     * reading that same pattern would read staging data by design, so callers
-     * must not overlap save/load operations.
-     */
-    if (pattern != 0u)
-        return &filesystem_discardStep;
-    return pat_stepPtr(scene_getActiveIndex(), track, step);
+    memset(header, 0, PATTERN_FILE_HEADER_BYTES);
+    header[0] = 'P'; header[1] = 'A'; header[2] = 'T'; header[3] = '4';
+    header[4] = (uint8_t)PATTERN_FILE_VERSION;
+    header[5] = (uint8_t)(PATTERN_FILE_VERSION >> 8u);
+    header[6] = (uint8_t)PAT_STACK_SIZE;
+    header[7] = (uint8_t)(PAT_STACK_SIZE >> 8u);
+    header[8] = (uint8_t)PATTERN_FILE_HEADER_BYTES;
+    header[9] = (uint8_t)(PATTERN_FILE_HEADER_BYTES >> 8u);
+    header[32] = region->pattern_change_bar;
+    header[33] = region->pattern_next;
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        uint16_t base = (uint16_t)(48u +
+                                   track * PATTERN_FILE_TRACK_HEADER_BYTES);
+        header[base] = region->track_length[track];
+        header[base + 1u] = region->track_scale[track];
+        header[base + 2u] = region->track_shuffle[track];
+    }
 }
 
-static uint16_t *filesystem_patternMainPtr(uint8_t pattern, uint8_t track)
+/* Validate v4 geometry and return the file header/pool/checksum fields. */
+static uint8_t filesystem_patternHeaderValid(const uint8_t *header,
+                                             uint16_t *header_size,
+                                             uint16_t *stack_size,
+                                             uint32_t *stored_crc)
 {
-    /*
-     * Returns the PatternData main-step bitfield for pattern serialization.
-     *
-     * Main steps are Pattern-owned track data. The staging rule mirrors
-     * filesystem_patternStepPtr() so active-pattern loads do not modify the
-     * currently sounding pattern until Sequencer commits them.
-     */
-    if (pattern != 0u)
-        return &filesystem_discardMainSteps;
-    return pat_mainStepsPtr(scene_getActiveIndex(), track);
-}
+    uint16_t version;
+    uint16_t file_stack;
+    uint16_t file_header;
 
-static PatternSetting *filesystem_patternSettingPtr(uint8_t pattern)
-{
-    /*
-     * Returns PatternData's per-pattern settings record for serialization.
-     *
-     * Pattern settings include nextPattern/changeBar. They belong with Pattern
-     * data rather than Sequencer globals because they are saved with .pat files.
-     * Active-pattern loads use the staging pattern for boundary-safe commit.
-     */
-    if (pattern != 0u)
-        return &filesystem_discardPatternSetting;
-    return pat_patternSettingPtr(scene_getActiveIndex());
-}
-
-static LengthRotate *filesystem_patternLengthPtr(uint8_t pattern, uint8_t track)
-{
-    /*
-     * Returns PatternData's per-pattern/per-track length/rotation record.
-     *
-     * Length/rotation moved under PatternData during FrontPanelParser removal.
-     * Filesystem streams those bytes directly from the owner instead of asking
-     * Sequencer/frontPanelParser for encoded values.
-     */
-    if (pattern != 0u)
-        return &filesystem_discardLengthRotate;
-    return pat_lengthRotatePtr(scene_getActiveIndex(), track);
-}
-
-static Step *filesystem_patternSetStepPtr(PatternSet *pattern_set,
-                                          uint8_t pattern,
-                                          uint8_t track,
-                                          uint8_t step)
-{
-    /*
-     * Borrow one Step from a staged Scene PatternSet.
-     *
-     * Scene Load must not write through live PatternData while it is still
-     * validating sibling files. Inputs are the bridge file coordinates; output
-     * is a mutable staged Step for pattern 0 or the discard record for legacy
-     * non-live patterns. The bounds mirror PatternData's current one-pattern
-     * bridge shape.
-     */
-    if (pattern != 0u)
-        return &filesystem_discardStep;
-    if (!pattern_set || track >= NUM_TRACKS || step >= NUM_STEPS)
-        return NULL;
-    return &pattern_set->pat_subStepPattern[track][step];
-}
-
-static uint16_t *filesystem_patternSetMainPtr(PatternSet *pattern_set,
-                                              uint8_t pattern,
-                                              uint8_t track)
-{
-    if (pattern != 0u)
-        return &filesystem_discardMainSteps;
-    if (!pattern_set || track >= NUM_TRACKS)
-        return NULL;
-    return &pattern_set->pat_mainSteps[track];
-}
-
-static PatternSetting *filesystem_patternSetSettingPtr(PatternSet *pattern_set,
-                                                       uint8_t pattern)
-{
-    if (pattern != 0u)
-        return &filesystem_discardPatternSetting;
-    return pattern_set ? &pattern_set->pat_patternSettings : NULL;
-}
-
-static LengthRotate *filesystem_patternSetLengthPtr(PatternSet *pattern_set,
-                                                    uint8_t pattern,
-                                                    uint8_t track)
-{
-    if (pattern != 0u)
-        return &filesystem_discardLengthRotate;
-    if (!pattern_set || track >= NUM_TRACKS)
-        return NULL;
-    return &pattern_set->pat_patternLengthRotate[track];
-}
-
-static void filesystem_packStep(const Step *step, uint8_t *buf)
-{
-    buf[0] = step->volume;
-    buf[1] = step->prob;
-    buf[2] = step->note;
-    buf[3] = (uint8_t)(step->param1Nr & 0xffu);
-    buf[4] = (uint8_t)(step->param1Nr >> 8);
-    buf[5] = step->param1Val;
-    buf[6] = (uint8_t)(step->param2Nr & 0xffu);
-    buf[7] = (uint8_t)(step->param2Nr >> 8);
-    buf[8] = step->param2Val;
-}
-
-static void filesystem_unpackStep(Step *step, const uint8_t *buf)
-{
-    instrument_param_id_t param;
-
-    /*
-     * Unpack one stored Step and normalize legacy automation destinations.
-     *
-     * Inputs: on-card Step bytes. Outputs: Step fields are restored, but
-     * automation destinations outside the legacy automationNode 1..254 range
-     * collapse to NO_AUTOMATION. Why this must exist: current Step storage uses
-     * a uint16_t field, and old/default/off values may be 0xffff; playback's
-     * legacy automation bridge indexes a 255-entry MIDI CC history table and
-     * must never receive those wide sentinels.
-     */
-    step->volume = buf[0];
-    step->prob = buf[1];
-    step->note = buf[2];
-    param = (instrument_param_id_t)buf[3] |
-            ((instrument_param_id_t)buf[4] << 8);
-    step->param1Nr = (param > 0u && param < NO_AUTOMATION)
-        ? param
-        : NO_AUTOMATION;
-    step->param1Val = buf[5];
-    param = (instrument_param_id_t)buf[6] |
-            ((instrument_param_id_t)buf[7] << 8);
-    step->param2Nr = (param > 0u && param < NO_AUTOMATION)
-        ? param
-        : NO_AUTOMATION;
-    step->param2Val = buf[8];
-}
-#endif
-
-static uint32_t filesystem_writeStreamChunk(const uint8_t *buf, uint8_t len)
-{
-    uint32_t n = afatfs_fwrite(op_file, buf + op_item_offset,
-                               (uint32_t)(len - op_item_offset));
-    op_item_offset = (uint8_t)(op_item_offset + n);
-    op_bytes_done += n;
-    return n;
-}
-
-static uint32_t filesystem_readStreamChunk(uint8_t *buf, uint8_t len)
-{
-    uint32_t n = afatfs_fread(op_file, buf + op_item_offset,
-                              (uint32_t)(len - op_item_offset));
-    op_item_offset = (uint8_t)(op_item_offset + n);
-    op_bytes_done += n;
-    return n;
+    if (!header || !header_size || !stack_size || !stored_crc ||
+        header[0] != 'P' || header[1] != 'A' ||
+        header[2] != 'T' || header[3] != '4')
+        return 0u;
+    version = (uint16_t)header[4] | ((uint16_t)header[5] << 8u);
+    file_stack = (uint16_t)header[6] | ((uint16_t)header[7] << 8u);
+    file_header = (uint16_t)header[8] | ((uint16_t)header[9] << 8u);
+    if (version != PATTERN_FILE_VERSION ||
+        file_stack > PAT_STACK_SIZE ||
+        file_header < PATTERN_FILE_HEADER_BYTES ||
+        file_header > sizeof(staging_buf))
+        return 0u;
+    *header_size = file_header;
+    *stack_size = file_stack;
+    *stored_crc = (uint32_t)header[PATTERN_FILE_CRC_OFFSET] |
+                  ((uint32_t)header[PATTERN_FILE_CRC_OFFSET + 1u] << 8u) |
+                  ((uint32_t)header[PATTERN_FILE_CRC_OFFSET + 2u] << 16u) |
+                  ((uint32_t)header[PATTERN_FILE_CRC_OFFSET + 3u] << 24u);
+    return 1u;
 }
 
 /*
@@ -4011,7 +3843,8 @@ static void filesystem_beginInstrumentIndexRecovery(void)
 
 /* Start the selected scan/index or direct-index chain after a save flush.
  *
- * What: ordinary Kit/Scene/Bank kinds use the boot-equivalent physical scan;
+ * What: ordinary Kit/Scene/Bank/Pattern kinds use the boot-equivalent
+ * physical scan;
  * FS_NAME_CACHE_BANK_DIRECT_WRITE skips only that scan and starts the same
  * complete Bank `.hcindex` writer from a precondition-validated retained cache.
  * Why: Save can create, rename, duplicate, or otherwise make a cache uncertain,
@@ -4062,6 +3895,9 @@ static void filesystem_startLibraryIndexRebuild(void)
             ? filesystem_requestScanScenes(filesystem_libraryIndexRebuildScanComplete)
             : (kind == FS_NAME_CACHE_BANK)
                 ? filesystem_requestScanBanks(filesystem_libraryIndexRebuildScanComplete)
+                : (kind == FS_NAME_CACHE_PATTERN)
+                    ? filesystem_requestScanPatterns(
+                        filesystem_libraryIndexRebuildScanComplete)
                 : false;
     if (!started) {
         filesystem_makeNamedErrorCode("Idx", 0u);
@@ -4839,7 +4675,7 @@ static void filesystem_loadInstrumentIndex_tick(void)
  * operation uses the same single name cache that the menu reads, then returns
  * to root and passes through filesystem_finish() for the normal FAT flush.
  * Inputs: op_library_index_kind and its already-populated shared cache.
- * Clients: boot index refresh and successful Kit/Scene/Bank saves.
+ * Clients: boot index refresh and successful Kit/Scene/Bank/Pattern saves.
  * The root directory is opened before any mkdir fallback so index generation
  * cannot duplicate a host-created LFN root component.
  */
@@ -4849,8 +4685,10 @@ static void filesystem_createLibraryIndex_tick(void)
         ? STORAGE_ROOT_KIT
         : (op_library_index_kind == FS_NAME_CACHE_SCENE)
             ? STORAGE_ROOT_SCENE
-            : (op_library_index_kind == FS_NAME_CACHE_BANK)
-                ? STORAGE_ROOT_BANK
+        : (op_library_index_kind == FS_NAME_CACHE_BANK)
+            ? STORAGE_ROOT_BANK
+            : (op_library_index_kind == FS_NAME_CACHE_PATTERN)
+                ? STORAGE_ROOT_PATTERN
             : NULL;
 
     switch (op_phase) {
@@ -5472,6 +5310,14 @@ static uint16_t filesystem_residentSceneRow(uint8_t scene_index)
     return (uint16_t)(1u + scene_index);
 }
 
+/* Convert one resident Scene coordinate into its appended Pattern row. */
+static uint16_t filesystem_residentPatternRow(uint8_t scene_index)
+{
+    if (scene_index >= STORAGE_BANK_SCENE_MAX_SLOTS)
+        return FS_RESIDENT_NAMES_ROW_COUNT;
+    return (uint16_t)(FS_RESIDENT_NAMES_PATTERN_BASE + scene_index);
+}
+
 static const char *filesystem_cachedResidentName(uint16_t row)
 {
     /*
@@ -5501,7 +5347,8 @@ static uint8_t filesystem_residentSourceValid(uint16_t row, uint16_t source)
         return 1u;
     }
     return (uint8_t)(source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT &&
-                     row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE);
+                     row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE &&
+                     row < FS_RESIDENT_NAMES_PATTERN_BASE);
 }
 
 uint16_t filesystem_residentSource(uint16_t row)
@@ -5564,7 +5411,12 @@ uint16_t filesystem_resolveResidentSource(uint16_t row,
                 *resolved_row = row;
             return source;
         }
-        if (row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE) {
+        if (row >= FS_RESIDENT_NAMES_PATTERN_BASE) {
+            /* Pattern rows are direct library identities or inherit through
+             * their resident Scene; they do not carry Instrument type text. */
+            row = (uint16_t)(1u +
+                             (row - FS_RESIDENT_NAMES_PATTERN_BASE));
+        } else if (row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE) {
             row = (uint16_t)(FS_RESIDENT_NAMES_KIT_BASE +
                              ((row - FS_RESIDENT_NAMES_INSTRUMENT_BASE) /
                               STORAGE_KIT_SLOT_COUNT));
@@ -5756,7 +5608,10 @@ static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
          * that field position is the mandatory type column instead; the
          * refresh witness, if present, moves to the fourth field.
          */
-        if (row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE) {
+        if (row >= FS_RESIDENT_NAMES_PATTERN_BASE) {
+            /* Pattern rows have the ordinary source/R suffix but no type. */
+            refresh_field = second_tab ? second_tab + 1u : NULL;
+        } else if (row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE) {
             /*
              * Validate the Instrument type field from HCNAMES rows (33..128).
              *
@@ -5900,12 +5755,13 @@ static void filesystem_setResidentSceneRefreshed(uint8_t scene_index)
     /*
      * Mark the Scene identity and its complete embedded Kit hierarchy together.
      * Inputs: one successfully committed resident Scene Load/Save. Output:
-     * Scene, Kit, and six Instrument rows carry the same refresh witness, so
+     * Scene, Kit, Pattern, and six Instrument rows carry the same refresh witness, so
      * autosave can clear each flag independently only after its own payload
      * interval has become clean. No additional row list or bitmap is retained.
      */
     filesystem_setResidentRefreshed(filesystem_residentSceneRow(scene_index));
     filesystem_setResidentRefreshed(filesystem_residentKitRow(scene_index));
+    filesystem_setResidentRefreshed(filesystem_residentPatternRow(scene_index));
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++)
         filesystem_setResidentRefreshed(
             filesystem_residentInstrumentRow(scene_index, slot));
@@ -6053,7 +5909,7 @@ static void filesystem_cacheCurrentResidentSceneNames(void)
  * and the identity store (FS_IDENTITY_KIT_ROW,
  * FS_IDENTITY_INSTRUMENT_ROW_0..5) staged by the Scene action's commit
  * path before this update ran. Outputs: hcnames_name_mirror[] cells for
- * rows 17..32 and 33..128 of every selected Scene; no file I/O and no
+ * rows 17..32, 33..128, and 129..144 of every selected Scene; no file I/O and no
  * source-cell or refreshed-witness change (sources and R were staged at
  * commit).
  *
@@ -6093,6 +5949,55 @@ static void filesystem_cacheCurrentResidentSceneChildNames(void)
                 row, filesystem_identityName((uint8_t)(
                     FS_IDENTITY_INSTRUMENT_ROW_0 + slot)));
         }
+        row = filesystem_residentPatternRow(scene_index);
+        if (row < FS_RESIDENT_NAMES_ROW_COUNT) {
+            filesystem_cacheResidentName(row, op_pattern_display_name);
+            (void)filesystem_setResidentSource(row, op_pattern_source);
+        }
+    }
+}
+
+/* Overlay a root Pattern operation into its appended resident HCNAMES row. */
+static void filesystem_cacheCurrentResidentPatternName(void)
+{
+    uint16_t row = filesystem_residentPatternRow(op_pattern_scene);
+
+    if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
+        return;
+    filesystem_cacheResidentName(row, op_pattern_display_name);
+    (void)filesystem_setResidentSource(row, op_pattern_source);
+    filesystem_setResidentRefreshed(row);
+}
+
+/* Hand a completed root Pattern payload to the shared HCNAMES transaction.
+ * Inputs: op_pattern_scene/display/source and the root Pattern owner. Output:
+ * the appended resident row is published through the normal read/merge/temp/
+ * rename/flush path. Pattern Save parks its original callback until the
+ * physical `/Pattern/.hcindex` rebuild also completes; Pattern Load does not. */
+static void filesystem_startPatternHcnamesUpdate(void)
+{
+    if (current_op == FS_INTERNAL_OP_SAVE_PATTERN) {
+        op_library_index_rebuild_kind = FS_NAME_CACHE_PATTERN;
+        op_library_index_rebuild_pending = 1u;
+        op_library_index_rebuild_callback = completion_callback;
+        completion_callback = filesystem_patternHcnamesUpdateComplete;
+    }
+    current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN;
+    op_phase = 0u;
+}
+
+/* Continue or terminate a root Pattern Save after HCNAMES is durable. */
+static void filesystem_patternHcnamesUpdateComplete(void)
+{
+    if (status != FS_STATUS_DONE) {
+        filesystem_completeLibraryIndexRebuild(status);
+        return;
+    }
+    status = FS_STATUS_IDLE;
+    current_op = FS_INTERNAL_OP_NONE;
+    if (!filesystem_requestScanPatterns(
+            filesystem_libraryIndexRebuildScanComplete)) {
+        filesystem_completeLibraryIndexRebuild(FS_STATUS_ERROR);
     }
 }
 
@@ -6138,7 +6043,8 @@ static void filesystem_residentNames_tick(void)
     const uint8_t update = (uint8_t)(
         current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT ||
         current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT ||
-        current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE);
+        current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE ||
+        current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN);
     fs_hcnames_probe_result_t probe_result;
 
     /*
@@ -6269,6 +6175,8 @@ static void filesystem_residentNames_tick(void)
         else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE) {
             filesystem_cacheCurrentResidentSceneNames();
             filesystem_cacheCurrentResidentSceneChildNames();
+        } else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN) {
+            filesystem_cacheCurrentResidentPatternName();
         } else
             filesystem_cacheCurrentResidentInstrumentNames();
         /* The source image was read successfully, but the writer below must
@@ -6488,6 +6396,8 @@ static void filesystem_residentNames_tick(void)
              * six Instrument rows, not only the Scene-row names. */
             filesystem_cacheCurrentResidentSceneNames();
             filesystem_cacheCurrentResidentSceneChildNames();
+        } else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN) {
+            filesystem_cacheCurrentResidentPatternName();
         } else
             filesystem_cacheCurrentResidentInstrumentNames();
         op_file_ready = false;
@@ -6720,14 +6630,14 @@ static void filesystem_ensureAutosaveFiles_tick(void)
          * Recover a durable HCNAMES temp file before reading the live file.
          *
          * Inputs: the optional synced `.hcnamtmp` left by an interrupted
-         * rewrite. Output: a temp containing exactly 129 parseable rows is
+         * rewrite. Output: a temp containing exactly 145 parseable rows is
          * promoted with remove-old/rename; an invalid temp is removed; a
          * missing temp falls through to the existing live-register read. The
          * row counter and parser use operation scratch, so boot recovery adds
          * no SRAM or filesystem handle. `op_file_version` is borrowed only as
          * the one-bit prelude state until normal A/B ensure begins. A temp is
          * current only when it begins with the #types header line (validated
-         * in phase 21) followed by exactly 129 parseable data rows.
+         * in phase 21) followed by exactly 145 parseable data rows.
          */
         if (op_file_version == 0u) {
             if (!afatfs_chdir(NULL))
@@ -7190,7 +7100,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         return;
     }
 
-    case 16: /* VALIDATE ALL 129 TEMP HCNAMES DATA ROWS AFTER THE HEADER */
+    case 16: /* VALIDATE ALL 145 TEMP HCNAMES DATA ROWS AFTER THE HEADER */
     {
         uint8_t line_ready = 0u;
         uint8_t eof = 0u;
@@ -7235,7 +7145,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         op_file = NULL;
         /* A complete row count is necessary but not sufficient: a parser or
          * close error must also force discard, otherwise a partial temp can be
-         * promoted merely because its last readable row happened to be 129. */
+         * promoted merely because its last readable row happened to be 145. */
         op_stream_index = (uint32_t)(
             op_file_version == 2u &&
             op_item_offset == FS_RESIDENT_NAMES_ROW_COUNT &&
@@ -7386,7 +7296,7 @@ static uint8_t filesystem_autosaveDrainHasRefreshWork(void)
      *
      * Inputs: the durable in-session HCNAMES mirror, bit-13 refresh witnesses,
      * and Autosave.c's canonical dirty mask. Output: one boolean deciding
-     * whether this successful drain needs a full 129-row HCNAMES rewrite.
+     * whether this successful drain needs a full 145-row HCNAMES rewrite.
      * Invalid mirror state fails closed: a stale/empty image must never be
      * serialized over the physical register. The scan is bounded and uses no
      * additional SRAM.
@@ -9146,6 +9056,8 @@ static void filesystem_libraryIndexRebuildScanComplete(void)
         ? FS_FILE_KIT
         : (op_library_index_rebuild_kind == FS_NAME_CACHE_SCENE)
             ? FS_FILE_SCENE : FS_FILE_BANK;
+    if (op_library_index_rebuild_kind == FS_NAME_CACHE_PATTERN)
+        file_type = FS_FILE_PATTERN;
 
     if (scan_status != FS_STATUS_DONE) {
         filesystem_completeLibraryIndexRebuild(scan_status);
@@ -9186,7 +9098,8 @@ static void filesystem_libraryIndexRebuildWriteComplete(void)
  * occupancy arrays are rebuilt from non-empty rows so payload loaders can
  * validate a selection without retaining another display-name array.
  * Inputs: op_library_index_kind captured by the public request. Clients: the
- * top-level Load/Save menu after entering Kit, KitMrp, root Scene, or Bank.
+ * top-level Load/Save menu after entering Kit, KitMrp, root Scene, Bank, or
+ * Pattern.
  */
 static void filesystem_loadLibraryIndex_tick(void)
 {
@@ -9194,8 +9107,10 @@ static void filesystem_loadLibraryIndex_tick(void)
         ? STORAGE_ROOT_KIT
         : (op_library_index_kind == FS_NAME_CACHE_SCENE)
             ? STORAGE_ROOT_SCENE
-            : (op_library_index_kind == FS_NAME_CACHE_BANK)
+        : (op_library_index_kind == FS_NAME_CACHE_BANK)
                 ? STORAGE_ROOT_BANK
+                : (op_library_index_kind == FS_NAME_CACHE_PATTERN)
+                    ? STORAGE_ROOT_PATTERN
                 : NULL;
 
     switch (op_phase) {
@@ -9710,6 +9625,60 @@ static void filesystem_recordSavedBankDirectory(const char *display_name,
     memcpy(fs_list_cache_name[slot], display,
            STORAGE_KIT_DISPLAY_NAME_LEN + 1u);
     (void)open_name;
+}
+
+/* Record one numbered root Pattern file in the slot-ordered cache.
+ * Inputs: an LFN/SFN display component such as `012 intro.pat`. Output: the
+ * eight-cell Pattern name at slot 012 when the component is a valid v4 name;
+ * malformed files are ignored so the browser never offers an unopenable slot. */
+static void filesystem_recordPatternFile(const char *filename)
+{
+    uint16_t slot;
+    uint16_t length;
+    uint16_t begin;
+    uint16_t end;
+    char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+    uint8_t i;
+
+    if (!filename || filename[0] < '0' || filename[0] > '9' ||
+        filename[1] < '0' || filename[1] > '9' ||
+        filename[2] < '0' || filename[2] > '9' ||
+        (filename[3] != ' ' && filename[3] != '_')) {
+        return;
+    }
+    length = (uint16_t)strlen(filename);
+    if (length < 9u || length < 4u ||
+        filename[length - 4u] != '.' ||
+        (filename[length - 3u] != 'p' && filename[length - 3u] != 'P') ||
+        (filename[length - 2u] != 'a' && filename[length - 2u] != 'A') ||
+        (filename[length - 1u] != 't' && filename[length - 1u] != 'T')) {
+        return;
+    }
+    slot = (uint16_t)((uint16_t)(filename[0] - '0') * 100u +
+                      (uint16_t)(filename[1] - '0') * 10u +
+                      (uint16_t)(filename[2] - '0'));
+    if (slot >= STORAGE_PATTERN_MAX_SLOTS)
+        return;
+    begin = 4u;
+    end = (uint16_t)(length - 4u);
+    while (end > begin && filename[end - 1u] == ' ')
+        end--;
+    if (end == begin)
+        return;
+    memset(display, ' ', sizeof(display));
+    for (i = 0u; i < STORAGE_KIT_DISPLAY_NAME_LEN &&
+                  begin + i < end; i++) {
+        char c = filename[begin + i];
+        display[i] = (c >= 0x20 && c <= 0x7e) ? c : '_';
+    }
+    display[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    if (filesystem_librarySlotExists(FS_NAME_CACHE_PATTERN, slot) &&
+        !filesystem_displayPrecedesCached(
+            display,
+            filesystem_cachedLibraryName(FS_NAME_CACHE_PATTERN, slot))) {
+        return;
+    }
+    memcpy(fs_list_cache_name[slot], display, sizeof(display));
 }
 
 /* Decide whether Bank Save may bypass the post-write physical root scan.
@@ -10653,8 +10622,8 @@ _Static_assert(sizeof(text_buf_pos) + sizeof(text_buf_len) == 4u,
 _Static_assert(sizeof(hcnames_name_mirror) + sizeof(hcnames_mirror_valid) +
                sizeof(op_bank_child_scratch) +
                sizeof(text_buf_pos) + sizeof(text_buf_len) +
-               sizeof(op_bank_cwd_at_parent) == 1311u,
-               "Option 1 total SRAM1 must be exactly 1311 bytes (within 1320-byte reservation)");
+               sizeof(op_bank_cwd_at_parent) == 1455u,
+               "Option 1 total SRAM1 must be exactly 1455 bytes (within the S063 reservation)");
 
 static void filesystem_resetTextReader(void)
 {
@@ -11398,9 +11367,10 @@ static void filesystem_loadKitDirectory_tick(void)
 ** The loader enters Scene/<NNN Name>/ from the root Scene scan cache, discovers
 ** child filenames from actual FAT entries, parses sceneset.scg into
 ** the separate Scene settings/Kit stage, validates that non-Pattern
-** payload, commits it to final Scene SRAM, then parses the `.pat` bridge
-** directly into the final PatternSet. The first direct destination is mirrored
-** to any other selected destination after a successful Pattern read.
+** payload, commits it to final Scene SRAM, then parses the named v4 Pattern
+** child directly into the final PatternData region. The first direct
+** destination is mirrored to any other selected destination after a
+** successful Pattern read.
 **
 ** Inputs: op_slot and op_scene_load_scene_mask are set by
 ** filesystem_requestLoadSceneForScenes(). Outputs: selected resident Scenes
@@ -11615,10 +11585,22 @@ static void filesystem_loadSceneDirectory_tick(void)
                                         &op_object.id.displayName[4]);
             }
         } else if (op_object.id.kind == AFATFS_OBJECT_FILE) {
-            if (op_scene_pattern_open_name[0] == '\0' &&
-                filesystem_nameHasExtension(op_object.id.displayName, ".pat")) {
-                storage_copyFilename(op_scene_pattern_open_name,
-                                     op_object.id.shortName);
+            if (filesystem_nameHasExtension(op_object.id.displayName, ".pat")) {
+                if (op_scene_pattern_open_name[0] != '\0') {
+                    /* RQ1: a Scene must contain exactly one Pattern child. */
+                    filesystem_setPresetNameInvalid();
+                    op_close_status = FS_STATUS_ERROR;
+                    op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+                    op_phase = 10u;
+                    return;
+                }
+                filesystem_copyLongComponent(
+                    op_scene_pattern_open_name,
+                    sizeof(op_scene_pattern_open_name),
+                    op_object.id.displayName);
+                filesystem_patternDisplayFromFilename(
+                    op_pattern_display_name, op_scene_pattern_open_name);
+                op_pattern_source = FS_RESIDENT_SOURCE_INHERIT;
             } else if (op_scene_effect_open_name[0] == '\0' &&
                        filesystem_nameHasExtension(op_object.id.displayName,
                                                    ".fx")) {
@@ -12128,7 +12110,7 @@ static void filesystem_loadSceneDirectory_tick(void)
              *
              * Inputs: current directory is the embedded Kit child. Output:
              * one parent step returns to the Bank-local Scene folder so the
-             * already-scanned `pattern.pat` and `effects.fx` open relative to
+             * already-scanned named Pattern and `effects.fx` children open relative to
              * `SS Scene/`. The root Scene path below must not run here,
              * because it would leave the Bank and reopen `/Scene/NNN`, which is
              * a different library namespace.
@@ -12242,351 +12224,258 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 44;
         return;
 
-    case 44: /* OPEN bridge pattern */
-        if (filesystem_bankPayloadDetailActive())
-            filesystem_bootLoggingSetBankSceneDetail('P');
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(op_scene_pattern_open_name, "r", on_file_opened))
-            return;
-        op_phase = 45;
-        return;
-
-    case 45: /* WAIT bridge pattern */
-        if (!op_file_ready) return;
-        if (!op_file) {
-            filesystem_setPresetNameInvalid();
-            op_close_status = FS_STATUS_ERROR;
-            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
-            op_phase = 62;
-            return;
-        }
-        op_stream_index = 0u;
-        op_item_offset = 0u;
-        op_phase = 46;
-        return;
-
-    case 46: /* PROBE text-only v3/v2/v1 pattern file */
-    {
-        uint32_t n;
-
-        /*
-         * Scene patterns now have two accepted wire shapes.
-         *
-         * New Scene/Bank-local Scene Save writes text beginning with "format=".
-         * Version 1 is an empty placeholder, v2 imports active bits only, and
-         * v3 is the emitted hex bitmap. Binary Step streams are rejected:
-         * accepting them would require retired Step/length/automation storage.
-         */
-        if (op_item_offset < 7u) {
-            n = filesystem_readStreamChunk(staging_buf, 7u);
-            if (op_item_offset < 7u) {
-                if (n == 0u && afatfs_feof(op_file)) {
-                    filesystem_setPresetNameInvalid();
-                    op_close_status = FS_STATUS_ERROR;
-                    op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
-                    op_phase = 54;
-                }
-                return;
-            }
-        }
-        if (op_item_offset == 7u &&
-            staging_buf[0] == 'f' && staging_buf[1] == 'o' &&
-            staging_buf[2] == 'r' && staging_buf[3] == 'm' &&
-            staging_buf[4] == 'a' && staging_buf[5] == 't' &&
-            staging_buf[6] == '=') {
-            /* Reset the discard once per parsed file. The active text parser
-             * requests the target once per line, so resetting in the accessor
-             * would erase previously parsed track rows. */
-            pat_initPatternSet(&filesystem_pattern_discard);
-            storage_patternStubStateInit(&op_pattern_stub_state);
-            memcpy(op_line_buf, "format=", 7u);
-            op_line_len = 7u;
-            op_phase = 53;
-            return;
-        }
-        (void)n;
-        filesystem_setPresetNameInvalid();
-        op_close_status = FS_STATUS_ERROR;
-        op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
-        op_phase = 54;
-        return;
-    }
-
-#if 0 /* Retired binary Step reader phases. */
-    case 47: /* READ pattern steps */
-    {
-        uint8_t pattern, track, step_nr;
-        Step *step;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_STEP_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 48;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
-        if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
-            filesystem_patternStepAddress(op_stream_index, &pattern, &track,
-                                          &step_nr);
-            step = filesystem_patternSetStepPtr(filesystem_directPatternTarget(),
-                                                pattern, track, step_nr);
-            if (!step) {
-                filesystem_setPresetNameInvalid();
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 54;
-                return;
-            }
-            filesystem_unpackStep(step, staging_buf);
-            op_item_offset = 0u;
-            op_stream_index++;
-        } else if (n == 0u && afatfs_feof(op_file)) {
-            filesystem_setPresetNameInvalid();
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 54;
-        }
-        return;
-    }
-
-    case 48: /* READ pattern main steps */
-    {
-        uint8_t pattern, track;
-        uint16_t *main_steps;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_MAIN_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 49;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
-        if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            main_steps = filesystem_patternSetMainPtr(filesystem_directPatternTarget(),
-                                                      pattern, track);
-            if (!main_steps) {
-                filesystem_setPresetNameInvalid();
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 54;
-                return;
-            }
-            *main_steps = (uint16_t)staging_buf[0] |
-                          ((uint16_t)staging_buf[1] << 8);
-            op_item_offset = 0u;
-            op_stream_index++;
-        } else if (n == 0u && afatfs_feof(op_file)) {
-            filesystem_setPresetNameInvalid();
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 54;
-        }
-        return;
-    }
-
-    case 49: /* READ pattern settings */
-    {
-        PatternSetting *setting;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_SETTINGS_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 50;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
-        if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
-            setting = filesystem_patternSetSettingPtr(filesystem_directPatternTarget(),
-                                                      (uint8_t)op_stream_index);
-            if (!setting) {
-                filesystem_setPresetNameInvalid();
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 54;
-                return;
-            }
-            setting->nextPattern = staging_buf[0];
-            setting->changeBar = staging_buf[1];
-            op_item_offset = 0u;
-            op_stream_index++;
-        } else if (n == 0u && afatfs_feof(op_file)) {
-            filesystem_setPresetNameInvalid();
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 54;
-        }
-        return;
-    }
-
-    case 50: /* READ pattern lengths */
-    {
-        uint8_t pattern, track;
-        LengthRotate *lr;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 51;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, 1u);
-        if (op_item_offset >= 1u || (n == 0u && afatfs_feof(op_file))) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            lr = filesystem_patternSetLengthPtr(filesystem_directPatternTarget(),
-                                                pattern, track);
-            if (!lr) {
-                filesystem_setPresetNameInvalid();
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 54;
-                return;
-            }
-            lr->length = (op_item_offset >= 1u) ? staging_buf[0] : 0u;
-            filesystem_defaultTrackSettings(lr, track);
-            op_item_offset = 0u;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 51: /* READ optional rotate/scale extension */
-    {
-        uint8_t pattern, track;
-        LengthRotate *lr;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0u;
-            op_item_offset = 0u;
-            op_phase = 52;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf,
-                                       FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            lr = filesystem_patternSetLengthPtr(filesystem_directPatternTarget(),
-                                                pattern, track);
-            if (!lr) {
-                filesystem_setPresetNameInvalid();
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 54;
-                return;
-            }
-            lr->rotate = staging_buf[0];
-            lr->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
-                ? staging_buf[1]
-                : TRACK_SCALE_OFF;
-            op_item_offset = 0u;
-            op_stream_index++;
-        } else if (n == 0u && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 54;
-        }
-        return;
-    }
-
-    case 52: /* READ optional shuffle extension */
-    {
-        uint8_t pattern, track;
-        LengthRotate *lr;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 54;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            lr = filesystem_patternSetLengthPtr(filesystem_directPatternTarget(),
-                                                pattern, track);
-            if (!lr) {
-                filesystem_setPresetNameInvalid();
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 54;
-                return;
-            }
-            lr->shuffle = (staging_buf[0] <= 127u) ? staging_buf[0] : 0u;
-            op_item_offset = 0u;
-            op_stream_index++;
-        } else if (n == 0u && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 54;
-        }
-        return;
-    }
-
-#endif
     /*
-     * Unregistered Scene child (future HCNAMES row).
+     * Unregistered Effect child (future HCNAMES row).
      *
-     * What: pattern.pat / effects.fx are committed by this Scene action but
-     * have no /.hcnames identity row today (Pattern format is not final;
-     * Effect is a validation-only placeholder with zero live parameters).
+     * What: the unregistered `effects.fx` placeholder is committed by this
+     * Scene action; the named v4 Pattern child already has a /.hcnames row.
+     * Effect remains a validation-only placeholder with zero live parameters.
      * Why: the Session 061 invariant requires every Load/Save to mark all
-     * committed children; these two children cannot be marked until they
-     * gain durable identity rows. When they do, they must join the Scene
-     * action's marked-children block (filesystem_cacheCurrentResidentScene
-     * ChildNames(), the refreshed-witness staging, and the boot reader's
-     * per-Scene evaluation) in the same change that introduces their rows.
+     * committed children; the named Pattern child is already included in the
+     * Scene action's marked-children block and only the Effect placeholder
+     * lacks a durable identity row. The Effect row can join the same update
+     * when its schema becomes loadable.
      * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
      * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
      * reader's Case-2 narrow loaders.
      */
-    case 53: /* READ text pattern placeholder/draft */
-        st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
-                                     sizeof(op_line_buf), &line_ready, &eof);
-        if (st == STORAGE_STATUS_WAIT)
+    case 44: /* OPEN v4 Pattern file */
+        if (filesystem_bankPayloadDetailActive())
+            filesystem_bootLoggingSetBankSceneDetail('P');
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(op_scene_pattern_open_name,
+                              "r", AFATFS_MATCH_CASE_INSENSITIVE,
+                              NULL, on_file_opened))
             return;
-        if (st != STORAGE_STATUS_OK) {
+        op_phase = 45u;
+        return;
+
+    case 45: /* WAIT v4 Pattern open and initialize resident region */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
             op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
-            op_phase = 54;
+            op_phase = 52u;
             return;
         }
-        if (line_ready) {
-            st = storage_patternStubParseLine(&op_pattern_stub_state,
-                                              op_line_buf,
-                                              filesystem_directPatternTarget());
-            if (st != STORAGE_STATUS_OK) {
+        op_pattern_scene = 0u;
+        while (op_pattern_scene < 16u &&
+               (op_scene_load_scene_mask &
+                (uint16_t)(1u << op_pattern_scene)) == 0u)
+            op_pattern_scene++;
+        if (op_pattern_scene >= SCENE_COUNT || op_pattern_scene >= 16u) {
+            op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 52u;
+            return;
+        }
+        pat_initScene(op_pattern_scene);
+        op_pattern_crc = autosave_recordCrcBegin();
+        op_pattern_stored_crc = 0u;
+        op_pattern_header_size = 0u;
+        op_pattern_stack_size = 0u;
+        op_stream_index = 0u;
+        op_item_offset = 0u;
+        op_phase = 46u;
+        return;
+
+    case 46: /* READ and validate fixed v4 header */
+    {
+        uint32_t n;
+
+        if (op_item_offset >= PATTERN_FILE_FIXED_HEADER_BYTES) {
+            if (!filesystem_patternHeaderValid(
+                    staging_buf, &op_pattern_header_size,
+                    &op_pattern_stack_size, &op_pattern_stored_crc)) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
                 op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
-                op_phase = 54;
+                op_phase = 52u;
+                return;
             }
+            op_pattern_crc = filesystem_patternCrcFeed(
+                op_pattern_crc, 0u, staging_buf,
+                PATTERN_FILE_FIXED_HEADER_BYTES);
+            op_item_offset = 0u;
+            op_phase = 47u;
             return;
         }
-        if (eof) {
-            st = storage_patternStubFinalize(&op_pattern_stub_state);
-            op_close_status = (st == STORAGE_STATUS_OK)
-                ? FS_STATUS_DONE
-                : FS_STATUS_ERROR;
-            if (st != STORAGE_STATUS_OK) {
-                filesystem_setPresetNameInvalid();
-                op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
-            }
-            op_phase = 54;
+        n = afatfs_fread(op_file, staging_buf + op_item_offset,
+                         PATTERN_FILE_FIXED_HEADER_BYTES - op_item_offset);
+        if (n != 0u)
+            op_item_offset = (uint16_t)(op_item_offset + n);
+        else if (afatfs_feof(op_file)) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 52u;
         }
         return;
+    }
 
-    case 54: /* CLOSE bridge pattern */
+    case 47: /* READ header extension and apply resident parameters */
+    {
+        uint16_t extension_bytes = (uint16_t)(
+            op_pattern_header_size - PATTERN_FILE_FIXED_HEADER_BYTES);
+        uint32_t n;
+        pat_scene_region_t *region = pat_sceneRegionMut(op_pattern_scene);
+
+        if (!region) {
+            op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 52u;
+            return;
+        }
+        if (op_item_offset >= extension_bytes) {
+            uint8_t track;
+            region->pattern_change_bar = staging_buf[32];
+            region->pattern_next = staging_buf[33];
+            for (track = 0u; track < NUM_TRACKS; track++) {
+                uint16_t base = (uint16_t)(48u +
+                    track * PATTERN_FILE_TRACK_HEADER_BYTES);
+                region->track_length[track] = staging_buf[base];
+                region->track_scale[track] = staging_buf[base + 1u];
+                region->track_shuffle[track] = staging_buf[base + 2u];
+            }
+            op_stream_index = 0u;
+            op_phase = 48u;
+            return;
+        }
+        n = afatfs_fread(op_file,
+                         staging_buf + PATTERN_FILE_FIXED_HEADER_BYTES +
+                             op_item_offset,
+                         extension_bytes - op_item_offset);
+        if (n != 0u) {
+            op_pattern_crc = filesystem_patternCrcFeed(
+                op_pattern_crc,
+                PATTERN_FILE_FIXED_HEADER_BYTES + op_item_offset,
+                staging_buf + PATTERN_FILE_FIXED_HEADER_BYTES +
+                    op_item_offset, (uint16_t)n);
+            op_item_offset = (uint16_t)(op_item_offset + n);
+        } else if (afatfs_feof(op_file)) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 52u;
+        }
+        return;
+    }
+
+    case 48: /* READ address array into resident Pattern storage */
+    case 49: /* READ allocator bitmap into resident Pattern storage */
+    case 50: /* READ file pool prefix into resident Pattern storage */
+    {
+        pat_scene_region_t *region = pat_sceneRegionMut(op_pattern_scene);
+        uint32_t section_start;
+        uint32_t section_bytes;
+        uint32_t remaining;
+        uint16_t chunk;
+        uint8_t *destination;
+        uint32_t n;
+
+        if (!region) {
+            op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 52u;
+            return;
+        }
+        if (op_phase == 48u) {
+            section_start = PATTERN_FILE_HEADER_BYTES;
+            section_bytes = PATTERN_FILE_ADDRESS_BYTES;
+            destination = (uint8_t *)region->address;
+        } else if (op_phase == 49u) {
+            section_start = PATTERN_FILE_HEADER_BYTES +
+                            PATTERN_FILE_ADDRESS_BYTES;
+            section_bytes = PATTERN_FILE_BITMAP_BYTES;
+            destination = region->bitmap;
+        } else {
+            section_start = PATTERN_FILE_HEADER_BYTES +
+                            PATTERN_FILE_ADDRESS_BYTES +
+                            PATTERN_FILE_BITMAP_BYTES;
+            section_bytes = (uint32_t)op_pattern_stack_size * 32u;
+            destination = region->pool;
+        }
+        if (op_stream_index >= section_bytes) {
+            op_stream_index = 0u;
+            op_phase = (uint8_t)(op_phase + 1u);
+            return;
+        }
+        remaining = section_bytes - op_stream_index;
+        chunk = (remaining > sizeof(staging_buf))
+            ? (uint16_t)sizeof(staging_buf) : (uint16_t)remaining;
+        n = afatfs_fread(op_file, destination + op_stream_index, chunk);
+        if (n != 0u) {
+            op_pattern_crc = filesystem_patternCrcFeed(
+                op_pattern_crc, section_start + op_stream_index,
+                destination + op_stream_index, (uint16_t)n);
+            op_stream_index += n;
+        } else if (afatfs_feof(op_file)) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 52u;
+        }
+        return;
+    }
+
+    case 51: /* VALIDATE header CRC, then fan out selected destinations */
+    {
+        pat_scene_region_t *source = pat_sceneRegionMut(op_pattern_scene);
+
+        if (!source) {
+            op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 52u;
+            return;
+        }
+        if (autosave_recordCrcFinish(op_pattern_crc) !=
+            op_pattern_stored_crc) {
+            filesystem_setPresetNameInvalid();
+            op_close_status = FS_STATUS_ERROR;
+            op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
+            op_phase = 52u;
+            return;
+        }
+        {
+            uint8_t scene_index;
+            for (scene_index = 0u;
+                 scene_index < SCENE_COUNT && scene_index < 16u;
+                 scene_index++) {
+                if ((op_scene_load_scene_mask &
+                     (uint16_t)(1u << scene_index)) != 0u &&
+                    scene_index != op_pattern_scene) {
+                    pat_scene_region_t *target =
+                        pat_sceneRegionMut(scene_index);
+                    if (target)
+                        memcpy(target, source, sizeof(*target));
+                }
+            }
+        }
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 52u;
+        return;
+    }
+
+    case 52: /* CLOSE v4 Pattern */
         if (filesystem_bankPayloadDetailActive())
             filesystem_bootLoggingSetBankSceneDetail('P');
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 55;
+            op_phase = 53u;
         return;
 
-    case 55: /* WAIT bridge pattern close */
-        if (!op_close_done) return;
+    case 53: /* WAIT v4 Pattern close */
+        if (!op_close_done)
+            return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
-            op_phase = 62;
+            op_phase = 62u;
             return;
         }
-        op_phase = 56;
+        op_phase = 56u;
         return;
 
     case 56: /* OPEN effect placeholder */
@@ -12666,18 +12555,13 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 61;
         return;
 
-    case 61: /* Pattern bridge remains disconnected for Session 062 */
+    case 61: /* Publish the validated v4 Pattern and Scene payload */
     {
         uint8_t scene_index;
 
-        /*
-         * Leave live Pattern regions empty instead of fanning out a legacy
-         * PatternSet. Each selected Scene was initialized by
-         * filesystem_commitSceneStage() through pat_initScene(), and the v3
-         * bridge is intentionally not converted to the new address/pool
-         * format in B/B½. Scene identity and the selected mask remain handled
-         * by the following HCNAMES publication path.
-         */
+        /* The v4 reader already populated the first selected resident region
+         * and copied it to the remaining selected Scenes. This terminal only
+         * publishes the validated Scene/Kit/Pattern identity block. */
         memcpy(preset_currentName, op_scene_display_name, 8u);
         /*
          * All Scene payload layers, including Pattern and Effect, have now
@@ -13008,7 +12892,7 @@ static void filesystem_loadBankDirectory_tick(void)
          * only after request validation and Bank-name repair have consumed the
          * browser row. Inputs: selected Bank display retained in
          * op_bank_display_name and mask captured by filesystem_requestLoadBank.
-         * Output: a 129-row HCNAMES image whose unselected Scene blocks remain
+         * Output: a 145-row HCNAMES image whose unselected Scene blocks remain
          * untouched while selected Bank children overlay their rows at commit.
          * The final writer restores `/Bank/.hcindex`, so this cache borrowing
          * adds no persistent SRAM allocation or browser-state ambiguity.
@@ -14203,6 +14087,455 @@ static void filesystem_loadBankDirectory_tick(void)
     }
 }
 
+/* Read one v4 Pattern payload section from the active root Pattern file.
+ * Inputs: phase 7/8/9, the selected resident Scene, and the stream cursor.
+ * Output: 0 while async I/O is pending, 1 when the section is complete, or 2
+ * after EOF proves the file invalid. The helper keeps the root reader bounded
+ * to staging_buf-sized reads and hashes only bytes actually accepted. */
+static uint8_t filesystem_patternReadSection(uint8_t phase)
+{
+    pat_scene_region_t *region = pat_sceneRegionMut(op_pattern_scene);
+    uint32_t section_start;
+    uint32_t section_bytes;
+    uint8_t *destination;
+    uint32_t remaining;
+    uint16_t chunk;
+    uint32_t n;
+
+    if (!region)
+        return 2u;
+    if (phase == 7u) {
+        section_start = PATTERN_FILE_HEADER_BYTES;
+        section_bytes = PATTERN_FILE_ADDRESS_BYTES;
+        destination = (uint8_t *)region->address;
+    } else if (phase == 8u) {
+        section_start = PATTERN_FILE_HEADER_BYTES +
+                        PATTERN_FILE_ADDRESS_BYTES;
+        section_bytes = PATTERN_FILE_BITMAP_BYTES;
+        destination = region->bitmap;
+    } else {
+        section_start = PATTERN_FILE_HEADER_BYTES +
+                        PATTERN_FILE_ADDRESS_BYTES +
+                        PATTERN_FILE_BITMAP_BYTES;
+        section_bytes = (uint32_t)op_pattern_stack_size * 32u;
+        destination = region->pool;
+    }
+    if (op_stream_index >= section_bytes)
+        return 1u;
+    remaining = section_bytes - op_stream_index;
+    chunk = (remaining > sizeof(staging_buf))
+        ? (uint16_t)sizeof(staging_buf) : (uint16_t)remaining;
+    n = afatfs_fread(op_file, destination + op_stream_index, chunk);
+    if (n != 0u) {
+        op_pattern_crc = filesystem_patternCrcFeed(
+            op_pattern_crc, section_start + op_stream_index,
+            destination + op_stream_index, (uint16_t)n);
+        op_stream_index += n;
+    } else if (afatfs_feof(op_file)) {
+        return 2u;
+    }
+    return 0u;
+}
+
+/* Stage and stream one v4 Pattern payload section to the active file.
+ * Inputs: phase 7/8/9, a resident region, and the two write cursors. Output:
+ * 0 while partial, 1 when the section is complete, or 2 on a proven full-card
+ * write failure. CRC is fed once per staged chunk before the chunk is written. */
+static uint8_t filesystem_patternWriteSection(uint8_t phase)
+{
+    const pat_scene_region_t *region = pat_sceneRegion(op_pattern_scene);
+    uint32_t section_start;
+    uint32_t section_bytes;
+    const uint8_t *source;
+    uint32_t remaining;
+    uint16_t chunk;
+    uint32_t n;
+
+    if (!region)
+        return 2u;
+    if (phase == 7u) {
+        section_start = PATTERN_FILE_HEADER_BYTES;
+        section_bytes = PATTERN_FILE_ADDRESS_BYTES;
+        source = (const uint8_t *)region->address;
+    } else if (phase == 8u) {
+        section_start = PATTERN_FILE_HEADER_BYTES +
+                        PATTERN_FILE_ADDRESS_BYTES;
+        section_bytes = PATTERN_FILE_BITMAP_BYTES;
+        source = region->bitmap;
+    } else {
+        section_start = PATTERN_FILE_HEADER_BYTES +
+                        PATTERN_FILE_ADDRESS_BYTES +
+                        PATTERN_FILE_BITMAP_BYTES;
+        section_bytes = PATTERN_FILE_POOL_BYTES;
+        source = region->pool;
+    }
+    if (op_stream_index >= section_bytes)
+        return 1u;
+    if (op_bytes_done == 0u) {
+        remaining = section_bytes - op_stream_index;
+        chunk = (remaining > sizeof(staging_buf))
+            ? (uint16_t)sizeof(staging_buf) : (uint16_t)remaining;
+        memcpy(staging_buf, source + op_stream_index, chunk);
+        op_bytes_done = chunk;
+        op_item_offset = 0u;
+        op_pattern_crc = filesystem_patternCrcFeed(
+            op_pattern_crc, section_start + op_stream_index,
+            staging_buf, chunk);
+    }
+    n = afatfs_fwrite(op_file, staging_buf + op_item_offset,
+                      op_bytes_done - op_item_offset);
+    op_item_offset = (uint16_t)(op_item_offset + n);
+    if (n == 0u && afatfs_isFull())
+        return 2u;
+    if (op_item_offset < op_bytes_done)
+        return 0u;
+    op_stream_index += op_bytes_done;
+    op_item_offset = 0u;
+    op_bytes_done = 0u;
+    return (op_stream_index >= section_bytes) ? 1u : 0u;
+}
+
+/* Shared v4 root Pattern reader/writer.
+ * What: serializes the active resident Scene to `/Pattern/NNN name.pat` or
+ * restores that file into it. Why: root Pattern files and Scene/Bank-local
+ * Pattern children have one header, CRC, address, bitmap, and pool contract;
+ * this state machine owns only the numbered root namespace. */
+static void filesystem_loadPattern_tick(void)
+{
+    uint8_t result;
+
+    switch (op_phase) {
+    case 0u:
+        if (!afatfs_chdir(NULL)) return;
+        op_phase = 1u;
+        return;
+    case 1u:
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_PATTERN,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                NULL, on_file_opened)) return;
+        op_phase = 2u;
+        return;
+    case 2u:
+        if (!op_file_ready) return;
+        if (!op_file) { filesystem_finish(FS_STATUS_ERROR); return; }
+        op_kit_root_dir = op_file;
+        op_phase = 3u;
+        return;
+    case 3u:
+        if (!afatfs_chdir(op_kit_root_dir)) return;
+        op_phase = 4u;
+        return;
+    case 4u:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed)) op_phase = 5u;
+        return;
+    case 5u:
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL;
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(op_pattern_filename, "r",
+                              AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                              on_file_opened)) return;
+        op_phase = 6u;
+        return;
+    case 6u:
+        if (!op_file_ready) return;
+        if (!op_file) { op_close_status = FS_STATUS_ERROR; op_phase = 13u; return; }
+        pat_initScene(op_pattern_scene);
+        op_pattern_crc = autosave_recordCrcBegin();
+        op_pattern_header_size = 0u;
+        op_pattern_stack_size = 0u;
+        op_item_offset = 0u;
+        op_stream_index = 0u;
+        op_phase = 7u;
+        return;
+    case 7u: {
+        uint32_t n;
+        if (op_item_offset >= PATTERN_FILE_FIXED_HEADER_BYTES) {
+            if (!filesystem_patternHeaderValid(staging_buf,
+                                                &op_pattern_header_size,
+                                                &op_pattern_stack_size,
+                                                &op_pattern_stored_crc)) {
+                op_close_status = FS_STATUS_ERROR; op_phase = 13u; return;
+            }
+            op_pattern_crc = filesystem_patternCrcFeed(
+                op_pattern_crc, 0u, staging_buf,
+                PATTERN_FILE_FIXED_HEADER_BYTES);
+            op_item_offset = 0u; op_phase = 8u; return;
+        }
+        n = afatfs_fread(op_file, staging_buf + op_item_offset,
+                         PATTERN_FILE_FIXED_HEADER_BYTES - op_item_offset);
+        if (n != 0u) op_item_offset = (uint16_t)(op_item_offset + n);
+        else if (afatfs_feof(op_file)) { op_close_status = FS_STATUS_ERROR; op_phase = 13u; }
+        return;
+    }
+    case 8u: {
+        uint16_t extension = (uint16_t)(op_pattern_header_size -
+                                        PATTERN_FILE_FIXED_HEADER_BYTES);
+        uint32_t n;
+        if (op_item_offset >= extension) {
+            uint8_t track;
+            pat_scene_region_t *region = pat_sceneRegionMut(op_pattern_scene);
+            if (!region) { op_close_status = FS_STATUS_ERROR; op_phase = 13u; return; }
+            region->pattern_change_bar = staging_buf[32u];
+            region->pattern_next = staging_buf[33u];
+            for (track = 0u; track < NUM_TRACKS; track++) {
+                uint16_t base = (uint16_t)(48u +
+                    track * PATTERN_FILE_TRACK_HEADER_BYTES);
+                region->track_length[track] = staging_buf[base];
+                region->track_scale[track] = staging_buf[base + 1u];
+                region->track_shuffle[track] = staging_buf[base + 2u];
+            }
+            op_stream_index = 0u; op_phase = 9u; return;
+        }
+        n = afatfs_fread(op_file, staging_buf + PATTERN_FILE_FIXED_HEADER_BYTES +
+                         op_item_offset, extension - op_item_offset);
+        if (n != 0u) {
+            op_pattern_crc = filesystem_patternCrcFeed(
+                op_pattern_crc, PATTERN_FILE_FIXED_HEADER_BYTES + op_item_offset,
+                staging_buf + PATTERN_FILE_FIXED_HEADER_BYTES + op_item_offset,
+                (uint16_t)n);
+            op_item_offset = (uint16_t)(op_item_offset + n);
+        } else if (afatfs_feof(op_file)) { op_close_status = FS_STATUS_ERROR; op_phase = 13u; }
+        return;
+    }
+    case 9u:
+    case 10u:
+    case 11u:
+        result = filesystem_patternReadSection((uint8_t)(op_phase - 2u));
+        if (result == 2u) { op_close_status = FS_STATUS_ERROR; op_phase = 13u; }
+        else if (result == 1u) { op_stream_index = 0u; op_phase++; }
+        return;
+    case 12u:
+        if (autosave_recordCrcFinish(op_pattern_crc) != op_pattern_stored_crc)
+            op_close_status = FS_STATUS_ERROR;
+        op_phase = 13u;
+        return;
+    case 13u:
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed)) op_phase = 14u;
+        return;
+    case 14u:
+        if (!op_close_done) return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL)) return;
+        if (op_close_status != FS_STATUS_DONE) {
+            /* A failed root Pattern read must not leave a partially streamed
+             * region available to playback or to the next Scene selection. */
+            pat_initScene(op_pattern_scene);
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        filesystem_startPatternHcnamesUpdate();
+        return;
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
+static void filesystem_savePattern_tick(void)
+{
+    uint8_t result;
+    const pat_scene_region_t *region;
+
+    switch (op_phase) {
+    case 0u:
+        if (!afatfs_chdir(NULL)) return;
+        op_create_dir_retry = 0u; op_phase = 1u; return;
+    case 1u:
+        op_file_ready = false; op_file = NULL;
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_PATTERN,
+                                AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                                on_file_opened)) return;
+        op_phase = 2u; return;
+    case 2u:
+        if (!op_file_ready) return;
+        if (!op_file) {
+            if (op_create_dir_retry != 0u) { filesystem_finish(FS_STATUS_ERROR); return; }
+            op_create_dir_retry = 1u; op_file_ready = false;
+            if (!afatfs_mkdir_lfn(STORAGE_ROOT_PATTERN,
+                                  AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                                  on_file_opened)) return;
+            return;
+        }
+        op_kit_root_dir = op_file; op_phase = 3u; return;
+    case 3u:
+        if (!afatfs_chdir(op_kit_root_dir)) return;
+        op_phase = 4u; return;
+    case 4u:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed)) op_phase = 5u;
+        return;
+    case 5u:
+        if (!op_close_done) return;
+        op_kit_root_dir = NULL; op_file_ready = false; op_file = NULL;
+        if (op_scene_pattern_open_name[0] != '\0') {
+            /* Retire the previous slot filename before publishing a renamed
+             * Pattern, so one slot cannot leave two competing `.pat` files. */
+            op_remove_done = 0u;
+            op_remove_result = AFATFS_RESULT_OK;
+            if (!afatfs_removeObjects_lfn(
+                    op_scene_pattern_open_name,
+                    AFATFS_MATCH_CASE_INSENSITIVE,
+                    AFATFS_REMOVE_FILES_ONLY, on_remove_complete))
+                return;
+            op_phase = 14u;
+            return;
+        }
+        if (!afatfs_fopen_lfn(op_pattern_filename, "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                              on_file_opened)) return;
+        op_phase = 6u; return;
+    case 6u:
+        if (!op_file_ready) return;
+        if (!op_file) { filesystem_finish(FS_STATUS_ERROR); return; }
+        region = pat_sceneRegion(op_pattern_scene);
+        if (!region) { filesystem_finish(FS_STATUS_ERROR); return; }
+        filesystem_patternBuildHeader(staging_buf, region);
+        op_pattern_crc = autosave_recordCrcBegin();
+        op_pattern_crc = filesystem_patternCrcFeed(
+            op_pattern_crc, 0u, staging_buf, PATTERN_FILE_HEADER_BYTES);
+        op_item_offset = 0u; op_bytes_done = 0u; op_stream_index = 0u;
+        op_phase = 7u; return;
+    case 7u:
+        if (op_item_offset < PATTERN_FILE_HEADER_BYTES) {
+            uint32_t n = afatfs_fwrite(op_file, staging_buf + op_item_offset,
+                                       PATTERN_FILE_HEADER_BYTES - op_item_offset);
+            op_item_offset = (uint16_t)(op_item_offset + n); return;
+        }
+        op_stream_index = 0u; op_item_offset = 0u; op_bytes_done = 0u;
+        op_phase = 8u; return;
+    case 8u:
+    case 9u:
+    case 10u:
+        result = filesystem_patternWriteSection((uint8_t)(op_phase - 1u));
+        if (result == 2u) { filesystem_finish(FS_STATUS_ERROR); return; }
+        if (result == 1u) { op_stream_index = 0u; op_phase++; }
+        return;
+    case 11u: {
+        afatfsOperationStatus_e seek = afatfs_fseek(
+            op_file, (int32_t)PATTERN_FILE_CRC_OFFSET, AFATFS_SEEK_SET);
+        if (seek == AFATFS_OPERATION_IN_PROGRESS) return;
+        if (seek == AFATFS_OPERATION_FAILURE) { filesystem_finish(FS_STATUS_ERROR); return; }
+        {
+            uint32_t crc = autosave_recordCrcFinish(op_pattern_crc);
+            staging_buf[0] = (uint8_t)crc; staging_buf[1] = (uint8_t)(crc >> 8u);
+            staging_buf[2] = (uint8_t)(crc >> 16u); staging_buf[3] = (uint8_t)(crc >> 24u);
+        }
+        op_item_offset = 0u; op_phase = 12u; return;
+    }
+    case 12u:
+        if (op_item_offset < 4u) {
+            uint32_t n = afatfs_fwrite(op_file, staging_buf + op_item_offset,
+                                       4u - op_item_offset);
+            op_item_offset = (uint16_t)(op_item_offset + n); return;
+        }
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed)) op_phase = 13u;
+        return;
+    case 13u:
+        if (!op_close_done) return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL)) return;
+        filesystem_startPatternHcnamesUpdate();
+        return;
+    case 14u:
+        if (!op_remove_done)
+            return;
+        if (op_remove_result != AFATFS_RESULT_OK) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_scene_pattern_open_name[0] = '\0';
+        op_phase = 5u;
+        return;
+    default:
+        filesystem_finish(FS_STATUS_ERROR); return;
+    }
+}
+
+/* Scan `/Pattern/` and rebuild the numbered `<name>.pat` browser cache.
+ * What: walks public directory objects and accepts only the v4 library naming
+ * contract. Why: Pattern uses files rather than numbered directories, but the
+ * menu still needs the same slot-preserving `.hcindex` cache. Missing Pattern/
+ * is an empty successful library, matching the other root domains. */
+static void filesystem_scanPatterns_tick(void)
+{
+    switch (op_phase) {
+    case 0u:
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1u;
+        return;
+    case 1u:
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_opendir_lfn(STORAGE_ROOT_PATTERN,
+                                AFATFS_MATCH_CASE_INSENSITIVE,
+                                NULL, on_file_opened))
+            return;
+        op_phase = 2u;
+        return;
+    case 2u:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        op_kit_root_dir = op_file;
+        op_phase = 3u;
+        return;
+    case 3u:
+        if (!afatfs_chdir(op_kit_root_dir))
+            return;
+        afatfs_findFirstObject(op_kit_root_dir, &op_object_finder);
+        op_phase = 4u;
+        return;
+    case 4u: {
+        afatfsOperationStatus_e st = afatfs_findNextObject(
+            op_kit_root_dir, &op_object_finder, &op_object);
+        if (st == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (st == AFATFS_OPERATION_FAILURE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 5u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_NONE) {
+            afatfs_findLastObject(op_kit_root_dir, &op_object_finder);
+            op_close_status = FS_STATUS_DONE;
+            op_phase = 5u;
+            return;
+        }
+        if (op_object.id.kind == AFATFS_OBJECT_FILE)
+            filesystem_recordPatternFile(op_object.id.displayName);
+        return;
+    }
+    case 5u:
+        op_close_done = false;
+        if (afatfs_fclose(op_kit_root_dir, on_file_closed))
+            op_phase = 6u;
+        return;
+    case 6u:
+        if (!op_close_done)
+            return;
+        op_kit_root_dir = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finish(op_close_status);
+        return;
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+}
+
 static void filesystem_scanBankScenes_tick(void)
 {
     /*
@@ -14449,7 +14782,7 @@ static void filesystem_loadInstrument_tick(void)
     case 6: /* OPEN subdir */
         op_file_ready = false;
         op_file = NULL;
-        
+
         /*
          * We use AFATFS_MATCH_CASE_INSENSITIVE here to match user-created directories seamlessly,
          * ensuring that even if the directory on the card is named "drum" instead of "Drum",
@@ -14502,7 +14835,7 @@ static void filesystem_loadInstrument_tick(void)
         op_line_len = 0u;
         op_file_ready = false;
         op_file = NULL;
-        
+
         {
             char lfn[STORAGE_KIT_FILENAME_MAX];
             const char *display_name = op_instrument_save_display_name;
@@ -15230,13 +15563,13 @@ static void filesystem_commitSceneStage(void)
      * I/O starts.
      *
      * Why: Pattern is intentionally non-atomic for the current format work;
-     * excluding PatternSet from staging keeps validation inside the separate
+     * excluding the live Pattern payload from staging keeps validation inside the separate
      * typed stage. Inputs: fully parsed stage image and the immutable
      * destination mask. Outputs: final Scene settings/Kit plus an empty live
      * PatternData region ready for the future address/pool loader.
      *
-     * Affiliates: filesystem_directPatternTarget(), Scene Pattern phases, and
-     * the later Pattern transactional redesign.
+     * Affiliates: pat_sceneRegionMut(), Scene Pattern phases, and the later
+     * Pattern transactional redesign.
      */
     for (scene_index = 0u;
          scene_index < SCENE_COUNT && scene_index < 16u;
@@ -15263,20 +15596,6 @@ static void filesystem_commitSceneStage(void)
     }
 }
 
-static PatternSet *__attribute__((unused)) filesystem_directPatternTarget(void)
-{
-    /*
-     * Return the disconnected legacy PatternSet parse sink.
-     *
-     * Inputs: none. Output: the caller-independent PatternSet reset once when
-     * the active text parser enters its file phase. The accessor is called for
-     * each line and therefore must not clear the record itself. Pattern data is
-     * never copied into a Scene's live address array; the B/B½ format boundary
-     * remains disconnected. Affiliates: legacy parser compatibility and the
-     * future v4 bridge.
-     */
-    return &filesystem_pattern_discard;
-}
 
 static void filesystem_resetSceneLoadChildDiscovery(void)
 {
@@ -15302,6 +15621,8 @@ static void filesystem_resetSceneLoadChildDiscovery(void)
            sizeof(op_scene_child_display_name));
     memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
     memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
+    memset(op_pattern_display_name, 0, sizeof(op_pattern_display_name));
+    op_pattern_source = FS_RESIDENT_SOURCE_UNKNOWN;
 }
 
 static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot)
@@ -15428,6 +15749,102 @@ static void filesystem_copyLongComponent(char *dst, uint16_t cap,
         i++;
     }
     dst[i] = '\0';
+}
+
+/* Convert an on-card `<name>.pat` component into an eight-cell display stem. */
+static void filesystem_patternDisplayFromFilename(
+    char dst[STORAGE_KIT_DISPLAY_NAME_LEN + 1u], const char *filename)
+{
+    char stem[AFATFS_LONG_FILENAME_MAX + 1u];
+    uint16_t i = 0u;
+
+    if (!dst)
+        return;
+    if (!filename) {
+        memset(dst, ' ', STORAGE_KIT_DISPLAY_NAME_LEN);
+        dst[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        return;
+    }
+    while (filename[i] != '\0' && filename[i] != '.' &&
+           i < sizeof(stem) - 1u) {
+        stem[i] = filename[i];
+        i++;
+    }
+    stem[i] = '\0';
+    storage_copyDisplayName(dst, stem);
+    dst[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+}
+
+/* Build a Scene/Bank-child `<name>.pat` from the resident Pattern identity. */
+static void filesystem_makePatternChildFilename(char *dst, uint16_t capacity,
+                                                uint8_t scene_index)
+{
+    const char *name;
+    int8_t end = (int8_t)(STORAGE_KIT_DISPLAY_NAME_LEN - 1u);
+    uint16_t pos = 0u;
+    uint8_t i;
+
+    if (!dst || capacity == 0u)
+        return;
+    dst[0] = '\0';
+    name = filesystem_cachedResidentName(
+        filesystem_residentPatternRow(scene_index));
+    if (filesystem_residentNameIsBlank(name)) {
+        name = filesystem_cachedResidentName(
+            filesystem_residentSceneRow(scene_index));
+    }
+    if (filesystem_residentNameIsBlank(name))
+        name = "pattern";
+    while (end >= 0 && name[(uint8_t)end] == ' ')
+        end--;
+    for (i = 0u; end >= 0 && i <= (uint8_t)end; i++) {
+        char c = name[i];
+        if (c < 0x20 || c > 0x7e || c == '/' || c == '\\')
+            c = '_';
+        if (pos + 1u >= capacity)
+            return;
+        dst[pos++] = c;
+    }
+    if (pos + 5u >= capacity)
+        return;
+    dst[pos++] = '.'; dst[pos++] = 'p'; dst[pos++] = 'a'; dst[pos++] = 't';
+    dst[pos] = '\0';
+}
+
+/* Build a numbered root Pattern filename: `NNN <name>.pat`. */
+static void filesystem_makePatternLibraryFilename(char *dst, uint16_t capacity,
+                                                  uint16_t slot,
+                                                  const char name[8])
+{
+    uint16_t pos = 0u;
+    int8_t end = (int8_t)(STORAGE_KIT_DISPLAY_NAME_LEN - 1u);
+    uint8_t i;
+
+    if (!dst || capacity == 0u)
+        return;
+    dst[0] = '\0';
+    if (slot > 999u)
+        slot = 999u;
+    if (capacity < 5u)
+        return;
+    dst[pos++] = (char)('0' + ((slot / 100u) % 10u));
+    dst[pos++] = (char)('0' + ((slot / 10u) % 10u));
+    dst[pos++] = (char)('0' + (slot % 10u));
+    dst[pos++] = ' ';
+    while (end >= 0 && (!name || name[(uint8_t)end] == ' '))
+        end--;
+    if (end < 0)
+        end = 6;
+    for (i = 0u; i <= (uint8_t)end && pos + 1u < capacity; i++) {
+        char c = name ? name[i] : ' ';
+        if (c < 0x20 || c > 0x7e || c == '/' || c == '\\')
+            c = '_';
+        dst[pos++] = c;
+    }
+    if (pos + 5u >= capacity)
+        return;
+    dst[pos++] = '.'; dst[pos++] = 'p'; dst[pos++] = 'a'; dst[pos++] = 't';
+    dst[pos] = '\0';
 }
 
 static void filesystem_makeNumberedDir(char *dst,
@@ -15754,22 +16171,6 @@ static uint8_t filesystem_nextEffectPlaceholderLine(char *dst, uint16_t cap,
     return storage_formatEffectPlaceholderLine(dst, cap, op_write_line_index);
 }
 
-static uint8_t filesystem_nextPatternStubLine(char *dst, uint16_t cap,
-                                              void *raw)
-{
-    const PatternSet *pattern = (const PatternSet *)raw;
-
-    /*
-     * Adapt storageTypes' draft pattern writer to filesystem_writeTextLine.
-     *
-     * Inputs: raw is the Scene being saved's PatternSet. Output: one v2 draft
-     * pattern.pat row per call. The writer stores only Step active bits plus
-     * length/scale; non-stored fields are recreated from PatternData defaults
-     * by the loader.
-     */
-    return storage_formatPatternStubLine(dst, cap, pattern,
-                                         op_write_line_index);
-}
 
 static uint8_t filesystem_nextBanksetLine(char *dst, uint16_t cap,
                                           void *raw)
@@ -17601,7 +18002,7 @@ static void filesystem_saveBankDirectory_tick(void)
          * was prepared by prepareBankSceneSaveSource() at phase 20; the old
          * child was deleted by phases 20-21. Outputs: the Scene writer creates
          * `SS Name/` with sceneset.scg, embedded Kit directory, instruments,
-         * pattern.pat, and effects.fx. When the Scene writer completes, it
+         * the named v4 Pattern child, and effects.fx. When the Scene writer completes, it
          * returns to Bank Save phase 12 to advance the cursor. Affiliates:
          * filesystem_saveSceneDirectory_tick() phase 8..37,
          * op_bank_payload_active dispatch at top of this function.
@@ -17932,7 +18333,7 @@ static void filesystem_saveSceneDirectory_tick(void)
      * root Scene slot, source resident Scene, display Scene name, embedded Kit
      * directory name, and six generated member filenames. Outputs are a clean
      * Scene/<NNN Name>/ tree containing sceneset.scg, Kit <name>/kitset.kcg,
-     * six Instrument files, pattern.pat, and effects.fx.
+     * six Instrument files, the named v4 Pattern child, and effects.fx.
      *
      * The state machine intentionally mirrors Kit Save where possible. The
      * important extra loop is the child-file sequence after sceneset.scg: write
@@ -18321,78 +18722,139 @@ static void filesystem_saveSceneDirectory_tick(void)
     }
 
     /*
-     * Unregistered Scene child (future HCNAMES row).
+     * Unregistered Effect child (future HCNAMES row).
      *
-     * What: pattern.pat / effects.fx are committed by this Scene action but
-     * have no /.hcnames identity row today (Pattern format is not final;
-     * Effect is a validation-only placeholder with zero live parameters).
+     * What: the unregistered `effects.fx` placeholder is committed by this
+     * Scene action; the named v4 Pattern child already has a /.hcnames row.
+     * Effect remains a validation-only placeholder with zero live parameters.
      * Why: the Session 061 invariant requires every Load/Save to mark all
-     * committed children; these two children cannot be marked until they
-     * gain durable identity rows. When they do, they must join the Scene
-     * action's marked-children block (filesystem_cacheCurrentResidentScene
-     * ChildNames(), the refreshed-witness staging, and the boot reader's
-     * per-Scene evaluation) in the same change that introduces their rows.
+     * committed children; the named Pattern child is already included in the
+     * Scene action's marked-children block and only the Effect placeholder
+     * lacks a durable identity row. The Effect row can join the same update
+     * when its schema becomes loadable.
      * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
      * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
      * reader's Case-2 narrow loaders.
      */
-    case 29:
+    case 29: /* OPEN named v4 Pattern child */
+        filesystem_makePatternChildFilename(
+            op_scene_pattern_open_name, sizeof(op_scene_pattern_open_name),
+            op_kit_save_source_scene);
+        filesystem_patternDisplayFromFilename(
+            op_pattern_display_name, op_scene_pattern_open_name);
+        op_pattern_source = FS_RESIDENT_SOURCE_INHERIT;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen_lfn("pattern.pat",
-                              "w",
+        if (!afatfs_fopen_lfn(op_scene_pattern_open_name, "w",
                               AFATFS_MATCH_CASE_INSENSITIVE,
-                              op_root_open_name,
-                              on_file_opened)) {
+                              op_root_open_name, on_file_opened))
             return;
-        }
         op_phase = 30u;
         return;
 
-    case 30:
+    case 30: /* WAIT Pattern open and prepare fixed header */
         if (!op_file_ready)
             return;
         if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        op_write_line_index = 0u;
-        op_write_line_len = 0u;
-        op_write_line_offset = 0u;
-        /*
-         * Scene Save retains the v3 file shape but must not serialize a stale
-         * parsed PatternSet from a previous operation. The live PatternData
-         * region is intentionally not connected until the future v4 format.
-         */
-        pat_initPatternSet(&filesystem_pattern_discard);
+        {
+            const pat_scene_region_t *region =
+                pat_sceneRegion(op_kit_save_source_scene);
+            if (!region) {
+                filesystem_finish(FS_STATUS_ERROR);
+                return;
+            }
+            filesystem_patternBuildHeader(staging_buf, region);
+        }
+        op_pattern_crc = autosave_recordCrcBegin();
+        op_pattern_crc = filesystem_patternCrcFeed(
+            op_pattern_crc, 0u, staging_buf,
+            PATTERN_FILE_HEADER_BYTES);
+        op_pattern_io_phase = 0u;
+        op_item_offset = 0u;
+        op_stream_index = 0u;
         op_phase = 31u;
         return;
 
-    case 31:
-        if (filesystem_writeTextLine(filesystem_nextPatternStubLine,
-                                     (void *)&filesystem_pattern_discard))
+    case 31: /* STREAM fixed header */
+        if (op_item_offset < PATTERN_FILE_HEADER_BYTES) {
+            uint32_t n = afatfs_fwrite(
+                op_file, staging_buf + op_item_offset,
+                PATTERN_FILE_HEADER_BYTES - op_item_offset);
+            if (n != 0u)
+                op_item_offset = (uint16_t)(op_item_offset + n);
             return;
+        }
+        op_item_offset = 0u;
+        op_stream_index = 0u;
+        op_pattern_io_phase = 0u;
         op_phase = 32u;
         return;
 
-    case 32:
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 33u;
+    case 32: /* STREAM address, bitmap, and resident-sized pool */
+    {
+        const pat_scene_region_t *region =
+            pat_sceneRegion(op_kit_save_source_scene);
+        const uint8_t *source;
+        uint32_t section_start;
+        uint32_t section_size;
+        uint32_t remaining;
+        uint16_t chunk;
+        uint32_t n;
+
+        if (!region) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        if (op_pattern_io_phase == 0u) {
+            source = (const uint8_t *)region->address;
+            section_start = PATTERN_FILE_HEADER_BYTES;
+            section_size = PATTERN_FILE_ADDRESS_BYTES;
+        } else if (op_pattern_io_phase == 1u) {
+            source = region->bitmap;
+            section_start = PATTERN_FILE_HEADER_BYTES +
+                            PATTERN_FILE_ADDRESS_BYTES;
+            section_size = PATTERN_FILE_BITMAP_BYTES;
+        } else {
+            source = region->pool;
+            section_start = PATTERN_FILE_HEADER_BYTES +
+                            PATTERN_FILE_ADDRESS_BYTES +
+                            PATTERN_FILE_BITMAP_BYTES;
+            section_size = PATTERN_FILE_POOL_BYTES;
+        }
+        if (op_stream_index >= section_size) {
+            op_stream_index = 0u;
+            op_pattern_io_phase++;
+            if (op_pattern_io_phase >= 3u)
+                op_phase = 80u;
+            return;
+        }
+        remaining = section_size - op_stream_index;
+        chunk = (remaining > sizeof(staging_buf))
+            ? (uint16_t)sizeof(staging_buf) : (uint16_t)remaining;
+        n = afatfs_fwrite(op_file, source + op_stream_index, chunk);
+        if (n != 0u) {
+            op_pattern_crc = filesystem_patternCrcFeed(
+                op_pattern_crc, section_start + op_stream_index,
+                source + op_stream_index, (uint16_t)n);
+            op_stream_index += n;
+        }
         return;
+    }
 
     /*
-     * Unregistered Scene child (future HCNAMES row).
+     * Unregistered Effect child (future HCNAMES row).
      *
-     * What: pattern.pat / effects.fx are committed by this Scene action but
-     * have no /.hcnames identity row today (Pattern format is not final;
-     * Effect is a validation-only placeholder with zero live parameters).
+     * What: the unregistered `effects.fx` placeholder is committed by this
+     * Scene action; the named v4 Pattern child already has a /.hcnames row.
+     * Effect remains a validation-only placeholder with zero live parameters.
      * Why: the Session 061 invariant requires every Load/Save to mark all
-     * committed children; these two children cannot be marked until they
-     * gain durable identity rows. When they do, they must join the Scene
-     * action's marked-children block (filesystem_cacheCurrentResidentScene
-     * ChildNames(), the refreshed-witness staging, and the boot reader's
-     * per-Scene evaluation) in the same change that introduces their rows.
+     * committed children; the named Pattern child is already included in the
+     * Scene action's marked-children block and only the Effect placeholder
+     * lacks a durable identity row. The Effect row can join the same update
+     * when its schema becomes loadable.
      * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
      * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
      * reader's Case-2 narrow loaders.
@@ -18524,10 +18986,14 @@ static void filesystem_saveSceneDirectory_tick(void)
                             op_kit_save_source_scene, instrument_slot));
                 }
             }
-            /* Scene Save replaces the Scene payload and its embedded Kit
-             * hierarchy. Mark the complete seven-row Scene identity block only
-             * after the directory payload has reached its successful handoff.
+            /* Scene Save replaces the Scene payload, embedded Kit hierarchy,
+             * and named Pattern child. Stage the Pattern source in the
+             * expanded HCNAMES register; it remains outside the S063 AutoSave
+             * 129-row wire image until the later Pattern AutoSave session.
              */
+            (void)filesystem_setResidentSource(
+                filesystem_residentPatternRow(op_kit_save_source_scene),
+                op_pattern_source);
             filesystem_setResidentSceneRefreshed(op_kit_save_source_scene);
             autosaveTrace_record(
                 AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
@@ -18564,868 +19030,79 @@ static void filesystem_saveSceneDirectory_tick(void)
         filesystem_finish(FS_STATUS_DONE);
         return;
 
-    default:
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
-}
-
-/* -----------------------------------------------------------------------
-** SAVE PATTERN state machine
-**
-** The `.pat` payload mirrors the original AVR file format, but the data is
-** read through PatternData instead of requesting it over the old
-** AVR/STM32 pseudo-sysex link. Each tick writes at most one logical record,
-** so audio-time callers can keep pumping filesystem_tick().
-**
-** Phases: 0=open, 1=wait_open, 2=name, 3=steps, 4=main steps,
-**         5=settings, 6=lengths, 7=track settings extension,
-**         8=track shuffle extension, 9=close, 10=wait_close
-** ----------------------------------------------------------------------- */
-#if 0 /* Retired generic binary pattern/container stream state machines. */
-static void filesystem_savePattern_tick(void)
-{
-    switch (op_phase) {
-    case 0: /* OPEN */
-    {
-        char fname[13];
-        if (!filesystem_makeFilename(fname, op_file_type, op_slot)) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(fname, "w", on_file_opened))
-            return;
-        op_phase = 1;
-        return;
-    }
-
-    case 1: /* WAIT_OPEN */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_phase = 2;
-        op_stream_index = 0;
-        op_item_offset = 0;
-        op_bytes_done = 0;
-        return;
-
-    case 2: /* NAME */
-        filesystem_writeStreamChunk((const uint8_t *)preset_currentName, 8);
-        if (op_item_offset >= 8u) {
-            op_item_offset = 0;
-            op_stream_index = 0;
-            op_phase = 3;
-        }
-        return;
-
-    case 3: /* STEPS */
-    {
-        uint8_t pattern, track, step_nr;
-        Step *step;
-
-        if (op_stream_index >= FS_PATTERN_STEP_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 4;
-            return;
-        }
-
-        filesystem_patternStepAddress(op_stream_index, &pattern, &track, &step_nr);
-        step = filesystem_patternStepPtr(pattern, track, step_nr);
-        if (!step) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        filesystem_packStep(step, staging_buf);
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
-        if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 4: /* MAIN STEPS */
-    {
-        uint8_t pattern, track;
-        uint16_t main_steps;
-
-        if (op_stream_index >= FS_PATTERN_MAIN_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 5;
-            return;
-        }
-
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
+    case 80: /* SEEK to the v4 Pattern CRC field */
         {
-            uint16_t *mainPtr = filesystem_patternMainPtr(pattern, track);
-            if (!mainPtr) {
+            afatfsOperationStatus_e seek = afatfs_fseek(
+                op_file, (int32_t)PATTERN_FILE_CRC_OFFSET, AFATFS_SEEK_SET);
+            if (seek == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (seek == AFATFS_OPERATION_FAILURE) {
                 filesystem_finish(FS_STATUS_ERROR);
                 return;
             }
-            main_steps = *mainPtr;
         }
-        staging_buf[0] = (uint8_t)(main_steps & 0xffu);
-        staging_buf[1] = (uint8_t)(main_steps >> 8);
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
-        if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 5: /* PATTERN SETTINGS */
-    {
-        PatternSetting *setting;
-
-        if (op_stream_index >= FS_PATTERN_SETTINGS_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 6;
-            return;
-        }
-
-        setting = filesystem_patternSettingPtr((uint8_t)op_stream_index);
-        if (!setting) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        staging_buf[0] = setting->nextPattern;
-        staging_buf[1] = setting->changeBar;
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
-        if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 6: /* TRACK LENGTHS */
-    {
-        uint8_t pattern, track;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 7;
-            return;
-        }
-
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
         {
-            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
-            if (!lr) {
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            staging_buf[0] = lr->length;
+            uint32_t crc = autosave_recordCrcFinish(op_pattern_crc);
+            staging_buf[0] = (uint8_t)crc;
+            staging_buf[1] = (uint8_t)(crc >> 8u);
+            staging_buf[2] = (uint8_t)(crc >> 16u);
+            staging_buf[3] = (uint8_t)(crc >> 24u);
         }
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
+        op_item_offset = 0u;
+        op_phase = 81u;
         return;
-    }
 
-    case 7: /* TRACK SETTINGS EXTENSION */
-    {
-        uint8_t pattern, track;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 8;
+    case 81: /* WRITE the v4 Pattern CRC */
+        if (op_item_offset < 4u) {
+            uint32_t n = afatfs_fwrite(op_file, staging_buf + op_item_offset,
+                                       4u - op_item_offset);
+            if (n != 0u)
+                op_item_offset = (uint16_t)(op_item_offset + n);
             return;
         }
-
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        {
-            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
-            if (!lr) {
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            /*
-             * New pattern saves append the fields that make the STEP front page
-             * PatternData-owned. Length remains in the legacy block above so old
-             * files and old tooling still see the expected byte stream prefix.
-             * Shuffle deliberately does not widen this record; it has its own
-             * following extension so files saved by the earlier four-byte
-             * extension build remain unambiguous.
-             */
-            staging_buf[0] = lr->rotate;
-            staging_buf[1] = lr->scale;
-        }
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 8: /* TRACK SHUFFLE EXTENSION */
-    {
-        uint8_t pattern, track;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 9;
-            return;
-        }
-
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        {
-            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
-            if (!lr) {
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            /*
-             * Per-track shuffle is persisted in a standalone append-only
-             * extension. Input is the PatternData LengthRotate owner for the
-             * current file coordinate; output is one 0..127 shuffle byte.
-             * Clients are newer pattern/container loaders. Older firmware stops
-             * before this block because all earlier bytes keep their original
-             * size and order.
-             */
-            staging_buf[0] = lr->shuffle;
-        }
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 9: /* CLOSE */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed)) {
-            /*
-             * Pattern save follows the same close/request then wait/finish
-             * contract. Advancing to case 10 lets the callback complete the
-             * operation; re-entering case 9 would hang after the file payload.
-             */
-            op_phase = 10;
-        }
-        return;
-
-    case 10: /* WAIT_CLOSE */
-        if (!op_close_done) return;
-        filesystem_finish(op_close_status);
-        return;
-
-    default:
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
-}
-
-/* -----------------------------------------------------------------------
-** LOAD PATTERN state machine
-**
-** Required sections (name, steps, main steps, settings, shuffle) fail on EOF.
-** The final length block is optional for old `.pat` files; missing lengths
-** are set to 0, which PatternData normalizes to the 128-step default. New
-** files may append track-settings and track-shuffle extensions after the
-** legacy length block.
-**
-** If the file contains the currently playing pattern while the sequencer is
-** running, that pattern is loaded into PatternData's temporary buffer. At completion,
-** seq_newPatternAvailable plus seq_armActivePatternReload() arms the existing
-** sequencer boundary-swap path without replacing a queued pattern change.
-**
-** Phases: 0=open, 1=wait_open, 2=name, 3=steps, 4=main steps,
-**         5=settings, 6=lengths, 7=settings extension,
-**         8=shuffle extension, 9=close, 10=wait_close
-** ----------------------------------------------------------------------- */
-static void filesystem_loadPattern_tick(void)
-{
-    switch (op_phase) {
-    case 0: /* OPEN */
-    {
-        char fname[13];
-        if (!filesystem_makeFilename(fname, op_file_type, op_slot)) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_file_ready = false;
-        op_file = NULL;
-        if (!afatfs_fopen(fname, "r", on_file_opened))
-            return;
-        op_phase = 1;
-        return;
-    }
-
-    case 1: /* WAIT_OPEN */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            memcpy(preset_currentName, "Empty   ", 8);
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        /*
-         * TempPattern no longer exists. A one-Scene build cannot replace the
-         * playing Pattern safely, so running loads fail explicitly instead of
-         * writing through a hidden staging shape.
-         */
-        if (seq_isRunning()) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 9;
-            return;
-        }
-        op_loaded_active_pattern_running = 0u;
-        op_phase = 2;
-        op_stream_index = 0;
-        op_item_offset = 0;
-        op_bytes_done = 0;
-        return;
-
-    case 2: /* NAME */
-    {
-        uint32_t n = filesystem_readStreamChunk((uint8_t *)preset_currentName, 8);
-        if (op_item_offset >= 8u) {
-            uint8_t i;
-            for (i = 0; i < 8; i++)
-                if (preset_currentName[i] < 0x20 || preset_currentName[i] > 0x7E)
-                    preset_currentName[i] = ' ';
-            op_item_offset = 0;
-            op_stream_index = 0;
-            op_phase = 3;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 9;
-        }
-        return;
-    }
-
-    case 3: /* STEPS */
-    {
-        uint8_t pattern, track, step_nr;
-        Step *step;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_STEP_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 4;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
-        if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
-            filesystem_patternStepAddress(op_stream_index, &pattern, &track, &step_nr);
-            step = filesystem_patternStepPtr(pattern, track, step_nr);
-            filesystem_unpackStep(step, staging_buf);
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 9;
-        }
-        return;
-    }
-
-    case 4: /* MAIN STEPS */
-    {
-        uint8_t pattern, track;
-        uint16_t *main_steps;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_MAIN_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 5;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
-        if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            main_steps = filesystem_patternMainPtr(pattern, track);
-            *main_steps = (uint16_t)staging_buf[0] | ((uint16_t)staging_buf[1] << 8);
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 9;
-        }
-        return;
-    }
-
-    case 5: /* PATTERN SETTINGS */
-    {
-        PatternSetting *setting;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_SETTINGS_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 6;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
-        if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
-            setting = filesystem_patternSettingPtr((uint8_t)op_stream_index);
-            setting->nextPattern = staging_buf[0];
-            setting->changeBar = staging_buf[1];
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 9;
-        }
-        return;
-    }
-
-    case 6: /* TRACK LENGTHS */
-    {
-        uint8_t pattern, track;
-        LengthRotate *length_rotate;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 7;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u || (n == 0 && afatfs_feof(op_file))) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            length_rotate = filesystem_patternLengthPtr(pattern, track);
-            length_rotate->length = (op_item_offset >= 1u) ? staging_buf[0] : 0;
-            filesystem_defaultTrackSettings(length_rotate, track);
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 7: /* TRACK SETTINGS EXTENSION */
-    {
-        uint8_t pattern, track;
-        LengthRotate *length_rotate;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 8;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            length_rotate = filesystem_patternLengthPtr(pattern, track);
-            /*
-             * Optional four-byte track-settings extension for new pattern
-             * saves. Legacy files hit EOF before this block and keep the
-             * defaults assigned while reading the length block above. Per-track
-             * shuffle is intentionally a following extension so the four-byte
-             * record size remains compatible with earlier Phase 2 saves.
-             */
-            length_rotate->rotate = staging_buf[0];
-            length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
-                ? staging_buf[1]
-                : TRACK_SCALE_OFF;
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_item_offset = 0;
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 9;
-        }
-        return;
-    }
-
-    case 8: /* TRACK SHUFFLE EXTENSION */
-    {
-        uint8_t pattern, track;
-        LengthRotate *length_rotate;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 9;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            length_rotate = filesystem_patternLengthPtr(pattern, track);
-            /*
-             * Optional per-track shuffle extension. Input is one stored 0..127
-             * byte for the current PatternData track; output updates
-             * LengthRotate.shuffle. If EOF arrives before this block exists,
-             * shuffle remains at the default-off value assigned with the track
-             * length/settings defaults.
-             * Clients: PatternData accessors and the per-track sequencer timing
-             * scheduler.
-             */
-            length_rotate->shuffle = (staging_buf[0] <= 127u) ? staging_buf[0] : 0u;
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 9;
-        }
-        return;
-    }
-
-    case 9: /* CLOSE */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 10;
+            op_phase = 82u;
         return;
 
-    case 10: /* WAIT_CLOSE */
-        if (!op_close_done) return;
-        filesystem_finish(op_close_status);
-        return;
-
-    default:
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
-}
-
-/* -----------------------------------------------------------------------
-** SAVE ALL / PERFORMANCE state machine
-**
-** Container format matches the reference:
-**   name[8], version[1], meta area[64], kit area[512], pattern payload
-**
-** ALL meta area stores all globals, then 0xff padding to 64 bytes.
-** PERFORMANCE meta area stores BPM and bar-reset mode, then 0xff padding.
-** Kit area stores active kit bytes without a name, then 0xff padding.
-** Pattern payload is the same as `.pat` after its 8-byte name header.
-**
-** Pattern payload phases: 8=steps, 9=main steps, 10=settings,
-** 11=lengths, 12=track settings extension, 13=track shuffle extension,
-** 14=close, 15=wait_close.
-** ----------------------------------------------------------------------- */
-static void filesystem_saveContainer_tick(void)
-{
-    uint8_t is_all = (current_op == FS_INTERNAL_OP_SAVE_ALL);
-
-    switch (op_phase) {
-    case 0: /* OPEN */
-    {
-        char fname[13];
-        if (!filesystem_makeFilename(fname, op_file_type, op_slot)) {
-            filesystem_finish(FS_STATUS_ERROR);
+    case 82: /* WAIT Pattern close, then open effects */
+        if (!op_close_done)
             return;
-        }
-        op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen(fname, "w", on_file_opened))
+        op_file_ready = false;
+        if (!afatfs_fopen_lfn("effects.fx", "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE,
+                              op_root_open_name, on_file_opened))
             return;
-        op_phase = 1;
+        op_phase = 83u;
         return;
-    }
 
-    case 1: /* WAIT_OPEN */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
+    case 83: /* WAIT effects open */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
             filesystem_finish(FS_STATUS_ERROR);
             return;
         }
-        op_phase = 2;
-        op_stream_index = 0;
-        op_item_offset = 0;
-        op_bytes_done = 0;
+        op_write_line_index = 0u;
+        op_write_line_len = 0u;
+        op_write_line_offset = 0u;
+        op_phase = 84u;
         return;
 
-    case 2: /* NAME */
-        filesystem_writeStreamChunk((const uint8_t *)preset_currentName, 8);
-        if (op_item_offset >= 8u) {
-            op_item_offset = 0;
-            op_phase = 3;
-        }
-        return;
-
-    case 3: /* VERSION */
-        staging_buf[0] = FS_CONTAINER_VERSION;
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index = 0;
-            op_phase = 4;
-        }
-        return;
-
-    case 4: /* META */
-    {
-        uint16_t meta_len = is_all ? (NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS) : 2u;
-
-        if (op_stream_index >= meta_len) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 5;
+    case 84: /* WRITE effects placeholder */
+        if (filesystem_writeTextLine(filesystem_nextEffectPlaceholderLine,
+                                     NULL))
             return;
-        }
-
-        if (is_all) {
-            staging_buf[0] = parameter_values[PAR_BEGINNING_OF_GLOBALS + op_stream_index];
-        } else {
-            staging_buf[0] = (op_stream_index == 0u)
-                ? parameter_values[PAR_BPM]
-                : parameter_values[PAR_BAR_RESET_MODE];
-        }
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 5: /* META PADDING */
-    {
-        uint16_t meta_len = is_all ? (NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS) : 2u;
-        uint16_t pad_len = FS_CONTAINER_META_LEN - meta_len;
-
-        if (op_stream_index >= pad_len) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 6;
-            return;
-        }
-
-        staging_buf[0] = FS_CONTAINER_PAD_BYTE;
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 6: /* KIT DATA */
-        if (op_stream_index >= END_OF_SOUND_PARAMETERS) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 7;
-            return;
-        }
-        staging_buf[0] = parameter_values[op_stream_index];
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-
-    case 7: /* KIT PADDING */
-    {
-        uint16_t pad_len = FS_CONTAINER_KIT_LEN - END_OF_SOUND_PARAMETERS;
-        if (op_stream_index >= pad_len) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 8;
-            return;
-        }
-        staging_buf[0] = FS_CONTAINER_PAD_BYTE;
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 8: /* PATTERN STEPS */
-    {
-        uint8_t pattern, track, step_nr;
-        Step *step;
-        if (op_stream_index >= FS_PATTERN_STEP_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 9;
-            return;
-        }
-        filesystem_patternStepAddress(op_stream_index, &pattern, &track, &step_nr);
-        step = filesystem_patternStepPtr(pattern, track, step_nr);
-        if (!step) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        filesystem_packStep(step, staging_buf);
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
-        if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 9: /* PATTERN MAIN STEPS */
-    {
-        uint8_t pattern, track;
-        uint16_t main_steps;
-        if (op_stream_index >= FS_PATTERN_MAIN_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 10;
-            return;
-        }
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        {
-            uint16_t *mainPtr = filesystem_patternMainPtr(pattern, track);
-            if (!mainPtr) {
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            main_steps = *mainPtr;
-        }
-        staging_buf[0] = (uint8_t)(main_steps & 0xffu);
-        staging_buf[1] = (uint8_t)(main_steps >> 8);
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
-        if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 10: /* PATTERN SETTINGS */
-    {
-        PatternSetting *setting;
-        if (op_stream_index >= FS_PATTERN_SETTINGS_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 11;
-            return;
-        }
-        setting = filesystem_patternSettingPtr((uint8_t)op_stream_index);
-        if (!setting) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        staging_buf[0] = setting->nextPattern;
-        staging_buf[1] = setting->changeBar;
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
-        if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 11: /* PATTERN LENGTHS */
-    {
-        uint8_t pattern, track;
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 12;
-            return;
-        }
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        {
-            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
-            if (!lr) {
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            staging_buf[0] = lr->length;
-        }
-        filesystem_writeStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 12: /* PATTERN SETTINGS EXTENSION */
-    {
-        uint8_t pattern, track;
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 13;
-            return;
-        }
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        {
-            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
-            if (!lr) {
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            /*
-             * Container pattern payload mirrors standalone .pat: write the
-             * current track length block, then append PatternData-owned track
-             * settings for new firmware. Shuffle is not packed into this
-             * four-byte record; it has a separate extension immediately after
-             * this block.
-             */
-            staging_buf[0] = lr->rotate;
-            staging_buf[1] = lr->scale;
-        }
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 13: /* TRACK SHUFFLE EXTENSION */
-    {
-        uint8_t pattern, track;
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 14;
-            return;
-        }
-        filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-        {
-            LengthRotate *lr = filesystem_patternLengthPtr(pattern, track);
-            if (!lr) {
-                filesystem_finish(FS_STATUS_ERROR);
-                return;
-            }
-            /*
-             * Append per-track shuffle after the track-settings
-             * extension. Input is PatternData's stored 0..127 timing amount;
-             * output is one byte consumed by newer container/pattern loaders.
-             */
-            staging_buf[0] = lr->shuffle;
-        }
-        filesystem_writeStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 14: /* CLOSE */
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 15;
+            op_phase = 85u;
         return;
 
-    case 15: /* WAIT_CLOSE */
-        if (!op_close_done) return;
-        filesystem_finish(op_close_status);
+    case 85: /* WAIT effects close and reuse the existing terminal path */
+        if (!op_close_done)
+            return;
+        op_phase = 37u;
         return;
 
     default:
@@ -19434,409 +19111,6 @@ static void filesystem_saveContainer_tick(void)
     }
 }
 
-/* -----------------------------------------------------------------------
-** LOAD ALL / PERFORMANCE state machine
-**
-** Pattern payload phases mirror saveContainer(): 8=steps, 9=main steps,
-** 10=settings, 11=lengths, 12=track settings extension,
-** 13=optional track shuffle extension, 14=close, 15=wait_close. Required
-** sections close with error on EOF; optional extensions close with done.
-** ----------------------------------------------------------------------- */
-static void filesystem_loadContainer_tick(void)
-{
-    uint8_t is_all = (current_op == FS_INTERNAL_OP_LOAD_ALL);
-
-    switch (op_phase) {
-    case 0: /* OPEN */
-    {
-        char fname[13];
-        if (!filesystem_makeFilename(fname, op_file_type, op_slot)) {
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        op_file_ready = false;
-        op_file = NULL;
-        if (is_all)
-            fs_stale_warning_pending = FS_STALE_WARNING_NONE;
-        if (!afatfs_fopen(fname, "r", on_file_opened))
-            return;
-        op_phase = 1;
-        return;
-    }
-
-    case 1: /* WAIT_OPEN */
-        if (!op_file_ready) return;
-        if (op_file == NULL) {
-            memcpy(preset_currentName, "Empty   ", 8);
-            filesystem_finish(FS_STATUS_ERROR);
-            return;
-        }
-        if (seq_isRunning()) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-            return;
-        }
-        op_loaded_active_pattern_running = 0u;
-        op_phase = 2;
-        op_stream_index = 0;
-        op_item_offset = 0;
-        op_bytes_done = 0;
-        return;
-
-    case 2: /* NAME */
-    {
-        uint32_t n = filesystem_readStreamChunk((uint8_t *)preset_currentName, 8);
-        if (op_item_offset >= 8u) {
-            uint8_t i;
-            for (i = 0; i < 8; i++)
-                if (preset_currentName[i] < 0x20 || preset_currentName[i] > 0x7E)
-                    preset_currentName[i] = ' ';
-            op_item_offset = 0;
-            op_phase = 3;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 3: /* VERSION */
-    {
-        uint32_t n = filesystem_readStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_file_version = staging_buf[0];
-            op_item_offset = 0;
-            op_stream_index = 0;
-            if (op_file_version > FS_CONTAINER_VERSION) {
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 14;
-            } else {
-                op_phase = 4;
-            }
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 4: /* META */
-    {
-        uint32_t n;
-
-        if (is_all) {
-            uint16_t globals_len = (uint16_t)(NUM_PARAMS - PAR_BEGINNING_OF_GLOBALS);
-
-            /* Read the complete 64-byte .all meta field before deciding how
-            ** many globals it actually contains. This preserves the fixed file
-            ** offset regardless of whether globals are current, legacy, or
-            ** stale. Unknown layouts are safely defaulted and warned later. */
-            n = filesystem_readStreamChunk(staging_buf, FS_CONTAINER_META_LEN);
-            if (op_item_offset >= FS_CONTAINER_META_LEN) {
-                if (globals_len <= FS_CONTAINER_META_LEN &&
-                    filesystem_metaHasStoredGlobalsLen(staging_buf, globals_len)) {
-                    filesystem_applyGlobalsPrefix(staging_buf, globals_len);
-                } else if (filesystem_metaHasStoredGlobalsLen(staging_buf,
-                                                             FS_GLOBALS_LEGACY_LEN_22)) {
-                    /* Legacy 22-byte globals: keep values, force known-safe
-                    ** settings for fields that shifted/weren't present. */
-                    filesystem_applyLegacy22Globals(staging_buf, FS_GLOBALS_LEGACY_LEN_22);
-                } else {
-                    filesystem_applyStaleGlobalsFallback(staging_buf,
-                                                         filesystem_staleMetaPrefixLen(staging_buf));
-                    fs_stale_warning_pending = FS_STALE_WARNING_ALL;
-                }
-                op_item_offset = 0;
-                op_stream_index = 0;
-                op_phase = 6;
-            } else if (n == 0 && afatfs_feof(op_file)) {
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 14;
-            }
-            return;
-        }
-
-        {
-            uint16_t meta_len = (op_file_version > 1u ? 2u : 1u);
-
-            if (op_stream_index >= meta_len) {
-                op_stream_index = 0;
-                op_item_offset = 0;
-                op_phase = 5;
-                return;
-            }
-
-            n = filesystem_readStreamChunk(staging_buf, 1);
-            if (op_item_offset >= 1u) {
-                if (op_stream_index == 0u) {
-                    parameter_values[PAR_BPM] = staging_buf[0];
-                } else {
-                    parameter_values[PAR_BAR_RESET_MODE] = staging_buf[0];
-                }
-                op_item_offset = 0;
-                op_stream_index++;
-            } else if (n == 0 && afatfs_feof(op_file)) {
-                op_close_status = FS_STATUS_ERROR;
-                op_phase = 14;
-            }
-        }
-        return;
-    }
-
-    case 5: /* META PADDING */
-    {
-        uint16_t meta_len = (op_file_version > 1u ? 2u : FS_CONTAINER_META_LEN);
-        uint16_t pad_len = FS_CONTAINER_META_LEN - meta_len;
-        uint32_t n;
-
-        if (op_stream_index >= pad_len) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 6;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 6: /* KIT DATA */
-    {
-        uint32_t n;
-        if (op_stream_index >= END_OF_SOUND_PARAMETERS) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 7;
-            return;
-        }
-        n = filesystem_readStreamChunk(parameter_values + op_stream_index, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            memset(parameter_values + op_stream_index, 0,
-                   END_OF_SOUND_PARAMETERS - op_stream_index);
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 7;
-        }
-        return;
-    }
-
-    case 7: /* KIT PADDING */
-    {
-        uint16_t pad_len = FS_CONTAINER_KIT_LEN - END_OF_SOUND_PARAMETERS;
-        uint32_t n;
-        if (op_stream_index >= pad_len) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 8;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u) {
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 8: /* PATTERN STEPS */
-    {
-        uint8_t pattern, track, step_nr;
-        Step *step;
-        uint32_t n;
-        if (op_stream_index >= FS_PATTERN_STEP_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 9;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_STEP_SIZE);
-        if (op_item_offset >= FS_PATTERN_STEP_SIZE) {
-            filesystem_patternStepAddress(op_stream_index, &pattern, &track, &step_nr);
-            step = filesystem_patternStepPtr(pattern, track, step_nr);
-            filesystem_unpackStep(step, staging_buf);
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 9: /* PATTERN MAIN STEPS */
-    {
-        uint8_t pattern, track;
-        uint16_t *main_steps;
-        uint32_t n;
-        if (op_stream_index >= FS_PATTERN_MAIN_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 10;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_MAIN_SIZE);
-        if (op_item_offset >= FS_PATTERN_MAIN_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            main_steps = filesystem_patternMainPtr(pattern, track);
-            *main_steps = (uint16_t)staging_buf[0] | ((uint16_t)staging_buf[1] << 8);
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 10: /* PATTERN SETTINGS */
-    {
-        PatternSetting *setting;
-        uint32_t n;
-        if (op_stream_index >= FS_PATTERN_SETTINGS_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 11;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_SETTING_SIZE);
-        if (op_item_offset >= FS_PATTERN_SETTING_SIZE) {
-            setting = filesystem_patternSettingPtr((uint8_t)op_stream_index);
-            setting->nextPattern = staging_buf[0];
-            setting->changeBar = staging_buf[1];
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_ERROR;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 11: /* PATTERN LENGTHS */
-    {
-        uint8_t pattern, track;
-        LengthRotate *length_rotate;
-        uint32_t n;
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 12;
-            return;
-        }
-        n = filesystem_readStreamChunk(staging_buf, 1);
-        if (op_item_offset >= 1u || (n == 0 && afatfs_feof(op_file))) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            length_rotate = filesystem_patternLengthPtr(pattern, track);
-            length_rotate->length = (op_item_offset >= 1u) ? staging_buf[0] : 0;
-            filesystem_defaultTrackSettings(length_rotate, track);
-            op_item_offset = 0;
-            op_stream_index++;
-        }
-        return;
-    }
-
-    case 12: /* PATTERN SETTINGS EXTENSION */
-    {
-        uint8_t pattern, track;
-        LengthRotate *length_rotate;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_stream_index = 0;
-            op_item_offset = 0;
-            op_phase = 13;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SETTINGS_EXTRA_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            length_rotate = filesystem_patternLengthPtr(pattern, track);
-            /*
-             * Optional four-byte track-settings extension inside .all/.prf
-             * containers. Inputs are the append-only bytes after the current
-             * length block; outputs update PatternData's track settings record.
-             * Shuffle is intentionally not read here because it belongs to the
-             * following one-byte-per-track extension, keeping this record
-             * compatible with earlier four-byte saves.
-             */
-            length_rotate->rotate = staging_buf[0];
-            length_rotate->scale = (staging_buf[1] < TRACK_SCALE_COUNT)
-                ? staging_buf[1]
-                : TRACK_SCALE_OFF;
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_item_offset = 0;
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 13: /* TRACK SHUFFLE EXTENSION */
-    {
-        uint8_t pattern, track;
-        LengthRotate *length_rotate;
-        uint32_t n;
-
-        if (op_stream_index >= FS_PATTERN_LENGTH_COUNT) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 14;
-            return;
-        }
-
-        n = filesystem_readStreamChunk(staging_buf, FS_PATTERN_TRACK_SHUFFLE_SIZE);
-        if (op_item_offset >= FS_PATTERN_TRACK_SHUFFLE_SIZE) {
-            filesystem_patternTrackAddress(op_stream_index, &pattern, &track);
-            length_rotate = filesystem_patternLengthPtr(pattern, track);
-            /*
-             * Optional per-track shuffle extension for container payloads.
-             * Input is one stored 0..127 byte for the current PatternData
-             * track; output updates LengthRotate.shuffle. If a provisional file
-             * ends before this block, shuffle remains at the default-off value.
-             */
-            length_rotate->shuffle = (staging_buf[0] <= 127u) ? staging_buf[0] : 0u;
-            op_item_offset = 0;
-            op_stream_index++;
-        } else if (n == 0 && afatfs_feof(op_file)) {
-            op_close_status = FS_STATUS_DONE;
-            op_phase = 14;
-        }
-        return;
-    }
-
-    case 14: /* CLOSE */
-        op_close_done = false;
-        if (afatfs_fclose(op_file, on_file_closed))
-            op_phase = 15;
-        return;
-
-    case 15: /* WAIT_CLOSE */
-        if (!op_close_done) return;
-        filesystem_finish(op_close_status);
-        return;
-
-    default:
-        filesystem_finish(FS_STATUS_ERROR);
-        return;
-    }
-}
-
-#endif
 /* -----------------------------------------------------------------------
 ** LOAD SETTINGS state machine — with boot recovery prelude.
 **
@@ -21536,8 +20810,9 @@ static uint8_t filesystem_appendInstrumentTypeField(char *dst,
     const kit_instrument_slot_t *inst;
     const char *token;
 
-    if (row < FS_RESIDENT_NAMES_INSTRUMENT_BASE)
-        return 1u; /* Bank/Scene/Kit rows carry no type field */
+    if (row < FS_RESIDENT_NAMES_INSTRUMENT_BASE ||
+        row >= FS_RESIDENT_NAMES_PATTERN_BASE)
+        return 1u; /* Bank/Scene/Kit/Pattern rows carry no type field */
     offset = (uint16_t)(row - FS_RESIDENT_NAMES_INSTRUMENT_BASE);
     inst = scene_instrumentSlotConst(
         (uint8_t)(offset / STORAGE_KIT_SLOT_COUNT),
@@ -24702,6 +23977,7 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_UPDATE_HCNAMES_KIT:
     case FS_INTERNAL_OP_LOAD_HCNAMES_SCENE:
     case FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE:
+    case FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN:
         filesystem_residentNames_tick();
         break;
     case FS_INTERNAL_OP_LOAD_KIT:
@@ -24758,7 +24034,11 @@ void filesystem_tick(void)
         filesystem_loadKit_tick();
         break;
     case FS_INTERNAL_OP_LOAD_PATTERN:
+        filesystem_loadPattern_tick();
+        break;
     case FS_INTERNAL_OP_SAVE_PATTERN:
+        filesystem_savePattern_tick();
+        break;
     case FS_INTERNAL_OP_LOAD_ALL:
     case FS_INTERNAL_OP_LOAD_PERFORMANCE:
     case FS_INTERNAL_OP_SAVE_ALL:
@@ -24784,6 +24064,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_SCAN_BANKS:
         filesystem_scanBanks_tick();
+        break;
+    case FS_INTERNAL_OP_SCAN_PATTERNS:
+        filesystem_scanPatterns_tick();
         break;
     case FS_INTERNAL_OP_SCAN_BANK_SCENES:
         filesystem_scanBankScenes_tick();
@@ -25930,8 +25213,9 @@ static uint8_t filesystem_regenClassifyPayloadByte(uint32_t payload_relative,
 /*
  * Regenerate .hcnames from a validated winner record's identity fields.
  *
- * What: rebuilds all 129 rows of .hcnames using the winner record's
- * embedded name bytes and Phase C source fields, plus the Bank identity
+ * What: rebuilds the expanded 145-row .hcnames file from the winner's 129
+ * AutoSave-wire identity fields, using embedded name bytes and Phase C source
+ * fields plus the Bank identity
  * from the record's Bank section. The #types header is emitted first via
  * filesystem_formatHcnamesHeader(). Inputs: the validated winner record,
  * read in bounded chunks from the card. Outputs: a new .hcnames written
@@ -27193,20 +26477,166 @@ static uint8_t filesystem_bootReaderNarrowLoadInstrument(
 }
 
 /*
- * Boot-time Pattern bridge disconnect for Session 062.
+ * Read one complete v4 Pattern file from the current directory.
  *
- * What: skip the legacy pattern.pat v3 reader. Why: v3 stores PatternSet
- * bitmap data, while live PatternData now owns address entries and the
- * reserved dynamic pool; converting the old file would silently create a
- * partial representation. Inputs: Scene index supplied by the boot reader.
- * Output: zero, which the caller treats as a non-fatal absent Pattern load;
- * pat_initScene() has already left the resident region empty. Affiliates:
- * boot-reader orchestration and the future v4 Pattern serializer.
+ * What: validates the fixed header/stack geometry, streams the header
+ * extension plus address/bitmap/pool sections directly into one resident
+ * Scene region, and verifies the header CRC field after all payload bytes are
+ * accepted. Inputs: current working directory, one `<name>.pat` or numbered
+ * root Pattern filename, and its resident Scene destination. Output: nonzero
+ * only after the complete v4 payload is valid; the caller owns the empty
+ * fallback when this returns zero. Why: boot restore cannot enter the normal
+ * asynchronous Scene/Pattern state machine, but it must use the exact same
+ * binary contract. Affiliates: filesystem_patternHeaderValid(),
+ * filesystem_patternCrcFeed(), pat_sceneRegionMut(), and the boot Pattern
+ * source resolver below. The CRC bytes at header offset 14 are already fed as
+ * zero by filesystem_patternCrcFeed(); the stored value is not a trailing
+ * file record.
+ */
+static uint8_t filesystem_bootReaderReadPatternFile(const char *file_name,
+                                                     uint8_t scene_index)
+{
+    afatfsFilePtr_t file;
+    pat_scene_region_t *region;
+    uint16_t header_size;
+    uint16_t stack_size;
+    uint16_t extension;
+    uint32_t stored_crc;
+    uint32_t crc;
+    uint32_t pool_bytes;
+    uint8_t track;
+    uint8_t ok = 0u;
+
+    if (!file_name || scene_index >= SCENE_COUNT)
+        return 0u;
+    region = pat_sceneRegionMut(scene_index);
+    if (!region)
+        return 0u;
+    file = filesystem_blockOpenLfn(file_name);
+    if (!file)
+        return 0u;
+    pat_initScene(scene_index);
+    crc = autosave_recordCrcBegin();
+    if (filesystem_blockRead(file, staging_buf,
+                             PATTERN_FILE_FIXED_HEADER_BYTES) !=
+        PATTERN_FILE_FIXED_HEADER_BYTES ||
+        !filesystem_patternHeaderValid(staging_buf, &header_size,
+                                       &stack_size, &stored_crc)) {
+        goto close;
+    }
+    crc = filesystem_patternCrcFeed(
+        crc, 0u, staging_buf, PATTERN_FILE_FIXED_HEADER_BYTES);
+    extension = (uint16_t)(header_size - PATTERN_FILE_FIXED_HEADER_BYTES);
+    if (extension != 0u) {
+        if (filesystem_blockRead(file,
+                                 staging_buf + PATTERN_FILE_FIXED_HEADER_BYTES,
+                                 extension) != extension) {
+            goto close;
+        }
+        crc = filesystem_patternCrcFeed(
+            crc, PATTERN_FILE_FIXED_HEADER_BYTES,
+            staging_buf + PATTERN_FILE_FIXED_HEADER_BYTES, extension);
+    }
+    region->pattern_change_bar = staging_buf[32u];
+    region->pattern_next = staging_buf[33u];
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        uint16_t base = (uint16_t)(48u +
+            track * PATTERN_FILE_TRACK_HEADER_BYTES);
+        region->track_length[track] = staging_buf[base];
+        region->track_scale[track] = staging_buf[base + 1u];
+        region->track_shuffle[track] = staging_buf[base + 2u];
+    }
+    if (filesystem_blockRead(file, (uint8_t *)region->address,
+                             PATTERN_FILE_ADDRESS_BYTES) !=
+        PATTERN_FILE_ADDRESS_BYTES) {
+        goto close;
+    }
+    crc = filesystem_patternCrcFeed(
+        crc, PATTERN_FILE_HEADER_BYTES,
+        (const uint8_t *)region->address, PATTERN_FILE_ADDRESS_BYTES);
+    if (filesystem_blockRead(file, region->bitmap,
+                              PATTERN_FILE_BITMAP_BYTES) !=
+        PATTERN_FILE_BITMAP_BYTES) {
+        goto close;
+    }
+    crc = filesystem_patternCrcFeed(
+        crc, PATTERN_FILE_HEADER_BYTES + PATTERN_FILE_ADDRESS_BYTES,
+        region->bitmap, PATTERN_FILE_BITMAP_BYTES);
+    pool_bytes = (uint32_t)stack_size * 32u;
+    if (filesystem_blockRead(file, region->pool, pool_bytes) != pool_bytes)
+        goto close;
+    crc = filesystem_patternCrcFeed(
+        crc, PATTERN_FILE_HEADER_BYTES + PATTERN_FILE_ADDRESS_BYTES +
+            PATTERN_FILE_BITMAP_BYTES,
+        region->pool, (uint16_t)pool_bytes);
+    ok = (uint8_t)(autosave_recordCrcFinish(crc) == stored_crc);
+
+close:
+    (void)filesystem_blockClose(file);
+    if (!ok)
+        pat_initScene(scene_index);
+    return ok;
+}
+
+/*
+ * Restore one Scene's v4 Pattern during boot.
+ *
+ * What: resolves the Pattern HCNAMES row either to a numbered root
+ * `/Pattern/NNN name.pat` source or through the resident Scene/Bank source to
+ * a named child inside that Scene directory. Inputs: parsed 145-row HCNAMES
+ * mirror and a resident Scene index. Output: the complete Pattern region is
+ * restored, or left at pat_initScene() defaults when the source/file is
+ * missing or invalid. Why: Pattern data is not part of the AutoSave wire
+ * payload in Session 063, so the accepted Scene still needs its v4 child or
+ * library file before playback resumes. Affiliates:
+ * filesystem_bootReaderResolveResidentRow(),
+ * filesystem_bootReaderEnterSceneFolder(), and
+ * filesystem_bootReaderReadPatternFile().
  */
 static uint8_t filesystem_bootReaderLoadPattern(uint8_t scene_index)
 {
-    (void)scene_index;
-    return 0u;
+    uint16_t pattern_row;
+    uint16_t resolved_row;
+    uint16_t source;
+    char file_name[AFATFS_LONG_FILENAME_MAX + 1u];
+    uint8_t ok = 0u;
+
+    if (scene_index >= SCENE_COUNT || scene_index >= 16u)
+        return 0u;
+    pat_initScene(scene_index);
+    pattern_row = filesystem_residentPatternRow(scene_index);
+    source = filesystem_bootReaderResolveResidentRow(
+        pattern_row, &resolved_row);
+    if (source < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT &&
+        resolved_row == pattern_row) {
+        if (!filesystem_blockChdir(NULL) ||
+            !filesystem_bootReaderEnterDirectory(STORAGE_ROOT_PATTERN)) {
+            (void)filesystem_blockChdir(NULL);
+            return 0u;
+        }
+        filesystem_makePatternLibraryFilename(
+            file_name, sizeof(file_name), source,
+            hcnames_name_mirror[pattern_row]);
+    } else {
+        uint16_t scene_row = filesystem_residentSceneRow(scene_index);
+        uint16_t scene_resolved_row;
+        uint16_t scene_source;
+
+        scene_source = filesystem_bootReaderResolveResidentRow(
+            scene_row, &scene_resolved_row);
+        if (scene_source >= FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT ||
+            scene_source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT ||
+            !filesystem_bootReaderEnterSceneFolder(
+                scene_index, scene_source, scene_resolved_row)) {
+            (void)filesystem_blockChdir(NULL);
+            return 0u;
+        }
+        filesystem_makePatternChildFilename(file_name, sizeof(file_name),
+                                             scene_index);
+    }
+    ok = filesystem_bootReaderReadPatternFile(file_name, scene_index);
+    (void)filesystem_blockChdir(NULL);
+    return ok;
 }
 
 /*
@@ -27238,8 +26668,9 @@ static uint8_t filesystem_bootReaderApplyRowType(uint16_t row,
     uint8_t slot;
 
     if (row < FS_RESIDENT_NAMES_INSTRUMENT_BASE ||
+        row >= FS_RESIDENT_NAMES_PATTERN_BASE ||
         row >= FS_RESIDENT_NAMES_ROW_COUNT || !line) {
-        return 1u; /* Bank/Scene/Kit rows carry no type field */
+        return 1u; /* Bank/Scene/Kit/Pattern rows carry no type field */
     }
     second_tab = strchr(line, '\t');
     if (!second_tab)
@@ -27271,7 +26702,7 @@ static uint8_t filesystem_bootReaderApplyRowType(uint16_t row,
 }
 
 /*
- * Parse one complete .hcnames image (header plus 129 rows) into the cache.
+ * Parse one complete .hcnames image (header plus 145 rows) into the cache.
  *
  * What: blocking version of the register read used by the runtime
  * machines: validates the #types header, streams every data row through
@@ -27361,7 +26792,8 @@ static void filesystem_bootReaderSeedInstrumentTypes(void)
  * What: clears the Scene record to the same safe defaults scene_initAll()
  * establishes (zero payload, decimation 127, per-track MIDI channels,
  * default voice mix, default instrument types, fresh Pattern defaults) and
- * resets the Scene's eight HCNAMES rows to UNKNOWN + refreshed so the
+ * resets the Scene's nine HCNAMES rows (Scene, Kit, Pattern, and six
+ * Instruments) to UNKNOWN + refreshed so the
  * next boot re-evaluates the Scene as unresolvable. Names in the mirror
  * are retained for display. Inputs: scene_index. Outputs: resident
  * SceneData emptied; fs_resident_source[] rows 1+scene, 17+scene, and
@@ -27405,6 +26837,9 @@ static void filesystem_bootReaderEmptyScene(uint8_t scene_index)
     row = filesystem_residentKitRow(scene_index);
     fs_resident_source[row] = (uint16_t)(
         FS_RESIDENT_SOURCE_UNKNOWN | FS_RESIDENT_SOURCE_REFRESHED_FLAG);
+    row = filesystem_residentPatternRow(scene_index);
+    fs_resident_source[row] = (uint16_t)(
+        FS_RESIDENT_SOURCE_UNKNOWN | FS_RESIDENT_SOURCE_REFRESHED_FLAG);
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
         row = filesystem_residentInstrumentRow(scene_index, slot);
         fs_resident_source[row] = (uint16_t)(
@@ -27437,6 +26872,7 @@ static uint16_t filesystem_bootReaderResolveResidentRow(
 
     if (resolved < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT &&
         row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE &&
+        row < FS_RESIDENT_NAMES_PATTERN_BASE &&
         resolved_row && *resolved_row == row) {
         /* No writer produces numeric Instrument-row sources; a
          * numeric token directly on an Instrument row (not
@@ -27734,8 +27170,8 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
         }
     }
     (void)filesystem_blockClose(record);
-    /* Step 3b: load patterns from disk for non-emptied scenes.
-     * Autosave captures parameters but not PatternSet data; without this
+    /* Step 3b: load Patterns from disk for non-emptied scenes.
+     * AutoSave captures parameters but not PatternData; without this
      * step, Case 1 scenes would have zeroed bitmaps and play as silence. */
     for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
          scene_index++) {
@@ -27747,7 +27183,19 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
             (uint16_t)(1u << scene_index)) {
             continue;
         }
-        (void)filesystem_bootReaderLoadPattern(scene_index);
+        if (!filesystem_bootReaderLoadPattern(scene_index)) {
+            /* R10: a missing, corrupt, or incompatible Pattern child
+             * invalidates the complete Scene rather than leaving a mixed
+             * Scene/pattern state resident after boot. */
+            filesystem_bootReaderEmptyScene(scene_index);
+            fs_boot_latch.case2_scene_mask = (uint16_t)(
+                fs_boot_latch.case2_scene_mask &
+                (uint16_t)~(uint16_t)(1u << scene_index));
+            fs_boot_latch.case3_scene_mask = (uint16_t)(
+                fs_boot_latch.case3_scene_mask |
+                (uint16_t)(1u << scene_index));
+            rows_changed = 1u;
+        }
     }
     /* Step 4: persist register changes and any adopted crash prelude. */
     if (rows_changed || adopted_temp) {
@@ -27770,13 +27218,13 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
  * What: parses .hcnames (temp-file prelude first, then the register),
  * then requires the two special-case checks — the register Bank row is a
  * direct numeric slot equal to bank_restoreBankSlot() (the settings.cfg
- * boot Bank), and all 129 rows carry the refreshed witness. When both
+ * boot Bank), and all 145 rows carry the refreshed witness. When both
  * hold, the register is authoritative: this function constructs the
  * whole resident state from it — the Bank container via
  * filesystem_bootNarrowLoadBank(), then every present Scene's eight rows
  * via resolve-plus-narrow-load, Bank-inherited rows from the Bank tree
- * and direct rows from their Scene/Kit/Instrument libraries, then
- * pattern.pat per non-emptied Scene. Any unresolvable child of a Scene
+ * and direct rows from their Scene/Kit/Instrument libraries, then the named
+ * v4 Pattern child per non-emptied Scene. Any unresolvable child of a Scene
  * applies the unbreakable rule: the Scene is not loaded, it is created
  * empty and noticed. Returns 1 on a completed authoritative load and 0
  * when either check fails or a hard failure occurs, in which case the
@@ -27920,7 +27368,7 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
             }
         }
     }
-    /* Step 5: pattern.pat per present Scene not emptied by step 4. */
+    /* Step 5: named v4 Pattern child per present Scene not emptied by step 4. */
     for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
          scene_index++) {
         if ((present_mask & (uint16_t)(1u << scene_index)) == 0u)
@@ -27929,7 +27377,18 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
             (uint16_t)(1u << scene_index)) {
             continue;
         }
-        (void)filesystem_bootReaderLoadPattern(scene_index);
+        if (!filesystem_bootReaderLoadPattern(scene_index)) {
+            /* R10: the authoritative register cannot keep a partially
+             * restored Scene when its named Pattern child is invalid. */
+            filesystem_bootReaderEmptyScene(scene_index);
+            fs_boot_latch.case2_scene_mask = (uint16_t)(
+                fs_boot_latch.case2_scene_mask &
+                (uint16_t)~(uint16_t)(1u << scene_index));
+            fs_boot_latch.case3_scene_mask = (uint16_t)(
+                fs_boot_latch.case3_scene_mask |
+                (uint16_t)(1u << scene_index));
+            rows_changed = 1u;
+        }
     }
     /* Step 6: persist register changes and any adopted crash prelude.
      * Successfully resolved rows keep their existing correct cells; only
@@ -27956,8 +27415,9 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
     /*
      * Persist one numbered-library cache during pre-audio boot.
      *
-     * Inputs: a mounted card and the requested Kit, root Scene, or root Bank
-     * domain. Output: a slot-ordered `.hcindex`, including blank rows for
+     * Inputs: a mounted card and the requested Kit, root Scene, root Bank, or
+     * root Pattern domain. Output: a slot-ordered `.hcindex`, including blank
+     * rows for
      * absent slots, after the normal asyncfatfs flush boundary. The wrapper
      * normally receives a cache populated by the preceding boot scan, but it
      * deliberately re-scans when the active shared cache tag does not match.
@@ -27975,6 +27435,8 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
         internal_kind = FS_NAME_CACHE_SCENE;
     else if (kind == FS_LIBRARY_INDEX_BANK)
         internal_kind = FS_NAME_CACHE_BANK;
+    else if (kind == FS_LIBRARY_INDEX_PATTERN)
+        internal_kind = FS_NAME_CACHE_PATTERN;
     else
         return 0u;
     /* A completed error from an immediately preceding boot step is no longer
@@ -27993,7 +27455,8 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
      * field. Repairing first lets the existing scan choose canonical physical
      * names and keeps `.hcindex` a faithful cache of the post-repair card.
      */
-    if (!filesystem_repairLibraryNamesBlocking(kind))
+    if (kind != FS_LIBRARY_INDEX_PATTERN &&
+        !filesystem_repairLibraryNamesBlocking(kind))
         return 0u;
     filesystem_clearNameCacheStorage();
 
@@ -28004,8 +27467,10 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
             scan_started = filesystem_requestScanKits(NULL);
         else if (internal_kind == FS_NAME_CACHE_SCENE)
             scan_started = filesystem_requestScanScenes(NULL);
-        else
+        else if (internal_kind == FS_NAME_CACHE_BANK)
             scan_started = filesystem_requestScanBanks(NULL);
+        else
+            scan_started = filesystem_requestScanPatterns(NULL);
         if (!scan_started)
             return 0u;
         while (status == FS_STATUS_BUSY)
@@ -28021,7 +27486,9 @@ uint8_t filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind)
                           (kind == FS_LIBRARY_INDEX_KIT)
                               ? FS_FILE_KIT
                               : (kind == FS_LIBRARY_INDEX_SCENE)
-                                  ? FS_FILE_SCENE : FS_FILE_BANK,
+                                  ? FS_FILE_SCENE
+                                  : (kind == FS_LIBRARY_INDEX_BANK)
+                                      ? FS_FILE_BANK : FS_FILE_PATTERN,
                           0u,
                           NULL))
         return 0u;
@@ -28054,7 +27521,21 @@ bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb
     case FS_FILE_MORPH:
         return filesystem_start(FS_INTERNAL_OP_LOAD_MORPH, type, slot, cb);
     case FS_FILE_PATTERN:
-        return filesystem_start(FS_INTERNAL_OP_LOAD_PATTERN, type, slot, cb);
+        if (slot >= STORAGE_PATTERN_MAX_SLOTS ||
+            !filesystem_librarySlotExists(FS_NAME_CACHE_PATTERN, slot))
+            return false;
+        if (!filesystem_start(FS_INTERNAL_OP_LOAD_PATTERN, type, slot, cb))
+            return false;
+        op_pattern_scene = scene_getActiveIndex();
+        memcpy(op_pattern_display_name,
+               filesystem_cachedLibraryName(FS_NAME_CACHE_PATTERN, slot),
+               STORAGE_KIT_DISPLAY_NAME_LEN);
+        op_pattern_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        op_pattern_source = slot;
+        filesystem_makePatternLibraryFilename(
+            op_pattern_filename, sizeof(op_pattern_filename), slot,
+            op_pattern_display_name);
+        return true;
     case FS_FILE_ALL:
         return filesystem_start(FS_INTERNAL_OP_LOAD_ALL, type, slot, cb);
     case FS_FILE_PERFORMANCE:
@@ -28364,7 +27845,26 @@ bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb
     case FS_FILE_MORPH:
         return false;
     case FS_FILE_PATTERN:
-        return filesystem_start(FS_INTERNAL_OP_SAVE_PATTERN, type, slot, cb);
+        if (slot >= STORAGE_PATTERN_MAX_SLOTS)
+            return false;
+        if (!filesystem_start(FS_INTERNAL_OP_SAVE_PATTERN, type, slot, cb))
+            return false;
+        op_pattern_scene = scene_getActiveIndex();
+        op_scene_pattern_open_name[0] = '\0';
+        if (filesystem_librarySlotExists(FS_NAME_CACHE_PATTERN, slot)) {
+            filesystem_makePatternLibraryFilename(
+                op_scene_pattern_open_name,
+                sizeof(op_scene_pattern_open_name), slot,
+                filesystem_cachedLibraryName(FS_NAME_CACHE_PATTERN, slot));
+        }
+        memcpy(op_pattern_display_name, preset_currentName,
+               STORAGE_KIT_DISPLAY_NAME_LEN);
+        op_pattern_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        op_pattern_source = slot;
+        filesystem_makePatternLibraryFilename(
+            op_pattern_filename, sizeof(op_pattern_filename), slot,
+            op_pattern_display_name);
+        return true;
     case FS_FILE_ALL:
         return filesystem_start(FS_INTERNAL_OP_SAVE_ALL, type, slot, cb);
     case FS_FILE_PERFORMANCE:
@@ -28706,6 +28206,16 @@ bool filesystem_requestScanBanks(fs_completion_cb_t cb)
     return filesystem_start(FS_INTERNAL_OP_SCAN_BANKS, FS_FILE_BANK, 0, cb);
 }
 
+bool filesystem_requestScanPatterns(fs_completion_cb_t cb)
+{
+    /* Rebuild the numbered Pattern-file cache from `/Pattern/`. */
+    if (status == FS_STATUS_BUSY)
+        return false;
+    filesystem_prepareLibraryNameCache(FS_NAME_CACHE_PATTERN);
+    return filesystem_start(FS_INTERNAL_OP_SCAN_PATTERNS,
+                            FS_FILE_PATTERN, 0u, cb);
+}
+
 bool filesystem_requestScanBankScenes(uint16_t slot, fs_completion_cb_t cb)
 {
     /*
@@ -29018,6 +28528,8 @@ bool filesystem_requestReloadLibraryIndex(fs_library_index_kind_t kind,
         cache_kind = FS_NAME_CACHE_SCENE;
     else if (kind == FS_LIBRARY_INDEX_BANK)
         cache_kind = FS_NAME_CACHE_BANK;
+    else if (kind == FS_LIBRARY_INDEX_PATTERN)
+        cache_kind = FS_NAME_CACHE_PATTERN;
     else
         return false;
 
@@ -29027,7 +28539,9 @@ bool filesystem_requestReloadLibraryIndex(fs_library_index_kind_t kind,
                             (cache_kind == FS_NAME_CACHE_KIT)
                                 ? FS_FILE_KIT
                                 : (cache_kind == FS_NAME_CACHE_SCENE)
-                                    ? FS_FILE_SCENE : FS_FILE_BANK,
+                                    ? FS_FILE_SCENE
+                                    : (cache_kind == FS_NAME_CACHE_BANK)
+                                        ? FS_FILE_BANK : FS_FILE_PATTERN,
                             0u,
                             cb);
 }
@@ -29061,6 +28575,12 @@ bool filesystem_requestLoadBankIndex(fs_completion_cb_t cb)
     return filesystem_requestReloadLibraryIndex(FS_LIBRARY_INDEX_BANK, cb);
 }
 
+bool filesystem_requestLoadPatternIndex(fs_completion_cb_t cb)
+{
+    /* Load the slot-preserving root Pattern index into the shared cache. */
+    return filesystem_requestReloadLibraryIndex(FS_LIBRARY_INDEX_PATTERN, cb);
+}
+
 bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind)
 {
     /*
@@ -29074,6 +28594,8 @@ bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind)
         return fs_list_cache_kind == FS_NAME_CACHE_SCENE;
     if (kind == FS_LIBRARY_INDEX_BANK)
         return fs_list_cache_kind == FS_NAME_CACHE_BANK;
+    if (kind == FS_LIBRARY_INDEX_PATTERN)
+        return fs_list_cache_kind == FS_NAME_CACHE_PATTERN;
     return false;
 }
 
@@ -29095,7 +28617,8 @@ void filesystem_clearNameCache(void)
     /*
      * Dispose the one shared browser-name cache for every library.
      *
-     * Inputs: none. Output: no Instrument, Kit, root Scene, root Bank, or
+     * Inputs: none. Output: no Instrument, Kit, root Scene, root Bank, root
+     * Pattern, or
      * temporary HCNAMES view remains readable. Menu calls this on Load/Save
      * exit and type changes; retaining occupancy/open metadata here would make
      * a later payload operation appear valid without a corresponding display-
@@ -29808,6 +29331,24 @@ const char *filesystem_bankSlotName(uint16_t zero_based_slot)
                                         zero_based_slot);
 }
 
+uint8_t filesystem_patternSlotExists(uint16_t zero_based_slot)
+{
+    /* A non-blank `.hcindex` row is the sole root Pattern occupancy record. */
+    if (zero_based_slot >= STORAGE_PATTERN_MAX_SLOTS)
+        return 0u;
+    return filesystem_librarySlotExists(FS_NAME_CACHE_PATTERN,
+                                        zero_based_slot);
+}
+
+const char *filesystem_patternSlotName(uint16_t zero_based_slot)
+{
+    /* Return the cached eight-cell Pattern name or the common empty sentinel. */
+    if (!filesystem_patternSlotExists(zero_based_slot))
+        return "Empty   ";
+    return filesystem_cachedLibraryName(FS_NAME_CACHE_PATTERN,
+                                        zero_based_slot);
+}
+
 uint16_t filesystem_firstKitSlot(void)
 {
     uint16_t slot;
@@ -29862,6 +29403,18 @@ uint16_t filesystem_firstBankSlot(void)
             return slot;
     }
     return STORAGE_BANK_MAX_SLOTS;
+}
+
+uint16_t filesystem_firstPatternSlot(void)
+{
+    uint16_t slot;
+
+    /* Find the lowest present root Pattern slot for boot/menu fallback. */
+    for (slot = 0u; slot < STORAGE_PATTERN_MAX_SLOTS; slot++) {
+        if (filesystem_patternSlotExists(slot))
+            return slot;
+    }
+    return STORAGE_PATTERN_MAX_SLOTS;
 }
 
 uint8_t filesystem_lastBankLoadLoadedScene(void)
@@ -29989,6 +29542,19 @@ const char *filesystem_residentSceneName(uint8_t scene_index)
      * the normal `Empty` fallback for an invalid/blank row. The pointer is
      * mirror-owned and valid until the next HCNAMES transaction.
      */
+    if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID ||
+        row >= FS_RESIDENT_NAMES_ROW_COUNT ||
+        filesystem_residentNameIsBlank(hcnames_name_mirror[row])) {
+        return "Empty   ";
+    }
+    return hcnames_name_mirror[row];
+}
+
+const char *filesystem_residentPatternName(uint8_t scene_index)
+{
+    uint16_t row = filesystem_residentPatternRow(scene_index);
+
+    /* Borrow the appended Pattern HCNAMES cell for the Save-name editor. */
     if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID ||
         row >= FS_RESIDENT_NAMES_ROW_COUNT ||
         filesystem_residentNameIsBlank(hcnames_name_mirror[row])) {

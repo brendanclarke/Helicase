@@ -197,7 +197,7 @@ uint8_t preset_loadFirstAvailableSceneOrKit(void);
  * PRESET_OP_SCENE_SAVE completion. Saving does not alter the retained HCNAMES
  * source provenance; failure likewise preserves it. This is separate from
  * preset_saveDrumset() because Scene Save serializes Scene settings, embedded
- * Kit, Pattern stub, and Effect placeholder, not only the Kit payload.
+ * Kit, Pattern, and Effect placeholder, not only the Kit payload.
  * Affiliates: filesystem's HCNAMES identity/source register.
  */
 uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene);
@@ -224,8 +224,8 @@ uint8_t preset_loadGlobals(void);
 uint8_t preset_saveGlobals(void);
 
 /* Pattern — async direct serializer in filesystem.c. */
-uint8_t preset_loadPattern(uint8_t presetNr);
-void    preset_savePattern(uint8_t presetNr);
+uint8_t preset_loadPattern(uint16_t presetNr);
+uint8_t preset_savePattern(uint16_t presetNr);
 
 /* All / Performance — async container serializers in filesystem.c. */
 void    preset_saveAll(uint8_t presetNr, uint8_t isAll);

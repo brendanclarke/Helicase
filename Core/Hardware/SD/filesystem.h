@@ -100,7 +100,8 @@ typedef enum {
 
 /*
  * Root numbered-library domains served by the one generalized name cache.
- * Kit, root Scene, and root Bank indexes preserve slot order, including blank slots, so
+ * Kit, root Scene, root Bank, and root Pattern indexes preserve slot order,
+ * including blank slots, so
  * callers can reconstruct the visible `NNN Name` folder key. Instrument
  * indexes remain typed and are requested through their existing API because
  * their rows are alphabetically sorted files rather than numbered folders.
@@ -110,6 +111,8 @@ typedef enum {
     FS_LIBRARY_INDEX_SCENE,
     /* Root Bank uses the same slot-preserving cache/index contract. */
     FS_LIBRARY_INDEX_BANK,
+    /* Root Pattern uses numbered LFN files and the same slot cache. */
+    FS_LIBRARY_INDEX_PATTERN,
 } fs_library_index_kind_t;
 
 typedef void (*fs_completion_cb_t)(void);
@@ -124,7 +127,7 @@ typedef void (*fs_completion_cb_t)(void);
  *
  * phase identifies the live HCNAMES state: 0=root/open request, 1=open wait,
  * 2=row streaming, 3=close wait, 4=final media flush, 5=done, and 6=error.
- * row is the next fixed-order SRAM row to write (0..129). The callback is
+ * row is the next fixed-order SRAM row to write (0..144). The callback is
  * observational only and must not start or acknowledge filesystem operations.
  * It exists to locate the current hardware boot freeze and should be removed
  * after the stalled phase has been confirmed.
@@ -351,13 +354,13 @@ uint8_t filesystem_autosaveBootReaderBlocking(void);
  * What: parses .hcnames (temp-file prelude first, then the register),
  * then requires the two special-case checks — the register Bank row is a
  * direct numeric slot equal to bank_restoreBankSlot() (the settings.cfg
- * boot Bank), and all 129 rows carry the refreshed witness. When both
+ * boot Bank), and all 145 HCNAMES rows carry the refreshed witness. When both
  * hold, the register is authoritative: this function constructs the
  * whole resident state from it — the Bank container via
  * filesystem_bootNarrowLoadBank(), then every present Scene's eight rows
  * via resolve-plus-narrow-load, Bank-inherited rows from the Bank tree
- * and direct rows from their Scene/Kit/Instrument libraries, then
- * pattern.pat per non-emptied Scene. Any unresolvable child of a Scene
+ * and direct rows from their Scene/Kit/Instrument libraries, then the
+ * v4 `<name>.pat` Pattern child per non-emptied Scene. Any unresolvable child of a Scene
  * applies the unbreakable rule: the Scene is not loaded, it is created
  * empty and noticed. Returns 1 on a completed authoritative load and 0
  * when either check fails or a hard failure occurs, in which case the
@@ -495,7 +498,8 @@ uint8_t     filesystem_repairInstrumentNamesBlocking(void);
  */
 bool filesystem_requestRepairBankNames(uint16_t slot, fs_completion_cb_t cb);
 /*
- * Write one slot-ordered Kit, root Scene, or root Bank cache as `.hcindex` at
+ * Write one slot-ordered Kit, root Scene, root Bank, or root Pattern cache as
+ * `.hcindex` at
  * boot. If the requested domain is not active in the one shared cache, the
  * implementation first performs the matching physical directory scan so a
  * missed caller scan cannot silently omit the index. Returns nonzero only
@@ -602,9 +606,9 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
  * Inputs: direct root Scene slot, source resident Scene, eight-cell display
  * name, and completion callback. Output: asynchronous replacement scoped to
  * same-number children under /Scene/: Scene/<NNN Name>/ with sceneset.scg,
- * embedded Kit directory, six instrument files, a draft text pattern.pat, and
- * effects.fx placeholder. pattern.pat stores only the 128x7 step-active grid
- * plus per-track length/scale until the final pattern schema exists. Other
+ * embedded Kit directory, six instrument files, a named v4 Pattern child, and
+ * effects.fx placeholder. The Pattern child stores the complete dynamic
+ * address/pool/bitmap payload and its per-track settings. Other
  * numbered Scene directories must not be removed, regardless of how many nested
  * children they contain. The resident Scene display name updates only after the
  * directory save succeeds. After the directory is durable, the filesystem
@@ -711,19 +715,21 @@ bool filesystem_requestSaveBank(uint16_t slot,
 bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 /*
- * Scan the physical Kit/, root Scene/, or root Bank/ directory representation.
+ * Scan the physical Kit/, root Scene/, root Bank/, or root Pattern/
+ * directory representation.
  *
  * What: clears and repopulates the single slot-ordered generalized name
  * cache from numbered directory entries. Why: boot/index maintenance still
  * needs to discover names from the card, while Load/Save browsing normally
  * enters through the corresponding `.hcindex`; a non-blank cache row is the
- * sole Kit/Scene/Bank occupancy record. No 1,000-entry presence bitmap or FAT
+ * sole Kit/Scene/Bank/Pattern occupancy record. No 1,000-entry presence bitmap or FAT
  * alias table is retained. Inputs: completion callback. Output: cache rows
- * only. Kit, Scene, and Bank no longer maintain parallel browser maps.
+ * only. Kit, Scene, Bank, and Pattern no longer maintain parallel browser maps.
  */
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanBanks(fs_completion_cb_t cb);
+bool filesystem_requestScanPatterns(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
 /*
  * Operation-scoped authoritative identity rows.
@@ -820,7 +826,7 @@ const char *filesystem_residentInstrumentName(uint8_t scene_index,
  * Resident Kit name-register access.
  *
  * The load request mirrors Instrument menu entry: it borrows the generalized
- * cache for all 129 root HCNAMES rows so Menu can copy one resident Scene's Kit
+ * cache for all 145 root HCNAMES rows so Menu can copy one resident Scene's Kit
  * name plus all six Instrument names before `/Kit/.hcindex` replaces that same
  * allocation. Menu retains those seven rows for the complete combined
  * Kit/Instrument session. Loads and saves only update the Menu scratch and an
@@ -872,6 +878,8 @@ bool filesystem_requestUpdateResidentSceneNames(
     fs_completion_cb_t cb);
 /* Borrow the requested Scene row while HCNAMES owns the shared cache. */
 const char *filesystem_residentSceneName(uint8_t scene_index);
+/* Borrow the appended Pattern row for one resident Scene. */
+const char *filesystem_residentPatternName(uint8_t scene_index);
 /*
  * Load or repair one registered Instrument type's browser index.
  *
@@ -890,7 +898,7 @@ bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
  * Reload one existing root-library `.hcindex` into the shared browser cache.
  *
  * Inputs: a numbered root-library kind and optional completion callback.
- * Output: the selected Kit, Scene, or Bank slot-ordered index replaces the
+ * Output: the selected Kit, Scene, Bank, or Pattern slot-ordered index replaces the
  * previous cache domain while preserving blank rows. This is a read-only cache
  * restoration operation: it does not scan a directory or rewrite `.hcindex`.
  * Pure Loads use it only after their runtime apply has completed; Saves use
@@ -906,10 +914,12 @@ bool filesystem_requestReloadLibraryIndex(fs_library_index_kind_t kind,
 bool filesystem_requestLoadKitIndex(fs_completion_cb_t cb);
 bool filesystem_requestLoadSceneIndex(fs_completion_cb_t cb);
 bool filesystem_requestLoadBankIndex(fs_completion_cb_t cb);
+/* Load the numbered root Pattern-file index into the shared browser cache. */
+bool filesystem_requestLoadPatternIndex(fs_completion_cb_t cb);
 /* True when the requested root library currently owns the shared cache. */
 bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind);
-/* Dispose the single shared Instrument/Kit/Scene/Bank browser cache or its
- * temporary 129-row HCNAMES view; no second name allocation exists. */
+/* Dispose the single shared Instrument/Kit/Scene/Bank/Pattern browser cache or its
+ * temporary 145-row HCNAMES view; no second name allocation exists. */
 void filesystem_clearNameCache(void);
 /* Compatibility spelling retained for existing Instrument menu callers. */
 void filesystem_clearInstrumentCache(void);
@@ -919,7 +929,7 @@ void filesystem_clearInstrumentCache(void);
  * Inputs are accepted only to keep stale developer-only callers buildable.
  * Outputs are empty/false and no filesystem transaction or SRAM cache is
  * created. Affiliates: matching presetManager compatibility stubs; musical
- * Load/Save code must use its Kit/Scene/Bank/Instrument requests instead.
+ * Load/Save code must use its Kit/Scene/Bank/Pattern/Instrument requests instead.
  */
 bool filesystem_requestScanTestFiles(fs_completion_cb_t cb);
 bool filesystem_requestScanTestDirs(fs_completion_cb_t cb);
@@ -1098,9 +1108,13 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
  */
 uint8_t     filesystem_bankSlotExists(uint16_t zero_based_slot);
 const char *filesystem_bankSlotName(uint16_t zero_based_slot);
+/* Root Pattern slots are numbered files (`NNN <name>.pat`) rather than folders. */
+uint8_t     filesystem_patternSlotExists(uint16_t zero_based_slot);
+const char *filesystem_patternSlotName(uint16_t zero_based_slot);
 uint16_t    filesystem_firstKitSlot(void);
 uint16_t    filesystem_firstSceneSlot(void);
 uint16_t    filesystem_firstBankSlot(void);
+uint16_t    filesystem_firstPatternSlot(void);
 /*
  * Report whether the completed Bank Load committed at least one child Scene.
  *

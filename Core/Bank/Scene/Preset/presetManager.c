@@ -76,7 +76,7 @@ static volatile uint8_t          pm_request_type = SAVE_TYPE_KIT;
  * menu.h prevents invisible UI slots from being selected by encoder stepping. */
 enum {
     PRESET_REQUEST_LEGACY_MORPH = NUM_SAVE_TYPES,
-    PRESET_REQUEST_LEGACY_PATTERN,
+    PRESET_REQUEST_PATTERN,
     PRESET_REQUEST_LEGACY_PERFORMANCE,
     PRESET_REQUEST_LEGACY_ALL,
 };
@@ -637,6 +637,7 @@ static fs_file_type_t preset_fileTypeFromSaveType(uint8_t what, uint8_t *hasName
     case SAVE_TYPE_KIT_MORPH:   return FS_FILE_KIT;
     case SAVE_TYPE_SCENE:       return FS_FILE_SCENE;
     case SAVE_TYPE_BANK:        return FS_FILE_BANK;
+    case SAVE_TYPE_PATTERN:     return FS_FILE_PATTERN;
     case SAVE_TYPE_GLO:
         if (hasName) *hasName = 0;
         return FS_FILE_SETTINGS;
@@ -2705,28 +2706,31 @@ uint8_t preset_saveTestSimpleDir(const char *name) { (void)name; return 0u; }
 
 #define FILE_VERSION 2
 
-uint8_t preset_loadPattern(uint8_t presetNr)
+uint8_t preset_loadPattern(uint16_t presetNr)
 {
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
-    pm_request_type = PRESET_REQUEST_LEGACY_PATTERN;
+    pm_request_type = PRESET_REQUEST_PATTERN;
     if (filesystem_requestLoad(FS_FILE_PATTERN, presetNr, on_pattern_load_complete))
         return 1;
     pm_status = PRESET_IDLE;
     return 0;
 }
 
-void preset_savePattern(uint8_t presetNr)
+uint8_t preset_savePattern(uint16_t presetNr)
 {
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
-    pm_request_type = PRESET_REQUEST_LEGACY_PATTERN;
-    if (!filesystem_requestSave(FS_FILE_PATTERN, presetNr, on_pattern_save_complete))
+    pm_request_type = PRESET_REQUEST_PATTERN;
+    if (!filesystem_requestSave(FS_FILE_PATTERN, presetNr, on_pattern_save_complete)) {
         pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
 }
 
 void preset_saveAll(uint8_t presetNr, uint8_t isAll)
