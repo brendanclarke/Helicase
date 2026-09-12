@@ -1521,7 +1521,6 @@ static void filesystem_scanPatterns_tick(void);
 static void filesystem_loadPattern_tick(void);
 static void filesystem_savePattern_tick(void);
 static void filesystem_startPatternHcnamesUpdate(void);
-static void filesystem_patternHcnamesUpdateComplete(void);
 static void filesystem_scanBankScenes_tick(void);
 static void filesystem_makeNumberedDir(char *dst,
                                        uint16_t slot,
@@ -5979,26 +5978,10 @@ static void filesystem_startPatternHcnamesUpdate(void)
     if (current_op == FS_INTERNAL_OP_SAVE_PATTERN) {
         op_library_index_rebuild_kind = FS_NAME_CACHE_PATTERN;
         op_library_index_rebuild_pending = 1u;
-        op_library_index_rebuild_callback = completion_callback;
-        completion_callback = filesystem_patternHcnamesUpdateComplete;
     }
+    filesystem_prepareResidentNamesCache();
     current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN;
     op_phase = 0u;
-}
-
-/* Continue or terminate a root Pattern Save after HCNAMES is durable. */
-static void filesystem_patternHcnamesUpdateComplete(void)
-{
-    if (status != FS_STATUS_DONE) {
-        filesystem_completeLibraryIndexRebuild(status);
-        return;
-    }
-    status = FS_STATUS_IDLE;
-    current_op = FS_INTERNAL_OP_NONE;
-    if (!filesystem_requestScanPatterns(
-            filesystem_libraryIndexRebuildScanComplete)) {
-        filesystem_completeLibraryIndexRebuild(FS_STATUS_ERROR);
-    }
 }
 
 static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)

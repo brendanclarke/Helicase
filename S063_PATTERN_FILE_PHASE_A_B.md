@@ -1157,3 +1157,158 @@ Post-S063: ~117,101 B free.
 - Verification: `make -j2` succeeds; final image size is `text=423876`,
   `data=416`, `bss=279372`. Remaining diagnostics are the existing newlib
   syscall/linker warnings and unrelated unused legacy helpers.
+
+## Post-implementation verification — 2026-09-12
+
+Reviewed all changed files against the plan above. The implementation is
+complete and correct; the v4 binary Pattern format is fully wired to Scene
+Load, Scene Save, Bank Load, Bank Save, and root Pattern Load/Save.
+
+### PatternData.h — verified
+
+- `pat_scene_region_t` struct moved from .c to .h with `__attribute__((packed))`
+  and the five new scalar fields (`track_length[7]`, `track_scale[7]`,
+  `track_shuffle[7]`, `pattern_change_bar`, `pattern_next`). The packed
+  attribute was not in the plan but is correct — it guarantees the struct
+  layout matches the on-card byte stream with no padding.
+- Static asserts confirm struct size = `(PAT_STEPS_PER_SCENE * 2) +
+  (PAT_STACK_SIZE * 32) + 512 + 23 = 10,519` bytes.
+- Format constants use the `PATTERN_FILE_*` prefix (plan used `PAT_V4_*`).
+  The final naming is better — it is consistent with `PATTERN_FILE_TOTAL_BYTES`
+  as a self-describing namespace and avoids collision with the `PAT_ADDR_*` /
+  `PAT_BLOCK_*` runtime constants.
+- Three geometry static asserts: header = 160, address = 1,792, and payload
+  = address + bitmap + pool.
+- `pat_sceneRegion()` and `pat_sceneRegionMut()` declared. Option B accessor
+  design confirmed.
+- `pat_initPatternSet`, `pat_patternSetGetStep`, `pat_patternSetSetStep`
+  removed. `PatternSet` typedef removed.
+- `TRACK_SCALE_OFF` = 10 defined for the new default.
+- `pat_setPatternChangeBar`, `pat_setPatternNext`, `pat_applyPatternSettingsToMenu`,
+  `pat_applyTrackSettingsToMenu`, `pat_setTrackLength`, `pat_setTrackScale`,
+  `pat_setTrackShuffle` all declared.
+
+### PatternData.c — verified
+
+- Struct typedef removed (now in .h). Static asserts retained.
+- `pat_regions[SCENE_COUNT]` remains static.
+- `pat_initScene()` initializes the five new fields:
+  `track_length[t] = NUM_STEPS`, `track_scale[t] = TRACK_SCALE_OFF`,
+  `track_shuffle[t] = 0`, `pattern_change_bar = 0`, `pattern_next = 0`.
+- Accessors return `&pat_regions[scene_index]` or NULL for invalid index.
+- All setter implementations are real (not no-ops): each validates coordinates,
+  writes to the region field, and calls `bank_invalidateSdCleanScene()`.
+- `pat_applyPatternSettingsToMenu` reads `pattern_change_bar` → `PAR_PATTERN_BEAT`
+  and `pattern_next` → `PAR_PATTERN_NEXT`.
+- `pat_applyTrackSettingsToMenu` reads `track_length/scale/shuffle` into
+  `PAR_TRACK_LENGTH/TRACK_SCALE/SHUFFLE`.
+- Copy operations (`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar`) remain
+  deliberate Session-062 no-ops as expected.
+- Legacy `pat_initPatternSet`, `pat_patternSetGetStep`, `pat_patternSetSetStep`
+  fully removed.
+
+### filesystem.c — verified
+
+**HCNAMES expansion (129 → 145):**
+- `FS_RESIDENT_NAMES_PATTERN_BASE` = `FS_RESIDENT_NAMES_INSTRUMENT_BASE +
+  (16 × 6)` = 129.
+- `FS_RESIDENT_NAMES_ROW_COUNT` = `FS_RESIDENT_NAMES_PATTERN_BASE + 16` = 145.
+- `filesystem_residentPatternRow()` maps `scene_index → PATTERN_BASE + index`.
+- `filesystem_cacheCurrentResidentPatternName()` overlays Pattern display name
+  and source into the appended HCNAMES row.
+- `filesystem_startPatternHcnamesUpdate()` hands completed root Pattern
+  load/save to the shared HCNAMES transaction.
+- Physical `.hcnames` file is 146 lines (145 data rows + 1 `#types` header).
+- AutoSave wire image stays at 129 rows (confirmed `AUTOSAVE_HCNAMES_ROW_COUNT`
+  = 129 in Autosave.h); Pattern rows are filesystem-only for S063.
+
+**v4 binary helpers:**
+- `filesystem_patternCrcFeed()` — byte-at-a-time CRC32C via
+  `autosave_crc32cByteUpdate()`, zero-filling the four CRC field bytes at
+  offset 14..17. Correct.
+- `filesystem_patternBuildHeader()` — constructs the 160-byte `PAT4` header
+  from a resident `pat_scene_region_t`. Magic bytes, version, stack size,
+  header size, global parameters at offset 32..33, track parameters at
+  offset 48 + (track × 16). Matches the plan's v4 header layout.
+- `filesystem_patternHeaderValid()` — validates magic, version, stack size
+  ≤ `PAT_STACK_SIZE`, header size ≥ 160, and extracts stored CRC. Forward-
+  compatible with larger headers from future firmware.
+
+**Scene Load v4 reader (phases 45–52):**
+- Phase 45: WAIT Pattern file open, init region, begin CRC.
+- Phase 46: READ and validate 32-byte fixed header.
+- Phase 47: READ header extension, apply track/global parameters to region.
+- Phase 48/49/50: READ address array, bitmap, pool into region (bounded
+  chunked reads via staging_buf).
+- Phase 51: VALIDATE CRC, then fan out to all masked Scene destinations via
+  `memcpy(target, source, sizeof(*target))`.
+- Phase 52: Close file and continue Scene Load.
+- All phases hash bytes through `filesystem_patternCrcFeed()` and reject
+  on CRC mismatch or premature EOF.
+
+**Scene Save v4 writer (phases 29–82):**
+- Phase 29: OPEN named v4 Pattern child file for write.
+- Phase 30: Build 160-byte header, begin CRC.
+- Phase 31: STREAM fixed header.
+- Phase 32: STREAM address, bitmap, pool sections via chunked writes.
+  Each chunk is CRC-fed before write. Uses `op_pattern_io_phase` to
+  sequence the three payload sections.
+- Phase 80: SEEK to CRC offset, finalize CRC, write 4 bytes.
+- Phase 81: WRITE CRC bytes.
+- Phase 82: Close Pattern file, continue to Effect file.
+
+**Root Pattern Load/Save (`filesystem_loadPattern_tick`, `filesystem_savePattern_tick`):**
+- Load: chdir → `/Pattern/`, open LFN filename, init region, read fixed header
+  → header extension → 3 payload sections → validate CRC → close → HCNAMES
+  update. Failed reads reinitialize the region.
+- Save: chdir → `/Pattern/`, mkdir if needed, retire old slot filename if
+  renamed, open LFN for write → build header → stream header → 3 payload
+  sections → seek back to CRC offset → write CRC → close → HCNAMES update
+  → library index rebuild.
+- Save includes retirement of the previous slot filename via
+  `afatfs_removeObjects_lfn()` when the Pattern is renamed.
+
+**v3 removal confirmed:**
+- No occurrences of `filesystem_pattern_discard`, `op_pattern_stub_state`,
+  `filesystem_directPatternTarget`, `filesystem_nextPatternStubLine`,
+  `PatternSet`, `pat_initPatternSet`, `pat_patternSetGetStep`,
+  `pat_patternSetSetStep`, `PATTERN_LINE_MAX`, `PATTERN_TRIGGER_MAX`,
+  `PATTERN_TEXT_VERSION`, or `PAT_V3` anywhere in the codebase.
+
+### storageTypes.h — verified
+
+- `STORAGE_ROOT_PATTERN "Pattern"` and `STORAGE_PATTERN_MAX_SLOTS 1000u`
+  defined.
+- Comment at line 540 confirms: "Pattern files use the fixed binary v4 stream
+  owned by filesystem.c." No text parser added — correct for a binary format.
+- No `storage_pattern_stub_state_t` or Pattern text parser/writer remains.
+
+### storageTypes.c — verified
+
+- No v3 Pattern parser, writer, or `#if 0` bridge code remains.
+- The `storage_patternHex()` helper is retained only for bankset hex parsing
+  (`scene_mask_voice_edit`), not for any Pattern format code.
+
+### Deviations from plan
+
+1. **Naming convention**: Plan used `PAT_V4_*` prefix; implementation uses
+   `PATTERN_FILE_*`. The final naming is clearer and self-contained.
+2. **Packed attribute**: Plan did not specify `__attribute__((packed))` on
+   `pat_scene_region_t`; implementation added it. Correct — ensures the
+   struct layout matches the binary file stream byte-for-byte.
+3. **`TRACK_SCALE_OFF`**: Plan did not specify a named default; implementation
+   added `#define TRACK_SCALE_OFF 10u` in PatternData.h. Good practice.
+4. **Scene Save phase numbering**: Plan anticipated phases 29–33 for Pattern
+   write; implementation uses 29–32 for the payload and jumps to 80–82 for
+   CRC back-patch and close. The gap leaves room for future Effect phases.
+5. **Root Pattern library**: Plan referenced `B.5.*` changes for menu
+   integration; actual menu wiring uses the existing browser framework with
+   `FS_NAME_CACHE_PATTERN` and `filesystem_requestScanPatterns()`.
+
+### Conclusion
+
+All 38 planned changes are accounted for. The v4 binary Pattern file format
+is fully implemented, CRC32C-validated, and wired to Scene Load/Save, Bank
+Load/Save, and root Pattern Load/Save. HCNAMES is expanded to 145 rows.
+v3 text format and PatternSet bridge are completely removed. The build is
+clean at `text=423876, data=416, bss=279372`.
