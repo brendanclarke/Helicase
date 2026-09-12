@@ -211,4 +211,16 @@ void pat_setStepProbability(uint8_t scene_index, uint8_t track, uint8_t step, ui
 void pat_setStepNote(uint8_t scene_index, uint8_t track, uint8_t step, uint8_t value);
 void pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step, uint8_t value);
 
+/*
+ * Pattern AutoSave snapshot operations.
+ *
+ * pat_snapshotScene() copies one live resident Scene region into the internal
+ * snapshot buffer. Input: scene_index 0..15. The caller must ensure RECORD
+ * and ERASE are inactive; no interrupt masking is performed here.
+ * pat_autosaveSnapshot() returns the const snapshot pointer, valid until the
+ * next snapshot call. Affiliates: filesystem.c Pattern drain state machine.
+ */
+void pat_snapshotScene(uint8_t scene_index);
+const pat_scene_region_t *pat_autosaveSnapshot(void);
+
 #endif /* PATTERNDATA_H_ */

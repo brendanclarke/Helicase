@@ -470,15 +470,17 @@ static void on_scene_load_complete(void)
      *
      * Inputs: FS_STATUS_DONE and the immutable destination mask captured by
      * preset_loadSceneForScenes(). Outputs: every selected now-present Scene
-     * gets the existing non-Pattern scope—live Scene settings, the current
-     * Effect scope, and the complete Kit scope. Why:
+     * gets the complete Scene scope—live Scene settings, the current Effect
+     * scope, the complete Kit scope, and the separate Pattern AutoSave dirty
+     * bit. Why:
      * filesystem_commitSceneStage() assigns settings and kit_t directly before
      * Pattern I/O; marking there could publish a load whose later Pattern,
-     * Effect, or HCNAMES work failed. Pattern is intentionally absent because
-     * the chosen marker has no Pattern payload. Affiliates:
+     * Effect, or HCNAMES work failed. This completion is the first boundary at
+     * which the complete Scene replacement, including Pattern, is known to
+     * have succeeded. Affiliates:
      * filesystem_commitSceneStage(),
      * preset_markRequestedScenesPresentOnSuccessfulLoad(),
-     * autosave_markSceneWithoutPatternDirty(), and
+     * autosave_markSceneWithPatternDirty(), and
      * preset_completeFilesystemOp().
      */
     preset_markRequestedScenesPresentOnSuccessfulLoad();
@@ -488,7 +490,10 @@ static void on_scene_load_complete(void)
              scene_index++) {
             if ((pm_kit_request_scene_mask &
                  (uint16_t)(1u << scene_index)) != 0u) {
-                autosave_markSceneWithoutPatternDirty(scene_index);
+                /* A directory-backed Pattern replacement starts its own
+                 * hidden AutoSave generation epoch before dirty marking. */
+                filesystem_resetPatternAutosaveGeneration(scene_index);
+                autosave_markSceneWithPatternDirty(scene_index);
             }
         }
     }
@@ -523,13 +528,13 @@ static void on_bank_load_complete(void)
      *
      * Inputs: FS_STATUS_DONE and filesystem_lastBankLoadSceneMask() before the
      * completion helper acknowledges operation scratch. Output: each set child
-     * bit receives the existing non-Pattern Scene dirty scope; a valid empty
-     * Bank yields no Scene marks. Why: the original request may name absent
+     * bit receives the complete Scene dirty scope, including Pattern; a valid
+     * empty Bank yields no Scene marks. Why: the original request may name absent
      * children, while bank_scenePresentMask() also contains retained unselected
      * Scenes; only the completed effective-child mask identifies this Bank
      * Load's payload. BankData has already marked changed Bank fields through
      * its own setters. Affiliates: filesystem_lastBankLoadSceneMask(), Bank
-     * phase-20 metadata commit, autosave_markSceneWithoutPatternDirty(), and
+     * phase-20 metadata commit, autosave_markSceneWithPatternDirty(), and
      * preset_completeFilesystemOp().
      */
     if (filesystem_status() == FS_STATUS_DONE) {
@@ -538,8 +543,12 @@ static void on_bank_load_complete(void)
         for (scene_index = 0u;
              scene_index < SCENE_COUNT && scene_index < 16u;
              scene_index++) {
-            if ((completed_scene_mask & (uint16_t)(1u << scene_index)) != 0u)
-                autosave_markSceneWithoutPatternDirty(scene_index);
+            if ((completed_scene_mask & (uint16_t)(1u << scene_index)) != 0u) {
+                /* The loaded Bank child owns a fresh Pattern source; its next
+                 * AutoSave image must begin at generation 1/file A. */
+                filesystem_resetPatternAutosaveGeneration(scene_index);
+                autosave_markSceneWithPatternDirty(scene_index);
+            }
         }
         /*
          * Option 2: publish card-clean authority for the completed effective

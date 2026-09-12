@@ -1070,6 +1070,25 @@ int main(void)
              */
 
             /*
+             * Restore per-Scene Pattern AutoSave files after the canonical
+             * Scene/Bank Pattern loads and before runtime AutoSave setup.
+             * Inputs: the mounted card's `.patNNa`/`.patNNb` pair, restored
+             * HCNAMES provenance, and resident Bank Scene presence. Output:
+             * only nonzero-generation `@`-provenance winners replace the
+             * directory/default Pattern; every winner generation becomes the
+             * next background-drain baseline. A Scene/Kit/default fallback is
+             * deliberately not an autosave context, so its directory/default
+             * Pattern remains authoritative. Affiliates:
+             * filesystem_patternAutosaveBootReaderBlocking(),
+             * filesystem_autosaveBootReaderBlocking(), and PatternData.
+             */
+            if (bank_hasResidentBank() && filesystem_autosaveEnabled()) {
+                filesystem_patternAutosaveBootReaderBlocking();
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+            }
+
+            /*
              * Establish the two working-Bank delta-register files only after
              * the complete Bank-or-fallback ladder and globals operation have
              * released filesystem ownership.  A Scene/Kit/default fallback is

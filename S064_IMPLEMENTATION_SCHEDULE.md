@@ -921,3 +921,205 @@ already sized at 145 rows (done in S063). No additional RAM from Step 1.
 - The 32 new `.patNNx` files are created on first drain, not at boot.
   No ensure step is needed because the drain writer creates files with
   `"w"` mode (create-or-truncate).
+
+---
+
+## Implementation Notes (2026-09-12)
+
+- Confirmed the S063 filesystem already owns 145 physical HCNAMES rows and
+  already streams complete v4 Pattern payloads through `staging_buf`; the
+  scalar AutoSave record remains the fixed 34,768-byte contract. S064 changes
+  the resident-name array dimensions and header version, not the scalar mask,
+  payload, or record byte counts.
+- Confirmed `@` is currently encoded as
+  `FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT` for Instrument rows only. S064 needs
+  a distinct Pattern-only provenance token so Pattern `@` does not resolve as
+  an Instrument source; the parser/formatter/resolver will be updated with a
+  dedicated value.
+- Confirmed the runtime scheduler order is settings, diagnostic trace,
+  parameter drain, then the new Pattern drain. Pattern drain will reuse the
+  existing facade, `staging_buf`, and Pattern CRC helpers, and will publish
+  the Pattern HCNAMES row in the same durable transaction before its callback
+  clears the dirty bit.
+- Confirmed current PatternData mutation setters funnel card-clean invalidation
+  through `bank_invalidateSdCleanScene()`, but that helper also serves
+  non-Pattern mutations. PatternData therefore needs a local mutation wrapper
+  that calls the existing invalidation plus the new Pattern dirty marker.
+- Approved S064 retained SRAM additions are exactly: 10,519 bytes for the
+  Pattern snapshot in PatternData.c, 2 bytes for the Pattern dirty mask in
+  Autosave.c, 64 bytes for sixteen uint32 Pattern generations, and 1 byte for
+  the active drain Scene in filesystem.c; total 10,586 bytes in SRAM1.
+
+### Progress
+
+- Step X: complete — sequencer exposes the existing record/erase flags.
+- Step 1: complete — AutoSave format version is 2 and HCNAMES geometry is
+  aligned to 145 rows while scalar record geometry remains fixed.
+- Steps 2–4: complete — independent 16-bit Pattern dirty tracking, mutation
+  funnels, the approved snapshot region, and snapshot accessors are implemented.
+- Step 5: complete — the Pattern drain streams a full PAT4 image with a
+  generation-bearing header, CRC, full-card handling, and shared HCNAMES
+  publication.
+- Step 6: complete — settings/trace/parameter scheduling declines before the
+  lowest-priority Pattern drain; record/erase flags gate snapshot capture and
+  the lowest dirty Scene is selected.
+- Step 7: complete — the blocking reader validates both hidden candidates with
+  exact current-size geometry, full CRC, no trailing bytes, A-wins ties, and
+  only overlays when HCNAMES says Pattern `@` with generation > 0.
+- Steps 8–9: complete — complete Scene/Bank loads include Pattern dirty work;
+  root Pattern loads and directory-backed Scene/Bank loads reset generation;
+  successful Pattern drains publish `@`/`R`, while mutations clear `R`.
+- Build and static verification: final clean build, linker SRAM audit, diff
+  check, stale-wording audit, and Pattern mutation-funnel audit passed.
+
+### Implementation Notes (continued, 2026-09-12)
+
+- The Pattern drain clears its selected bit at snapshot ownership, not in the
+  final callback. A mutation during the multi-tick file stream can therefore
+  re-set the bit and survive a successful HCNAMES flush; an error explicitly
+  re-arms the bit. This uses no additional retained byte.
+- Hidden-candidate validation requires `stack_size == PAT_STACK_SIZE`, hashes
+  the fixed header, extension, address/bitmap/pool payload, and probes EOF for
+  an exact file length before accepting CRC. The live Scene Pattern is only
+  replaced after validation, with the prior directory/default image restored
+  if the second read fails.
+- A successful directory-backed Pattern replacement resets its generation
+  through the filesystem API before marking the Scene complete. The boot
+  reader also resets the baseline when HCNAMES Pattern provenance is not `@`,
+  so stale hidden files cannot influence a fresh library/Scene/Bank source.
+- The Pattern HCNAMES `@` value is distinct from Instrument `@` in the logical
+  register. Parser, formatter, row validity, and resolver behavior all keep
+  the token Pattern-only while preserving the existing Instrument token.
+
+### Implementation Notes (final verification, 2026-09-12)
+
+- Final clean firmware build passed after all header and source changes:
+  `text=426,716`, `data=412`, `bss=289,964`, total `717,092` bytes.
+- Linker symbols confirm only the approved S064 retained SRAM additions:
+  `pat_autosave_snapshot` = 10,519 bytes,
+  `autosave_pattern_dirty_mask` = 2 bytes,
+  `fs_pattern_generation[16]` = 64 bytes, and
+  `fs_pattern_drain_scene` = 1 byte; total = 10,586 bytes.
+- Final source checks passed: `git diff --check`, stale 129-row wording
+  audit, and Pattern mutation-funnel audit. The tracked firmware image removed
+  by the clean build was restored unchanged from the repository index.
+
+---
+
+## Code Review Assessment (2026-09-12)
+
+**Reviewer**: Claude Opus 4.6 (post-implementation diff review)
+**Scope**: all 10 changed files, 1,045 insertions / 72 deletions
+**Verdict**: **PASS — ready to commit**
+
+### Step-by-step coverage
+
+| Step | Schedule requirement | Implemented | Notes |
+|------|---------------------|-------------|-------|
+| X | Extern `seq_recordActive`, `seq_eraseActive` in sequencer.h | Yes | Docstring, placement, and `volatile` annotation match schedule |
+| 1 | HCNAMES 129→145, format version 1→2 | Yes | `AUTOSAVE_HCNAMES_ROW_COUNT` = 145, `AUTOSAVE_HEADER_FORMAT_VERSION` = 2, static assert anchors Pattern base |
+| 2 | 16-bit Pattern dirty mask + API | Yes | PRIMASK-guarded set/clear/get; `filesystem_clearResidentRefreshed()` called inside the same critical section as dirty-set |
+| 3 | Snapshot region + accessor | Yes | `pat_autosave_snapshot` (10,519 B SRAM1), `pat_snapshotScene()` = plain memcpy, `pat_autosaveSnapshot()` = const pointer return |
+| 4 | Mutation funnel | Yes | `pat_markSceneDirty()` combines `bank_invalidateSdCleanScene()` + `autosave_markPatternDirty()`; all 14 mutation sites redirected |
+| 5 | Drain state machine | Yes | Phases 0–10 plus default: open, header build/CRC/stream, three payload sections via refactored helper, CRC seek-back/write, close, HCNAMES publication |
+| 6 | Scheduler integration | Yes | Lowest-priority claimant after scalar AutoSave; seq record/erase gate, menu gate, filesystem-ready gate; clear-before-copy ownership boundary |
+| 7 | Boot reader | Yes | Candidate validator (exact size, full CRC, EOF probe), A-wins-tie rule, `@`-provenance guard, generation-zero guard, snapshot-and-restore on second-read failure |
+| 8 | Scene/Bank load wiring | Yes | `autosave_markSceneWithPatternDirty()` replaces `WithoutPattern`; `filesystem_resetPatternAutosaveGeneration()` called before dirty marking |
+| 9 | HCNAMES lifecycle | Yes | `FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE` (0x1ffc) distinct from `INSTRUMENT_DIRECT`; parser/formatter/resolver/validator updated; refresh witness race handled in `filesystem_cacheCurrentResidentPatternName()` |
+
+### Beyond-schedule additions (all justified)
+
+1. **`pat_markSceneDirty()` local funnel** (PatternData.c): not in the original
+   9-step plan but avoids false Pattern dirty bits from non-Pattern mutations
+   that share `bank_invalidateSdCleanScene()`. Correct architectural decision.
+
+2. **`filesystem_patternWriteRegionSection()`** (filesystem.c): refactored from
+   `filesystem_patternWriteSection()` to accept an explicit region pointer so
+   the drain can write the snapshot region instead of the live region. Minimal
+   invasive change — the original callers pass the existing implicit region.
+
+3. **`filesystem_clearResidentRefreshed()`** public API (filesystem.h/c): needed
+   so `autosave_markPatternDirty()` can atomically clear the HCNAMES refresh
+   witness when a mutation invalidates a just-flushed snapshot. Prevents the
+   HCNAMES writer from publishing a stale `R` flag for an already-dirty Pattern.
+
+4. **Drain race witness guard** in `filesystem_cacheCurrentResidentPatternName()`:
+   checks the dirty mask before setting `R` — if a mutation arrived between
+   snapshot and HCNAMES overlay, the refresh witness is cleared rather than
+   falsely set. Subtle but correct.
+
+5. **Root Pattern load generation reset** in `filesystem_loadPattern_tick()`:
+   after a library Pattern replaces a resident Scene's data, its generation
+   resets to 0 and the Scene is marked Pattern-dirty. This starts a fresh A/B
+   epoch and ensures the replacement is captured before old hidden files could
+   be considered authoritative.
+
+6. **`filesystem_resetPatternAutosaveGeneration()`** public API: called by
+   presetManager.c Scene/Bank load completion. Ensures directory-backed Pattern
+   replacements start a clean generation epoch.
+
+### Correctness observations
+
+- **Ownership boundary**: dirty bit is cleared before snapshot memcpy in the
+  scheduler, so any mutation during the multi-tick file stream re-sets the bit
+  and is not lost. The completion callback re-arms the bit on any error. This
+  is the same proven pattern used by the scalar AutoSave drain.
+
+- **Boot reader safety**: candidate validation is read-only and never modifies
+  live Pattern data. The winner is applied only after full CRC validation with
+  exact file-size enforcement. The prior directory/default image is preserved
+  via snapshot-and-restore if the second read encounters a card error.
+
+- **HCNAMES row exclusion**: `filesystem_autosaveDrainHasRefreshWork()` and
+  `filesystem_clearResidentRefreshedCaptured()` now stop at `PATTERN_BASE`,
+  preventing the scalar drain from claiming ownership of Pattern rows.
+
+- **`autosave_markSourceDirty()` guard**: Pattern rows (≥ PATTERN_BASE) return
+  early, preventing the scalar source-tracking code from misinterpreting a
+  Pattern HCNAMES mutation as a source change it should track.
+
+- **`autosave_discardDirtyMask()`** clears the Pattern mask alongside the
+  existing scalar mask.
+
+- **Boot lifecycle**: `filesystem_initAfterCardReady()` and
+  `filesystem_resetFacadeForBootLogRecovery()` both zero the generation array
+  and drain scene index.
+
+- **main.c integration**: Pattern boot reader runs after canonical Scene/Bank
+  Pattern loads and before runtime AutoSave setup, guarded by
+  `bank_hasResidentBank() && filesystem_autosaveEnabled()`.
+
+### Potential concerns (none blocking)
+
+1. **No explicit 32-file cleanup**: stale `.patNNx` files from a previous
+   resident Bank are not deleted when a new Bank is loaded. They will be
+   overwritten on the next drain cycle. This is consistent with the scalar
+   AutoSave approach (`.hcprms1`/`.hcprms2` are never explicitly deleted).
+
+2. **Generation uint32 wrap**: generation increments from 1 with a wrap guard
+   (`if (generation == 0u) generation = 1u`). At one drain per second this
+   would take ~136 years. Non-issue.
+
+3. **Blocking boot reader**: `filesystem_patternAutosaveBootReaderBlocking()`
+   reads up to 32 files (16 scenes × 2 candidates) during boot. Each file is
+   10,656 bytes. With the bit-bang SPI this could add measurable boot time.
+   Acceptable given the existing blocking boot reader precedent.
+
+### SRAM accounting
+
+Matches the approved budget exactly:
+- `pat_autosave_snapshot`: 10,519 B (SRAM1, PatternData.c)
+- `autosave_pattern_dirty_mask`: 2 B (SRAM1, Autosave.c)
+- `fs_pattern_generation[16]`: 64 B (SRAM1, filesystem.c)
+- `fs_pattern_drain_scene`: 1 B (SRAM1, filesystem.c)
+- **Total**: 10,586 B
+
+### Summary
+
+All 9 scheduled steps plus the prerequisite Step X are fully implemented.
+The 6 beyond-schedule additions are architecturally sound and address real
+race conditions or API gaps that the original plan did not anticipate.
+No blocking issues found. No unsafe patterns. No ISR-blocking paths. The
+implementation is consistent with the project's existing AutoSave contracts
+and the async filesystem architecture. Ready for functional testing on
+hardware.

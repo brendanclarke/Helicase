@@ -9,6 +9,7 @@
 #include "PatternData.h"
 #include "SceneData.h"
 #include "BankData.h"
+#include "Autosave.h"
 #include "config.h"
 /*
  * Menu owns the parameter buffer and PAR_STEP_* identifiers used by the
@@ -46,6 +47,63 @@ _Static_assert(sizeof(pat_scene_region_t) ==
  * key. Affiliate: every Scene-indexed pat_* operation in this file.
  */
 static pat_scene_region_t pat_regions[SCENE_COUNT];
+
+/*
+ * Pattern AutoSave snapshot staging buffer.
+ *
+ * What: one standalone pat_scene_region_t separate from pat_regions[]. Why:
+ * the background writer snapshots one Scene in the main loop, then streams
+ * it over many filesystem ticks without reading data that recording/erasing
+ * may later change. SRAM cost: 10,519 bytes in SRAM1 .bss. Lifetime: static;
+ * written by pat_snapshotScene() and read by pat_autosaveSnapshot(). Owner:
+ * PatternData.c exclusively. Affiliate: filesystem.c Pattern drain writer.
+ */
+static pat_scene_region_t pat_autosave_snapshot;
+
+/*
+ * Mark one Pattern mutation at the existing card-clean boundary.
+ *
+ * What: combines the established Bank card-clean invalidation with the new
+ * per-Scene Pattern AutoSave dirty bit. Why: bank_invalidateSdCleanScene()
+ * is shared by non-Pattern owners, so wiring the Pattern bit in that generic
+ * helper would falsely dirty Pattern files for Scene/Kit/Instrument edits.
+ * Inputs: validated resident Scene index. Output: both ownership registers
+ * receive the same mutation boundary. Affiliates: every Pattern setter below.
+ */
+static void pat_markSceneDirty(uint8_t scene_index)
+{
+    bank_invalidateSdCleanScene(scene_index);
+    autosave_markPatternDirty(scene_index);
+}
+
+/*
+ * Capture one coherent Pattern region for the background writer.
+ *
+ * Inputs: validated resident Scene index and an idle RECORD/ERASE boundary.
+ * Output: the dedicated 10,519-byte snapshot becomes a plain copy of the
+ * selected live region. No interrupt masking is performed; filesystem.c owns
+ * the scheduler guard that makes the copy safe. Affiliate:
+ * pat_autosaveSnapshot().
+ */
+void pat_snapshotScene(uint8_t scene_index)
+{
+    if (!scene_indexValid(scene_index))
+        return;
+    memcpy(&pat_autosave_snapshot, &pat_regions[scene_index],
+           sizeof(pat_scene_region_t));
+}
+
+/*
+ * Borrow the latest Pattern AutoSave snapshot for bounded file streaming.
+ *
+ * Input: none. Output: const pointer to PatternData's dedicated snapshot,
+ * valid until the next pat_snapshotScene() call. No allocation or I/O occurs;
+ * filesystem.c is the sole consumer. Affiliate: Pattern drain state machine.
+ */
+const pat_scene_region_t *pat_autosaveSnapshot(void)
+{
+    return &pat_autosave_snapshot;
+}
 
 /*
  * Resolve one live address-array entry.
@@ -338,7 +396,7 @@ static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
             pat_poolFree(r, old_offset, old_chunks);
         }
         *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
-        bank_invalidateSdCleanScene(scene_index);
+        pat_markSceneDirty(scene_index);
         return;
     }
 
@@ -350,7 +408,7 @@ static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
                            velocity, probability);
             *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
                                 old_offset);
-            bank_invalidateSdCleanScene(scene_index);
+            pat_markSceneDirty(scene_index);
             return;
         }
         pat_poolFree(r, old_offset, old_chunks);
@@ -359,14 +417,14 @@ static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
     new_offset = pat_poolAlloc(r, new_chunks);
     if (new_offset == PAT_ADDR_SENTINEL) {
         *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
-        bank_invalidateSdCleanScene(scene_index);
+        pat_markSceneDirty(scene_index);
         return;
     }
 
     pat_blockWrite(r, new_offset, track, step, new_flags, note, velocity,
                    probability);
     *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | new_offset);
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 uint8_t pat_trackValid(uint8_t track)
@@ -471,9 +529,8 @@ void pat_setStepActive(uint8_t scene_index, uint8_t track, uint8_t step,
         *entry |= (uint16_t)PAT_ADDR_TRIGGER_BIT;
     else
         *entry &= (uint16_t)~PAT_ADDR_TRIGGER_BIT;
-    /* Option 2: live Pattern edits invalidate the owning Scene's card-clean
-     * bit; AutoSave deliberately does not yet own Pattern payload bytes. */
-    bank_invalidateSdCleanScene(scene_index);
+    /* The local Pattern mutation funnel also sets the S064 dirty bit. */
+    pat_markSceneDirty(scene_index);
 }
 
 void pat_toggleStep(uint8_t track, uint8_t step, uint8_t scene_index)
@@ -491,7 +548,7 @@ void pat_toggleStep(uint8_t track, uint8_t step, uint8_t scene_index)
     if (!entry)
         return;
     *entry ^= (uint16_t)PAT_ADDR_TRIGGER_BIT;
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step)
@@ -519,7 +576,7 @@ void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step)
         pat_poolFree(r, offset, chunks);
     }
     *entry = PAT_ADDR_SENTINEL;
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 /*
@@ -607,7 +664,7 @@ void pat_clearTrack(uint8_t scene_index, uint8_t track)
         }
         r->address[track][step] = PAT_ADDR_SENTINEL;
     }
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 void pat_clearPattern(uint8_t scene_index)
@@ -621,7 +678,7 @@ void pat_clearPattern(uint8_t scene_index)
     if (!scene_indexValid(scene_index))
         return;
     pat_initScene(scene_index);
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 void pat_copyTrack(uint8_t scene_index, uint8_t src_track, uint8_t dst_track)
@@ -711,7 +768,7 @@ void pat_setTrackLength(uint8_t scene_index, uint8_t track, uint8_t value)
     if (!region || !pat_trackValid(track))
         return;
     region->track_length[track] = value;
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 /* Persist one track-scale menu edit in the resident Scene region. */
@@ -722,7 +779,7 @@ void pat_setTrackScale(uint8_t scene_index, uint8_t track, uint8_t value)
     if (!region || !pat_trackValid(track))
         return;
     region->track_scale[track] = value;
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 /* Persist one track-shuffle menu edit in the resident Scene region. */
@@ -733,7 +790,7 @@ void pat_setTrackShuffle(uint8_t scene_index, uint8_t track, uint8_t value)
     if (!region || !pat_trackValid(track))
         return;
     region->track_shuffle[track] = value;
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 void pat_setActiveAutomationTrack(uint8_t v) { (void)v; }
 void pat_setSelectedStep(uint8_t step) { (void)step; }
@@ -747,7 +804,7 @@ void pat_setPatternChangeBar(uint8_t scene_index, uint8_t value)
     if (!region)
         return;
     region->pattern_change_bar = value;
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 /* Persist the global Pattern-next selection. */
@@ -758,7 +815,7 @@ void pat_setPatternNext(uint8_t scene_index, uint8_t value)
     if (!region)
         return;
     region->pattern_next = value;
-    bank_invalidateSdCleanScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
 /*

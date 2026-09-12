@@ -34,7 +34,18 @@
 #define AUTOSAVE_HEADER_CRC32C_OFFSET        12u
 /* One-byte writer witness; generation, not this wrapping byte, selects A/B. */
 #define AUTOSAVE_HEADER_PROBE_COUNTER_OFFSET 16u
-#define AUTOSAVE_HEADER_FORMAT_VERSION        1u
+/*
+ * S064 format version for the scalar AutoSave record.
+ *
+ * What: identifies the 145-row HCNAMES identity image carried by the
+ * record. Why: the previous version serialized only rows 0..128, so its
+ * payload must not be interpreted as a complete Pattern-aware identity
+ * image. Inputs/outputs: compile-time format tag consumed by the writer and
+ * boot validator; the scalar record byte geometry remains unchanged.
+ * Affiliates: autosave_streamValidationUpdate(),
+ * filesystem_autosaveBootReaderBlocking(), and HCNAMES Pattern provenance.
+ */
+#define AUTOSAVE_HEADER_FORMAT_VERSION        2u
 #define AUTOSAVE_HEADER_COMMIT_VALID        0xa5u
 
 /*
@@ -77,7 +88,19 @@
 #define AUTOSAVE_SCENE_SOURCE_OFFSET           8u
 #define AUTOSAVE_KIT_SOURCE_OFFSET             8u
 #define AUTOSAVE_INSTRUMENT_SOURCE_OFFSET     11u
-#define AUTOSAVE_HCNAMES_ROW_COUNT           129u
+/*
+ * Total HCNAMES identity rows in the scalar AutoSave image.
+ *
+ * What: aligns the record's resident-name arrays with the filesystem's
+ * Bank/Scene/Kit/Instrument/Pattern rows 0..144. Why: Pattern provenance is
+ * part of the identity image even though Pattern payload bytes are stored in
+ * separate PAT4 files. Inputs/outputs: compile-time row count used by the
+ * initial record formatter, CRC stream, validators, and static asserts; it
+ * does not allocate a new static array in Autosave.c.
+ * Affiliates: filesystem.c's FS_RESIDENT_NAMES_ROW_COUNT and the Pattern
+ * dirty/HNAMES lifecycle.
+ */
+#define AUTOSAVE_HCNAMES_ROW_COUNT           145u
 #define AUTOSAVE_HCNAMES_ROW_BYTES             9u
 
 /* HCNAMES' fixed Bank / Scene / Kit / Instrument row ownership. */
@@ -88,6 +111,20 @@
     (AUTOSAVE_HCNAMES_SCENE_BASE + AUTOSAVE_SCENE_COUNT)
 #define AUTOSAVE_HCNAMES_INSTRUMENT_BASE \
     (AUTOSAVE_HCNAMES_KIT_BASE + AUTOSAVE_SCENE_COUNT)
+/*
+ * HCNAMES Pattern row base for the scalar AutoSave identity image.
+ *
+ * What: row 129 starts one Pattern provenance cell for each resident Scene.
+ * Why: the hidden Pattern AutoSave file needs a durable source/name witness
+ * without inserting its 10,519-byte payload into the scalar record. Inputs:
+ * the fixed Instrument base and Scene/instrument counts. Output: rows 129..144
+ * address Pattern identity; the Pattern dirty mask remains independent.
+ * Affiliates: autosave_markPatternDirty(), filesystem.c HCNAMES publication,
+ * and filesystem_patternAutosaveBootReaderBlocking().
+ */
+#define AUTOSAVE_HCNAMES_PATTERN_BASE \
+    (AUTOSAVE_HCNAMES_INSTRUMENT_BASE + \
+     (AUTOSAVE_SCENE_COUNT * AUTOSAVE_INSTRUMENTS_PER_KIT))
 
 /*
  * Absolute top-level offsets.
@@ -259,8 +296,7 @@ _Static_assert(AUTOSAVE_KIT_PARAMETERS_OFFSET +
                    AUTOSAVE_KIT_PARAMETER_ALLOC_BYTES ==
                    AUTOSAVE_KIT_INSTRUMENTS_OFFSET,
                "Kit parameter allocation must end at Instruments");
-_Static_assert(AUTOSAVE_HCNAMES_INSTRUMENT_BASE +
-                   (AUTOSAVE_SCENE_COUNT * AUTOSAVE_INSTRUMENTS_PER_KIT) ==
+_Static_assert(AUTOSAVE_HCNAMES_PATTERN_BASE + AUTOSAVE_SCENE_COUNT ==
                    AUTOSAVE_HCNAMES_ROW_COUNT,
                "autosave name mapping must consume all HCNAMES rows");
 _Static_assert(AUTOSAVE_SCENE_PARAM_COUNT ==
@@ -416,7 +452,7 @@ uint8_t autosave_maskBitTake(uint16_t payload_offset);
 /*
  * Report whether one HCNAMES object's current autosave payload scope is clean.
  *
- * Input: HCNAMES row 0..128. Output: nonzero only when no canonical dirty bit
+ * Input: HCNAMES row 0..144. Output: nonzero only when no canonical dirty bit
  * remains in that Bank, Scene, Kit, or Instrument wire scope. This is a
  * read-only post-drain query; it allocates no storage and never clears work.
  * Filesystem.c uses it before clearing the matching HCNAMES refreshed flag.
@@ -451,7 +487,7 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
 /*
  * Mark one HCNAMES-addressed 2-byte source field dirty.
  *
- * Input: HCNAMES row 0..128. Output: the corresponding Scene, Kit, or
+ * Input: HCNAMES row 0..144. Output: the corresponding Scene, Kit, or
  * Instrument source bytes become dirty when mutation tracking is enabled;
  * Bank row zero is intentionally a no-op because the autosave Bank section
  * has no source field. Why: source provenance is filesystem-owned, but its
@@ -473,13 +509,14 @@ void autosave_markSourceDirty(uint16_t hcnames_row);
  * scope only after its compatible endpoint commit. Endpoint-only copies
  * require matching types before calling their marker. Kit includes its source
  * and all six Instruments; Scene includes its source, settings, the Effect
- * stub, and Kit. SceneWithPattern is intentionally only the non-Pattern alias
- * until Pattern persistence exists.
+ * stub, Kit, and its separate Pattern dirty bit. SceneWithPattern is the
+ * complete replacement marker for callers that commit PatternData together
+ * with the Scene payload.
  *
  * Current load affiliates are intentionally asymmetric: successful normal Kit
  * completion calls autosave_markKitDirty() for each target; successful root
  * Scene and exact-mask Bank completion call
- * autosave_markSceneWithoutPatternDirty(); KitMrp and InstrumentMrp call
+ * autosave_markSceneWithPatternDirty(); KitMrp and InstrumentMrp call
  * autosave_markInstrumentMorphDirty() only after compatible endpoint copies.
  * The generated KitMrp track-7 Morph decay is a named Kit scalar and therefore
  * reaches autosave_markKitParameterDirty() through SceneData, not an
@@ -500,13 +537,27 @@ void autosave_markSceneWithPatternDirty(uint8_t scene_index);
  *
  * Inputs: BankData fields and its present-Scene mask after tracking has been
  * enabled. Output: all live Bank fields plus every present Scene's implemented
- * non-Pattern scope become dirty in the one canonical mask. Why: runtime
+ * scalar scope and separate Pattern dirty bit become dirty. Why: runtime
  * AutoSave re-enable must capture changes made while tracking was OFF rather
  * than waiting only for later scalar edits. Names remain owned by the existing
  * HCNAMES/baseline identity path. Affiliates: filesystem runtime setup and the
  * whole-region marker family above.
  */
 void autosave_markResidentBankDirty(void);
+
+/*
+ * Pattern-specific dirty tracking API.
+ *
+ * What: set, read, and clear one bit per resident Scene. Why: Pattern bytes
+ * are persisted in separate `.patNNa`/`.patNNb` files rather than the scalar
+ * parameter record, so the existing per-byte mask cannot represent them.
+ * Inputs/outputs: scene_index 0..15 for set/clear; the getter returns the full
+ * 16-bit pending mask. Affiliates: filesystem.c Pattern drain scheduling and
+ * autosave_markSceneWithPatternDirty().
+ */
+void autosave_markPatternDirty(uint8_t scene_index);
+uint16_t autosave_patternDirtyMask(void);
+void autosave_clearPatternDirty(uint8_t scene_index);
 
 /*
  * Payload-to-resident apply functions (boot reader, §10).

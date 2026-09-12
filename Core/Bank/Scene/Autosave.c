@@ -75,6 +75,18 @@ _Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
  */
 static volatile uint8_t autosave_dirty_mask[AUTOSAVE_MASK_BYTES];
 static volatile uint8_t autosave_mutation_tracking_enabled;
+/*
+ * Per-Scene dirty register for Pattern AutoSave.
+ *
+ * What: one bit per resident Scene whose Pattern region needs a complete
+ * PAT4 drain. Why: Pattern payload bytes are outside the scalar parameter
+ * record, so autosave_dirty_mask[] cannot represent their persistence state.
+ * Inputs/outputs: set/read/clear through the public Pattern API; the mask is
+ * volatile because mutation paths may be reached from recording/MIDI work.
+ * Lifetime: static SRAM1 .bss, cleared at processor reset or policy discard.
+ * Affiliates: PatternData.c mutation funnel and filesystem.c scheduler.
+ */
+static volatile uint16_t autosave_pattern_dirty_mask;
 
 _Static_assert(sizeof(autosave_dirty_mask) == AUTOSAVE_MASK_BYTES,
                "autosave canonical dirty record must match the wire mask");
@@ -101,6 +113,63 @@ static uint32_t autosave_irqSave(void)
 static void autosave_irqRestore(uint32_t primask)
 {
     __asm volatile("msr primask, %0" :: "r"(primask) : "memory");
+}
+
+/*
+ * Mark one resident Scene's Pattern region dirty for AutoSave.
+ *
+ * Input: scene_index 0..15. Output: the corresponding bit is atomically set
+ * only while runtime mutation tracking is enabled, and the Pattern HCNAMES
+ * refreshed witness is cleared. Why: Pattern payloads live outside the
+ * scalar record, while the refreshed bit must stop claiming that the prior
+ * on-card image still matches SRAM after a user edit. No I/O occurs here.
+ * Affiliates: PatternData.c mutation funnel and filesystem.c scheduler.
+ */
+void autosave_markPatternDirty(uint8_t scene_index)
+{
+    uint32_t primask;
+
+    if (!autosave_mutation_tracking_enabled || scene_index >= SCENE_COUNT)
+        return;
+    primask = autosave_irqSave();
+    autosave_pattern_dirty_mask |= (uint16_t)(1u << scene_index);
+    /* Keep the dirty bit and its HCNAMES witness clear in one IRQ-safe
+     * boundary; this marker is reachable from MIDI/recording interrupt work. */
+    (void)filesystem_clearResidentRefreshed(
+        (uint16_t)(AUTOSAVE_HCNAMES_PATTERN_BASE + scene_index));
+    autosave_irqRestore(primask);
+}
+
+/*
+ * Read the pending Pattern Scene mask without consuming any bits.
+ *
+ * Input: none. Output: one bit per Scene requiring a Pattern drain. Why:
+ * filesystem.c chooses the lowest pending Scene only after the parameter and
+ * trace schedulers decline the shared facade. Affiliate:
+ * filesystem_autosavePatternDrainSchedule_tick().
+ */
+uint16_t autosave_patternDirtyMask(void)
+{
+    return autosave_pattern_dirty_mask;
+}
+
+/*
+ * Clear one Pattern dirty bit after its complete durable transaction.
+ *
+ * Input: scene_index 0..15. Output: one atomically cleared bit; a mutation
+ * arriving after this boundary can set it again for the next drain. Why:
+ * successful file and HCNAMES flush completion is the only point at which
+ * Pattern SRAM may be considered persisted. Affiliate: Pattern drain callback.
+ */
+void autosave_clearPatternDirty(uint8_t scene_index)
+{
+    uint32_t primask;
+
+    if (scene_index >= SCENE_COUNT)
+        return;
+    primask = autosave_irqSave();
+    autosave_pattern_dirty_mask &= (uint16_t)~(1u << scene_index);
+    autosave_irqRestore(primask);
 }
 
 /*
@@ -1204,12 +1273,13 @@ void autosave_discardDirtyMask(void)
      * Clear the sole canonical record after producers and transforms stop.
      *
      * Inputs: filesystem lifecycle has disabled tracking and verified that no
-     * autosave operation is consuming mask chunks. Output: every pending bit
-     * is discarded in SRAM; SD records remain untouched. Why: stale work from
+     * autosave operation is consuming mask chunks. Output: every pending
+     * scalar and Pattern bit is discarded in SRAM; SD records remain untouched. Why: stale work from
      * an intentionally disabled/retired Bank session must not reappear after
      * re-enable. Affiliates: filesystem's immediate/deferred OFF transition.
      */
     memset((void *)autosave_dirty_mask, 0, sizeof(autosave_dirty_mask));
+    autosave_pattern_dirty_mask = 0u;
 }
 
 void autosave_markBankFieldDirty(autosave_bank_field_t field)
@@ -1416,7 +1486,7 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
 /*
  * Mark the source bytes belonging to one HCNAMES row.
  *
- * Input: fixed row 0..128. Output: both source bytes for a present Scene,
+ * Input: fixed row 0..144. Output: both source bytes for a present Scene,
  * Kit, or Instrument are sent through the canonical tracking/range funnel;
  * Bank row zero and invalid/absent rows are no-ops. Why: source ownership
  * stays in filesystem.c, while the autosave record needs the same atomic dirty
@@ -1452,6 +1522,9 @@ void autosave_markSourceDirty(uint16_t hcnames_row)
         payload_base = (uint16_t)(
             payload_base + AUTOSAVE_KIT_OFFSET +
             AUTOSAVE_KIT_SOURCE_OFFSET);
+    } else if (hcnames_row >= AUTOSAVE_HCNAMES_PATTERN_BASE) {
+        /* Pattern provenance is carried by its separate PAT4 file. */
+        return;
     } else if (hcnames_row >= AUTOSAVE_HCNAMES_INSTRUMENT_BASE &&
                hcnames_row < AUTOSAVE_HCNAMES_ROW_COUNT) {
         uint16_t instrument_index = (uint16_t)(
@@ -1722,15 +1795,15 @@ void autosave_markSceneWithoutPatternDirty(uint8_t scene_index)
 void autosave_markSceneWithPatternDirty(uint8_t scene_index)
 {
     /*
-     * Reserve the later Scene-with-Pattern copy boundary explicitly.
+     * Mark a complete Scene replacement, including its separate Pattern file.
      *
-     * Input: destination Scene. Output: Phase 1 marks only the implemented
-     * non-Pattern scope. Why: Pattern is not in this autosave wire format, so
-     * callers must not mistake this stub for persistence. Affiliate: future
-     * Pattern autosave/copy work, which must extend this function deliberately.
+     * Inputs: destination Scene after a successful Scene/Bank commit. Output:
+     * the scalar Scene scope and the independent Pattern dirty bit are offered
+     * together, preserving the commit boundary without putting Pattern bytes
+     * into the scalar record. Affiliate: Preset Scene/Bank load completion.
      */
     autosave_markSceneWithoutPatternDirty(scene_index);
-    /* TODO: mark Pattern only after Pattern persistence has a defined owner. */
+    autosave_markPatternDirty(scene_index);
 }
 
 void autosave_markResidentBankDirty(void)
@@ -1744,7 +1817,7 @@ void autosave_markResidentBankDirty(void)
      *
      * Inputs: enabled mutation tracking, every typed Bank field, and the
      * current resident Scene-present mask. Outputs: all gettable Bank bytes and
-     * non-Pattern scopes of present Scenes become dirty. Why: AutoSave OFF
+     * every present Scene's implemented scopes, including Pattern, become dirty. Why: AutoSave OFF
      * intentionally ignores intervening mutations, so runtime re-enable needs
      * an explicit convergence boundary. Affiliates: BankData, the existing
      * whole-Scene marker, and filesystem runtime ensure completion.
@@ -1754,7 +1827,7 @@ void autosave_markResidentBankDirty(void)
     for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
          scene_index++) {
         if ((present_mask & (uint16_t)(1u << scene_index)) != 0u)
-            autosave_markSceneWithoutPatternDirty(scene_index);
+            autosave_markSceneWithPatternDirty(scene_index);
     }
 }
 
@@ -1832,6 +1905,9 @@ uint8_t autosave_objectFullyCaptured(uint16_t hcnames_row)
             ((uint32_t)(hcnames_row - AUTOSAVE_HCNAMES_KIT_BASE) *
              AUTOSAVE_SCENE_SECTION_BYTES) + AUTOSAVE_KIT_OFFSET;
         payload_end = payload_start + AUTOSAVE_KIT_SECTION_BYTES;
+    } else if (hcnames_row >= AUTOSAVE_HCNAMES_PATTERN_BASE) {
+        /* Pattern provenance has no scalar-record payload interval. */
+        return 1u;
     } else if (hcnames_row < AUTOSAVE_HCNAMES_ROW_COUNT) {
         uint16_t instrument_index = (uint16_t)(
             hcnames_row - AUTOSAVE_HCNAMES_INSTRUMENT_BASE);

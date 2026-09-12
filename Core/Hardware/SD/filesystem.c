@@ -135,7 +135,8 @@
  * identity, not byte offsets. The physical file also carries one `#types`
  * header line before row 0 (see FS_RESIDENT_NAMES_TYPE_HEADER), so a complete
  * v4 register has 146 lines while FS_RESIDENT_NAMES_ROW_COUNT stays 145: data
- * rows only. AutoSave's independent wire image remains 129 rows for S063.
+ * rows only. AutoSave's independent wire image is also 145 rows in S064;
+ * Pattern payload bytes remain in separate per-Scene PAT4 files.
  */
 #define FS_RESIDENT_NAMES_INSTRUMENT_BASE \
     (1u + STORAGE_BANK_SCENE_MAX_SLOTS + STORAGE_BANK_SCENE_MAX_SLOTS)
@@ -268,6 +269,15 @@ typedef enum {
      * must never be confused with, or allowed to preempt, parameter draining.
      */
     FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
+    /*
+     * Lowest-priority per-Scene Pattern AutoSave drain.
+     *
+     * What: streams one snapshotted v4 PAT4 image into the Scene's alternating
+     * root `.patNNa`/`.patNNb` file. Why: Pattern payload bytes are outside
+     * the scalar AutoSave record and need their own durable transaction.
+     * Affiliates: PatternData snapshot accessors and HCNAMES publication.
+     */
+    FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN,
     /*
      * Boot-blocking .hcprms A/B candidate validation and winner selection.
      *
@@ -1432,6 +1442,9 @@ static void filesystem_settingsWriterSchedule_tick(void);
 static void filesystem_settingsWriterCompleted(void);
 static void filesystem_autosaveWriterSchedule_tick(void);
 static void filesystem_autosaveWriterCompleted(void);
+static void filesystem_autosavePatternDrain_tick(void);
+static void filesystem_autosavePatternDrainSchedule_tick(void);
+static void filesystem_autosavePatternDrainCompleted(void);
 static void filesystem_autosaveTraceFlushSchedule_tick(void);
 static void filesystem_autosaveTraceFlushCompleted(void);
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
@@ -1779,6 +1792,18 @@ static uint32_t op_pattern_stored_crc = 0u;
 static char op_pattern_filename[AFATFS_LONG_FILENAME_MAX + 1u];
 static uint8_t op_pattern_io_phase = 0u;
 static uint8_t op_loaded_active_pattern_running = 0;
+/*
+ * Pattern AutoSave drain retained state.
+ *
+ * What: records the newest valid generation for each Scene and the Scene
+ * currently owned by the asynchronous writer. Why: A/B selection survives
+ * operation scratch reuse, and each successful drain advances only its own
+ * Scene's generation. Lifetime: static SRAM1 .bss. Owner: filesystem.c.
+ * Approved S064 allocation: 64 bytes for generations plus 1 byte for the
+ * active Scene. Affiliates: Pattern scheduler, writer, and boot reader.
+ */
+static uint32_t fs_pattern_generation[SCENE_COUNT];
+static uint8_t fs_pattern_drain_scene = 0u;
 static uint8_t op_file_version = 0;
 static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
 static uint8_t fs_boot_detected_unsupported_card = 0;
@@ -2736,6 +2761,51 @@ static bool filesystem_makeFilename(char *buf, fs_file_type_t type, uint16_t num
     return true;
 }
 
+/*
+ * Build one hidden root Pattern AutoSave filename.
+ *
+ * Inputs: resident Scene index and target generation. Output: `.patNNa` for
+ * even generations or `.patNNb` for odd generations, NUL terminated. Why:
+ * each Scene owns an independent ping-pong pair and generation parity selects
+ * the inactive target before the next complete file is committed. No storage
+ * is retained beyond the caller's buffer. Affiliates: Pattern drain writer
+ * and boot candidate reader.
+ */
+static void filesystem_patternAutosaveFilename(char *dst,
+                                               uint8_t scene_index,
+                                               uint32_t generation)
+{
+    if (!dst)
+        return;
+    dst[0] = '.';
+    dst[1] = 'p';
+    dst[2] = 'a';
+    dst[3] = 't';
+    dst[4] = (char)('0' + (scene_index / 10u));
+    dst[5] = (char)('0' + (scene_index % 10u));
+    dst[6] = (generation & 1u) ? 'b' : 'a';
+    dst[7] = '\0';
+}
+
+/*
+ * Insert one Pattern AutoSave generation into a PAT4 header.
+ *
+ * Input: a header already built by filesystem_patternBuildHeader() and one
+ * uint32 generation. Output: little-endian bytes 10..13 contain the value;
+ * the header CRC bytes remain zero for the existing CRC feed. Affiliate:
+ * filesystem_autosavePatternDrain_tick().
+ */
+static void filesystem_patternSetGeneration(uint8_t *header,
+                                            uint32_t generation)
+{
+    if (!header)
+        return;
+    header[10] = (uint8_t)generation;
+    header[11] = (uint8_t)(generation >> 8u);
+    header[12] = (uint8_t)(generation >> 16u);
+    header[13] = (uint8_t)(generation >> 24u);
+}
+
 /* Feed one bounded v4 Pattern byte range into CRC32C.
  * Inputs: running CRC, absolute file offset, and accepted file bytes. Output:
  * the next accumulator, with the four header CRC bytes treated as zero. */
@@ -3313,6 +3383,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_WRITE_BOOT_LOG:        return "BLog";
     case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN: return "ASv";
     case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:  return "AST";
+    case FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN: return "ASP";
     case FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER:
         return "ASvV";
     case FS_INTERNAL_OP_REGENERATE_HCNAMES_FROM_WINNER:
@@ -5345,9 +5416,11 @@ static uint8_t filesystem_residentSourceValid(uint16_t row, uint16_t source)
         source == FS_RESIDENT_SOURCE_UNKNOWN) {
         return 1u;
     }
-    return (uint8_t)(source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT &&
-                     row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE &&
-                     row < FS_RESIDENT_NAMES_PATTERN_BASE);
+    if (source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT)
+        return (uint8_t)(row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE &&
+                         row < FS_RESIDENT_NAMES_PATTERN_BASE);
+    return (uint8_t)(source == FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE &&
+                     row >= FS_RESIDENT_NAMES_PATTERN_BASE);
 }
 
 uint16_t filesystem_residentSource(uint16_t row)
@@ -5404,6 +5477,14 @@ uint16_t filesystem_resolveResidentSource(uint16_t row,
     while (row < FS_RESIDENT_NAMES_ROW_COUNT) {
         uint16_t source = filesystem_residentSource(row);
 
+        if (row >= FS_RESIDENT_NAMES_PATTERN_BASE &&
+            source == FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE) {
+            /* Pattern `@` is a terminal hidden-file provenance, not a
+             * hierarchy edge to the resident Scene's directory child. */
+            if (resolved_row)
+                *resolved_row = row;
+            return source;
+        }
         if (source < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT ||
             source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT) {
             if (resolved_row)
@@ -5482,7 +5563,9 @@ static uint8_t filesystem_parseResidentSourceToken(const char *token,
     else if (strcmp(token, "?") == 0)
         value = FS_RESIDENT_SOURCE_UNKNOWN;
     else if (strcmp(token, "@") == 0)
-        value = FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT;
+        value = (row >= FS_RESIDENT_NAMES_PATTERN_BASE)
+            ? FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE
+            : FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT;
     else {
         if (token[0] < '0' || token[0] > '9' ||
             token[1] < '0' || token[1] > '9' ||
@@ -5747,6 +5830,23 @@ static void filesystem_setResidentRefreshed(uint16_t row)
         fs_resident_source[row] |= FS_RESIDENT_SOURCE_REFRESHED_FLAG;
 }
 
+/*
+ * Clear one resident HCNAMES refresh witness after a Pattern mutation.
+ *
+ * Input: fixed logical HCNAMES row. Output: bit 13 is cleared in the
+ * filesystem-owned RAM register and nonzero is returned for a valid row.
+ * This deliberately does not stage a source rewrite or perform I/O; the next
+ * HCNAMES transaction serializes the changed witness. Affiliate:
+ * autosave_markPatternDirty().
+ */
+uint8_t filesystem_clearResidentRefreshed(uint16_t row)
+{
+    if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
+        return 0u;
+    fs_resident_source[row] &= (uint16_t)~FS_RESIDENT_SOURCE_REFRESHED_FLAG;
+    return 1u;
+}
+
 static void filesystem_setResidentSceneRefreshed(uint8_t scene_index)
 {
     uint8_t slot;
@@ -5973,7 +6073,16 @@ static void filesystem_cacheCurrentResidentPatternName(void)
             continue;
         filesystem_cacheResidentName(row, op_pattern_display_name);
         (void)filesystem_setResidentSource(row, op_pattern_source);
-        filesystem_setResidentRefreshed(row);
+        /* A mutation may arrive after snapshot ownership but before this
+         * HCNAMES overlay. Preserve the clear witness in that case; setting R
+         * would falsely claim that this stale snapshot matches live SRAM. */
+        if (op_pattern_source == FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE &&
+            (autosave_patternDirtyMask() &
+             (uint16_t)(1u << scene_index)) != 0u) {
+            (void)filesystem_clearResidentRefreshed(row);
+        } else {
+            filesystem_setResidentRefreshed(row);
+        }
     }
 }
 
@@ -7287,15 +7396,17 @@ static uint8_t filesystem_autosaveDrainHasRefreshWork(void)
      * Find refreshed rows whose complete autosave object is now clean.
      *
      * Inputs: the durable in-session HCNAMES mirror, bit-13 refresh witnesses,
-     * and Autosave.c's canonical dirty mask. Output: one boolean deciding
-     * whether this successful drain needs a full 145-row HCNAMES rewrite.
+     * and Autosave.c's canonical scalar dirty mask. Output: one boolean
+     * deciding whether this successful scalar drain needs a full 145-row
+     * HCNAMES rewrite. Pattern rows are owned by the separate Pattern drain
+     * and are therefore not candidates for this scalar convergence pass.
      * Invalid mirror state fails closed: a stale/empty image must never be
      * serialized over the physical register. The scan is bounded and uses no
      * additional SRAM.
      */
     if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID)
         return 0u;
-    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+    for (row = 0u; row < FS_RESIDENT_NAMES_PATTERN_BASE; row++) {
         if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_REFRESHED_FLAG) !=
                 0u && autosave_objectFullyCaptured(row)) {
             return 1u;
@@ -7313,11 +7424,12 @@ static void filesystem_clearResidentRefreshedCaptured(void)
      * completed temp-file publication and final sync. Inputs are the
      * post-rename source register and canonical autosave mask; output clears
      * bit 13 while source values and any still-dirty object's witness remain
-     * intact. This is the
+     * intact. Pattern rows are excluded because their independent whole-file
+     * transaction owns their refreshed witness. This is the
      * final in-RAM half of the autosave convergence boundary and allocates no
      * per-row bookkeeping.
      */
-    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+    for (row = 0u; row < FS_RESIDENT_NAMES_PATTERN_BASE; row++) {
         if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_REFRESHED_FLAG) !=
                 0u && autosave_objectFullyCaptured(row)) {
             fs_resident_source[row] &= (uint16_t)~
@@ -14133,9 +14245,9 @@ static uint8_t filesystem_patternReadSection(uint8_t phase)
  * Inputs: phase 7/8/9, a resident region, and the two write cursors. Output:
  * 0 while partial, 1 when the section is complete, or 2 on a proven full-card
  * write failure. CRC is fed once per staged chunk before the chunk is written. */
-static uint8_t filesystem_patternWriteSection(uint8_t phase)
+static uint8_t filesystem_patternWriteRegionSection(
+    uint8_t phase, const pat_scene_region_t *region)
 {
-    const pat_scene_region_t *region = pat_sceneRegion(op_pattern_scene);
     uint32_t section_start;
     uint32_t section_bytes;
     const uint8_t *source;
@@ -14185,6 +14297,22 @@ static uint8_t filesystem_patternWriteSection(uint8_t phase)
     op_item_offset = 0u;
     op_bytes_done = 0u;
     return (op_stream_index >= section_bytes) ? 1u : 0u;
+}
+
+/*
+ * Stream one section from the live Pattern owner for the existing library
+ * save/load state machine.
+ *
+ * Input: v4 section phase and the current operation Scene. Output: the same
+ * bounded partial-write result as filesystem_patternWriteRegionSection().
+ * Why: the S064 drain must select the immutable snapshot explicitly while
+ * legacy Pattern Save continues to stream live resident storage. Affiliate:
+ * filesystem_savePattern_tick().
+ */
+static uint8_t filesystem_patternWriteSection(uint8_t phase)
+{
+    return filesystem_patternWriteRegionSection(
+        phase, pat_sceneRegion(op_pattern_scene));
 }
 
 /* Shared v4 root Pattern reader/writer.
@@ -14333,6 +14461,11 @@ static void filesystem_loadPattern_tick(void)
                     if (target)
                         memcpy(target, source, sizeof(*target));
                 }
+                /* A root-library Pattern replacement starts a new hidden-file
+                 * generation epoch and must be durably re-captured before its
+                 * old AutoSave pair can be considered authoritative. */
+                fs_pattern_generation[si] = 0u;
+                autosave_markPatternDirty(si);
                 bank_invalidateSdCleanScene(si);
             }
         }
@@ -14462,6 +14595,183 @@ static void filesystem_savePattern_tick(void)
         return;
     default:
         filesystem_finish(FS_STATUS_ERROR); return;
+    }
+}
+
+/*
+ * Stream one resident Scene Pattern snapshot into its ping-pong AutoSave file.
+ *
+ * What: writes a complete PAT4 header, address array, bitmap, pool, and
+ * in-header CRC for fs_pattern_drain_scene. Why: the separate Pattern dirty
+ * register needs a whole-file commit whose source remains immutable after the
+ * scheduler's snapshot. Inputs: pat_autosaveSnapshot(), the incremented
+ * fs_pattern_generation[], and the existing AsyncFATFS facade. Output: after
+ * the file closes, the operation enters the shared HCNAMES Pattern update;
+ * only that update's final flush invokes the completion callback. Errors close
+ * the handle and retain the dirty bit for retry. No new staging buffer is
+ * allocated; staging_buf remains the 512-byte write window.
+ * Affiliates: filesystem_autosavePatternDrainSchedule_tick(),
+ * filesystem_patternWriteRegionSection(), and HCNAMES publication.
+ */
+static void filesystem_autosavePatternDrain_tick(void)
+{
+    const pat_scene_region_t *snapshot;
+
+    switch (op_phase) {
+    case 0u:
+        if (!afatfs_chdir(NULL))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1u:
+        op_file_ready = false;
+        op_file = NULL;
+        if (!afatfs_fopen_lfn(op_pattern_filename, "w",
+                              AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                              on_file_opened))
+            return;
+        op_phase = 2u;
+        return;
+
+    case 2u:
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        snapshot = pat_autosaveSnapshot();
+        if (!snapshot) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 9u;
+            return;
+        }
+        filesystem_patternBuildHeader(staging_buf, snapshot);
+        filesystem_patternSetGeneration(
+            staging_buf, fs_pattern_generation[fs_pattern_drain_scene]);
+        op_pattern_crc = autosave_recordCrcBegin();
+        op_pattern_crc = filesystem_patternCrcFeed(
+            op_pattern_crc, 0u, staging_buf, PATTERN_FILE_HEADER_BYTES);
+        op_item_offset = 0u;
+        op_bytes_done = 0u;
+        op_stream_index = 0u;
+        op_close_status = FS_STATUS_DONE;
+        op_phase = 3u;
+        return;
+
+    case 3u:
+        if (op_item_offset < PATTERN_FILE_HEADER_BYTES) {
+            uint32_t n = afatfs_fwrite(
+                op_file, staging_buf + op_item_offset,
+                PATTERN_FILE_HEADER_BYTES - op_item_offset);
+
+            op_item_offset = (uint16_t)(op_item_offset + n);
+            if (n == 0u && afatfs_isFull()) {
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 9u;
+            }
+            return;
+        }
+        op_stream_index = 0u;
+        op_item_offset = 0u;
+        op_bytes_done = 0u;
+        op_phase = 4u;
+        return;
+
+    case 4u:
+    case 5u:
+    case 6u: {
+        uint8_t result = filesystem_patternWriteRegionSection(
+            (uint8_t)(op_phase + 3u), pat_autosaveSnapshot());
+
+        if (result == 2u) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 9u;
+        } else if (result == 1u) {
+            op_stream_index = 0u;
+            op_phase++;
+        }
+        return;
+    }
+
+    case 7u: {
+        afatfsOperationStatus_e seek = afatfs_fseek(
+            op_file, (int32_t)PATTERN_FILE_CRC_OFFSET, AFATFS_SEEK_SET);
+
+        if (seek == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (seek == AFATFS_OPERATION_FAILURE) {
+            op_close_status = FS_STATUS_ERROR;
+            op_phase = 9u;
+            return;
+        }
+        {
+            uint32_t crc = autosave_recordCrcFinish(op_pattern_crc);
+
+            staging_buf[0] = (uint8_t)crc;
+            staging_buf[1] = (uint8_t)(crc >> 8u);
+            staging_buf[2] = (uint8_t)(crc >> 16u);
+            staging_buf[3] = (uint8_t)(crc >> 24u);
+        }
+        op_item_offset = 0u;
+        op_phase = 8u;
+        return;
+    }
+
+    case 8u:
+        if (op_item_offset < 4u) {
+            uint32_t n = afatfs_fwrite(
+                op_file, staging_buf + op_item_offset, 4u - op_item_offset);
+
+            op_item_offset = (uint16_t)(op_item_offset + n);
+            if (n == 0u && afatfs_isFull()) {
+                op_close_status = FS_STATUS_ERROR;
+                op_phase = 9u;
+            }
+            return;
+        }
+        op_phase = 9u;
+        return;
+
+    case 9u:
+        if (!op_file) {
+            filesystem_finish(op_close_status);
+            return;
+        }
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 10u;
+        return;
+
+    case 10u:
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_chdir(NULL))
+            return;
+        if (op_close_status != FS_STATUS_DONE) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        /* HCNAMES is part of the same durable transaction. Preserve its
+         * display name, replace only the provenance with Pattern AutoSave,
+         * and let the existing update writer publish the refreshed witness. */
+        op_scene_load_scene_mask = (uint16_t)(
+            1u << fs_pattern_drain_scene);
+        memcpy(op_pattern_display_name,
+               filesystem_residentPatternName(fs_pattern_drain_scene),
+               STORAGE_KIT_DISPLAY_NAME_LEN);
+        op_pattern_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+        op_pattern_source = FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE;
+        filesystem_startPatternHcnamesUpdate();
+        return;
+
+    default:
+        if (op_file)
+            op_close_status = FS_STATUS_ERROR;
+        op_phase = 9u;
+        return;
     }
 }
 
@@ -18995,8 +19305,9 @@ static void filesystem_saveSceneDirectory_tick(void)
             }
             /* Scene Save replaces the Scene payload, embedded Kit hierarchy,
              * and named Pattern child. Stage the Pattern source in the
-             * expanded HCNAMES register; it remains outside the S063 AutoSave
-             * 129-row wire image until the later Pattern AutoSave session.
+             * expanded 145-row HCNAMES register; Pattern payload bytes remain
+             * outside the fixed scalar AutoSave payload and are handled by
+             * the separate Pattern AutoSave file.
              */
             (void)filesystem_setResidentSource(
                 filesystem_residentPatternRow(op_kit_save_source_scene),
@@ -20938,7 +21249,8 @@ static uint8_t filesystem_formatResidentNameLine(char *dst,
         token = "-";
     else if (source == FS_RESIDENT_SOURCE_UNKNOWN)
         token = "?";
-    else if (source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT)
+    else if (source == FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT ||
+             source == FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE)
         token = "@";
     else {
         if (len + 4u >= cap)
@@ -22673,6 +22985,9 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
     fs_autosave_transaction_active = 0u;
     fs_autosave_discard_pending = 0u;
     fs_autosave_page_suppressed = 0u;
+    /* A destroyed facade starts a fresh Pattern A/B generation epoch. */
+    memset(fs_pattern_generation, 0, sizeof(fs_pattern_generation));
+    fs_pattern_drain_scene = 0u;
     autosave_setMutationTrackingEnabled(0u);
     /*
      * Abandon autonomous settings scheduling with the destroyed FAT facade.
@@ -22734,6 +23049,13 @@ void filesystem_initAfterCardReady(void)
      * continuation shortcut before any boot or runtime operation can start.
      */
     fs_autosave_winner_cached = 0u;
+    /*
+     * Pattern AutoSave generations belong to this mounted card session.
+     * Reset them before the blocking boot reader repopulates valid winners;
+     * missing or invalid .patNNx pairs must therefore start at generation 1.
+     */
+    memset(fs_pattern_generation, 0, sizeof(fs_pattern_generation));
+    fs_pattern_drain_scene = 0u;
     /*
      * A fresh mount also clears the boot reader's deferred latch.
      *
@@ -22825,6 +23147,24 @@ uint8_t filesystem_autosaveEnabled(void)
      * filesystem_setAutosaveEnabled() and main.c's pre-audio setup ladder.
      */
     return fs_autosave_enabled;
+}
+
+/*
+ * Reset one resident Pattern AutoSave generation after a directory load.
+ *
+ * Inputs: a resident Scene index whose PatternData has just been replaced by
+ * a successful Scene, Bank, or root Pattern load. Output: the next hidden
+ * Pattern drain starts from generation 1 and file A, while the current dirty
+ * bit and HCNAMES lifecycle remain owned by the caller. Why: a directory
+ * source is authoritative until the newly loaded Pattern is captured by its
+ * own AutoSave file; continuing an older hidden-file generation would make
+ * the replacement look like a continuation of unrelated Pattern data. No
+ * filesystem I/O occurs. Affiliates: Preset load completion and Pattern drain.
+ */
+void filesystem_resetPatternAutosaveGeneration(uint8_t scene_index)
+{
+    if (scene_index < SCENE_COUNT && scene_index < 16u)
+        fs_pattern_generation[scene_index] = 0u;
 }
 
 void filesystem_setAutosaveEnabled(uint8_t enabled)
@@ -23260,6 +23600,28 @@ static void filesystem_autosaveWriterCompleted(void)
     filesystem_ack();
 }
 
+/*
+ * Complete one Pattern AutoSave transaction and release the shared facade.
+ *
+ * What: retains the Pattern dirty bit on any file, close, HCNAMES, or final
+ * flush failure, then returns the autonomous operation to IDLE. Why: the
+ * scheduler clears the selected bit before snapshot ownership so a mutation
+ * after that boundary can set it again without being lost; a failed stream
+ * therefore has to re-arm the bit here. On success, phase 10 has already
+ * staged the Pattern `@` source and refreshed witness before the HCNAMES
+ * transaction, so no second HCNAMES operation is needed. Inputs: terminal
+ * status and fs_pattern_drain_scene. Outputs: dirty work is preserved on
+ * failure and the facade is acknowledged in every terminal case. Affiliates:
+ * filesystem_autosavePatternDrainSchedule_tick(),
+ * filesystem_autosavePatternDrain_tick(), and Autosave.c.
+ */
+static void filesystem_autosavePatternDrainCompleted(void)
+{
+    if (status != FS_STATUS_DONE)
+        autosave_markPatternDirty(fs_pattern_drain_scene);
+    filesystem_ack();
+}
+
 static void filesystem_autosaveSetupCompleted(void)
 {
     uint8_t setup_ok = (uint8_t)(status == FS_STATUS_DONE);
@@ -23492,6 +23854,69 @@ static void filesystem_autosaveWriterSchedule_tick(void)
          */
         autosaveTrace_record(AUTOSAVE_TRACE_STAGE_ADMITTED, 0u, 0u);
     }
+}
+
+/*
+ * Admit one per-Scene Pattern AutoSave drain when higher-priority work declines.
+ *
+ * What: selects the lowest dirty resident Scene, verifies that the runtime
+ * Bank/session and card gates are open, clears the bit at snapshot ownership,
+ * copies the live Pattern region, advances its A/B generation, and starts the
+ * dedicated whole-file writer. Why: Pattern is lower priority than settings,
+ * trace, and the scalar parameter drain, while the clear-before-copy boundary
+ * prevents a mutation made during the long file stream from being erased by a
+ * later completion callback. An I/O error restores the bit; a successful
+ * transaction leaves it clear unless a later mutation re-set it. Inputs:
+ * autosave_patternDirtyMask(), seq_recordActive, seq_eraseActive, and the
+ * mounted filesystem. Outputs: at most one Pattern drain owns the facade.
+ * Affiliates: pat_snapshotScene(), filesystem_autosavePatternDrain_tick(),
+ * and filesystem_autosavePatternDrainCompleted().
+ */
+static void filesystem_autosavePatternDrainSchedule_tick(void)
+{
+    uint16_t mask;
+    uint8_t scene;
+    uint32_t generation;
+
+    if (!fs_autosave_enabled || !fs_autosave_runtime_ready ||
+        !fs_autosave_writer_boot_ready || !bank_hasResidentBank())
+        return;
+    if (menu_isLoadSaveCommandActive())
+        return;
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+        return;
+    if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY)
+        return;
+    if (seq_recordActive || seq_eraseActive)
+        return;
+
+    mask = autosave_patternDirtyMask();
+    if (mask == 0u)
+        return;
+    for (scene = 0u; scene < SCENE_COUNT && scene < 16u; scene++) {
+        if ((mask & (uint16_t)(1u << scene)) != 0u)
+            break;
+    }
+    if (scene >= SCENE_COUNT || scene >= 16u)
+        return;
+
+    /* Move the dirty bit into the in-flight ownership boundary before copy. */
+    autosave_clearPatternDirty(scene);
+    pat_snapshotScene(scene);
+    fs_pattern_drain_scene = scene;
+    generation = fs_pattern_generation[scene] + 1u;
+    if (generation == 0u)
+        generation = 1u;
+    fs_pattern_generation[scene] = generation;
+    if (!filesystem_start(FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN,
+                          FS_FILE_SETTINGS, 0u,
+                          filesystem_autosavePatternDrainCompleted)) {
+        /* No owner was admitted, so return the work to the canonical mask. */
+        autosave_markPatternDirty(scene);
+        return;
+    }
+    op_pattern_scene = scene;
+    filesystem_patternAutosaveFilename(op_pattern_filename, scene, generation);
 }
 
 /*
@@ -23942,6 +24367,9 @@ void filesystem_tick(void)
      */
     if (status == FS_STATUS_IDLE)
         filesystem_autosaveWriterSchedule_tick();
+    /* Pattern is the final background claimant after scalar AutoSave work. */
+    if (status == FS_STATUS_IDLE)
+        filesystem_autosavePatternDrainSchedule_tick();
     if (status != FS_STATUS_BUSY) return;
 
     switch (current_op) {
@@ -23977,6 +24405,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:
         filesystem_autosaveTraceFlush_tick();
+        break;
+    case FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN:
+        filesystem_autosavePatternDrain_tick();
         break;
     case FS_INTERNAL_OP_LOAD_HCNAMES_INSTRUMENT:
     case FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT:
@@ -26589,13 +27020,14 @@ close:
  * Restore one Scene's v4 Pattern during boot.
  *
  * What: resolves the Pattern HCNAMES row either to a numbered root
- * `/Pattern/NNN name.pat` source or through the resident Scene/Bank source to
- * a named child inside that Scene directory. Inputs: parsed 145-row HCNAMES
- * mirror and a resident Scene index. Output: the complete Pattern region is
- * restored, or left at pat_initScene() defaults when the source/file is
- * missing or invalid. Why: Pattern data is not part of the AutoSave wire
- * payload in Session 063, so the accepted Scene still needs its v4 child or
- * library file before playback resumes. Affiliates:
+ * `/Pattern/NNN name.pat` source, to a hidden Pattern AutoSave `@` baseline,
+ * or through the resident Scene/Bank source to a named child inside that
+ * Scene directory. Inputs: parsed 145-row HCNAMES mirror and a resident Scene
+ * index. Output: the complete Pattern region is restored, or left at
+ * pat_initScene() defaults when the source/file is missing or invalid. Why:
+ * Pattern payload bytes remain outside the scalar AutoSave record, so the
+ * accepted Scene needs either its v4 child/library file or the later hidden
+ * Pattern AutoSave overlay before playback resumes. Affiliates:
  * filesystem_bootReaderResolveResidentRow(),
  * filesystem_bootReaderEnterSceneFolder(), and
  * filesystem_bootReaderReadPatternFile().
@@ -26612,6 +27044,12 @@ static uint8_t filesystem_bootReaderLoadPattern(uint8_t scene_index)
         return 0u;
     pat_initScene(scene_index);
     pattern_row = filesystem_residentPatternRow(scene_index);
+    if (filesystem_residentSource(pattern_row) ==
+        FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE) {
+        /* Main boot applies the validated hidden winner after this normal
+         * directory/payload ladder. Do not resolve `@` through Scene data. */
+        return 1u;
+    }
     source = filesystem_bootReaderResolveResidentRow(
         pattern_row, &resolved_row);
     if (source < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT &&
@@ -26644,6 +27082,174 @@ static uint8_t filesystem_bootReaderLoadPattern(uint8_t scene_index)
     ok = filesystem_bootReaderReadPatternFile(file_name, scene_index);
     (void)filesystem_blockChdir(NULL);
     return ok;
+}
+
+/*
+ * Validate one hidden Pattern AutoSave candidate without changing live Pattern.
+ *
+ * What: streams the complete PAT4 header, extension, address array, bitmap,
+ * and current-size pool through staging_buf, verifies the CRC with header CRC
+ * bytes zeroed, and rejects any trailing byte. Why: boot selection must never
+ * let a partially written file replace the already restored Scene-directory
+ * Pattern. Inputs: root-directory `.patNNa`/`.patNNb` filename. Outputs: the
+ * candidate generation and a nonzero validity result; no resident region is
+ * modified. Affiliates: filesystem_patternHeaderValid(),
+ * filesystem_patternCrcFeed(), filesystem_bootReaderReadPatternFile(), and
+ * filesystem_patternAutosaveBootReaderBlocking().
+ */
+static uint8_t filesystem_patternAutosaveCandidateValid(
+    const char *file_name, uint32_t *generation)
+{
+    afatfsFilePtr_t file;
+    uint16_t header_size;
+    uint16_t stack_size;
+    uint16_t extension;
+    uint32_t stored_crc;
+    uint32_t crc;
+    uint32_t offset;
+    uint32_t remaining;
+    uint32_t candidate_generation;
+    uint16_t chunk;
+    uint8_t ok = 0u;
+
+    if (!file_name || !generation)
+        return 0u;
+    file = filesystem_blockOpenLfn(file_name);
+    if (!file)
+        return 0u;
+    crc = autosave_recordCrcBegin();
+    if (filesystem_blockRead(file, staging_buf,
+                             PATTERN_FILE_FIXED_HEADER_BYTES) !=
+            PATTERN_FILE_FIXED_HEADER_BYTES ||
+        !filesystem_patternHeaderValid(staging_buf, &header_size,
+                                       &stack_size, &stored_crc) ||
+        stack_size != PAT_STACK_SIZE) {
+        goto close;
+    }
+    crc = filesystem_patternCrcFeed(
+        crc, 0u, staging_buf, PATTERN_FILE_FIXED_HEADER_BYTES);
+    extension = (uint16_t)(header_size - PATTERN_FILE_FIXED_HEADER_BYTES);
+    if (extension != 0u) {
+        if (filesystem_blockRead(
+                file, staging_buf + PATTERN_FILE_FIXED_HEADER_BYTES,
+                extension) != extension) {
+            goto close;
+        }
+        crc = filesystem_patternCrcFeed(
+            crc, PATTERN_FILE_FIXED_HEADER_BYTES,
+            staging_buf + PATTERN_FILE_FIXED_HEADER_BYTES, extension);
+    }
+    candidate_generation = (uint32_t)staging_buf[10u] |
+        ((uint32_t)staging_buf[11u] << 8u) |
+        ((uint32_t)staging_buf[12u] << 16u) |
+        ((uint32_t)staging_buf[13u] << 24u);
+
+    offset = PATTERN_FILE_HEADER_BYTES;
+    remaining = PATTERN_FILE_PAYLOAD_BYTES;
+    while (remaining != 0u) {
+        chunk = (remaining > sizeof(staging_buf))
+            ? (uint16_t)sizeof(staging_buf) : (uint16_t)remaining;
+        if (filesystem_blockRead(file, staging_buf, chunk) != chunk)
+            goto close;
+        crc = filesystem_patternCrcFeed(crc, offset, staging_buf, chunk);
+        offset += chunk;
+        remaining -= chunk;
+    }
+    /* A valid candidate is exactly one complete current-size PAT4 image. */
+    if (filesystem_blockRead(file, staging_buf, 1u) != 0u ||
+        !afatfs_feof(file)) {
+        goto close;
+    }
+    ok = (uint8_t)(autosave_recordCrcFinish(crc) == stored_crc);
+
+close:
+    if (!filesystem_blockClose(file))
+        ok = 0u;
+    if (ok)
+        *generation = candidate_generation;
+    return ok;
+}
+
+/*
+ * Restore per-Scene Pattern AutoSave winners during the blocking boot ladder.
+ *
+ * What: tries each Scene's `.patNNa` and `.patNNb`, retains the valid
+ * candidate with the greatest uint32 generation (A wins an equal-generation
+ * tie), and applies it only when the Pattern HCNAMES row is the `@` AutoSave
+ * provenance and generation is nonzero. Why: Scene/Bank/library Pattern files
+ * remain authoritative for every other HCNAMES source, while a committed
+ * Pattern AutoSave must survive a power loss independently of the scalar
+ * `.hcprms` record. Inputs: mounted root filesystem, resident Scene presence,
+ * HCNAMES mirror, and Pattern regions already restored by the normal boot
+ * path. Outputs: fs_pattern_generation[] for future drains and selected live
+ * Pattern regions; invalid/missing pairs leave existing Scene data unchanged.
+ * Affiliates: filesystem_bootReaderReadPatternFile(),
+ * filesystem_patternAutosaveCandidateValid(), pat_snapshotScene(), and main.c.
+ */
+void filesystem_patternAutosaveBootReaderBlocking(void)
+{
+    uint8_t scene;
+
+    if (!filesystem_blockChdir(NULL))
+        return;
+    for (scene = 0u; scene < SCENE_COUNT && scene < 16u; scene++) {
+        uint8_t candidate;
+        uint8_t winner_valid = 0u;
+        uint32_t winner_generation = 0u;
+        char winner_name[8] = { 0 };
+
+        fs_pattern_generation[scene] = 0u;
+        if ((bank_scenePresentMask() & (uint16_t)(1u << scene)) == 0u)
+            continue;
+        for (candidate = 0u; candidate < 2u; candidate++) {
+            char candidate_name[8];
+            uint32_t generation;
+
+            if (!filesystem_blockChdir(NULL))
+                return;
+            filesystem_patternAutosaveFilename(
+                candidate_name, scene, candidate);
+            if (!filesystem_patternAutosaveCandidateValid(
+                    candidate_name, &generation))
+                continue;
+            /* Candidate 0 is A; replacing only on a strictly newer
+             * generation preserves the required A-wins-tie rule. */
+            if (!winner_valid || generation > winner_generation) {
+                winner_valid = 1u;
+                winner_generation = generation;
+                memcpy(winner_name, candidate_name, sizeof(winner_name));
+            }
+        }
+        if (!winner_valid)
+            continue;
+        /* A directory/library source deliberately ignores stale hidden files;
+         * also discard their generation so the replacement's next drain
+         * starts a fresh A/B epoch rather than continuing unrelated data. */
+        if (filesystem_residentSource(filesystem_residentPatternRow(scene)) !=
+            FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE) {
+            fs_pattern_generation[scene] = 0u;
+            continue;
+        }
+        fs_pattern_generation[scene] = winner_generation;
+        if (winner_generation == 0u) {
+            continue;
+        }
+        if (!filesystem_blockChdir(NULL))
+            return;
+        /* Preserve the already authoritative directory Pattern if the second
+         * read encounters a removable-card error after validation. */
+        pat_snapshotScene(scene);
+        if (!filesystem_bootReaderReadPatternFile(winner_name, scene)) {
+            pat_scene_region_t *region = pat_sceneRegionMut(scene);
+            const pat_scene_region_t *snapshot = pat_autosaveSnapshot();
+
+            if (region && snapshot)
+                memcpy(region, snapshot, sizeof(*region));
+            if (filesystem_bootLoggingTimedOut())
+                return;
+        }
+    }
+    (void)filesystem_blockChdir(NULL);
 }
 
 /*

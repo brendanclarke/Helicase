@@ -26,6 +26,18 @@ extern uint8_t seq_activePattern;
 extern uint8_t seq_newPatternAvailable;
 extern uint8_t seq_resetBarOnPatternChange;
 
+/*
+ * Live recording and erasing activity flags.
+ *
+ * What: nonzero while the front-panel RECORD or ERASE mode is active. Why:
+ * the Pattern AutoSave drain must not copy the live Pattern region while
+ * seq_tick() can still modify it. Inputs/outputs: written by the existing
+ * record/erase mode handlers and read by filesystem.c's drain scheduler.
+ * Affiliates: PatternData mutation paths and S064 Pattern AutoSave.
+ */
+extern uint8_t seq_recordActive;
+extern uint8_t seq_eraseActive;
+
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note);
 /*
  * Stopped-transport voice preview.
