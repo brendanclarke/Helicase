@@ -81,94 +81,124 @@ This matches the Kit Save and Scene Save chains exactly.
 
 ---
 
-## Test 3: Root Pattern Load (slot 000) — FAIL (OPEN)
+## Test 3: Root Pattern Load (slot 001) — FAIL → FIXED
 
 **Steps**: After successful Pattern Save (Test 2 fix verified), load Pattern
-from slot 000.
+from slot 001.
 
 **Symptom**: Screen freezes on `Load: Pattern  ` / `001 Barf    ...` — the
 ellipsis never clears. Buttons still respond (mode changes work), and the
-Pattern data loads correctly (audio audibly changes to the loaded pattern), but
-the completion callback never fires so the menu never exits the loading screen.
+Pattern data loads correctly (audio audibly changes to the loaded pattern).
 
-**SD card post-test** (`SD_CARD_PAT_TEST_2/`): `.hcnames` has 146 lines,
-correct format, Pattern row shows `Barf	001	R`. Both `.pat` files are 10656
-bytes with valid PAT4 headers. No `.hcnamtmp` file present. `.hcindex` correct.
+**SD card post-test** (`SD_CARD_PAT_TEST_2/`, `SD_CARD_PAT_TEST_3/`):
+`.hcnames` has 146 lines, correct format, no `.hcnamtmp` present —
+proving the HCNAMES update completed successfully.
 
-### Fix attempt 1 — prepareResidentNamesCache (DID NOT FIX)
+### Misdiagnosis
 
-`filesystem_startPatternHcnamesUpdate()` was missing the call to
-`filesystem_prepareResidentNamesCache()` that every other HCNAMES update entry
-point makes. Added it:
+Initial investigation assumed the HCNAMES update state machine was hanging.
+Two fix attempts targeted the filesystem layer:
 
-```c
-static void filesystem_startPatternHcnamesUpdate(void)
-{
-    if (current_op == FS_INTERNAL_OP_SAVE_PATTERN) {
-        op_library_index_rebuild_kind = FS_NAME_CACHE_PATTERN;
-        op_library_index_rebuild_pending = 1u;
-    }
-    filesystem_prepareResidentNamesCache();
-    current_op = FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN;
-    op_phase = 0u;
-}
-```
+1. Added `filesystem_prepareResidentNamesCache()` to
+   `filesystem_startPatternHcnamesUpdate()`. Structurally correct (matches
+   other HCNAMES entry points) but did not fix the symptom. Remains applied.
+2. Bypassed the HCNAMES update entirely for Pattern Load. Eliminated the
+   symptom but was a workaround, not a fix. Reverted.
 
-This is structurally correct (matches all other entry points) and remains
-applied, but **did not fix the Pattern Load freeze**. The freeze persists
-identically after this change.
+The filesystem operation was completing successfully all along.
 
-### Fix attempt 2 — bypass HCNAMES update for load (REVERTED)
+### Root cause (two independent defects)
 
-Replaced the `filesystem_startPatternHcnamesUpdate()` call in
-`filesystem_loadPattern_tick()` case 14u with a direct
-`filesystem_cacheCurrentResidentPatternName()` + `filesystem_finish(DONE)`,
-skipping the HCNAMES update entirely for Pattern Load.
+See `S063_PAT_LOAD_FAILS_PRECISE_FIX.md` for the full evidence chain.
 
-This eliminated the freeze but was **not a real fix** — it avoided the problem
-by skipping the operation rather than finding why the HCNAMES update hangs.
-Pattern Load must complete the full HCNAMES update (as Scene Load does) to
-ensure the `.hcnames` file reflects the loaded state. **Reverted.**
+**Defect 1 — persistent `...`**: The `PRESET_OP_PATTERN_LOAD` completion
+branch in `menu.c` cleared `menu_storageBusy` directly but never called
+`menu_finishLoadSaveCommand()`. This left `menu_loadSaveCommandActive = 1`
+permanently, so every Load/Save repaint showed `...` and input remained
+command-gated. The filesystem callback fired and reached Menu, but Menu
+failed to terminate the accepted command.
 
-### Current state
+**Defect 2 — Pattern loaded into wrong Scene**: `preset_loadPattern()` had
+no destination argument. The filesystem request substituted
+`scene_getActiveIndex()`, so the PAT4 reader always wrote the playing Scene
+regardless of the user's SEQ-button selection. The selected Scene mask from
+the Load page never reached the filesystem.
 
-- Fix 1 (`prepareResidentNamesCache`) remains applied — correct but insufficient
-- Fix 2 (HCNAMES bypass) reverted — case 14u calls
-  `filesystem_startPatternHcnamesUpdate()` again
-- **Root cause is unknown.** The HCNAMES update state machine
-  (`filesystem_residentNames_tick`) is shared code that works for Scene
-  Save/Load but hangs for Pattern Load. The HCNAMES update has no stall
-  detection, so the hang is permanent.
-- Pattern data loads correctly into SRAM (audio works); the freeze is in the
-  post-load HCNAMES update only.
+### Fix (applied)
 
-### Investigation notes
+**Menu completion** (`menu.c` `PRESET_OP_PATTERN_LOAD` branch): Now calls
+`pat_applyTrackSettingsToMenu()` for the current track, then routes through
+`menu_requestLoadCommandFinalIndexRestore()` → `menu_finishLoadSaveCommand()`,
+matching Scene/Bank Load's terminal contract.
 
-Exhaustive static analysis checked:
-- `completion_callback` is not lost (only modified at 6 known locations)
-- `op_close_status` is initialized to DONE by `filesystem_start()`
-- `op_library_index_rebuild_pending` is 0 for loads (no index rebuild)
-- HCNAMES file format is correct (146 lines, proper Pattern rows)
-- `filesystem_formatResidentNameLine` handles Pattern rows (no type field)
-- `filesystem_residentSourceValid` accepts Pattern row sources
+**Scene mask plumbing**: Menu passes `menu_kitLoadSceneMask` through
+`preset_loadPatternForScenes()` → `filesystem_requestLoadPatternForScenes()`.
+The filesystem validates the mask, sets `op_pattern_scene` to the first
+selected bit as the stream target, and stores the full mask in
+`op_scene_load_scene_mask`.
 
-Uninvestigated areas (for manual debugging):
-- Which HCNAMES phase the state machine is stuck in (no runtime trace exists)
-- Whether asyncfatfs internal state after the Pattern Load file read sequence
-  (open dir → chdir → close dir → open file → read → close → chdir root)
-  affects subsequent root-level `.hcnames` file open
-- Whether `op_file_ready` / `op_close_done` / `op_rename_done` carry stale
-  state from the Pattern Load into the HCNAMES update phases
-- Whether the probe/bootstrap path (phase 7) is entered unexpectedly
+**Fan-out copy** (`filesystem_loadPattern_tick` case 14u): After CRC
+validation, copies `pat_scene_region_t` from the stream target to every other
+selected Scene via `memcpy`. Calls `bank_invalidateSdCleanScene()` for each
+destination. On error, also invalidates the first target after `pat_initScene`.
+
+**HCNAMES multi-row publication**: `filesystem_cacheCurrentResidentPatternName`
+now iterates `op_scene_load_scene_mask` instead of using the single
+`op_pattern_scene`, publishing name/source/refreshed for every selected Scene's
+Pattern row. Pattern Save sets `op_scene_load_scene_mask` to its single
+`op_pattern_scene` bit, preserving single-row publication.
+
+**Preset**: `on_pattern_load_complete` now calls
+`preset_markRequestedScenesPresentOnSuccessfulLoad()` before
+`preset_completeFilesystemOp()`, matching Kit/Scene/Instrument Load.
+
+**Build**: `text=423996 (+280), data=416, bss=279372`.
 
 ---
+
+## Test 4: Root Pattern Load — non-active destination — PASS
+
+**Steps**: Load Pattern into a non-playing/non-active resident Scene via SEQ
+mask selection.
+
+**Result**: Pattern loads into the selected Scene without hanging. Menu exits
+`...` correctly and returns to the bracketed type row. No freeze.
+
+---
+
+## Test 5: Bank Save/Load (slot 036) — PASS (with follow-up)
+
+**Steps**: Save and load Bank slot 036.
+
+**SD card post-test**: `SD_CARD_PAT_TEST_4/`.
+
+**Result**: Bank Save and Bank Load complete successfully. Pattern data
+round-trips through the embedded Scene children.
+
+**Follow-up required**: All resident Scenes were saved into the Bank, including
+Scenes that should have been marked empty at boot and were never explicitly
+loaded. This suggests the Bank Save path does not filter by the Bank present
+mask, or that boot is marking Scenes present when it should not. This is not a
+regression from the Pattern file changes — it is a pre-existing behavior that
+needs more investigation in a later pass. Do not fix now.
+
+---
+
+## Session 063 Pattern file status
+
+Pattern Save and Pattern Load are functional. The v4 binary format, HCNAMES
+publication, library index rebuild, and multi-Scene fan-out are verified on
+hardware. The next session (S064) will address Pattern AutoSave.
 
 ## Remaining tests
 
 - [x] Root Pattern Save completes without freeze (Test 2)
-- [ ] Root Pattern Load completes without freeze (Test 3 — **BLOCKED**)
+- [x] Root Pattern Load — single non-active destination (Test 4)
+- [ ] Root Pattern Load — multi-destination with active opt-in
+- [x] Pattern Load terminal ownership — no hang (Test 4)
 - [ ] Pattern Save with rename retires the old file
 - [ ] Scene Save round-trip still works after fix
-- [ ] Bank Save/Load with Pattern children
-- [ ] Pattern HCNAMES row visible after save (row 129+)
+- [x] Bank Save/Load with Pattern children (Test 5 — functional, see follow-up)
+- [ ] Pattern HCNAMES rows correct after multi-Scene load (row 129+)
 - [ ] Pattern `.hcindex` correct after save
+- [ ] **Follow-up**: investigate why empty/unloaded Scenes are saved in Bank

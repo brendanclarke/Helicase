@@ -225,6 +225,7 @@ uint8_t preset_saveGlobals(void);
 
 /* Pattern — async direct serializer in filesystem.c. */
 uint8_t preset_loadPattern(uint16_t presetNr);
+uint8_t preset_loadPatternForScenes(uint16_t presetNr, uint16_t scene_mask);
 uint8_t preset_savePattern(uint16_t presetNr);
 
 /* All / Performance — async container serializers in filesystem.c. */

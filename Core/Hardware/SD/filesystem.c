@@ -5956,16 +5956,25 @@ static void filesystem_cacheCurrentResidentSceneChildNames(void)
     }
 }
 
-/* Overlay a root Pattern operation into its appended resident HCNAMES row. */
+/* Overlay root Pattern HCNAMES rows for every Scene in op_scene_load_scene_mask. */
 static void filesystem_cacheCurrentResidentPatternName(void)
 {
-    uint16_t row = filesystem_residentPatternRow(op_pattern_scene);
+    uint8_t scene_index;
 
-    if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
-        return;
-    filesystem_cacheResidentName(row, op_pattern_display_name);
-    (void)filesystem_setResidentSource(row, op_pattern_source);
-    filesystem_setResidentRefreshed(row);
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        uint16_t row;
+        if ((op_scene_load_scene_mask &
+             (uint16_t)(1u << scene_index)) == 0u)
+            continue;
+        row = filesystem_residentPatternRow(scene_index);
+        if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
+            continue;
+        filesystem_cacheResidentName(row, op_pattern_display_name);
+        (void)filesystem_setResidentSource(row, op_pattern_source);
+        filesystem_setResidentRefreshed(row);
+    }
 }
 
 /* Hand a completed root Pattern payload to the shared HCNAMES transaction.
@@ -14306,11 +14315,26 @@ static void filesystem_loadPattern_tick(void)
         op_file = NULL;
         if (!afatfs_chdir(NULL)) return;
         if (op_close_status != FS_STATUS_DONE) {
-            /* A failed root Pattern read must not leave a partially streamed
-             * region available to playback or to the next Scene selection. */
             pat_initScene(op_pattern_scene);
+            bank_invalidateSdCleanScene(op_pattern_scene);
             filesystem_finish(FS_STATUS_ERROR);
             return;
+        }
+        {
+            const pat_scene_region_t *source =
+                pat_sceneRegion(op_pattern_scene);
+            uint8_t si;
+            for (si = 0u; si < SCENE_COUNT && si < 16u; si++) {
+                if ((op_scene_load_scene_mask &
+                     (uint16_t)(1u << si)) == 0u)
+                    continue;
+                if (si != op_pattern_scene) {
+                    pat_scene_region_t *target = pat_sceneRegionMut(si);
+                    if (target)
+                        memcpy(target, source, sizeof(*target));
+                }
+                bank_invalidateSdCleanScene(si);
+            }
         }
         filesystem_startPatternHcnamesUpdate();
         return;
@@ -27504,21 +27528,8 @@ bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb
     case FS_FILE_MORPH:
         return filesystem_start(FS_INTERNAL_OP_LOAD_MORPH, type, slot, cb);
     case FS_FILE_PATTERN:
-        if (slot >= STORAGE_PATTERN_MAX_SLOTS ||
-            !filesystem_librarySlotExists(FS_NAME_CACHE_PATTERN, slot))
-            return false;
-        if (!filesystem_start(FS_INTERNAL_OP_LOAD_PATTERN, type, slot, cb))
-            return false;
-        op_pattern_scene = scene_getActiveIndex();
-        memcpy(op_pattern_display_name,
-               filesystem_cachedLibraryName(FS_NAME_CACHE_PATTERN, slot),
-               STORAGE_KIT_DISPLAY_NAME_LEN);
-        op_pattern_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
-        op_pattern_source = slot;
-        filesystem_makePatternLibraryFilename(
-            op_pattern_filename, sizeof(op_pattern_filename), slot,
-            op_pattern_display_name);
-        return true;
+        return filesystem_requestLoadPatternForScenes(
+            slot, (uint16_t)(1u << scene_getActiveIndex()), cb);
     case FS_FILE_ALL:
         return filesystem_start(FS_INTERNAL_OP_LOAD_ALL, type, slot, cb);
     case FS_FILE_PERFORMANCE:
@@ -27833,6 +27844,7 @@ bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb
         if (!filesystem_start(FS_INTERNAL_OP_SAVE_PATTERN, type, slot, cb))
             return false;
         op_pattern_scene = scene_getActiveIndex();
+        op_scene_load_scene_mask = (uint16_t)(1u << op_pattern_scene);
         op_scene_pattern_open_name[0] = '\0';
         if (filesystem_librarySlotExists(FS_NAME_CACHE_PATTERN, slot)) {
             filesystem_makePatternLibraryFilename(
@@ -27915,6 +27927,40 @@ bool filesystem_requestLoadSceneForScenes(uint16_t slot,
     op_scene_display_name[STORAGE_SCENE_DISPLAY_NAME_LEN] = '\0';
     op_scene_load_scene_mask = valid_mask;
     filesystem_initSceneStage(&fs_stage_workspace.scene_stage);
+    return true;
+}
+
+bool filesystem_requestLoadPatternForScenes(uint16_t slot,
+                                            uint16_t scene_mask,
+                                            fs_completion_cb_t cb)
+{
+    uint8_t scene_index;
+    uint16_t valid_mask = 0u;
+
+    for (scene_index = 0u; scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            valid_mask = (uint16_t)(valid_mask | (uint16_t)(1u << scene_index));
+    }
+    if (valid_mask == 0u || slot >= STORAGE_PATTERN_MAX_SLOTS ||
+        !filesystem_librarySlotExists(FS_NAME_CACHE_PATTERN, slot))
+        return false;
+    if (!filesystem_start(FS_INTERNAL_OP_LOAD_PATTERN, FS_FILE_PATTERN,
+                          slot, cb))
+        return false;
+    op_scene_load_scene_mask = valid_mask;
+    for (scene_index = 0u; scene_index < 16u; scene_index++) {
+        if ((valid_mask & (uint16_t)(1u << scene_index)) != 0u) break;
+    }
+    op_pattern_scene = scene_index;
+    memcpy(op_pattern_display_name,
+           filesystem_cachedLibraryName(FS_NAME_CACHE_PATTERN, slot),
+           STORAGE_KIT_DISPLAY_NAME_LEN);
+    op_pattern_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+    op_pattern_source = slot;
+    filesystem_makePatternLibraryFilename(
+        op_pattern_filename, sizeof(op_pattern_filename), slot,
+        op_pattern_display_name);
     return true;
 }
 

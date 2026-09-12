@@ -7581,8 +7581,9 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     }
                     break;
                 case SAVE_TYPE_PATTERN:
-                    if (preset_loadPattern(
-                            menu_currentPresetNr[SAVE_TYPE_PATTERN]))
+                    if (preset_loadPatternForScenes(
+                            menu_currentPresetNr[SAVE_TYPE_PATTERN],
+                            menu_kitLoadSceneMask))
                         commandAccepted = 1u;
                     break;
                 case SAVE_TYPE_GLO:
@@ -8634,9 +8635,16 @@ void menu_pollPresetStatus(void)
 
     case PRESET_OP_PATTERN_LOAD:
         pat_applyPatternSettingsToMenu(menu_getViewedPattern());
-        menu_storageBusy = 0;
-        menu_resetSaveParameters();
-        menu_repaintAll();
+        pat_applyTrackSettingsToMenu(menu_getViewedPattern(),
+                                     menu_getActiveVoice());
+        if (!menu_requestLoadCommandFinalIndexRestore()) {
+            if (menu_loadSaveCommandActive)
+                menu_finishLoadSaveCommand();
+            else {
+                menu_storageBusy = 0u;
+                menu_resetSaveParameters();
+            }
+        }
         break;
 
     case PRESET_OP_ALL_LOAD:

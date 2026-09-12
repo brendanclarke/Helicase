@@ -348,6 +348,7 @@ static void on_globals_load_complete(void)
 
 static void on_pattern_load_complete(void)
 {
+    preset_markRequestedScenesPresentOnSuccessfulLoad();
     preset_completeFilesystemOp(PRESET_OP_PATTERN_LOAD);
 }
 
@@ -2714,6 +2715,21 @@ uint8_t preset_loadPattern(uint16_t presetNr)
     pm_request_slot = presetNr;
     pm_request_type = PRESET_REQUEST_PATTERN;
     if (filesystem_requestLoad(FS_FILE_PATTERN, presetNr, on_pattern_load_complete))
+        return 1;
+    pm_status = PRESET_IDLE;
+    return 0;
+}
+
+uint8_t preset_loadPatternForScenes(uint16_t presetNr, uint16_t scene_mask)
+{
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = presetNr;
+    pm_request_type = PRESET_REQUEST_PATTERN;
+    pm_kit_request_scene_mask = scene_mask;
+    if (filesystem_requestLoadPatternForScenes(presetNr, scene_mask,
+                                               on_pattern_load_complete))
         return 1;
     pm_status = PRESET_IDLE;
     return 0;

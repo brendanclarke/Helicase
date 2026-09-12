@@ -659,6 +659,9 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
 bool filesystem_requestLoadSceneForScenes(uint16_t slot,
                                           uint16_t scene_mask,
                                           fs_completion_cb_t cb);
+bool filesystem_requestLoadPatternForScenes(uint16_t slot,
+                                            uint16_t scene_mask,
+                                            fs_completion_cb_t cb);
 /*
  * Load one root Bank directory and its selected Bank-local Scene.
  *
