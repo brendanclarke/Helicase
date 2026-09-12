@@ -19,6 +19,12 @@ planning docs when ambiguous), write terse index entry then verbose log
 then spec updates then root `MEMORY.md`. See the template and prior
 handoff logs for format.
 
+## File creation policy
+
+Never create a new file unless the user's message explicitly names the
+filename. If a task seems to call for a new file but the user hasn't
+specified one, ask first — don't assume.
+
 ## Capture budget
 
 Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting

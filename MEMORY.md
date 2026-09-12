@@ -844,6 +844,9 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
   variable, or storage type exists; what it does; inputs/outputs; and
   clients/accessors/affiliates. Do this proactively, not as a cleanup after the
   user asks again.
+- Agent volatile memory lives in `knowledge_files/volatile/memory/` (use it
+  the way you would `.claude/memory/`). Do not use `.claude/memory/` or
+  `.claude/projects/*/memory/` for this project.
 
 ---
 
