@@ -207,22 +207,18 @@ that all mutation paths reach the dirty marker.
 
 **Files**: `Autosave.h`, `Autosave.c`, possibly `BankData.c`.
 
-### 3. 17th Scene snapshot region
+### 3. Snapshot region (`scene_temp`)
 
-**What**: Allocate one extra `pat_scene_region_t` as the AutoSave staging
-buffer. This can be:
-- A 17th entry in `pat_regions[]` (bump `SCENE_COUNT` or use a separate
-  static)
-- A standalone `static pat_scene_region_t pat_autosave_snapshot` in
-  PatternData.c
-
-The standalone approach is simpler — no `SCENE_COUNT` change, no risk of
-16-vs-17 off-by-one in other code paths.
+**What**: Allocate `static pat_scene_region_t scene_temp` in `PatternData.c`
+as the AutoSave staging buffer. Standalone — not a 17th entry in
+`pat_regions[]`, `SCENE_COUNT` stays 16, no off-by-one risk. Expose via
+`pat_snapshotScene(scene_index)` (performs the copy) and a const pointer
+accessor for the drain writer to read from.
 
 **SRAM cost**: 10,519 bytes in SRAM1 `.bss`.
 
-**Files**: `PatternData.c` (allocation + accessor), `PatternData.h`
-(declaration).
+**Files**: `PatternData.c` (allocation + accessors), `PatternData.h`
+(declarations).
 
 ### 4. Snapshot copy (no ISR masking needed)
 
@@ -382,82 +378,60 @@ sequence (30+ seconds at one Scene per cycle). Not a problem.
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-### Q1 — File naming
+### Q1 — File naming — **No conflicts**
 
-The spec says `.patNNx` where NN is the two-digit scene index and x is `a`
-or `b`. Are there naming conflicts with any existing files? The format
-`.pat00a` through `.pat15b` uses 7 characters, fitting 8.3 without LFN.
-Confirm no other firmware component creates files matching `.pat*` in root.
+`.pat00a` through `.pat15b` (7 chars, 8.3-compatible). No other firmware
+component creates `.pat*` files in root.
 
-### Q2 — Generation counter initialization
+### Q2 — Generation counter initialization — **Same model as hcprms**
 
-Library saves write generation 0. AutoSave starts from generation 1. After a
-Pattern Load from library, the AutoSave generation for that Scene resets to
-0 (no AutoSave provenance). Does the first AutoSave drain after a library
-load write generation 1, and is this correctly distinguished from an existing
-generation-1 file from a previous session?
+Library saves write generation 0. AutoSave starts from generation 1. After
+a Pattern Load from library, the dirty mask is set, the drain writes
+generation 1 with fresh CRC, and any stale prior-session file has a
+non-matching CRC for the new data. Same lifecycle as the parameter record.
+Verify during implementation.
 
-The answer should be yes: the dirty mask is set on load, the drain writes a
-new file with generation 1, and the old file (if any) has a stale CRC because
-the pattern data changed. But this sequence should be verified.
+### Q3 — Partial drain recovery — **Explicit test after autosave verified**
 
-### Q3 — Partial drain recovery
+Standard A/B pair recovery: truncated/corrupt file has bad CRC, boot picks
+the valid peer. The v4 CRC covers the entire file; size mismatch or CRC
+mismatch both reject. Add a deliberate power-pull test after Pattern
+AutoSave is working and hardware-verified on the happy path.
 
-If the firmware loses power mid-write of a `.patNNx` file, that file has an
-invalid CRC. The other file in the pair (the previous generation) remains
-valid. Boot reads both, rejects the corrupt one, and uses the valid one. This
-is the standard A/B pair recovery. But confirm: does asyncfatfs guarantee
-that a partially written file has at least a bad CRC (not a valid-looking
-truncation that passes CRC by coincidence)?
+### Q4 — Whole-file drain — **Decided: whole-file only**
 
-The v4 CRC covers the entire file including the header. A truncated file
-produces a size mismatch (fewer bytes than expected) or a CRC mismatch. Both
-are rejected by the existing `filesystem_patternHeaderValid()` + CRC
-validation. This should be safe but deserves a deliberate test.
+Incremental sector-level drain is not a real optimization: the CRC covers
+the entire file, so any sector change requires re-streaming and
+recomputing the full CRC regardless. An incremental approach would still
+read-back and re-CRC the whole file, potentially making it slower than a
+straight whole-file write while adding per-Scene dirty-sector tracking
+SRAM. Not considered further.
 
-### Q4 — Should drain be whole-file or incremental?
+### Q5 — Snapshot buffer — **Decided: standalone `scene_temp` in PatternData.c**
 
-The current design writes the entire 10,656-byte Pattern file on every drain.
-An incremental approach (tracking dirty sectors within the pattern, writing
-only changed sectors) would reduce SD wear and write time. However:
-- The per-byte dirty mask would cost 1,315 bytes SRAM per Scene
-- Address array edits (step toggle) change one 2-byte entry but the sector
-  containing it must be rewritten anyway
-- Pool allocations change scattered bytes across the 8 KB pool
+`static pat_scene_region_t scene_temp` in `PatternData.c`, not a 17th
+entry in `pat_regions[]`. Avoids touching `SCENE_COUNT` and all
+index-bounded loops. PatternData.c owns the allocation, the
+`pat_snapshotScene()` accessor, and the pointer accessor the drain writer
+uses to read from it.
 
-Whole-file is simpler, uses less SRAM, and the write is already small (~21
-sectors). Incremental drain is a future optimization if needed.
+### Q6 — Pattern AutoSave enable timing — **Same point as parameter tracking**
 
-### Q5 — 17th Scene vs standalone snapshot
+Enable at `autosave_setMutationTrackingEnabled()`, same as parameter
+tracking. No pattern mutations should be possible before this point because
+both record-enable and step-edit require the menu to be unlocked, which
+happens after boot restore completes. Verify during implementation that no
+boot-path code mutates pattern data after restore and before tracking
+enable.
 
-The spec mentions either bumping `SCENE_COUNT` or using a separate
-`scene_temp`. A standalone static is recommended (avoids touching
-`SCENE_COUNT` which gates loops throughout the codebase). But should the
-snapshot buffer be in PatternData.c (owned by the pattern module) or in
-filesystem.c (owned by the drain writer)?
+### Q7 — Delete on Scene clear/empty — **Decided: leave stale files**
 
-The drain writer is the sole consumer, so filesystem.c ownership is
-defensible. But PatternData.c owns the TIM3-masked copy operation. Either
-location works; the decision affects only which module exposes the accessor.
-
-### Q6 — When does Pattern AutoSave enable?
-
-The existing parameter AutoSave enables at a specific point in the boot
-sequence (`autosave_setMutationTrackingEnabled`). Pattern dirty tracking
-should enable at the same point. Verify that no pattern mutations occur
-between boot restore and tracking enable that would be lost.
-
-### Q7 — Delete on Scene clear/empty
-
-When a Scene is cleared or emptied (no pattern), should the AutoSave files
-`.patNNa`/`.patNNb` be deleted? Or left as stale files that boot will ignore
-(because HCNAMES source says empty)?
-
-Leaving them is simpler and consistent with the parameter record (which
-retains Scene data even for empty Scenes). Deleting saves 21 KB of SD space
-per empty Scene but adds complexity. Recommend: leave them.
+Do not delete `.patNNa`/`.patNNb` when a Scene is cleared. Boot ignores
+them when HCNAMES source says empty. Consistent with parameter record
+behavior. Files are also theoretically user-recoverable from the SD card,
+though the product should not depend on that.
 
 ---
 
@@ -481,7 +455,7 @@ Post-S064 SRAM1 free estimate: ~117,101 − 10,809 ≈ **106,292 B** (103.8 KB).
 | `Autosave.h` | `AUTOSAVE_HCNAMES_ROW_COUNT` → 145, add Pattern HCNAMES base, format version bump, dirty mask API |
 | `Autosave.c` | Expand `resident_names` arrays, update static asserts, implement dirty mask, wire `markSceneWithPatternDirty`, update `markResidentBankDirty` |
 | `PatternData.h` | Declare snapshot accessor |
-| `PatternData.c` | Allocate snapshot region, implement TIM3-masked copy |
+| `PatternData.c` | Allocate `scene_temp` snapshot region, implement `pat_snapshotScene()` (plain memcpy, no masking) |
 | `filesystem.c` | Pattern drain state machine, scheduler integration, boot reader, AutoSave file naming, generation management |
 | `filesystem.h` | Possibly expose Pattern AutoSave status for Menu display |
 

@@ -1,129 +1,146 @@
-MidSet	013	R
-Chip	-	R
-Rollin	-	R
-Forest	-	R
-BarfWav	-	R
-SlakGrv	-	R
-FilMod	-	R
-Emott	-	R
-SoyEared	-	R
-RollDub	-	R
-FrestJm	-	R
-FilMod	-
-Emott	-
-SoyEared	-
-DocWirez	-
-Machine	-
+#types	drm	snr	cym	hat
+Full	036
+Barf	-
+Barf	-
+Barf	-
+Barf	-
+Barf	-
+Barf	-
+Barf	-
+Barf	-
 KitWool	-
-Chip	-	R
-Rollin	-	R
-Forest	-	R
+Barf	-
+Electro	-
+Eris	-
+CasioPop	-
+808ceebe	-
+808cb	-
+Pop	-
+Emott	-
+Emott	-
+Emott	-
+Emott	-
+Emott	-
+Emott	-
+Emott	-
+Emott	-
+KitWool	-
+Emott	-
+Electro	-
+Eris	-
+CasioPop	-
+808ceebe	-
+808cb	-
+Pop	-
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+kitwood1	-	drm
+kitwood2	-	drm
+kitwood3	-	drm
+kitwoos4	-	snr
+kitwooc5	-	cym
+kitwooh6	-	hat
+emottd11	-	drm
+emottd22	-	drm
+emottd33	-	drm
+emotts14	-	snr
+emottc15	-	cym
+emotth16	-	hat
+electrd1	-	drm
+electrd2	-	drm
+electrd3	-	drm
+electrs4	-	snr
+electrc5	-	cym
+electrh6	-	hat
+erisd1 1	-	drm
+erisd2 2	-	drm
+erisd3 3	-	drm
+eriss1 4	-	snr
+erisc1 5	-	cym
+erish1 6	-	hat
+casiopd1	-	drm
+casiopd2	-	drm
+casiopd3	-	drm
+casiops4	-	snr
+casiopc5	-	cym
+casioph6	-	hat
+808cbd11	-	drm
+808cbd22	-	drm
+808cbd33	-	drm
+808cbs14	-	snr
+808cbc15	-	cym
+808cbh16	-	hat
+808cbd11	-	drm
+808cbd22	-	drm
+808cbd33	-	drm
+808cbs14	-	snr
+808cbc15	-	cym
+808cbh16	-	hat
+popd1  1	-	drm
+beatmsd2	-	drm
+popd3  3	-	drm
+pops1  4	-	snr
+popc1  5	-	cym
+poph1  6	-	hat
+Barf	001	R
 Barf	-	R
-Slak	-	R
-FilMod	-	R
-Emott	-	R
-SoyEared	-	R
-Rollin	-	R
-Forest	-	R
-FilMod	-
-Emott	-
-SoyEared	-
-DocWire	-
-Machine	-
-KitWool	-
-chipd1.d	-	R
-chipd2.d	-	R
-chipd3.d	-	R
-chips1.s	-	R
-chipc1.c	-	R
-chiph1.h	-	R
-rollind1	-	R
-rollind2	-	R
-rollind3	-	R
-rollins1	-	R
-rollinc1	-	R
-rollinh1	-	R
-forestd1	-	R
-forestd2	-	R
-forestd3	-	R
-forests1	-	R
-forestc1	-	R
-foresth1	-	R
-barfd1 1	-	R
-barfd2 2	-	R
-barfd3 3	-	R
-barfs1 4	-	R
-barfc1 5	-	R
-barfh1 6	-	R
-slakd1.d	-	R
-slakd2.d	-	R
-slakd3.d	-	R
-slaks1.s	-	R
-slakc1.c	-	R
-slakh1.h	-	R
-filmodd1	-	R
-filmodd2	-	R
-filmodd3	-	R
-filmods1	-	R
-filmodc1	-	R
-filmodh1	-	R
-emottd1.	-	R
-emottd2.	-	R
-emottd3.	-	R
-emotts1.	-	R
-emottc1.	-	R
-emotth1.	-	R
-soyeard1	-	R
-soyeard2	-	R
-soyeard3	-	R
-soyears1	-	R
-soyearc1	-	R
-soyearh1	-	R
-rollind1	-	R
-rollind2	-	R
-rollind3	-	R
-rollins1	-	R
-rollinc1	-	R
-rollinh1	-	R
-forestd1	-	R
-forestd2	-	R
-forestd3	-	R
-forests1	-	R
-forestc1	-	R
-foresth1	-	R
-filmodd1	-
-filmodd2	-
-filmodd3	-
-filmods1	-
-filmodc1	-
-filmodh1	-
-emottd1.	-
-emottd2.	-
-emottd3.	-
-emotts1.	-
-emottc1.	-
-emotth1.	-
-soyeard1	-
-soyeard2	-
-soyeard3	-
-soyears1	-
-soyearc1	-
-soyearh1	-
-docwird1	-
-docwird2	-
-docwird3	-
-docwirs4	-
-docwirc5	-
-docwirh6	-
-machind1	-
-machind2	-
-machind3	-
-machins1	-
-machinc1	-
-machinh1	-
-kitwood1	-
-kitwood2	-
-kitwood3	-
-kitwoos1	-
-kitwooc1	-
-kitwooh1	-
+Barf	-	R
+Barf	-	R
+Barf	001	R
+Barf	-	R
+Barf	-	R
+Barf	-	R
+	?	R
+Barf	-	R
+	?	R
+	?	R
+	?	R
+	?	R
+	?	R
+	?	R

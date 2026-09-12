@@ -64,6 +64,8 @@
 			<integer>0</integer>
 			<key>is.network</key>
 			<integer>0</integer>
+			<key>is.noowners</key>
+			<integer>1</integer>
 			<key>is.pairedIndex</key>
 			<integer>0</integer>
 			<key>is.pairedTarget</key>
@@ -108,18 +110,18 @@
 			<integer>1</integer>
 		</dict>
 		<key>DebugKey1</key>
-		<string>2026-09-04 19:01:38 +0000 3</string>
+		<string>2026-09-06 18:07:41 +0000 3</string>
 		<key>DefaultStore_EffectiveSearch</key>
 		<integer>3</integer>
 		<key>DefaultStore_RequestedSearch</key>
 		<integer>3</integer>
 	</dict>
 	<key>ConfigurationCreationDate</key>
-	<date>2026-09-04T19:01:38Z</date>
+	<date>2026-09-06T18:07:41Z</date>
 	<key>ConfigurationCreationVersion</key>
-	<string>Version 14.8.9 (Build 23J631)</string>
+	<string>Version 26.6.2 (Build 25G83)</string>
 	<key>ConfigurationModificationDate</key>
-	<date>2026-09-05T07:36:14Z</date>
+	<date>2026-09-06T18:10:30Z</date>
 	<key>ConfigurationModificationVersion</key>
 	<string>Version 26.6.2 (Build 25G83)</string>
 	<key>ConfigurationVolumeUUID</key>
@@ -135,20 +137,20 @@
 	</dict>
 	<key>Stores</key>
 	<dict>
-		<key>E959DFB9-F3E2-4AA8-A29B-460AD30253BD</key>
+		<key>151AC308-A3F2-42EB-8662-5F6D23FCC5EF</key>
 		<dict>
 			<key>CreationDate</key>
-			<date>2026-09-04T19:01:38Z</date>
+			<date>2026-09-06T18:07:41Z</date>
 			<key>CreationVersion</key>
-			<string>Version 14.8.9 (Build 23J631)</string>
+			<string>Version 26.6.2 (Build 25G83)</string>
 			<key>CreationVolumeFlags</key>
-			<integer>72183041442709857</integer>
+			<integer>360413418131292513</integer>
 			<key>IndexVersion</key>
-			<integer>99</integer>
+			<integer>102</integer>
 			<key>PartialPath</key>
 			<string>/</string>
 			<key>PolicyDate</key>
-			<date>2026-09-05T07:36:14Z</date>
+			<date>2026-09-06T18:10:30Z</date>
 			<key>PolicyLevel</key>
 			<string>kMDConfigSearchLevelReadWrite</string>
 			<key>PolicyProcess</key>
@@ -156,7 +158,7 @@
 			<key>PolicyVersion</key>
 			<string>Version 26.6.2 (Build 25G83)</string>
 			<key>UpdateVolumeFlags</key>
-			<integer>72183041442709857</integer>
+			<integer>360413418131292513</integer>
 		</dict>
 	</dict>
 </dict>
