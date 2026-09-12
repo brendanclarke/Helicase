@@ -1,4 +1,26 @@
-- [Capture budget feedback](feedback_capture_budget.md) — Don't recommend bumping capture budget; user will initiate when ready
-- [Session log consolidation workflow](feedback_session_log_consolidation.md) — verify real code state, don't trust planning docs; terse index entry then verbose log then spec updates then MEMORY.md
-- [Helicase project doc system](project_helicase_docs.md) — log_archive + specification_reference + MEMORY.md + SCOPING_TARGETS.md three-tier structure
-- [Dynamic pattern storage spec](project_pattern_dynamic_stack.md) — Phase 4 dynamic Pattern system: storage S062, v4 PAT4 format + load/save S063, S064 next for Pattern AutoSave
+# Agent Behavioral Notes
+
+Notes for Claude Code / LLM agent sessions on this project.
+Project context lives at root `MEMORY.md`. Technical specs live in
+`knowledge_files/specification_reference/`. Session history lives in
+`knowledge_files/log_archive/`.
+
+## Do not use `.claude/memory/`
+
+All project memory is in the project directory only. Do not create files
+in `.claude/projects/*/memory/`.
+
+## Session log consolidation workflow
+
+When consolidating session docs into the permanent record, follow the
+sequence in `knowledge_files/SESSION_HANDOFF_TEMPLATE.md`: read all source
+docs fully, verify real code state via `git log`/`git diff` (don't trust
+planning docs when ambiguous), write terse index entry then verbose log
+then spec updates then root `MEMORY.md`. See the template and prior
+handoff logs for format.
+
+## Capture budget
+
+Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
+capture timing unless the user explicitly asks. The section-based CRC
+format redesign is the chosen path for write performance.

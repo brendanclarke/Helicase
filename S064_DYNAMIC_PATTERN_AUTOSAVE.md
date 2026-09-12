@@ -91,29 +91,54 @@ sector-aligned and the drain writes ~21 sectors regardless.
 ### Snapshot
 
 The drain writer must capture a coherent snapshot of `pat_scene_region_t`
-because `seq_tick()` (priority 2, 4 kHz) reads the address array and pool
-during playback. Without a snapshot, a mid-write pattern edit or sequencer
-read could produce a torn image.
+because `seq_tick()` (priority 2, 4 kHz) both reads and writes the address
+array and pool during playback:
 
-Options (from R4):
-- **BASEPRI mask**: set BASEPRI to `2u << 4` during `memcpy`, blocking TIM3
-  for ~50 µs. Ticks are delayed, not lost. Inaudible.
-- **NVIC_ICER**: disable TIM3 via NVIC for the copy. Same timing effect.
-- **17th Scene region**: allocate one extra `pat_scene_region_t` (10,519 B)
-  as a staging buffer. Copy from live region under the TIM3 mask, then drain
-  from the snapshot at leisure without blocking the sequencer.
+- `pat_isStepActive()`, `pat_readStepSpecials()` — **read** from
+  `pat_regions[]` on every active step (sequencer.c:389, :395)
+- `pat_eraseStep()` — **write** to `pat_regions[]` during live erase
+  (sequencer.c:391, called from TIM3 ISR when `seq_eraseActive`)
+- `pat_setStepActive()` — **write** to `pat_regions[]` during real-time
+  recording (sequencer.c:900 via `seq_recordTrigger()`, TIM3 ISR when
+  `seq_recordActive`; also MidiParser.c:1470 from MIDI ISR)
 
-The 17th region is the cleanest option: copy is fast (~50 µs), the drain
-writes from stable SRAM, and TIM3 is blocked only for the copy, not the
-entire SD write sequence. The snapshot region also serves future background
-Bank Load staging.
+Without protection, a main-loop `memcpy` during active recording or erasing
+can produce a torn snapshot (ISR modifies address/pool mid-copy).
+
+**Decision**: Pattern AutoSave drain does not run while `seq_recordActive`
+or `seq_eraseActive` is true. The drain scheduler checks both flags before
+initiating a snapshot; if either is set, the dirty Scene is skipped this
+cycle and retried next cycle. This eliminates the need for any ISR masking
+(BASEPRI, NVIC_ICER) during the snapshot `memcpy`, because:
+
+- When recording/erasing is inactive, `seq_tick()` only reads
+  `pat_regions[]` — reads cannot tear a read-side `memcpy`.
+- `seq_recordActive` and `seq_eraseActive` are set by main-loop button
+  handlers, so they cannot transition to true during a main-loop `memcpy`.
+- MIDI-triggered recording goes through `seq_recordTrigger()` which
+  requires `seq_recordActive` to already be set.
+
+The snapshot `memcpy` (10,519 B SRAM1→SRAM1) takes ~25–40 µs at M7
+speeds with optimized LDMIA/STMIA bursts; 50 µs is the conservative
+bound accounting for DMA bus contention. This is negligible CPU cost
+(0.001% at 5s cadence, 0.0025% at 2s).
+
+### 17th Scene snapshot region
+
+The 17th region remains useful even without ISR masking: copy the live
+region into the snapshot in the main loop, then drain from the snapshot
+across multiple scheduler ticks without holding up main-loop pattern
+edits. The snapshot region also serves future background Bank Load staging.
 
 ### Drain scheduling
 
 Pattern drain runs in the existing background AutoSave scheduler alongside
 the parameter drain and trace flush. When `autosave_pattern_dirty_mask` is
-nonzero, the scheduler picks the lowest dirty Scene, snapshots it, and writes
-one `.patNNx` file. One Scene per drain cycle keeps foreground latency low.
+nonzero, the scheduler picks the lowest dirty Scene. Before snapshotting,
+it checks `seq_recordActive` and `seq_eraseActive`: if either is true, the
+Scene is skipped this cycle (dirty bit stays set, retried next cycle).
+Otherwise, it snapshots the Scene and writes one `.patNNx` file. One Scene
+per drain cycle keeps foreground latency low.
 
 The generation counter increments each write and alternates between the A and
 B files. The commit model is identical to the parameter record: write the
@@ -199,16 +224,19 @@ The standalone approach is simpler — no `SCENE_COUNT` change, no risk of
 **Files**: `PatternData.c` (allocation + accessor), `PatternData.h`
 (declaration).
 
-### 4. Snapshot copy with TIM3 mask
+### 4. Snapshot copy (no ISR masking needed)
 
 **What**: Implement `pat_snapshotScene(scene_index)` that:
-1. Raises BASEPRI to `2u << 4` (or disables TIM3 via NVIC)
-2. `memcpy(&pat_autosave_snapshot, &pat_regions[scene], sizeof(...))`
-3. Restores BASEPRI / re-enables TIM3
+1. `memcpy(&pat_autosave_snapshot, &pat_regions[scene], sizeof(...))`
 
-Duration: ~50 µs for 10,519 bytes at M7 speeds. Sequencer ticks delayed
-by at most one 250 µs period, with the pending interrupt firing immediately
-on restore.
+No BASEPRI mask or NVIC disable. The drain scheduler (step 6) guards the
+call behind `!seq_recordActive && !seq_eraseActive`, so no ISR writes to
+`pat_regions[]` during the copy. `seq_tick()` only reads in this state.
+Both guard flags are set by main-loop button handlers and cannot transition
+during a main-loop `memcpy`.
+
+Duration: ~25–40 µs for 10,519 bytes (SRAM1→SRAM1, M7 LDMIA/STMIA);
+50 µs conservative bound with DMA bus contention.
 
 **Files**: `PatternData.c`, `PatternData.h`.
 
@@ -339,13 +367,18 @@ Pattern AutoSave reader runs, since the decision depends on the HCNAMES
 Pattern row's source value. The existing boot sequence already restores
 HCNAMES first, but this ordering dependency must be verified and documented.
 
-### R6 — TIM3 masking safety
+### R6 — Recording/erasing drain deferral
 
-The snapshot `memcpy` under BASEPRI mask delays TIM3 by ~50 µs. This is
-safe per R4 analysis (sequencer ticks are delayed, not lost). However, if
-future code increases `pat_scene_region_t` size (e.g., larger pool), the
-delay grows proportionally. At the current 10,519 bytes, the delay is
-well within one sequencer tick period (250 µs).
+~~(Originally: TIM3 masking safety.)~~ Resolved by architectural decision:
+drain does not run while `seq_recordActive` or `seq_eraseActive` is true.
+No BASEPRI mask, no ISR contention. The only consequence is that pattern
+changes made during a sustained recording/erasing session accumulate in the
+dirty mask and drain once the mode is exited. This is acceptable — the user
+is actively interacting, so immediate persistence is not expected.
+
+If a recording session lasts long enough that all 16 Scenes become dirty
+before drain runs, the first drain pass after exit writes all 16 in
+sequence (30+ seconds at one Scene per cycle). Not a problem.
 
 ---
 
