@@ -27,31 +27,48 @@ the Sequencer trigger path, the step-edit menu, or Pattern persistence.
 | Pool offset validation (hardening) | Complete, tested | 062 |
 | pat_clearTrack / pat_clearPattern (pool-aware) | Complete, tested | 062 |
 | pat_copyTrack / pat_copyPattern / pat_copyBar | **No-op stubs** — deferred to Phase 4.5 |
-| v4 Pattern file format (serialization) | **Not started** — v3 bridge persists trigger bitmap only |
+| v4 PAT4 binary file format (serialization) | Complete, tested | 063 |
+| pat_scene_region_t packed struct + Option B accessors | Complete, tested | 063 |
+| Pattern Save HCNAMES/index chain fix | Complete, tested | 063 |
+| Pattern Load dual-defect fix (menu lifecycle + scene mask) | Complete, tested | 063 |
+| filesystem_requestLoadPatternForScenes (mask + fan-out) | Complete, tested | 063 |
+| HCNAMES 145-row expansion (Pattern rows 129-144) | Complete, tested | 063 |
 | Step automation (pool header reserves 6-bit count) | **Not started** — header field reserved |
 | pat_applyPatternSettingsToMenu | Compatibility shim, no storage | 062 |
 | pat_setTrackLength / Scale / Shuffle | Live per-track storage, not pooled | pre-062 |
 
 ## 1. Memory Budget
 
-### 1.1 Per-Scene Region
+### 1.1 Per-Scene Region (`pat_scene_region_t`)
+
+As of Session 063, the per-Scene data is wrapped in a packed struct
+`pat_scene_region_t`:
 
 | Component | Formula | Bytes |
 |-----------|---------|------:|
 | Address array | 7 tracks × 128 steps × 2 B | 1,792 |
 | Event pool | PAT_STACK_SIZE × 32 B | 8,192 |
 | Free bitmap | 512 (always) | 512 |
-| **Total per Scene** | | **10,496** |
+| track_length[7] | 7 × 1 B | 7 |
+| track_scale[7] | 7 × 1 B | 7 |
+| track_shuffle[7] | 7 × 1 B | 7 |
+| pattern_change_bar | 1 B | 1 |
+| pattern_next | 1 B | 1 |
+| **Total per Scene** | | **10,519** |
+
+Accessed via Option B accessors `pat_sceneRegion(scene_index)` (const) and
+`pat_sceneRegionMut(scene_index)` (mutable), matching the `scene_t` / `kit_t`
+pattern.
 
 ### 1.2 System Total
 
 | Quantity | Value |
 |----------|------:|
 | Scenes | 16 |
-| Total pat_regions | 167,936 B (0x29000) |
+| Total pat_scene_region_t × 16 | 168,304 B |
 | scenes (after PatternSet removal) | 19,200 B |
 | filesystem_pattern_discard | 112 B |
-| **SRAM1 Pattern footprint** | **187,248 B** |
+| **SRAM1 Pattern footprint** | **187,616 B** |
 
 `PAT_STACK_SIZE` is defined in `config.h` as `256u`. The address array size
 is fixed; the pool and bitmap scale with PAT_STACK_SIZE. Increasing
@@ -98,24 +115,15 @@ Key properties:
 
 ### 3.1 Pool Geometry
 
-The pool is a contiguous byte array of `PAT_STACK_SIZE * 4` bytes (currently
-1,024 bytes at PAT_STACK_SIZE=256... wait, that's the chunk count × 4).
+The pool is declared as `uint8_t pool[PAT_STACK_SIZE * 32]` = 8,192 bytes.
+`PAT_STACK_SIZE` (256) is the number of allocatable 4-byte chunks.
 
-Correction: PAT_STACK_SIZE=256 chunks × 32-byte reservation = 8,192 bytes
-of reserved pool space. However, only the first `PAT_STACK_SIZE` 4-byte
-chunks are addressable through the bitmap. The pool memory is 8,192 bytes
-but the allocatable region is `PAT_STACK_SIZE × 4 = 1,024` bytes across 256
-four-byte chunks.
-
-No — let me state this precisely from the source:
-
-- The pool array is `uint8_t pool[PAT_STACK_SIZE * 32]` = 8,192 bytes
-- The bitmap is 512 bytes (one byte per potential slot)
-- Only the lower PAT_STACK_SIZE=256 bitmap slots map to real pool chunks
-- Each chunk is 4 bytes; chunk `n` starts at byte offset `n * 4`
-- Maximum addressable pool offset: `(PAT_STACK_SIZE - 1) * 4 = 1,020`
-- Bytes 1,024..8,191 of the pool array are padding/reserved for future
-  PAT_STACK_SIZE growth
+- 256 chunks × 4 bytes each = 1,024 bytes of addressable pool
+- Chunk `n` starts at byte offset `n * 4`
+- Maximum valid pool offset: `(PAT_STACK_SIZE - 1) * 4 = 1,020`
+- Bytes 1,024..8,191 are reserved for future `PAT_STACK_SIZE` growth
+- The bitmap has 512 slots; only the lower 256 map to real chunks
+- The upper 256 bitmap slots are permanently `0xFF` (scan terminators)
 
 ### 3.2 Block Format
 

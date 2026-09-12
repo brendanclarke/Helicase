@@ -1,0 +1,4 @@
+- [Capture budget feedback](feedback_capture_budget.md) — Don't recommend bumping capture budget; user will initiate when ready
+- [Session log consolidation workflow](feedback_session_log_consolidation.md) — verify real code state, don't trust planning docs; terse index entry then verbose log then spec updates then MEMORY.md
+- [Helicase project doc system](project_helicase_docs.md) — log_archive + specification_reference + MEMORY.md + SCOPING_TARGETS.md three-tier structure
+- [Dynamic pattern storage spec](project_pattern_dynamic_stack.md) — Phase 4 dynamic Pattern system: storage S062, v4 PAT4 format + load/save S063, S064 next for Pattern AutoSave

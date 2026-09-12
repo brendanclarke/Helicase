@@ -60,10 +60,21 @@ and the Session 061 boot reader:
 
 Not implemented and not to be inferred from the reader/writer:
 
-- Pattern persistence in the hidden records;
+- Pattern persistence in the hidden records (Session 064 plan exists:
+  separate per-Scene A/B pair files `.pat00a`..`.pat15b` using the v4 PAT4
+  binary format, whole-file drain with 16-bit dirty mask, 17th Scene
+  snapshot region — see `S064_DYNAMIC_PATTERN_AUTOSAVE.md`);
 - live Effect persistence (`AUTOSAVE_EFFECT_PARAM_COUNT` is zero);
 - crash-recoverable promotion into explicit Bank library files;
 - a second resident Bank, background staging Bank, or general object journal.
+
+`AUTOSAVE_HCNAMES_ROW_COUNT` remains 129 even though `FILESYSTEM_SPEC.md`'s
+HCNAMES is now 145 rows (Pattern rows 129-144 added in Session 063). Session
+064 will expand the AutoSave HCNAMES to 145, which is a breaking change to the
+`.hcprms` record format (version bump from 1 to 2 required).
+`autosave_markSceneWithPatternDirty()` currently delegates to
+`autosave_markSceneWithoutPatternDirty()` with a TODO; Session 064 will wire
+it to the new Pattern dirty mask.
 
 ## Ownership
 

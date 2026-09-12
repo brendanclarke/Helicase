@@ -1,13 +1,17 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 062. It includes the Session 058 Bank I/O and
+reference through Session 063. It includes the Session 058 Bank I/O and
 stopped-playback speedups, the Session 059 typed Instrument-index repair, and
 Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot Instrument
 `.hcindex` generation fix, and system-wide macOS AppleDouble (`._<name>`)
 file filtering. Session 061 adds typed HCNAMES, AutoSave/HCNAMES boot restore,
 complete committed-hierarchy identity publication, and the root-CWD readiness
-contract. Low-level FAT directory reservation and lazy
+contract. Session 063 adds the v4 binary PAT4 Pattern file format,
+`pat_scene_region_t` packed struct, `filesystem_requestLoadPatternForScenes()`
+scene-mask API, Pattern Load fan-out copy, Pattern Save/Load bug fixes, and
+HCNAMES 145-row expansion (Pattern rows 129-144). Low-level FAT directory
+reservation and lazy
 directory-cluster initialization, and the AppleDouble filter itself, are
 authoritative in `ASYNCFATFS_REFERENCE.md`.
 
@@ -31,14 +35,13 @@ Use this document to distinguish three things:
   `AUTOSAVE.md`.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: AutoSave Pattern/Effect persistence,
-  crash-recoverable promotion into explicit
-  Bank library files, real Effect load/save, v4 Pattern file format (the live
-  dynamic address-array/pool/bitmap storage from Session 062 is not yet
-  serialized — the v3 bridge persists only the 112-byte trigger bitmap),
-  descriptor-backed step automation playback, versioned/recoverable HCNAMES,
-  and `/.hcrepair` roll-forward. The legacy `kitBrowser` map and File/Dir
-  diagnostic caches are retired.
+- Not implemented yet: AutoSave Pattern persistence (S064 plan exists:
+  separate per-Scene A/B pair files `.pat00a`..`.pat15b`, see
+  `S064_DYNAMIC_PATTERN_AUTOSAVE.md`), AutoSave Effect persistence,
+  crash-recoverable promotion into explicit Bank library files, real Effect
+  load/save, descriptor-backed step automation playback,
+  versioned/recoverable HCNAMES, and `/.hcrepair` roll-forward. The legacy
+  `kitBrowser` map and File/Dir diagnostic caches are retired.
 
 Historical session logs and drafts may describe older flat `.SND`/`GLO.CFG`
 behavior. This file is the current source of truth for the intended filesystem
@@ -226,10 +229,14 @@ Current bridges and limitations:
   a 2,048-byte non-Pattern stage containing either one Kit, one Instrument
   candidate, or Scene settings plus embedded Kit.
 - Live Pattern storage is the Session 062 dynamic address-array/pool/bitmap
-  system (`pat_regions`, 167,936 B). The filesystem v3 bridge still persists
-  only the 112-byte trigger bitmap via `filesystem_pattern_discard`; a v4
-  format serializing pool blocks is needed to persist note/velocity/
-  probability specials across Scene/Bank save/load cycles.
+  system, now wrapped in `pat_scene_region_t` (10,519 B × 16 = 168,304 B).
+  The v4 binary PAT4 format (10,656 B) serializes the complete address array,
+  pool, bitmap, and per-track parameters with CRC32C integrity. Root Pattern
+  Save/Load, embedded Scene Save/Load, and Bank Save/Load all use the v4
+  format. The v3 text bridge is removed from Scene/Bank paths. Root Pattern
+  Load supports multi-Scene fan-out via
+  `filesystem_requestLoadPatternForScenes()`. AutoSave Pattern persistence
+  is not yet implemented (S064 plan exists).
 - `FS_FILE_KIT` save now routes to the new Kit directory writer. The old flat
   `.snd` Kit writer is no longer the normal Kit Save path.
 - `FS_FILE_MORPH` load/save still uses the legacy `.SND` morph-kit path.
@@ -305,7 +312,7 @@ three-digit slot prefix when Load/Save reconstructs `NNN Name`.
 `fs_list_cache_name[1000][9]` is the one 9,000-byte browser-index cache. Its
 active domain tag and count are separate small fields; it contains one typed
 Instrument or numbered-library `.hcindex` domain. HCNAMES uses the dedicated
-`hcnames_name_mirror[129][9]`, not this browser cache. No per-instrument-type,
+`hcnames_name_mirror[145][9]`, not this browser cache. No per-instrument-type,
 per-library, presence, or open-alias cache is permitted. The legacy
 `kitBrowser` compatibility map was retired in Session 042; Kit occupancy is
 the active slot cache/index row.
@@ -360,45 +367,55 @@ future boot-index failure is observable instead of silent. See
 
 ### Root resident-name register: `/.hcnames`
 
-HCNAMES is resident identity, not a directory browser. It has 129 fixed
-logical rows:
+HCNAMES is resident identity, not a directory browser. It has 145 fixed
+logical rows (expanded from 129 in Session 063):
 
 ```text
-row 0        Bank
-rows 1..16  resident Scene 0..15
-rows 17..32 embedded Kit for resident Scene 0..15
-rows 33..128 six Instruments per Scene
-              row = 33 + scene * 6 + voice
+row 0          Bank
+rows 1..16     resident Scene 0..15
+rows 17..32    embedded Kit for resident Scene 0..15
+rows 33..128   six Instruments per Scene
+                row = 33 + scene * 6 + voice
+rows 129..144  Pattern for resident Scene 0..15
+                row = 129 + scene
 ```
+
+`FS_RESIDENT_NAMES_ROW_COUNT` is 145. The AutoSave record's
+`AUTOSAVE_HCNAMES_ROW_COUNT` remains 129 until Session 064 expands it
+(breaking format change). `filesystem_residentPatternRow(scene_index)`
+returns `129 + scene_index`.
 
 The first line is a header declaring the instrument type vocabulary:
 `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat\n`. The tokens are instrument file
 extensions in instrument_type_t enum order. If the header does not match the
 firmware's registry, the file is invalid and must be regenerated.
 
-Data rows follow (129 rows, 0..128):
+Data rows follow (145 rows, 0..144):
 Bank/Scene/Kit rows (0..32) use `name<TAB>source[<TAB>R]\n`.
 Instrument rows (33..128) use `name<TAB>source<TAB>type[<TAB>R]\n`,
 where `type` is a mandatory three-character token (drm/snr/cym/hat)
 identifying the Instrument's typed directory. A missing or unrecognized
 type token on an Instrument row fails the read.
+Pattern rows (129..144) use `name<TAB>source[<TAB>R]\n` — the same format as
+Bank/Scene/Kit rows, with no type field. One row per resident Scene.
 
 `name` is at most eight printable characters and may be empty; `source` is
 `-` (inherit), `?` (unknown), `000` through `999` (direct root slot), or `@`
 (direct root Instrument stem). The refresh witness is the optional field
-immediately after the source column (third field for Bank/Scene/Kit rows,
-fourth field for Instrument rows): exactly the byte `R`; its presence marks
-the row "refreshed" — see `AUTOSAVE.md` "HCNAMES atomic safe-write and the
-refreshed flag" for what sets and clears it and why. Its absence is backward
-compatible with every pre-Session-060 file. The fixed row class supplies the
-namespace for a numeric slot. The 129-by-`uint16_t` filesystem-owned source
-register follows Instrument -> Kit -> Scene -> Bank until it finds a direct
+immediately after the source column (third field for Bank/Scene/Kit/Pattern
+rows, fourth field for Instrument rows): exactly the byte `R`; its presence
+marks the row "refreshed" — see `AUTOSAVE.md` "HCNAMES atomic safe-write and
+the refreshed flag" for what sets and clears it and why. Its absence is
+backward compatible with every pre-Session-060 file. The fixed row class
+supplies the namespace for a numeric slot. The 145-by-`uint16_t`
+filesystem-owned source register follows Instrument -> Kit -> Scene -> Bank
+until it finds a direct
 source or reaches ordinary boot fallback. A legacy name-only line remains
 readable as unknown; malformed extended records fail the read rather than
 silently inheriting. The name cache remains space-padded and NUL-terminated.
 
 Changing a row can change its physical byte length. Every targeted update
-therefore reads all 129 name/source pairs into the shared cache/register,
+therefore reads all 145 name/source pairs into the shared cache/register,
 overlays only the rows owned by the successful action, rewrites the complete
 file, closes, and uses the normal flush gate. A staged source survives that
 reread until the close succeeds, preventing stale on-card provenance from
@@ -411,7 +428,7 @@ error and authorize no creation or automatic repair.
 
 As of Session 060, "rewrites the complete file" means the same atomic
 temp-file safe-write `settings.cfg` and `.hcprms1/2` already use: stream all
-129 rows to `.hcnamtmp` (`FS_RESIDENT_NAMES_TEMP_FILENAME`), close, sync the
+145 rows to `.hcnamtmp` (`FS_RESIDENT_NAMES_TEMP_FILENAME`), close, sync the
 temp durable, remove the old live `.hcnames`, rename the temp into place,
 then take the final flush-gate sync. Every write path was converted — boot
 full-write, runtime targeted update, Bank Load, Bank Save, and the new
@@ -420,7 +437,7 @@ loss during any HCNAMES rewrite leaves either the intact prior register or a
 recoverable `.hcnamtmp`. A boot recovery prelude inside
 `filesystem_ensureAutosaveFiles_tick()` runs before any code path opens
 `.hcnames` for read: it validates a leftover `.hcnamtmp` (the exact `#types`
-header plus exactly 129 parseable rows) and either promotes or discards it, mirroring the
+header plus exactly 145 parseable rows) and either promotes or discards it, mirroring the
 `settings.tmp` recovery prelude below.
 
 A `.hcnamtmp` is current only when it starts with the `#types` header line
@@ -524,7 +541,7 @@ special-case checks hold:
 
 1. **Bank agreement:** the register Bank row (row 0) carries a direct
    numeric slot equal to the settings.cfg boot Bank (`bank_restoreBankSlot()`).
-2. **All refreshed:** every one of the 129 register rows carries the `R`
+2. **All refreshed:** every one of the 145 register rows carries the `R`
    witness.
 
 This is the state "load a Bank in the menu, load more library items into
@@ -860,16 +877,44 @@ folder but is named without a numeric slot prefix because it belongs to the
 scene. The word after `Kit` is the kit name. The kit name is not stored in
 `kitset.kcg`, `sceneset.scg`, or any other metadata field.
 
-`pattern.pat` is currently one of two accepted text shapes plus one controlled
-legacy import:
+`pattern.pat` is the v4 binary PAT4 format for all current Scene/Bank/root
+Pattern save/load. Legacy text formats v1-v3 remain accepted for import only.
 
-- thin v1 text placeholder;
-- v2 text import, from which only the final 128-character on/off field of each
-  track is retained;
-- compact v3 text writer/reader format; legacy binary bridge payloads are
-  rejected rather than decoded.
+The current v4 binary format (Session 063):
 
-The v1 placeholder:
+The file is exactly 10,656 bytes: a 160-byte header (32B fixed + 16B pattern
+params + 112B per-track params), a 1,792-byte address array, a 512-byte free
+bitmap, and an 8,192-byte event pool. See `PATTERN_DYNAMIC_STACK.md` for the
+live SRAM layout and `063_SESSION_HANDOFF_LOG.md` §1 for the complete byte
+map.
+
+```text
+Magic:      "PAT4" (4 bytes)
+Version:    1 (uint16_t LE)
+Stack size: 256 (uint16_t LE, must match firmware PAT_STACK_SIZE)
+Reserved:   2 bytes
+Generation: uint32_t LE (0 for library saves, incremented by AutoSave)
+CRC32C:     uint32_t LE (zeroed during computation, covers entire file)
+Reserved:   10 bytes
+Pattern:    pattern_change_bar(1), pattern_next(1), reserved(14)
+Tracks:     7 × 16B: length(1), scale(1), shuffle(1), reserved(13)
+Address:    7 × 128 × 2B (uint16_t LE, trigger/specials/offset encoding)
+Bitmap:     512B (per-chunk occupancy, 0x00=free, 0xFF=occupied)
+Pool:       8,192B (PAT_STACK_SIZE × 32 bytes)
+```
+
+CRC32C is Castagnoli, computed over the entire file while treating the 4 bytes
+at offset 14 as zero. This matches the HCPR AutoSave record CRC contract.
+
+Root Pattern Load uses `filesystem_requestLoadPatternForScenes(slot,
+scene_mask, cb)` with mask validation and fan-out copy: the reader streams
+into the first selected Scene, validates CRC, then copies `pat_scene_region_t`
+to every other selected Scene via `memcpy` after validation. Root Pattern Save
+writes from the active Scene's `pat_sceneRegion()`.
+
+Legacy text formats (import only):
+
+The thin v1 placeholder:
 
 ```text
 format=helicase.pattern
@@ -895,7 +940,7 @@ seven tracks. The former per-track `length` and `scale` prefixes are discarded.
 Velocity, note, probability, automation, rotation, shuffle, next-pattern,
 change-bar, and the main-step shadow are not retained.
 
-The current v3 writer and reader payload is:
+The legacy v3 text format:
 
 ```text
 format=helicase.pattern
@@ -908,7 +953,9 @@ track7=<32 hexadecimal characters>
 Each row is the literal sixteen bytes of one `PatternSet` track bitmap in
 ascending byte order. Bit zero of each byte is the earlier chronological step.
 All seven rows are required. The resulting file represents exactly 112 bytes
-of persistent on/off Pattern state and no timing or per-step metadata.
+of persistent on/off Pattern state and no timing or per-step metadata. The v3
+format is no longer written by Scene/Bank saves; it is accepted only for
+legacy import.
 
 `effects.fx` currently stores a guarded placeholder until real effect storage
 exists.
@@ -916,8 +963,12 @@ exists.
 Current `scene_t` ownership:
 
 - `scene_settings_t settings`
-- `PatternSet pattern`
 - `kit_t kit`
+
+Pattern data is stored separately in `pat_scene_region_t` (one per Scene,
+accessed via `pat_sceneRegion()` / `pat_sceneRegionMut()`), not inside
+`scene_t`. The legacy `PatternSet` exists only in `filesystem_pattern_discard`
+for import compatibility.
 
 Current `scene_settings_t` fields:
 

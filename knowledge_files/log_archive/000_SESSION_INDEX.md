@@ -71,6 +71,7 @@
 | 060 | 2026-09-01/04 | commits `3ff43e4`..`eca4271` on `dev-ph3-autosave-pre-overscope-apply`, plus uncommitted `Core/Hardware/SD/filesystem.c` and `Core/Hardware/SD/asyncfatfs/asyncfatfs.c` (Instrument `.hcindex` boot fix and system-wide AppleDouble filter, applied after the last commit) | Autosave writer continuation-cycle speedup (winner cache, ~3.1s->2.2s drain); `.hcnames` atomic safe-write + refreshed-flag/HCNAMES-convergence reader prep (Phase B/B2); zero-growth 2-byte HCNAMES source fields in every autosave sub-object (Phase C); Phase D audited as already-implemented (no code change); boot Instrument `.hcindex` generation fixed (macOS AppleDouble `._` files filtered system-wide in asyncfatfs) |
 | 061 | 2026-09-05/08 | commit `6642f4c` on `dev-ph3-autosave-ph6`, plus documentation closeout and `SD_CARD_READER_9` capture | Typed 130-line HCNAMES; matching-winner and all-refreshed HCNAMES-authoritative AutoSave boot readers; complete hierarchy publication; Pattern fallback; zero-growth 96-type lifetime fix; Reader 9 hardware acceptance; deferred Load/Save test matrix |
 | 062 | 2026-09-09/10 | commit `7b3254b` on `dev-ph3-autosave-ph6` | Phase 4 dynamic Pattern storage: 16-Scene address array + 256-chunk pool + free bitmap (167,936 B), first-fit allocator, per-step note/velocity/probability specials, block read/write, hardware RNG probability gating in Sequencer, step-edit menu bridge, PatternSet removal from scene_t; hardware-verified |
+| 063 | 2026-09-12 | commit `6bc4fb9` on `dev-ph4-pattern` | v4 binary PAT4 Pattern file format, Pattern Save/Load bug fixes, `pat_scene_region_t` packed struct, HCNAMES 145-row expansion, `filesystem_requestLoadPatternForScenes` scene-mask API, S064 Pattern AutoSave plan |
 
 
 ---
@@ -447,6 +448,11 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | `filesystem_finish(FS_STATUS_ERROR)` is not cancellation — it releases the shared facade without draining in-flight AsyncFATFS callbacks/handles. Aborting a stall detector while a callback may still be live let a later callback overwrite the next operation's shared `op_file` (observed: trace bytes written into an orphaned Bank instrument file). Only abort a phase proven to own no pending callback | 057 |
 | `AFATFS_MAX_OPEN_FILES` must stay 5 — bumping to 8 to test a handle-exhaustion hypothesis was disproven by trace evidence (handle count 0 between Bank Save children, 1 immediately after each child-directory create) and reverted. `sizeof(afatfsFile_t)` is 188 bytes on this target, not the historical 328 | 057 |
 | Bank Save is per-Scene delete-then-write, not total-tree-delete-then-recreate — a partial `Save:[Bank]` (subset mask) no longer deletes non-selected resident children | 057 |
+| v4 PAT4 binary Pattern format: 10,656 B (160B header + 1,792B addr + 512B bitmap + 8,192B pool), CRC32C at offset 14, generation counter at offset 10, magic "PAT4" | 063 |
+| `pat_scene_region_t` is the per-Scene SRAM struct: 10,519 B × 16 Scenes in SRAM1; Option B accessors `pat_sceneRegion()` / `pat_sceneRegionMut()` | 063 |
+| HCNAMES is 145 rows on the filesystem side: 129 original + 16 Pattern rows (129-144, one per resident Scene, no type field). `AUTOSAVE_HCNAMES_ROW_COUNT` stays 129 until S064 | 063 |
+| `filesystem_requestLoadPatternForScenes(slot, scene_mask, cb)` is the root Pattern Load API with mask validation and fan-out `memcpy` of `pat_scene_region_t` | 063 |
+| Pattern Save must set `op_scene_load_scene_mask` to the single `op_pattern_scene` bit for HCNAMES multi-row publication compatibility | 063 |
 
 ---
 
@@ -1098,3 +1104,44 @@ SHA-256 `412ca5b21509e1e2a787d7f82f15a4946f0c92489eb3ed0f422056c87f58eee9`.
 - **Find here**: [062_SESSION_HANDOFF_LOG.md](062_SESSION_HANDOFF_LOG.md),
   `PATTERN_DYNAMIC_STACK.md`, `SRAM_MANIFEST.md`,
   `MODULE_INTERCHANGE_SPEC.md`.
+
+### 063 — v4 Binary Pattern File Format And Pattern Load/Save Fixes (2026-09-12)
+
+Implemented the v4 binary PAT4 Pattern file format (10,656 bytes: 160B header
++ 1,792B address array + 512B bitmap + 8,192B pool) with CRC32C integrity and
+a generation counter. Introduced `pat_scene_region_t` as the packed per-Scene
+SRAM struct (10,519 B × 16 = 168,304 B) combining address array, pool,
+bitmap, and per-track params (track_length, track_scale, track_shuffle,
+pattern_change_bar, pattern_next). Exposed these via Option B accessors
+`pat_sceneRegion()` / `pat_sceneRegionMut()`. Fixed two Pattern Save/Load
+defects: Pattern Save's HCNAMES update double-triggered the library index
+rebuild chain by replacing the completion callback (removed the three
+callback-replacement lines and the dead
+`filesystem_patternHcnamesUpdateComplete()` function, matching Scene/Kit
+Save's pending-flag-only approach); Pattern Load had two independent bugs —
+the `PRESET_OP_PATTERN_LOAD` branch in `menu.c` never called
+`menu_finishLoadSaveCommand()` (leaving `menu_loadSaveCommandActive = 1`
+permanently, so every subsequent Load/Save repaint showed `...`) and
+`preset_loadPattern()` lacked a scene-mask destination argument, always
+targeting `scene_getActiveIndex()` regardless of the user's SEQ-button
+selection. Added `filesystem_requestLoadPatternForScenes(slot, scene_mask,
+cb)` with mask validation, first-set-bit stream target, and CRC-validated
+fan-out `memcpy` of `pat_scene_region_t` to every other selected Scene.
+Added `preset_loadPatternForScenes()` and menu-to-filesystem scene-mask
+plumbing through `menu_kitLoadSceneMask`. HCNAMES expanded from 129 to 145
+rows (Pattern rows 129-144, one per resident Scene, no type field, format
+`name<TAB>source[<TAB>R]`). `filesystem_cacheCurrentResidentPatternName()`
+now iterates `op_scene_load_scene_mask` for multi-row publication. Pattern
+Save sets `op_scene_load_scene_mask` to its single `op_pattern_scene` bit
+for compatibility. `AUTOSAVE_HCNAMES_ROW_COUNT` stays at 129 for S063;
+expansion to 145 is an S064 breaking change. Created the S064 Pattern
+AutoSave planning document: separate per-Scene A/B pair files
+(`.pat00a`/`.pat00b` through `.pat15b`), 17th Scene snapshot region
+(10,519 B) with TIM3-masked `memcpy` (~50 µs), whole-file drain with 16-bit
+dirty mask. Build: `text=423996, data=416, bss=279372`.
+
+- **Find here**: v4 PAT4 binary format spec, `pat_scene_region_t` struct,
+  Pattern Save callback chain fix, Pattern Load dual-defect root cause (menu
+  command lifecycle + scene mask), `filesystem_requestLoadPatternForScenes()`
+  API, HCNAMES 145-row expansion, Pattern Load fan-out copy, S064 AutoSave
+  plan, and [063_SESSION_HANDOFF_LOG.md](063_SESSION_HANDOFF_LOG.md)
