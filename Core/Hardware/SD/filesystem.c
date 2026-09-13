@@ -6112,8 +6112,9 @@ static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
      * Inputs: the Bank loader's one-bit child cursor, its parsed Scene display
      * name in op_scene_display_name, and the resident Scene just atomically
      * committed by the shared Scene loader. Output: only that Scene row, its
-     * Kit row, and its six Instrument rows change as name/source pairs in the
-     * borrowed cache. The child hierarchy inherits the Bank source; unmasked
+     * Kit row, its six Instrument rows, and its Pattern row change as
+     * name/source pairs in the borrowed cache. The child hierarchy inherits
+     * the Bank source; unmasked
      * resident Scenes are deliberately never touched, preserving both their
      * payload/name/source pairing during every mask-selective Bank Load.
      * Affiliates: filesystem_loadSceneDirectory_tick() commit phase and the
@@ -6136,6 +6137,14 @@ static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
             filesystem_identityName((uint8_t)(
                 FS_IDENTITY_INSTRUMENT_ROW_0 + slot)));
         (void)filesystem_setResidentSource(row, FS_RESIDENT_SOURCE_INHERIT);
+    }
+    {
+        uint16_t pat_row = filesystem_residentPatternRow(scene_index);
+        if (pat_row < FS_RESIDENT_NAMES_ROW_COUNT) {
+            filesystem_cacheResidentName(pat_row, op_pattern_display_name);
+            (void)filesystem_setResidentSource(pat_row,
+                                               FS_RESIDENT_SOURCE_INHERIT);
+        }
     }
 }
 
