@@ -17,23 +17,27 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 062 complete and hardware-verified on
-branch `dev-ph3-autosave-ph6`. The Phase 4 dynamic Pattern storage system is
-fully operational: 16-Scene address-array + pool + bitmap, first-fit
-allocator, per-step note/velocity/probability specials, Sequencer probability
-gating, and step-edit menu bridge. Link: `text=408,220`, `data=404`,
-`bss=262,468`; `pat_regions` = 167,936 B, `scenes` = 19,200 B,
-`filesystem_pattern_discard` = 112 B. Image SHA-256
-`412ca5b21509e1e2a787d7f82f15a4946f0c92489eb3ed0f422056c87f58eee9`.
-Typed HCNAMES and both AutoSave boot readers remain implemented.
+**Current working source**: Session 064 complete and functionally
+hardware-accepted on branch `dev-ph4-pattern`, commit `d5af5fd`. The complete
+dynamic Pattern object is persisted by exact 10,656-byte PAT4 files for
+Scene/Bank/root Pattern Load/Save and by 16 independent hidden A/B AutoSave
+pairs. Pattern AutoSave owns a separate 16-bit dirty mask, one 10,519-byte
+snapshot, nonzero per-Scene generations, Pattern HCNAMES rows 129..144, and a
+dedicated boot reader. HCPR is format v2 and aligned with the 145-row HCNAMES
+schema, but remains exactly 34,768 bytes and contains neither Pattern identity
+nor Pattern payload. Final forced rebuild:
+`text=426,756`, `data=412`, `bss=289,964`; image 427,184 bytes, SHA-256
+`c6d5c551e5f320c7c97427528dc937da7d6b3b297779cb70f945606e646cd481`.
 
-**Next feature step**: Phase 4.5 copy operations (pat_copyTrack/Pattern/Bar
-with pool block duplication), then v4 Pattern file format for Scene/Bank
-persistence. The v3 bridge currently persists only trigger bits; specials
-are lost on save/load. Load/Save refactor/test matrix is consolidated in
-`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; defer unless a severe issue
-blocks. One useful reader test remains: reboot `SD_CARD_READER_9` for
-mixed matching-winner Case-1/Case-2 capture.
+**Next feature step**: Phase 4.5 copy operations (`pat_copyTrack`,
+`pat_copyPattern`, `pat_copyBar`) with independent pool-block duplication.
+Pattern AutoSave functional testing is closed. Deterministic mid-write
+power-loss, record/erase admission, injected-CRC, and performance cases are
+supplemental deferred work requiring suitable instrumentation; unfinished
+Live Record is not a prerequisite for the accepted feature. Permanent Session
+064 authority is `knowledge_files/log_archive/064_SESSION_HANDOFF_LOG.md`,
+`AUTOSAVE.md`, `PATTERN_DYNAMIC_STACK.md`, `FILESYSTEM_SPEC.md`, and
+`SRAM_MANIFEST.md`.
 
 ## RAM Allocation Approval Policy
 
@@ -70,16 +74,17 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter records the Session 062 hardware-verified
+  `SRAM_MANIFEST.md`; the latter records the Session 064 linked allocation
   linked allocation and totals. Dynamic Pattern storage is in
   `PATTERN_DYNAMIC_STACK.md`. AutoSave format/reader/writer authority is
   `AUTOSAVE.md`; development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live
   memory manifest, module map, and oscillator-interpolation document.
-- Session 061 permanent authority is
+- Session 061 historical reader authority is
   `knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md` plus the updated
-  specs. HCNAMES is one exact `#types drm snr cym hat` header plus 129 rows;
+  specs. Its then-current HCNAMES covered rows 0..128; Session 064 authority
+  expands the live schema to 145 rows with Pattern rows 129..144.
   Instrument rows require their type field. Boot uses matching HCPR winner,
   all-refreshed settings-Bank-matching HCNAMES, then canonical fallback in that
   order. Case 3 always empties the whole Scene. Preserve all 96 HCNAMES types
@@ -93,16 +98,26 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   contents, CRC/generation fields, structural comparison, and trace order.
 - Source layout is now `Core/Bank/Scene/` and `Core/Bank/BankData.*`, not
   `Core/Scene/`.
-- Scene/Bank saves persist compact v3 `pattern.pat`: seven 32-hex-character
-  rows representing the 112-byte trigger bitmap only. Specials (note,
-  velocity, probability) stored in the dynamic pool are **not persisted** by
-  the v3 bridge. A v4 format is needed to serialize pool blocks.
+- Scene/Bank saves persist exact 10,656-byte PAT4 files containing the complete
+  dynamic Pattern region. Legacy v1-v3 text is import-only. Scene directories
+  contain exactly one `<Pattern name>.pat`; root library files are
+  `Pattern/NNN <name>.pat`.
 - Session 062 completed the Phase 4 dynamic Pattern storage system.
-  PatternData now owns a three-part per-Scene allocation: address array,
-  event pool, and free bitmap in `pat_regions` (167,936 B). Read
+  PatternData now owns a per-Scene address array, event pool, bit-packed free
+  bitmap, and Pattern/track parameters in `pat_regions` (168,304 B). Read
   `062_SESSION_HANDOFF_LOG.md` and `PATTERN_DYNAMIC_STACK.md` before changing
   PatternData internals, pool block format, or allocator behavior. Copy
   operations are deliberate no-ops pending Phase 4.5.
+- Session 064 functional Pattern AutoSave testing closed PASS on 2026-09-14 using the
+  full 16-Scene Test Card B hardware output. All 19 root PAT4 candidates were
+  valid; every Scene winner differed from its fixture Pattern; all Pattern
+  HCNAMES rows were `@|R`; both HCPR v2 records were valid; and every Scene had
+  committed scalar changes. The retained trace had no operation errors or
+  phase stalls, though its bounded diagnostic ring reported 6,513 dropped
+  records. TC5 power-fail and TC9 REC/erase gating require instrumentation and
+  are explicitly not part of this functional closeout. See
+  `knowledge_files/log_archive/064_SESSION_HANDOFF_LOG.md`; raw fixture/output
+  directories may be removed after archival.
 - Session 043 completed the bitmap Pattern/LUT/tagged-runtime/transient-ROM
   storage pass (now superseded by Session 062 for Pattern storage). Read
   `043_SESSION_HANDOFF_LOG.md` before changing slider conversion,
@@ -141,22 +156,24 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Instrument, Kit, root Scene, and root Bank Load/Save now share exactly one
   `fs_list_cache_name[1000][9]` display-name cache (9,000 bytes). Instrument
   rows are sorted; numbered-library rows are direct `000..999` slot rows with
-  blank rows preserved. HCNAMES has its separate 129-by-9 mirror and never
+  blank rows preserved. HCNAMES has its separate 145-by-9 mirror and never
   borrows this disposable browser cache. Menu entry/type changes and exit
   dispose or reload the same browser cache; no per-instrument or per-library
   name cache is allowed.
 - Root `/.hcnames` is the authoritative active identity **and provenance**
   register: row 0 Bank; rows 1..16 Scene; rows 17..32 Kit; rows 33..128 six
-  Instruments per Scene. Its physical schema is one
-  `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 129 rows.
+  Instruments per Scene; rows 129..144 one Pattern per Scene. Its physical schema is one
+  `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 145 rows.
   Bank/Scene/Kit rows are `name<TAB>source[<TAB>R]`; Instrument rows are
-  `name<TAB>source<TAB>type[<TAB>R]`. `-`, `?`, `000..999`, and `@` are its
-  only source tokens. The 258-byte filesystem-owned source
+  `name<TAB>source<TAB>type[<TAB>R]`; Pattern rows use the non-Instrument form.
+  `-`, `?`, `000..999`, and `@` are its only source tokens. Pattern `@`
+  (`0x1ffc`) is distinct in RAM from Instrument-direct `@` (`0x1ffd`). The
+  290-byte filesystem-owned source
   register survives name-cache reuse and replaces the retired 32-byte
   SceneData source array. Runtime holds exactly 81 bytes of musical identity:
   one Bank, one Scene, one Kit, and six Instrument names. `scene_t` and `kit_t`
   contain no display names or retained filename stems. Because text rows have
-  variable length, a targeted update reads the header and all 129 paired rows, overlays only
+  variable length, a targeted update reads the header and all 145 paired rows, overlays only
   its owned rows, and rewrites the file.
 - HCNAMES paired source correction: a successful non-empty root Bank Load must
   stage row 0 to its direct `op_slot` before the Bank-owned HCNAMES close gate,
@@ -222,8 +239,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Typed load staging is a separate aligned 2,048-byte union, never the
   9,000-byte name cache. It holds one Kit, one Instrument candidate, or Scene
   settings plus one Kit. Scene Pattern data is excluded: after settings and
-  the embedded Kit validate and commit, Pattern loads directly into the final
-  resident Scene slot and is intentionally non-atomic pending Pattern redesign.
+  the embedded Kit validate and commit, PAT4 streams into the selected Pattern
+  region and is fanned out only after complete validation. Pattern AutoSave
+  writes only from its separate immutable snapshot.
 - Boot writes `/Kit/.hcindex`, `/Scene/.hcindex`, `/Bank/.hcindex`, and the
   four registry-owned Instrument indexes one at a time, then reloads
   `/Bank/.hcindex` before initial Bank selection because Instrument generation
@@ -243,11 +261,12 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   suppress every cursor, and retain input locking until true terminal work
   finishes. Preparatory index/preview work may use `menu_storageBusy` without
   showing `...`. Every completion resets to the bracketed type row.
-- Sessions 045–061's committed AutoSave implementation is the
+- Sessions 045–064's committed AutoSave implementation is the
   accepted baseline, not rejected work: exact 34,768-byte A/B records, one 3,856-byte
   canonical mutation mask, bounded mask/value capture with atomic
   take/re-dirty behavior, typed scalar markers, source-free v1 settings, and
-  the AutoSave lifecycle trace, typed HCNAMES, and the two boot readers.
+  the AutoSave lifecycle trace, typed 145-row HCNAMES, scalar and Pattern boot
+  readers, and per-Scene Pattern A/B files.
   Available scalar controls are accepted as
   hardware tested: Scene; Kit/Instrument; and MIDI channel/note, which are
   Scene values. There is no user-changeable Bank scalar control for another UI
@@ -674,9 +693,9 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 │   │   ├── CPU_USE_DSP_AUDIT.md       ← historical DSP timing/performance audit, cache/MPU/IRQ findings, and ordered optimization record
 │   │   ├── DEV_MODES.md                ← authoritative screen-diagnostic versus file-logging policy and current log formats
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 061
+│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 064
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
-│   │   └── SRAM_MANIFEST.md           ← current Session 061 linked snapshot and binding reservation policy
+│   │   └── SRAM_MANIFEST.md           ← current Session 064 linked snapshot and binding reservation policy
 │   ├── hardware_archive/
 │   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
 │   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
@@ -806,13 +825,13 @@ and may contain historical snapshots as noted below.
 | File | What it contains | Use it when |
 |------|------------------|------------|
 | `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, LFN/SFN identity, object iteration, removal, terminator-aware directory-entry publication, lazy directory-cluster initialization, and flush boundaries. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
-| `AUTOSAVE.md` | Implemented hidden A/B wire format, matching-winner and HCNAMES-authoritative boot readers, ownership, canonical dirty mask, writer lifecycle, power-loss behavior, and validation status. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
+| `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior, and validation status. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
 | `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
 | `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
-| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 061: root layout, typed HCNAMES, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 061 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 064: root layout, typed 145-row HCNAMES, PAT4, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
+| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 064 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `SRAM_MANIFEST.md` | Current Session 061 logging-on linked snapshot, AutoSave reader/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
+| `SRAM_MANIFEST.md` | Current Session 064 logging-on linked snapshot, AutoSave Pattern/reader/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
 
 ---
 
@@ -1020,7 +1039,7 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
   directory shape and writes the current interpolated Morph state into both
   normal and morph endpoint sections.
 - Scene Load/Save uses root `Scene/NNN Name/` folders with `sceneset.scg`,
-  embedded `Kit <name>/`, draft `pattern.pat`, and placeholder `effects.fx`.
+  embedded `Kit <name>/`, exactly one named PAT4 file, and placeholder `effects.fx`.
   `sceneset.scg` never stores `name`.
 - Bank Load/Save uses root Bank/NNN Name/ folders with bankset.bcg and
   Bank-local two-digit Scene children 00..15. It loads/saves the selected set

@@ -4,7 +4,7 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 061. Historical plans and session logs explain how the
+through Session 064. Historical plans and session logs explain how the
 implementation was reached, but they do not override this document.
 
 Related authority is deliberately separate:
@@ -15,18 +15,19 @@ Related authority is deliberately separate:
 - `DEV_MODES.md` owns development-mode selection and diagnostic file output;
 - `ASYNCFATFS_REFERENCE.md` owns low-level AsyncFATFS contracts;
 - `SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
-  Session 061 linked allocation/capture snapshot;
+  Session 064 linked allocation/capture snapshot;
 - `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md` owns the deferred interaction
   and regression matrix for AutoSave, HCNAMES, `settings.cfg`, and Load/Save.
 
 AutoSave currently persists the active resident Bank's implemented scalar
-state into two hidden root records. It does not modify root `Bank/`, `Scene/`,
+state into two hidden root records and each present Scene's Pattern into its
+own hidden PAT4 A/B pair. It does not modify root `Bank/`, `Scene/`,
 `Kit/`, or `Instrument/` library objects and does not replace explicit Load or
 Save operations.
 
 Implemented through the Session 048 AutoSave baseline, Session 056 page-exit
 expedite and AsyncFATFS file-size fix, Session 060 writer/HCNAMES/source work,
-and the Session 061 boot reader:
+the Session 061 boot reader, and Session 064 Pattern AutoSave:
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
@@ -53,33 +54,34 @@ and the Session 061 boot reader:
 - per-row Case 1 payload application, Case 2 narrow library reload, and Case 3
   all-or-nothing Scene invalidation, including deferred dirty replay and
   non-blocking notices;
-- an all-129-rows-refreshed HCNAMES-authoritative boot path for a newer
+- an all-145-rows-refreshed HCNAMES-authoritative boot path for a newer
   Load/Save session that the page guard prevented HCPR from capturing;
-- best-effort boot loading of `pattern.pat` from each accepted Scene's resolved
-  library source, because Pattern data is not yet part of HCPR.
+- HCPR format v2 aligned with the 145-row HCNAMES contract while retaining the
+  exact 34,768-byte scalar record geometry; Pattern identity is not embedded;
+- one independent 16-bit Pattern dirty mask, a 10,519-byte immutable Pattern
+  snapshot, and per-Scene whole-PAT4 background drains;
+- 32 hidden Pattern candidates (`/.pat00a/b` through `/.pat15a/b`) with
+  generation/parity selection, exact-size/stack/CRC validation, retry, and
+  boot restore;
+- Pattern-only HCNAMES `@` provenance and refreshed publication on rows
+  129..144.
 
 Not implemented and not to be inferred from the reader/writer:
 
-- Pattern persistence in the hidden records (Session 064 plan exists:
-  separate per-Scene A/B pair files `.pat00a`..`.pat15b` using the v4 PAT4
-  binary format, whole-file drain with 16-bit dirty mask, 17th Scene
-  snapshot region — see `S064_DYNAMIC_PATTERN_AUTOSAVE.md`);
 - live Effect persistence (`AUTOSAVE_EFFECT_PARAM_COUNT` is zero);
 - crash-recoverable promotion into explicit Bank library files;
 - a second resident Bank, background staging Bank, or general object journal.
 
-`AUTOSAVE_HCNAMES_ROW_COUNT` remains 129 even though `FILESYSTEM_SPEC.md`'s
-HCNAMES is now 145 rows (Pattern rows 129-144 added in Session 063). Session
-064 will expand the AutoSave HCNAMES to 145, which is a breaking change to the
-`.hcprms` record format (version bump from 1 to 2 required).
-`autosave_markSceneWithPatternDirty()` currently delegates to
-`autosave_markSceneWithoutPatternDirty()` with a TODO; Session 064 will wire
-it to the new Pattern dirty mask.
+`AUTOSAVE_HCNAMES_ROW_COUNT` is 145. HCPR format version 2 is therefore the
+only current scalar record version; version 1 records are not accepted by the
+Pattern-aware reader. HCPR embeds scalar hierarchy identity rows 0..128 only;
+Pattern rows 129..144 and Pattern payload bytes never enter HCPR.
 
 ## Ownership
 
 - `Core/Bank/Scene/Autosave.c/.h` owns the binary format, live-byte projection,
-  CRC32C helpers, one canonical dirty mask, typed dirty-marker API, HCNAMES-row
+  CRC32C helpers, the canonical scalar dirty mask, the separate 16-bit Pattern
+  dirty mask, typed dirty-marker API, HCNAMES-row
   source-field projection, and the boot-only inverse payload-to-resident apply
   functions. It owns no file handle or scheduler.
 - Retained owners mark their own changes: `BankData`, `SceneData`, and Preset's
@@ -94,7 +96,7 @@ it to the new Pattern dirty mask.
 - `settings.cfg` and `filesystem_setAutosaveEnabled()` own policy. A trace or
   diagnostic must never change that policy or dirty state.
 
-## On-card v1 record contract
+## On-card HCPR v2 scalar record contract
 
 The two singleton names are:
 
@@ -150,7 +152,7 @@ fix is a prerequisite for correct whole-Bank AutoSave publication.
 Header requirements:
 
 - magic `HCPR`;
-- format version 1;
+- format version 2;
 - valid commit byte `0xa5`;
 - wrapping 32-bit generation;
 - Castagnoli CRC32C over the complete record while treating stored CRC bytes
@@ -241,10 +243,12 @@ invalid only when written directly on the Instrument row itself; a numeric
 slot inherited from a parent is a valid library source. Implementations must
 use the resolver's `resolved_row` to distinguish those cases.
 
-After row evaluation, every accepted Scene receives a best-effort
-`pattern.pat` load from its resolved Scene source. HCPR v1 does not store
-PatternSet. A missing/corrupt Pattern leaves the initialized empty PatternSet
-but does not empty otherwise valid scalar Scene state. Effects remain zero/live
+After scalar row evaluation, the dedicated Pattern reader evaluates each
+present Scene independently. It applies the newest format/size/CRC-valid hidden
+PAT4 candidate only when that Scene's Pattern HCNAMES row has Pattern-AutoSave
+`@` provenance and a nonzero generation. Otherwise the initialized or
+explicitly loaded Pattern remains authoritative. A missing/corrupt Pattern
+never empties otherwise valid scalar Scene state. Effects remain zero/live
 placeholder state because their format live count is zero.
 
 ### HCNAMES-authoritative reader
@@ -255,11 +259,12 @@ HCPR writer while HCNAMES already records every committed source. It may run
 only when:
 
 1. HCNAMES row 0 is a direct Bank slot equal to `settings.cfg`'s active Bank;
-2. every one of the 129 data rows has `R`.
+2. every one of the 145 data rows has `R`.
 
 It never uses or regenerates from HCPR. It loads the Bank container from the
-Bank tree, narrow-loads all eight rows of each present Scene with the same
-source resolver and all-or-nothing Scene rule, then best-effort loads Patterns.
+Bank tree, narrow-loads all eight scalar hierarchy rows of each present Scene
+with the same source resolver and all-or-nothing Scene rule, then lets the
+Pattern reader apply eligible hidden PAT4 winners.
 Any failed gate or hard failure declines to canonical fallback. Do not weaken
 the two gates: partial refreshed state is handled by the matching-winner reader,
 not by treating HCNAMES alone as a general parameter snapshot.
@@ -333,8 +338,11 @@ uses a Morph-only hidden snapshot and likewise marks only restored Morphable
 Morph endpoint cells. `autosave_markSceneWithPatternDirty()` is presently the
 non-Pattern alias and must not be described as Pattern persistence. Copy/paste
 and less common Load/Save transitions remain explicit regression targets in
-`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; do not infer coverage from a
-nearby marker.
+`autosave_markSceneWithPatternDirty()` additionally sets the Scene's separate
+Pattern dirty bit; the without-Pattern form remains the scalar-only boundary.
+Copy/paste and less common Load/Save transitions remain explicit regression
+targets in `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; do not infer coverage
+from a nearby marker.
 
 The ordering rule is binding: update the retained owner first, then mark the
 matching typed coordinate. Never calculate wire offsets in Menu, DSP, MIDI, or
@@ -473,22 +481,23 @@ mechanics and its interaction with AutoSave's dirty mask are specified here
 because the writer that clears the flag is the AutoSave drain itself.
 
 The current physical schema is one exact
-`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 129 data rows.
+`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 145 data rows.
 Bank/Scene/Kit rows are `name<TAB>source[<TAB>R]`; Instrument rows are
 `name<TAB>source<TAB>type[<TAB>R]`, where type is mandatory. The complete
-parser/source grammar belongs to `FILESYSTEM_SPEC.md`.
+Pattern rows 129..144 use the non-Instrument grammar and have no type field.
+The complete parser/source grammar belongs to `FILESYSTEM_SPEC.md`.
 
 **Atomic safe-write.** Every HCNAMES rewrite — boot full-write, runtime
 targeted update, Bank Load, Bank Save, and the drain post-commit convergence
 below — now follows the same temp-file pattern already used for
 `settings.cfg` and the `.hcprms` pair: open `.hcnamtmp`
 (`FS_RESIDENT_NAMES_TEMP_FILENAME`), stream the `#types` header line plus all
-129 rows, close, `afatfs_sync()` to make the temp durable, remove the old live
+145 rows, close, `afatfs_sync()` to make the temp durable, remove the old live
 `.hcnames`, rename the temp into place, then take the final flush-gate sync.
 The live file is untouched until the remove step; a power loss at any point
 leaves either the intact old register or a recoverable `.hcnamtmp` that a boot
 recovery prelude in `filesystem_ensureAutosaveFiles_tick()` validates (a
-current `#types` header plus 129 parseable rows) and either promotes or
+current `#types` header plus 145 parseable rows) and either promotes or
 discards before any code path opens `.hcnames` for read.
 `hcnames_mirror_valid` is demoted to `INVALID` before every write-capable
 open, set to `PUBLISH_PENDING` only after the rename succeeds (not after
@@ -501,13 +510,16 @@ just loaded or saved from the library and whose autosave record has not yet
 fully re-captured it. It is serialized as an optional third `.hcnames` column:
 `name<TAB>source<TAB>R\n` for Bank/Scene/Kit rows (0..32). Instrument rows
 (33..128) carry a mandatory type column between source and the witness, so
-`R` is their optional fourth column: `name<TAB>source<TAB>type<TAB>R\n`;
-see `FILESYSTEM_SPEC.md` for the row grammar. Absence of the `R` suffix means
+`R` is their optional fourth column: `name<TAB>source<TAB>type<TAB>R\n`.
+Pattern rows use `name<TAB>source[<TAB>R]\n`; `@` there is the Pattern-only
+`FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE` value. See `FILESYSTEM_SPEC.md` for the
+row grammar. Absence of the `R` suffix means
 not-refreshed
 (backward compatible with pre-Phase-B2 files). Adding this bit required
 narrowing `FS_RESIDENT_SOURCE_VALUE_MASK` from `0x7fff` to `0x1fff` and moving
-the three special source tokens into 13 bits: `FS_RESIDENT_SOURCE_INHERIT =
-0x1fff`, `_UNKNOWN = 0x1ffe`, `_INSTRUMENT_DIRECT = 0x1ffd`. Numbered library
+the special source tokens into 13 bits: `FS_RESIDENT_SOURCE_INHERIT =
+0x1fff`, `_UNKNOWN = 0x1ffe`, `_INSTRUMENT_DIRECT = 0x1ffd`, and
+`_PATTERN_AUTOSAVE = 0x1ffc`. Numbered library
 slots (0..999) are unaffected. Any code computing or comparing a source token
 must use these post-Phase-B2 13-bit values, not the older 15-bit ones that
 appear in pre-Session-060 planning documents.
@@ -557,6 +569,43 @@ identity, not autosave record names. Regeneration may use the winner's embedded
 names only when HCNAMES itself is absent/corrupt and the winner is valid. Do
 not add a name getter or dirty name bytes merely to make debug/baseline fields
 look current.
+
+Pattern rows do not map into the scalar payload interval used by
+`autosave_objectFullyCaptured()`. Their `R` lifecycle is owned by the Pattern
+drain transaction: successful durable PAT4 completion stages `@|R`, but only
+when no edit re-dirtied the Scene after snapshot ownership.
+
+## Pattern AutoSave contract (Session 064)
+
+Pattern payload is stored outside HCPR in 16 independent A/B pairs:
+`/.pat00a/b` through `/.pat15a/b`. Each candidate is one exact 10,656-byte
+PAT4 file. Odd generations target B, even generations target A, A wins an
+equal-generation tie, and generation zero is skipped for hidden writes.
+Validation requires exact EOF, current PAT4 version and stack size, and the
+whole-file CRC32C. Firmware trusts the payload generated by its writer; host
+acceptance additionally audits address/bitmap/pool consistency.
+
+Autosave owns a separate 16-bit dirty mask. PatternData sets it after every
+live mutation; whole Scene/Bank replacement marks it through
+`autosave_markSceneWithPatternDirty()`. The filesystem admits the lowest dirty
+Scene only while policy/runtime/card/Bank/menu gates are open and neither
+`seq_recordActive` nor `seq_eraseActive` is set. Pattern is the final
+background claimant after settings, diagnostic trace, and scalar HCPR work.
+
+Admission clears the selected bit before copying the 10,519-byte live region
+into the sole Pattern snapshot. The copy is plain `memcpy` with no interrupt
+mask. A later mutation therefore re-sets canonical work while the immutable
+snapshot streams. Failure re-arms the bit; success never blindly clears it.
+After durable completion the row is published as `name<TAB>@<TAB>R` only if no
+post-snapshot mutation is pending.
+
+At boot, both candidates for each present Scene are independently validated.
+The winner applies only when the corresponding HCNAMES Pattern row carries
+the Pattern-only `@` token (`0x1ffc`) and the generation is nonzero. Missing or
+bad Pattern files do not invalidate scalar Scene state. Explicit Pattern
+library and Scene/Bank directory loads reset the destination generation
+baseline to zero. Complete resident layout and PAT4 bytes are authoritative in
+`PATTERN_DYNAMIC_STACK.md`.
 
 ## Power-loss behavior
 
@@ -626,10 +675,11 @@ boot, policy, and SD orchestration use `filesystem.h`.
 | API family | Use | Constraint |
 |---|---|---|
 | `autosave_mark*ParameterDirty()` / `autosave_markSourceDirty()` | Mark one retained scalar/source after its owner commits the value | Producer does no file I/O and never computes a raw wire offset |
-| `autosave_markWholeInstrumentDirty()`, `autosave_markKitDirty()`, `autosave_markSceneWithoutPatternDirty()`, `autosave_markResidentBankDirty()` | Mark a completed object/region | Marks only currently implemented live bytes; names and Pattern remain excluded |
+| `autosave_markWholeInstrumentDirty()`, `autosave_markKitDirty()`, `autosave_markSceneWithoutPatternDirty()`, `autosave_markSceneWithPatternDirty()`, `autosave_markResidentBankDirty()` | Mark a completed object/region | Scalar names remain excluded; the WithPattern/Bank forms also set the separate Pattern bit |
+| `autosave_markPatternDirty()`, `autosave_patternDirtyMask()`, `autosave_clearPatternDirty()` | Produce/query/transfer one Scene's Pattern work | Separate 16-bit ownership; never alias it to scalar mask bytes |
 | `autosave_mask*()` helpers | Atomic take/merge/restore and writer progress | Filesystem consumes the one canonical mask; no second request mask |
 | `autosave_getLivePayloadByte()` | Serialize one live payload coordinate | Writer-side projection only |
-| validation/CRC/format helpers | Stream-validate and construct HCPR v1 | Exact geometry and commit-last rules remain binding |
+| validation/CRC/format helpers | Stream-validate and construct HCPR v2 | Exact geometry and commit-last rules remain binding |
 | `autosave_applyBankPayload()`, `autosave_applyScenePayload()`, `autosave_applyKitPayload()`, `autosave_applyInstrumentPayload()` | Apply validated HCPR bytes at boot | Tracking must be off; Instrument apply can reject unknown three-byte type text |
 | `autosave_extractPayloadSource()` | Read the two-byte source from a validated section | Used for Case-1 defense-in-depth comparison |
 
@@ -642,7 +692,8 @@ boot, policy, and SD orchestration use `filesystem.h`.
 | `filesystem_validateAutosaveWinnerBlocking()` / `filesystem_hasBootWinner()` | Stage-10b streaming validation and the stage-11 Bank-match gate |
 | `filesystem_autosaveBootReaderBlocking()` | Restore a validated Bank-matching winner with per-row Cases 1/2/3 |
 | `filesystem_regenerateHcnamesFromWinnerBlocking()` | Recover missing/invalid HCNAMES from a validated winner; internal boot orchestration is the normal caller |
-| `filesystem_bootHcnamesAuthoritativeLoad()` | Restore the all-129-rows-refreshed, settings-Bank-matching special state without using HCPR |
+| `filesystem_bootHcnamesAuthoritativeLoad()` | Restore the all-145-rows-refreshed, settings-Bank-matching special state without using HCPR |
+| `filesystem_patternAutosaveBootReaderBlocking()` | Validate/apply eligible per-Scene hidden PAT4 winners after scalar restore |
 | `filesystem_setBootLatchBankFallback()` | Defer whole-Bank dirty publication until tracking becomes live; `main.c` only |
 | `filesystem_bootReaderNoticeSceneMask()` / `filesystem_bootReaderNoticeBankFallback()` | Menu read-and-clear access to one-shot post-boot notices |
 | `filesystem_autosaveTraceFlushBlocking()` | Bench-only durable trace boundary before deliberate power removal |
@@ -666,21 +717,21 @@ For each new retained scalar:
 8. test mutation, writer error rollback, restart, AutoSave off, and power
    interruption at payload/CRC/commit boundaries appropriate to the change.
 
-Pattern or Effect support is a feature extension, not a scalar addition. It
-requires confirmed retained ownership, an explicit wire schema/version plan,
-bounded snapshot/read behavior, dirty hooks, recovery semantics, and SRAM
-approval for any new allocation.
+Effect support remains a feature extension, not a scalar addition. Any future
+Pattern wire/schema expansion likewise requires explicit versioning, bounded
+snapshot/read behavior, recovery semantics, and SRAM approval.
 
-Do not add a second writer, scheduler, mask, record-sized SRAM image, or
-filesystem handle. Do not borrow the 9,000-byte name cache for the dedicated
+Do not add a concurrent filesystem writer, record-sized HCPR SRAM image, or
+filesystem handle. The implemented Pattern path has its approved 16-bit mask
+and shares the existing scheduler/facade. Do not borrow the 9,000-byte name cache for the dedicated
 4,608-byte patch cache without a separately reviewed ownership transition.
 
 ## Validation status and diagnostics
 
 Hardware validation is accepted for scalar Scene, Kit, Instrument, MIDI
-channel/note, and the root Scene publication boundary. No user-changeable Bank
-scalar exists for an extra direct UI test. Pattern and live Effect remain
-excluded exactly as specified above.
+channel/note, the root Scene publication boundary, and functional Pattern
+AutoSave across all 16 Scenes. No user-changeable Bank scalar exists for an
+extra direct UI test. Live Effect remains excluded.
 
 Session 061 hardware-accepted the HCNAMES-authoritative reader with
 `SD_CARD_READER_9`, produced from a Bank 001 Load followed by root Scene 008
@@ -698,6 +749,18 @@ to exercise the mixed matching-winner Case-1/Case-2 path. The full later
 interaction/failure matrix is in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; it is not a claim that already
 accepted writer cases are unverified.
+
+Session 064 hardware-accepted Pattern AutoSave. The full Card B capture had 19
+valid hidden PAT4 candidates, a changed winner for every Scene, correct
+generation parity/CRC/allocator structure, 145 valid HCNAMES rows with every
+Pattern row `@|R`, and valid HCPR v2 generations 38/39 with an empty scalar
+mutation mask. All 38 observed scalar publications ended successfully and the
+trace contained no operation error or phase stall. Its bounded ring reported
+6,513 dropped diagnostic records, so durable PAT4/HCPR/HCNAMES evidence—not
+trace completeness—is the acceptance basis. Deterministic Pattern mid-write
+power loss, record/erase gate instrumentation, injected CRC fallback, and
+performance measurement remain supplemental deferred cases. See
+`../log_archive/064_SESSION_HANDOFF_LOG.md`.
 
 With file logging enabled, AutoSave emits bounded lifecycle transitions through
 the RAM-only `AutosaveTrace` producer. The trace must not alter AutoSave

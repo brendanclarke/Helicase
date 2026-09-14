@@ -1,7 +1,7 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 063. It includes the Session 058 Bank I/O and
+reference through Session 064. It includes the Session 058 Bank I/O and
 stopped-playback speedups, the Session 059 typed Instrument-index repair, and
 Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot Instrument
 `.hcindex` generation fix, and system-wide macOS AppleDouble (`._<name>`)
@@ -10,7 +10,10 @@ complete committed-hierarchy identity publication, and the root-CWD readiness
 contract. Session 063 adds the v4 binary PAT4 Pattern file format,
 `pat_scene_region_t` packed struct, `filesystem_requestLoadPatternForScenes()`
 scene-mask API, Pattern Load fan-out copy, Pattern Save/Load bug fixes, and
-HCNAMES 145-row expansion (Pattern rows 129-144). Low-level FAT directory
+HCNAMES 145-row expansion (Pattern rows 129-144). Session 064 adds the
+per-Scene hidden PAT4 AutoSave pairs, Pattern boot restore, Pattern-only `@`
+provenance, HCPR v2 identity coverage, and complete Bank-child Pattern-name
+publication. Low-level FAT directory
 reservation and lazy
 directory-cluster initialization, and the AppleDouble filter itself, are
 authoritative in `ASYNCFATFS_REFERENCE.md`.
@@ -31,13 +34,11 @@ Use this document to distinguish three things:
   Scene, and Bank, root `/.hcnames`, canonical eight-character name repair, a
   separate 2,048-byte non-Pattern validation stage, the reversible Instrument
   Load and InstrumentMrp `kit` rows backed by `.hctmp.<ext>`, and the root
-  `/.hcprms1`/`/.hcprms2` AutoSave pair and boot readers specified in
-  `AUTOSAVE.md`.
+  `/.hcprms1`/`/.hcprms2` AutoSave pair and boot readers, and the 16 hidden
+  Pattern A/B pairs specified in `AUTOSAVE.md`.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: AutoSave Pattern persistence (S064 plan exists:
-  separate per-Scene A/B pair files `.pat00a`..`.pat15b`, see
-  `S064_DYNAMIC_PATTERN_AUTOSAVE.md`), AutoSave Effect persistence,
+- Not implemented yet: AutoSave Effect persistence,
   crash-recoverable promotion into explicit Bank library files, real Effect
   load/save, descriptor-backed step automation playback,
   versioned/recoverable HCNAMES, and `/.hcrepair` roll-forward. The legacy
@@ -49,7 +50,7 @@ and current implemented state.
 
 ## Current Implementation Status
 
-Implemented through Session 061:
+Implemented through Session 064:
 
 - Normal kit loading scans root `Kit/` for numbered folders using asyncfatfs
   object iteration.
@@ -157,7 +158,8 @@ Implemented through Session 061:
   `fader_setting[6]`. `kitset.kcg` never emits these values; legacy
   `audio_out=` lines are parse-only side data for old embedded Kits.
 - Root Scene Load/Save is implemented for `Scene/NNN Name/` folders containing
-  `sceneset.scg`, embedded `Kit <name>/`, `pattern.pat`, and `effects.fx`.
+  `sceneset.scg`, embedded `Kit <name>/`, exactly one `<Pattern name>.pat`,
+  and `effects.fx`.
   `sceneset.scg` never stores the Scene name.
 - Root Scene and embedded Kit names originate in directory names, not fields of
   `scene_t` or `kit_t`. A successful root Scene Load publishes its Scene row
@@ -175,10 +177,9 @@ Implemented through Session 061:
 - Bank-local Scene folders use two digits, `00..15`, not root-library
   three-digit numbering. Bank Save writes every child selected by its 16-bit
   save mask and Bank Load iterates every requested/present local child.
-- Scene/Bank `pattern.pat` text v3 stores only the 112-byte 128x7 active-step
-  bitmap as seven 32-hex-character rows. Version 1 placeholders remain
-  accepted; v2 imports only its final 128-bit field and discards its former
-  length/scale prefix.
+- Scene/Bank Pattern files are exact binary PAT4 images. Version 1 placeholders
+  and legacy v2/v3 text remain accepted for import only; current saves never
+  emit them.
 - `File`, `Dir`, and Save-only `sDir` menu diagnostics and their two 64-entry
   name caches are retired. Compatibility APIs return empty/failure without
   starting filesystem work.
@@ -235,8 +236,8 @@ Current bridges and limitations:
   Save/Load, embedded Scene Save/Load, and Bank Save/Load all use the v4
   format. The v3 text bridge is removed from Scene/Bank paths. Root Pattern
   Load supports multi-Scene fan-out via
-  `filesystem_requestLoadPatternForScenes()`. AutoSave Pattern persistence
-  is not yet implemented (S064 plan exists).
+  `filesystem_requestLoadPatternForScenes()`. Session 064 Pattern AutoSave
+  persists each Scene independently in hidden root PAT4 A/B pairs.
 - `FS_FILE_KIT` save now routes to the new Kit directory writer. The old flat
   `.snd` Kit writer is no longer the normal Kit Save path.
 - `FS_FILE_MORPH` load/save still uses the legacy `.SND` morph-kit path.
@@ -282,6 +283,8 @@ settings.cfg
 /.hcnames
 /.hcprms1
 /.hcprms2
+/.pat00a ... /.pat15a
+/.pat00b ... /.pat15b
 ```
 
 ### Slot-ordered `.hcindex` name indexes and the single SRAM cache
@@ -380,9 +383,10 @@ rows 129..144  Pattern for resident Scene 0..15
                 row = 129 + scene
 ```
 
-`FS_RESIDENT_NAMES_ROW_COUNT` is 145. The AutoSave record's
-`AUTOSAVE_HCNAMES_ROW_COUNT` remains 129 until Session 064 expands it
-(breaking format change). `filesystem_residentPatternRow(scene_index)`
+`FS_RESIDENT_NAMES_ROW_COUNT` and `AUTOSAVE_HCNAMES_ROW_COUNT` are both 145.
+HCPR format v2 aligns its APIs/reader with this schema without changing its
+34,768-byte scalar geometry; Pattern identity remains in HCNAMES rather than
+HCPR payload cells. `filesystem_residentPatternRow(scene_index)`
 returns `129 + scene_index`.
 
 The first line is a header declaring the instrument type vocabulary:
@@ -899,7 +903,8 @@ Reserved:   10 bytes
 Pattern:    pattern_change_bar(1), pattern_next(1), reserved(14)
 Tracks:     7 × 16B: length(1), scale(1), shuffle(1), reserved(13)
 Address:    7 × 128 × 2B (uint16_t LE, trigger/specials/offset encoding)
-Bitmap:     512B (per-chunk occupancy, 0x00=free, 0xFF=occupied)
+Bitmap:     512B (bit-packed chunk occupancy; first 256B cover 2,048 chunks,
+            upper 256B are 0xFF reserved)
 Pool:       8,192B (PAT_STACK_SIZE × 32 bytes)
 ```
 
@@ -967,8 +972,8 @@ Current `scene_t` ownership:
 
 Pattern data is stored separately in `pat_scene_region_t` (one per Scene,
 accessed via `pat_sceneRegion()` / `pat_sceneRegionMut()`), not inside
-`scene_t`. The legacy `PatternSet` exists only in `filesystem_pattern_discard`
-for import compatibility.
+`scene_t`. Legacy text Pattern imports are converted directly into the dynamic
+region; no retained `PatternSet` or discard object remains.
 
 Current `scene_settings_t` fields:
 
@@ -1329,8 +1334,9 @@ Each `scene_t` owns one `kit_t`. Each `kit_t` owns six
 `kit_instrument_slot_t` records.
 
 `scene_t` and `kit_t` deliberately retain no Bank, Scene, Kit, Instrument,
-filename, or stem text. Their only contents are playable settings, PatternSet,
-Instrument types, and parameter images. HCNAMES owns display identity; the
+filename, or stem text. Their only contents are playable settings, Instrument
+types, and parameter images; Pattern lives in separate `pat_scene_region_t`
+storage. HCNAMES owns display identity; the
 immediate filesystem operation derives a component from an identity/index stem,
 slot context, and registry extension.
 
@@ -1684,19 +1690,19 @@ Pattern/
 ```
 
 Files are browsed alphanumerically. A pattern file can be loaded into a scene.
-Users may copy a scene's `pattern.pat` into this pool, and may copy a pool
-pattern into a scene if they rename it to `pattern.pat`.
+Current files are `NNN <name>.pat`; a Scene directory instead contains exactly
+one `<name>.pat` child. Use the firmware's Load/Save operations rather than
+renaming files to a fixed `pattern.pat` convention.
 
-Current bridge notes:
+Current Pattern notes:
 
-- Live `NUM_PATTERN` is 1.
-- Each resident Scene owns exactly one 112-byte `PatternSet` bitmap; no `Step`,
-  automation, length, scale, rotation, shuffle, note, probability, or velocity
-  Pattern storage remains.
-- v3 files serialize the seven literal bitmap rows. The old single global
-  shuffle and per-track timing extensions are ignored/omitted.
-- Final interchange migration/backfill should happen in external converters
-  once the final Pattern storage shape settles.
+- Each resident Scene owns one 10,519-byte dynamic Pattern region.
+- PAT4 persists trigger state, dynamic note/velocity/probability blocks,
+  allocator state, and current Pattern/track parameters.
+- Legacy v1-v3 text files are import-only and cannot represent the complete
+  current object.
+- Hidden per-Scene Pattern AutoSave files are root implementation artifacts,
+  not browser/library entries.
 
 ## Sample
 
@@ -2122,16 +2128,16 @@ winner validation, matching-winner restore, the all-refreshed
 HCNAMES-authoritative special path, per-row Case 1/2/3 behavior, deferred dirty
 replay/notices, and best-effort Pattern loading from explicit Scene files.
 
-The obsolete per-Instrument/Scene dot-backer proposal formerly in this section
+The obsolete per-Instrument/Scene scalar dot-backer proposal formerly in this section
 was never implemented and is removed to prevent two competing AutoSave
-specifications. Current firmware writes only the root `/.hcprms1` and
-`/.hcprms2` records; it does not create `.sceneset.scg`, `.kitset.kcg`,
+specifications. Current firmware writes the root `/.hcprms1`/`/.hcprms2`
+scalar pair plus 16 Pattern A/B pairs; it does not create `.sceneset.scg`, `.kitset.kcg`,
 `.pattern.pat`, `.effects.fx`, `.bankset.bcg`, or `.settings.cfg` backers.
 Explicit Bank/Scene/Kit/Instrument Load and Save continue to use the ordinary
 product objects specified above.
 
-Pattern/Effect persistence and crash-recoverable promotion into explicit Bank
-files remain future work. Less-common Load/Save/copy interactions and UI/cache
+Effect persistence and crash-recoverable promotion into explicit Bank files
+remain future work. Less-common Load/Save/copy interactions and UI/cache
 timing are regression/refactor targets in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; they must be changed through the
 single owner boundaries in `AUTOSAVE.md`, not by reviving the removed

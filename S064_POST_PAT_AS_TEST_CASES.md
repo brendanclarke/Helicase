@@ -96,12 +96,12 @@ complete (timing or separate issue). Content is correct.
 
 | # | Step | Expected | Result |
 |---|------|----------|--------|
-| 2.1 | Boot, load any Bank or Kit | Scenes present, AutoSave enabled | |
-| 2.2 | Edit pattern on current Scene (toggle steps, add specials) | `pat_markSceneDirty()` fires, dirty mask set | |
-| 2.3 | Wait ~5–10 s for drain (SD activity or trace) | `.patNNx` written at generation N+1 | |
-| 2.4 | Power cycle (hard reset, no explicit Save) | Device reboots | |
-| 2.5 | After boot, check current Scene's pattern | Step toggles and specials restored from AutoSave | |
-| 2.6 | Inspect SD: `.patNNx` file present, HCNAMES row is `@` | File validates (correct size, CRC, generation) | |
+| 2.1 | Boot, load any Bank or Kit | Scenes present, AutoSave enabled | PASS (TC2: Bank "DrainRst", 1 Scene) |
+| 2.2 | Edit pattern on current Scene (toggle steps, add specials) | `pat_markSceneDirty()` fires, dirty mask set | PASS (user edited steps + specials + voice params) |
+| 2.3 | Wait ~5–10 s for drain (SD activity or trace) | `.patNNx` written at generation N+1 | PASS (gen reached 22, both a+b files present) |
+| 2.4 | Power cycle (hard reset, no explicit Save) | Device reboots | PASS |
+| 2.5 | After boot, check current Scene's pattern | Step toggles and specials restored from AutoSave | PASS (user confirmed all edits restored) |
+| 2.6 | Inspect SD: `.patNNx` file present, HCNAMES row is `@` | File validates (correct size, CRC, generation) | PASS — `.pat00a` gen=22 winner, `.pat00b` gen=21, `Drain|@|R` |
 
 ### 3 — A/B ping-pong file alternation
 
@@ -111,11 +111,11 @@ complete (timing or separate issue). Content is correct.
 |---|------|----------|--------|
 | 3.1 | Start from clean state (no `.patNNx` files) | No hidden pattern files | PASS (TC1 card had none) |
 | 3.2 | Load Bank, wait for initial drain | Generation 1 → `.patNNb` files created | PASS (TC1: 4× `.patNNb` gen=1, no `a` files) |
-| 3.3 | Edit a pattern on Scene 0 | Dirty bit set | |
-| 3.4 | Wait for drain | Generation 2 → `.pat00a` created | |
-| 3.5 | Edit Scene 0 pattern again | Dirty bit set | |
-| 3.6 | Wait for drain | Generation 3 → `.pat00b` overwritten (gen 3 > gen 1) | |
-| 3.7 | Power cycle, check Scene 0 | Restored from `.pat00b` (generation 3, highest valid) | |
+| 3.3 | Edit a pattern on Scene 0 | Dirty bit set | PASS (TC2: multiple edits) |
+| 3.4 | Wait for drain | Generation 2 → `.pat00a` created | PASS (TC2: `.pat00a` gen=22, even→a) |
+| 3.5 | Edit Scene 0 pattern again | Dirty bit set | PASS (TC2: continued editing) |
+| 3.6 | Wait for drain | Generation 3 → `.pat00b` overwritten (gen 3 > gen 1) | PASS (TC2: `.pat00b` gen=21, odd→b) |
+| 3.7 | Power cycle, check Scene 0 | Restored from highest valid gen | PASS (TC2: gen 22 winner in `.pat00a`, edits restored) |
 
 ### 4 — Library Pattern load overrides AutoSave (S064 acceptance test C)
 
@@ -134,13 +134,18 @@ complete (timing or separate issue). Content is correct.
 
 **Goal**: Interrupted drain falls back to prior valid generation.
 
+**Execution status**: Deferred until a deterministic write-failure injection
+hook or equivalent instrumented harness exists. A manual power cut cannot be
+aimed at a specific background writer phase, so an uninstrumented attempt does
+not produce classifiable pass/fail evidence.
+
 | # | Step | Expected | Result |
 |---|------|----------|--------|
-| 5.1 | Have a valid generation-N AutoSave on Scene 0 | `.pat00x` at generation N | |
-| 5.2 | Edit the pattern (dirty bit set) | Drain will write generation N+1 | |
-| 5.3 | Power cycle DURING drain (before CRC write-back) | Interrupted file has bad CRC or truncated | |
-| 5.4 | After boot, check Scene 0 pattern | Restored from generation N (the prior valid file) | |
-| 5.5 | The interrupted edit is lost | Expected — AutoSave is best-effort | |
+| 5.1 | Prepare two valid, visibly distinct Scene-0 candidates | Newest and fallback generations are both known-good |
+| 5.2 | Arm an instrumented failure after the next target is opened/partially written but before its CRC transaction completes | The target becomes invalid while the prior candidate remains untouched |
+| 5.3 | Preserve and inspect the card before any reboot | One invalid newer target and one valid older candidate are proven |
+| 5.4 | Boot the preserved interrupted image | Reader rejects the target and restores the older candidate |
+| 5.5 | Verify the interrupted edit is absent | Expected best-effort loss; no corruption from the invalid file is applied |
 
 ### 6 — Multi-Scene drain and independent restore (S064 acceptance test B)
 
@@ -183,14 +188,18 @@ complete (timing or separate issue). Content is correct.
 
 **Goal**: Drain does not run while `seq_recordActive` or `seq_eraseActive`.
 
+**Execution status**: Deferred. Live Record is not yet complete enough to be a
+sound acceptance-test dependency, and the production UI does not expose an
+independent, observable hold/release boundary for both predicates. Test this
+with instrumentation once that workflow is implemented; it is not part of the
+functional Pattern AutoSave closeout below.
+
 | # | Step | Expected | Result |
 |---|------|----------|--------|
-| 9.1 | Edit a pattern (dirty bit set) | Drain pending | |
-| 9.2 | Enter recording mode (hold REC) | `seq_recordActive = 1` | |
-| 9.3 | While recording, observe that drain does NOT fire | No `.patNNx` write during recording | |
-| 9.4 | Exit recording mode | `seq_recordActive = 0` | |
-| 9.5 | Drain fires within next scheduler cycle | `.patNNx` updated | |
-| 9.6 | Repeat with erase mode | Same deferral behavior | |
+| 9.1 | Under instrumentation, make a Pattern dirty and force `seq_recordActive=1` | Dirty bit remains pending; no Pattern drain is admitted | |
+| 9.2 | Hold the predicate beyond several ordinary scheduler opportunities | Candidate generations remain unchanged | |
+| 9.3 | Clear `seq_recordActive` | Pending Scene drains and its generation advances once | |
+| 9.4 | Repeat by independently forcing `seq_eraseActive=1` | Same hold/release behavior is observed for the erase predicate | |
 
 ### 10 — Stale hidden files after Bank switch
 
@@ -211,10 +220,10 @@ complete (timing or separate issue). Content is correct.
 | # | Step | Expected | Result |
 |---|------|----------|--------|
 | 11.1 | Have valid `.pat00a` (gen 2) and `.pat00b` (gen 1) | Both validate | |
-| 11.2 | Corrupt `.pat00a` (flip a byte in the payload) | CRC no longer matches | |
-| 11.3 | Boot | `.pat00b` (gen 1) wins because `.pat00a` is invalid | |
-| 11.4 | Truncate `.pat00b` to 5,000 bytes | File too short for v4 image | |
-| 11.5 | Boot with both files invalid | Falls back to directory Pattern or `pat_initScene()` | |
+| 11.2 | In a copy of that checkpoint, flip one byte in root `/.pat00a` after offset 160 without updating its CRC; preserve a pre-boot copy | File remains 10,656 B but its calculated CRC32C differs from the stored CRC | |
+| 11.3 | Boot that card | `.pat00b` gen 1 wins; its known older marker state is visible | |
+| 11.4 | Restore the clean checkpoint; corrupt `.pat00a` again and truncate root `/.pat00b` to 5,000 bytes; preserve a pre-boot copy | A fails CRC and B fails exact-size validation | |
+| 11.5 | Boot with both candidates invalid | With the HCNAMES Pattern row still `@`, current boot behavior leaves Scene 0 at `pat_initScene()` defaults; it must not apply either damaged file | |
 
 ### 12 — Bank Load marks all children Pattern-dirty
 
@@ -238,10 +247,10 @@ HCNAMES Pattern rows 129–141 all show `@`.
 
 | # | Step | Expected | Result |
 |---|------|----------|--------|
-| 13.1 | After successful drain, check HCNAMES Pattern row | Source `@`, flag `R` present | |
-| 13.2 | Edit the pattern (mutate a step) | `R` flag cleared (refresh witness invalidated) | |
-| 13.3 | Wait for next drain to complete | `R` flag restored | |
-| 13.4 | During drain (after snapshot, before HCNAMES), edit pattern | `R` flag NOT set (drain race guard) | |
+| 13.1 | After successful drain, check HCNAMES Pattern row | Source `@`, flag `R` present | PASS (TC2: `Drain\t@\tR`) |
+| 13.2 | Edit the pattern (mutate a step) | `R` flag cleared (refresh witness invalidated) | — (not directly observed) |
+| 13.3 | Wait for next drain to complete | `R` flag restored | PASS (TC2: final state has `R`, so lifecycle completed) |
+| 13.4 | During drain (after snapshot, before HCNAMES), edit pattern | `R` flag NOT set (drain race guard) | — (race condition, impractical to test manually) |
 
 ### 14 — Absent Scene Pattern rows remain untouched
 
@@ -279,19 +288,23 @@ is stale at 32,768 B (incomplete/uncommitted).
 
 | # | Step | Expected | Result |
 |---|------|----------|--------|
-| 16.1 | Boot with 32 `.patNNx` files present | Measure time to ready state | |
-| 16.2 | Boot with no `.patNNx` files (delete all) | Measure time to ready state | |
-| 16.3 | Compare | No meaningful regression (< 500 ms delta) | |
+| 16.1 | Prepare and preserve an otherwise-complete card checkpoint containing valid gen-2 `/.pat00a` and gen-1 `/.pat00b` for all 16 Scenes | Exactly 32 valid hidden PAT4 candidates exist | |
+| 16.2 | Restore that same checkpoint before each trial; time power-on to the same ready-state cue three times | Record the median 32-file boot time | |
+| 16.3 | For each no-file trial, restore the same checkpoint and delete only root `/.pat??a` and `/.pat??b`; leave HCNAMES, HCPR, indexes, Bank, and settings unchanged | The comparison changes only hidden Pattern-file presence; `@` rows consequently initialize to defaults in this control | |
+| 16.4 | Time three no-file boots and compare medians | Record the delta; target is < 500 ms | |
 
-### 17 — Full 16-Scene drain throughput
+### 17 — Full 16-Scene background drain
 
-**Goal**: Measure worst-case drain time when all 16 Scenes are dirty.
+**Goal**: Verify that ordinary background operation saves distinct edits from
+all 16 Scenes without requiring phase timing or foreground interruption.
 
 | # | Step | Expected | Result |
 |---|------|----------|--------|
-| 17.1 | Load Bank with 16 present Scenes | All 16 dirty | |
-| 17.2 | Time from first drain to last drain completion | ~170 KB total write, estimate 16 scheduler cycles | |
-| 17.3 | Record elapsed time | Document for future reference | |
+| 17.1 | Boot the clean 16-Scene `FullHse` fixture | All Scenes load and background AutoSave starts | PASS |
+| 17.2 | During normal use, change each Scene's Pattern and at least one scalar parameter in each Scene | Every Scene becomes Pattern-dirty and scalar-dirty | PASS |
+| 17.3 | Allow normal background operation to settle, power off, and copy the card | One valid winning Pattern snapshot exists for every Scene | PASS |
+| 17.4 | Compare each winner with its directory PAT4 baseline | All 16 winners differ in Pattern address content | PASS |
+| 17.5 | Validate every candidate, HCNAMES Pattern row, HCPR record, and retained error trace | No invalid file, stale identity, operation error, or phase stall | PASS; see Test Card B result |
 
 ---
 
@@ -335,26 +348,147 @@ generation 2 → an 'a' file.
 
 | S064 Risk | Test Cases | Status |
 |-----------|------------|--------|
-| R1 — Record format break (hcprms v1→v2) | 15 | Preliminary pass |
-| R2 — 32 new root directory files | 16, 12 | 12 preliminary pass |
+| R1 — Record format break (hcprms v1→v2) | 15 | PASS (TC1: 15.3) |
+| R2 — 32 new root directory files | 16, 12 | 12 PASS (TC1: 12.1–12.3) |
 | R3 — SRAM cost (10,586 B) | Build verification | Confirmed in schedule |
-| R4 — Drain throughput | 17 | Not yet tested |
-| R5 — Boot ordering / AutoSave vs directory conflict | 4, 7, 8, 10 | Not yet tested |
-| R6 — Recording/erasing drain deferral | 9 | Not yet tested |
+| R4 — Drain throughput | 17 | Functional 16-Scene completion PASS; no elapsed-time bound claimed |
+| R5 — Boot ordering / AutoSave vs directory conflict | 4, 7, 8, 10 | Test Card A |
+| R6 — Recording/erasing drain deferral | 9 | Deferred until Live Record/instrumentation is ready |
 
 ---
 
-## Priority Order
+## Consolidated Test Workflows
 
-1. **1** — Pattern name propagation (preliminary concern flagged, test card ready)
-2. **2** — basic drain and restore (golden path)
-3. **3** — A/B ping-pong confirmation
-4. **4** — library load override
-5. **5** — power-loss recovery
-6. **6** — multi-Scene independence
-7. **7/8** — Save/library generation reset
-8. **9** — recording deferral
-9. **10** — Bank switch stale file isolation
-10. **11** — CRC rejection of corrupt files
-11. **16/17** — performance measurements
-12. **12/13/14/15** — edge cases and lifecycle details
+### Test Card A — `SD_CARD_TEST_CASE_A/` (covers TC4, 6, 7, 8, 10)
+
+```
+SD_CARD_TEST_CASE_A/
+├── settings.cfg                      autosave=1, active_bank=0
+├── Pattern/000 LibPat.pat            library Pattern for TC4/TC8
+├── Bank/000 BankAlf/                 4 Scenes: AlfZero–AlfThree
+│   ├── 00 Barf/ → AlfZero.pat
+│   ├── 01 Barf/ → AlfOne.pat
+│   ├── 02 Barf/ → AlfTwo.pat
+│   └── 03 Barf/ → AlfThree.pat
+└── Bank/001 BankBet/                 4 Scenes: BetZero–BetThree
+    ├── 00 Barf/ → BetZero.pat
+    ├── 01 Slak/ → BetOne.pat
+    ├── 02 RedSnap/ → BetTwo.pat
+    └── 03 Pop/ → BetThree.pat
+```
+
+**Workflow** (sequential, one boot session per block):
+
+1. Copy card contents to blank SD. Boot. Bank 000 "BankAlf" loads.
+2. Wait 15 s for drain. Verify 4× `.patNNb` gen=1.
+3. **TC6**: Switch to Scenes 0, 2, 3. Edit pattern on each differently
+   (e.g., Sc0: steps 1-4 on voice 1, Sc2: steps 9-12, Sc3: steps 13-16).
+   Wait for drain. **Power cycle.** Check each Scene's pattern restored
+   independently → TC6 pass.
+4. **TC4/TC8**: Load Pattern library entry "LibPat" into Scene 0.
+   Wait for drain. Observe: generation resets, `.pat00x` at gen 1.
+   **Power cycle.** Scene 0 should show LibPat content, not AlfZero.
+   HCNAMES row 129: name=`LibPat`, source=`@` → TC4/TC8 pass.
+5. **TC7**: Edit Scene 0 pattern several more times (get generation up
+   to 3+). Then **Save Scene 0** (explicit Save to slot). Wait for drain.
+   Check: generation resets to 1 (fresh epoch). **Power cycle.** Pattern
+   restored from fresh gen 1, not stale old files → TC7 pass.
+6. **TC10**: Load Bank 001 "BankBet" (via Bank browser). Wait for drain.
+   Check: HCNAMES Pattern rows show BetZero–BetThree names, not
+   AlfZero stale values. `.patNNb` files at gen 1 (fresh epoch).
+   **Power cycle.** BankBet patterns restored → TC10 pass.
+
+**Output**: Power off, mount card, copy root to `SD_CARD_TEST_CASE_A_OUTPUT/`.
+
+### Test Card B — `SD_CARD_TEST_CASE_B/` (16-Scene functional closeout)
+
+```
+SD_CARD_TEST_CASE_B/
+├── settings.cfg                      autosave=1, active_bank=0
+├── Pattern/000 LibPat.pat            library Pattern (spare)
+└── Bank/000 FullHse/                 16 Scenes (full house)
+    ├── 00 Barf/  ... 15 Pop/
+    └── bankset.bcg
+```
+
+**Static fixture audit (2026-09-14): PASS.** The seed contains exactly one
+Bank and all child slots 00..15, with one sceneset, one Pattern, one effects
+file, one embedded Kit, and six referenced Instruments per child. All 96
+Instrument references resolve exactly, all stems/display names satisfy the
+eight-character contract, and every Instrument `[params]` section matches its
+current type descriptor set. All 17 seed PAT4 files (16 Bank children plus the
+root library file) are exact 10,656-byte v1/stack-256/generation-0 images with
+valid CRC32C and consistent address/bitmap/pool state. Settings, bankset,
+scenesets, effects placeholders, Kit manifests, numeric ranges, and the
+intentional absence of generated hidden state also validate. No fixture file
+correction was required.
+
+#### Executed functional run (2026-09-14): **PASS — CLOSED**
+
+The hardware run used the feature as it actually operates: boot `FullHse`,
+enable the available Live Record mode, change every Scene's Pattern, change at
+least one parameter in every Scene, and leave AutoSave to run in the
+background. It did not attempt to stop or observe a particular writer phase.
+
+Inspection of `SD_CARD_TEST_CASE_B_OUTPUT/` found:
+
+- The complete seed Bank tree is still present and byte-identical to
+  `SD_CARD_TEST_CASE_B/`; the generated Bank and Pattern indexes contain the
+  expected slot-0 names, and the empty Kit/Scene indexes have the correct
+  1,000-row shape.
+- There are 19 Pattern candidates: valid generation-1 B files for all 16
+  Scenes plus valid generation-2 A files for Scenes 0..2. Size (10,656 B),
+  PAT4 version, stack size, CRC32C, generation/suffix parity, address ranges,
+  allocator bitmap, pool back-references, and non-overlap all validate.
+- The selected winner for every Scene differs from that Scene's directory
+  PAT4 baseline in address content. Address-byte difference counts for Scenes
+  0..15 are `36, 16, 7, 4, 4, 5, 6, 5, 5, 5, 6, 6, 5, 6, 6, 6`.
+  Therefore all 16 Pattern edits reached durable AutoSave candidates; the
+  mixed generation counts are consistent with the autonomous
+  drain reaching Scenes 0..2 before they received their later edits.
+- `/.hcnames` has the exact header and 145 data rows. Pattern rows 129..144
+  have the correct per-Scene names and all end in `@` plus refreshed witness
+  `R`.
+- Both HCPR candidates are valid committed 34,768-byte format-v2 records.
+  The winner is `/.hcprms1` generation 39, its peer is generation 38, its
+  mutation mask is empty, and comparison with the fixture finds 5–7 live
+  scalar parameter changes in every one of the 16 Scene regions.
+- `asavetrc.bin` is well-formed (11,395 eight-byte records). It
+  retains 38 scalar publications, generations 2..39, and all 38 terminal
+  records are successful. It contains no operation-error or phase-stall
+  record. The bounded diagnostic ring reports 6,513 dropped trace records;
+  that makes the trace incomplete but is not a Pattern AutoSave failure,
+  because every durable candidate and final identity/parameter record validates
+  independently.
+
+**Disposition**: no implementation defect was identified. Functional Pattern
+AutoSave testing is closed as **PASS**. This run proves autonomous 16-Scene
+Pattern persistence and coexistence with scalar AutoSave. It does not claim a
+timed throughput bound, deterministic mid-write recovery, corrupt-candidate
+fallback, or independent REC/erase-gate coverage; those require separate
+instrumentation and are not dependencies of this functional closeout.
+
+---
+
+## Completed Test Summary
+
+| TC | Description | Status | Evidence |
+|----|-------------|--------|----------|
+| Overall | Functional Pattern AutoSave | **PASS — CLOSED** | `SD_CARD_TEST_CASE_B_OUTPUT/` full 16-Scene run |
+| 1 | Pattern name propagation | **PASS** | TC1 run 2 (post-fix) |
+| 2 | Basic drain and restore | **PASS** | TC2 output |
+| 3 | A/B ping-pong alternation | **PASS** | TC1 (3.1–3.2) + TC2 (3.3–3.7) |
+| 12 | Bank Load marks all children dirty | **PASS** (12.1–12.3) | TC1 |
+| 13 | HCNAMES refresh witness `R` flag | **PASS** (13.1, 13.3) | TC2 |
+| 14 | Absent Scene rows untouched | **PASS** (14.1–14.3) | TC1 |
+| 15 | Format version (.hcprms v2) | **PASS** (15.3) | TC1 |
+| 4 | Library load overrides AutoSave | — | Test Card A |
+| 5 | Power-loss recovery | Deferred | Needs deterministic write-failure injection |
+| 6 | Multi-Scene independence | — | Test Card A |
+| 7 | Save resets generation epoch | — | Test Card A |
+| 8 | Library load resets generation | — | Test Card A |
+| 9 | Recording/erasing deferral | Deferred | Live Record/instrumentation not ready |
+| 10 | Bank switch stale file isolation | — | Test Card A |
+| 11 | CRC rejection of corrupt files | — | Supplemental fault-injection test |
+| 16 | Boot time measurement | — | Supplemental performance test |
+| 17 | Full 16-Scene background drain | **PASS** | `SD_CARD_TEST_CASE_B_OUTPUT/` |

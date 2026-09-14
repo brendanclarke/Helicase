@@ -594,7 +594,7 @@ Don't:
   files but filters `._*` AppleDouble entries before callbacks.
 - Kit/Scene/Bank `.hcindex` rows and typed Instrument rows reuse one
   1,000-by-9-byte cache in `filesystem.c`. HCNAMES uses its dedicated
-  129-by-9 mirror. Both are above asyncfatfs and do not alter object iteration
+  145-by-9 mirror. Both are above asyncfatfs and do not alter object iteration
   semantics.
 - File/Dir/sDir diagnostic menu entries and their list caches are retired.
   Compatibility facade calls perform no asyncfatfs operation. A total of 107

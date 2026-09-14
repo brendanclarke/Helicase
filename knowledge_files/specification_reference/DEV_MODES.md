@@ -521,4 +521,7 @@ For the current baseline:
 `tools/decode_devlogs.py` is the decoder for ordinary boot tokens, the
 conditional `ASENSURE` capsule, and `/asavetrc.bin` records. It does not
 decode AutoSave record payloads or replace the later, intentionally deferred
-general development-log converter.
+general development-log converter. Its `FS_INTERNAL_OPS` table is positional
+and must exactly match `fs_internal_op_t` in `filesystem.c`; Session 064
+closeout synchronized all 50 entries, including Pattern drain/HCNAMES/boot
+operations and Pattern scans.

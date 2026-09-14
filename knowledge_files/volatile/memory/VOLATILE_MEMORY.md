@@ -30,3 +30,15 @@ specified one, ask first — don't assume.
 Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
+
+## Current carryover after Session 064
+
+Pattern AutoSave functional acceptance is closed. Do not recreate tests that
+depend on interrupting a specific background phase or on unfinished Live
+Record behavior. The durable authority is
+`knowledge_files/log_archive/064_SESSION_HANDOFF_LOG.md`, `AUTOSAVE.md`, and
+`PATTERN_DYNAMIC_STACK.md`; the S063/S064 working plans and raw SD-card fixture
+directories are disposable. The next normal Pattern feature is Phase 4.5 copy
+operations with real pool-block duplication. Fault-injection, record/erase
+gate, CRC-corruption, and performance tests remain optional instrumented work,
+not blockers or identified defects.

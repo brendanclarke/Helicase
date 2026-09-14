@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-062, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+064, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, and the Phase 4 dynamic Pattern
 storage system. Historical migrations belong in session logs; this document states
 which live module owns each call, state transition, and retained object.
@@ -19,8 +19,9 @@ which live module owns each call, state transition, and retained object.
   live in `storageTypes.c/h`.
 - Sequencer may read pattern data through narrow PatternData playback helpers;
   it must not index PatternData storage arrays directly.
-- `pat_tmpPattern` is the active-pattern load staging buffer. The current
-  16-Scene Bank workspace does not allocate a separate staging Scene.
+- PAT4 readers stream into one selected live Scene and commit/fan out only
+  after validation. Pattern AutoSave streams from PatternData's one immutable
+  snapshot; there is no second staging Scene or per-Scene snapshot array.
 - Preset code lives under `Core/Bank/Scene/Preset/`, but public API names remain
   `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
 - Normal root Kit loads and saves are directory-based. Kit Morph Load and
@@ -42,13 +43,13 @@ which live module owns each call, state transition, and retained object.
   directly; missing/empty/corrupt metadata rebuilds only that type, while
   genuine FAT/SD failures remain terminal errors.
 - Root `/.hcnames` is the authoritative fixed-order resident identity and
-  provenance register. A dedicated 1,161-byte name mirror and the
-  filesystem-owned 258-byte source register retain its 129 rows independently
+  provenance register. A dedicated 1,305-byte name mirror and the
+  filesystem-owned 290-byte source register retain its 145 rows independently
   of the browser cache.
   Its physical file is a mandatory `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat`
-  header plus 129 rows; Instrument rows carry a mandatory three-byte type
-  column. Load/Save commits publish name, source, and refreshed state for the
-  complete hierarchy they committed.
+  header plus 145 rows; Instrument rows carry a mandatory three-byte type
+  column and rows 129..144 own Pattern identity. Load/Save commits publish
+  name, source, and refreshed state for the complete hierarchy they committed.
   The sole active identity block is 81 bytes: BankData's Bank row plus
   filesystem's Scene, Kit, and six Instrument rows. SceneData stores no name or
   filename text.
@@ -144,12 +145,11 @@ which live module owns each call, state transition, and retained object.
   `Core/Bank/Scene/SceneModTargets.c/h`. The first target set is `1vm..6vm` plus
   Scene Decimation `srt`; future FX parameters join that namespace instead of
   being inserted into per-instrument descriptor tables.
-- Live Pattern storage is the Session 062 dynamic address-array + pool +
-  bitmap system in `pat_regions`. The v3 filesystem bridge still persists
-  only the 112-byte trigger bitmap; dynamic specials (note, velocity,
-  probability) are not yet serialized. Per-track shuffle is the only live
-  shuffle storage; final migration/backfill remains deferred to external
-  converters.
+- Live Pattern storage is the dynamic address-array + pool + bit-packed bitmap
+  system in `pat_regions`. PAT4 persists the complete object, including
+  dynamic note/velocity/probability specials and current track/Pattern
+  parameters. Pattern AutoSave uses a separate dirty mask and root A/B files;
+  HCPR contains Pattern identity but no Pattern payload.
 
 ## Core/Bank/BankData
 
@@ -177,12 +177,12 @@ Bank Load/Save completion paths. See `058_SESSION_HANDOFF_LOG.md` §5.
 
 ## Core/Bank/Scene/Pattern/PatternData
 
-### Session 062 current contract
+### Session 064 current contract
 
 PatternData owns a three-part dynamic storage system per resident Scene:
 a 1,792-byte static address array (896 × uint16_t), an 8,192-byte event
 pool (PAT_STACK_SIZE=256 × 32-byte chunks), and a 512-byte free-tracking
-bitmap. These live in the permanent `pat_regions` symbol (167,936 bytes
+bitmap plus 23 parameter bytes. These live in the permanent `pat_regions` symbol (168,304 bytes
 total across 16 Scenes). Each address entry encodes trigger (bit 15),
 has-specials (bit 14), and a 14-bit pool byte offset (sentinel 0x3FFF).
 Pool blocks carry a 2-byte header, a 1-byte special-flags byte, and value
@@ -197,9 +197,9 @@ rewrite, reallocation, free, and graceful degradation on alloc failure.
 address entries. Copy operations remain deliberate no-ops pending pool
 block duplication design.
 
-The legacy `PatternSet` (112-byte bitmap) is retained only for the v3
-filesystem bridge; one discard instance lives in `filesystem.c`. `scene_t`
-no longer contains a PatternSet. Affiliates are SceneData, Sequencer,
+Current Scene/Bank/root Pattern interchange is exact binary PAT4; legacy text
+is import-only and no retained `PatternSet`/discard instance remains. `scene_t`
+does not contain Pattern data. Affiliates are SceneData, Sequencer,
 UI/LED/copy-clear, Euklid/SOM, and filesystem; none may add a parallel
 Pattern owner. See `SRAM_MANIFEST.md` for linked sizes and
 `PATTERN_DYNAMIC_STACK.md` for the complete specification.
@@ -247,21 +247,18 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_setTrackMidiChannel(pattern, track, channel)` / `pat_getTrackMidiChannel(pattern, track)` | Store/read per-track MIDI output channel in menu form (`1..16`). | `menu_parseGlobalParam(PAR_TRACK_MIDI_CHAN)`, Sequencer MIDI output/input matching |
 | `pat_setTrackMidiNote(pattern, track, note)` / `pat_getTrackMidiNote(pattern, track)` | Store/read per-track MIDI note override (`0` means fallback/default). | `menu_parseGlobalParam(PAR_TRACK_MIDI_NOTE)`, Sequencer trigger/preview/MIDI output |
 | `pat_setTrackShuffle(pattern, track, shuffle)` / `pat_getTrackShuffle(pattern, track)` | Store/read per-track shuffle amount (`0..127`); no legacy all-track shuffle import/export remains. | `menu_parseGlobalParam(PAR_SHUFFLE)`, filesystem per-track shuffle extension, Sequencer scheduler |
-| `pat_clearTrack(pattern, track)` | Reset one track. | copyClearTools, `pat_clearPattern()` |
-| `pat_clearPattern(pattern)` | Reset all tracks in one pattern. | copyClearTools, `pat_init()` |
-| `pat_clearAutomation(pattern, track, automTrack)` | Clear automation lane 0/1 for a track. | copyClearTools |
-| `pat_copyTrack(pattern, srcTrack, dstTrack)` | Copy one track inside a pattern. | copyClearTools |
-| `pat_copyPattern(srcPattern, dstPattern)` | Copy whole pattern slot. | copyClearTools |
+| `pat_clearTrack(scene, track)` | Free dynamic blocks and reset one track. | copyClearTools, `pat_clearPattern()` |
+| `pat_clearPattern(scene)` | Free dynamic blocks and reset all tracks in one Scene Pattern. | copyClearTools, initialization |
+| `pat_copyTrack(scene, src, dst)` / `pat_copyPattern(src_scene, dst_scene)` / `pat_copyBar(scene, track, src, dst)` | Reserved public copy surface. | Deliberate no-ops pending Phase 4.5 pool duplication |
 | `pat_setSelectedStep(step)` | Keep active step mirror in `PAR_ACTIVE_STEP`; `seq_selectedStep` no longer exists. | PatternData menu-apply and automation destination edit |
 | `pat_setActiveAutomationTrack(track)` / `pat_getActiveAutomationTrack(void)` | Select automation lane. | Menu; future UI clients |
 | `pat_armAutomationStep(step, track, armed)` | Arm/disarm held-step automation recording target. | buttonHandler long-press path |
-| `pat_recordNote(pattern, track, step, velocity, note)` | Record quantized note/velocity/probability/active state and parent main step. | `seq_addNote()` |
-| `pat_eraseMainStepSubSteps(pattern, track, mainStep)` | Erase one main-step cluster and restore first-sub-step invariant. | Sequencer live erase |
-| `pat_recordAutomation(pattern, track, step, dest, value)` | Write automation into a concrete quantized step. | Sequencer |
-| `pat_recordArmedAutomation(pattern, dest, value)` | Write automation into held/armed step if present. | Sequencer |
-| `pat_applyStepToMenu(pattern, track, step)` | Copy step editable fields into `parameter_values`. | buttonHandler, Menu active-step edits |
-| `pat_applyPatternSettingsToMenu(pattern)` | Copy pattern settings into menu params. | Menu load/apply paths, buttonHandler pattern view |
-| `pat_applyTrackSettingsToMenu(pattern, track)` | Copy track settings into menu params. | buttonHandler, led follow paths, Menu voice page |
+| `pat_readStepSpecials(scene, track, step)` | Resolve stored note/velocity/probability values and flags. | Sequencer, step menu |
+| `pat_setStepNote/Volume/Probability(scene, track, step, value)` | Tracked dynamic-block read/modify/write. | Menu edit path |
+| `pat_applyStepToMenu(scene, track, step)` | Copy step editable fields into `parameter_values`. | buttonHandler, Menu active-step edits |
+| `pat_applyPatternSettingsToMenu(scene)` | Copy Pattern settings into menu params. | Menu load/apply paths, buttonHandler Pattern view |
+| `pat_applyTrackSettingsToMenu(scene, track)` | Copy track settings into menu params. | buttonHandler, LED follow paths, Menu voice page |
+| `pat_snapshotScene(scene)` / `pat_autosaveSnapshot()` | Transfer one live Scene into the immutable Pattern AutoSave snapshot/read it during the drain. | filesystem Pattern scheduler/writer |
 
 ## Core/Bank/Scene/Pattern/EuklidGenerator
 
@@ -716,8 +713,9 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one direct Kit library slot `000..999` into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
 | `filesystem_requestLoadKitMorphForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging only so Preset can copy matching source normal endpoints into resident morph endpoints. | Preset/Menu KitMrp Load |
 | `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
-| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit into the independent non-Pattern stage, commit them after validation, then read Pattern directly into final Scene SRAM and validate the Effect placeholder. Pattern is intentionally non-atomic. On successful terminal root completion, Preset marks the implemented Scene-without-Pattern AutoSave scope before reporting `PRESET_OP_SCENE_LOAD`. | Preset/Menu Scene Load, boot |
-| `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, thin `pattern.pat`, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
+| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit into the independent non-Pattern stage, commit them after validation, then read/validate PAT4 into final Pattern storage and validate the Effect placeholder. Successful terminal completion marks Scene-with-Pattern AutoSave scope. | Preset/Menu Scene Load, boot |
+| `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, one named PAT4 file, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
+| `filesystem_requestLoadPatternForScenes(slot, scene_mask, cb)` | Validate one root-library PAT4 into the first selected Scene, fan out the complete region to the remaining selected Scenes, publish Pattern identity, and reset hidden-generation baselines. | Preset/Menu Pattern Load |
 | `filesystem_requestLoadInstrumentIndex(type, cb)` | Directly open and validate the registered type's `.hcindex` into the shared compact cache. Missing, empty, or structurally invalid metadata transfers the same accepted request into selected-type scan/write/sync recovery; fatal FAT/SD/read/scan/close/write faults return ERROR. The callback runs once. | Nested Instrument Load, InstrumentMrp, and Instrument Save type transitions |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the single shared 1,000-entry root Instrument browser cache for the currently loaded type. | Menu Instrument Load; boot uses one type-at-a-time scan/index passes |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Capture one typed index selection into immutable operation scratch and validate it into the one Instrument candidate stage without mutating live SceneData. | Preset Instrument request |
@@ -727,9 +725,10 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_loadedInstrumentWasMorphTemporary()` | Query whether the staged hidden Instrument load is the InstrumentMrp Morph-only baseline, valid beside the staged Instrument until the next request reuses operation scratch. | Preset Morph-apply origin dispatch |
 | `filesystem_ensureAutosaveFilesBlocking()` / `filesystem_setAutosaveEnabled(enabled)` / `filesystem_autosaveEnabled()` | Establish the hidden pair at boot, apply runtime policy, and authorize mutation tracking/background work only after successful setup. Format and failure rules are in `AUTOSAVE.md`. | `main.c`, Menu/settings policy |
 | `filesystem_validateAutosaveWinnerBlocking()` / `filesystem_hasBootWinner()` | Stream-validate both HCPR candidates after settings/index boot and expose only a valid active-Bank match to stage 11. | `main.c` boot stage 10b/11 |
-| `filesystem_autosaveBootReaderBlocking()` | Apply a validated matching winner and evaluate each Scene row as Case 1 payload, Case 2 narrow load, or Case 3 whole-Scene invalidation; Pattern loads best effort from its Scene source. | `main.c` boot stage 11 |
+| `filesystem_autosaveBootReaderBlocking()` | Apply a validated matching HCPR v2 winner and evaluate scalar Scene rows as Case 1 payload, Case 2 narrow load, or Case 3 whole-Scene invalidation. | `main.c` boot stage 11 |
+| `filesystem_patternAutosaveBootReaderBlocking()` | Validate each present Scene's PAT4 A/B pair and apply the eligible newest Pattern-AutoSave winner. | `main.c` after scalar restore |
 | `filesystem_regenerateHcnamesFromWinnerBlocking()` | Atomically rebuild absent/corrupt typed HCNAMES from a validated winner before its reader proceeds. | boot reader orchestration |
-| `filesystem_bootHcnamesAuthoritativeLoad()` | Load the settings-Bank-matching, all-129-rows-refreshed special state entirely from HCNAMES/library sources; decline on failed gates/hard error. | `main.c` boot stage 11 |
+| `filesystem_bootHcnamesAuthoritativeLoad()` | Load the settings-Bank-matching, all-145-rows-refreshed special state entirely from HCNAMES/library sources; decline on failed gates/hard error. | `main.c` boot stage 11 |
 | `filesystem_setBootLatchBankFallback()` | Record a canonical or HCNAMES-authoritative Bank restore whose dirty mark must replay after tracking enables. | `main.c`, HCNAMES-authoritative reader |
 | `filesystem_bootReaderNoticeSceneMask()` / `filesystem_bootReaderNoticeBankFallback()` | Read and clear Case-3/Bank one-shot notice state after audio starts. | Menu boot-notice sequencer |
 | `filesystem_autosaveTraceFlushBlocking()` | Bench-only durable boundary for currently pending lifecycle records; ordinary runtime trace flushing is autonomous and lower priority. | temporary test harness only |

@@ -1,12 +1,12 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-09-10 Session 062 C/D build.
-`arm-none-eabi-size build/lxr02.elf` reports `text=408,220`, `data=404`, and
-`bss=262,468`; `build/lxr02.bin` is 408,624 B and
-`build/LXRV2_lxr02.img` is 408,640 B with SHA-256
-`412ca5b21509e1e2a787d7f82f15a4946f0c92489eb3ed0f422056c87f58eee9`.
-The approved 258-byte `fs_resident_source` cache, the one-byte
+2026-09-14 Session 064 build at `d5af5fd`.
+`arm-none-eabi-size build/lxr02.elf` reports `text=426,756`, `data=412`, and
+`bss=289,964`; `build/lxr02.bin` is 427,168 B and
+`build/LXRV2_lxr02.img` is 427,184 B with SHA-256
+`c6d5c551e5f320c7c97427528dc937da7d6b3b297779cb70f945606e646cd481`.
+The approved 290-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
 This remains a linked-image inventory: sizes come from
 `arm-none-eabi-size -A` and `arm-none-eabi-nm -S --size-sort`, not source
@@ -24,9 +24,12 @@ five-byte set of filesystem boot-latch fields, seven bytes of boot-winner
 fields, and six Menu notice bytes; linked LTO symbols are 6, 12, and 6 bytes
 respectively because of structure alignment. The final 96-Instrument-type
 lifetime fix adds no BSS: it aliases the existing 144-byte Bank-child scratch.
-Session 062 B/B½ adds the permanent `pat_regions` Pattern allocation and
-removes the embedded Scene bridge bitmap; the legacy v3 filesystem bridge keeps
-one 112-byte discard `PatternSet` in normal SRAM1.
+Session 062 B/B½ added the permanent `pat_regions` Pattern allocation and
+removed the embedded Scene bitmap. Session 063 expanded each region by 23
+parameter bytes and removed the retained legacy discard object. Session 064
+adds exactly 10,586 bytes for one 10,519-byte Pattern snapshot, a two-byte
+Pattern dirty mask, sixteen 32-bit generations, and one drain-Scene byte. The
+HCNAMES mirror/source arrays expand from 129 to 145 rows (144 + 32 bytes).
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -52,12 +55,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 256,200 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **259,300 B** | **117,532 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **271,580 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 283,704 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **286,804 B** | **90,028 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **299,084 B** | — |
 
-The image contains 404 B of initialized SRAM1 data and 262,468 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 255,796 B in normal SRAM1
+The image contains 412 B of initialized SRAM1 data and 289,964 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 283,292 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -65,27 +68,29 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 395,288 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 413,824 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
-| `.data` | `0x20020c1c` | 404 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020db0` | 255,796 B | SRAM1 | Normal zero-initialized globals, including `pat_regions` |
+| `.data` | `0x20020c1c` | 412 B | SRAM1 | Initialized writable globals |
+| `.bss` | `0x20020db8` | 283,292 B | SRAM1 | Normal zero-initialized globals, including Pattern storage/snapshot |
 
 The final FLASH load image remains safely before the reserved sample-FLASH
-boundary `0x08080000`. `build/lxr02.bin` is 408,624 B.
+boundary `0x08080000`. `build/lxr02.bin` is 427,168 B.
 
 ## Primary SRAM1 owners
 
 | Symbol | Size | Purpose |
 | --- | ---: | --- |
 | `scenes` | 19,200 B | 16 resident `scene_t` values; Pattern storage is external to each Scene |
-| `pat_regions` | 167,936 B | 16 × 10,496-B Scene Pattern regions: address array, 8,192-B pool, 512-B bitmap |
-| `filesystem_pattern_discard` | 112 B | Legacy v3 `PatternSet` parser/writer sink; never live Scene data |
+| `pat_regions` | 168,304 B | 16 × 10,519-B Scene Pattern regions: address array, pool, bitmap, and 23 parameter bytes |
+| `pat_autosave_snapshot` | 10,519 B | Sole immutable Pattern AutoSave snapshot for one in-flight Scene |
+| `autosave_pattern_dirty_mask` | 2 B | Separate one-bit-per-Scene Pattern work ownership |
+| `fs_pattern_generation` + `fs_pattern_drain_scene` | 65 B | Sixteen hidden-pair generation baselines plus current drain selector |
 | `fs_list_cache_name` | 9,000 B | Shared typed-Instrument and numbered-library `.hcindex` browser cache |
-| `fs_resident_source` | 258 B | Persistent 129-row HCNAMES provenance register; approved filesystem-owned source cache |
-| `hcnames_name_mirror` | 1,161 B | Session 058 Option 1C dedicated 129-by-9 HCNAMES name mirror (replaces HCNAMES borrowing of `fs_list_cache_name`) |
+| `fs_resident_source` | 290 B | Persistent 145-row HCNAMES provenance register; approved filesystem-owned source cache |
+| `hcnames_name_mirror` | 1,305 B | Dedicated 145-by-9 HCNAMES name mirror, independent of `fs_list_cache_name` |
 | `hcnames_mirror_valid` | 1 B | Session 058 Option 1C tri-state mirror validity gate |
 | `op_bank_child_scratch` | 144 B | Shared Session 058 Option 1A 16-by-9 Bank-child display view and zero-growth Session 061 16-by-6 boot-reader Instrument-type view; lifetimes are mutually exclusive |
 | `fs_boot_latch` | 6 B linked / 5 B logical | Boot-only Bank-fallback byte plus 16-bit Case-2 and Case-3 masks; replayed after tracking enables, with notice fields cleared by Menu accessors |
@@ -139,7 +144,7 @@ all of them.
 
 | Change | Current linked result |
 | --- | --- |
-| Pattern representation | `scenes` is 19,200 B; `pat_regions` is 16 x 10,496 B = 167,936 B; the 112-B bridge is a separate discard sink. No `Step[7][128]` symbol is linked. |
+| Pattern representation | `scenes` is 19,200 B; `pat_regions` is 16 × 10,519 B = 168,304 B; `pat_autosave_snapshot` is 10,519 B. No `PatternSet`, discard sink, or `Step[7][128]` symbol is linked. |
 | Slider LUT | `slider_lut` is 4,096 B: 1,024 `float` values, four ADC codes per non-interpolated node. |
 | Instrument runtime ownership | Exactly one `runtime_slots` symbol is linked at 7,056 B. No native drum/snare/cymbal/hat object or per-engine expansion pool is linked. |
 

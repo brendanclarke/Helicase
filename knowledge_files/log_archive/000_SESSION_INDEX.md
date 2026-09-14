@@ -72,6 +72,7 @@
 | 061 | 2026-09-05/08 | commit `6642f4c` on `dev-ph3-autosave-ph6`, plus documentation closeout and `SD_CARD_READER_9` capture | Typed 130-line HCNAMES; matching-winner and all-refreshed HCNAMES-authoritative AutoSave boot readers; complete hierarchy publication; Pattern fallback; zero-growth 96-type lifetime fix; Reader 9 hardware acceptance; deferred Load/Save test matrix |
 | 062 | 2026-09-09/10 | commit `7b3254b` on `dev-ph3-autosave-ph6` | Phase 4 dynamic Pattern storage: 16-Scene address array + 256-chunk pool + free bitmap (167,936 B), first-fit allocator, per-step note/velocity/probability specials, block read/write, hardware RNG probability gating in Sequencer, step-edit menu bridge, PatternSet removal from scene_t; hardware-verified |
 | 063 | 2026-09-12 | commit `6bc4fb9` on `dev-ph4-pattern` | v4 binary PAT4 Pattern file format, Pattern Save/Load bug fixes, `pat_scene_region_t` packed struct, HCNAMES 145-row expansion, `filesystem_requestLoadPatternForScenes` scene-mask API, S064 Pattern AutoSave plan |
+| 064 | 2026-09-12/14 | commits `e268107`..`d5af5fd` on `dev-ph4-pattern` | Per-Scene PAT4 A/B Pattern AutoSave, independent 16-bit dirty tracking and 10,519-byte snapshot, HCPR v2 plus 145-row HCNAMES, boot restore, Bank-Load Pattern-name publication fix, and hardware-accepted 16-Scene functional closeout |
 
 
 ---
@@ -450,9 +451,18 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | Bank Save is per-Scene delete-then-write, not total-tree-delete-then-recreate — a partial `Save:[Bank]` (subset mask) no longer deletes non-selected resident children | 057 |
 | v4 PAT4 binary Pattern format: 10,656 B (160B header + 1,792B addr + 512B bitmap + 8,192B pool), CRC32C at offset 14, generation counter at offset 10, magic "PAT4" | 063 |
 | `pat_scene_region_t` is the per-Scene SRAM struct: 10,519 B × 16 Scenes in SRAM1; Option B accessors `pat_sceneRegion()` / `pat_sceneRegionMut()` | 063 |
-| HCNAMES is 145 rows on the filesystem side: 129 original + 16 Pattern rows (129-144, one per resident Scene, no type field). `AUTOSAVE_HCNAMES_ROW_COUNT` stays 129 until S064 | 063 |
+| HCNAMES is 145 rows: row 0 Bank, 1..16 Scene, 17..32 Kit, 33..128 Instrument (6 per Scene), 129..144 Pattern (1 per Scene, no type field). `AUTOSAVE_HCNAMES_ROW_COUNT` is 145 as of S064 | 063, 064 |
 | `filesystem_requestLoadPatternForScenes(slot, scene_mask, cb)` is the root Pattern Load API with mask validation and fan-out `memcpy` of `pat_scene_region_t` | 063 |
 | Pattern Save must set `op_scene_load_scene_mask` to the single `op_pattern_scene` bit for HCNAMES multi-row publication compatibility | 063 |
+| HCPR is format v2 (34,768 B unchanged geometry); v1 records are rejected by the Pattern-aware reader. Pattern identity/payload never enter HCPR — they live in HCNAMES rows 129..144 and the 32 hidden PAT4 files | 064 |
+| Pattern AutoSave uses 16 independent hidden root A/B pairs (`/.pat00a/b` through `/.pat15a/b`), a separate 16-bit dirty mask, one 10,519-byte immutable snapshot, and per-Scene nonzero generation baselines. Pattern is the lowest-priority background claimant after settings, trace, and scalar HCPR | 064 |
+| Pattern AutoSave `@` source is `FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE == 0x1ffc`, distinct from Instrument-direct `@ == 0x1ffd`; only HCNAMES rows 129..144 may carry it | 064 |
+| Pattern snapshot admission is deferred while `seq_recordActive` or `seq_eraseActive` — the `memcpy` does not mask TIM3 or any interrupt | 064 |
+| Pattern AutoSave clear-before-snapshot: the dirty bit is cleared before `memcpy`, a later mutation re-sets it, any writer error re-arms it, and successful completion publishes `R` only if no post-snapshot edit occurred | 064 |
+| Boot Pattern reader applies the highest-generation valid hidden PAT4 winner only when the HCNAMES Pattern row is `@` and generation is nonzero; missing/corrupt candidates never empty scalar Scene state | 064 |
+| Explicit root Pattern Load and Scene/Bank directory Pattern loads reset the destination generation baseline to zero, starting a fresh AutoSave lineage | 064 |
+| `filesystem_cacheCurrentBankSceneNameBlock()` must cache the Pattern HCNAMES row (row 129+scene_index) alongside Scene/Kit/Instrument rows — the S064 fix for the `Empty|@` Bank Load defect | 064 |
+| `tools/decode_devlogs.py` operation-name table must match the `fs_internal_op_t` enum in `filesystem.c` (50 entries as of S064); Session 064 synchronized it after the S061/S063/S064 insertions broke labels after operation 8 | 064 |
 
 ---
 
@@ -1145,3 +1155,31 @@ dirty mask. Build: `text=423996, data=416, bss=279372`.
   command lifecycle + scene mask), `filesystem_requestLoadPatternForScenes()`
   API, HCNAMES 145-row expansion, Pattern Load fan-out copy, S064 AutoSave
   plan, and [063_SESSION_HANDOFF_LOG.md](063_SESSION_HANDOFF_LOG.md)
+
+### 064 — Dynamic Pattern AutoSave And Functional Closeout (2026-09-12/14)
+
+Implemented separate per-Scene hidden PAT4 ping-pong files (`/.pat00a/b`
+through `/.pat15a/b`) with generation/parity selection, exact-size and CRC32C
+validation, a 16-bit Pattern dirty mask, one 10,519-byte snapshot, whole-file
+background streaming, retry-on-error, and boot restore. Pattern identity now
+uses HCNAMES rows 129..144 with the Pattern-only `@` source token; HCPR moved
+to format v2 for the Pattern-aware 145-row HCNAMES contract without changing
+its 34,768-byte scalar geometry; Pattern identity/payload remain outside HCPR.
+Snapshot admission is deferred while sequencer
+record or erase is active, and Pattern remains the lowest-priority background
+claimant after settings, trace, and scalar AutoSave work.
+
+Hardware testing closed the functional Pattern AutoSave feature PASS. The
+full 16-Scene Card B capture contained 19 valid PAT4 candidates; every Scene's
+winning Pattern differed from its seed, all Pattern HCNAMES rows were `@|R`,
+both HCPR v2 records were valid, and all Scenes had scalar mutations. A Bank
+Load identity-publication defect found during testing was fixed by caching the
+Pattern row with the other Scene children. Deterministic mid-write power-loss
+and record/erase admission tests remain deferred pending instrumentation/live
+record readiness; they are not defects or prerequisites for this functional
+closeout. Card A stopped because its generated fixture/instructions were
+invalid, not because of a firmware `BKKit14` defect.
+
+- **Find here**: [064_SESSION_HANDOFF_LOG.md](064_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE.md`, `PATTERN_DYNAMIC_STACK.md`, `FILESYSTEM_SPEC.md`, and
+  `SRAM_MANIFEST.md`.
