@@ -1145,19 +1145,23 @@ static uint8_t menuIndex = 0;
 static uint8_t menu_voiceSubPageScreen[NUM_SUB_PAGES];
 
 /*
- * STEP automation editor state (+3 B static Menu state).
+ * STEP automation editor state (+5 B static Menu state).
  *
- * What: the selected automation page, DELETE/CLEAR action, and activation
- * flag for the custom SEQ sub-page-1 renderer. Why: the normal eight-cell menu
- * table no longer owns the retired P1/P2 controls; PatternData owns the list
- * while Menu retains only this transient cursor/mode state. Inputs/outputs:
- * navigation, encoder, and endless-pot handlers update these bytes and the
- * renderer reads them. Lifetime: foreground Menu session only; state resets on
- * active-step, track, or page-context changes. Affiliate: pat_* automation CRUD.
+ * What: the selected automation page, DELETE/CLEAR action, activation flag,
+ * five-item cursor, and number-lock mode for the custom SEQ sub-page-1
+ * renderer. Why: the normal eight-cell menu table no longer owns the retired
+ * P1/P2 controls; PatternData owns the list while Menu retains only this
+ * transient cursor/mode state. Inputs/outputs: navigation, encoder, and
+ * endless-pot handlers update these bytes and the renderer reads them.
+ * Lifetime: foreground Menu session only; state resets on active-step, track,
+ * or page-context changes. Cost: 5 B static SRAM. Affiliate: pat_* automation
+ * CRUD.
  */
 static uint8_t menu_stepAutoPageIndex = 0u;
 static uint8_t menu_stepAutoDeleteMode = 0u;
 static uint8_t menu_stepAutoActive = 0u;
+static uint8_t menu_stepAutoCursor = 0u;
+static uint8_t menu_stepAutoNumberLocked = 0u;
 
 uint8_t menu_numSamples = 0;
 uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
@@ -6280,6 +6284,15 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
         }
     }
 
+    /*
+     * STEP specials lead to the live automation pages on the right. The
+     * custom automation renderer takes ownership once the user scrolls past
+     * probability, so this affordance is limited to the three fixed cells.
+     */
+    if (menu_activePage == SEQ_PAGE && activePage == 1u &&
+        !menu_stepAutoActive && activeParameter <= 2u)
+        return '>';
+
     if (has2ndPage(activePage)) return is2ndPage ? '<' : '>';
     else return 0;
 }
@@ -6913,6 +6926,96 @@ static void menu_stepAutomationReset(void)
     menu_stepAutoPageIndex = 0u;
     menu_stepAutoDeleteMode = 0u;
     menu_stepAutoActive = 0u;
+    menu_stepAutoCursor = 0u;
+    menu_stepAutoNumberLocked = 0u;
+}
+
+/*
+ * Upper-bound clamp for a 7-bit automation value based on target dtype.
+ *
+ * Inputs: resolved descriptor (may be NULL). Output: maximum valid value
+ * in the 7-bit automation domain. DTYPE_MENU tables return count-1 so the
+ * encoder cannot produce OOB indices; MENU_WAVEFORM is excluded because
+ * indices beyond the built-in table address sample slots.
+ */
+static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
+{
+    uint8_t dtype_lo;
+
+    if (!descriptor)
+        return 127u;
+    dtype_lo = (uint8_t)(descriptor->dtype & 0x0fu);
+    switch (dtype_lo) {
+    case DTYPE_MENU: {
+        uint8_t menuId = (uint8_t)(descriptor->dtype >> 4);
+
+        switch (menuId) {
+        case MENU_FILTER:     return (uint8_t)(filterTypes[0][0] - 1u);
+        case MENU_TRANS:      return (uint8_t)(transientNames[0][0] - 1u);
+        case MENU_LFO_WAVES:  return (uint8_t)(lfoWaveNames[0][0] - 1u);
+        case MENU_RETRIGGER:  return (uint8_t)(retriggerNames[0][0] - 1u);
+        case MENU_SYNC_RATES: return (uint8_t)(syncRateNames[0][0] - 1u);
+        default: return 127u;
+        }
+    }
+    case DTYPE_ON_OFF:
+    case DTYPE_MIX_FM:
+        return 1u;
+    case DTYPE_LFO_POLARITY:
+        return 2u;
+    default:
+        return 127u;
+    }
+}
+
+/*
+ * Format a 7-bit automation value into 3 display characters by dtype.
+ *
+ * Inputs: resolved descriptor (may be NULL), 7-bit value, output buffer.
+ * Output: 3 characters written to buf. Named dtypes show their short text;
+ * numeric dtypes show a space-padded decimal. DTYPE_MENU values beyond the
+ * table count fall through to numeric display.
+ */
+static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
+                                        uint8_t value, char *buf)
+{
+    uint8_t dtype_lo;
+
+    if (!descriptor) {
+        numtostrpu(buf, value, ' ');
+        return;
+    }
+    dtype_lo = (uint8_t)(descriptor->dtype & 0x0fu);
+    switch (dtype_lo) {
+    case DTYPE_MENU: {
+        uint8_t menuId = (uint8_t)(descriptor->dtype >> 4);
+        uint8_t max_val = menu_automationValueMax(descriptor);
+
+        if (menuId == MENU_WAVEFORM || value <= max_val)
+            getMenuItemNameForValue(menuId, value, buf);
+        else
+            numtostrpu(buf, value, ' ');
+        return;
+    }
+    case DTYPE_ON_OFF:
+        memcpy(buf, value ? menuText_on : menuText_off, 3);
+        return;
+    case DTYPE_MIX_FM:
+        memcpy(buf, (value == 1u) ? menuText_mix : menuText_fm, 3);
+        return;
+    case DTYPE_LFO_POLARITY:
+        menu_getLfoPolarityName(value, buf);
+        return;
+    case DTYPE_PM63:
+        numtostrps(buf, (int8_t)(value - 63));
+        return;
+    case DTYPE_NOTE_NAME:
+        setNoteName(value, buf);
+        return;
+    default:
+        numtostrpu(buf, value, ' ');
+        return;
+    }
 }
 
 /*
@@ -7189,15 +7292,31 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
     }
 
     if (field == 3u) {
-        int16_t next = (int16_t)autos[page].value + inc;
+        instrument_param_id_t vt = autos[page].target;
+        const ParamDescriptor *desc = 0;
+        uint8_t max_val = 127u;
+        int16_t next;
+
+        if (instrumentParam_isVoiceParameter(vt) &&
+            instrumentManager_targetValid(scene, vt,
+                                          INSTRUMENT_TARGET_AUTOMATION)) {
+            uint8_t s = instrumentParam_slot(vt);
+            const kit_instrument_slot_t *inst =
+                scene_instrumentSlotConst(scene, s);
+
+            if (inst)
+                desc = instrumentManager_descriptor(
+                    inst->type, instrumentParam_local(vt));
+        }
+        max_val = menu_automationValueMax(desc);
+        next = (int16_t)autos[page].value + inc;
         if (next < 0)
             next = 0;
-        if (next > 127)
-            next = 127;
+        if (next > (int16_t)max_val)
+            next = (int16_t)max_val;
         if ((uint8_t)next == autos[page].value)
             return 0u;
-        return pat_writeStepAutomation(scene, track, step,
-                                       autos[page].target, (uint8_t)next);
+        return pat_writeStepAutomation(scene, track, step, vt, (uint8_t)next);
     }
     return 0u;
 }
@@ -7243,6 +7362,12 @@ static uint8_t menu_stepAutomationExecuteItem0(void)
     if (page >= count) {
         if (!menu_stepAutomationAddDefault())
             return 0u;
+        /*
+         * A clicked Add becomes an assigned page at cursor item 0. Number
+         * lock is cleared because the newly created page is now editable.
+         */
+        menu_stepAutoCursor = 0u;
+        menu_stepAutoNumberLocked = 0u;
     } else if (menu_stepAutoDeleteMode) {
         (void)pat_removeTrackAutomationByTarget(scene, track, autos[page].target);
     } else {
@@ -7257,12 +7382,13 @@ static uint8_t menu_stepAutomationExecuteItem0(void)
 /*
  * Render the variable-length STEP automation page.
  *
- * What: row 1 shows action/VOICE/PARAM/AMT labels and row 2 shows the selected
- * step, target slot, descriptor, and 0..127 value. Why: the normal Page table
- * has no fixed number of automation rows. Inputs: PatternData's decoded list,
- * Menu cursor, and current target descriptors. Output: two complete 16-column
- * LCD rows; the final synthetic page is an Add affordance. Affiliates:
- * menu_repaintGeneric(), InstrumentManager, and SceneModTargets.
+ * What: render the cursor-driven compact automation page or one selected
+ * voice/parameter/amount detail view. Why: the normal Page table has no fixed
+ * number of automation rows and cannot express the synthetic Add page.
+ * Inputs: PatternData's decoded list, Menu cursor, and current target
+ * descriptors. Output: two complete 16-column LCD rows with stale characters
+ * cleared before every frame. Affiliates: menu_repaintGeneric(),
+ * InstrumentManager, and SceneModTargets.
  */
 static void menu_repaintStepAutomation(void)
 {
@@ -7273,15 +7399,137 @@ static void menu_repaintStepAutomation(void)
     uint8_t count = pat_readStepAutomations(scene, track, step, autos,
                                             PAT_BLOCK_AUTO_COUNT_MASK);
     uint8_t page = menu_stepAutoPageIndex;
+    uint8_t on_add = (uint8_t)(page >= count);
 
     memset(editDisplayBuffer[0], ' ', 16u);
     memset(editDisplayBuffer[1], ' ', 16u);
-    if (page >= count) {
-        memcpy(&editDisplayBuffer[0][0], "add", 3u);
-        memcpy(&editDisplayBuffer[0][4], "voi", 3u);
-        memcpy(&editDisplayBuffer[0][8], "par", 3u);
-        memcpy(&editDisplayBuffer[0][12], "amt", 3u);
+
+    if (editModeActive && !on_add && menu_stepAutoCursor >= 2u) {
+        uint16_t target = autos[page].target;
+
+        if (menu_stepAutoCursor == 2u) {
+            memcpy(&editDisplayBuffer[0][0], "Target  Voice", 13u);
+            if (instrumentParam_isVoiceParameter(target) &&
+                instrumentManager_targetValid(scene, target,
+                                              INSTRUMENT_TARGET_AUTOMATION)) {
+                numtostru(&editDisplayBuffer[1][2],
+                          (uint8_t)(instrumentParam_slot(target) + 1u));
+            } else {
+                menu_copyPaddedField(&editDisplayBuffer[1][2],
+                                     "Invalid", 7u);
+            }
+        } else if (menu_stepAutoCursor == 3u) {
+            const char *label = 0;
+            uint8_t label_width = 0u;
+
+            memcpy(&editDisplayBuffer[0][0], "Target  Parametr", 16u);
+            if (sceneModTarget_isSceneTarget(target)) {
+                const scene_mod_target_descriptor_t *scene_descriptor =
+                    sceneModTarget_descriptor(target);
+                if (scene_descriptor) {
+                    uint8_t i = 0u;
+                    uint8_t j = 0u;
+
+                    while (i < 14u && scene_descriptor->category &&
+                           scene_descriptor->category[i]) {
+                        editDisplayBuffer[1][2u + i] =
+                            scene_descriptor->category[i];
+                        i++;
+                    }
+                    if (i < 14u)
+                        editDisplayBuffer[1][2u + i++] = ' ';
+                    while (i < 14u && scene_descriptor->long_name &&
+                           scene_descriptor->long_name[j]) {
+                        editDisplayBuffer[1][2u + i] =
+                            scene_descriptor->long_name[j++];
+                        i++;
+                    }
+                } else {
+                    label = "Invalid";
+                    label_width = 7u;
+                }
+            } else if (instrumentParam_isVoiceParameter(target) &&
+                       instrumentManager_targetValid(
+                           scene, target, INSTRUMENT_TARGET_AUTOMATION)) {
+                uint8_t slot = instrumentParam_slot(target);
+                const kit_instrument_slot_t *instrument =
+                    scene_instrumentSlotConst(scene, slot);
+                const ParamDescriptor *descriptor = instrument
+                    ? instrumentManager_descriptor(
+                          instrument->type, instrumentParam_local(target))
+                    : 0;
+                if (descriptor) {
+                    uint8_t i = 0u;
+                    uint8_t j = 0u;
+
+                    while (i < 14u && descriptor->category &&
+                           descriptor->category[i]) {
+                        editDisplayBuffer[1][2u + i] =
+                            descriptor->category[i];
+                        i++;
+                    }
+                    while (i < 14u && descriptor->long_name &&
+                           descriptor->long_name[j]) {
+                        editDisplayBuffer[1][2u + i] =
+                            descriptor->long_name[j++];
+                        i++;
+                    }
+                } else {
+                    label = "Invalid";
+                    label_width = 7u;
+                }
+            } else {
+                label = "Invalid";
+                label_width = 7u;
+            }
+            if (label)
+                menu_copyPaddedField(&editDisplayBuffer[1][2], label,
+                                     label_width);
+        } else {
+            uint8_t amt_value = autos[page].value;
+            char *amt_out = &editDisplayBuffer[1][2];
+
+            memcpy(&editDisplayBuffer[0][0], "Autom.  Amount", 14u);
+            {
+                const ParamDescriptor *desc = 0;
+
+                if (instrumentParam_isVoiceParameter(target) &&
+                    instrumentManager_targetValid(scene, target,
+                                                  INSTRUMENT_TARGET_AUTOMATION)) {
+                    uint8_t slot = instrumentParam_slot(target);
+                    const kit_instrument_slot_t *inst =
+                        scene_instrumentSlotConst(scene, slot);
+
+                    if (inst)
+                        desc = instrumentManager_descriptor(
+                            inst->type, instrumentParam_local(target));
+                }
+                menu_formatAutomationValue3(desc, amt_value, amt_out);
+            }
+        }
+        return;
+    }
+
+    /* Compact view uses one selectable number, action, and three fields. */
+    editDisplayBuffer[0][0] = menu_stepAutoNumberLocked ? '*'
+        : (menu_stepAutoCursor == 0u ? '>' : ' ');
+    editDisplayBuffer[0][1] = (char)('0' + (page / 10u));
+    editDisplayBuffer[0][2] = (char)('0' + (page % 10u));
+    memcpy(&editDisplayBuffer[0][4], "voi", 3u);
+    memcpy(&editDisplayBuffer[0][8], "par", 3u);
+    memcpy(&editDisplayBuffer[0][12], "amt", 3u);
+    if (!on_add && menu_stepAutoCursor == 2u)
+        upr_three(&editDisplayBuffer[0][4]);
+    if (!on_add && menu_stepAutoCursor == 3u)
+        upr_three(&editDisplayBuffer[0][8]);
+    if (!on_add && menu_stepAutoCursor == 4u)
+        upr_three(&editDisplayBuffer[0][12]);
+
+    if (on_add) {
+        editDisplayBuffer[1][0] = menu_stepAutoCursor == 1u ? '>' : ' ';
         memcpy(&editDisplayBuffer[1][1], "add", 3u);
+        if (menu_stepAutoCursor == 1u)
+            upr_three(&editDisplayBuffer[1][1]);
         memcpy(&editDisplayBuffer[1][5], "off", 3u);
         memcpy(&editDisplayBuffer[1][9], "off", 3u);
         memcpy(&editDisplayBuffer[1][13], "off", 3u);
@@ -7289,16 +7537,19 @@ static void menu_repaintStepAutomation(void)
         uint16_t target = autos[page].target;
         uint8_t valid = instrumentManager_targetValid(
             scene, target, INSTRUMENT_TARGET_AUTOMATION);
-        numtostrpu(&editDisplayBuffer[0][0], page, '0');
-        memcpy(&editDisplayBuffer[0][4], "voi", 3u);
-        memcpy(&editDisplayBuffer[0][8], "par", 3u);
-        memcpy(&editDisplayBuffer[0][12], "amt", 3u);
-        if (page + 1u < count)
-            editDisplayBuffer[0][15] = '>';
+        const ParamDescriptor *descriptor = 0;
+
+        editDisplayBuffer[0][15] =
+            (uint8_t)(page + 1u < count ||
+                      (page + 1u == count &&
+                       count < PAT_BLOCK_AUTO_COUNT_MASK)) ? '>' : ' ';
+        editDisplayBuffer[1][0] = menu_stepAutoCursor == 1u ? '>' : ' ';
         if (menu_stepAutoDeleteMode)
             memcpy(&editDisplayBuffer[1][1], "clr", 3u);
         else
             memcpy(&editDisplayBuffer[1][1], "del", 3u);
+        if (menu_stepAutoCursor == 1u)
+            upr_three(&editDisplayBuffer[1][1]);
         if (sceneModTarget_isSceneTarget(target)) {
             memcpy(&editDisplayBuffer[1][5], "scn", 3u);
             sceneModTarget_formatShort(target, &editDisplayBuffer[1][9]);
@@ -7306,10 +7557,10 @@ static void menu_repaintStepAutomation(void)
             uint8_t slot = instrumentParam_slot(target);
             const kit_instrument_slot_t *instrument =
                 scene_instrumentSlotConst(scene, slot);
-            const ParamDescriptor *descriptor = instrument
-                ? instrumentManager_descriptor(instrument->type,
-                                               instrumentParam_local(target))
-                : 0;
+
+            if (instrument)
+                descriptor = instrumentManager_descriptor(
+                    instrument->type, instrumentParam_local(target));
             numtostru(&editDisplayBuffer[1][5], (uint8_t)(slot + 1u));
             if (descriptor)
                 menu_copyPaddedField(&editDisplayBuffer[1][9],
@@ -7320,7 +7571,8 @@ static void menu_repaintStepAutomation(void)
             memcpy(&editDisplayBuffer[1][5], "scn", 3u);
             menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
         }
-        numtostrpu(&editDisplayBuffer[1][13], autos[page].value, '0');
+        menu_formatAutomationValue3(descriptor, autos[page].value,
+                                    &editDisplayBuffer[1][13]);
     }
 }
 
@@ -7492,6 +7744,12 @@ static void menu_repaintGeneric(void)
             }
         }
     } else {
+        /*
+         * Clear stale text left by custom renderers before overview redraw.
+         * The ordinary compact loop repopulates only its active cells.
+         */
+        memset(editDisplayBuffer[0], ' ', 16u);
+        memset(editDisplayBuffer[1], ' ', 16u);
         const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
             ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
@@ -7545,7 +7803,26 @@ static void menu_encoderChangeParameter(int8_t inc)
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
 
     if (menu_stepAutomationPageActive()) {
-        (void)menu_stepAutomationEdit(activeParameter, inc);
+        /*
+         * Number lock turns the encoder into a bounded page selector. The
+         * synthetic Add page is included below the 63 assigned-entry limit.
+         */
+        if (menu_stepAutoNumberLocked) {
+            uint8_t count = pat_stepAutomationCount(
+                menu_getViewedPattern(), menu_getActiveVoice(),
+                parameter_values[PAR_ACTIVE_STEP]);
+            uint8_t max_page = (count < PAT_BLOCK_AUTO_COUNT_MASK)
+                ? count
+                : (count ? (uint8_t)(count - 1u) : 0u);
+
+            if (inc > 0 && menu_stepAutoPageIndex < max_page)
+                menu_stepAutoPageIndex++;
+            else if (inc < 0 && menu_stepAutoPageIndex > 0u)
+                menu_stepAutoPageIndex--;
+        } else if (menu_stepAutoCursor >= 2u) {
+            uint8_t field = (uint8_t)(menu_stepAutoCursor - 1u);
+            (void)menu_stepAutomationEdit(field, inc);
+        }
         return;
     }
 
@@ -7635,19 +7912,40 @@ static void menu_moveToMenuItem(int8_t inc)
         uint8_t count = pat_stepAutomationCount(
             menu_getViewedPattern(), menu_getActiveVoice(),
             parameter_values[PAR_ACTIVE_STEP]);
+        uint8_t page = menu_stepAutoPageIndex;
+        uint8_t on_add = (uint8_t)(page >= count);
+        uint8_t max_cursor = on_add ? 1u : 4u;
 
-        /*
-         * The custom list has one synthetic Add page after its entries. Main
-         * encoder scrolling changes only the page index; the four displayed
-         * fields are edited by their corresponding endless pots.
-         */
-        if (inc > 0) {
-            if (menu_stepAutoPageIndex < count)
+        if (menu_stepAutoNumberLocked) {
+            uint8_t max_page = (count < PAT_BLOCK_AUTO_COUNT_MASK)
+                ? count
+                : (count ? (uint8_t)(count - 1u) : 0u);
+
+            if (inc > 0 && page < max_page)
                 menu_stepAutoPageIndex++;
-        } else if (menu_stepAutoPageIndex > 0u) {
+            else if (inc < 0 && page > 0u)
+                menu_stepAutoPageIndex--;
+            return;
+        }
+
+        if (inc > 0) {
+            if (menu_stepAutoCursor < max_cursor) {
+                menu_stepAutoCursor++;
+            } else if (!on_add &&
+                       (page + 1u < count ||
+                        (page + 1u == count &&
+                         count < PAT_BLOCK_AUTO_COUNT_MASK))) {
+                menu_stepAutoPageIndex++;
+                menu_stepAutoCursor = 0u;
+            }
+        } else if (menu_stepAutoCursor > 0u) {
+            menu_stepAutoCursor--;
+        } else if (page > 0u) {
             menu_stepAutoPageIndex--;
+            menu_stepAutoCursor = 4u;
         } else {
             menu_stepAutoActive = 0u;
+            menu_stepAutoNumberLocked = 0u;
             menuIndex = (uint8_t)((1u << PAGE_SHIFT) | 2u);
         }
         return;
@@ -8412,17 +8710,26 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     }
 
     /*
-     * STEP automation item-0 owns its click while the compact page is in
-     * navigation mode. Inputs: encoder click on DELETE/CLEAR/ADD. Output:
-     * PatternData performs the selected action and the custom page repaints;
-     * ordinary edit-mode toggling is suppressed for this one action cell.
-     * Affiliates: menu_stepAutomationExecuteItem0() and PatternData CRUD.
+     * STEP automation owns encoder clicks while its custom page is active.
+     * Inputs: cursor item 0 toggles number lock, item 1 executes
+     * DELETE/CLEAR/ADD, and items 2..4 enter or leave the corresponding detail
+     * view. Output: only the selected action mutates PatternData; ordinary
+     * menu edit mode is not used for the number/action items. Affiliates:
+     * menu_stepAutomationExecuteItem0() and menu_stepAutomationEdit().
      */
-    if (btnClicked && !editModeActive && menu_stepAutomationPageActive() &&
-        (menuIndex & MASK_PARAMETER) == 0u) {
-        (void)menu_stepAutomationExecuteItem0();
+    if (btnClicked && menu_stepAutomationPageActive()) {
+        if (menu_stepAutoCursor == 0u) {
+            menu_stepAutoNumberLocked =
+                (uint8_t)(!menu_stepAutoNumberLocked);
+        } else if (menu_stepAutoCursor == 1u) {
+            if (!editModeActive) {
+                (void)menu_stepAutomationExecuteItem0();
+                menu_endlessPotMappingChanged();
+            }
+        } else {
+            editModeActive = (uint8_t)(1u - editModeActive);
+        }
         menu_repaintAll();
-        menu_endlessPotMappingChanged();
         return;
     }
 

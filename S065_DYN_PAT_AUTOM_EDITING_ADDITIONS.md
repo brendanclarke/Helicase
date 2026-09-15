@@ -929,3 +929,195 @@ This is a minor addition to the existing code.
 | `menu_stepAutoCursor` | 1 B static |
 | `menu_stepAutoNumberLocked` | 1 B static |
 | **Total new** | **50 B** |
+
+## D. Implementation Notes
+
+### 2026-09-15 — Additions implementation
+
+- Added `seq_automation_dirty[INSTRUMENT_SLOT_COUNT]` in `sequencer.c`: six
+  64-bit slot bitmaps, 48 B of static SRAM. The foreground automation drain
+  marks successful voice-descriptor runtime writes by local descriptor index.
+- Added `seq_restoreAutomatedParameters()` to `sequencer.c/.h` and invoked it
+  from `MidiVoiceControl.c` after deferred Scene-slot application and before
+  `instrumentManager_triggerTrack()`. Visible track index 6 (track 7) maps to
+  zero-based descriptor slot 5. Scene targets remain outside this
+  descriptor restore boundary.
+- Dirty bits are cleared during sequencer initialization, fixed-grid restart,
+  and transport stop. This prevents runtime overlays from crossing a new
+  transport or Scene/Pattern context.
+- Added the requested STEP menu cursor state (cursor and number lock),
+  cursor-aware encoder navigation/clicks, assigned/add-page rendering,
+  single-field detail views, add-page cursor conversion, the specials-page
+  scroll marker, and overview-buffer clearing in `menu.c`. The two new Menu
+  bytes are included in the 50 B total above. Existing endless-pot mappings
+  remain physical-column based.
+- All new public `.h` declarations and `.c` implementations have adjacent
+  comment blocks describing inputs, outputs, ownership, lifetime, or display
+  behavior as applicable.
+
+### Validation
+
+- `make -j2` passes on the Cortex-M7 target. Link summary: text 433,492 B,
+  data 412 B, BSS 290,796 B, total 724,700 B.
+- `make img` passes and regenerates `build/LXRV2_lxr02.img` with a 433,904 B
+  firmware payload (433,920 B including the 16-byte image header).
+- `git diff --check` passes.
+
+---
+
+## C. Implementation Audit
+
+Audit of the user's code changes against Sections A and B above, performed
+after the implementation was committed. Build baseline: text 433,492 B
+(pre-fix), 433,604 B (post-fix).
+
+### C1. Section A — Automation parameter reset
+
+| Spec item | File | Status |
+|---|---|---|
+| A2 `seq_automation_dirty[6]` (48 B bitmap) | `sequencer.c` | Correct |
+| A3 `seq_clearAutomationDirty()` static helper | `sequencer.c` | Correct |
+| A4 dirty-bit marking in `seq_drainPendingAutomation` | `sequencer.c` | Correct |
+| A5 `seq_restoreAutomatedParameters()` bit-scan restore | `sequencer.c` | Correct |
+| A6 declaration in `sequencer.h` | `sequencer.h` | Correct |
+| A7 insertion in `voiceControl_triggerNow` | `MidiVoiceControl.c` | Correct — after deferred Scene apply, before trigger dispatch |
+| A8 clear in `seq_init()` | `sequencer.c` | Correct |
+| A9 clear in `seq_setRunning()` (transport stop) | `sequencer.c` | Correct |
+| A10 clear in `seq_setStepIndexToStart()` | `sequencer.c` | Correct |
+
+All Section A items match the spec. Trigger ordering is correct: ISR enqueues
+trigger then automation; foreground processes trigger (with reset) then drains
+automation — previous step's overlays are cleared before current step's are
+applied.
+
+### C2. Section B — Step-edit menu UX
+
+| Spec item | File | Status |
+|---|---|---|
+| B1 `menu_stepAutoCursor` + `menu_stepAutoNumberLocked` state | `menu.c:1163-1164` | Correct (5 B total) |
+| B2 state reset in `menu_stepAutomationReset()` | `menu.c:6929-6930` | Correct |
+| B3 `checkScrollSign` '>' on specials subpage | `menu.c:6292-6294` | Correct |
+| B4 overview `memset` stale-character fix | `menu.c:7613-7614` | Correct |
+| B5 `menu_stepAutomationExecuteItem0` post-add cursor/lock reset | `menu.c:7265-7266` | Correct |
+| B6 compact renderer restructure | `menu.c:7290-7439` | Correct — detail views, compact layout, add page, scroll indicator |
+| B7 `menu_encoderChangeParameter` number-lock + field edit | `menu.c:7667-7688` | Correct |
+| B8 `menu_moveToMenuItem` cursor navigation | `menu.c:7773-7813` | Correct — wrapping, exit to probability |
+| B9 `menu_parseEncoder` click dispatch | `menu.c:8582-8596` | Correct |
+
+### C3. Bug found and fixed
+
+**`numtostrpu` 3-character overflow in compact renderer**
+
+`numtostrpu(&editDisplayBuffer[0][1], page, '0')` at line 7381 wrote 3
+characters to positions 1–3, but the compact layout needs only 2 digits
+(positions 1–2) with position 3 as a space separator before "voi" at
+position 4. The third digit bled into the separator gap.
+
+Visible effect: page 0 rendered `>000voi` instead of `>00 voi`.
+
+Fix applied — replaced with manual 2-digit formatting:
+```c
+editDisplayBuffer[0][1] = (char)('0' + (page / 10u));
+editDisplayBuffer[0][2] = (char)('0' + (page % 10u));
+```
+
+Post-fix build: text 433,604 B, data 412 B, BSS 290,796 B. Clean, no
+warnings.
+
+---
+
+## D. Post-Testing Fixes — Automation Ordering and Restore Source
+
+Two bugs found in testing after the Section A/B implementation landed.
+
+### D1. Bug: automation applied ~50% of the time (ordering race)
+
+**Root cause:** `voiceControl_processPending()` (which calls `voiceControl_triggerNow`
+→ `seq_restoreAutomatedParameters`) runs inside `audio_check_and_render()` at
+main.c:191, called ~8 times per main-loop iteration. `seq_drainPendingAutomation()`
+sat at a single fixed point at main.c:1250, between two `audio_check_and_render()`
+calls.
+
+When TIM3 enqueued both a trigger and automation entries, and the ISR landed
+between the `audio_check_and_render()` before the drain and the drain itself:
+
+1. Drain ran first → applied automation → set dirty bits
+2. Next `audio_check_and_render()` → processed the trigger → restore cleared
+   the dirty bits that were **just set** → trigger fired with non-automated values
+
+Whether the ISR landed before or after the drain was timing-dependent, giving
+the observed ~50% success rate.
+
+**Fix:** Moved `seq_drainPendingAutomation()` into `audio_check_and_render()`
+immediately after `voiceControl_processPending()`, inside the per-chunk render
+loop. Removed the standalone call from the main loop. The trigger ring is now
+always consumed before the automation buffer within the same render chunk, and
+automation values are applied before `mixer_calcNextSampleBlock()` reads them.
+
+Files changed:
+- `main.c:192` — added `seq_drainPendingAutomation();` after
+  `voiceControl_processPending();`
+- `main.c:1245-1251` (old) — removed standalone drain call and its comment
+  block
+
+### D2. Bug: restore writes wrong value (raw Scene A instead of morph interpolation)
+
+**Root cause:** `seq_restoreAutomatedParameters()` at sequencer.c:657 read from
+`instrument->parameter_images.instrument_parameters[local]` — the raw Scene A
+endpoint. When the morph crossfader is not at 0%, the actual current default
+value is `morph_interpolation[local]`, the interpolated result of the morph
+worker. The restore wrote the wrong value, causing parameters to snap to the
+Scene A endpoint rather than returning to the morph-interpolated position.
+
+This also caused the "freeze" symptom when changing automation targets: if
+the restored value happened to differ from the morph-interpolated value, the
+morph system would later overwrite it on its own schedule, creating a race.
+Parameters that lost the race stayed at their last automated value.
+
+**Fix:** Changed the restore source to `morph_interpolation[local]`. This
+writes the value the morph crossfader would currently apply, directly to the
+runtime, without routing through the morph drain. Updated the function's
+doc comment to reflect the new source.
+
+File changed:
+- `sequencer.c:657` — `instrument_parameters[local]` →
+  `morph_interpolation[local]`
+- `sequencer.c:628` — comment updated
+
+### D3. Display: detail view labels and amount formatting
+
+**Row 0 labels** for cursor 2/3/4 detail views changed to show both category
+and long name in the same format the user sees on normal VOICE pages:
+
+| Cursor | Old label | New label |
+|---|---|---|
+| 2 (Voice) | `Voice` | `Target  Voice` |
+| 3 (Par Target) | `Par Target` | `Target  Parametr` |
+| 4 (Amount) | `Amount` | `Autom.  Amount` |
+
+**Row 1 for voice parameter target (cursor 3):** now concatenates
+`descriptor->category` + `descriptor->long_name` (e.g., `OscilltrCoarse`)
+instead of showing only `long_name`.
+
+**Amount value (cursor 4 detail and compact row):** changed zero-padding to
+space-padding (consistent with all other parameter displays). Detail view
+now formats the value by the target descriptor's dtype:
+
+- `DTYPE_MENU` — shows the short name from the menu text table (waveform
+  names, filter type names, transient names, LFO wave names, retrigger names,
+  sync rate names). Bounds-checked: values exceeding the table count fall
+  through to numeric display. Waveform OOB is handled by the existing sample
+  name path in `getMenuItemNameForValue`.
+- `DTYPE_ON_OFF` — `on`/`off`
+- `DTYPE_MIX_FM` — `mix`/`fm`
+- `DTYPE_LFO_POLARITY` — `neg`/`pos`/`bi`
+- `DTYPE_PM63` — signed ±63
+- `DTYPE_NOTE_NAME` — note name
+- Default — space-padded numeric
+
+Files changed: `menu.c` (detail view renderer, compact view amount pad char).
+
+### D4. Build
+
+Post-fix build: text 434,012 B, data 412 B, BSS 290,788 B. Clean, no
+warnings.

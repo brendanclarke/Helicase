@@ -1,11 +1,10 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-09-14 Session 064 build at `d5af5fd`.
-`arm-none-eabi-size build/lxr02.elf` reports `text=426,756`, `data=412`, and
-`bss=289,964`; `build/lxr02.bin` is 427,168 B and
-`build/LXRV2_lxr02.img` is 427,184 B with SHA-256
-`c6d5c551e5f320c7c97427528dc937da7d6b3b297779cb70f945606e646cd481`.
+2026-09-15 Session 065 build (detail inventory from Session 064 build at
+`d5af5fd`; Session 065 deltas noted below).
+`arm-none-eabi-size build/lxr02.elf` reports `text=434,036`, `data=412`, and
+`bss=290,788`.
 The approved 290-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
 This remains a linked-image inventory: sizes come from
@@ -30,6 +29,10 @@ parameter bytes and removed the retained legacy discard object. Session 064
 adds exactly 10,586 bytes for one 10,519-byte Pattern snapshot, a two-byte
 Pattern dirty mask, sixteen 32-bit generations, and one drain-Scene byte. The
 HCNAMES mirror/source arrays expand from 129 to 145 rows (144 + 32 bytes).
+Session 065 adds 50 B new static: 48 B `seq_automation_dirty[6]` (per-slot
+64-bit dirty bitmap, sequencer.c) and 2 B menu state (`menu_stepAutoCursor`,
+`menu_stepAutoNumberLocked`, menu.c). The 192 B sequencer pending automation
+buffer was committed before Session 065. BSS delta from Session 064: +824 B.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -55,9 +58,9 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 283,704 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **286,804 B** | **90,028 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **299,084 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 284,528 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **287,628 B** | **89,204 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **299,908 B** | — |
 
 The image contains 412 B of initialized SRAM1 data and 289,964 B of
 zero-initialized data: 3,100 B in `.dma_nocache`, 283,292 B in normal SRAM1

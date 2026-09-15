@@ -17,26 +17,24 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 064 complete and functionally
-hardware-accepted on branch `dev-ph4-pattern`, commit `d5af5fd`. The complete
-dynamic Pattern object is persisted by exact 10,656-byte PAT4 files for
-Scene/Bank/root Pattern Load/Save and by 16 independent hidden A/B AutoSave
-pairs. Pattern AutoSave owns a separate 16-bit dirty mask, one 10,519-byte
-snapshot, nonzero per-Scene generations, Pattern HCNAMES rows 129..144, and a
-dedicated boot reader. HCPR is format v2 and aligned with the 145-row HCNAMES
-schema, but remains exactly 34,768 bytes and contains neither Pattern identity
-nor Pattern payload. Final forced rebuild:
-`text=426,756`, `data=412`, `bss=289,964`; image 427,184 bytes, SHA-256
-`c6d5c551e5f320c7c97427528dc937da7d6b3b297779cb70f945606e646cd481`.
+**Current working source**: Session 065 complete on branch `dev-ph4-pattern`.
+Session 065 implemented per-step automation (Method 1): pool block automation
+read/write/remove APIs, step-edit menu with cursor navigation and dtype-aware
+detail views, sequencer pending-buffer playback with foreground drain via
+`instrumentManager_writeRuntime()`, per-slot 64-bit dirty bitmap with
+morph-interpolation restore on voice retrigger. Hardware-tested. 50 B new
+static SRAM (48 B dirty bitmap + 2 B menu state). Build:
+`text=434,036`, `data=412`, `bss=290,788`.
 
-**Next feature step**: Phase 4.5 copy operations (`pat_copyTrack`,
-`pat_copyPattern`, `pat_copyBar`) with independent pool-block duplication.
-Pattern AutoSave functional testing is closed. Deterministic mid-write
-power-loss, record/erase admission, injected-CRC, and performance cases are
-supplemental deferred work requiring suitable instrumentation; unfinished
-Live Record is not a prerequisite for the accepted feature. Permanent Session
-064 authority is `knowledge_files/log_archive/064_SESSION_HANDOFF_LOG.md`,
-`AUTOSAVE.md`, `PATTERN_DYNAMIC_STACK.md`, `FILESYSTEM_SPEC.md`, and
+**Next feature step**: Session 066 — VOICE-page held-step automation overlay
+(Method 2) from `S065_DYN_PAT_VOICE_PARAM_UX.md`: overlay activation via
+held-step + pot turn, two-tier CGRAM underline (value/assigned), live value
+display, step illumination of automated steps, async track-wide target search,
+pot-to-automation write. Phase 4.5 copy operations (`pat_copyTrack`,
+`pat_copyPattern`, `pat_copyBar`) with independent pool-block duplication
+remain deferred. Permanent Session 065 authority is
+`knowledge_files/log_archive/065_SESSION_HANDOFF_LOG.md`,
+`PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, and
 `SRAM_MANIFEST.md`.
 
 ## RAM Allocation Approval Policy
@@ -74,8 +72,8 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter records the Session 064 linked allocation
-  linked allocation and totals. Dynamic Pattern storage is in
+  `SRAM_MANIFEST.md`; the latter records the Session 065 linked allocation
+  and totals. Dynamic Pattern storage is in
   `PATTERN_DYNAMIC_STACK.md`. AutoSave format/reader/writer authority is
   `AUTOSAVE.md`; development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete

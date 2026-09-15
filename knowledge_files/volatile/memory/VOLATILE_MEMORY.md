@@ -31,14 +31,42 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 064
+## Current carryover after Session 065
 
-Pattern AutoSave functional acceptance is closed. Do not recreate tests that
-depend on interrupting a specific background phase or on unfinished Live
-Record behavior. The durable authority is
-`knowledge_files/log_archive/064_SESSION_HANDOFF_LOG.md`, `AUTOSAVE.md`, and
-`PATTERN_DYNAMIC_STACK.md`; the S063/S064 working plans and raw SD-card fixture
-directories are disposable. The next normal Pattern feature is Phase 4.5 copy
-operations with real pool-block duplication. Fault-injection, record/erase
-gate, CRC-corruption, and performance tests remain optional instrumented work,
-not blockers or identified defects.
+Session 065 implemented step automation Method 1 (step-edit menu and sequencer
+playback). The durable authority is
+`knowledge_files/log_archive/065_SESSION_HANDOFF_LOG.md`,
+`PATTERN_DYNAMIC_STACK.md`, and `MODULE_INTERCHANGE_SPEC.md`.
+The S065 planning documents (`S065_DYN_PAT_STEP_AUTOMATION.md`,
+`S065_DYN_PAT_STEP_AUTOM_EDITING.md`, `S065_DYN_PAT_AUTOM_EDITING_ADDITIONS.md`)
+are disposable; their durable facts are in the handoff log and spec references.
+`S065_DYN_PAT_VOICE_PARAM_UX.md` is the Session 066 general plan — keep it.
+
+### Automation ordering invariant
+
+`seq_drainPendingAutomation()` must run inside `audio_check_and_render()`
+immediately after `voiceControl_processPending()`, within the per-chunk render
+loop. This ensures triggers are processed before automations within the same
+render chunk. Moving the drain outside the render loop caused a 50% automation
+failure rate in Session 065 testing.
+
+### Restore source invariant
+
+`seq_restoreAutomatedParameters()` must restore from `morph_interpolation[]`,
+not `instrument_parameters[]`. The latter is Scene A only; `morph_interpolation`
+is the runtime-interpolated value that accounts for Morph position.
+
+### ISR safety
+
+`instrumentManager_writeRuntime()` is NOT ISR-safe. Automation values are
+buffered in the TIM3 ISR pending buffer and drained in the foreground only.
+Do not call `instrumentManager_writeRuntime()` from any interrupt context.
+
+### Next feature: Method 2 VOICE overlay (Session 066)
+
+`S065_DYN_PAT_VOICE_PARAM_UX.md` covers: overlay activation via held-step +
+pot turn, two-tier CGRAM underline (value bar tier 1, assigned dot tier 2),
+live value display, step illumination of automated steps, async track-wide
+target search, pot-to-automation write. CGRAM slots 2-7 are available for
+runtime use (0-1 reserved). The `numtostrpu(buf, num, pad)` helper writes
+3 characters to buf[0..2]; for 2-digit displays use manual formatting instead.

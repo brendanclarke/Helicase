@@ -150,6 +150,33 @@ static volatile seq_pending_automation_t
 static volatile uint8_t seq_pending_automation_count = 0u;
 static volatile uint8_t seq_pending_automation_drain = 0u;
 
+/*
+ * Per-voice automation restore bitmap (+48 B static SRAM1).
+ *
+ * What: six 64-bit bitmaps, one bit per descriptor-local parameter image.
+ * Why: foreground automation writes are transient runtime overlays; the next
+ * trigger must restore only the descriptor images changed since that trigger.
+ * Lifetime: static until the matching trigger restores the set bits or a
+ * transport/pattern reset clears them. Owner: Sequencer. Affiliate:
+ * seq_drainPendingAutomation() and seq_restoreAutomatedParameters().
+ */
+static uint64_t seq_automation_dirty[INSTRUMENT_SLOT_COUNT];
+
+/*
+ * Clear all pending transient automation restores.
+ *
+ * Inputs: none. Output: every voice-slot dirty bitmap is zero. This is used
+ * at boot, fixed-grid restart, and transport stop so a stale overlay cannot
+ * leak into a later transport or Scene/Pattern context.
+ */
+static void seq_clearAutomationDirty(void)
+{
+    uint8_t slot;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        seq_automation_dirty[slot] = 0u;
+}
+
 static void seq_sendMidi(MidiMsg msg);
 static void seq_sendRealtime(const uint8_t status);
 static void seq_sendProgChg(const uint8_t ptn);
@@ -163,6 +190,7 @@ void seq_init()
 	memset(seq_lastMasterStep,0,NUM_TRACKS);
 	seq_pending_automation_count = 0u;
 	seq_pending_automation_drain = 0u;
+	seq_clearAutomationDirty();
 }
 //------------------------------------------------------------------------------
 static void seq_calcDeltaT(uint16_t bpm)
@@ -564,9 +592,12 @@ void seq_drainPendingAutomation(void)
                                                    instrumentParam_local(target))
                     : 0;
 
-                if (descriptor)
-                    (void)instrumentManager_writeRuntime(slot, descriptor,
-                                                          value8);
+                /* Mark only successful voice runtime overlays for retrigger restore. */
+                if (descriptor &&
+                    instrumentManager_writeRuntime(slot, descriptor, value8)) {
+                    uint8_t local = instrumentParam_local(target);
+                    seq_automation_dirty[slot] |= (1ULL << local);
+                }
             }
             i++;
         }
@@ -587,6 +618,48 @@ void seq_drainPendingAutomation(void)
                            : "memory");
         }
     }
+}
+
+/*
+ * Restore automated descriptor parameters immediately before a trigger.
+ *
+ * Inputs: visible trigger track 0..6, where track 6 shares slot 5's
+ * descriptor image. Output: every dirty descriptor-local runtime value for
+ * that slot is restored from morph_interpolation[] (the value the morph
+ * crossfader would currently apply), then the slot bitmap is cleared.
+ * Invalid/stale bits are discarded safely; Scene-level targets remain
+ * outside this voice-descriptor restore path until their runtime boundary is
+ * defined. Affiliate: MidiVoiceControl.c's single trigger funnel.
+ */
+void seq_restoreAutomatedParameters(uint8_t trigger_track)
+{
+    uint8_t slot;
+    uint64_t mask;
+    const kit_instrument_slot_t *instrument;
+
+    if (trigger_track >= NUM_TRACKS)
+        return;
+    slot = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+        ? (INSTRUMENT_SLOT_COUNT - 1u) : trigger_track;
+    mask = seq_automation_dirty[slot];
+    if (!mask)
+        return;
+
+    instrument = scene_instrumentSlotConst(seq_activePattern, slot);
+    if (instrument) {
+        while (mask) {
+            uint8_t local = (uint8_t)__builtin_ctzll(mask);
+            const ParamDescriptor *descriptor = instrumentManager_descriptor(
+                instrument->type, local);
+
+            if (descriptor)
+                (void)instrumentManager_writeRuntime(
+                    slot, descriptor,
+                    instrument->parameter_images.morph_interpolation[local]);
+            mask &= (mask - 1ULL);
+        }
+    }
+    seq_automation_dirty[slot] = 0u;
 }
 
 static uint8_t seq_handleMasterBoundary(void)
@@ -847,6 +920,11 @@ void seq_setRunning(uint8_t isRunning)
 	//jump to 1st step if sequencer is stopped
 	if(!seq_running)
 	{
+		/*
+		 * Transport stop discards transient automation overlays before any later
+		 * preview or restart can reuse the runtime voice objects.
+		 */
+		seq_clearAutomationDirty();
 
 		//reset song position bar counter
 		seq_barCounter = 0;
@@ -1211,6 +1289,11 @@ static void seq_setStepIndexToStart()
 	 * zero. There is no PatternData rotation, length, or event-count affiliate.
 	 */
 	uint8_t i;
+	/*
+	 * Fixed-grid restart also drops overlays from the prior step/context; this
+	 * covers both transport restart and active Scene/Pattern realignment.
+	 */
+	seq_clearAutomationDirty();
 	for(i=0;i<NUM_TRACKS;i++) {
 		seq_lastMasterStep[i] = 0u;
 		seq_stepIndex[i] = -1;

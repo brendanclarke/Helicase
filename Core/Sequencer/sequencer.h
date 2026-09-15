@@ -129,6 +129,16 @@ void seq_alignActivePatternToScene(uint8_t scene_index);
  * Affiliate: main.c calls this before audio rendering.
  */
 void seq_drainPendingAutomation(void);
+/*
+ * Restore transient automation overlays for one visible trigger track.
+ *
+ * Inputs: trigger track 0..6, with track 6 mapped to descriptor slot 5.
+ * Output: dirty voice-descriptor runtime values are restored from the active
+ * Scene endpoint image immediately before the trigger and their bitmap is
+ * cleared. Scene-level targets are intentionally not handled by this API.
+ * Client: MidiVoiceControl.c's common trigger path.
+ */
+void seq_restoreAutomatedParameters(uint8_t trigger_track);
 void seq_setRunning(uint8_t isRunning);
 uint8_t seq_isRunning(void);
 void seq_armActivePatternReload(void);

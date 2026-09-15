@@ -3,7 +3,7 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, and
-Pattern AutoSave reference through Session 064. Historical Session 062/063/064
+Pattern AutoSave reference through Session 065. Historical Session 062/063/064
 plans describe how the design was reached but do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
 and Pattern AutoSave scheduling/recovery are in `AUTOSAVE.md`; exact linked
@@ -14,17 +14,25 @@ Implemented and hardware accepted:
 - 16 independent resident Scene Patterns;
 - 7 tracks × 128 steps per Scene;
 - trigger state plus dynamic note, velocity, and probability specials;
+- per-step automation entries (2-byte LE, 7-bit value + 9-bit target,
+  up to 63 per step) with uniqueness invariant and dtype-aware editing;
 - first-fit bit-packed pool allocator and block reclamation;
 - Pattern/track settings and Sequencer probability playback;
+- sequencer automation playback: TIM3 copies to 32-entry debounced
+  pending buffer, foreground drain via `instrumentManager_writeRuntime()`,
+  per-slot dirty bitmap with morph-interpolation restore on voice trigger;
+- step-edit automation pages (Method 1): cursor navigation, detail views,
+  add/delete/clear, parameter cycling with uniqueness, dtype-aware display;
 - exact binary PAT4 Scene/Bank/root Pattern Load and Save;
 - scene-mask Pattern Load fan-out;
 - per-Scene hidden A/B Pattern AutoSave and boot restore;
 - HCNAMES Pattern identity rows 129..144.
 
 Not implemented: Pattern copy operations (the three APIs are deliberate
-no-ops), step automation payload/playback, allocator compaction, and real-time
-editing guarantees while a snapshot is admitted during record/erase (admission
-is instead deferred while those modes are active).
+no-ops), VOICE-page held-step automation overlay (Method 2, Session 066),
+live-record capture, allocator compaction, and real-time editing guarantees
+while a snapshot is admitted during record/erase (admission is instead
+deferred while those modes are active).
 
 ## 1. Resident object
 
@@ -96,15 +104,27 @@ A block starts at a 4-byte-aligned pool offset:
 ```text
 bytes 0..1  little-endian header
              bits 15..6: track * 128 + step (10-bit back-reference)
-             bits 5..0: automation count (currently zero/reserved)
+             bits 5..0: automation count (0..63)
 byte 2      special flags: bit0 note, bit1 velocity, bit2 probability
 bytes 3..   present values in note, velocity, probability order
+next bytes  automation entries, 2 bytes each, auto_count entries:
+             each entry little-endian: bits 15..9 = 7-bit value (0..127),
+             bits 8..0 = 9-bit instrument_param_id_t target
 padding     zero to a 4-byte boundary
 ```
 
-One special consumes one 4-byte chunk. Two or three specials consume two
-chunks (8 bytes). Unknown flag bits, nonzero unsupported automation count, or
-an inconsistent back-reference make a block invalid.
+Block size: `chunks = (2 + 1 + popcount(flags & 0x07) + auto_count * 2 + 3) / 4`.
+One special with no automation is one 4-byte chunk. Three specials with four
+automations is four chunks (14 bytes padded to 16). An unknown flag bit or an
+inconsistent back-reference makes a block invalid.
+
+Each automation entry's 9-bit target is the canonical `instrument_param_id_t`:
+`slot * INSTRUMENT_PARAM_COUNT + descriptor_index` for voice parameters
+(IDs 0..383), or a Scene target ID (384+). A step must never contain two
+entries with the same 9-bit target (uniqueness invariant, enforced at write
+time). The 7-bit value maps to `instrument_param_value_t` (0..255) via
+`(v == 127) ? 255 : v * 2` (same as MIDI CC); the inverse is
+`(v >= 255) ? 127 : v / 2`.
 
 Default resolved values when a special is absent are the Pattern default note,
 default velocity, and probability 127. `pat_readStepSpecials()` always returns
@@ -112,8 +132,10 @@ usable values plus flags saying which were explicitly stored.
 
 Writers use read-modify-write semantics. When a new size differs, allocate the
 replacement, write it completely, point the address entry at it, then free the
-old block. Clearing the last special removes the block and bit 14 while
-preserving trigger state.
+old block. Clearing the last special removes the block and bit 14 only when
+no automation entries remain; a block with zero specials but nonzero
+automation count is preserved (flags byte = 0, no special values stored,
+automation entries follow immediately).
 
 ## 5. Public behavior
 
@@ -123,13 +145,26 @@ invalid coordinate:
 - `pat_isStepActive`, `pat_setStepActive`, `pat_toggleStep`, `pat_eraseStep`;
 - `pat_clearTrack`, `pat_clearPattern`;
 - `pat_readStepSpecials` and the note/velocity/probability setters;
+- `pat_readStepAutomations` — read decoded entries for one step (returns
+  count);
+- `pat_writeStepAutomation` — add or update one entry (uniqueness enforced,
+  returns 1 on success, 0 on pool exhaustion or 63-entry ceiling);
+- `pat_removeStepAutomation` — remove one entry by 9-bit target (returns 1
+  if found);
+- `pat_removeTrackAutomationByTarget` — remove all entries with a given
+  target from all 128 steps of a track (returns count removed);
+- `pat_stepAutomationCount` — count entries without reading them;
 - track length/scale/shuffle and Pattern change-bar/next setters;
 - menu apply helpers for Pattern, track, and selected-step state.
 
+`pat_writeSpecials` preserves existing automation entries across
+specials-only edits. `pat_eraseStep` and `pat_clearTrack` include automation
+entries in block-size calculations when freeing pool chunks.
+
 `pat_copyTrack`, `pat_copyPattern`, and `pat_copyBar` intentionally do nothing.
-Their future implementation must duplicate live pool blocks and rebuild
-destination address offsets/bitmap ownership; it must never alias one Scene's
-or step's pool allocation from another.
+Their future implementation must duplicate live pool blocks (including
+automation entries) and rebuild destination address offsets/bitmap ownership;
+it must never alias one Scene's or step's pool allocation from another.
 
 All real Pattern mutations converge on PatternData's local dirty helper. It
 invalidates the Bank clean-Scene witness and calls
@@ -143,6 +178,42 @@ triggered step it evaluates probability using the hardware RNG, suppresses the
 event when the random value is greater than or equal to the stored 0..127
 probability, and otherwise triggers with the resolved note and velocity. Roll
 events remain independent fixed-note behavior.
+
+### 6.1 Step automation playback
+
+On each step advance, `seq_advanceTrackStep()` reads automation entries from
+every step that has a pool block (bit 14 set, valid offset), regardless of
+trigger state. Decoded entries are copied into a 32-entry debounced pending
+buffer in `sequencer.c` (192 B static SRAM). Multiple writes to the same
+`(step_id, target)` pair coalesce; the ISR is the sole writer.
+
+The foreground drain (`seq_drainPendingAutomation()`) runs inside
+`audio_check_and_render()` immediately after `voiceControl_processPending()`,
+within the per-chunk render loop. For each entry, it validates the target,
+expands the 7-bit value to 8-bit, and calls
+`instrumentManager_writeRuntime(slot, descriptor, value8)`. On success, it
+sets the corresponding bit in `seq_automation_dirty[slot]` (a `uint64_t`
+per-slot bitmap, 48 B total).
+
+### 6.2 Automation reset on voice retrigger
+
+All trigger sources funnel through `voiceControl_triggerNow()` in
+`MidiVoiceControl.c`. Before `instrumentManager_triggerTrack()`, it calls
+`seq_restoreAutomatedParameters(voice)`, which iterates set bits in the
+dirty bitmap using `__builtin_ctzll`, writes the `morph_interpolation[]`
+value for each dirty descriptor back to the runtime, and clears the bitmap.
+The dirty bitmap is also cleared on `seq_init()`, transport stop, and
+`seq_setStepIndexToStart()`.
+
+### 6.3 Step-edit automation pages
+
+After the existing specials pages (note, velocity, probability), the
+selected-step edit page shows dynamically counted automation pages. Each
+page displays one entry with a 5-item cursor: number (with number-lock
+mode), del/clr action, voice, parameter (with uniqueness-filtered cycling),
+and amount (with dtype-aware display and bounds clamping). An "add" page
+follows the last assigned entry. Detail views show category+long_name for
+parameter targets and dtype-aware named values for amounts.
 
 The selected-step edit page reads the live dynamic block. Setting note,
 velocity, or probability performs a tracked pool read-modify-write and repaints
@@ -269,7 +340,14 @@ absent rows, and content changes in every Scene. The full card contained 19
 valid hidden candidates and no identified Pattern defect. See
 `../log_archive/064_SESSION_HANDOFF_LOG.md` for exact evidence.
 
+Session 065 implemented step automation editing (Method 1) and sequencer
+playback: pool block automation read/write/remove APIs, step-edit menu with
+cursor navigation and detail views, sequencer pending buffer with foreground
+drain, per-slot dirty bitmap and trigger-time morph-interpolation restore.
+Hardware-tested. See `../log_archive/065_SESSION_HANDOFF_LOG.md`.
+
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
 measurement. They do not reopen the functional closeout. Phase 4.5 copy
-operations and descriptor-backed step automation are future features.
+operations, VOICE-page held-step automation overlay (Method 2, Session 066),
+and live-record capture are future features.

@@ -120,13 +120,14 @@ which live module owns each call, state transition, and retained object.
   parameter paths and by `AutomationNode`. It is no longer the canonical map
   for instrument file keys. `Step` destinations are already canonical 16-bit
   IDs, but AutomationNode still narrows them to legacy byte CC/CC2 routing;
-  descriptor step automation is therefore deliberately unfinished.
+  descriptor step automation uses canonical 9-bit `instrument_param_id_t`
+  targets and 7-bit pool-packed values (Session 065).
 - Descriptor-backed velocity/LFO target storage, menu display, and runtime
   application are live after Session 035 for direct descriptor targets,
   voice-local decimation, per-voice Morph, and Scene Decimation. Direct
   descriptor LFO overlays use InstrumentManager's descriptor-domain adapter and
-  the normal descriptor runtime writer; step automation remains the unfinished
-  descriptor/Scene target path.
+  the normal descriptor runtime writer; step automation now uses the same
+  descriptor runtime writer via `instrumentManager_writeRuntime()` (Session 065).
 - Direct descriptor modulation must use the descriptor owner's byte-domain
   runtime writer. Do not write raw DSP members such as `SlopeEg2.decay` for a
   byte descriptor: that bypasses the setter's unit conversion and can turn a
@@ -233,8 +234,11 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_setStepNote(pattern, track, step, note)` | Mutate selected step note and menu mirror. | `menu_parseGlobalParam(PAR_STEP_NOTE)` |
 | `pat_setStepVolume(pattern, track, step, volume)` | Mutate selected step velocity without clearing active bit. | `menu_parseGlobalParam(PAR_STEP_VOLUME)` |
 | `pat_setStepProbability(pattern, track, step, prob)` | Mutate selected step probability. | `menu_parseGlobalParam(PAR_STEP_PROB)` |
-| `pat_setStepAutomationDestination(pattern, track, step, slot, targetParam)` | Mutate step automation destination for lane 0/1. | `menu_parseGlobalParam(PAR_P1_DEST/PAR_P2_DEST)` |
-| `pat_setStepAutomationValue(pattern, track, step, slot, value)` | Mutate step automation value for lane 0/1. | `menu_parseGlobalParam(PAR_P1_VAL/PAR_P2_VAL)` |
+| `pat_readStepAutomations(scene, track, step, out[], maxEntries)` | Read decoded automation entries for one step; returns count. | Sequencer playback, step-edit menu display |
+| `pat_writeStepAutomation(scene, track, step, target9, value7)` | Add or update one automation entry; uniqueness enforced, returns 1 on success, 0 on pool exhaustion or 63-entry ceiling. | Step-edit menu add/update, future VOICE overlay |
+| `pat_removeStepAutomation(scene, track, step, target9)` | Remove one automation entry by 9-bit target; returns 1 if found. | Step-edit menu delete |
+| `pat_removeTrackAutomationByTarget(scene, track, target9)` | Remove all entries with a given target from all 128 steps of a track; returns count removed. | Step-edit menu clear-by-target |
+| `pat_stepAutomationCount(scene, track, step)` | Count automation entries without reading them. | Step-edit menu page count, sequencer |
 | `pat_setPatternChangeBar(pattern, value)` | Set pattern change-bar rule. | `menu_parseGlobalParam(PAR_PATTERN_BEAT)` |
 | `pat_setPatternNext(pattern, value)` | Set pattern next-pattern rule. | `menu_parseGlobalParam(PAR_PATTERN_NEXT)` |
 | `pat_getPatternChangeBar(pattern)` / `pat_getPatternNext(pattern)` | Read pattern settings. | Future callers; currently mostly direct pointer reads |
@@ -455,6 +459,8 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_addNote(trackNr, vel, note)` | Record played note into pattern when recording. | MidiParser, roll path |
 | `seq_setRecordingMode(active)` / `seq_setErasingMode(active)` | Recording/erase gates. | buttonHandler |
 | `seq_recordAutomation(voice, dest, value)` | Sequencer-gated and held-step automation recording. | Preset, MidiParser |
+| `seq_drainPendingAutomation(void)` | Foreground drain of debounced pending buffer; calls `instrumentManager_writeRuntime()` and sets dirty bits. Runs inside `audio_check_and_render()` after `voiceControl_processPending()`. | `main.c` render loop |
+| `seq_restoreAutomatedParameters(voice)` | Restore dirty descriptors from `morph_interpolation[]` on voice retrigger; clears per-slot dirty bitmap. | `voiceControl_triggerNow()` |
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
 | `seq_offsetTrackStepIndexForRotation(trackNr, oldRot, newRot, len)` | Narrow runtime hook for live rotation compensation. | PatternData only |
 

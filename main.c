@@ -189,6 +189,7 @@ static void audio_check_and_render(void)
         for (uint32_t frame = 0; frame < AUDIO_DMA_FRAMES; frame += OUTPUT_DMA_SIZE) {
             uint32_t basepri;
             voiceControl_processPending();
+            seq_drainPendingAutomation();
             basepri = dsp_maskLowPriorityIrqs();
             mixer_calcNextSampleBlock(&buf[frame * 2], &buf2[frame * 2]);
             irq_setBasepri(basepri);
@@ -1241,13 +1242,6 @@ boot_filesystem_done:
         audio_check_and_render();        
         // foreground front-panel hardware service, scheduled by TIM6 at 500Hz
         timebase_serviceFrontPanel();
-        /*
-         * Apply raw voice automation published by the TIM3 sequencer owner.
-         * Inputs: the bounded pending queue. Output: descriptor runtime images
-         * are updated before the next audio render; Scene targets remain
-         * deferred to the later Scene-target session.
-         */
-        seq_drainPendingAutomation();
         audio_check_and_render();
         // service DIN/USB MIDI input and flush USB MIDI output
         midi_service();
