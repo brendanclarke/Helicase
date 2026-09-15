@@ -375,29 +375,36 @@ The user is on the VOICE page. They press and hold one or more SEQ buttons.
 While buttons are held, the VOICE page becomes an automation overlay for the
 currently viewed voice's track.
 
-### 4.2 Visual behavior: underlined parameter names
+Use a short long-press, configured globally as `BUTTON_HOLD_DELAY_MS` in
+`config.h` and initially 100 ms. This replaces the private `BUTTON_TIMEOUT`
+threshold and is shared by every UI gesture that distinguishes hold from tap.
 
-Two tiers of underline indicate automation presence:
+The Pattern-wide name indicator described below remains active on ordinary
+VOICE pages even when no step is held. All behavior applies in the compact
+four-parameter and clicked-in single-parameter views, including the persistent
+SHIFT+VOICE Morph endpoint view. `S065_DYN_PAT_VOICE_PARAM_UX.md` is the
+detailed implementation authority for this method.
 
-**Tier 1 — held-step automation (immediate):** If the focus step (last SEQ
-button pressed) has an automation entry for a displayed parameter, ALL
-characters of that parameter's short name are underlined (plus the value
-characters in single-parameter view). This indicates "this step automates this
-parameter."
+### 4.2 Visual behavior: one marker per parameter
 
-**Tier 2 — track-wide automation (async):** If a parameter is automated on
-ANY step of the current track (targeting the track's own voice), the FIRST
-character only of that parameter's short name is underlined. This indicates
-"this parameter has automation somewhere on this track." A small async polled
-search agent services this: it runs when the user changes parameter page (or
-enters the overlay) and updates the display when it finds results. The search
-scans all 128 steps of the track for automation entries matching the visible
-parameters. It can be slow — it runs in the foreground service loop and
-processes a few steps per pass. The tier-2 underline appears after the search
-completes; it does not need to be instant.
+Each displayed parameter uses at most one underlined character:
 
-A parameter that qualifies for both tiers displays tier 1 (full underline),
-which subsumes the first-char indicator.
+- **Pattern-wide automation:** if the parameter is automated on any step of the
+  current track/Pattern, underline the leftmost character of its short name in
+  overview or its long name in clicked-in view.
+- **Held-step automation:** for each parameter, find the most recently pressed,
+  still-held step containing automation for that exact target. Display that
+  automated value and underline only the rightmost non-space character of the
+  value. Do not underline that parameter's name.
+
+The held-step rule has precedence per parameter. Different visible parameters
+may source their values from different held steps. Whenever a value is
+underlined it must be an automation value for that exact target, never the
+saved normal or Morph endpoint value.
+
+A small async foreground agent scans all 128 steps for the Pattern-wide result.
+Held-step matching reads the small held set directly and does not wait for that
+scan.
 
 #### LCD underline mechanism
 
@@ -412,32 +419,20 @@ The splash characters are used only at boot and are dead at runtime. **Slots
 2-7 (6 slots) are free for runtime use.** Slots 0 and 1 are used by the menu
 (`...` for Load/Save operations, pop bar for level displays).
 
-To underline a character, define a CGRAM slot with the standard ASCII glyph
-plus the bottom pixel row set to `0x1F` (all 5 dots on). At runtime, call
-`lcd_define_char(slot, underlined_glyph)` for each unique character that needs
-underlining, then emit `\x02`..`\x07` in the LCD string where the underlined
-characters appear.
-
-With 6 free slots, the underline budget is **6 distinct underlined glyphs on
-screen at once.** The same CGRAM slot can appear at multiple screen positions
-(e.g., two parameters containing underlined 'a' share one slot).
+Only `0-9`, `A-Z`, and `a-z` may be underlined: 62 glyphs stored as 8-byte
+CGRAM row images, for a 496-byte flash table sourced from the matching WS0010
+ROM font. Define the chosen glyph with the bottom row set to `0x1F` (all 5 dots
+on), then emit that slot code at the marker location.
 
 #### Slot budget analysis
 
-In **single-parameter view**: up to 3 name chars + 3 value chars = 6 unique
-underlined glyphs. Fits exactly in the 6-slot budget.
-
-In **multi-parameter overview** (4 parameters visible): worst case with a held
-step automating 2 parameters (6 chars from their names) plus 2 other parameters
-with tier-2 first-char-only (2 more) = up to 8 distinct glyphs. This can
-exceed 6 in the worst case.
-
-**Resolution: priority allocation.** Tier 1 (held-step full underline) fills
-CGRAM slots first — these are the active editing indicator. Remaining slots go
-to tier 2 (first-char track-wide). If identical base characters appear across
-parameters, they share one CGRAM slot. If the 6-slot budget is exhausted, the
-lowest-priority tier-2 indicators silently don't render. In practice, glyph
-sharing keeps most real layouts within budget.
+There are at most four visible parameters and each receives at most one marker,
+so the hard worst case is four distinct underlined glyphs. Use slots 2..5 as a
+four-entry cache and leave slots 6 and 7 free. A clicked-in view needs only one
+slot. No indicator is dropped. During rapid held-step value editing, show the
+new value immediately without its underline and reapply it once after
+`VOICE_AUTOMATION_UNDERLINE_QUIET_MS` (initially 100 ms) of foreground quiet,
+avoiding repeated CGRAM rewrites.
 
 ### 4.3 Step illumination in single-parameter view
 
@@ -450,7 +445,8 @@ single-parameter view (encoder click-in on a specific parameter):
   voice.
 - Steps without automation for that parameter are unlit, regardless of trigger
   state.
-- The focus step (last pressed) remains illuminated as normal.
+- Every physically held step remains illuminated so the edit selection is not
+  hidden.
 
 Normal trigger-based illumination is restored when:
 - All SEQ buttons are released (overlay exits);
@@ -469,23 +465,24 @@ step illumination must update immediately on any of these changes:
 
 ### 4.5 Value display behavior
 
-The **last step pressed and held** is the "focus step." If the focus step has
-an automation entry for the currently viewed parameter:
+For each displayed parameter, walk held steps from newest press to oldest and
+use the first step containing an automation entry for that exact target:
 
 - The value display shows the automated value (after 7-bit → 8-bit expansion),
-  not the voice default.
-- The value is also underlined (in single-parameter view) — the value characters
-  count toward the tier-1 underline budget.
+  never the saved normal or Morph endpoint.
+- Only the rightmost non-space character of the value is underlined, in both
+  overview and single-parameter views. The name is not underlined.
 
-If the focus step does NOT automate this parameter:
+If no held step automates this exact parameter:
 
-- The value shows the voice default parameter value (from the Scene image).
-- The value is NOT underlined.
+- The value shows the selected normal or Morph endpoint and is not underlined.
+- If the parameter is automated elsewhere in the Pattern, its name retains the
+  Pattern-wide first-character underline.
 
-### 4.6 Writing automations via pot adjustment
+### 4.6 Writing automations via parameter adjustment
 
-While holding SEQ buttons, if the user turns a pot to adjust any displayed
-parameter:
+While holding SEQ buttons, if the user turns an endless pot or the clicked-in
+encoder to adjust a displayed parameter:
 
 - An automation entry is written for that parameter on **every held step**.
   The target is the track's own voice (there is no cross-voice targeting from
@@ -496,11 +493,27 @@ parameter:
   block size doesn't change).
 - If a held step does not have that parameter automated, a new entry is added
   (pool read-modify-write, may reallocate if chunk count grows).
-- The parameter name and value become underlined after the write.
+- An existing matching held automation supplies the edit's starting value. If
+  none exists yet, the first edit may start from the visible normal/Morph
+  endpoint, but the value marker appears only after that adjusted result has
+  been stored successfully as automation.
+- The same resulting automation value is broadcast to every held step. After
+  at least one successful write, the display sources an actual held-step
+  automation value, removes the name underline, shows the new value immediately
+  in ROM characters, and reapplies its one-character value underline after the
+  configured value-edit quiet period.
 
 Best-effort semantics for multi-step writes: if the pool fills partway through
 or a step reaches the 63-entry ceiling, successfully written steps keep their
 automation; steps that failed are unchanged. No notification — fall-through.
+
+**Endpoint safety is absolute:** while any step is held, neither the normal nor
+Morph endpoint, its Menu mirror, nor its Autosave state may be changed. With
+playback running, the UI performs only the Pattern automation writes. With
+playback stopped, it may additionally send the value through an audited
+runtime-DSP-only path for audible preview. That preview is ephemeral and is not
+an endpoint write. If the implementer cannot prove the distinction, omit the
+preview and write only the Pattern automation.
 
 ### 4.7 Pot input handling
 
@@ -513,15 +526,19 @@ physically turn the pot to trigger a write.
 ### 4.8 Implementation notes
 
 - Detect "any SEQ button held" state to enter overlay mode.
-- In overlay mode, read automation data for all held steps on the current track,
-  building a union set of "which parameters are automated on any held step."
-- Track the most recent button-down event (not just button state) for the
-  focus step.
+- Retain held buttons in press order. Walk newest-to-oldest, read each held
+  step once, and resolve the newest exact-target match independently for each
+  visible parameter.
 - Underline rendering updates on: SEQ button press/release, parameter page
-  scroll, automation write.
+  scroll, Pattern scan completion, automation write, and the configured
+  value-edit quiet-period expiry.
+- Budget the Pattern-wide scan with
+  `VOICE_AUTOMATION_SCAN_STEPS_PER_PASS` in `config.h`, initially 4 steps. At
+  the 63-entry per-step ceiling this is at most 252 automation entries/target
+  comparisons per foreground pass.
 - On full SEQ button release, exit overlay and restore normal VOICE display
-  (including restoring CGRAM slots 2-7 if needed, though in practice they can
-  stay defined until reused).
+  while retaining Pattern-wide name indicators. CGRAM slots 2..5 can stay
+  defined until reused; ordinary pages stop emitting their codes.
 - Writing to up to 16 steps is a foreground loop, each step doing one
   independent pool read-modify-write. Bounded at 16 iterations.
 
@@ -716,16 +733,16 @@ should call through to `sceneModTarget_valid()` for Scene-range IDs when
 
 ### 7.5 CGRAM slot lifecycle
 
-The 6 free CGRAM slots (2-7) are overwritten with underline glyphs when the
-VOICE overlay is active. No other runtime code uses slots 2-7 (the splash
-characters are boot-only). Slots 0 (ellipsis) and 1 (pop) must not be
-touched. On overlay exit, slots 2-7 can remain defined — they are only
-referenced when the overlay emits `\x02`..`\x07` codes in LCD strings, which
-it stops doing on exit.
+Slots 0 (ellipsis) and 1 (pop) must not be touched. The six boot-only splash
+slots 2..7 are runtime-free, but the automation indicator may use only slots
+2..5. Its four-entry cache records the rendered base character assigned to
+each slot and redefines only changed entries. Slots 6 and 7 remain available.
 
-If a future feature also needs CGRAM slots at runtime, a slot-manager
-abstraction would be needed. For now, the automation overlay is the sole
-runtime CGRAM consumer and can use slots 2-7 unconditionally.
+Before redefining a cached slot, replace stale DDRAM references with their ROM
+characters; then define the new glyph and write its new references. Preflight
+the whole ordered transaction against the async LCD queue so it is deferred as
+a unit rather than partially enqueued. On leaving VOICE pages the definitions
+may remain, but no ordinary page emits their slot codes.
 
 ---
 
@@ -758,21 +775,26 @@ runtime CGRAM consumer and can use slots 2-7 unconditionally.
 10. **Implement Method 1 menu pages** — step-edit automation page rendering,
     navigation, add/delete/clear, `inv` display for stale targets, parameter
     cycling with duplicate skip.
-11. **Implement Method 2 VOICE overlay** — held-step detection, two-tier CGRAM
-    underline rendering (tier 1: held-step full underline, tier 2: async
-    track-wide first-char underline), step illumination in single-parameter
-    view, pot-to-automation write path.
+11. **Implement Method 2 VOICE overlay** — press-ordered held-step detection,
+    per-parameter exact-target value sourcing, bounded four-slot CGRAM marker
+    rendering from the 496-byte alphanumeric table, configured hold and
+    value-underline delays, step illumination in single-parameter view,
+    normal/Morph display integration, and an endpoint-bypassing
+    parameter-to-automation write path.
 12. **Implement async track-wide automation search** — polled foreground agent
-    that scans 128 steps for automation matching the currently visible
-    parameters. Runs on parameter page change, processes a few steps per
-    foreground pass, updates tier-2 underline indicators when complete.
+    that scans 128 steps for every automatable descriptor on the current track.
+    Runs while VOICE pages are active, processes the configured four steps
+    (at most 252 entries) per foreground pass, and updates the
+    first-name-character indicators when complete.
 13. **Implement sequencer playback** — TIM3 copies pending entries to the
     32-entry debounced buffer; foreground drains it through
     `instrumentManager_writeRuntime()`.
 14. **Test on hardware** — create automation via both methods, verify playback
     applies values audibly, test `inv`/`clr` after instrument swap, test step
-    illumination in single-parameter view, save/load PAT4, confirm automations
-    survive.
+    illumination in single-parameter view, exercise four simultaneous markers
+    and the configured reapplication delay in normal and SHIFT+VOICE Morph
+    views, prove both endpoint images and Autosave state remain unchanged by
+    held-step edits, save/load PAT4, and confirm automations survive.
 
 ---
 
@@ -781,13 +803,16 @@ runtime CGRAM consumer and can use slots 2-7 unconditionally.
 | # | Question | Resolution |
 |---|----------|------------|
 | 1 | Automation on inactive steps | **Implement now.** Per `SCOPING_TARGETS.md` §4.6, automation applies regardless of trigger state. Additionally: in single-parameter VOICE view with a held step, SEQ LEDs show only steps carrying automation for the viewed parameter (§4.3). |
-| 2 | LCD underline rendering | **CGRAM for all views.** Two-tier system: tier 1 = full underline (held-step automation, all chars), tier 2 = first-char underline (track-wide async search). Priority allocation when >6 distinct glyphs needed (§4.2). |
+| 2 | LCD underline rendering | **CGRAM for all VOICE views, bounded to four slots.** Each visible parameter has exactly one possible marker: first name character for Pattern-wide presence, or rightmost value character when a held step supplies automation for that exact target. Held value wins and can never display an endpoint. Slots 2..5 suffice; a 62-glyph alphanumeric table costs 496 flash bytes; value-marker reapplication uses the configured 100 ms edit quiet period (§4.2). |
 | 3 | Sequencer automation context | **Foreground only.** TIM3 copies decoded entries to a 32-entry pending buffer with `(step, target)` debounce; foreground drains via `instrumentManager_writeRuntime()` (§5.4). |
 | 4 | Multi-step write failure | **Best-effort, fall-through.** Pool exhaustion and 63-entry ceiling both cause silent failure on the affected step. No notification (§7.2). |
 | 5 | Automation persistence | **Persists until next trigger.** The DSP runtime state holds the value naturally. No explicit hold/reset tracking this session. Hold/reset flags are deferred and additive (§5.5). |
 | 6 | Stale entries after instrument swap | **`inv` display + `clr` track-wide cleanup.** Invalid targets show `inv` in the Method 1 parameter field. `clr` action searches all 128 steps for matching voice+parameter and deletes them. Playback skips invalid entries silently (§7.3). |
 | 7 | Scene target validation | **Extend `instrumentManager_targetValid()`.** Accept Scene-range IDs (384+) when `use == INSTRUMENT_TARGET_AUTOMATION`, delegating to `sceneModTarget_valid()`. Required before Method 1 can offer Scene targets (§1.2). |
 | 8 | Pending-automation buffer | **32 entries, debounced by `(step, target)`.** Multiple writes to the same step and parameter coalesce; different steps targeting the same parameter are preserved. Overflow drops the new entry (§5.4). |
+| 9 | Hold recognition | **Short configurable long-press.** `BUTTON_HOLD_DELAY_MS` lives in `config.h`, starts at 100 ms, replaces the private `BUTTON_TIMEOUT`, and is common to all hold-vs-tap UI gestures (§4.1). |
+| 10 | Endpoint/runtime behavior during held edits | **Never mutate endpoints.** Running playback receives Pattern writes only. Stopped playback may additionally receive an ephemeral runtime-DSP-only preview; if that boundary is unclear, omit preview (§4.6). |
+| 11 | VOICE-overlay retained SRAM | **40 bytes approved.** One Menu-owned, two-byte-aligned `.bss` block with runtime lifetime, as itemized in `S065_DYN_PAT_VOICE_PARAM_UX.md` §10. Any increase requires new approval. |
 
 ---
 
@@ -801,7 +826,8 @@ sequencer playback with foreground application buffer, legacy stub replacement,
 and target validator extension. Delivers a working end-to-end path: create
 automation in step-edit mode, hear it play back, save/load via PAT4.
 
-**Session 066**: Method 2 VOICE overlay (held-step automation writing, two-tier
-CGRAM underline, step illumination in single-parameter view, async track-wide
-search agent), and any non-essential polish or edge-case handling deferred from
-065.
+**Session 066** (`S065_DYN_PAT_VOICE_PARAM_UX.md`): Method 2 VOICE overlay
+(held-step automation writing, four-slot single-marker CGRAM underline,
+per-parameter held value sourcing, normal/Morph view integration, step
+illumination in single-parameter view, async Pattern-wide search agent), and
+any non-essential polish or edge-case handling deferred from 065.
