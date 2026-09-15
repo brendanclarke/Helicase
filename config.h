@@ -387,6 +387,21 @@
  */
 #define AUTOSAVE_TRACE_FLUSH_INTERVAL_MS 500u
 
+/*
+ * Session-065 pending automation handoff and PatternTrace geometry.
+ *
+ * What: reserve one 4-byte pending automation record per queued ISR event and
+ * one eight-byte DEV-only PatternTrace record per retained trace event. Why:
+ * TIM3 must publish automation without doing descriptor/runtime work, while
+ * foreground filesystem code needs a bounded diagnostic history. SRAM cost:
+ * SEQ_PENDING_BUF_COUNT * 4 = 512 bytes in SRAM1 plus one 32-record trace ring
+ * of 256 bytes only when DEV_MODE_LOGGING is enabled. Affiliates: sequencer.c,
+ * PatternTrace.c, and filesystem.c.
+ */
+#define SEQ_PENDING_BUF_COUNT       128u
+#define PAT_TRACE_RECORD_COUNT      32u
+#define PAT_TRACE_FLUSH_INTERVAL_MS 1000u
+
 /* -----------------------------------------------------------------------
 ** Display — WS0010 OLED 16×2, 4-bit parallel
 **   RS  = PE12

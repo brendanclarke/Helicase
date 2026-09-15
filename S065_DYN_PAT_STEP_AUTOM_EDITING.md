@@ -614,6 +614,2079 @@ while voice parameters (0..383) work immediately.
 
 ### 6.6 RAM allocation acknowledgement
 
-Per `SRAM_MANIFEST.md` policy, the ~162–194 bytes of new static SRAM1
-allocation requires explicit user acknowledgement before implementation. The
-pending buffer is Pattern playback infrastructure in normal SRAM1.
+Per `SRAM_MANIFEST.md` policy, new static SRAM1 allocations require
+explicit user acknowledgement before implementation:
+
+- **Pending step-event buffer:** 514 bytes unconditional SRAM1 .bss
+  (SEQ_PENDING_BUF_COUNT × 4 + 2 = 128 × 4 + 2). Count adjustable in
+  config.h. Owner: sequencer.c. Lifetime: process.
+- **Pattern trace ring:** 256 bytes DEV_MODE_LOGGING-only SRAM1
+  (PAT_TRACE_RECORD_COUNT × 8 = 32 × 8). Not present in production builds.
+  Owner: PatternTrace.c. Lifetime: process.
+
+---
+
+## 7. Complete Implementation Specification
+
+Every change below is described by file, line number, and operation
+(ADD/MODIFY/REMOVE). Code blocks include the comment documentation
+required at each site. All line numbers reference commit `ed4a2db`.
+
+---
+
+### 7.1 Phase A — Pool Block Infrastructure
+
+#### A1. Extend `pat_blockChunks()`
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.c`
+**Lines:** 261–275
+**Operation:** MODIFY
+
+**Current code (lines 261–275):**
+```c
+static uint8_t pat_blockChunks(uint8_t special_flags)
+{
+    uint8_t value_count = 0u;
+    uint8_t total;
+
+    special_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (special_flags & PAT_SPECIAL_NOTE_BIT)
+        value_count++;
+    if (special_flags & PAT_SPECIAL_VEL_BIT)
+        value_count++;
+    if (special_flags & PAT_SPECIAL_PROB_BIT)
+        value_count++;
+    total = (uint8_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count);
+    return (uint8_t)((total + 3u) >> 2u);
+}
+```
+
+**Replacement:**
+```c
+/*
+ * Calculate the four-byte allocation size for a dynamic pool block.
+ *
+ * What: compute chunks from the specials flags byte and the automation
+ * entry count. Why: allocator, free, reallocation, and block-size audit
+ * paths must all agree on block ownership. The formula accounts for the
+ * two-byte header, one flags byte, popcount(flags) specials values, and
+ * auto_count two-byte automation entries, all rounded up to 4-byte chunks.
+ *
+ * Inputs: special_flags (bits 0..2 note/vel/prob), auto_count (0..63).
+ * Output: chunk count (1..32). Affiliates: pat_poolAlloc(), pat_poolFree(),
+ *   pat_writeSpecials(), pat_eraseStep(), pat_clearTrack(),
+ *   pat_writeStepAutomation(), pat_removeStepAutomation().
+ */
+static uint8_t pat_blockChunks(uint8_t special_flags, uint8_t auto_count)
+{
+    uint8_t value_count = 0u;
+    uint8_t total;
+
+    special_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (special_flags & PAT_SPECIAL_NOTE_BIT)
+        value_count++;
+    if (special_flags & PAT_SPECIAL_VEL_BIT)
+        value_count++;
+    if (special_flags & PAT_SPECIAL_PROB_BIT)
+        value_count++;
+    total = (uint8_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count +
+                      auto_count * 2u);
+    return (uint8_t)((total + 3u) >> 2u);
+}
+```
+
+**Caller update summary** — every existing call must pass the auto_count
+read from the block header (`pool[offset + 1] & PAT_BLOCK_AUTO_COUNT_MASK`)
+or `0u` for new blocks:
+
+| Call site | Line | Current | New |
+|-----------|------|---------|-----|
+| `pat_blockWrite` memset | 305 | `pat_blockChunks(special_flags)` | `pat_blockChunks(special_flags, auto_count)` |
+| `pat_writeSpecials` old-block size | 395 | `pat_blockChunks(r->pool[old_offset + 2u])` | `pat_blockChunks(r->pool[old_offset + 2u], old_auto_count)` |
+| `pat_writeSpecials` new-block size | 403 | `pat_blockChunks(new_flags)` | `pat_blockChunks(new_flags, old_auto_count)` |
+| `pat_writeSpecials` same-size check | 405 | `pat_blockChunks(r->pool[old_offset + 2u])` | `pat_blockChunks(r->pool[old_offset + 2u], old_auto_count)` |
+| `pat_eraseStep` | 575 | `pat_blockChunks(r->pool[offset + 2u])` | `pat_blockChunks(r->pool[offset + 2u], r->pool[offset + 1u] & PAT_BLOCK_AUTO_COUNT_MASK)` |
+| `pat_clearTrack` | 662 | `pat_blockChunks(r->pool[offset + 2u])` | `pat_blockChunks(r->pool[offset + 2u], r->pool[offset + 1u] & PAT_BLOCK_AUTO_COUNT_MASK)` |
+
+---
+
+#### A2. Extend `pat_blockWrite()`
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.c`
+**Lines:** 287–317
+**Operation:** MODIFY
+
+**Current code (lines 287–317):**
+```c
+static void pat_blockWrite(pat_scene_region_t *r, uint16_t byte_offset,
+                           uint8_t track, uint8_t step,
+                           uint8_t special_flags, uint8_t note,
+                           uint8_t velocity, uint8_t probability)
+{
+    uint8_t *p;
+    uint16_t step_id;
+    uint16_t header;
+    uint8_t idx;
+
+    if (!r || !pat_poolOffsetValid(byte_offset))
+        return;
+    special_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    p = &r->pool[byte_offset];
+    step_id = (uint16_t)(track * NUM_STEPS + step);
+    header = (uint16_t)((step_id << PAT_BLOCK_STEP_ID_SHIFT) &
+                        PAT_BLOCK_STEP_ID_MASK);
+
+    memset(p, 0, (size_t)pat_blockChunks(special_flags) * 4u);
+    p[0] = (uint8_t)(header >> 8u);
+    p[1] = (uint8_t)(header & 0xFFu);
+    p[2] = special_flags;
+
+    idx = 3u;
+    if (special_flags & PAT_SPECIAL_NOTE_BIT)
+        p[idx++] = note;
+    if (special_flags & PAT_SPECIAL_VEL_BIT)
+        p[idx++] = velocity;
+    if (special_flags & PAT_SPECIAL_PROB_BIT)
+        p[idx++] = probability;
+}
+```
+
+**Replacement:**
+```c
+/*
+ * Write one complete dynamic block at an allocated pool offset.
+ *
+ * What: encode the step back-reference, automation count, flags, specials
+ * values, and automation entries in the documented byte order. Why: every
+ * mutation path (specials edit, automation add/remove, erase) and future
+ * integrity reader needs one stable layout. The header stores the step_id
+ * in bits 15..6 and auto_count in bits 5..0 (big-endian). After the
+ * specials region, each automation entry is packed as a little-endian
+ * 16-bit word: bits 15..9 = 7-bit value, bits 8..0 = 9-bit target.
+ *
+ * Inputs: region, validated offset, track/step, flags, three candidate
+ *   specials values, automation entry array (may be NULL when count is 0),
+ *   and auto_count (0..63).
+ * Output: the allocated block is fully written and zero-padded to the
+ *   chunk boundary. Affiliates: pat_blockRead(),
+ *   pat_blockReadAutomations(), pat_writeSpecials(),
+ *   pat_writeStepAutomation(), pat_removeStepAutomation().
+ */
+static void pat_blockWrite(pat_scene_region_t *r, uint16_t byte_offset,
+                           uint8_t track, uint8_t step,
+                           uint8_t special_flags, uint8_t note,
+                           uint8_t velocity, uint8_t probability,
+                           const pat_automation_entry_t *autos,
+                           uint8_t auto_count)
+{
+    uint8_t *p;
+    uint16_t step_id;
+    uint16_t header;
+    uint8_t idx;
+    uint8_t i;
+
+    if (!r || !pat_poolOffsetValid(byte_offset))
+        return;
+    special_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (auto_count > 63u)
+        auto_count = 63u;
+    p = &r->pool[byte_offset];
+    step_id = (uint16_t)(track * NUM_STEPS + step);
+    header = (uint16_t)(((step_id << PAT_BLOCK_STEP_ID_SHIFT) &
+                         PAT_BLOCK_STEP_ID_MASK) |
+                        (auto_count & PAT_BLOCK_AUTO_COUNT_MASK));
+
+    memset(p, 0, (size_t)pat_blockChunks(special_flags, auto_count) * 4u);
+    p[0] = (uint8_t)(header >> 8u);
+    p[1] = (uint8_t)(header & 0xFFu);
+    p[2] = special_flags;
+
+    idx = 3u;
+    if (special_flags & PAT_SPECIAL_NOTE_BIT)
+        p[idx++] = note;
+    if (special_flags & PAT_SPECIAL_VEL_BIT)
+        p[idx++] = velocity;
+    if (special_flags & PAT_SPECIAL_PROB_BIT)
+        p[idx++] = probability;
+
+    for (i = 0u; i < auto_count; i++) {
+        uint16_t packed = (uint16_t)(((autos[i].value & 0x7Fu) << 9u) |
+                                     (autos[i].target & 0x01FFu));
+        p[idx++] = (uint8_t)(packed & 0xFFu);
+        p[idx++] = (uint8_t)(packed >> 8u);
+    }
+}
+```
+
+**Caller update** — every existing call to `pat_blockWrite` must append
+`NULL, 0u`:
+
+| Call site | Line | Change |
+|-----------|------|--------|
+| `pat_writeSpecials` in-place overwrite | 407–408 | append `, autos, old_auto_count` (preserved entries) |
+| `pat_writeSpecials` new-block write | 424–425 | append `, autos, old_auto_count` (preserved entries) |
+
+These callers are modified as part of A4 below, not simply `NULL, 0u`,
+because `pat_writeSpecials` must preserve existing automation entries.
+
+---
+
+#### A3. Add `pat_blockReadAutomations()`
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.c`
+**Location:** ADD after `pat_blockRead()` (after line 356, before line 358)
+**Operation:** ADD
+
+```c
+/*
+ * Read automation entries from one dynamic pool block.
+ *
+ * What: locate the automation region after the specials values, read the
+ * auto_count from the block header, and unpack each 2-byte entry into the
+ * caller's typed array. Why: separating automation reads from specials
+ * reads lets the sequencer's hot trigger path stay small (specials only)
+ * while edit and playback paths read automations independently.
+ *
+ * Inputs: validated Scene region, pool byte offset, the flags byte from
+ *   pool[offset + 2] (to compute the specials region size), output array,
+ *   and max_count capacity. Output: actual entry count (0..min(auto_count,
+ *   max_count)). Each entry's target and value are unpacked from the
+ *   little-endian packed format (bits 15..9 = value, bits 8..0 = target).
+ * Affiliates: pat_readStepAutomations(), pat_writeStepAutomation(),
+ *   pat_removeStepAutomation(), pat_writeSpecials().
+ */
+static uint8_t pat_blockReadAutomations(const pat_scene_region_t *r,
+                                        uint16_t byte_offset,
+                                        uint8_t special_flags,
+                                        pat_automation_entry_t *out,
+                                        uint8_t max_count)
+{
+    const uint8_t *p;
+    uint8_t auto_count;
+    uint8_t value_count;
+    uint8_t auto_start;
+    uint8_t copy_count;
+    uint8_t i;
+
+    if (!r || !pat_poolOffsetValid(byte_offset) || !out || max_count == 0u)
+        return 0u;
+
+    p = &r->pool[byte_offset];
+    auto_count = (uint8_t)(p[1] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if (auto_count == 0u)
+        return 0u;
+
+    special_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    value_count = 0u;
+    if (special_flags & PAT_SPECIAL_NOTE_BIT)   value_count++;
+    if (special_flags & PAT_SPECIAL_VEL_BIT)    value_count++;
+    if (special_flags & PAT_SPECIAL_PROB_BIT)   value_count++;
+    auto_start = (uint8_t)(3u + value_count);
+
+    copy_count = (auto_count < max_count) ? auto_count : max_count;
+    for (i = 0u; i < copy_count; i++) {
+        uint8_t base = (uint8_t)(auto_start + i * 2u);
+        uint16_t packed = (uint16_t)((uint16_t)p[base + 1u] << 8u) |
+                          (uint16_t)p[base];
+        out[i].target = (uint16_t)(packed & 0x01FFu);
+        out[i].value  = (uint8_t)((packed >> 9u) & 0x7Fu);
+    }
+    return copy_count;
+}
+```
+
+---
+
+#### A4. Fix `pat_writeSpecials()` for automation preservation
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.c`
+**Lines:** 370–428
+**Operation:** MODIFY (complete rewrite)
+
+**Current code (lines 370–428):**
+```c
+static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
+                              uint8_t step, uint8_t new_flags,
+                              uint8_t note, uint8_t velocity,
+                              uint8_t probability)
+{
+    pat_scene_region_t *r;
+    uint16_t *entry;
+    uint16_t addr;
+    uint16_t old_offset;
+    uint8_t old_chunks;
+    uint8_t new_chunks;
+    uint16_t new_offset;
+    uint16_t trigger_bits;
+
+    entry = pat_addrPtr(scene_index, track, step);
+    if (!entry)
+        return;
+    r = &pat_regions[scene_index];
+    new_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    addr = *entry;
+    trigger_bits = (uint16_t)(addr & PAT_ADDR_TRIGGER_BIT);
+    old_offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+
+    if (new_flags == 0u) {
+        if (pat_poolOffsetValid(old_offset)) {
+            old_chunks = pat_blockChunks(r->pool[old_offset + 2u]);
+            pat_poolFree(r, old_offset, old_chunks);
+        }
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
+        pat_markSceneDirty(scene_index);
+        return;
+    }
+
+    new_chunks = pat_blockChunks(new_flags);
+    if (pat_poolOffsetValid(old_offset)) {
+        old_chunks = pat_blockChunks(r->pool[old_offset + 2u]);
+        if (old_chunks == new_chunks) {
+            pat_blockWrite(r, old_offset, track, step, new_flags, note,
+                           velocity, probability);
+            *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
+                                old_offset);
+            pat_markSceneDirty(scene_index);
+            return;
+        }
+        pat_poolFree(r, old_offset, old_chunks);
+    }
+
+    new_offset = pat_poolAlloc(r, new_chunks);
+    if (new_offset == PAT_ADDR_SENTINEL) {
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
+        pat_markSceneDirty(scene_index);
+        return;
+    }
+
+    pat_blockWrite(r, new_offset, track, step, new_flags, note, velocity,
+                   probability);
+    *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | new_offset);
+    pat_markSceneDirty(scene_index);
+}
+```
+
+**Replacement:**
+```c
+/*
+ * Replace one step's specials while preserving existing automation entries.
+ *
+ * What: read the current block (specials + automations), replace only the
+ * specials portion, and rewrite the complete block. If no specials remain
+ * AND no automations exist, the block is removed. If only automations
+ * remain (new_flags == 0 but auto_count > 0), the block is preserved with
+ * flags = 0. The allocate-first pattern prevents automation loss when a
+ * size change requires reallocation (S065 risk §5.2).
+ *
+ * Why: specials and automations share one pool block. A specials-only edit
+ * must not truncate or lose the automation payload. The previous code freed
+ * before allocating and ignored auto_count entirely.
+ *
+ * Inputs: Scene/track/step, desired flags, three candidate specials values.
+ * Output: address and pool state agree; on allocation failure the old block
+ *   is untouched and the specials edit is silently rejected (data preserved).
+ * Affiliates: pat_setStepNote(), pat_setStepVolume(), pat_setStepProbability(),
+ *   pat_blockReadAutomations(), pat_blockWrite(), pat_blockChunks().
+ */
+static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
+                              uint8_t step, uint8_t new_flags,
+                              uint8_t note, uint8_t velocity,
+                              uint8_t probability)
+{
+    pat_scene_region_t *r;
+    uint16_t *entry;
+    uint16_t addr;
+    uint16_t old_offset;
+    uint8_t old_auto_count;
+    uint8_t old_chunks;
+    uint8_t new_chunks;
+    uint16_t new_offset;
+    uint16_t trigger_bits;
+    pat_automation_entry_t autos[63];
+
+    entry = pat_addrPtr(scene_index, track, step);
+    if (!entry)
+        return;
+    r = &pat_regions[scene_index];
+    new_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    addr = *entry;
+    trigger_bits = (uint16_t)(addr & PAT_ADDR_TRIGGER_BIT);
+    old_offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+
+    /* Read existing automation entries to preserve them. */
+    old_auto_count = 0u;
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(old_offset)) {
+        old_auto_count = pat_blockReadAutomations(
+            r, old_offset, r->pool[old_offset + 2u], autos, 63u);
+    }
+
+    /*
+     * If no specials AND no automations, remove the block entirely.
+     * If no specials but automations exist, keep the block (flags=0).
+     */
+    if (new_flags == 0u && old_auto_count == 0u) {
+        if (pat_poolOffsetValid(old_offset)) {
+            old_chunks = pat_blockChunks(r->pool[old_offset + 2u],
+                                         old_auto_count);
+            pat_poolFree(r, old_offset, old_chunks);
+        }
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
+        pat_markSceneDirty(scene_index);
+        return;
+    }
+
+    new_chunks = pat_blockChunks(new_flags, old_auto_count);
+    if (pat_poolOffsetValid(old_offset)) {
+        old_chunks = pat_blockChunks(r->pool[old_offset + 2u],
+                                     old_auto_count);
+        if (old_chunks == new_chunks) {
+            pat_blockWrite(r, old_offset, track, step, new_flags, note,
+                           velocity, probability, autos, old_auto_count);
+            *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
+                                old_offset);
+            pat_markSceneDirty(scene_index);
+            return;
+        }
+        /*
+         * Allocate-first: do NOT free the old block before the new one
+         * is secured. If allocation fails, the old block and all its
+         * automation data remain intact. The specials edit is rejected
+         * rather than losing automation. (S065 risk §5.2.)
+         */
+        new_offset = pat_poolAlloc(r, new_chunks);
+        if (new_offset == PAT_ADDR_SENTINEL) {
+            /* Allocation failed — old block preserved, edit rejected. */
+            pat_markSceneDirty(scene_index);
+            return;
+        }
+        pat_blockWrite(r, new_offset, track, step, new_flags, note,
+                       velocity, probability, autos, old_auto_count);
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
+                            new_offset);
+        pat_poolFree(r, old_offset, old_chunks);
+        pat_markSceneDirty(scene_index);
+        return;
+    }
+
+    /* No existing block — allocate new. */
+    new_offset = pat_poolAlloc(r, new_chunks);
+    if (new_offset == PAT_ADDR_SENTINEL) {
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
+        pat_markSceneDirty(scene_index);
+        return;
+    }
+    pat_blockWrite(r, new_offset, track, step, new_flags, note, velocity,
+                   probability, autos, old_auto_count);
+    *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | new_offset);
+    pat_markSceneDirty(scene_index);
+}
+```
+
+**Critical changes from the current code:**
+1. Reads existing automations into stack-local `autos[63]` (252 B) before any modification.
+2. Early exit now checks `new_flags == 0u && old_auto_count == 0u` (was `new_flags == 0u`).
+3. All `pat_blockChunks()` calls pass `old_auto_count`.
+4. All `pat_blockWrite()` calls pass `autos, old_auto_count`.
+5. **Allocate-first pattern**: new block is allocated BEFORE old block is freed. On failure, the old block is preserved and the edit is silently rejected — no data loss.
+
+---
+
+#### A5. Fix `pat_eraseStep()`
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.c`
+**Lines:** 554–580
+**Operation:** MODIFY (line 575 only)
+
+**Current code (line 575):**
+```c
+        uint8_t chunks = pat_blockChunks(r->pool[offset + 2u]);
+```
+
+**Replacement:**
+```c
+        /*
+         * Block size must include automation entries. The auto_count lives
+         * in the header's second byte bits 5..0. Under-freeing would leak
+         * occupied pool chunks that remain marked but unreferenced.
+         */
+        uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
+                                          r->pool[offset + 1u] &
+                                              PAT_BLOCK_AUTO_COUNT_MASK);
+```
+
+---
+
+#### A6. Fix `pat_clearTrack()`
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.c`
+**Lines:** 640–668
+**Operation:** MODIFY (line 662 only)
+
+**Current code (line 662):**
+```c
+            uint8_t chunks = pat_blockChunks(r->pool[offset + 2u]);
+```
+
+**Replacement:**
+```c
+            /*
+             * Same auto_count-aware block size as pat_eraseStep(). Every
+             * block-free path must read the header for auto_count or
+             * pool chunks are leaked.
+             */
+            uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
+                                              r->pool[offset + 1u] &
+                                                  PAT_BLOCK_AUTO_COUNT_MASK);
+```
+
+---
+
+### 7.2 Phase B — Public Automation APIs
+
+#### B-TYPE. New type in PatternData.h
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.h`
+**Location:** ADD after line 168 (after `pat_step_specials_t` closing brace)
+**Operation:** ADD
+
+```c
+/*
+ * One decoded step automation entry.
+ *
+ * What: in-memory representation of one automation binding stored in a
+ * dynamic pool block. Why: callers read and write automations as typed
+ * structs while the pool stores them as packed 2-byte words. The target
+ * field carries a 9-bit instrument_param_id_t (voice-descriptor or
+ * Scene-mod-target namespace); the value field carries a 7-bit amount
+ * (0..127). Inputs/outputs: pat_readStepAutomations() fills these;
+ * pat_writeStepAutomation() consumes target+value. Affiliates:
+ * pat_blockReadAutomations(), pat_blockWrite(), sequencer playback.
+ */
+typedef struct {
+    uint16_t target;   /* 9-bit instrument_param_id_t (bits 8..0) */
+    uint8_t  value;    /* 7-bit (0..127) */
+} pat_automation_entry_t;
+```
+
+---
+
+#### B-DECL. New declarations in PatternData.h
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.h`
+**Lines:** 201–206
+**Operation:** REMOVE old declarations, ADD new block
+
+**Remove (lines 201–206):**
+```c
+void pat_setActiveAutomationTrack(uint8_t value);
+void pat_setSelectedStep(uint8_t step);
+void pat_setStepAutomationDestination(uint8_t scene_index, uint8_t track,
+                                      uint8_t step, uint8_t slot, uint16_t value);
+void pat_setStepAutomationValue(uint8_t scene_index, uint8_t track,
+                                uint8_t step, uint8_t slot, uint8_t value);
+```
+
+**Insert in their place:**
+```c
+/*
+ * Step automation read/write API.
+ *
+ * What: public access to per-step automation entries stored in the dynamic
+ * pool. Each entry pairs a 9-bit instrument_param_id_t with a 7-bit value.
+ * A step holds 0..63 entries; the count is in header bits 5..0. Why: the
+ * step-edit menu and sequencer need a stable interface to automation data
+ * without learning pool byte layout. These replace the legacy two-lane
+ * pat_setStepAutomation* stubs.
+ *
+ * Inputs: Scene/track/step coordinates. Outputs: decoded entries or
+ *   success/failure codes. Affiliates: step-edit menu (Phase D), sequencer
+ *   playback (Phase E), Pattern AutoSave (raw pool persistence).
+ */
+uint8_t pat_stepAutomationCount(uint8_t scene_index, uint8_t track,
+                                uint8_t step);
+uint8_t pat_readStepAutomations(uint8_t scene_index, uint8_t track,
+                                uint8_t step, pat_automation_entry_t *out,
+                                uint8_t max_count);
+uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
+                                uint8_t step, uint16_t target, uint8_t value);
+uint8_t pat_removeStepAutomation(uint8_t scene_index, uint8_t track,
+                                 uint8_t step, uint16_t target);
+uint8_t pat_removeTrackAutomationByTarget(uint8_t scene_index, uint8_t track,
+                                          uint16_t target);
+```
+
+---
+
+#### B1–B5. New public functions in PatternData.c
+
+**File:** `Core/Bank/Scene/Pattern/PatternData.c`
+**Location:** ADD after line 798 (replacing the four removed stubs)
+**Operation:** REMOVE lines 795–798, ADD five new functions
+
+**Remove (lines 795–798):**
+```c
+void pat_setActiveAutomationTrack(uint8_t v) { (void)v; }
+void pat_setSelectedStep(uint8_t step) { (void)step; }
+void pat_setStepAutomationDestination(uint8_t s,uint8_t t,uint8_t p,uint8_t l,uint16_t v) {(void)s;(void)t;(void)p;(void)l;(void)v;}
+void pat_setStepAutomationValue(uint8_t s,uint8_t t,uint8_t p,uint8_t l,uint8_t v) {(void)s;(void)t;(void)p;(void)l;(void)v;}
+```
+
+**Insert:**
+
+```c
+/*
+ * Return the automation entry count on one step.
+ *
+ * What: read the 6-bit auto_count from the pool block header without
+ * decoding any entry data. Why: the step-edit menu needs a count to
+ * compute its dynamic page total, and callers need a lightweight
+ * has-automation test. Returns 0 for trigger-only or unallocated steps.
+ *
+ * Inputs: resident Scene index, track 0..6, step 0..127.
+ * Output: 0..63 automation entry count.
+ * Affiliates: step-edit page count computation,
+ *   pat_readStepAutomations().
+ */
+uint8_t pat_stepAutomationCount(uint8_t scene_index, uint8_t track,
+                                uint8_t step)
+{
+    const uint16_t *entry;
+    uint16_t addr;
+    uint16_t offset;
+
+    entry = pat_addrPtr(scene_index, track, step);
+    if (!entry)
+        return 0u;
+    addr = *entry;
+    if ((addr & PAT_ADDR_SPECIALS_BIT) == 0u)
+        return 0u;
+    offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+    if (!pat_poolOffsetValid(offset))
+        return 0u;
+    return (uint8_t)(pat_regions[scene_index].pool[offset + 1u] &
+                     PAT_BLOCK_AUTO_COUNT_MASK);
+}
+
+/*
+ * Read decoded automation entries from one step.
+ *
+ * What: validate coordinates, locate the pool block, and unpack entries
+ * into the caller's array. Why: the step-edit menu and track-wide removal
+ * helper need decoded entries without learning pool layout. Entries beyond
+ * max_count are silently not copied.
+ *
+ * Inputs: Scene/track/step, output array (must not be NULL), max_count.
+ * Output: actual count written to `out` (0..min(auto_count, max_count)).
+ * Affiliates: pat_blockReadAutomations(), pat_writeStepAutomation(),
+ *   pat_removeStepAutomation().
+ */
+uint8_t pat_readStepAutomations(uint8_t scene_index, uint8_t track,
+                                uint8_t step, pat_automation_entry_t *out,
+                                uint8_t max_count)
+{
+    const uint16_t *entry;
+    uint16_t addr;
+    uint16_t offset;
+    const pat_scene_region_t *r;
+
+    if (!out || max_count == 0u)
+        return 0u;
+    entry = pat_addrPtr(scene_index, track, step);
+    if (!entry)
+        return 0u;
+    addr = *entry;
+    if ((addr & PAT_ADDR_SPECIALS_BIT) == 0u)
+        return 0u;
+    offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+    if (!pat_poolOffsetValid(offset))
+        return 0u;
+    r = &pat_regions[scene_index];
+    return pat_blockReadAutomations(r, offset, r->pool[offset + 2u],
+                                    out, max_count);
+}
+
+/*
+ * Add or update one automation entry on a step.
+ *
+ * What: write one (target, value) entry to the step's pool block.
+ * Creates the block if none exists, updates in place if the target already
+ * has an entry (uniqueness invariant), or appends otherwise. Uses the
+ * allocate-first pattern so a failed reallocation preserves the old block.
+ *
+ * Why: the step-edit menu edits one entry at a time. The API must own the
+ * complete read-modify-write including allocation, address swap, and free,
+ * so callers never see partial pool state.
+ *
+ * Inputs: Scene/track/step, 9-bit target (masked), 7-bit value (clamped).
+ * Output: 1 on success, 0 on pool exhaustion, 63-limit, or bad coords.
+ *   Trigger bit is preserved. Scene is marked dirty on success.
+ * Affiliates: pat_blockReadAutomations(), pat_blockRead(),
+ *   pat_blockWrite(), pat_blockChunks(), pat_poolAlloc(), pat_poolFree(),
+ *   pat_markSceneDirty(), step-edit menu, VOICE overlay (Session 066).
+ */
+uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
+                                uint8_t step, uint16_t target, uint8_t value)
+{
+    uint16_t *entry;
+    uint16_t addr;
+    uint16_t offset;
+    uint16_t trigger_bits;
+    pat_scene_region_t *r;
+    pat_step_specials_t sp;
+    pat_automation_entry_t autos[63];
+    uint8_t auto_count;
+    uint8_t old_flags;
+    uint8_t old_chunks;
+    uint8_t new_chunks;
+    uint16_t new_offset;
+    uint8_t i;
+    uint8_t found;
+
+    entry = pat_addrPtr(scene_index, track, step);
+    if (!entry)
+        return 0u;
+
+    r = &pat_regions[scene_index];
+    addr = *entry;
+    trigger_bits = (uint16_t)(addr & PAT_ADDR_TRIGGER_BIT);
+    target &= 0x01FFu;
+    if (value > 127u)
+        value = 127u;
+
+    offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u && pat_poolOffsetValid(offset)) {
+        sp = pat_blockRead(r, offset);
+        old_flags = sp.flags;
+        auto_count = pat_blockReadAutomations(r, offset, old_flags,
+                                              autos, 63u);
+        old_chunks = pat_blockChunks(old_flags, auto_count);
+    } else {
+        sp.note = PAT_DEFAULT_NOTE;
+        sp.velocity = PAT_DEFAULT_VELOCITY;
+        sp.probability = 127u;
+        old_flags = 0u;
+        auto_count = 0u;
+        old_chunks = 0u;
+        offset = PAT_ADDR_SENTINEL;
+    }
+
+    found = 0u;
+    for (i = 0u; i < auto_count; i++) {
+        if ((autos[i].target & 0x01FFu) == target) {
+            autos[i].value = value;
+            found = 1u;
+            break;
+        }
+    }
+    if (!found) {
+        if (auto_count >= 63u)
+            return 0u;
+        autos[auto_count].target = target;
+        autos[auto_count].value = value;
+        auto_count++;
+    }
+
+    new_chunks = pat_blockChunks(old_flags, auto_count);
+
+    if (old_chunks > 0u && new_chunks == old_chunks) {
+        pat_blockWrite(r, offset, track, step, old_flags,
+                       sp.note, sp.velocity, sp.probability,
+                       autos, auto_count);
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | offset);
+        pat_markSceneDirty(scene_index);
+        return 1u;
+    }
+
+    new_offset = pat_poolAlloc(r, new_chunks);
+    if (new_offset == PAT_ADDR_SENTINEL)
+        return 0u;
+
+    pat_blockWrite(r, new_offset, track, step, old_flags,
+                   sp.note, sp.velocity, sp.probability,
+                   autos, auto_count);
+    *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | new_offset);
+
+    if (pat_poolOffsetValid(offset))
+        pat_poolFree(r, offset, old_chunks);
+
+    pat_markSceneDirty(scene_index);
+    return 1u;
+}
+
+/*
+ * Remove one automation entry from a step by its 9-bit target.
+ *
+ * What: read-modify-write: find the matching entry, shift remaining
+ * entries down, rewrite with auto_count - 1. If the block becomes empty
+ * (no specials and no automations), remove it entirely. Uses allocate-first
+ * when the block shrinks to a smaller chunk count; falls back to in-place
+ * overwrite if the smaller allocation somehow fails.
+ *
+ * Inputs: Scene/track/step, 9-bit target. Output: 1 if found and removed,
+ *   0 if not found or bad coords. Trigger bit preserved.
+ * Affiliates: pat_removeTrackAutomationByTarget(), step-edit `del` action.
+ */
+uint8_t pat_removeStepAutomation(uint8_t scene_index, uint8_t track,
+                                 uint8_t step, uint16_t target)
+{
+    uint16_t *entry;
+    uint16_t addr;
+    uint16_t offset;
+    uint16_t trigger_bits;
+    pat_scene_region_t *r;
+    pat_step_specials_t sp;
+    pat_automation_entry_t autos[63];
+    uint8_t auto_count;
+    uint8_t old_flags;
+    uint8_t old_chunks;
+    uint8_t new_chunks;
+    uint16_t new_offset;
+    uint8_t i;
+    uint8_t found_idx;
+
+    entry = pat_addrPtr(scene_index, track, step);
+    if (!entry)
+        return 0u;
+    addr = *entry;
+    if ((addr & PAT_ADDR_SPECIALS_BIT) == 0u)
+        return 0u;
+    offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+    if (!pat_poolOffsetValid(offset))
+        return 0u;
+
+    r = &pat_regions[scene_index];
+    trigger_bits = (uint16_t)(addr & PAT_ADDR_TRIGGER_BIT);
+    target &= 0x01FFu;
+
+    sp = pat_blockRead(r, offset);
+    old_flags = sp.flags;
+    auto_count = pat_blockReadAutomations(r, offset, old_flags, autos, 63u);
+
+    found_idx = 0xFFu;
+    for (i = 0u; i < auto_count; i++) {
+        if ((autos[i].target & 0x01FFu) == target) {
+            found_idx = i;
+            break;
+        }
+    }
+    if (found_idx == 0xFFu)
+        return 0u;
+
+    for (i = found_idx; i + 1u < auto_count; i++)
+        autos[i] = autos[i + 1u];
+    auto_count--;
+
+    if (auto_count == 0u && old_flags == 0u) {
+        old_chunks = pat_blockChunks(0u, auto_count + 1u);
+        pat_poolFree(r, offset, old_chunks);
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
+        pat_markSceneDirty(scene_index);
+        return 1u;
+    }
+
+    old_chunks = pat_blockChunks(old_flags, auto_count + 1u);
+    new_chunks = pat_blockChunks(old_flags, auto_count);
+
+    if (new_chunks == old_chunks) {
+        pat_blockWrite(r, offset, track, step, old_flags,
+                       sp.note, sp.velocity, sp.probability,
+                       autos, auto_count);
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | offset);
+        pat_markSceneDirty(scene_index);
+        return 1u;
+    }
+
+    new_offset = pat_poolAlloc(r, new_chunks);
+    if (new_offset == PAT_ADDR_SENTINEL) {
+        pat_blockWrite(r, offset, track, step, old_flags,
+                       sp.note, sp.velocity, sp.probability,
+                       autos, auto_count);
+        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | offset);
+        pat_markSceneDirty(scene_index);
+        return 1u;
+    }
+
+    pat_blockWrite(r, new_offset, track, step, old_flags,
+                   sp.note, sp.velocity, sp.probability,
+                   autos, auto_count);
+    *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | new_offset);
+    pat_poolFree(r, offset, old_chunks);
+    pat_markSceneDirty(scene_index);
+    return 1u;
+}
+
+/*
+ * Remove all entries matching one target from an entire track.
+ *
+ * What: iterate all 128 steps and call pat_removeStepAutomation() for each
+ * that has a matching entry. Why: the step-edit `clr` action removes a
+ * stale or unwanted target across the whole track so the user does not
+ * visit each step individually. Each step is an independent pool
+ * read-modify-write; the full scan completes in microseconds (pure SRAM).
+ *
+ * Inputs: Scene/track, 9-bit target. Output: count of entries removed.
+ * Affiliates: step-edit menu `clr` action.
+ */
+uint8_t pat_removeTrackAutomationByTarget(uint8_t scene_index, uint8_t track,
+                                          uint16_t target)
+{
+    uint8_t s;
+    uint8_t removed = 0u;
+
+    if (!scene_indexValid(scene_index) || !pat_trackValid(track))
+        return 0u;
+    for (s = 0u; s < NUM_STEPS; s++) {
+        if (pat_removeStepAutomation(scene_index, track, s, target))
+            removed++;
+    }
+    return removed;
+}
+```
+
+---
+
+### 7.3 Phase C — Target Validation and Legacy Cleanup
+
+#### C1. Extend `instrumentManager_targetValid()`
+
+**File:** `Core/DSP/Instruments/InstrumentManager.c`
+**Lines:** 728–732
+**Operation:** MODIFY
+
+**Current code (lines 728–732):**
+```c
+    const kit_instrument_slot_t *slot;
+    const ParamDescriptor *descriptor;
+    uint8_t target_slot;
+    if (!instrumentParam_isVoiceParameter(id))
+        return 0u;
+```
+
+**Replacement:**
+```c
+    const kit_instrument_slot_t *slot;
+    const ParamDescriptor *descriptor;
+    uint8_t target_slot;
+    /*
+     * Scene-range automation target gate.
+     *
+     * What: accept Scene mod targets (IDs >= INSTRUMENT_VOICE_ID_COUNT)
+     * for automation use by delegating to the Scene target namespace.
+     * Why: the voice-parameter gate below rejects all IDs outside the
+     * per-slot descriptor range, but Scene targets (Morph, Decimation,
+     * Slot6 Decay, future FX) are valid automation destinations in a
+     * different ID namespace. Presence in the Scene target table is
+     * sufficient for automation validity; there is no AUTOMATION flag
+     * in scene_mod_target_use_t yet.
+     *
+     * Inputs: target ID in the Scene namespace (384..511).
+     * Output: nonzero when the ID exists in the Scene target table.
+     * Affiliates: sceneModTarget_isSceneTarget(), SceneModTargets.h,
+     *   step-edit parameter picker, sequencer playback drain.
+     */
+    if (!instrumentParam_isVoiceParameter(id)) {
+        if (use == INSTRUMENT_TARGET_AUTOMATION &&
+            id >= INSTRUMENT_VOICE_ID_COUNT &&
+            id < INSTRUMENT_TOTAL_ID_COUNT) {
+            return sceneModTarget_isSceneTarget(id);
+        }
+        return 0u;
+    }
+```
+
+Lines 733+ remain unchanged.
+
+InstrumentManager.c already includes `"SceneModTargets.h"` (line 6), so
+no new include is needed.
+
+---
+
+#### C2. Remove legacy stubs and menu integration
+
+**C2-1. PatternData.c lines 795–798:** REMOVE (replaced by Phase B functions above).
+
+**C2-2. PatternData.h lines 201–206:** REMOVE (replaced by Phase B declarations above).
+
+**C2-3. menu.c lines 9573–9623:** REMOVE the five case handlers
+(`PAR_AUTOM_TRACK`, `PAR_P1_DEST`, `PAR_P2_DEST`, `PAR_P1_VAL`, `PAR_P2_VAL`).
+
+**C2-4. menuPages.h line 84:** MODIFY — replace the four legacy parameter IDs:
+
+**Current:**
+```c
+  {TEXT_STEP_VELOCITY,TEXT_NOTE,TEXT_PROBABILITY,TEXT_SKIP,TEXT_PARAM_DEST,TEXT_PARAM_VAL,TEXT_PARAM_DEST,TEXT_PARAM_VAL, PAR_STEP_VOLUME,PAR_STEP_NOTE,PAR_STEP_PROB,PAR_NONE,PAR_P1_DEST,PAR_P1_VAL,PAR_P2_DEST,PAR_P2_VAL},
+```
+
+**Replacement:**
+```c
+  {TEXT_STEP_VELOCITY,TEXT_NOTE,TEXT_PROBABILITY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_STEP_VOLUME,PAR_STEP_NOTE,PAR_STEP_PROB,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
+```
+
+**C2-5. menuPages.h line 115:** MODIFY — replace `PAR_AUTOM_TRACK`:
+
+**Current:**
+```c
+  {TEXT_AUTOMATION_TRACK,TEXT_QUANTISATION,..., PAR_AUTOM_TRACK,PAR_QUANTISATION,...},
+```
+
+**Replacement:**
+```c
+  {TEXT_QUANTISATION,TEXT_EMPTY,..., PAR_QUANTISATION,PAR_NONE,...},
+```
+
+**Preserved items (dead but harmless):**
+- `ParameterArray.h` enum members `PAR_AUTOM_TRACK`, `PAR_P1_DEST`, `PAR_P2_DEST`,
+  `PAR_P1_VAL`, `PAR_P2_VAL` — keep to preserve enum numbering.
+- `menu.c` parameterTypes entries and `DTYPE_AUTOM_TARGET` rendering branch —
+  dead code (never reached after menuPages change), removable in cleanup.
+
+---
+
+### 7.4 Phase D — Step-Edit Menu Automation Pages
+
+#### D0. Architectural approach
+
+The automation pages use **custom rendering** that bypasses the static
+`menuPages[][]` table. This matches the precedent set by VOICE pages,
+which already use instrument-descriptor-driven custom rendering.
+
+When the user is on SEQ_PAGE subpage 1 (step edit) and scrolls right past
+the last specials parameter (probability, activeParameter 2), the menu
+enters automation page mode. A new `menu_stepAutoPageIndex` state variable
+tracks which automation entry is displayed (0 = first entry,
+`auto_count` = add page). Scrolling left from automation page 0 returns
+to the specials view.
+
+All automation display and editing is handled by dedicated functions in
+menu.c. The static page table's positions 3–7 on SEQ_PAGE subpage 1 are
+`PAR_NONE`/`TEXT_EMPTY` (per C2-4) and serve as a hard stop so the normal
+traversal cannot enter them.
+
+---
+
+#### D1. New menu state variables
+
+**File:** `Core/Menu/menu.c`
+**Location:** ADD near existing static menu state (after line 1133)
+**Operation:** ADD
+
+```c
+/*
+ * Step-edit automation page state.
+ *
+ * What: menu_stepAutoPageIndex tracks which automation entry is displayed
+ * on the dynamic step-edit automation pages (0 = first entry,
+ * auto_count = add page). menu_stepAutoDeleteMode toggles between del (0)
+ * and clr (1) for item 0. menu_stepAutoActive is nonzero when the step
+ * edit subpage has scrolled into the automation region.
+ *
+ * Why: automation pages are dynamically generated from PatternData pool
+ * blocks, not from the static menuPages table. These variables hold the
+ * navigation and edit state that the static page system provides for
+ * fixed parameters.
+ *
+ * Inputs: set by encoder scroll, pot turns, step selection changes.
+ * Output: read by the automation page renderer and edit handlers.
+ * Affiliates: pat_stepAutomationCount(), pat_readStepAutomations(),
+ *   pat_writeStepAutomation(), pat_removeStepAutomation(),
+ *   pat_removeTrackAutomationByTarget().
+ */
+static uint8_t menu_stepAutoPageIndex = 0u;
+static uint8_t menu_stepAutoDeleteMode = 0u;
+static uint8_t menu_stepAutoActive = 0u;
+```
+
+---
+
+#### D2. Automation page reset on step change
+
+**File:** `Core/Menu/menu.c`
+**Line:** 9820 (PAR_ACTIVE_STEP handler)
+**Operation:** MODIFY
+
+**Current:**
+```c
+        pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), value);
+```
+
+**Replacement:**
+```c
+        pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), value);
+        menu_stepAutoPageIndex = 0u;
+        menu_stepAutoDeleteMode = 0u;
+        menu_stepAutoActive = 0u;
+```
+
+Also in `menu_showStepEditPage()` at line 9994, add after `menu_endlessPotMappingChanged()`:
+```c
+    menu_stepAutoPageIndex = 0u;
+    menu_stepAutoDeleteMode = 0u;
+    menu_stepAutoActive = 0u;
+```
+
+---
+
+#### D3. Automation page rendering function
+
+**File:** `Core/Menu/menu.c`
+**Location:** ADD before `menu_repaintGeneric()` (before line 6871)
+**Operation:** ADD
+
+```c
+/*
+ * Render one step-edit automation page on the LCD.
+ *
+ * What: display one automation entry (or the add page) using four
+ * columns: index/action, voice, parameter, amount. Why: automation pages
+ * are dynamically generated from pool data, not from the static menuPages
+ * table, so they need a dedicated renderer.
+ *
+ * Layout (16 chars × 2 rows):
+ *   Top:    "nnn voi par amt"  or  "add voi par amt"
+ *   Bottom: " del  1  wav 064"  (existing entry)
+ *           " add off off off"  (add page)
+ *
+ * When the stored target does not resolve to a valid descriptor on the
+ * current instrument, the parameter column shows "inv" (invalid).
+ *
+ * Inputs: menu_stepAutoPageIndex, current step/track/scene, menu_stepAutoDeleteMode.
+ * Output: editDisplayBuffer is filled; lcd_setString queues the display.
+ * Affiliates: pat_readStepAutomations(), pat_stepAutomationCount(),
+ *   instrumentManager_descriptor(), instrumentParam_slot(),
+ *   instrumentParam_local(), scene_instrumentSlotConst().
+ */
+static void menu_repaintStepAutomation(void)
+{
+    uint8_t scene = menu_getViewedPattern();
+    uint8_t track = menu_getActiveVoice();
+    uint8_t step_idx = parameter_values[PAR_ACTIVE_STEP];
+    uint8_t auto_count = pat_stepAutomationCount(scene, track, step_idx);
+    uint8_t page = menu_stepAutoPageIndex;
+    pat_automation_entry_t autos[63];
+    uint8_t read_count;
+    uint8_t i;
+
+    memset(&editDisplayBuffer[0][0], ' ', 16);
+    memset(&editDisplayBuffer[1][0], ' ', 16);
+
+    if (page >= auto_count) {
+        /* Add page */
+        memcpy(&editDisplayBuffer[0][0], "add", 3);
+        memcpy(&editDisplayBuffer[0][4], "voi", 3);
+        memcpy(&editDisplayBuffer[0][8], "par", 3);
+        memcpy(&editDisplayBuffer[0][12], "amt", 3);
+        memcpy(&editDisplayBuffer[1][1], "add", 3);
+        memcpy(&editDisplayBuffer[1][5], "off", 3);
+        memcpy(&editDisplayBuffer[1][9], "off", 3);
+        memcpy(&editDisplayBuffer[1][13], "off", 3);
+    } else {
+        read_count = pat_readStepAutomations(scene, track, step_idx,
+                                              autos, 63u);
+        if (page < read_count) {
+            pat_automation_entry_t *ae = &autos[page];
+            uint16_t tgt = (uint16_t)(ae->target & 0x01FFu);
+            uint8_t slot = instrumentParam_slot(tgt);
+            uint8_t local = instrumentParam_local(tgt);
+            const kit_instrument_slot_t *kit_slot;
+            const ParamDescriptor *desc;
+            char par_text[4] = "inv";
+
+            /* Top row: index, labels */
+            numtostru(&editDisplayBuffer[0][0], page);
+            memcpy(&editDisplayBuffer[0][4], "voi", 3);
+            memcpy(&editDisplayBuffer[0][8], "par", 3);
+            memcpy(&editDisplayBuffer[0][12], "amt", 3);
+            if (page + 1u < auto_count)
+                editDisplayBuffer[0][15] = '>';
+
+            /* Bottom row item 0: del or clr */
+            if (menu_stepAutoDeleteMode)
+                memcpy(&editDisplayBuffer[1][1], "clr", 3);
+            else
+                memcpy(&editDisplayBuffer[1][1], "del", 3);
+
+            /* Bottom row item 1: voice (1-based) */
+            if (instrumentParam_isVoiceParameter(tgt)) {
+                numtostru(&editDisplayBuffer[1][5],
+                          (uint8_t)(slot + 1u));
+            } else {
+                memcpy(&editDisplayBuffer[1][5], "scn", 3);
+            }
+
+            /* Bottom row item 2: parameter short name or inv */
+            if (instrumentParam_isVoiceParameter(tgt)) {
+                kit_slot = scene_instrumentSlotConst(scene, slot);
+                desc = kit_slot ? instrumentManager_descriptor(
+                    kit_slot->type, local) : NULL;
+                if (desc && desc->short_name) {
+                    for (i = 0u; i < 3u && desc->short_name[i]; i++)
+                        par_text[i] = desc->short_name[i];
+                }
+            } else if (sceneModTarget_isSceneTarget(tgt)) {
+                const scene_mod_target_descriptor_t *smt =
+                    sceneModTarget_descriptor(tgt);
+                if (smt && smt->short_name) {
+                    for (i = 0u; i < 3u && smt->short_name[i]; i++)
+                        par_text[i] = smt->short_name[i];
+                }
+            }
+            editDisplayBuffer[1][9]  = par_text[0];
+            editDisplayBuffer[1][10] = par_text[1];
+            editDisplayBuffer[1][11] = par_text[2];
+
+            /* Bottom row item 3: amount 0..127 */
+            numtostru(&editDisplayBuffer[1][13], ae->value);
+        }
+    }
+}
+```
+
+---
+
+#### D4. Integration into rendering path
+
+**File:** `Core/Menu/menu.c`
+**Function:** `menu_repaintGeneric()` (line 6871)
+**Operation:** MODIFY — add early return for automation pages
+
+**Add at the top of `menu_repaintGeneric()` (after line 6877, inside the
+`if (editModeActive)` block):**
+```c
+        if (menu_activePage == SEQ_PAGE && menu_stepAutoActive) {
+            menu_repaintStepAutomation();
+            return;
+        }
+```
+
+---
+
+#### D5. Navigation: encoder scroll into/out of automation
+
+**File:** `Core/Menu/menu.c`
+**Function:** The encoder-turn handler for SEQ_PAGE step edit subpage.
+This is in `menu_moveToMenuItem()` or the encoder scroll handler near
+lines 7143–7243.
+**Operation:** MODIFY — intercept right-scroll past probability (parameter 2)
+and left-scroll from automation page 0.
+
+When on SEQ_PAGE subpage 1 and `activeParameter == 2` (probability) and
+direction > 0:
+- Enter automation mode: `menu_stepAutoActive = 1; menu_stepAutoPageIndex = 0;`
+- Suppress the normal parameter increment.
+
+When `menu_stepAutoActive` and direction > 0:
+- `menu_stepAutoPageIndex++` (capped at `auto_count` = add page).
+
+When `menu_stepAutoActive` and direction < 0:
+- If `menu_stepAutoPageIndex > 0`: decrement.
+- If `menu_stepAutoPageIndex == 0`: exit automation mode, return to specials
+  (`menu_stepAutoActive = 0; menuIndex = (1u << PAGE_SHIFT) | 2u;`).
+
+The exact insertion point depends on how the encoder handler dispatches
+for SEQ_PAGE; the handler at line ~7143 switches on `activeParameter` and
+`activePage`. A new guard at the top of that handler checks
+`menu_stepAutoActive` and delegates to automation navigation before the
+normal parameter logic runs.
+
+---
+
+#### D6. Pot editing on automation pages
+
+**File:** `Core/Menu/menu.c`
+**Function:** The pot-value handler for SEQ_PAGE. Currently, pot changes
+call `menu_parseParameter()` which routes through the static page table.
+**Operation:** MODIFY — when `menu_stepAutoActive`, intercept pot changes.
+
+The pot handler checks which of the four columns (items 0–3) the pot
+corresponds to. Because automation pages show four items across four
+endless pots:
+
+- **Pot 0 (item 0):** toggle `menu_stepAutoDeleteMode` between 0 (del) and
+  1 (clr). No PatternData write.
+- **Pot 1 (item 1):** cycle voice 1..6 (slot 0..5). Re-resolve the target:
+  `target = instrumentParam_make(new_slot, old_local)`. Call
+  `pat_removeStepAutomation()` for old target, then
+  `pat_writeStepAutomation()` for new. If the new slot has no valid
+  descriptor at `old_local`, snap to the first available parameter.
+- **Pot 2 (item 2):** cycle automatable parameter for the selected voice.
+  Use `instrumentManager_stepTargetForSlot(scene, slot, current, direction,
+  INSTRUMENT_TARGET_AUTOMATION)` which already skips non-automatable
+  descriptors. Additionally filter out targets already present in other
+  entries on this step (uniqueness): before accepting a candidate, scan
+  the step's other entries to ensure no duplicate.
+- **Pot 3 (item 3):** adjust value 0..127. Call
+  `pat_writeStepAutomation(scene, track, step, target, new_value)`.
+
+On the **add page**, any pot adjustment away from `off` creates a new
+entry with defaults (see D7 below).
+
+---
+
+#### D7. Encoder click behavior
+
+**File:** `Core/Menu/menu.c`
+**Function:** The encoder-press handler for SEQ_PAGE.
+**Operation:** MODIFY — when `menu_stepAutoActive`, handle add/del/clr.
+
+On an existing entry page (page < auto_count), encoder click on item 0:
+- If `menu_stepAutoDeleteMode == 0` (del): call
+  `pat_removeStepAutomation(scene, track, step, current_target)`. Adjust
+  page index: if page >= new auto_count, show page = max(0, new auto_count - 1)
+  or the add page if none remain.
+- If `menu_stepAutoDeleteMode == 1` (clr): call
+  `pat_removeTrackAutomationByTarget(scene, track, current_target)`. Re-read
+  auto_count. Set page = min(old page, new auto_count).
+
+On the add page (page == auto_count), encoder click:
+- Determine default voice slot = track index (tracks 0..5 map to slots 0..5;
+  track 6 maps to slot 5). Verify with `menu_getActiveVoice()`.
+- Determine default parameter = first automatable parameter from
+  `instrumentManager_stepTargetForSlot(scene, slot, INSTRUMENT_PARAM_INVALID,
+  +1, INSTRUMENT_TARGET_AUTOMATION)`.
+- If no valid parameter available, fail silently (no entry created).
+- Determine default value: read from Scene image at
+  `scene_instrumentSlotConst(scene, slot)->parameter_images
+  .instrument_parameters[local]`, convert 8-bit to 7-bit:
+  `(v >= 255u) ? 127u : (uint8_t)(v / 2u)`.
+- Call `pat_writeStepAutomation(scene, track, step, target, value)`.
+- Transform page to normal editing page (page index stays at what was
+  auto_count, now showing the new entry).
+
+---
+
+### 7.5 Phase E — Sequencer Playback
+
+#### E0. config.h constants
+
+**File:** `config.h`
+**Location:** ADD after the autosave trace constants (after line 388)
+**Operation:** ADD
+
+```c
+/*
+ * Pending step-event buffer capacity.
+ *
+ * What: maximum number of 4-byte records in the ISR-to-foreground pending
+ * buffer in sequencer.c. Why: adjustable here so bench builds can enlarge
+ * the buffer to stress-test the future stack servicer's deferred-write
+ * path without editing sequencer.c.
+ *
+ * Inputs: none (compile-time). Output: buffer array size in sequencer.c.
+ * Budget: SEQ_PENDING_BUF_COUNT * 4 + 2 control bytes. At 128, that is
+ * 514 bytes in SRAM1 .bss.
+ * Affiliates: sequencer.c (buffer owner), seq_drainPendingAutomation().
+ */
+#define SEQ_PENDING_BUF_COUNT 128u
+
+/*
+ * Pattern trace retained ring capacity for the DEV_MODE_LOGGING-only
+ * diagnostic file `pattrace.bin`.
+ *
+ * What: number of 8-byte trace records retained in SRAM before filesystem
+ * flush. Why: the pattern pending buffer silently drops entries on
+ * overflow; the trace ring captures those drops and any future pool
+ * servicer anomalies so card-side evidence is available for debugging.
+ *
+ * Inputs: none (compile-time). Output: PatternTrace.c ring size.
+ * Budget: PAT_TRACE_RECORD_COUNT * 8 bytes SRAM1 (256 bytes at 32).
+ * This SRAM exists only when DEV_MODE_LOGGING is 1.
+ * Affiliates: PatternTrace.h/c, filesystem.c pattrace.bin drain.
+ */
+#define PAT_TRACE_RECORD_COUNT 32u
+
+/*
+ * Minimum idle interval between background pattern-trace append attempts.
+ * Same role as AUTOSAVE_TRACE_FLUSH_INTERVAL_MS for asavetrc.bin.
+ */
+#define PAT_TRACE_FLUSH_INTERVAL_MS 1000u
+```
+
+---
+
+#### E1. Pending step-event buffer
+
+**File:** `Core/Sequencer/sequencer.c`
+**Location:** ADD near existing statics (after line 111)
+**Operation:** ADD
+
+```c
+/*
+ * Pending step-event buffer for foreground application.
+ *
+ * What: a flat append-only array that the TIM3 ISR fills with 4-byte
+ * step-event records and the foreground main loop drains. Each record
+ * pairs a step identity word with a payload word, supporting both
+ * automation entries (current) and specials events (future stack servicer).
+ *
+ * Record format (4 bytes, all little-endian):
+ *   Word 0 — identity:
+ *     bits  9..0 : step_id (track * NUM_STEPS + step, 0..895)
+ *     bit  10    : type (0 = special, 1 = automation)
+ *     bits 15..11: reserved (zero)
+ *   Word 1 — payload:
+ *     automation (type=1): bits 15..9 = 7-bit value, bits 8..0 = 9-bit
+ *       target. This is the raw pool wire format — the ISR copies the
+ *       packed 2-byte entry from the pool block directly into this word,
+ *       avoiding any unpack/repack overhead.
+ *     special (type=0, future): bits 15..8 = 8-bit value,
+ *       bits 7..0 = special subtype (0=note, 1=vel, 2=prob).
+ *
+ * Why: instrumentManager_writeRuntime() is NOT ISR-safe (strcmp chains,
+ * modulation baseline refresh, instance pointer arithmetic) and must run
+ * in the foreground. The ISR appends here and sets a drain flag; the
+ * foreground applies entries within one main-loop pass (~sub-ms latency).
+ *
+ * Future stack servicer: during pool defragmentation, the ISR cannot
+ * safely read from pool blocks that the foreground is moving. The ISR
+ * sets a defrag-active flag (checked before pool reads) and the
+ * foreground buffers menu-originated pool writes here instead of writing
+ * the pool directly. Both use cases fit the same 4-byte record format.
+ * The buffer capacity (SEQ_PENDING_BUF_COUNT, config.h) is sized for
+ * either path: 128 records handles 2+ ticks of 7-track automation
+ * readout or >4 seconds of continuous maximum-speed menu editing during
+ * defrag.
+ *
+ * Overflow: when the buffer is full, new entries are silently dropped —
+ * no on-screen message. The dropped entry is recorded in the pattern
+ * trace ring (PatternTrace.h) so overflow events appear in pattrace.bin
+ * on the SD card when DEV_MODE_LOGGING is 1.
+ *
+ * Race safety: the ISR (TIM3, priority 2) is the sole writer. The
+ * foreground is the sole reader/drainer. The foreground cannot preempt
+ * TIM3. volatile on the drain flag and count is sufficient.
+ *
+ * RAM cost: SEQ_PENDING_BUF_COUNT * 4 + 2 = 514 bytes at default 128.
+ * Region: normal SRAM1 .bss. Owner: sequencer.c. Lifetime: process.
+ * Affiliates: seq_advanceTrackStep(), seq_drainPendingAutomation(),
+ *   main.c foreground drain call, PatternTrace (overflow logging).
+ */
+
+#define SEQ_PENDING_TYPE_SPECIAL    0u
+#define SEQ_PENDING_TYPE_AUTOMATION 1u
+#define SEQ_PENDING_TYPE_SHIFT      10u
+#define SEQ_PENDING_STEP_ID_MASK    0x03FFu
+
+typedef struct {
+    uint16_t identity;   /* step_id | (type << 10) */
+    uint16_t payload;    /* type-dependent: raw pool word or special+value */
+} seq_pending_entry_t;
+
+static seq_pending_entry_t seq_pendingBuf[SEQ_PENDING_BUF_COUNT];
+static volatile uint8_t seq_pendingCount = 0u;
+static volatile uint8_t seq_pendingDrain = 0u;
+```
+
+---
+
+#### E2. ISR automation readout
+
+**File:** `Core/Sequencer/sequencer.c`
+**Function:** `seq_advanceTrackStep()` (line 366)
+**Location:** ADD after line 410 (after the close of the
+`if (pat_isStepActive(...))` block), before line 412 (the roll check).
+Must remain INSIDE the `if (!(seq_mutedTracks & (1u << track)))` block.
+**Operation:** ADD
+
+```c
+        /*
+         * Automation readout — fires regardless of trigger state.
+         *
+         * What: read the address entry for the current step. If a pool
+         * block exists (bit 14) with auto_count > 0, copy each raw 2-byte
+         * packed entry from the pool into the pending buffer as a 4-byte
+         * record. Why: automation must apply on untriggered steps too
+         * (SCOPING_TARGETS §4.6). The ISR reads directly from the pool
+         * because the public pat_readStepAutomations() uses stack-local
+         * arrays unsuitable for the ISR budget. The address-entry read is
+         * atomic (16-bit naturally aligned on Cortex-M7).
+         *
+         * No dedup: with 128 entries (SEQ_PENDING_BUF_COUNT) there is
+         * room for ~2 full ticks of 7-track readout. A linear dedup scan
+         * would cost O(n) ISR cycles per entry for marginal benefit.
+         * Duplicate targets are harmless — last-write-wins in the drain.
+         *
+         * Overflow: when the buffer is full, the entry is silently
+         * dropped and a trace record is emitted to PatternTrace (when
+         * DEV_MODE_LOGGING is 1). No on-screen message.
+         *
+         * Inputs: seq_activePattern, track, seq_stepIndex[track].
+         * Output: records appended to seq_pendingBuf[], drain flag set.
+         * Affiliates: seq_drainPendingAutomation(), pat_sceneRegion(),
+         *   PAT_ADDR_SPECIALS_BIT, PAT_BLOCK_AUTO_COUNT_MASK,
+         *   patternTrace_record().
+         */
+        if (!seq_eraseActive || track != menu_getActiveVoice()) {
+            const pat_scene_region_t *rgn =
+                pat_sceneRegion(seq_activePattern);
+            if (rgn) {
+                uint16_t a_addr =
+                    rgn->address[track][(uint8_t)seq_stepIndex[track]];
+                if ((a_addr & PAT_ADDR_SPECIALS_BIT) != 0u) {
+                    uint16_t a_off =
+                        (uint16_t)(a_addr & PAT_ADDR_OFFSET_MASK);
+                    if (a_off != PAT_ADDR_SENTINEL &&
+                        (a_off & 3u) == 0u &&
+                        a_off < (uint16_t)(PAT_STACK_SIZE * 32u)) {
+                        uint8_t a_cnt = (uint8_t)(
+                            rgn->pool[a_off + 1u] &
+                            PAT_BLOCK_AUTO_COUNT_MASK);
+                        if (a_cnt > 0u) {
+                            uint8_t a_flags = (uint8_t)(
+                                rgn->pool[a_off + 2u] &
+                                PAT_SPECIAL_FLAGS_MASK);
+                            uint8_t a_vcnt = 0u;
+                            uint8_t a_base;
+                            uint8_t ai;
+                            uint16_t a_step_id = (uint16_t)(
+                                track * NUM_STEPS +
+                                (uint8_t)seq_stepIndex[track]);
+                            uint16_t a_ident = (uint16_t)(
+                                (a_step_id & SEQ_PENDING_STEP_ID_MASK) |
+                                (SEQ_PENDING_TYPE_AUTOMATION
+                                    << SEQ_PENDING_TYPE_SHIFT));
+                            if (a_flags & PAT_SPECIAL_NOTE_BIT) a_vcnt++;
+                            if (a_flags & PAT_SPECIAL_VEL_BIT)  a_vcnt++;
+                            if (a_flags & PAT_SPECIAL_PROB_BIT) a_vcnt++;
+                            a_base = (uint8_t)(3u + a_vcnt);
+                            for (ai = 0u; ai < a_cnt; ai++) {
+                                uint8_t ab =
+                                    (uint8_t)(a_base + ai * 2u);
+                                /* Raw packed word from pool — no decode
+                                 * needed. The foreground drain unpacks. */
+                                uint16_t pk =
+                                    (uint16_t)(
+                                        (uint16_t)rgn->pool[a_off + ab + 1u]
+                                            << 8u) |
+                                    (uint16_t)rgn->pool[a_off + ab];
+                                if (seq_pendingCount <
+                                        SEQ_PENDING_BUF_COUNT) {
+                                    seq_pendingBuf[
+                                        seq_pendingCount].identity =
+                                            a_ident;
+                                    seq_pendingBuf[
+                                        seq_pendingCount].payload = pk;
+                                    seq_pendingCount++;
+                                } else {
+                                    patternTrace_recordOverflow(
+                                        a_ident, pk);
+                                }
+                            }
+                            seq_pendingDrain = 1u;
+                        }
+                    }
+                }
+            }
+        }
+```
+
+The `if (!seq_eraseActive || track != menu_getActiveVoice())` guard
+prevents automation readout on the step being erased in record-erase mode,
+matching the trigger path's existing guard.
+
+---
+
+#### E3. Foreground drain
+
+**File:** `Core/Sequencer/sequencer.c`
+**Location:** ADD at end of file (before closing `#endif` if any)
+**Operation:** ADD
+
+Add to sequencer.h:
+```c
+void seq_drainPendingAutomation(void);
+```
+
+In sequencer.c:
+```c
+/*
+ * Drain pending step-event records from the ISR buffer.
+ *
+ * What: iterate all pending 4-byte records. For automation-type records
+ * (type bit = 1), unpack the payload word (pool wire format: bits 15..9 =
+ * 7-bit value, bits 8..0 = 9-bit target) and apply via
+ * instrumentManager_writeRuntime(). Special-type records (type bit = 0)
+ * are skipped — they are reserved for the future stack servicer's
+ * deferred-write path. The identity word's step_id field is not used by
+ * the current drain (the DSP target is fully specified by the payload's
+ * target field); step_id is carried for the future servicer and for
+ * diagnostic logging.
+ *
+ * Why: the buffer is private to sequencer.c; this function is the
+ * foreground-safe drain point called once per main-loop pass. Keeping the
+ * drain in sequencer.c prevents exposing the buffer statics and
+ * concentrates all buffer access (ISR writer + foreground drainer) in one
+ * translation unit.
+ *
+ * Value conversion: 7-bit (0..127) → 8-bit (0..255) using the
+ * established MIDI CC formula: (v == 127) ? 255 : v * 2.
+ *
+ * Inputs: seq_pendingBuf[], seq_pendingCount, seq_pendingDrain.
+ * Output: each valid voice-automation target is applied to its DSP owner.
+ *   Buffer count and drain flag are cleared. Scene targets deferred.
+ * Affiliates: seq_advanceTrackStep() (writer), main.c (caller),
+ *   instrumentManager_writeRuntime(), instrumentManager_descriptor(),
+ *   instrumentParam_slot(), instrumentParam_local(),
+ *   scene_instrumentSlotConst(), scene_getActiveIndex().
+ */
+void seq_drainPendingAutomation(void)
+{
+    uint8_t i;
+    uint8_t count;
+
+    if (!seq_pendingDrain)
+        return;
+    count = seq_pendingCount;
+    for (i = 0u; i < count; i++) {
+        uint16_t ident = seq_pendingBuf[i].identity;
+        uint8_t type = (uint8_t)((ident >> SEQ_PENDING_TYPE_SHIFT) & 1u);
+        if (type == SEQ_PENDING_TYPE_AUTOMATION) {
+            uint16_t pk = seq_pendingBuf[i].payload;
+            uint16_t tgt = (uint16_t)(pk & 0x01FFu);
+            uint8_t v7 = (uint8_t)((pk >> 9u) & 0x7Fu);
+            uint8_t v8 = (v7 == 127u) ? 255u : (uint8_t)(v7 * 2u);
+            if (instrumentParam_isVoiceParameter(tgt)) {
+                uint8_t slot = instrumentParam_slot(tgt);
+                uint8_t local = instrumentParam_local(tgt);
+                const kit_instrument_slot_t *ks =
+                    scene_instrumentSlotConst(scene_getActiveIndex(),
+                                              slot);
+                if (ks) {
+                    const ParamDescriptor *desc =
+                        instrumentManager_descriptor(ks->type, local);
+                    if (desc)
+                        instrumentManager_writeRuntime(slot, desc, v8);
+                }
+            }
+            /* Scene targets (IDs 384+) deferred to Session 066. */
+        }
+        /* SEQ_PENDING_TYPE_SPECIAL: future stack servicer path. */
+    }
+    seq_pendingCount = 0u;
+    seq_pendingDrain = 0u;
+}
+```
+
+**File:** `main.c`
+**Location:** ADD after line 1243 (`timebase_serviceFrontPanel();`),
+before line 1244 (`audio_check_and_render();`)
+**Operation:** ADD
+
+```c
+        seq_drainPendingAutomation();
+        audio_check_and_render();
+```
+
+No new includes needed in main.c — the drain function is declared in
+sequencer.h which main.c already includes.
+
+---
+
+#### E4. PatternTrace module
+
+New files following the AutosaveTrace architecture: a DEV_MODE_LOGGING-
+gated SRAM ring with peek/advance/dropped-count API, no filesystem I/O.
+When DEV_MODE_LOGGING is 0, all functions compile to no-op stubs and no
+SRAM is allocated.
+
+**File:** `Core/Bank/Scene/Pattern/PatternTrace.h` (NEW)
+**Operation:** ADD
+
+```c
+/*
+ * PatternTrace.h -- bounded SRAM diagnostic trace for pattern pool events.
+ *
+ * This module owns a fixed-size ring of 8-byte records and cursor
+ * bookkeeping that lets filesystem.c drain them to pattrace.bin on the
+ * SD card. It owns no filesystem handle and performs no I/O. It exists
+ * to capture pending-buffer overflow events (and future pool servicer
+ * anomalies) so card-side evidence is available for debugging.
+ *
+ * Every API is safe to call unconditionally. When DEV_MODE_LOGGING is 0
+ * the implementation supplies no-op/zero-return stubs, so production
+ * builds keep no trace SRAM and perform no trace-file I/O while call
+ * sites stay simple.
+ *
+ * Architecture mirrors AutosaveTrace.h: stage(1) + flags(1) + tick16(2)
+ * + value32(4) = 8 bytes per record, same peek/advance/dropped interface.
+ * Affiliates: PatternTrace.c, filesystem.c (pattrace.bin drain),
+ *   sequencer.c (overflow producer), config.h (PAT_TRACE_RECORD_COUNT).
+ */
+#ifndef PATTERN_TRACE_H_
+#define PATTERN_TRACE_H_
+
+#include <stdint.h>
+
+#define PAT_TRACE_RECORD_BYTES 8u
+
+#ifndef PAT_TRACE_RECORD_COUNT
+#define PAT_TRACE_RECORD_COUNT 32u
+#endif
+
+#define PAT_TRACE_FILENAME "pattrace.bin"
+
+/*
+ * Stage codes. Currently only overflow; future sessions add pool servicer
+ * stages (defrag start/end, block move, allocation failure, etc.).
+ */
+typedef enum {
+    /*
+     * H: pending buffer overflow. An ISR entry was silently dropped.
+     * flags: the record type that was dropped (0=special, 1=automation).
+     * value32: bits 0..15 = identity word (step_id + type),
+     *          bits 16..31 = payload word (the dropped data).
+     * Why: captures the exact entry that was lost so the developer can
+     * assess whether the buffer count needs to increase.
+     */
+    PAT_TRACE_STAGE_PENDING_OVERFLOW = 'H',
+} pat_trace_stage_t;
+
+/* Record one timestamped event. Safe to call from ISR (uses PRIMASK). */
+void patternTrace_record(pat_trace_stage_t stage, uint8_t flags,
+                         uint32_t value);
+
+/*
+ * Convenience wrapper called from the ISR overflow path. Packs the
+ * identity and payload words into value32 and emits a PENDING_OVERFLOW
+ * record. When DEV_MODE_LOGGING is 0 this compiles to nothing.
+ */
+void patternTrace_recordOverflow(uint16_t identity, uint16_t payload);
+
+/* Return the bounded number of records not yet acknowledged durable. */
+uint16_t patternTrace_pendingCount(void);
+/* Copy one pending record by oldest-relative index. */
+uint8_t patternTrace_peekRecord(uint16_t index,
+                                uint8_t out[PAT_TRACE_RECORD_BYTES]);
+/* Acknowledge records whose serialized bytes have passed a sync gate. */
+void patternTrace_advanceFlushCursor(uint16_t count);
+/* Return the saturated count of records overwritten before durable flush. */
+uint16_t patternTrace_droppedCount(void);
+
+#endif /* PATTERN_TRACE_H_ */
+```
+
+**File:** `Core/Bank/Scene/Pattern/PatternTrace.c` (NEW)
+**Operation:** ADD
+
+Implementation mirrors `AutosaveTrace.c` exactly: a volatile ring of
+`PAT_TRACE_RECORD_COUNT` 8-byte records, a write cursor, a flush cursor,
+a dropped counter, and PRIMASK-based ISR safety. All functions compile to
+stubs when `DEV_MODE_LOGGING` is 0.
+
+`patternTrace_recordOverflow()` is:
+```c
+void patternTrace_recordOverflow(uint16_t identity, uint16_t payload)
+{
+#if DEV_MODE_LOGGING
+    uint8_t type = (uint8_t)((identity >> 10u) & 1u);
+    uint32_t value = (uint32_t)identity |
+                     ((uint32_t)payload << 16u);
+    patternTrace_record(PAT_TRACE_STAGE_PENDING_OVERFLOW, type, value);
+#else
+    (void)identity;
+    (void)payload;
+#endif
+}
+```
+
+---
+
+#### E5. filesystem.c — pattrace.bin drain
+
+**File:** `Core/Hardware/SD/filesystem.c`
+**Operation:** MODIFY — add a new drain state machine following the
+autosaveTraceFlush pattern.
+
+This is a direct structural clone of the existing `asavetrc.bin` drain
+(lines 5232–5318). The changes are:
+
+1. **New static forward declarations** (after line 1450):
+```c
+static void filesystem_patternTraceFlush_tick(void);
+static void filesystem_patternTraceFlushSchedule_tick(void);
+static void filesystem_patternTraceFlushCompleted(void);
+```
+
+2. **New internal operation enum value**: add `FS_INTERNAL_OP_PATTERN_TRACE_FLUSH`
+   to the `fs_internal_op_t` enum (after the autosave trace flush entry).
+
+3. **New flush state machine** (`filesystem_patternTraceFlush_tick`):
+   Same 4-phase structure as `autosaveTraceFlush_tick`:
+   - Phase 0: chdir root, snapshot pending count, serialize, open
+     `PAT_TRACE_FILENAME` in append mode
+   - Phase 1: wait for file open
+   - Phase 2: stream the snapshot, handle full-media error
+   - Phase 3: wait close + sync, advance flush cursor
+   - Phase 4: error-handle close
+
+4. **Scheduler** (`filesystem_patternTraceFlushSchedule_tick`):
+   Same debounce pattern as autosave trace: check
+   `PAT_TRACE_FLUSH_INTERVAL_MS` elapsed since last attempt, check
+   `patternTrace_pendingCount() > 0`, start the flush operation if the
+   filesystem scheduler is idle.
+
+5. **Integration into `filesystem_tick()`**: call
+   `filesystem_patternTraceFlushSchedule_tick()` from the same scheduling
+   section that calls `filesystem_autosaveTraceFlushSchedule_tick()`, gated
+   on `DEV_MODE_LOGGING`.
+
+6. **Include**: add `#include "PatternTrace.h"` to filesystem.c's includes.
+
+The drain uses the same `staging_buf` and `on_file_opened`/`on_file_closed`
+callbacks as the autosave trace drain — these are shared infrastructure in
+filesystem.c. The two drains never run concurrently because the filesystem
+scheduler serializes all operations.
+
+---
+
+### 7.6 Summary of All Changed Files
+
+| File | Lines | Operation | Phase |
+|------|-------|-----------|-------|
+| `config.h` | 388+ | ADD `SEQ_PENDING_BUF_COUNT`, `PAT_TRACE_*` | E0 |
+| `PatternData.h` | 168+ | ADD `pat_automation_entry_t` | B-TYPE |
+| `PatternData.h` | 201–206 | REMOVE old stubs, ADD new decls | B-DECL, C2-2 |
+| `PatternData.c` | 261–275 | MODIFY `pat_blockChunks` | A1 |
+| `PatternData.c` | 287–317 | MODIFY `pat_blockWrite` | A2 |
+| `PatternData.c` | 356+ | ADD `pat_blockReadAutomations` | A3 |
+| `PatternData.c` | 370–428 | MODIFY `pat_writeSpecials` | A4 |
+| `PatternData.c` | 575 | MODIFY `pat_eraseStep` chunk calc | A5 |
+| `PatternData.c` | 662 | MODIFY `pat_clearTrack` chunk calc | A6 |
+| `PatternData.c` | 795–798 | REMOVE stubs, ADD 5 new publics | B1–B5, C2-1 |
+| `InstrumentManager.c` | 728–732 | MODIFY `targetValid` | C1 |
+| `menu.c` | 1133+ | ADD auto page state vars | D1 |
+| `menu.c` | 6871+ | ADD `menu_repaintStepAutomation()` | D3 |
+| `menu.c` | 6877+ | MODIFY `menu_repaintGeneric()` | D4 |
+| `menu.c` | 7143+ | MODIFY encoder scroll handler | D5 |
+| `menu.c` | 9573–9623 | REMOVE legacy cases | C2-3 |
+| `menu.c` | 9820 | MODIFY PAR_ACTIVE_STEP handler | D2 |
+| `menu.c` | 9994+ | MODIFY `menu_showStepEditPage()` | D2 |
+| `menuPages.h` | 84 | MODIFY SEQ_PAGE subpage 1 | C2-4 |
+| `menuPages.h` | 115 | MODIFY RECORDING_PAGE | C2-5 |
+| `PatternTrace.h` | NEW | ADD trace header | E4 |
+| `PatternTrace.c` | NEW | ADD trace ring implementation | E4 |
+| `sequencer.c` | 111+ | ADD pending buffer types/vars | E1 |
+| `sequencer.c` | 410+ | ADD ISR automation readout | E2 |
+| `sequencer.c` | EOF | ADD `seq_drainPendingAutomation()` | E3 |
+| `sequencer.h` | EOF | ADD drain declaration | E3 |
+| `filesystem.c` | 1450+ | ADD pattern trace flush state machine | E5 |
+| `main.c` | 1243+ | ADD drain call | E3 |
+
+**Total new static RAM (always present):**
+~514 bytes — pending step-event buffer in SRAM1 .bss
+(SEQ_PENDING_BUF_COUNT × 4 + 2 control = 128 × 4 + 2 = 514 bytes).
+
+**DEV_MODE_LOGGING-only SRAM (not in production builds):**
+~256 bytes — PatternTrace ring (PAT_TRACE_RECORD_COUNT × 8 = 32 × 8).
+
+Per `SRAM_MANIFEST.md` policy, user acknowledgement required before
+implementation. The 514-byte pending buffer is unconditional; the 256-byte
+trace ring exists only in logging builds.
+
+**Stack impact:** deepest new allocation is `pat_automation_entry_t[63]`
+= 252 bytes in foreground call paths (`pat_writeStepAutomation`,
+`pat_removeStepAutomation`, `pat_writeSpecials`, `menu_repaintStepAutomation`).
+No ISR stack growth — the ISR reads directly from the pool and appends
+4-byte records to the pending buffer without any stack-local arrays.
+
+---
+
+## 8. Session 065 Implementation Notes
+
+### 8.1 Work completed
+
+- Read `MEMORY.md`, the parent automation plan, and the complete implementation
+  specification above before editing. The implementation follows the resolved
+  Session-062 architecture: PatternData owns resident pool blocks, TIM3 only
+  publishes raw automation words, and the foreground owns runtime writes.
+- Extended the dynamic block layout and allocator accounting for up to 63
+  packed automation entries. Special edits preserve automation entries, while
+  erase, clear, removal, and reallocation free the complete block.
+- Replaced the four legacy PatternData no-op stubs with count/read/write/remove
+  APIs, extended Scene-range automation validation, and removed the legacy
+  step-page `modTargets[]` handlers from the active menu path.
+- Added Method 1 custom STEP automation rendering and navigation: fixed
+  probability remains the entry point, pages expose `del`/`clr`, voice/
+  parameter/value pots, uniqueness filtering, Add defaults, stale `inv`
+  display, and track-wide clear.
+- Added the 128-record, four-byte TIM3-to-foreground pending queue. Voice
+  automation is validated and applied in the main loop with the settled
+  7-bit-to-8-bit conversion; Scene target runtime application remains deferred
+  to Session 066.
+- Added the DEV-only 32-record PatternTrace ring and the asynchronous
+  `pattrace.bin` append path. Pending-buffer overflow uses the specified H-stage
+  wrapper, and trace records are acknowledged only after close and sync.
+
+### 8.2 Resource accounting and verification
+
+- New unconditional static allocation: 128 × 4-byte pending records plus two
+  control bytes = 514 bytes in SRAM1 `.bss`.
+- New `DEV_MODE_LOGGING` allocation: 32 × 8-byte PatternTrace records = 256
+  bytes, plus cursor bookkeeping. No PatternTrace ring exists in production
+  builds.
+- All new and modified C/H code paths have adjacent comment-block
+  descriptions, including the public API declarations and PatternTrace
+  production stubs.
+- `make -j2` and `make img` completed successfully after the implementation
+  and the final contract corrections. The resulting image was
+  `build/LXRV2_lxr02.img` (432352 bytes). The remaining diagnostics are the
+  existing packed member and embedded-libc syscall warnings.
+
+### 8.3 Deferred validation
+
+Hardware workflow, audio playback, instrument-swap stale-entry cleanup,
+PAT4 round-trip, and pool-stress checks remain hardware/integration tests. The
+VOICE overlay, CGRAM underline, step illumination, async track-wide search,
+and Scene-target runtime application remain explicitly deferred to Session 066.
+
+---
+
+## 9. Post-Implementation Code Assessment
+
+Audit performed against the plan in §7 and the diff at the head of
+`dev-ph4-pattern` (parent `ed4a2db`). All 13 changed files reviewed.
+
+### 9.1 Phase A — Pool Block Infrastructure
+
+| Item | Plan | Implementation | Status |
+|------|------|----------------|--------|
+| A1 `pat_blockChunks` | Add `auto_count` param | Matches. Adds defensive clamp to `PAT_BLOCK_AUTO_COUNT_MASK`. | OK+ |
+| A2 `pat_blockWrite` | Add `autos, auto_count` params, pack entries LE | Matches. Packs auto_count into header word. Adds clamp. | OK+ |
+| A3 `pat_blockReadAutomations` | New static after `pat_blockRead` | Matches. Reads flags from `p[2]` directly (plan passed as arg). Adds pool-boundary bounds check. | OK+ |
+| A4 `pat_writeSpecials` rewrite | Allocate-first, preserve automations | Refactored into `pat_writeDynamic()` + thin `pat_writeSpecials` wrapper. Better design — see §9.6. | OK+ |
+| A5 `pat_eraseStep` | Chunk calc with auto_count | Matches. | OK |
+| A6 `pat_clearTrack` | Chunk calc with auto_count | Matches. | OK |
+
+**Extra A changes not in plan:**
+- `pat_blockRead()` gained a bounds check: rejects blocks that extend past
+  pool end. Defensive; no functional change to existing specials path.
+- `pat_writeDynamic` introduced `allow_shrink_in_place` parameter for the
+  removal edge case where pool is full but block is shrinking. Plan did not
+  address this scenario. Correct: writes the shorter block at the same
+  offset and frees the surplus tail chunks.
+
+### 9.2 Phase B — Public Automation APIs
+
+| Item | Plan | Implementation | Status |
+|------|------|----------------|--------|
+| B-TYPE `pat_automation_entry_t` | After line 168 | Matches. | OK |
+| B-DECL declarations | Replace lines 201–206 | Matches. | OK |
+| B1 `pat_stepAutomationCount` | Pool read, return header bits 5..0 | Adds full bounds check (block must fit pool). | OK+ |
+| B2 `pat_readStepAutomations` | Delegate to `pat_blockReadAutomations` | Matches. | OK |
+| B3 `pat_writeStepAutomation` | Read-modify-write, allocate-first | Delegates to `pat_writeDynamic`. Adds `instrumentManager_targetValid()` pre-check (plan had it in caller). | OK+ |
+| B4 `pat_removeStepAutomation` | Find, shift, rewrite | Delegates to `pat_writeDynamic` with `allow_shrink_in_place=1`. | OK+ |
+| B5 `pat_removeTrackAutomationByTarget` | 128-step scan | Matches. | OK |
+
+### 9.3 Phase C — Target Validation and Legacy Cleanup
+
+| Item | Plan | Implementation | Status |
+|------|------|----------------|--------|
+| C1 `instrumentManager_targetValid` | Scene-range gate for AUTOMATION use | Matches exactly. Uses `sceneModTarget_isSceneTarget()`. | OK |
+| C2-1 PatternData.c stubs | Remove lines 795–798 | Removed. | OK |
+| C2-2 PatternData.h decls | Remove lines 201–206 | Replaced with new API decls. | OK |
+| C2-3 menu.c legacy handlers | Remove PAR_AUTOM_TRACK/P1/P2 cases | Removed. | OK |
+| C2-4 menuPages.h SEQ_PAGE | Positions 3–7 → PAR_NONE/TEXT_EMPTY | Matches. Positions 3–7 all PAR_NONE/TEXT_EMPTY. | OK |
+| C2-5 menuPages.h RECORDING_PAGE | PAR_AUTOM_TRACK → PAR_NONE | Matches. Row shifted to start with PAR_QUANTISATION. | OK |
+
+### 9.4 Phase D — Step-Edit Menu
+
+Plan described behavior; implementation provides full function-level code.
+
+| Item | Plan | Implementation | Status |
+|------|------|----------------|--------|
+| D1 state vars | 3 statics after line 1133 | Matches. | OK |
+| D2 reset on step change | Reset in PAR_ACTIVE_STEP + showStepEditPage | Matches + adds resets in `menu_switchPage`, `menu_setActiveVoice`, `menu_showStepTrackSettingsFirstHalf`, `menu_toggleStepTrackSettingsHalf`. More thorough. | OK+ |
+| D3 renderer | Four-column layout: action/voi/par/amt | Matches layout. Uses `sceneModTarget_formatShort()` for Scene targets, `instrumentManager_descriptor()->short_name` for voice. | OK |
+| D4 render integration | Early return in `menu_repaintGeneric` | Matches. | OK |
+| D5 navigation | Enter at probability+right, exit at page 0+left | Matches. Add page at `count`. | OK |
+| D6 pot editing | 4 pots map to 4 fields | Matches. Pot 0 toggles del/clr mode. Pots 1–3 delegate to `menu_stepAutomationEdit`. Add page creates default on any pot turn. | OK |
+| D7 encoder click | Add/del/clr dispatch | Matches intent. **Label/action mismatch — see §9.7.** | BUG |
+
+**Additional menu helpers (not in plan but necessary):**
+- `menu_stepAutomationPageActive()` — predicate consolidation.
+- `menu_stepAutomationTargetUsed()` — uniqueness enforcement.
+- `menu_stepAutomationFirstTarget()` / `menu_stepAutomationNextTarget()` —
+  target stepper with uniqueness filtering.
+- `menu_stepAutomationReplaceTarget()` — atomic target swap at the 63-entry
+  edge case (write new before removing old, or remove+restore on failure).
+- `menu_stepAutomationSlotForTrack()` — track→slot mapping.
+- `menu_stepAutomationAddDefault()` — default entry creation with current
+  parameter image value.
+- `menu_stepAutomationEnsurePage()` — lazy creation on pot turn.
+
+### 9.5 Phase E — Sequencer Playback
+
+| Item | Plan | Implementation | Status |
+|------|------|----------------|--------|
+| E0 config.h | `SEQ_PENDING_BUF_COUNT=128`, `PAT_TRACE_*` | Matches. | OK |
+| E1 pending buffer | 4-byte identity/payload records | Matches format. Struct name `seq_pending_automation_t` (plan: `seq_pending_entry_t`). Adds `_Static_assert(sizeof==4)`. Array is `volatile`. | OK+ |
+| E2 ISR readout | Append raw packed words, no dedup | Factored into `seq_queueStepAutomations()` helper (plan had inline). Adds step_id header validation against expected track/step. Adds full block-tail bounds check. | OK+ |
+| E3 foreground drain | `seq_drainPendingAutomation()` | Matches. Uses PRIMASK compare-and-reset loop to close ISR append race (plan used simple reset). Calls `instrumentManager_targetValid()` per entry (plan didn't). | OK+ |
+| E4 PatternTrace.h/c | DEV_MODE_LOGGING ring, stage 'H' | Matches. Complete implementation with stubs for production. | OK |
+| E5 filesystem.c drain | `pattrace.bin` append state machine | Matches. 4-phase clone of autosave trace flush. Scheduler, serializer, completion, integration into `filesystem_tick()`. | OK |
+
+### 9.6 Architectural deviations (improvements)
+
+**`pat_writeDynamic()` factoring.** The plan had `pat_writeSpecials` as the
+transaction owner and each CRUD function duplicating the allocate/write/free
+sequence. The implementation introduces `pat_writeDynamic()` as the single
+transaction owner. Both `pat_writeSpecials` and all public CRUD functions
+delegate to it. This eliminates ~80 lines of duplicated allocation logic and
+makes the allocate-first invariant impossible to violate in a single caller.
+Better than planned.
+
+**PRIMASK drain loop.** The plan's drain did `count = seq_pendingCount;
+for (i..count) { ... } count=0; drain=0;`. This has a race: if TIM3
+appends between the last iteration and the reset, the new entry is lost. The
+implementation uses a `for(;;)` loop that rechecks the count under PRIMASK
+before resetting, retrying if TIM3 raced. Correct, and the plan's version
+was subtly wrong.
+
+**`allow_shrink_in_place`.** Plan's `pat_removeStepAutomation` returned
+failure on pool exhaustion even when the block was shrinking. The
+implementation allows in-place shrink: overwrite the block at the same offset
+and free the trailing chunks. This is safe because the block is getting
+smaller — the valid data is a prefix of the old allocation.
+
+### 9.7 Bug: del/clr label-action mismatch
+
+In `menu.c`, the renderer and the action handler have swapped semantics:
+
+| `menu_stepAutoDeleteMode` | Renderer shows | Action executed |
+|---------------------------|----------------|-----------------|
+| 0 (default) | `del` | `pat_removeTrackAutomationByTarget` (all steps) |
+| 1 | `clr` | `pat_removeStepAutomation` (this step only) |
+
+The plan in §7.4 D7 specified:
+- mode 0 (`del`) → `pat_removeStepAutomation` (single step)
+- mode 1 (`clr`) → `pat_removeTrackAutomationByTarget` (track-wide)
+
+The labels match the plan but the action branches are swapped.
+
+**Fixed:** swapped the two function calls in
+`menu_stepAutomationExecuteItem0()` so that mode 1 (`clr`) calls
+`pat_removeTrackAutomationByTarget` and mode 0 (`del`) calls
+`pat_removeStepAutomation`, matching the plan and the rendered labels.
+
+### 9.8 RAM and binary size
+
+| Resource | Plan | Actual |
+|----------|------|--------|
+| Pending buffer | 514 B SRAM1 | 514 B (128 × 4 + 2 volatile control) |
+| PatternTrace ring (DEV only) | 256 B SRAM1 | 259 B (256 data + 3 cursors) |
+| Flash image delta | — | +5184 B (427184 → 432368) |
+
+### 9.9 Files changed vs. plan
+
+All files listed in §7.6 are present in the diff. Two additional changes
+not in the table:
+- `Makefile`: `PatternTrace.c` added to `SRCS` (necessary, not in table).
+- `build/LXRV2_lxr02.img`: binary artifact (expected, not a source change).
+
+### 9.10 Assessment summary
+
+All five phases are implemented. The code matches the plan's intent with
+three architectural improvements (pat_writeDynamic factoring, PRIMASK drain
+race fix, shrink-in-place removal) and pervasive defensive bounds checks not
+in the plan. One bug found and fixed: del/clr label-action swap in the
+step-edit menu (§9.7). No other issues. Binary builds clean.

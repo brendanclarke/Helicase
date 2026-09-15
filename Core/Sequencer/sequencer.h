@@ -120,6 +120,15 @@ void seq_selectActivePattern(uint8_t pattern);
  * program-change, and note-off behaviour is unchanged.
  */
 void seq_alignActivePatternToScene(uint8_t scene_index);
+/*
+ * Drain TIM3-published voice automation in foreground context.
+ *
+ * Inputs: the bounded pending queue written by seq_advanceTrackStep(). Output:
+ * validated voice descriptor runtime images are updated after front-panel
+ * service; Scene targets remain queued only for the later Scene-target session.
+ * Affiliate: main.c calls this before audio rendering.
+ */
+void seq_drainPendingAutomation(void);
 void seq_setRunning(uint8_t isRunning);
 uint8_t seq_isRunning(void);
 void seq_armActivePatternReload(void);

@@ -728,8 +728,23 @@ uint8_t instrumentManager_targetValid(uint8_t scene_index,
     const kit_instrument_slot_t *slot;
     const ParamDescriptor *descriptor;
     uint8_t target_slot;
-    if (!instrumentParam_isVoiceParameter(id))
+    /*
+     * Validate the complete automation namespace.
+     *
+     * Inputs: a canonical target ID and requested use. Voice IDs continue
+     * through the registry-driven descriptor checks below; Scene IDs are
+     * validated by the Scene-target table because they have no instrument
+     * descriptor. Output: Scene targets are legal for automation when present
+     * in that table, while all other non-voice IDs remain invalid. Affiliate:
+     * PatternData's packed automation writer and the STEP target picker.
+     */
+    if (!instrumentParam_isVoiceParameter(id)) {
+        if (use == INSTRUMENT_TARGET_AUTOMATION &&
+            id >= INSTRUMENT_VOICE_ID_COUNT &&
+            id < INSTRUMENT_TOTAL_ID_COUNT)
+            return sceneModTarget_isSceneTarget(id);
         return 0u;
+    }
     target_slot = instrumentParam_slot(id);
     slot = scene_instrumentSlotConst(scene_index, target_slot);
     if (!slot)

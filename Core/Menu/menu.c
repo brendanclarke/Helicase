@@ -1144,6 +1144,21 @@ static uint8_t menuIndex = 0;
  */
 static uint8_t menu_voiceSubPageScreen[NUM_SUB_PAGES];
 
+/*
+ * STEP automation editor state (+3 B static Menu state).
+ *
+ * What: the selected automation page, DELETE/CLEAR action, and activation
+ * flag for the custom SEQ sub-page-1 renderer. Why: the normal eight-cell menu
+ * table no longer owns the retired P1/P2 controls; PatternData owns the list
+ * while Menu retains only this transient cursor/mode state. Inputs/outputs:
+ * navigation, encoder, and endless-pot handlers update these bytes and the
+ * renderer reads them. Lifetime: foreground Menu session only; state resets on
+ * active-step, track, or page-context changes. Affiliate: pat_* automation CRUD.
+ */
+static uint8_t menu_stepAutoPageIndex = 0u;
+static uint8_t menu_stepAutoDeleteMode = 0u;
+static uint8_t menu_stepAutoActive = 0u;
+
 uint8_t menu_numSamples = 0;
 uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 uint8_t menu_shownPattern = 0;
@@ -1464,6 +1479,12 @@ static void menu_formatCpuUsePercent4(char *buf);
 static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot);
 static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value);
 static void setNoteName(uint8_t num, char *buf);
+static uint8_t menu_stepAutomationPageActive(void);
+static void menu_stepAutomationReset(void);
+static void menu_repaintStepAutomation(void);
+static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc);
+static uint8_t menu_stepAutomationHandleKnob(uint8_t knobNr, int8_t delta);
+static uint8_t menu_stepAutomationExecuteItem0(void);
 
 typedef enum {
     MENU_CELL_EMPTY = 0,
@@ -6865,6 +6886,444 @@ static void menu_repaintLoadSavePage(void)
     }
 }
 
+/*
+ * Identify the live custom STEP automation page.
+ *
+ * Inputs: Menu page/sub-page state. Output: nonzero only for SEQ_PAGE
+ * subpage 1 while the automation editor is active. Keeping this predicate in
+ * one helper prevents the ordinary eight-cell table from accidentally
+ * handling the empty replacement row. Affiliates: renderer and input paths.
+ */
+static uint8_t menu_stepAutomationPageActive(void)
+{
+    return (uint8_t)(menu_stepAutoActive && menu_activePage == SEQ_PAGE &&
+                     (((menuIndex & MASK_PAGE) >> PAGE_SHIFT) == 1u));
+}
+
+/*
+ * Reset transient STEP automation cursor/action state.
+ *
+ * Inputs: none. Output: the next STEP editor entry starts on its first page
+ * with DELETE selected. PatternData remains untouched; this is only Menu's
+ * foreground navigation state. Affiliates: active-step, track, and page
+ * transition helpers.
+ */
+static void menu_stepAutomationReset(void)
+{
+    menu_stepAutoPageIndex = 0u;
+    menu_stepAutoDeleteMode = 0u;
+    menu_stepAutoActive = 0u;
+}
+
+/*
+ * Return whether a target is already used by another automation page.
+ *
+ * Inputs: decoded list, count, candidate target, and an optional page to
+ * exclude. Output: nonzero on a duplicate. This enforces the one-target-per-
+ * step invariant for both descriptor and Scene target IDs.
+ */
+static uint8_t menu_stepAutomationTargetUsed(
+    const pat_automation_entry_t *autos, uint8_t count,
+    uint16_t target, uint8_t exclude)
+{
+    uint8_t i;
+
+    for (i = 0u; i < count; i++)
+        if (i != exclude && autos[i].target == target)
+            return 1u;
+    return 0u;
+}
+
+/*
+ * Find the first unused automatable descriptor for one target slot.
+ *
+ * Inputs: viewed Scene, zero-based slot, and current step list. Output: the
+ * first registry target not already present, or INSTRUMENT_PARAM_INVALID when
+ * the slot exposes no free automatable target. Affiliate:
+ * instrumentManager_stepTargetForSlot().
+ */
+static instrument_param_id_t menu_stepAutomationFirstTarget(
+    uint8_t scene_index, uint8_t slot,
+    const pat_automation_entry_t *autos, uint8_t count)
+{
+    instrument_param_id_t candidate;
+    uint8_t i;
+
+    candidate = instrumentManager_stepTargetForSlot(
+        scene_index, slot, INSTRUMENT_PARAM_INVALID, 1,
+        INSTRUMENT_TARGET_AUTOMATION);
+    for (i = 0u; i < INSTRUMENT_PARAM_COUNT &&
+                candidate != INSTRUMENT_PARAM_INVALID; i++) {
+        if (!menu_stepAutomationTargetUsed(autos, count, candidate, 0xffu))
+            return candidate;
+        {
+            instrument_param_id_t next = instrumentManager_stepTargetForSlot(
+                scene_index, slot, candidate, 1,
+                INSTRUMENT_TARGET_AUTOMATION);
+            if (next == candidate)
+                break;
+            candidate = next;
+        }
+    }
+    return INSTRUMENT_PARAM_INVALID;
+}
+
+/*
+ * Step one slot's valid target list while skipping duplicate page targets.
+ *
+ * Inputs: Scene/slot, current target, signed movement, decoded list, and the
+ * page being edited. Output: the next unused canonical target or the current
+ * target when the bounded registry walk cannot move. Voice descriptor order is
+ * owned by InstrumentManager; Menu owns only uniqueness filtering.
+ */
+static instrument_param_id_t menu_stepAutomationNextTarget(
+    uint8_t scene_index, uint8_t slot, instrument_param_id_t current,
+    int8_t direction, const pat_automation_entry_t *autos, uint8_t count,
+    uint8_t exclude)
+{
+    instrument_param_id_t candidate = current;
+    uint8_t i;
+
+    if (direction == 0)
+        return current;
+    if (direction < 0 &&
+        (current == INSTRUMENT_PARAM_INVALID ||
+         !instrumentManager_targetValid(scene_index, current,
+                                        INSTRUMENT_TARGET_AUTOMATION)))
+        return current;
+    for (i = 0u; i < INSTRUMENT_PARAM_COUNT; i++) {
+        instrument_param_id_t next = instrumentManager_stepTargetForSlot(
+            scene_index, slot, candidate, direction,
+            INSTRUMENT_TARGET_AUTOMATION);
+        if (next == candidate || next == INSTRUMENT_PARAM_INVALID)
+            return current;
+        if (!menu_stepAutomationTargetUsed(autos, count, next, exclude))
+            return next;
+        candidate = next;
+    }
+    return current;
+}
+
+/*
+ * Atomically replace a page target while preserving uniqueness.
+ *
+ * Inputs: old/new canonical targets, page value, and current list count.
+ * Output: the new target is written before the old one is removed whenever
+ * capacity permits. At the 63-entry limit the old entry is temporarily removed
+ * and restored on failure so a full block can still change target without an
+ * intermediate duplicate. Affiliate: main-encoder target edits.
+ */
+static uint8_t menu_stepAutomationReplaceTarget(
+    uint8_t scene, uint8_t track, uint8_t step,
+    uint16_t old_target, uint16_t new_target, uint8_t value, uint8_t count)
+{
+    if (old_target == new_target)
+        return 0u;
+    if (count < PAT_BLOCK_AUTO_COUNT_MASK) {
+        if (!pat_writeStepAutomation(scene, track, step, new_target, value))
+            return 0u;
+        (void)pat_removeStepAutomation(scene, track, step, old_target);
+        return 1u;
+    }
+    if (!pat_removeStepAutomation(scene, track, step, old_target))
+        return 0u;
+    if (pat_writeStepAutomation(scene, track, step, new_target, value))
+        return 1u;
+    (void)pat_writeStepAutomation(scene, track, step, old_target, value);
+    return 0u;
+}
+
+/*
+ * Return the default target slot for one visible STEP track.
+ *
+ * Inputs: fixed-grid track index 0..6. Output: matching voice slot 0..5;
+ * track 7 (index 6) intentionally shares slot 6's descriptor namespace as
+ * required by the fixed-grid hardware mapping. Affiliate: STEP Add behavior.
+ */
+static uint8_t menu_stepAutomationSlotForTrack(uint8_t track)
+{
+    return (track < INSTRUMENT_SLOT_COUNT) ? track
+                                           : (INSTRUMENT_SLOT_COUNT - 1u);
+}
+
+/*
+ * Add the default automation entry for the selected step.
+ *
+ * Inputs: current viewed Scene, active track, and decoded existing list.
+ * Output: nonzero when the first unused automatable target on the mapped slot
+ * is created with the inverse-mapped current parameter image. This is the only
+ * implicit creation path used by endless-pot edits on the Add page.
+ */
+static uint8_t menu_stepAutomationAddDefault(void)
+{
+    uint8_t scene = menu_getViewedPattern();
+    uint8_t track = menu_getActiveVoice();
+    uint8_t slot = menu_stepAutomationSlotForTrack(track);
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    instrument_param_id_t target;
+    const kit_instrument_slot_t *instrument;
+    uint8_t count;
+    uint8_t value = 0u;
+    uint8_t local;
+
+    count = pat_readStepAutomations(scene, track,
+                                    parameter_values[PAR_ACTIVE_STEP], autos,
+                                    PAT_BLOCK_AUTO_COUNT_MASK);
+    target = menu_stepAutomationFirstTarget(scene, slot, autos, count);
+    if (target == INSTRUMENT_PARAM_INVALID)
+        return 0u;
+    instrument = scene_instrumentSlotConst(scene, slot);
+    if (instrument && instrumentParam_isVoiceParameter(target)) {
+        local = instrumentParam_local(target);
+        value = instrument->parameter_images.instrument_parameters[local];
+        value = (uint8_t)(value >= 255u ? 127u : (value / 2u));
+    }
+    return pat_writeStepAutomation(scene, track,
+                                   parameter_values[PAR_ACTIVE_STEP], target,
+                                   value);
+}
+
+/*
+ * Ensure the selected automation page exists before a pot edits it.
+ *
+ * Inputs: current page cursor. Output: nonzero when the page is an existing
+ * entry after optional default creation; a failed Add leaves PatternData and
+ * the cursor unchanged. Affiliate: menu_stepAutomationHandleKnob().
+ */
+static uint8_t menu_stepAutomationEnsurePage(void)
+{
+    uint8_t count = pat_stepAutomationCount(
+        menu_getViewedPattern(), menu_getActiveVoice(),
+        parameter_values[PAR_ACTIVE_STEP]);
+
+    if (menu_stepAutoPageIndex < count)
+        return 1u;
+    if (!menu_stepAutomationAddDefault())
+        return 0u;
+    count = pat_stepAutomationCount(menu_getViewedPattern(),
+                                    menu_getActiveVoice(),
+                                    parameter_values[PAR_ACTIVE_STEP]);
+    if (count == 0u)
+        return 0u;
+    if (menu_stepAutoPageIndex >= count)
+        menu_stepAutoPageIndex = (uint8_t)(count - 1u);
+    return 1u;
+}
+
+/*
+ * Edit one selected automation field with the main encoder.
+ *
+ * Inputs: signed encoder delta and the custom page/field cursor. Output:
+ * nonzero when PatternData commits a target/value change. Field 0 is an
+ * action selector; fields 1/2/3 edit voice/parameter/value respectively, with
+ * duplicate target candidates skipped. Affiliate: menu_encoderChangeParameter.
+ */
+static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    uint8_t scene;
+    uint8_t track;
+    uint8_t step;
+    uint8_t count;
+    uint8_t page;
+
+    if (!menu_stepAutomationPageActive() || inc == 0)
+        return 0u;
+    scene = menu_getViewedPattern();
+    track = menu_getActiveVoice();
+    step = parameter_values[PAR_ACTIVE_STEP];
+    count = pat_readStepAutomations(scene, track, step, autos,
+                                    PAT_BLOCK_AUTO_COUNT_MASK);
+    page = menu_stepAutoPageIndex;
+    if (page >= count || field == 0u || field > 3u)
+        return 0u;
+
+    if (field == 1u) {
+        instrument_param_id_t old_target = autos[page].target;
+        uint8_t old_slot;
+        uint8_t new_slot;
+        uint8_t old_local;
+        instrument_param_id_t new_target;
+        uint8_t movement = (uint8_t)(inc < 0 ? -inc : inc);
+
+        if (!instrumentParam_isVoiceParameter(old_target))
+            return 0u;
+        old_slot = instrumentParam_slot(old_target);
+        old_local = instrumentParam_local(old_target);
+        new_slot = old_slot;
+        while (movement--) {
+            if (inc > 0)
+                new_slot = (uint8_t)((new_slot + 1u) % INSTRUMENT_SLOT_COUNT);
+            else
+                new_slot = (new_slot == 0u) ?
+                    (INSTRUMENT_SLOT_COUNT - 1u) : (uint8_t)(new_slot - 1u);
+        }
+        new_target = instrumentParam_make(new_slot, old_local);
+        if (!instrumentManager_targetValid(scene, new_target,
+                                           INSTRUMENT_TARGET_AUTOMATION) ||
+            menu_stepAutomationTargetUsed(autos, count, new_target, page))
+            new_target = menu_stepAutomationFirstTarget(scene, new_slot, autos,
+                                                         count);
+        if (new_target == INSTRUMENT_PARAM_INVALID)
+            return 0u;
+        return menu_stepAutomationReplaceTarget(
+            scene, track, step, old_target, new_target, autos[page].value,
+            count);
+    }
+
+    if (field == 2u) {
+        instrument_param_id_t old_target = autos[page].target;
+        instrument_param_id_t new_target;
+        uint8_t slot;
+
+        if (!instrumentParam_isVoiceParameter(old_target))
+            return 0u;
+        slot = instrumentParam_slot(old_target);
+        new_target = menu_stepAutomationNextTarget(
+            scene, slot, old_target, inc, autos, count, page);
+        if (new_target == old_target)
+            return 0u;
+        return menu_stepAutomationReplaceTarget(
+            scene, track, step, old_target, new_target, autos[page].value,
+            count);
+    }
+
+    if (field == 3u) {
+        int16_t next = (int16_t)autos[page].value + inc;
+        if (next < 0)
+            next = 0;
+        if (next > 127)
+            next = 127;
+        if ((uint8_t)next == autos[page].value)
+            return 0u;
+        return pat_writeStepAutomation(scene, track, step,
+                                       autos[page].target, (uint8_t)next);
+    }
+    return 0u;
+}
+
+/*
+ * Edit one custom automation field from an endless pot.
+ *
+ * Inputs: pot column 0..3 and signed delta. Output: nonzero when the action,
+ * target, or value changes. Any pot turn on the Add page creates the default
+ * entry first; duplicate targets remain unavailable during target stepping.
+ */
+static uint8_t menu_stepAutomationHandleKnob(uint8_t knobNr, int8_t delta)
+{
+    if (!menu_stepAutomationPageActive() || delta == 0u)
+        return 0u;
+    if (knobNr == 0u) {
+        menu_stepAutoDeleteMode = (uint8_t)(!menu_stepAutoDeleteMode);
+        return 1u;
+    }
+    if (!menu_stepAutomationEnsurePage())
+        return 0u;
+    return menu_stepAutomationEdit(knobNr, delta);
+}
+
+/*
+ * Execute the custom page's item-0 action.
+ *
+ * Inputs: selected automation page and DELETE/CLEAR mode. Output: Add creates
+ * the default entry; DELETE removes the current entry; CLEAR removes every
+ * automation from the selected step. The cursor is clamped to the resulting
+ * page count. Affiliate: the encoder click path.
+ */
+static uint8_t menu_stepAutomationExecuteItem0(void)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    uint8_t scene = menu_getViewedPattern();
+    uint8_t track = menu_getActiveVoice();
+    uint8_t step = parameter_values[PAR_ACTIVE_STEP];
+    uint8_t count = pat_readStepAutomations(scene, track, step, autos,
+                                            PAT_BLOCK_AUTO_COUNT_MASK);
+    uint8_t page = menu_stepAutoPageIndex;
+
+    if (page >= count) {
+        if (!menu_stepAutomationAddDefault())
+            return 0u;
+    } else if (menu_stepAutoDeleteMode) {
+        (void)pat_removeTrackAutomationByTarget(scene, track, autos[page].target);
+    } else {
+        (void)pat_removeStepAutomation(scene, track, step, autos[page].target);
+    }
+    count = pat_stepAutomationCount(scene, track, step);
+    if (menu_stepAutoPageIndex > count)
+        menu_stepAutoPageIndex = count;
+    return 1u;
+}
+
+/*
+ * Render the variable-length STEP automation page.
+ *
+ * What: row 1 shows action/VOICE/PARAM/AMT labels and row 2 shows the selected
+ * step, target slot, descriptor, and 0..127 value. Why: the normal Page table
+ * has no fixed number of automation rows. Inputs: PatternData's decoded list,
+ * Menu cursor, and current target descriptors. Output: two complete 16-column
+ * LCD rows; the final synthetic page is an Add affordance. Affiliates:
+ * menu_repaintGeneric(), InstrumentManager, and SceneModTargets.
+ */
+static void menu_repaintStepAutomation(void)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    uint8_t scene = menu_getViewedPattern();
+    uint8_t track = menu_getActiveVoice();
+    uint8_t step = parameter_values[PAR_ACTIVE_STEP];
+    uint8_t count = pat_readStepAutomations(scene, track, step, autos,
+                                            PAT_BLOCK_AUTO_COUNT_MASK);
+    uint8_t page = menu_stepAutoPageIndex;
+
+    memset(editDisplayBuffer[0], ' ', 16u);
+    memset(editDisplayBuffer[1], ' ', 16u);
+    if (page >= count) {
+        memcpy(&editDisplayBuffer[0][0], "add", 3u);
+        memcpy(&editDisplayBuffer[0][4], "voi", 3u);
+        memcpy(&editDisplayBuffer[0][8], "par", 3u);
+        memcpy(&editDisplayBuffer[0][12], "amt", 3u);
+        memcpy(&editDisplayBuffer[1][1], "add", 3u);
+        memcpy(&editDisplayBuffer[1][5], "off", 3u);
+        memcpy(&editDisplayBuffer[1][9], "off", 3u);
+        memcpy(&editDisplayBuffer[1][13], "off", 3u);
+    } else {
+        uint16_t target = autos[page].target;
+        uint8_t valid = instrumentManager_targetValid(
+            scene, target, INSTRUMENT_TARGET_AUTOMATION);
+        numtostrpu(&editDisplayBuffer[0][0], page, '0');
+        memcpy(&editDisplayBuffer[0][4], "voi", 3u);
+        memcpy(&editDisplayBuffer[0][8], "par", 3u);
+        memcpy(&editDisplayBuffer[0][12], "amt", 3u);
+        if (page + 1u < count)
+            editDisplayBuffer[0][15] = '>';
+        if (menu_stepAutoDeleteMode)
+            memcpy(&editDisplayBuffer[1][1], "clr", 3u);
+        else
+            memcpy(&editDisplayBuffer[1][1], "del", 3u);
+        if (sceneModTarget_isSceneTarget(target)) {
+            memcpy(&editDisplayBuffer[1][5], "scn", 3u);
+            sceneModTarget_formatShort(target, &editDisplayBuffer[1][9]);
+        } else if (valid && instrumentParam_isVoiceParameter(target)) {
+            uint8_t slot = instrumentParam_slot(target);
+            const kit_instrument_slot_t *instrument =
+                scene_instrumentSlotConst(scene, slot);
+            const ParamDescriptor *descriptor = instrument
+                ? instrumentManager_descriptor(instrument->type,
+                                               instrumentParam_local(target))
+                : 0;
+            numtostru(&editDisplayBuffer[1][5], (uint8_t)(slot + 1u));
+            if (descriptor)
+                menu_copyPaddedField(&editDisplayBuffer[1][9],
+                                     descriptor->short_name, 3u);
+            else
+                menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
+        } else {
+            memcpy(&editDisplayBuffer[1][5], "scn", 3u);
+            menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
+        }
+        numtostrpu(&editDisplayBuffer[1][13], autos[page].value, '0');
+    }
+}
+
 /* -----------------------------------------------------------------------
 ** menu_repaintGeneric — exact port of original
 ** ----------------------------------------------------------------------- */
@@ -6873,6 +7332,11 @@ static void menu_repaintGeneric(void)
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     char valueAsText[3];
+
+    if (menu_stepAutomationPageActive()) {
+        menu_repaintStepAutomation();
+        return;
+    }
 
     if (editModeActive) {
         menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
@@ -7079,6 +7543,12 @@ static void menu_encoderChangeParameter(int8_t inc)
 {
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+
+    if (menu_stepAutomationPageActive()) {
+        (void)menu_stepAutomationEdit(activeParameter, inc);
+        return;
+    }
+
     menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
     uint16_t value;
 
@@ -7146,6 +7616,42 @@ static void menu_moveToMenuItem(int8_t inc)
     uint8_t allowedSkips = 3;
 
     inc = (int8_t)(inc > 0 ? 1 : -1);
+
+    /*
+     * Probability is the last fixed STEP field. Scrolling right from it
+     * enters the variable automation list, while the static table's empty
+     * cells remain unreachable. The custom renderer starts on page zero and
+     * keeps item 0 selected for DELETE/CLEAR/ADD clicks.
+     */
+    if (menu_activePage == SEQ_PAGE && activePage == 1 &&
+        !menu_stepAutoActive && activeParameter == 2 && inc > 0) {
+        menu_stepAutoActive = 1u;
+        menu_stepAutoPageIndex = 0u;
+        menuIndex = (uint8_t)(1u << PAGE_SHIFT);
+        return;
+    }
+
+    if (menu_stepAutomationPageActive()) {
+        uint8_t count = pat_stepAutomationCount(
+            menu_getViewedPattern(), menu_getActiveVoice(),
+            parameter_values[PAR_ACTIVE_STEP]);
+
+        /*
+         * The custom list has one synthetic Add page after its entries. Main
+         * encoder scrolling changes only the page index; the four displayed
+         * fields are edited by their corresponding endless pots.
+         */
+        if (inc > 0) {
+            if (menu_stepAutoPageIndex < count)
+                menu_stepAutoPageIndex++;
+        } else if (menu_stepAutoPageIndex > 0u) {
+            menu_stepAutoPageIndex--;
+        } else {
+            menu_stepAutoActive = 0u;
+            menuIndex = (uint8_t)((1u << PAGE_SHIFT) | 2u);
+        }
+        return;
+    }
 
     if (menu_isVoicePage(menu_activePage)) {
         /*
@@ -7905,6 +8411,21 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
         return;
     }
 
+    /*
+     * STEP automation item-0 owns its click while the compact page is in
+     * navigation mode. Inputs: encoder click on DELETE/CLEAR/ADD. Output:
+     * PatternData performs the selected action and the custom page repaints;
+     * ordinary edit-mode toggling is suppressed for this one action cell.
+     * Affiliates: menu_stepAutomationExecuteItem0() and PatternData CRUD.
+     */
+    if (btnClicked && !editModeActive && menu_stepAutomationPageActive() &&
+        (menuIndex & MASK_PARAMETER) == 0u) {
+        (void)menu_stepAutomationExecuteItem0();
+        menu_repaintAll();
+        menu_endlessPotMappingChanged();
+        return;
+    }
+
     if (btnClicked)
         editModeActive = (uint8_t)(1 - editModeActive);
 
@@ -8046,6 +8567,19 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     if (knobNr >= ENDLESS_POT_COUNT) return;
     if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
         menu_handleLoadSaveKnobDelta(knobNr, delta);
+        return;
+    }
+
+    /*
+     * Endless pots map directly to the four custom STEP automation fields.
+     * Inputs: RV1 action, RV2 target voice, RV3 parameter, RV4 amount. Output:
+     * the custom handler creates the default entry on Add and requests one
+     * coalesced foreground repaint; the ordinary empty Page row is bypassed.
+     * Affiliate: menu_stepAutomationHandleKnob().
+     */
+    if (menu_stepAutomationPageActive()) {
+        if (menu_stepAutomationHandleKnob(knobNr, delta))
+            menu_knobs_dirty = 1u;
         return;
     }
 
@@ -9167,6 +9701,15 @@ void menu_switchPage(uint8_t pageNr)
     }
 
     /*
+     * Leaving or re-entering a Menu context invalidates the variable-length
+     * STEP automation cursor. Inputs: the requested physical page. Output:
+     * only transient automation navigation state is reset; PatternData and
+     * the selected step remain unchanged. Affiliate: menu_showStepEditPage()
+     * re-enables the custom page explicitly when appropriate.
+     */
+    menu_stepAutomationReset();
+
+    /*
      * Capture the old context before page mutation. Pressing the Load/Save
      * mode button toggles LOAD_PAGE/SAVE_PAGE through pageNr==LOAD_PAGE and
      * keeps the shared name session. Any other page target is the physical
@@ -9570,58 +10113,6 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         pat_setTrackShuffle(menu_getViewedPattern(), menu_getActiveVoice(), value);
         break;
 
-    case PAR_AUTOM_TRACK:
-        /*
-         * Active automation lane is Pattern edit context. Menu writes through
-         * PatternData so automation recording/editing state is centralized
-         * outside the front-panel parser.
-         */
-        pat_setActiveAutomationTrack(value);
-        break;
-
-    case PAR_P1_DEST:
-    case PAR_P2_DEST:
-    {
-        /*
-         * Automation destination edits mutate the selected Pattern step.
-         *
-         * Inputs: PAR_ACTIVE_STEP is the currently selected absolute step,
-         * active voice/viewed pattern come from Menu, and P1/P2 chooses
-         * automation lane 0/1. The menu value indexes modTargets[] and the
-         * Pattern stores the resolved parameter id.
-         *
-         * Output: PatternData updates the step automation destination.
-         * Risk: pat_setSelectedStep() preserves the old side effect where the
-         * active step was also pushed through the opcode path before the lane
-         * destination changed.
-         */
-        uint16_t tmp = modTargets[value].param;
-        pat_setSelectedStep(parameter_values[PAR_ACTIVE_STEP]);
-        pat_setStepAutomationDestination(menu_getViewedPattern(), menu_getActiveVoice(),
-                                         parameter_values[PAR_ACTIVE_STEP],
-                                         (uint8_t)(paramNr == PAR_P1_DEST ? 0u : 1u),
-                                         tmp);
-        break;
-    }
-
-    case PAR_P1_VAL:
-        /*
-         * Automation lane value for selected step, lane 0. PatternData owns the
-         * step mutation; Menu only supplies current edit coordinates.
-         */
-        pat_setStepAutomationValue(menu_getViewedPattern(), menu_getActiveVoice(),
-                                   parameter_values[PAR_ACTIVE_STEP], 0u, value);
-        break;
-
-    case PAR_P2_VAL:
-        /*
-         * Automation lane value for selected step, lane 1. Kept separate from
-         * P1 for readability because the menu parameters are distinct.
-         */
-        pat_setStepAutomationValue(menu_getViewedPattern(), menu_getActiveVoice(),
-                                   parameter_values[PAR_ACTIVE_STEP], 1u, value);
-        break;
-
     case PAR_QUANTISATION:
         /*
          * Quantisation affects recording/playback timing, so it remains a
@@ -9818,6 +10309,7 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
          * and automation lane data for the selected step into menu parameters.
          */
         pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), value);
+        menu_stepAutomationReset();
         break;
 
     case PAR_STEP_PROB:
@@ -9947,7 +10439,13 @@ uint8_t menu_getActivePage(void)   { return menu_activePage; }
 /* Expose only the accepted-command busy window needed by filesystem tracing. */
 uint8_t menu_isLoadSaveCommandActive(void) { return menu_loadSaveCommandActive; }
 uint8_t menu_getActiveVoice(void)  { return menu_activeVoice; }
-void    menu_setActiveVoice(uint8_t v) { menu_activeVoice = v; }
+/* Track changes restart the custom STEP automation cursor at page zero. */
+void menu_setActiveVoice(uint8_t v)
+{
+    if (menu_activeVoice != v)
+        menu_stepAutomationReset();
+    menu_activeVoice = v;
+}
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
 uint8_t menu_getSubPage(void)      { return (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT); }
 void    menu_setNumSamples(uint8_t n) { menu_numSamples = n; }
@@ -9977,6 +10475,7 @@ void menu_showStepTrackSettingsFirstHalf(void)
      * Output: menuIndex selects SEQ_PAGE subpage 0 parameter 0 and endless-pot
      * snapshots update for the visible columns.
      */
+    menu_stepAutomationReset();
     menuIndex = 0u;
     menu_endlessPotMappingChanged();
 }
@@ -9991,6 +10490,7 @@ void menu_showStepEditPage(void)
      * values are loaded from PatternData, endless-pot snapshots refresh,
      * and the LCD is repainted. Affiliate: buttonHandler_selectActiveStep.
      */
+    menu_stepAutomationReset();
     menuIndex = (uint8_t)(1u << PAGE_SHIFT);
     pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(),
                         parameter_values[PAR_ACTIVE_STEP]);
@@ -10009,6 +10509,7 @@ void menu_toggleStepTrackSettingsHalf(void)
      * endless-pot mappings are refreshed for the newly visible half.
      */
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
+    menu_stepAutomationReset();
     menuIndex = (activeParameter < 4u) ? 4u : 0u;
     menu_endlessPotMappingChanged();
 }

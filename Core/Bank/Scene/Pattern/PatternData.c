@@ -250,15 +250,16 @@ static void pat_poolFree(pat_scene_region_t *r, uint16_t byte_offset,
 }
 
 /*
- * Calculate the four-byte allocation size for a special-flags byte.
+ * Calculate the four-byte allocation size for one dynamic block.
  *
- * What: include the two-byte header, flags byte, and one byte per supported
- * special, then round up to a chunk. Why: allocator/free/reallocation paths
- * must agree on block ownership. Inputs: note/velocity/probability flags;
- * reserved bits are ignored. Output: one or two chunks for Session 062.
- * Affiliates: pat_poolAlloc(), pat_poolFree(), and pat_writeSpecials().
+ * What: include the two-byte header, flags byte, one byte per supported
+ * special, and two bytes per automation entry, then round up to a chunk. Why:
+ * allocator/free/reallocation paths must agree on complete block ownership.
+ * Inputs: supported special flags and a bounded automation count. Output: the
+ * required four-byte chunk count. Affiliates: all dynamic block readers and
+ * writers below.
  */
-static uint8_t pat_blockChunks(uint8_t special_flags)
+static uint8_t pat_blockChunks(uint8_t special_flags, uint8_t auto_count)
 {
     uint8_t value_count = 0u;
     uint8_t total;
@@ -270,39 +271,49 @@ static uint8_t pat_blockChunks(uint8_t special_flags)
         value_count++;
     if (special_flags & PAT_SPECIAL_PROB_BIT)
         value_count++;
-    total = (uint8_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count);
+    if (auto_count > PAT_BLOCK_AUTO_COUNT_MASK)
+        auto_count = PAT_BLOCK_AUTO_COUNT_MASK;
+    total = (uint8_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count +
+                      ((uint16_t)auto_count * 2u));
     return (uint8_t)((total + 3u) >> 2u);
 }
 
 /*
  * Write one complete dynamic block at an allocated pool offset.
  *
- * What: encode the step back-reference, flags, and value bytes in the fixed
- * block order. Why: every menu mutation and future integrity reader needs one
- * stable byte layout. Inputs: region/offset, bounded track/step, supported
- * flags, and the three candidate values. Output: the allocated block is
- * written big-endian for the header; absent values are not emitted. Affiliates:
- * pat_blockRead() and pat_writeSpecials().
+ * What: encode the step back-reference, special flags/values, and packed
+ * automation entries in the fixed block order. Why: every menu mutation and
+ * future integrity reader needs one stable byte layout. Inputs: region/offset,
+ * bounded track/step, supported flags, special values, and up to 63 decoded
+ * automation entries. Output: the allocated block is written with a
+ * big-endian header and little-endian automation words. Affiliates:
+ * pat_blockRead(), pat_blockReadAutomations(), and pat_writeSpecials().
  */
 static void pat_blockWrite(pat_scene_region_t *r, uint16_t byte_offset,
                            uint8_t track, uint8_t step,
                            uint8_t special_flags, uint8_t note,
-                           uint8_t velocity, uint8_t probability)
+                           uint8_t velocity, uint8_t probability,
+                           const pat_automation_entry_t *autos,
+                           uint8_t auto_count)
 {
     uint8_t *p;
     uint16_t step_id;
     uint16_t header;
     uint8_t idx;
+    uint8_t auto_idx;
 
     if (!r || !pat_poolOffsetValid(byte_offset))
         return;
     special_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (auto_count > PAT_BLOCK_AUTO_COUNT_MASK)
+        auto_count = PAT_BLOCK_AUTO_COUNT_MASK;
     p = &r->pool[byte_offset];
     step_id = (uint16_t)(track * NUM_STEPS + step);
     header = (uint16_t)((step_id << PAT_BLOCK_STEP_ID_SHIFT) &
                         PAT_BLOCK_STEP_ID_MASK);
+    header |= (uint16_t)(auto_count & PAT_BLOCK_AUTO_COUNT_MASK);
 
-    memset(p, 0, (size_t)pat_blockChunks(special_flags) * 4u);
+    memset(p, 0, (size_t)pat_blockChunks(special_flags, auto_count) * 4u);
     p[0] = (uint8_t)(header >> 8u);
     p[1] = (uint8_t)(header & 0xFFu);
     p[2] = special_flags;
@@ -314,6 +325,13 @@ static void pat_blockWrite(pat_scene_region_t *r, uint16_t byte_offset,
         p[idx++] = velocity;
     if (special_flags & PAT_SPECIAL_PROB_BIT)
         p[idx++] = probability;
+    for (auto_idx = 0u; auto_idx < auto_count; auto_idx++) {
+        uint16_t packed = (uint16_t)(((uint16_t)(autos[auto_idx].value & 0x7Fu)
+                                      << 9u) |
+                                     (autos[auto_idx].target & 0x01FFu));
+        p[idx++] = (uint8_t)(packed & 0xFFu);
+        p[idx++] = (uint8_t)(packed >> 8u);
+    }
 }
 
 /*
@@ -333,6 +351,7 @@ static pat_step_specials_t pat_blockRead(const pat_scene_region_t *r,
     const uint8_t *p;
     uint8_t flags;
     uint8_t idx;
+    uint8_t auto_count;
 
     out.note = PAT_DEFAULT_NOTE;
     out.velocity = PAT_DEFAULT_VELOCITY;
@@ -343,6 +362,11 @@ static pat_step_specials_t pat_blockRead(const pat_scene_region_t *r,
 
     p = &r->pool[byte_offset];
     flags = (uint8_t)(p[2] & PAT_SPECIAL_FLAGS_MASK);
+    auto_count = (uint8_t)(p[1] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if ((uint32_t)byte_offset +
+            ((uint32_t)pat_blockChunks(flags, auto_count) * 4u) >
+        (PAT_STACK_SIZE * 32u))
+        return out;
     out.flags = flags;
     idx = 3u;
     if (flags & PAT_SPECIAL_NOTE_BIT)
@@ -356,21 +380,74 @@ static pat_step_specials_t pat_blockRead(const pat_scene_region_t *r,
 }
 
 /*
- * Replace one step's dynamic specials block while preserving its trigger bit.
+ * Decode the automation tail of one dynamic pool block.
  *
- * What: free, reuse, or allocate the block selected by `new_flags`, then swap
- * the address entry to its resulting offset. Why: all three Step-062 setters
- * need one read-modify-write owner that preserves the other specials and
- * degrades safely if the pool is exhausted. Inputs: Scene/track/step, desired
- * supported flags, and candidate note/velocity/probability values. Output:
- * address and bitmap/pool state agree, or the step retains only its trigger bit
- * after allocation failure. Affiliates: the three pat_setStep* functions,
- * pat_eraseStep(), and pat_clearTrack().
+ * What: read the header count and unpack each little-endian 16-bit entry into
+ * the public target/value form. Why: menu editing and migration code need the
+ * automation list without duplicating the block layout. Inputs: a validated
+ * pool base, output storage, and its capacity. Outputs: the number copied,
+ * capped by both the encoded count and `max_count`; malformed tails return
+ * zero. Affiliate: the step-automation CRUD functions below.
  */
-static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
-                              uint8_t step, uint8_t new_flags,
-                              uint8_t note, uint8_t velocity,
-                              uint8_t probability)
+static uint8_t pat_blockReadAutomations(const pat_scene_region_t *r,
+                                        uint16_t byte_offset,
+                                        pat_automation_entry_t *out,
+                                        uint8_t max_count)
+{
+    const uint8_t *p;
+    uint8_t flags;
+    uint8_t value_count = 0u;
+    uint8_t auto_count;
+    uint8_t copy_count;
+    uint8_t idx;
+    uint8_t auto_idx;
+
+    if (!r || !out || max_count == 0u || !pat_poolOffsetValid(byte_offset))
+        return 0u;
+    p = &r->pool[byte_offset];
+    flags = (uint8_t)(p[2] & PAT_SPECIAL_FLAGS_MASK);
+    if (flags & PAT_SPECIAL_NOTE_BIT)
+        value_count++;
+    if (flags & PAT_SPECIAL_VEL_BIT)
+        value_count++;
+    if (flags & PAT_SPECIAL_PROB_BIT)
+        value_count++;
+    auto_count = (uint8_t)(p[1] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if ((uint32_t)byte_offset +
+            ((uint32_t)pat_blockChunks(flags, auto_count) * 4u) >
+        (PAT_STACK_SIZE * 32u))
+        return 0u;
+    copy_count = auto_count < max_count ? auto_count : max_count;
+    idx = (uint8_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count);
+    for (auto_idx = 0u; auto_idx < copy_count; auto_idx++) {
+        uint16_t packed = (uint16_t)(p[idx] | ((uint16_t)p[idx + 1u] << 8u));
+        out[auto_idx].target = (uint16_t)(packed & 0x01FFu);
+        out[auto_idx].value = (uint8_t)((packed >> 9u) & 0x7Fu);
+        idx = (uint8_t)(idx + 2u);
+    }
+    return copy_count;
+}
+
+/*
+ * Replace one step's complete dynamic block while preserving its trigger bit.
+ *
+ * What: free, reuse, or allocate the block selected by the special flags and
+ * automation list, then swap the address entry to its resulting offset. Why:
+ * special and automation edits must share one ownership transaction, including
+ * automation-only blocks whose special-flags byte is zero. Inputs: Scene/
+ * track/step, supported flags, special values, at most 63 entries, and a
+ * shrink-in-place policy used only by removal. Output: nonzero when the
+ * block/address state was committed; allocation failure otherwise leaves the
+ * old block and address untouched. Affiliates: pat_writeSpecials() and the
+ * public automation CRUD functions below.
+ */
+static uint8_t pat_writeDynamic(uint8_t scene_index, uint8_t track,
+                                uint8_t step, uint8_t new_flags,
+                                uint8_t note, uint8_t velocity,
+                                uint8_t probability,
+                                const pat_automation_entry_t *autos,
+                                uint8_t auto_count,
+                                uint8_t allow_shrink_in_place)
 {
     pat_scene_region_t *r;
     uint16_t *entry;
@@ -380,51 +457,105 @@ static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
     uint8_t new_chunks;
     uint16_t new_offset;
     uint16_t trigger_bits;
-
     entry = pat_addrPtr(scene_index, track, step);
     if (!entry)
-        return;
+        return 0u;
     r = &pat_regions[scene_index];
     new_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (auto_count > PAT_BLOCK_AUTO_COUNT_MASK)
+        return 0u;
+    if (auto_count > 0u && !autos)
+        return 0u;
     addr = *entry;
     trigger_bits = (uint16_t)(addr & PAT_ADDR_TRIGGER_BIT);
     old_offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
 
-    if (new_flags == 0u) {
+    if (new_flags == 0u && auto_count == 0u) {
         if (pat_poolOffsetValid(old_offset)) {
-            old_chunks = pat_blockChunks(r->pool[old_offset + 2u]);
+            old_chunks = pat_blockChunks(
+                r->pool[old_offset + 2u],
+                (uint8_t)(r->pool[old_offset + 1u] &
+                          PAT_BLOCK_AUTO_COUNT_MASK));
             pat_poolFree(r, old_offset, old_chunks);
         }
         *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
         pat_markSceneDirty(scene_index);
-        return;
+        return 1u;
     }
 
-    new_chunks = pat_blockChunks(new_flags);
+    new_chunks = pat_blockChunks(new_flags, auto_count);
     if (pat_poolOffsetValid(old_offset)) {
-        old_chunks = pat_blockChunks(r->pool[old_offset + 2u]);
+        old_chunks = pat_blockChunks(
+            r->pool[old_offset + 2u],
+            (uint8_t)(r->pool[old_offset + 1u] & PAT_BLOCK_AUTO_COUNT_MASK));
         if (old_chunks == new_chunks) {
             pat_blockWrite(r, old_offset, track, step, new_flags, note,
-                           velocity, probability);
+                           velocity, probability, autos, auto_count);
             *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
                                 old_offset);
             pat_markSceneDirty(scene_index);
-            return;
+            return 1u;
         }
-        pat_poolFree(r, old_offset, old_chunks);
     }
 
     new_offset = pat_poolAlloc(r, new_chunks);
     if (new_offset == PAT_ADDR_SENTINEL) {
-        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
-        pat_markSceneDirty(scene_index);
-        return;
+        /*
+         * A removal can safely shrink in place when the pool has no separate
+         * run for the replacement. Add/special-growth edits never take this
+         * path: their old block remains authoritative until a new run exists.
+         */
+        if (allow_shrink_in_place && pat_poolOffsetValid(old_offset) &&
+            new_chunks < old_chunks) {
+            pat_blockWrite(r, old_offset, track, step, new_flags, note,
+                           velocity, probability, autos, auto_count);
+            pat_poolFree(r, (uint16_t)(old_offset + new_chunks * 4u),
+                         (uint8_t)(old_chunks - new_chunks));
+            *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
+                                old_offset);
+            pat_markSceneDirty(scene_index);
+            return 1u;
+        }
+        return 0u;
     }
 
     pat_blockWrite(r, new_offset, track, step, new_flags, note, velocity,
-                   probability);
+                   probability, autos, auto_count);
+    if (pat_poolOffsetValid(old_offset))
+        pat_poolFree(r, old_offset, old_chunks);
     *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | new_offset);
     pat_markSceneDirty(scene_index);
+    return 1u;
+}
+
+/*
+ * Replace one step's special values while retaining every automation entry.
+ *
+ * Inputs: Scene/track/step, desired special flags, and candidate values.
+ * Output: the shared dynamic-block transaction preserves automation entries
+ * and commits the special edit or leaves the old state on allocation failure.
+ * Affiliate: pat_setStepNote(), pat_setStepVolume(), and
+ * pat_setStepProbability().
+ */
+static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
+                              uint8_t step, uint8_t new_flags,
+                              uint8_t note, uint8_t velocity,
+                              uint8_t probability)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    const uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t offset;
+    uint8_t auto_count = 0u;
+
+    if (!r || !entry)
+        return;
+    offset = (uint16_t)(*entry & PAT_ADDR_OFFSET_MASK);
+    if (pat_poolOffsetValid(offset))
+        auto_count = pat_blockReadAutomations(r, offset, autos,
+                                              PAT_BLOCK_AUTO_COUNT_MASK);
+    (void)pat_writeDynamic(scene_index, track, step, new_flags, note, velocity,
+                           probability, autos, auto_count, 0u);
 }
 
 uint8_t pat_trackValid(uint8_t track)
@@ -572,7 +703,9 @@ void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step)
     offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
     if (pat_poolOffsetValid(offset)) {
         pat_scene_region_t *r = &pat_regions[scene_index];
-        uint8_t chunks = pat_blockChunks(r->pool[offset + 2u]);
+        uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
+                                         (uint8_t)(r->pool[offset + 1u] &
+                                                   PAT_BLOCK_AUTO_COUNT_MASK));
         pat_poolFree(r, offset, chunks);
     }
     *entry = PAT_ADDR_SENTINEL;
@@ -659,7 +792,9 @@ void pat_clearTrack(uint8_t scene_index, uint8_t track)
         addr = r->address[track][step];
         offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
         if (pat_poolOffsetValid(offset)) {
-            uint8_t chunks = pat_blockChunks(r->pool[offset + 2u]);
+            uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
+                                             (uint8_t)(r->pool[offset + 1u] &
+                                                       PAT_BLOCK_AUTO_COUNT_MASK));
             pat_poolFree(r, offset, chunks);
         }
         r->address[track][step] = PAT_ADDR_SENTINEL;
@@ -792,10 +927,169 @@ void pat_setTrackShuffle(uint8_t scene_index, uint8_t track, uint8_t value)
     region->track_shuffle[track] = value;
     pat_markSceneDirty(scene_index);
 }
-void pat_setActiveAutomationTrack(uint8_t v) { (void)v; }
-void pat_setSelectedStep(uint8_t step) { (void)step; }
-void pat_setStepAutomationDestination(uint8_t s,uint8_t t,uint8_t p,uint8_t l,uint16_t v) {(void)s;(void)t;(void)p;(void)l;(void)v;}
-void pat_setStepAutomationValue(uint8_t s,uint8_t t,uint8_t p,uint8_t l,uint8_t v) {(void)s;(void)t;(void)p;(void)l;(void)v;}
+
+/*
+ * Return the encoded automation count for one dynamic step block.
+ *
+ * Inputs: resident Scene/track/step coordinates. Output: the six-bit count
+ * stored in the block header, or zero for trigger-only, invalid, or malformed
+ * entries. The complete block geometry is checked before the count is exposed
+ * so callers never trust a tail beyond the configured pool. Affiliate:
+ * pat_readStepAutomations().
+ */
+uint8_t pat_stepAutomationCount(uint8_t scene_index, uint8_t track,
+                                uint8_t step)
+{
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    const uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t offset;
+    uint8_t flags;
+    uint8_t count;
+
+    if (!r || !entry || ((*entry & PAT_ADDR_SPECIALS_BIT) == 0u))
+        return 0u;
+    offset = (uint16_t)(*entry & PAT_ADDR_OFFSET_MASK);
+    if (!pat_poolOffsetValid(offset))
+        return 0u;
+    flags = (uint8_t)(r->pool[offset + 2u] & PAT_SPECIAL_FLAGS_MASK);
+    count = (uint8_t)(r->pool[offset + 1u] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if ((uint32_t)offset +
+            ((uint32_t)pat_blockChunks(flags, count) * 4u) >
+        (PAT_STACK_SIZE * 32u))
+        return 0u;
+    return count;
+}
+
+/*
+ * Decode one step's automation entries into caller-owned storage.
+ *
+ * Inputs: resident coordinates, output array, and its capacity. Output: the
+ * number of entries copied, preserving on-disk order and capping the result at
+ * `max_count`; invalid or trigger-only steps return zero. Affiliate:
+ * STEP automation rendering and sequencer persistence tests.
+ */
+uint8_t pat_readStepAutomations(uint8_t scene_index, uint8_t track,
+                                uint8_t step, pat_automation_entry_t *out,
+                                uint8_t max_count)
+{
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    const uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t offset;
+
+    if (!r || !entry || !out || max_count == 0u ||
+        ((*entry & PAT_ADDR_SPECIALS_BIT) == 0u))
+        return 0u;
+    offset = (uint16_t)(*entry & PAT_ADDR_OFFSET_MASK);
+    if (!pat_poolOffsetValid(offset))
+        return 0u;
+    return pat_blockReadAutomations(r, offset, out, max_count);
+}
+
+/*
+ * Add or update one step automation entry.
+ *
+ * Inputs: resident coordinates, a canonical voice/Scene target ID, and a
+ * 7-bit value. Output: nonzero when the validated target is updated or
+ * appended; duplicate targets update in place, while a 64th entry or pool
+ * exhaustion leaves the existing block unchanged. Affiliate:
+ * instrumentManager_targetValid().
+ */
+uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
+                                uint8_t step, uint16_t target, uint8_t value)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    pat_step_specials_t sp;
+    uint8_t count;
+    uint8_t i;
+
+    if (!pat_addrPtr(scene_index, track, step) ||
+        target >= INSTRUMENT_TOTAL_ID_COUNT ||
+        !instrumentManager_targetValid(scene_index, target,
+                                       INSTRUMENT_TARGET_AUTOMATION))
+        return 0u;
+    count = pat_readStepAutomations(scene_index, track, step, autos,
+                                    PAT_BLOCK_AUTO_COUNT_MASK);
+    for (i = 0u; i < count; i++) {
+        if (autos[i].target == target) {
+            autos[i].value = (uint8_t)(value & 0x7Fu);
+            sp = pat_readStepSpecials(scene_index, track, step);
+            return pat_writeDynamic(scene_index, track, step, sp.flags, sp.note,
+                                    sp.velocity, sp.probability, autos, count,
+                                    0u);
+        }
+    }
+    if (count >= PAT_BLOCK_AUTO_COUNT_MASK)
+        return 0u;
+    autos[count].target = target;
+    autos[count].value = (uint8_t)(value & 0x7Fu);
+    count++;
+    sp = pat_readStepSpecials(scene_index, track, step);
+    return pat_writeDynamic(scene_index, track, step, sp.flags, sp.note,
+                            sp.velocity, sp.probability, autos, count, 0u);
+}
+
+/*
+ * Remove one exact target from a step's automation list.
+ *
+ * Inputs: resident coordinates and a canonical target ID. Output: nonzero
+ * when an entry was removed and the compacted block committed; the final
+ * automation may release the block entirely when no specials remain. Target
+ * validity is not required here so stale entries can be cleaned after an
+ * instrument replacement. Affiliate: menu delete/clear actions.
+ */
+uint8_t pat_removeStepAutomation(uint8_t scene_index, uint8_t track,
+                                 uint8_t step, uint16_t target)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    pat_step_specials_t sp;
+    uint8_t count;
+    uint8_t i;
+    uint8_t found = 0u;
+
+    if (!pat_addrPtr(scene_index, track, step) ||
+        target >= INSTRUMENT_TOTAL_ID_COUNT)
+        return 0u;
+    count = pat_readStepAutomations(scene_index, track, step, autos,
+                                    PAT_BLOCK_AUTO_COUNT_MASK);
+    for (i = 0u; i < count; i++) {
+        if (autos[i].target == target) {
+            found = 1u;
+            break;
+        }
+    }
+    if (!found)
+        return 0u;
+    for (; i + 1u < count; i++)
+        autos[i] = autos[i + 1u];
+    count--;
+    sp = pat_readStepSpecials(scene_index, track, step);
+    return pat_writeDynamic(scene_index, track, step, sp.flags, sp.note,
+                            sp.velocity, sp.probability, autos, count, 1u);
+}
+
+/*
+ * Remove every matching target from one track.
+ *
+ * Inputs: resident Scene/track coordinates and a canonical target ID. Output:
+ * all 128 steps are scanned and matching entries are removed through the
+ * single-step owner, including complete block release where appropriate.
+ * Affiliate: InstrumentManager slot replacement and future target cleanup.
+ */
+uint8_t pat_removeTrackAutomationByTarget(uint8_t scene_index, uint8_t track,
+                                          uint16_t target)
+{
+    uint8_t step;
+    uint8_t removed = 0u;
+
+    if (!scene_indexValid(scene_index) || !pat_trackValid(track) ||
+        target >= INSTRUMENT_TOTAL_ID_COUNT)
+        return 0u;
+    for (step = 0u; step < NUM_STEPS; step++)
+        if (pat_removeStepAutomation(scene_index, track, step, target))
+            removed++;
+    return removed;
+}
+
 /* Persist the global Pattern change-bar selection. */
 void pat_setPatternChangeBar(uint8_t scene_index, uint8_t value)
 {

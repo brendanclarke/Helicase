@@ -77,6 +77,7 @@
 #include "SampleMemory.h"
 #include "sequencer.h"
 #include "PatternData.h"
+#include "PatternTrace.h"
 #include "MidiNoteNumbers.h"
 #include "MidiMessages.h"
 #include "timebase.h"
@@ -269,6 +270,15 @@ typedef enum {
      * must never be confused with, or allowed to preempt, parameter draining.
      */
     FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH,
+    /*
+     * Lowest-priority DEV-only append of raw sequencer automation witnesses.
+     *
+     * Inputs are PatternTrace's bounded ISR-safe ring; output is an append to
+     * root `pattrace.bin`, acknowledged only after close and sync. It has no
+     * effect when DEV_MODE_LOGGING is disabled because PatternTrace then has no
+     * retained records. Affiliate: PatternTrace.c and filesystem_tick().
+     */
+    FS_INTERNAL_OP_PATTERN_TRACE_FLUSH,
     /*
      * Lowest-priority per-Scene Pattern AutoSave drain.
      *
@@ -530,6 +540,10 @@ static uint8_t staging_buf[512];
     ((uint16_t)(sizeof(staging_buf) / AUTOSAVE_TRACE_RECORD_BYTES))
 _Static_assert((sizeof(staging_buf) % AUTOSAVE_TRACE_RECORD_BYTES) == 0u,
                "staging_buf must hold whole autosave trace records");
+#define PAT_TRACE_FLUSH_BATCH_RECORDS \
+    ((uint16_t)(sizeof(staging_buf) / PAT_TRACE_RECORD_BYTES))
+_Static_assert((sizeof(staging_buf) % PAT_TRACE_RECORD_BYTES) == 0u,
+               "staging_buf must hold whole PatternTrace records");
 
 /* Name buffer for load_name operation.
  *
@@ -1448,6 +1462,9 @@ static void filesystem_autosavePatternDrainCompleted(void);
 static void filesystem_autosaveTraceFlushSchedule_tick(void);
 static void filesystem_autosaveTraceFlushCompleted(void);
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
+static void filesystem_patternTraceFlush_tick(void);
+static void filesystem_patternTraceFlushSchedule_tick(void);
+static void filesystem_patternTraceFlushCompleted(void);
 static void filesystem_autosaveSetupCompleted(void);
 static void filesystem_clearResidentSourceDirtyFlags(void);
 /* Boot Pattern restore resolves the 145-row HCNAMES hierarchy below. */
@@ -1940,6 +1957,8 @@ static uint16_t fs_autosave_trace_next_due_tick = 0u;
 static uint8_t fs_autosave_suppress_witness = 0u;
 static uint8_t fs_trace_suppress_witness = 0u;
 static uint16_t fs_trace_reported_dropped = 0u;
+/* Next wrapping deadline for the independent PatternTrace append cadence. */
+static uint16_t fs_pattern_trace_next_due_tick = 0u;
 #endif
 /*
  * Pre-audio boot owns first creation of the hidden record pair. This gate
@@ -3383,6 +3402,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_WRITE_BOOT_LOG:        return "BLog";
     case FS_INTERNAL_OP_AUTOSAVE_PARAMETER_DRAIN: return "ASv";
     case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:  return "AST";
+    case FS_INTERNAL_OP_PATTERN_TRACE_FLUSH:  return "PTR";
     case FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN: return "ASP";
     case FS_INTERNAL_OP_VALIDATE_AUTOSAVE_WINNER:
         return "ASvV";
@@ -5323,6 +5343,162 @@ static void filesystem_autosaveTraceFlush_tick(void)
     }
 #else
     filesystem_finish(FS_STATUS_DONE);
+#endif
+}
+
+/*
+ * Serialize a bounded oldest-first PatternTrace batch into staging_buf.
+ *
+ * Inputs: pending record count capped by PAT_TRACE_FLUSH_BATCH_RECORDS. Output:
+ * exact byte length plus fixed eight-byte records in the shared staging area.
+ * PatternTrace retains its ring until the caller reaches the post-sync cursor
+ * acknowledgement. Affiliate: filesystem_patternTraceFlush_tick().
+ */
+static void filesystem_patternTraceSerialize(uint16_t record_count,
+                                             uint16_t *byte_count)
+{
+    uint16_t i;
+
+    for (i = 0u; i < record_count; i++)
+        (void)patternTrace_peekRecord(
+            i, staging_buf + (i * PAT_TRACE_RECORD_BYTES));
+    *byte_count = (uint16_t)(record_count * PAT_TRACE_RECORD_BYTES);
+}
+
+/*
+ * Append one bounded PatternTrace batch to root pattrace.bin.
+ *
+ * Inputs: PatternTrace's pending ring. Output: append, close, sync, and only
+ * then cursor advancement. DEV_MODE_LOGGING 0 reaches the disabled terminal
+ * branch without opening a file. Full-card and close failures preserve the
+ * ring for a later retry. Affiliates: PatternTrace.c and filesystem_tick().
+ */
+static void filesystem_patternTraceFlush_tick(void)
+{
+#if DEV_MODE_LOGGING
+    switch (op_phase) {
+    case 0u: /* RETURN ROOT + SNAPSHOT/OPEN APPEND TRACE FILE */
+        if (!afatfs_chdir(NULL))
+            return;
+        op_stream_index = patternTrace_pendingCount();
+        if (op_stream_index > PAT_TRACE_FLUSH_BATCH_RECORDS)
+            op_stream_index = PAT_TRACE_FLUSH_BATCH_RECORDS;
+        if (op_stream_index == 0u) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
+        filesystem_patternTraceSerialize((uint16_t)op_stream_index,
+                                         &op_write_line_len);
+        op_file_ready = false;
+        op_file = NULL;
+        op_bytes_done = 0u;
+        if (!afatfs_fopen_lfn(PAT_TRACE_FILENAME, "a",
+                              AFATFS_MATCH_CASE_INSENSITIVE, NULL,
+                              on_file_opened))
+            return;
+        op_phase = 1u;
+        return;
+
+    case 1u: /* WAIT FOR APPEND FILE OPEN */
+        if (!op_file_ready)
+            return;
+        if (!op_file) {
+            filesystem_finish(FS_STATUS_ERROR);
+            return;
+        }
+        op_phase = 2u;
+        return;
+
+    case 2u: /* STREAM THE SNAPSHOT */
+    {
+        uint32_t written;
+
+        if (op_bytes_done >= op_write_line_len) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 3u;
+            return;
+        }
+        written = afatfs_fwrite(op_file, staging_buf + op_bytes_done,
+                                op_write_line_len - op_bytes_done);
+        op_bytes_done += written;
+        if (written == 0u && afatfs_isFull()) {
+            op_close_status = FS_STATUS_ERROR;
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 4u;
+        }
+        return;
+    }
+
+    case 3u: /* WAIT CLOSE + DURABLE SYNC BEFORE ACKNOWLEDGING */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        if (!afatfs_sync())
+            return;
+        patternTrace_advanceFlushCursor((uint16_t)op_stream_index);
+        filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 4u: /* WAIT ERROR-HANDLE CLOSE */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        filesystem_finish(op_close_status);
+        return;
+
+    default:
+        filesystem_finish(FS_STATUS_ERROR);
+        return;
+    }
+#else
+    filesystem_finish(FS_STATUS_DONE);
+#endif
+}
+
+/*
+ * Release the autonomous PatternTrace append's terminal facade status.
+ *
+ * Inputs: DONE/ERROR from the append state machine. Output: the shared
+ * filesystem facade returns to IDLE; failed appends retain their ring because
+ * the cursor advances only after sync. Affiliate: the PatternTrace scheduler.
+ */
+static void filesystem_patternTraceFlushCompleted(void)
+{
+#if DEV_MODE_LOGGING
+    if (status == FS_STATUS_DONE &&
+        patternTrace_pendingCount() >= PAT_TRACE_FLUSH_BATCH_RECORDS)
+        fs_pattern_trace_next_due_tick = 0u;
+#endif
+    filesystem_ack();
+}
+
+/*
+ * Schedule the lowest-priority PatternTrace append.
+ *
+ * Inputs: pending DEV ring, wrapping millisecond deadline, and the accepted
+ * Load/Save command gate. Output: at most one eight-byte-record append per
+ * interval, after higher-priority filesystem schedulers decline the facade.
+ * Production builds compile this to no retained state and no I/O.
+ */
+static void filesystem_patternTraceFlushSchedule_tick(void)
+{
+#if DEV_MODE_LOGGING
+    uint16_t now;
+
+    if (menu_isLoadSaveCommandActive() || patternTrace_pendingCount() == 0u)
+        return;
+    now = time_sysTick;
+    if (fs_pattern_trace_next_due_tick == 0u)
+        fs_pattern_trace_next_due_tick = now;
+    if ((uint16_t)(now - fs_pattern_trace_next_due_tick) >= 0x8000u)
+        return;
+    if (filesystem_start(FS_INTERNAL_OP_PATTERN_TRACE_FLUSH,
+                         FS_FILE_SETTINGS, 0u,
+                         filesystem_patternTraceFlushCompleted))
+        fs_pattern_trace_next_due_tick = (uint16_t)(
+            now + PAT_TRACE_FLUSH_INTERVAL_MS);
 #endif
 }
 
@@ -24364,6 +24540,9 @@ void filesystem_tick(void)
      */
     if (status == FS_STATUS_IDLE)
         filesystem_autosaveTraceFlushSchedule_tick();
+    /* PatternTrace is diagnostic-only and runs behind the existing trace gate. */
+    if (status == FS_STATUS_IDLE)
+        filesystem_patternTraceFlushSchedule_tick();
     /*
      * Start the durable AutoSave writer only after settings and, when pending,
      * its pre-drain diagnostic witness declined the idle facade.
@@ -24414,6 +24593,9 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_AUTOSAVE_TRACE_FLUSH:
         filesystem_autosaveTraceFlush_tick();
+        break;
+    case FS_INTERNAL_OP_PATTERN_TRACE_FLUSH:
+        filesystem_patternTraceFlush_tick();
         break;
     case FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN:
         filesystem_autosavePatternDrain_tick();

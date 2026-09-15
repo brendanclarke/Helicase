@@ -57,6 +57,7 @@
 #include "menu.h"
 #include "SceneData.h"
 #include "config.h"
+#include "PatternTrace.h"
 
 /*
  * Pattern probability uses the existing hardware RNG without new state.
@@ -126,16 +127,42 @@ static uint16_t midi_notes_on=0;		    /**< which channels have a note currently 
 
 uint8_t seq_newPatternAvailable = 0; //indicate that a new pattern has loaded in the background and we should switch
 
+/*
+ * TIM3-to-foreground automation handoff (+514 B SRAM1).
+ *
+ * What: 128 four-byte identity/payload records and two publication bytes. Why:
+ * seq_advanceTrackStep() must only decode the bounded Pattern block and queue
+ * raw values; descriptor validation/runtime writes belong to foreground code.
+ * Lifetime: static until seq_drainPendingAutomation() consumes the queue.
+ * Owner: Sequencer. Affiliate: PatternTrace is optional diagnostics only and
+ * owns a separate 32-record, 256-byte DEV ring.
+ */
+typedef struct {
+    uint16_t identity;
+    uint16_t payload;
+} seq_pending_automation_t;
+
+_Static_assert(sizeof(seq_pending_automation_t) == 4u,
+               "pending automation record must remain four bytes");
+#define SEQ_PENDING_TYPE_AUTOMATION_BIT (1u << 10u)
+static volatile seq_pending_automation_t
+    seq_pending_automation[SEQ_PENDING_BUF_COUNT];
+static volatile uint8_t seq_pending_automation_count = 0u;
+static volatile uint8_t seq_pending_automation_drain = 0u;
+
 static void seq_sendMidi(MidiMsg msg);
 static void seq_sendRealtime(const uint8_t status);
 static void seq_sendProgChg(const uint8_t ptn);
 static void seq_processSchedulerTick(void);
 static void seq_setStepIndexToStart();
+static void seq_queueStepAutomations(uint8_t track, uint8_t step);
 //------------------------------------------------------------------------------
 void seq_init()
 {
 	memset(seq_stepIndex,0,sizeof(seq_stepIndex));
 	memset(seq_lastMasterStep,0,NUM_TRACKS);
+	seq_pending_automation_count = 0u;
+	seq_pending_automation_drain = 0u;
 }
 //------------------------------------------------------------------------------
 static void seq_calcDeltaT(uint16_t bpm)
@@ -363,18 +390,91 @@ void seq_alignActivePatternToScene(uint8_t scene_index)
 	seq_realignActivePatternToMasterClock();
 }
 
+/*
+ * Queue raw automation entries for one scheduled fixed-grid step.
+ *
+ * Inputs: track and current 16-step scheduler position. Output: each valid
+ * automation word is copied into the bounded pending queue with a step
+ * identity/type bit; no Scene target application or descriptor/runtime write
+ * occurs in TIM3 context. Full-queue events are retained as PatternTrace
+ * overflow witnesses when DEV_MODE_LOGGING is enabled. Affiliates:
+ * PatternData's dynamic block format and seq_drainPendingAutomation().
+ */
+static void seq_queueStepAutomations(uint8_t track, uint8_t step)
+{
+    const pat_scene_region_t *region;
+    uint16_t address;
+    uint16_t offset;
+    const uint8_t *block;
+    uint16_t header;
+    uint16_t step_id;
+    uint8_t flags;
+    uint8_t value_count = 0u;
+    uint8_t auto_count;
+    uint8_t i;
+    uint16_t base;
+
+    region = pat_sceneRegion(seq_activePattern);
+    if (!region || !pat_trackValid(track) || !pat_stepValid(step))
+        return;
+    address = region->address[track][step];
+    if ((address & PAT_ADDR_SPECIALS_BIT) == 0u)
+        return;
+    offset = (uint16_t)(address & PAT_ADDR_OFFSET_MASK);
+    if (offset == PAT_ADDR_SENTINEL || (offset & 3u) != 0u ||
+        offset >= (PAT_STACK_SIZE * 32u))
+        return;
+    block = &region->pool[offset];
+    header = (uint16_t)(((uint16_t)block[0] << 8u) | block[1]);
+    step_id = (uint16_t)(track * NUM_STEPS + step);
+    if (((header & PAT_BLOCK_STEP_ID_MASK) >> PAT_BLOCK_STEP_ID_SHIFT) !=
+        step_id)
+        return;
+    flags = (uint8_t)(block[2] & PAT_SPECIAL_FLAGS_MASK);
+    if (flags & PAT_SPECIAL_NOTE_BIT)
+        value_count++;
+    if (flags & PAT_SPECIAL_VEL_BIT)
+        value_count++;
+    if (flags & PAT_SPECIAL_PROB_BIT)
+        value_count++;
+    auto_count = (uint8_t)(block[1] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if ((uint32_t)offset +
+            ((uint32_t)((PAT_BLOCK_HEADER_BYTES + 1u + value_count +
+                         ((uint16_t)auto_count * 2u) + 3u) >> 2u) * 4u) >
+        (PAT_STACK_SIZE * 32u))
+        return;
+    base = (uint16_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count);
+    for (i = 0u; i < auto_count; i++) {
+        uint16_t packed = (uint16_t)(block[base + (i * 2u)] |
+                                     ((uint16_t)block[base + (i * 2u) + 1u]
+                                      << 8u));
+        if (seq_pending_automation_count < SEQ_PENDING_BUF_COUNT) {
+            uint8_t pending_index = seq_pending_automation_count;
+
+            seq_pending_automation[pending_index].identity =
+                (uint16_t)(step_id | SEQ_PENDING_TYPE_AUTOMATION_BIT);
+            seq_pending_automation[pending_index].payload = packed;
+            seq_pending_automation_count = (uint8_t)(pending_index + 1u);
+            seq_pending_automation_drain = 1u;
+        } else {
+            patternTrace_recordOverflow(
+                (uint16_t)(step_id | SEQ_PENDING_TYPE_AUTOMATION_BIT), packed);
+        }
+    }
+}
+
+/*
+ * Advance and service one fixed-grid step for one track.
+ *
+ * Input: track index at a sixteenth-note scheduler boundary. Output: its
+ * cursor advances modulo 16, active steps trigger with PatternData specials,
+ * and raw automation is queued for foreground application. Probability gates
+ * only the voice trigger; automation publication remains tied to the step
+ * visit so descriptor/runtime state follows the authored automation. Affiliates:
+ * PatternData and seq_drainPendingAutomation().
+ */
 static void seq_advanceTrackStep(uint8_t track)
 {
-	/*
-	 * Advance and service one fixed-grid step for one track.
-	 *
-	 * Input: track index at a sixteenth-note scheduler boundary. Output: its
-	 * cursor advances modulo 16 and an active address-array bit triggers with
-	 * the step's pool-stored velocity and note (or defaults if no specials are
-	 * assigned). Probability gates whether the trigger fires at all.
-	 * Automation entries, length, scale, shuffle, and rotation are not yet read
-	 * from PatternData.
-	 */
 	seq_stepIndex[track]++;
 	if (seq_stepIndex[track] >= (int16_t)NUM_STEPS_PER_BAR)
 		seq_stepIndex[track] = 0;
@@ -407,6 +507,8 @@ static void seq_advanceTrackStep(uint8_t track)
 					seq_triggerVoice(track, sp.velocity, sp.note);
 			}
 		}
+		if (!seq_eraseActive || track != menu_getActiveVoice())
+			seq_queueStepAutomations(track, (uint8_t)seq_stepIndex[track]);
 	}
 
 	if (seq_rollRate != 0xffu && (seq_rollState & (1u << track))) {
@@ -416,6 +518,75 @@ static void seq_advanceTrackStep(uint8_t track)
 			seq_recordTrigger(track);
 		}
 	}
+}
+
+/*
+ * Apply queued voice automation after front-panel service.
+ *
+ * Inputs: the volatile four-byte queue published by TIM3. Output: valid voice
+ * descriptor targets update their owning runtime image through
+ * InstrumentManager; Scene targets are deliberately ignored until Session
+ * 066 defines their runtime apply boundary. The foreground follows the live
+ * producer count and atomically resets only after no append raced the drain,
+ * while PatternTrace remains independent of playback. Affiliate: main.c's
+ * pre-audio foreground sequence.
+ */
+void seq_drainPendingAutomation(void)
+{
+    uint8_t i = 0u;
+
+    if (!seq_pending_automation_drain)
+        return;
+
+    /*
+     * Consume the monotonically growing producer range. The interrupt-safe
+     * handoff below closes the only race: an append between the last count
+     * read and queue reset is detected and left for this same drain pass.
+     */
+    for (;;) {
+        while (i < seq_pending_automation_count) {
+            uint16_t identity = seq_pending_automation[i].identity;
+            uint16_t packed = seq_pending_automation[i].payload;
+            uint16_t target = (uint16_t)(packed & 0x01FFu);
+            uint8_t value7 = (uint8_t)((packed >> 9u) & 0x7Fu);
+            uint8_t value8 = (value7 == 127u) ? 255u :
+                             (uint8_t)(value7 * 2u);
+
+            if ((identity & SEQ_PENDING_TYPE_AUTOMATION_BIT) != 0u &&
+                instrumentParam_isVoiceParameter(target) &&
+                instrumentManager_targetValid(seq_activePattern, target,
+                                              INSTRUMENT_TARGET_AUTOMATION)) {
+                uint8_t slot = instrumentParam_slot(target);
+                const kit_instrument_slot_t *instrument =
+                    scene_instrumentSlotConst(seq_activePattern, slot);
+                const ParamDescriptor *descriptor = instrument
+                    ? instrumentManager_descriptor(instrument->type,
+                                                   instrumentParam_local(target))
+                    : 0;
+
+                if (descriptor)
+                    (void)instrumentManager_writeRuntime(slot, descriptor,
+                                                          value8);
+            }
+            i++;
+        }
+
+        {
+            uint32_t primask;
+
+            __asm volatile("mrs %0, primask\n\tcpsid i"
+                           : "=r"(primask) :: "memory");
+            if (i == seq_pending_automation_count) {
+                seq_pending_automation_count = 0u;
+                seq_pending_automation_drain = 0u;
+                __asm volatile("msr primask, %0" :: "r"(primask)
+                               : "memory");
+                return;
+            }
+            __asm volatile("msr primask, %0" :: "r"(primask)
+                           : "memory");
+        }
+    }
 }
 
 static uint8_t seq_handleMasterBoundary(void)

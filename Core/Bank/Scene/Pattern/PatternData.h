@@ -22,7 +22,7 @@
  * Address-array encoding for the live Session-062 Pattern representation.
  *
  * Every 16-bit entry owns one track/step: bit 15 is the trigger state, bit 14
- * announces a dynamic block with specials, and bits 13..0 are a
+ * announces a dynamic block, and bits 13..0 are a
  * 4-byte-aligned pool byte offset. PAT_ADDR_SENTINEL is the reserved no-data
  * value; it cannot be a valid aligned offset. These constants are shared by
  * PatternData and future Sequencer/pool readers so no caller repeats masks.
@@ -167,6 +167,20 @@ typedef struct {
     uint8_t flags;
 } pat_step_specials_t;
 
+/*
+ * One decoded two-byte step-automation entry.
+ *
+ * What: the canonical nine-bit instrument/Scene target and its seven-bit
+ * automation value. Why: PatternData owns the packed pool representation but
+ * callers should not depend on its byte layout. Inputs/outputs: public CRUD
+ * APIs exchange this bounded value object; `target` is 0..511 and `value` is
+ * 0..127. Affiliate: PatternData.c automation block helpers.
+ */
+typedef struct {
+    uint16_t target;
+    uint8_t value;
+} pat_automation_entry_t;
+
 pat_step_specials_t pat_readStepSpecials(uint8_t scene_index,
                                          uint8_t track, uint8_t step);
 
@@ -198,12 +212,30 @@ void pat_applyTrackSettingsToMenu(uint8_t scene_index, uint8_t track);
 void pat_setTrackLength(uint8_t scene_index, uint8_t track, uint8_t value);
 void pat_setTrackScale(uint8_t scene_index, uint8_t track, uint8_t value);
 void pat_setTrackShuffle(uint8_t scene_index, uint8_t track, uint8_t value);
-void pat_setActiveAutomationTrack(uint8_t value);
-void pat_setSelectedStep(uint8_t step);
-void pat_setStepAutomationDestination(uint8_t scene_index, uint8_t track,
-                                      uint8_t step, uint8_t slot, uint16_t value);
-void pat_setStepAutomationValue(uint8_t scene_index, uint8_t track,
-                                uint8_t step, uint8_t slot, uint8_t value);
+
+/*
+ * Step-automation persistence operations.
+ *
+ * What: count, decode, add/update, remove, and track-wide-remove automation
+ * entries for one resident step. Why: the STEP automation page and the
+ * Sequencer use one owner for validation, uniqueness, pool allocation, and
+ * dirty-state publication. Inputs: valid Scene/track/step coordinates,
+ * canonical target IDs, and 7-bit values. Outputs: bounded entry/removal
+ * counts or nonzero success; invalid targets and exhausted storage leave the
+ * Pattern unchanged.
+ * Affiliates: InstrumentManager, menu.c, and sequencer.c.
+ */
+uint8_t pat_stepAutomationCount(uint8_t scene_index, uint8_t track,
+                                uint8_t step);
+uint8_t pat_readStepAutomations(uint8_t scene_index, uint8_t track,
+                                uint8_t step, pat_automation_entry_t *out,
+                                uint8_t max_count);
+uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
+                                uint8_t step, uint16_t target, uint8_t value);
+uint8_t pat_removeStepAutomation(uint8_t scene_index, uint8_t track,
+                                 uint8_t step, uint16_t target);
+uint8_t pat_removeTrackAutomationByTarget(uint8_t scene_index, uint8_t track,
+                                          uint16_t target);
 void pat_setPatternChangeBar(uint8_t scene_index, uint8_t value);
 void pat_setPatternNext(uint8_t scene_index, uint8_t value);
 void pat_applyStepToMenu(uint8_t scene_index, uint8_t track, uint8_t step);

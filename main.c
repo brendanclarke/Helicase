@@ -1241,6 +1241,13 @@ boot_filesystem_done:
         audio_check_and_render();        
         // foreground front-panel hardware service, scheduled by TIM6 at 500Hz
         timebase_serviceFrontPanel();
+        /*
+         * Apply raw voice automation published by the TIM3 sequencer owner.
+         * Inputs: the bounded pending queue. Output: descriptor runtime images
+         * are updated before the next audio render; Scene targets remain
+         * deferred to the later Scene-target session.
+         */
+        seq_drainPendingAutomation();
         audio_check_and_render();
         // service DIN/USB MIDI input and flush USB MIDI output
         midi_service();
