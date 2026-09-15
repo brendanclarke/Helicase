@@ -1163,6 +1163,59 @@ static uint8_t menu_stepAutoActive = 0u;
 static uint8_t menu_stepAutoCursor = 0u;
 static uint8_t menu_stepAutoNumberLocked = 0u;
 
+/*
+ * VOICE held-step automation overlay state (exactly 40 B static SRAM).
+ *
+ * What: Menu-owned foreground state for held-step selection, the asynchronous
+ * 128-step Pattern search, four CGRAM marker slots, and one shared underline
+ * debounce timestamp/mask. Held step order is newest-first; each displayed
+ * parameter resolves its own exact canonical target against that order.
+ * Why: the overlay spans button, LCD, LED, and PatternData interactions, while
+ * no ISR may touch its state. Inputs are the raw SEQ held mask, VOICE context,
+ * foreground service ticks, and successful Pattern writes. Outputs are display
+ * marker bytes, CGRAM definitions, step LEDs, and Pattern pool mutations.
+ * Affiliates: buttonHandler_seqHeldMask(), buttonHandler_visibleStep(),
+ * pat_readStepAutomations(), pat_writeStepAutomation(), lcd_underlineGlyph(),
+ * led_updateAutomationStepView(), and time_sysTick.
+ * Budget: 20 B held selection + 12 B search + 5 B CGRAM cache + 3 B debounce.
+ * Any enlargement requires a new RAM-allocation acknowledgement.
+ */
+static uint16_t va_heldMask = 0u;
+static uint8_t va_heldOrder[16];
+static uint8_t va_heldCount = 0u;
+static uint8_t va_overlayActive = 0u;
+
+static uint8_t va_searchTrack = 0u;
+static uint8_t va_searchPattern = 0u;
+static uint8_t va_searchCursor = 0u;
+static uint8_t va_searchComplete = 0u;
+static uint8_t va_searchTargetMask[8];
+
+static uint8_t va_cgramBase[4];
+static uint8_t va_cgramValid = 0u;
+
+static uint16_t va_lastEditTick = 0u;
+static uint8_t va_underlineSuppressed = 0u;
+
+_Static_assert(
+    sizeof(va_heldMask) + sizeof(va_heldOrder) + sizeof(va_heldCount) +
+    sizeof(va_overlayActive) + sizeof(va_searchTrack) +
+    sizeof(va_searchPattern) + sizeof(va_searchCursor) +
+    sizeof(va_searchComplete) + sizeof(va_searchTargetMask) +
+    sizeof(va_cgramBase) + sizeof(va_cgramValid) +
+    sizeof(va_lastEditTick) + sizeof(va_underlineSuppressed) == 40u,
+    "S066 VOICE overlay state must remain exactly 40 bytes");
+
+/* Declared here so a CGRAM/DDRAM transaction can retire a Load/Save hardware
+ * cursor before redefining slots; the initialized definitions live beside
+ * sendDisplayBuffer(). */
+static uint8_t cur_want_on;
+static uint8_t cur_hw_on;
+
+/* Defined with the endless-pot service state below; the overlay write helper
+ * needs the same coalesced repaint flag before that definition is reached. */
+extern volatile uint8_t menu_knobs_dirty;
+
 uint8_t menu_numSamples = 0;
 uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 uint8_t menu_shownPattern = 0;
@@ -1579,6 +1632,21 @@ static void menu_displayInstrumentTargetFull(uint16_t target);
 static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText);
 static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value);
 
+/* S066 VOICE overlay helpers. Definitions stay adjacent to their state/logic
+ * below; these declarations keep the existing Menu file's forward-reference
+ * style and make the repaint/input call sites explicit. */
+static void va_searchRestart(void);
+static void va_scanService(void);
+static void va_updateHeldState(void);
+static void va_resetOverlay(void);
+static uint8_t va_resolveHeldValue(instrument_param_id_t target,
+                                   uint8_t *out_value);
+static uint8_t va_expand7to8(uint8_t value);
+static void va_underlineService(void);
+static void va_refreshAutomationLeds(void);
+static void va_applyVoiceMarkers(void);
+static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta);
+
 static uint8_t menu_isVoicePage(uint8_t page)
 {
     return (uint8_t)(page <= VOICE7_PAGE);
@@ -1589,6 +1657,614 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
     if (page >= VOICE7_PAGE)
         return 5u;
     return page;
+}
+
+#define VA_CGRAM_SLOT_BASE  2u
+#define VA_CGRAM_SLOT_COUNT 4u
+
+/*
+ * Restart the asynchronous track-wide automation search.
+ *
+ * What: records the current viewed Pattern/track context, clears the
+ * descriptor-presence mask, and resumes at absolute step zero. Why: a result
+ * from another Pattern, track, or voice slot must never produce a stale name
+ * underline. Inputs: Menu's current Pattern and active track. Output: partial
+ * results are cleared and markers remain absent until step 127 completes.
+ * Affiliates: va_scanService(), va_searchSetBit(), and page/context changes.
+ */
+static void va_searchRestart(void)
+{
+    va_searchTrack = menu_activeVoice;
+    va_searchPattern = menu_shownPattern;
+    va_searchCursor = 0u;
+    va_searchComplete = 0u;
+    memset(va_searchTargetMask, 0, sizeof(va_searchTargetMask));
+}
+
+static void va_searchSetBit(uint8_t descriptor_index)
+{
+    if (descriptor_index < 64u)
+        va_searchTargetMask[descriptor_index >> 3u] |=
+            (uint8_t)(1u << (descriptor_index & 7u));
+}
+
+static uint8_t va_searchTestBit(uint8_t descriptor_index)
+{
+    if (descriptor_index >= 64u)
+        return 0u;
+    return (uint8_t)(va_searchTargetMask[descriptor_index >> 3u] &
+                     (uint8_t)(1u << (descriptor_index & 7u)));
+}
+
+/*
+ * Advance the Pattern-wide search by the configured bounded slice.
+ *
+ * What: reads at most VOICE_AUTOMATION_SCAN_STEPS_PER_PASS step lists and
+ * records only voice targets belonging to the active VOICE page's slot. Why:
+ * synchronously scanning 128 steps on every repaint would stall the UI. Inputs:
+ * current search context and PatternData pool. Output: a complete 64-bit
+ * descriptor mask after 128 steps, with a hard 4*63 comparison ceiling per
+ * service pass. Affiliates: instrumentParam_make namespace and PatternData.
+ */
+static void va_scanService(void)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    uint8_t slot;
+    uint8_t budget;
+
+    if (va_searchComplete)
+        return;
+    if (va_searchTrack != menu_activeVoice ||
+        va_searchPattern != menu_shownPattern) {
+        va_searchRestart();
+        return;
+    }
+
+    slot = menu_voicePageToSlot(menu_activePage);
+    for (budget = 0u;
+         budget < VOICE_AUTOMATION_SCAN_STEPS_PER_PASS &&
+         va_searchCursor < NUM_STEPS;
+         budget++, va_searchCursor++) {
+        uint8_t count = pat_readStepAutomations(
+            va_searchPattern, va_searchTrack, va_searchCursor,
+            autos, PAT_BLOCK_AUTO_COUNT_MASK);
+        uint8_t i;
+
+        for (i = 0u; i < count; i++) {
+            if (instrumentParam_isVoiceParameter(autos[i].target) &&
+                instrumentParam_slot(autos[i].target) == slot)
+                va_searchSetBit(instrumentParam_local(autos[i].target));
+        }
+    }
+    if (va_searchCursor >= NUM_STEPS) {
+        va_searchComplete = 1u;
+        menu_repaint();
+    }
+}
+
+/*
+ * Resolve one exact automation target through newest-to-oldest held steps.
+ *
+ * What: reads each held step at most once for this parameter and returns the
+ * first exact target match. Why: each visible parameter has an independent
+ * value-source step; another target on a newer step does not qualify. Inputs:
+ * canonical target and Menu's press-ordered held list. Output: seven-bit value
+ * and success flag. Affiliates: buttonHandler_visibleStep() and PatternData.
+ */
+static uint8_t va_resolveHeldValue(instrument_param_id_t target,
+                                   uint8_t *out_value)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    uint8_t i;
+
+    for (i = 0u; i < va_heldCount; i++) {
+        uint8_t step = buttonHandler_visibleStep(va_heldOrder[i]);
+        uint8_t count = pat_readStepAutomations(
+            menu_shownPattern, menu_activeVoice, step,
+            autos, PAT_BLOCK_AUTO_COUNT_MASK);
+        uint8_t j;
+
+        for (j = 0u; j < count; j++) {
+            if (autos[j].target == target) {
+                if (out_value)
+                    *out_value = autos[j].value;
+                return 1u;
+            }
+        }
+    }
+    return 0u;
+}
+
+static uint8_t va_expand7to8(uint8_t value)
+{
+    return (value == 127u) ? 255u : (uint8_t)(value * 2u);
+}
+
+/*
+ * Refresh the held-step list from the ISR-maintained physical mask.
+ *
+ * What: removes released button indices, inserts new indices newest-first, and
+ * exits the overlay when the mask becomes empty. Why: event-ring delivery can
+ * lag the ISR's raw held state, so Menu polls the authoritative physical mask.
+ * Inputs: buttonHandler_seqHeldMask(). Outputs: held order, overlay flag,
+ * normal/automation LED ownership, and a repaint on overlay exit. Affiliates:
+ * led_updateAutomationStepView(), led_updatePatternTrackView(), and the
+ * existing TIMER_ACTION_OCCURED release sentinel in ButtonHandler.
+ */
+static void va_updateHeldState(void)
+{
+    uint16_t new_mask = buttonHandler_seqHeldMask();
+    uint16_t pressed = (uint16_t)(new_mask & (uint16_t)~va_heldMask);
+    uint16_t released = (uint16_t)(va_heldMask & (uint16_t)~new_mask);
+    uint8_t changed = (uint8_t)(new_mask != va_heldMask);
+    uint8_t i;
+
+    for (i = 0u; i < va_heldCount; ) {
+        uint8_t j;
+        if ((released & (uint16_t)(1u << va_heldOrder[i])) == 0u) {
+            i++;
+            continue;
+        }
+        for (j = i; j + 1u < va_heldCount; j++)
+            va_heldOrder[j] = va_heldOrder[j + 1u];
+        va_heldCount--;
+    }
+
+    for (i = 0u; i < 16u; i++) {
+        if ((pressed & (uint16_t)(1u << i)) == 0u)
+            continue;
+        if (va_heldCount < 16u) {
+            memmove(&va_heldOrder[1], &va_heldOrder[0], va_heldCount);
+            va_heldOrder[0] = i;
+            va_heldCount++;
+        }
+    }
+    va_heldMask = new_mask;
+
+    if (changed)
+        va_underlineSuppressed = 0u;
+
+    if (new_mask == 0u && va_overlayActive) {
+        va_overlayActive = 0u;
+        va_underlineSuppressed = 0u;
+        led_updatePatternTrackView(menu_activeVoice, menu_shownPattern,
+                                   buttonHandler_selectedStep, 0u);
+        menu_repaintAll();
+    } else if (changed && va_overlayActive) {
+        va_refreshAutomationLeds();
+        menu_repaint();
+    }
+}
+
+/*
+ * Clear transient overlay state at a VOICE context boundary.
+ *
+ * What: releases Menu's held-order/search/marker ownership without touching
+ * PatternData. Why: page/track changes must not let an old held-step or CGRAM
+ * code leak into a new context. Inputs: none. Outputs: zeroed overlay state and
+ * invalidated underline cache. Affiliates: menu_switchPage(), track/Pattern
+ * setters, and the ordinary LED repaint path.
+ */
+static void va_resetOverlay(void)
+{
+    va_heldMask = 0u;
+    va_heldCount = 0u;
+    va_overlayActive = 0u;
+    va_underlineSuppressed = 0u;
+    va_cgramValid = 0u;
+}
+
+/*
+ * ButtonHandler's foreground hold deadline notification.
+ *
+ * What: transfers a qualifying VOICE SEQ gesture to the Menu overlay. Why:
+ * ButtonHandler owns the common timer, while Menu owns all foreground Pattern,
+ * LCD, and LED state. Inputs: current mode/page and raw held mask. Output:
+ * overlay active state; the next service poll records the complete held order.
+ */
+void menu_voiceAutoOverlayHoldExpired(void)
+{
+    if (buttonHandler_getMode() != SELECT_MODE_VOICE ||
+        !menu_isVoicePage(menu_activePage) ||
+        buttonHandler_seqHeldMask() == 0u)
+        return;
+    va_overlayActive = 1u;
+    va_underlineSuppressed = 0u;
+    va_refreshAutomationLeds();
+    menu_repaint();
+}
+
+uint8_t menu_voiceAutoOverlayActive(void)
+{
+    return va_overlayActive;
+}
+
+/*
+ * Repaint the automation LED view after the visible bar changes.
+ *
+ * What: keeps the bar-to-absolute-step mapping and the single-parameter LED
+ * presence view synchronized. Inputs: current Menu bar/parameter context.
+ * Output: automation LEDs when applicable, otherwise normal track LEDs remain
+ * under their existing owner. Affiliate: buttonHandler_selectBar().
+ */
+void menu_voiceAutoOverlayBarChanged(void)
+{
+    if (va_overlayActive) {
+        va_underlineSuppressed = 0u;
+        va_refreshAutomationLeds();
+        menu_repaint();
+    }
+}
+
+/*
+ * Invalidate the track-wide marker result after a destructive Pattern clear.
+ *
+ * What: restarts the bounded search and cancels any pending value-marker
+ * debounce while retaining the current held-step context. Why: removing one
+ * target cannot be proven absent from the remaining 128 steps without a full
+ * rescan. Inputs: an already-completed copy/clear PatternData mutation.
+ * Outputs: cleared search result and refreshed VOICE frame. Affiliate:
+ * copyClearTools.c.
+ */
+void menu_voiceAutoOverlayPatternDeleted(void)
+{
+    if (!menu_isVoicePage(menu_activePage))
+        return;
+    va_searchRestart();
+    va_underlineSuppressed = 0u;
+    menu_repaint();
+}
+
+/*
+ * Repaint the single-parameter automation presence row, or restore normal
+ * trigger LEDs when the overlay is not in that view.
+ */
+static void va_refreshAutomationLeds(void)
+{
+    uint8_t activePage;
+    uint8_t activeParameter;
+    menu_cell_t cell;
+
+    if (!menu_isVoicePage(menu_activePage) || !va_overlayActive)
+        return;
+    if (!editModeActive)
+        return;
+
+    activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    activeParameter = (uint8_t)(menuIndex & MASK_PARAMETER);
+    cell = menu_resolveCell(activePage, activeParameter);
+    if (cell.kind == MENU_CELL_INSTRUMENT) {
+        led_updateAutomationStepView(
+            menu_activeVoice, menu_shownPattern,
+            instrumentParam_make(menu_voicePageToSlot(menu_activePage),
+                                 cell.descriptor_index),
+            va_heldMask);
+    } else {
+        led_updatePatternTrackView(menu_activeVoice, menu_shownPattern,
+                                   buttonHandler_selectedStep, 0u);
+    }
+}
+
+/*
+ * Queue one complete marker transaction when a CGRAM mapping changes.
+ *
+ * What: reserves slots 2..5, restores stale slot references to their ordinary
+ * ROM bytes, defines changed glyphs, then writes the final 32-character frame.
+ * Why: redefining a slot while DDRAM still references it causes transient wrong
+ * glyphs; preflighting the whole ordered transaction prevents partial queue
+ * updates. Inputs: desired slot base characters/valid mask and marker cells
+ * already identified by va_applyVoiceMarkers(). Output: atomic LCD queue work,
+ * shadow buffer, and cache metadata. Affiliates: lcd_queueFree(),
+ * lcd_underlineGlyph(), lcd_define_char(), and sendDisplayBuffer().
+ */
+static void va_queueMarkerTransaction(const uint8_t desired_base[4],
+                                      uint8_t desired_valid,
+                                      const uint8_t marker_row[4],
+                                      const uint8_t marker_col[4])
+{
+    uint8_t changed[4] = { 0u, 0u, 0u, 0u };
+    uint8_t changed_count = 0u;
+    uint8_t stale_refs = 0u;
+    uint8_t i;
+    uint8_t row;
+    uint8_t col;
+    uint8_t needed;
+
+    for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+        uint8_t valid = (uint8_t)(desired_valid & (uint8_t)(1u << i));
+        if (((va_cgramValid & (uint8_t)(1u << i)) != 0u) != (valid != 0u) ||
+            (valid && va_cgramBase[i] != desired_base[i])) {
+            changed[i] = 1u;
+            changed_count++;
+        }
+    }
+
+    if (changed_count == 0u) {
+        for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+            if ((desired_valid & (uint8_t)(1u << i)) != 0u) {
+                editDisplayBuffer[marker_row[i]][marker_col[i]] =
+                    (char)(VA_CGRAM_SLOT_BASE + i);
+            }
+        }
+        return;
+    }
+
+    for (row = 0u; row < 2u; row++) {
+        for (col = 0u; col < 16u; col++) {
+            for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+                if (changed[i] &&
+                    (uint8_t)currentDisplayBuffer[row][col] ==
+                        (uint8_t)(VA_CGRAM_SLOT_BASE + i)) {
+                    stale_refs++;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* stale restore + CGRAM definitions + complete final frame. */
+    needed = (uint8_t)(stale_refs * 2u + changed_count * 10u + 64u +
+                       (cur_hw_on ? 1u : 0u));
+    if (needed > lcd_queueFree()) {
+        for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+            if ((desired_valid & (uint8_t)(1u << i)) != 0u)
+                editDisplayBuffer[marker_row[i]][marker_col[i]] =
+                    (char)desired_base[i];
+        }
+        menu_lcdRefreshPending = 1u;
+        return;
+    }
+
+    if (cur_hw_on)
+        lcd_turnOn(1u, 0u);
+
+    for (row = 0u; row < 2u; row++) {
+        for (col = 0u; col < 16u; col++) {
+            for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+                if (changed[i] &&
+                    (uint8_t)currentDisplayBuffer[row][col] ==
+                        (uint8_t)(VA_CGRAM_SLOT_BASE + i)) {
+                    lcd_setcursor(col, (uint8_t)(row + 1u));
+                    /* va_cgramBase is retained even when the valid mask was
+                     * invalidated at a VOICE-page boundary, so an old DDRAM
+                     * slot reference can still be restored to its ROM byte. */
+                    lcd_data(va_cgramBase[i]);
+                    break;
+                }
+            }
+        }
+    }
+
+    for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+        if (changed[i] &&
+            (desired_valid & (uint8_t)(1u << i)) != 0u) {
+            uint8_t glyph[8];
+            if (lcd_underlineGlyph(desired_base[i], glyph))
+                lcd_define_char((uint8_t)(VA_CGRAM_SLOT_BASE + i), glyph);
+        }
+    }
+
+    for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+        if ((desired_valid & (uint8_t)(1u << i)) != 0u)
+            editDisplayBuffer[marker_row[i]][marker_col[i]] =
+                (char)(VA_CGRAM_SLOT_BASE + i);
+    }
+    for (row = 0u; row < 2u; row++) {
+        for (col = 0u; col < 16u; col++) {
+            char want = editDisplayBuffer[row][col];
+            if (want == '\0')
+                want = ' ';
+            lcd_setcursor(col, (uint8_t)(row + 1u));
+            lcd_data((uint8_t)want);
+            currentDisplayBuffer[row][col] = want;
+        }
+    }
+
+    for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+        if ((desired_valid & (uint8_t)(1u << i)) != 0u) {
+            va_cgramBase[i] = desired_base[i];
+            va_cgramValid |= (uint8_t)(1u << i);
+        } else {
+            va_cgramValid &= (uint8_t)~(1u << i);
+        }
+    }
+    cur_hw_on = 0u;
+    menu_lcdRefreshPending = 0u;
+}
+
+/*
+ * Apply the one-marker-per-visible-parameter convention after ordinary VOICE
+ * formatting. Held-step values replace endpoints before their value marker is
+ * selected; a Pattern-wide match otherwise marks the parameter name. The final
+ * character mapping is handed to va_queueMarkerTransaction().
+ */
+static void va_applyVoiceMarkers(void)
+{
+    uint8_t glyph_probe[8];
+    uint8_t desired_base[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_row[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_col[4] = { 0u, 0u, 0u, 0u };
+    uint8_t desired_valid = 0u;
+    uint8_t activePage;
+    uint8_t activeParameter;
+    uint8_t slot = menu_voicePageToSlot(menu_activePage);
+    uint8_t i;
+
+    if (!menu_isVoicePage(menu_activePage))
+        return;
+
+    activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    activeParameter = (uint8_t)(menuIndex & MASK_PARAMETER);
+
+    if (editModeActive) {
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        if (cell.kind == MENU_CELL_INSTRUMENT) {
+            instrument_param_id_t target =
+                instrumentParam_make(slot, cell.descriptor_index);
+            uint8_t value7;
+
+            if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
+                char *value_field = &editDisplayBuffer[1][0];
+                int8_t right;
+                memset(value_field, ' ', 16u);
+                numtostrpu(&value_field[13], va_expand7to8(value7), ' ');
+                if ((va_underlineSuppressed & 0x01u) == 0u) {
+                    for (right = 15; right >= 0 && value_field[right] == ' '; right--)
+                        ;
+                    if (right >= 0 && lcd_underlineGlyph(
+                            (uint8_t)value_field[right], glyph_probe)) {
+                        desired_base[0] = (uint8_t)value_field[right];
+                        marker_row[0] = 1u;
+                        marker_col[0] = (uint8_t)right;
+                        desired_valid = 0x01u;
+                    }
+                }
+            } else if (va_searchComplete &&
+                       va_searchTestBit(cell.descriptor_index)) {
+                int8_t left;
+                for (left = 8; left < 16 &&
+                     editDisplayBuffer[0][left] == ' '; left++)
+                    ;
+                if (left < 16 && lcd_underlineGlyph(
+                        (uint8_t)editDisplayBuffer[0][left], glyph_probe)) {
+                    desired_base[0] = (uint8_t)editDisplayBuffer[0][left];
+                    marker_row[0] = 0u;
+                    marker_col[0] = (uint8_t)left;
+                    desired_valid = 0x01u;
+                }
+            }
+        }
+        va_queueMarkerTransaction(desired_base, desired_valid,
+                                  marker_row, marker_col);
+        return;
+    }
+
+    for (i = 0u; i < 4u; i++) {
+        menu_cell_t cell = menu_resolveCell(activePage, i);
+        uint8_t value7;
+        instrument_param_id_t target;
+
+        if (cell.kind != MENU_CELL_INSTRUMENT)
+            continue;
+        target = instrumentParam_make(slot, cell.descriptor_index);
+        if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
+            char value_text[3];
+            int8_t right;
+            numtostrpu(value_text, va_expand7to8(value7), ' ');
+            memcpy(&editDisplayBuffer[1][4u * i], value_text, 3u);
+            if ((va_underlineSuppressed & (uint8_t)(1u << i)) == 0u) {
+                for (right = 2; right >= 0 && value_text[right] == ' '; right--)
+                    ;
+                if (right >= 0 && lcd_underlineGlyph(
+                        (uint8_t)value_text[right], glyph_probe)) {
+                    desired_base[i] = (uint8_t)value_text[right];
+                    marker_row[i] = 1u;
+                    marker_col[i] = (uint8_t)(4u * i + right);
+                    desired_valid |= (uint8_t)(1u << i);
+                }
+            }
+        } else if (va_searchComplete &&
+                   va_searchTestBit(cell.descriptor_index)) {
+            int8_t left;
+            uint8_t start = (uint8_t)(4u * i);
+            for (left = 0; left < 3 &&
+                 editDisplayBuffer[0][start + left] == ' '; left++)
+                ;
+            if (left < 3 && lcd_underlineGlyph(
+                    (uint8_t)editDisplayBuffer[0][start + left], glyph_probe)) {
+                desired_base[i] =
+                    (uint8_t)editDisplayBuffer[0][start + left];
+                marker_row[i] = 0u;
+                marker_col[i] = (uint8_t)(start + left);
+                desired_valid |= (uint8_t)(1u << i);
+            }
+        }
+    }
+    va_queueMarkerTransaction(desired_base, desired_valid,
+                              marker_row, marker_col);
+}
+
+/*
+ * Expire the shared quiet period after held-step value edits.
+ *
+ * What: clears value-marker suppression only after the configured wrap-safe
+ * quiet interval, then repaints once. Why: rapid detents should update text
+ * immediately without redefining CGRAM for every value character. Inputs:
+ * time_sysTick and overlay context. Output: one foreground repaint or a
+ * discarded stale request. Affiliate: va_applyVoiceMarkers().
+ */
+static void va_underlineService(void)
+{
+    if (va_underlineSuppressed == 0u)
+        return;
+    if (!menu_isVoicePage(menu_activePage) || !va_overlayActive ||
+        va_heldMask == 0u) {
+        va_underlineSuppressed = 0u;
+        return;
+    }
+    if ((uint16_t)(time_sysTick - va_lastEditTick) >=
+        VOICE_AUTOMATION_UNDERLINE_QUIET_MS) {
+        va_underlineSuppressed = 0u;
+        menu_repaint();
+    }
+}
+
+/*
+ * Write one adjusted VOICE parameter to every physically held step.
+ *
+ * What: seeds from the newest exact held automation value or the current
+ * normal/Morph display endpoint, applies the pot/encoder delta, converts to
+ * seven-bit storage, and best-effort writes every held step. Why: held edits
+ * are Pattern-only and must never call endpoint commit, DSP, or Autosave code.
+ * Inputs: visible column and signed adjustment. Outputs: Pattern pool writes,
+ * search result bit, immediate ROM value repaint, and quiet-period state.
+ * Affiliates: pat_writeStepAutomation(), va_resolveHeldValue(), and Menu's
+ * ordinary display pipeline. No runtime preview is attempted.
+ */
+static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
+{
+    uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    menu_cell_t cell;
+    instrument_param_id_t target;
+    uint8_t value7;
+    int16_t value8;
+    uint8_t i;
+    uint8_t wrote = 0u;
+
+    if (knobNr >= 4u || !menu_isVoicePage(menu_activePage) ||
+        !va_overlayActive)
+        return;
+    cell = menu_resolveCell(activePage, knobNr);
+    if (cell.kind != MENU_CELL_INSTRUMENT)
+        return;
+
+    target = instrumentParam_make(menu_voicePageToSlot(menu_activePage),
+                                  cell.descriptor_index);
+    if (va_resolveHeldValue(target, &value7))
+        value8 = va_expand7to8(value7);
+    else {
+        uint16_t endpoint = menu_cellDisplayValue(&cell);
+        value8 = (endpoint > 255u) ? 255 : (int16_t)endpoint;
+    }
+    value8 += delta;
+    if (value8 < 0)
+        value8 = 0;
+    else if (value8 > 255)
+        value8 = 255;
+
+    value7 = (value8 >= 255) ? 127u : (uint8_t)((uint8_t)value8 / 2u);
+    for (i = 0u; i < va_heldCount; i++) {
+        if (pat_writeStepAutomation(
+                menu_shownPattern, menu_activeVoice,
+                buttonHandler_visibleStep(va_heldOrder[i]), target, value7))
+            wrote = 1u;
+    }
+    if (wrote) {
+        va_searchSetBit(cell.descriptor_index);
+        va_underlineSuppressed |= (uint8_t)(1u << knobNr);
+        va_lastEditTick = time_sysTick;
+        menu_knobs_dirty = 1u;
+    }
 }
 
 static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
@@ -7370,8 +8046,14 @@ static uint8_t menu_stepAutomationExecuteItem0(void)
         menu_stepAutoNumberLocked = 0u;
     } else if (menu_stepAutoDeleteMode) {
         (void)pat_removeTrackAutomationByTarget(scene, track, autos[page].target);
+        /* S066: a target deletion can change the Pattern-wide name marker. */
+        if (menu_isVoicePage(menu_activePage))
+            va_searchRestart();
     } else {
         (void)pat_removeStepAutomation(scene, track, step, autos[page].target);
+        /* S066: a target deletion can change the Pattern-wide name marker. */
+        if (menu_isVoicePage(menu_activePage))
+            va_searchRestart();
     }
     count = pat_stepAutomationCount(scene, track, step);
     if (menu_stepAutoPageIndex > count)
@@ -7792,6 +8474,10 @@ static void menu_repaintGeneric(void)
             memcpy(&editDisplayBuffer[1][4*i], valueAsText, 3);
         }
     }
+
+    /* S066 markers are applied only after the ordinary VOICE frame is fully
+     * formatted, including the active-parameter capitalization above. */
+    va_applyVoiceMarkers();
 }
 
 /* -----------------------------------------------------------------------
@@ -7828,6 +8514,22 @@ static void menu_encoderChangeParameter(int8_t inc)
 
     menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
     uint16_t value;
+
+    /*
+     * Held-step VOICE encoder edits are Pattern-only.
+     *
+     * What: redirects the clicked-in single-parameter adjustment before any
+     * LFO/velocity/end-point branch can run. Why: an overlay edit must not
+     * mutate normal or Morph images, runtime DSP, Menu mirrors, or Autosave.
+     * Inputs: active visible parameter and signed encoder increment. Output:
+     * best-effort automation writes plus the ordinary repaint requested by the
+     * caller. Affiliate: va_writeAutomationFromKnob().
+     */
+    if (va_overlayActive && menu_isVoicePage(menu_activePage) &&
+        cell.kind == MENU_CELL_INSTRUMENT) {
+        va_writeAutomationFromKnob(activeParameter, inc);
+        return;
+    }
 
     if (menu_cellIsEmpty(&cell))
         return;
@@ -8736,6 +9438,14 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     if (btnClicked)
         editModeActive = (uint8_t)(1 - editModeActive);
 
+    if (btnClicked && menu_isVoicePage(menu_activePage) &&
+        va_overlayActive) {
+        /* Entering/leaving the clicked-in view changes marker/LED geometry;
+         * any pending value underline belongs to the old screen. */
+        va_underlineSuppressed = 0u;
+        va_refreshAutomationLeds();
+    }
+
     /* NOTE: original AVR did inc *= -1 here to correct encoder orientation.
     ** Our TIM1 input capture is wired for the same physical CW=positive sense
     ** so the inversion is NOT needed. */
@@ -8766,6 +9476,10 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     if ((oldPage != menu_activePage || oldIndex != menuIndex) &&
         menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) {
         menu_endlessPotMappingChanged();
+        if (menu_isVoicePage(menu_activePage) && va_overlayActive) {
+            va_underlineSuppressed = 0u;
+            va_refreshAutomationLeds();
+        }
     }
 }
 
@@ -8890,6 +9604,18 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
         return;
     }
 
+    /*
+     * VOICE held-step pot edits bypass every endpoint commit path.
+     *
+     * The helper resolves the pot column against the track voice, seeds from
+     * the newest exact held automation value (or the read-only displayed
+     * endpoint for first creation), and writes only Pattern pool entries.
+     */
+    if (va_overlayActive && menu_isVoicePage(menu_activePage)) {
+        va_writeAutomationFromKnob(knobNr, delta);
+        return;
+    }
+
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     const uint8_t is2ndPage       = menu_isVoicePage(menu_activePage)
@@ -8982,6 +9708,18 @@ void menu_serviceRuntimeWidgets(void)
 
     if (menu_storageBusy)
         return;
+
+    /*
+     * VOICE overlay services run every foreground pass, independently of the
+     * slower CPU-use widget cadence. Held-state polling is first so scan/value
+     * resolution sees the latest raw SEQ mask; all LCD work remains foreground
+     * only. Pattern-wide scans are four steps per pass by configuration.
+     */
+    if (menu_isVoicePage(menu_activePage)) {
+        va_updateHeldState();
+        va_scanService();
+        va_underlineService();
+    }
 
     if ((uint16_t)(now - menu_cpuUseLastRefresh) < MENU_CPU_USE_REFRESH_MS)
         return;
@@ -9912,6 +10650,8 @@ void menu_switchSubPage(uint8_t subPageNr)
 
         menuIndex = (uint8_t)((activePage << PAGE_SHIFT) | activeParameter);
         menu_endlessPotMappingChanged();
+        va_underlineSuppressed = 0u;
+        va_refreshAutomationLeds();
         return;
     }
 
@@ -9946,6 +10686,7 @@ void menu_switchSubPage(uint8_t subPageNr)
 
     menuIndex = (uint8_t)((activePage << PAGE_SHIFT) | activeParameter);
     menu_endlessPotMappingChanged();
+    va_refreshAutomationLeds();
 }
 
 /* -----------------------------------------------------------------------
@@ -9986,6 +10727,8 @@ void menu_resetActiveParameter(void)
 void menu_switchPage(uint8_t pageNr)
 {
     uint8_t end_resident_name_session;
+    uint8_t old_page = menu_activePage;
+    uint8_t was_voice_page = menu_isVoicePage(menu_activePage);
 
     if (menu_storageBusy) {
         /*
@@ -10015,6 +10758,9 @@ void menu_switchPage(uint8_t pageNr)
      * re-enables the custom page explicitly when appropriate.
      */
     menu_stepAutomationReset();
+
+    if (was_voice_page && !menu_isVoicePage(pageNr))
+        va_resetOverlay();
 
     /*
      * Capture the old context before page mutation. Pressing the Load/Save
@@ -10136,6 +10882,10 @@ void menu_switchPage(uint8_t pageNr)
         if (pageNr > VOICE7_PAGE)
             menu_setVoiceModeShowMorph(0u);
         menu_activePage = pageNr;
+        if (!was_voice_page || old_page != pageNr) {
+            va_resetOverlay();
+            va_searchRestart();
+        }
         if (pageNr < 7)
             menu_setActiveVoice(pageNr);
         editModeActive = 0;
@@ -10749,8 +11499,13 @@ uint8_t menu_getActiveVoice(void)  { return menu_activeVoice; }
 /* Track changes restart the custom STEP automation cursor at page zero. */
 void menu_setActiveVoice(uint8_t v)
 {
-    if (menu_activeVoice != v)
+    if (menu_activeVoice != v) {
         menu_stepAutomationReset();
+        va_resetOverlay();
+        menu_activeVoice = v;
+        va_searchRestart();
+        return;
+    }
     menu_activeVoice = v;
 }
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
@@ -10766,9 +11521,14 @@ void menu_setVoiceModeShowMorph(uint8_t onOff)
      * Output: voiceModeShowMorph is updated and the next repaint/edit resolves
      * voice-page sound parameters against the matching buffer. Confederates:
      * buttonHandler also owns the MODE1 blink feedback for this flag.
-     */
+    */
     voiceModeShowMorph = (uint8_t)(onOff != 0u);
     menu_endlessPotMappingChanged();
+    /* Morph changes endpoint display only; target identity/search results and
+     * held-step values remain valid. Repaint the current VOICE frame so a
+     * no-match parameter switches endpoints immediately. */
+    if (menu_isVoicePage(menu_activePage))
+        menu_repaint();
 }
 
 void menu_showStepTrackSettingsFirstHalf(void)
@@ -10832,10 +11592,22 @@ void    menu_setShownPattern(uint8_t p)
      *
      * Input: p is the viewed pattern index supplied by button/menu navigation.
      * Output: the UI Pattern index follows the resident Scene/Pattern slot when
-     * valid, otherwise it falls back to Scene 0. Risk: this setter does not
-     * repaint LEDs or reload PatternData params; callers must do that explicitly.
+     * valid, otherwise it falls back to Scene 0. A VOICE context change also
+     * invalidates the held-step/search view before repainting it.
      */
-    menu_shownPattern = pat_patternValid(p) ? p : 0u;
+    {
+        uint8_t next = pat_patternValid(p) ? p : 0u;
+        if (menu_shownPattern == next)
+            return;
+        menu_shownPattern = next;
+        if (menu_isVoicePage(menu_activePage)) {
+            va_resetOverlay();
+            va_searchRestart();
+            led_updatePatternTrack(menu_activeVoice, menu_shownPattern,
+                                   buttonHandler_selectedStep);
+            menu_repaint();
+        }
+    }
 }
 uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 

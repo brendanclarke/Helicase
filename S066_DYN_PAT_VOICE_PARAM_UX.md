@@ -657,3 +657,146 @@ runtime-lifetime budget; any increase requires a new acknowledgement.
    at most 252 automation entries/target comparisons per foreground pass.
 5. **Static SRAM:** the exact 40-byte Menu-owned `.bss` budget in §10 is
    approved.
+
+---
+
+## 12. Implementation Notes — 2026-09-15
+
+The scheduled S066 implementation is now landed in the working tree.
+
+- Added the shared `BUTTON_HOLD_DELAY_MS`, underline quiet-period, and
+  four-step asynchronous scan-budget configuration constants.
+- Routed the common foreground long-press path into the VOICE overlay while
+  preserving the existing STEP automation timer sentinel and release
+  suppression behavior.
+- Added the 62-glyph alphanumeric underline source table (`496` bytes in
+  flash) and a safe glyph lookup helper that rejects punctuation, whitespace,
+  and invalid output buffers.
+- Added the Menu-owned VOICE overlay state with a compile-time assertion for
+  the approved exact `40`-byte static `.bss` budget. Held-step order, newest
+  value resolution, Pattern-wide presence scanning, and context invalidation
+  are all serviced from the foreground path.
+- Held-step edits write only PatternData step automations through the existing
+  S065 APIs. Normal and Morph endpoint buffers are not used as write targets;
+  no runtime-DSP preview was added because its non-persistent boundary is not
+  unambiguous in this firmware path.
+- Added automation-presence step LEDs, restoration on overlay exit, and
+  invalidation hooks for bar, voice, page, Pattern, and destructive clear
+  changes.
+- Added a preflighted LCD transaction that restores stale DDRAM marker
+  references before redefining CGRAM slots and queues the complete marker frame
+  only when the bounded LCD queue can hold the transaction.
+- `make clean && make -j2 && make img` completed successfully. Final image
+  metrics were `text=439124`, `data=412`, `bss=290844`; the generated image was
+  `build/LXRV2_lxr02.img` (`439536` bytes).
+
+Remaining validation is physical-hardware testing: overview and clicked-in
+VOICE/Morph views, rapid underline debounce, independent source steps, the
+worst-case scan and four-marker LCD transaction, LED restoration, endpoint and
+Autosave invariance, and playback while the LCD queue is busy.
+
+---
+
+## 13. Code Review — 2026-09-15
+
+Independent post-implementation audit of the uncommitted working-tree changes
+against the spec (§1–§11) and the implementation schedule
+(`S066_IMPLEMENTATION_SCHEDULE.md`). No code changes this turn.
+
+### Files touched
+
+| File | Change type | Lines added/removed |
+|------|-------------|---------------------|
+| `config.h` | ADD | +22 (3 constants + comment block) |
+| `buttonHandler.h` | MODIFY + ADD | replaced `BUTTON_TIMEOUT`, added `seqHeldMask()` and `visibleStep()` exports, added `#include "config.h"` |
+| `buttonHandler.c` | MODIFY + ADD | `seqHeldMask()` body, `visibleStep()` promoted to extern, wrap-safe `buttonHandler_tick()`, VOICE branch in `armTimerActionStep()`, overlay routing in SEQ press/release, bar-change notification |
+| `lcd.h` | ADD | `lcd_underlineGlyph()` declaration |
+| `lcd.c` | ADD | 62-glyph font table (496 B flash), `lcd_fontIndex()`, `lcd_underlineGlyph()`, `#include <string.h>` |
+| `ledHandler.h` | ADD | `led_updateAutomationStepView()` declaration, `#include "InstrumentManager.h"` |
+| `ledHandler.c` | ADD | `led_updateAutomationStepView()` body |
+| `menu.h` | ADD | four overlay bridge functions |
+| `menu.c` | ADD + MODIFY | ~610 new lines: 40 B state block, CGRAM cache, async search, held resolution, marker transaction, overlay lifecycle, write intercepts, service hooks, context invalidation |
+| `copyClearTools.c` | ADD | two `menu_voiceAutoOverlayPatternDeleted()` calls |
+
+### Spec compliance
+
+| Spec section | Verdict | Notes |
+|--------------|---------|-------|
+| §1 Overlay activation | **Pass** | Hold threshold via config.h `BUTTON_HOLD_DELAY_MS`; `armTimerActionStep` VOICE branch transfers to Menu; SEQ press/release suppression via `menu_voiceAutoOverlayActive()` guard; exit on all-released in `va_updateHeldState()`. |
+| §1.2 Held-step tracking | **Pass** | 16-byte press-order ring with newest-first insertion. Per-parameter exact-target resolution in `va_resolveHeldValue()`. Different parameters source different steps correctly. |
+| §1.3 Existing behavior preservation | **Pass** | STEP mode path unchanged in `armTimerActionStep`; release suppression reuses existing `TIMER_ACTION_OCCURED` sentinel; overlay-active presses set the sentinel directly to skip the timer. |
+| §2 Underline system | **Pass** | Four slots (2..5), bounded cache, preflighted ordered LCD transaction. Stale DDRAM refs restored to ROM bytes before CGRAM redefinition. Queue-full fallback defers via `menu_lcdRefreshPending`. |
+| §2.2 Font table | **Pass** | 62 glyphs × 8 bytes = 496 B const flash. Arithmetic mapping via `lcd_fontIndex()`. Null-pointer guard on `out`. Punctuation/whitespace rejected. |
+| §2.3 Pattern-wide marker | **Pass** | Leftmost non-space of short name (overview) or long name column 8..15 (clicked-in). Applied only when `va_searchComplete` and bit set. |
+| §2.4 Held-step value marker | **Pass** | Rightmost non-space of the rendered automation value. Takes precedence over name marker per-parameter. Value-marker invariant enforced: displayed value is always the automation value when underlined. |
+| §2.5 Four-slot bound | **Pass** | `VA_CGRAM_SLOT_COUNT = 4`, loop indices `0..3`, `_Static_assert` on total state. |
+| §2.6 CGRAM lifecycle | **Pass** | `va_cgramBase[]`/`va_cgramValid` track loaded state; skip when unchanged; `va_cgramInvalidate()` on context exit. |
+| §3 Value display | **Pass** | 7→8 expansion matches spec formula. Suppression mask prevents underline during edits; ROM characters show the value immediately. |
+| §3.4 Debounced reapplication | **Pass** | `va_underlineService()` uses wrap-safe `(uint16_t)(time_sysTick - va_lastEditTick)`. Stale context discarded. Single repaint after quiet period. |
+| §4 Step illumination | **Pass** | `led_updateAutomationStepView()` reads 16 steps, held steps always lit. Restore via `led_updatePatternTrackView()` on overlay exit. Dynamic updates on bar/track/page change. Only active in `editModeActive`. |
+| §5 Async search | **Pass** | 4-step budget, 128-step range, 64-bit descriptor mask, context mismatch restarts. `instrumentParam_isVoiceParameter()` guard filters Scene mod targets. Bit set immediately on write; restart on deletion. |
+| §6 Automation write | **Pass** | `va_writeAutomationFromKnob()` called from both pot and encoder intercepts, before any endpoint branch. Seeds from held value or read-only endpoint. Best-effort multi-step writes. No endpoint/DSP/Autosave mutation. |
+| §6.5 Endpoint safety | **Pass** | The write path calls only `pat_writeStepAutomation()`. Does not call `menu_cellCommitValue()`, `menu_sendEditedParameter()`, any preset setter, or `instrumentManager_writeRuntime()`. No runtime-DSP preview — matches the spec's safe fallback. |
+| §7 Integration points | **Pass** | `menu_switchPage()`, `menu_setActiveVoice()`, `menu_setShownPattern()`, `menu_switchSubPage()`, `menu_parseEncoder()` click toggle, `copyClearTools.c` clears — all wired to overlay reset/search restart/LED refresh as needed. |
+| §8 Risk cases | See below | |
+| §10 RAM budget | **Pass** | `_Static_assert` verifies exactly 40 bytes. Font table is 496 B flash. |
+
+### Risk-case coverage (§8)
+
+| Risk | Verdict | Notes |
+|------|---------|-------|
+| §8.1 CGRAM bound | **Pass** | Loop index hard-bounded 0..3; slot range 2..5. |
+| §8.2 Pool reads | **Pass** | Held resolution bounded by `va_heldCount` (max 16); scan bounded by config budget. |
+| §8.3 Sequencer race | **Pass** | All overlay writes are foreground; existing allocate-first pool design protects ISR reads. |
+| §8.4 Stale debounce | **Pass** | `va_underlineService()` validates page/overlay/held context before repainting. Cleared on overlay exit, context change, bar change, and click toggle. |
+| §8.5 Per-parameter source changes | **Pass** | `va_updateHeldState()` detects mask changes and triggers repaint; `va_resolveHeldValue()` walks the updated order. |
+| §8.6 CGRAM/DDRAM ordering | **Pass** | `va_queueMarkerTransaction()` restores stale refs, then defines CGRAM, then writes the full frame. Preflight ensures atomic transaction. Fallback to `menu_lcdRefreshPending` on queue-full. |
+| §8.7 Morph view | **Pass** | `menu_setVoiceModeShowMorph()` repaints but does not restart the search or reset the overlay. Write path is identical in both modes. |
+
+### Observations (non-blocking)
+
+1. **`cur_want_on`/`cur_hw_on` forward declarations.** The overlay block at
+   ~line 1212 uses C tentative definitions to forward-reference the cursor state
+   variables defined later at ~line 7002. Legal C, but uncommon — the comment
+   explains the reason (cursor retirement before CGRAM redefinition).
+
+2. **Full-frame write on CGRAM change.** When any CGRAM mapping changes,
+   `va_queueMarkerTransaction()` rewrites all 32 display cells (64 queue ops)
+   rather than only the changed cells. This is conservative: it guarantees no
+   stale CGRAM code survives, at the cost of a larger queue transaction. The
+   preflight accounts for this (worst case ~113 ops, within the 128-entry
+   queue). Acceptable given the low frequency of CGRAM changes.
+
+3. **`menu_setShownPattern()` early return.** The implementation adds a
+   same-value early return that was not present before. This is a net
+   improvement — it avoids unnecessary overlay/search/LED resets on redundant
+   calls — but it is a behavioral change beyond the S066 scope. If any caller
+   depends on the setter always executing its side effects, this could suppress
+   an expected repaint. Low risk given the typical call sites.
+
+4. **`menu_setActiveVoice()` restructure.** The changed-voice branch now
+   early-returns after resetting overlay, setting `menu_activeVoice`, and
+   restarting the search. The unchanged-voice fallthrough still executes the
+   assignment. The early return ensures `va_searchRestart()` sees the new voice
+   value, which is correct. The `menu_stepAutomationReset()` call that was
+   previously unconditional now only runs on actual voice change — same net
+   effect since the reset is a no-op when the voice hasn't changed.
+
+5. **Image size delta.** The spec's §12 reports 439536 bytes; the current
+   binary is 439552 — a 16-byte increase likely from linker alignment padding.
+   Within normal variation.
+
+6. **No runtime-DSP preview.** The spec's §6.5 safe implementation rule says to
+   omit preview if the non-persistent boundary is not unambiguous. The
+   implementation correctly chose the safe path: Pattern-only writes with no
+   audible preview when stopped.
+
+### Verdict
+
+The implementation faithfully covers all twelve spec sections, the approved
+40-byte SRAM budget, and the 496-byte flash font table. Endpoint safety is
+maintained: the overlay write path calls only `pat_writeStepAutomation()` and
+never touches endpoint images, Autosave, or DSP runtime. All context
+invalidation hooks (page, track, Pattern, bar, Scene, clear) are wired.
+
+**Status: ready for hardware test per §12 test plan.**

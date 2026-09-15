@@ -1138,6 +1138,44 @@ void led_updatePatternTrack(uint8_t track, uint8_t pattern,
 }
 
 /*
+ * Paint automation-bearing steps for the VOICE single-parameter overlay.
+ *
+ * What: reads each of the sixteen steps in menu_currentBar, lights exact
+ * target matches, and forces every physically held step on. Why: the overlay
+ * must make automation presence visible without hiding the user's current
+ * multi-step edit selection. Inputs: track, viewed Pattern, canonical target,
+ * and visible held mask. Output: STEP1..STEP16 LED base state. The read buffer
+ * is stack-owned and bounded by the PatternData 63-entry ceiling; no ISR calls
+ * this foreground-only function. Affiliate: led_updatePatternTrackView().
+ */
+void led_updateAutomationStepView(uint8_t track, uint8_t pattern,
+                                  instrument_param_id_t target,
+                                  uint16_t heldMask)
+{
+    uint8_t start = (uint8_t)(menu_currentBar * NUM_STEPS_PER_BAR);
+    uint8_t i;
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+
+    for (i = 0u; i < NUM_STEPS_PER_BAR; i++) {
+        uint8_t on = (uint8_t)((heldMask & (uint16_t)(1u << i)) != 0u);
+        uint8_t j;
+
+        if (!on) {
+            uint8_t count = pat_readStepAutomations(
+                pattern, track, (uint8_t)(start + i), autos,
+                PAT_BLOCK_AUTO_COUNT_MASK);
+            for (j = 0u; j < count; j++) {
+                if (autos[j].target == target) {
+                    on = 1u;
+                    break;
+                }
+            }
+        }
+        led_setValue(on, (uint8_t)(LED_STEP1 + i));
+    }
+}
+
+/*
  * Apply the transport beat-pulse LED state.
  *
  * Input: on is boolean and comes from seq_ledState.beatPulse. Output:

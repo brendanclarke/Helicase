@@ -379,6 +379,25 @@ uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index);
  * encoder, and endless-pot code uses the matching parameter buffer.
  */
 void menu_setVoiceModeShowMorph(uint8_t onOff);
+
+/*
+ * VOICE held-step automation overlay bridge.
+ *
+ * What: ButtonHandler calls menu_voiceAutoOverlayHoldExpired() when the common
+ * hold timer crosses its deadline; Menu then owns held-step resolution and
+ * rendering. menu_voiceAutoOverlayActive() lets ButtonHandler suppress later
+ * SEQ tap/timer behavior while the overlay owns the gesture. Why: the raw
+ * button array is ISR-owned, while overlay state and LCD/Pattern work are
+ * foreground-owned. Affiliates: buttonHandler_tick(), buttonHandler_seqHeldMask(),
+ * and menu_serviceRuntimeWidgets().
+ */
+void menu_voiceAutoOverlayHoldExpired(void);
+uint8_t menu_voiceAutoOverlayActive(void);
+
+/* Re-evaluate overlay LEDs/display after a visible bar change. */
+void menu_voiceAutoOverlayBarChanged(void);
+/* Notify the VOICE search after an in-place Pattern/track clear. */
+void menu_voiceAutoOverlayPatternDeleted(void);
 /*
  * STEP front-page half navigation.
  *

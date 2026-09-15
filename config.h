@@ -290,6 +290,28 @@
 #define FRONTPANEL_TICK_HZ   1000
 #define SYSTICK_TICKS_PER_MS (SYSTICK_HZ / 1000)
 
+/* -----------------------------------------------------------------------
+** VOICE overlay and UI hold-gesture timing.
+**
+** What: three tunable constants governing the VOICE-page held-step
+** automation overlay (S066). BUTTON_HOLD_DELAY_MS is the common short
+** long-press threshold shared by every UI gesture that distinguishes a hold
+** from a tap. VOICE_AUTOMATION_UNDERLINE_QUIET_MS is the quiet period before
+** reapplying a value underline after a rapid pot edit. The scan budget bounds
+** the asynchronous Pattern search to four steps per foreground pass.
+**
+** Why: timing belongs in config.h so one clean rebuild applies the same
+** thresholds to every UI path. The search budget also keeps the worst case at
+** 4 * 63 = 252 automation-entry comparisons per pass.
+**
+** Inputs: none (compile-time constants). Outputs: buttonHandler and Menu UI
+** timing/search policy. Affiliates: time_sysTick, buttonHandler_tick(), and
+** menu_serviceRuntimeWidgets().
+** ----------------------------------------------------------------------- */
+#define BUTTON_HOLD_DELAY_MS                 100u
+#define VOICE_AUTOMATION_UNDERLINE_QUIET_MS  100u
+#define VOICE_AUTOMATION_SCAN_STEPS_PER_PASS 4u
+
 /*
  * Ordinary pause between autonomous autosave transactions.
  *

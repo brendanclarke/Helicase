@@ -61,6 +61,8 @@ void copyClear_clearCurrentPattern()
 	uint8_t pattern = menu_getViewedPattern();
 	led_clearSequencerLeds();
 	pat_clearPattern(pattern);
+	/* S066: clear invalidates the asynchronous VOICE marker-presence result. */
+	menu_voiceAutoOverlayPatternDeleted();
 };
 //-----------------------------------------------------------------------------
 void copyClear_executeClear()
@@ -124,6 +126,8 @@ void copyClear_clearCurrentTrack()
 	uint8_t pattern = menu_getViewedPattern();
 	led_clearSequencerLeds();
 	pat_clearTrack(pattern, voice);
+	/* S066: clear invalidates the asynchronous VOICE marker-presence result. */
+	menu_voiceAutoOverlayPatternDeleted();
 };
 //-----------------------------------------------------------------------------
 void copyClear_copyTrack()
