@@ -1,10 +1,10 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-09-15 Session 065 build (detail inventory from Session 064 build at
-`d5af5fd`; Session 065 deltas noted below).
-`arm-none-eabi-size build/lxr02.elf` reports `text=434,036`, `data=412`, and
-`bss=290,788`.
+2026-09-16 Session 066 build (detail inventory from Session 064 build at
+`d5af5fd`; Session 065/066 deltas noted below).
+`arm-none-eabi-size build/lxr02.elf` reports `text=439,396`, `data=412`, and
+`bss=290,852`.
 The approved 290-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
 This remains a linked-image inventory: sizes come from
@@ -33,6 +33,13 @@ Session 065 adds 50 B new static: 48 B `seq_automation_dirty[6]` (per-slot
 64-bit dirty bitmap, sequencer.c) and 2 B menu state (`menu_stepAutoCursor`,
 `menu_stepAutoNumberLocked`, menu.c). The 192 B sequencer pending automation
 buffer was committed before Session 065. BSS delta from Session 064: +824 B.
+Session 066 adds 64 B new static: 44 B VOICE overlay state block in menu.c
+(overlay-active flag, active-parameter index, async search state, CGRAM valid
+mask, underline suppression/validity byte, 4 B working-value cache, debounce
+timestamp, and tracking fields; verified by `_Static_assert`) and 20 B
+buttonHandler state (held-step timing, overlay routing). 496 B flash font table
+in lcd.c (62 glyphs × 8 bytes, `.rodata`). BSS delta from Session 065: +64 B.
+Text delta from Session 065: +5,360 B.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2

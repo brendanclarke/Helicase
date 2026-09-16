@@ -1202,10 +1202,12 @@ static uint16_t va_lastEditTick = 0u;
 static uint8_t va_underlineSuppressed = 0u;
 
 /* 8-bit working-value cache: breaks the lossy 8→7→8 round-trip between
- * consecutive pot/encoder edits. Valid when the corresponding bit in
- * va_underlineSuppressed is set (the same bit that suppresses the value
- * underline during rapid edits). Invalidated when the overlay exits, held
- * steps change, or the debounce quiet period expires. */
+ * consecutive pot/encoder edits. Valid when the corresponding upper-nibble
+ * bit in va_underlineSuppressed is set (bit 4..7 = validity, bit 0..3 =
+ * underline suppression). The underline suppression clears on debounce
+ * expiry (100 ms) to let markers reappear; the validity persists so the
+ * display keeps showing the working value until the held mask changes or
+ * the overlay exits. */
 static uint8_t va_workingValue[4];
 
 _Static_assert(
@@ -1674,6 +1676,9 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
 
 #define VA_CGRAM_SLOT_BASE  2u
 #define VA_CGRAM_SLOT_COUNT 4u
+/* Packed into va_cgramValid bit 4; survives sendDisplayBuffer() clearing
+ * menu_lcdRefreshPending so the marker transaction retries reliably. */
+#define VA_MARKER_RETRY_BIT 0x10u
 
 /*
  * Restart the asynchronous track-wide automation search.
@@ -1842,7 +1847,10 @@ static void va_updateHeldState(void)
         va_underlineSuppressed = 0u;
         led_updatePatternTrackView(menu_activeVoice, menu_shownPattern,
                                    buttonHandler_selectedStep, 0u);
-        menu_repaintAll();
+        /* menu_repaint (not repaintAll): currentDisplayBuffer must retain
+         * the real LCD state so va_queueMarkerTransaction() can detect
+         * stale CGRAM slot references and restore them before redefining. */
+        menu_repaint();
     } else if (changed && va_overlayActive) {
         va_refreshAutomationLeds();
         menu_repaint();
@@ -1978,6 +1986,7 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
     uint8_t changed[4] = { 0u, 0u, 0u, 0u };
     uint8_t changed_count = 0u;
     uint8_t stale_refs = 0u;
+    uint8_t diff_count = 0u;
     uint8_t i;
     uint8_t row;
     uint8_t col;
@@ -1999,31 +2008,50 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
                     (char)(VA_CGRAM_SLOT_BASE + i);
             }
         }
+        va_cgramValid &= (uint8_t)~VA_MARKER_RETRY_BIT;
         return;
     }
 
+    /* Set marker positions to CGRAM refs before pre-scanning. */
+    for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
+        if ((desired_valid & (uint8_t)(1u << i)) != 0u)
+            editDisplayBuffer[marker_row[i]][marker_col[i]] =
+                (char)(VA_CGRAM_SLOT_BASE + i);
+    }
+
+    /* Pre-scan: simulate stale-ref restoration and count actual diffs.
+     * This avoids the fixed 64-op full-frame write — diff-based writes
+     * keep the queue cost proportional to what actually changed. */
     for (row = 0u; row < 2u; row++) {
         for (col = 0u; col < 16u; col++) {
+            char sim = currentDisplayBuffer[row][col];
+            char want = editDisplayBuffer[row][col];
+            if (want == '\0') want = ' ';
             for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
                 if (changed[i] &&
-                    (uint8_t)currentDisplayBuffer[row][col] ==
-                        (uint8_t)(VA_CGRAM_SLOT_BASE + i)) {
+                    (uint8_t)sim == (uint8_t)(VA_CGRAM_SLOT_BASE + i)) {
+                    sim = (char)va_cgramBase[i];
                     stale_refs++;
                     break;
                 }
             }
+            if (sim != want)
+                diff_count++;
         }
     }
 
-    /* stale restore + CGRAM definitions + complete final frame. */
-    needed = (uint8_t)(stale_refs * 2u + changed_count * 10u + 64u +
-                       (cur_hw_on ? 1u : 0u));
+    /* stale restore + CGRAM definitions + diff-based frame update. */
+    needed = (uint8_t)(stale_refs * 2u + changed_count * 10u +
+                       diff_count * 2u + (cur_hw_on ? 1u : 0u));
     if (needed > lcd_queueFree()) {
+        /* Revert marker positions to ROM chars so sendDisplayBuffer()
+         * renders a clean frame without CGRAM refs. */
         for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
             if ((desired_valid & (uint8_t)(1u << i)) != 0u)
                 editDisplayBuffer[marker_row[i]][marker_col[i]] =
                     (char)desired_base[i];
         }
+        va_cgramValid |= VA_MARKER_RETRY_BIT;
         menu_lcdRefreshPending = 1u;
         return;
     }
@@ -2031,6 +2059,8 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
     if (cur_hw_on)
         lcd_turnOn(1u, 0u);
 
+    /* Restore stale DDRAM refs and sync the shadow buffer so the
+     * diff-write below sees the post-restoration state. */
     for (row = 0u; row < 2u; row++) {
         for (col = 0u; col < 16u; col++) {
             for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
@@ -2038,10 +2068,8 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
                     (uint8_t)currentDisplayBuffer[row][col] ==
                         (uint8_t)(VA_CGRAM_SLOT_BASE + i)) {
                     lcd_setcursor(col, (uint8_t)(row + 1u));
-                    /* va_cgramBase is retained even when the valid mask was
-                     * invalidated at a VOICE-page boundary, so an old DDRAM
-                     * slot reference can still be restored to its ROM byte. */
                     lcd_data(va_cgramBase[i]);
+                    currentDisplayBuffer[row][col] = (char)va_cgramBase[i];
                     break;
                 }
             }
@@ -2057,19 +2085,16 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
         }
     }
 
-    for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
-        if ((desired_valid & (uint8_t)(1u << i)) != 0u)
-            editDisplayBuffer[marker_row[i]][marker_col[i]] =
-                (char)(VA_CGRAM_SLOT_BASE + i);
-    }
+    /* Diff-based frame write: only send positions that actually changed. */
     for (row = 0u; row < 2u; row++) {
         for (col = 0u; col < 16u; col++) {
             char want = editDisplayBuffer[row][col];
-            if (want == '\0')
-                want = ' ';
-            lcd_setcursor(col, (uint8_t)(row + 1u));
-            lcd_data((uint8_t)want);
-            currentDisplayBuffer[row][col] = want;
+            if (want == '\0') want = ' ';
+            if (currentDisplayBuffer[row][col] != want) {
+                lcd_setcursor(col, (uint8_t)(row + 1u));
+                lcd_data((uint8_t)want);
+                currentDisplayBuffer[row][col] = want;
+            }
         }
     }
 
@@ -2081,6 +2106,7 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
             va_cgramValid &= (uint8_t)~(1u << i);
         }
     }
+    va_cgramValid &= (uint8_t)~VA_MARKER_RETRY_BIT;
     cur_hw_on = 0u;
     menu_lcdRefreshPending = 0u;
 }
@@ -2158,13 +2184,15 @@ static void va_applyVoiceMarkers(void)
             uint8_t value7;
             uint8_t suppress_bit =
                 (uint8_t)(1u << (activeParameter & 3u));
+            uint8_t validity_bit =
+                (uint8_t)(suppress_bit << 4u);
 
             if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
                 char *value_field = &editDisplayBuffer[1][0];
                 int8_t right;
-                /* Use working value if mid-edit, else expanded stored. */
+                /* Use working value if validity bit set, else expanded stored. */
                 uint8_t display_val =
-                    (va_underlineSuppressed & suppress_bit)
+                    (va_underlineSuppressed & validity_bit)
                         ? va_workingValue[activeParameter & 3u]
                         : va_expand7to8(value7);
                 memset(value_field, ' ', 16u);
@@ -2211,9 +2239,9 @@ static void va_applyVoiceMarkers(void)
         if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
             char value_text[3];
             int8_t right;
-            /* Use working value if mid-edit, else expanded stored. */
+            /* Use working value if validity bit set, else expanded stored. */
             uint8_t display_val =
-                (va_underlineSuppressed & (uint8_t)(1u << i))
+                (va_underlineSuppressed & (uint8_t)(0x10u << i))
                     ? va_workingValue[i]
                     : va_expand7to8(value7);
             va_formatValue3(&cell, display_val, value_text);
@@ -2261,7 +2289,7 @@ static void va_applyVoiceMarkers(void)
  */
 static void va_underlineService(void)
 {
-    if (va_underlineSuppressed == 0u)
+    if ((va_underlineSuppressed & 0x0Fu) == 0u)
         return;
     if (!menu_isVoicePage(menu_activePage) || !va_overlayActive ||
         va_heldMask == 0u) {
@@ -2270,7 +2298,11 @@ static void va_underlineService(void)
     }
     if ((uint16_t)(time_sysTick - va_lastEditTick) >=
         VOICE_AUTOMATION_UNDERLINE_QUIET_MS) {
-        va_underlineSuppressed = 0u;
+        /* Clear suppression (lower nibble) so underline markers reappear.
+         * Keep validity (upper nibble) so the working-value cache
+         * continues to feed the display — avoids a ±1 snap for odd values
+         * like PM63 +64 that don't round-trip through 7-bit storage. */
+        va_underlineSuppressed &= 0xF0u;
         menu_repaint();
     }
 }
@@ -2313,9 +2345,9 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
     target = instrumentParam_make(menu_voicePageToSlot(menu_activePage),
                                   cell.descriptor_index);
 
-    /* Seed: working cache if mid-edit, else stored 7-bit expanded, else
-     * the read-only displayed endpoint for first creation. */
-    if (va_underlineSuppressed & (uint8_t)(1u << knobNr))
+    /* Seed: working cache if validity bit set, else stored 7-bit expanded,
+     * else the read-only displayed endpoint for first creation. */
+    if (va_underlineSuppressed & (uint8_t)(0x10u << knobNr))
         value = (uint16_t)va_workingValue[knobNr];
     else if (va_resolveHeldValue(target, &stored7))
         value = (uint16_t)va_expand7to8(stored7);
@@ -2342,7 +2374,7 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
     }
     if (wrote) {
         va_searchSetBit(cell.descriptor_index);
-        va_underlineSuppressed |= (uint8_t)(1u << knobNr);
+        va_underlineSuppressed |= (uint8_t)((1u << knobNr) | (0x10u << knobNr));
         va_lastEditTick = time_sysTick;
         menu_knobs_dirty = 1u;
     }
@@ -9800,6 +9832,14 @@ void menu_serviceRuntimeWidgets(void)
         va_updateHeldState();
         va_scanService();
         va_underlineService();
+        /* Retry a deferred marker transaction once the queue has drained.
+         * The retry bit survives sendDisplayBuffer() clearing
+         * menu_lcdRefreshPending, ensuring underlines recover after a
+         * burst of rapid encoder events. */
+        if ((va_cgramValid & VA_MARKER_RETRY_BIT) &&
+            lcd_queueFree() >= 72u) {
+            menu_repaint();
+        }
     }
 
     if ((uint16_t)(now - menu_cpuUseLastRefresh) < MENU_CPU_USE_REFRESH_MS)

@@ -31,16 +31,20 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 065
+## Current carryover after Session 066
 
+Session 066 implemented VOICE-page held-step automation overlay (Method 2).
 Session 065 implemented step automation Method 1 (step-edit menu and sequencer
-playback). The durable authority is
+playback). The durable authorities are
+`knowledge_files/log_archive/066_SESSION_HANDOFF_LOG.md`,
 `knowledge_files/log_archive/065_SESSION_HANDOFF_LOG.md`,
-`PATTERN_DYNAMIC_STACK.md`, and `MODULE_INTERCHANGE_SPEC.md`.
-The S065 planning documents (`S065_DYN_PAT_STEP_AUTOMATION.md`,
+`PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, and
+`SRAM_MANIFEST.md`.
+The S066 planning documents (`S066_DYN_PAT_VOICE_PARAM_UX.md`,
+`S066_IMPLEMENTATION_SCHEDULE.md`, `S066_DYN_P-LOCK_FOLLOW-UP.md`) and the
+S065 planning documents (`S065_DYN_PAT_STEP_AUTOMATION.md`,
 `S065_DYN_PAT_STEP_AUTOM_EDITING.md`, `S065_DYN_PAT_AUTOM_EDITING_ADDITIONS.md`)
-are disposable; their durable facts are in the handoff log and spec references.
-`S065_DYN_PAT_VOICE_PARAM_UX.md` is the Session 066 general plan — keep it.
+are disposable; their durable facts are in the handoff logs and spec references.
 
 ### Automation ordering invariant
 
@@ -62,11 +66,25 @@ is the runtime-interpolated value that accounts for Morph position.
 buffered in the TIM3 ISR pending buffer and drained in the foreground only.
 Do not call `instrumentManager_writeRuntime()` from any interrupt context.
 
-### Next feature: Method 2 VOICE overlay (Session 066)
+### 7-bit automation storage with 8-bit display
 
-`S065_DYN_PAT_VOICE_PARAM_UX.md` covers: overlay activation via held-step +
-pot turn, two-tier CGRAM underline (value bar tier 1, assigned dot tier 2),
-live value display, step illumination of automated steps, async track-wide
-target search, pot-to-automation write. CGRAM slots 2-7 are available for
-runtime use (0-1 reserved). The `numtostrpu(buf, num, pad)` helper writes
-3 characters to buf[0..2]; for 2-digit displays use manual formatting instead.
+Automation values are stored as 7-bit (0..127). Display expansion to 8-bit:
+`(v == 127) ? 255 : v * 2`. Inverse: `(v >= 255) ? 127 : v / 2`. The
+working-value cache (`va_workingValue[4]`) stores 8-bit values to avoid lossy
+8→7→8 round-trip during pot edits. Nibble-split suppression byte
+(`va_suppress[4]`): lower nibble = underline suppression, upper nibble =
+working value validity.
+
+### CGRAM underline cache
+
+Four-slot bounded cache in CGRAM slots 2..5. Each slot holds a 5×8 underline
+glyph for one of the 4 voice automation parameters. Diff-based CGRAM
+transactions with retry bit (`VA_MARKER_RETRY_BIT = 0x10`) prevent redundant
+LCD writes. Slot allocation is deterministic (voice parameter index + 2).
+
+### Next feature: S067 defragmentation service and pool monitor
+
+`S067_DYN_PAT_STACK_SERVICE.md` covers: two-tier defragmentation (micro-
+relocation + global compaction), bounded per-tick work budget, pool usage
+monitor in settings menu (`pol:NN`). 33 bytes RAM budget estimated.
+Phase 4.5 copy operations remain deferred.

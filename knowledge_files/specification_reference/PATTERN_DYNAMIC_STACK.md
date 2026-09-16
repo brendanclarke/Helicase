@@ -3,7 +3,7 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, and
-Pattern AutoSave reference through Session 065. Historical Session 062/063/064
+Pattern AutoSave reference through Session 066. Historical Session 062/063/064
 plans describe how the design was reached but do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
 and Pattern AutoSave scheduling/recovery are in `AUTOSAVE.md`; exact linked
@@ -29,10 +29,9 @@ Implemented and hardware accepted:
 - HCNAMES Pattern identity rows 129..144.
 
 Not implemented: Pattern copy operations (the three APIs are deliberate
-no-ops), VOICE-page held-step automation overlay (Method 2, Session 066),
-live-record capture, allocator compaction, and real-time editing guarantees
-while a snapshot is admitted during record/erase (admission is instead
-deferred while those modes are active).
+no-ops), live-record capture, allocator compaction/defragmentation, and
+real-time editing guarantees while a snapshot is admitted during record/erase
+(admission is instead deferred while those modes are active).
 
 ## 1. Resident object
 
@@ -346,8 +345,20 @@ cursor navigation and detail views, sequencer pending buffer with foreground
 drain, per-slot dirty bitmap and trigger-time morph-interpolation restore.
 Hardware-tested. See `../log_archive/065_SESSION_HANDOFF_LOG.md`.
 
+Session 066 implemented the VOICE-page held-step automation overlay (Method 2):
+overlay activation via configurable short long-press, four-slot bounded CGRAM
+underline cache (slots 2..5), held-value resolution with endpoint fallback,
+async track-wide automation search agent (4 steps/pass), pot/encoder-to-
+automation write with working-value cache, debounced value-underline
+reapplication, step illumination of automated steps, and Morph integration.
+44 bytes overlay state in `menu.c` (approved). 496 bytes flash font table in
+`lcd.c`. Six post-hardware-test fixes applied: delta handling working-value
+cache, editMode bit index, non-numeric dtype display, 'S' glyph, PM63 nibble
+split, diff-based CGRAM transactions with retry bit. Hardware-tested.
+See `../log_archive/066_SESSION_HANDOFF_LOG.md`.
+
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
 measurement. They do not reopen the functional closeout. Phase 4.5 copy
-operations, VOICE-page held-step automation overlay (Method 2, Session 066),
-and live-record capture are future features.
+operations, live-record capture, and allocator compaction/defragmentation are
+future features.

@@ -1,10 +1,12 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-064, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
-repair, AsyncFATFS directory publication, and the Phase 4 dynamic Pattern
-storage system. Historical migrations belong in session logs; this document states
-which live module owns each call, state transition, and retained object.
+066, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
+system, step automation editing/playback (Session 065), and the VOICE-page
+held-step automation overlay (Session 066). Historical migrations belong in
+session logs; this document states which live module owns each call, state
+transition, and retained object.
 
 ## Rules
 
@@ -328,6 +330,7 @@ Sequencer LED feedback via `SeqLedState`.
 | `led_notifyPatternChanged(playedPattern)` | Sequencer pattern-change notification and follow-mode UI refresh. | Sequencer |
 | `led_notifyTrackRotationReset(rotation)` | Update visible rotation parameter after Sequencer stop reset. | Sequencer |
 | `led_processSeqLedState()` | Foreground drain of Sequencer LED dirty state. | `main.c` |
+| `led_updateAutomationStepView(track, target, scene)` | Light SEQ LEDs for steps with automation matching a target parameter (Session 066). | Menu VOICE overlay |
 
 Shared object: `SeqLedState seq_ledState` is written by Sequencer and consumed
 by ledHandler in foreground.
@@ -352,6 +355,8 @@ dispatch to owners.
 | `buttonHandler_setRunStopState(running)` | Sync UI transport bit and START/STOP LED. | MidiParser, local button path |
 | `buttonHandler_showMuteLEDs()` | Show mute-state LEDs. | Menu/voice/performance paths |
 | `buttonHandler_muteVoice(voice, isMuted)` | Update front-panel mute shadow. | buttonHandler local, MIDI/UI paths if needed |
+| `seqHeldMask()` | Return the current held-step bitmask for VOICE overlay (Session 066). | Menu overlay |
+| `visibleStep()` | Return the visible step index accounting for bar offset (Session 066, promoted to extern). | Menu, ledHandler |
 
 Public state used by other modules:
 
@@ -395,6 +400,9 @@ edit dispatch, and post-load operation follow-up.
 | `menu_getActiveVoice()` / `menu_setActiveVoice(voiceNr)` | UI active voice. | buttonHandler, MidiParser, PatternData callers |
 | `menu_areMuteLedsShown()` | Mute LED UI state query. | ledHandler/buttonHandler |
 | `menu_setShownPattern(patternNr)` / `menu_getViewedPattern()` | UI viewed/edited pattern. | buttonHandler, ledHandler, PatternData callers |
+| `menu_voiceAutoOverlayEnter()` / `menu_voiceAutoOverlayExit()` | Enter/exit VOICE-page held-step automation overlay (Session 066). Entry initializes 44-byte state block, starts async search. Exit restores normal VOICE display and clears CGRAM. | buttonHandler SEQ held-step timing |
+| `menu_voiceAutoOverlayHeldChanged()` | Notify overlay that the held-step mask changed. Invalidates working values, restarts async search. | buttonHandler SEQ press/release during overlay |
+| `menu_voiceAutoOverlayPatternDeleted()` | Notify overlay that the current pattern was deleted/cleared. Forces overlay exit. | copyClearTools |
 
 Shared state used by clients:
 

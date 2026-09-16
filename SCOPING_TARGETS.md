@@ -1421,6 +1421,35 @@ items formerly in this section now live in
 
 ---
 
+## Session 066 identified bugs and future work (2026-09-16)
+
+- **AutoSave CPU usage.** AutoSave uses ~4-5% CPU constantly even when no
+  pattern or parameter changes exist; disappears when autosave is set to 'off'.
+  Need to investigate and reduce resource usage — the idle-poll or debounce-timer
+  path may be re-evaluating work that has no dirty state to capture.
+- **AutoSave off→on doesn't pick up changes.** When autosave is switched off and
+  back on, it doesn't pick up changes until the next reboot. The re-enable path
+  likely fails to re-arm the dirty mask or restart the writer scheduler from the
+  current resident state.
+- **Probability step parameter 'prb' only applies to trigger.** The probability
+  special currently controls whether the step's note fires, but it should control
+  whether the whole step (including its automation entries) is played. When
+  probability suppresses a step, automation on that step should also be
+  suppressed, matching the user's intent that the step as a whole is
+  probabilistic.
+- **Chaselight still missing sometimes.** Particularly after reboot; tends to
+  come back after switching scenes. Partially traced in Session 057 — both the
+  rendering side (`led_updateCurrentStep()`) and the producer side
+  (`seq_ledState.chaseStep`) were examined but the root cause is unresolved. May
+  relate to the Pattern/Scene index alignment (the `seq_activePattern` /
+  `menu_shownPattern` desync class of bug from Session 054).
+- **Menu specification sheet.** Need a comprehensive menu specification
+  reference in `knowledge_files/specification_reference/` covering all pages,
+  sub-pages, parameter assignments, knob/button behaviors, and display rules.
+  Dedicated future session — do not implement now.
+
+---
+
 ## Session 063 deferred items (2026-09-11)
 
 - **Hardware CRC32C acceleration**: the STM32F765 CRC peripheral uses the

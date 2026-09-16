@@ -74,6 +74,7 @@
 | 063 | 2026-09-12 | commit `6bc4fb9` on `dev-ph4-pattern` | v4 binary PAT4 Pattern file format, Pattern Save/Load bug fixes, `pat_scene_region_t` packed struct, HCNAMES 145-row expansion, `filesystem_requestLoadPatternForScenes` scene-mask API, S064 Pattern AutoSave plan |
 | 064 | 2026-09-12/14 | commits `e268107`..`d5af5fd` on `dev-ph4-pattern` | Per-Scene PAT4 A/B Pattern AutoSave, independent 16-bit dirty tracking and 10,519-byte snapshot, HCPR v2 plus 145-row HCNAMES, boot restore, Bank-Load Pattern-name publication fix, and hardware-accepted 16-Scene functional closeout |
 | 065 | 2026-09-15 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | Step automation editing (Method 1) and sequencer playback: pool block automation read/write/remove APIs, step-edit cursor/navigation/detail views, sequencer pending buffer with foreground drain, per-slot dirty bitmap and trigger-time restore from morph interpolation, dtype-aware value display and bounds clamping; hardware-tested |
+| 066 | 2026-09-15/16 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | VOICE-page held-step automation overlay (Method 2): overlay activation via configurable short long-press, four-slot bounded CGRAM underline cache, held-value resolution with endpoint fallback, async track-wide search agent, pot/encoder-to-automation write, debounced value-underline reapplication, step illumination of automated steps, Morph integration, 62-glyph alphanumeric font table for underlined characters; six post-hardware-test fixes (delta handling working-value cache, editMode bit index, non-numeric dtype display, 'S' glyph, PM63 nibble split, diff-based CGRAM transactions with retry bit); hardware-tested |
 
 
 ---
@@ -1196,3 +1197,148 @@ invalid, not because of a firmware `BKKit14` defect.
 - **Find here**: [064_SESSION_HANDOFF_LOG.md](064_SESSION_HANDOFF_LOG.md),
   `AUTOSAVE.md`, `PATTERN_DYNAMIC_STACK.md`, `FILESYSTEM_SPEC.md`, and
   `SRAM_MANIFEST.md`.
+
+### 066 — VOICE-Page Held-Step Automation Overlay (Method 2) (2026-09-15/16)
+
+Implemented the complete VOICE-page held-step automation overlay system from
+`S065_DYN_PAT_VOICE_PARAM_UX.md` (written as part of S065, implemented as
+S066). This is Method 2 of the step automation editing workflow: while viewing
+a VOICE parameter page, holding one or more SEQ step buttons and turning a pot
+or encoder overlays the held steps' automation values onto the normal VOICE
+display, with CGRAM-underlined characters indicating which parameters have
+stored automation. The full implementation schedule is
+`S066_IMPLEMENTATION_SCHEDULE.md` (12 steps, ~1720 lines of line-by-line
+implementation detail).
+
+**Overlay activation** (§1): configurable short long-press
+(`BUTTON_HOLD_DELAY_MS = 100u` in `config.h`). `buttonHandler.c` arms a timer
+on SEQ press during VOICE mode; if still held after 100ms and at least one step
+is active, the overlay enters. `seqHeldMask()` (new export) returns the current
+held-step bitmask. `visibleStep()` promoted to extern for inter-module use.
+Wrap-safe 16-bit millisecond timing against `time_sysTick`.
+
+**Four-slot bounded CGRAM underline cache** (§2): CGRAM slots 2..5 assigned to
+the four visible VOICE-page parameters. Two marker tiers: **value bar** (5-pixel
+bottom row, shows a step has automation for this exact parameter) and **assigned
+dot** (center pixel, shows automation exists for this parameter on at least one
+step in the track). Cache tracks which glyphs are loaded via `va_cgramValid`
+bitmask. `lcd_fontIndex()` maps ASCII 0x20..0x7E to a 62-entry flash font table
+(496 bytes); `lcd_underlineGlyph()` composites the ROM glyph with the marker
+tier into a CGRAM-ready 8-byte pattern.
+
+**Async track-wide automation search** (§5): polled state machine scanning all
+128 steps of the current track, 4 steps per pass
+(`VOICE_AUTOMATION_SCAN_STEPS_PER_PASS = 4u`), checking each step's pool block
+for entries matching the four visible parameter targets. Populates the
+"assigned" tier underlines. Self-invalidates on track change, page change, or
+any automation write.
+
+**Value display and resolution** (§3): per-parameter value-source resolution
+walks the held mask newest-to-oldest, returns the first held step with an exact
+target match. Display shows the resolved 8-bit value using dtype-aware
+formatting (`va_formatValue3()`). When no held step has automation for a
+parameter, the Scene image endpoint value is displayed instead.
+
+**Step illumination** (§4): `led_updateAutomationStepView()` lights SEQ LEDs
+for every step that has automation matching the focused parameter.
+
+**Automation write** (§6): pot delta and encoder delta enter through
+`va_writeAutomationFromKnob()`. Working-value cache (`va_workingValue[4]`)
+breaks the lossy 8→7→8 round-trip by caching the clamped 8-bit result between
+consecutive edits. Converts to 7-bit only at the `pat_writeStepAutomation()`
+call. Nibble-split suppression byte: lower nibble = underline suppression
+(clears on debounce), upper nibble = working value validity (persists until
+held mask change or overlay exit).
+
+**Debounced value-underline reapplication** (§7):
+`VOICE_AUTOMATION_UNDERLINE_QUIET_MS = 100u`. After pot/encoder edits stop
+for 100ms, the value-bar underline reappears. The underline is suppressed
+during rapid edits to avoid CGRAM queue thrashing.
+
+**Morph integration** (§8): held-step edits never mutate normal or Morph
+endpoint values. The overlay reads/writes only automation storage. Endpoint
+display values come from `morph_interpolation[]` (the runtime-interpolated
+value accounting for current Morph position).
+
+**State block**: 44 bytes total static SRAM (40 approved S066 + 4 approved
+extension for working values), verified by `_Static_assert`. Includes
+overlay-active flag, active-parameter index, async search state, CGRAM valid
+mask, underline suppression/validity byte, working value cache, debounce
+timestamp, and all associated tracking.
+
+**LCD async queue preflight**: CGRAM/DDRAM transactions are preflight-checked
+against the 128-entry SPSC ring's available capacity before committing.
+Transaction cost formula: `stale * 2 + changed * 10 + diff * 2 + cursor`.
+Fallback on insufficient space sets the retry bit and defers.
+
+**Diff-based CGRAM transaction** (Fix 6): replaced the fixed 32-char full-frame
+write with a diff against `currentDisplayBuffer`. Stale DDRAM references
+(positions still showing old CGRAM slot codes) are restored to their ROM
+characters and `currentDisplayBuffer` is synced before CGRAM redefinition and
+the diff-write. Typical cost during scrolling: ~16-24 ops instead of ~112.
+
+**Retry bit** (Fix 6): `VA_MARKER_RETRY_BIT` (bit 4 of `va_cgramValid`)
+survives `sendDisplayBuffer()` clearing `menu_lcdRefreshPending`. When set,
+`menu_serviceRuntimeWidgets()` checks for sufficient queue space (≥72 free) and
+triggers a repaint to recover underlines after a queue-full burst.
+
+**Six post-hardware-test fixes** (documented in `S066_DYN_P-LOCK_FOLLOW-UP.md`):
+
+- **Fix 1 — Delta handling (Critical)**: CW pot rotation produced no visible
+  change; CCW decremented by 2. Root cause: lossy 8→7→8 round-trip in
+  `va_writeAutomationFromKnob()`. Fixed with `va_workingValue[4]` cache that
+  breaks the feedback loop (+4 B SRAM, 40→44 total).
+- **Fix 1b — editMode bit index (Minor)**: `va_applyVoiceMarkers()` editMode
+  branch checked `va_underlineSuppressed & 0x01u` (always bit 0) instead of
+  the bit for the actual `activeParameter`. Fixed to use
+  `(1u << (activeParameter & 3u))`.
+- **Fix 2 — Non-numeric parameter display (Important)**: parameters with
+  non-numeric display types (waveform, filter type, on/off, ±63, note names)
+  showed raw numbers. Added `va_formatValue3()` — dtype-aware formatter matching
+  `menu_formatCellValue3()` but accepting an explicit value.
+- **Fix 3 — Capital 'S' font glyph (Minor)**: underlined 'S' had hooked end
+  pixels (serifs) that the WS0010 CGROM 'S' does not show. Fixed rows 1 and 5
+  of `lcd_font_alpha_numeric[28]`.
+- **Fix 4 — PM63 ±64 snap after debounce (Important)**: Fine tune and pan
+  reached +64 (8-bit 127) during editing but snapped to +63 after the 100ms
+  debounce quiet period. Root cause: working-value cache invalidated when
+  underline suppression cleared. Fixed by splitting `va_underlineSuppressed`
+  into two nibbles: lower = underline suppression (clears on debounce), upper =
+  working-value validity (persists until held mask change or overlay exit).
+- **Fix 5 — Overlay exit CGRAM ordering glitch (Important)**: releasing all held
+  step buttons caused a one-frame CGRAM glitch (value-row underlined character
+  appearing at the name-row position). Root cause: `menu_repaintAll()` filled
+  `currentDisplayBuffer` with 0x7F, defeating stale-ref detection. Fixed by
+  using `menu_repaint()` instead (preserves real LCD state).
+- **Fix 6 — Fast encoder scroll underline disappearance (Important)**: rapidly
+  scrolling the encoder caused all automation underlines to disappear and not
+  recover. Two sub-issues: (A) excessive queue cost from full 32-char frame
+  writes (~112 ops) vs 128-entry queue capacity, and (B) lost retry signal
+  (`sendDisplayBuffer()` cleared `menu_lcdRefreshPending` after a fallback).
+  Fixed with diff-based frame write (~16-24 ops typical) and a separate retry
+  bit in `va_cgramValid`.
+
+**Files changed:**
+
+| File | Changes |
+|------|---------|
+| `config.h` | +3 constants: `BUTTON_HOLD_DELAY_MS`, `VOICE_AUTOMATION_UNDERLINE_QUIET_MS`, `VOICE_AUTOMATION_SCAN_STEPS_PER_PASS` |
+| `lcd.c` | +496 B flash font table (62 glyphs), `lcd_fontIndex()`, `lcd_underlineGlyph()`, 'S' glyph fix |
+| `lcd.h` | `lcd_underlineGlyph()` declaration |
+| `menu.c` | ~660+ lines: 44-byte state block with `_Static_assert`, CGRAM cache helpers, async search agent, held-value resolution, overlay lifecycle, write intercepts, debounce service, context invalidation hooks, `va_formatValue3()`, all 6 fixes |
+| `menu.h` | Four overlay bridge function declarations |
+| `buttonHandler.c` | `BUTTON_TIMEOUT` alias, `seqHeldMask()` export, `visibleStep()` promoted to extern, wrap-safe tick comparison, VOICE branch in `armTimerActionStep`, overlay routing in SEQ press/release |
+| `buttonHandler.h` | `seqHeldMask()` and `visibleStep()` declarations |
+| `ledHandler.c` | `led_updateAutomationStepView()` implementation |
+| `ledHandler.h` | `led_updateAutomationStepView()` declaration |
+| `copyClearTools.c` | Two `menu_voiceAutoOverlayPatternDeleted()` calls |
+
+**Build (after all 6 fixes):** `text=439,396`, `data=412`, `bss=290,852`,
+`image=439,808`. Net text delta from S065: +5,360 (overlay + font table +
+helpers). Net bss delta: +64 (44 B overlay state + 20 B buttonHandler state).
+
+- **Find here**: [066_SESSION_HANDOFF_LOG.md](066_SESSION_HANDOFF_LOG.md),
+  `S066_DYN_PAT_VOICE_PARAM_UX.md` (design spec, 803 lines),
+  `S066_IMPLEMENTATION_SCHEDULE.md` (12-step implementation, 1720 lines),
+  `S066_DYN_P-LOCK_FOLLOW-UP.md` (6 hardware-test fixes),
+  `PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`.
