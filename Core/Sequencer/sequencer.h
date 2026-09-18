@@ -135,10 +135,12 @@ void seq_alignActivePatternToScene(uint8_t scene_index);
 /*
  * Drain TIM3-published voice automation in foreground context.
  *
- * Inputs: the bounded pending queue written by seq_advanceTrackStep(). Output:
- * validated voice descriptor runtime images are updated after front-panel
- * service; Scene targets remain queued only for the later Scene-target session.
- * Affiliate: main.c calls this before audio rendering.
+ * Inputs: the bounded pending queue written by seq_advanceTrackStep(), whose
+ * packed automation values are already in the voice descriptor parameter
+ * domain. Output: validated voice descriptor runtime images are updated after
+ * front-panel service without MIDI-CC-style 7-bit expansion; Scene targets
+ * remain queued only for the later Scene-target session. Affiliate: main.c
+ * calls this before audio rendering.
  */
 void seq_drainPendingAutomation(void);
 /*

@@ -603,9 +603,9 @@ void seq_drainPendingAutomation(void)
             uint16_t identity = seq_pending_automation[i].identity;
             uint16_t packed = seq_pending_automation[i].payload;
             uint16_t target = (uint16_t)(packed & 0x01FFu);
-            uint8_t value7 = (uint8_t)((packed >> 9u) & 0x7Fu);
-            uint8_t value8 = (value7 == 127u) ? 255u :
-                             (uint8_t)(value7 * 2u);
+            /* Automation storage is already in descriptor parameter space;
+             * do not apply MIDI-CC-style 7-bit-to-8-bit expansion here. */
+            uint8_t value = (uint8_t)((packed >> 9u) & 0x7Fu);
 
             if ((identity & SEQ_PENDING_TYPE_AUTOMATION_BIT) != 0u &&
                 instrumentParam_isVoiceParameter(target) &&
@@ -621,7 +621,7 @@ void seq_drainPendingAutomation(void)
 
                 /* Mark only successful voice runtime overlays for retrigger restore. */
                 if (descriptor &&
-                    instrumentManager_writeRuntime(slot, descriptor, value8)) {
+                    instrumentManager_writeRuntime(slot, descriptor, value)) {
                     uint8_t local = instrumentParam_local(target);
                     seq_automation_dirty[slot] |= (1ULL << local);
                 }

@@ -1171,16 +1171,17 @@ static uint8_t menu_stepAutoNumberLocked = 0u;
  *
  * What: Menu-owned foreground state for held-step selection, the asynchronous
  * 128-step Pattern search, four CGRAM marker slots, one shared underline
- * debounce timestamp/mask, and four bytes of 8-bit working values that cache
- * the cell-domain edit value between consecutive pot/encoder detents. Held
+ * debounce timestamp/mask, and four bytes of working values that cache the
+ * parameter-domain edit value between consecutive pot/encoder detents. Held
  * step order is newest-first; each displayed parameter resolves its own exact
  * canonical target against that order.
  * Why: the overlay spans button, LCD, LED, and PatternData interactions, while
- * no ISR may touch its state. The working-value cache breaks the lossy 8→7→8
- * round-trip that would otherwise cause missed increments and ±2 display
- * jumps. Inputs are the raw SEQ held mask, VOICE context, foreground service
- * ticks, and successful Pattern writes. Outputs are display marker bytes,
- * CGRAM definitions, step LEDs, and Pattern pool mutations.
+ * no ISR may touch its state. The working-value cache avoids re-resolving the
+ * held value and re-reading Pattern storage between consecutive encoder
+ * detents, keeping edit responsiveness consistent with the normal parameter
+ * edit path. Inputs are the raw SEQ held mask, VOICE context, foreground
+ * service ticks, and successful Pattern writes. Outputs are display marker
+ * bytes, CGRAM definitions, step LEDs, and Pattern pool mutations.
  * Affiliates: buttonHandler_seqHeldMask(), buttonHandler_visibleStep(),
  * pat_readStepAutomations(), patSvc_writeStepAutomation(), lcd_underlineGlyph(),
  * led_updateAutomationStepView(), and time_sysTick.
@@ -1204,13 +1205,13 @@ static uint8_t va_cgramValid = 0u;
 static uint16_t va_lastEditTick = 0u;
 static uint8_t va_underlineSuppressed = 0u;
 
-/* 8-bit working-value cache: breaks the lossy 8→7→8 round-trip between
- * consecutive pot/encoder edits. Valid when the corresponding upper-nibble
- * bit in va_underlineSuppressed is set (bit 4..7 = validity, bit 0..3 =
- * underline suppression). The underline suppression clears on debounce
- * expiry (100 ms) to let markers reappear; the validity persists so the
- * display keeps showing the working value until the held mask changes or
- * the overlay exits. */
+/* Parameter-domain working-value cache: preserves the exact edit value between
+ * consecutive pot/encoder edits instead of re-reading a quantized storage
+ * value. Valid when the corresponding upper-nibble bit in
+ * va_underlineSuppressed is set (bit 4..7 = validity, bit 0..3 = underline
+ * suppression). The underline suppression clears on debounce expiry (100 ms)
+ * to let markers reappear; validity persists so the display keeps showing the
+ * working value until the held mask changes or the overlay exits. */
 static uint8_t va_workingValue[4];
 
 _Static_assert(
@@ -1674,7 +1675,7 @@ static void va_updateHeldState(void);
 static void va_resetOverlay(void);
 static uint8_t va_resolveHeldValue(instrument_param_id_t target,
                                    uint8_t *out_value);
-static uint8_t va_expand7to8(uint8_t value);
+static uint8_t va_storedToParam(uint8_t value);
 static void va_underlineService(void);
 static void va_refreshAutomationLeds(void);
 static void va_applyVoiceMarkers(void);
@@ -1812,9 +1813,18 @@ static uint8_t va_resolveHeldValue(instrument_param_id_t target,
     return 0u;
 }
 
-static uint8_t va_expand7to8(uint8_t value)
+/*
+ * Convert stored automation to the descriptor parameter domain.
+ *
+ * Stored automation values already use the descriptor's 7-bit domain for all
+ * currently automatable targets, so this intentionally remains an identity
+ * mapping. Keeping this named conversion point makes future dtype-specific
+ * expansion explicit without applying the former MIDI-CC 7-bit scaling to
+ * ordinary instrument parameters.
+ */
+static uint8_t va_storedToParam(uint8_t value)
 {
-    return (value == 127u) ? 255u : (uint8_t)(value * 2u);
+    return value;
 }
 
 /*
@@ -2134,8 +2144,10 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
  * Format one automation value using the cell's dtype vocabulary.
  *
  * Mirrors the dtype switch in menu_formatCellValue3() but accepts an explicit
- * 8-bit value rather than reading from the Scene image. Produces the same
- * three-character compact text used by the overview and clicked-in value fields.
+ * parameter-domain value rather than reading from the Scene image. Produces
+ * the same three-character compact text used by the overview and clicked-in
+ * value fields. Affiliates: va_applyVoiceMarkers() for both editMode and
+ * overview display branches.
  */
 static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
                             char out[3])
@@ -2209,11 +2221,11 @@ static void va_applyVoiceMarkers(void)
             if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
                 char *value_field = &editDisplayBuffer[1][0];
                 int8_t right;
-                /* Use working value if validity bit set, else expanded stored. */
+                /* Use the cached parameter value, else the stored parameter value. */
                 uint8_t display_val =
                     (va_underlineSuppressed & validity_bit)
                         ? va_workingValue[activeParameter & 3u]
-                        : va_expand7to8(value7);
+                        : va_storedToParam(value7);
                 memset(value_field, ' ', 16u);
                 va_formatValue3(&cell, display_val, &value_field[13]);
                 if ((va_underlineSuppressed & suppress_bit) == 0u) {
@@ -2258,11 +2270,11 @@ static void va_applyVoiceMarkers(void)
         if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
             char value_text[3];
             int8_t right;
-            /* Use working value if validity bit set, else expanded stored. */
+            /* Use the cached parameter value, else the stored parameter value. */
             uint8_t display_val =
                 (va_underlineSuppressed & (uint8_t)(0x10u << i))
                     ? va_workingValue[i]
-                    : va_expand7to8(value7);
+                    : va_storedToParam(value7);
             va_formatValue3(&cell, display_val, value_text);
             memcpy(&editDisplayBuffer[1][4u * i], value_text, 3u);
             if ((va_underlineSuppressed & (uint8_t)(1u << i)) == 0u) {
@@ -2318,9 +2330,9 @@ static void va_underlineService(void)
     if ((uint16_t)(time_sysTick - va_lastEditTick) >=
         VOICE_AUTOMATION_UNDERLINE_QUIET_MS) {
         /* Clear suppression (lower nibble) so underline markers reappear.
-         * Keep validity (upper nibble) so the working-value cache
-         * continues to feed the display — avoids a ±1 snap for odd values
-         * like PM63 +64 that don't round-trip through 7-bit storage. */
+         * Keep validity (upper nibble) so the parameter-domain working-value
+         * cache continues to feed the display until the held mask changes or
+         * the overlay exits. */
         va_underlineSuppressed &= 0xF0u;
         menu_repaint();
     }
@@ -2329,15 +2341,16 @@ static void va_underlineService(void)
 /*
  * Write one adjusted VOICE parameter to every physically held step.
  *
- * What: seeds from the 8-bit working-value cache (if mid-edit), else from the
- * expanded stored 7-bit automation value, else from the read-only displayed
- * endpoint. Applies the delta and clamps using the same menu_clampCellValue()
- * path as normal parameter editing. The clamped 8-bit result is cached so the
- * next detent seeds from it directly (avoiding the lossy 8→7→8 round-trip),
- * then converted to 7-bit and written to every held step.
+ * What: seeds from the parameter-domain working-value cache (if mid-edit),
+ * else from the stored automation value, else from the read-only displayed
+ * endpoint. Applies the delta and clamps using the same
+ * menu_clampCellValue() path as normal parameter editing. The clamped result
+ * is cached so the next detent seeds from it directly, then saturated to the
+ * 7-bit storage domain and written to every held step.
  * Why: held edits are Pattern-only and must never call endpoint commit, DSP,
- * or Autosave code. The working-value cache ensures every pot/encoder detent
- * produces a visible display change, matching the normal edit path's feel.
+ * or Autosave code. The working-value cache avoids re-resolving the held value
+ * between consecutive detents, keeping edit responsiveness consistent with
+ * the normal edit path's feel.
  * Inputs: visible column and signed adjustment. Outputs: Pattern pool writes,
  * working-value cache update, search result bit, and coalesced repaint.
  * Affiliates: patSvc_writeStepAutomation(), va_resolveHeldValue(),
@@ -2364,12 +2377,12 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
     target = instrumentParam_make(menu_voicePageToSlot(menu_activePage),
                                   cell.descriptor_index);
 
-    /* Seed: working cache if validity bit set, else stored 7-bit expanded,
+    /* Seed: working cache if validity bit set, else the stored parameter value,
      * else the read-only displayed endpoint for first creation. */
     if (va_underlineSuppressed & (uint8_t)(0x10u << knobNr))
         value = (uint16_t)va_workingValue[knobNr];
     else if (va_resolveHeldValue(target, &stored7))
-        value = (uint16_t)va_expand7to8(stored7);
+        value = (uint16_t)va_storedToParam(stored7);
     else
         value = menu_cellDisplayValue(&cell);
 
@@ -2380,11 +2393,12 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
     value = (uint16_t)next;
     menu_clampCellValue(&cell, &value);
 
-    /* Cache the clamped 8-bit working value for the next detent. */
+    /* Cache the clamped parameter-domain value for the next detent. */
     va_workingValue[knobNr] = (value > 255u) ? 255u : (uint8_t)value;
 
-    /* Convert to 7-bit for Pattern storage only. */
-    stored7 = (value >= 255u) ? 127u : (uint8_t)(value / 2u);
+    /* Saturate the parameter-domain value to the 7-bit Pattern storage range;
+     * no MIDI-CC-style division is valid for instrument descriptor values. */
+    stored7 = (value > 127u) ? 127u : (uint8_t)value;
     for (i = 0u; i < va_heldCount; i++) {
         if (patSvc_writeStepAutomation(
                 menu_shownPattern, menu_activeVoice,
@@ -8019,8 +8033,8 @@ static uint8_t menu_stepAutomationSlotForTrack(uint8_t track)
  *
  * Inputs: current viewed Scene, active track, and decoded existing list.
  * Output: nonzero when the first unused automatable target on the mapped slot
- * is created with the inverse-mapped current parameter image. This is the only
- * implicit creation path used by endless-pot edits on the Add page.
+ * is created with the current descriptor-domain parameter image. This is the
+ * only implicit creation path used by endless-pot edits on the Add page.
  */
 static uint8_t menu_stepAutomationAddDefault(void)
 {
@@ -8044,7 +8058,10 @@ static uint8_t menu_stepAutomationAddDefault(void)
     if (instrument && instrumentParam_isVoiceParameter(target)) {
         local = instrumentParam_local(target);
         value = instrument->parameter_images.instrument_parameters[local];
-        value = (uint8_t)(value >= 255u ? 127u : (value / 2u));
+        /* The image is already in descriptor parameter space; only clamp it
+         * defensively to the 7-bit Pattern automation storage domain. */
+        if (value > 127u)
+            value = 127u;
     }
     return patSvc_writeStepAutomation(scene, track,
                                    parameter_values[PAR_ACTIVE_STEP], target,

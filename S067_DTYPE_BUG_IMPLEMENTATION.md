@@ -374,3 +374,214 @@ hardware:
   entry (`bits 9..15`) is unchanged. The semantic meaning of the stored value
   changes from "halved parameter" to "direct parameter" but the binary
   encoding and field width are identical.
+
+---
+
+## Implementation Notes
+
+### 2026-09-18 — Identity-domain fix implemented
+
+- Renamed `va_expand7to8()` to `va_storedToParam()` and made the conversion an
+  identity for currently automatable descriptor values. Updated both overlay
+  display branches and the held-edit seed path.
+- Replaced VOICE overlay `/2` storage with a defensive `127` saturation, and
+  made step automation default creation copy the descriptor-domain parameter
+  image directly before the same saturation.
+- Removed sequencer playback's `value7` → `value8` expansion so runtime writes
+  receive the stored descriptor-domain value unchanged.
+- Updated the overlay state, working-cache, debounce, edit-contract, and
+  explicit-value formatting comments to describe parameter-domain caching and
+  storage quantization accurately. The matching `sequencer.h` drain contract
+  now states the same value-domain rule. The existing four-byte cache and all
+  other RAM sizes are unchanged; no API signature or binary-format changes were
+  needed.
+- Hardware checks from the verification checklist remain pending. The required
+  firmware build and static checks will be recorded below after implementation.
+
+### Verification
+
+- `git diff --check` passed.
+- The conversion-site search found no remaining `va_expand7to8`, `value8`,
+  automation `/2`, or playback `*2` sites in the affected Menu/Sequencer
+  paths. Unrelated MIDI conversion code and binary packing remain unchanged.
+- `make -j2` passed and produced `build/lxr02.elf` with
+  `text=447,580`, `data=412`, `bss=291,140`. The dtype fix adds no RAM and
+  leaves the existing four-byte working cache and PAT4 field width unchanged.
+- `make img` passed and regenerated the tracked
+  `build/LXRV2_lxr02.img` from the clean-build binary (`447,992` bytes).
+- Existing linker warnings for unimplemented `nosys` stubs and serial LTO
+  compilation remain; no new warning was introduced by this fix.
+- Hardware regression checks 1–11 remain pending, including display round trips,
+  sequencer playback, step-page agreement, and rapid-edit cache behavior.
+
+### Post-Implementation Assessment (2026-09-18)
+
+Independent review of the committed diff against the six-change schedule.
+
+**Change 1 — `va_expand7to8()` → `va_storedToParam()` (identity conversion).**
+Verified. Forward declaration at line 1678 renamed. Definition at line 1825
+returns `value` directly. Comment block describes the identity mapping and its
+future-expansion role. All three call sites updated:
+- Line 2228: editMode display branch in `va_applyVoiceMarkers()`.
+- Line 2277: overview display branch in `va_applyVoiceMarkers()`.
+- Line 2385: seed path in `va_writeAutomationFromKnob()`.
+
+No remaining references to `va_expand7to8` in either file. Correct.
+
+**Change 2 — `va_writeAutomationFromKnob()` write path (remove halving).**
+Verified. Line 2401: `stored7 = (value > 127u) ? 127u : (uint8_t)value;`
+replaces `(value >= 255u) ? 127u : (uint8_t)(value / 2u)`. The 127 saturation
+is purely defensive — after `menu_clampCellValue()` every automatable dtype
+already has value ≤ 127. The function contract comment (lines 2341–2356),
+seed comment (line 2377), cache comment (line 2396), and storage comment
+(lines 2399–2400) all updated to remove "lossy 8→7→8" language. Correct.
+
+**Change 3 — `seq_drainPendingAutomation()` (remove doubling on playback).**
+Verified. Lines 606–608: the two-variable `value7`/`value8` pattern replaced
+by a single `uint8_t value` with an inline comment explaining the
+descriptor-domain identity. Line 624 passes `value` to
+`instrumentManager_writeRuntime()`. No expansion, no intermediate variable.
+Correct.
+
+**Change 4 — `menu_stepAutomationAddDefault()` (remove halving on creation).**
+Verified. Lines 8061–8064: `value / 2u` expression replaced by
+`if (value > 127u) value = 127u;` with an inline comment. The function's
+contract comment (line 8036) updated from "inverse-mapped" to
+"descriptor-domain". Correct.
+
+**Change 5 — Working-value cache comment updates.**
+Verified. Five comment sites updated:
+- 5a: Overlay state block (lines 1174–1184) — "lossy 8→7→8 round-trip" and
+  "missed increments / ±2 display jumps" language removed; replaced with
+  "avoids re-resolving / re-reading Pattern storage" rationale.
+- 5b: Working-value declaration (lines 1208–1214) — "8-bit working-value
+  cache: breaks the lossy 8→7→8 round-trip" replaced with
+  "Parameter-domain working-value cache: preserves the exact edit value
+  instead of re-reading a quantized storage value."
+- 5c: Underline debounce (lines 2332–2335) — "±1 snap for odd values like
+  PM63 +64 that don't round-trip" replaced with "parameter-domain
+  working-value cache continues to feed the display until the held mask
+  changes or the overlay exits."
+- Two display-branch comments (lines 2224, 2273) — "Use working value if
+  validity bit set, else expanded stored" replaced with "Use the cached
+  parameter value, else the stored parameter value."
+All correct.
+
+**Change 6 — `va_formatValue3()` comment update.**
+Verified. Lines 2144–2150: "8-bit value" replaced with "parameter-domain
+value"; Affiliates line added. Function body unchanged — the dtype switch was
+already correct. Correct.
+
+**Stale reference sweep.** Grep for `expand7to8`, `value8`, `value / 2u`,
+and `value * 2u` across both files returns zero hits. The MIDI CC `* 2u` in
+`MidiParser.c:319` is unrelated and untouched. Correct.
+
+**Semantic correctness of the identity mapping.** For every automatable
+descriptor parameter:
+- `DTYPE_0B127` (freq, reso, decay, vol, etc.): range 0..127 fits in 7 bits.
+  Stored = parameter value. Sequencer passes raw value to runtime writer which
+  normalizes to float via `value / 127.0f`. Identical to the normal edit path.
+- `DTYPE_PM63` (pan, fine pitch): range 0..127 (display −63..+64). Stored =
+  parameter value. `va_formatValue3` and `menu_formatAutomationValue3` both
+  display as `value − 63`. Sequencer passes raw value to runtime, which for
+  pan writes `(uint8_t)value` directly. Identical to normal path.
+- `DTYPE_MENU` (filter type, waveform, LFO wave, retrigger, sync, transient):
+  range 0..N (N ≤ 8). Stored = 0-indexed menu item. Display indexes
+  `table[value+1]`. Sequencer passes to `writeSpecialRuntime` which for
+  filter_type adds +1 to convert 0-indexed descriptor to 1-indexed DSP enum.
+  Identical to normal path.
+- `DTYPE_ON_OFF`, `DTYPE_MIX_FM`: range 0..1. Stored value = 0 or 1.
+  Previously ON (1) stored as `1/2 = 0` (catastrophic). Now stores 1.
+- `DTYPE_LFO_POLARITY`: range 0..2. Stored value = polarity enum. Previously
+  index 1 stored as 0. Now stores correctly.
+
+No automatable parameter has `DTYPE_0B255`. The `> 127` defensive clamp in
+Sites 1, 2, and 4 is unreachable for current dtypes but guards against future
+additions that might exceed the 7-bit field without the explicit expansion
+point being updated.
+
+**Verdict: all six changes match the schedule. The diff is minimal, correct,
+and complete. Hardware verification checklist items 1–11 remain pending.**
+
+### Hardware Output Validation — Post-Dtype-Fix (2026-09-18)
+
+SD_CARD_PAT_STACK_OUTPUT updated after the dtype identity-domain fix. The
+user reports pan and filter assignments now stick and sound correct. Files
+parsed: `.pat08a`, `.pat08b`, `.pat09b`, `pattrace.bin` (37,064 B, 4,633
+records), `asavetrc.bin` (628,920 B, 78,615 records).
+
+**PAT4 structural integrity.**
+
+| Check | .pat08a | .pat08b | .pat09b |
+|-------|---------|---------|---------|
+| Magic / version | PAT4 v1 | PAT4 v1 | PAT4 v1 |
+| Dynamic blocks | 11 | 11 | 0 |
+| Bitmap consistency | OK | OK | OK |
+| Block overlap | OK | OK | OK |
+| Orphaned bitmap bits | 0 | 0 | 0 |
+| Step-id verification | 11/11 | 11/11 | 0/0 |
+| Bitmap used | 51/2048 (2%) | 51/2048 (2%) | 0/0 |
+
+Both `.pat08a` and `.pat08b` hold 11 blocks with 51 logical chunks. All
+step-id fields decode correctly. Zero structural errors.
+
+**A/B snapshot agreement.**
+
+10 of 11 blocks share the same offset in both snapshots. One block moved:
+
+- **T2S2**: `.pat08a` offset 36, `.pat08b` offset 8. The relocation trace
+  shows a 623-entry chain for this block (the most active in the pool).
+  Final chain position is 36, matching `.pat08a` — `.pat08a` was captured
+  after `.pat08b`.
+
+All 11 common blocks agree on flags, auto_count, and automation entry
+contents. No logical differences between snapshots.
+
+**Automation value domain check.**
+
+With the identity-domain fix, stored automation values should equal the raw
+descriptor parameter value (no halving). Spot-checked T1S11 (18 entries):
+
+| Parameter | Target | Stored | Dtype | Domain check |
+|-----------|--------|--------|-------|-------------|
+| filter_type | 75 | 1 | MENU_FILTER (0..7) | HP; valid menu index |
+| instrument_pan | 83 | 56 | PM63 (0..127) | Display −7; valid |
+| filter_freq | 72 | 105 | 0B127 (0..127) | Valid |
+| filter_reso | 73 | 127 | 0B127 (0..127) | Max; valid |
+| filter_drive | 74 | 3 | 0B127 (0..127) | Valid |
+| osc2_mod_type | 71 | 51 | MIX_FM (0..1) | **51 > 1; see note** |
+| instrument_vol | 82 | 70 | 0B127 (0..127) | Valid |
+| amp_envelope_attack | 76 | 56 | 0B127 (0..127) | Valid |
+
+All DTYPE_0B127 and DTYPE_PM63 values are within 0..127. DTYPE_MENU
+filter_type value 1 is within the valid range 0..7.
+
+**Note on osc2_mod_type = 51:** This target (desc[6]) is `osc2_mod_type`
+with `DTYPE_MIX_FM` (range 0..1). A stored value of 51 exceeds the valid
+range. This block likely predates the dtype fix (written via the overlay with
+the old halving path where a different value was encoded). The value will
+clamp or be re-entered on next edit. Not a regression from this fix.
+
+**PatternTrace.**
+
+- 4,633 records: 3,902 TIER1_GAP + 731 TIER2_RELOC.
+- **Zero error events** (no PENDING_OVERFLOW, QUEUE_OVERFLOW, CAPACITY_DROP,
+  FRAG_DROP, or WRONG_SCENE).
+- Relocation activity spans scenes 8 and 10, consistent with the user's
+  workflow.
+
+**AutoSaveTrace.**
+
+- 78,615 records. Dominant stages: DIRTY (77,590), INSTRUMENT_MARK (364),
+  VALIDATED (113), TERMINAL (87), ADMITTED (86).
+- **Zero OPERATION_ERROR.** Zero PHASE_STALL.
+- 27 BOOT_READER summaries, all with `case2_mask=0x0000` and
+  `case3_mask=0x0000` (clean boots, no reload-needed or invalidated scenes).
+- 27 SAVE_LIFECYCLE records, 0 with FAILED flag. Kit/Scene/Bank operations
+  all completed successfully.
+- Final lifecycle: SCHEDULED → ADMITTED → VALIDATED → MASK_MERGED →
+  CAPTURED → PUBLISHED → TERMINAL. Clean save pipeline with no stalls.
+
+**Verdict: zero errors across both traces, PAT4 structural integrity
+confirmed, automation values are in the expected identity domain, and A/B
+snapshot consistency holds. No regressions from the dtype fix.**
