@@ -123,7 +123,9 @@ enum NamesEnum {
      */
     TEXT_VOICE1_MORPH, TEXT_VOICE2_MORPH, TEXT_VOICE3_MORPH,
     TEXT_VOICE4_MORPH, TEXT_VOICE5_MORPH, TEXT_VOICE6_MORPH,
-    /* Global AutoSave cell; parallel short/long enums below must append too. */
+    /* Pattern pool-use widget; parallel short/long enums below stay aligned. */
+    TEXT_PAT_STORE_USE,
+    /* Global AutoSave cell; parallel short/long enums below stay aligned. */
     TEXT_AUTOSAVE,
     NUM_NAMES
 };
@@ -161,6 +163,8 @@ enum longNamesEnum {
     /* Long names used in single-parameter PERF edit view for 1vm..6vm. */
     LONG_VOICE1_MORPH, LONG_VOICE2_MORPH, LONG_VOICE3_MORPH,
     LONG_VOICE4_MORPH, LONG_VOICE5_MORPH, LONG_VOICE6_MORPH,
+    /* Read-only Global widget title for the active Pattern pool occupancy. */
+    LONG_PAT_STORE_USE,
     /* Long label for PAR_AUTOSAVE_ENABLED's Global edit view. */
     LONG_AUTOSAVE,
 };
@@ -187,11 +191,24 @@ enum shortNamesEnum {
     /* Compact PERF labels for per-voice Morph columns. */
     SHORT_VOICE1_MORPH, SHORT_VOICE2_MORPH, SHORT_VOICE3_MORPH,
     SHORT_VOICE4_MORPH, SHORT_VOICE5_MORPH, SHORT_VOICE6_MORPH,
+    /* Read-only three-character label for Pattern pool occupancy. */
+    SHORT_PAT_STORE_USE,
     /* Three-cell Global-page label for PAR_AUTOSAVE_ENABLED. */
     SHORT_AUTOSAVE
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu
+
+/*
+ * Virtual parameter sentinel for the read-only Pattern pool-use widget.
+ *
+ * What: distinguishes the retained Pattern StoreUse cell from real
+ * ParameterArray entries. Why: Menu must format the one-shot occupancy value
+ * specially and reject encoder edits without allocating a parameter slot.
+ * Inputs/outputs: compile-time id only. Affiliates: menuPages.h, the CPU
+ * widget render/edit guards, and pat_poolUsagePercent().
+ */
+#define PAR_PAT_STORE_USE 0xFFFDu
 
 #define ARROW_SIGN '>'
 

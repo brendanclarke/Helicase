@@ -77,6 +77,7 @@
 #include "SampleMemory.h"
 #include "sequencer.h"
 #include "PatternData.h"
+#include "PatternStackService.h"
 #include "PatternTrace.h"
 #include "MidiNoteNumbers.h"
 #include "MidiMessages.h"
@@ -1406,7 +1407,7 @@ static uint8_t op_create_dir_retry = 0u;
  * avoids implicit-function warnings when the state machine calls them.
  */
 static void filesystem_initSceneStage(filesystem_scene_stage_t *stage);
-static void filesystem_commitSceneStage(void);
+static uint8_t filesystem_commitSceneStage(void);
 static void filesystem_resetSceneLoadChildDiscovery(void);
 static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot);
 static uint8_t filesystem_nameStartsWithKitSpace(const char *name);
@@ -1414,6 +1415,8 @@ static uint8_t filesystem_nameHasExtension(const char *name,
                                            const char *extension);
 static void filesystem_copyLongComponent(char *dst, uint16_t cap,
                                          const char *src);
+static uint8_t filesystem_patternServiceReady(uint16_t scene_mask);
+static void filesystem_patternServiceFinish(uint16_t scene_mask);
 static void filesystem_patternDisplayFromFilename(
     char dst[STORAGE_KIT_DISPLAY_NAME_LEN + 1u], const char *filename);
 static uint16_t filesystem_interpolateMorphEndpoint(uint16_t normal,
@@ -3713,6 +3716,9 @@ static uint32_t op_flush_stall_ticks = 0u;
 static void filesystem_finish(fs_status_t final_status)
 {
     uint8_t flush_before_complete = (uint8_t)(final_status == FS_STATUS_DONE);
+
+    /* Any terminal load/error path must release a Pattern replacement gate. */
+    filesystem_patternServiceFinish(op_scene_load_scene_mask);
 
     if (!flush_before_complete && op_library_index_rebuild_pending) {
         /*
@@ -11672,6 +11678,52 @@ static uint8_t op_scene_load_stall_last_phase = 0u;
 static uint32_t op_scene_load_stall_ticks = 0u;
 #endif
 
+/*
+ * Quiesce the Pattern stack before direct filesystem region replacement.
+ *
+ * What: ask the service to close admission and drain its queue/barriers for
+ * every selected resident Scene. Why: the asynchronous Pattern loader writes
+ * address, bitmap, and pool sections directly through pat_sceneRegionMut();
+ * those writes must not overlap a service relocation or raw pool mutation.
+ * Inputs: the loader's selected-Scene bit mask. Output: nonzero only when all
+ * selected replacements are safe to begin. Affiliate: patSvc_tick().
+ */
+static uint8_t filesystem_patternServiceReady(uint16_t scene_mask)
+{
+    uint8_t scene_index;
+
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((scene_mask & (uint16_t)(1u << scene_index)) != 0u &&
+            !patSvc_prepareSceneReplace(scene_index))
+            return 0u;
+    }
+    return 1u;
+}
+
+/*
+ * Reopen the Pattern service after a complete or failed direct replacement.
+ *
+ * What: hand each selected Scene back to PatternStackService so the active
+ * service target can recount its new bitmap and resume maintenance. Why: a
+ * filesystem operation may finish after CRC/error cleanup, and leaving the
+ * admission gate closed would strand foreground edits permanently. Inputs:
+ * the same selected-Scene mask used at preparation; output: reopened service
+ * state for the service Scene. Affiliate: patSvc_finishSceneReplace().
+ */
+static void filesystem_patternServiceFinish(uint16_t scene_mask)
+{
+    uint8_t scene_index;
+
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((scene_mask & (uint16_t)(1u << scene_index)) != 0u)
+            patSvc_finishSceneReplace(scene_index);
+    }
+}
+
 static void filesystem_loadSceneDirectory_tick(void)
 {
     uint8_t line_ready;
@@ -12381,6 +12433,8 @@ static void filesystem_loadSceneDirectory_tick(void)
          * separately redesigned, non-atomic phase and is read directly into
          * final Scene SRAM below.
          */
+        if (!filesystem_patternServiceReady(op_scene_load_scene_mask))
+            return;
         filesystem_commitSceneStage();
         if (current_op == FS_INTERNAL_OP_LOAD_BANK) {
             afatfsOperationStatus_e ast;
@@ -12561,6 +12615,8 @@ static void filesystem_loadSceneDirectory_tick(void)
             op_phase = 52u;
             return;
         }
+        if (!filesystem_patternServiceReady(op_scene_load_scene_mask))
+            return;
         pat_initScene(op_pattern_scene);
         op_pattern_crc = autosave_recordCrcBegin();
         op_pattern_stored_crc = 0u;
@@ -12749,6 +12805,9 @@ static void filesystem_loadSceneDirectory_tick(void)
     }
 
     case 52: /* CLOSE v4 Pattern */
+        /* Pattern bytes are no longer being written; release the service gate
+         * before effect cleanup or the terminal Scene publication continues. */
+        filesystem_patternServiceFinish(op_scene_load_scene_mask);
         if (filesystem_bankPayloadDetailActive())
             filesystem_bootLoggingSetBankSceneDetail('P');
         op_close_done = false;
@@ -14549,6 +14608,8 @@ static void filesystem_loadPattern_tick(void)
     case 6u:
         if (!op_file_ready) return;
         if (!op_file) { op_close_status = FS_STATUS_ERROR; op_phase = 13u; return; }
+        if (!filesystem_patternServiceReady(op_scene_load_scene_mask))
+            return;
         pat_initScene(op_pattern_scene);
         op_pattern_crc = autosave_recordCrcBegin();
         op_pattern_header_size = 0u;
@@ -14629,6 +14690,7 @@ static void filesystem_loadPattern_tick(void)
         if (!afatfs_chdir(NULL)) return;
         if (op_close_status != FS_STATUS_DONE) {
             pat_initScene(op_pattern_scene);
+            filesystem_patternServiceFinish(op_scene_load_scene_mask);
             bank_invalidateSdCleanScene(op_pattern_scene);
             filesystem_finish(FS_STATUS_ERROR);
             return;
@@ -14654,6 +14716,7 @@ static void filesystem_loadPattern_tick(void)
                 bank_invalidateSdCleanScene(si);
             }
         }
+        filesystem_patternServiceFinish(op_scene_load_scene_mask);
         filesystem_startPatternHcnamesUpdate();
         return;
     default:
@@ -16056,7 +16119,7 @@ static void filesystem_initSceneStage(filesystem_scene_stage_t *stage)
     }
 }
 
-static void filesystem_commitSceneStage(void)
+static uint8_t filesystem_commitSceneStage(void)
 {
     uint8_t scene_index;
 
@@ -16096,6 +16159,7 @@ static void filesystem_commitSceneStage(void)
         if (current_op == FS_INTERNAL_OP_LOAD_SCENE)
             bank_invalidateSdCleanScene(scene_index);
     }
+    return 1u;
 }
 
 
@@ -24073,6 +24137,19 @@ static void filesystem_autosavePatternDrainSchedule_tick(void)
     if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY)
         return;
     if (seq_recordActive || seq_eraseActive)
+        return;
+
+    /*
+     * Defer Pattern AutoSave until the unified stack service is quiescent.
+     *
+     * What: prevent a snapshot while queued edits, bulk barriers, reactive
+     * compaction, or mutation-target handover still owns the live Pattern.
+     * Why: a streamed PAT4 snapshot must begin only after all accepted pool
+     * mutations have committed. Inputs: patSvc_idle(); output is a later
+     * scheduler attempt with no new filesystem state. Affiliate:
+     * PatternStackService.c.
+     */
+    if (!patSvc_idle())
         return;
 
     mask = autosave_patternDirtyMask();

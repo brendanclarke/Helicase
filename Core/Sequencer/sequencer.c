@@ -58,6 +58,7 @@
 #include "SceneData.h"
 #include "config.h"
 #include "PatternTrace.h"
+#include "PatternStackService.h"
 
 /*
  * Pattern probability uses the existing hardware RNG without new state.
@@ -106,6 +107,17 @@ uint8_t seq_running = 0;					/**< 1 if running, 0 if stopped*/
 
 uint8_t seq_activePattern = 0;				/**< the currently playing pattern*/
 uint8_t seq_pendingPattern = 0;				/**< next pattern to play*/
+
+/*
+ * Current per-track Pattern assignment stub.
+ *
+ * What: one resident Scene byte per track, currently all equal to the active
+ * Pattern. Why: the stack service's single mutation target remains explicit
+ * while a future sequencer revision may assign tracks independently. Inputs:
+ * initialization and active-pattern changes. Output: playback-facing state;
+ * no independent assignment behavior exists in S067. RAM: +7 bytes SRAM1.
+ */
+uint8_t seq_perTrackPattern[NUM_TRACKS];
 
 uint8_t seq_recordActive = 0;				/**< set to 1 to activate the reording mode*/
 
@@ -188,6 +200,9 @@ void seq_init()
 {
 	memset(seq_stepIndex,0,sizeof(seq_stepIndex));
 	memset(seq_lastMasterStep,0,NUM_TRACKS);
+	/* Keep the future per-track map aligned with the one active Scene. */
+	for (uint8_t track = 0u; track < NUM_TRACKS; track++)
+		seq_perTrackPattern[track] = seq_activePattern;
 	seq_pending_automation_count = 0u;
 	seq_pending_automation_drain = 0u;
 	seq_clearAutomationDirty();
@@ -375,6 +390,9 @@ void seq_selectActivePattern(uint8_t pattern)
 
 	seq_activePattern = pattern;
 	seq_pendingPattern = pattern;
+	/* S067 has one playback Scene, so every track follows the new target. */
+	for (uint8_t track = 0u; track < NUM_TRACKS; track++)
+		seq_perTrackPattern[track] = pattern;
 	seq_loadPendigFlag = 0u;
 	seq_newPatternAvailable = 0u;
 	seq_realignActivePatternToMasterClock();
@@ -413,6 +431,9 @@ void seq_alignActivePatternToScene(uint8_t scene_index)
 
 	seq_activePattern = scene_index;
 	seq_pendingPattern = scene_index;
+	/* Keep the future per-track assignment stub aligned during boot restore. */
+	for (uint8_t track = 0u; track < NUM_TRACKS; track++)
+		seq_perTrackPattern[track] = scene_index;
 	seq_loadPendigFlag = 0u;
 	seq_newPatternAvailable = 0u;
 	seq_realignActivePatternToMasterClock();
@@ -516,9 +537,15 @@ static void seq_advanceTrackStep(uint8_t track)
 	if (!(seq_mutedTracks & (1u << track))) {
 		if (pat_isStepActive(track, (uint8_t)seq_stepIndex[track], seq_activePattern)) {
 			if (seq_eraseActive && track == menu_getActiveVoice()) {
-				pat_eraseStep(seq_activePattern,
-				              menu_getActiveVoice(),
-				              (uint8_t)seq_stepIndex[track]);
+				/*
+				 * Live erase clears only the static trigger in TIM3. Pool
+				 * reclamation is a foreground PatternStackService event so this
+				 * ISR never mutates pool bytes or bitmap state.
+				 */
+				pat_setStepActive(seq_activePattern, track,
+				                  (uint8_t)seq_stepIndex[track], 0u);
+				patSvc_enqueueErase(seq_activePattern, track,
+				                    (uint8_t)seq_stepIndex[track]);
 			} else {
 				pat_step_specials_t sp = pat_readStepSpecials(
 				    seq_activePattern, track,
@@ -679,6 +706,9 @@ static uint8_t seq_handleMasterBoundary(void)
 			seq_loadPendigFlag = 0u;
 			seq_newPatternAvailable = 0u;
 			seq_activePattern = seq_pendingPattern;
+			/* The S067 stub follows the instant master-boundary switch. */
+			for (uint8_t track = 0u; track < NUM_TRACKS; track++)
+				seq_perTrackPattern[track] = seq_activePattern;
 			seq_setStepIndexToStart();
 			seq_resetStepScheduler();
 			led_notifyPatternChanged(seq_activePattern);

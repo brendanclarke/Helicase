@@ -17,7 +17,8 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 066 complete on branch `dev-ph4-pattern`.
+**Current working source**: Session 067 Pattern Stack Service implementation
+compiled on branch `dev-ph4-pattern`; hardware validation remains pending.
 Session 066 implemented the VOICE-page held-step automation overlay (Method 2)
 from `S065_DYN_PAT_VOICE_PARAM_UX.md`: overlay activation via configurable
 short long-press, four-slot bounded CGRAM underline cache, held-value resolution
@@ -29,9 +30,9 @@ nibble split, diff-based CGRAM transactions with retry bit). Hardware-tested.
 64 B new static SRAM (44 B overlay state + 20 B buttonHandler). Build:
 `text=439,396`, `data=412`, `bss=290,852`.
 
-**Next feature step**: Session 067 — Pattern dynamic stack defragmentation
-service agent and settings-menu pool usage monitor. See
-`S067_DYN_PAT_STACK_SERVICE.md`. Phase 4.5 copy operations (`pat_copyTrack`,
+**Next feature step**: Session 067 hardware stress validation for Pattern
+stack queueing, playback-safe relocation, filesystem replacement handover, and
+pool widget behavior. Phase 4.5 copy operations (`pat_copyTrack`,
 `pat_copyPattern`, `pat_copyBar`) with independent pool-block duplication
 remain deferred. Permanent Session 066 authority is
 `knowledge_files/log_archive/066_SESSION_HANDOFF_LOG.md`,

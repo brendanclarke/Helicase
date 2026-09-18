@@ -149,6 +149,30 @@ void pat_toggleStep(uint8_t track, uint8_t step, uint8_t scene_index);
 void pat_setStepActive(uint8_t scene_index, uint8_t track, uint8_t step,
                        uint8_t on);
 void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step);
+
+/*
+ * Service-only dynamic detach that preserves the current trigger bit.
+ *
+ * What: atomically replace one dynamic address with its sentinel while
+ * retaining bit 15, then reclaim the captured pool block. Why: deferred live
+ * erase and clear-track barriers must remove pool content without erasing a
+ * trigger bit that was set after the barrier was requested. Inputs are valid
+ * Scene/track/step coordinates; invalid or trigger-only entries are harmless.
+ * Affiliate: PatternStackService.c's DELETE_DYNAMIC and CLEAR_TRACK events.
+ */
+void pat_releaseStepDynamic(uint8_t scene_index, uint8_t track,
+                            uint8_t step);
+
+/*
+ * Mark a service-owned relocation as a resident Pattern mutation.
+ *
+ * What: expose the established Pattern dirty boundary without exposing the
+ * allocator or its bitmap helpers. Why: Tier 1/2 relocation changes live pool
+ * offsets and must be included in card-clean and Pattern AutoSave ownership.
+ * Inputs: resident Scene index. Output: the existing dirty registers are
+ * invalidated. Affiliate: PatternStackService.c relocation executor.
+ */
+void pat_markPoolMutationDirty(uint8_t scene_index);
 uint8_t pat_sceneHasActiveSteps(uint8_t scene_index);
 
 /*
@@ -219,11 +243,13 @@ void pat_setTrackShuffle(uint8_t scene_index, uint8_t track, uint8_t value);
  * What: count, decode, add/update, remove, and track-wide-remove automation
  * entries for one resident step. Why: the STEP automation page and the
  * Sequencer use one owner for validation, uniqueness, pool allocation, and
- * dirty-state publication. Inputs: valid Scene/track/step coordinates,
- * canonical target IDs, and 7-bit values. Outputs: bounded entry/removal
- * counts or nonzero success; invalid targets and exhausted storage leave the
- * Pattern unchanged.
- * Affiliates: InstrumentManager, menu.c, and sequencer.c.
+ * dirty-state publication. The pat_* mutation entrypoints below are raw
+ * service-exclusive workers; application callers use PatternStackService.h so
+ * queued work and maintenance share this owner. Inputs: valid Scene/track/
+ * step coordinates, canonical target IDs, and 7-bit values. Outputs: bounded
+ * entry/removal counts or nonzero success; invalid targets and exhausted
+ * storage leave the Pattern unchanged. Affiliates: InstrumentManager,
+ * PatternStackService.c, menu.c, and sequencer.c.
  */
 uint8_t pat_stepAutomationCount(uint8_t scene_index, uint8_t track,
                                 uint8_t step);
@@ -239,9 +265,21 @@ uint8_t pat_removeTrackAutomationByTarget(uint8_t scene_index, uint8_t track,
 void pat_setPatternChangeBar(uint8_t scene_index, uint8_t value);
 void pat_setPatternNext(uint8_t scene_index, uint8_t value);
 void pat_applyStepToMenu(uint8_t scene_index, uint8_t track, uint8_t step);
-void pat_setStepProbability(uint8_t scene_index, uint8_t track, uint8_t step, uint8_t value);
-void pat_setStepNote(uint8_t scene_index, uint8_t track, uint8_t step, uint8_t value);
-void pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step, uint8_t value);
+/*
+ * Raw service-exclusive special setters.
+ *
+ * What: retain the other special values and replace the complete dynamic
+ * block. Why: S067 removed unsafe same-size in-place rewrites, so callers
+ * need a failure result when a disjoint replacement cannot fit. Inputs are
+ * resident coordinates and one 7-bit value; output is nonzero on commit.
+ * PatternStackService.h supplies the application-facing queue boundary.
+ */
+uint8_t pat_setStepProbability(uint8_t scene_index, uint8_t track,
+                               uint8_t step, uint8_t value);
+uint8_t pat_setStepNote(uint8_t scene_index, uint8_t track, uint8_t step,
+                        uint8_t value);
+uint8_t pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step,
+                          uint8_t value);
 
 /*
  * Pattern AutoSave snapshot operations.
@@ -254,5 +292,17 @@ void pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step, uint8_t
  */
 void pat_snapshotScene(uint8_t scene_index);
 const pat_scene_region_t *pat_autosaveSnapshot(void);
+
+/*
+ * Compute one resident Scene's dynamic-pool occupancy for the Global widget.
+ *
+ * What: count the set bits in the backed PAT_STACK_SIZE-byte bitmap prefix
+ * and return a saturated 0..99 percentage. Why: Menu needs one alignment-safe
+ * pool-use sample without knowing PatternData's bitmap geometry. Inputs are a
+ * resident Scene index; invalid indices return zero. Affiliates:
+ * PatternStackService.c's pool accounting and menu.c's compute-on-entry
+ * StoreUse widget.
+ */
+uint8_t pat_poolUsagePercent(uint8_t scene_index);
 
 #endif /* PATTERNDATA_H_ */

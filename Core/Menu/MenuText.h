@@ -139,6 +139,8 @@ static const char shortNames[][4] = {
     {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},{"sca"},
     /* PERF per-voice Morph compact labels: voice number + "vm". */
     {"1vm"},{"2vm"},{"3vm"},{"4vm"},{"5vm"},{"6vm"},
+    /* Read-only Pattern pool-use widget label. */
+    {"pts"},
     /* Requested short label for the persistent Global AutoSave switch. */
     {"ats"},
 };
@@ -170,6 +172,8 @@ static const char longNames[][16] = {
     {"CPU use time"},{"OscIntrp"},{"Scale"},
     /* Single-parameter long names for PERF per-voice Morph controls. */
     {"1 Morph"},{"2 Morph"},{"3 Morph"},{"4 Morph"},{"5 Morph"},{"6 Morph"},
+    /* Read-only Pattern pool-use widget title; fits the 15-visible-char field. */
+    {"PtrnStoreUse"},
     /* Requested long label; valueNames assigns it to category Global. */
     {"AutoSave"},
 };

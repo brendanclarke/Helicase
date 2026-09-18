@@ -37,6 +37,7 @@
 
 #include "EuklidGenerator.h"
 #include "PatternData.h"
+#include "PatternStackService.h"
 
 static uint8_t euklid_length[NUM_TRACKS];
 static uint8_t euklid_steps[NUM_TRACKS];
@@ -280,7 +281,9 @@ void euklid_transferPattern(uint8_t trackNr, uint8_t patternNr)
 		steps = len;
 	rotation = (uint8_t)(euklid_rotation[trackNr] % len);
 
-	pat_clearTrack(patternNr, trackNr);
+	/* Clear pool ownership through the service; trigger generation remains
+	 * immediate and is preserved by the later barrier drain. */
+	patSvc_clearTrack(patternNr, trackNr);
 
 	for (i = 0; i < len; i++) {
 		uint8_t dst;

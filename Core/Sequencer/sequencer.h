@@ -38,6 +38,18 @@ extern uint8_t seq_resetBarOnPatternChange;
 extern uint8_t seq_recordActive;
 extern uint8_t seq_eraseActive;
 
+/*
+ * Per-track Pattern assignment stub for the unified stack service.
+ *
+ * What: seven resident Scene indices, one per sequencer track. Why: S067
+ * keeps every track assigned to seq_activePattern, but the array establishes
+ * the future per-track playback data path without adding a second mutation
+ * target today. Inputs: seq_init(), seq_selectActivePattern(), and the
+ * master-boundary switch. Output: all entries mirror the active Scene.
+ * RAM: +7 bytes SRAM1. Affiliate: future per-track Pattern assignment.
+ */
+extern uint8_t seq_perTrackPattern[NUM_TRACKS];
+
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note);
 /*
  * Stopped-transport voice preview.

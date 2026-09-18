@@ -58,6 +58,7 @@
 #include "triggerJacks.h"
 #include "sequencer.h"
 #include "sequencerTimer.h"
+#include "PatternStackService.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
 
@@ -1177,6 +1178,19 @@ boot_filesystem_done:
         filesystem_bootLoggingEnd();
     }
 
+
+    /*
+     * Initialize the unified Pattern stack service after boot loading.
+     *
+     * What: bind service_scene to the final seq_activePattern and recount its
+     * live bitmap before runtime foreground ticks begin. Why: boot Scene/Bank
+     * loading may replace every resident Pattern region, so initialization
+     * must follow that complete filesystem ladder. Inputs: initialized
+     * PatternData regions and Sequencer's active Scene. Output: an open,
+     * empty service ready for menu/TIM3 admissions. Affiliate:
+     * PatternStackService.c.
+     */
+    patSvc_init();
 
     /* Initialise audio path: PLLI2S, GPIO, DMA circular streams, I2S.
     ** AFTER all blocking SD operations. From this point forward, SD

@@ -1331,4 +1331,80 @@ Approved ceiling: +300 bytes SRAM1.
 | `Core/Hardware/timebase.c` | ADD 1 call | G2 |
 | `Core/Hardware/SD/filesystem.c` | ADD 1 guard | G2 |
 | `main.c` | ADD init call | G2 |
+
+---
+
+## Session 067 implementation notes
+
+### 2026-09-18 — Part B and Gates 1–8 landed
+
+- Added `pat_poolUsagePercent()` with packed-bitmap-safe `memcpy`/popcount
+  accounting and the retained Global `pts`/Pattern StoreUse widget. The value
+  is sampled only when entering the Global page; it is not recomputed during
+  the session.
+- Corrected dynamic-block publication ordering in `PatternData.c`: clear and
+  erase paths detach the address before freeing bytes; replacement paths write
+  the new block, atomically publish the latest trigger plus offset, then free
+  the old run. Same-size whole-block rewrites no longer happen in place.
+- Added the narrow PatternData service hooks needed by the separate service
+  translation unit: relocation dirty marking and trigger-preserving dynamic
+  detach/free. This preserves PatternData ownership of block geometry and
+  dirty registers without exposing allocator helpers.
+- Added `PatternStackService.c/.h` with a 64-entry PRIMASK-protected FIFO,
+  direct-when-idle/queued-when-busy admission, live-erase handoff, bounded
+  clear/target-removal barriers, target handover, logical occupancy recount,
+  Tier 1 trailing-gap relocation, and paced reactive/background Tier 2 moves.
+- Routed Menu, copy/clear, and Euclidean pool mutations through `patSvc_*`;
+  static trigger-bit operations remain direct as required by the plan. TIM3
+  now clears the trigger immediately and only publishes deferred reclamation.
+- Added S067 trace stage codes, service cadence, AutoSave idle gating, boot
+  initialization after the boot filesystem ladder, per-track assignment stub,
+  and Makefile/config integration.
+
+### Source-grounded implementation decisions
+
+- The existing PatternData pool helpers are file-local, so the service calls
+  the now service-exclusive raw `pat_*` mutation entrypoints rather than
+  duplicating their block serialization. The service remains the only caller
+  outside PatternData; all application callers use `patSvc_*`.
+- The legacy shrink-in-place fallback was removed along with same-size
+  rewrite-in-place. A removal can compact automation bytes, so rewriting the
+  old live block after allocation failure would violate the playback safety
+  invariant; reactive compaction retries the unchanged operation instead.
+- Relocation dirty marking is exposed as a one-function PatternData boundary,
+  not by exporting bitmap/allocator internals. The service only owns the
+  relocation transaction and its queue/maintenance policy.
+
+### Verification status
+
+- Source edits are complete through the planned service integration. Hardware
+  stress tests remain pending.
+
+### 2026-09-18 — Safety hardening and final build verification
+
+- Corrected the Gate-6 append verifier so it checks the existing automation
+  entries from the first entry byte, then writes the appended value before
+  publishing the new count. The append path now remains disjoint from any
+  live rewrite of previously published bytes.
+- Reactive compaction now permits any validated lower relocation to coalesce
+  fragmented free space; it no longer skips smaller blocks that can still
+  create the run required by the blocked queue head.
+- Added the filesystem replacement boundary required by the detail plan:
+  asynchronous Pattern loads close service admission before direct resident
+  address/bitmap/pool writes, wait for queued work to drain, and reconcile the
+  bitmap/cursors before reopening. Boot-time replacement remains before
+  `patSvc_init()` as required.
+- Changed queued track/pattern clears to admit the barrier before clearing
+  static triggers. A full FIFO therefore leaves the existing trigger and pool
+  ownership intact instead of creating an orphaned dynamic block.
+- `make -j2` completed and linked `build/lxr02.elf`: `text=447,644`,
+  `data=412`, `bss=291,140`. Compared with the S066 baseline in MEMORY.md,
+  this is `+8,248` text bytes, `0` data bytes, and `+288` SRAM bytes; the
+  SRAM delta is within the approved +300-byte ceiling. `git diff --check`
+  is clean.
+- Build warnings are limited to the existing packed-member warning in
+  `PatternData.c`, the corresponding packed address-member warning in the new
+  relocation helper, existing unused filesystem helpers, standard `nosys`
+  syscall stubs, and the known LTO serial-compilation note. No hardware
+  playback/SD stress test was available in this workspace.
 | `Makefile` | ADD 1 source | G2 |

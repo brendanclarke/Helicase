@@ -45,6 +45,7 @@
 #include "SampleMemory.h"
 #include "sequencer.h"
 #include "PatternData.h"
+#include "PatternStackService.h"
 #include "SceneData.h"
 #include "BankData.h"
 #include "SceneModTargets.h"
@@ -1123,6 +1124,8 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_VOICE4_MORPH,CAT_VOICE,LONG_VOICE4_MORPH},
     {SHORT_VOICE5_MORPH,CAT_VOICE,LONG_VOICE5_MORPH},
     {SHORT_VOICE6_MORPH,CAT_VOICE,LONG_VOICE6_MORPH},
+    /* Read-only active-Scene Pattern pool occupancy widget. */
+    {SHORT_PAT_STORE_USE,CAT_PATTERN,LONG_PAT_STORE_USE},
     /* Requested `ats` / Global / `AutoSave` metadata triplet. */
     {SHORT_AUTOSAVE,CAT_GLOBAL,LONG_AUTOSAVE},
 };
@@ -1179,7 +1182,7 @@ static uint8_t menu_stepAutoNumberLocked = 0u;
  * ticks, and successful Pattern writes. Outputs are display marker bytes,
  * CGRAM definitions, step LEDs, and Pattern pool mutations.
  * Affiliates: buttonHandler_seqHeldMask(), buttonHandler_visibleStep(),
- * pat_readStepAutomations(), pat_writeStepAutomation(), lcd_underlineGlyph(),
+ * pat_readStepAutomations(), patSvc_writeStepAutomation(), lcd_underlineGlyph(),
  * led_updateAutomationStepView(), and time_sysTick.
  * Budget: 20 B held + 12 B search + 5 B CGRAM + 3 B debounce + 4 B working.
  * Approved on 2026-09-15 (40 B) and extended +4 B for working values.
@@ -1397,6 +1400,17 @@ static uint16_t menu_cpuUseSampleSum = 0;
 static uint8_t  menu_cpuUseAvgPercent = 0;
 static uint16_t menu_cpuUseLastRefresh = 0;
 
+/*
+ * Retained active-Scene Pattern pool-use percentage for the Global widget.
+ *
+ * What: one byte holding the compute-on-entry 0..99 occupancy result. Why:
+ * the Global page does not edit Pattern data, so repainting can use this
+ * stable snapshot without repeating a packed-bitmap scan. Lifetime: the
+ * current Global-page session. RAM owner: Menu, +1 byte SRAM1. Affiliates:
+ * pat_poolUsagePercent(), menu_repaintGeneric(), and the read-only guards.
+ */
+static uint8_t menu_patStoreUsePercent = 0u;
+
 static volatile struct {
     /* Four bits are required now that Pattern is a numbered root type before GLO. */
     unsigned what  :4;
@@ -1547,6 +1561,11 @@ static void menu_endlessPotMappingChanged(void);
 static uint8_t menu_cpuUseWidgetVisible(void);
 static void menu_formatCpuUsePercent3(char *buf);
 static void menu_formatCpuUsePercent4(char *buf);
+/* Pattern StoreUse has the same repaint entry points as CPU, but no sampler. */
+static uint8_t menu_patStoreUseWidgetVisible(void);
+static void menu_formatPatStoreUsePercent3(char *buf);
+static void menu_formatPatStoreUsePercent4(char *buf);
+static void menu_displayPatStoreUseEdit(void);
 static void menu_formatPresetNumber3(char *dst, uint16_t zero_based_slot);
 static void menu_sendEditedParameter(uint16_t paramNr, uint8_t value);
 static void setNoteName(uint8_t num, char *buf);
@@ -2321,7 +2340,7 @@ static void va_underlineService(void)
  * produces a visible display change, matching the normal edit path's feel.
  * Inputs: visible column and signed adjustment. Outputs: Pattern pool writes,
  * working-value cache update, search result bit, and coalesced repaint.
- * Affiliates: pat_writeStepAutomation(), va_resolveHeldValue(),
+ * Affiliates: patSvc_writeStepAutomation(), va_resolveHeldValue(),
  * menu_clampCellValue(), and Menu's ordinary display pipeline.
  */
 static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
@@ -2367,7 +2386,7 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
     /* Convert to 7-bit for Pattern storage only. */
     stored7 = (value >= 255u) ? 127u : (uint8_t)(value / 2u);
     for (i = 0u; i < va_heldCount; i++) {
-        if (pat_writeStepAutomation(
+        if (patSvc_writeStepAutomation(
                 menu_shownPattern, menu_activeVoice,
                 buttonHandler_visibleStep(va_heldOrder[i]), target, stored7))
             wrote = 1u;
@@ -6752,6 +6771,41 @@ static void menu_formatCpuUsePercent4(char *buf)
     buf[3] = '%';
 }
 
+/*
+ * Format the retained Pattern StoreUse value for a compact row cell.
+ *
+ * What: produce the same right-justified three-character field as the CPU
+ * widget, saturated at 99 because the Global cell has two visible digits.
+ * Inputs: menu_patStoreUsePercent captured on Global entry. Output: three
+ * characters in the caller's value buffer. Affiliate: menu_repaintGeneric().
+ */
+static void menu_formatPatStoreUsePercent3(char *buf)
+{
+    uint8_t pct = menu_patStoreUsePercent;
+
+    if (pct > 99u)
+        pct = 99u;
+    numtostrpu(buf, pct, ' ');
+}
+
+/*
+ * Format the retained Pattern StoreUse value for the click-in view.
+ *
+ * What: append a percent sign to the three-character right-justified value.
+ * Inputs: the same one-byte Global-page snapshot as the row formatter. Output:
+ * four characters in the edit display buffer. Affiliate:
+ * menu_displayPatStoreUseEdit().
+ */
+static void menu_formatPatStoreUsePercent4(char *buf)
+{
+    uint8_t pct = menu_patStoreUsePercent;
+
+    if (pct > 99u)
+        pct = 99u;
+    numtostrpu(buf, pct, ' ');
+    buf[3] = '%';
+}
+
 static void setNoteName(uint8_t num, char *buf)
 {
     uint8_t n = num % 12;
@@ -6909,6 +6963,28 @@ static void menu_displayCpuUseEdit(void)
     for (i = 0; i < sizeof(title) - 1u && i < 16u; i++)
         editDisplayBuffer[0][i] = title[i];
     menu_formatCpuUsePercent4(&editDisplayBuffer[1][12]);
+}
+
+/*
+ * Render the read-only Pattern StoreUse click-in view.
+ *
+ * What: show the descriptive Pattern title and the retained occupancy value
+ * with a percent suffix. Why: the virtual cell has no ParameterArray value or
+ * editable range, so it needs a dedicated display path parallel to CPU use.
+ * Inputs: menu_patStoreUsePercent. Output: both LCD edit rows are formatted;
+ * no runtime state is mutated. Affiliates: PAR_PAT_STORE_USE and
+ * menu_repaintGeneric().
+ */
+static void menu_displayPatStoreUseEdit(void)
+{
+    static const char title[] = "Pattern StoreUse";
+    uint8_t i;
+
+    memset(&editDisplayBuffer[0][0], ' ', 16u);
+    memset(&editDisplayBuffer[1][0], ' ', 16u);
+    for (i = 0u; i < sizeof(title) - 1u && i < 16u; i++)
+        editDisplayBuffer[0][i] = title[i];
+    menu_formatPatStoreUsePercent4(&editDisplayBuffer[1][12]);
 }
 
 /* -----------------------------------------------------------------------
@@ -7912,16 +7988,16 @@ static uint8_t menu_stepAutomationReplaceTarget(
     if (old_target == new_target)
         return 0u;
     if (count < PAT_BLOCK_AUTO_COUNT_MASK) {
-        if (!pat_writeStepAutomation(scene, track, step, new_target, value))
+        if (!patSvc_writeStepAutomation(scene, track, step, new_target, value))
             return 0u;
-        (void)pat_removeStepAutomation(scene, track, step, old_target);
+        (void)patSvc_removeStepAutomation(scene, track, step, old_target);
         return 1u;
     }
-    if (!pat_removeStepAutomation(scene, track, step, old_target))
+    if (!patSvc_removeStepAutomation(scene, track, step, old_target))
         return 0u;
-    if (pat_writeStepAutomation(scene, track, step, new_target, value))
+    if (patSvc_writeStepAutomation(scene, track, step, new_target, value))
         return 1u;
-    (void)pat_writeStepAutomation(scene, track, step, old_target, value);
+    (void)patSvc_writeStepAutomation(scene, track, step, old_target, value);
     return 0u;
 }
 
@@ -7970,7 +8046,7 @@ static uint8_t menu_stepAutomationAddDefault(void)
         value = instrument->parameter_images.instrument_parameters[local];
         value = (uint8_t)(value >= 255u ? 127u : (value / 2u));
     }
-    return pat_writeStepAutomation(scene, track,
+    return patSvc_writeStepAutomation(scene, track,
                                    parameter_values[PAR_ACTIVE_STEP], target,
                                    value);
 }
@@ -8105,7 +8181,7 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
             next = (int16_t)max_val;
         if ((uint8_t)next == autos[page].value)
             return 0u;
-        return pat_writeStepAutomation(scene, track, step, vt, (uint8_t)next);
+        return patSvc_writeStepAutomation(scene, track, step, vt, (uint8_t)next);
     }
     return 0u;
 }
@@ -8158,12 +8234,12 @@ static uint8_t menu_stepAutomationExecuteItem0(void)
         menu_stepAutoCursor = 0u;
         menu_stepAutoNumberLocked = 0u;
     } else if (menu_stepAutoDeleteMode) {
-        (void)pat_removeTrackAutomationByTarget(scene, track, autos[page].target);
+        (void)patSvc_removeTrackAutomationByTarget(scene, track, autos[page].target);
         /* S066: a target deletion can change the Pattern-wide name marker. */
         if (menu_isVoicePage(menu_activePage))
             va_searchRestart();
     } else {
-        (void)pat_removeStepAutomation(scene, track, step, autos[page].target);
+        (void)patSvc_removeStepAutomation(scene, track, step, autos[page].target);
         /* S066: a target deletion can change the Pattern-wide name marker. */
         if (menu_isVoicePage(menu_activePage))
             va_searchRestart();
@@ -8397,6 +8473,11 @@ static void menu_repaintGeneric(void)
             menu_displayCpuUseEdit();
             return;
         }
+        if (cell.kind == MENU_CELL_STATIC &&
+            cell.static_param == PAR_PAT_STORE_USE) {
+            menu_displayPatStoreUseEdit();
+            return;
+        }
 
         curParmVal = menu_cellDisplayValue(&cell);
         dtype = (uint8_t)(menu_cellDtype(&cell) & 0x0f);
@@ -8581,6 +8662,9 @@ static void menu_repaintGeneric(void)
             } else if (cell.kind == MENU_CELL_STATIC &&
                        cell.static_param == PAR_RUNTIME_CPU_USE) {
                 menu_formatCpuUsePercent3(valueAsText);
+            } else if (cell.kind == MENU_CELL_STATIC &&
+                       cell.static_param == PAR_PAT_STORE_USE) {
+                menu_formatPatStoreUsePercent3(valueAsText);
             } else {
                 menu_formatCellValue3(&cell, valueAsText);
             }
@@ -8647,7 +8731,8 @@ static void menu_encoderChangeParameter(int8_t inc)
     if (menu_cellIsEmpty(&cell))
         return;
     if (cell.kind == MENU_CELL_STATIC &&
-        cell.static_param == PAR_RUNTIME_CPU_USE)
+        (cell.static_param == PAR_RUNTIME_CPU_USE ||
+         cell.static_param == PAR_PAT_STORE_USE))
         return;
 
     value = menu_cellDisplayValue(&cell);
@@ -9740,7 +9825,8 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 
     if (menu_cellIsEmpty(&cell)) return;
     if (cell.kind == MENU_CELL_STATIC &&
-        cell.static_param == PAR_RUNTIME_CPU_USE) return;
+        (cell.static_param == PAR_RUNTIME_CPU_USE ||
+         cell.static_param == PAR_PAT_STORE_USE)) return;
 
     value = menu_cellDisplayValue(&cell);
     if (menu_cellIsLfoTargetVoice(&cell)) {
@@ -9814,6 +9900,30 @@ static uint8_t menu_cpuUseWidgetVisible(void)
     return (uint8_t)(activePage == 1u && activeParameter >= 4u);
 }
 
+/*
+ * Report whether the Pattern StoreUse cell is the visible Global widget.
+ *
+ * What: mirror the CPU visibility predicate for the new virtual cell while
+ * keeping the retained Pattern percentage out of the periodic CPU sampler.
+ * Inputs: active Global page/cursor and menu cell resolution. Output: nonzero
+ * when repainting the retained value is useful. Affiliates:
+ * menu_serviceRuntimeWidgets(), PAR_PAT_STORE_USE, and menu_repaintGeneric().
+ */
+static uint8_t menu_patStoreUseWidgetVisible(void)
+{
+    uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    uint8_t activeParameter = menuIndex & MASK_PARAMETER;
+
+    if (menu_activePage != MENU_MIDI_PAGE)
+        return 0u;
+    if (editModeActive) {
+        menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
+        return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
+                         cell.static_param == PAR_PAT_STORE_USE);
+    }
+    return (uint8_t)(activePage == 1u && activeParameter >= 7u);
+}
+
 void menu_serviceRuntimeWidgets(void)
 {
     uint16_t now = time_sysTick;
@@ -9865,7 +9975,10 @@ void menu_serviceRuntimeWidgets(void)
         menu_cpuUseAvgPercent = (uint8_t)((menu_cpuUseSampleSum + (menu_cpuUseSampleCount / 2u)) /
                                           menu_cpuUseSampleCount);
 
-    if (!screensaver_isActive() && menu_cpuUseWidgetVisible())
+    /* A CPU cadence also provides a cheap repaint opportunity for the
+     * retained Pattern value; no Pattern bitmap rescan occurs here. */
+    if (!screensaver_isActive() &&
+        (menu_cpuUseWidgetVisible() || menu_patStoreUseWidgetVisible()))
         menu_repaint();
 }
 
@@ -10953,6 +11066,19 @@ void menu_switchPage(uint8_t pageNr)
             ** was on voice AEG (sub-page 2) shows a non-existent page.
             ** Reset menuIndex so we always enter globals at sub-page 0. */
             menuIndex = 0;
+
+            /*
+             * Snapshot Pattern pool occupancy once on Global entry.
+             *
+             * What: retain the active Scene's backed bitmap usage for this
+             * settings session. Why: Global access is a diagnostic read-only
+             * surface; a single bounded scan avoids periodic Pattern work and
+             * keeps the displayed value stable while the page is open. Inputs:
+             * seq_activePattern and PatternData's resident bitmap. Output:
+             * menu_patStoreUsePercent is 0..99. Affiliate: pat_poolUsagePercent().
+             */
+            menu_patStoreUsePercent =
+                pat_poolUsagePercent(seq_activePattern);
         }
         break; }
 
@@ -11495,7 +11621,7 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
          * Step probability mutates the selected Pattern step for the active
          * voice/viewed pattern.
          */
-        pat_setStepProbability(menu_getViewedPattern(), menu_getActiveVoice(),
+        patSvc_setStepProbability(menu_getViewedPattern(), menu_getActiveVoice(),
                                parameter_values[PAR_ACTIVE_STEP], value);
         break;
 
@@ -11504,7 +11630,7 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
          * Step note mutates the selected Pattern step. PatternData validates
          * pattern/track/step coordinates and owns the stored note value.
          */
-        pat_setStepNote(menu_getViewedPattern(), menu_getActiveVoice(),
+        patSvc_setStepNote(menu_getViewedPattern(), menu_getActiveVoice(),
                         parameter_values[PAR_ACTIVE_STEP], value);
         break;
 
@@ -11513,7 +11639,7 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
          * Step volume/velocity mutates the selected Pattern step. This direct
          * call replaces the old sequencer-step opcode.
          */
-        pat_setStepVolume(menu_getViewedPattern(), menu_getActiveVoice(),
+        patSvc_setStepVolume(menu_getViewedPattern(), menu_getActiveVoice(),
                           parameter_values[PAR_ACTIVE_STEP], value);
         break;
 

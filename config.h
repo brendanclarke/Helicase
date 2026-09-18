@@ -254,6 +254,21 @@
 #define PAT_DEFAULT_NOTE          63u
 #define PAT_DEFAULT_VELOCITY     100u
 
+/*
+ * Pattern stack service maintenance policy.
+ *
+ * What: gap reduction selects one trailing free chunk at or above sixty
+ * percent logical occupancy; Tier 2 scans sixteen address entries per 500 Hz
+ * pass and waits at least 100 ms between background passes. Why: foreground
+ * edits and playback retain priority while fragmented free space is repaired
+ * cooperatively. Inputs: compile-time service policy. Outputs: bounded
+ * PatternStackService.c Tier 1/Tier 2 work. Affiliates: patSvc_tick().
+ */
+#define PAT_GAP_REDUCE_THRESHOLD   60u
+#define PAT_COMPACT_INTERVAL_MS   100u
+#define PAT_COMPACT_SCAN_PER_TICK  16u
+#define PAT_COMPACT_FREE_RUN_THRESHOLD 8u
+
 
 #define EG_SPEED 	1;//0.04125f
 #define PITCH_AMOUNT_FACTOR 32

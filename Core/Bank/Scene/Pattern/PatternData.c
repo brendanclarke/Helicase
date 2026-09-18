@@ -77,6 +77,23 @@ static void pat_markSceneDirty(uint8_t scene_index)
 }
 
 /*
+ * Mark a service-owned relocation through PatternData's established dirty
+ * boundary.
+ *
+ * What: keep card-clean invalidation and Pattern AutoSave ownership in this
+ * module while allowing PatternStackService.c to publish a completed pool
+ * relocation. Why: the service may mutate address offsets/bitmap runs, but it
+ * must not duplicate the two existing dirty-register calls. Inputs: a
+ * resident Scene index; invalid indices are ignored. Affiliate: the Tier 1/2
+ * relocation executor.
+ */
+void pat_markPoolMutationDirty(uint8_t scene_index)
+{
+    if (scene_indexValid(scene_index))
+        pat_markSceneDirty(scene_index);
+}
+
+/*
  * Capture one coherent Pattern region for the background writer.
  *
  * Inputs: validated resident Scene index and an idle RECORD/ERASE boundary.
@@ -103,6 +120,35 @@ void pat_snapshotScene(uint8_t scene_index)
 const pat_scene_region_t *pat_autosaveSnapshot(void)
 {
     return &pat_autosave_snapshot;
+}
+
+/*
+ * Compute one resident Scene's dynamic-pool occupancy for the Global widget.
+ *
+ * What: count set bits in the first PAT_STACK_SIZE bitmap bytes, which cover
+ * the 2,048 backed four-byte chunks at the current 8,192-byte pool size, and
+ * convert that count to a saturated 0..99 percentage. Why: the settings
+ * widget needs a bounded one-shot reading while the bitmap is inside a
+ * packed resident region. Inputs are a resident Scene index; invalid input
+ * returns zero. Each four-byte word is copied with memcpy before popcount so
+ * no unaligned access is assumed. Affiliates: pat_sceneRegion(),
+ * PatternStackService.c, and menu.c.
+ */
+uint8_t pat_poolUsagePercent(uint8_t scene_index)
+{
+    const pat_scene_region_t *region = pat_sceneRegion(scene_index);
+    uint32_t used = 0u;
+    uint32_t word;
+    uint16_t i;
+
+    if (!region)
+        return 0u;
+    for (i = 0u; i < (uint16_t)(PAT_STACK_SIZE / 4u); i++) {
+        memcpy(&word, &region->bitmap[i * 4u], sizeof(word));
+        used += (uint32_t)__builtin_popcount(word);
+    }
+    used = (used * 100u) / (PAT_STACK_SIZE * 8u);
+    return used > 99u ? 99u : (uint8_t)used;
 }
 
 /*
@@ -429,6 +475,78 @@ static uint8_t pat_blockReadAutomations(const pat_scene_region_t *r,
 }
 
 /*
+ * Append one new automation entry into an adjacent free chunk run.
+ *
+ * What: grow an unchanged-flags block in place only when the new operation is
+ * exactly one appended automation and the extra logical chunks are adjacent
+ * and free. The new entry is written before the header count is updated.
+ * Why: this is the safe Gate-6 growth optimization; existing block bytes are
+ * never cleared or rewritten while TIM3 can read them. Inputs: the old block,
+ * the complete requested automation list, and its new chunk count. Output:
+ * nonzero on an in-place append; zero leaves the block untouched so the normal
+ * disjoint write-new/swap/free-old path can run. Affiliate: pat_writeDynamic().
+ */
+static uint8_t pat_tryAppendAutomation(pat_scene_region_t *r,
+                                       uint16_t old_offset,
+                                       uint8_t old_chunks,
+                                       uint8_t old_flags,
+                                       uint8_t old_count,
+                                       const pat_automation_entry_t *autos,
+                                       uint8_t auto_count,
+                                       uint8_t new_chunks)
+{
+    uint8_t value_count = 0u;
+    uint16_t byte_index;
+    uint16_t i;
+
+    if (!r || !autos || old_count >= PAT_BLOCK_AUTO_COUNT_MASK ||
+        auto_count != (uint8_t)(old_count + 1u) ||
+        pat_blockChunks(old_flags, old_count) != old_chunks ||
+        pat_blockChunks(old_flags, auto_count) != new_chunks)
+        return 0u;
+    if (old_flags & PAT_SPECIAL_NOTE_BIT)
+        value_count++;
+    if (old_flags & PAT_SPECIAL_VEL_BIT)
+        value_count++;
+    if (old_flags & PAT_SPECIAL_PROB_BIT)
+        value_count++;
+    for (i = old_chunks; i < new_chunks; i++) {
+        if (pat_bitmapGet(r, (uint16_t)((old_offset >> 2u) + i)))
+            return 0u;
+    }
+    byte_index = (uint16_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count);
+    /* Confirm the old entries remain byte-for-byte in their original order. */
+    for (i = 0u; i < old_count; i++) {
+        uint16_t packed = (uint16_t)(r->pool[old_offset + byte_index] |
+                                     ((uint16_t)r->pool[old_offset + byte_index + 1u]
+                                      << 8u));
+        uint16_t expected = (uint16_t)(
+            ((uint16_t)(autos[i].value & 0x7Fu) << 9u) |
+            (autos[i].target & 0x01FFu));
+
+        if (packed != expected)
+            return 0u;
+        byte_index = (uint16_t)(byte_index + 2u);
+    }
+    for (i = old_chunks; i < new_chunks; i++)
+        pat_bitmapSet(r, (uint16_t)((old_offset >> 2u) + i));
+    {
+        uint16_t packed = (uint16_t)(
+            ((uint16_t)(autos[old_count].value & 0x7Fu) << 9u) |
+            (autos[old_count].target & 0x01FFu));
+
+        r->pool[old_offset + byte_index] = (uint8_t)packed;
+        r->pool[old_offset + byte_index + 1u] = (uint8_t)(packed >> 8u);
+    }
+    /* The count is published last; its two step-id bits are retained. */
+    r->pool[old_offset + 1u] = (uint8_t)(
+        (r->pool[old_offset + 1u] & (uint8_t)~PAT_BLOCK_AUTO_COUNT_MASK) |
+        (auto_count & PAT_BLOCK_AUTO_COUNT_MASK));
+    pat_markSceneDirty((uint8_t)(r - pat_regions));
+    return 1u;
+}
+
+/*
  * Replace one step's complete dynamic block while preserving its trigger bit.
  *
  * What: free, reuse, or allocate the block selected by the special flags and
@@ -471,59 +589,105 @@ static uint8_t pat_writeDynamic(uint8_t scene_index, uint8_t track,
     old_offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
 
     if (new_flags == 0u && auto_count == 0u) {
-        if (pat_poolOffsetValid(old_offset)) {
+        /*
+         * Detach before freeing the old block.
+         *
+         * What: publish the no-data entry before clearing the old bitmap run
+         * and pool bytes. Why: TIM3 may preempt this foreground writer after
+         * the publish; it must see either the old complete block or the
+         * sentinel, never an old address whose bytes have already been
+         * zeroed. The short PRIMASK section also re-reads the live trigger bit
+         * so a concurrent static trigger edit is retained. Inputs: the live
+         * entry and its captured old offset. Output: a safe sentinel followed
+         * by old-block reclamation. Affiliate: pat_eraseStep().
+         */
+        if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+            pat_poolOffsetValid(old_offset)) {
             old_chunks = pat_blockChunks(
                 r->pool[old_offset + 2u],
                 (uint8_t)(r->pool[old_offset + 1u] &
                           PAT_BLOCK_AUTO_COUNT_MASK));
-            pat_poolFree(r, old_offset, old_chunks);
         }
-        *entry = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
+        {
+            uint16_t published;
+
+            __asm volatile("cpsid i" ::: "memory");
+            trigger_bits = (uint16_t)(*entry & PAT_ADDR_TRIGGER_BIT);
+            published = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
+            *entry = published;
+            __asm volatile("cpsie i" ::: "memory");
+        }
+        if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+            pat_poolOffsetValid(old_offset))
+            pat_poolFree(r, old_offset, old_chunks);
         pat_markSceneDirty(scene_index);
         return 1u;
     }
 
     new_chunks = pat_blockChunks(new_flags, auto_count);
-    if (pat_poolOffsetValid(old_offset)) {
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(old_offset)) {
+        uint8_t old_flags;
+        uint8_t old_count;
+
+        old_flags = (uint8_t)(r->pool[old_offset + 2u] &
+                              PAT_SPECIAL_FLAGS_MASK);
+        old_count = (uint8_t)(r->pool[old_offset + 1u] &
+                              PAT_BLOCK_AUTO_COUNT_MASK);
         old_chunks = pat_blockChunks(
             r->pool[old_offset + 2u],
             (uint8_t)(r->pool[old_offset + 1u] & PAT_BLOCK_AUTO_COUNT_MASK));
-        if (old_chunks == new_chunks) {
-            pat_blockWrite(r, old_offset, track, step, new_flags, note,
-                           velocity, probability, autos, auto_count);
-            *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
-                                old_offset);
-            pat_markSceneDirty(scene_index);
+        if (new_flags == old_flags && new_chunks > old_chunks &&
+            pat_tryAppendAutomation(r, old_offset, old_chunks, old_flags,
+                                    old_count, autos, auto_count,
+                                    new_chunks))
             return 1u;
-        }
     }
 
     new_offset = pat_poolAlloc(r, new_chunks);
     if (new_offset == PAT_ADDR_SENTINEL) {
         /*
-         * A removal can safely shrink in place when the pool has no separate
-         * run for the replacement. Add/special-growth edits never take this
-         * path: their old block remains authoritative until a new run exists.
+         * Do not rewrite a live block in place on allocation failure.
+         *
+         * What: retain the old block and report failure when no disjoint
+         * replacement run exists. Why: even a removal can compact existing
+         * automation bytes, so rewriting the old block before publishing a
+         * replacement would let TIM3 observe a partially rewritten block.
+         * The service's deferred compaction path may create a run and retry
+         * the operation. Inputs: old/new block sizes and the caller's legacy
+         * shrink hint. Output: no live state changes on failure. Affiliate:
+         * PatternStackService.c reactive compaction.
          */
-        if (allow_shrink_in_place && pat_poolOffsetValid(old_offset) &&
-            new_chunks < old_chunks) {
-            pat_blockWrite(r, old_offset, track, step, new_flags, note,
-                           velocity, probability, autos, auto_count);
-            pat_poolFree(r, (uint16_t)(old_offset + new_chunks * 4u),
-                         (uint8_t)(old_chunks - new_chunks));
-            *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
-                                old_offset);
-            pat_markSceneDirty(scene_index);
-            return 1u;
-        }
+        (void)old_chunks;
+        (void)allow_shrink_in_place;
         return 0u;
     }
 
+    /*
+     * Publish the complete replacement before returning the old run.
+     *
+     * What: write the new block, atomically publish its offset with the latest
+     * trigger bit, then free the old allocation. Why: the aligned address
+     * halfword is TIM3's only pool pointer; publish-then-free guarantees that
+     * playback sees either complete old bytes or complete new bytes. Inputs:
+     * new_offset/new block and old_offset/old block. Output: one committed
+     * address swap and one reclaimed old run. Affiliate: pat_poolAlloc().
+     */
     pat_blockWrite(r, new_offset, track, step, new_flags, note, velocity,
                    probability, autos, auto_count);
-    if (pat_poolOffsetValid(old_offset))
+    {
+        uint16_t published;
+
+        __asm volatile("cpsid i" ::: "memory");
+        trigger_bits = (uint16_t)(*entry & PAT_ADDR_TRIGGER_BIT);
+        published = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
+                               new_offset);
+        *entry = published;
+        __asm volatile("cpsie i" ::: "memory");
+    }
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(old_offset))
         pat_poolFree(r, old_offset, old_chunks);
-    *entry = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT | new_offset);
     pat_markSceneDirty(scene_index);
     return 1u;
 }
@@ -537,10 +701,10 @@ static uint8_t pat_writeDynamic(uint8_t scene_index, uint8_t track,
  * Affiliate: pat_setStepNote(), pat_setStepVolume(), and
  * pat_setStepProbability().
  */
-static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
-                              uint8_t step, uint8_t new_flags,
-                              uint8_t note, uint8_t velocity,
-                              uint8_t probability)
+static uint8_t pat_writeSpecials(uint8_t scene_index, uint8_t track,
+                                 uint8_t step, uint8_t new_flags,
+                                 uint8_t note, uint8_t velocity,
+                                 uint8_t probability)
 {
     pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
     const pat_scene_region_t *r = pat_sceneRegion(scene_index);
@@ -549,13 +713,14 @@ static void pat_writeSpecials(uint8_t scene_index, uint8_t track,
     uint8_t auto_count = 0u;
 
     if (!r || !entry)
-        return;
+        return 0u;
     offset = (uint16_t)(*entry & PAT_ADDR_OFFSET_MASK);
-    if (pat_poolOffsetValid(offset))
+    if (((*entry & PAT_ADDR_SPECIALS_BIT) != 0u) &&
+        pat_poolOffsetValid(offset))
         auto_count = pat_blockReadAutomations(r, offset, autos,
                                               PAT_BLOCK_AUTO_COUNT_MASK);
-    (void)pat_writeDynamic(scene_index, track, step, new_flags, note, velocity,
-                           probability, autos, auto_count, 0u);
+    return pat_writeDynamic(scene_index, track, step, new_flags, note, velocity,
+                            probability, autos, auto_count, 0u);
 }
 
 uint8_t pat_trackValid(uint8_t track)
@@ -689,26 +854,71 @@ void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step)
     uint16_t offset;
 
     /*
-     * Erase one step's complete address state.
+     * Erase one step's complete address state with detach-before-free order.
      *
-     * Inputs: bounded Scene/track/step coordinates. Output: trigger and
-     * specials are cleared, the old dynamic block is returned to the bitmap,
-     * and the pool offset becomes PAT_ADDR_SENTINEL. This destructive path
-     * differs from toggling, which deliberately preserves bits 14..0.
-     * Affiliate: pat_poolFree().
+     * What: capture the old block, publish PAT_ADDR_SENTINEL under a short
+     * PRIMASK section, then clear the detached pool run. Why: TIM3 must never
+     * read an old address after its pool bytes have been zeroed. The operation
+     * is destructive and intentionally clears the trigger bit as well as the
+     * specials/offset. Inputs: bounded Scene/track/step coordinates. Output:
+     * no-data address plus reclaimed old storage. Affiliate: deferred live
+     * erase through PatternStackService.c.
      */
     if (!entry)
         return;
     addr = *entry;
     offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
-    if (pat_poolOffsetValid(offset)) {
+    {
+        __asm volatile("cpsid i" ::: "memory");
+        *entry = PAT_ADDR_SENTINEL;
+        __asm volatile("cpsie i" ::: "memory");
+    }
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(offset)) {
         pat_scene_region_t *r = &pat_regions[scene_index];
         uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
                                          (uint8_t)(r->pool[offset + 1u] &
                                                    PAT_BLOCK_AUTO_COUNT_MASK));
         pat_poolFree(r, offset, chunks);
     }
-    *entry = PAT_ADDR_SENTINEL;
+    pat_markSceneDirty(scene_index);
+}
+
+/*
+ * Detach one dynamic block while preserving the latest trigger bit.
+ *
+ * What: publish the sentinel with bit 15 copied from the live address, then
+ * free the captured logical block. Why: queued live erase and track-clear
+ * barriers own pool reclamation in foreground context, while a trigger edit
+ * may have arrived after the request was accepted. Inputs are bounded
+ * Scene/track/step coordinates. Output: dynamic content is gone and the
+ * trigger state survives. Affiliate: PatternStackService.c queue executor.
+ */
+void pat_releaseStepDynamic(uint8_t scene_index, uint8_t track,
+                            uint8_t step)
+{
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t addr;
+    uint16_t offset;
+    uint16_t published;
+
+    if (!entry)
+        return;
+    addr = *entry;
+    offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+    __asm volatile("cpsid i" ::: "memory");
+    published = (uint16_t)((*entry & PAT_ADDR_TRIGGER_BIT) |
+                           PAT_ADDR_SENTINEL);
+    *entry = published;
+    __asm volatile("cpsie i" ::: "memory");
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(offset)) {
+        pat_scene_region_t *r = &pat_regions[scene_index];
+        uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
+                                         (uint8_t)(r->pool[offset + 1u] &
+                                                   PAT_BLOCK_AUTO_COUNT_MASK));
+        pat_poolFree(r, offset, chunks);
+    }
     pat_markSceneDirty(scene_index);
 }
 
@@ -780,9 +990,11 @@ void pat_clearTrack(uint8_t scene_index, uint8_t track)
     /*
      * Return all 128 address entries in one track to the empty sentinel.
      *
-     * Inputs: resident Scene and track. Output: the track has no trigger or
-     * address state and every referenced dynamic block is freed before its
-     * entry is reset. Affiliates: copyClearTools, EuklidGenerator, and
+     * What: detach each address before clearing its referenced pool run. Why:
+     * a TIM3 read must see an intact old block or a sentinel, never a freed
+     * allocation still named by the address array. Inputs: resident Scene and
+     * track. Output: every trigger/address state is cleared and all detached
+     * blocks are reclaimed. Affiliates: the stack-service clear barrier and
      * pat_poolFree().
      */
     if (!scene_indexValid(scene_index) || !pat_trackValid(track))
@@ -791,13 +1003,20 @@ void pat_clearTrack(uint8_t scene_index, uint8_t track)
     for (step = 0u; step < NUM_STEPS; step++) {
         addr = r->address[track][step];
         offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
-        if (pat_poolOffsetValid(offset)) {
+        if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+            pat_poolOffsetValid(offset)) {
             uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
                                              (uint8_t)(r->pool[offset + 1u] &
                                                        PAT_BLOCK_AUTO_COUNT_MASK));
+            __asm volatile("cpsid i" ::: "memory");
+            r->address[track][step] = PAT_ADDR_SENTINEL;
+            __asm volatile("cpsie i" ::: "memory");
             pat_poolFree(r, offset, chunks);
+        } else {
+            __asm volatile("cpsid i" ::: "memory");
+            r->address[track][step] = PAT_ADDR_SENTINEL;
+            __asm volatile("cpsie i" ::: "memory");
         }
-        r->address[track][step] = PAT_ADDR_SENTINEL;
     }
     pat_markSceneDirty(scene_index);
 }
@@ -1136,11 +1355,12 @@ void pat_applyStepToMenu(uint8_t scene_index, uint8_t track, uint8_t step)
  * What: retain velocity/probability specials while changing note. Why: the
  * endless encoder edits one field at a time, and PAT_DEFAULT_NOTE needs no
  * pool byte. Inputs: Scene/track/step and a MIDI note value 0..127. Output:
- * pat_writeSpecials() reallocates, updates, or frees the block as required.
+ * pat_writeSpecials() reallocates, updates, or frees the block as required and
+ * returns nonzero only after the address/pool transaction commits.
  * Affiliates: menu PAR_STEP_NOTE dispatch and pat_readStepSpecials().
  */
-void pat_setStepNote(uint8_t scene_index, uint8_t track, uint8_t step,
-                     uint8_t value)
+uint8_t pat_setStepNote(uint8_t scene_index, uint8_t track, uint8_t step,
+                        uint8_t value)
 {
     pat_step_specials_t sp = pat_readStepSpecials(scene_index, track, step);
     uint8_t new_flags;
@@ -1149,8 +1369,8 @@ void pat_setStepNote(uint8_t scene_index, uint8_t track, uint8_t step,
         new_flags = (uint8_t)(sp.flags & (uint8_t)~PAT_SPECIAL_NOTE_BIT);
     else
         new_flags = (uint8_t)(sp.flags | PAT_SPECIAL_NOTE_BIT);
-    pat_writeSpecials(scene_index, track, step, new_flags,
-                      value, sp.velocity, sp.probability);
+    return pat_writeSpecials(scene_index, track, step, new_flags,
+                             value, sp.velocity, sp.probability);
 }
 
 /*
@@ -1159,11 +1379,12 @@ void pat_setStepNote(uint8_t scene_index, uint8_t track, uint8_t step,
  * What: retain note/probability specials while changing velocity. Why: the
  * Step volume encoder must not disturb another stored value, and
  * PAT_DEFAULT_VELOCITY needs no pool byte. Inputs: Scene/track/step and a
- * 0..127 velocity. Output: pat_writeSpecials() updates or releases storage.
+ * 0..127 velocity. Output: pat_writeSpecials() updates or releases storage
+ * and returns nonzero only after the address/pool transaction commits.
  * Affiliates: menu PAR_STEP_VOLUME dispatch and pat_readStepSpecials().
  */
-void pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step,
-                       uint8_t value)
+uint8_t pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step,
+                          uint8_t value)
 {
     pat_step_specials_t sp = pat_readStepSpecials(scene_index, track, step);
     uint8_t new_flags;
@@ -1172,8 +1393,8 @@ void pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step,
         new_flags = (uint8_t)(sp.flags & (uint8_t)~PAT_SPECIAL_VEL_BIT);
     else
         new_flags = (uint8_t)(sp.flags | PAT_SPECIAL_VEL_BIT);
-    pat_writeSpecials(scene_index, track, step, new_flags,
-                      sp.note, value, sp.probability);
+    return pat_writeSpecials(scene_index, track, step, new_flags,
+                             sp.note, value, sp.probability);
 }
 
 /*
@@ -1182,11 +1403,12 @@ void pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step,
  * What: retain note/velocity specials while changing probability. Why: 127 is
  * the always-fire default and therefore needs no pool byte. Inputs:
  * Scene/track/step and a 0..127 probability. Output: pat_writeSpecials()
- * updates or releases storage; lower values gate playback probabilistically.
+ * updates or releases storage and returns nonzero only after commit; lower
+ * values gate playback probabilistically.
  * Affiliates: menu PAR_STEP_PROB dispatch and pat_readStepSpecials().
  */
-void pat_setStepProbability(uint8_t scene_index, uint8_t track, uint8_t step,
-                            uint8_t value)
+uint8_t pat_setStepProbability(uint8_t scene_index, uint8_t track,
+                               uint8_t step, uint8_t value)
 {
     pat_step_specials_t sp = pat_readStepSpecials(scene_index, track, step);
     uint8_t new_flags;
@@ -1195,6 +1417,6 @@ void pat_setStepProbability(uint8_t scene_index, uint8_t track, uint8_t step,
         new_flags = (uint8_t)(sp.flags & (uint8_t)~PAT_SPECIAL_PROB_BIT);
     else
         new_flags = (uint8_t)(sp.flags | PAT_SPECIAL_PROB_BIT);
-    pat_writeSpecials(scene_index, track, step, new_flags,
-                      sp.note, sp.velocity, value);
+    return pat_writeSpecials(scene_index, track, step, new_flags,
+                             sp.note, sp.velocity, value);
 }

@@ -67,6 +67,7 @@
 #include "encoder.h"
 #include "endlessPots.h"
 #include "mixer.h"
+#include "PatternStackService.h"
 
 /* -----------------------------------------------------------------------
 ** TIM6 registers (APB1, base 0x40001000)
@@ -185,6 +186,18 @@ void timebase_serviceFrontPanel(void)
 
     encoder_tick();
     endlessPots_tick();
+
+    /*
+     * Run the Pattern stack service at the bounded 500 Hz foreground cadence.
+     *
+     * What: drains deferred edits, advances bulk barriers, and gives gap
+     * maintenance/compaction one cooperative pass after front-panel input.
+     * Why: all dynamic-pool mutations remain outside TIM3 and the LCD/audio
+     * owners. Inputs: service queue and active Pattern target. Output: one
+     * bounded service step; no new timing or storage state is allocated here.
+     * Affiliate: PatternStackService.c.
+     */
+    patSvc_tick();
 }
 
 /* -----------------------------------------------------------------------
